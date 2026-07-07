@@ -161,6 +161,26 @@ mod tests {
     use crate::ooda_brain::{DecideContext, DecideJudgment, OodaDecideBrain};
     use crate::ooda_loop::{ActionKind, OodaConfig, Priority};
 
+    /// Build a fully-explicit [`OodaConfig`] for tests that reads **no** process
+    /// env (unlike [`OodaConfig::default`], which consults `SIMARD_SCALING`,
+    /// `SIMARD_MAX_CONCURRENT_ACTIONS`, budget, and distillation vars). Keeps
+    /// `decide` unit tests hermetic and independent of the host environment
+    /// (issue #2732). `scaler` is `None` so the explicit `max_concurrent_actions`
+    /// is the sole cap under test.
+    fn test_config() -> OodaConfig {
+        OodaConfig {
+            max_concurrent_actions: 5,
+            improvement_threshold: 0.02,
+            gym_suite_id: "progressive".to_string(),
+            daily_budget_usd: 500.0,
+            weekly_budget_usd: 2500.0,
+            distill_min_episodes: 25,
+            distill_interval_cycles: 50,
+            lesson_recurrence_threshold: 2,
+            scaler: None,
+        }
+    }
+
     #[test]
     fn decide_respects_max_concurrent_actions() {
         let priorities = vec![
@@ -185,12 +205,24 @@ mod tests {
                 reason: "d".to_string(),
             },
         ];
+        // Construct the config explicitly with `scaler: None` instead of
+        // `..Default::default()`: `OodaConfig::default()` reads process env
+        // (`SIMARD_SCALING` / `SIMARD_MAX_CONCURRENT_ACTIONS`), so on a host
+        // with `SIMARD_SCALING=auto` the default scaler would override the
+        // explicit `max_concurrent_actions=2` under test and the result would
+        // depend on the environment rather than the config. Building it
+        // explicitly keeps the test hermetic (issue #2732).
         let config = OodaConfig {
             max_concurrent_actions: 2,
-            ..Default::default()
+            scaler: None,
+            ..test_config()
         };
         let actions = decide(&priorities, &config).unwrap();
-        assert_eq!(actions.len(), 2);
+        assert_eq!(
+            actions.len(),
+            2,
+            "explicit max_concurrent_actions=2 with no scaler must cap to 2"
+        );
     }
 
     #[test]
