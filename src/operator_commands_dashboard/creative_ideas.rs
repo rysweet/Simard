@@ -91,9 +91,15 @@ fn load_ideas(state_root: &Path) -> SimardResult<Vec<CreativeIdea>> {
 
 /// Per-status count map over every [`IdeaStatus`] value (zero-filled).
 fn status_counts(ideas: &[CreativeIdea]) -> Value {
+    // Single O(n) tally instead of one full scan per status; every status is
+    // still emitted in `ALL` order (zero-filled).
+    let mut tally: std::collections::HashMap<IdeaStatus, usize> = std::collections::HashMap::new();
+    for idea in ideas {
+        *tally.entry(idea.status).or_insert(0) += 1;
+    }
     let mut map = serde_json::Map::new();
     for status in IdeaStatus::ALL {
-        let n = ideas.iter().filter(|i| i.status == status).count();
+        let n = tally.get(&status).copied().unwrap_or(0);
         map.insert(status.as_str().to_string(), json!(n));
     }
     Value::Object(map)
