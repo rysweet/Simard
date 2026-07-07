@@ -4,7 +4,7 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 use std::path::Path;
 
-use super::dashboard_goal_board_snapshot;
+use super::dashboard_live_goal_board;
 use super::routes::resolve_state_root;
 use super::subagent::{count_json_records, file_metrics};
 use crate::cognitive_memory::metrics::RECALL_PRECISION_METRIC;
@@ -31,14 +31,25 @@ pub(crate) async fn memory_metrics() -> Json<Value> {
     let fact_count = count_json_records(&memory_path);
     let evidence_count = count_json_records(&evidence_path);
 
-    // Goal records now live in cognitive memory (issue #1590); render a
-    // metadata-only panel so the dashboard's "Goal Records" tile keeps
-    // working without any disk file.
-    let goal_board = dashboard_goal_board_snapshot(&state_root).ok();
-    let goal_count = goal_board
+    // Goal records now come from the LIVE goal board (issue #2922): the
+    // snapshot base unioned with the live `CognitiveMemoryGoalStore` overlay, so
+    // a freshly-persisted goal record (e.g. a promoted creative idea) is counted
+    // on the very next poll instead of lagging a ~5-min snapshot cycle. Reads
+    // fail-closed: a live-read failure surfaces an explicit `error` on the tile
+    // and is EXCLUDED from `total_facts` (never a stale or fabricated count),
+    // with the error chain logged server-side only.
+    let live_board = dashboard_live_goal_board(&state_root);
+    let goal_records_error = live_board.as_ref().err().map(|err| {
+        tracing::warn!(
+            error = %err,
+            "dashboard live goal-board read failed for the goal_records tile"
+        );
+        "goal-board read failed"
+    });
+    let goal_count = live_board
         .as_ref()
-        .map(|b| (b.active.len() + b.backlog.len()) as u64)
-        .unwrap_or(0);
+        .ok()
+        .map(|b| (b.active.len() + b.backlog.len()) as u64);
 
     // Query the library-backed cognitive memory for live statistics (#419),
     // routed through `open_reader_client` so the daemon's IPC writer serves the
@@ -61,15 +72,29 @@ pub(crate) async fn memory_metrics() -> Json<Value> {
     let (consolidation_count, last_consolidation) = recent_consolidation_activity(&state_root);
     let recent_last = last_consolidation.clone();
 
-    // Use LadybugDB counts when available; JSON file counts are the legacy source.
+    // Use LadybugDB counts when available; JSON file counts are the legacy
+    // source. On a goal-board live-read failure `goal_count` is `None`, so the
+    // fallback total EXCLUDES goal records rather than counting a stale/zero
+    // value (issue #2922 fail-closed).
     let total = native_stats
         .as_ref()
         .map(|s| s.total())
-        .unwrap_or(fact_count + evidence_count + goal_count);
+        .unwrap_or(fact_count + evidence_count + goal_count.unwrap_or(0));
 
     // De-fork Phase 2b (#2307): the library backend persists at
     // `<state_root>/cognitive`, replacing the native `cognitive_memory.ladybug`.
     let db_path = state_root.join("cognitive");
+
+    // Issue #2922: additively surface a goal-board live-read failure on the tile
+    // (never returned as a silently-zero count). Omitted on success so the shape
+    // is byte-identical for the healthy case.
+    let mut goal_records = json!({
+        "source": "cognitive-memory:live-goal-board",
+        "count": goal_count.unwrap_or(0),
+    });
+    if let Some(err) = goal_records_error {
+        goal_records["error"] = json!(err);
+    }
 
     Json(json!({
         "state_root": state_root.to_string_lossy(),
@@ -85,10 +110,7 @@ pub(crate) async fn memory_metrics() -> Json<Value> {
             "size_bytes": evidence_info.0,
             "modified": evidence_info.1,
         },
-        "goal_records": {
-            "source": "cognitive-memory:goal-board:snapshot",
-            "count": goal_count,
-        },
+        "goal_records": goal_records,
         "handoff": {
             "path": handoff_path.to_string_lossy().to_string(),
             "size_bytes": handoff_info.0,

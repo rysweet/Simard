@@ -53,6 +53,13 @@ mod tests_goals_crud;
 // silently return.
 #[cfg(test)]
 mod tests_memory_recent_last_hour;
+// Issue #2922: the dashboard goal-board READ is live — `dashboard_live_goal_board`
+// unions the `goal-board:snapshot` base with a live `CognitiveMemoryGoalStore`
+// overlay (deduped by slug, board wins), so a promoted creative-idea Proposed
+// goal appears immediately instead of lagging a ~5-min snapshot cycle; the read
+// is fail-closed (no silent fallback to the stale snapshot).
+#[cfg(test)]
+mod tests_live_goal_board;
 #[cfg(test)]
 mod tests_ooda_cycles_history;
 // Issue #26: the Logs tab's "Cycle Reports" card (#cycle-reports) must show the
@@ -87,8 +94,10 @@ use std::path::Path;
 
 use crate::error::SimardResult;
 use crate::goal_curation::{
-    GoalBoard, load_goal_board, save_goal_board, save_goal_board_with_removals,
+    BoardPlacement, GoalBoard, load_goal_board, record_as_active_goal, save_goal_board,
+    save_goal_board_with_removals,
 };
+use crate::goals::{CognitiveMemoryGoalStore, GoalStore, goal_slug};
 use crate::memory_ipc::{launch_writer_client, open_reader_client};
 
 /// Read the cognitive-memory `goal-board:snapshot` for the dashboard.
@@ -131,6 +140,67 @@ pub(crate) fn dashboard_save_goal_board_with_removals(
 ) -> SimardResult<()> {
     let writer = launch_writer_client(state_root)?;
     save_goal_board_with_removals(board, force_remove_ids, writer.ops())
+}
+
+/// Build the dashboard's **live** goal board (issue #2922): the authoritative
+/// `goal-board:snapshot` board unioned with a LIVE `CognitiveMemoryGoalStore`
+/// overlay, so a freshly-persisted `goal-store:record` (a promoted creative-idea
+/// Proposed goal, a meeting goal, an unblocked goal, …) appears immediately
+/// instead of lagging up to a ~5-min snapshot cycle.
+///
+/// Two live sources, deduped by slug with the **base winning**:
+/// - **Base** — [`dashboard_goal_board_snapshot`], the operator read-your-writes
+///   snapshot board carrying the daemon-OODA active/backlog goals with their
+///   rich fields (`current_activity`, `wip_refs`, `repo`, …).
+/// - **Overlay** — [`CognitiveMemoryGoalStore::list`], the same shared live
+///   store the creative-ideas / meeting / runtime / seed writers `put` into. A
+///   record whose slug is already on the base board is dropped (the base carries
+///   the richer, authoritative fields); only records *absent* from the base are
+///   mapped in via [`record_as_active_goal`].
+///
+/// **Fail-closed** (issues #2922 / #2896): either leg failing — the snapshot
+/// base read or the overlay `list()` — propagates as `Err`. There is no fallback
+/// to the stale snapshot and no coercion of a transport fault into a phantom
+/// empty board; the caller surfaces the error rather than serving silently-stale
+/// or partial data.
+pub(crate) fn dashboard_live_goal_board(state_root: &Path) -> SimardResult<GoalBoard> {
+    // Base: authoritative snapshot board. Fail-closed — never unwrap_or_default.
+    let mut board = dashboard_goal_board_snapshot(state_root)?;
+
+    // Index the base by slug so the overlay dedup is O(overlay). Slugs are
+    // derived with `goal_slug` (the SAME function the forward adapter uses),
+    // because an `ActiveGoal.id` is not guaranteed to already be a slug —
+    // comparing raw ids would let a slugged overlay record slip past dedup and
+    // double-render.
+    let mut seen: std::collections::HashSet<String> = board
+        .active
+        .iter()
+        .map(|g| goal_slug(&g.id))
+        .chain(board.backlog.iter().map(|b| goal_slug(&b.id)))
+        .collect();
+
+    // Overlay: LIVE goal-store records. `list()` is fail-closed (#2896); a
+    // reader-open or `search_facts` transport fault propagates as `Err`.
+    let overlay = CognitiveMemoryGoalStore::new(state_root.to_path_buf())?.list()?;
+    for record in overlay {
+        if seen.contains(&record.slug) {
+            continue;
+        }
+        match record_as_active_goal(&record) {
+            BoardPlacement::Active(goal) => {
+                seen.insert(record.slug);
+                board.active.push(goal);
+            }
+            BoardPlacement::Backlog(item) => {
+                seen.insert(record.slug);
+                board.backlog.push(item);
+            }
+            // Terminal (`Completed`) records are not surfaced on the live board.
+            BoardPlacement::Skip => {}
+        }
+    }
+
+    Ok(board)
 }
 
 /// Initialize dashboard auth and print the login code to stderr.

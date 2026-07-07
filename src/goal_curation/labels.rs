@@ -153,6 +153,27 @@ pub fn source_for_backlog(backlog_source: &str) -> &'static str {
     }
 }
 
+/// Plain-English provenance label for a goal, derived from the first `source:*`
+/// tag in `labels` (issue #2922). Used when rendering a live overlay
+/// `goal-store:record` as a backlog `source`, so the raw `source:creative-ideas`
+/// token never leaks to the operator surface. Falls back to `"From goals"` when
+/// no recognized `source:*` tag is present (e.g. legacy/seed records).
+pub fn human_source_label(labels: &[String]) -> &'static str {
+    for label in labels {
+        match label.as_str() {
+            SOURCE_CREATIVE_IDEAS => return "From creative ideas",
+            SOURCE_OPERATOR => return "From an operator",
+            SOURCE_OODA => return "From the OODA loop",
+            SOURCE_OVERSEER => return "From the overseer",
+            SOURCE_MEETING => return "From a meeting",
+            SOURCE_SEED => return "From the seed board",
+            SOURCE_DECOMPOSITION => return "From goal decomposition",
+            _ => {}
+        }
+    }
+    "From goals"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

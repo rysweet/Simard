@@ -1428,3 +1428,91 @@ pub fn active_goals_as_records(board: &GoalBoard) -> Vec<crate::goals::GoalRecor
         })
         .collect()
 }
+
+// ---------------------------------------------------------------------------
+// GoalRecord -> board placement adapter (reverse of active_goals_as_records)
+// ---------------------------------------------------------------------------
+
+/// Where a persisted [`GoalRecord`] lands when mapped back onto the live board
+/// (issue #2922). The inverse of [`active_goals_as_records`]: it renders an
+/// overlay `goal-store:record` — a promoted creative-idea Proposed goal, a
+/// meeting goal, a seed/runtime goal — in the SAME `ActiveGoal` / `BacklogItem`
+/// shapes a snapshot goal uses, so the dashboard's live union renders overlay
+/// and snapshot goals identically.
+///
+/// `Skip` drops terminal (`Completed`) records: they are not surfaced on the
+/// live board in either bucket.
+#[derive(Debug)]
+// An `ActiveGoal` is materially larger than the other two variants; the doc
+// contract (#2922) is that this enum stays unboxed so callers can move the
+// payload out and `{:?}`-format it, so we accept the size disparity rather than
+// box the variant.
+#[allow(clippy::large_enum_variant)]
+pub enum BoardPlacement {
+    Active(ActiveGoal),
+    Backlog(BacklogItem),
+    Skip,
+}
+
+/// Map a persisted [`GoalRecord`] back into its live-board placement (issue
+/// #2922) — the inverse of [`active_goals_as_records`].
+///
+/// Status routing mirrors the board's own active/backlog split:
+///
+/// | `GoalStatus` | Placement | Rendered progress |
+/// |--------------|-----------|-------------------|
+/// | `Active`     | active    | `InProgress { percent: 0 }` |
+/// | `Proposed`   | backlog   | — |
+/// | `Paused`     | backlog   | — |
+/// | `Completed`  | skipped   | terminal |
+///
+/// A `GoalRecord` carries none of the snapshot-only rich fields, so they are
+/// synthesized as `None` / `[]` / `false`. Pure struct mapping — panic-free on
+/// arbitrary record text: overlay records carry untrusted, model-generated
+/// content and a panic here would 500 the dashboard read path.
+pub fn record_as_active_goal(record: &crate::goals::GoalRecord) -> BoardPlacement {
+    match record.status {
+        crate::goals::GoalStatus::Completed => BoardPlacement::Skip,
+        crate::goals::GoalStatus::Active => {
+            // The forward adapter writes the `"unassigned"` sentinel for a
+            // goal with no assignee; map it back to `None` so the round-trip
+            // is faithful.
+            let assigned_to = match record.owner_identity.as_str() {
+                "unassigned" => None,
+                owner => Some(owner.to_string()),
+            };
+            BoardPlacement::Active(ActiveGoal {
+                id: record.slug.clone(),
+                description: record.title.clone(),
+                priority: u32::from(record.priority),
+                status: GoalProgress::InProgress { percent: 0 },
+                assigned_to,
+                repo: None,
+                current_activity: None,
+                wip_refs: Vec::new(),
+                last_progress_update_at: None,
+                parent_goal_id: None,
+                priority_explicit: false,
+                labels: record.labels.clone(),
+            })
+        }
+        crate::goals::GoalStatus::Proposed | crate::goals::GoalStatus::Paused => {
+            BoardPlacement::Backlog(BacklogItem {
+                id: record.slug.clone(),
+                description: record.title.clone(),
+                source: super::labels::human_source_label(&record.labels).to_string(),
+                score: backlog_score_for_priority(record.priority),
+            })
+        }
+    }
+}
+
+/// Deterministic backlog score from a goal's priority so the proposed backlog
+/// orders stably (issue #2922). Higher priority — a LOWER number, p1 is most
+/// important — yields a higher score. The priority is clamped into `[1, 10]`
+/// and mapped to `(0, 1]` via `(11 - p) / 10`, so p1 -> 1.0, p3 -> 0.8, and
+/// p10+ -> 0.1. Always finite; never panics for any `u8`.
+fn backlog_score_for_priority(priority: u8) -> f64 {
+    let p = f64::from(priority.clamp(1, 10));
+    (11.0 - p) / 10.0
+}
