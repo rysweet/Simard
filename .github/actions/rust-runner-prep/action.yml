@@ -49,6 +49,15 @@ runs:
         sudo swapon /swapfile
         echo "Swap enabled: $(swapon --show)"
 
+    - name: Harden apt sources (drop flaky packages.microsoft.com repo, #2975)
+      shell: bash
+      # GitHub runners ship packages.microsoft.com apt sources that periodically
+      # serve an invalid InRelease ("NOSPLIT" / "no longer signed"), which makes
+      # the `apt-get update` below exit 100 and fails the job with a spurious red
+      # on the default branch. This job only needs Ubuntu-archive packages
+      # (mold), so strip the Microsoft sources first. Idempotent and non-fatal.
+      run: bash "$GITHUB_WORKSPACE/scripts/ci-harden-apt.sh"
+
     - name: Install mold linker
       shell: bash
       # mold is a drop-in replacement for ld/lld with 3-5x faster cold-link of

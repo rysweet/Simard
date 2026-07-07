@@ -353,6 +353,15 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      - name: Harden apt sources (drop flaky packages.microsoft.com repo, #2975)
+        # `playwright install --with-deps` runs `apt-get update` to pull the
+        # browser OS dependencies. GitHub runners ship packages.microsoft.com
+        # apt sources that periodically serve an invalid InRelease ("NOSPLIT" /
+        # "no longer signed"), which makes that update exit 100 and fails the
+        # job with a spurious red. We only need Ubuntu-archive deps here, so
+        # strip the Microsoft sources first. Idempotent and non-fatal.
+        run: bash "$GITHUB_WORKSPACE/scripts/ci-harden-apt.sh"
+
       - name: Install Playwright (chromium)
         run: npx playwright install --with-deps chromium
 
