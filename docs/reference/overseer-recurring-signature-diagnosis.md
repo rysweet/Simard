@@ -52,7 +52,20 @@ description: >
   terminal-park path; H3 via the #17 live-timestamp staleness proof — all three re-confirmed at
   zero source drift (no `src/` change since `85245e87`), with the deduped verbatim tail steady at 10
   (#2875) and the escalation channel steady at 79 (#2894 @ 14:05:18Z, unchanged from round-13):
-  seventh consecutive identical board read, confidence remains High.
+  seventh consecutive identical board read, confidence remains High. Round-14
+  primary-investigator deep dive (§7t, HEAD `56160966`) traced the stale-safeguard-park chain
+  end-to-end through the sensor (author `spawn.rs:198`/`no_progress_breaker.rs:86` → project
+  `sensor.rs:204/209/213` → emit `signal.rs:441` → tokenize `mod.rs:1349`; stale because neither
+  self-heal path fires for non-perpetual goals, `intervention.rs:52-58`/`advance_goal/mod.rs:87`),
+  mapped the previously-uninventoried `recurring_goal_reblock` emission point
+  (`decide_blocked_goal` `mod.rs:1646`, gate `recurrence>=3` `root_cause.rs:33`), and **corrected**
+  the round-13/§7s "un-deduplicated" framing: that channel HAS a stable dedup key (5 sigs / 5 goals,
+  100% `standing-goal-not-tagged-perpetual`) that is **defeated by a malformed GitHub search query**
+  in `RealGhClient::search_issues` (`gh_client.rs:37`, `stewardship-signature:{sig} in:body` parsed
+  as an unknown qualifier → 0 rows; live-proven vs. the bare-token form → 23 rows) — a code defect
+  masked by the `(repo,signature)`-keyed test fake (`stewardship/tests.rs:68-82`). Adds one-line
+  **P6** (fix the query + real-query integration test) which collapses the 79→~5 flood independent of
+  the upstream reconciliation P2. No finding overturned, confidence High.
 last_updated: 2026-07-07
 review_schedule: as-needed
 owner: simard
@@ -1663,6 +1676,130 @@ verbatim source anchors, H2 by live CLOSED states + the terminal-park/no-reconci
 by the live-timestamp staleness proof. Every anchor resolves at HEAD `e5bd3a1b` with **zero
 drift** (no `src/` change since `85245e87`); live state is **unchanged** (seventh consecutive
 identical board read across rounds 8→14). No finding changed; overall confidence remains **High**.
+
+### 7t. Round-14 primary-investigator deep dive — the SECOND self-amplifying channel (`recurring_goal_reblock`): a malformed stewardship dedup query, plus the full stale-safeguard-park chain re-anchored through the sensor (HEAD `56160966`)
+
+This pass owns the assigned focus — **signature-token emission mapping AND the stale-safeguard-park
+root-cause chain (sensor)** — and is anchored at HEAD `56160966`. `git diff --name-only 85245e87..HEAD -- src/`
+is **empty** (all commits since docs-only), so every §7p emission anchor and the sensor/safeguard
+anchors below re-resolve **verbatim** by reading the files at this HEAD. `cargo test --lib
+overseer::tests_memory_recall` → **36 passed, 0 failed**; `…::h` → **4 passed, 0 failed**; sensor
+projection suite `overseer::sensor` → **9 passed, 0 failed**. It is strictly additive but it
+**sharpens a mischaracterization** carried by §7r-net-new-#1 and §7s ("the `recurring_goal_reblock`
+path carries *no equivalent dedup* / is *un-deduplicated*"): the channel in fact has a **complete
+dedup pipeline with a correctly-stable key** that is **silently defeated by one malformed GitHub
+search query** — a concrete, one-line-fixable code defect, not a design omission.
+
+**A. The stale-safeguard-park chain, re-anchored end-to-end through the sensor (assigned focus #2).**
+A `goal:blocked:{id}` token is the tail of a five-hop chain; every hop re-resolved at `56160966`:
+
+| Hop | Role | Anchor (verbatim @ `56160966`) |
+|---|---|---|
+| 1. Safeguard **authors** the park | brain-failure safeguard writes `Blocked("{PREFIX}{n}{SUFFIX}")` after ≥3 consecutive brain failures | `spawn.rs:198-200` (author), gate `prior_failures >= 2` `:166`, `BRAIN_FAILURE_BLOCKED_PREFIX` `:35` (`\u{1F512} [OODA-SAFEGUARD] OODA brain failing for `) |
+| 1′. …or the no-progress breaker | `Escalate{blocked_reason}` sets the sentinel on the no-action livelock | `no_progress_breaker.rs:86` (`no_progress_blocked_reason`), `Escalate` variant `:121`, `NO_PROGRESS_BLOCKED_PREFIX` `:69` |
+| 2. Sensor **projects** it | `blocked_goals_from_board` → `blocked_goal_of` emits one `BlockedGoal`; `needs_review = is_no_progress_marker \|\| is_brain_failure_marker`; `consecutive_no_action = safeguard_marker_count(reason)` | `sensor.rs:204` → `:209`; `needs_review` `:213`; `safeguard_marker_count` `:219`/`:227` |
+| 3. Signal **emits** it | per-blocked-goal loop pushes `Signal::GoalBlocked{…}` | `signal.rs:440` (loop) → `:441` (push) |
+| 4. `dedup_key` **tokenizes** it | `classify_signal` renders `format!("goal:blocked:{goal_id}")` | `mod.rs:1349` |
+| 5. Composite **re-wraps + recalls** it | `observation_signature` sorts/dedups keys + `overseer-obs:` prefix; write-back → unfiltered self-recall (`source_label` dropped) → `RecurringSignature` | `mod.rs:1081-1085`; `wiring.rs:1024-1030`; `signal.rs:464` (unchanged from §7p) |
+
+**Why the park is STALE (the reconciliation gap, now pinned to the exact predicate).** The five
+kgpacks workstream goals were **delivered and their GitHub issues CLOSED 2026-07-06** (#16 20:16:25Z /
+#18 10:33:04Z / #21 13:29:03Z / #22 12:07:33Z; #17 the only OPEN, an intentional gate). Nothing
+reconciles the local board row when the backing issue closes, and **neither self-heal path fires** for
+these goals:
+- the Overseer's `Intervention::UnblockGoal` self-heal (`intervention.rs:52-58`) is gated
+  `perpetual && is_no_progress_marker(&reason)` (`mod.rs:1655`) — the kgpacks workstreams are **not
+  perpetual**;
+- the issue-#1911 auto-recovery branch (`advance_goal/mod.rs:87`) only clears
+  `is_brain_failure_marker` reasons on **re-dispatch**, which a de-prioritized parked goal never gets.
+
+`root_cause::blocked_goal_candidates` (`root_cause.rs:168`) therefore classifies them
+**`standing-goal-not-tagged-perpetual`** (the `no_progress && !perpetual` branch, `:196-206`) — and the
+**live escalation-issue bodies confirm this exact label on 79/79** (see C). So the sensor re-projects
+`goal:blocked:{id}` on **every** tick: a standing, self-refreshing stale input. (Emission map for the
+other composite tokens — `quality:gym_skipped` `signal.rs:399`→`mod.rs:1295`, `resource:engineer_spawn`
+`:396`→`:1283`, `workstream-gap` `:476`→`:1384`, `RecurringSignature` `:464` — re-resolves verbatim
+per §7p; unchanged.)
+
+**B. NEW emission point the prior maps (§7f/§7j/§7l/§7p) did NOT inventory: `recurring_goal_reblock`.**
+`decide_blocked_goal` (`mod.rs:1624`) routes a blocked goal. When memory-recall recurrence crosses the
+escalation floor — `recurrence >= RECURRENCE_ESCALATION_THRESHOLD` (**= 3**, `root_cause.rs:33`),
+`:1640` — it returns `Intervention::FileIssue{ … failure_kind: "recurring_goal_reblock" … }` (`:1646`,
+routed `target_repo`/`source_module: "simard::overseer"`). This is a **signature-adjacent token that
+leaves via the Act-phase stewardship channel**, *not* `observation_signature`, which is why §7p's
+composite-only map omitted it. It is the emission behind the board's largest artifact class.
+
+**C. The dedup INTENT is sound; the dedup GATE is defeated by a malformed query (root cause of the
+79-issue flood).** The stewardship filer `process_orchestrator_run` (`stewardship/mod.rs:51`) is a
+correct check-then-file:
+1. compute a **stable** `failure_signature(failure_kind, error_text)` — `sha256`-derived 16-hex,
+   noise-normalized (`dedup.rs:63`);
+2. `existing = gh.search_issues(repo, signature)` (`mod.rs:61`);
+3. `find_existing(&existing, signature)` matches `stewardship-signature: {sig}` in the body
+   (`dedup.rs:78-81`) → `MatchedExisting` (no dupe) if found, else `create_issue` (`:93`).
+
+The key **is** stable — proven live: the 79 open dupes carry exactly **5 distinct signatures, one per
+goal** (ws6/#21 `a2e7df65817fe87e` ×28, ws3/#18 `b81f60992ea1181a` ×26, ws7/#22 `c5109c2fbe04b255`
+×23, ws1/#16 ×1, parity-umbrella ×1); the same goal always hashes to the same signature. The defect is
+in step 2: `RealGhClient::search_issues` (`gh_client.rs:37`) builds
+
+```
+gh issue list -R {repo} --state open --search "stewardship-signature:{signature} in:body"
+```
+
+GitHub parses the `stewardship-signature:` prefix as an **unknown search *qualifier*** and returns
+**zero rows deterministically** — this is *not* index latency. Live proof (2026-07-07 ~14:12 UTC,
+`rysweet/Simard`, sig `c5109c2fbe04b255`):
+
+| Query | Rows |
+|---|---|
+| production form `stewardship-signature:c5109c2fbe04b255 in:body` | **0** |
+| bare token `c5109c2fbe04b255 in:body` | **23** |
+| quoted phrase `"stewardship-signature: c5109c2fbe04b255" ` | **23** |
+| ground truth (open bodies actually containing the sig) | **23** |
+
+So `find_existing` receives an **empty** list every cycle → `create_issue` fires again → one fresh
+duplicate **per reblock cycle**, unbounded: **79 open `recurring_goal_reblock` issues** (#2688 …
+**#2894**, newest **2026-07-07T14:05:18Z — still firing**), **100 % cause
+`standing-goal-not-tagged-perpetual`**. ws2/#17 (the genuine OPEN intentional gate) is **absent from
+all 79** — a clean cross-check that this flood is *exclusively* stale-safeguard-park-driven, exactly
+the population §1/§A identify.
+
+**Why the test suite is green while production dedup is 100 % broken.** `FakeGhClient::search_issues`
+(`stewardship/tests.rs:68-82`) returns a canned response keyed on `(repo, signature)` — it *simulates a
+working search* and never constructs or exercises the real `--search` string. The malformed-query bug
+lives entirely in `RealGhClient` and is invisible to the 36/36 + 4/4 suite: a textbook
+fake-hides-integration-defect. (A third, smaller channel — 18 open `[creative-idea]` issues via the
+Creative-Ideas thread #2419, e.g. **#2868** proposing "auto-carve one bounded shippable sub-goal" when
+the OODA-SAFEGUARD blocks — is the system *correctly diagnosing its own root cause* but filing it as an
+idea rather than a fix; noted for completeness, outside both self-amplifying loops.)
+
+**D. Consequence for remediation (net-new; refines P2/P3 and adds P6).** §7r/§7s treat the reblock
+flood as an inherent "no-dedup" property, implying only upstream reconciliation (P2) can help. This
+dive shows a **cheaper, independent, immediately-deployable cap**:
+
+- **NEW P6 (trivial edit, high blast-radius reduction).** Fix `gh_client.rs:37` to query the indexed
+  token instead of a phantom qualifier — e.g. `format!("{signature} in:body")` or the quoted phrase
+  `format!("\"stewardship-signature: {signature}\" in:body")` (both proven to return all 23 live) —
+  **and add a real-query integration test** (or assert the constructed `--search` string) so the fake
+  can never again mask it. This alone collapses the channel from 79→~5 (one open issue per live stale
+  goal) *without* touching the OODA loop.
+- **P2 unchanged but re-scoped:** reconciling stale parks (done-gate on issue-close + perpetual
+  tagging) is still required to stop the *re-file attempts* at the source; P6 only bounds their
+  visible cost. The two are complementary: P6 caps the symptom today, P2 removes the driver.
+- **P3 backlog cleanup:** the ~79 `recurring_goal_reblock` dupes are safe to bulk-close **once P6
+  lands** (dedup will then hold); closing them before P6 just invites immediate re-filing.
+
+**Verification footer.** HEAD `56160966`; `git diff --name-only 85245e87..HEAD -- src/` **empty**
+(zero source drift — every §7p emission anchor + the §A sensor/safeguard/reconciliation anchors
+re-resolved verbatim by reading the files at this HEAD); `cargo test --lib
+overseer::tests_memory_recall` **36/0**, `…::h` **4/0**, `overseer::sensor` **9/0**; live board read
+`rysweet/Simard` **265 open** = 79 `recurring_goal_reblock` (5 stable sigs) + 10 verbatim
+`recurring signature seen 2×` (#2669…#2875) + 18 `[creative-idea]` + others; three live `gh issue
+list --search` queries as tabled in C; `rysweet/agent-kgpacks-rs` #16/#18/#21/#22 **CLOSED**, #17
+**OPEN** (unchanged since 07-02T23:22:49Z). **No prior finding overturned**; §7t is additive and
+**corrects one framing** (reblock channel *has* a stable dedup key defeated by a malformed query, not
+a missing dedup), yielding the new one-line **P6**. Confidence **High**.
 
 ---
 
