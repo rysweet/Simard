@@ -1756,3 +1756,62 @@ fn goal_decomposition_prompt_pins_output_contract() {
         "each sub-goal must carry a description"
     );
 }
+
+// Issue #2690 — the engineer-admission prompt is embedded, loads in pure
+// embedded mode, and pins the overlap-reasoning + output contract the shim
+// depends on.
+#[test]
+fn engineer_admission_prompt_is_embedded_and_pins_overlap_contract() {
+    // Registered in the embedded-fallback table.
+    let prompt = embedded_fallback("ooda_engineer_admission.md")
+        .expect("ooda_engineer_admission.md embedded prompt");
+
+    // Loads non-empty in pure embedded mode (no disk dir).
+    let store = PromptStore::new(None);
+    assert_eq!(
+        store.load("ooda_engineer_admission.md"),
+        prompt,
+        "embedded mode must return the embedded admission prompt"
+    );
+
+    let lower = prompt.to_lowercase();
+    // Reasoning intent: file-footprint overlap between the candidate and the
+    // in-flight engineers.
+    assert!(
+        lower.contains("overlap"),
+        "prompt must reason about overlap"
+    );
+    assert!(
+        lower.contains("collide") || lower.contains("collision"),
+        "prompt must name the merge-collision problem"
+    );
+    // The three decision variants the parser (admission_decision_from_variant)
+    // depends on.
+    assert!(prompt.contains("admit"), "must document the admit variant");
+    assert!(prompt.contains("defer"), "must document the defer variant");
+    assert!(
+        prompt.contains("serialize_after"),
+        "must document the serialize_after variant"
+    );
+    // The load-bearing envelope fields the shim reads explicitly.
+    assert!(prompt.contains("blocked_by"), "defer carries blocked_by");
+    assert!(
+        prompt.contains("after_goal_id") && prompt.contains("overlap_files"),
+        "serialize_after carries after_goal_id + overlap_files"
+    );
+    // Fail-OPEN polarity is pinned so a future edit cannot silently flip it.
+    assert!(
+        lower.contains("fail") && lower.contains("open"),
+        "prompt must pin the fail-open contract"
+    );
+    // The canonical collisions this gate exists to catch are anchored in the
+    // few-shot examples.
+    assert!(
+        prompt.contains("goals_status.rs"),
+        "few-shot must anchor on the goals_status.rs collision"
+    );
+    assert!(
+        lower.contains("bridge"),
+        "few-shot must anchor on the Bridge-rename incident"
+    );
+}

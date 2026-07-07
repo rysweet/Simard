@@ -17,6 +17,12 @@ pub(crate) mod spawn;
 // validator is reusable by the operator CLI and dashboard ingress points;
 // consumed by `spawn::dispatch_spawn_engineer` and exercised by inline tests.
 pub(crate) mod repo_resolver;
+// Issue #2690: dependency/overlap-aware engineer admission.
+//   - `overlap` supplies the file-footprint FACTS (changed_files / overlap).
+//   - `admission` is the gather→reason→apply seam + its two rails; `pub(crate)`
+//     so `spawn::dispatch_spawn_engineer` can invoke the gate.
+pub(crate) mod admission;
+mod overlap;
 mod subordinate;
 use spawn::{dispatch_spawn_engineer, is_brain_failure_marker};
 // Dispatch-dedup helper introduced by PR #1228; intentionally re-exported so

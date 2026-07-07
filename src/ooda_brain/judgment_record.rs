@@ -21,8 +21,8 @@
 use std::cell::RefCell;
 
 use super::{
-    DecideJudgment, EngineerLifecycleDecision, GoalOutcomeDecision, OrientJudgment,
-    ParseFailureRecord,
+    DecideJudgment, EngineerAdmissionDecision, EngineerLifecycleDecision, GoalOutcomeDecision,
+    OrientJudgment, ParseFailureRecord,
 };
 
 /// Which recipe-backed brain phase produced the judgment. Serialised as
@@ -47,6 +47,9 @@ pub enum BrainPhase {
     /// Closed-loop outcome verification of a completion-candidate goal (issue
     /// #2751). Serialises as `"outcome_verify"`.
     OutcomeVerify,
+    /// Dependency/overlap-aware engineer admission at the spawn decision point
+    /// (issue #2690). Serialises as `"engineer_admission"`.
+    EngineerAdmission,
 }
 
 impl BrainPhase {
@@ -61,6 +64,7 @@ impl BrainPhase {
             BrainPhase::Orient => "orient",
             BrainPhase::MergeJudge => "merge_judge",
             BrainPhase::OutcomeVerify => "outcome_verify",
+            BrainPhase::EngineerAdmission => "engineer_admission",
         }
     }
 }
@@ -272,6 +276,34 @@ impl BrainJudgmentRecord {
             rationale: decision.rationale().to_string(),
             confidence: 1.0,
             fallback: false,
+            prompt_version: prompt_version.into(),
+            parse_failure: None,
+        }
+    }
+
+    /// Build an EngineerAdmission-phase record from an applied admission
+    /// decision (issue #2690). `fallback` is `true` for the deterministic
+    /// exact-path rail block and the fail-open brain-error path (both carry
+    /// lower confidence). The overlapping / serialized-after goal ids are folded
+    /// into the context summary so a cycle report shows *what* the candidate was
+    /// weighed against. Pure: no IO.
+    pub fn from_engineer_admission(
+        goal_id: &str,
+        decision: &EngineerAdmissionDecision,
+        fallback: bool,
+        prompt_version: impl Into<String>,
+    ) -> Self {
+        let blocking = decision.blocking_goals();
+        Self {
+            phase: BrainPhase::EngineerAdmission,
+            context_summary: truncate(&format!(
+                "engineer-admission goal_id={goal_id} vs=[{}]",
+                blocking.join(",")
+            )),
+            decision: decision.variant_label().to_string(),
+            rationale: decision.rationale().to_string(),
+            confidence: if fallback { 0.5 } else { 1.0 },
+            fallback,
             prompt_version: prompt_version.into(),
             parse_failure: None,
         }

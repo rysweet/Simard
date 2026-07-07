@@ -256,6 +256,147 @@ impl GoalOutcomeDecision {
 }
 
 // ---------------------------------------------------------------------------
+// Dependency/overlap-aware engineer admission (issue #2690)
+// ---------------------------------------------------------------------------
+
+/// The goal Simard is about to spawn an engineer for, plus its **predicted file
+/// footprint**. Assembled best-effort by the admission gather step.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct CandidateGoal {
+    /// Goal id.
+    pub id: String,
+    /// Goal title / task text — the work order the engineer would receive.
+    pub title: String,
+    /// Predicted target paths (repo-relative POSIX), derived best-effort from
+    /// the goal's `wip_refs` then prior-PR file lists. EMPTY when unknown — an
+    /// empty scope means "no overlap knowable" ⇒ admit (fail-open), and the
+    /// exact-path rail is inert.
+    #[serde(default)]
+    pub predicted_scope: Vec<String>,
+}
+
+/// One in-flight engineer, with the facts the brain weighs to judge overlap.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct LiveEngineerSignal {
+    /// Goal id the live engineer is pursuing (recovered from its worktree dir).
+    pub goal_id: String,
+    /// PID recorded in the worktree claim sentinel.
+    #[serde(default)]
+    pub pid: i32,
+    /// The engineer's worktree path (used only to compute `changed_files`).
+    #[serde(default)]
+    pub worktree_path: String,
+    /// Files this engineer is touching: `git diff --name-only <merge-base>` ∪
+    /// working-tree diff, repo-relative POSIX. Empty on any git error
+    /// (absent-tolerant ⇒ no overlap ⇒ fail-open).
+    #[serde(default)]
+    pub changed_files: Vec<String>,
+    /// Intersection of `changed_files` with the candidate's `predicted_scope`.
+    /// Non-empty ⇒ an overlap signal.
+    #[serde(default)]
+    pub overlap_with_candidate: Vec<String>,
+    /// `true` when the candidate goal's `wip_refs` reference this engineer's
+    /// goal_id / PR (an explicit dependency, not just an incidental overlap).
+    #[serde(default)]
+    pub depended_on: bool,
+}
+
+/// The structured context handed to the brain for the admission decision.
+/// Assembled by `gather_engineer_admission_ctx` — a **pure, best-effort**
+/// function. Every `gh` / `git` call is made **off the state lock**, is
+/// absent-tolerant, and degrades to a default (empty) value; the gather step
+/// never panics and never blocks.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct EngineerAdmissionCtx {
+    /// The goal about to be spawned, with its predicted file footprint.
+    pub candidate: CandidateGoal,
+    /// Every OTHER live engineer (the candidate's own goal is excluded — the
+    /// same-goal case is already handled upstream by the lifecycle branch).
+    #[serde(default)]
+    pub live_engineers: Vec<LiveEngineerSignal>,
+    /// Resolved target repo root (used for merge-base resolution + rendering).
+    #[serde(default)]
+    pub repo_root: String,
+}
+
+/// What the brain decided about admitting a NEW engineer for a candidate goal
+/// given the live engineer set (issue #2690). Tagged on `choice` (snake_case),
+/// matching [`EngineerLifecycleDecision`] and [`GoalOutcomeDecision`].
+///
+/// Fail-**open** polarity: an un-migrated brain or a broken brain resolves to
+/// `Admit` (scheduling is an optimization — wrongly stalling a spawn is cheaper
+/// to recover from than wrongly blocking the fleet). The one control that
+/// survives a broken/compromised brain is the deterministic exact-path rail in
+/// the seam.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "choice", rename_all = "snake_case")]
+pub enum EngineerAdmissionDecision {
+    /// No blocking overlap — spawn now (the existing path, unchanged).
+    Admit { rationale: String },
+    /// A live engineer is touching files this goal needs — do NOT spawn this
+    /// cycle. Retried naturally next OODA round. `blocked_by` names the goal(s)
+    /// in the way; `retry_after_secs` is an optional advisory hint.
+    Defer {
+        #[serde(default)]
+        blocked_by: Vec<String>,
+        rationale: String,
+        #[serde(default)]
+        retry_after_secs: Option<u64>,
+    },
+    /// Spawn now, but instruct the engineer to rebase onto `after_goal_id`'s
+    /// work before editing `overlap_files`. Advisory hint threaded into the
+    /// engineer `task` string — no new machinery.
+    SerializeAfter {
+        after_goal_id: String,
+        #[serde(default)]
+        overlap_files: Vec<String>,
+        rationale: String,
+    },
+}
+
+impl Default for EngineerAdmissionDecision {
+    /// Fail-open: the absence of a positive block is always an admit. An
+    /// un-migrated brain, a parse gap, or the seam's Rail-2 fallback all resolve
+    /// here — never to a spawn-stalling `Defer`.
+    fn default() -> Self {
+        EngineerAdmissionDecision::Admit {
+            rationale: String::new(),
+        }
+    }
+}
+
+impl EngineerAdmissionDecision {
+    /// Stable snake_case label — identical to the serde `choice` tag. Shared by
+    /// the judgment record, the metric context, and the admission seam log line.
+    pub fn variant_label(&self) -> &'static str {
+        match self {
+            Self::Admit { .. } => "admit",
+            Self::Defer { .. } => "defer",
+            Self::SerializeAfter { .. } => "serialize_after",
+        }
+    }
+
+    /// The rationale the brain carried on the chosen variant.
+    pub fn rationale(&self) -> &str {
+        match self {
+            Self::Admit { rationale }
+            | Self::Defer { rationale, .. }
+            | Self::SerializeAfter { rationale, .. } => rationale,
+        }
+    }
+
+    /// The goal ids this decision names as blocking / serialized-after, for the
+    /// judgment + metric context. Empty for `Admit`.
+    pub fn blocking_goals(&self) -> Vec<String> {
+        match self {
+            Self::Admit { .. } => Vec::new(),
+            Self::Defer { blocked_by, .. } => blocked_by.clone(),
+            Self::SerializeAfter { after_goal_id, .. } => vec![after_goal_id.clone()],
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The trait
 // ---------------------------------------------------------------------------
 
@@ -267,6 +408,26 @@ pub trait OodaBrain: Send + Sync {
         &self,
         ctx: &EngineerLifecycleCtx,
     ) -> SimardResult<EngineerLifecycleDecision>;
+
+    /// Decide whether to admit a NEW engineer for `ctx.candidate` right now,
+    /// given the live engineer set and file-overlap signals (issue #2690).
+    /// Called at the spawn/admission decision point for a genuinely NEW
+    /// engineer on a DIFFERENT goal — repeated structured evaluation of "will
+    /// this new engineer collide with an in-flight one?".
+    ///
+    /// Scheduling optimization only — MUST fail **open**. Defaulted to the
+    /// fail-open [`EngineerAdmissionDecision::Admit`] so every existing
+    /// `OodaBrain` impl and test double compiles unchanged and an un-migrated
+    /// brain can NEVER accidentally stall a spawn. The production [`RecipeBrain`]
+    /// overrides this to run the reasoning recipe.
+    fn decide_engineer_admission(
+        &self,
+        _ctx: &EngineerAdmissionCtx,
+    ) -> SimardResult<EngineerAdmissionDecision> {
+        Ok(EngineerAdmissionDecision::Admit {
+            rationale: "admission-scheduling not implemented by this brain".into(),
+        })
+    }
 
     /// Reason about whether the goal's real success criteria are met LIVE in
     /// production (issue #2751). Called each curate cycle for
