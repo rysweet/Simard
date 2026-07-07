@@ -146,6 +146,19 @@ non-graceful process exit (`SIGKILL` during deploy) and is recovered when the
 store is reopened. An explicit `checkpoint()` (== the library's `close()`, which
 folds the WAL into the main file) is **not** required for durability.
 
+> **Scope of this guarantee (SIGKILL vs. power loss).** "Write-through" means
+> each commit reaches the WAL *file* rather than an in-process buffer, so a
+> committed write survives a **process-level** non-graceful exit — `SIGKILL`,
+> OOM-kill, or a deploy restart — where the OS and its page cache stay up and
+> replay the WAL on the next open. It is **not** an assertion of a per-commit
+> `fsync` barrier, so it does not by itself guarantee survival of **power loss
+> or kernel panic**; that additionally requires the engine to flush the WAL to
+> durable media before acknowledging the commit, which Simard does not itself
+> enforce. Layer C (below) exercises the `SIGKILL` class only. For power-loss /
+> media-failure recovery the durability contract is the most recent verified
+> backup — see
+> [Cognitive memory durability § Durability contract](../operations/cognitive-memory-durability.md#durability-contract).
+
 This was verified empirically and is pinned by a regression test: persist an
 idea, `std::mem::forget` the writer handle so its graceful-`Drop` checkpoint
 never fires, clear the process store cache, cold-reopen from disk — the idea is

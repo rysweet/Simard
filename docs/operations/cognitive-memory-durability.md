@@ -85,8 +85,15 @@ Durability now has three layers:
 
 For `SIGKILL`, OOM-kill, or power loss, Simard does not add a current
 `post_write_barrier`. Completed-write durability is the library backend's
-responsibility; in-flight writes remain undefined. The operator recovery point
-is the most recent verified backup under `state_root/backups`.
+responsibility; in-flight writes remain undefined. A committed write reaches the
+backend's **write-through WAL**, so it survives a *process-level* non-graceful
+exit (`SIGKILL`, OOM-kill, or a deploy restart) where the OS and its page cache
+stay up and replay the WAL on the next open. Surviving **power loss or kernel
+panic** additionally requires the backend to `fsync` the WAL to durable media
+before acknowledging the commit — write-through alone does not assert that
+barrier, and Simard does not itself enforce it. For those failure classes the
+operator recovery point is the most recent verified backup under
+`state_root/backups`.
 
 ### Historical incidents
 
