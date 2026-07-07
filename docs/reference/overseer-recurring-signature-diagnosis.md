@@ -46,6 +46,13 @@ description: >
   representative #2707 — as an **un-deduplicated flood of 79 open issues** (#2688…#2894, still
   firing) distinct from the WhisperGate-deduped verbatim tail (steady at 10), corroborating the
   no-reconciliation root cause and sharpening P2/P3 scope — no finding overturned, confidence High.
+  Round-14 (§7s, HEAD `e5bd3a1b`) re-executed the per-hypothesis practical tests — H1 via the full
+  `tests_memory_recall` module (36 passed, 0 failed) + the four hypothesis tests in isolation (4
+  passed, 0 failed) and verbatim anchor re-resolution; H2 via live #16/#18/#21/#22 CLOSED + the
+  terminal-park path; H3 via the #17 live-timestamp staleness proof — all three re-confirmed at
+  zero source drift (no `src/` change since `85245e87`), with the deduped verbatim tail steady at 10
+  (#2875) and the escalation channel steady at 79 (#2894 @ 14:05:18Z, unchanged from round-13):
+  seventh consecutive identical board read, confidence remains High.
 last_updated: 2026-07-07
 review_schedule: as-needed
 owner: simard
@@ -419,7 +426,7 @@ not directly observed.
 
 ---
 
-## 7. Consolidation & verification (rounds 3–13)
+## 7. Consolidation & verification (rounds 3–14)
 
 The consolidation pass (rounds 3–4, this update) reconciled the parallel deep dives
 against the live working tree at **HEAD `20fb7539`** and **executed** the round-2
@@ -1591,11 +1598,77 @@ for the fix to *stick*, and **must also cover the stewardship re-file path**; **
 auto-filed backlog (≈10 verbatim + ~79 escalation) only when paired with P2; **P4** conditional
 (#17 disposition + `gym_skipped` down-rank); **P5** optional. No new remediation is introduced.
 
+### 7s. Round-14 addendum — per-hypothesis practical tests re-executed at HEAD `e5bd3a1b`
+
+Round 14 (this update) **re-executed the practical verification test for each hypothesis** at
+HEAD `e5bd3a1b` (2026-07-07 ~14:20 UTC). HEAD advanced from round-13's `480aeca1` by one
+docs-only commit (`e5bd3a1b`, the §7r consolidation) — `git diff --name-only 480aeca1..HEAD`
+returns only this file, and `git diff --name-only 85245e87..HEAD -- src/` is **empty**, so **no
+source line drifted** and every §7b/§7f/§7j/§7l/§7o/§7p anchor re-resolves verbatim.
+
+**H1 — self-amplifying self-recall loop (method: executable test + trace_code). CONFIRMED.**
+
+- `cargo test --lib overseer::tests_memory_recall` → **36 passed, 0 failed**. The four
+  hypothesis tests re-run in isolation (`…::tests_memory_recall::h`) → **4 passed, 0 failed**:
+  `h1_confirm_self_recall_reemits_recurring_signature_from_own_writebacks`,
+  `h1_refute_by_fix_provenance_filter_collapses_the_loop`,
+  `h2_confirm_observation_signature_stacks_prefix_each_generation`,
+  `h2_refute_by_fix_idempotent_signature_is_a_fixed_point` — CONFIRM + REFUTE-by-fix all green.
+- **Recall carries no provenance filter (re-resolved verbatim at this HEAD).** `recall_episodic`
+  maps each ranked episode via `.map(|e| RecalledEpisode { failure_signature, id, summary, score })`
+  (`wiring.rs:1024-1030`) — the map **drops `source_label`**; `struct RecalledEpisode`
+  (`capabilities.rs:607-616`) has fields `id`/`summary`/`failure_signature`/`score` and **no
+  `source_label`**, so recall cannot exclude self-authored episodes. The write-back it re-ingests
+  is tagged `OVERSEER_SOURCE_LABEL = "overseer"` (`wiring.rs:952`).
+- **Re-wrap + threshold + summary all re-resolve verbatim.** `observation_signature`
+  (`mod.rs:1081`) sorts + dedups the `dedup_key`s (`:1082-1084`) then re-prefixes
+  `format!("overseer-obs:{}", keys.join("|"))` (`:1085`); the `RecurringSignature` summary is the
+  verbatim line `"recurring signature seen {occurrences}× in cognitive memory ({signature})"`
+  (`mod.rs:1373-1375`); `RECURRING_SIGNATURE_THRESHOLD = 2` (`signal.rs:362`) — the `2×` is the
+  recalled-episode count, not a retry counter.
+
+**H2 — stale safeguard-parks for #16/#18/#21/#22 (method: verify_config + live GitHub). CONFIRMED.**
+
+- `gh issue view` at HEAD (`rysweet/agent-kgpacks-rs`): **#16 CLOSED** 2026-07-06T20:16:25Z,
+  **#18 CLOSED** 10:33:04Z, **#21 CLOSED** 13:29:03Z, **#22 CLOSED** 12:07:33Z — four delivered,
+  matching §1/§7o/§7p/§7r to the second. **4 of the 6 kgpacks blockers reference already-CLOSED
+  issues.**
+- **Terminal-park / no-close-reconciliation code path re-resolves.**
+  `NO_PROGRESS_BREAKER_THRESHOLD = 3` (`goal_curation/no_progress_breaker.rs:58`) → the done-gate
+  runs once and sets the `NO_PROGRESS_BLOCKED_PREFIX`/`_SUFFIX` sentinel (`:69/:74`); no branch
+  clears a park when its backing issue later closes, so `blocked_goals_from_board`
+  (`sensor.rs:204`) → `blocked_goal_of` (`:209`) keeps re-emitting the four stale `goal:blocked`
+  rows every tick.
+
+**H3 — #17 stale-premise dep-block (method: verify_config + live board + timestamp proof). CONFIRMED.**
+
+- **#17 OPEN**, `updatedAt` **2026-07-02T23:22:49Z**. Its block premise ("#16 still OPEN") is
+  provably stale: `updatedAt_17` (07-02T23:22:49Z) **precedes** `closedAt_16` (07-06T20:16:25Z)
+  by ≈3.8 days with no event since — the §7l/§7m/§7o timestamp proof re-confirmed from the live
+  values. Same missing done-gate/block-reconciliation defect as §1; #17 remains legitimately
+  deferrable as the flag-gated spike.
+
+**Loop still live — both channels unchanged in the ~15 min since round-13.** The
+`rysweet/Simard` WhisperGate-deduped verbatim tail is **exactly 10 open** (#2669, #2672, #2678,
+#2691, #2744, #2750, #2757, #2768, #2841, #2875; newest #2875 @ 2026-07-07T11:31:36Z) — **no
+11th**. The un-deduplicated `recurring_goal_reblock` stewardship-escalation channel holds at
+**79 open** (#2688…#2894; newest **#2894 @ 2026-07-07T14:05:18Z**) — **byte-identical to the
+round-13 read** taken ~15 min earlier, i.e. no new escalation issue filed in this window (both
+channels momentarily quiescent, but the mechanism remains live and un-reconciled).
+`rysweet/amplihack-xpia-defender` re-confirmed a live public repo (`gh repo view` →
+`{"isPrivate":false,"name":"amplihack-xpia-defender"}`).
+
+Net: all three hypotheses **re-confirmed** — H1 by 36/36 module + 4/4 hypothesis tests green and
+verbatim source anchors, H2 by live CLOSED states + the terminal-park/no-reconciliation path, H3
+by the live-timestamp staleness proof. Every anchor resolves at HEAD `e5bd3a1b` with **zero
+drift** (no `src/` change since `85245e87`); live state is **unchanged** (seventh consecutive
+identical board read across rounds 8→14). No finding changed; overall confidence remains **High**.
+
 ---
 
 ## 8. Provenance
 
-Investigation-only follow-up (investigation-workflow, rounds 1–13). No production
+Investigation-only follow-up (investigation-workflow, rounds 1–14). No production
 behavior was changed by this document. Round-1 established the structural cause
 ([`overseer-memory-recall-api`](./overseer-memory-recall-api.md)); round-2 added the
 semantic diagnosis and the executable H1/H2 tests; round-3 consolidated the parallel
@@ -1705,6 +1778,18 @@ corroborates the §1/§7g-4 no-reconciliation root cause (symptom-unblocks don't
 re-file path), and folds §7q's direct RUSTSEC-2026-0204 remediation confirmation into
 success-criterion #3 — no finding overturned, no remediation-weighting change, confidence remains
 High.
+Round-14 (§7s, HEAD `e5bd3a1b`) re-executed the per-hypothesis practical tests — H1 via
+`tests_memory_recall` (36 passed, 0 failed) plus the four hypothesis tests re-run in isolation
+(4 passed, 0 failed) and verbatim re-resolution of the H1 recall-path anchors (`signal.rs:362`,
+`mod.rs:1081-1085/1373-1375`, `wiring.rs:952/1024-1030`, `capabilities.rs:607-616`); H2 via live
+kgpacks-rs #16/#18/#21/#22 CLOSED + the terminal-park/no-reconciliation path
+(`goal_curation/no_progress_breaker.rs:58/69/74`, `sensor.rs:204/209`); and H3 via #17 OPEN with a
+live-timestamp staleness proof (`updatedAt` 07-02T23:22:49Z < #16 `closedAt` 07-06T20:16:25Z) —
+all three re-confirmed, verified no `src/` change since `85245e87` (zero source drift), the
+WhisperGate-deduped verbatim tail unchanged at 10 (newest #2875) and the un-deduplicated
+`recurring_goal_reblock` escalation channel steady at 79 (newest #2894 @ 14:05:18Z, byte-identical
+to the round-13 read ~15 min earlier), `rysweet/amplihack-xpia-defender` re-confirmed a live public
+repo — seventh consecutive identical board read (rounds 8→14), confidence remains High.
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
