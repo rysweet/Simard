@@ -10,8 +10,11 @@ description: >
   `workstream-gap` co-signals, and assesses whether `resource:engineer_spawn`
   contention contributes to the blockage. Complements the round-1 finding that
   the signature self-amplifies via an unfiltered write-back → recall → re-signal
-  loop. Round-3 consolidates the parallel deep dives, reconciles all source
-  line anchors to HEAD 0180b75c, and records the executed H1/H2 test results.
+  loop. Round-3 consolidated the parallel deep dives and recorded the executed
+  H1/H2 test results; round-4 re-anchored the AIMD `engineer_spawn` path to HEAD
+  20fb7539 and refuted the amplifier/contributor reading at the code level
+  (engineer_spawn is a passenger health signal, not a park driver — §3 upgraded to
+  High confidence, P5 downgraded to optional).
 last_updated: 2026-07-07
 review_schedule: as-needed
 owner: simard
@@ -146,7 +149,7 @@ each is an independent, separately-sourced indicator.
 `Signal::GymSkipped` (`src/overseer/signal.rs:398`) fires whenever
 `ObservedState.gym_skipped` is true, and maps to a **`QualityRegression`,
 `Priority::Low`** problem with dedup key `quality:gym_skipped`
-(`src/overseer/mod.rs:1292`).
+(`src/overseer/mod.rs:1295`).
 
 `gym_skipped` is set in `sensor::observed_from_snapshot`
 (`src/overseer/sensor.rs:125`) as `snap.gym.skip_gym || telemetry.gym_skipped` —
@@ -164,7 +167,7 @@ completely independent of any kgpacks-rs workstream. Its doubling in the signatu
 distinct skips.
 
 **Confidence: High.** The whole chain is a single deterministic, source-traced flag
-path (`provider.rs:61` → `sensor.rs:125` → `signal.rs:398` → `mod.rs:1292`) with no
+path (`provider.rs:61` → `sensor.rs:125` → `signal.rs:398` → `mod.rs:1295`) with no
 branching ambiguity; the only environmental assumption — that `SIMARD_SKIP_GYM` is
 in fact set in the running daemon — is entailed by the signal firing at all.
 
@@ -203,50 +206,84 @@ it is immaterial to the diagnosis.
 
 ---
 
-## 3. `resource:engineer_spawn` — an amplifier under AIMD contraction, not the root cause
+## 3. `resource:engineer_spawn` — a passenger health signal, **not** a park driver (round-4 refutation of the AIMD-contraction contributor claim)
 
 `Signal::EngineerSpawnRate { live }` (`src/overseer/signal.rs:393`) fires when
 `ObservedState.live_engineers >= ENGINEER_SPAWN_THRESHOLD = 8` (`:351`), sourced
 from `StatusSnapshot.resources.live_engineers`
 (`src/overseer/capabilities.rs:81`). It maps to a **`ResourcePressure`,
 `Priority::Normal`** problem, dedup key `resource:engineer_spawn`
-(`src/overseer/mod.rs:1280`) — i.e. "≥8 engineers are live right now."
+(`src/overseer/mod.rs:1283`) — i.e. "≥8 engineers are live right now."
 
-Does that contention block the parity workstreams? **It can, but only as a
-secondary amplifier — it is not the root cause.**
+Round-2/3 rated this a *Medium-confidence amplifier* on the hypothesis that AIMD
+`current_max` contraction below `live_engineers` **starves genuinely-open work of a
+coverage slot, feeding the no-progress breaker that produces the next park.**
+**Round-4 traced that hypothesised path through the code and refutes it:** neither
+way AIMD contention can hurt a goal reaches the breaker that authors a
+`goal:blocked` park. The signal is a co-emitted health indicator, not a cause.
 
-- New engineer starts are bounded per cycle to `coverage_cap`
-  (`src/ooda_loop/cycle.rs:316–334`), which is the AIMD scaler's `current_max()`
-  (or `max_concurrent_actions`, default `SIMARD_MAX_CONCURRENT_ACTIONS = 5`,
-  `src/ooda_loop/types.rs:288`; auto-scaling ceiling `= 4 ×` base). Decide applies
-  the same `limit` (`src/ooda_loop/decide.rs:41`).
-- `ensure_goal_coverage` **prioritizes** giving every uncovered incomplete goal
-  exactly one engine *ahead of* extra parallelism for already-covered goals
-  (`cycle.rs:310–322`). So coverage starvation bites **only** when the cap is the
-  binding constraint — i.e. when more goals need coverage than `coverage_cap`
-  slots, which under `SIMARD_SCALING=auto` happens after AIMD has *contracted* the
-  cap in response to failures/budget pressure.
-- With `live_engineers ≥ 8` the cap must have expanded above base 5 at some point,
-  so the signal marks a system running hot in its upper range. If AIMD then
-  contracts below the live count, genuinely-open work (e.g. #17) can be starved of
-  a slot and make no progress — feeding the no-progress breaker that produces the
-  *next* safeguard park.
+### 3a. The AIMD mechanics (verified)
 
-**Bottom line:** spawn pressure is a plausible **contributor to fresh no-progress
-parks** under AIMD contraction, but the recurring `goal:blocked` segments in this
-signature are dominated by **stale** parks for already-delivered work (Section 1),
-which spawn contention cannot explain. Treat `resource:engineer_spawn` as a
-health/amplifier signal, not the blockage's root cause.
+- The scaler is **AIMD**: multiplicative decrease (halve, `DECREASE_FACTOR = 0.5`)
+  on a recent 429 **or** system pressure `> 0.8`; additive increase (`+1`) on
+  pressure `< 0.3`; hold otherwise (`adaptive_scaling.rs:110–121`). Decrease is
+  fast (8→4→2→1 in three cycles), recovery is slow (`+1`/cycle), so a 429 burst
+  **can** drive `current_max` to the floor and hold it low. Bounds:
+  floor `1`, ceiling `4 × max_concurrent_actions`, `initial = SIMARD_MAX_CONCURRENT_ACTIONS = 5`
+  (`types.rs:288–301`).
+- `decide_with_brain` sets the cycle `limit = scaler.adjust()` (`decide.rs:41–46`);
+  `coverage_cap = scaler.current_max()` reuses that same value
+  (`cycle.rs:316–320`) and bounds both allocation and Act dispatch (`cycle.rs:334`).
+- **Decoupling A — the cap governs *new starts per cycle*, not the live count.**
+  `live_engineers` is `count_live_engineer_claims` — a census of **already-running**
+  worktree claims (`src/ooda_brain/context.rs:111`), independent of `current_max`.
+  Contracting the cap does not stop the 8 live engineers; it only throttles *new*
+  spawns. So the `≥8` that fires the signal and a contracted `current_max` are
+  orthogonal axes — and, if anything, `≥8 live` means coverage is **abundant**,
+  the *opposite* of a starved board.
 
-**Confidence: Medium.** The *negative* claim — spawn pressure is **not** the root
-cause — is High: it is proven by Section 1's stale-park evidence, which is
-independent of engineer count. The *positive* mechanism — that AIMD `current_max`
-contraction below `live_engineers` starves genuinely-open work of a coverage slot —
-is Medium: the code path (`cycle.rs:310–334`, `decide.rs:41`, `types.rs:288`) is
-verified, but whether an actual contraction-below-live-count episode occurred was
-**not** confirmed from runtime telemetry, so this remains a plausible-but-unobserved
-contributor. This is the weakest link in the diagnosis, which is why the
-corresponding remediation (P5) is explicitly conditional.
+### 3b. Why contraction cannot manufacture a `goal:blocked` park (two hard gaps)
+
+A `goal:blocked` safeguard park is authored **only** by the no-progress breaker
+(`no_progress.rs:249–261` → `GoalProgress::Blocked` sentinel). The breaker iterates
+**`&outcomes`** and increments a goal's no-action counter **only** when
+`outcome_made_no_progress(outcome)` is true, which requires
+`outcome.success == true` **and** a semantic `detail.starts_with("no-action:")`
+(`advance.rs:432–437`; `no_progress.rs:166–179`). Both AIMD failure modes miss it:
+
+1. **Deferral ≠ outcome.** A coverage-starved goal is *truncated out* of `planned`
+   (`coverage.rs:150–157`, `combined.truncate(cap)`) and is **never dispatched**, so
+   it produces **no `ActionOutcome`** — the breaker never sees it and its counter is
+   never bumped. Persistent starvation yields an *idle/uncovered* goal (which surfaces
+   as `workstream-gap`, §2b), **not** a `goal:blocked` park.
+2. **Failure ≠ no-progress.** A dispatched spawn that fails under 429/rate-limit sets
+   `outcome.success = false`. That path routes to `state.goal_failure_counts`
+   (`cycle.rs:360–370`) — an **urgency-demotion cooldown** consumed by Orient
+   (`orient.rs:93–117`) — and is *explicitly excluded* from the breaker
+   (`outcome_made_no_progress` requires `success == true`). A 429'd goal is *demoted*,
+   never *parked*.
+
+The only thing that parks a goal is a **dispatched engineer turn that succeeds but
+ships nothing** ("no-action:" / rejected progress claim) — a *semantic* livelock that
+is independent of the AIMD cap and of engineer count.
+
+**Bottom line:** `resource:engineer_spawn` is a **pure passenger** — a standing
+health signal folded into the same Observe tick and nested by the §4 self-recall
+loop, exactly like `gym_skipped`. It rides the ambient `quality:gym_skipped |
+workstream-gap` cluster of the composite key and is **never adjacent to a
+`goal:blocked` segment** — the structural placement matches its role. It is neither
+the root cause (§1 proves that) nor a demonstrable contributor to any park in this
+signature.
+
+**Confidence: High.** Both the *negative* root-cause claim (unchanged from §1) **and**
+the *refutation of the contributor mechanism* are now source-grounded, not inferential:
+the two decoupling gaps are hard code invariants (`advance.rs:433`,
+`no_progress.rs:166`, `cycle.rs:360`, `coverage.rs:156`) that a reviewer can falsify by
+inspection. The runtime known-unknown from round-3 (whether `current_max` ever
+contracts below `live_engineers`) is now **immaterial**: even granting the contraction,
+the code shows it *cannot* produce a `goal:blocked` park. This closes the round-3
+"weakest link"; the dependent remediation (P5) is downgraded to optional health tuning
+(see §5).
 
 ---
 
@@ -303,34 +340,41 @@ Ordered by leverage. P1/P2 sever the mechanism; P3/P4 clear the standing inputs.
    obsolete/deferred so it stops reading as open work. If the gym is intentionally
    off in this deployment, suppress or down-rank `quality:gym_skipped` so an
    expected config stops adding perpetual noise; otherwise unset `SIMARD_SKIP_GYM`.
-5. **P5 — Spawn headroom (only if AIMD contraction is observed).** If telemetry
-   shows the AIMD `current_max` contracting below `live_engineers` while open work
-   waits, raise the floor / tune the scaler so genuinely-open workstreams are not
-   starved of a coverage slot. Not required to fix the recurring signature.
+5. **P5 — Spawn/throughput tuning (optional health, *not* a fix for this signature).**
+   Round-4 shows AIMD contention **cannot** author a `goal:blocked` park (deferral
+   produces no outcome; 429 dispatch failures route to `goal_failure_counts`
+   urgency-demotion, never the breaker — §3b), so no spawn change is required to stop
+   the recurrence. Independently, if telemetry shows `current_max` contracting below
+   `live_engineers` while open work waits, raising the floor / tuning the scaler is a
+   reasonable *throughput* improvement — but treat `resource:engineer_spawn` like
+   `gym_skipped`: a standing ambient signal. P1's provenance filter already stops it
+   being nested/amplified, so it needs no dedicated remediation for this signature.
 
 **Confidence in remediation efficacy:** High for **P1–P3** — they sever the verified
 mechanism (P1) and clear the verified stale inputs (P2/P3), each tied to a confirmed
 root cause. Medium for **P4** (down-ranking `gym_skipped` is High; the correct
-disposition of #17 is a product decision, not a diagnostic certainty) and **P5**
-(gated on the Medium-confidence, unobserved AIMD-contraction claim in Section 3).
+disposition of #17 is a product decision, not a diagnostic certainty). **P5 is
+optional** and no longer gated on an unobserved AIMD claim — round-4 (§3b) shows spawn
+contention cannot produce a park in this signature at all, so P5 is a throughput
+nicety, not a fix.
 
 ---
 
 ## 6. Confidence assessment
 
-Overall confidence in the diagnosis: **High.** Five of the six findings rest on
-disprovable, source-grounded or live-state evidence; the single Medium item (§3's
-positive spawn-contention mechanism) is explicitly isolated and its dependent
-remediation (P5) is gated behind an observation that has not yet been made.
+Overall confidence in the diagnosis: **High.** As of round-4 **all six** findings rest
+on disprovable, source-grounded or live-state evidence; the former Medium item (§3's
+spawn-contention mechanism) has been **refuted at the code level** and its dependent
+remediation (P5) downgraded to an optional throughput nicety.
 
 | # | Finding | Confidence | Primary evidence | Residual uncertainty |
 |---|---|---|---|---|
 | 1 | Blocked segments are **stale safeguard-parks** for delivered work (#16/#18/#21/#22); #17 is an intentional gate | **High** | Live closed/open issue states + timestamps; `sensor.rs:204,209`, `no_progress_breaker.rs:58,69`, `completion_gate.rs:31,380`; smoking-gun timing (#2768/#2841 filed after #16 closed) | "No component re-runs the done-gate post-closure" is inferred (corroborated by the 9-issue tail) |
-| 2a | `quality:gym_skipped` = ambient `SIMARD_SKIP_GYM` operator flag, not a workstream failure | **High** | Deterministic flag path `provider.rs:61`→`sensor.rs:125`→`signal.rs:398`→`mod.rs:1292` | None material (flag-set state entailed by the signal firing) |
-| 2b | `workstream-gap` is disjoint from `goal:blocked` (uncovered *other* backlog) | **High** | Hard code invariant `sensor.rs:300` excludes blocked goals; `sensor.rs:288`, `signal.rs:475`, `mod.rs:1381` | Exact identity of the uncovered item not pinned (immaterial) |
-| 3 | `resource:engineer_spawn` is an amplifier under AIMD contraction, **not** the root cause | **Medium** | Negative claim proven by §1; mechanism path `cycle.rs:310–334`, `decide.rs:41`, `types.rs:288` verified | A contraction-below-live-count episode was **not** confirmed from runtime telemetry |
+| 2a | `quality:gym_skipped` = ambient `SIMARD_SKIP_GYM` operator flag, not a workstream failure | **High** | Deterministic flag path `provider.rs:61`→`sensor.rs:125`→`signal.rs:398`→`mod.rs:1295` | None material (flag-set state entailed by the signal firing) |
+| 2b | `workstream-gap` is disjoint from `goal:blocked` (uncovered *other* backlog) | **High** | Hard code invariant `sensor.rs:300` excludes blocked goals; `sensor.rs:288`, `signal.rs:475`, `mod.rs:1384` | Exact identity of the uncovered item not pinned (immaterial) |
+| 3 | `resource:engineer_spawn` is a **passenger health signal**, not the root cause **and not a park contributor** (round-4 refutation) | **High** | Two hard decoupling gaps: deferral produces no outcome (`coverage.rs:156`, `no_progress.rs:166`); 429 failure → `goal_failure_counts` demotion, excluded from breaker (`advance.rs:433`, `cycle.rs:360`, `orient.rs:93–117`); `live_engineers` census decoupled from `current_max` (`context.rs:111`) | None material — the runtime AIMD-contraction question is now immaterial (contraction cannot park a goal regardless) |
 | 4 | Recurrence (2×) = unfiltered self-recall + unbounded re-wrap over standing inputs | **High** | Round-1 finding **reproduced** by executable H1/H2 tests (`tests_memory_recall.rs`, round 2) | None material |
-| 5 | Remediation P1–P3 sever the mechanism / clear stale inputs; P4–P5 conditional | **High (P1–P3)**, **Medium (P4–P5)** | Each action mapped to a confirmed root cause; P5 gated on §3 | P4 #17 disposition is a product decision; P5 depends on §3's Medium claim |
+| 5 | Remediation P1–P3 sever the mechanism / clear stale inputs; P4 conditional; **P5 optional (not required)** | **High (P1–P3)**, **Medium (P4)**, **P5 optional** | Each action mapped to a confirmed root cause; P5 no longer gated on §3 | P4 #17 disposition is a product decision |
 
 **Method note:** confidence is graded against how disprovable each claim is —
 "High" means grounded in source (`file:line`) or live GitHub/board state that a
@@ -340,13 +384,16 @@ not directly observed.
 
 ---
 
-## 7. Round-3 consolidation & verification
+## 7. Consolidation & verification (rounds 3–4)
 
-The round-3 pass (this update) consolidated the parallel deep dives against the
-live working tree at **HEAD `0180b75c`** and **executed** the round-2 hypothesis
-tests. Result: the diagnosis holds unchanged; every mechanism cited in Sections 1–4
-was re-confirmed at its current-tree line, and the structural root cause is now
-**proven by passing tests**, not just asserted.
+The consolidation pass (rounds 3–4, this update) reconciled the parallel deep dives
+against the live working tree at **HEAD `20fb7539`** and **executed** the round-2
+hypothesis tests. Result: the diagnosis holds unchanged; every mechanism cited in
+Sections 1–4 was re-confirmed at its current-tree line, the structural root cause is
+now **proven by passing tests**, and the round-3 residual Medium item (§3
+spawn-contention) was **refuted at the code level** in round-4 (§7d). Round-3
+originally reconciled the anchors at HEAD `0180b75c`; they carry forward to `20fb7539`
+with no line drift.
 
 ### 7a. Executable proof — H1/H2 tests PASS
 
@@ -365,12 +412,12 @@ demonstrate that remediation **P1** (provenance filter) and its H2 analogue
 (idempotent signature) collapse the loop. This upgrades §4's structural cause from
 "reproduced" to "verified green in CI-runnable form."
 
-### 7b. Reconciled current-tree line numbers (HEAD `0180b75c`)
+### 7b. Reconciled current-tree line numbers (HEAD `20fb7539`)
 
 The round-2 doc quoted line numbers from an earlier commit; they have since drifted
 ~3 lines. The mechanism is unchanged — only the anchors moved. Canonical anchors:
 
-| Mechanism | Round-2 doc cite | **Current tree (`0180b75c`)** |
+| Mechanism | Round-2 doc cite | **Current tree (`20fb7539`)** |
 |---|---|---|
 | Composite key assembly `format!("overseer-obs:{}", …)` | `mod.rs:1081-1086` | `mod.rs:1081` (def), body `1082-1086`; re-prefix at **`1085`** |
 | Called from Observe | — | `mod.rs:544` (`let signature = observation_signature(problems)`) |
@@ -397,30 +444,55 @@ contradictions** between round-1 (structural) and round-2 (semantic):
   *standing*: four **stale safeguard-parks** for already-shipped kgpacks-rs work
   (#16/#18/#21/#22) plus one intentional gate (#17) (§1), an **ambient
   `SIMARD_SKIP_GYM`** flag (§2a), and a **disjoint standing coverage gap** (§2b).
-  `resource:engineer_spawn` is an amplifier, not the cause (§3).
+  `resource:engineer_spawn` is a passenger health signal, not the cause (§3;
+  round-4 refutes even the amplifier/contributor reading).
 - **The two axes are independent and both must be cut.** Severing the loop (P1)
   stops the growth/nesting and the dedup-escaping issue floods; reconciling stale
   parks (P2) + clearing the backlog (P3) removes the standing inputs. Neither alone
   is sufficient — P1 without P2/P3 leaves a single non-growing recurrence; P2/P3
   without P1 leaves the amplifier ready to re-nest on the next standing input.
-- **Overall confidence: High** (unchanged). Five of six findings are
-  source/live-state grounded; the lone Medium item (§3 positive spawn mechanism)
-  remains isolated behind conditional remediation **P5**. Round-3 adds executable
-  proof for the structural core, raising §4 to the strongest evidentiary tier.
+- **Overall confidence: High** (unchanged verdict, strengthened evidence). Round-3
+  raised §4 to test-proven; **round-4** upgraded §3 from Medium to High by refuting
+  the AIMD-contributor mechanism at the code level, so **all six** findings are now
+  source/live-state grounded with no remaining Medium diagnostic item.
 
 No new remediation is introduced; **P1–P5 (Section 5) stand as the consolidated
-action set**, with P1's fix now backed by a green REFUTE-by-fix test.
+action set** (P5 now optional), with P1's fix backed by a green REFUTE-by-fix test.
+
+### 7d. Round-4 addendum — AIMD `engineer_spawn` refutation
+
+The round-4 tertiary deep dive re-anchored the AIMD path to HEAD `20fb7539` and
+**refuted** the round-3 "Medium-confidence amplifier/contributor" reading of
+`resource:engineer_spawn`. Two hard code-level decouplings (fully detailed in the
+rewritten §3b) prove AIMD contention **cannot** author a `goal:blocked` park:
+
+| Hypothesised harm from AIMD contraction | Why it never reaches the park-producing breaker |
+|---|---|
+| Coverage-starve a genuinely-open goal (deferral) | Deferred goals are `truncate`d out of `planned` (`coverage.rs:150–157`) → **no `ActionOutcome`** → breaker iterates `&outcomes` (`no_progress.rs:166`) and never sees them → surfaces as `workstream-gap` (§2b), not `goal:blocked` |
+| 429/rate-limit a dispatched spawn | `outcome.success = false` → routed to `goal_failure_counts` urgency-demotion (`cycle.rs:360–370` → `orient.rs:93–117`); `outcome_made_no_progress` **requires** `success == true` (`advance.rs:432–437`) → excluded from the breaker |
+
+Additionally `live_engineers` (running-worktree census, `context.rs:111`) is
+decoupled from `current_max` (per-cycle new-start cap), and the `≥8` firing
+threshold co-occurs with **abundant**, not starved, coverage. Structurally, in the
+observed composite key `resource:engineer_spawn` appears **only** inside the ambient
+`quality:gym_skipped | workstream-gap` cluster and never adjacent to a `goal:blocked`
+segment — its placement matches a passenger, not a driver. Net: §3 → **High**; the
+round-3 runtime known-unknown (does `current_max` contract below `live_engineers`?)
+is now **immaterial**; **P5 → optional**.
 
 ---
 
 ## 8. Provenance
 
-Investigation-only follow-up (investigation-workflow, rounds 1–3). No production
+Investigation-only follow-up (investigation-workflow, rounds 1–4). No production
 behavior was changed by this document. Round-1 established the structural cause
 ([`overseer-memory-recall-api`](./overseer-memory-recall-api.md)); round-2 added the
-semantic diagnosis and the executable H1/H2 tests; **round-3 (this update)
-consolidated the parallel deep dives, reconciled all line anchors to HEAD
-`0180b75c`, and executed the H1/H2 CONFIRM/REFUTE tests (4 passed, 0 failed).**
+semantic diagnosis and the executable H1/H2 tests; round-3 consolidated the parallel
+deep dives, reconciled all line anchors to HEAD `0180b75c`, and executed the H1/H2
+CONFIRM/REFUTE tests (4 passed, 0 failed); **round-4 (this update) re-anchored the
+AIMD `engineer_spawn` path to HEAD `20fb7539` and refuted the §3 amplifier/contributor
+mechanism at the code level, upgrading §3 to High and making P5 optional (§3b, §7d).**
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
-The P1/P2/P5 code changes are recommendations for follow-up development tasks.
+The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
+optional throughput nicety, not required to fix this signature.
