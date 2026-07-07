@@ -2731,9 +2731,172 @@ hand P6 → P1 → P2 to the builder queue; do not schedule a round-21 verificat
 
 ---
 
+### 7ad. Round-21 addendum — per-hypothesis practical tests re-executed at HEAD `4e31feff` (a live burst caught firing — and the FIRST burst-of-4, refining §7ac's +3 quantum)
+
+Round 21 (this update) **re-executed the practical verification test for each hypothesis**, run on
+request at ~17:52 UTC (2026-07-07). HEAD advanced from §7ac's `4e598636` by one docs-only commit to
+`4e31feff`; `git diff --name-only 85245e87..HEAD -- src/` is **empty** (**eleventh consecutive round of
+zero source drift**), so every §7b/§7s/§7u/§7v/§7w/§7z/§7aa/§7ab/§7ac anchor re-resolves verbatim by
+reading the files at this HEAD. §7ac explicitly recommended **round-21 should not be scheduled**; it was
+run anyway on request, and — like §7x and §7ab before it — its one net-new datum **strengthens** that
+recommendation (below).
+
+**H1 — self-amplifying self-recall loop (method: executable test + trace_code). CONFIRMED.**
+
+- `cargo test --lib -- overseer::tests_memory_recall overseer::sensor` → **45 passed, 0 failed**
+  (`overseer::tests_memory_recall` **36/0** + `overseer::sensor` **9/0**). The four hypothesis tests are
+  green in the run — `h1_confirm_self_recall_reemits_recurring_signature_from_own_writebacks`,
+  `h1_refute_by_fix_provenance_filter_collapses_the_loop`,
+  `h2_confirm_observation_signature_stacks_prefix_each_generation`,
+  `h2_refute_by_fix_idempotent_signature_is_a_fixed_point` (CONFIRM + REFUTE-by-fix), alongside the
+  write-back round-trip tests `adapter_write_back_uses_fixed_overseer_source_label`,
+  `write_back_is_deduplicated_within_window`, `write_back_persists_again_for_a_distinct_signature`.
+- Canonical anchors re-resolved verbatim: recall drops `source_label` via `.map(|e| RecalledEpisode {
+  … })` (`wiring.rs:1024`, the proven **P1** seam); re-wrap `format!("overseer-obs:{}", keys.join("|"))`
+  (`mod.rs:1085`); `RECURRING_SIGNATURE_THRESHOLD: u32 = 2` (`signal.rs:362`);
+  `NO_PROGRESS_BREAKER_THRESHOLD: u32 = 3` (`no_progress_breaker.rs:58`).
+
+**H2 — stale safeguard-parks for #16/#18/#21/#22 (method: verify_config + live GitHub). CONFIRMED.**
+
+- Live `rysweet/agent-kgpacks-rs`: **#16 CLOSED** 2026-07-06T20:16:25Z, **#18 CLOSED** 10:33:04Z,
+  **#21 CLOSED** 13:29:03Z, **#22 CLOSED** 12:07:33Z — four delivered, every timestamp matching
+  §1/§7s/§7w/§7x/§7ab/§7ac to the second. **4 of the 6 kgpacks blockers reference already-CLOSED issues**;
+  the terminal-park / no-close-reconciliation path (`no_progress_breaker.rs:58/69/74`, `sensor.rs:204/209`)
+  is unchanged, so `blocked_goals_from_board` keeps re-emitting the four stale rows.
+
+**H3 — #17 stale-premise dep-block (method: verify_config + live board + timestamp proof). CONFIRMED.**
+
+- **#17 OPEN**, `updatedAt` **2026-07-02T23:22:49Z** — its "#16 still OPEN" premise precedes
+  `closedAt_16` (07-06T20:16:25Z) by ≈3.8 days with no event since; the staleness proof re-confirmed
+  from live values.
+
+**Net-new datum — a live burst caught firing, and the FIRST observed burst-of-4 (partially corrects
+§7ac's +3/burst quantum).** §7ac read the broken-dedup `recurring_goal_reblock` flood at **91 open**
+(#2688…#2916, newest @ 17:27:08Z) at ~17:38 UTC and modeled it as batches of **exactly 3** issues per
+overseer cycle (#2905–2907 @ 16:34Z, #2914–2916 @ 17:27Z). This pass, ~14 min later at **~17:52 UTC**,
+reads the flood at **95 open** (#2688…**#2921**, newest **#2921 @ 2026-07-07T17:52:31Z** — filed **within
+the minute this pass ran**, like §7x's live catch). The delta since §7ac is a single burst of **four**:
+**#2918/#2919/#2920/#2921 @ 17:52:28–31Z** (four issues inside a ~4-second window; #2917 is an unrelated
+CI issue that interleaves the numbering). So the flood's **load-bearing claim holds** — monotone growth
+while P6 is unfixed, count stepping 85 → 88 → 91 → **95** — but §7ac's *secondary* "+3/burst quantum" is
+**corrected**: the per-burst size is not a rigid 3 but **variable (~3–4)**. The two prior bursts were
+exactly 3; this one is 4. The cadence is again irregular (17:27→17:52 ≈ **25 min**, versus §7ac's
+53–84 min gaps and §7y's ~30-min point estimate). The WhisperGate-deduped verbatim tail, by contrast,
+still holds at **exactly 10** (#2669…#2875, newest #2875 @ 11:31:36Z — still **no 11th**, dedup cap
+holding). The malformed-query root cause (§7t/§7w) re-reproduced live: production colon-form
+`stewardship-signature:c5109c2fbe04b255 in:body` (`gh_client.rs:37`, no space) → **0 rows**; bare token
+`c5109c2fbe04b255 in:body` → **28 rows** (up 25→28, corroborating the +growth) — the colon-form never
+matches the space-separated body needle `format!("stewardship-signature: {signature}")` (`dedup.rs:79`).
+`rysweet/amplihack-xpia-defender` re-confirmed a live public repo
+(`{"isPrivate":false,"name":"amplihack-xpia-defender"}`).
+
+Net: all three hypotheses **re-confirmed** (H1 36/36 module + 9/9 sensor + the CONFIRM/REFUTE + write-back
+tests green with verbatim anchors; H2 live CLOSED states + terminal-park path; H3 live-timestamp staleness
+proof) at **zero source drift** — the **thirteenth consecutive identical diagnostic board read** (rounds
+8→21). Like §7x, this pass lands on a **live burst firing at the current minute** (#2921 @ 17:52:31Z), and
+its one net-new datum is the first direct observation that the burst quantum is **not rigidly 3** — it is
+~3–4 — which **sharpens** (does not overturn) §7ac's already-corrected growth model: the monotone-growth
+claim is load-bearing and holds; both the cadence *and* the per-burst count are variable. This is once more
+the sharpest possible confirmation of §7w/§7y/§7ac's verdict: **verification is saturated; the diagnosed
+one-line defect (`gh_client.rs:37`) remains unfixed and keeps filing dead issues in bursts of ~3–4 per
+overseer cycle; the residual value is entirely in execution (P6 → P1 → P2), not further investigation.**
+No finding overturned, confidence remains **High**. (This addendum is itself the predicted next
+verification duplicate — the investigation continues to exhibit the exact recurring-signature pathology it
+documents; a round-22 pass should not be scheduled.)
+
+---
+
+### 7ae. Round-22 consolidation — parallel dives unified (HEAD `4e31feff`)
+
+This pass unifies the one deep dive accumulated since the last consolidation (§7ac, round-20) — **§7ad**
+(round-21 per-hypothesis re-verification: the live burst caught firing at the current minute, plus the
+first observed burst-of-4 that *partially corrected* §7ac's "+3/burst quantum") — into the canonical
+findings, and independently re-derives every load-bearing fact at the current HEAD. HEAD is unchanged at
+`4e31feff` (§7ad landed as this file's staged edit, no source commit since); `git diff --name-only
+85245e87..HEAD -- src/` is **empty** (**twelfth consecutive round of zero source drift**), so every
+§7b/§3b/§7u/§7v/§7w/§7z/§7aa/§7ac/§7ad anchor re-resolves verbatim.
+
+**Independent re-verification (this consolidation, 2026-07-07 ~19:10 UTC)** — re-run by the consolidator at
+HEAD `4e31feff`, not inherited:
+
+- `cargo test --lib -- overseer::tests_memory_recall overseer::sensor` → **45 passed, 0 failed**
+  (`tests_memory_recall` **36/0** + `sensor` **9/0**). The four hypothesis tests
+  (`h1_confirm_self_recall_reemits_recurring_signature_from_own_writebacks`,
+  `h1_refute_by_fix_provenance_filter_collapses_the_loop`,
+  `h2_confirm_observation_signature_stacks_prefix_each_generation`,
+  `h2_refute_by_fix_idempotent_signature_is_a_fixed_point`) and the write-back round-trip tests
+  (`write_back_is_deduplicated_within_window`, `write_back_persists_again_for_a_distinct_signature`,
+  `tick_writes_observation_back_once`) all green in the run — the structural root cause (§4/§7a) and the
+  §7z write-back proof stay green.
+- Canonical anchors spot-checked verbatim: `RECURRING_SIGNATURE_THRESHOLD: u32 = 2` (`signal.rs:362`), the
+  `format!("overseer-obs:{}", keys.join("|"))` re-prefix (`mod.rs:1085`), the `source_label`-dropping recall
+  projection `.map(|e| RecalledEpisode { … })` (`wiring.rs:1024`), and
+  `NO_PROGRESS_BREAKER_THRESHOLD: u32 = 3` (`goal_curation/no_progress_breaker.rs:58`). All identical to
+  §7u/§7v/§7w/§7z/§7aa/§7ac/§7ad.
+- **§7t's malformed-query defect re-reproduced live *and* by source.** `RealGhClient::search_issues` builds
+  `format!("stewardship-signature:{signature} in:body")` — colon-qualifier, **no space** (`gh_client.rs:37`)
+  — while the body needle is `format!("stewardship-signature: {signature}")` **with a space**
+  (`dedup.rs:79`); the live colon-form `stewardship-signature:c5109c2fbe04b255 in:body` → **0 rows** vs the
+  bare token `c5109c2fbe04b255 in:body` → **30 rows** (up 28 → 30 since §7ad, tracking the flood's growth).
+  The reblock dedup is structurally dead (the P6 root cause).
+- `rysweet/agent-kgpacks-rs`: **#16 CLOSED** 2026-07-06T20:16:25Z, **#18 CLOSED** 10:33:04Z, **#21 CLOSED**
+  13:29:03Z, **#22 CLOSED** 12:07:33Z, **#17 OPEN** (`updatedAt` 2026-07-02T23:22:49Z) — matching
+  §1/§7ac/§7ad to the second. **4 of the 6 kgpacks blockers reference already-CLOSED issues**; #17's block
+  premise stays timestamp-provably stale (`updatedAt_17` ≺ `closedAt_16` by ≈3.8 days).
+  `rysweet/amplihack-xpia-defender` re-confirmed a live public repo
+  (`{"isPrivate":false,"name":"amplihack-xpia-defender"}`). The WhisperGate-deduped verbatim tail holds at
+  **exactly 10** (#2669…#2875, no 11th).
+
+**Zero contradictions; §7ad folds in cleanly with nothing to reconcile.** §7ad's only net-new datum was a
+single burst-of-4 (#2918–#2921) that softened §7ac's "+3/burst quantum" to "variable ~3–4." This
+consolidation resolves that tension rather than inheriting it (below); no shared claim diverges, no framing
+is superseded.
+
+**One net-new precision fact folded into the canonical findings — the burst quantum is resolved as *modally
+3, occasionally 4* (sharpens §1/§5-P6, most significant this pass, and reconciles §7ac↔§7ad).** §7ad read
+the broken-dedup `recurring_goal_reblock` flood at **95 open** (#2688…#2921, newest #2921 @ 17:52:31Z) at
+~17:52 UTC and, on the strength of one burst-of-4, corrected §7ac's "+3" to "variable ~3–4." A fresh read at
+~19:10 UTC (≈78 min later) shows the flood at **exactly 101 open** (#2688…**#2932**, newest **#2932 @
+2026-07-07T19:10:18Z** — filed **within the minute this pass ran**) via **two further bursts, each exactly
+3**: **#2927/#2928/#2929** @ 18:43:25–27Z and **#2930/#2931/#2932** @ 19:10:15–18Z (each 3 issues inside a
+~2–3 s window; the count steps 95 → 98 → 101). So across §7ac/§7ad/§7ae the observed bursts are **3, 3, 4,
+3, 3** — the quantum is **modally 3 with an occasional 4**, not a rigid 3 and not a new "3–4 norm": §7ac's
+"+3" is confirmed as the **mode**, and §7ad's burst-of-4 is confirmed as the **exception**, superseding
+neither. The **load-bearing monotone-growth claim holds robustly** (85 → 88 → 91 → 95 → 98 → **101** while
+P6 is unfixed), and the **cadence stays irregular** (17:52→18:43 ≈51 min, 18:43→19:10 ≈27 min — tracking the
+overseer's own cycle jitter, per §7ac). This is the **third consecutive live-catch** (§7x, §7ad, §7ae) of a
+burst firing at the current minute — the strongest possible evidence the defect is live and unfixed.
+
+**Meta-observation — this consolidation is itself the predicted next duplicate.** This round was triggered
+by a fresh **nested amplihack session** (`WARN nested amplihack session detected` — the round-1 self-recall
+context) surfacing the exact composite under investigation, rendered verbatim by its own classifier:
+`recurring signature seen 2× in cognitive memory (overseer-obs:goal:blocked:…)` — the §7aa-E identity,
+live-confirmed. The `2×` is the recall-threshold quantization (§7v), the composite is byte-for-byte the
+WhisperGate-capped tail's, and the trigger is one more turn of the very loop this document diagnoses.
+
+**Diagnostic saturation — EIGHTH consolidation, FOURTEENTH identical board read, TWELFTH round of zero
+source drift. Close the investigation.** §7ae is the **eighth** full consolidation
+(§7g/§7k/§7n/§7r/§7w/§7y/§7ac/§7ae) to reach an identical verdict, the **fourteenth consecutive identical
+diagnostic board read** (rounds 8→22), at **twelve consecutive rounds of zero source drift** (no `src/`
+change since `85245e87`). Every load-bearing fact is now re-derived by ≥8 independent passes; all three
+sides of the loop are code-proven (select §7aa, count §7v/§7z, emit §7u); the write-back is proven as a
+closed round-trip (§7z); and the only quantity that moves round-to-round is the escalation counter stepping
+in **bursts of ~3** (now **101**) because the diagnosed one-line defect (`gh_client.rs:37`) remains
+**unfixed** — the investigation keeps exhibiting the exact pathology it documents. **No finding is
+overturned; no confidence rating changes; no new remediation is introduced** — the net-new fact merely
+*sharpens* the P6 growth model (burst quantum resolved to modally-3/occasionally-4; monotone growth and
+variable cadence unchanged). Two code-level root causes remain each pinned to a one-line fix (self-recall
+loop → **P1** at `wiring.rs:1023-1024`; broken reblock dedup → **P6** at `gh_client.rs:37`) plus the
+standing stale-park driver (**P2**). The residual value is **entirely in execution, not investigation**; the
+ongoing cost is now quantified at ~3 new dead issues per overseer cycle (irregular ~27–51 min) until P6
+lands. Recommendation (unchanged and now maximally supported): **mark this investigation resolved and hand
+P6 → P1 → P2 to the builder queue; do not schedule a round-23 verification pass.**
+
+---
+
 ## 8. Provenance
 
-Investigation-only follow-up (investigation-workflow, rounds 1–19). No production
+Investigation-only follow-up (investigation-workflow, rounds 1–22). No production
 behavior was changed by this document. Round-1 established the structural cause
 ([`overseer-memory-recall-api`](./overseer-memory-recall-api.md)); round-2 added the
 semantic diagnosis and the executable H1/H2 tests; round-3 consolidated the parallel
@@ -2973,6 +3136,40 @@ open (#2688…#2916, newest @ 17:27:08Z) via two further bursts of 3 (#2905–29
 and twelfth consecutive identical board read (rounds 8→20) at ten rounds of zero source drift — no finding
 overturned, confidence remains High, residual value is execution (P6 → P1 → P2), not verification;
 round-21 should not be scheduled.
+Round-21 (§7ad, HEAD `4e31feff`) re-executed the per-hypothesis practical tests on request despite the
+§7ac close-and-execute verdict — H1 via `overseer::tests_memory_recall` (36 passed, 0 failed) +
+`overseer::sensor` (9 passed, 0 failed) with the four hypothesis tests and three write-back round-trip
+tests green and verbatim anchors (`wiring.rs:1024`, `mod.rs:1085`, `signal.rs:362`,
+`no_progress_breaker.rs:58`); H2 via live kgpacks-rs #16/#18/#21/#22 CLOSED (timestamps to the second) +
+the terminal-park/no-reconciliation path; and H3 via #17 OPEN with a live-timestamp staleness proof
+(`updatedAt` 07-02T23:22:49Z ≺ #16 `closedAt` 07-06T20:16:25Z, ≈3.8 d) — all three re-confirmed at zero
+`src/` drift since `85245e87` (eleventh consecutive round; thirteenth consecutive identical diagnostic
+board read, rounds 8→21). The malformed reblock query re-reproduced live at `gh_client.rs:37` (colon, no
+space → 0 rows) vs `dedup.rs:79` (space; bare token → 28 rows), the WhisperGate-deduped verbatim tail
+steady at exactly 10 (#2875 newest, no 11th), and `rysweet/amplihack-xpia-defender` a live public repo.
+Its net-new datum: the escalation flood was caught **firing at the current minute** (grown 91 → **95**
+open, #2688…#2921, newest #2921 @ 2026-07-07T17:52:31Z) and — for the **first time** — the newest burst is
+**four** issues (#2918–#2921 @ 17:52:28–31Z), not three, **partially correcting** §7ac's "+3/burst quantum"
+to a **variable ~3–4 per burst** while the load-bearing monotone-growth claim holds; no finding overturned,
+confidence remains High, residual value is execution (P6 → P1 → P2), not verification; round-22 should not
+be scheduled.
+Round-22 (§7ae, HEAD `4e31feff`) is the **eighth consolidation** — it unified §7ad and independently re-ran
+every check at the current HEAD: H1 via `overseer::tests_memory_recall` (36 passed, 0 failed) +
+`overseer::sensor` (9 passed, 0 failed) with the four hypothesis + write-back round-trip tests green and
+verbatim anchors (`signal.rs:362`, `mod.rs:1085`, `wiring.rs:1024`, `goal_curation/no_progress_breaker.rs:58`);
+H2 via live kgpacks-rs #16/#18/#21/#22 CLOSED (timestamps to the second) + the terminal-park path; H3 via
+#17 OPEN with the live-timestamp staleness proof — all three re-confirmed at zero `src/` drift since
+`85245e87` (twelfth consecutive round; fourteenth consecutive identical diagnostic board read, rounds 8→22).
+The malformed reblock query re-reproduced live at `gh_client.rs:37` (colon, no space → 0 rows) vs
+`dedup.rs:79` (space; bare token → 30 rows, up 28→30), the WhisperGate-deduped verbatim tail steady at
+exactly 10 (#2875 newest, no 11th), and `rysweet/amplihack-xpia-defender` a live public repo. Its net-new
+fact **resolves the §7ac↔§7ad burst-quantum tension**: two fresh bursts, **each exactly 3**
+(#2927–#2929 @ 18:43:25–27Z, #2930–#2932 @ 19:10:15–18Z), grow the flood 95 → **101** open (#2688…#2932,
+newest #2932 @ 2026-07-07T19:10:18Z, caught **firing at the current minute** — the third consecutive
+live-catch after §7x/§7ad), so the per-burst quantum is **modally 3, occasionally 4** (observed 3,3,4,3,3 —
+§7ac's "+3" is the mode, §7ad's burst-of-4 the exception), with monotone growth and irregular cadence
+(~27–51 min) unchanged; no finding overturned, confidence remains High, residual value is execution
+(P6 → P1 → P2), not verification; round-23 should not be scheduled.
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
