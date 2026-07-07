@@ -199,3 +199,112 @@ fn memory_deeplink_alias_to_resources_removed() {
          Memory is a canonical tab (#2627)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Fail-LOUD front-end contract (issue #2627): the graph must never silently
+// blank. A data-load failure is surfaced as a VISIBLE on-canvas error overlay
+// (`#mem-graph-error`, driven by the `mgError` state and painted by `mgRender`),
+// and a genuinely-empty store shows a neutral "empty" message — not a blank
+// canvas. See docs/reference/dashboard-memory-graph-fail-loud.md.
+//
+// TDD note (Step 7 / red): these FAIL against the current renderer — there is no
+// `#mem-graph-error` overlay and no `mgError`; `fetchMemoryGraph` writes errors
+// to the low-visibility `#mem-graph-stats` line (`Error: …` / `Load failed`) and
+// `return`s, leaving the canvas untouched (the silent blank). They pass once the
+// overlay + `mgError` render path replace those stats-line writes.
+// ---------------------------------------------------------------------------
+
+/// Return the body of a JS `function <name>(...)` from the rendered HTML: from
+/// the declaration up to the next top-level `function ` declaration. Sufficient
+/// for the flat helpers in the Memory-graph script. Panics if the function is
+/// absent so a missing/renamed function fails loudly.
+fn js_function<'h>(html: &'h str, name: &str) -> &'h str {
+    let marker = format!("function {name}(");
+    let start = html.find(&marker).unwrap_or_else(|| {
+        panic!("expected a JS `{marker}...` declaration in the rendered dashboard")
+    });
+    let rest = &html[start + marker.len()..];
+    let end = rest.find("function ").unwrap_or(rest.len());
+    &rest[..end]
+}
+
+/// The Memory panel must own a dedicated, visible error-overlay element so a
+/// data-load failure is announced on the canvas, not swallowed into a tiny stats
+/// line. `role="alert"` makes it announce to assistive tech.
+#[test]
+fn memory_panel_has_visible_error_overlay_element() {
+    let html: &str = &INDEX_HTML;
+    let panel = tab_panel(html, "memory");
+    assert!(
+        panel.contains(r#"id="mem-graph-error""#),
+        "the Memory panel must render a dedicated #mem-graph-error overlay so a \
+         data-load failure is visible on the canvas (never a silent blank)"
+    );
+    assert!(
+        panel.contains(r#"role="alert""#),
+        "the #mem-graph-error overlay must carry role=\"alert\" so the failure is \
+         announced to assistive tech"
+    );
+}
+
+/// The renderer must track a single `mgError` state: `fetchMemoryGraph` sets it
+/// (on `d.error`, a fetch throw, or a client-side discrepancy) and the single
+/// paint path `mgRender` honours it by showing the `#mem-graph-error` overlay.
+#[test]
+fn memory_graph_fetch_and_render_wire_the_mg_error_overlay() {
+    let html: &str = &INDEX_HTML;
+    assert!(
+        html.contains("mgError"),
+        "the Memory-graph script must track an `mgError` state string driving the \
+         error overlay"
+    );
+
+    let fetch_body = js_function(html, "fetchMemoryGraph");
+    assert!(
+        fetch_body.contains("mgError"),
+        "fetchMemoryGraph must set/clear `mgError` (fail-loud on d.error / fetch \
+         throw / discrepancy), not just write the low-visibility stats line; body: {fetch_body}"
+    );
+
+    let render_body = js_function(html, "mgRender");
+    assert!(
+        render_body.contains("mgError"),
+        "mgRender (the single paint path) must honour `mgError`; body: {render_body}"
+    );
+    assert!(
+        render_body.contains("mem-graph-error"),
+        "mgRender must show the #mem-graph-error overlay when `mgError` is set so a \
+         partial/failed load is never presented as a blank canvas; body: {render_body}"
+    );
+}
+
+/// The retired silent branches must be gone: the pre-fix `fetchMemoryGraph` wrote
+/// `Error: …` / `Load failed` to the low-visibility `#mem-graph-stats` line and
+/// `return`ed, leaving the canvas a silent blank. There must be a SINGLE error
+/// surface (the overlay), so those stats-line error writes are removed.
+#[test]
+fn memory_graph_error_is_not_hidden_in_the_stats_line() {
+    let html: &str = &INDEX_HTML;
+    assert!(
+        !html.contains("Error: '+d.error"),
+        "the silent stats-line error branch (`#mem-graph-stats` = 'Error: '+d.error) \
+         must be replaced by the visible #mem-graph-error overlay (single error surface)"
+    );
+    assert!(
+        !html.contains("'Load failed'"),
+        "the silent stats-line 'Load failed' catch branch must be replaced by the \
+         visible #mem-graph-error overlay (never a silent blank)"
+    );
+}
+
+/// A genuinely-empty store is a distinct, non-error state: the renderer shows a
+/// neutral "empty" message (not the error overlay, not a blank canvas).
+#[test]
+fn memory_graph_has_neutral_empty_state_message() {
+    let html: &str = &INDEX_HTML;
+    assert!(
+        html.contains("Memory graph is empty"),
+        "the renderer must show a neutral \"Memory graph is empty\" message for a \
+         genuinely-empty store (distinct from the error overlay)"
+    );
+}
