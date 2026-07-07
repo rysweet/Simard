@@ -42,8 +42,17 @@ pub trait SupplyChainGh {
     fn search_issues(&self, signature: &str) -> SimardResult<Vec<GhIssue>>;
     /// File a tracking issue and return its handle (with URL + number).
     fn create_issue(&self, title: &str, body: &str, labels: &[String]) -> SimardResult<GhIssue>;
-    /// `cargo update -p <crate> --precise <to> --locked` — the minimal bump.
+    /// `cargo update -p <crate> --precise <to>` — the minimal bump. `--locked`
+    /// is deliberately NOT passed: it forbids Cargo from touching `Cargo.lock`,
+    /// which is exactly what `--precise` must do, so the combination aborts with
+    /// exit 101 on every real bump.
     fn cargo_update_precise(&self, crate_name: &str, to: &str) -> SimardResult<()>;
+    /// Reset the working tree to the scan's pristine base commit so each
+    /// advisory's remediation branch and commit contains ONLY its own change.
+    /// The base (the default-branch checkout HEAD) is captured on the first
+    /// call; subsequent calls discard any prior advisory's un-pushed local
+    /// state. Idempotent.
+    fn reset_to_scan_base(&self) -> SimardResult<()>;
     /// Commit the working-tree changes on a branch, push, and open a PR.
     fn open_remediation_pr(&self, spec: &PrSpec) -> SimardResult<OpenedPr>;
     /// Green-CI-only self-merge of the steward's **own** PR. Refuses unless
@@ -57,12 +66,19 @@ pub trait SupplyChainGh {
 /// Production implementation: shells out to `gh`, `cargo`, and `git`.
 pub struct RealSupplyChainGh {
     repo: String,
+    /// The scan's pristine base commit (default-branch HEAD), captured lazily on
+    /// the first `reset_to_scan_base` call — before any remediation commit — so
+    /// every advisory branches from the same clean point.
+    base: std::cell::OnceCell<String>,
 }
 
 impl RealSupplyChainGh {
     /// Construct against `repo` (an `owner/name` slug).
     pub fn new(repo: impl Into<String>) -> Self {
-        Self { repo: repo.into() }
+        Self {
+            repo: repo.into(),
+            base: std::cell::OnceCell::new(),
+        }
     }
 
     /// Resolve the repo slug from `STEWARD_REPO` (set by the workflow to
@@ -73,6 +89,26 @@ impl RealSupplyChainGh {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "rysweet/Simard".to_string());
         Self::new(repo)
+    }
+
+    /// The scan's pristine base commit SHA, captured once from `HEAD`. Because
+    /// this is first read before any remediation commit is made, it pins the
+    /// original default-branch checkout regardless of later branch/commit state.
+    fn scan_base(&self) -> SimardResult<String> {
+        if let Some(base) = self.base.get() {
+            return Ok(base.clone());
+        }
+        let output = Self::run("git", &["rev-parse", "HEAD"], "scan_base")?;
+        let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if sha.is_empty() {
+            return Err(SimardError::SupplyChainRemediationFailed {
+                reason: "scan_base: `git rev-parse HEAD` returned no SHA".to_string(),
+            });
+        }
+        // First writer wins; single-threaded here, and any redundant set would
+        // just re-store the same HEAD, so returning our own read is correct.
+        let _ = self.base.set(sha.clone());
+        Ok(sha)
     }
 
     fn run(cmd: &str, args: &[&str], step: &str) -> SimardResult<std::process::Output> {
@@ -188,12 +224,21 @@ impl SupplyChainGh for RealSupplyChainGh {
     }
 
     fn cargo_update_precise(&self, crate_name: &str, to: &str) -> SimardResult<()> {
+        // NB: no `--locked` — it forbids the very `Cargo.lock` edit `--precise`
+        // performs (cargo aborts exit 101 otherwise). This matches the
+        // non-mutating `--dry-run` resolvability probe in the driver.
         Self::run(
             "cargo",
-            &["update", "-p", crate_name, "--precise", to, "--locked"],
+            &["update", "-p", crate_name, "--precise", to],
             "cargo_update_precise",
         )
         .map(|_| ())
+    }
+
+    fn reset_to_scan_base(&self) -> SimardResult<()> {
+        let base = self.scan_base()?;
+        Self::run("git", &["reset", "--hard", &base], "reset_to_scan_base")?;
+        Ok(())
     }
 
     fn open_remediation_pr(&self, spec: &PrSpec) -> SimardResult<OpenedPr> {
@@ -329,6 +374,11 @@ impl SupplyChainGh for FakeSupplyChainGh {
                 reason: format!("cargo update -p {crate_name} --precise {to} failed (test)"),
             })
         }
+    }
+
+    fn reset_to_scan_base(&self) -> SimardResult<()> {
+        self.log.borrow_mut().push("reset_to_scan_base".to_string());
+        Ok(())
     }
 
     fn open_remediation_pr(&self, spec: &PrSpec) -> SimardResult<OpenedPr> {

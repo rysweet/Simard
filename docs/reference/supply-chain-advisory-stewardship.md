@@ -231,8 +231,11 @@ What a run does, in order:
    [advisory scope](#advisory-scope)), invoke the reasoner's pure
    [`decide()`](#the-decision-function) to pick an action.
 3. **File a tracking issue** (idempotently — see [idempotency](#idempotency-and-deduplication))
-   and, per the decision, **open a remediation PR** (a bump) or leave it
-   issue-only (escalate / justified-ignore).
+   and, per the decision, **open a remediation PR** — a bump (self-merged when
+   green) or a justified-ignore commit (opened for **human review**, never
+   self-merged) — or leave it issue-only (escalate). Each remediation first
+   resets the working tree to the scan's pristine base, so one scan that fixes
+   several advisories produces one clean, single-change PR per advisory.
 4. When the fresh DB is otherwise **clean** (no un-pinned advisory the gate would
    miss), **log the advanceable DB HEAD SHA** so
    [`.github/advisory-db.sha`](#githubadvisory-dbsha) can be advanced to DB HEAD
@@ -337,9 +340,9 @@ pub fn decide(advisory: &Advisory, ctx: &RemediationContext) -> Decision;
 ```rust
 pub enum Decision {
     /// A patched version exists AND is resolvable against Cargo.lock — do the
-    /// minimal `cargo update -p <crate> --precise <to> --locked`. If the
-    /// advisory was previously (mis)ignored as "no fix", the bump additionally
-    /// removes the now-stale ignore from both files.
+    /// minimal `cargo update -p <crate> --precise <to>`. If the advisory was
+    /// previously (mis)ignored as "no fix", the bump additionally removes the
+    /// now-stale ignore from both files.
     Bump { crate_name: String, from: String, to: String },
 
     /// No patched version exists AND the advisory is not exploitable in
@@ -407,12 +410,14 @@ picks the **lowest released version** that both satisfies the requirement **and*
 resolves against `Cargo.lock`'s constraints, then runs:
 
 ```bash
-cargo update -p <crate> --precise <version> --locked
+cargo update -p <crate> --precise <version>
 ```
 
-This is the *minimal* bump — least churn that clears the advisory. If no
-satisfying version resolves cleanly, `resolvable_patch` is `None` and the
-decision is `Escalate` (never a forced, incompatible upgrade).
+This is the *minimal* bump — least churn that clears the advisory. `--locked` is
+deliberately **not** passed: it forbids the very `Cargo.lock` edit `--precise`
+performs, so the two together abort with exit 101. If no satisfying version
+resolves cleanly, `resolvable_patch` is `None` and the decision is `Escalate`
+(never a forced, incompatible upgrade).
 
 ### Advisory scope
 
@@ -441,8 +446,10 @@ pub enum RemediationOutcome {
     /// Opened a green-CI bump PR (and self-merged it, when CI passed and a bot
     /// token was present).
     OpenedBumpPr { pr_number: u32, url: String, merged: bool },
-    /// Filed the tracking issue, then wrote the justified ignore to both files.
-    FiledJustifiedIgnore { advisory_id: String, issue_url: String },
+    /// Filed the tracking issue, wrote the justified ignore to both files, and
+    /// opened a PR that commits those edits (never self-merged — left for human
+    /// review).
+    FiledJustifiedIgnore { advisory_id: String, issue_url: String, pr_number: u32, pr_url: String },
     /// Filed the tracking issue only; no PR, no ignore.
     Escalated { advisory_id: String, issue_url: String },
     /// Matched an existing tracking issue / already-mitigated advisory.
@@ -456,7 +463,11 @@ The **ordering invariant** for `JustifiedIgnore` is enforced here, not in
 1. `execute` first files (or matches) the tracking issue via `gh`.
 2. **Only if** an issue URL is obtained does it write the ignore to **both**
    `deny.toml` and `.cargo/audit.toml`, embedding that URL.
-3. If issue filing fails, it returns `Err(SupplyChainRemediationFailed { .. })`
+3. It then opens a PR that **commits** those ignore edits so they actually land
+   in the repo (otherwise they would be discarded with the ephemeral scan
+   checkout and the gates would never receive the ignore). The PR is **never
+   self-merged** — a security suppression stays under human review.
+4. If issue filing fails, it returns `Err(SupplyChainRemediationFailed { .. })`
    and writes **no** ignore.
 
 A guard rejects any attempt to materialise an ignore without an issue URL with
@@ -613,7 +624,7 @@ The reasoner ships the task's mandated cases plus the escalate/ordering cases
 | Test | Asserts |
 | --- | --- |
 | **patched → bump** | `decide()` returns `Bump { to }` with the correct minimal `--precise` version for an advisory with a `Fixed` requirement and a resolvable patch (e.g. RUSTSEC-2026-0204 → `crossbeam-epoch >= 0.9.20`). |
-| **no fix → justified ignore** | `decide()` returns `JustifiedIgnore { advisory_id, crate_name, reason }` when `patched == None`; execution writes `{ id, reason }` **with the tracking-issue link** to both files. |
+| **no fix → justified ignore** | `decide()` returns `JustifiedIgnore { advisory_id, crate_name, reason }` when `patched == None`; execution writes `{ id, reason }` **with the tracking-issue link** to both files and opens a PR that commits them (never self-merged). |
 | **fix exists → never silent-suppress** | For any advisory with a `Fixed` requirement, `decide()` **never** returns `JustifiedIgnore` — it is `Bump` (applicable) or `Escalate` (not applicable). |
 | **fix unappliable → escalate** | `decide()` returns `Escalate` when a patch exists but is unresolvable or behind a git dep; no PR, no ignore. |
 | **stale ignore revalidated** | An advisory already ignored as "no fix" but now carrying a `Fixed` requirement yields `Bump` (not `NoAction`); execution removes the stale ignore from **both** files. |

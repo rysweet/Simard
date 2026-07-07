@@ -11,9 +11,17 @@
 //!
 //! For a [`Decision::JustifiedIgnore`], `execute` files the tracking issue
 //! **first**; only once an issue URL exists does it write the ignore to both
-//! files, embedding that URL. If issue filing yields no URL it returns
+//! files, embedding that URL, and then open a PR that **commits** those edits
+//! (never self-merged — a security suppression stays under human review). If
+//! issue filing yields no URL it returns
 //! [`SimardError::SupplyChainSuppressionWithoutTracker`] and writes **no**
 //! ignore — so the reasoner can never silently suppress an advisory.
+//!
+//! Every mutating remediation ([`Decision::Bump`] and
+//! [`Decision::JustifiedIgnore`]) first resets the working tree to the scan's
+//! pristine base via [`SupplyChainGh::reset_to_scan_base`], so each advisory's
+//! PR branch and commit contains only its own change even when a single scan
+//! remediates several advisories.
 
 use crate::error::{SimardError, SimardResult};
 use crate::stewardship::{MergeOutcome, failure_signature, find_existing};
@@ -32,10 +40,14 @@ pub enum RemediationOutcome {
         url: String,
         merged: bool,
     },
-    /// Filed the tracking issue, then wrote the justified ignore to both files.
+    /// Filed the tracking issue, wrote the justified ignore to both files, and
+    /// opened a PR that commits those edits (never self-merged — a security
+    /// suppression is left for human review).
     FiledJustifiedIgnore {
         advisory_id: String,
         issue_url: String,
+        pr_number: u32,
+        pr_url: String,
     },
     /// Filed the tracking issue only; no PR, no ignore.
     Escalated {
@@ -130,11 +142,15 @@ fn execute_bump(
         signature,
         advisory,
         &format!(
-            "A patched version is available; opening a minimal bump PR (`cargo update -p {crate_name} --precise {to} --locked`)."
+            "A patched version is available; opening a minimal bump PR (`cargo update -p {crate_name} --precise {to}`)."
         ),
     );
     let issue = gh.create_issue(&title, &body, &labels(false))?;
 
+    // Start every remediation from the pristine scan base so this PR's commit
+    // contains only this advisory's change (no cross-contamination when a single
+    // scan remediates several advisories).
+    gh.reset_to_scan_base()?;
     gh.cargo_update_precise(crate_name, to)?;
     // A fix has shipped — any ignore previously added as "no fix" is now stale.
     files.remove_ignore(&advisory.id)?;
@@ -197,12 +213,30 @@ fn execute_justified_ignore(
         });
     }
 
-    // 3. Write the ignore to BOTH files, embedding the issue URL.
+    // 3. Reset to the pristine scan base, then write the ignore to BOTH files,
+    //    embedding the issue URL.
+    gh.reset_to_scan_base()?;
     files.add_justified_ignore(advisory_id, reason, &issue.url)?;
+
+    // 4. Open a PR that COMMITS the ignore edits. Without this the edits live
+    //    only in the ephemeral scan checkout and are discarded, so the two
+    //    advisory gates would never actually receive the ignore. Deliberately
+    //    NOT self-merged: suppressing a security advisory is a judgement call
+    //    that stays under human review.
+    let can_trigger = gh.has_ci_trigger_token();
+    let spec = PrSpec {
+        branch: branch_name(advisory_id),
+        title: format!("chore(deps): {advisory_id} — justified ignore for {crate_name}"),
+        body: ignore_pr_body(advisory, &issue.url, can_trigger),
+        labels: labels(!can_trigger),
+    };
+    let pr = gh.open_remediation_pr(&spec)?;
 
     Ok(RemediationOutcome::FiledJustifiedIgnore {
         advisory_id: advisory_id.to_string(),
         issue_url: issue.url,
+        pr_number: pr.number,
+        pr_url: pr.url,
     })
 }
 
@@ -256,11 +290,34 @@ fn pr_body(advisory: &Advisory, to: &str, issue_url: &str, can_trigger: bool) ->
     format!(
         "Proactive supply-chain remediation for **{id}** ({krate} → {to}).\n\n\
          Tracking issue: {issue_url}\n\n\
-         Applied: `cargo update -p {krate} --precise {to} --locked`.\n\n\
+         Applied: `cargo update -p {krate} --precise {to}`.\n\n\
          {ci_note}\n",
         id = advisory.id,
         krate = advisory.crate_name,
         to = to,
+        issue_url = issue_url,
+        ci_note = ci_note,
+    )
+}
+
+/// PR body for a `JustifiedIgnore` remediation — a tracked, no-fix suppression
+/// added to both advisory gates. Never self-merged; the note tells reviewers
+/// why the PR exists and (when no CI-triggering token was present) that its CI
+/// must be re-triggered before a human merges it.
+fn ignore_pr_body(advisory: &Advisory, issue_url: &str, can_trigger: bool) -> String {
+    let ci_note = if can_trigger {
+        "This PR was opened with a CI-triggering token; review the justification and merge once every required check is green. It is NOT self-merged — a security suppression stays under human review."
+    } else {
+        "No CI-triggering bot token was configured, so this PR is labelled `needs-CI-trigger`: re-trigger CI, review the justification, and merge manually. It is never self-merged."
+    };
+    format!(
+        "Proactive supply-chain remediation for **{id}** ({krate}).\n\n\
+         No fixed upstream release exists, so a justified, tracked ignore is added \
+         to `deny.toml` and `.cargo/audit.toml` (kept in sync).\n\n\
+         Tracking issue: {issue_url}\n\n\
+         {ci_note}\n",
+        id = advisory.id,
+        krate = advisory.crate_name,
         issue_url = issue_url,
         ci_note = ci_note,
     )

@@ -638,15 +638,23 @@ fn execute_justified_ignore_files_issue_before_writing_ignore() {
         RemediationOutcome::FiledJustifiedIgnore {
             advisory_id,
             issue_url,
+            pr_url,
+            ..
         } => {
             assert_eq!(advisory_id, "RUSTSEC-2099-0009");
             assert!(issue_url.contains("/issues/"));
+            assert!(
+                pr_url.contains("/pull/"),
+                "ignore must be committed via a PR"
+            );
         }
         other => panic!("expected FiledJustifiedIgnore, got {other:?}"),
     }
 
-    // The issue was created BEFORE the ignore write, and the ignore is present
-    // in both files and in sync.
+    // The issue was created BEFORE the ignore write, the ignore is present in
+    // both files and in sync, and a PR was opened to COMMIT those edits (a
+    // justified ignore that never lands in the repo is useless) — but it is
+    // never self-merged (security suppressions stay under human review).
     let log = gh.log.borrow();
     let create_idx = log
         .iter()
@@ -654,6 +662,15 @@ fn execute_justified_ignore_files_issue_before_writing_ignore() {
         .unwrap();
     let search_idx = log.iter().position(|l| l.starts_with("search")).unwrap();
     assert!(search_idx < create_idx, "search then create: {log:?}");
+    assert!(
+        log.iter()
+            .any(|l| l.starts_with("open_pr:chore/advisory-rustsec-2099-0009")),
+        "ignore edits must be committed via a PR: {log:?}"
+    );
+    assert!(
+        !log.iter().any(|l| l.starts_with("self_merge:")),
+        "a security suppression must never self-merge: {log:?}"
+    );
     assert!(files.is_ignored("RUSTSEC-2099-0009").unwrap());
     assert!(files.ignored_ids_in_sync().unwrap());
 }
@@ -697,10 +714,17 @@ fn execute_bump_opens_pr_removes_stale_ignore_and_self_merges_with_token() {
     }
 
     let log = gh.log.borrow();
-    assert!(
-        log.iter()
-            .any(|l| l.starts_with("cargo_update:crossbeam-epoch@0.9.20"))
-    );
+    // Issue 3: the worktree is reset to the scan base before the mutating bump,
+    // so each advisory's PR commit carries only its own change.
+    let reset_idx = log
+        .iter()
+        .position(|l| l == "reset_to_scan_base")
+        .expect("bump must reset to scan base");
+    let update_idx = log
+        .iter()
+        .position(|l| l.starts_with("cargo_update:crossbeam-epoch@0.9.20"))
+        .expect("bump must run cargo update");
+    assert!(reset_idx < update_idx, "reset before mutation: {log:?}");
     assert!(
         log.iter()
             .any(|l| l.starts_with("open_pr:chore/advisory-rustsec-2026-0204"))

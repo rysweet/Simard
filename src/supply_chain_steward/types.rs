@@ -72,10 +72,9 @@ pub struct RemediationContext {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Decision {
     /// A patched version exists AND resolves against `Cargo.lock` — do the
-    /// minimal `cargo update -p <crate> --precise <to> --locked`. If the
-    /// advisory was previously (mis)ignored as "no fix", the bump additionally
-    /// removes the now-stale ignore from both files (done by the execution
-    /// layer).
+    /// minimal `cargo update -p <crate> --precise <to>`. If the advisory was
+    /// previously (mis)ignored as "no fix", the bump additionally removes the
+    /// now-stale ignore from both files (done by the execution layer).
     Bump {
         /// Affected crate.
         crate_name: String,
