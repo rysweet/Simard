@@ -10,9 +10,12 @@ related:
   - ./recover-goal-board.md
   - ./run-ooda-daemon.md
   - ./spawn-engineers-from-ooda-daemon.md
+  - ./diagnose-a-no-progress-block.md
   - ../concepts/ooda-loop-self-detection.md
   - ../concepts/perpetual-goal-no-progress-exemption.md
+  - ../concepts/no-progress-root-cause-resolution.md
   - ../reference/no-progress-breaker-api.md
+  - ../reference/no-progress-root-cause-resolution-api.md
 ---
 
 # Unblock OODA goals stuck after a brain-failure lockout
@@ -129,6 +132,41 @@ manual steps below. See
 [Standing/perpetual goals are exempt from the no-progress hard-block](../concepts/perpetual-goal-no-progress-exemption.md)
 and the [no-progress breaker API](../reference/no-progress-breaker-api.md) for
 details.
+
+## No-progress blocks explain WHY and self-resolve first
+
+> **Implemented (issue #16).** On by default; set
+> `SIMARD_NO_PROGRESS_INVESTIGATE=off` to revert to the base ladder. The manual
+> CLI steps below remain the escape hatch for any block you want to clear by hand.
+
+The OODA **no-progress breaker** (3 consecutive no-action cycles) no longer parks
+a goal with a bare "needs human review". Before authoring any block it classifies
+**why** the goal stalled and self-resolves the machine-fixable causes:
+
+- an **already-complete** goal (issues closed / PRs merged / deployed) is
+  auto-marked `completed` — **not** blocked;
+- a goal missing a **precondition** (e.g. an un-cloned governed repo) has it
+  established and retries — **not** blocked;
+- a goal waiting on an **upstream** goal/PR/issue is `paused` with the blocking
+  ref recorded and **auto-clears** when the upstream lands — **not** blocked;
+- an **unclear-criteria** / **genuinely-stuck** goal gets **one** guided engineer
+  first; only if it stalls again does it block.
+
+When a block *is* unavoidable, the reason carries the classified WHY + evidence
+(it still starts with the `🔒 [OODA-SAFEGUARD]` sentinel, so the commands below
+keep working):
+
+```text
+🔒 [OODA-SAFEGUARD] OODA goal made no shippable progress for 4 consecutive no-action cycles; why=GENUINELY-STUCK evidence=[pr #7 (OPEN)]
+```
+
+So most stalls that used to land here now resolve themselves, and the ones that
+don't arrive with a diagnosis attached. For reading the WHY, the per-branch
+examples (including the `kgpacks-rs` "already done" incident), and the
+configuration, see
+[Diagnose a no-progress block and read its WHY](./diagnose-a-no-progress-block.md).
+The manual CLI steps below remain the escape hatch for a block you want to clear
+by hand regardless of its cause.
 
 ## Manual recovery via the CLI
 

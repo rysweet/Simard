@@ -37,6 +37,12 @@ mod tests_types;
 #[cfg(test)]
 mod tests_no_progress;
 
+// Issue #16 (TDD): integration tests for the agentic root-cause upgrade — the
+// investigated adapter routes a stuck goal down the self-resolving ladder and
+// only ever authors a human block WITH the concrete why + evidence attached.
+#[cfg(test)]
+mod tests_no_progress_investigation;
+
 // Issue #2329: Observe-vs-Decide phase weights yield different ranked-recall
 // ordering of the same fact set, exercised against the real lbug-backed
 // `LibraryCognitiveMemory` adapter.
