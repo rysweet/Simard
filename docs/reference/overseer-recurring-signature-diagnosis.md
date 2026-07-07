@@ -10,7 +10,8 @@ description: >
   `workstream-gap` co-signals, and assesses whether `resource:engineer_spawn`
   contention contributes to the blockage. Complements the round-1 finding that
   the signature self-amplifies via an unfiltered write-back → recall → re-signal
-  loop.
+  loop. Round-3 consolidates the parallel deep dives, reconciles all source
+  line anchors to HEAD 0180b75c, and records the executed H1/H2 test results.
 last_updated: 2026-07-07
 review_schedule: as-needed
 owner: simard
@@ -339,10 +340,87 @@ not directly observed.
 
 ---
 
-## 7. Provenance
+## 7. Round-3 consolidation & verification
 
-Investigation-only follow-up (investigation-workflow, round 2). No production
-behavior was changed by this document. Source references were verified against the
-working tree at commit-time; GitHub states were read from `rysweet/agent-kgpacks-rs`
-and `rysweet/Simard` on 2026-07-07. The P1/P2/P5 code changes are recommendations
-for follow-up development tasks.
+The round-3 pass (this update) consolidated the parallel deep dives against the
+live working tree at **HEAD `0180b75c`** and **executed** the round-2 hypothesis
+tests. Result: the diagnosis holds unchanged; every mechanism cited in Sections 1–4
+was re-confirmed at its current-tree line, and the structural root cause is now
+**proven by passing tests**, not just asserted.
+
+### 7a. Executable proof — H1/H2 tests PASS
+
+`cargo test --lib overseer::tests_memory_recall::h` → **4 passed, 0 failed**:
+
+| Test | Claim | Result |
+|---|---|---|
+| `h1_confirm_self_recall_reemits_recurring_signature_from_own_writebacks` | Recalling the Overseer's own `source_label="overseer"` write-backs re-emits `RecurringSignature` from self-authored data | **ok** |
+| `h1_refute_by_fix_provenance_filter_collapses_the_loop` | Dropping `source_label==OVERSEER_SOURCE_LABEL` episodes before mapping breaks the loop | **ok** |
+| `h2_confirm_observation_signature_stacks_prefix_each_generation` | `observation_signature` re-prefixes `overseer-obs:` every generation → unbounded nesting | **ok** |
+| `h2_refute_by_fix_idempotent_signature_is_a_fixed_point` | An idempotent (prefix-collapsing) signature is a fixed point | **ok** |
+
+The CONFIRM tests reproduce the defect **through the real `MemoryRecallOps`
+adapter** (`recall_episodes_ranked → recall_episodic`); the REFUTE-by-fix tests
+demonstrate that remediation **P1** (provenance filter) and its H2 analogue
+(idempotent signature) collapse the loop. This upgrades §4's structural cause from
+"reproduced" to "verified green in CI-runnable form."
+
+### 7b. Reconciled current-tree line numbers (HEAD `0180b75c`)
+
+The round-2 doc quoted line numbers from an earlier commit; they have since drifted
+~3 lines. The mechanism is unchanged — only the anchors moved. Canonical anchors:
+
+| Mechanism | Round-2 doc cite | **Current tree (`0180b75c`)** |
+|---|---|---|
+| Composite key assembly `format!("overseer-obs:{}", …)` | `mod.rs:1081-1086` | `mod.rs:1081` (def), body `1082-1086`; re-prefix at **`1085`** |
+| Called from Observe | — | `mod.rs:544` (`let signature = observation_signature(problems)`) |
+| Write-back gate `WhisperGate::new(900, 5)` | `mod.rs:297` | **`mod.rs:297`** (`write_back_gate`) |
+| dedup key `resource:engineer_spawn` | `mod.rs:1280` | **`mod.rs:1283`** |
+| dedup key `quality:gym_skipped` | `mod.rs:1292` | **`mod.rs:1295`** |
+| dedup key `goal:blocked:{id}` | `mod.rs:1349` | **`mod.rs:1349`** |
+| dedup key `workstream-gap` | `mod.rs:1381` | **`mod.rs:1384`** |
+| `RECURRING_SIGNATURE_THRESHOLD = 2` | `signal.rs:362` | **`signal.rs:362`** |
+| Recall counting loop (`signals_from`) | `signal.rs:455-470` | **`signal.rs:366`** (fn), count+emit **`458-464`** |
+| Provenance dropped — `RecalledEpisode` has no `source_label` | `wiring.rs:1013-1031` | **`wiring.rs:1024-1029`** (map omits `source_label`) |
+| Fixed write-back provenance | `wiring.rs:1088` | **`wiring.rs:952`** (`OVERSEER_SOURCE_LABEL`), stored at **`1088`** |
+| `[sig:…]` marker re-parse | `wiring.rs:976-986` | **`wiring.rs:976`** (`parse_failure_signature`) |
+| H1/H2 tests | `tests_memory_recall.rs:1108/1194` | **`:1109` / `:1199`** (H1/H2 CONFIRM) |
+
+### 7c. Consolidated conclusion
+
+The parallel deep dives converge on a single, coherent account with **no
+contradictions** between round-1 (structural) and round-2 (semantic):
+
+- **One self-amplifying loop, two standing input classes.** The `2×` is the
+  recalled-episode count from an unfiltered self-recall + unbounded re-wrap
+  (structural, §4, now test-proven §7a). It never resolves because its inputs are
+  *standing*: four **stale safeguard-parks** for already-shipped kgpacks-rs work
+  (#16/#18/#21/#22) plus one intentional gate (#17) (§1), an **ambient
+  `SIMARD_SKIP_GYM`** flag (§2a), and a **disjoint standing coverage gap** (§2b).
+  `resource:engineer_spawn` is an amplifier, not the cause (§3).
+- **The two axes are independent and both must be cut.** Severing the loop (P1)
+  stops the growth/nesting and the dedup-escaping issue floods; reconciling stale
+  parks (P2) + clearing the backlog (P3) removes the standing inputs. Neither alone
+  is sufficient — P1 without P2/P3 leaves a single non-growing recurrence; P2/P3
+  without P1 leaves the amplifier ready to re-nest on the next standing input.
+- **Overall confidence: High** (unchanged). Five of six findings are
+  source/live-state grounded; the lone Medium item (§3 positive spawn mechanism)
+  remains isolated behind conditional remediation **P5**. Round-3 adds executable
+  proof for the structural core, raising §4 to the strongest evidentiary tier.
+
+No new remediation is introduced; **P1–P5 (Section 5) stand as the consolidated
+action set**, with P1's fix now backed by a green REFUTE-by-fix test.
+
+---
+
+## 8. Provenance
+
+Investigation-only follow-up (investigation-workflow, rounds 1–3). No production
+behavior was changed by this document. Round-1 established the structural cause
+([`overseer-memory-recall-api`](./overseer-memory-recall-api.md)); round-2 added the
+semantic diagnosis and the executable H1/H2 tests; **round-3 (this update)
+consolidated the parallel deep dives, reconciled all line anchors to HEAD
+`0180b75c`, and executed the H1/H2 CONFIRM/REFUTE tests (4 passed, 0 failed).**
+Source references were verified against the working tree at commit-time; GitHub
+states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
+The P1/P2/P5 code changes are recommendations for follow-up development tasks.
