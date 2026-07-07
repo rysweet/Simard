@@ -218,7 +218,15 @@ jobs:
           path: .advisory-db
 
       - name: Install cargo-audit
-        uses: taiki-e/install-action@754bf4dbae00ad1b16b244717154b96ba27d2416 # cargo-audit
+        # Pin the reachable `v2` release SHA of taiki-e/install-action and select
+        # the tool via the `tool:` input. The former per-tool `cargo-audit` tag
+        # commit lived on a lineage diverged from the action's default branch, so
+        # Dependabot's github_actions updater could not resolve it ("no such
+        # commit") and the whole update job failed. The `v2` release SHA is
+        # reachable from main, keeping the pin SHA-hardened *and* Dependabot-updatable.
+        uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2.82.10
+        with:
+          tool: cargo-audit
 
       - name: Run cargo audit (offline, against the pinned DB)
         # `--no-fetch` disables the network fetch; `--db` points at the pinned
@@ -251,11 +259,12 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install cargo-deny
-        # SHA pins the per-tool `cargo-deny` tag of taiki-e/install-action
-        # (same pattern as the cargo-audit job above). The `tool:` input also
-        # pins the cargo-deny VERSION: deny.toml uses the 0.19.x advisories
-        # schema, so an unpinned bump could reinterpret the policy.
-        uses: taiki-e/install-action@4e4e4d1450e58bef95d6f394ac20d46ad7d24ebf # cargo-deny
+        # SHA-pins the reachable `v2` release of taiki-e/install-action (same
+        # pattern as the cargo-audit job above; a diverged per-tool tag commit
+        # breaks Dependabot). The `tool:` input pins the cargo-deny VERSION:
+        # deny.toml uses the 0.19.x advisories schema, so an unpinned bump could
+        # reinterpret the policy.
+        uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2.82.10
         with:
           tool: cargo-deny@0.19.9
 
@@ -281,8 +290,9 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install cargo-vet
-        # SHA pins the per-tool `cargo-vet` tag of taiki-e/install-action.
-        uses: taiki-e/install-action@7b51dc7487ebab790625f16f2c5f541029a3b0ab # cargo-vet
+        # SHA-pins the reachable `v2` release of taiki-e/install-action and
+        # selects the tool via the `tool:` input (Dependabot-resolvable).
+        uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2.82.10
         with:
           tool: cargo-vet
 

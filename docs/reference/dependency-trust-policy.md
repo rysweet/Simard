@@ -83,7 +83,7 @@ cargo-vet:
     - name: Check out repository
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     - name: Install cargo-vet
-      uses: taiki-e/install-action@7b51dc7487ebab790625f16f2c5f541029a3b0ab # cargo-vet
+      uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2.82.10
       with:
         tool: cargo-vet
     - name: Run cargo vet
@@ -95,9 +95,12 @@ Properties, identical to the other guardrail jobs:
 - **Lockfile-only** — no crate compilation, not in `pre-commit`, never writes
   the shared `simard-ci-v2` cache.
 - **`contents: read`** only — no token write scope.
-- **SHA-pinned** `taiki-e/install-action` with an explicit `tool: cargo-vet`
-  input (each tool has its own tag/commit, so a SHA pin alone selects the tool
-  baked into that commit — always pass `tool:`).
+- **SHA-pinned** `taiki-e/install-action` — pinned to its **`v2` release**
+  commit (`# v2.82.10`, reachable from the action's default branch so
+  Dependabot's `github_actions` updater can resolve and bump it) with an
+  explicit `tool: cargo-vet` input that selects the tool. Do **not** pin
+  `taiki-e`'s per-tool convenience tags (`# cargo-vet`): their commits are
+  diverged from the default branch and break Dependabot (`no such commit …`).
 - **`--locked`** — fails on a dirty `Cargo.lock`.
 
 `cargo vet --locked` passes when every third-party crate in the locked graph is

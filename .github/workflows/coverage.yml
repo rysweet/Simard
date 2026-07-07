@@ -37,7 +37,12 @@ jobs:
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@81ee9698f20724138a785d788c7567d40f14cd2d # cargo-llvm-cov
+        # SHA-pins the reachable `v2` release of taiki-e/install-action and
+        # selects the tool via the `tool:` input. A diverged per-tool tag commit
+        # breaks Dependabot's github_actions updater ("no such commit").
+        uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2.82.10
+        with:
+          tool: cargo-llvm-cov
 
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
