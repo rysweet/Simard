@@ -2,8 +2,8 @@
 //!
 //! The gate logic is pure (evidence is injected), so these are real passing
 //! tests — including the headline reproduction of the cognitive-memory backup
-//! false-completion. Prompt content-pin tests are `#[ignore]`d until the
-//! prompts are edited in the implementation step.
+//! false-completion. The prompt content-pin tests are active: they assert the
+//! shipped `prompt_assets/` copy carries the three-part done-gate wording.
 
 use crate::error::{SimardError, SimardResult};
 use crate::goal_curation::archive_completed;
@@ -11,9 +11,9 @@ use crate::goal_curation::types::{ActiveGoal, GoalBoard, GoalProgress, WipRef};
 
 use super::{
     COMPLETION_VERIFICATION_METRIC, CompletionEvidenceGate, CompletionVerdict, EvidenceSource,
-    FALSE_COMPLETION_RATE_METRIC, MissingEvidence, VerificationOutcome,
-    archive_completed_with_evidence, classify_from_missing, classify_outcome,
-    completion_evidence_enabled, error_class_from_missing, false_completion_rate,
+    FALSE_COMPLETION_RATE_METRIC, GhCliEvidenceSource, MissingEvidence, VerificationOutcome,
+    archive_completed_evidence_aware, archive_completed_with_evidence, classify_from_missing,
+    classify_outcome, completion_evidence_enabled, error_class_from_missing, false_completion_rate,
     has_derivable_signal, is_self_affecting, record_completion_verification,
     record_false_completion_rate,
 };
@@ -666,4 +666,242 @@ fn is_complete_candidate_is_false_for_perpetual_goals() {
         "n",
         GoalProgress::Completed
     )));
+}
+
+// --- MissingEvidence::label + render_missing (surfaced to dashboard/logs) ----
+
+#[test]
+fn missing_evidence_label_is_stable_for_every_kind() {
+    // These strings are surfaced verbatim in `current_activity` and logs, so a
+    // change is a behavior change the dashboard sees — pin each one.
+    assert_eq!(MissingEvidence::PrNotMerged.label(), "PR not merged");
+    assert_eq!(MissingEvidence::IssueOpen.label(), "issue still open");
+    assert_eq!(
+        MissingEvidence::NotDeployed.label(),
+        "merged but not deployed"
+    );
+    assert_eq!(
+        MissingEvidence::CouldNotVerify {
+            detail: "gh 503".to_string(),
+        }
+        .label(),
+        "could not verify: gh 503"
+    );
+}
+
+#[test]
+fn render_missing_joins_labels_with_semicolons_in_order() {
+    // The rendered blocker string preserves the gate's PR → issue → deploy order
+    // and separates entries with "; " (empty list renders empty).
+    assert_eq!(super::render_missing(&[]), "");
+    assert_eq!(
+        super::render_missing(&[MissingEvidence::PrNotMerged]),
+        "PR not merged"
+    );
+    assert_eq!(
+        super::render_missing(&[
+            MissingEvidence::PrNotMerged,
+            MissingEvidence::IssueOpen,
+            MissingEvidence::NotDeployed,
+        ]),
+        "PR not merged; issue still open; merged but not deployed"
+    );
+}
+
+// --- archive_completed_evidence_aware: the public, kill-switch-aware entry ----
+//
+// This is the production entrypoint the daemon calls each cycle. It composes
+// the gate, drives the `&dyn EvidenceSource` blanket impl, and (gate-on) emits
+// the #2456 verification metrics as cfg!(test) no-ops. The tests exercise it
+// hermetically through an in-memory board + the canned `FakeEvidence`.
+
+#[test]
+fn evidence_aware_archive_archives_fully_verified_goal() {
+    // Gate ON (default env): a Completed goal with full evidence archives.
+    let mut board = GoalBoard::new();
+    board
+        .active
+        .push(simard_goal("verified", GoalProgress::Completed));
+    let (archived, blocked) =
+        archive_completed_evidence_aware(&mut board, &FakeEvidence::ok(true, true, true));
+    assert_eq!(archived.len(), 1, "fully-verified goal must archive");
+    assert_eq!(archived[0].id, "verified");
+    assert!(blocked.is_empty());
+    assert!(board.active.is_empty());
+}
+
+#[test]
+// `archive_completed_evidence_aware` reads `SIMARD_COMPLETION_EVIDENCE` via
+// `completion_evidence_enabled()`. The kill-switch tests flip that var (under the
+// same serial key), and this test's outcome DIFFERS between gate-on (blocked,
+// retained) and the legacy off path (the Completed goal is archived) — so it must
+// be serialized against those mutators or it can flake if it reads "off" mid-race.
+#[serial_test::serial(simard_completion_evidence_env)]
+fn evidence_aware_archive_retains_and_annotates_unverified_goals() {
+    // Gate ON: a Completed goal with NO merge/close/deploy evidence must stay on
+    // the board, be reported as blocked, and carry a human-readable annotation.
+    let mut board = GoalBoard::new();
+    board
+        .active
+        .push(simard_goal("unverified", GoalProgress::Completed));
+    let (archived, blocked) =
+        archive_completed_evidence_aware(&mut board, &FakeEvidence::ok(false, false, false));
+
+    assert!(
+        archived.is_empty(),
+        "no goal archives without evidence, got {archived:?}"
+    );
+    assert_eq!(blocked.len(), 1, "the completed goal is blocked");
+    let (blocked_goal, missing) = &blocked[0];
+    assert_eq!(blocked_goal.id, "unverified");
+    assert!(missing.contains(&MissingEvidence::PrNotMerged));
+    assert_eq!(board.active.len(), 1, "blocked goal stays on the board");
+    let activity = board.active[0].current_activity.as_deref().unwrap_or("");
+    assert!(
+        activity.to_lowercase().contains("completion blocked"),
+        "retained goal must surface the blocker, got {activity:?}"
+    );
+}
+
+#[test]
+#[serial_test::serial(simard_completion_evidence_env, cognitive_memory)]
+fn evidence_aware_archive_falls_back_to_legacy_when_kill_switch_off() {
+    // With SIMARD_COMPLETION_EVIDENCE=off, the evidence-aware archive must behave
+    // exactly like the legacy unguarded `archive_completed`: a Completed goal is
+    // archived regardless of (absent) evidence, and `blocked` is always empty.
+    let prev = std::env::var("SIMARD_COMPLETION_EVIDENCE").ok();
+    // SAFETY: serialised via serial(...); no concurrent reader/writer of this key.
+    unsafe {
+        std::env::set_var("SIMARD_COMPLETION_EVIDENCE", "off");
+    }
+
+    let mut board = GoalBoard::new();
+    board
+        .active
+        .push(simard_goal("legacy-done", GoalProgress::Completed));
+    // Evidence says "nothing merged/closed/deployed"; the gate would block — but
+    // it is disabled, so the legacy path archives anyway.
+    let (archived, blocked) =
+        archive_completed_evidence_aware(&mut board, &FakeEvidence::ok(false, false, false));
+
+    // Restore env before any assertion can unwind.
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("SIMARD_COMPLETION_EVIDENCE", v),
+            None => std::env::remove_var("SIMARD_COMPLETION_EVIDENCE"),
+        }
+    }
+
+    assert_eq!(
+        archived.len(),
+        1,
+        "kill-switch-off restores unguarded archiving"
+    );
+    assert_eq!(archived[0].id, "legacy-done");
+    assert!(
+        blocked.is_empty(),
+        "legacy mode never reports blocked goals"
+    );
+    assert!(
+        board.active.is_empty(),
+        "the goal was archived off the board"
+    );
+}
+
+#[test]
+fn evidence_aware_archive_leaves_incomplete_goals_in_place() {
+    // A below-100% in-progress goal is not a completion candidate, so it is
+    // neither archived nor blocked, and its annotation is left untouched.
+    let mut board = GoalBoard::new();
+    board
+        .active
+        .push(simard_goal("wip", GoalProgress::InProgress { percent: 25 }));
+    let (archived, blocked) =
+        archive_completed_evidence_aware(&mut board, &FakeEvidence::ok(true, true, true));
+    assert!(archived.is_empty());
+    assert!(blocked.is_empty());
+    assert_eq!(board.active.len(), 1);
+    assert!(board.active[0].current_activity.is_none());
+}
+
+// --- GhCliEvidenceSource: hermetic pure logic (repo slug + no-ref clauses) ---
+//
+// The `gh`/git-touching methods (gh_state, is_deployed) are deliberately NOT
+// exercised here — they shell out and are non-hermetic. These tests cover the
+// pure, network-free surface: repo-slug resolution and the "no tracked ref"
+// short-circuits that must answer WITHOUT any subprocess.
+
+#[test]
+fn gh_source_repo_slug_resolves_all_four_forms() {
+    let source = GhCliEvidenceSource::new("/nonexistent/repo/dir");
+
+    // None → the default owner/repo.
+    let mut g = simard_goal("g", GoalProgress::Completed);
+    g.repo = None;
+    assert_eq!(source.repo_slug(&g), "rysweet/Simard");
+
+    // Explicit "Simard" (case-insensitive) → the default.
+    g.repo = Some("Simard".to_string());
+    assert_eq!(source.repo_slug(&g), "rysweet/Simard");
+    g.repo = Some("sImArD".to_string());
+    assert_eq!(source.repo_slug(&g), "rysweet/Simard");
+
+    // Already-qualified owner/repo → verbatim.
+    g.repo = Some("octo/widgets".to_string());
+    assert_eq!(source.repo_slug(&g), "octo/widgets");
+
+    // Bare slug → scoped under the default owner.
+    g.repo = Some("amplihack-rs".to_string());
+    assert_eq!(source.repo_slug(&g), "rysweet/amplihack-rs");
+}
+
+#[test]
+fn gh_source_no_pr_ref_reports_unmerged_without_network() {
+    // A goal with no PR wip_ref must resolve `any_pr_merged == false` cheaply and
+    // hermetically (the branch that short-circuits before any `gh` call).
+    let source = GhCliEvidenceSource::new("/nonexistent/repo/dir");
+    let goal = no_signal_goal("g"); // off-repo, no wip_refs
+    assert!(
+        !source
+            .any_pr_merged(&goal)
+            .expect("no-ref path must not error"),
+        "no tracked PR ⇒ no merge evidence"
+    );
+}
+
+#[test]
+fn gh_source_no_issue_ref_reports_closed_without_network() {
+    // No issue wip_ref ⇒ nothing open to gate on ⇒ the clause vacuously holds
+    // (`issue_closed == true`), again with no `gh` call.
+    let source = GhCliEvidenceSource::new("/nonexistent/repo/dir");
+    let goal = no_signal_goal("g");
+    assert!(
+        source
+            .issue_closed(&goal)
+            .expect("no-ref path must not error"),
+        "no tracked issue ⇒ clause holds vacuously"
+    );
+}
+
+#[test]
+fn gh_source_first_ref_of_kind_matches_case_insensitively() {
+    // `first_ref_of_kind` underpins both no-ref short-circuits; pin its matching.
+    let mut goal = no_signal_goal("g");
+    goal.wip_refs = vec![
+        WipRef {
+            kind: "PR".to_string(),
+            ref_id: "101".to_string(),
+            label: "the pr".to_string(),
+            url: None,
+        },
+        WipRef {
+            kind: "issue".to_string(),
+            ref_id: "202".to_string(),
+            label: "the issue".to_string(),
+            url: None,
+        },
+    ];
+    assert_eq!(super::first_ref_of_kind(&goal, "pr"), Some("101"));
+    assert_eq!(super::first_ref_of_kind(&goal, "ISSUE"), Some("202"));
+    assert_eq!(super::first_ref_of_kind(&goal, "commit"), None);
 }
