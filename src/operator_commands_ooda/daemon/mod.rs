@@ -1337,7 +1337,16 @@ pub fn run_ooda_daemon(
                             &[(names::ATTR_TYPE, "SUPERSEDES")],
                         );
                     }
-                    if let Err(e) = telemetry::flush_snapshot(&state_root) {
+                    // Flush the metrics snapshot with the per-cycle enrichment
+                    // rollup section attached (issue #2942) so the dashboard's
+                    // `GET /api/enrichment` live-read sees the attach-rate and
+                    // average injected facts/procedures per decision. The rollup
+                    // is read (not drained) so the dashboard shows a stable
+                    // lifetime figure; reading it never touches the recall corpus.
+                    if let Err(e) = telemetry::flush_snapshot_with(
+                        &state_root,
+                        crate::enrichment_observability::snapshot_section(),
+                    ) {
                         eprintln!("[simard] telemetry: failed to flush metrics snapshot: {e}");
                     }
                 }

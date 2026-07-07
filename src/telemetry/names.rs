@@ -86,6 +86,28 @@ pub const GOAL_COMPLETED: &str = "simard.goal.completed";
 /// Aggregate progress signal 0–100 (gauge).
 pub const GOAL_PROGRESS: &str = "simard.goal.progress";
 
+// ── Enrichment observability — simard.enrichment.* (#2942) ──────────────────
+
+/// One instrumented enrichment decision. Attribute `attached` = `true` | `false`
+/// (the memory bridge resolved to `Some` vs degraded to `None`). The
+/// `attached` split is the attach-rate numerator/denominator
+/// (`attach_rate = decisions{attached=true} / decisions{*}`), recorded only for
+/// the *expected* population (turns where enrichment was configured).
+pub const ENRICHMENT_DECISIONS: &str = "simard.enrichment.decisions";
+/// One bridge-launch degrade. Attribute `reason` = `memory_ipc` |
+/// `knowledge_launch` — the concrete cause so an operator sees which bridge is
+/// down.
+pub const ENRICHMENT_DEGRADED: &str = "simard.enrichment.degraded";
+/// Rendered enrichment-block size injected per decision (histogram: count+sum →
+/// average bytes/decision at zero attribute cardinality).
+pub const ENRICHMENT_PREAMBLE_BYTES: &str = "simard.enrichment.preamble_bytes";
+/// Facts rendered into the preamble per decision (histogram: count+sum → avg
+/// facts/decision).
+pub const ENRICHMENT_FACTS_INJECTED: &str = "simard.enrichment.facts_injected";
+/// Procedures rendered into the preamble per decision (histogram: count+sum →
+/// avg procedures/decision).
+pub const ENRICHMENT_PROCEDURES_INJECTED: &str = "simard.enrichment.procedures_injected";
+
 // ── Attribute keys ──────────────────────────────────────────────────────────
 
 /// Attribute key: outcome/result discriminator (`ok`/`parse_fail`, parse
@@ -101,6 +123,10 @@ pub const ATTR_TYPE: &str = "type";
 pub const ATTR_DIR: &str = "dir";
 /// Attribute key: token cache status.
 pub const ATTR_CACHED: &str = "cached";
+/// Attribute key: enrichment memory-bridge attach state (`true` | `false`).
+pub const ATTR_ATTACHED: &str = "attached";
+/// Attribute key: enrichment degrade reason (`memory_ipc` | `knowledge_launch`).
+pub const ATTR_REASON: &str = "reason";
 
 /// Sentinel bucket an out-of-catalog attribute value is folded into.
 pub const OTHER_BUCKET: &str = "other";

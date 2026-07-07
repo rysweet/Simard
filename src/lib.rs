@@ -58,6 +58,11 @@ pub mod disk_health;
 pub mod disk_pressure;
 pub mod engineer_loop;
 pub mod engineer_worktree;
+// Issue #2942: the enrichment-observability emit seam — proves recalled memory
+// reaches OODA decisions (per-turn attach/degrade INFO/WARN + simard.enrichment.*
+// metrics, the per-cycle rollup the dashboard reads, and the recall-on-vs-off
+// ablation feeding #2644).
+pub mod enrichment_observability;
 pub mod error;
 // Issue #2679: the shared per-fact reliability scorer, homed here so both
 // write-boundary seams (the IPC `StoreFactGated` handler and the in-process

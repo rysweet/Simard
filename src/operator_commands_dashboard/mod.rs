@@ -8,6 +8,7 @@ mod creative_ideas;
 mod current_work;
 pub(crate) mod cycle_source;
 mod distributed;
+mod enrichment;
 mod feedback;
 mod goals;
 mod goals_status;
@@ -73,6 +74,14 @@ mod tests_routes_b;
 // clamped params, verdict truth table, and fail-closed auth/leak contract.
 #[cfg(test)]
 mod tests_recall_precision_correlation;
+
+// Issue #2942 (Step 7): the read-only GET /api/enrichment endpoint that surfaces
+// whether recall is reaching decisions — attach-rate and average injected
+// facts/procedures/preamble-bytes per decision, read from the live
+// metrics_snapshot.json. Pins its clamped params, degrade-safe/missing-snapshot
+// contract, populated-schema surface, and fail-closed auth + no-leak posture.
+#[cfg(test)]
+mod tests_enrichment_endpoint;
 
 // Issue #2798 — Layer B: pins that the dashboard resolver (`resolve_state_root`)
 // equals the daemon resolver (`simard_state_root` / `default_state_root`) for

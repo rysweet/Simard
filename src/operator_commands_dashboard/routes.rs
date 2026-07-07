@@ -16,6 +16,7 @@ use super::creative_ideas::{
 };
 use super::current_work::current_work;
 use super::distributed::{distributed, vacate_vm};
+use super::enrichment::enrichment;
 use super::feedback::{feedback_status, feedback_submit};
 use super::goals::{
     add_goal, demote_goal, goals, promote_backlog_item, remove_goal, seed_goals, update_goal_status,
@@ -80,6 +81,7 @@ pub fn build_router() -> Router {
             "/api/cognition/recall-precision",
             get(recall_precision_correlation),
         )
+        .route("/api/enrichment", get(enrichment))
         .route("/api/merge-judge", get(merge_judge_decisions))
         .route("/api/merge-readiness", get(merge_readiness))
         .route("/api/traces", get(traces))

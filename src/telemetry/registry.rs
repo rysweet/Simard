@@ -167,6 +167,7 @@ pub fn capture() -> MetricsSnapshot {
         gauges,
         histograms,
         overflow_series: reg.overflow_series,
+        enrichment: None,
     }
 }
 

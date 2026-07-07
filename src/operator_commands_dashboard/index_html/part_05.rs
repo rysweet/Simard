@@ -524,7 +524,7 @@ pub(crate) const PART_05: &str = r#"      try {
       'overseer':[{fn:fetchOverseer,intervalMs:30000,paths:['/api/overseer']}],
       'journal':[{fn:loadJournal,intervalMs:120000,paths:['/api/journal/dates']}],
       'creative-ideas':[{fn:loadCreativeIdeas,intervalMs:120000,paths:['/api/creative-ideas']}],
-      'memory':[{fn:fetchMemoryGraph,intervalMs:120000,paths:['/api/memory/graph']},{fn:fetchMemory,intervalMs:120000,paths:['/api/memory']}]
+      'memory':[{fn:fetchMemoryGraph,intervalMs:120000,paths:['/api/memory/graph']},{fn:fetchMemory,intervalMs:120000,paths:['/api/memory']},{fn:fetchEnrichment,intervalMs:30000,paths:['/api/enrichment']}]
     };
     window.TAB_LOADERS=TAB_LOADERS;
 
