@@ -1803,6 +1803,80 @@ a missing dedup), yielding the new one-line **P6**. Confidence **High**.
 
 ---
 
+### 7u. Round-15 primary-investigator deep dive — the complete signature-token → emission map re-anchored as ONE self-contained table (HEAD `38c39d5f`)
+
+This pass owns the assigned focus verbatim — **map every signature token to its authoritative
+emission source (file:line) in `src`** — anchored at HEAD `38c39d5f` (the §7t commit). Prior maps
+were split across sections (§7f/§7j/§7l token decode; §7p full `out.push`/`format!` inventory; §7t
+the `goal:blocked` five-hop chain + the `recurring_goal_reblock` sibling) and several rows read
+"per §7p, unchanged." This round **consolidates them into one self-contained table** covering
+**exactly** the tokens that appear in the round's own investigation-question signature, and pins a
+precision that a careless reader of that composite would get wrong (D/E below). `git diff
+--name-only 85245e87..HEAD -- src/` is **empty** (zero source drift since the §7p anchor base), so
+every line below re-resolved **verbatim** by `sed -n` at this HEAD; `cargo test --lib
+overseer::tests_memory_recall` → **36 passed, 0 failed**. Strictly additive; no prior finding
+overturned.
+
+**A. The signature decomposes into exactly FIVE distinct token families.** Splitting the recalled
+composite on `|` and stripping repeated `overseer-obs:` prefixes yields: the wrapper prefix, seven
+`goal:blocked:{id}` instances, and one each of `quality:gym_skipped`, `workstream-gap`,
+`resource:engineer_spawn`. Every family maps to **one** authoritative literal-emitting line:
+
+| # | Token (as it appears in the signature) | Instances in THIS signature | Full chain: input → `Signal` push → `dedup_key` literal | Authoritative emission (file:line @ `38c39d5f`) |
+|---|---|---|---|---|
+| 1 | `overseer-obs:` (composite wrapper) | 1 real + N self-amplified (see §7t/§7p) | `observation_signature()` sorts+dedups all problem keys, then prefixes | **`src/overseer/mod.rs:1085`** (`format!("overseer-obs:{}", keys.join("\|"))`; fn `1081`–`1086`) |
+| 2 | `goal:blocked:{id}` | **7** (6 kgpacks goals + `fix-rustsec-2026-0204-…-xpia-defende-dde66fb8`) | `blocked_goal_of` (`sensor.rs:215`, `id: goal.id.clone()`) → per-goal loop `signal.rs:440` pushes `Signal::GoalBlocked` `:441` → `classify_signal` renders the key | **`src/overseer/mod.rs:1349`** (`format!("goal:blocked:{goal_id}")`) |
+| 3 | `quality:gym_skipped` | 1 | `sensor.rs:125-126` sets `state.gym_skipped` → `signal.rs:398` gate pushes `Signal::GymSkipped` `:399` → `classify_signal` | **`src/overseer/mod.rs:1295`** (`"quality:gym_skipped".to_string()`) |
+| 4 | `workstream-gap` | 1 | `mod.rs:399-403` fills `observed.workstream_gaps` (curator survey) → `signal.rs:475` non-empty gate pushes `Signal::WorkstreamGap` `:476` → `classify_signal` | **`src/overseer/mod.rs:1384`** (`"workstream-gap".to_string()`) |
+| 5 | `resource:engineer_spawn` | 1 | `sensor.rs:123` reads `live_engineers` → `signal.rs:393-394` threshold gate (`>= ENGINEER_SPAWN_THRESHOLD`) pushes `Signal::EngineerSpawnRate` `:396` → `classify_signal` | **`src/overseer/mod.rs:1283`** (`"resource:engineer_spawn".to_string()`) |
+
+**B. The composite as its own token (the self-amplification re-entry).** The whole `overseer-obs:…`
+string above is written back and later recalled *as a failure signature*, at which point it becomes
+a `dedup_key` verbatim (untrusted → sanitized) — the mechanism that makes it "seen 2× in cognitive
+memory." Authoritative emission: **`src/overseer/mod.rs:1372`** (`sanitize_recalled(signature)`, the
+`Signal::RecurringSignature` arm `1366`–`1376`), fed by the push at `signal.rs:464` and the
+self-recall read at `wiring.rs:1024-1030` whose `RecalledEpisode` carries only
+`{failure_signature,id,summary,score}` — **`source_label` is dropped**, so the Overseer cannot tell
+its own prior write-back from an external episode (the §7t/§7p self-recall confirmation, re-verified
+here).
+
+**C. Every emission is a single point; the 7 goal slugs share ONE source line.** All seven
+`goal:blocked:*` instances — including the cross-repo `fix-rustsec-2026-0204-…` one, which proves
+the pattern is **not** kgpacks-specific — are the *same* `format!("goal:blocked:{goal_id}")` at
+`mod.rs:1349`, differing only by the runtime `goal_id`. `observation_signature`'s
+`keys.sort_unstable(); keys.dedup()` (`mod.rs:1083-1084`) drops only *byte-identical* keys, so
+seven distinct slugs survive as seven tokens from one emitting line. There is **no** second literal
+site for any family; a fix at each tabled line is sufficient and complete.
+
+**D. Disambiguation #1 — `workstream-gap` (bare) ≠ `workstream-gap:{sig}` (Act-phase whisper key).**
+The token in the signature is the **bare** `workstream-gap` problem `dedup_key` (`mod.rs:1384`). The
+similarly-spelled `format!("workstream-gap:{}", g.signature)` at **`mod.rs:904`** and **`mod.rs:945`**
+is a *different* string — the per-gap `WhisperGate` dedup key inside `act_flag_workstream_gaps`, used
+only to rate-limit operator notifications; it never enters `observation_signature`. Anchoring the
+signature token to `:904/:945` would be wrong.
+
+**E. Disambiguation #2 — `dedup_key` tokens ≠ recall-KEYWORD fragments (same bare word, different
+function).** `signal_keyword` in **`capabilities.rs:562`** / **`:564`** returns the bare words
+`"engineer_spawn"` / `"gym_skipped"` — but those are *recall query keywords* (they feed
+`RecallKeys::query`), **not** the `resource:`/`quality:`-prefixed `dedup_key` tokens that appear in
+the signature. The authoritative emission of the signature tokens is `classify_signal`
+(`mod.rs:1283/1295`), never `signal_keyword`. The two functions coincidentally share the bare stem.
+
+**Consequence for remediation (no change; sharper targeting).** The map confirms the existing
+P1–P6 all act at the correct layer: symptom-level unblocks that don't reconcile the board leave the
+`goal:blocked:{id}` **input** live (so `mod.rs:1349` keeps re-emitting) — the §1/§7g-4/§7t
+no-reconciliation root cause — while P6's dedup fix targets the Act-phase reblock channel (§7t-B),
+which is orthogonal to the six composite-token emission lines tabled here. No emission line is
+itself defective; each faithfully tokenizes a **standing, self-refreshing input**.
+
+**Verification footer.** HEAD `38c39d5f`; `git diff --name-only 85245e87..HEAD -- src/` **empty**
+(zero source drift — all six emission anchors + the sensor/signal chain re-resolved verbatim via
+`sed -n` at this HEAD); `cargo test --lib overseer::tests_memory_recall` **36/0**. **No prior
+finding overturned**; §7u is a consolidation + two disambiguations (D/E) that pre-empt the two
+plausible mis-anchorings of the composite. Confidence **High**.
+
+---
+
 ## 8. Provenance
 
 Investigation-only follow-up (investigation-workflow, rounds 1–14). No production
@@ -1927,6 +2001,17 @@ WhisperGate-deduped verbatim tail unchanged at 10 (newest #2875) and the un-dedu
 `recurring_goal_reblock` escalation channel steady at 79 (newest #2894 @ 14:05:18Z, byte-identical
 to the round-13 read ~15 min earlier), `rysweet/amplihack-xpia-defender` re-confirmed a live public
 repo — seventh consecutive identical board read (rounds 8→14), confidence remains High.
+A round-15 primary-investigator deep dive (§7u, HEAD `38c39d5f`) consolidated the signature-token
+emission map — previously split across §7f/§7j/§7l/§7p/§7t — into one self-contained table covering
+exactly the five distinct token families in the investigation-question signature (`overseer-obs:`
+wrapper `mod.rs:1085`, seven `goal:blocked:{id}` → the single `mod.rs:1349`, `quality:gym_skipped`
+`:1295`, `workstream-gap` `:1384`, `resource:engineer_spawn` `:1283`, plus the composite-as-token
+re-entry `:1372`), verified verbatim at HEAD with zero `src/` drift since `85245e87` and 36/0 on
+`tests_memory_recall`; it adds two disambiguations — the bare `workstream-gap` problem key vs. the
+Act-phase whisper key `workstream-gap:{sig}` (`mod.rs:904/945`), and the `dedup_key` tokens vs. the
+same-stemmed recall keywords in `signal_keyword` (`capabilities.rs:562/564`) — and confirms the
+cross-repo `fix-rustsec-2026-0204` goal shares the one `mod.rs:1349` source, so no emission line is
+itself defective and no finding is overturned; confidence remains High.
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
