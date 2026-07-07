@@ -35,6 +35,9 @@ description: >
   the six cognitive-memory-channel anchors re-resolved verbatim plus a two-channel enumeration
   proving the byte-similar Act-phase `workstream-gap` strings and recall-query keys sit outside
   the self-amplifying composite (§7p); 36/36 + 4/4 tests green, live board unchanged, zero drift.
+  Round-12 directly verified RUSTSEC-2026-0204 (`crossbeam-epoch`) is **remediated** in
+  `amplihack-xpia-defender` — `Cargo.lock` pins the patched `0.9.20`, bumped from the affected
+  `0.9.18` via merged PR #23 — closing the one previously-indirect success criterion (§7q).
 last_updated: 2026-07-07
 review_schedule: as-needed
 owner: simard
@@ -408,7 +411,7 @@ not directly observed.
 
 ---
 
-## 7. Consolidation & verification (rounds 3–11)
+## 7. Consolidation & verification (rounds 3–12)
 
 The consolidation pass (rounds 3–4, this update) reconciled the parallel deep dives
 against the live working tree at **HEAD `20fb7539`** and **executed** the round-2
@@ -1403,11 +1406,83 @@ no 11th; **#2707** open). No prior finding overturned — §7p is strictly addit
 full emission inventory at `85245e87` and adds the **two-channel** enumeration (A vs. B) proving the
 byte-similar Act-phase `workstream-gap` strings are outside the self-amplifying loop. Confidence **High**.
 
+### 7q. Round-12 — direct RUSTSEC-2026-0204 present/remediated verification (lockfile-vs-advisory + merged fix-PR)
+
+Prior rounds (§7j-C, §7l-D) correctly reframed the `fix-rustsec-2026-0204-in-amplihack-xpia-defende`
+token as **cross-goal contamination** — an unrelated `Blocked` goal swept into the self-amplifying
+composite by the unfiltered recall loop — and confirmed `rysweet/amplihack-xpia-defender` exists as a
+live public repo whose fix-goal parks with a local `NOT_A_REPO` worktree error. What they did **not**
+do is directly establish whether the underlying vulnerability is actually present in that repo's
+dependency tree. This round closes that gap with a **direct lockfile-vs-advisory comparison** plus a
+**merged fix-PR check** — independent of the parked overseer goal.
+
+**A. The advisory (authoritative version ranges).** `RUSTSEC-2026-0204` — *Invalid pointer dereference
+in `fmt::Pointer` impl for `Atomic` and `Shared` when the underlying pointer is invalid* — affects
+crate **`crossbeam-epoch`** (NULL-pointer-dereference; reported/issued **2026-07-06**; fix
+[crossbeam-rs/crossbeam#1276](https://github.com/crossbeam-rs/crossbeam/pull/1276)). Per the
+advisory-db entry (`crates/crossbeam-epoch/RUSTSEC-2026-0204.md`):
+
+```toml
+[versions]
+patched     = [">= 0.9.20"]
+unaffected  = ["< 0.9.0"]
+```
+
+→ the **affected range is `>= 0.9.0, < 0.9.20`** (`fmt::Display`/`fmt::Pointer` impls that dereference
+the underlying pointer; pre-0.9 impls do not dereference and are unaffected).
+
+**B. The repo's pinned version (direct lockfile read).** `rysweet/amplihack-xpia-defender`'s
+`Cargo.lock` (HEAD `54557b00`, `main`) pins:
+
+```
+name = "crossbeam-epoch"
+version = "0.9.20"
+checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
+```
+
+a **transitive** dependency (pulled via `crossbeam-deque` 0.8.6). `0.9.20` satisfies the patched
+predicate `>= 0.9.20` exactly (it is the *first* patched release), so the resolved dependency graph is
+**not affected** by RUSTSEC-2026-0204.
+
+**C. Remediation provenance (merged fix-PR — the vuln WAS present).** The bump was deliberate, not
+incidental: PR
+[**#23** *"fix(deps): update crossbeam-epoch 0.9.18→0.9.20 (RUSTSEC-2026-0204)"*](https://github.com/rysweet/amplihack-xpia-defender/pull/23)
+is **MERGED** (commit `54557b00`, authored **2026-07-07T12:32:11Z**). Before it, the lock pinned
+**`0.9.18`** — squarely inside the affected `>= 0.9.0, < 0.9.20` range. So the vulnerability **was
+genuinely present** (transitively, at 0.9.18) and is **now remediated** (0.9.20). CI would also now
+catch a regression: PR #22 (2026-06-30) added a **`cargo-deny`** supply-chain gate.
+
+**D. Verdict on success-criterion #3 — REMEDIATED.** RUSTSEC-2026-0204 in `amplihack-xpia-defender` is
+**confirmed remediated as of 2026-07-07T12:32:11Z** (was present at `crossbeam-epoch` 0.9.18 → fixed to
+0.9.20 via merged PR #23), established by direct advisory-range-vs-`Cargo.lock` comparison and fix-PR
+verification — not inferred from the parked overseer goal.
+
+**E. This *independently corroborates* the report's root-cause thesis.** The fix merged at
+**12:32:11Z**, i.e., **before** the round-1 investigation's verify step ran (~13:11–14:02Z) — yet the
+overseer's `fix-rustsec-2026-0204-…` goal was **still parked as `goal:blocked`** at recall time (local
+`NOT_A_REPO` worktree error, `error/display.rs:158`). The real-world remediation had already landed
+remotely, but the overseer's local goal never reconciled to *done*, so its stale `Blocked` row kept
+being swept into the self-amplifying composite. This is the **exact same missing done-gate/park-
+reconciliation defect** proven for the CLOSED kgpacks issues in §1 and §7l-C — now demonstrated on a
+**second, unrelated goal whose underlying work is verifiably complete**. It strengthens §1's
+stale-input thesis and P2 (done-gate/park reconciliation) as the fix that must land for unblocks to
+*stick*: closing the real work (here, merging PR #23) is **necessary but not sufficient**; without
+reconciliation the goal board keeps re-emitting the stale block.
+
+**Verification footer.** Advisory ranges read from `rustsec/advisory-db`
+`crates/crossbeam-epoch/RUSTSEC-2026-0204.md`; `Cargo.lock` read from
+`rysweet/amplihack-xpia-defender@main` (crossbeam-epoch **0.9.20**, patched); remediation PR
+[#23](https://github.com/rysweet/amplihack-xpia-defender/pull/23) confirmed **MERGED** (07-07T12:32:11Z,
+0.9.18→0.9.20); `cargo-deny` gate added in PR #22. No prior finding overturned — §7q is strictly
+additive: it converts the previously *indirect* (parked-goal) read of criterion #3 into a **direct
+lockfile-vs-advisory + fix-PR confirmation**, and adds an independent non-kgpacks corroboration of the
+reconciliation-gap root cause. Confidence **High**.
+
 ---
 
 ## 8. Provenance
 
-Investigation-only follow-up (investigation-workflow, rounds 1–11). No production
+Investigation-only follow-up (investigation-workflow, rounds 1–12). No production
 behavior was changed by this document. Round-1 established the structural cause
 ([`overseer-memory-recall-api`](./overseer-memory-recall-api.md)); round-2 added the
 semantic diagnosis and the executable H1/H2 tests; round-3 consolidated the parallel
@@ -1492,6 +1567,15 @@ verbatim, and adding a **two-channel** enumeration that proves the byte-similar 
 `workstream-gap` strings (`mod.rs:904/939/945`, `notify.rs:98/204`) and the `signal_keyword` recall
 keys (`capabilities.rs:562/564`) are outside the self-amplifying recalled composite (36/36 module +
 4/4 hypothesis tests green; live board unchanged) — no finding overturned, confidence remains High.
+Round-12 (§7q) directly verified success-criterion #3: RUSTSEC-2026-0204 (`crossbeam-epoch`,
+affected `>= 0.9.0, < 0.9.20` per `rustsec/advisory-db`) is **remediated** in
+`rysweet/amplihack-xpia-defender` — its `Cargo.lock` pins the patched `0.9.20` (transitive via
+`crossbeam-deque`), bumped from the affected `0.9.18` by merged PR #23 (`54557b00`, 07-07T12:32:11Z),
+with a `cargo-deny` gate added in PR #22 — converting the prior *indirect* (parked-goal) read into a
+direct lockfile-vs-advisory + fix-PR confirmation, and, because the fix landed before the round-1
+verify step yet the overseer goal stayed parked, independently corroborating the
+done-gate/reconciliation-gap root cause on a second, unrelated goal — no finding overturned,
+confidence remains High.
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
