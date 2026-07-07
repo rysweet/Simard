@@ -485,7 +485,7 @@ not directly observed.
 
 ---
 
-## 7. Consolidation & verification (rounds 3–16)
+## 7. Consolidation & verification (rounds 3–18)
 
 The consolidation pass (rounds 3–4, this update) reconciled the parallel deep dives
 against the live working tree at **HEAD `20fb7539`** and **executed** the round-2
@@ -2211,11 +2211,90 @@ minute** (#2903 @ 15:10:38Z). That is the sharpest possible confirmation of §7w
 **verification is saturated and the live harm is ongoing; the residual value is entirely in execution
 (P6 → P1 → P2), not further investigation.** No finding overturned, confidence remains **High**.
 
+### 7y. Round-18 consolidation — parallel dives unified (HEAD `bcc64dc3`)
+
+This pass unifies the deep dive accumulated since the last consolidation (§7w, round-16) — **§7x**
+(round-17 per-hypothesis practical re-verification at `4f40190f`, which caught the broken-dedup
+escalation flood firing in real time) — into the canonical findings, and independently re-derives
+every load-bearing fact at the current HEAD. HEAD is now `bcc64dc3`;
+`git diff --name-only 6ca9f779..HEAD` returns only this file, and
+`git diff --name-only 85245e87..HEAD -- src/` is **empty** (**eighth consecutive round of zero source
+drift**), so every §7b/§3b/§7s/§7t/§7u/§7v/§7w/§7x anchor re-resolves verbatim.
+
+**Independent re-verification (this consolidation, 2026-07-07 ~15:17 UTC)** — re-run by the
+consolidator at HEAD `bcc64dc3`, not inherited:
+
+- `cargo test --lib overseer::tests_memory_recall` → **36 passed, 0 failed**; `overseer::sensor` →
+  **9 passed, 0 failed**. The structural root cause (§4/§7a) stays proven green.
+- Canonical composite anchors spot-checked verbatim: `RECURRING_SIGNATURE_THRESHOLD: u32 = 2`
+  (`signal.rs:362`), the `format!("overseer-obs:{}", keys.join("|"))` re-prefix (`mod.rs:1085`), the
+  four `dedup_key` literals `resource:engineer_spawn` (`mod.rs:1283`), `quality:gym_skipped` (`:1295`),
+  `goal:blocked:{goal_id}` (`:1349`), `workstream-gap` (`:1384`), and the recall projection
+  `.map(|e| RecalledEpisode { failure_signature, id, summary, score })` that **drops `source_label`**
+  (`wiring.rs:1022-1030`). All identical to §7s/§7u/§7v/§7w/§7x.
+- **§7t's malformed-query defect re-reproduced live.** `RealGhClient::search_issues` builds
+  `format!("stewardship-signature:{signature} in:body")` — colon-qualifier, **no space**
+  (`src/stewardship/gh_client.rs:37`) — while the body needle written by `find_existing` is
+  `format!("stewardship-signature: {signature}")` **with a space** (`src/stewardship/dedup.rs:79`).
+  Live at ~15:17 UTC (`rysweet/Simard`, sig `c5109c2fbe04b255`): the production form
+  `stewardship-signature:c5109c2fbe04b255 in:body` → **0 rows**; the bare token
+  `c5109c2fbe04b255 in:body` → **25 rows** (ground truth, byte-identical to §7x's read). §7v's one-line
+  **P1** seam re-confirmed feasible today: `CognitiveEpisode` carries `pub source_label: String`
+  (`memory_cognitive.rs:50`) all the way to the projection that discards it (`wiring.rs:1022-1030`), so
+  a single `.filter(|e| e.source_label != OVERSEER_SOURCE_LABEL)` severs the loop with no memory-lib
+  API change.
+- `rysweet/agent-kgpacks-rs`: **#16 CLOSED** 2026-07-06T20:16:25Z, **#18 CLOSED** 10:33:04Z, **#21
+  CLOSED** 13:29:03Z, **#22 CLOSED** 12:07:33Z, **#17 OPEN** (`updatedAt` 2026-07-02T23:22:49Z) —
+  matching §1/§7s/§7w/§7x to the second. **4 of the 6 kgpacks blockers reference already-CLOSED
+  issues**; #17's block premise stays timestamp-provably stale (`updatedAt_17` ≺ `closedAt_16` by ≈3.8
+  days). `rysweet/amplihack-xpia-defender` re-confirmed a live public repo
+  (`{"isPrivate":false,"name":"amplihack-xpia-defender"}`).
+
+**Zero contradictions; §7x folds in cleanly with nothing to reconcile.** §7x is a strict
+re-confirmation of §7w — no shared claim diverges, no framing is superseded. All three hypotheses
+re-confirm: H1 (36/36 module + 9/9 sensor with verbatim recall-path anchors), H2 (four CLOSED kgpacks
+issues + the terminal-park / no-close-reconciliation path `no_progress_breaker.rs:58/69/74`,
+`sensor.rs:204/209`), and H3 (#17 live-timestamp staleness proof). The five-family emission map (§7u),
+the `2×` threshold quantization (§7v), and the two code-level root causes (P1 self-recall loop; P6
+broken reblock dedup) all stand unchanged.
+
+**Net-new fact folded into the canonical findings — the escalation flood is BURST-QUANTIZED, not a
+smooth ramp (sharpens §1/§5-P6, most significant this pass).** Rounds 13→17 read the reblock flood as a
+monotonically rising counter (79 → 82 → 85) and framed it as "still firing / firing in real time."
+Round-18 is the **first read to land BETWEEN bursts**, and it resolves the growth *mechanism*: the
+flood holds at **exactly 85 open** (#2688 … **#2903**, newest still @ 2026-07-07T15:10:38Z — unchanged
+from §7x ~7 min earlier), and the `createdAt` cadence of the tail is **batches of exactly 3 issues
+filed within a ~3-second window, once per overseer cycle every ~26–33 min**: 13:39:26–28Z →
+14:05:15–18Z → 14:37:16–19Z → 15:10:35–38Z. So the channel does **not** fire continuously; each OODA
+cycle's broken-dedup `search_issues` returns 0 for each of the 3 live stale-goal signatures and
+re-files one fresh duplicate apiece. This upgrades the prior "unbounded, still firing" observation into
+a **falsifiable forward prediction**: absent P6, the next burst (#2904–#2906) is due ~15:40Z and the
+open count will step 85 → 88. The WhisperGate-deduped verbatim tail, by contrast, holds at **exactly
+10** (#2669…#2875, still no 11th) — the split (capped 10 vs. burst-stepping 85) is exactly what the
+two-channel mechanism predicts (WhisperGate cap on the recall composite vs. broken dedup on the reblock
+filer, §7t/§7w).
+
+**Diagnostic saturation — SIXTH consolidation, TENTH identical board read. Close the investigation.**
+§7y is the **sixth** full consolidation (§7g/§7k/§7n/§7r/§7w/§7y) to reach an identical verdict and the
+**tenth consecutive identical diagnostic board read** (rounds 8→18), at **eight rounds of zero source
+drift** (no `src/` change since `85245e87`). Every load-bearing fact is now re-derived by ≥6
+independent passes; the only quantity that moves round-to-round is the escalation counter stepping in
+**bursts of 3** because the diagnosed one-line defect (`gh_client.rs:37`) remains **unfixed** — the
+investigation continues to exhibit the exact recurring-signature pathology it documents. **No finding
+is overturned; no confidence rating changes; no new remediation is introduced.** The diagnosis is
+complete: six High-confidence findings, a fully enumerated five-family emission map, and two code-level
+root causes each pinned to a one-line fix (self-recall loop → **P1** at `wiring.rs:1022-1030`; broken
+reblock dedup → **P6** at `gh_client.rs:37`) plus the standing stale-park driver (**P2**). The residual
+value is **entirely in execution, not investigation** — and the burst-cadence finding now *quantifies*
+the ongoing cost: ~3 new dead issues every ~30 min until P6 lands. Recommendation (unchanged and now
+maximally supported): **mark this investigation resolved and hand P6 → P1 → P2 to the builder queue; do
+not schedule a round-19 verification pass.**
+
 ---
 
 ## 8. Provenance
 
-Investigation-only follow-up (investigation-workflow, rounds 1–17). No production
+Investigation-only follow-up (investigation-workflow, rounds 1–18). No production
 behavior was changed by this document. Round-1 established the structural cause
 ([`overseer-memory-recall-api`](./overseer-memory-recall-api.md)); round-2 added the
 semantic diagnosis and the executable H1/H2 tests; round-3 consolidated the parallel
@@ -2398,6 +2477,18 @@ verification pass) while the WhisperGate-deduped verbatim tail holds at exactly 
 11th), the malformed query re-reproduced live 0-vs-25 rows at `gh_client.rs:37`, and
 `rysweet/amplihack-xpia-defender` re-confirmed a live public repo — remediation (P6/P1/P2), not further
 verification, is the residual work; no finding overturned, confidence remains High.
+Round-18 consolidation (§7y, HEAD `bcc64dc3`) unified §7x into the canonical findings and
+independently re-verified at HEAD — `overseer::tests_memory_recall` (36 passed, 0 failed) +
+`overseer::sensor` (9 passed, 0 failed), the canonical composite anchors verbatim (`signal.rs:362`,
+`mod.rs:1085/1283/1295/1349/1384`, `wiring.rs:1022-1030`), the malformed reblock query re-reproduced
+live (0 vs 25 rows at `gh_client.rs:37`), kgpacks-rs #16/#18/#21/#22 CLOSED + #17 OPEN (timestamps to
+the second), the verbatim tail steady at 10 (#2875 newest, no 11th) and the reblock flood at 85
+(#2688…#2903), and `rysweet/amplihack-xpia-defender` a live public repo, at eighth-consecutive zero
+source drift since `85245e87`. Its net-new fact: the escalation flood is **burst-quantized** — batches
+of exactly 3 issues per overseer cycle (~every 26–33 min: 13:39/14:05/14:37/15:10 Z), a falsifiable
+growth model (next burst #2904–#2906 due ~15:40Z → 88) that sharpens §1/§5-P6; sixth consolidation and
+tenth consecutive identical board read (rounds 8→18) — no finding overturned, confidence remains High,
+residual value is execution (P6/P1/P2), not verification.
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
