@@ -342,6 +342,135 @@ fn generated_idea_persists_as_prospective_node_and_round_trips() {
     assert_eq!(by_id.node_id, got.node_id);
 }
 
+/// Regression for the dashboard read path (#122): persisted creative ideas must
+/// appear even when the store already holds far more than the read window's
+/// worth of *unrelated* prospective memories.
+///
+/// The daemon persists ~10 ideas per Creative-Ideas run, but the live OODA
+/// store accumulates thousands of other prospective facts. The dashboard read
+/// path (`store.list(IDEA_LIST_LIMIT)`) used to fetch the first
+/// `IDEA_LIST_LIMIT` prospective nodes *across every trigger* and only then
+/// filter for the creative-idea sentinel — so once the store held more than
+/// `IDEA_LIST_LIMIT` non-creative prospectives the creative nodes fell outside
+/// the window and `GET /api/creative-ideas` returned 0 across all statuses
+/// ("I'm still not seeing any of the creative ideas work in the dashboard").
+///
+/// The fix scopes the `LIMIT` to the creative-idea trigger *in the query*
+/// (`list_prospective_by_trigger`), so every persisted idea survives regardless
+/// of how many unrelated prospectives exist. This test therefore FAILS before
+/// the fix (creative nodes truncated out of the window) and PASSES after it.
+#[test]
+fn creative_ideas_survive_beyond_the_prospective_read_window() {
+    // Mirror of the dashboard's module-private `IDEA_LIST_LIMIT`
+    // (`src/operator_commands_dashboard/creative_ideas.rs`).
+    const IDEA_LIST_LIMIT: u32 = 512;
+    // Flood the store far past the window (8x) so a naive "take LIMIT rows then
+    // filter" read reliably drops the creative nodes: the creative sentinel is a
+    // vanishing fraction of the prospective set, exactly the production shape.
+    const NON_CREATIVE_FLOOD: u32 = IDEA_LIST_LIMIT * 8;
+    const CREATIVE_IDEA_COUNT: usize = 10;
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory store");
+
+    // Thousands of *non-creative* prospective memories under a distinct trigger
+    // — the noise the live OODA store accumulates around the ideas.
+    for i in 0..NON_CREATIVE_FLOOD {
+        mem.store_prospective(
+            &format!("unrelated prospective memory {i}"),
+            "some-unrelated-trigger",
+            "{}",
+            1,
+        )
+        .expect("store non-creative prospective");
+    }
+
+    // A handful of real creative ideas persisted through the store — the ~10/run
+    // the daemon logs as "10 persisted".
+    let store = ProspectiveCreativeIdeaStore::new(&mem);
+    let mut expected_ids = Vec::with_capacity(CREATIVE_IDEA_COUNT);
+    for i in 0..CREATIVE_IDEA_COUNT {
+        let idea = CreativeIdea::new(
+            format!("creative idea number {i}"),
+            sample_context(),
+            1_700_000_000 + i as u64,
+        );
+        expected_ids.push(store.store(&idea).expect("store creative idea"));
+    }
+
+    // The exact dashboard read path.
+    let listed = store.list(IDEA_LIST_LIMIT).expect("dashboard list");
+
+    // Every persisted idea must be visible — this is the user-facing bug.
+    for id in &expected_ids {
+        assert!(
+            listed.iter().any(|idea| &idea.node_id == id),
+            "persisted creative idea {id} is missing from the dashboard read: it \
+             was truncated out of the {IDEA_LIST_LIMIT}-row prospective window by \
+             the unrelated flood (the #122 read-path bug)"
+        );
+    }
+    assert_eq!(
+        listed.len(),
+        expected_ids.len(),
+        "the dashboard must list exactly the {} persisted creative ideas, not a \
+         limit-truncated subset (got {})",
+        expected_ids.len(),
+        listed.len(),
+    );
+}
+
+/// Contract for the new trigger-scoped prospective primitive
+/// ([`CognitiveMemoryOps::list_prospective_by_trigger`]) that backs the #122
+/// fix: the `limit` must bound only nodes matching the requested trigger, so a
+/// creative-idea read stays complete no matter how large the non-creative
+/// prospective population grows. Distinct from the store-level regression above,
+/// this pins the primitive directly on the library adapter.
+#[test]
+fn list_prospective_by_trigger_scopes_the_limit_to_matching_nodes() {
+    const LIMIT: u32 = 512;
+    const FLOOD: u32 = LIMIT * 8;
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory store");
+
+    // A large non-creative prospective population under a different trigger.
+    for i in 0..FLOOD {
+        mem.store_prospective(&format!("noise {i}"), "unrelated-trigger", "{}", 1)
+            .expect("store noise prospective");
+    }
+    // A handful of creative-idea nodes (raw, under the sentinel trigger).
+    let mut creative_ids = Vec::new();
+    for i in 0..10i64 {
+        creative_ids.push(
+            mem.store_prospective(&format!("idea {i}"), CREATIVE_IDEA_TRIGGER, "{}", i)
+                .expect("store creative prospective"),
+        );
+    }
+
+    // Every creative node must come back even though `LIMIT` << `FLOOD`: the
+    // query filters by trigger BEFORE applying the limit (fail-closed — no
+    // fallback to an unfiltered `list_all_prospective`).
+    let got: Vec<CognitiveProspective> = mem
+        .list_prospective_by_trigger(CREATIVE_IDEA_TRIGGER, LIMIT)
+        .expect("list_prospective_by_trigger");
+
+    assert!(
+        got.iter()
+            .all(|p| p.trigger_condition == CREATIVE_IDEA_TRIGGER),
+        "the primitive must return only nodes matching the requested trigger"
+    );
+    for id in &creative_ids {
+        assert!(
+            got.iter().any(|p| &p.node_id == id),
+            "creative node {id} must survive the trigger-scoped read despite the flood"
+        );
+    }
+    assert_eq!(
+        got.len(),
+        creative_ids.len(),
+        "exactly the creative-trigger nodes are returned, none of the {FLOOD} flood"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 3. Pipeline — all four reviewers + synthesis sets a legal status
 // ---------------------------------------------------------------------------

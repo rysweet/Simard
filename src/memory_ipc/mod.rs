@@ -246,6 +246,16 @@ pub enum MemoryRequest {
     ResolveProspective {
         node_id: String,
     },
+    /// Trigger-scoped prospective enumeration (issue #122). Carries the exact
+    /// `trigger_condition` to match plus the row cap; the server applies the
+    /// filter *in the backend query* so the cap bounds only matching nodes.
+    /// The creative-ideas dashboard reads through the IPC client (tier-1), so
+    /// this must round-trip end-to-end rather than fall back to the empty trait
+    /// default. Returns [`MemoryResponse::Prospectives`].
+    ListProspectiveByTrigger {
+        trigger: String,
+        limit: u32,
+    },
     /// PR-C (issue #2281, problem 4): keyword-overlap episodic search
     /// for `preparation_memory_operations`.
     SearchEpisodesByKeywords {
@@ -474,6 +484,13 @@ impl CognitiveMemoryOps for SharedMemory {
     }
     fn list_all_prospective(&self, limit: u32) -> SimardResult<Vec<CognitiveProspective>> {
         self.0.list_all_prospective(limit)
+    }
+    fn list_prospective_by_trigger(
+        &self,
+        trigger: &str,
+        limit: u32,
+    ) -> SimardResult<Vec<CognitiveProspective>> {
+        self.0.list_prospective_by_trigger(trigger, limit)
     }
     fn list_all_episodes(&self, limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
         self.0.list_all_episodes(limit)

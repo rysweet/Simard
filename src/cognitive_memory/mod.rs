@@ -596,6 +596,36 @@ pub trait CognitiveMemoryOps: Send + Sync {
         Ok(vec![])
     }
 
+    /// Return up to `limit` prospective memories whose `trigger_condition`
+    /// **equals** `trigger`, priority-ordered (highest first), across every
+    /// status (issue #122).
+    ///
+    /// The trigger-scoped counterpart of
+    /// [`list_all_prospective`](Self::list_all_prospective): the `limit` bounds
+    /// only *matching* nodes because the equality filter is pushed into the
+    /// backend query **before** the row cap, not applied in Rust afterwards.
+    /// This is the read the creative-ideas dashboard needs: a store holding
+    /// thousands of unrelated prospective facts must still surface every idea
+    /// under the [`crate::cognitive_memory::creative_idea::CREATIVE_IDEA_TRIGGER`]
+    /// sentinel, which the old "take `limit` rows across all triggers, then
+    /// filter" path truncated out of the window (`GET /api/creative-ideas`
+    /// returned 0 even though ideas were persisted).
+    ///
+    /// A pure read: like `list_all_prospective` it neither filters by content
+    /// nor mutates status the way [`check_triggers`](Self::check_triggers)
+    /// does. The default returns empty so non-library backends degrade
+    /// gracefully; [`LibraryCognitiveMemory`] overrides it via the library's
+    /// `get_prospective_by_trigger`, and the IPC client / `SharedMemory`
+    /// forward it so both tier-0 (in-process) and tier-1 (socket) dashboard
+    /// readers reach the trigger-scoped query.
+    fn list_prospective_by_trigger(
+        &self,
+        _trigger: &str,
+        _limit: u32,
+    ) -> SimardResult<Vec<CognitiveProspective>> {
+        Ok(vec![])
+    }
+
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics>;
 
     /// Probe whether the store is *confirmed* empty, **failing closed** on a
