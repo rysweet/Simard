@@ -3,10 +3,10 @@ title: Creative Ideas durable read-after-write
 description: >
   How persisted creative ideas become immediately visible to the dashboard
   reader (read-after-write) and survive a non-graceful daemon restart
-  (durability). Documents the unified dashboard state-root resolver (D1), the
-  per-batch checkpoint after the creative-ideas persist loop (D2), the
-  `GET /api/creative-ideas` contract, operator verification, and the
-  three-layer regression suite. Fixes issue #2798.
+  (durability). Documents the unified dashboard state-root resolver (D1) that was
+  the root cause, the engine's write-through WAL that already guarantees
+  durability, the `GET /api/creative-ideas` contract, operator verification, and
+  the three-layer regression suite. Fixes issue #2798.
 last_updated: 2026-07-07
 review_schedule: as-needed
 owner: simard
@@ -30,17 +30,20 @@ persists each one to prospective memory. Before issue #2798 the dashboard
 reporting `10 persisted` on every tick.
 
 This page documents the shipped fix. The symptom was **not** a UI bug, a
-status-filter bug, or a "no ideas were generated" bug. It was two coupled
-defects in the **prospective-memory persistence seam** for creative ideas:
+status-filter bug, or a "no ideas were generated" bug. It was a single
+root-cause defect in the **prospective-memory persistence seam** for creative
+ideas — a read-after-write miss (D1). The second, durability half of the
+requirement was *already* satisfied by the memory engine and needed no Simard
+code:
 
-| Defect | Symptom | Fix |
+| Concern | Finding | Resolution |
 |---|---|---|
-| **D1 — read-after-write** | The dashboard reader opened a *different* store view than the daemon's in-process writer, so freshly-persisted ideas were invisible in the same running process. | Route the dashboard reader through the **same** state-root resolver the daemon registers with, so `open_reader_client` tier-0 shares the live in-process writer handle. |
-| **D2 — durability** | Prospective writes sat in the lbug writer buffer until a graceful checkpoint; a `SIGKILL` during deploy dropped them entirely. | **Checkpoint once per persist batch** after the creative-ideas loop, flushing the WAL to the main store so ideas survive a non-graceful restart. |
+| **D1 — read-after-write** (the bug) | The dashboard reader opened a *different* store view than the daemon's in-process writer, so freshly-persisted ideas were invisible in the same running process. | Route the dashboard reader through the **same** state-root resolver the daemon registers with, so `open_reader_client` tier-0 shares the live in-process writer handle. |
+| **Durability across restart** (already held) | An early hypothesis blamed *buffer-only* prospective writes lost on `SIGKILL`. This was **disproved**: the pinned engine's WAL is *write-through* and replayed on open, so persisted ideas already survive a non-graceful restart with no explicit checkpoint. | **No Simard change.** The durability requirement is met by the engine; a regression test pins it so a future engine bump can't silently break it. |
 
-Both fixes are **Simard-side seams only**. No `amplihack-memory` engine change
-was required and the store format (v41) is unchanged — see
-[Memory-architecture policy (G2)](#memory-architecture-policy-g2).
+The fix is a **Simard-side seam only** (the dashboard resolver). No
+`amplihack-memory` engine change was required and the store format (v41) is
+unchanged — see [Memory-architecture policy (G2)](#memory-architecture-policy-g2).
 
 ---
 
@@ -55,7 +58,7 @@ CreativeIdeasThread::tick                                GET /api/creative-ideas
   ProspectiveCreativeIdeaStore::store(&idea)               load_ideas(state_root)
     CognitiveMemoryOps::store_prospective(                   open_reader_client(state_root)
       &idea.idea, CREATIVE_IDEA_TRIGGER, &action, prio)        tier 0: lookup_in_process_writer  <-- must hit
-  ctx.memory.checkpoint()   // D2, once per batch              ProspectiveCreativeIdeaStore::list
+    (engine WAL is write-through: durable on commit)         ProspectiveCreativeIdeaStore::list
                                                                  (filter trigger == CREATIVE_IDEA_TRIGGER)
 ```
 
@@ -133,36 +136,27 @@ validation ladder.
 > `resolve_state_root()`. The D1 change must never relocate or expose the auth
 > key; a regression guard asserts this decoupling.
 
-### D2 fix: checkpoint once per persist batch
+### Durability: provided by the engine's write-through WAL
 
 `ProspectiveCreativeIdeaStore::store` calls the backend's `store_prospective`,
-which buffers the write in lbug's WAL. `LibraryCognitiveMemory::checkpoint`
-(the `CognitiveMemoryOps::checkpoint` trait method) flushes the WAL into the
-main store via the library's `close()` path. The creative-ideas thread now
-invokes it **once per run**, after the persist loop, gated so it only runs when
-real writes occurred:
+which commits the write to lbug's WAL. The pinned engine opens the store with
+`CognitiveMemory::open_persistent_with_recovery`, whose **WAL is write-through
+and replayed on open** — so a committed prospective write survives a
+non-graceful process exit (`SIGKILL` during deploy) and is recovered when the
+store is reopened. An explicit `checkpoint()` (== the library's `close()`, which
+folds the WAL into the main file) is **not** required for durability.
 
-```rust
-// src/cognitive_threads/threads/creative_ideas.rs (after the persist loop)
-if !ctx.dry_run && report.persisted > 0 {
-    ctx.memory.checkpoint()?; // WAL -> main; surfaces errors, never silent
-}
-```
+This was verified empirically and is pinned by a regression test: persist an
+idea, `std::mem::forget` the writer handle so its graceful-`Drop` checkpoint
+never fires, clear the process store cache, cold-reopen from disk — the idea is
+still listable (Layer C, below). The creative-ideas thread therefore adds **no
+per-batch checkpoint**; the minimal correct fix is the D1 resolver change alone.
 
-Design choices:
-
-- **Per-batch, not per-idea.** `checkpoint()` == `close()` is heavy; the thread
-  runs on a large (≥ 24 h) cadence with ~10 ideas per run, so one flush per run
-  is correct and cheap. A per-idea checkpoint would multiply the cost tenfold
-  for no durability benefit.
-- **Gated on `report.persisted > 0`.** A run that persisted nothing (or a
-  dry-run) performs no writes and must never checkpoint.
-- **Errors propagate via `?`.** A checkpoint failure surfaces as a thread error
-  / telemetry — it is never swallowed into a false "persisted" success.
-
-Decision-scope memory reads correctly today because it is written through /
-checkpointed on its own path; only the prospective creative-idea writes lacked
-a flush. D2 closes that gap for the creative-ideas batch specifically.
+Decision-scope memory and creative-idea prospective memory are durable by the
+*same* write-through mechanism; the always-empty tab was never a durability gap.
+If a future engine bump moved durability back behind an explicit checkpoint,
+Layer C fails RED and the durable fix belongs in the engine (G2), not a
+Simard-side checkpoint.
 
 ---
 
@@ -269,8 +263,8 @@ journalctl -u simard-ooda --since "1 hour ago" \
 
 ### 4. Verify durability across a restart
 
-Restart the daemon and re-read. The ideas must persist (they were checkpointed,
-not buffer-only):
+Restart the daemon and re-read. The ideas must persist — they are durable via
+the engine's write-through WAL:
 
 ```bash
 sudo systemctl restart simard-ooda
@@ -282,8 +276,8 @@ curl -s -b /tmp/simard.cookies http://127.0.0.1:8080/api/creative-ideas | jq '.i
 ```
 
 Even a **non-graceful** exit (`SIGKILL` during deploy) preserves already-persisted
-ideas, because each batch is checkpointed at generation time rather than only on
-graceful shutdown.
+ideas: the engine commits each prospective write to its WAL and replays the WAL
+on the next open, so no explicit checkpoint is needed.
 
 ---
 
@@ -294,7 +288,7 @@ No new configuration is introduced. The relevant existing knobs:
 | Env var | Default | Effect |
 |---------|---------|--------|
 | `SIMARD_CREATIVE_IDEAS_ENABLED` | `false` | Master switch for the thread. Ideas are only generated/persisted when truthy. |
-| `SIMARD_CREATIVE_IDEAS_INTERVAL_SECS` | `86400` | Generator cadence (also the checkpoint cadence, since checkpoint is once per run). |
+| `SIMARD_CREATIVE_IDEAS_INTERVAL_SECS` | `86400` | Generator cadence. |
 | `SIMARD_CREATIVE_IDEAS_BATCH` | `10` | Ideas targeted per run. |
 | `SIMARD_STATE_ROOT` | *(unset → `~/.simard`)* | Resolved identically by the daemon **and** the dashboard reader after D1. See [State-root resolution](./state-root-resolution.md). |
 
@@ -323,14 +317,13 @@ unpatched defect and passes GREEN after the fix.
 |---|---|---|---|
 | **A — engine read-after-write** | `src/cognitive_memory/tests_library_parity.rs` | One handle: `store_prospective(CREATIVE_IDEA_TRIGGER)` → same-handle `list_all_prospective` is non-empty. | The engine buffers-but-serves its own writes. If this ever fails RED the defect is engine-level and escalates to `amplihack-memory` (see G2). |
 | **B — reader seam (D1)** | `src/operator_commands_dashboard/tests_state_root_parity.rs` | Dashboard `resolve_state_root()` == daemon `default_state_root()` / `simard_state_root()` across env permutations (empty / relative / unset `HOME`). Store on the registered writer, then a **fresh** `open_reader_client(same state_root)` `list` is non-empty. | The read-after-write miss (divergent resolver → tier-0 miss). |
-| **C — durability (D2)** | `src/cognitive_memory/tests_library_parity.rs` | Persist → **simulated non-graceful restart** (open a fresh handle on the same `state_root` *without* gracefully dropping/checkpointing handle 1; `clear_tier2_store_cache()` between) → `list` is non-empty. | Buffer-only writes lost on `SIGKILL`. Fails RED without the batch checkpoint. |
+| **C — engine write-through durability** | `src/cognitive_memory/tests_library_parity.rs` (plus an end-to-end tick variant in `src/creative_ideas/tests.rs`) | Persist → **simulated non-graceful restart** (`std::mem::forget` the writer so no graceful checkpoint fires; `clear_tier2_store_cache()` between) → cold-reopen `list` is non-empty, with **no explicit checkpoint**. | Durability regressing in the engine (WAL no longer write-through / replayed). Escalates to `amplihack-memory` per G2. |
 
 Additional guards:
 
-- **Checkpoint-failure surfacing.** A checkpoint error in the batch propagates
-  as a thread error / telemetry (never swallowed); the read endpoint's
-  load-failure contract still returns `{ "error": …, "ideas": [], "counts": {} }`
-  rather than a silent empty pool.
+- **Fail-loud read contract.** The read endpoint never masks a load failure as
+  an empty pool: on any load error it returns
+  `{ "error": …, "ideas": [], "counts": {} }` rather than a silent empty pool.
 - **Auth decoupling.** The `.dashkey` login path stays hardcoded to
   `$HOME/.simard/.dashkey` and independent of `resolve_state_root()`.
 
@@ -340,8 +333,9 @@ These tests mutate/read the process-global state-root env surface and register
 the in-process writer, so they run under the `cognitive_memory` **serial** group
 and use `test_support::HermeticState`. Always `clear_in_process_writer()` (and
 `clear_tier2_store_cache()` for durability tests) between runs. The
-non-graceful-restart simulation must avoid `Database::drop` firing an implicit
-checkpoint — otherwise Layer C is a false GREEN. See
+non-graceful-restart simulation `std::mem::forget`s the writer so `Database::drop`
+never fires an implicit checkpoint — that is what makes it a real `SIGKILL`
+simulation and proves the engine's WAL (not a checkpoint) provides durability. See
 [serial(cognitive_memory) test isolation](../testing/cognitive-memory-serial-isolation.md)
 and [Writing hermetic tests against cognitive memory](../testing/hermetic-tests.md).
 
@@ -358,13 +352,13 @@ fork engine logic. This fix respects that boundary:
   buffered prospective writes on the same handle. No engine defect was found, so
   **no engine change and no dependency-pin bump** were made. Store format v41 is
   frozen.
-- The Simard-side seams — the dashboard resolver (D1) and the per-batch
-  `checkpoint()` call (D2) — are the only changes. They **call** the engine's
-  existing `checkpoint()` seam; they do not reimplement it.
-- **Escalation rule:** if Layer A ever fails RED (the engine drops prospective
-  writes it retains for other scopes), the durable fix moves to
+- The Simard-side seam — the dashboard resolver (D1) — is the only change. It
+  routes the reader through the canonical resolver; it does not touch engine
+  durability logic. Durability is left entirely to the engine's write-through WAL.
+- **Escalation rule:** if Layer A or C ever fails RED (the engine drops or fails
+  to replay prospective writes it commits), the durable fix moves to
   `amplihack-memory-lib` and Simard bumps its pinned dependency — never a
-  Simard-side fork of engine logic.
+  Simard-side fork of engine logic or a compensating checkpoint.
 
 ---
 
@@ -388,17 +382,19 @@ with different `HOME`; align them.
 
 ### The tab empties after a restart
 
-A durability gap. Confirm the checkpoint ran:
+Persisted creative ideas are durable via the engine's write-through WAL, so this
+should not happen. If ideas were persisted (journald shows `… persisted`) but
+vanish after a `SIGKILL`/deploy, durability has regressed in the memory **engine**
+(the WAL is no longer write-through or is not being replayed on open) — that is a
+`amplihack-memory` issue (G2), not a Simard seam. Confirm the persist ran:
 
 ```bash
 journalctl -u simard-ooda --since "2 hours ago" \
-  | grep -E 'creative_ideas: .* persisted|checkpoint'
+  | grep -E 'creative_ideas: .* persisted'
 ```
 
-If ideas were persisted but vanish after a `SIGKILL`/deploy, the per-batch
-checkpoint (D2) is not firing — verify `report.persisted > 0` and that
-`ctx.dry_run` is false on the run in question. As a recovery point, the most
-recent verified backup under `state_root/backups` still contains the pool; see
+As a recovery point, the most recent verified backup under `state_root/backups`
+still contains the pool; see
 [Cognitive memory durability](../operations/cognitive-memory-durability.md).
 
 ### The endpoint returns `{"error": …}`

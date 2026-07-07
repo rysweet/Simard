@@ -429,7 +429,7 @@ Review them only for migration forensics; current live data is under
 
 - [`docs/memory.md`](../memory.md) — cognitive-memory data model
 - [`docs/daemon-mode.md`](../daemon-mode.md) — OODA daemon overview
-- [Creative Ideas durable read-after-write](../reference/creative-ideas-durable-read-after-write.md) — per-batch checkpoint that makes persisted creative ideas durable across a non-graceful restart (#2798)
+- [Creative Ideas durable read-after-write](../reference/creative-ideas-durable-read-after-write.md) — the dashboard read-after-write (state-root resolver) fix; persisted creative ideas are durable across a non-graceful restart via the engine's write-through WAL (#2798)
 - [Cognitive-Memory WAL Recovery Runbook](cognitive-memory-wal-recovery-runbook.md) — corrupt-WAL recovery, `memory import`, startup auto-restore
 - [Verified Backups of the Live Cognitive Store](verified-backups.md) — verify-before-prune, whole-store export, bounded quarantines
 - [`CONTRIBUTING.md`](https://github.com/rysweet/Simard/blob/main/CONTRIBUTING.md) — contributor durability notes

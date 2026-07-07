@@ -1182,3 +1182,99 @@ fn wired_thread_tick_generates_reviews_and_routes() {
         assert_eq!(idea.reviews.len(), 3);
     }
 }
+
+// ---------------------------------------------------------------------------
+// 13. Durability — persisted ideas survive a non-graceful restart (#2798)
+// ---------------------------------------------------------------------------
+
+/// **Durability regression (#2798).** The dashboard "Creative Ideas" tab was
+/// always empty after a deploy. A tempting hypothesis was that the creative-idea
+/// prospective writes were buffer-only and lost on a `SIGKILL` unless the thread
+/// checkpointed each batch. This test **disproves** that hypothesis and pins the
+/// real behavior: the pinned amplihack-memory engine's WAL is *write-through* and
+/// replayed on open, so a batch persisted by a real `CreativeIdeasThread::tick`
+/// survives a non-graceful restart with **no explicit checkpoint** at all.
+///
+/// It drives the real tick against an *on-disk* store, then simulates a
+/// SIGKILL-during-deploy by `std::mem::forget`-ing the writer handle so its
+/// graceful-`Drop` checkpoint never runs, and cold-reopens from disk. The ideas
+/// are still listable. If a future engine bump regressed WAL write-through /
+/// replay (moving durability back behind an explicit checkpoint), this fails
+/// **RED** — which, per the memory-architecture policy (G2), would be an engine
+/// defect fixed in `amplihack-memory-lib`, not with a Simard-side checkpoint.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn tick_persisted_ideas_survive_nongraceful_restart_via_engine_wal() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build current-thread runtime");
+    let shutdown = AtomicBool::new(false);
+
+    let raws: Vec<RawIdea> = (0..3)
+        .map(|i| RawIdea {
+            idea: format!("durable self-improvement idea {i}"),
+            links: vec![MemoryLink {
+                kind: MemoryLinkKind::Goal,
+                node_id: format!("g{i}"),
+            }],
+            rationale: format!("grounded rationale {i}"),
+        })
+        .collect();
+    let expected = raws.len();
+
+    {
+        let mem = LibraryCognitiveMemory::open(&root).expect("open on-disk store");
+        let cfg = CreativeIdeasConfig {
+            enabled: true,
+            batch: expected,
+            ..CreativeIdeasConfig::default()
+        };
+        let mut thread = CreativeIdeasThread::with_pipeline(
+            cfg,
+            Box::new(FakeIdeaSource::with_ideas(raws)),
+            Box::new(NoopPipeline),
+        );
+        let mut ctx = ThreadContext {
+            state_root: &root,
+            repo_root: &root,
+            memory: &mem as &dyn CognitiveMemoryOps,
+            runtime: rt.handle().clone(),
+            shutdown: &shutdown,
+            now_epoch: 1_000,
+            dry_run: false,
+        };
+        let outcome = thread.tick(&mut ctx);
+        assert!(
+            outcome.ran && outcome.success,
+            "tick must persist the batch: {}",
+            outcome.summary
+        );
+
+        // Simulate a SIGKILL-during-deploy: skip the graceful `Drop` (and its
+        // implicit checkpoint) entirely. Durability must come from the engine's
+        // write-through WAL, NOT from any checkpoint.
+        std::mem::forget(mem);
+    }
+
+    // Force a genuine cold reopen from disk (drop any shared cached handle and
+    // reap the stale open-lock left by the forgotten writer).
+    crate::memory_ipc::clear_tier2_store_cache();
+    let _ = crate::memory_ipc::reap_stale_open_lock(&root);
+
+    let reopened = LibraryCognitiveMemory::open(&root).expect("cold reopen after restart");
+    let ideas = ProspectiveCreativeIdeaStore::new(&reopened)
+        .list(u32::MAX)
+        .expect("list creative ideas after restart");
+    assert_eq!(
+        ideas.len(),
+        expected,
+        "every persisted creative idea must survive a non-graceful daemon restart \
+         through the engine's write-through WAL (no explicit checkpoint): persist \
+         -> SIGKILL -> reopen -> list is non-empty (#2798); got {}",
+        ideas.len()
+    );
+}

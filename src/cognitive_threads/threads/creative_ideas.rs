@@ -237,6 +237,17 @@ impl CreativeIdeasThread {
             }
         }
 
+        // Durability note (issue #2798): no explicit checkpoint is needed here.
+        // The pinned amplihack-memory engine opens the store with
+        // `open_persistent_with_recovery`, whose WAL is write-through and is
+        // replayed on the next open — so a creative-idea persisted above survives
+        // a non-graceful daemon exit (SIGKILL during deploy) and is recovered when
+        // the store is reopened. This was verified empirically (persist -> forget
+        // the handle so no graceful-drop checkpoint fires -> reopen -> the idea is
+        // listable) and is pinned by the durability regression tests. The
+        // always-empty dashboard tab was therefore never a durability defect; it
+        // was the state-root resolver divergence fixed in
+        // `operator_commands_dashboard::routes::resolve_state_root` (D1).
         Ok(report)
     }
 

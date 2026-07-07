@@ -453,4 +453,156 @@ mod library {
             },
         );
     }
+
+    // ========================================================================
+    // Issue #2798 — creative-idea prospective persistence: engine read-after-write
+    // (Layer A) and engine write-through durability (Layer C).
+    //
+    // The dashboard "Creative Ideas" tab was ALWAYS EMPTY even though the thread
+    // reported "10 persisted" each run. These two tests pin the ENGINE half of
+    // the diagnosis (memory-architecture policy G2): they prove the lbug-backed
+    // `LibraryCognitiveMemory` engine already (A) serves a freshly-stored
+    // creative-idea prospective row to a *separate* on-disk view and (C) retains
+    // it durably across a non-graceful reopen WITH NO EXPLICIT CHECKPOINT —
+    // because the engine's WAL is write-through and replayed on open. Both pass
+    // on the pinned engine, so the always-empty bug is NOT an engine defect and
+    // needs NO `amplihack-memory-lib` change: it lives entirely in the one
+    // Simard-side seam that diverged — the dashboard state-root resolver (D1),
+    // which made the reader open a *different* store than the daemon wrote to.
+    //
+    // Layer C also refutes the initial "prospective writes are buffer-only and
+    // lost on SIGKILL unless the thread checkpoints each batch" hypothesis: they
+    // are not buffer-only, so no per-batch checkpoint is added to the thread
+    // (ruthless simplicity — the minimal correct fix is D1 alone). If Layer A or
+    // C ever fails RED, durability HAS regressed in the engine and the fix
+    // escalates to `amplihack-memory-lib` (Simard bumps its pinned dep), never a
+    // Simard-side fork or a compensating checkpoint.
+    //
+    // See src/operator_commands_dashboard/tests_state_root_parity.rs for Layer B
+    // (the reader-seam / resolver-divergence regression that DOES fail RED on the
+    // unpatched bug).
+    // ========================================================================
+
+    use crate::cognitive_memory::creative_idea::{
+        CREATIVE_IDEA_TRIGGER, CreativeIdea, CreativeIdeaStore, IdeaContext,
+        ProspectiveCreativeIdeaStore,
+    };
+
+    /// A minimal provenance context for a synthetic creative idea.
+    fn idea_ctx() -> IdeaContext {
+        IdeaContext {
+            source: "creative-ideas-thread".to_string(),
+            goals_snapshot: vec![],
+            observation_digest: "digest".to_string(),
+            rationale: "recall precision plateaued".to_string(),
+        }
+    }
+
+    /// Count creative-idea rows (filtered by the retrieval sentinel) visible to
+    /// a store view over `mem`.
+    fn creative_idea_count(mem: &dyn CognitiveMemoryOps) -> usize {
+        ProspectiveCreativeIdeaStore::new(mem)
+            .list(u32::MAX)
+            .expect("list creative ideas")
+            .len()
+    }
+
+    /// **Layer A — engine read-after-write (G2 boundary).** A creative idea
+    /// persisted through `ProspectiveCreativeIdeaStore::store` (which calls the
+    /// engine's `store_prospective` under the `CREATIVE_IDEA_TRIGGER` sentinel)
+    /// must be immediately observable both on the same handle AND through a
+    /// *separate* on-disk view opened on the same `state_root` — the engine does
+    /// not hide its own un-checkpointed prospective writes from a fresh reader.
+    ///
+    /// This is the control that proves the always-empty tab is a Simard-side
+    /// seam bug, not an engine bug: if this test is GREEN the engine is fine and
+    /// no `amplihack-memory-lib` change is warranted (see the module note).
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn creative_idea_read_after_write_visible_to_separate_view() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+
+        // Writer handle (the daemon's live writer, in spirit).
+        let writer = LibraryCognitiveMemory::open(&root).expect("open writer");
+        let store = ProspectiveCreativeIdeaStore::new(&writer);
+        let mut idea = CreativeIdea::new("improve recall ranking", idea_ctx(), 1);
+        idea.node_id = store.store(&idea).expect("store creative idea");
+        assert!(!idea.node_id.is_empty(), "store must return a node id");
+
+        // Same-handle read-after-write.
+        assert_eq!(
+            creative_idea_count(&writer),
+            1,
+            "the writer handle must see its own freshly-persisted creative idea"
+        );
+
+        // A SEPARATE on-disk view (the dashboard reader, in spirit) opened while
+        // the writer is still alive must also observe the idea — the engine
+        // serves un-checkpointed prospective writes to a fresh reader, so a
+        // divergent view on the SAME path is never the source of the empty tab.
+        let reader = LibraryCognitiveMemory::open(&root).expect("open separate reader view");
+        assert_eq!(
+            creative_idea_count(&reader),
+            1,
+            "a separate on-disk view on the same state_root must observe the \
+             persisted creative idea (engine read-after-write holds — G2 boundary)"
+        );
+        let raw = reader
+            .list_all_prospective(u32::MAX)
+            .expect("list_all_prospective");
+        assert!(
+            raw.iter()
+                .any(|n| n.trigger_condition == CREATIVE_IDEA_TRIGGER),
+            "the persisted row must carry the CREATIVE_IDEA_TRIGGER retrieval sentinel"
+        );
+    }
+
+    /// **Layer C — engine write-through durability across a non-graceful
+    /// restart (#2798).** A creative idea is persisted and then the writer suffers
+    /// a *non-graceful* process exit: we `std::mem::forget` the handle so its
+    /// `Drop` (which would otherwise run an implicit graceful checkpoint) never
+    /// fires, clear the tier-2 store cache, and cold-reopen from disk. The idea
+    /// must still be listable — with **no explicit `checkpoint()` anywhere** —
+    /// because the engine's WAL is write-through and replayed on open.
+    ///
+    /// The `forget` is what makes this a real `SIGKILL`-during-deploy simulation
+    /// rather than a false GREEN off a graceful-drop checkpoint. This pins the
+    /// engine property the whole diagnosis rests on: prospective creative-idea
+    /// writes are durable by themselves, so the always-empty tab was never a
+    /// durability defect (it was the D1 resolver divergence) and the thread adds
+    /// no compensating per-batch checkpoint. If this fails RED, WAL write-through
+    /// has regressed in the engine — a `amplihack-memory-lib` fix (G2), not a
+    /// Simard-side checkpoint.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn creative_idea_survives_nongraceful_restart_without_checkpoint() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+
+        {
+            let writer = LibraryCognitiveMemory::open(&root).expect("open writer");
+            let store = ProspectiveCreativeIdeaStore::new(&writer);
+            let idea = CreativeIdea::new("auto-delete stale worktrees", idea_ctx(), 7);
+            store.store(&idea).expect("store creative idea");
+
+            // Simulate a SIGKILL: skip the graceful Drop (and its checkpoint)
+            // entirely. NO explicit checkpoint — durability must come from the
+            // engine's write-through WAL alone.
+            std::mem::forget(writer);
+        }
+
+        // Force a genuine cold reopen from disk (no shared cached handle).
+        crate::memory_ipc::clear_tier2_store_cache();
+        let _ = crate::memory_ipc::reap_stale_open_lock(&root);
+
+        let reopened = LibraryCognitiveMemory::open(&root).expect("cold reopen after restart");
+        assert_eq!(
+            creative_idea_count(&reopened),
+            1,
+            "a persisted creative idea must survive a non-graceful daemon restart \
+             via the engine's write-through WAL with no explicit checkpoint \
+             (persist -> SIGKILL -> reopen -> list is non-empty)"
+        );
+    }
 }

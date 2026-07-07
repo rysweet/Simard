@@ -298,11 +298,20 @@ async fn index() -> axum::response::Html<String> {
     axum::response::Html(super::index_html::index_html_string())
 }
 
+/// Resolve the durable state root the dashboard reads from.
+///
+/// Issue #2798 (D1): this MUST be byte-for-byte the resolver the OODA daemon
+/// uses to register its in-process writer — the daemon keys tier-0 under
+/// [`crate::memory_ipc::default_state_root`], which delegates to
+/// [`crate::state_root::simard_state_root`]. The dashboard previously carried a
+/// divergent private copy that took `SIMARD_STATE_ROOT` *verbatim* (so an empty
+/// value resolved to `PathBuf::from("")` and a relative value leaked through)
+/// and hardcoded a `/home/azureuser` `HOME` fallback. When the two resolvers
+/// disagreed, `open_reader_client` tier-0 (`lookup_in_process_writer`) never
+/// matched the daemon's registered key, so the dashboard read a *different*
+/// store than the creative-ideas thread wrote to and the "Creative Ideas" tab
+/// was permanently empty even while journald logged "10 persisted". Delegating
+/// to the single canonical resolver keeps the read-after-write seam intact.
 pub(crate) fn resolve_state_root() -> std::path::PathBuf {
-    std::env::var("SIMARD_STATE_ROOT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
-            std::path::PathBuf::from(home).join(".simard")
-        })
+    crate::state_root::simard_state_root()
 }
