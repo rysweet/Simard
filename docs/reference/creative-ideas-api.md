@@ -76,6 +76,9 @@ src/creative_ideas/
   routing.rs     # route_idea_to_goal / route_idea_to_issue / mark_idea_pr,
                  # IdeaGhClient + FakeIdeaGhClient, IdeaPrGate
   dedup.rs       # is_near_duplicate, select_balanced, within_budget
+  dedup_gate.rs  # PLANNED (#2925, not yet implemented): semantic dedup +
+                 # enhance gate — plan_candidate, PlannedAction, apply_enhance,
+                 # consolidate_existing (see the dedup-gate API reference)
   tests.rs       # unit tests (all fakes, no network)
 src/error/mod.rs # + InvalidIdeaTransition, InvalidCreativeIdeaRecord
 ```

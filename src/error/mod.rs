@@ -251,7 +251,9 @@ pub enum SimardError {
     PromptNotFound {
         name: String,
     },
-    /// Stewardship: source-module → repo routing has no matching keyword. Fail-loud — no default repo.
+    /// Stewardship: source-module → repo routing had no matching keyword.
+    /// Retained for API/`Display` stability; **no longer produced by
+    /// `route_failure`**, which now falls back to the default repo instead.
     StewardshipRoutingAmbiguous {
         source: String,
     },

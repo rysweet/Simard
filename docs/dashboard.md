@@ -747,6 +747,7 @@ The `SIMARD_DASHBOARD_URL` environment variable is honored by `conftest.py` (def
 - [Activity tab — Cycle Reports (live cycle number, accurate tree status, shared detail)](reference/dashboard-activity-cycle-reports.md)
 - [Overview Health & live memory-consolidation (Open PRs card removal, live Last Memory Compaction)](reference/dashboard-overview-health-and-live-memory.md)
 - [Memory tab — dedicated cognitive-memory graph (live nodes/edges, per-type filters)](reference/dashboard-memory-tab.md)
+- [Memory graph fail-loud data-load contract (visible error overlay, never a silent blank canvas)](reference/dashboard-memory-graph-fail-loud.md)
 - [Background tab prefetch and refresh (instant tab switches)](reference/dashboard-background-tab-prefetch.md)
 - [Header deployment datetime (build number + PST/PDT deploy time)](reference/dashboard-header-deployment-datetime.md)
 - [Creative Ideas tab — live view and operator controls (Run now / Promote / Prune)](operator-dashboard/creative-ideas-operator-controls.md)

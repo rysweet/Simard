@@ -358,6 +358,7 @@ simard bootstrap run <identity> <base-type> <topology> <objective>
 | `SIMARD_LLM_PROVIDER` | Override the LLM provider selected from `~/.simard/config.toml` |
 | `SIMARD_COPILOT_GH_ACCOUNT` | GitHub account for Copilot auth (e.g., `rysweet_microsoft`) |
 | `SIMARD_COMMIT_GH_ACCOUNT` | GitHub account for git commits (e.g., `rysweet`) |
+| `SIMARD_OODA_MAX_CONCURRENT` | Per-OODA-cycle goal-coverage parallelism ceiling — how many independent goals a cycle may cover. Default `24`, range `1..=64`, fail-closed to `24` on an invalid value (logged via `tracing::warn!`). Seeds the AIMD scaler base and ceiling. Legacy `SIMARD_MAX_CONCURRENT_ACTIONS` is honoured when this is unset. Raising it only *allows* more coverage — the resource-admission and overlap gates still bound actual spawns. See [OODA coverage parallelism ceiling](docs/reference/ooda-coverage-parallelism-ceiling.md). |
 
 Runtime configuration lives at `~/.simard/config.toml`. The runtime fails loudly when required configuration is missing — there are no silent defaults.
 

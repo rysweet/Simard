@@ -515,6 +515,9 @@ duplicated.
 
 ## Related
 
+- [Agentic disk reclamation](../concepts/agentic-disk-reclamation.md) — the
+  disk-reclaim guard (`src/disk_reclaim/guard.rs`) **composes** the liveness and
+  uncommitted/unpushed primitives documented here rather than duplicating them.
 - [Per-engineer worktree isolation](./engineer-worktree-isolation.md) — how each
   worktree is allocated and cleaned up.
 - [Run the OODA daemon](../howto/run-ooda-daemon.md)

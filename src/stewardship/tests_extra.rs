@@ -297,20 +297,93 @@ fn process_run_propagates_gh_create_failure() {
 }
 
 #[test]
-fn process_run_does_not_call_gh_when_routing_ambiguous() {
+fn process_run_routes_overseer_to_default_and_dedups() {
+    // Regression for the `flag_workstream_gaps` failure: the Overseer files gap
+    // issues with the bare source_module "overseer" (no keyword match). Before
+    // the routing fallback this returned `StewardshipRoutingAmbiguous` and the
+    // whole intervention failed every tick ("intervention failed ...
+    // flag_workstream_gaps"). Now the router must route the unmatched source to
+    // the DEFAULT repo (rysweet/Simard), file exactly ONE issue, and dedup on a
+    // rerun with the same gap signature (no duplicate issues).
     let gh = FakeGhClient::new();
     let mut board = GoalBoard::new();
     let mut run = sample_run();
-    run.source_module = "totally_unknown_subsystem".to_string();
+    run.source_module = "overseer".to_string();
+    let sig = failure_signature(&run.failure_kind, &run.error_text);
 
-    let err = process_orchestrator_run(&run, &gh, &mut board).unwrap_err();
-    assert!(matches!(
-        err,
-        SimardError::StewardshipRoutingAmbiguous { .. }
-    ));
-    assert_eq!(gh.search_call_count(), 0);
-    assert_eq!(gh.create_call_count(), 0);
-    assert!(board.backlog.is_empty());
+    // First tick: no existing issue in the default repo → file exactly one.
+    gh.seed_search("rysweet/Simard", &sig, Ok(vec![]));
+    gh.seed_create(
+        "rysweet/Simard",
+        Ok(GhIssue {
+            number: 314,
+            url: "https://github.com/rysweet/Simard/issues/314".into(),
+            title: "[stewardship] workstream gap".into(),
+            body: format!("stewardship-signature: {sig}"),
+        }),
+    );
+
+    let first = process_orchestrator_run(&run, &gh, &mut board).unwrap();
+    match first {
+        StewardshipOutcome::FiledNew {
+            repo, issue_number, ..
+        } => {
+            assert_eq!(
+                repo, "rysweet/Simard",
+                "an unmatched source_module routes to the default repo"
+            );
+            assert_eq!(issue_number, 314);
+        }
+        other => panic!("expected FiledNew in rysweet/Simard, got {other:?}"),
+    }
+    // The router must have searched the DEFAULT repo (not amplihack) and created
+    // exactly one tracking issue.
+    assert_eq!(
+        gh.search_call_count(),
+        1,
+        "must search the default repo before filing"
+    );
+    assert_eq!(
+        gh.create_call_count(),
+        1,
+        "exactly one gap issue filed on the first tick"
+    );
+    assert_eq!(board.backlog.len(), 1);
+
+    // Second tick, SAME gap signature: search now returns the existing issue →
+    // MatchedExisting and NO second create (idempotent per signature — one
+    // rolling tracking issue per distinct gap, never a duplicate each tick).
+    gh.seed_search(
+        "rysweet/Simard",
+        &sig,
+        Ok(vec![GhIssue {
+            number: 314,
+            url: "https://github.com/rysweet/Simard/issues/314".into(),
+            title: "[stewardship] workstream gap".into(),
+            body: format!("stewardship-signature: {sig}"),
+        }]),
+    );
+    let second = process_orchestrator_run(&run, &gh, &mut board).unwrap();
+    assert!(
+        matches!(
+            second,
+            StewardshipOutcome::MatchedExisting {
+                issue_number: 314,
+                ..
+            }
+        ),
+        "rerun with the same gap signature must dedup to the existing issue: {second:?}"
+    );
+    assert_eq!(
+        gh.create_call_count(),
+        1,
+        "idempotent per gap signature — no duplicate issue on rerun"
+    );
+    assert_eq!(
+        board.backlog.len(),
+        1,
+        "no duplicate backlog row across ticks for the same gap"
+    );
 }
 
 // ─────────────────────────── Input validation ───────────────────────────

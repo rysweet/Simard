@@ -6,7 +6,7 @@
 //!
 //! Pipeline:
 //! 1. Validate the [`OrchestratorRunSummary`] (fail-loud on missing fields).
-//! 2. Route `source_module` → [`TargetRepo`] (no default).
+//! 2. Route `source_module` → [`TargetRepo`] (unmatched → default repo).
 //! 3. Compute a noise-stripped [`failure_signature`].
 //! 4. Search the target repo for an open issue with that signature.
 //! 5. If found → [`StewardshipOutcome::MatchedExisting`].

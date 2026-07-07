@@ -424,6 +424,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       <div style="display:flex;gap:1rem">
         <div class="card" style="flex:1;padding:0;position:relative;min-height:60vh">
           <canvas id="mem-graph-canvas" style="width:100%;height:60vh;display:block;cursor:grab"></canvas>
+          <div id="mem-graph-error" role="alert" style="display:none;position:absolute;top:0;left:0;right:0;bottom:0;align-items:center;justify-content:center;text-align:center;padding:1.5rem;background:rgba(13,17,23,0.82);z-index:20"></div>
           <div id="mem-graph-tooltip" style="display:none;position:absolute;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:.5rem .75rem;font-size:.8rem;max-width:320px;pointer-events:none;z-index:10;word-break:break-word"></div>
         </div>
         <div id="mem-graph-detail" class="card" style="width:280px;display:none">

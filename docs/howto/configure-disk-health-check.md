@@ -7,12 +7,24 @@ owner: simard
 doc_type: howto
 related:
   - ../concepts/automated-disk-health.md
+  - ../concepts/agentic-disk-reclamation.md
+  - ../howto/configure-disk-reclamation.md
   - ../reference/disk-health-api.md
   - ./inspect-and-clean-engineer-worktrees.md
   - ./reclaim-disk-space-and-run-low-space-rust-builds.md
 ---
 
 # Configure and monitor the disk health check
+
+> **Superseded (2026-07-07).** For self-healing disk cleanup, use the agentic
+> [disk-reclamation capability](./configure-disk-reclamation.md) instead. It runs
+> an agent that *proposes* reclaimable candidates and a deterministic Rust
+> executor that *disposes* of them behind hard safety rails (never removes
+> `worktrees/main`, a daemon working directory, a live-PID path, or a worktree
+> with unpushed work). The manual `find … -mtime +1 -exec rm -rf` and
+> merge-base-is-ancestor cleanup patterns below are **deprecated** — they have no
+> safety rails and the merge-base heuristic misfired on fresh worktrees. The
+> per-cycle check documented here still exists but is no longer the primary path.
 
 Simard runs an automated disk health check at the start of every OODA cycle.
 When the home partition exceeds 80% usage, it cleans stale engineer worktrees,
@@ -276,34 +288,44 @@ You should see one `disk health:` line per OODA cycle (default: every 60s).
 
 ## Manually trigger cleanup
 
-To run cleanup outside the daemon without waiting for a cycle:
+To reclaim disk on demand, prefer the guarded agentic capability — it applies
+the hard safety rails and stops once under threshold:
 
 ```bash
-# Run the recipe directly (JSON envelope mode, same as daemon)
+simard disk-reclaim            # dry-run: preview what would be reclaimed
+simard disk-reclaim --apply    # perform guarded reclamation
+```
+
+See [Configure disk reclamation](./configure-disk-reclamation.md).
+
+To run the legacy per-cycle recipe directly (JSON envelope mode, same as daemon):
+
+```bash
 recipe-runner-rs prompt_assets/simard/recipes/disk-health-check.yaml \
   --output-format json \
   -c STATE_ROOT="$HOME/.simard" \
   -c REPO_ROOT="/home/azureuser/src/Simard"
 ```
 
-Or clean specific categories manually (these skip the claim-file safety
-check — only use when you know no engineers are running):
-
-```bash
-# Stale worktrees only (no claim-file check — the recipe is safer)
-find ~/.simard/engineer-worktrees/ -maxdepth 1 -mindepth 1 -type d \
-  -mtime +1 -exec rm -rf {} +
-
-# LadybugDB backups (keep 5 most recent)
-ls -t ~/.simard/backups/* | tail -n +6 | xargs rm -f
-
-# Shared cargo caches
-rm -rf ~/.simard/cargo-target/* ~/.simard/shared-target/*
-```
+> **Deprecated — do not use.** The raw commands below have **no safety rails**:
+> the `find … -mtime +1 -exec rm -rf` pattern deletes by mtime alone (no
+> live-process, uncommitted/unpushed, or PR-state check) and the
+> merge-base-is-ancestor "already merged" shortcut misfires on fresh worktrees.
+> Use `simard disk-reclaim --apply` instead, which guards every deletion.
+>
+> ```bash
+> # DEPRECATED — unguarded; kept only to document the old runbook.
+> # find ~/.simard/engineer-worktrees/ -maxdepth 1 -mindepth 1 -type d \
+> #   -mtime +1 -exec rm -rf {} +
+> # ls -t ~/.simard/backups/* | tail -n +6 | xargs rm -f
+> # rm -rf ~/.simard/cargo-target/* ~/.simard/shared-target/*
+> ```
 
 ## Related
 
-- [Automated disk health (concept)](../concepts/automated-disk-health.md) — design rationale
+- [Configure disk reclamation](./configure-disk-reclamation.md) — the agentic, self-healing successor with hard safety rails
+- [Agentic disk reclamation (concept)](../concepts/agentic-disk-reclamation.md) — design rationale
+- [Automated disk health (concept)](../concepts/automated-disk-health.md) — design rationale (superseded)
 - [Disk health API (reference)](../reference/disk-health-api.md) — module API, structs, data flow
 - [Inspect and clean engineer worktrees](./inspect-and-clean-engineer-worktrees.md) — manual worktree operations
 - [Reclaim disk space and run low-space Rust builds](./reclaim-disk-space-and-run-low-space-rust-builds.md) — build artifact scripts

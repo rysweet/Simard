@@ -1,5 +1,8 @@
 import { test, expect } from '../fixtures/simard-dashboard';
 import type { Page } from '@playwright/test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 /*
  * Dedicated "Memory" tab contract (issue #2627).
@@ -129,5 +132,121 @@ test.describe('Dedicated Memory tab @structural', () => {
     await authenticatedPage.goto('/');
     // Moved, not copied: exactly one canvas in the whole document.
     await expect(authenticatedPage.locator('#mem-graph-canvas')).toHaveCount(1);
+  });
+});
+
+/*
+ * Fail-LOUD contract (issue #2627): the memory graph must never silently blank.
+ * A data-load failure surfaces a VISIBLE on-canvas #mem-graph-error overlay (not
+ * a tiny stats-line note, not a blank canvas). See
+ * docs/reference/dashboard-memory-graph-fail-loud.md.
+ *
+ * TDD note: RED against the current renderer — there is no #mem-graph-error
+ * overlay; fetchMemoryGraph writes `Error: …` to the low-visibility
+ * #mem-graph-stats line and returns, leaving the canvas untouched. Passes once
+ * the overlay + mgError render path land.
+ */
+test.describe('Memory tab fail-loud error state @structural', () => {
+  const ERROR_GRAPH = {
+    error: 'Cognitive memory reader is unavailable.',
+    available: false,
+    nodes: [],
+    edges: [],
+    stats: { working: 0, semantic: 0, episodic: 0, procedural: 0, prospective: 0, sensory: 0 },
+  };
+
+  function installErrorRoutes(page: Page): void {
+    page.route('**/api/**', async (route) => {
+      const pathname = new URL(route.request().url()).pathname;
+      const body =
+        pathname === '/api/memory/graph'
+          ? ERROR_GRAPH
+          : pathname in BODIES
+            ? BODIES[pathname]
+            : {};
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(body),
+      });
+    });
+  }
+
+  test('a data-load error paints the visible #mem-graph-error overlay, not a silent blank', async ({
+    authenticatedPage,
+  }) => {
+    installErrorRoutes(authenticatedPage);
+    await authenticatedPage.goto('/');
+    await authenticatedPage.locator('.tab[data-tab="memory"]').click();
+
+    const overlay = authenticatedPage.locator('#tab-memory #mem-graph-error');
+    await expect(
+      overlay,
+      'a graph-load error must surface a VISIBLE #mem-graph-error overlay (fail-loud, never a silent blank)',
+    ).toBeVisible();
+    await expect(
+      overlay,
+      'the overlay must show the sanitized error message from the payload',
+    ).toContainText('Cognitive memory reader is unavailable.');
+  });
+});
+
+/*
+ * Live acceptance gate (issue #2627): against the REAL dashboard (webServer runs
+ * `dashboard serve`), an authenticated GET /api/memory/graph must return a
+ * non-empty graph when the live cognitive store has content — the end-to-end
+ * proof the Memory tab shows Simard's live memory, not a stale/empty stub.
+ *
+ * Gated + skipped cleanly when there is no dashkey or the live store is empty, so
+ * it never flakes in CI without a live daemon (per the design's live-path risk).
+ */
+function readDashkeyOrEmpty(): string {
+  if (process.env.SIMARD_DASHKEY) return process.env.SIMARD_DASHKEY;
+  try {
+    return fs.readFileSync(path.join(os.homedir(), '.simard', '.dashkey'), 'utf-8').trim();
+  } catch {
+    return '';
+  }
+}
+
+test.describe('Memory tab live acceptance @smoke', () => {
+  test('authenticated GET /api/memory/graph returns a non-empty graph when the live store has content', async ({
+    page,
+    baseURL,
+  }) => {
+    const code = readDashkeyOrEmpty();
+    test.skip(!code, 'no ~/.simard/.dashkey or SIMARD_DASHKEY — live cognitive store unavailable');
+
+    const login = await page.request.post(`${baseURL}/api/login`, { data: { code } });
+    test.skip(login.status() !== 200, 'dashkey did not authenticate against the live dashboard');
+
+    const resp = await page.request.get(`${baseURL}/api/memory/graph`);
+    expect(resp.status(), 'the live graph endpoint must respond 200 to an authenticated GET').toBe(200);
+    const g = await resp.json();
+
+    // Fail-loud: a data-load error must be a non-empty string, never a silent blank.
+    if (g.error !== undefined && g.error !== null) {
+      expect(typeof g.error, 'a data-load `error` must be a string when present').toBe('string');
+      expect(String(g.error).length, 'a data-load `error` must be non-empty (fail-loud)').toBeGreaterThan(0);
+      test.skip(true, `live reader reported an error state (fail-loud, not asserting content): ${g.error}`);
+    }
+
+    const s = g.stats ?? {};
+    const enumerable = (s.semantic ?? 0) + (s.episodic ?? 0) + (s.procedural ?? 0) + (s.prospective ?? 0);
+    test.skip(enumerable === 0, 'live store holds no enumerable content (empty store) — nothing to render');
+
+    // ACCEPTANCE GATE: a populated live store must surface item nodes + edges,
+    // never a silent-empty / hub-only graph (the #2627 regression).
+    const nodes: Array<{ hub?: boolean }> = Array.isArray(g.nodes) ? g.nodes : [];
+    const edges: unknown[] = Array.isArray(g.edges) ? g.edges : [];
+    const itemNodes = nodes.filter((n) => !n.hub);
+    expect(
+      itemNodes.length,
+      'a populated live store (~7700 facts) must emit item nodes, not just the six type hubs',
+    ).toBeGreaterThan(0);
+    expect(
+      edges.length,
+      'live item nodes must be linked to their type hubs (non-empty edges)',
+    ).toBeGreaterThan(0);
   });
 });

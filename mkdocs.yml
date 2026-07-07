@@ -111,6 +111,7 @@ nav:
     - Closed-Loop Outcome Verification (live-verified done): concepts/closed-loop-outcome-verification.md
     - Dependency/Overlap-Aware Engineer Scheduling: concepts/dependency-overlap-aware-scheduling.md
     - Resource-Aware Engineer Admission: concepts/resource-aware-engineer-admission.md
+    - Semantic Dedup + Enhance for Creative Ideas: concepts/semantic-creative-ideas-dedup.md
     - Rust Domain-Expertise Gym (first experiment): concepts/rust-expertise-gym.md
     - Hybrid Cognition Measurement (benchmark + live): concepts/hybrid-cognition-measurement.md
     - Enrichment Observability (is recall reaching decisions?): concepts/enrichment-observability.md
@@ -123,6 +124,7 @@ nav:
     - Goal-Board Persistence: concepts/goal-board-persistence.md
     - Keeping the OODA Daemon Steerable: concepts/steerable-ooda-daemon.md
     - Perpetual Goals Exempt from No-Progress Hard-Block: concepts/perpetual-goal-no-progress-exemption.md
+    - No-Progress Breaker Explains WHY and Self-Resolves: concepts/no-progress-root-cause-resolution.md
     - Overseer Goal-Board Health: concepts/overseer-goal-board-health.md
     - Overseer Root-Cause (WHY) Principle: concepts/overseer-root-cause-why.md
     - Authoritative Goal-Board Store: concepts/authoritative-goal-board-store.md
@@ -134,6 +136,7 @@ nav:
     - Goal Stewardship Mode: concepts/stewardship-mode.md
     - The Simard Whisperer: concepts/simard-whisperer.md
     - Automated Disk-Health Management: concepts/automated-disk-health.md
+    - Agentic Disk Reclamation: concepts/agentic-disk-reclamation.md
     - Update-Check Design: concepts/update-check-design.md
     - The amplihack Freshness Gate: concepts/amplihack-freshness-gate.md
     - The Simard Journal: concepts/simard-journal.md
@@ -156,6 +159,7 @@ nav:
     - Diagnose a Deferred/Serialized Engineer Spawn (overlap): howto/diagnose-a-deferred-engineer-spawn.md
     - Configure Resource-Aware Engineer Admission: howto/configure-resource-aware-admission.md
     - Unblock Stuck OODA Goals: howto/unblock-stuck-ooda-goals.md
+    - Diagnose a No-Progress Block and Read Its WHY: howto/diagnose-a-no-progress-block.md
     - Add a New Recipe-Brain Phase: howto/add-a-new-recipe-brain-phase.md
     - Edit the OODA Brain Prompt: howto/edit-the-ooda-brain-prompt.md
     - Diagnose Brain Decision Parse Failures: howto/diagnose-brain-decision-parse-failures.md
@@ -205,6 +209,7 @@ nav:
     - Configure the Simard Whisperer: howto/configure-the-simard-whisperer.md
     - Configure the Monthly Self-Quality-Audit: howto/configure-self-quality-audit.md
     - Configure the Disk-Health Check: howto/configure-disk-health-check.md
+    - Configure Disk Reclamation: howto/configure-disk-reclamation.md
     - Reclaim Disk Space (Low-Space Rust Builds): howto/reclaim-disk-space-and-run-low-space-rust-builds.md
     - Fix CI Linker OOM: howto/fix-ci-linker-oom.md
     - Triage Stale Pull Requests: howto/triage-stale-pull-requests.md
@@ -228,6 +233,7 @@ nav:
     - Configure Cognitive-Thread Scheduling: howto/configure-cognitive-thread-scheduling.md
     - Add a New Cognitive Thread: howto/add-a-new-cognitive-thread.md
     - Configure the Creative Ideas Thread: howto/configure-creative-ideas-thread.md
+    - Configure Creative-Ideas Semantic Dedup: howto/configure-creative-ideas-semantic-dedup.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
     - Telemetry Metrics: reference/telemetry-metrics.md
@@ -245,6 +251,7 @@ nav:
     - simard-engineer-step CLI: reference/simard-engineer-step.md
     - simard-tui Dashboard: reference/simard-tui.md
     - Dashboard Memory Tab: reference/dashboard-memory-tab.md
+    - Dashboard Memory Graph Fail-Loud: reference/dashboard-memory-graph-fail-loud.md
     - Dashboard Memory Last-Hour Count: reference/dashboard-memory-recent-last-hour-count.md
     - Journal API: reference/journal-api.md
     - Journal Narrative Result Channel: reference/journal-narrative-result-channel.md
@@ -315,6 +322,7 @@ nav:
     - CI-Health Sweep: reference/ci-health-sweep.md
     - Simard Whisperer API: reference/simard-whisperer-api.md
     - Maximum Safe Parallelism: reference/maximum-safe-parallelism.md
+    - OODA Coverage Parallelism Ceiling: reference/ooda-coverage-parallelism-ceiling.md
     - Concurrent Engineer Dispatch: reference/concurrent-engineer-dispatch.md
     - Engineer-Admission API (overlap-aware scheduling): reference/engineer-admission-api.md
     - OODA Engineer-Admission Recipe & Prompt Schema: reference/ooda-engineer-admission-recipe.md
@@ -333,6 +341,8 @@ nav:
     - Completion-Evidence Gate API: reference/completion-evidence-gate-api.md
     - Outcome-Verification API: reference/outcome-verification-api.md
     - No-Progress Breaker API: reference/no-progress-breaker-api.md
+    - No-Progress Root-Cause Resolution API: reference/no-progress-root-cause-resolution-api.md
+    - OODA No-Progress WHY Recipe: reference/ooda-no-progress-why-recipe.md
     - Durable OODA Cycle Counter API: reference/durable-ooda-cycle-counter.md
     - Progress-Evidence API: reference/progress-evidence-api.md
     - Trustworthy-Confidence API: reference/trustworthy-confidence-api.md
@@ -354,6 +364,8 @@ nav:
     - Brain Introspection API: reference/brain-introspection-api.md
     - Self-Quality-Audit API: reference/self-quality-audit-api.md
     - Disk-Health API: reference/disk-health-api.md
+    - Disk Reclaim API: reference/disk-reclaim-api.md
+    - Disk Reclaim Telemetry: reference/disk-reclaim-telemetry.md
     - Dashboard E2E Tests: reference/dashboard-e2e-tests.md
     - Dashboard Action-Detail Humanization: reference/dashboard-action-detail-humanization.md
     - Dashboard Goal Lifecycle-Status Badges: reference/dashboard-goal-lifecycle-status.md
@@ -376,6 +388,8 @@ nav:
     - Creative Ideas Durable Read-After-Write: reference/creative-ideas-durable-read-after-write.md
     - Creative-Ideas Goal Routing — Fail-Closed Persistence: reference/creative-ideas-goal-routing-fail-closed.md
     - Creative Ideas Trigger-Scoped Read: reference/creative-ideas-trigger-scoped-read.md
+    - Creative-Ideas Semantic Dedup-Gate API: reference/creative-ideas-dedup-gate-api.md
+    - Creative-Idea Dedup Recipe & Prompt Schema: reference/creative-idea-dedup-recipe.md
   - Operations:
     - Overview: operations/index.md
     - Verified Backups of the Live Store: operations/verified-backups.md
@@ -386,6 +400,7 @@ nav:
     - Outcome-Verification Kill Switch: operations/outcome-verification-kill-switch.md
     - Engineer-Admission Kill Switch: operations/engineer-admission-kill-switch.md
     - Resource-Admission Kill Switch: operations/resource-admission-kill-switch.md
+    - Creative-Ideas Semantic-Dedup Kill Switch: operations/creative-ideas-semantic-dedup-kill-switch.md
     - Safe Self-Update: safe-self-update.md
     - Pre-Commit Setup: operations/pre-commit-setup.md
   - Operator Dashboard:

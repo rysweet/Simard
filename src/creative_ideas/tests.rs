@@ -1437,3 +1437,286 @@ fn tick_persisted_ideas_survive_nongraceful_restart_via_engine_wal() {
         ideas.len()
     );
 }
+
+// ---------------------------------------------------------------------------
+// 13. Semantic dedup + enhance gate wiring in the tick (issue #2925)
+// ---------------------------------------------------------------------------
+
+use crate::ooda_brain::{
+    EngineerLifecycleCtx, EngineerLifecycleDecision, IdeaDedupCtx, IdeaDedupDecision, OodaBrain,
+};
+
+/// A stub dedup reasoner that returns scripted decisions (or errors) in order,
+/// so the tick's plan-and-apply seam can be driven hermetically.
+struct ScriptedDedupBrain {
+    decisions: std::sync::Mutex<std::collections::VecDeque<SimardResult<IdeaDedupDecision>>>,
+}
+
+impl ScriptedDedupBrain {
+    fn new(decisions: Vec<SimardResult<IdeaDedupDecision>>) -> Self {
+        Self {
+            decisions: std::sync::Mutex::new(decisions.into()),
+        }
+    }
+}
+
+impl OodaBrain for ScriptedDedupBrain {
+    fn decide_engineer_lifecycle(
+        &self,
+        _ctx: &EngineerLifecycleCtx,
+    ) -> SimardResult<EngineerLifecycleDecision> {
+        Ok(EngineerLifecycleDecision::ContinueSkipping {
+            rationale: "unused".into(),
+        })
+    }
+
+    fn decide_idea_dedup(&self, _ctx: &IdeaDedupCtx) -> SimardResult<IdeaDedupDecision> {
+        self.decisions
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| {
+                Ok(IdeaDedupDecision::CreateNew {
+                    rationale: "default".into(),
+                })
+            })
+    }
+}
+
+/// Seed one `New` idea into `mem` and return it (with its persisted `node_id`).
+fn seed_idea(mem: &LibraryCognitiveMemory, idea: &str, rationale: &str) -> CreativeIdea {
+    let store = ProspectiveCreativeIdeaStore::new(mem);
+    let mut ci = CreativeIdea::new(
+        idea,
+        IdeaContext {
+            source: "seed".into(),
+            rationale: rationale.into(),
+            ..Default::default()
+        },
+        100,
+    );
+    ci.node_id = store.store(&ci).expect("store seed");
+    store
+        .get(&ci.node_id)
+        .expect("get seed")
+        .expect("seed present after store")
+}
+
+fn cand(idea: &str, rationale: &str) -> RawIdea {
+    RawIdea {
+        idea: idea.to_string(),
+        links: Vec::new(),
+        rationale: rationale.to_string(),
+    }
+}
+
+fn dedup_thread(
+    env: &TickEnv,
+    candidates: Vec<RawIdea>,
+    decisions: Vec<SimardResult<IdeaDedupDecision>>,
+) -> CreativeIdeasThread {
+    let cfg = CreativeIdeasConfig {
+        enabled: true,
+        batch: candidates.len().max(1),
+        ..CreativeIdeasConfig::default()
+    };
+    let _ = env;
+    CreativeIdeasThread::with_pipeline_and_brain(
+        cfg,
+        Box::new(FakeIdeaSource::with_ideas(candidates)),
+        Box::new(NoopPipeline),
+        Box::new(ScriptedDedupBrain::new(decisions)),
+        /* semantic_enabled */ true,
+    )
+}
+
+#[test]
+fn tick_gate_skip_drops_candidate_no_new_node() {
+    let env = TickEnv::new();
+    let _seed = seed_idea(
+        &env.mem,
+        "cache the goal board reads each cycle",
+        "seed rationale",
+    );
+
+    let mut thread = dedup_thread(
+        &env,
+        vec![cand("goal board reads are cached each cycle", "dup")],
+        vec![Ok(IdeaDedupDecision::Skip {
+            rationale: "true duplicate".into(),
+        })],
+    );
+    let mut ctx = env.ctx(1_000, /* dry_run */ false);
+    let report = thread.run_now(&mut ctx).expect("run_now");
+
+    assert_eq!(report.generated, 1);
+    assert_eq!(report.skipped, 1, "a SKIP decision drops the candidate");
+    assert_eq!(report.persisted, 0, "SKIP persists nothing");
+
+    let ideas = ProspectiveCreativeIdeaStore::new(&env.mem)
+        .list(u32::MAX)
+        .expect("list");
+    assert_eq!(
+        ideas.len(),
+        1,
+        "SKIP creates no new node (only the seed remains)"
+    );
+}
+
+#[test]
+fn tick_gate_enhance_updates_match_zero_new_nodes() {
+    let env = TickEnv::new();
+    let seed = seed_idea(
+        &env.mem,
+        "cache the goal board reads each cycle",
+        "original rationale",
+    );
+
+    let mut thread = dedup_thread(
+        &env,
+        vec![cand(
+            "goal board reads should be cached once",
+            "candidate adds a benchmark angle",
+        )],
+        vec![Ok(IdeaDedupDecision::EnhanceExisting {
+            target_node_id: seed.node_id.clone(),
+            rationale: "same idea, adds a benchmark".into(),
+        })],
+    );
+    let mut ctx = env.ctx(1_000, /* dry_run */ false);
+    let report = thread.run_now(&mut ctx).expect("run_now");
+
+    assert_eq!(
+        report.enhanced, 1,
+        "an ENHANCE decision strengthens the match"
+    );
+    assert_eq!(report.persisted, 0, "ENHANCE creates no new idea");
+
+    let ideas = ProspectiveCreativeIdeaStore::new(&env.mem)
+        .list(u32::MAX)
+        .expect("list");
+    assert_eq!(ideas.len(), 1, "ENHANCE creates 0 new nodes (same idea_id)");
+    let merged = &ideas[0];
+    assert_eq!(merged.idea_id, seed.idea_id, "same stable idea_id");
+    assert_eq!(merged.status, IdeaStatus::New, "status preserved");
+    assert!(
+        merged.context.rationale.contains("original rationale")
+            && merged.context.rationale.contains("benchmark"),
+        "the matched idea's rationale is strengthened: {}",
+        merged.context.rationale
+    );
+}
+
+#[test]
+fn tick_gate_create_persists_new_idea() {
+    let env = TickEnv::new();
+    let _seed = seed_idea(&env.mem, "cache the goal board reads each cycle", "seed");
+
+    let mut thread = dedup_thread(
+        &env,
+        vec![cand(
+            "goal metrics dashboard redesign",
+            "genuinely different",
+        )],
+        vec![Ok(IdeaDedupDecision::CreateNew {
+            rationale: "novel".into(),
+        })],
+    );
+    let mut ctx = env.ctx(1_000, /* dry_run */ false);
+    let report = thread.run_now(&mut ctx).expect("run_now");
+
+    assert_eq!(
+        report.persisted, 1,
+        "a CREATE decision persists the new idea"
+    );
+    assert_eq!(report.skipped, 0);
+    assert_eq!(report.enhanced, 0);
+
+    let ideas = ProspectiveCreativeIdeaStore::new(&env.mem)
+        .list(u32::MAX)
+        .expect("list");
+    assert_eq!(ideas.len(), 2, "seed + one newly-created idea");
+}
+
+#[test]
+fn tick_gate_reasoner_error_is_fail_closed_no_silent_duplicate() {
+    let env = TickEnv::new();
+    let _seed = seed_idea(&env.mem, "cache the goal board reads each cycle", "seed");
+
+    let mut thread = dedup_thread(
+        &env,
+        vec![cand("goal board reads cached each cycle", "would be a dup")],
+        vec![Err(SimardError::ReviewUnavailable {
+            reason: "reasoner offline".into(),
+        })],
+    );
+    let mut ctx = env.ctx(1_000, /* dry_run */ false);
+    let report = thread
+        .run_now(&mut ctx)
+        .expect("run_now is total even on a fail-closed drop");
+
+    assert_eq!(
+        report.dedup_errors, 1,
+        "a reasoner error is counted (surfaced)"
+    );
+    assert_eq!(
+        report.persisted, 0,
+        "fail-closed: the candidate is NOT persisted"
+    );
+    assert_eq!(report.skipped, 0);
+    assert_eq!(report.enhanced, 0);
+
+    let ideas = ProspectiveCreativeIdeaStore::new(&env.mem)
+        .list(u32::MAX)
+        .expect("list");
+    assert_eq!(
+        ideas.len(),
+        1,
+        "fail-closed must create NO duplicate — only the seed remains"
+    );
+}
+
+#[test]
+fn tick_gate_telemetry_counts_mixed_batch() {
+    let env = TickEnv::new();
+    let seed = seed_idea(&env.mem, "cache the goal board reads each cycle", "seed");
+
+    let candidates = vec![
+        cand("goal board caching is redundant", "r1"),
+        cand("goal board reads should be cached once", "r2 adds evidence"),
+        cand("goal indexing a brand new approach", "r3"),
+    ];
+    let decisions = vec![
+        Ok(IdeaDedupDecision::Skip {
+            rationale: "dup".into(),
+        }),
+        Ok(IdeaDedupDecision::EnhanceExisting {
+            target_node_id: seed.node_id.clone(),
+            rationale: "adds evidence".into(),
+        }),
+        Ok(IdeaDedupDecision::CreateNew {
+            rationale: "novel".into(),
+        }),
+    ];
+
+    let mut thread = dedup_thread(&env, candidates, decisions);
+    let mut ctx = env.ctx(1_000, /* dry_run */ false);
+    let report = thread.run_now(&mut ctx).expect("run_now");
+
+    // The four counts backing the `[simard] creative_ideas dedup: generated=…
+    // skipped=… enhanced=… created=…` telemetry line.
+    assert_eq!(report.generated, 3, "generated");
+    assert_eq!(report.skipped, 1, "skipped");
+    assert_eq!(report.enhanced, 1, "enhanced");
+    assert_eq!(report.persisted, 1, "created");
+    assert_eq!(report.dedup_errors, 0);
+
+    let ideas = ProspectiveCreativeIdeaStore::new(&env.mem)
+        .list(u32::MAX)
+        .expect("list");
+    assert_eq!(
+        ideas.len(),
+        2,
+        "seed (enhanced in place) + one created idea = 2 nodes"
+    );
+}

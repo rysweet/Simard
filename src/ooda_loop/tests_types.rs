@@ -247,7 +247,10 @@ fn action_kind_equality() {
 #[test]
 fn ooda_config_default_values() {
     let config = OodaConfig::default();
-    assert_eq!(config.max_concurrent_actions, 5);
+    // Issue #2935: the per-OODA-cycle goal-coverage parallelism ceiling was
+    // raised from the arbitrary low default of 5 to 24 (env-configurable via
+    // SIMARD_OODA_MAX_CONCURRENT).
+    assert_eq!(config.max_concurrent_actions, 24);
     assert!((config.improvement_threshold - 0.02).abs() < f64::EPSILON);
     assert_eq!(config.gym_suite_id, "progressive");
 }

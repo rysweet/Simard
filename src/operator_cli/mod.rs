@@ -1,8 +1,10 @@
 mod args;
 mod ci_health;
+mod creative_ideas;
 mod curation;
 mod dashboard;
 mod decisions;
+mod disk_reclaim;
 mod engineer;
 mod goal;
 mod gym;
@@ -97,6 +99,7 @@ Product modes:
                            inspect a probe-isolated sandbox instead
   improvement-curation run <base-type> <topology> <objective> [state-root]
   improvement-curation read <base-type> <topology> <state-root>
+  creative-ideas consolidate [--apply]  — cluster + merge semantically-duplicate ideas (#2925)
   gym list
   gym run <scenario-id>
   gym compare <scenario-id>
@@ -127,6 +130,9 @@ Product modes:
                            pass --repo to land a PR in any repo Simard governs
   worktree-gc [--apply] [--idle-days=N] [--root=PATH ...] [--parent-repo=PATH]
                          — prune merged/stale engineer worktrees (dry-run by default)
+  disk-reclaim [--apply] [--report-json] [--target-pct=N]
+  disk-reclaim exec --candidates <json|@file|@-> [--apply] [--report-json]
+                         — agentic disk reclamation behind hard safety rails (dry-run by default)
   handover [--canary-dir=PATH] [--manifest-dir=PATH]
   update
   self-test
@@ -243,6 +249,7 @@ where
         "goal" => goal::dispatch_goal_command(args),
         "goal-curation" => curation::dispatch_goal_curation_command(args),
         "improvement-curation" => curation::dispatch_improvement_curation_command(args),
+        "creative-ideas" => creative_ideas::dispatch_creative_ideas_command(args),
         "review" => review::dispatch_review_command(args),
         "gym" => gym::dispatch_gym_command(args),
         "ooda" => ooda::dispatch_ooda_command(args),
@@ -253,6 +260,7 @@ where
         "spawn" => dispatch_spawn_command(args),
         "merge-pr" => merge::dispatch_merge_pr_command(args),
         "worktree-gc" => worktree_gc::dispatch_worktree_gc_command(args),
+        "disk-reclaim" => disk_reclaim::dispatch_disk_reclaim_command(args),
         "handover" => dispatch_handover_command(args),
         "bootstrap" => dispatch_bootstrap_command(args),
         "act-on-decisions" => {
@@ -364,7 +372,7 @@ where
 }
 
 pub fn operator_cli_usage() -> &'static str {
-    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|ooda|memory|status|spawn|merge-pr|worktree-gc|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap|signal> ..."
+    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|ooda|memory|status|spawn|merge-pr|worktree-gc|disk-reclaim|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap|signal> ..."
 }
 
 pub fn operator_cli_help() -> &'static str {
