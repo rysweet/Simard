@@ -301,9 +301,33 @@ pub fn false_completion_rate(outcomes: &[VerificationOutcome]) -> Option<f64> {
     Some(refuted as f64 / checkable as f64)
 }
 
+/// The resolution state of a goal's declared upstream dependency, as observed by
+/// [`EvidenceSource::dependency_goal_state`]. Backs the `UPSTREAM-DEPENDENCY`
+/// rung of the no-progress root-cause ladder (issue #16): a goal gated on a
+/// still-open upstream is *deferred* (Paused with the blocking ref recorded)
+/// rather than blocked, and *auto-clears* once the upstream resolves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DependencyState {
+    /// No declared/known upstream dependency for this goal.
+    None,
+    /// A specific upstream (goal id / PR / issue) is still open — the goal is
+    /// waiting on it. `blocking_ref` identifies the blocker for the WHY.
+    Pending { blocking_ref: String },
+    /// The previously-blocking upstream has landed (PR merged / issue closed /
+    /// dependency goal completed) — a deferred goal may resume.
+    Resolved { blocking_ref: String },
+}
+
 /// Injected evidence lookups. The production impl resolves PR/issue state via
 /// `gh` and `is_deployed` via the reconciliation detector; tests inject a
 /// canned source.
+///
+/// The two root-cause methods ([`repo_present`](Self::repo_present) and
+/// [`dependency_goal_state`](Self::dependency_goal_state), issue #16) carry
+/// **default bodies** so every existing implementation and test double keeps
+/// compiling unchanged. Both default *conservatively* — a source that cannot
+/// tell must never fabricate a missing precondition or an upstream dependency,
+/// so the breaker never self-heals or self-defers on an unknown state.
 pub trait EvidenceSource: Send + Sync {
     /// Is any PR for this goal merged? (`wip_refs` of kind "pr", or a merged PR
     /// referencing the goal's issue.)
@@ -313,6 +337,23 @@ pub trait EvidenceSource: Send + Sync {
     /// Is the merged self-change running? Backed by the Workstream A
     /// `ReconcileDetector` (`!DeployDrift::needs_deploy`).
     fn is_deployed(&self, goal: &ActiveGoal) -> SimardResult<bool>;
+
+    /// Is the goal's governed target repository present in the workspace? Backs
+    /// the `MISSING-PRECONDITION` classification (issue #16). Default `Ok(true)`:
+    /// a source that cannot tell must not invent a missing precondition.
+    fn repo_present(&self, goal: &ActiveGoal) -> SimardResult<bool> {
+        let _ = goal;
+        Ok(true)
+    }
+
+    /// State of the goal's declared upstream dependency, if any. Backs the
+    /// `UPSTREAM-DEPENDENCY` classification (issue #16). Default
+    /// `Ok(DependencyState::None)`: a source that cannot tell reports no known
+    /// dependency, so the breaker never defers on an unknown state.
+    fn dependency_goal_state(&self, goal: &ActiveGoal) -> SimardResult<DependencyState> {
+        let _ = goal;
+        Ok(DependencyState::None)
+    }
 }
 
 /// Blanket impl so an `&dyn EvidenceSource` (e.g. `Arc::as_ref()`) satisfies the
@@ -328,6 +369,12 @@ impl<T: EvidenceSource + ?Sized> EvidenceSource for &T {
     }
     fn is_deployed(&self, goal: &ActiveGoal) -> SimardResult<bool> {
         (**self).is_deployed(goal)
+    }
+    fn repo_present(&self, goal: &ActiveGoal) -> SimardResult<bool> {
+        (**self).repo_present(goal)
+    }
+    fn dependency_goal_state(&self, goal: &ActiveGoal) -> SimardResult<DependencyState> {
+        (**self).dependency_goal_state(goal)
     }
 }
 
@@ -654,6 +701,28 @@ impl EvidenceSource for GhCliEvidenceSource {
             crate::self_deploy::GitDeploySource::at(&self.repo_dir),
         );
         Ok(!detector.detect().needs_deploy)
+    }
+
+    fn repo_present(&self, goal: &ActiveGoal) -> SimardResult<bool> {
+        // A goal that routes to the daemon's own repo is always present (this is
+        // the checkout the daemon is running from). A repo-scoped goal is
+        // present iff its governed clone exists under `$HOME/src/<repo>` — the
+        // same workspace convention `ooda_actions::advance_goal`'s repo_resolver
+        // uses. Absence is the MISSING-PRECONDITION signal (issue #16). When the
+        // home dir cannot be resolved we report `true` (conservative: never
+        // invent a missing precondition on an undeterminable path).
+        let repo = match &goal.repo {
+            None => return Ok(true),
+            Some(r) if r.eq_ignore_ascii_case("Simard") => return Ok(true),
+            Some(r) => r,
+        };
+        // Use only the bare repo name for the local clone path (an `owner/repo`
+        // slug clones to `$HOME/src/<repo>`).
+        let name = repo.rsplit('/').next().unwrap_or(repo);
+        match dirs::home_dir() {
+            Some(home) => Ok(home.join("src").join(name).is_dir()),
+            None => Ok(true),
+        }
     }
 }
 

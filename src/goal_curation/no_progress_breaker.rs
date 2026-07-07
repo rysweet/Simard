@@ -50,6 +50,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::completion_gate::{CompletionEvidenceGate, CompletionVerdict, EvidenceSource};
+use super::no_progress_why::{Evidence, NoProgressClass, NoProgressWhy};
 use super::types::ActiveGoal;
 
 /// Consecutive no-action cycles on one goal before the breaker fires. Kept
@@ -73,18 +74,54 @@ pub const NO_PROGRESS_BLOCKED_PREFIX: &str =
 /// `{PREFIX}{count}{SUFFIX}`.
 pub const NO_PROGRESS_BLOCKED_SUFFIX: &str = " consecutive no-action cycles; needs human review";
 
-/// True when `reason` was authored by the no-progress breaker (both sentinel
-/// halves present). Distinct from the brain-failure marker.
+/// True when `reason` was authored by the no-progress breaker.
+///
+/// Keys on the globally-unique [`NO_PROGRESS_BLOCKED_PREFIX`] sentinel **alone**
+/// (issue #16): the base breaker rendered `{PREFIX}{count}{SUFFIX}`, but the
+/// root-cause upgrade appends a WHY segment in place of the bare
+/// `needs human review` suffix, so recognition must not depend on that suffix.
+/// The prefix (the `🔒 [OODA-SAFEGUARD]` lock token) still uniquely identifies a
+/// safeguard-authored block and distinguishes it from operator-set, scope-, or
+/// dependency-blocked reasons, so `simard goal unblock-all`, the load-time
+/// self-heal, and the overseer count-parser keep working unchanged on both the
+/// legacy and the WHY-bearing strings.
 pub fn is_no_progress_marker(reason: &str) -> bool {
-    reason.starts_with(NO_PROGRESS_BLOCKED_PREFIX) && reason.contains(NO_PROGRESS_BLOCKED_SUFFIX)
+    reason.starts_with(NO_PROGRESS_BLOCKED_PREFIX)
 }
 
 /// Render the sentinel [`GoalProgress::Blocked`] reason for a goal escalated
 /// after `consecutive` no-action cycles.
 ///
+/// Retained for existing callers/tests and as the legacy shape recognised by the
+/// self-heal path. New escalations author the richer
+/// [`no_progress_blocked_reason_with_why`] instead.
+///
 /// [`GoalProgress::Blocked`]: super::types::GoalProgress::Blocked
 pub fn no_progress_blocked_reason(consecutive: u32) -> String {
     format!("{NO_PROGRESS_BLOCKED_PREFIX}{consecutive}{NO_PROGRESS_BLOCKED_SUFFIX}")
+}
+
+/// Render a **WHY-bearing** escalation reason (issue #16): the safeguard sentinel
+/// with the classified root cause and its evidence attached, so a human block is
+/// never bare.
+///
+/// Shape: `{PREFIX}{consecutive} consecutive no-action cycles; why={TOKEN} evidence=[…]`.
+///
+/// Invariants (asserted by tests):
+/// - **starts with** [`NO_PROGRESS_BLOCKED_PREFIX`] → [`is_no_progress_marker`]
+///   stays `true` and the load-time self-heal still recognises it;
+/// - the leading digits after the prefix still parse as `consecutive`, so the
+///   overseer's `{prefix}{count}` count-parser is undisturbed;
+/// - it **contains** the class token and the evidence, and is strictly richer
+///   than the bare [`no_progress_blocked_reason`] — never a "needs human review"
+///   with no diagnosis.
+pub fn no_progress_blocked_reason_with_why(consecutive: u32, why: &NoProgressWhy) -> String {
+    format!(
+        "{NO_PROGRESS_BLOCKED_PREFIX}{consecutive} consecutive no-action cycles; \
+         why={} evidence=[{}]",
+        why.class.token(),
+        why.render_evidence(),
+    )
 }
 
 /// The verified disposition of a stuck goal at the breaker threshold, computed
@@ -114,10 +151,32 @@ pub enum NoProgressResolution {
     /// Threshold reached and the goal is obsolete — DROP it from the active
     /// board (the caller removes it), carrying the human-readable reason.
     Drop { reason: String },
+    /// `MISSING-PRECONDITION` (issue #16) — a machine-establishable precondition
+    /// is absent (e.g. a governed repo was never cloned). The caller establishes
+    /// it (clones the repo, or spawns an engineer to), resets the no-action
+    /// counter, and lets the goal retry. **No block.**
+    Heal { why: NoProgressWhy },
+    /// `UPSTREAM-DEPENDENCY` (issue #16) — the goal is gated on a specific
+    /// upstream that has not landed. The caller sets the goal
+    /// [`GoalProgress::Paused`](super::types::GoalProgress::Paused), records
+    /// `blocking_ref`, and lets the auto-clear pass resume it when the upstream
+    /// resolves. **No block.**
+    Defer {
+        blocking_ref: String,
+        evidence: Vec<Evidence>,
+    },
+    /// `UNCLEAR-CRITERIA` / `GENUINELY-STUCK`, first occurrence (issue #16) — the
+    /// caller spawns **one** guided engineer (via the shared dispatch) with
+    /// `task` embedding the WHY, and records that the goal has spent its guided
+    /// retry. **No block yet.**
+    SpawnEngineer { task: String, why: NoProgressWhy },
     /// Threshold reached and unresolved — the caller files `issue_title` /
     /// `issue_body` as a tracking issue and sets the goal
     /// [`GoalProgress::Blocked`](super::types::GoalProgress::Blocked) to
-    /// `blocked_reason` (the [`is_no_progress_marker`] sentinel).
+    /// `blocked_reason`. Under the root-cause upgrade (issue #16) this is reached
+    /// only after a spent guided retry, and `blocked_reason` carries the concrete
+    /// WHY + evidence (see [`no_progress_blocked_reason_with_why`]) — never a
+    /// bare "needs human review".
     Escalate {
         blocked_reason: String,
         issue_title: String,
@@ -253,6 +312,87 @@ pub fn resolve_no_progress(
     }
 }
 
+/// Build the guided-engineer task for an `UNCLEAR-CRITERIA` / `GENUINELY-STUCK`
+/// stall, embedding the classified WHY + evidence so the engineer starts from the
+/// diagnosis rather than a cold read.
+fn engineer_task_for_why(why: &NoProgressWhy) -> String {
+    format!(
+        "Prior OODA cycles stalled with no shippable progress. Diagnosed root \
+         cause: why={} evidence=[{}]. Investigate and fix this specific WHY \
+         (clarify and make the done-criteria measurable if they are unclear), \
+         then advance the goal.",
+        why.class.token(),
+        why.render_evidence(),
+    )
+}
+
+/// Build the WHY-bearing escalation `(title, body)` for a goal that stalled again
+/// after its guided engineer retry.
+fn why_escalation_issue(consecutive: u32, why: &NoProgressWhy) -> (String, String) {
+    let token = why.class.token();
+    let title = format!("OODA no-progress breaker: goal stuck after guided retry ({token})");
+    let body = format!(
+        "The OODA daemon produced **no shippable action** for {consecutive} \
+         consecutive cycles and a guided engineer retry did not resolve it.\n\n\
+         Root cause: **{token}**\n\
+         Evidence: {}\n\n\
+         The goal has been marked Blocked with the WHY attached (never a bare \
+         \"needs human review\"). Inspect the evidence above and either supply the \
+         missing completion evidence, re-scope the goal with measurable \
+         done-criteria, or mark it out of scope.\n\n\
+         Triggered by the root-cause safeguard in \
+         `src/goal_curation/no_progress_breaker.rs` (issue #16).",
+        why.render_evidence(),
+    );
+    (title, body)
+}
+
+/// Map a classified [`NoProgressWhy`] to the resolution the breaker takes at the
+/// threshold (issue #16). This is the **pure** heart of the root-cause ladder;
+/// the side effects (transition, clone, defer, spawn, escalate) are performed by
+/// the caller in `crate::ooda_loop::no_progress`.
+///
+/// `consecutive` is the count that renders into the escalation reason/issue.
+/// `guided_retry_used` is the goal's persisted one-shot flag: the first time an
+/// `UNCLEAR-CRITERIA` / `GENUINELY-STUCK` stall reaches here it spawns a guided
+/// engineer ([`NoProgressResolution::SpawnEngineer`]); only once that retry is
+/// spent and the goal is *still* stuck does it [`Escalate`](NoProgressResolution::Escalate)
+/// — always WITH the concrete WHY + evidence attached.
+pub fn resolution_for_why(
+    consecutive: u32,
+    why: NoProgressWhy,
+    guided_retry_used: bool,
+) -> NoProgressResolution {
+    match why.class {
+        NoProgressClass::AlreadyComplete => NoProgressResolution::MarkDone,
+        NoProgressClass::Obsolete => NoProgressResolution::Drop {
+            reason: format!("obsolete: {}", why.render_evidence()),
+        },
+        NoProgressClass::MissingPrecondition => NoProgressResolution::Heal { why },
+        NoProgressClass::UpstreamDependency => {
+            let blocking_ref = why.blocking_ref();
+            NoProgressResolution::Defer {
+                blocking_ref,
+                evidence: why.evidence,
+            }
+        }
+        NoProgressClass::UnclearCriteria | NoProgressClass::GenuinelyStuck => {
+            if guided_retry_used {
+                let blocked_reason = no_progress_blocked_reason_with_why(consecutive, &why);
+                let (issue_title, issue_body) = why_escalation_issue(consecutive, &why);
+                NoProgressResolution::Escalate {
+                    blocked_reason,
+                    issue_title,
+                    issue_body,
+                }
+            } else {
+                let task = engineer_task_for_why(&why);
+                NoProgressResolution::SpawnEngineer { task, why }
+            }
+        }
+    }
+}
+
 /// Per-goal consecutive no-action counter that drives the breaker.
 ///
 /// Mirrors `OodaState.goal_failure_counts` but tracks the *no-action* livelock:
@@ -269,6 +409,13 @@ pub fn resolve_no_progress(
 pub struct NoProgressTracker {
     #[serde(default)]
     counts: HashMap<String, u32>,
+    /// Goals that have already spent their **one** guided-engineer retry (issue
+    /// #16). An `UNCLEAR-CRITERIA` / `GENUINELY-STUCK` stall spawns a guided
+    /// engineer the first time it reaches the threshold; if it stalls again with
+    /// this flag set it escalates (WITH the WHY) instead of spawning a second
+    /// engineer. `#[serde(default)]` keeps pre-#16 snapshots deserializable.
+    #[serde(default)]
+    guided_retries: HashSet<String>,
 }
 
 impl NoProgressTracker {
@@ -285,9 +432,30 @@ impl NoProgressTracker {
     }
 
     /// Reset `goal_id`'s counter after concrete progress (an engineer spawn, a
-    /// commit, a PR, an accepted progress bump).
+    /// commit, a PR, an accepted progress bump). Also clears the goal's spent
+    /// guided-retry flag: genuine progress means a *future* stall earns a fresh
+    /// guided retry.
     pub fn record_progress(&mut self, goal_id: &str) {
         self.counts.remove(goal_id);
+        self.guided_retries.remove(goal_id);
+    }
+
+    /// Reset only `goal_id`'s no-action counter, **preserving** any spent
+    /// guided-retry flag (issue #16). Used when the breaker gives the goal a
+    /// fresh retry window that must NOT reset the one-shot guided-retry bound —
+    /// e.g. after healing a precondition or spawning the guided engineer.
+    pub fn reset_count(&mut self, goal_id: &str) {
+        self.counts.remove(goal_id);
+    }
+
+    /// Mark that `goal_id` has spent its one guided-engineer retry (issue #16).
+    pub fn mark_guided_retry(&mut self, goal_id: &str) {
+        self.guided_retries.insert(goal_id.to_string());
+    }
+
+    /// Whether `goal_id` has already spent its one guided-engineer retry.
+    pub fn guided_retry_used(&self, goal_id: &str) -> bool {
+        self.guided_retries.contains(goal_id)
     }
 
     /// Current consecutive no-action count for `goal_id` (`0` when untracked).
@@ -299,6 +467,7 @@ impl NoProgressTracker {
     /// `OodaState.goal_failure_counts` pruning), so stale ids cannot leak.
     pub fn retain_goals(&mut self, live: &HashSet<String>) {
         self.counts.retain(|id, _| live.contains(id));
+        self.guided_retries.retain(|id| live.contains(id));
     }
 
     /// Record a no-action cycle for `goal_id` and return the breaker's
