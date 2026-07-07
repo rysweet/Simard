@@ -165,6 +165,11 @@ pub fn insert_deny_ignore(deny_toml: &str, id: &str, reason: &str) -> SimardResu
     if deny_ignored_ids(deny_toml).contains(id) {
         return Ok(deny_toml.to_string());
     }
+    // Escape `id` for the same defense-in-depth reason `reason` is escaped: it is
+    // interpolated into a TOML basic string (and a `#` comment). Today `id` is
+    // constrained to the RustSec/CVE/GHSA ID format from the SHA-pinned
+    // advisory-db, but escaping keeps this robust if that source ever loosens.
+    let id = escape_toml_basic(id);
     let entry = format!(
         "    # {id}: auto-added by the supply-chain steward (#2741) — no fixed \
          upstream release; not reachable in Simard's usage.\n    \
@@ -180,6 +185,9 @@ pub fn insert_audit_ignore(audit_toml: &str, id: &str, reason: &str) -> SimardRe
     if audit_ignored_ids(audit_toml).contains(id) {
         return Ok(audit_toml.to_string());
     }
+    // Escape `id` before it lands in the TOML bare-string value (see the
+    // matching note in `insert_deny_ignore`).
+    let id = escape_toml_basic(id);
     let entry = format!(
         "    # {reason}\n    \"{id}\",",
         reason = reason.replace('\n', " ")
