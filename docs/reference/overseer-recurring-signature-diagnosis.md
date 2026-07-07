@@ -38,6 +38,14 @@ description: >
   Round-12 directly verified RUSTSEC-2026-0204 (`crossbeam-epoch`) is **remediated** in
   `amplihack-xpia-defender` — `Cargo.lock` pins the patched `0.9.20`, bumped from the affected
   `0.9.18` via merged PR #23 — closing the one previously-indirect success criterion (§7q).
+  Round-13 consolidation (§7r, HEAD `480aeca1`) unified the round-11/round-12 dives (§7o/§7p/§7q),
+  independently re-verified the module (36 passed, 0 failed) + the four hypothesis tests (4 passed,
+  0 failed) and the canonical anchors, re-confirmed the kgpacks board (#16/#18/#21/#22 CLOSED,
+  #17 OPEN) with zero source drift since `85245e87`, and **newly quantified** the
+  `recurring_goal_reblock` stewardship-escalation channel — previously tracked by its
+  representative #2707 — as an **un-deduplicated flood of 79 open issues** (#2688…#2894, still
+  firing) distinct from the WhisperGate-deduped verbatim tail (steady at 10), corroborating the
+  no-reconciliation root cause and sharpening P2/P3 scope — no finding overturned, confidence High.
 last_updated: 2026-07-07
 review_schedule: as-needed
 owner: simard
@@ -411,7 +419,7 @@ not directly observed.
 
 ---
 
-## 7. Consolidation & verification (rounds 3–12)
+## 7. Consolidation & verification (rounds 3–13)
 
 The consolidation pass (rounds 3–4, this update) reconciled the parallel deep dives
 against the live working tree at **HEAD `20fb7539`** and **executed** the round-2
@@ -1478,11 +1486,116 @@ additive: it converts the previously *indirect* (parked-goal) read of criterion 
 lockfile-vs-advisory + fix-PR confirmation**, and adds an independent non-kgpacks corroboration of the
 reconciliation-gap root cause. Confidence **High**.
 
+### 7r. Round-13 consolidation — parallel dives unified (HEAD `480aeca1`)
+
+This pass unifies the three deep dives accumulated since the last consolidation (§7n,
+round-10) — **§7o** (round-11 per-hypothesis practical re-verification at `1e394dc6`: H1 via
+the full module + four hypothesis tests, H2 via live CLOSED states + the terminal-park path,
+H3 via the live-timestamp staleness proof), **§7p** (round-11 primary-investigator deep dive at
+`85245e87`: full signature-token emission re-anchoring in `src/overseer/` with the two-channel
+Act-phase-vs-loop disambiguation), and **§7q** (round-12 direct RUSTSEC-2026-0204
+present/remediated verification at `480aeca1`: lockfile-vs-advisory + merged fix-PR) — into one
+conclusion and folds their net-new facts into the canonical findings (§1/§5/§6). HEAD is now
+`480aeca1`; **every commit since round-10's `85245e87` is docs-only** (verified:
+`git diff --name-only 85245e87..HEAD` returns only this file), so **no source line drifted** and
+every §7b/§3b/§7f/§7j/§7l/§7p anchor still resolves verbatim.
+
+**Independent re-verification (this consolidation, 2026-07-07 ~14:10 UTC)** — re-run by the
+consolidator at HEAD `480aeca1`, not inherited:
+
+- `cargo test --lib overseer::tests_memory_recall` → **36 passed, 0 failed**; the four
+  hypothesis tests re-run in isolation (`…::tests_memory_recall::h`) → **4 passed, 0 failed**
+  (`h1_confirm`/`h1_refute_by_fix`/`h2_confirm`/`h2_refute_by_fix` — CONFIRM + REFUTE-by-fix all
+  green). The structural root cause (§4/§7a) remains proven green.
+- Canonical anchors spot-checked verbatim at HEAD: `RECURRING_SIGNATURE_THRESHOLD = 2`
+  (`signal.rs:362`), the `format!("overseer-obs:{}", keys.join("|"))` re-prefix (`mod.rs:1085`),
+  the `"recurring signature seen {occurrences}× in cognitive memory ({signature})"` summary
+  (`mod.rs:1373-1375`), and the recall `.map(|e| RecalledEpisode { failure_signature, id, summary,
+  score })` that **drops `source_label`** (`wiring.rs:1024-1030`). All identical to §7n/§7o/§7p
+  (zero drift since `85245e87`).
+- `rysweet/agent-kgpacks-rs`: **#16 CLOSED 2026-07-06T20:16:25Z**, **#18 CLOSED 10:33:04Z**,
+  **#21 CLOSED 13:29:03Z**, **#22 CLOSED 12:07:33Z**, **#17 OPEN** (`updatedAt`
+  2026-07-02T23:22:49Z) — matching §1/§7o/§7p/§7q to the second. **4 of the 6 kgpacks blockers
+  reference already-CLOSED issues**, and #17's block premise remains timestamp-provably stale
+  (`updatedAt_17` ≺ `closedAt_16` by ≈3.8 days, no event since).
+- `rysweet/amplihack-xpia-defender` re-confirmed a live public repo (`gh repo view` →
+  `{"isPrivate":false,"name":"amplihack-xpia-defender"}`).
+
+**Zero contradictions across the three dives.** §7o, §7p and §7q agree on every shared claim —
+test results (36/36 module; 4/4 hypothesis), the H1 recall-path anchors, the
+terminal-park / no-close-reconciliation path (`no_progress_breaker.rs:58/69/74`,
+`sensor.rs:204/209`), the deterministic composite ordering, and the live #16/#18/#21/#22-CLOSED +
+#17-OPEN board. They are strictly additive: §7o re-executes the practical per-hypothesis tests;
+§7p re-anchors the full `out.push`/`format!` emission inventory at HEAD and adds the two-channel
+enumeration proving the byte-similar Act-phase `workstream-gap` strings (`mod.rs:904/939/945`,
+`notify.rs:98/204`) and the `signal_keyword` recall-query keys (`capabilities.rs:562/564`) sit
+**outside** the self-amplifying recalled composite; §7q converts the previously *indirect*
+(parked-goal) read of RUSTSEC-2026-0204 into a **direct** lockfile-vs-advisory + fix-PR
+confirmation. This consolidation overturns **no** finding and makes **no** remediation-weighting
+change (P1–P5 stand exactly as consolidated in §7g/§7k/§7n).
+
+**Net-new facts folded into the canonical findings:**
+
+1. **The escalation channel is an un-deduplicated flood — newly quantified (most significant this
+   pass).** Rounds 8–11 tracked the stewardship escalation by its representative issue **#2707**
+   (`[stewardship] recurring_goal_reblock in simard::overseer`, still OPEN). A direct live count
+   this pass shows that title is in fact an **un-deduplicated flood of 79 open issues**
+   (#2688 … **#2894**, newest **2026-07-07T14:05:18Z** — ≈5 minutes before this consolidation),
+   **still actively firing**. This is a **distinct channel** from the WhisperGate-deduped verbatim
+   `recurring signature seen 2×` tail (which holds at **exactly 10** — #2669/#2672/#2678/#2691/
+   #2744/#2750/#2757/#2768/#2841/#2875, newest #2875 @ 11:31:36Z, **still no 11th**). The
+   contrast is the point: the RecurringSignature composite is dedup-capped at 10 by its
+   `WhisperGate`, but the `recurring_goal_reblock` stewardship path carries **no equivalent
+   dedup/reconciliation**, so it re-files every reblock cycle. This *corroborates* — does not
+   overturn — §1 and §7g-4/§7k (symptom-level unblocks do not stick; no component reconciles a
+   park when its backing work completes) and **sharpens P3's backlog scope**: the stale
+   auto-filed backlog is ≈10 verbatim duplicates **plus** ~79 escalation issues, and **P2 must
+   also cover the stewardship re-file path**, not only the RecurringSignature composite.
+2. **RUSTSEC-2026-0204 direct-remediation confirmation (§7q) adopted as canonical for
+   success-criterion #3.** The `crossbeam-epoch` vuln (affected `>= 0.9.0, < 0.9.20`) is
+   **remediated** in `amplihack-xpia-defender` — `Cargo.lock` pins the patched `0.9.20`
+   (transitive via `crossbeam-deque`), bumped from the affected `0.9.18` by **merged PR #23**
+   (`54557b00`, 2026-07-07T12:32:11Z; `cargo-deny` gate added in PR #22). Because the fix landed
+   **before** the round-1 verify step yet the overseer's `fix-rustsec-…` goal **stayed parked as
+   `goal:blocked`**, this is the **same missing done-gate / park-reconciliation defect** proven
+   for the CLOSED kgpacks issues (§1, §7l-C) — now demonstrated on a **second, unrelated goal
+   whose underlying work is verifiably complete**, strengthening §1's stale-input thesis and P2.
+3. **Full emission inventory + two-channel disambiguation (§7p) adopted as canonical.** The single
+   loop-bearing `workstream-gap` token is the `mod.rs:1384` `dedup_key`; the byte-similar
+   Act-phase strings and the recall-query keys are outside `observation_signature`, resolving the
+   latent "are those strings part of the loop?" ambiguity as **No**. Substance unchanged from
+   §7l-A/§7n; the emission map is now enumerated across *all* channels with the non-loop hits
+   explicitly excluded.
+4. **Live board stable across rounds 8→13 (sixth consecutive identical read).** The kgpacks board
+   (#16/#18/#21/#22 CLOSED, #17 OPEN) and the 10-issue verbatim tail are **byte-identical** to
+   rounds 8–12; only the (separately-counted) escalation channel has grown. The loop is **live and
+   the escalation path is accelerating**, while the deduped composite tail is quiescent — exactly
+   the split the mechanism predicts.
+
+**Consolidated verdict (rounds 1–13).** Unchanged and further strengthened — **High** confidence,
+all six findings source- or live-state-grounded, no remaining Medium diagnostic item. One
+self-amplifying loop — unfiltered self-recall (`recall_episodic` drops `source_label`) + unbounded
+re-wrap (`observation_signature` re-prefixes `overseer-obs:`), **test-proven** (H1/H2 green, 36/36
+module; 4/4 hypothesis), **fully decoded and loop-traced** (§7j), **HEAD-line-anchored across all
+emission channels** (§7p) — fed by standing, time-varying inputs: four **stale safeguard-parks**
+(#16/#18/#21/#22), one **stale-premise dep-block** (#17, timestamp-proven), an ambient
+**`gym_skipped`** flag, and a disjoint **`workstream-gap`**; **`engineer_spawn` is a passenger**
+(round-4), **`whisper_ops.rs` a non-amplifying sibling** (round-7), and the cross-goal
+**xpia-defender** token a **local-worktree park whose underlying vuln is verifiably remediated**
+(§7q). The loop is **live** — the WhisperGate-deduped verbatim tail steady at 10 (#2875 newest)
+while the **un-deduplicated `recurring_goal_reblock` escalation channel has swelled to 79 open and
+is still firing** (#2894 @ 14:05:18Z) — and symptom-level unblocks **do not stick** (#2707 among
+79 open). Action set unchanged: **P1** (provenance filter) severs the amplifier; **P2**
+(done-gate/park reconciliation + perpetual tagging) removes the standing stale inputs, is required
+for the fix to *stick*, and **must also cover the stewardship re-file path**; **P3** clears the
+auto-filed backlog (≈10 verbatim + ~79 escalation) only when paired with P2; **P4** conditional
+(#17 disposition + `gym_skipped` down-rank); **P5** optional. No new remediation is introduced.
+
 ---
 
 ## 8. Provenance
 
-Investigation-only follow-up (investigation-workflow, rounds 1–12). No production
+Investigation-only follow-up (investigation-workflow, rounds 1–13). No production
 behavior was changed by this document. Round-1 established the structural cause
 ([`overseer-memory-recall-api`](./overseer-memory-recall-api.md)); round-2 added the
 semantic diagnosis and the executable H1/H2 tests; round-3 consolidated the parallel
@@ -1576,6 +1689,22 @@ direct lockfile-vs-advisory + fix-PR confirmation, and, because the fix landed b
 verify step yet the overseer goal stayed parked, independently corroborating the
 done-gate/reconciliation-gap root cause on a second, unrelated goal — no finding overturned,
 confidence remains High.
+Round-13 consolidation (§7r, HEAD `480aeca1`) unified the round-11/round-12 dives (§7o/§7p/§7q),
+independently re-verified the full module (36 passed, 0 failed) + the four hypothesis tests in
+isolation (4 passed, 0 failed) and spot-checked the canonical anchors verbatim (`signal.rs:362`
+threshold `= 2`, `mod.rs:1085` prefix, `mod.rs:1373-1375` summary, `wiring.rs:1024-1030` map drops
+`source_label`), re-confirmed kgpacks-rs #16/#18/#21/#22 CLOSED + #17 OPEN and the verbatim
+10-issue Simard tail (newest #2875 @ 11:31:36Z, no 11th) with `rysweet/amplihack-xpia-defender`
+re-verified a live public repo, and confirmed **every commit since `85245e87` is docs-only** (zero
+source drift). Its net-new fact: the `recurring_goal_reblock` **stewardship-escalation channel** —
+tracked in rounds 8–11 by its representative issue #2707 — is an **un-deduplicated flood of 79 open
+issues** (#2688…#2894, newest #2894 @ 2026-07-07T14:05:18Z, still firing), a channel **distinct**
+from the WhisperGate-deduped verbatim tail and lacking any equivalent dedup/reconciliation; this
+corroborates the §1/§7g-4 no-reconciliation root cause (symptom-unblocks don't stick), sharpens
+**P3**'s backlog scope (≈10 verbatim + ~79 escalation) and **P2** (must also cover the stewardship
+re-file path), and folds §7q's direct RUSTSEC-2026-0204 remediation confirmation into
+success-criterion #3 — no finding overturned, no remediation-weighting change, confidence remains
+High.
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
