@@ -304,6 +304,14 @@ fn dispatch(memory: &dyn CognitiveMemoryOps, req: MemoryRequest) -> MemoryRespon
                 Err(e) => MemoryResponse::Error(e.to_string()),
             }
         }
+        MemoryRequest::ListAllEpisodes { limit } => match memory.list_all_episodes(limit) {
+            Ok(v) => MemoryResponse::Episodes(v),
+            Err(e) => MemoryResponse::Error(e.to_string()),
+        },
+        MemoryRequest::ListAllProspective { limit } => match memory.list_all_prospective(limit) {
+            Ok(v) => MemoryResponse::Prospectives(v),
+            Err(e) => MemoryResponse::Error(e.to_string()),
+        },
         MemoryRequest::DrainPassLedger { pass_id } => {
             MemoryResponse::Count(drain_pass_ledger(&pass_id))
         }

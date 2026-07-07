@@ -13,6 +13,9 @@ mod tests_tab_meta;
 #[cfg(test)]
 mod tests_tab_prefetch;
 
+#[cfg(test)]
+mod tests_memory_tab;
+
 use part_00::PART_00;
 use part_01::PART_01;
 use part_02::PART_02;

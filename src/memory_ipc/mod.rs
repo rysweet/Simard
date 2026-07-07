@@ -259,6 +259,26 @@ pub enum MemoryRequest {
     DrainPassLedger {
         pass_id: String,
     },
+    /// Enumerate up to `limit` episodes (newest-first, including
+    /// compressed/consolidated ones) across the socket, so a reader on the
+    /// daemon-socket tier gets the same live enumeration as an in-process reader.
+    /// Additive (issue #2627): the dashboard Memory-tab graph reads live per-item
+    /// episode nodes through this; without it the socket client would fall back
+    /// to the empty `list_all_episodes` trait default and the graph would
+    /// silently collapse episodes to their type hub. Returns
+    /// [`MemoryResponse::Episodes`].
+    ListAllEpisodes {
+        limit: u32,
+    },
+    /// Enumerate up to `limit` prospective (trigger → action) memories in every
+    /// status, priority-ordered, across the socket. Additive companion of
+    /// [`ListAllEpisodes`](MemoryRequest::ListAllEpisodes) for the Memory-tab
+    /// graph (issue #2627) — without it a socket-tier reader collapses
+    /// prospective memories to their type hub. Returns
+    /// [`MemoryResponse::Prospectives`].
+    ListAllProspective {
+        limit: u32,
+    },
     GetStatistics,
 }
 

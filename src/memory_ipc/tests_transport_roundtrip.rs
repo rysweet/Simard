@@ -351,6 +351,53 @@ fn procedure_store_and_recall_over_socket() {
 }
 
 #[test]
+fn list_all_episodes_and_prospective_enumerate_over_socket() {
+    // Issue #2627: the dashboard Memory-tab graph reads live per-item nodes for
+    // episodes and prospective memories through `list_all_episodes` /
+    // `list_all_prospective`. Both have empty trait defaults, so unless the
+    // socket client FORWARDS them (and the server dispatches them) a reader on
+    // the daemon-socket tier would silently collapse both types to their type
+    // hub — exactly the regression this additive forward prevents.
+    let fx = in_memory_fixture();
+
+    let ep = fx
+        .client
+        .store_episode("engineer restored the memory tab graph", "test", None)
+        .expect("store_episode over socket");
+    let pr = fx
+        .client
+        .store_prospective(
+            "watch for memory-graph regressions",
+            "when a memory socket test fails",
+            "page the on-call engineer",
+            7,
+        )
+        .expect("store_prospective over socket");
+
+    let episodes = fx
+        .client
+        .list_all_episodes(50)
+        .expect("list_all_episodes over socket");
+    assert!(
+        episodes.iter().any(|e: &CognitiveEpisode| e.node_id == ep),
+        "the stored episode must enumerate over the socket (a missing forward \
+         would return the empty trait default); got {} episodes",
+        episodes.len()
+    );
+
+    let prospective = fx
+        .client
+        .list_all_prospective(50)
+        .expect("list_all_prospective over socket");
+    assert!(
+        prospective.iter().any(|p| p.node_id == pr),
+        "the stored prospective memory must enumerate over the socket; got {} \
+         prospective",
+        prospective.len()
+    );
+}
+
+#[test]
 fn prospective_store_trigger_and_resolve_over_socket() {
     let fx = in_memory_fixture();
 

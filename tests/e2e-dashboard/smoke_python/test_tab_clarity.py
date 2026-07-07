@@ -42,9 +42,9 @@ BANNED_JARGON: tuple[str, ...] = (
     "ideate",
 )
 
-# The nine canonical tabs after the #2627 consolidation, in nav-render order.
-# Views that were formerly standalone tabs now live as sub-sections inside one
-# of these parents (see ``CANONICAL_TABS`` / the alias map below).
+# The canonical top-level tabs after the #2627 consolidation, in nav-render
+# order. Memory was restored as its own dedicated top-level tab by the #2627
+# regression fix (it had been folded into Resources).
 CANONICAL_SLUGS: tuple[str, ...] = (
     "overview",
     "goals",
@@ -52,6 +52,7 @@ CANONICAL_SLUGS: tuple[str, ...] = (
     "workers",
     "pull-requests",
     "resources",
+    "memory",
     "chat",
     "overseer",
     "journal",
@@ -71,7 +72,6 @@ RETIRED_SLUG_PARENTS: dict[str, str] = {
     "terminal": "workers",
     "merge-decisions": "pull-requests",
     "pr-readiness": "pull-requests",
-    "memory": "resources",
     "costs": "resources",
 }
 
@@ -100,12 +100,13 @@ def loaded_dashboard(page: Page, dashboard_url: str) -> Page:
 
 
 def test_at_least_nine_tabs_discoverable(loaded_dashboard: Page) -> None:
-    """Sanity: the nav exposes exactly the nine consolidated tabs (#2627)."""
+    """Sanity: the nav exposes the consolidated tabs (#2627) plus the restored
+    dedicated Memory tab (#2627 regression fix)."""
     slugs = _discover_tab_slugs(loaded_dashboard)
     assert len(slugs) >= 9, (
         f"expected >=9 tabs, discovered {len(slugs)}: {slugs}"
     )
-    # The nine canonical slugs must all be present (drift detector for #2627).
+    # The canonical slugs must all be present (drift detector for #2627).
     required = set(CANONICAL_SLUGS)
     missing = required - set(slugs)
     assert not missing, f"required canonical tabs missing from nav: {sorted(missing)}"

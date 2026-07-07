@@ -21,7 +21,7 @@ fn tab_meta_slugs_unique() {
             t.slug
         );
     }
-    assert_eq!(TAB_METADATA.len(), 10, "expected 10 tabs");
+    assert_eq!(TAB_METADATA.len(), 11, "expected 11 tabs");
 }
 
 #[test]
@@ -767,15 +767,22 @@ fn feedback_widget_posts_report_and_context_to_authed_endpoint() {
 // of this taxonomy lives in `docs/dashboard.md#canonical-tab-taxonomy`; these
 // tests pin the source-of-truth table and the rendered HTML to it.
 
-/// The nine canonical dashboard tabs, in nav-render order, paired with the
+/// The canonical dashboard tabs, in nav-render order, paired with the
 /// label each must expose. This is the single in-test statement of the
-/// consolidated taxonomy that `docs/dashboard.md` documents.
+/// consolidated taxonomy that `docs/dashboard.md` documents. The trailing
+/// `memory` entry is the #2627 regression fix (its viz was dropped by the
+/// 17->9 consolidation and is restored as a dedicated tab).
 const CANONICAL_TABS: &[(&str, &str)] = &[
     ("overview", "Overview"),
     ("goals", "Goals"),
     ("activity", "Activity"),
     ("workers", "Workers"),
     ("pull-requests", "Pull Requests"),
+    // #2627 regression fix: the memory-graph visualization dropped during the
+    // 17->9 consolidation is restored as its OWN dedicated top-level tab
+    // (previously folded into Resources as a sub-section / deep-link alias),
+    // sitting alongside Resources.
+    ("memory", "Memory"),
     ("resources", "Resources"),
     ("chat", "Chat"),
     ("overseer", "Overseer"),
@@ -786,11 +793,13 @@ const CANONICAL_TABS: &[(&str, &str)] = &[
 /// Slugs that were real top-level tabs in the 17-tab set and must NOT survive
 /// as nav tabs after consolidation — each is now a sub-section reachable via
 /// its deep-link alias.
+///
+/// `memory` is deliberately absent: issue #2627 promotes it back to a
+/// first-class top-level tab, so it now lives in [`CANONICAL_TABS`] instead.
 const RETIRED_SLUGS: &[&str] = &[
     "traces",
     "logs",
     "processes",
-    "memory",
     "costs",
     "workboard",
     "thinking",
@@ -877,14 +886,16 @@ fn js_canonical_tabs_allowlist_includes_every_tab() {
 }
 
 #[test]
-fn rendered_html_has_exactly_ten_page_h1s() {
-    // Invariant 2 across the consolidated set plus the Creative Ideas tab: each
-    // tab panel owns exactly one `<h1 class="page-h1">`, so the rendered HTML has
-    // exactly ten of them. Sub-sections must use `<h2>`, never a second page-h1.
+fn rendered_html_has_exactly_eleven_page_h1s() {
+    // Invariant 2 across the consolidated set plus Creative Ideas and the
+    // restored Memory tab (#2627): each tab panel owns exactly one
+    // `<h1 class="page-h1">`, so the rendered HTML has exactly eleven of them.
+    // Sub-sections must use `<h2>`, never a second page-h1. (Resources keeps a
+    // `<h2 class="subsection">Memory</h2>` recall summary — an h2, not counted.)
     let count = INDEX_HTML.matches(r#"<h1 class="page-h1">"#).count();
     assert_eq!(
-        count, 10,
-        "expected exactly 10 page-h1 headings (one per tab), found {count}; \
+        count, 11,
+        "expected exactly 11 page-h1 headings (one per tab), found {count}; \
          a stray page-h1 usually means an absorbed panel kept its old <h1> instead of \
          being demoted to an <h2 class=\"subsection\">"
     );
@@ -952,7 +963,6 @@ fn rendered_html_wires_tab_alias_allowlist() {
         ("terminal", "workers"),
         ("merge-decisions", "pull-requests"),
         ("pr-readiness", "pull-requests"),
-        ("memory", "resources"),
         ("costs", "resources"),
     ];
     for (retired, parent) in alias_pairs {
@@ -963,6 +973,15 @@ fn rendered_html_wires_tab_alias_allowlist() {
              expected to find: {needle}"
         );
     }
+    // #2627: `memory` is now a canonical top-level tab, so its old
+    // `"memory":"resources"` deep-link alias MUST be removed. The resolver
+    // checks CANONICAL_TABS before TAB_ALIASES, so a stale alias would be dead
+    // code that silently misroutes a `#memory` bookmark into Resources.
+    assert!(
+        !INDEX_HTML.contains(r#""memory":"resources""#),
+        "the retired-slug alias \"memory\":\"resources\" must be removed once \
+         Memory is a canonical tab (issue #2627); it would shadow the real tab"
+    );
     // The untrusted-hash validator must be present so a crafted hash can never
     // reach a DOM selector.
     assert!(

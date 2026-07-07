@@ -955,8 +955,8 @@ pub(crate) const PART_01: &str = r#"
        validated against ^[a-z-]+$, matched against the allowlist, and falls
        back to 'overview' on any miss. The hash is never concatenated into a
        DOM selector, so a crafted hash cannot inject markup. */
-    const CANONICAL_TABS=['overview','goals','activity','workers','pull-requests','resources','chat','overseer','journal','creative-ideas'];
-    const TAB_ALIASES={"status":"overview","workboard":"goals","logs":"activity","traces":"activity","thinking":"activity","brain-failures":"activity","processes":"workers","terminal":"workers","merge-decisions":"pull-requests","pr-readiness":"pull-requests","memory":"resources","costs":"resources"};
+    const CANONICAL_TABS=['overview','goals','activity','workers','pull-requests','memory','resources','chat','overseer','journal','creative-ideas'];
+    const TAB_ALIASES={"status":"overview","workboard":"goals","logs":"activity","traces":"activity","thinking":"activity","brain-failures":"activity","processes":"workers","terminal":"workers","merge-decisions":"pull-requests","pr-readiness":"pull-requests","costs":"resources"};
 
     /* #2649: the per-tab fetch/refresh chain that used to live here
        (runTabFetches / clearTabTimers) is retired. Background prefetch and
