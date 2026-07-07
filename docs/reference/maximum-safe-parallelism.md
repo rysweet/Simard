@@ -9,6 +9,7 @@ related:
   - ./concurrent-engineer-dispatch.md
   - ./goal-coverage-allocation.md
   - ./adaptive-scaling-api.md
+  - ./ooda-coverage-parallelism-ceiling.md
   - ./ooda-decide-prompt.md
   - ./simard-cli.md
   - ../concepts/adaptive-scaling.md
@@ -104,16 +105,25 @@ Pressure is `max(cpu_pressure, mem_pressure)` from `/proc/stat` and
 `report_reason`.
 
 **Production bounds.** `OodaConfig::default()` constructs the scaler as
-`AdaptiveScaler::new(base, 1, ceiling)` where `base =
-SIMARD_MAX_CONCURRENT_ACTIONS` (default **5**) and `ceiling = base × 4` (default
-**20**). Once per cycle the daemon logs the cap it used in the coverage line
-`[simard] OODA cycle: coverage — … (cap N)`, where `N` is the scaler's
-`current_max()` (or `max_concurrent_actions` when `SIMARD_SCALING` is off). That
-cap **starts at `base` and climbs additively** toward the ceiling under low
-pressure — so the machine fills over a few cycles rather than all at once. The ceiling of 20 is
-already ample for "fill the machine"; raise both the base and ceiling together
-by setting `SIMARD_MAX_CONCURRENT_ACTIONS` (the ceiling tracks at 4× the base).
-The additive-increase + pressure/error backoff behavior is unchanged by this.
+`AdaptiveScaler::new(base, 1, ceiling)` where `base` is resolved from the
+environment (preferring `SIMARD_OODA_MAX_CONCURRENT`, falling back to the legacy
+`SIMARD_MAX_CONCURRENT_ACTIONS`, else the default **24**; range `1..=64`,
+fail-closed) and `ceiling = base` (default **24**). Once per cycle the daemon
+logs the cap it used in the coverage line `[simard] OODA cycle: coverage — …
+(cap N)`, where `N` is the scaler's `current_max()` (or `max_concurrent_actions`
+when `SIMARD_SCALING` is off). That cap **starts at `base` and adapts** — it
+holds at the ceiling under low pressure, halves under CPU/memory/429 pressure,
+and recovers `+1` per calm cycle. The default ceiling of **24** lets a single
+cycle cover up to 24 genuinely-independent goals; raise or lower it with
+`SIMARD_OODA_MAX_CONCURRENT`. The additive-increase + pressure/error backoff
+behavior is unchanged by this — only the base and ceiling values moved
+(from 5/20 to 24/24). See
+[OODA coverage parallelism ceiling](./ooda-coverage-parallelism-ceiling.md).
+
+> **The ceiling is not a spawn guarantee.** 24 is the number of goals coverage
+> may *plan* per cycle; the resource-admission gate (disk / memory / load) and
+> the overlap/dependency gate still bound how many engineers actually spawn. A
+> full board at cap 24 under disk pressure still defers.
 
 > The cap is a **hard ceiling**: coverage never emits more than `cap` actions,
 > and the scaler shrinks the cap under CPU/memory/429 pressure. Filling the
@@ -218,4 +228,7 @@ The Rust parsers are untouched; the prompts keep their existing shapes:
 - [`simard goal add` CLI reference](./simard-cli.md) — the mechanism the
   decomposition uses to create one per-issue goal per distinct issue.
 - [Configure adaptive scaling](../howto/configure-adaptive-scaling.md) — how to
-  widen the ceiling via `SIMARD_MAX_CONCURRENT_ACTIONS`.
+  widen the ceiling via `SIMARD_OODA_MAX_CONCURRENT`.
+- [OODA coverage parallelism ceiling](./ooda-coverage-parallelism-ceiling.md) —
+  the default-24 ceiling, its env override, and why it never bypasses the
+  resource-admission or overlap gates.

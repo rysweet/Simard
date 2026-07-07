@@ -551,6 +551,37 @@ mod tests {
         }
     }
 
+    // Issue #2935: raising the per-cycle count ceiling to 24 must NOT bypass the
+    // exact-path overlap rail. Even when the daemon may spawn up to 24 engineers,
+    // a candidate whose predicted scope is fully held by a live engineer (a
+    // duplicate/overlapping goal) is deterministically deferred — a brain that
+    // would Admit is overridden. The count cap and the overlap gate are
+    // independent axes; the higher cap only raises the number of *independent*
+    // goals that may run.
+    #[test]
+    fn count_cap_24_does_not_bypass_exact_path_rail() {
+        let c = ctx(
+            "cand",
+            &["src/shared.rs"],
+            vec![engineer("other", &["src/shared.rs", "src/other.rs"])],
+        );
+        let brain = stub(EngineerAdmissionDecision::Admit {
+            rationale: "count cap is 24 — plenty of room".into(),
+        });
+        let out = evaluate_admission(&c, "task", &brain).outcome;
+        match out {
+            AdmissionOutcome::Defer { detail } => {
+                assert!(
+                    detail.contains("other"),
+                    "names the blocking engineer: {detail}"
+                );
+            }
+            other => panic!(
+                "exact-path rail must still Defer a duplicate/overlapping goal at count cap 24, got {other:?}"
+            ),
+        }
+    }
+
     // T6 — brain Err ⇒ fail OPEN to Admit (never a silent stall).
     #[test]
     fn t6_brain_error_fails_open_to_admit() {

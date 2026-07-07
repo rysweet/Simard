@@ -658,6 +658,49 @@ mod tests {
         assert!(matches!(out, ResourceAdmissionOutcome::Defer { .. }));
     }
 
+    // ── Issue #2935: raising the count ceiling to 24 must NOT bypass gates ───
+
+    // Raising the per-cycle count ceiling to 24 is a COUNT axis; the disk-ceiling
+    // rail is an independent RESOURCE axis. Even when the daemon may spawn up to
+    // 24 engineers, a candidate that would push disk past the ceiling is still
+    // deterministically deferred — the ENOSPC guard is untouched by the higher cap.
+    #[test]
+    fn count_cap_24_does_not_bypass_disk_ceiling_rail() {
+        let e = eval(
+            &ctx(Some(95.0), 90.0),
+            &stub(admit("count cap is 24 — parallelize aggressively")),
+        );
+        match e.outcome {
+            ResourceAdmissionOutcome::Defer { detail } => {
+                assert!(detail.contains("disk-ceiling"), "names the rail: {detail}");
+            }
+            other => panic!(
+                "disk-ceiling rail must still Defer a spawn past the ceiling at count cap 24, got {other:?}"
+            ),
+        }
+    }
+
+    // Memory pressure is a SOFT signal the brain reasons about. Even at count cap
+    // 24, when the reasoner Defers under memory pressure the seam yields a benign
+    // skip: the raised count ceiling never forces a spawn under pressure.
+    #[test]
+    fn count_cap_24_still_defers_under_memory_pressure() {
+        let out = eval(
+            &ctx(Some(50.0), 90.0),
+            &stub(defer("memory pressure: MemAvailable critically low")),
+        )
+        .outcome;
+        match out {
+            ResourceAdmissionOutcome::Defer { detail } => {
+                assert!(
+                    detail.contains("memory pressure"),
+                    "carries the reason: {detail}"
+                );
+            }
+            other => panic!("expected Defer under memory pressure at count cap 24, got {other:?}"),
+        }
+    }
+
     #[test]
     fn unknown_disk_admits_on_reasoning() {
         // total=0 ⇒ used_pct None ⇒ rail inert ⇒ brain Admit honored.
