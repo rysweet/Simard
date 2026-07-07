@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use super::goals_status::render_status_and_detail;
 use super::routes::resolve_state_root;
 use super::{
-    dashboard_goal_board_snapshot, dashboard_save_goal_board,
+    dashboard_goal_board_snapshot, dashboard_live_goal_board, dashboard_save_goal_board,
     dashboard_save_goal_board_with_removals,
 };
 use crate::goal_curation::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS};
@@ -91,7 +91,28 @@ pub(crate) async fn goals() -> Json<Value> {
 /// (#2408 / #2384). See [`load_board_or_empty_at`] for the trusted-internal
 /// `state_root` invariant.
 pub(crate) async fn goals_at(state_root: &std::path::Path) -> Json<Value> {
-    let board = dashboard_goal_board_snapshot(state_root).unwrap_or_default();
+    // Issue #2922: read the LIVE goal board (snapshot base unioned with the live
+    // `CognitiveMemoryGoalStore` overlay), fail-closed. A live-read failure
+    // surfaces an explicit error payload with zeroed counts and empty lists —
+    // NEVER a silently-empty or stale board that a client could not distinguish
+    // from "no goals". The underlying error chain is logged server-side only
+    // (tracing), never returned to the client.
+    let board = match dashboard_live_goal_board(state_root) {
+        Ok(board) => board,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "dashboard live goal-board read failed; serving fail-closed error payload"
+            );
+            return Json(json!({
+                "active": [],
+                "backlog": [],
+                "active_count": 0,
+                "backlog_count": 0,
+                "error": "goal-board read failed",
+            }));
+        }
+    };
 
     // Issue #2695 follow-up: emit active goals ordered by priority ASCENDING
     // (p1 = highest first) with a stable id tiebreak, so the Goals tab renders a
