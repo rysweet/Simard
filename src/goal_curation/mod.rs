@@ -7,8 +7,11 @@
 //! ([`decompose`]) that breaks one large goal into bounded sub-goals.
 
 pub mod completion_gate;
+pub mod live_signal;
+pub mod live_signal_source;
 pub mod no_progress_breaker;
 mod operations;
+pub mod outcome_verify;
 pub mod progress_evidence;
 pub mod progress_reviewer;
 pub mod recipe_progress_checker;
@@ -54,6 +57,13 @@ pub use no_progress_breaker::{
     NO_PROGRESS_BLOCKED_PREFIX, NO_PROGRESS_BLOCKED_SUFFIX, NO_PROGRESS_BREAKER_THRESHOLD,
     NoProgressResolution, NoProgressTracker, StuckGoalDisposition, is_no_progress_marker,
     no_progress_blocked_reason, obsolescence_reason, resolve_no_progress, verify_stuck_goal,
+};
+
+pub use live_signal::{LiveSignal, LiveSignalSource};
+pub use live_signal_source::DaemonLiveSignals;
+pub use outcome_verify::{
+    GOAL_LIVE_OUTCOME_VERIFICATION_METRIC, OutcomeVerificationReport, outcome_verify_enabled,
+    record_outcome_verification, verify_completion_candidates, verify_goal_outcome,
 };
 
 #[cfg(test)]

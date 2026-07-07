@@ -575,6 +575,54 @@ fn run_ooda_cycle_inner(
         Vec::new()
     };
 
+    // --- Outcome verification: gate archival on a verified LIVE effect (#2751) ---
+    // When the outcome-verify bridge pair is wired (production daemon,
+    // `SIMARD_OUTCOME_VERIFY` on), every completion-candidate goal is verified
+    // LIVE before the archive step below can complete it. The framing invariant:
+    // an ARTIFACT (a merged PR / a deploy) is NOT an OUTCOME — a goal is
+    // "achieved" only once a verified live signal corroborates its real success
+    // criteria (the kgpacks E2BIG regression: artifact present, effect absent).
+    // Non-achieved / errored goals are re-opened in place; only rail-passed
+    // `mark_achieved` goals stay `Completed` and thus archivable by the step
+    // below. Absent the pair (tests / non-daemon callers), this is a no-op.
+    if let (Some(ov_brain), Some(signals)) = (
+        bridges.outcome_verify_brain.clone(),
+        bridges.live_signals.clone(),
+    ) {
+        let reports = crate::goal_curation::verify_completion_candidates(
+            &mut state.active_goals,
+            ov_brain.as_ref(),
+            signals.as_ref(),
+            bridges.completion_evidence.as_deref(),
+        );
+        for r in &reports {
+            match &r.error {
+                Some(err) => {
+                    // NO-FALLBACK: a signal-source or brain error is a visible
+                    // cycle failure. The goal is kept open, never archived.
+                    tracing::error!(
+                        target: "simard::ooda",
+                        goal = %r.goal_id,
+                        error = %err,
+                        "OODA outcome-verify FAILED (no-fallback) — goal kept open",
+                    );
+                    eprintln!(
+                        "[simard] OODA outcome-verify: FAILED for goal '{}' — {} (kept open, not archived)",
+                        r.goal_id, err
+                    );
+                }
+                None => {
+                    eprintln!(
+                        "[simard] OODA outcome-verify: goal '{}' -> {} ({} verified live signal(s))",
+                        r.goal_id,
+                        r.decision.variant_label(),
+                        r.verified_signal_count,
+                    );
+                }
+            }
+        }
+    }
+
     // --- Curate: archive completed goals, promote from backlog ---
     // With a deploy-aware done-gate installed (production daemon, issue #2419),
     // a completed goal archives only with hard evidence — merged PR, closed

@@ -27,7 +27,10 @@ use super::orient::{
     FAILURE_PENALTY_PER_CONSECUTIVE, OodaOrientBrain, OrientContext, OrientJudgment,
 };
 use super::sanitize::sanitize_context_var;
-use super::{BrainPhase, EngineerLifecycleCtx, EngineerLifecycleDecision, OodaBrain};
+use super::{
+    BrainPhase, EngineerLifecycleCtx, EngineerLifecycleDecision, GoalOutcomeCtx,
+    GoalOutcomeDecision, OodaBrain,
+};
 use crate::error::{SimardError, SimardResult};
 
 #[cfg(test)]
@@ -1170,6 +1173,192 @@ impl OodaBrain for RecipeBrain {
             termination,
             attempts,
         )
+    }
+
+    /// Closed-loop outcome verification (issue #2751). Runs the
+    /// `ooda-goal-outcome-verification.yaml` recipe over the goal's real success
+    /// criteria, the artifact-level signals (INPUT), and the freshly-gathered
+    /// live signals, then parses the `{"decision", "rationale"[, "replan_hint"]}`
+    /// envelope into a [`GoalOutcomeDecision`].
+    ///
+    /// NO-FALLBACK (operator zero-fallback contract, #2580 / #1711): a recipe
+    /// invocation failure OR an unparseable decision surfaces as an explicit
+    /// `Err`. The seam records it as a visible cycle failure and keeps the goal
+    /// open — never a silent `keep_open_and_report` masquerading as a reasoned
+    /// decision. A genuine "it is really achieved, live" answer is a real,
+    /// model-emitted `mark_achieved` (which the Rust Rail-3 then still gates on
+    /// >=1 verified live signal).
+    fn decide_goal_outcome_verification(
+        &self,
+        ctx: &GoalOutcomeCtx,
+    ) -> SimardResult<GoalOutcomeDecision> {
+        let raw = self.invoke_outcome_verify_raw(ctx)?;
+        parse_outcome_decision(&raw).ok_or_else(|| SimardError::VerificationFailed {
+            reason: format!(
+                "{}: outcome-verify recipe output had no parseable decision envelope: {}",
+                self.adapter_tag,
+                truncate(&raw, MAX_RATIONALE_CHARS)
+            ),
+        })
+    }
+}
+
+impl RecipeBrain {
+    /// Invoke the outcome-verification recipe once and return the raw decision
+    /// text (the recipe's final step output). Errors surface loudly (NO-FALLBACK).
+    fn invoke_outcome_verify_raw(&self, ctx: &GoalOutcomeCtx) -> SimardResult<String> {
+        let artifact = format!(
+            "pr_merged={} issue_closed={} self_affecting={} deployed={}",
+            ctx.artifact_signals.pr_merged,
+            ctx.artifact_signals.issue_closed,
+            ctx.artifact_signals.self_affecting,
+            ctx.artifact_signals.deployed,
+        );
+        let live = render_live_signals(&ctx.live_signals);
+
+        let output = Command::new("recipe-runner-rs")
+            .arg(self.recipe_path.as_os_str())
+            .arg("--output-format")
+            .arg("json")
+            .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
+            .arg("-c")
+            .arg(format!(
+                "goal_id={}",
+                sanitize_context_var(&ctx.goal_id, 500)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "goal_title={}",
+                sanitize_context_var(&ctx.goal_title, 500)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "success_criteria={}",
+                sanitize_context_var(&ctx.success_criteria, 2000)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "artifact_signals={}",
+                sanitize_context_var(&artifact, 500)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "live_signals={}",
+                sanitize_context_var(&live, 8000)
+            ))
+            .arg("-c")
+            .arg(format!("reverify_count={}", ctx.reverify_count))
+            .output();
+
+        let output = match output {
+            Ok(o) => o,
+            Err(e) => {
+                return Err(SimardError::AdapterInvocationFailed {
+                    base_type: self.adapter_tag.to_string(),
+                    reason: format!("recipe-runner-rs spawn failed: {e}"),
+                });
+            }
+        };
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(SimardError::AdapterInvocationFailed {
+                base_type: self.adapter_tag.to_string(),
+                reason: format!(
+                    "recipe exited with {}: {}",
+                    output.status,
+                    truncate(&stderr, MAX_RATIONALE_CHARS)
+                ),
+            });
+        }
+
+        extract_recipe_decision_output(&output.stdout, self.adapter_tag)
+    }
+}
+
+/// Render the gathered live signals into a single bounded, sanitized string for
+/// the recipe's `live_signals` context var. Capped at 32 signals (prompt-cost
+/// DoS guard, #2751); each field is control/ANSI-stripped and length-capped so
+/// an injected `detail` cannot corrupt the prompt. The `verified` boolean is
+/// rendered from the adapter-set flag — the recipe treats `detail` as untrusted,
+/// and the Rust Rail-3 (not the prompt) is the decider.
+fn render_live_signals(signals: &[crate::goal_curation::live_signal::LiveSignal]) -> String {
+    signals
+        .iter()
+        .take(32)
+        .map(|s| {
+            format!(
+                "[source={} kind={} verified={} detail={}]",
+                sanitize_context_var(&s.source, 500),
+                sanitize_context_var(&s.kind, 500),
+                s.verified,
+                sanitize_context_var(&s.detail, 2000),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A structured outcome-verification decision envelope. Unlike the shared
+/// [`DecisionEnvelope`], this reads the optional `replan_hint` explicitly so a
+/// `replan` decision carries its load-bearing re-scope guidance (the shared shim
+/// would default every struct-variant field to empty — see #2751 API reference).
+#[derive(Debug, Clone, serde::Deserialize)]
+struct OutcomeEnvelope {
+    decision: String,
+    #[serde(default)]
+    rationale: String,
+    #[serde(default)]
+    replan_hint: String,
+}
+
+/// Parse the outcome-verify recipe output into a [`GoalOutcomeDecision`], or
+/// `None` when no balanced JSON object with a known `decision` variant is
+/// present (the caller surfaces that as a NO-FALLBACK `Err`). Routes through the
+/// shared sanitizing chokepoint so a banner-polluted envelope still parses.
+fn parse_outcome_decision(text: &str) -> Option<GoalOutcomeDecision> {
+    let payload = crate::recipe_output::extract_json_payload(text)?;
+    let env: OutcomeEnvelope = serde_json::from_str(&payload).ok()?;
+    if env.decision.trim().is_empty() {
+        return None;
+    }
+    let rationale = {
+        let r = env.rationale.trim();
+        if r.is_empty() {
+            truncate(env.decision.trim(), MAX_RATIONALE_CHARS)
+        } else {
+            truncate(r, MAX_RATIONALE_CHARS)
+        }
+    };
+    outcome_decision_from_variant(
+        &env.decision,
+        rationale,
+        truncate(env.replan_hint.trim(), MAX_RATIONALE_CHARS),
+    )
+}
+
+/// Map an outcome-verify decision variant token (case-insensitive) to a
+/// [`GoalOutcomeDecision`]; `None` for an unknown token. `replan_hint` is only
+/// carried by the `replan` variant.
+fn outcome_decision_from_variant(
+    word: &str,
+    rationale: String,
+    replan_hint: String,
+) -> Option<GoalOutcomeDecision> {
+    let w = word.trim();
+    if w.eq_ignore_ascii_case("mark_achieved") {
+        Some(GoalOutcomeDecision::MarkAchieved { rationale })
+    } else if w.eq_ignore_ascii_case("reopen") {
+        Some(GoalOutcomeDecision::Reopen { rationale })
+    } else if w.eq_ignore_ascii_case("replan") {
+        Some(GoalOutcomeDecision::Replan {
+            rationale,
+            replan_hint,
+        })
+    } else if w.eq_ignore_ascii_case("keep_open_and_report") {
+        Some(GoalOutcomeDecision::KeepOpenAndReport { rationale })
+    } else {
+        None
     }
 }
 

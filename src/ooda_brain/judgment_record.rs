@@ -20,7 +20,10 @@
 
 use std::cell::RefCell;
 
-use super::{DecideJudgment, EngineerLifecycleDecision, OrientJudgment, ParseFailureRecord};
+use super::{
+    DecideJudgment, EngineerLifecycleDecision, GoalOutcomeDecision, OrientJudgment,
+    ParseFailureRecord,
+};
 
 /// Which recipe-backed brain phase produced the judgment. Serialised as
 /// snake_case strings so the cycle-report JSON consumers (dashboard, ad-hoc
@@ -41,6 +44,9 @@ pub enum BrainPhase {
     /// Recipe-backed merge-readiness judge (`simard merge-pr`). Serialises as
     /// `"merge_judge"`.
     MergeJudge,
+    /// Closed-loop outcome verification of a completion-candidate goal (issue
+    /// #2751). Serialises as `"outcome_verify"`.
+    OutcomeVerify,
 }
 
 impl BrainPhase {
@@ -54,6 +60,7 @@ impl BrainPhase {
             BrainPhase::Decide => "decide",
             BrainPhase::Orient => "orient",
             BrainPhase::MergeJudge => "merge_judge",
+            BrainPhase::OutcomeVerify => "outcome_verify",
         }
     }
 }
@@ -234,6 +241,30 @@ impl BrainJudgmentRecord {
             rationale: judgment.rationale.clone(),
             confidence: judgment.confidence as f32,
             fallback,
+            prompt_version: prompt_version.into(),
+            parse_failure: None,
+        }
+    }
+
+    /// Build an OutcomeVerify-phase record from an applied outcome-verification
+    /// decision (issue #2751). `verified_signal_count` is the number of
+    /// adapter-verified live signals that were present when the decision was
+    /// applied — the load-bearing input to Rail-3. Pure: no IO.
+    pub fn from_goal_outcome(
+        goal_id: &str,
+        decision: &GoalOutcomeDecision,
+        verified_signal_count: u32,
+        prompt_version: impl Into<String>,
+    ) -> Self {
+        Self {
+            phase: BrainPhase::OutcomeVerify,
+            context_summary: truncate(&format!(
+                "outcome-verify goal_id={goal_id} verified_signals={verified_signal_count}"
+            )),
+            decision: decision.variant_label().to_string(),
+            rationale: decision.rationale().to_string(),
+            confidence: 1.0,
+            fallback: false,
             prompt_version: prompt_version.into(),
             parse_failure: None,
         }
