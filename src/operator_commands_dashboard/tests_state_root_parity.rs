@@ -1,31 +1,23 @@
 //! Issue #2798 — Layer B: the dashboard reader-seam regression for the
 //! always-empty "Creative Ideas" tab.
 //!
-//! Root cause (D1): the dashboard resolved its state root with a **private copy**
-//! of the resolver that took `$SIMARD_STATE_ROOT` *verbatim* (and fell back to a
-//! hardcoded `/home/azureuser`), while the OODA daemon — the process that both
-//! registers the in-process writer and persists creative ideas — resolves via the
-//! canonical `crate::state_root::simard_state_root()`, which **validates**
-//! `SIMARD_STATE_ROOT` (empty / relative / NUL values are rejected with a WARN and
-//! fall back to `~/.simard`).
+//! Root cause (D1): the dashboard resolved its state root with a private copy of
+//! the resolver that took `$SIMARD_STATE_ROOT` verbatim (and hardcoded a
+//! `/home/azureuser` fallback), while the OODA daemon — which registers the
+//! in-process writer and persists ideas — resolves via the canonical
+//! `crate::state_root::simard_state_root()`, which validates the env (empty /
+//! relative / NUL fall back to `~/.simard`). When they disagree,
+//! `open_reader_client` tier-0 (`lookup_in_process_writer`) never matches the
+//! daemon's key, so the dashboard reads a different store and the tab stays
+//! empty. These tests pin the resolvers equal for every `SIMARD_STATE_ROOT`
+//! input class; the empty/relative cases fail RED pre-fix. Layer A (engine
+//! read-after-write) and Layer C (durability) live in
+//! `crate::cognitive_memory::tests_library_parity`.
 //!
-//! When the two resolvers disagree, `open_reader_client` tier-0
-//! (`lookup_in_process_writer`) never matches the daemon's registered key, the
-//! dashboard reads a *different* store than the one the thread wrote to, and the
-//! tab is permanently empty even while journald logs "10 persisted".
-//!
-//! These tests pin the fix: the dashboard resolver must be **byte-for-byte** the
-//! daemon resolver for every `SIMARD_STATE_ROOT` input class. The `empty_env` and
-//! `relative_env` cases fail **RED** on the unpatched divergent resolver and pass
-//! **GREEN** once `resolve_state_root()` delegates to `simard_state_root()`.
-//!
-//! Layer A (engine read-after-write) and Layer C (durability) live in
-//! `src/cognitive_memory/tests_library_parity.rs`.
-//!
-//! Isolation: these mutate/read the process-global `SIMARD_STATE_ROOT` surface and
-//! register the in-process writer, so they run under the `cognitive_memory` serial
-//! group (the resolver-parity cases also share the `simard_state_root_env` key
-//! with the `state_root` module's env tests) and use `HermeticState`.
+//! Isolation: these mutate the process-global `SIMARD_STATE_ROOT` and register
+//! the in-process writer, so they run serial under `cognitive_memory` (and share
+//! `simard_state_root_env` with the `state_root` env tests) and use
+//! `HermeticState`.
 
 use std::ffi::OsString;
 use std::path::PathBuf;

@@ -456,31 +456,14 @@ mod library {
 
     // ========================================================================
     // Issue #2798 — creative-idea prospective persistence: engine read-after-write
-    // (Layer A) and engine write-through durability (Layer C).
-    //
-    // The dashboard "Creative Ideas" tab was ALWAYS EMPTY even though the thread
-    // reported "10 persisted" each run. These two tests pin the ENGINE half of
-    // the diagnosis (memory-architecture policy G2): they prove the lbug-backed
-    // `LibraryCognitiveMemory` engine already (A) serves a freshly-stored
-    // creative-idea prospective row to a *separate* on-disk view and (C) retains
-    // it durably across a non-graceful reopen WITH NO EXPLICIT CHECKPOINT —
-    // because the engine's WAL is write-through and replayed on open. Both pass
-    // on the pinned engine, so the always-empty bug is NOT an engine defect and
-    // needs NO `amplihack-memory-lib` change: it lives entirely in the one
-    // Simard-side seam that diverged — the dashboard state-root resolver (D1),
-    // which made the reader open a *different* store than the daemon wrote to.
-    //
-    // Layer C also refutes the initial "prospective writes are buffer-only and
-    // lost on SIGKILL unless the thread checkpoints each batch" hypothesis: they
-    // are not buffer-only, so no per-batch checkpoint is added to the thread
-    // (ruthless simplicity — the minimal correct fix is D1 alone). If Layer A or
-    // C ever fails RED, durability HAS regressed in the engine and the fix
-    // escalates to `amplihack-memory-lib` (Simard bumps its pinned dep), never a
-    // Simard-side fork or a compensating checkpoint.
-    //
-    // See src/operator_commands_dashboard/tests_state_root_parity.rs for Layer B
-    // (the reader-seam / resolver-divergence regression that DOES fail RED on the
-    // unpatched bug).
+    // (Layer A) and engine write-through durability across a non-graceful reopen
+    // (Layer C). Both pass on the pinned engine, proving the always-empty tab is
+    // NOT an engine defect (no `amplihack-memory-lib` change) — it was the
+    // Simard-side state-root resolver divergence (D1). Layer C also refutes the
+    // "prospective writes are buffer-only, lost on SIGKILL" hypothesis, so the
+    // thread adds no per-batch checkpoint. A RED here means engine durability
+    // regressed and the fix escalates to `amplihack-memory-lib` (G2). Layer B is
+    // in `operator_commands_dashboard::tests_state_root_parity`.
     // ========================================================================
 
     use crate::cognitive_memory::creative_idea::{
@@ -513,10 +496,8 @@ mod library {
     /// must be immediately observable both on the same handle AND through a
     /// *separate* on-disk view opened on the same `state_root` — the engine does
     /// not hide its own un-checkpointed prospective writes from a fresh reader.
-    ///
-    /// This is the control that proves the always-empty tab is a Simard-side
-    /// seam bug, not an engine bug: if this test is GREEN the engine is fine and
-    /// no `amplihack-memory-lib` change is warranted (see the module note).
+    /// GREEN here means the engine is fine, so the empty-tab bug is a Simard-side
+    /// seam bug, not an `amplihack-memory-lib` defect.
     #[test]
     #[serial_test::serial(cognitive_memory)]
     fn creative_idea_read_after_write_visible_to_separate_view() {
@@ -559,20 +540,14 @@ mod library {
     }
 
     /// **Layer C — engine write-through durability across a non-graceful
-    /// restart (#2798).** A creative idea is persisted and then the writer suffers
-    /// a *non-graceful* process exit: we `std::mem::forget` the handle so its
-    /// `Drop` (which would otherwise run an implicit graceful checkpoint) never
-    /// fires, clear the tier-2 store cache, and cold-reopen from disk. The idea
-    /// must still be listable — with **no explicit `checkpoint()` anywhere** —
-    /// because the engine's WAL is write-through and replayed on open.
-    ///
-    /// The `forget` is what makes this a real `SIGKILL`-during-deploy simulation
-    /// rather than a false GREEN off a graceful-drop checkpoint. This pins the
-    /// engine property the whole diagnosis rests on: prospective creative-idea
-    /// writes are durable by themselves, so the always-empty tab was never a
-    /// durability defect (it was the D1 resolver divergence) and the thread adds
-    /// no compensating per-batch checkpoint. If this fails RED, WAL write-through
-    /// has regressed in the engine — a `amplihack-memory-lib` fix (G2), not a
+    /// restart (#2798).** Persist a creative idea, then simulate a non-graceful
+    /// exit: `std::mem::forget` the handle so its `Drop` (an implicit graceful
+    /// checkpoint) never fires, clear the tier-2 store cache, and cold-reopen from
+    /// disk. The idea must still be listable with no explicit `checkpoint()`,
+    /// because the engine's WAL is write-through and replayed on open. The
+    /// `forget` is what makes this a real `SIGKILL` simulation rather than a false
+    /// GREEN off a graceful-drop checkpoint. A RED here means engine WAL
+    /// write-through regressed — an `amplihack-memory-lib` fix (G2), not a
     /// Simard-side checkpoint.
     #[test]
     #[serial_test::serial(cognitive_memory)]

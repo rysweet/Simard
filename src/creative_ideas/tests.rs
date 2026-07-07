@@ -1187,21 +1187,15 @@ fn wired_thread_tick_generates_reviews_and_routes() {
 // 13. Durability — persisted ideas survive a non-graceful restart (#2798)
 // ---------------------------------------------------------------------------
 
-/// **Durability regression (#2798).** The dashboard "Creative Ideas" tab was
-/// always empty after a deploy. A tempting hypothesis was that the creative-idea
-/// prospective writes were buffer-only and lost on a `SIGKILL` unless the thread
-/// checkpointed each batch. This test **disproves** that hypothesis and pins the
-/// real behavior: the pinned amplihack-memory engine's WAL is *write-through* and
-/// replayed on open, so a batch persisted by a real `CreativeIdeasThread::tick`
-/// survives a non-graceful restart with **no explicit checkpoint** at all.
-///
-/// It drives the real tick against an *on-disk* store, then simulates a
-/// SIGKILL-during-deploy by `std::mem::forget`-ing the writer handle so its
-/// graceful-`Drop` checkpoint never runs, and cold-reopens from disk. The ideas
-/// are still listable. If a future engine bump regressed WAL write-through /
-/// replay (moving durability back behind an explicit checkpoint), this fails
-/// **RED** — which, per the memory-architecture policy (G2), would be an engine
-/// defect fixed in `amplihack-memory-lib`, not with a Simard-side checkpoint.
+/// **Durability regression (#2798).** Disproves the "creative-idea prospective
+/// writes are buffer-only, lost on SIGKILL unless the thread checkpoints each
+/// batch" hypothesis: a real `CreativeIdeasThread::tick` batch survives a
+/// non-graceful restart with no explicit checkpoint, because the pinned engine's
+/// WAL is write-through and replayed on open. It drives the tick against an
+/// on-disk store, `std::mem::forget`s the handle to skip the graceful-`Drop`
+/// checkpoint, cold-reopens from disk, and asserts the ideas are still listable.
+/// A RED here means engine WAL replay regressed — an `amplihack-memory-lib` fix
+/// (G2), not a Simard-side checkpoint.
 #[test]
 #[serial_test::serial(cognitive_memory)]
 fn tick_persisted_ideas_survive_nongraceful_restart_via_engine_wal() {
