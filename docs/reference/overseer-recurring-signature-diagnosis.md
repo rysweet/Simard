@@ -400,7 +400,7 @@ not directly observed.
 
 ---
 
-## 7. Consolidation & verification (rounds 3–7)
+## 7. Consolidation & verification (rounds 3–8)
 
 The consolidation pass (rounds 3–4, this update) reconciled the parallel deep dives
 against the live working tree at **HEAD `20fb7539`** and **executed** the round-2
@@ -1029,11 +1029,90 @@ fix to *stick*; **P3** clears the 10-issue backlog only when paired with P2; **P
 conditional (#17 disposition + `gym_skipped` down-rank); **P5** optional throughput nicety.
 No new remediation is introduced.
 
+### 7l. Round-8 primary-investigator deep dive — HEAD-anchored token→signal-variant→provenance table, #17 temporal-staleness proof, and the xpia-defender repo-exists refinement (HEAD `ca20e29b`)
+
+This pass owns the assigned focus — the **signature-token → signal-variant → `file:line`
+provenance map** across `src/overseer/`, and a **fresh per-`goal:blocked` classification
+against live GitHub/board state**. It is anchored at the repo's current HEAD `ca20e29b`,
+with **every source line independently re-resolved** (not inherited from §7f/§7j's older
+`db02dd7b`/`c868d6bd` anchors). Only one non-Rust file changed since `941f40cc`
+(`.github/hooks/amplihack-hooks.json`, 6 ± lines), so every Rust anchor is byte-identical —
+verified by re-resolving each below. `cargo test --lib overseer::tests_memory_recall` →
+**36 passed, 0 failed** at this HEAD.
+
+**A. Authoritative token → signal-variant → provenance table (re-resolved at `ca20e29b`,
+push-line precision).** Each token maps to exactly one `Signal` variant (all emitted inside
+`signals_from`, `signal.rs:366`) and one `dedup_key` (assigned in `classify_signal`,
+`mod.rs:1251`). Where §7f/§7j cited the match-arm / gate *start*, this table cites the exact
+`out.push(…)` / `format!(…)` **emission line**:
+
+| Token | Signal variant (`signal.rs`) | Emission line | dedup_key (`mod.rs`) | Root input (provenance) |
+|---|---|---|---|---|
+| `overseer-obs:` prefix | — (assembler, not a signal) | — | `observation_signature` fmt `:1085`, called `:544`→`record_observation` `:552` | self write-back re-wrap (§4) |
+| `goal:blocked:{id}` (×7) | `GoalBlocked` | push `:441` | `format!("goal:blocked:{goal_id}")` `:1349` | `blocked_goals_from_board` `sensor.rs:204` → `blocked_goal_of` `:209` |
+| `quality:gym_skipped` | `GymSkipped` | push `:399` (gate `:398`) | `"quality:gym_skipped"` `:1295` | `gym_skipped` OR-fold `sensor.rs:125-126` ← `SIMARD_SKIP_GYM` |
+| `resource:engineer_spawn` | `EngineerSpawnRate` | push `:396` (gate `:393-394`) | `"resource:engineer_spawn"` `:1283` | `live_engineers` `capabilities.rs:81` |
+| `workstream-gap` | `WorkstreamGap` | push `:476` | `"workstream-gap"` `:1384` | `detect_workstream_gaps` `sensor.rs:288`; blocked goals excluded `:300` |
+| recalled composite (the `2×` driver) | `RecurringSignature` | push `:464` (tally `:456-460`, threshold `:463` = `2` `:362`) | `sanitize_recalled(signature)` `:1372` — the whole prior key | unfiltered self-recall `recall_episodic` `wiring.rs:1013`; `failure_signature` map `:1025` **drops provenance**; `RecalledEpisode` `capabilities.rs:607-615` has **no `source_label`** field; own write-back tagged `OVERSEER_SOURCE_LABEL` `wiring.rs:952`, stored `:1088` |
+
+Refinement vs. §7f/§7j: the emission anchors are `signal.rs:396/399/441/464/476` (the
+`out.push`), one-to-three lines below the arm/gate starts those tables cite
+(`:393-396`,`:398`,`:441`,`:463-467`,`:475`). Substance is unchanged; this is the precise
+byte-anchor at HEAD. `observer.rs` still emits **no** token (Decide-phase consumer only), as
+§7f noted.
+
+**B. Per-`goal:blocked` classification against live GitHub/board (re-read 2026-07-07
+~13:1x UTC).** Six kgpacks tokens + one contamination token:
+
+| `goal:blocked` token | Issue | Live state | Classification |
+|---|---|---|---|
+| `advance-…-full-parity-f29bb15c` | umbrella (no single issue) | standing goal, safeguard-parked | **stale safeguard-park** — un-satisfiable terminal done-gate, not tagged perpetual |
+| `…issue-16-ws1-full-pack-cve` | #16 | **CLOSED** 07-06T20:16:25Z | **stale park** |
+| `…issue-17-ws2-int8-pq-embed` | #17 | **OPEN**, `updatedAt` 07-02T23:22:49Z | **stale-premise dep-block** (see C) |
+| `…issue-18-ws3-versioned-rel` | #18 | **CLOSED** 07-06T10:33:04Z | **stale park** |
+| `…issue-21-ws6-resumable-pip` | #21 | **CLOSED** 07-06T13:29:03Z | **stale park** |
+| `…issue-22-ws7-sign-the-rele` | #22 | **CLOSED** 07-06T12:07:33Z | **stale park** |
+| `fix-rustsec-2026-0204-in-amplihack-xpia-defende` | (unrelated goal) | local-worktree park | **cross-goal contamination** (see D) |
+
+**4 of the 6 kgpacks blockers reference already-CLOSED issues**; only #17 is open — the
+board keeps five stale `goal:blocked` rows that `blocked_goals_from_board` (`sensor.rs:204`)
+re-emits every tick.
+
+**C. Temporal-staleness proof for #17 (new — sharper than §7i's prose reading).** #17's
+engineer `record_blocker` asserts "#16 still OPEN … no landed baseline." But #17's own
+`updatedAt` = **2026-07-02T23:22:49Z** while #16's `closedAt` = **2026-07-06T20:16:25Z** —
+so the block reason was authored **≈3.8 days BEFORE #16 closed** and has had **no event
+since** (`updatedAt_17 < closedAt_16`, and no post-close edit). The staleness is thus not
+inferred from the sentence — it is **provable from the timestamps**. This is the same
+missing done-gate/block-reconciliation defect as §1, demonstrated on a **non-safeguard**
+block by timestamp. (#17 remains legitimately deferrable as the flag-gated spike; the point
+is the block *premise* is unreconciled.)
+
+**D. The xpia-defender contamination token is a LOCAL-worktree park, not a missing repo
+(refines §7j-C/§7f).** Prior rounds framed `fix-rustsec-2026-0204-in-amplihack-xpia-defende`
+as a `NOT_A_REPO` resolver error (`error/display.rs:158`) and contrasted it with intact
+kgpacks routing. Refinement: **`rysweet/amplihack-xpia-defender` exists as a live public
+GitHub repo** (`gh repo view` → `{"name":"amplihack-xpia-defender","isPrivate":false}`). So
+the park is **not** a missing-GitHub-repo; the message reads `NOT_A_REPO:
+'…/amplihack-xpia-defender' is not inside a valid git worktree` — a **local checkout** that
+was never hydrated into a git worktree. The contamination *mechanism* (§7j-C: any
+board-`Blocked` goal is swept into the self-amplifying key) is unchanged; the token's **own**
+root cause is a local-worktree hydration gap, orthogonal to (and not evidence against) the
+kgpacks recurrence.
+
+**Verification footer.** HEAD `ca20e29b`; `cargo test --lib overseer::tests_memory_recall`
+→ **36 passed, 0 failed**; every table anchor re-resolved verbatim at HEAD; live GitHub
+re-read (#16/#18/#21/#22 CLOSED, #17 OPEN; 10-issue Simard tail unchanged — #2669/#2672/
+#2678/#2691/#2744/#2750/#2757/#2768/#2841/#2875, #2707 open); `rysweet/amplihack-xpia-defender`
+confirmed to exist. No prior finding overturned — §7l is strictly additive: HEAD-precise
+push-line anchors, a timestamp proof for #17, and the local-vs-remote refinement of the
+contamination token. Confidence **High**.
+
 ---
 
 ## 8. Provenance
 
-Investigation-only follow-up (investigation-workflow, rounds 1–7). No production
+Investigation-only follow-up (investigation-workflow, rounds 1–8). No production
 behavior was changed by this document. Round-1 established the structural cause
 ([`overseer-memory-recall-api`](./overseer-memory-recall-api.md)); round-2 added the
 semantic diagnosis and the executable H1/H2 tests; round-3 consolidated the parallel
@@ -1070,7 +1149,18 @@ tail (#2707 open), folded the §7j token decode / deterministic-sort / cross-goa
 contamination / whisper rule-out into §1/§4, and added the ambient lead-token drift across
 the tail (oldest four lead with `anomaly:distill parse-fail`, newer six with `goal:blocked:`)
 as fresh corroboration of the deterministic-sort and generational-growth findings — no
-finding overturned, no remediation-weighting change, confidence remains High.**
+finding overturned, no remediation-weighting change, confidence remains High; round-8
+primary-investigator deep dive (§7l, HEAD `ca20e29b`) re-resolved the full
+token→signal-variant→provenance map at the current HEAD with push-line precision
+(`signal.rs:396/399/441/464/476` emission lines; `mod.rs:1085/1283/1295/1349/1372/1384`;
+`wiring.rs:952/1013/1025/1088`; `capabilities.rs:81/607-615`; `sensor.rs:125-126/204/288/300`),
+re-ran the module (36 passed, 0 failed) at HEAD, re-read the live board (kgpacks-rs
+#16/#18/#21/#22 CLOSED, #17 OPEN — **4 of 6 blockers reference already-closed issues**),
+added a **timestamp proof** that #17's block premise is stale (`updatedAt` 07-02T23:22:49Z <
+#16 `closedAt` 07-06T20:16:25Z, no event since), and **refined** the xpia-defender
+contamination token from "missing repo" to a **local-worktree park** (`rysweet/amplihack-xpia-defender`
+verified to exist as a public GitHub repo; the `NOT_A_REPO` park is a local checkout not
+hydrated into a git worktree) — additive only, no finding overturned, confidence remains High.**
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
