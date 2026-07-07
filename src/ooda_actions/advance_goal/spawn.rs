@@ -7,10 +7,12 @@ use crate::agent_roles::AgentRole;
 use crate::agent_supervisor::{SubordinateConfig, spawn_subordinate};
 use crate::identity_composition::max_subordinate_depth;
 use crate::ooda_brain::{
-    BrainJudgmentRecord, EngineerLifecycleDecision, OodaBrain, apply_decision_to_state,
-    gather_engineer_lifecycle_ctx, push_brain_judgment,
+    AdmissionGate, BrainJudgmentRecord, EngineerLifecycleDecision, OodaAdmissionBrain, OodaBrain,
+    apply_decision_to_state, configured_ceiling_pct, gather_engineer_lifecycle_ctx,
+    gather_resource_admission_ctx, judge_and_resolve, push_brain_judgment,
 };
 use crate::ooda_loop::{ActionOutcome, OodaState, PlannedAction};
+use std::path::Path;
 
 use crate::ooda_actions::make_outcome;
 
@@ -84,12 +86,20 @@ pub(crate) fn lock_state<'g, 'a>(
 ///
 /// Honours `SIMARD_SUBORDINATE_DEPTH` vs. `SIMARD_MAX_SUBORDINATE_DEPTH`
 /// so a recursing supervisor does not spawn forever.
+///
+/// `admission` is the RESOURCE-AWARE admission reasoner consulted on the
+/// fresh-spawn path (after the count cap, before worktree allocation): it
+/// weighs disk / build-cache / load and decides ADMIT / DEFER / RECLAIM-FIRST,
+/// guarded by a deterministic disk hard-rail. `repo_root` locates the
+/// disk-health reclaim recipe invoked on RECLAIM-FIRST.
 pub fn dispatch_spawn_engineer(
     action: &PlannedAction,
     state: &Mutex<&mut OodaState>,
     goal_id: &str,
     task: &str,
     brain: &dyn OodaBrain,
+    admission: &dyn OodaAdmissionBrain,
+    repo_root: &Path,
 ) -> ActionOutcome {
     // Re-check assignment under a short exclusive state lock to prevent a
     // double-spawn race (two cycles/threads parsing spawn_engineer for the
@@ -122,11 +132,16 @@ pub fn dispatch_spawn_engineer(
     // clears the failure counter and makes FAILURE_PENALTY useless), consult
     // the prompt-driven brain. The brain reasons about whether to keep
     // skipping, reclaim, deprioritize, file an issue, or block the goal.
-    let state_root_inflight = engineer_worktree_state_root();
-    if let Some(live) = find_live_engineer_for_goal(&state_root_inflight, goal_id) {
+    // Resolve the engineer-worktree state root ONCE and reuse it for both the
+    // in-flight re-attach check below and the resource-admission gate further
+    // down. `engineer_worktree_state_root()` is a pure env-read + path-join, so
+    // this is a clarity win rather than a hot-path saving, but it removes a
+    // duplicate computation and keeps a single source of truth for the root.
+    let engineer_state_root = engineer_worktree_state_root();
+    if let Some(live) = find_live_engineer_for_goal(&engineer_state_root, goal_id) {
         let ctx = {
             let guard = lock_state(state);
-            gather_engineer_lifecycle_ctx(&guard, &state_root_inflight, goal_id, &live)
+            gather_engineer_lifecycle_ctx(&guard, &engineer_state_root, goal_id, &live)
         };
         // NO FALLBACK: brain.decide_engineer_lifecycle Err must surface as a
         // visible cycle failure (operator constraint, issue #1711, #1748).
@@ -290,6 +305,117 @@ pub fn dispatch_spawn_engineer(
                 "spawn_engineer denied for goal '{goal_id}': subordinate depth {current_depth} >= configured limit {depth_limit}"
             ),
         );
+    }
+
+    // ── RESOURCE-AWARE admission gate (fresh-spawn only) ─────────────────
+    //
+    // The AIMD scaler bounds engineer COUNT; nothing above this point weighs
+    // DISK / build-cache / system load. On a busy host that gap let 40+ cargo
+    // build caches pile up and drove disk to 91% → ENOSPC killed recipes.
+    // Before allocating another worktree, gather the resource picture and ask
+    // the admission brain to reason ADMIT / DEFER / RECLAIM-FIRST — repeated
+    // structured thought at every admission, following the same
+    // gather→reason→apply pattern as the engineer-lifecycle brain above. The
+    // *intelligence* lives in the recipe/prompt; the only deterministic code
+    // here is a THIN disk hard-rail inside `judge_and_resolve` that blocks
+    // admission when disk% is known to be at/over the ceiling, regardless of
+    // what the brain decided (irreversible ENOSPC must never be reachable).
+    //
+    // Placed AFTER the count cap + depth guard and BEFORE worktree allocation
+    // (and before target-repo resolution) so a DEFER grows nothing. Both
+    // dispatch call sites inherit this gate. The live-engineer re-attach branch
+    // above is exempt — it allocates no new resources.
+    {
+        let ceiling = configured_ceiling_pct();
+        let admission_ctx = gather_resource_admission_ctx(&engineer_state_root, ceiling);
+        match judge_and_resolve(admission, &admission_ctx) {
+            Ok(AdmissionGate::Proceed) => {
+                // Admitted — emit an observability record and fall through to
+                // the normal spawn path below.
+                push_brain_judgment(BrainJudgmentRecord::from_admission(
+                    goal_id,
+                    "admit",
+                    "resources healthy; admitting fresh engineer",
+                    "",
+                ));
+            }
+            Ok(AdmissionGate::Defer { reason }) => {
+                // Benign skip: NO worktree, NO failure-count bump (success=true,
+                // see cycle.rs). The goal is simply retried next cycle. A
+                // resource defer is neither progress nor failure.
+                tracing::info!(
+                    target: "simard::ooda_brain",
+                    goal = %goal_id,
+                    reason = %reason,
+                    "resource-aware admission: DEFER (benign skip — no worktree, no failure)",
+                );
+                push_brain_judgment(BrainJudgmentRecord::from_admission(
+                    goal_id, "defer", &reason, "",
+                ));
+                return make_outcome(
+                    action,
+                    true,
+                    format!("deferred: resource pressure: {reason}"),
+                );
+            }
+            Ok(AdmissionGate::Reclaim { reason }) => {
+                // Reclaim disk first (reuse the existing disk-health recipe),
+                // then DEFER this cycle and re-evaluate next cycle. Still a
+                // benign skip (no worktree, no failure-count bump). A reclaim
+                // failure is logged but never turned into a cycle failure — we
+                // defer regardless so a deferred cycle grows nothing.
+                tracing::warn!(
+                    target: "simard::ooda_brain",
+                    goal = %goal_id,
+                    reason = %reason,
+                    "resource-aware admission: RECLAIM-FIRST (running disk-health reclaim, then defer)",
+                );
+                push_brain_judgment(BrainJudgmentRecord::from_admission(
+                    goal_id, "reclaim", &reason, "",
+                ));
+                match crate::disk_health::run_disk_health_check(
+                    repo_root,
+                    &engineer_state_root,
+                    None,
+                ) {
+                    Ok(report) => {
+                        tracing::info!(
+                            target: "simard::ooda_brain",
+                            goal = %goal_id,
+                            "disk-health reclaim completed; deferring this cycle to re-evaluate next cycle: {}",
+                            report.summary(),
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "simard::ooda_brain",
+                            goal = %goal_id,
+                            error = %e,
+                            "disk-health reclaim recipe failed (still deferring this cycle)",
+                        );
+                    }
+                }
+                return make_outcome(action, true, format!("deferred: reclaim-first: {reason}"));
+            }
+            Err(e) => {
+                // NO FALLBACK: a broken admission brain must surface as a
+                // visible cycle failure, never a silent phantom admit that
+                // could fill the disk (mirrors the lifecycle NO-FALLBACK
+                // contract). success=false → cycle.rs bumps the failure count.
+                tracing::error!(
+                    target: "simard::ooda_brain",
+                    goal = %goal_id,
+                    error = %e,
+                    "resource-aware admission brain FAILED — surfacing as cycle failure (NO silent admit)",
+                );
+                eprintln!("[simard] RESOURCE-ADMISSION BRAIN FAILURE goal={goal_id} error={e}");
+                return make_outcome(
+                    action,
+                    false,
+                    format!("resource-admission brain failure: {e}"),
+                );
+            }
+        }
     }
 
     let agent_name = build_engineer_name(goal_id);

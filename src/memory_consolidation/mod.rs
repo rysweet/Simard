@@ -981,6 +981,15 @@ pub mod scheduler;
 #[cfg(test)]
 mod distillation_tests;
 
+// Issues #2622 / #2619: hermetic TDD tests for the structured file-channel that
+// replaces stdout-scraping of the distill agent's `{ "facts": [...] }` output.
+// Pins that a launcher banner / log noise on stdout can NEVER cause a
+// parse-failure (the facts are read from a dedicated file), that a genuinely
+// empty batch is a SUCCESS not a parse-failure, and that a missing/empty/
+// unparseable file surfaces an explicit ParseFailure (no silent fallback).
+#[cfg(test)]
+mod distillation_file_channel_tests;
+
 // Perpetual-cognition sub-goal: raise distillation fact-yield. A deterministic,
 // DB-free benchmark that records a baseline facts-per-consolidation-input number
 // over a fixed sample corpus and proves the concept-canonicalization change

@@ -214,8 +214,9 @@ pub fn run_ooda_daemon(
     let brain = brains::build_act_brain(&state_root, &repo_root);
     let decide_brain = brains::build_decide_brain(&state_root, &repo_root);
     let orient_brain = brains::build_orient_brain(&state_root, &repo_root);
+    let admission_brain = brains::build_admission_brain(&state_root, &repo_root);
 
-    // After all three brains are constructed, surface the cumulative
+    // After all four brains are constructed, surface the cumulative
     // fallback count in the dashboard. Nonzero == daemon is running in
     // degraded mode (see issues #1711, #1748). Future health endpoints
     // should refuse "healthy" when this is nonzero.
@@ -224,13 +225,13 @@ pub fn run_ooda_daemon(
         daemon_log(
             &state_root,
             &format!(
-                "[simard] OODA daemon: DEGRADED MODE — {degraded}/3 brains fell back to deterministic (see issues #1711, #1748)"
+                "[simard] OODA daemon: DEGRADED MODE — {degraded}/4 brains fell back to deterministic (see issues #1711, #1748)"
             ),
         );
     } else {
         daemon_log(
             &state_root,
-            "[simard] OODA daemon: all 3 brains LLM-backed (no fallback in use)",
+            "[simard] OODA daemon: all 4 brains LLM-backed (no fallback in use)",
         );
     }
 
@@ -344,6 +345,7 @@ pub fn run_ooda_daemon(
         repo_root,
         progress_evidence,
         completion_evidence,
+        admission_brain: Some(admission_brain),
     };
 
     // Issue #1: the authoritative goal board lives in
@@ -1536,6 +1538,7 @@ mod tests {
                 crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
             ),
             completion_evidence: None,
+            admission_brain: None,
         }
     }
 

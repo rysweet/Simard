@@ -41,6 +41,9 @@ pub enum BrainPhase {
     /// Recipe-backed merge-readiness judge (`simard merge-pr`). Serialises as
     /// `"merge_judge"`.
     MergeJudge,
+    /// Recipe-backed RESOURCE-AWARE engineer admission (fresh-spawn gate).
+    /// Serialises as `"resource_admission"`.
+    ResourceAdmission,
 }
 
 impl BrainPhase {
@@ -54,6 +57,7 @@ impl BrainPhase {
             BrainPhase::Decide => "decide",
             BrainPhase::Orient => "orient",
             BrainPhase::MergeJudge => "merge_judge",
+            BrainPhase::ResourceAdmission => "resource_admission",
         }
     }
 }
@@ -234,6 +238,29 @@ impl BrainJudgmentRecord {
             rationale: judgment.rationale.clone(),
             confidence: judgment.confidence as f32,
             fallback,
+            prompt_version: prompt_version.into(),
+            parse_failure: None,
+        }
+    }
+
+    /// Build a ResourceAdmission-phase record from the resolved admission gate.
+    /// Emitted for observability at every fresh-spawn admission cycle so the
+    /// ADMIT / DEFER / RECLAIM-FIRST reasoning is inspectable in cycle reports.
+    /// `label` is the stable snake_case gate label (`admit` / `defer` /
+    /// `reclaim`); `reason` is the brain's (or hard-rail's) rationale.
+    pub fn from_admission(
+        goal_id: &str,
+        label: &str,
+        reason: &str,
+        prompt_version: impl Into<String>,
+    ) -> Self {
+        Self {
+            phase: BrainPhase::ResourceAdmission,
+            context_summary: truncate(&format!("resource-admission goal_id={goal_id}")),
+            decision: label.to_string(),
+            rationale: reason.to_string(),
+            confidence: 1.0,
+            fallback: false,
             prompt_version: prompt_version.into(),
             parse_failure: None,
         }

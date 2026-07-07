@@ -415,6 +415,35 @@ impl EmailSender for TcpSmtpSender {
     }
 }
 
+/// Fold any CR/LF out of an SMTP header value or envelope address (replace with
+/// a space). Prevents **SMTP header / command injection**: an embedded newline
+/// in a subject, From/To display value, or envelope address could otherwise
+/// inject extra headers (e.g. `Bcc:`) or raw SMTP commands into the stream.
+/// Notification subjects/addresses now carry board-derived, potentially
+/// LLM-influenced goal text, so this is enforced at the transport sink for every
+/// notification kind.
+fn sanitize_smtp_field(value: &str) -> String {
+    value.replace(['\r', '\n'], " ")
+}
+
+/// Apply SMTP dot-stuffing (RFC 5321 §4.5.2) to an already CRLF-normalized body:
+/// any line beginning with `.` gets an extra leading `.`. Without this, a body
+/// line consisting of a lone `.` would terminate the DATA section early and let
+/// following body content be interpreted as SMTP commands — the message body now
+/// carries attacker-influenceable `reason` text, so it must be escaped.
+fn dot_stuff_body(body: &str) -> String {
+    body.split("\r\n")
+        .map(|line| {
+            if line.starts_with('.') {
+                format!(".{line}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n")
+}
+
 /// Minimal plaintext SMTP conversation. Kept small and defensive.
 fn smtp_send_plaintext(host: &str, port: u16, msg: &EmailMessage) -> Result<(), String> {
     use std::io::{BufRead, BufReader, Write};
@@ -447,10 +476,11 @@ fn smtp_send_plaintext(host: &str, port: u16, msg: &EmailMessage) -> Result<(), 
     expect(&mut reader, 2)?; // greeting 220
     writeln!(writer, "EHLO simard-overseer").map_err(|e| e.to_string())?;
     expect(&mut reader, 2)?;
-    writeln!(writer, "MAIL FROM:<{}>", msg.from).map_err(|e| e.to_string())?;
+    writeln!(writer, "MAIL FROM:<{}>", sanitize_smtp_field(&msg.from))
+        .map_err(|e| e.to_string())?;
     expect(&mut reader, 2)?;
     for rcpt in &msg.to {
-        writeln!(writer, "RCPT TO:<{rcpt}>").map_err(|e| e.to_string())?;
+        writeln!(writer, "RCPT TO:<{}>", sanitize_smtp_field(rcpt)).map_err(|e| e.to_string())?;
         expect(&mut reader, 2)?;
     }
     writeln!(writer, "DATA").map_err(|e| e.to_string())?;
@@ -458,10 +488,10 @@ fn smtp_send_plaintext(host: &str, port: u16, msg: &EmailMessage) -> Result<(), 
     write!(
         writer,
         "From: {}\r\nTo: {}\r\nSubject: {}\r\n\r\n{}\r\n.\r\n",
-        msg.from,
-        msg.to.join(", "),
-        msg.subject,
-        msg.body.replace("\r\n", "\n").replace('\n', "\r\n"),
+        sanitize_smtp_field(&msg.from),
+        sanitize_smtp_field(&msg.to.join(", ")),
+        sanitize_smtp_field(&msg.subject),
+        dot_stuff_body(&msg.body.replace("\r\n", "\n").replace('\n', "\r\n")),
     )
     .map_err(|e| e.to_string())?;
     expect(&mut reader, 2)?; // 250 accepted
@@ -600,6 +630,28 @@ mod tests {
         assert!(body.contains("abcdef1234567890"));
         assert!(body.contains("0011223344556677"));
         assert!(body.contains("canary green"));
+    }
+
+    // ── SMTP wire-format hardening (injection defenses) ───────────────────────
+
+    #[test]
+    fn sanitize_smtp_field_folds_crlf_to_space() {
+        // A CRLF-bearing subject must not be able to inject a second header.
+        let injected = "needs review\r\nBcc: attacker@evil.test";
+        let safe = super::sanitize_smtp_field(injected);
+        assert!(!safe.contains('\r') && !safe.contains('\n'));
+        assert_eq!(safe, "needs review  Bcc: attacker@evil.test");
+    }
+
+    #[test]
+    fn dot_stuff_body_escapes_leading_dot_lines() {
+        // A lone "." line (or any leading-dot line) must be escaped so it cannot
+        // terminate the DATA section early and smuggle SMTP commands.
+        let body = "line one\r\n.\r\n.MAIL FROM:<x>\r\nnormal";
+        let stuffed = super::dot_stuff_body(body);
+        assert_eq!(stuffed, "line one\r\n..\r\n..MAIL FROM:<x>\r\nnormal");
+        // A body that does not begin lines with '.' is left byte-for-byte intact.
+        assert_eq!(super::dot_stuff_body("a\r\nb\r\nc"), "a\r\nb\r\nc");
     }
 
     // ── fakes ────────────────────────────────────────────────────────────────

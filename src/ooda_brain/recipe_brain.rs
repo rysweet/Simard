@@ -22,6 +22,7 @@ use std::process::Command;
 
 use serde::Deserialize;
 
+use super::admission::{AdmissionDecision, OodaAdmissionBrain, ResourceAdmissionCtx};
 use super::decide::{DecideContext, DecideJudgment, OodaDecideBrain};
 use super::orient::{
     FAILURE_PENALTY_PER_CONSECUTIVE, OodaOrientBrain, OrientContext, OrientJudgment,
@@ -46,6 +47,13 @@ const MAX_RATIONALE_CHARS: usize = 500;
 /// (issue #2419). `value` is always `1.0`; the `outcome` label in the context
 /// JSON is the numerator/denominator signal.
 const LIFECYCLE_DECISION_METRIC: &str = "brain_lifecycle_decision";
+
+/// Metric emitted once per resource-aware admission decision (fresh-spawn gate)
+/// so the ADMIT / DEFER / RECLAIM-FIRST distribution and the hard-rail block
+/// rate are measurable from `metrics.jsonl`. `value` is always `1.0`; the
+/// context JSON carries `{choice, disk_usage_pct, in_flight_engineers,
+/// ceiling_pct}`. Mirrors [`LIFECYCLE_DECISION_METRIC`].
+const ADMISSION_DECISION_METRIC: &str = "brain_admission_decision";
 
 /// Shared metric emitted once per recipe-backed brain phase invocation
 /// (decide / orient / merge-judge) so the verdict/decision parse-success rate
@@ -848,6 +856,147 @@ impl OodaOrientBrain for RecipeBrain {
             termination,
             attempts,
         )
+    }
+}
+
+impl OodaAdmissionBrain for RecipeBrain {
+    /// RESOURCE-AWARE engineer admission — the agentic augmentation of the AIMD
+    /// count cap. Invoke `recipe-runner-rs --output-format json` on
+    /// `ooda-resource-admission.yaml`, parse the agent's structured
+    /// `{"choice": "...", "rationale": "..."}` decision, and return it.
+    ///
+    /// **NO FALLBACK** (operator zero-fallback contract): a recipe-runner
+    /// failure OR an unparseable decision surfaces as an explicit `Err`. The
+    /// admission seam then treats a broken brain as a visible failure — it must
+    /// never silently become a phantom `admit` that could fill the disk. The
+    /// deterministic hard rail in [`super::admission::resolve_admission`] still
+    /// guards ENOSPC over any `Admit` this brain returns.
+    fn judge_admission(&self, ctx: &ResourceAdmissionCtx) -> SimardResult<AdmissionDecision> {
+        let raw = self.invoke_admission_raw(ctx)?;
+        let decision =
+            parse_admission_decision(&raw).ok_or_else(|| SimardError::AdapterInvocationFailed {
+                base_type: self.adapter_tag.to_string(),
+                reason: format!(
+                    "no parseable admission decision in recipe output (expected \
+                     {{\"choice\":\"admit|defer|reclaim_first\",\"rationale\":\"...\"}}); \
+                     raw={}",
+                    truncate(raw.trim(), MAX_RATIONALE_CHARS)
+                ),
+            })?;
+        record_admission_decision_metric(ctx, &decision);
+        Ok(decision)
+    }
+}
+
+impl RecipeBrain {
+    /// Invoke the admission recipe once, returning the agent's raw decision
+    /// text (the JSON envelope's final step output). Genuine recipe-runner
+    /// failures (spawn / nonzero exit / envelope decode) propagate as `Err`.
+    ///
+    /// The full [`ResourceAdmissionCtx`] is passed as `-c` context vars so the
+    /// prompt can reason over disk %, build-cache size, load-per-core, and
+    /// in-flight builds. `None` probes render as the literal `unknown` so the
+    /// prompt can weigh missing signals explicitly.
+    fn invoke_admission_raw(&self, ctx: &ResourceAdmissionCtx) -> SimardResult<String> {
+        let opt_u8 = |v: Option<u8>| v.map(|n| n.to_string()).unwrap_or_else(|| "unknown".into());
+        let opt_u64 = |v: Option<u64>| v.map(|n| n.to_string()).unwrap_or_else(|| "unknown".into());
+        let opt_f64 = |v: Option<f64>| {
+            v.map(|n| format!("{n:.2}"))
+                .unwrap_or_else(|| "unknown".into())
+        };
+        let opt_usize =
+            |v: Option<usize>| v.map(|n| n.to_string()).unwrap_or_else(|| "unknown".into());
+
+        let output = Command::new("recipe-runner-rs")
+            .arg(self.recipe_path.as_os_str())
+            .arg("--output-format")
+            .arg("json")
+            .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
+            .arg("-c")
+            .arg(format!("disk_usage_pct={}", opt_u8(ctx.disk_usage_pct)))
+            .arg("-c")
+            .arg(format!(
+                "worktree_cache_bytes={}",
+                opt_u64(ctx.worktree_cache_bytes)
+            ))
+            .arg("-c")
+            .arg(format!("load_avg_1m={}", opt_f64(ctx.load_avg_1m)))
+            .arg("-c")
+            .arg(format!("cpu_count={}", opt_usize(ctx.cpu_count)))
+            .arg("-c")
+            .arg(format!("in_flight_engineers={}", ctx.in_flight_engineers))
+            .arg("-c")
+            .arg(format!("ceiling_pct={}", ctx.ceiling_pct))
+            .output()
+            .map_err(|e| SimardError::AdapterInvocationFailed {
+                base_type: self.adapter_tag.to_string(),
+                reason: format!("recipe-runner-rs spawn failed: {e}"),
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(SimardError::AdapterInvocationFailed {
+                base_type: self.adapter_tag.to_string(),
+                reason: format!(
+                    "recipe exited with {}: {}",
+                    output.status,
+                    truncate(&stderr, MAX_RATIONALE_CHARS)
+                ),
+            });
+        }
+
+        extract_recipe_decision_output(&output.stdout, self.adapter_tag)
+    }
+}
+
+/// Parse the admission reasoner's raw output into an [`AdmissionDecision`].
+///
+/// Routes through the shared #2484 sanitizing chokepoint
+/// ([`crate::recipe_output::extract_json_payload`]) so a banner/log-polluted
+/// `{"choice": "...", "rationale": "..."}` object still parses, then
+/// deserializes it directly into the tagged [`AdmissionDecision`] enum. Returns
+/// `None` when no well-formed decision object is present — the caller surfaces
+/// that as an explicit `Err` (NO silent default admission).
+fn parse_admission_decision(text: &str) -> Option<AdmissionDecision> {
+    let payload = crate::recipe_output::extract_json_payload(text)?;
+    serde_json::from_str::<AdmissionDecision>(&payload).ok()
+}
+
+/// Build the JSON `context` payload for the `brain_admission_decision` metric.
+/// Separated from I/O so the payload shape can be unit-tested without touching
+/// the real `metrics.jsonl`.
+fn build_admission_metric_context(
+    ctx: &ResourceAdmissionCtx,
+    decision: &AdmissionDecision,
+) -> String {
+    serde_json::json!({
+        "choice": decision.label(),
+        "disk_usage_pct": ctx.disk_usage_pct,
+        "worktree_cache_bytes": ctx.worktree_cache_bytes,
+        "load_avg_1m": ctx.load_avg_1m,
+        "cpu_count": ctx.cpu_count,
+        "in_flight_engineers": ctx.in_flight_engineers,
+        "ceiling_pct": ctx.ceiling_pct,
+    })
+    .to_string()
+}
+
+/// Record one `brain_admission_decision` metric event (value `1.0`) per
+/// admission decision. Best-effort: a metrics-write failure is logged, never
+/// propagated. No-op under `cfg!(test)` so unit tests never append to the
+/// operator's real `metrics.jsonl`.
+fn record_admission_decision_metric(ctx: &ResourceAdmissionCtx, decision: &AdmissionDecision) {
+    if cfg!(test) {
+        return;
+    }
+    let context = build_admission_metric_context(ctx, decision);
+    if let Err(e) = crate::self_metrics::record_metric(ADMISSION_DECISION_METRIC, 1.0, &context) {
+        tracing::warn!(
+            target: "simard::ooda_brain",
+            error = %e,
+            choice = decision.label(),
+            "failed to record brain_admission_decision metric (decision unaffected)",
+        );
     }
 }
 
@@ -2088,6 +2237,94 @@ mod tests {
             msg.contains("recipe-decide-brain"),
             "error should contain the adapter tag; got: {msg}"
         );
+    }
+
+    // ===================================================================
+    // Resource-aware admission — parse seam + metric payload + NO FALLBACK
+    // ===================================================================
+
+    fn admission_ctx() -> ResourceAdmissionCtx {
+        ResourceAdmissionCtx {
+            disk_usage_pct: Some(42),
+            worktree_cache_bytes: Some(1_024),
+            load_avg_1m: Some(3.1),
+            cpu_count: Some(16),
+            in_flight_engineers: 2,
+            ceiling_pct: 90,
+        }
+    }
+
+    #[test]
+    fn parse_admission_decision_reads_all_three_choices() {
+        let admit = parse_admission_decision(r#"{"choice":"admit","rationale":"headroom"}"#)
+            .expect("admit parses");
+        assert!(matches!(admit, AdmissionDecision::Admit { .. }));
+
+        let defer = parse_admission_decision(r#"{"choice":"defer","rationale":"tight"}"#)
+            .expect("defer parses");
+        assert!(matches!(defer, AdmissionDecision::Defer { .. }));
+
+        let reclaim =
+            parse_admission_decision(r#"{"choice":"reclaim_first","rationale":"stale cache"}"#)
+                .expect("reclaim parses");
+        assert!(matches!(reclaim, AdmissionDecision::ReclaimFirst { .. }));
+    }
+
+    #[test]
+    fn parse_admission_decision_recovers_from_banner_and_fence() {
+        // The agent step output routinely wraps the JSON in a ```json fence and
+        // a runner banner; the shared #2484 chokepoint must still recover it.
+        let raw = "Recipe: ooda-resource-admission SUCCESS\n```json\n{\"choice\": \"defer\", \"rationale\": \"load 2.1/core\"}\n```\n";
+        let d = parse_admission_decision(raw).expect("banner-wrapped JSON must parse");
+        assert_eq!(d.label(), "defer");
+    }
+
+    #[test]
+    fn parse_admission_decision_none_for_unparseable() {
+        // No default admission: garbage / unknown tag / empty must be None so
+        // the caller surfaces an explicit Err (never a phantom admit).
+        assert!(parse_admission_decision("").is_none());
+        assert!(parse_admission_decision("not json at all").is_none());
+        assert!(
+            parse_admission_decision(r#"{"choice":"launch_the_missiles","rationale":"x"}"#)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn judge_admission_surfaces_error_no_fallback() {
+        // A recipe-runner failure (nonexistent recipe) must surface as Err,
+        // NEVER a silent Admit that could fill the disk.
+        let brain = RecipeBrain {
+            recipe_path: PathBuf::from("/nonexistent/recipe.yaml"),
+            agent_binary: "copilot",
+            adapter_tag: "recipe-resource-admission-brain",
+        };
+        let result = brain.judge_admission(&admission_ctx());
+        assert!(
+            result.is_err(),
+            "broken admission brain must Err, not phantom-admit: {result:?}"
+        );
+        assert!(
+            format!("{}", result.unwrap_err()).contains("recipe-resource-admission-brain"),
+            "error should name the adapter tag"
+        );
+    }
+
+    #[test]
+    fn admission_metric_context_carries_choice_and_numbers() {
+        let ctx = admission_ctx();
+        let json = build_admission_metric_context(
+            &ctx,
+            &AdmissionDecision::Defer {
+                rationale: "tight".to_string(),
+            },
+        );
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(v["choice"], "defer");
+        assert_eq!(v["disk_usage_pct"], 42);
+        assert_eq!(v["in_flight_engineers"], 2);
+        assert_eq!(v["ceiling_pct"], 90);
     }
 
     #[test]

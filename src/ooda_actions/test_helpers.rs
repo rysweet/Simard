@@ -149,6 +149,7 @@ pub(crate) fn test_bridges() -> OodaBridges {
             crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
         ),
         completion_evidence: None,
+        admission_brain: None,
     }
 }
 
@@ -210,5 +211,6 @@ pub(crate) fn bridges_with_session(session: MockSession) -> OodaBridges {
             crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
         ),
         completion_evidence: None,
+        admission_brain: None,
     }
 }

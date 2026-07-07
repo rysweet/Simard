@@ -223,7 +223,7 @@ pub fn emergency_cleanup(repo_root: &Path, state_root: &Path) -> Option<DiskHeal
 }
 
 /// Get disk usage percentage for the filesystem containing `path`.
-fn get_disk_usage_pct(path: &Path) -> Option<u8> {
+pub(crate) fn get_disk_usage_pct(path: &Path) -> Option<u8> {
     let output = Command::new("df")
         .arg("--output=pcent")
         .arg(path)

@@ -1,0 +1,158 @@
+# ooda-resource-admission.yaml — Recipe-runner recipe for the OODA
+# RESOURCE-AWARE engineer admission brain (fresh-spawn gate).
+#
+# WHY THIS EXISTS
+# The AIMD adaptive scaler bounds how MANY engineers run concurrently, but a
+# count cap cannot see a full disk, a thrashing load average, or a cargo build
+# cache that has quietly grown to tens of gigabytes. On a busy self-improvement
+# host that gap bit hard: 40+ engineer worktrees accumulated, parallel `cargo`
+# builds piled up, disk climbed to 91%, and the next allocation tripped ENOSPC
+# (No space left on device) — which kills recipes mid-flight. Count-control is
+# necessary but NOT sufficient; admission must also weigh RESOURCES.
+#
+# This recipe is the intelligence for that admission decision. It runs at EVERY
+# fresh-engineer spawn (repeated structured thought), reasons over the current
+# resource picture, and emits exactly one of ADMIT / DEFER / RECLAIM-FIRST.
+#
+# The Rust shim (src/ooda_brain/recipe_brain.rs :: judge_admission) parses the
+# structured JSON decision below into an `AdmissionDecision`. A THIN
+# deterministic hard-rail in Rust (src/ooda_brain/admission.rs ::
+# resolve_admission) sits BELOW this reasoning: if disk% is known to be at/above
+# `ceiling_pct`, admission is refused regardless of what you decide here. You
+# can only ever be made MORE conservative by the rail, never less — so you never
+# have to hedge toward safety on disk; state your honest judgment.
+#
+# Context vars (passed via -c). Any probe that failed on the host renders as the
+# literal string `unknown`; weigh an `unknown` explicitly rather than assuming
+# the best case:
+#   disk_usage_pct        — % full of the state/worktree filesystem (0-100)
+#   worktree_cache_bytes  — total bytes under the engineer-worktrees/build-cache
+#   load_avg_1m           — 1-minute system load average
+#   cpu_count             — logical CPU count (normalize load per core)
+#   in_flight_engineers   — engineers already running this cycle
+#   ceiling_pct           — the deterministic disk hard-rail ceiling in effect
+#
+# Output: a single JSON object (see OUTPUT FORMAT) as the agent step output.
+
+name: "ooda-resource-admission"
+description: "OODA resource-aware engineer admission — ADMIT / DEFER / RECLAIM-FIRST"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "ooda", "admission", "resource-aware"]
+
+context: {}
+
+steps:
+  - id: "resource-admission-decision"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      # OODA Brain — Resource-Aware Engineer Admission
+
+      ## ROLE
+
+      You are the brain of Simard's OODA daemon. A goal has already passed the
+      AIMD engineer-COUNT cap and is about to spawn a FRESH engineer, which will
+      allocate a new git worktree and (very likely) kick off a parallel `cargo`
+      build with its own multi-gigabyte target cache. Before that allocation
+      happens, decide whether this host can currently AFFORD one more engineer.
+
+      Your job is resource ADMISSION, not count control. The count question was
+      already answered "yes" upstream. You answer the different question: **"can
+      this host afford one more engineer RIGHT NOW, given disk / build-cache /
+      load?"** Judge on the live numbers below, not on habit.
+
+      ## CONTEXT (current resource picture)
+
+      - disk_usage_pct: {{disk_usage_pct}}      # % full; `unknown` if the probe failed
+      - worktree_cache_bytes: {{worktree_cache_bytes}}  # bytes under engineer-worktrees / build caches
+      - load_avg_1m: {{load_avg_1m}}            # 1-minute load average
+      - cpu_count: {{cpu_count}}                # logical CPUs (load_avg_1m / cpu_count = load-per-core)
+      - in_flight_engineers: {{in_flight_engineers}}   # engineers already running this cycle
+      - ceiling_pct: {{ceiling_pct}}            # deterministic disk hard-rail ceiling
+
+      ## HOW TO REASON
+
+      Weigh three signals together — no single hardcoded threshold, that is the
+      whole point of doing this agentically:
+
+      1. **Disk headroom.** The dominant, irreversible risk is ENOSPC. The closer
+         `disk_usage_pct` is to `ceiling_pct`, the less headroom another build
+         cache leaves. Well below the ceiling with room to spare → disk is not a
+         reason to hold back. Approaching the ceiling → be cautious. At/above the
+         ceiling the deterministic rail will block you anyway, but if the disk is
+         high AND the growth is clearly reclaimable (a large `worktree_cache_bytes`
+         from stale worktrees / build caches), prefer RECLAIM-FIRST so the next
+         cycle has room, rather than a bare DEFER that just spins.
+      2. **Build-cache size.** A large `worktree_cache_bytes` relative to the
+         disk means much of the disk pressure is *reclaimable* (stale worktrees,
+         `target/` dirs) rather than load-bearing. That favors RECLAIM-FIRST over
+         DEFER when disk is tight, and is reassuring (reclaim is available) when
+         disk is moderate.
+      3. **System load.** Compare `load_avg_1m` to `cpu_count`. Load per core well
+         under ~1.0 means CPU headroom for another parallel build; load per core
+         well above ~1.5-2.0 means the host is already saturated and another
+         build would thrash without finishing faster. Many `in_flight_engineers`
+         plus high load is a strong DEFER signal even when disk is fine.
+
+      Treat any `unknown` field as a genuine unknown: do not assume it is
+      healthy. If disk is `unknown` you have lost your primary safety signal, so
+      lean conservative (DEFER) unless load and in-flight counts are clearly low.
+
+      ## OPTIONS — pick exactly one `choice`
+
+      - `admit` — Resources are healthy enough to add an engineer now. Disk has
+        clear headroom below the ceiling AND load-per-core leaves room for another
+        build. This is the normal, healthy answer; use it whenever the numbers
+        genuinely support it. Do NOT reflexively hold back — throttling a healthy
+        host wastes throughput.
+      - `defer` — Resources are tight and adding an engineer now is unwise (high
+        load-per-core, many in-flight engineers, or disk near the ceiling with
+        little reclaimable cache). A benign skip: no worktree is allocated, the
+        goal is simply retried next cycle, and this is NOT counted as a failure.
+      - `reclaim_first` — Disk pressure is high but clearly RECLAIMABLE (a large
+        build-cache / worktree footprint). Run disk reclamation first, then defer
+        this cycle and re-evaluate next cycle once space is freed.
+
+      ## OUTPUT FORMAT
+
+      Respond with a SINGLE JSON object of this exact shape (a fenced ```json
+      block is fine; the daemon strips any surrounding banner/prose before
+      parsing):
+
+      ```json
+      {"choice": "<admit|defer|reclaim_first>", "rationale": "<one concise sentence citing the numbers you weighed>"}
+      ```
+
+      `choice` MUST be exactly one of `admit`, `defer`, `reclaim_first`. There is
+      NO default: if your output is unparseable the daemon surfaces an explicit
+      error (and does NOT silently admit — an accidental admit could fill the
+      disk). Always cite the concrete numbers you weighed in the rationale so the
+      decision is auditable.
+
+      ## EXAMPLES
+
+      Healthy host — admit:
+
+      ```json
+      {"choice": "admit", "rationale": "disk 42% (ceiling 90), load 3.1 over 16 cpus = 0.19/core, 2 engineers in flight — ample headroom"}
+      ```
+
+      Saturated host — defer:
+
+      ```json
+      {"choice": "defer", "rationale": "disk 61% is fine but load 34 over 16 cpus = 2.1/core with 8 engineers in flight; another build would thrash, retry next cycle"}
+      ```
+
+      Tight but reclaimable disk — reclaim_first:
+
+      ```json
+      {"choice": "reclaim_first", "rationale": "disk 88% near ceiling 90, but worktree_cache_bytes is 210GB of stale caches — reclaim then re-evaluate rather than block"}
+      ```
+
+      Lost disk signal — conservative defer:
+
+      ```json
+      {"choice": "defer", "rationale": "disk_usage_pct unknown so primary safety signal is gone; with 6 engineers in flight, defer one cycle rather than risk ENOSPC"}
+      ```
+    output: "admission_result"

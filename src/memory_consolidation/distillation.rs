@@ -814,7 +814,15 @@ pub fn classify_distill_error(err: &SimardError) -> DistillFailureClass {
         DistillFailureClass::RecipeReportedFailure
     } else if msg.starts_with("distill: `distill` step output did not contain a parseable")
         || msg.starts_with("distill: recipe run did not yield a parseable")
+        || msg.starts_with("distill: distill step produced no parseable facts file")
     {
+        // The structured file-channel manifestations (issues #2622, #2619): the
+        // recipe process exited 0 but the distill agent's dedicated facts-output
+        // file was missing / empty / not parseable JSON. This is the *same*
+        // failure mode as the legacy stdout parse miss — the run reached output
+        // parsing but yielded no facts — so it maps to `ParseFailure` (transient,
+        // in-cycle retried, counted in `distill_parse_success_rate`), never a
+        // silent success.
         DistillFailureClass::ParseFailure
     } else {
         DistillFailureClass::Other
@@ -1252,6 +1260,121 @@ pub(crate) fn parse_recipe_output_full(raw: &str) -> SimardResult<DistillOutput>
         "distill: recipe run did not yield a parseable {{ \"facts\": [...] }} object: {}",
         truncate(raw, 200)
     )))
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Structured file-channel parsing (issues #2622, #2619)
+// ───────────────────────────────────────────────────────────────────────────
+//
+// The stdout-scraping tiers above are the brittle G3 antipattern the operator
+// flagged: the copilot launcher BANNER / INFO log lines are captured as the
+// distill step "output", and a balanced-brace grep for `{ "facts": [...] }`
+// then fails, so distillation cannot parse its own output (parse-failure 67% /
+// 100%). The fix gives the distill agent a DEDICATED output channel: the recipe
+// passes `-c facts_output_path=<temp>` and instructs the agent to WRITE its
+// `{ "facts": [...], "procedures": [...] }` envelope to that file. Simard reads
+// the file after the subprocess exits and deserializes it — launcher banners
+// and log noise on stdout can never contaminate the parse.
+//
+// STATUS: the two functions below are the real, test-driven implementations of
+// the structured file channel; the suite in `distillation_file_channel_tests.rs`
+// pins their full contract. They deserialize the agent-written facts file
+// directly through the shared [`RecipeEnvelope`] serde boundary — the same
+// field-lenient / concept-canonicalizing contract the stdout path uses — with
+// the ONLY tolerated noise being surrounding whitespace and an optional ```json
+// markdown fence. They are referenced from the test suite today; wiring them into
+// `RecipeRunnerSubprocess::invoke_recipe` (pass `-c facts_output_path=<temp>`,
+// have the recipe write its envelope there, then read the file after the
+// subprocess exits) is the remaining production integration and is why they still
+// carry `#[allow(dead_code)]` for non-test builds — drop the allow once the
+// subprocess is wired to the file channel.
+
+/// Stable error prefix for every file-channel extraction miss. It is
+/// deliberately one of the prefixes [`classify_distill_error`] maps to
+/// [`DistillFailureClass::ParseFailure`], so a missing / empty / non-JSON facts
+/// file is a transient, in-cycle-retried parse miss counted in
+/// `distill_parse_success_rate` — never a silent success.
+const FILE_CHANNEL_PARSE_FAILURE_PREFIX: &str =
+    "distill: distill step produced no parseable facts file";
+
+/// Strip an optional surrounding ```json … ``` markdown fence (and any
+/// surrounding whitespace) the distill agent occasionally wraps its envelope in.
+///
+/// This is a single, well-defined unwrap of ONE fence — deliberately NOT the
+/// balanced-brace / banner-stripping stdout scanning that is the G3 antipattern
+/// the file channel exists to retire. Non-fenced input is returned trimmed and
+/// otherwise untouched.
+fn strip_optional_json_fence(contents: &str) -> &str {
+    let trimmed = contents.trim();
+    let Some(after_open) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    // Drop the remainder of the fence-open line (e.g. the `json` language tag).
+    let body = match after_open.find('\n') {
+        Some(nl) => &after_open[nl + 1..],
+        None => after_open,
+    };
+    // Drop a trailing ``` fence if present, then re-trim.
+    let body = body.trim();
+    body.strip_suffix("```").unwrap_or(body).trim()
+}
+
+/// Parse the JSON envelope the distill agent writes to its dedicated
+/// facts-output file into a [`DistillOutput`].
+///
+/// STRICT structured channel — NOT stdout scraping. The agent's file-write tool
+/// owns this channel and writes ONLY the `{ "facts": [...], "procedures": [...] }`
+/// envelope, so this deserializes it directly via the shared [`RecipeEnvelope`]
+/// serde boundary (the same field-lenient / concept-canonicalizing contract the
+/// stdout path used, so one malformed sibling does not sink a batch). The only
+/// tolerated noise is surrounding whitespace and an optional ```json markdown
+/// fence — never balanced-brace scanning or ANSI/banner stripping.
+///
+/// Contract (see `distillation_file_channel_tests.rs`):
+/// - valid envelope → `Ok(DistillOutput { facts, procedures })`
+/// - `{"facts":[],"procedures":[]}` → `Ok(DistillOutput::default())` (SUCCESS,
+///   zero yield — NEVER `parse-failure`)
+/// - empty / non-JSON / launcher-banner contents → `Err` classified
+///   [`DistillFailureClass::ParseFailure`] (no silent fallback, no hollow `Ok`)
+// `#[allow(dead_code)]`: referenced from the TDD suite today; the production
+// caller (`invoke_recipe`) is wired to the file channel in the follow-on
+// integration — remove the allow then.
+#[allow(dead_code)]
+pub(crate) fn parse_distill_facts_file(contents: &str) -> SimardResult<DistillOutput> {
+    let cleaned = strip_optional_json_fence(contents);
+    serde_json::from_str::<RecipeEnvelope>(cleaned)
+        .map(RecipeEnvelope::into_output)
+        .map_err(|e| {
+            SimardError::BridgeError(format!(
+                "{FILE_CHANNEL_PARSE_FAILURE_PREFIX}: {e}: {}",
+                truncate(contents, 200)
+            ))
+        })
+}
+
+/// Read the distill agent's dedicated facts-output file at `path` and parse it
+/// via [`parse_distill_facts_file`].
+///
+/// A missing / unreadable / empty / unparseable file is an EXPLICIT
+/// [`DistillFailureClass::ParseFailure`] — never a silent success. This is the
+/// no-silent-fallback invariant: on a genuine extraction failure the caller
+/// surfaces telemetry and leaves the batch unmarked for a retry, but the healthy
+/// path reliably yields facts from the uncontaminated file.
+// `#[allow(dead_code)]`: referenced from the TDD suite today; the production
+// caller (`invoke_recipe`) is wired to the file channel in the follow-on
+// integration — remove the allow then.
+#[allow(dead_code)]
+pub(crate) fn read_distill_facts_file(path: &Path) -> SimardResult<DistillOutput> {
+    // A missing / unreadable file is itself a parse-failure-classified miss (the
+    // run reached output collection but yielded no facts file), so map the read
+    // error onto the shared prefix before delegating to the strict parse.
+    let contents = std::fs::read_to_string(path).map_err(|e| {
+        SimardError::BridgeError(format!(
+            "{FILE_CHANNEL_PARSE_FAILURE_PREFIX} at {}: {e}",
+            path.display()
+        ))
+    })?;
+    parse_distill_facts_file(&contents)
 }
 
 /// Recover a [`DistillOutput`] from recipe-runner stdout whose JSON envelope is

@@ -107,6 +107,7 @@ pub fn bridges_from_state_root(state_root: &Path) -> SimardResult<OodaBridges> {
             crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
         ),
         completion_evidence: None,
+        admission_brain: None,
     })
 }
 

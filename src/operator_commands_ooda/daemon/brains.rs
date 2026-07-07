@@ -161,6 +161,39 @@ pub(super) fn build_orient_brain(
     }
 }
 
+/// Construct the RESOURCE-AWARE admission brain (fresh-spawn gate). Always
+/// returns an `Arc` — falls back to
+/// [`crate::ooda_brain::DeterministicAdmissionBrain`] (the no-LLM floor, which
+/// always `Admit`s and is still guarded by the deterministic disk hard-rail)
+/// when the recipe/runner is unavailable, loudly per [`record_fallback`].
+///
+/// Unlike `build_decide_brain` / `build_orient_brain`, admission always yields
+/// a concrete brain rather than `None`: the seam must always have a reasoner to
+/// consult, and the deterministic floor + hard-rail preserve safe behaviour
+/// even with no LLM.
+pub(super) fn build_admission_brain(
+    state_root: &Path,
+    repo_root: &Path,
+) -> Arc<dyn crate::ooda_brain::OodaAdmissionBrain> {
+    if let Some(b) = crate::ooda_brain::RecipeBrain::new(
+        repo_root,
+        crate::ooda_brain::ADMISSION_RECIPE_NAME,
+        "recipe-resource-admission-brain",
+    ) {
+        daemon_log(
+            state_root,
+            "[simard] OODA daemon: admission_brain = RecipeBrain (recipe-runner-rs backed, resource-admission)",
+        );
+        return Arc::new(b);
+    }
+    record_fallback(
+        state_root,
+        "admission",
+        "recipe-runner-rs or ooda-resource-admission.yaml not available",
+    );
+    Arc::new(crate::ooda_brain::DeterministicAdmissionBrain)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,5 +273,78 @@ mod tests {
             log.contains(unique_reason),
             "the LlmProvider::resolve() error must be in the dashboard log verbatim; got: {log}"
         );
+    }
+
+    /// RAII guard that points `$HOME` at an empty directory for the duration of
+    /// a test and restores the prior value on drop. `resolve_recipe_path`
+    /// consults `~/.simard/prompt_assets/simard/recipes/…` *before* `repo_root`,
+    /// so a nonexistent repo alone does NOT make `RecipeBrain::new` return
+    /// `None` on a provisioned host where the ambient hot-reload recipe exists.
+    /// Neutralizing `$HOME` closes that non-hermetic hole. Safe because the
+    /// caller holds [`lock()`], which serializes all env-var mutation in this
+    /// module.
+    struct HomeGuard {
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl HomeGuard {
+        fn empty(dir: &Path) -> Self {
+            let prev = std::env::var_os("HOME");
+            // SAFETY: env mutation is serialized via `lock()`; restored on drop.
+            unsafe {
+                std::env::set_var("HOME", dir);
+            }
+            Self { prev }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: env mutation is serialized via `lock()`.
+            unsafe {
+                match self.prev.take() {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+    }
+
+    /// `build_admission_brain` ALWAYS yields a working brain (never `None`):
+    /// with an unresolvable recipe, it falls back — loudly — to the
+    /// deterministic admission floor, which admits so the deterministic disk
+    /// hard-rail (not this brain) remains the ENOSPC guard.
+    #[test]
+    fn build_admission_brain_falls_back_to_deterministic_floor() {
+        use crate::ooda_brain::ResourceAdmissionCtx;
+        let _g = lock();
+        reset_fallback_brain_count_for_test();
+        let tmp = TempDir::new().expect("tempdir");
+
+        // Point HOME at a fresh empty dir so the hot-reload lookup
+        // (`~/.simard/prompt_assets/…`) finds nothing, THEN pass a nonexistent
+        // repo so the in-tree lookup also misses → resolve_recipe_path returns
+        // None → RecipeBrain::new returns None regardless of recipe-runner
+        // availability → deterministic floor. Hermetic against the ambient
+        // ~/.simard/prompt_assets directory on provisioned hosts.
+        let fake_home = TempDir::new().expect("fake home tempdir");
+        let _home = HomeGuard::empty(fake_home.path());
+        let brain = build_admission_brain(tmp.path(), Path::new("/nonexistent-repo-root"));
+        assert!(
+            fallback_brain_count() >= 1,
+            "fallback to the deterministic floor must be recorded loudly"
+        );
+        // The floor admits (count-cap only); the deterministic disk hard-rail
+        // downstream is what guards ENOSPC.
+        let ctx = ResourceAdmissionCtx {
+            disk_usage_pct: Some(10),
+            worktree_cache_bytes: None,
+            load_avg_1m: None,
+            cpu_count: Some(8),
+            in_flight_engineers: 0,
+            ceiling_pct: 90,
+        };
+        let decision = brain.judge_admission(&ctx).expect("floor never errors");
+        assert_eq!(decision.label(), "admit");
     }
 }

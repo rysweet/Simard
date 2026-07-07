@@ -1,6 +1,7 @@
 //! Pure context gathering — best-effort, never panics, never propagates IO.
 
 use super::EngineerLifecycleCtx;
+use super::admission::ResourceAdmissionCtx;
 use crate::ooda_loop::OodaState;
 use std::path::Path;
 use std::time::SystemTime;
@@ -132,6 +133,58 @@ pub fn count_live_engineer_claims(state_root: &Path) -> u32 {
         }
     }
     count
+}
+
+/// Best-effort byte size of a directory subtree via `du -sb`. Returns `None`
+/// on missing dir / IO failure / parse failure so the caller can pass the
+/// "unknown" through to the admission reasoner (never panic, never 0-as-known).
+fn dir_size_bytes_opt(path: &Path) -> Option<u64> {
+    let out = std::process::Command::new("du")
+        .arg("-sb")
+        .arg(path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()?
+        .parse::<u64>()
+        .ok()
+}
+
+/// Read the 1-minute load average from `/proc/loadavg` (first field).
+/// `None` on any platform / read / parse failure.
+fn read_load_avg_1m() -> Option<f64> {
+    std::fs::read_to_string("/proc/loadavg")
+        .ok()?
+        .split_whitespace()
+        .next()?
+        .parse::<f64>()
+        .ok()
+}
+
+/// Assemble the best-effort [`ResourceAdmissionCtx`] the admission brain
+/// reasons over before a FRESH engineer is spawned (resource-aware augmentation
+/// of the AIMD count cap). Every probe degrades to `None` on error — never
+/// panics, never propagates IO — so a transient probe failure hands the
+/// reasoner an explicit "unknown" instead of blocking or crashing.
+///
+/// The disk-usage probe reuses [`crate::disk_health::get_disk_usage_pct`] so
+/// there is one disk-reading implementation, not two. `ceiling_pct` is the
+/// deterministic hard-rail ceiling in effect for this decision (see
+/// [`crate::ooda_brain::admission::resolve_admission`]).
+pub fn gather_resource_admission_ctx(state_root: &Path, ceiling_pct: u8) -> ResourceAdmissionCtx {
+    let worktrees_root = state_root.join(crate::engineer_worktree::WORKTREES_SUBDIR);
+    ResourceAdmissionCtx {
+        disk_usage_pct: crate::disk_health::get_disk_usage_pct(state_root),
+        worktree_cache_bytes: dir_size_bytes_opt(&worktrees_root),
+        load_avg_1m: read_load_avg_1m(),
+        cpu_count: std::thread::available_parallelism().ok().map(|n| n.get()),
+        in_flight_engineers: count_live_engineer_claims(state_root),
+        ceiling_pct,
+    }
 }
 
 /// Minutes since the last safe-update attempt (success or failure), inferred
@@ -349,6 +402,21 @@ fn redact_line(line: &str) -> String {
 #[cfg(test)]
 mod inner_tests {
     use super::*;
+
+    #[test]
+    fn gather_resource_admission_ctx_is_hermetic_and_preserves_ceiling() {
+        // A nonexistent state root must not panic: every probe degrades to
+        // best-effort (None / 0) and the caller-supplied ceiling is preserved
+        // verbatim so the hard rail downstream compares against the right value.
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("no-such-state-root");
+        let ctx = gather_resource_admission_ctx(&missing, 90);
+        assert_eq!(ctx.ceiling_pct, 90);
+        // No engineer worktrees under a missing root → zero in flight.
+        assert_eq!(ctx.in_flight_engineers, 0);
+        // worktree cache probe over a missing dir degrades to None (not 0).
+        assert!(ctx.worktree_cache_bytes.is_none());
+    }
 
     #[test]
     fn tail_file_caps_at_50_lines() {

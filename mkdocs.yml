@@ -116,6 +116,7 @@ nav:
     - Goal Stewardship Mode: concepts/stewardship-mode.md
     - The Simard Whisperer: concepts/simard-whisperer.md
     - Automated Disk-Health Management: concepts/automated-disk-health.md
+    - Resource-Aware Engineer Admission: concepts/resource-aware-engineer-admission.md
     - Update-Check Design: concepts/update-check-design.md
     - The amplihack Freshness Gate: concepts/amplihack-freshness-gate.md
   - Tutorials:
@@ -172,6 +173,7 @@ nav:
     - Configure the Monthly Self-Quality-Audit: howto/configure-self-quality-audit.md
     - Configure the Disk-Health Check: howto/configure-disk-health-check.md
     - Reclaim Disk Space (Low-Space Rust Builds): howto/reclaim-disk-space-and-run-low-space-rust-builds.md
+    - Configure Resource-Aware Admission: howto/configure-resource-aware-admission.md
     - Fix CI Linker OOM: howto/fix-ci-linker-oom.md
     - Triage Stale Pull Requests: howto/triage-stale-pull-requests.md
     - Diagnose merge-pr Verdict-Parse Failures: howto/diagnose-merge-pr-verdict-parse-failures.md
@@ -215,6 +217,7 @@ nav:
     - OODA Orient Prompt Schema: reference/ooda-orient-prompt.md
     - OODA Orient Recipe: reference/ooda-orient-recipe.md
     - OODA Engineer-Lifecycle Recipe: reference/ooda-engineer-lifecycle-recipe.md
+    - OODA Resource-Admission Recipe: reference/ooda-resource-admission-recipe.md
     - OODA Procedural Memory: reference/ooda-procedural-memory.md
     - Recipe-Brain Verdict/Decision Parsing: reference/recipe-brain-verdict-parsing.md
     - OODA Binary-Identity Reload Gate: reference/ooda-binary-identity-reload-gate.md
@@ -277,6 +280,7 @@ nav:
     - Brain Introspection API: reference/brain-introspection-api.md
     - Self-Quality-Audit API: reference/self-quality-audit-api.md
     - Disk-Health API: reference/disk-health-api.md
+    - Resource-Aware Admission API: reference/resource-aware-admission-api.md
     - Dashboard E2E Tests: reference/dashboard-e2e-tests.md
     - Dashboard Action-Detail Humanization: reference/dashboard-action-detail-humanization.md
     - Azlin Hosts Self-Membership: reference/azlin-hosts-self-membership.md

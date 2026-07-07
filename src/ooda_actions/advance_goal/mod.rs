@@ -143,6 +143,12 @@ pub(super) fn dispatch_advance_goal(
     // when we mutably borrow `bridges.session` below (issue #1266).
     let brain = std::sync::Arc::clone(&bridges.brain);
 
+    // Resource-aware admission brain (fresh-spawn gate) + repo_root for the
+    // RECLAIM-FIRST disk-health recipe. Cloned up-front for the same
+    // borrow-checker reason. `None` → the deterministic admission floor.
+    let admission = bridges.admission_brain.clone();
+    let admission_repo_root = bridges.repo_root.clone();
+
     // Same pattern for the progress-evidence checker (issue #1967): clone
     // the Arc up-front so it lives across the inner mutable session
     // borrow without colliding with the bridges field-borrow check.
@@ -181,7 +187,21 @@ pub(super) fn dispatch_advance_goal(
         }) = result.action
         {
             let state_mx = std::sync::Mutex::new(&mut *state);
-            return dispatch_spawn_engineer(action, &state_mx, &goal_id, &task, brain.as_ref());
+            let default_admission = crate::ooda_brain::DeterministicAdmissionBrain;
+            let admission_ref: &dyn crate::ooda_brain::OodaAdmissionBrain =
+                match admission.as_deref() {
+                    Some(b) => b,
+                    None => &default_admission,
+                };
+            return dispatch_spawn_engineer(
+                action,
+                &state_mx,
+                &goal_id,
+                &task,
+                brain.as_ref(),
+                admission_ref,
+                &admission_repo_root,
+            );
         }
 
         return result.outcome;

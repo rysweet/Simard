@@ -51,7 +51,10 @@ pub use confidence::{
     effective_k, is_high_stakes, is_irreversible_lifecycle, lifecycle_conservative_rank,
     self_consistency_vote, should_self_consistency_sample, validate_confidence,
 };
-pub use context::{count_live_engineer_claims, gather_engineer_lifecycle_ctx, redact_secrets};
+pub use context::{
+    count_live_engineer_claims, gather_engineer_lifecycle_ctx, gather_resource_admission_ctx,
+    redact_secrets,
+};
 pub use decide::{
     DecideContext, DecideJudgment, DeterministicDecideBrain, OodaDecideBrain,
     PROMPT_NAME as DECIDE_PROMPT_NAME,
@@ -322,6 +325,26 @@ mod inline_tests_1979 {
             serde_json::to_string(&BrainPhase::Orient).unwrap(),
             "\"orient\""
         );
+        // Resource-aware admission phase (fresh-spawn gate observability).
+        assert_eq!(
+            serde_json::to_string(&BrainPhase::ResourceAdmission).unwrap(),
+            "\"resource_admission\""
+        );
+        assert_eq!(BrainPhase::ResourceAdmission.as_str(), "resource_admission");
+    }
+
+    #[test]
+    fn admission_judgment_record_captures_gate() {
+        let rec =
+            BrainJudgmentRecord::from_admission("goal-x", "defer", "disk 88% near ceiling 90", "");
+        assert_eq!(rec.phase, BrainPhase::ResourceAdmission);
+        assert_eq!(rec.decision, "defer");
+        assert!(rec.rationale.contains("88%"));
+        assert!(!rec.fallback);
+        // Round-trips through the cycle-report JSON like every other record.
+        let json = serde_json::to_string(&rec).unwrap();
+        let back: BrainJudgmentRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(rec, back);
     }
 
     #[test]

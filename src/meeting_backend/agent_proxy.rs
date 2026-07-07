@@ -1,8 +1,20 @@
 //! Direct-invoke agent proxy for meeting conversations.
 //!
-//! Spawns the coding agent per-turn via `copilot -p "MESSAGE"` with piped
-//! stdout — no PTY, no script(1), no bash wrapper. This is the "thin proxy"
-//! replacing the 30-90s PTY overhead (issue #2179).
+//! Spawns the coding agent per-turn via `copilot -p "MESSAGE"`. Each turn runs
+//! under a lightweight one-shot `script(1)` pseudo-terminal by default so the
+//! Node-based CLI detects an interactive TTY and flushes its reply
+//! incrementally — letting the streaming reader tee each line to the client as
+//! it arrives (issue #2581) instead of the reply appearing only once the whole
+//! turn completes. Over a plain pipe those CLIs detect a non-tty and
+//! block-buffer the entire turn into a single final write, which is exactly the
+//! "wait for the whole thread" latency this wrapper removes.
+//!
+//! This is distinct from the persistent, prompt-driven PTY session that added
+//! 30-90s of handshake overhead (issue #2179): the wrapper here is a single
+//! non-interactive invocation that self-terminates, so its startup cost is
+//! negligible and per-turn latency stays in the ~4-15s range. Set
+//! `SIMARD_AGENT_PTY_STREAM=0` to fall back to a direct piped invocation
+//! (marginally faster to start, but the reply only appears once the turn ends).
 //!
 //! Copilot CLI does not support persistent interactive stdin when piped, so
 //! each turn is a separate subprocess. The conversation context is maintained
@@ -24,6 +36,141 @@ use crate::base_types::{
 use crate::error::{SimardError, SimardResult};
 use crate::metadata::{BackendDescriptor, Freshness};
 use crate::runtime::RuntimeTopology;
+
+/// External PTY launcher used to give a one-shot agent turn an interactive
+/// terminal so the CLI streams its output incrementally (issue #2581). Matches
+/// the `terminal_session` launcher; `script(1)` is present on Linux
+/// (util-linux) and macOS (BSD).
+const PTY_LAUNCHER: &str = "script";
+
+/// Whether agent turns run under a `script(1)` PTY (default) so the CLI streams
+/// its reply incrementally, versus a direct piped invocation where the reply
+/// only lands once the turn ends. Pure over the raw env value so the parsing is
+/// unit-testable without mutating process env (mirrors `parse_turn_timeout`).
+///
+/// Any of `0`, `false`, `no`, `off` (case-insensitive) disables the PTY; every
+/// other value — including an unset var — keeps it on.
+fn pty_streaming_from_env(raw: Option<String>) -> bool {
+    match raw {
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        None => true,
+    }
+}
+
+/// Live check of [`pty_streaming_from_env`] against the process environment.
+fn pty_streaming_enabled() -> bool {
+    pty_streaming_from_env(std::env::var("SIMARD_AGENT_PTY_STREAM").ok())
+}
+
+/// POSIX single-quote escaping so an arbitrary string — including the untrusted
+/// user prompt — can be embedded in the `sh -c` command line that `script`
+/// evaluates without any risk of shell injection. Wraps the value in single
+/// quotes and rewrites each embedded quote as the canonical `'\''` sequence.
+fn shell_single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Reconstruct the full agent invocation (`<cmd> <base_args…> -p <prompt>`) as a
+/// single shell-escaped command line suitable for `sh -c` / `script -c`. Every
+/// token is quoted independently so neither the args nor the prompt can alter
+/// the command structure.
+fn agent_shell_line(agent_cmd: &str, base_args: &[String], prompt: &str) -> String {
+    let mut tokens: Vec<String> = Vec::with_capacity(base_args.len() + 3);
+    tokens.push(shell_single_quote(agent_cmd));
+    for a in base_args {
+        tokens.push(shell_single_quote(a));
+    }
+    tokens.push(shell_single_quote("-p"));
+    tokens.push(shell_single_quote(prompt));
+    tokens.join(" ")
+}
+
+/// Strip a trailing carriage return and any ANSI/VT escape sequences from one
+/// line of agent output. PTY-relayed output carries CRLF line endings and may
+/// embed colour/cursor control sequences the CLI emits once it detects a TTY;
+/// neither belongs in the substantive chat text (issue #2581). A line with no
+/// escapes is returned unchanged apart from a trailing `\r`, so this is safe to
+/// apply to plain piped (non-PTY) output too. Char-based so multi-byte UTF-8 is
+/// preserved intact.
+///
+/// Takes the line by value so the common escape-free case reuses the caller's
+/// existing buffer — the trailing `\r` is popped in place and the same `String`
+/// handed straight back with zero extra allocation. Only a line that actually
+/// carries an ESC pays for a stripped copy. This matters because the streaming
+/// reader calls this once per output line (issue #2581).
+fn sanitize_terminal_line(mut line: String) -> String {
+    // Drop a trailing CR from CRLF terminal endings in place — no reallocation.
+    if line.ends_with('\r') {
+        line.pop();
+    }
+    // Fast path: no escape sequences, so the buffer is already the clean line —
+    // return it as-is without copying.
+    if !line.contains('\u{1b}') {
+        return line;
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            // CSI: ESC '[' … terminated by a final byte in 0x40..=0x7e.
+            Some('[') => {
+                chars.next();
+                while let Some(&nc) = chars.peek() {
+                    chars.next();
+                    if ('\u{40}'..='\u{7e}').contains(&nc) {
+                        break;
+                    }
+                }
+            }
+            // String-payload control sequences: an ESC introducer followed by
+            // an opaque data string terminated by ST (ESC '\') or, defensively,
+            // BEL (0x07). All carry data — never visible text — so the whole
+            // sequence including its payload is dropped:
+            //   OSC  ESC ']'   operating system command (e.g. window title)
+            //   DCS  ESC 'P'   device control string
+            //   SOS  ESC 'X'   start of string
+            //   PM   ESC '^'   privacy message
+            //   APC  ESC '_'   application program command
+            Some(']') | Some('P') | Some('X') | Some('^') | Some('_') => {
+                chars.next();
+                while let Some(nc) = chars.next() {
+                    if nc == '\u{07}' {
+                        break;
+                    }
+                    if nc == '\u{1b}' {
+                        if let Some('\\') = chars.peek() {
+                            chars.next();
+                        }
+                        break;
+                    }
+                }
+            }
+            // Two-character escape (e.g. ESC M): drop the following byte.
+            Some(_) => {
+                chars.next();
+            }
+            None => {}
+        }
+    }
+    out
+}
 
 /// True when a single agent output line is copilot CLI noise (usage stats,
 /// bootstrap banners, progress indicators) that should never be surfaced as
@@ -229,13 +376,15 @@ fn resolve_agent_command() -> SimardResult<(String, Vec<String>)> {
 }
 
 /// A direct-invoke agent proxy that spawns the coding agent per-turn via
-/// `copilot -p "MESSAGE"` with piped stdout.
+/// `copilot -p "MESSAGE"`.
 ///
-/// Unlike `CopilotSdkAdapter` (which uses PTY/script per turn), this proxy
-/// invokes the agent directly with `-p` flag and captures stdout — no PTY
-/// allocation, no script(1) wrapper, no bash intermediary.
-///
-/// Response time: ~4-15s per turn vs 30-90s with the old PTY path.
+/// Each turn is wrapped in a one-shot `script(1)` PTY by default so the CLI
+/// streams its reply incrementally (issue #2581). This is a single
+/// non-interactive invocation — not the persistent, prompt-driven PTY session
+/// `CopilotSdkAdapter` uses — so it keeps the ~4-15s/turn latency rather than
+/// the 30-90s of the old interactive PTY path (issue #2179).
+/// `SIMARD_AGENT_PTY_STREAM=0` opts back into a direct piped invocation (no PTY,
+/// but the reply then only appears once the turn ends).
 pub struct PersistentAgentProxy {
     descriptor: BaseTypeDescriptor,
     is_open: bool,
@@ -312,6 +461,58 @@ impl PersistentAgentProxy {
         Ok(())
     }
 
+    /// Build the per-turn agent spawn command (program + argv only; stdio,
+    /// process group, and working directory are applied by the caller so both
+    /// modes share them).
+    ///
+    /// When `pty` is true (the default; see [`pty_streaming_enabled`]) the agent
+    /// runs under a one-shot `script(1)` PTY so the Node-based CLI
+    /// (`copilot`/`claude`) sees an interactive terminal and flushes its reply
+    /// incrementally, letting [`Self::invoke_agent_streaming`] tee each line to
+    /// the client as it is produced (issue #2581). Over a plain pipe those CLIs
+    /// detect a non-tty and block-buffer the whole turn into a single final
+    /// write, so nothing streams until the turn completes. The untrusted prompt
+    /// is shell-escaped via [`agent_shell_line`] before it reaches `sh -c`.
+    ///
+    /// When `pty` is false the agent is spawned directly with its argv, giving
+    /// the piped, non-tty stdio of the original thin proxy (issue #2179).
+    fn build_agent_command(&self, prompt: &str, pty: bool) -> Command {
+        if !pty {
+            let mut cmd = Command::new(&self.agent_cmd);
+            cmd.args(&self.agent_base_args).arg("-p").arg(prompt);
+            return cmd;
+        }
+
+        let agent_line = agent_shell_line(&self.agent_cmd, &self.agent_base_args, prompt);
+        let mut cmd = Command::new(PTY_LAUNCHER);
+        if cfg!(target_os = "macos") {
+            // BSD `script` (macOS): `-F` flushes each write; the typescript file
+            // is positional and precedes the command, which we run via an
+            // explicit shell so the escaped argv is honored identically.
+            cmd.arg("-qFe")
+                .arg("/dev/null")
+                .arg("/bin/sh")
+                .arg("-c")
+                .arg(agent_line);
+        } else {
+            // util-linux `script` (Linux): `-f` flushes each write, `-e`
+            // propagates the child exit code, and `-c` takes the command
+            // string; the typescript is discarded to /dev/null.
+            //
+            // util-linux `script -c` runs the command via `$SHELL`, falling
+            // back to `/bin/sh` only when it is unset. Pin `SHELL=/bin/sh` so
+            // an operator's non-POSIX login shell (fish, csh, …) can never
+            // reinterpret the POSIX single-quote-escaped command line — the
+            // macOS branch above already names `/bin/sh` explicitly. This
+            // hardens the one shell-boundary crossing (security review #2581).
+            cmd.env("SHELL", "/bin/sh")
+                .arg("-qefc")
+                .arg(agent_line)
+                .arg("/dev/null");
+        }
+        cmd
+    }
+
     /// Invoke the agent with a prompt and return the full (noise-stripped)
     /// response. Thin wrapper over [`Self::invoke_agent_streaming`] with a
     /// no-op chunk sink, for callers that don't need incremental output.
@@ -341,11 +542,12 @@ impl PersistentAgentProxy {
             "Invoking agent (streaming)"
         );
 
-        let mut cmd = Command::new(&self.agent_cmd);
-        cmd.args(&self.agent_base_args)
-            .arg("-p")
-            .arg(prompt)
-            .stdin(std::process::Stdio::null())
+        // Build the turn command — under a one-shot `script(1)` PTY by default
+        // so the agent CLI streams its reply incrementally instead of
+        // block-buffering the whole turn behind a non-tty pipe (issue #2581).
+        // `SIMARD_AGENT_PTY_STREAM=0` opts back into the direct piped path.
+        let mut cmd = self.build_agent_command(prompt, pty_streaming_enabled());
+        cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
@@ -467,6 +669,11 @@ impl PersistentAgentProxy {
                     // Fresh output — reset the idle-liveness clock so a
                     // productive turn is never reaped regardless of total length.
                     last_activity = Instant::now();
+                    // PTY-relayed output carries CRLF endings and may embed ANSI
+                    // control sequences the CLI emits once it sees a TTY; strip
+                    // both so the streamed preview and the final joined response
+                    // are clean text (a no-op for plain piped output).
+                    let line = sanitize_terminal_line(line);
                     if !line_is_noise(line.trim()) {
                         on_chunk(&line);
                     }
@@ -692,6 +899,93 @@ mod tests {
         let input = "Normal response.\nWith multiple lines.";
         let result = strip_copilot_noise(input);
         assert_eq!(result, "Normal response.\nWith multiple lines.");
+    }
+
+    // ── issue #2581: PTY streaming helpers ──
+
+    #[test]
+    fn pty_streaming_defaults_on_when_unset() {
+        assert!(
+            pty_streaming_from_env(None),
+            "unset env must keep incremental PTY streaming enabled by default"
+        );
+    }
+
+    #[test]
+    fn pty_streaming_disabled_by_falsey_values() {
+        for v in ["0", "false", "FALSE", "no", "Off", " off "] {
+            assert!(
+                !pty_streaming_from_env(Some(v.to_string())),
+                "{v:?} must disable PTY streaming"
+            );
+        }
+    }
+
+    #[test]
+    fn pty_streaming_enabled_by_other_values() {
+        for v in ["1", "true", "yes", "on", ""] {
+            assert!(
+                pty_streaming_from_env(Some(v.to_string())),
+                "{v:?} must keep PTY streaming enabled"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_single_quote_escapes_embedded_quote() {
+        // A prompt attempting to break out of the sh -c string stays inert.
+        assert_eq!(shell_single_quote("a'b"), "'a'\\''b'");
+        assert_eq!(shell_single_quote("plain"), "'plain'");
+    }
+
+    #[test]
+    fn agent_shell_line_quotes_every_token() {
+        let base = vec!["--allow-all-tools".to_string()];
+        let line = agent_shell_line("copilot", &base, "hi; rm -rf /");
+        // Structure: '<cmd>' '<arg>' '-p' '<prompt>' — all single-quoted so the
+        // injected ';' and spaces are literal prompt text, not shell syntax.
+        assert_eq!(line, "'copilot' '--allow-all-tools' '-p' 'hi; rm -rf /'");
+    }
+
+    #[test]
+    fn sanitize_terminal_line_strips_cr_and_ansi() {
+        // Trailing CR from CRLF terminal endings.
+        assert_eq!(sanitize_terminal_line("hello\r".to_string()), "hello");
+        // CSI colour codes around real text.
+        assert_eq!(
+            sanitize_terminal_line("\u{1b}[32mgreen\u{1b}[0m text\r".to_string()),
+            "green text"
+        );
+        // OSC sequence (window title) terminated by BEL.
+        assert_eq!(
+            sanitize_terminal_line("\u{1b}]0;title\u{07}visible".to_string()),
+            "visible"
+        );
+        // DCS/SOS/PM/APC string sequences carry an opaque payload terminated by
+        // ST (ESC '\') — the whole sequence, payload included, must be dropped.
+        assert_eq!(
+            sanitize_terminal_line("\u{1b}Pq#0;2;0;0;0\u{1b}\\shown".to_string()),
+            "shown"
+        );
+        assert_eq!(
+            sanitize_terminal_line("\u{1b}_private data\u{1b}\\kept".to_string()),
+            "kept"
+        );
+        assert_eq!(
+            sanitize_terminal_line("\u{1b}^pm payload\u{1b}\\end".to_string()),
+            "end"
+        );
+    }
+
+    #[test]
+    fn sanitize_terminal_line_preserves_plain_and_utf8() {
+        assert_eq!(sanitize_terminal_line("just text".to_string()), "just text");
+        // Multi-byte UTF-8 must survive intact (char-based scan).
+        assert_eq!(sanitize_terminal_line("café ☕\r".to_string()), "café ☕");
+        assert_eq!(
+            sanitize_terminal_line("\u{1b}[1mbold café ☕\u{1b}[0m".to_string()),
+            "bold café ☕"
+        );
     }
 
     // ── issues #2549/#2581: default idle-liveness window ──
@@ -965,15 +1259,16 @@ mod tests {
         );
     }
 
-    // ── thin-proxy invariant (issue #2179): no PTY, piped stdio ──
+    // ── streaming vs thin-proxy stdio (issues #2179 / #2581) ──
 
     #[test]
-    fn invoke_agent_uses_piped_stdio_not_a_pty() {
-        // The thin proxy spawns the agent with a null stdin and a piped stdout —
-        // never a PTY/script(1)/bash wrapper (issue #2179, replacing the 30-90s
-        // PTY overhead). A child that inspects its own descriptors must therefore
-        // observe NON-tty stdin and stdout; if a PTY leaked back in, `[ -t 0 ]` /
-        // `[ -t 1 ]` would report a terminal and this assertion would fail.
+    fn invoke_agent_streams_under_a_pty_by_default() {
+        // Streaming (issue #2581) requires the agent to see an interactive
+        // terminal so it flushes incrementally instead of block-buffering the
+        // whole turn behind a non-tty pipe. By default the turn therefore runs
+        // under a one-shot `script(1)` PTY: a child that inspects its own
+        // descriptors observes tty stdin AND stdout. (`SIMARD_AGENT_PTY_STREAM`
+        // is unset in the test process, so the default PTY path is exercised.)
         let mut proxy = PersistentAgentProxy::new().unwrap();
         proxy.agent_cmd = "sh".to_string();
         proxy.agent_base_args = vec![
@@ -986,12 +1281,74 @@ mod tests {
 
         let response = proxy
             .invoke_agent("hello")
-            .expect("no-PTY probe child must return Ok");
+            .expect("PTY probe child must return Ok");
         assert_eq!(
-            response, "stdin=notty stdout=notty",
-            "proxy must invoke the agent over piped (non-PTY) stdio — no \
-             script(1)/PTY/bash wrapper (issue #2179)"
+            response, "stdin=tty stdout=tty",
+            "streaming turns must run the agent under a PTY so it flushes \
+             incrementally (issue #2581)"
         );
+    }
+
+    #[test]
+    fn build_agent_command_direct_mode_is_a_plain_pipe() {
+        // With the PTY disabled the agent is spawned directly with its own argv
+        // — no `script(1)`/PTY/bash wrapper — preserving the thin-proxy path
+        // (issue #2179) as an opt-out.
+        let mut proxy = PersistentAgentProxy::new().unwrap();
+        proxy.agent_cmd = "copilot".to_string();
+        proxy.agent_base_args = vec!["--allow-all-tools".to_string()];
+
+        let cmd = proxy.build_agent_command("hi there", false);
+        assert_eq!(cmd.get_program(), "copilot");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, vec!["--allow-all-tools", "-p", "hi there"]);
+    }
+
+    #[test]
+    fn build_agent_command_pty_mode_wraps_script_with_escaped_prompt() {
+        // With the PTY enabled the agent runs under `script(1)`; the full
+        // invocation is passed as a single shell-escaped command string so an
+        // adversarial prompt cannot break out of `sh -c`.
+        let mut proxy = PersistentAgentProxy::new().unwrap();
+        proxy.agent_cmd = "copilot".to_string();
+        proxy.agent_base_args = vec!["--allow-all-tools".to_string()];
+
+        let cmd = proxy.build_agent_command("hi; rm -rf /", true);
+        assert_eq!(cmd.get_program(), PTY_LAUNCHER);
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        // The escaped agent line must appear verbatim as one argument, with the
+        // injected `;` quoted inside the prompt rather than as shell syntax.
+        let expected_line = "'copilot' '--allow-all-tools' '-p' 'hi; rm -rf /'";
+        assert!(
+            args.iter().any(|a| a == expected_line),
+            "escaped agent line must be passed as a single argument: {args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == "/dev/null"),
+            "typescript output must be discarded to /dev/null: {args:?}"
+        );
+        // Security hardening: the util-linux `script -c` path must pin
+        // `SHELL=/bin/sh` so a non-POSIX operator login shell cannot reinterpret
+        // the single-quote-escaped command line (macOS names /bin/sh directly).
+        #[cfg(not(target_os = "macos"))]
+        {
+            let shell = cmd
+                .get_envs()
+                .find(|(k, _)| *k == std::ffi::OsStr::new("SHELL"))
+                .and_then(|(_, v)| v)
+                .map(|v| v.to_string_lossy().into_owned());
+            assert_eq!(
+                shell.as_deref(),
+                Some("/bin/sh"),
+                "script -c must run the command under /bin/sh, not $SHELL"
+            );
+        }
     }
 
     #[test]

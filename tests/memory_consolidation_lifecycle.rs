@@ -187,6 +187,7 @@ fn ooda_cycle_runs_with_consolidation_wired_in() {
             simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
         ),
         completion_evidence: None,
+        admission_brain: None,
     };
 
     let mut board = GoalBoard::new();
@@ -344,6 +345,7 @@ fn multiple_ooda_cycles_accumulate_consolidation() {
             simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
         ),
         completion_evidence: None,
+        admission_brain: None,
     };
 
     let mut board = GoalBoard::new();

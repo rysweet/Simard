@@ -103,6 +103,7 @@ fn test_bridges() -> OodaBridges {
             simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
         ),
         completion_evidence: None,
+        admission_brain: None,
     }
 }
 

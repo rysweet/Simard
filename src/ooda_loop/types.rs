@@ -479,6 +479,14 @@ pub struct OodaBridges {
     /// non-daemon callers. Bounded by the AIMD `cap` (`scaler.current_max()`)
     /// so concurrency stays resource-aware.
     pub session_factory: Option<std::sync::Arc<dyn OrchestratorSessionFactory>>,
+    /// Resource-aware admission brain (fresh-spawn gate). When `Some`, the
+    /// spawn seam consults it — gathering the resource picture (disk %,
+    /// build-cache size, load, in-flight engineers) and reasoning ADMIT /
+    /// DEFER / RECLAIM-FIRST — before allocating an engineer worktree. When
+    /// `None`, the seam uses the [`crate::ooda_brain::DeterministicAdmissionBrain`]
+    /// floor (always admit). The deterministic disk hard-rail
+    /// ([`crate::ooda_brain::resolve_admission`]) blocks ENOSPC either way.
+    pub admission_brain: Option<std::sync::Arc<dyn crate::ooda_brain::OodaAdmissionBrain>>,
 }
 
 // ---------------------------------------------------------------------------

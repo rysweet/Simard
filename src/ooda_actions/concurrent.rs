@@ -32,10 +32,11 @@ use crate::base_types::BaseTypeSession;
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::goal_curation::GoalProgress;
 use crate::goal_curation::progress_evidence::ProgressEvidenceChecker;
-use crate::ooda_brain::OodaBrain;
+use crate::ooda_brain::{OodaAdmissionBrain, OodaBrain};
 use crate::ooda_loop::{
     ActionOutcome, OodaBridges, OodaState, OrchestratorSessionFactory, PlannedAction,
 };
+use std::path::Path;
 
 use super::advance_goal::spawn::{dispatch_spawn_engineer, is_brain_failure_marker, lock_state};
 use super::goal_session::{GoalAction, apply_goal_advance_result, build_goal_advance_input};
@@ -98,6 +99,11 @@ struct AdvanceCtx<'a> {
     memory: &'a dyn CognitiveMemoryOps,
     checker: &'a dyn ProgressEvidenceChecker,
     brain: &'a dyn OodaBrain,
+    /// Resource-aware admission reasoner (fresh-spawn gate). Consulted by
+    /// `dispatch_spawn_engineer` before allocating an engineer worktree.
+    admission: &'a dyn OodaAdmissionBrain,
+    /// Repo root for the RECLAIM-FIRST disk-health recipe.
+    repo_root: &'a Path,
     /// Mints a fresh per-goal session so `run_turn` calls run concurrently.
     session_factory: Option<&'a dyn OrchestratorSessionFactory>,
     /// Fallback single session used (under lock, serialized) only when no
@@ -132,6 +138,17 @@ pub(super) fn dispatch_advance_concurrent(
     let session_factory: Option<&dyn OrchestratorSessionFactory> =
         bridges.session_factory.as_deref();
 
+    // Resource-aware admission brain (fresh-spawn gate) + repo_root for the
+    // RECLAIM-FIRST disk-health recipe. `None` → the deterministic admission
+    // floor (still guarded by the deterministic disk hard-rail). The default
+    // is declared here so it outlives the thread scope below.
+    let default_admission = crate::ooda_brain::DeterministicAdmissionBrain;
+    let admission: &dyn OodaAdmissionBrain = match bridges.admission_brain.as_deref() {
+        Some(b) => b,
+        None => &default_admission,
+    };
+    let repo_root: &Path = &bridges.repo_root;
+
     // Take ownership of the shared fallback session for the duration of the
     // round so the per-thread context can lend it out by `Box` (avoids tying a
     // `&mut` into the ctx struct). Restored afterwards so daemon shutdown can
@@ -146,6 +163,8 @@ pub(super) fn dispatch_advance_concurrent(
         memory,
         checker,
         brain,
+        admission,
+        repo_root,
         session_factory,
         shared_session: &shared_session,
         state: &state_mx,
@@ -373,7 +392,15 @@ fn dispatch_advance_goal_concurrent(action: &PlannedAction, ctx: &AdvanceCtx) ->
     // ── Engineer spawn — short state critical sections only (the git
     //    worktree allocation + detached subprocess run with NO lock held). ──
     if let Some(GoalAction::SpawnEngineer { task, .. }) = result.action {
-        return dispatch_spawn_engineer(action, ctx.state, &goal_id, &task, ctx.brain);
+        return dispatch_spawn_engineer(
+            action,
+            ctx.state,
+            &goal_id,
+            &task,
+            ctx.brain,
+            ctx.admission,
+            ctx.repo_root,
+        );
     }
 
     result.outcome
