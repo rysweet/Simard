@@ -87,8 +87,12 @@ fn scan() -> SimardResult<()> {
         count = advisories.len(),
         "vulnerabilities reported against DB HEAD"
     );
+    // Parse Cargo.lock's git-sourced packages ONCE for the whole sweep instead
+    // of re-reading and re-parsing the lockfile inside every advisory's context
+    // build (see `git_sourced_packages`).
+    let git_pkgs = git_sourced_packages(&root);
     for adv in &advisories {
-        let ctx = build_context(adv, &root, &files);
+        let ctx = build_context(adv, &git_pkgs, &files);
         let decision = decide(adv, &ctx);
         info!(advisory = %adv.id, crate_name = %adv.crate_name, decision = ?decision, "remediation decision");
         match execute(decision, adv, &files, &gh) {
@@ -147,9 +151,12 @@ fn decide_only() -> SimardResult<()> {
 /// failure degrades to the conservative value (not resolvable / not ignored),
 /// which routes the advisory to `Escalate`/`JustifiedIgnore` rather than a wrong
 /// bump.
-fn build_context(adv: &Advisory, root: &Path, files: &IgnoreFiles) -> RemediationContext {
-    let behind_git_dep =
-        crate_is_git_sourced(root, &adv.crate_name, &adv.installed).unwrap_or(false);
+fn build_context(
+    adv: &Advisory,
+    git_pkgs: &[(String, String)],
+    files: &IgnoreFiles,
+) -> RemediationContext {
+    let behind_git_dep = is_git_sourced(git_pkgs, &adv.crate_name, &adv.installed);
     let already_ignored = files.is_ignored(&adv.id).unwrap_or(false);
     let resolvable_patch = match &adv.patched {
         PatchStatus::None => None,
@@ -166,30 +173,47 @@ fn build_context(adv: &Advisory, root: &Path, files: &IgnoreFiles) -> Remediatio
     }
 }
 
-/// True when the installed version of `crate_name` is pinned by a `git+` source
-/// in `Cargo.lock` (a bump belongs in that upstream repo, not Simard's lock).
-fn crate_is_git_sourced(root: &Path, crate_name: &str, version: &str) -> SimardResult<bool> {
-    let lock = std::fs::read_to_string(root.join("Cargo.lock")).map_err(|e| {
-        SimardError::SupplyChainRemediationFailed {
-            reason: format!("read Cargo.lock: {e}"),
-        }
-    })?;
-    let doc: toml::Value =
-        toml::from_str(&lock).map_err(|e| SimardError::SupplyChainRemediationFailed {
-            reason: format!("parse Cargo.lock: {e}"),
-        })?;
-    let Some(packages) = doc.get("package").and_then(|p| p.as_array()) else {
-        return Ok(false);
-    };
-    for pkg in packages {
-        let name = pkg.get("name").and_then(|v| v.as_str());
-        let ver = pkg.get("version").and_then(|v| v.as_str());
-        if name == Some(crate_name) && ver == Some(version) {
-            let source = pkg.get("source").and_then(|v| v.as_str()).unwrap_or("");
-            return Ok(source.starts_with("git+"));
-        }
+/// The `(name, version)` pairs pinned by a `git+` source in `Cargo.lock`.
+///
+/// Parsed **once per scan**: a package's git-vs-registry origin is stable across
+/// a single sweep (a `--precise` bump changes versions, it never turns a
+/// registry crate into a git one), so the per-advisory git-dep check becomes an
+/// allocation-free lookup over this small set instead of re-reading and
+/// re-parsing the whole lockfile — and building a full generic `toml::Value`
+/// DOM — for every advisory. A read/parse failure degrades to an empty set
+/// (nothing treated as git-sourced), matching the previous best-effort default.
+fn git_sourced_packages(root: &Path) -> Vec<(String, String)> {
+    #[derive(serde::Deserialize, Default)]
+    struct Lock {
+        #[serde(default)]
+        package: Vec<LockPackage>,
     }
-    Ok(false)
+    #[derive(serde::Deserialize)]
+    struct LockPackage {
+        name: String,
+        version: String,
+        #[serde(default)]
+        source: Option<String>,
+    }
+    let Ok(raw) = std::fs::read_to_string(root.join("Cargo.lock")) else {
+        return Vec::new();
+    };
+    let Ok(lock) = toml::from_str::<Lock>(&raw) else {
+        return Vec::new();
+    };
+    lock.package
+        .into_iter()
+        .filter(|p| p.source.as_deref().is_some_and(|s| s.starts_with("git+")))
+        .map(|p| (p.name, p.version))
+        .collect()
+}
+
+/// True when `(crate_name, version)` is among the (typically few) git-pinned
+/// packages — a bump for it belongs in that upstream repo, not Simard's lock.
+fn is_git_sourced(git_pkgs: &[(String, String)], crate_name: &str, version: &str) -> bool {
+    git_pkgs
+        .iter()
+        .any(|(name, ver)| name == crate_name && ver == version)
 }
 
 /// Best-effort "lowest patched version that resolves against Cargo.lock": parse
