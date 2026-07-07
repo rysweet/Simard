@@ -190,21 +190,23 @@ fn error_json(e: impl std::fmt::Display) -> Value {
     json!({ "error": e.to_string() })
 }
 
-/// Load `idea_id` from the LIVE writer store, apply the `target` transition, and
-/// persist the resulting revision. Returns the updated idea, or an operator
-/// error `Value`.
+/// Load `idea_id` from the given live writer `store`, apply the `target`
+/// transition, and persist the resulting revision. Returns the updated idea, or
+/// an operator error `Value`.
+///
+/// Takes an already-opened `store` (rather than a `state_root`) so a caller that
+/// performs several writes in one request — e.g. Promote's accept-then-route —
+/// pays the writer-client setup cost once and shares a single handle.
 ///
 /// Fail-closed: an unknown id, or an edge not in the [`IdeaStatus`] transition
 /// table, surfaces loudly as `Err(json!({"error": ...}))` — never a silent
 /// no-op or a corrupted store.
 fn transition_and_persist(
-    state_root: &Path,
+    store: &ProspectiveCreativeIdeaStore<'_>,
     idea_id: &str,
     target: IdeaStatus,
 ) -> Result<CreativeIdea, Value> {
-    let writer = launch_writer_client(state_root).map_err(error_json)?;
-    let store = ProspectiveCreativeIdeaStore::new(writer.ops());
-    let mut idea = match load_idea(&store, idea_id) {
+    let mut idea = match load_idea(store, idea_id) {
         Ok(Some(i)) => i,
         Ok(None) => return Err(json!({ "error": "idea not found" })),
         Err(e) => return Err(error_json(e)),
@@ -217,9 +219,18 @@ fn transition_and_persist(
 /// Accept `idea_id` and (optionally) route it to a goal. Returns the operator
 /// response value (`{ok, idea, goal?/goal_error?}` or `{error}`).
 fn promote_idea(state_root: &Path, idea_id: &str, route_to_goal: bool) -> Value {
+    // Open ONE writer handle for the whole accept(+route) sequence. The accept
+    // persist and the post-route persist reuse it, so the (potentially IPC)
+    // writer-client/socket setup is paid once per request, not per write.
+    let writer = match launch_writer_client(state_root) {
+        Ok(w) => w,
+        Err(e) => return error_json(e),
+    };
+    let store = ProspectiveCreativeIdeaStore::new(writer.ops());
+
     // Accept + persist FIRST. Fail-closed: an invalid edge surfaces loudly.
     let mut idea =
-        match transition_and_persist(state_root, idea_id, IdeaStatus::AcceptedForImplementation) {
+        match transition_and_persist(&store, idea_id, IdeaStatus::AcceptedForImplementation) {
             Ok(i) => i,
             Err(e) => return e,
         };
@@ -230,7 +241,7 @@ fn promote_idea(state_root: &Path, idea_id: &str, route_to_goal: bool) -> Value 
 
     // Best-effort route to a goal. Failure surfaces `goal_error` WITHOUT rolling
     // back the (already-persisted) acceptance.
-    match route_accepted_idea_to_goal(state_root, &mut idea) {
+    match route_accepted_idea_to_goal(state_root, &store, &mut idea) {
         Ok(goal) => json!({ "ok": true, "idea": idea_summary(&idea), "goal": goal }),
         Err(e) => json!({ "ok": true, "idea": idea_summary(&idea), "goal_error": e.to_string() }),
     }
@@ -239,7 +250,12 @@ fn promote_idea(state_root: &Path, idea_id: &str, route_to_goal: bool) -> Value 
 /// Reject `idea_id` (terminal [`IdeaStatus::Rejected`]). Returns `{ok, idea}` or
 /// `{error}`.
 fn prune_idea(state_root: &Path, idea_id: &str) -> Value {
-    match transition_and_persist(state_root, idea_id, IdeaStatus::Rejected) {
+    let writer = match launch_writer_client(state_root) {
+        Ok(w) => w,
+        Err(e) => return error_json(e),
+    };
+    let store = ProspectiveCreativeIdeaStore::new(writer.ops());
+    match transition_and_persist(&store, idea_id, IdeaStatus::Rejected) {
         Ok(idea) => json!({ "ok": true, "idea": idea_summary(&idea) }),
         Err(e) => e,
     }
@@ -260,12 +276,14 @@ fn load_idea(
 /// live goal board, advance it to `ImplementationStarted`, and persist. Returns
 /// a compact goal summary. Any failure is returned as `Err` (surfaced as
 /// `goal_error` by the caller, without rolling back the acceptance).
-fn route_accepted_idea_to_goal(state_root: &Path, idea: &mut CreativeIdea) -> SimardResult<Value> {
+fn route_accepted_idea_to_goal(
+    state_root: &Path,
+    store: &ProspectiveCreativeIdeaStore<'_>,
+    idea: &mut CreativeIdea,
+) -> SimardResult<Value> {
     let goals = CognitiveMemoryGoalStoreFactory.open(state_root)?;
     let record = route_idea_to_goal(idea, goals.as_ref(), now_epoch())?;
     idea.try_transition(IdeaStatus::ImplementationStarted)?;
-    let writer = launch_writer_client(state_root)?;
-    let store = ProspectiveCreativeIdeaStore::new(writer.ops());
     store.update(idea)?;
     Ok(json!({
         "id": record.slug,
