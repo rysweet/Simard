@@ -25,16 +25,24 @@ file. The orchestrator-failure sub-mode of Goal Stewardship:
    for outer-loop / recipe-runner / orchestrator infrastructure failures, and
    `rysweet/Simard` for inner-loop module failures (`engineer_loop`,
    `base_type`, `self_improve`, `goal_curation`, `agent_loop`,
-   `session_builder`, `simard::*`).
+   `session_builder`, `simard::*`). A `source_module` that matches **no**
+   keyword — for example the Overseer's own `"overseer"` workstream-gap briefs —
+   routes to the configured **default repo** (`rysweet/Simard`, the
+   `DEFAULT_TARGET_REPO` constant) and the fallback is recorded with
+   `tracing::warn!`. Routing is therefore *total*: it never errors and never
+   drops a gap on the floor.
 3. **Deduplicates** the failure against existing open issues using a stable
    SHA-256 signature embedded in each issue body.
 4. **Files** a new issue (or matches an existing one) via the `gh` CLI.
 5. **Enqueues** the resulting issue into Simard's own backlog through
    `src/goal_curation`, so the next curation cycle can pick it up.
 
-There are **no fallbacks**. Any ambiguity, `gh` failure, or invalid input
-surfaces as a `SimardError` — the loop never silently degrades, never
-picks a default repo, and never files duplicate issues.
+The loop **never silently degrades**. Any `gh` failure or invalid input
+surfaces as a `SimardError`, and the loop never files duplicate issues. Routing
+is the one deliberately *total* step: an unmatched `source_module` is **not** an
+error — it falls back to the default repo (`rysweet/Simard`) and is logged via
+`tracing::warn!`, so the originating gap or failure is always tracked somewhere
+rather than lost. This is a *logged, non-error* recovery, not a silent one.
 
 ## Loop at a Glance
 
@@ -45,7 +53,7 @@ OrchestratorRunSummary
   validate(run)                          ── invalid → StewardshipInvalidRunSummary
         │
         ▼
-  route_failure(source_module)           ── unknown → StewardshipRoutingAmbiguous
+  route_failure(source_module)           ── unknown → default repo (rysweet/Simard), warn-logged
         │
         ▼
   failure_signature(kind, error_text)
@@ -60,8 +68,13 @@ OrchestratorRunSummary
 
 ## Invariants
 
-- **Routing totality.** A successful outcome implies routing succeeded.
-- **No filing without routing.** Routing failure short-circuits before any I/O.
+- **Routing totality.** `route_failure` is total — every input yields a
+  `TargetRepo`. A matched keyword pins the repo; an unmatched `source_module`
+  falls back to the default repo (`rysweet/Simard`) and is `tracing::warn!`-logged.
+  Routing can therefore never short-circuit the loop.
+- **No filing without valid input.** Validation failure (an empty required
+  field) short-circuits before any I/O. Routing never blocks filing, but a
+  malformed `OrchestratorRunSummary` still does.
 - **No filing without search.** `create_issue` runs only after a successful
   search returns no signature match.
 - **At most one create per call.** Each call yields exactly one of
@@ -72,7 +85,10 @@ OrchestratorRunSummary
 - **Closed issues do not match.** Signature search is scoped to open issues
   only; recurrence after manual close files a fresh issue.
 - **Fail-loud.** Missing `gh`, non-zero `gh` exit, malformed JSON, or empty
-  required fields all produce errors. There is no silent recovery path.
+  required fields all produce errors. There is no silent recovery path. The
+  routing default-fallback is the one exception, and it is **not silent** — it
+  is a logged (`tracing::warn!`), first-class routing outcome, not an error and
+  not a swallow.
 
 ## Routing Matrix
 
@@ -83,11 +99,20 @@ lowercased source string against ordered keyword sets:
 |-------|--------------------------------------------------------------------------------------------------|--------------------|
 | 1     | `amplihack`, `recipe-runner`, `orchestrator`, `recipe::`                                         | `rysweet/amplihack` |
 | 2     | `engineer_loop`, `base_type`, `self_improve`, `goal_curation`, `agent_loop`, `session_builder`, `simard::` | `rysweet/Simard`    |
-| —     | none                                                                                             | `Err(StewardshipRoutingAmbiguous)` |
+| —     | none (default fallback)                                                                          | `rysweet/Simard` (`DEFAULT_TARGET_REPO`), logged via `tracing::warn!` |
 
 Amplihack keywords are checked first. If a source string contains both
 families (e.g. `amplihack::engineer_loop`), the outer-system tag wins by
 design; this precedence is pinned by tests.
+
+When no keyword matches, `route_failure` **does not error**. It returns the
+`DEFAULT_TARGET_REPO` constant (`TargetRepo::Simard` → `rysweet/Simard`) and
+emits a single `tracing::warn!` carrying the unmatched `source_module` and the
+chosen default slug. `DEFAULT_TARGET_REPO` is a compile-time constant — the one
+named source of truth for the default — so the fallback can never be an
+attacker-chosen or dynamically-supplied repo. This is what lets the Overseer's
+own `source_module = "overseer"` gap-scan briefs file/upsert tracking issues in
+`rysweet/Simard` instead of failing every tick.
 
 ## Failure Signature
 
