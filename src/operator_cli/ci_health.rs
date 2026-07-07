@@ -9,15 +9,18 @@
 //! See `docs/reference/ci-health-sweep.md`.
 
 use crate::ci_health::{
-    RealGhWorkflowClient, render_human, report_to_json, sweep_fixture, sweep_live,
+    RealGhWorkflowClient, render_human, report_to_json, sweep_fixture, sweep_live_with_options,
 };
 
 pub(super) const CI_HEALTH_HELP: &str = "\
 Simard ci-health subcommand
 
-Usage: simard ci-health [--json] [--from-json <path>]
+Usage: simard ci-health [--json] [--no-cache] [--from-json <path>]
 
   --json               Emit the FleetReport as JSON (default: human table).
+  --no-cache           Force a full re-collection of every repo, ignoring the
+                       last-known-green head-SHA cache (the cache is still
+                       refreshed from this sweep). Alias: --refresh.
   --from-json <path>   Classify an offline snapshot fixture instead of calling
                        `gh` (the fixture shape mirrors the live snapshot).
 
@@ -28,6 +31,11 @@ failure / timed_out / startup_failure. Disabled workflows and non-failure
 conclusions (cancelled, skipped, neutral, action_required, stale) are ignored
 with a reason.
 
+To avoid re-auditing an already-green fleet every cycle, each repo's
+last-known-green default-branch head commit SHA is cached; a repo whose head SHA
+is unchanged (and whose CI is commit-driven) is served from cache as green
+instead of being re-collected. Use --no-cache to force a full sweep.
+
 Exit code: 0 when the fleet is green; non-zero when any actionable failure
 exists.
 ";
@@ -35,16 +43,19 @@ exists.
 /// Parsed `ci-health` flags.
 struct Flags {
     json: bool,
+    no_cache: bool,
     from_json: Option<String>,
 }
 
 fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, Box<dyn std::error::Error>> {
     let mut json = false;
+    let mut no_cache = false;
     let mut from_json = None;
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--json" => json = true,
+            "--no-cache" | "--refresh" => no_cache = true,
             "--from-json" => {
                 let path = args
                     .next()
@@ -63,7 +74,11 @@ fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, Box<dyn std:
             }
         }
     }
-    Ok(Flags { json, from_json })
+    Ok(Flags {
+        json,
+        no_cache,
+        from_json,
+    })
 }
 
 /// Dispatch `simard ci-health`. Returns `Ok(())` when the fleet is green and an
@@ -80,7 +95,7 @@ pub(super) fn dispatch_ci_health_command(
                 std::fs::read(path).map_err(|e| format!("failed to read fixture '{path}': {e}"))?;
             sweep_fixture(&bytes)?
         }
-        None => sweep_live(&RealGhWorkflowClient::new())?,
+        None => sweep_live_with_options(&RealGhWorkflowClient::new(), !flags.no_cache)?,
     };
 
     if flags.json {

@@ -2,7 +2,10 @@
 //! motivated the module: a `disabled` workflow's stale `failure` is **ignored**,
 //! while an `active` workflow's `failure` is an **actionable** failure.
 
-use super::classify::{IgnoreReason, WorkflowVerdict, build_report, classify_workflow};
+use super::cache::GreenShaCache;
+use super::classify::{
+    IgnoreReason, WorkflowVerdict, build_report, classify_workflow, repo_cacheable,
+};
 use super::gh::{
     GhWorkflowClient, RawRunRow, RawWorkflowRow, build_repo_snapshot, collect_fleet,
     latest_run_by_workflow, parse_run_rows, snapshot_from_fixture,
@@ -10,7 +13,7 @@ use super::gh::{
 use super::types::{
     FleetSnapshot, RepoSnapshot, RunConclusion, WorkflowRun, WorkflowSnapshot, WorkflowState,
 };
-use super::{report_to_json, sweep_fixture};
+use super::{report_to_json, run_sweep, sweep_fixture};
 use crate::error::SimardResult;
 
 fn run(status: &str, conclusion: Option<&str>) -> WorkflowRun {
@@ -209,6 +212,8 @@ fn mixed_fleet() -> FleetSnapshot {
             RepoSnapshot {
                 slug: "rysweet/azlin".to_string(),
                 default_branch: "main".to_string(),
+                head_sha: "azlin-sha".to_string(),
+                green_from_cache: false,
                 workflows: vec![
                     wf(
                         "CI",
@@ -225,6 +230,8 @@ fn mixed_fleet() -> FleetSnapshot {
             RepoSnapshot {
                 slug: "rysweet/agent-kgpacks".to_string(),
                 default_branch: "main".to_string(),
+                head_sha: "kgpacks-sha".to_string(),
+                green_from_cache: false,
                 workflows: vec![wf(
                     "Build Knowledge Pack",
                     WorkflowState::Active,
@@ -250,6 +257,8 @@ fn report_flags_active_failure_with_run_url() {
     fleet.repos.push(RepoSnapshot {
         slug: "rysweet/RustyClawd".to_string(),
         default_branch: "main".to_string(),
+        head_sha: "rusty-sha".to_string(),
+        green_from_cache: false,
         workflows: vec![WorkflowSnapshot {
             name: "CI".to_string(),
             state: WorkflowState::Active,
@@ -336,7 +345,7 @@ fn build_repo_snapshot_keys_by_id_so_same_named_workflows_dont_collapse() {
         run_row("CI", 100, "2026-07-06T00:00:00Z", "completed", "success", 1),
         run_row("CI", 200, "2026-07-05T00:00:00Z", "completed", "failure", 2),
     ];
-    let snap = build_repo_snapshot("rysweet/foo", "main", &workflows, &runs);
+    let snap = build_repo_snapshot("rysweet/foo", "main", "foo-sha", &workflows, &runs);
     // Keying by id must NOT collapse them onto the newer success.
     assert_eq!(
         classify_workflow(&snap.workflows[0]),
@@ -373,7 +382,7 @@ fn build_repo_snapshot_joins_and_marks_missing_runs() {
         "success",
         7,
     )];
-    let snap = build_repo_snapshot("rysweet/foo", "main", &workflows, &runs);
+    let snap = build_repo_snapshot("rysweet/foo", "main", "foo-sha", &workflows, &runs);
     assert_eq!(snap.workflows.len(), 2);
     let ci = snap.workflows.iter().find(|w| w.name == "CI").unwrap();
     assert_eq!(ci.latest_run.as_ref().unwrap().database_id, 7);
@@ -388,6 +397,7 @@ fn parse_run_rows_maps_empty_conclusion_to_none() {
     let snap = build_repo_snapshot(
         "rysweet/foo",
         "main",
+        "foo-sha",
         &[RawWorkflowRow {
             name: "CI".to_string(),
             state: "active".to_string(),
@@ -411,6 +421,9 @@ struct FakeGh;
 impl GhWorkflowClient for FakeGh {
     fn default_branch(&self, _repo: &str) -> SimardResult<String> {
         Ok("main".to_string())
+    }
+    fn head_sha(&self, _repo: &str, _branch: &str) -> SimardResult<String> {
+        Ok("fake-sha".to_string())
     }
     fn list_workflows(&self, _repo: &str) -> SimardResult<Vec<RawWorkflowRow>> {
         Ok(vec![
@@ -458,7 +471,12 @@ impl GhWorkflowClient for FakeGh {
 
 #[test]
 fn collect_fleet_builds_green_snapshot_from_fake() {
-    let snap = collect_fleet(&FakeGh, &["rysweet/a", "rysweet/b"]).unwrap();
+    let snap = collect_fleet(
+        &FakeGh,
+        &["rysweet/a", "rysweet/b"],
+        &GreenShaCache::empty(),
+    )
+    .unwrap();
     assert_eq!(snap.repos.len(), 2);
     let report = build_report(&snap);
     assert!(report.green);
@@ -475,6 +493,9 @@ struct WindowGapGh {
 impl GhWorkflowClient for WindowGapGh {
     fn default_branch(&self, _repo: &str) -> SimardResult<String> {
         Ok("main".to_string())
+    }
+    fn head_sha(&self, _repo: &str, _branch: &str) -> SimardResult<String> {
+        Ok("windowgap-sha".to_string())
     }
     fn list_workflows(&self, _repo: &str) -> SimardResult<Vec<RawWorkflowRow>> {
         Ok(vec![
@@ -537,7 +558,7 @@ fn collect_fleet_falls_back_for_active_workflow_missing_from_window() {
     let gh = WindowGapGh {
         queried: std::cell::RefCell::new(Vec::new()),
     };
-    let snap = collect_fleet(&gh, &["rysweet/x"]).unwrap();
+    let snap = collect_fleet(&gh, &["rysweet/x"], &GreenShaCache::empty()).unwrap();
     let report = build_report(&snap);
 
     // The out-of-window active failure must surface as actionable, not be
@@ -578,4 +599,344 @@ fn fixture_round_trips_real_scenario() {
       {"name":"CI","state":"active","latest_run":{"status":"completed","conclusion":"failure","event":"push","created_at":"2026-07-06T00:00:00Z","database_id":9}}]}]}"#;
     let snap: FleetSnapshot = snapshot_from_fixture(failing).unwrap();
     assert!(!build_report(&snap).green);
+}
+
+// ── last-known-green head-SHA cache ─────────────────────────────────────────
+
+/// A configurable fake that records how many times the expensive collection
+/// calls (`list_workflows` / `list_runs`) were made, so a cache *skip* can be
+/// proven by asserting they were never called.
+struct CountingGh {
+    head: String,
+    workflows: Vec<RawWorkflowRow>,
+    runs: Vec<RawRunRow>,
+    workflows_calls: std::cell::RefCell<usize>,
+    runs_calls: std::cell::RefCell<usize>,
+    head_calls: std::cell::RefCell<usize>,
+}
+
+impl CountingGh {
+    fn new(head: &str, workflows: Vec<RawWorkflowRow>, runs: Vec<RawRunRow>) -> Self {
+        Self {
+            head: head.to_string(),
+            workflows,
+            runs,
+            workflows_calls: std::cell::RefCell::new(0),
+            runs_calls: std::cell::RefCell::new(0),
+            head_calls: std::cell::RefCell::new(0),
+        }
+    }
+    /// One active, commit-driven (`push`), successful CI workflow.
+    fn green_push() -> Self {
+        Self::new(
+            "sha-B",
+            vec![RawWorkflowRow {
+                name: "CI".to_string(),
+                state: "active".to_string(),
+                id: 100,
+            }],
+            vec![run_row(
+                "CI",
+                100,
+                "2026-07-06T00:00:00Z",
+                "completed",
+                "success",
+                10,
+            )],
+        )
+    }
+}
+
+impl GhWorkflowClient for CountingGh {
+    fn default_branch(&self, _repo: &str) -> SimardResult<String> {
+        Ok("main".to_string())
+    }
+    fn head_sha(&self, _repo: &str, _branch: &str) -> SimardResult<String> {
+        *self.head_calls.borrow_mut() += 1;
+        Ok(self.head.clone())
+    }
+    fn list_workflows(&self, _repo: &str) -> SimardResult<Vec<RawWorkflowRow>> {
+        *self.workflows_calls.borrow_mut() += 1;
+        Ok(self.workflows.clone())
+    }
+    fn list_runs(&self, _repo: &str, _branch: &str) -> SimardResult<Vec<RawRunRow>> {
+        *self.runs_calls.borrow_mut() += 1;
+        Ok(self.runs.clone())
+    }
+    fn latest_run(
+        &self,
+        _repo: &str,
+        _branch: &str,
+        _workflow_id: u64,
+    ) -> SimardResult<Option<RawRunRow>> {
+        Ok(None)
+    }
+}
+
+#[test]
+fn cache_hit_skips_collection_and_reports_green_by_cache() {
+    // The repo's head SHA matches the cached green SHA, so the expensive
+    // collection must be skipped entirely. The fake would return a *failing*
+    // workflow if it were ever asked — proving the skip.
+    let gh = CountingGh::new(
+        "sha-A",
+        vec![RawWorkflowRow {
+            name: "CI".to_string(),
+            state: "active".to_string(),
+            id: 100,
+        }],
+        vec![run_row(
+            "CI",
+            100,
+            "2026-07-06T00:00:00Z",
+            "completed",
+            "failure",
+            10,
+        )],
+    );
+    let mut cache = GreenShaCache::empty();
+    cache.record_green("rysweet/x", "sha-A");
+
+    let report = run_sweep(&gh, &["rysweet/x"], &mut cache).unwrap();
+
+    assert!(report.green, "cache-served repo keeps the fleet green");
+    assert_eq!(report.repos_from_cache, 1);
+    assert_eq!(report.repos_checked, 1);
+    assert_eq!(report.workflows_checked, 0, "no workflows re-collected");
+    assert!(report.repos[0].green_from_cache);
+    // The expensive collection calls were never made.
+    assert_eq!(*gh.workflows_calls.borrow(), 0);
+    assert_eq!(*gh.runs_calls.borrow(), 0);
+    // The cache entry is preserved unchanged.
+    assert_eq!(cache.get("rysweet/x"), Some("sha-A"));
+}
+
+#[test]
+fn cache_miss_on_sha_change_recollects_and_updates_entry() {
+    // Cached at sha-A, but the branch head is now sha-B -> cache miss -> full
+    // collection -> still green -> cache advances to sha-B.
+    let gh = CountingGh::green_push();
+    let mut cache = GreenShaCache::empty();
+    cache.record_green("rysweet/x", "sha-A");
+
+    let report = run_sweep(&gh, &["rysweet/x"], &mut cache).unwrap();
+
+    assert!(report.green);
+    assert_eq!(report.repos_from_cache, 0, "SHA changed -> not from cache");
+    assert!(!report.repos[0].green_from_cache);
+    assert_eq!(report.workflows_checked, 1);
+    // The expensive collection ran exactly once...
+    assert_eq!(*gh.workflows_calls.borrow(), 1);
+    assert_eq!(*gh.runs_calls.borrow(), 1);
+    // ...and the cache now pins the new green SHA.
+    assert_eq!(cache.get("rysweet/x"), Some("sha-B"));
+}
+
+#[test]
+fn cache_invalidation_on_non_green_drops_entry() {
+    // Cached at sha-A; head moved to sha-B and CI now fails -> cache miss ->
+    // collect -> red -> the stale green entry is invalidated.
+    let gh = CountingGh::new(
+        "sha-B",
+        vec![RawWorkflowRow {
+            name: "CI".to_string(),
+            state: "active".to_string(),
+            id: 100,
+        }],
+        vec![run_row(
+            "CI",
+            100,
+            "2026-07-06T00:00:00Z",
+            "completed",
+            "failure",
+            10,
+        )],
+    );
+    let mut cache = GreenShaCache::empty();
+    cache.record_green("rysweet/x", "sha-A");
+
+    let report = run_sweep(&gh, &["rysweet/x"], &mut cache).unwrap();
+
+    assert!(!report.green);
+    assert_eq!(report.actionable_failures.len(), 1);
+    assert_eq!(*gh.workflows_calls.borrow(), 1, "red repo was re-collected");
+    assert_eq!(cache.get("rysweet/x"), None, "stale green SHA invalidated");
+}
+
+#[test]
+fn green_but_scheduled_repo_is_not_cached() {
+    // A green fleet whose latest run is `schedule` (not commit-driven) must NOT
+    // be cached: a future scheduled run could fail without a new commit, so
+    // skipping on an unchanged SHA would be unsound.
+    let gh = CountingGh::new(
+        "sha-B",
+        vec![RawWorkflowRow {
+            name: "Nightly".to_string(),
+            state: "active".to_string(),
+            id: 100,
+        }],
+        vec![RawRunRow {
+            event: "schedule".to_string(),
+            ..run_row(
+                "Nightly",
+                100,
+                "2026-07-06T00:00:00Z",
+                "completed",
+                "success",
+                10,
+            )
+        }],
+    );
+    let mut cache = GreenShaCache::empty();
+
+    let report = run_sweep(&gh, &["rysweet/x"], &mut cache).unwrap();
+
+    assert!(report.green);
+    assert!(
+        cache.is_empty(),
+        "scheduled-workflow repo must not be cached"
+    );
+}
+
+#[test]
+fn repo_cacheable_only_for_completed_commit_driven_non_failing_active_workflows() {
+    let commit_driven_green = RepoSnapshot {
+        slug: "rysweet/x".to_string(),
+        default_branch: "main".to_string(),
+        head_sha: "sha".to_string(),
+        green_from_cache: false,
+        workflows: vec![wf(
+            "CI",
+            WorkflowState::Active,
+            Some(run("completed", Some("success"))),
+        )],
+    };
+    assert!(repo_cacheable(&commit_driven_green));
+
+    // A disabled-only repo is vacuously cacheable (nothing can run).
+    let disabled_only = RepoSnapshot {
+        workflows: vec![wf(
+            "Old",
+            WorkflowState::DisabledManually,
+            Some(run("completed", Some("failure"))),
+        )],
+        ..commit_driven_green.clone()
+    };
+    assert!(repo_cacheable(&disabled_only));
+
+    // Scheduled latest run -> not commit-driven -> not cacheable.
+    let scheduled = RepoSnapshot {
+        workflows: vec![WorkflowSnapshot {
+            name: "Nightly".to_string(),
+            state: WorkflowState::Active,
+            latest_run: Some(WorkflowRun {
+                event: "schedule".to_string(),
+                ..run("completed", Some("success"))
+            }),
+        }],
+        ..commit_driven_green.clone()
+    };
+    assert!(!repo_cacheable(&scheduled));
+
+    // A repo whose only active workflow has never run is cacheable: a scheduled
+    // trigger would already have produced runs, so a never-run workflow cannot
+    // fire on an unchanged default branch.
+    let never_ran = RepoSnapshot {
+        workflows: vec![wf("New", WorkflowState::Active, None)],
+        ..commit_driven_green.clone()
+    };
+    assert!(repo_cacheable(&never_ran));
+
+    // A push-success workflow alongside a never-run workflow stays cacheable.
+    let push_plus_norun = RepoSnapshot {
+        workflows: vec![
+            wf(
+                "CI",
+                WorkflowState::Active,
+                Some(run("completed", Some("success"))),
+            ),
+            wf("Release", WorkflowState::Active, None),
+        ],
+        ..commit_driven_green.clone()
+    };
+    assert!(repo_cacheable(&push_plus_norun));
+
+    // But a push-success workflow alongside a *completed scheduled* run is NOT
+    // cacheable — the schedule can fire again without a commit.
+    let push_plus_scheduled = RepoSnapshot {
+        workflows: vec![
+            wf(
+                "CI",
+                WorkflowState::Active,
+                Some(run("completed", Some("success"))),
+            ),
+            WorkflowSnapshot {
+                name: "advisory-scan".to_string(),
+                state: WorkflowState::Active,
+                latest_run: Some(WorkflowRun {
+                    event: "schedule".to_string(),
+                    ..run("completed", Some("success"))
+                }),
+            },
+        ],
+        ..commit_driven_green.clone()
+    };
+    assert!(!repo_cacheable(&push_plus_scheduled));
+
+    // In-progress latest run -> not cacheable.
+    let in_progress = RepoSnapshot {
+        workflows: vec![wf(
+            "CI",
+            WorkflowState::Active,
+            Some(run("in_progress", None)),
+        )],
+        ..commit_driven_green.clone()
+    };
+    assert!(!repo_cacheable(&in_progress));
+
+    // A repo already served from cache is trivially still cacheable.
+    let from_cache = RepoSnapshot {
+        green_from_cache: true,
+        workflows: vec![],
+        ..commit_driven_green.clone()
+    };
+    assert!(repo_cacheable(&from_cache));
+}
+
+#[test]
+fn cache_is_green_requires_non_empty_matching_sha() {
+    let mut cache = GreenShaCache::empty();
+    cache.record_green("rysweet/x", "sha-A");
+    assert!(cache.is_green("rysweet/x", "sha-A"));
+    assert!(!cache.is_green("rysweet/x", "sha-B"));
+    assert!(!cache.is_green("rysweet/y", "sha-A"));
+    // An empty head SHA never matches, even against an (impossible) empty entry.
+    assert!(!cache.is_green("rysweet/x", ""));
+    // record_green ignores an empty SHA (never caches a blank).
+    cache.record_green("rysweet/z", "");
+    assert_eq!(cache.get("rysweet/z"), None);
+}
+
+#[test]
+fn cache_round_trips_through_disk_and_tolerates_missing_or_corrupt() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("nested").join("ci_health_green_sha.json");
+
+    // Missing file -> empty cache (first run).
+    assert!(GreenShaCache::load(&path).is_empty());
+
+    let mut cache = GreenShaCache::empty();
+    cache.record_green("rysweet/Simard", "deadbeef");
+    cache.record_green("rysweet/azlin", "cafef00d");
+    cache.save(&path).unwrap();
+
+    let loaded = GreenShaCache::load(&path);
+    assert_eq!(loaded.get("rysweet/Simard"), Some("deadbeef"));
+    assert_eq!(loaded.get("rysweet/azlin"), Some("cafef00d"));
+    assert_eq!(loaded.len(), 2);
+    assert_eq!(loaded, cache);
+
+    // Corrupt file -> empty cache (never blocks a sweep).
+    std::fs::write(&path, b"{ this is not json").unwrap();
+    assert!(GreenShaCache::load(&path).is_empty());
 }
