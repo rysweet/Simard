@@ -175,3 +175,41 @@ fn detect_is_failsafe_on_source_error() {
     );
     assert_eq!(drift, DeployDrift::current());
 }
+
+#[test]
+fn try_detect_surfaces_source_error_while_detect_fails_safe() {
+    // Regression (#2751): `try_detect` must SURFACE a source error as `Err` so
+    // the outcome-verify Rail-3 can tell "could not determine" apart from
+    // "positively no drift" — while `detect` stays fail-safe for the
+    // deploy-trigger path. If `try_detect` folded the error into `current()`
+    // like `detect`, an unknown deploy state would forge a `verified` live
+    // signal for a self-affecting goal.
+    let src = FakeDeploySource {
+        fail: true,
+        ..Default::default()
+    };
+    let detector = ReconcileDetector::new(src);
+    assert!(
+        detector.try_detect().is_err(),
+        "try_detect must not swallow a source error"
+    );
+    assert!(
+        !detector.detect().needs_deploy,
+        "detect must still fail safe (no spurious deploy)"
+    );
+}
+
+#[test]
+fn try_detect_agrees_with_detect_on_success() {
+    // When the source is healthy, `try_detect` and `detect` return the same
+    // drift — the fallible variant only diverges on error.
+    let src = FakeDeploySource {
+        behind: 4,
+        ..Default::default()
+    };
+    let detector = ReconcileDetector::new(src);
+    let via_try = detector.try_detect().unwrap();
+    assert_eq!(via_try, detector.detect());
+    assert!(via_try.needs_deploy);
+    assert_eq!(via_try.behind_commits, 4);
+}

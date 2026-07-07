@@ -12,8 +12,12 @@
 //! authenticated corroboration:
 //!
 //! - `deployed_running` — the reconcile detector reports the merged change is
-//!   actually running (`!DeployDrift::needs_deploy`). This is the verified
-//!   signal that lets a healthy self-affecting goal clear Rail-3.
+//!   actually running (`!DeployDrift::needs_deploy`, via the fail-*closed*
+//!   [`ReconcileDetector::try_detect`](crate::self_deploy::ReconcileDetector::try_detect)).
+//!   This is the verified signal that lets a healthy self-affecting goal clear
+//!   Rail-3. A git/source probe *error* is NOT this signal: it is emitted as an
+//!   UNVERIFIED `deploy_state_unknown` marker, so an unknown deploy state can
+//!   never forge a completion.
 //! - `external_repo` — for goals that route to another repo, the daemon has no
 //!   live probe of that repo's production; it emits one verified marker so
 //!   external goals continue to defer to the artifact done-gate (no regression)
@@ -55,6 +59,22 @@ const FAILURE_SIGNATURES: &[(&str, &str)] = &[
     ("oom-kill", "OOM killer fired"),
 ];
 
+/// Three-way result of probing whether the merged change is live on the running
+/// binary. The distinction between [`Self::Running`] and [`Self::Unknown`] is
+/// load-bearing: Rail-3 (issue #2751) only accepts *positively confirmed*
+/// running as a `verified` live signal, so a git/source probe error must be an
+/// explicit "unknown" rather than being folded into "running".
+enum DeployProbe {
+    /// Reconcile detector positively confirmed no drift — the merged change is
+    /// running. The only state that yields a `verified` live signal.
+    Running,
+    /// Drift positively observed: the running binary is behind merged `main`.
+    NotRunning,
+    /// The deploy state could not be determined (git/source probe error). Never
+    /// a verified signal — the carried reason is surfaced to the reasoner.
+    Unknown(String),
+}
+
 /// Production [`LiveSignalSource`]. Reads the deploy-reconcile state and the
 /// daemon's own log tail; both are local, authenticated origins.
 pub struct DaemonLiveSignals {
@@ -72,16 +92,30 @@ impl DaemonLiveSignals {
         }
     }
 
-    /// `true` when the running binary is not behind merged `main` (the change
-    /// is actually deployed and running). Fail-safe: a transient git error
-    /// reports "no drift", so this never spuriously blocks — it only reports
-    /// `false` when drift is positively observed. Mirrors the completion gate's
-    /// `is_deployed`.
-    fn deployed_running(&self) -> bool {
+    /// Probe whether the running binary reflects the merged change, as a
+    /// three-way state. Rail-3 stakes `verified: true` on *authenticated
+    /// positive corroboration*, so this deliberately does **not** collapse a git
+    /// probe error into "running":
+    ///
+    /// - [`DeployProbe::Running`] — the reconcile detector positively confirmed
+    ///   no drift (`!needs_deploy`). Only this yields a `verified` live signal.
+    /// - [`DeployProbe::NotRunning`] — drift positively observed; the running
+    ///   binary is behind merged `main`. Unverified.
+    /// - [`DeployProbe::Unknown`] — the git/source probe errored, so the deploy
+    ///   state could not be determined. Unverified: the *absence* of a signal
+    ///   must never be reported as a positive one (issue #2751). Uses the
+    ///   fail-closed [`ReconcileDetector::try_detect`], not the fail-safe
+    ///   `detect`, precisely so a transient git error cannot forge a verified
+    ///   signal that clears Rail-3 for a self-affecting goal.
+    fn deploy_state(&self) -> DeployProbe {
         let detector = crate::self_deploy::ReconcileDetector::new(
             crate::self_deploy::GitDeploySource::at(&self.repo_root),
         );
-        !detector.detect().needs_deploy
+        match detector.try_detect() {
+            Ok(drift) if drift.needs_deploy => DeployProbe::NotRunning,
+            Ok(_) => DeployProbe::Running,
+            Err(e) => DeployProbe::Unknown(e.to_string()),
+        }
     }
 
     /// Read the last [`LOG_TAIL_BYTES`] of the daemon log, best-effort. Returns
@@ -98,21 +132,34 @@ impl LiveSignalSource for DaemonLiveSignals {
         let mut signals = Vec::new();
 
         if is_self_affecting(goal) {
-            let running = self.deployed_running();
+            let (kind, verified, detail) = match self.deploy_state() {
+                DeployProbe::Running => (
+                    "deployed_running",
+                    true,
+                    "merged change is running (no deploy drift)".to_string(),
+                ),
+                DeployProbe::NotRunning => (
+                    "not_running",
+                    false,
+                    "running binary is behind merged main — not yet deployed".to_string(),
+                ),
+                // A probe error is an UNKNOWN deploy state, never a verified
+                // "running". Reported as an unverified signal so the brain can
+                // weigh it, but it can NEVER satisfy Rail-3 (issue #2751).
+                DeployProbe::Unknown(reason) => (
+                    "deploy_state_unknown",
+                    false,
+                    format!(
+                        "deploy state could not be determined ({reason}) — unverified, not live proof"
+                    ),
+                ),
+            };
             signals.push(LiveSignal {
                 source: "reconcile_detector".to_string(),
-                kind: if running {
-                    "deployed_running".to_string()
-                } else {
-                    "not_running".to_string()
-                },
+                kind: kind.to_string(),
                 // Authenticated positive corroboration only.
-                verified: running,
-                detail: if running {
-                    "merged change is running (no deploy drift)".to_string()
-                } else {
-                    "running binary is behind merged main — not yet deployed".to_string()
-                },
+                verified,
+                detail,
                 observed_at: now,
             });
 
@@ -231,6 +278,46 @@ mod tests {
         assert_eq!(signals.len(), 1);
         assert_eq!(signals[0].kind, "external_repo");
         assert!(signals[0].verified);
+    }
+
+    #[test]
+    fn self_affecting_goal_probe_error_is_unverified_unknown_not_forged_running() {
+        // Regression (#2751): the load-bearing Rail-3 guard. A self-affecting
+        // goal (repo=None → routes to Simard) whose deploy probe ERRORS — here a
+        // nonexistent repo makes `ReconcileDetector::try_detect` return `Err` —
+        // must NOT get a `verified: true` "deployed_running" signal. Previously
+        // the fail-*open* `detect()` folded that error into `needs_deploy=false`
+        // → `verified: true`, silently forging live proof for exactly the class
+        // of goal (self-affecting, deploy unverifiable) this feature exists to
+        // protect. It must instead emit an UNVERIFIED `deploy_state_unknown`
+        // marker so Rail-3 sees zero verified live signals.
+        let g = ActiveGoal::new("g", "eliminate E2BIG on spawn", 1);
+        assert!(
+            crate::goal_curation::completion_gate::is_self_affecting(&g),
+            "fixture must be self-affecting for this guard to be meaningful"
+        );
+        let src = DaemonLiveSignals::new(
+            PathBuf::from("/no-such-repo-xyz-123"),
+            PathBuf::from("/no-such-state-root-xyz-123"),
+        );
+        let signals = src.gather(&g).unwrap();
+        let recon = signals
+            .iter()
+            .find(|s| s.source == "reconcile_detector")
+            .expect("a self-affecting goal must emit a reconcile_detector signal");
+        assert_eq!(
+            recon.kind, "deploy_state_unknown",
+            "a probe error must be reported as an unknown deploy state"
+        );
+        assert!(
+            !recon.verified,
+            "an UNKNOWN deploy state must never be a verified live signal"
+        );
+        assert_eq!(
+            signals.iter().filter(|s| s.verified).count(),
+            0,
+            "Rail-3 must see zero verified live signals when the deploy state is unknown"
+        );
     }
 
     #[test]
