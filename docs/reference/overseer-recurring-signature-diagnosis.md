@@ -125,6 +125,16 @@ description: >
   `RECURRING_SIGNATURE_THRESHOLD = 2`), test-backed and scoped to magnitude (P1 stays the load-bearing cut);
   tests 36/0 + 9/0 + 5/0 at zero drift, the kgpacks board stays wholly CLOSED, the verbatim tail holds at 10
   (no 11th), and the `recurring_goal_reblock` flood grew 101 → 110 (still firing).
+  Round-26 (§7aj, the NINTH consolidation, HEAD `499d2868`) unified the four dives since
+  §7ae (§7af/§7ag/§7ah/§7ai): re-ran the suites (36/0 + 9/0 + 5/0, incl.
+  `recall_budget_default_is_5_5_3_5` and `sanitize_recalled_caps_length`), re-anchored every
+  canonical line verbatim at zero `src/` drift, and folded three net-new facts — the emitted
+  composite is now proven **doubly bounded** (length ≤ 8192 B §7ag + count `2 ≤ N ≤ 5` §7ai;
+  neither severs the loop, **P1** stays load-bearing); the **whole kgpacks board is CLOSED**
+  (#17 @ 19:19:47Z), folding **H3 into H2** and growing the stale-park set 4→5 (**P2**
+  enlarged, urgency raised); and the `recurring_goal_reblock` flood grew 110 → 113 (a fresh
+  burst-of-3, still firing, `gh_client.rs:37` unfixed). No finding overturned; close-and-execute
+  (P1 → P2 → P6). Confidence High.
 last_updated: 2026-07-07
 review_schedule: as-needed
 owner: simard
@@ -414,14 +424,18 @@ Confirmed in round 1 and reinforced here:
   they persist tick-over-tick. A self-referential loop fed by standing inputs
   recurs indefinitely.
 
-The empirical tail (9 open near-duplicate issues, growing keys) is the observable
+The empirical tail (10 open near-duplicate issues, growing but **doubly-bounded** keys —
+length ≤ 8192 B §7ag, count `N ∈ [2, 5]` §7ai) is the observable
 consequence.
 
 **Confidence: High.** The structural cause is confirmed by round-1 **and**
 reproduced here through the real code path by the executable H1/H2
 CONFIRM / REFUTE-by-fix tests added in `src/overseer/tests_memory_recall.rs`
 (round 2): H1 shows `RecurringSignature` is re-emitted purely from the Overseer's
-own write-backs, and H2 shows `observation_signature` stacks a prefix unboundedly.
+own write-backs, and H2 shows `observation_signature` stacks a prefix each generation — a
+real but **doubly-bounded** growth (the recalled token is length-capped at
+`RECALLED_TEXT_MAX_LEN` = 8192 B §7ag and the emitted `seen N×` count is budget-capped at
+`N ∈ [2, 5]` §7ai; neither bound severs the loop, so **P1** stays the load-bearing cut).
 The semantic cause follows directly from the High-confidence Sections 1–2.
 
 ---
@@ -440,7 +454,9 @@ Ordered by leverage. P1/P2 sever the mechanism; P3/P4 clear the standing inputs.
    goal-board reconciliation step that re-runs the done-gate for
    safeguard-`Blocked` goals whose backing issue is now closed / PR merged, and
    auto-archives (or drops) them instead of holding a terminal park forever. This
-   removes the *stale* `goal:blocked` segments for #16/#18/#21/#22 at the source
+   removes the *stale* `goal:blocked` segments for #16/#17/#18/#21/#22 at the source
+   — **all five now reference CLOSED issues after #17 closed 2026-07-07T19:19:47Z (round-24
+   §7ah, whole board CLOSED), so the stale-park set grew 4→5 and P2's scope/urgency rose**
    (see `howto/recover-goal-board.md`, `howto/unblock-stuck-ooda-goals.md`).
 3. **P3 — Clear the current backlog (only durable when paired with P2).** Run
    `simard goal unblock-all` (or equivalent) to clear the stale parks now; bulk-close
@@ -471,12 +487,12 @@ Ordered by leverage. P1/P2 sever the mechanism; P3/P4 clear the standing inputs.
    deterministically**, while the body needle written by `find_existing`
    (`src/stewardship/dedup.rs:79`) is `stewardship-signature: {signature}` **with a
    space**. So every reblock cycle sees an empty list and files a fresh duplicate,
-   yielding the **~82-issue open flood** (#2688…#2899, still firing). Fix the query to the
+   yielding the **~113-issue open flood** (#2688…#2932+, still firing; 113 open at round-26 §7aj). Fix the query to the
    indexed token — `format!("{signature} in:body")` or the quoted phrase
    `format!("\"stewardship-signature: {signature}\" in:body")` (both live-proven to return
    all rows) — **and add a real-query integration test** (or assert the constructed
    `--search` string) so the `(repo,signature)`-keyed test fake (`stewardship/tests.rs:68-82`)
-   can never again mask it. This collapses the channel from ~82→~5 (one issue per live
+   can never again mask it. This collapses the channel from ~113→~5 (one issue per live
    stale goal) **without** touching the OODA loop, complementary to P2 (P6 caps the
    symptom today; P2 removes the driver). **P1b (belt for P1, round-15 §7v):** have
    `observation_signature` (`src/overseer/mod.rs:1081`) drop any `overseer-obs:`-prefixed
@@ -503,12 +519,12 @@ remediation (P5) downgraded to an optional throughput nicety.
 
 | # | Finding | Confidence | Primary evidence | Residual uncertainty |
 |---|---|---|---|---|
-| 1 | Blocked segments are **stale safeguard-parks** for delivered work (#16/#18/#21/#22); #17 is a **stale-premise dep-block** (same reconciliation defect), still optional to ship | **High** | Live closed/open issue states + timestamps; direct `simard goal list` board read (§7f); `sensor.rs:204,209`, `no_progress_breaker.rs:58,69`, `completion_gate.rs:31,380`; smoking-gun timing (#2768/#2841/#2875 filed after #16 closed) | "No component re-runs the done-gate post-closure" is inferred (corroborated by the 10-issue tail + #2707 re-park escalation) |
+| 1 | Blocked segments are **stale safeguard-parks** for delivered work; as of 2026-07-07 **all five** backing issues #16/#17/#18/#21/#22 are CLOSED (#17 closed 19:19:47Z, round-24 §7ah), so H3's former "#17 stale-premise dep-block" **folds into this row as a fifth stale park** — enlarging **P2** and raising its urgency | **High** | Live CLOSED issue states + timestamps (whole board CLOSED, §7ah/§7ai/§7aj); direct `simard goal list` board read (§7f); `sensor.rs:204,209`, `no_progress_breaker.rs:58,69`, `completion_gate.rs:31,380`; smoking-gun timing (#2768/#2841/#2875 filed after #16 closed) | "No component re-runs the done-gate post-closure" is inferred (corroborated by the 10-issue tail + #2707 re-park escalation); falsifiable — an 11th tail issue carrying an `issue-17` token filed after 19:19:47Z would confirm (none yet) |
 | 2a | `quality:gym_skipped` = ambient `SIMARD_SKIP_GYM` operator flag, not a workstream failure | **High** | Deterministic flag path `provider.rs:61`→`sensor.rs:125`→`signal.rs:398`→`mod.rs:1295` | None material (flag-set state entailed by the signal firing) |
 | 2b | `workstream-gap` is disjoint from `goal:blocked` (uncovered *other* backlog) | **High** | Hard code invariant `sensor.rs:300` excludes blocked goals; `sensor.rs:288`, `signal.rs:475`, `mod.rs:1384` | Exact identity of the uncovered item not pinned (immaterial) |
 | 3 | `resource:engineer_spawn` is a **passenger health signal**, not the root cause **and not a park contributor** (round-4 refutation) | **High** | Two hard decoupling gaps: deferral produces no outcome (`coverage.rs:156`, `no_progress.rs:166`); 429 failure → `goal_failure_counts` demotion, excluded from breaker (`advance.rs:433`, `cycle.rs:360`, `orient.rs:93–117`); `live_engineers` census decoupled from `current_max` (`context.rs:111`) | None material — the runtime AIMD-contraction question is now immaterial (contraction cannot park a goal regardless) |
 | 4 | Recurrence (2×) = unfiltered self-recall + unbounded re-wrap over standing inputs | **High** | Round-1 finding **reproduced** by executable H1/H2 tests (`tests_memory_recall.rs`, round 2) | None material |
-| 5 | Remediation: **P1** severs the recall amplifier (proven one-line seam §7v), **P2** removes standing stale inputs and is required for the fix to *stick*, **P3** clears the ~10-verbatim + ~82-escalation backlog only when paired with P2+P6, P4 conditional, **P5 optional**, **P6** caps the reblock flood via a one-line query fix (§7t, live-reproduced §7w) | **High (P1–P3, P6)**, **Medium (P4)**, **P5 optional** | Each action mapped to a confirmed root cause; #2707 shows bare unblock (P3-alone) re-parks; P6's malformed query reproduced live (0 vs 24 rows); P5 no longer gated on §3 | P4 #17 disposition is a product decision |
+| 5 | Remediation: **P1** severs the recall amplifier (proven one-line seam §7v), **P2** removes standing stale inputs and is required for the fix to *stick* (now **five** stale parks after #17 closed, §7ah/§7aj), **P3** clears the ~10-verbatim + ~113-escalation backlog only when paired with P2+P6, P4 conditional, **P5 optional**, **P6** caps the reblock flood via a one-line query fix (§7t, live-reproduced §7w) | **High (P1–P3, P6)**, **Medium (P4)**, **P5 optional** | Each action mapped to a confirmed root cause; #2707 shows bare unblock (P3-alone) re-parks; P6's malformed query reproduced live (0 vs 24 rows); P5 no longer gated on §3 | P4 #17 disposition is a product decision |
 
 **Method note:** confidence is graded against how disprovable each claim is —
 "High" means grounded in source (`file:line`) or live GitHub/board state that a
@@ -518,7 +534,7 @@ not directly observed.
 
 ---
 
-## 7. Consolidation & verification (rounds 3–25)
+## 7. Consolidation & verification (rounds 3–26)
 
 The consolidation pass (rounds 3–4, this update) reconciled the parallel deep dives
 against the live working tree at **HEAD `20fb7539`** and **executed** the round-2
@@ -3297,6 +3313,117 @@ close-and-execute verdict — residual value is execution of **P1 → P2 → P6*
 
 ---
 
+### 7aj. Round-26 consolidation — the four dives since §7ae unified (§7af/§7ag/§7ah/§7ai): the emitted composite is proven DOUBLY bounded, and the whole kgpacks board has CLOSED, folding H3 into H2 (HEAD `499d2868`)
+
+This pass unifies the **four** parallel deep dives accumulated since the last consolidation (§7ae, round-22) —
+**§7af** (round-23 emission-map re-anchor + the `mod.rs:1374`→`1372` citation correction), **§7ag** (round-23
+loop re-verification + the NET-NEW 8192-byte length bound), **§7ah** (round-24 per-hypothesis re-execution that
+caught #17's live OPEN→CLOSED transition and folded H3 into H2), and **§7ai** (round-25 NET-NEW count bound
+`2 ≤ N ≤ 5`) — into the canonical findings, and independently re-derives every load-bearing fact at the current
+HEAD. HEAD is `499d2868` (the round-25/§7ai commit; §7af–§7ai landed as docs-only commits); `git diff
+--name-only 85245e87..HEAD -- src/` is **empty** (19 commits, all docs/config — the zero-`src/`-drift streak
+unbroken since round 8), so every §7b/§3b/§7u/§7v/§7w/§7z/§7aa/§7ac/§7ae/§7af/§7ag/§7ai anchor re-resolves
+verbatim.
+
+**Independent re-verification (this consolidation, 2026-07-07 ~22:07 UTC)** — re-run by the consolidator at HEAD
+`499d2868`, not inherited:
+
+- `cargo test --lib -- overseer::tests_memory_recall overseer::sensor cognitive_memory::tests_ranked_episodic`
+  → **50 passed, 0 failed** (`tests_memory_recall` **36/0** + `sensor` **9/0** + `tests_ranked_episodic`
+  **5/0**). The four hypothesis tests (`h1_confirm_self_recall_reemits_recurring_signature_from_own_writebacks`,
+  `h1_refute_by_fix_provenance_filter_collapses_the_loop`,
+  `h2_confirm_observation_signature_stacks_prefix_each_generation`,
+  `h2_refute_by_fix_idempotent_signature_is_a_fixed_point`), the four write-back round-trip tests
+  (`adapter_write_back_uses_fixed_overseer_source_label`, `write_back_is_deduplicated_within_window`,
+  `write_back_persists_again_for_a_distinct_signature`, `tick_writes_observation_back_once`), and **both**
+  magnitude-bound backings (`recall_budget_default_is_5_5_3_5` — the §7ai count ceiling;
+  `sanitize_recalled_caps_length` — the §7ag length cap) were all green in the run.
+- Canonical anchors spot-checked **verbatim by reading source at this HEAD** (all identical to §7af/§7ag/§7ai):
+  `RECURRING_SIGNATURE_THRESHOLD: u32 = 2` (`signal.rs:362`); the `for (signature, occurrences) in counts { if
+  occurrences >= …` tally/gate/push (`signal.rs:456-464`); the `format!("overseer-obs:{}", keys.join("|"))`
+  re-wrap (`mod.rs:1085`); the composite-recall `dedup_key` `sanitize_recalled(signature)` (`mod.rs:1372`, the
+  §7af-corrected anchor) + its summary (`mod.rs:1373-1375`); the recall draw `RecallBudget::default()` →
+  `recall_episodic(keys, budget.episodic)` (`mod.rs:497-499`); `episodic: 5` (`capabilities.rs:501`);
+  `RECALLED_TEXT_MAX_LEN: usize = 8192` (`capabilities.rs:455`); the `source_label`-dropping recall projection
+  `.map(|e| RecalledEpisode { failure_signature, id, summary, score })` (`wiring.rs:1024`, the P1 seam);
+  `out.truncate(limit as usize)` (`library_adapter.rs:1330`); `NO_PROGRESS_BREAKER_THRESHOLD: u32 = 3`
+  (`no_progress_breaker.rs:58`); and the **P6 defect pair** — malformed `format!("stewardship-signature:{signature}
+  in:body")` (`gh_client.rs:37`, colon **no space**) vs the correct body needle
+  `format!("stewardship-signature: {signature}")` (`dedup.rs:79`, colon **+ space**), gated by
+  `RECURRENCE_ESCALATION_THRESHOLD = 3` (`root_cause.rs:33`). Every anchor verbatim.
+- **Live board (`rysweet/agent-kgpacks-rs`, `rysweet/Simard`, ~22:07 UTC):** the **whole kgpacks workstream board
+  is CLOSED** — #16 CLOSED 07-06T20:16:25Z, **#17 CLOSED 07-07T19:19:47Z**, #18 CLOSED 07-06T10:33:04Z, #21
+  CLOSED 07-06T13:29:03Z, #22 CLOSED 07-06T12:07:33Z, #23 CLOSED 07-06T12:45:45Z — with only #32 (an *optional*
+  semantic-embeddings follow-up, never a WS blocker) OPEN. The WhisperGate-deduped verbatim tail holds at
+  **exactly 10** (#2669…#2875, no 11th). The broken-dedup `recurring_goal_reblock` escalation flood reads
+  **113 open** (`search/issues` `total_count`), up **110 → 113** since §7ai (~26 min; a fresh **burst of 3**
+  re-confirming §7ae's modally-3 quantum, still firing). The P6 malformed-query defect is confirmed **verbatim at
+  source** this pass (above); a live `search/issues` re-reproduction was **rate-limited** (GitHub secondary limit)
+  this pass but has been live-confirmed ≥8 prior rounds (§7t/§7w/§7ae/§7ah, 0-rows-vs-all-rows), and the flood's
+  110→113 growth is itself downstream proof the broken dedup is still firing.
+
+**Zero contradictions across the four dives; two parallel-dive tensions resolved here (not inherited).**
+
+1. **The composite's two bounds are complementary, not competing → the emitted artifact is proven DOUBLY
+   bounded.** §7ag capped its *length* (`sanitize_recalled` → `RECALLED_TEXT_MAX_LEN` = 8192 B, `capabilities.rs:455`)
+   and *explicitly left the count open*; §7ai closed exactly that dimension with the *count* bound
+   (`RecallBudget.episodic = 5` ceiling `capabilities.rs:501`, `RECURRING_SIGNATURE_THRESHOLD = 2` floor
+   `signal.rs:362` → `N ∈ [2, 5]`). Unified canonical statement: the recalled composite `"recurring signature
+   seen N× … (COMPOSITE)"` is a **bounded-magnitude integer (`N ∈ [2, 5]`) over a bounded-length blob (≤ 8192
+   B)**. **Both bounds are pure magnitude/length-hygiene (the belt-`P1b` class), and NEITHER severs the loop** —
+   a self-authored episode still self-selects (§7aa) and is still counted as foreign (`source_label` dropped,
+   §7af row 6). **P1 (the provenance filter at `wiring.rs:1024`) remains the uniquely load-bearing cut.** This
+   *sharpens* §4's "unbounded re-wrap" to "grows each generation but is doubly ceilinged," overturning nothing.
+2. **Nesting depth `13` (§7ag) vs `12` (§7ai) is a whole-body-vs-composite distinction, already reconciled by
+   §7ai.** Both dives measured `rysweet/Simard` #2875 at **4895 bytes** (byte-exact agreement). §7ag's **13**
+   counted every `overseer-obs:` prefix in the issue body (one of which is the issue-header echo); §7ai's **12**
+   counted the nesting of the *re-entry composite itself*. Canonical: **#2875 = 4895 B, 12 in-composite
+   generations (13 whole-body), ~60% of the 8192 B cap** — a 1-count prose refinement, same class as §7af's
+   `:1372`/`:1374` correction, **not** a source change.
+3. **#17's OPEN→CLOSED transition (caught independently by §7ag-D and §7ah) folds H3 into H2.** Through §7ae, #17
+   was the sole OPEN kgpacks issue and H3's live-timestamp staleness proof. §7ah caught it CLOSED @ 19:19:47Z
+   (corroborated by §7ag-D). Per the §1/§7t terminal-park / no-reconciliation mechanism, **nothing re-runs the
+   done-gate now that #17 has closed**, so a `goal:blocked:…issue-17-ws2…` row is predicted to persist as a
+   **fifth stale park** exactly like the #16 smoking gun (issues #2768/#2841 filed 6–12 h *after* #16 closed) —
+   H3 therefore converts from a distinct live item into a **fifth H2 instance**. The stale-park set grows
+   **4 → 5**; **P2's scope becomes strictly larger and its urgency strictly higher.** Falsifiable follow-on
+   (§7ag/§7ah/§7ai): an 11th tail issue carrying an `issue-17` token filed after 19:19:47Z would confirm — none
+   yet at this read (tail still 10).
+
+**Net-new facts folded into the canonical findings (§4/§5/§6):** (a) the amplifier output is **doubly bounded**
+(length ≤ 8192 B §7ag + count `N ∈ [2, 5]` §7ai) — §4's "unbounded re-wrap" refined to a "bounded rolling
+window," with **P1** still the only loop-severing cut; (b) the **whole kgpacks board is now CLOSED** (#17 @
+19:19:47Z), **H3 folds into H2**, the stale-park set is **5**, and **P2 is enlarged and its urgency raised** (§5-P2,
+§6 row 1); (c) the composite-recall anchor is canonically **`mod.rs:1372`** (§7af correction adopted); (d) the
+`recurring_goal_reblock` flood continues its monotone, modally-3 growth (now **113**) because the P6 defect
+(`gh_client.rs:37`) is unfixed (§5-P6, §6 row 5 figures refreshed ~82 → ~113).
+
+**Meta-observation — this consolidation is once again the predicted next turn of the loop.** Like §7ae/§7ah, this
+round was triggered by a fresh **nested amplihack session** surfacing the exact composite under investigation,
+rendered verbatim by its own classifier — `recurring signature seen 2× in cognitive memory
+(overseer-obs:goal:blocked:…)` — the §7aa-E identity, live-confirmed: `2×` is the recall-threshold **floor**
+(§7v/§7ai), the composite is the WhisperGate-capped tail's, and the trigger is one more tick of the very loop this
+document diagnoses. The `N = 2` in the trigger is direct live corroboration of §7ai's proven floor.
+
+**Diagnostic saturation — NINTH consolidation; the board has read wholly-CLOSED for four consecutive passes; zero
+source drift persists. Close the investigation.** §7aj is the **ninth** full consolidation
+(§7g/§7k/§7n/§7r/§7w/§7y/§7ac/§7ae/§7aj) to reach an identical verdict. Since round 8 the diagnosis has not
+changed; the **only** material board movement in the entire investigation was #17's single OPEN→CLOSED flip
+(rounds 23–24), which *strengthened* (did not overturn) the thesis by enlarging P2. All three loop sides are
+code-proven (select §7aa, count §7v/§7ai, emit §7u/§7af), the write-back is a proven closed round-trip (§7z), and
+the emitted artifact is now proven **doubly bounded** (§7ag length + §7ai count) — yet **neither bound, nor the
+8192-byte cap, nor P1b, severs the loop; only P1 does.** The one quantity still moving is the
+`recurring_goal_reblock` counter stepping in bursts of ~3 (now **113**) because the diagnosed one-line defect
+(`gh_client.rs:37`) is **unfixed** — the investigation keeps exhibiting the exact pathology it documents. **No
+finding is overturned; no confidence rating changes; no new remediation is introduced.** Two code-level root
+causes remain each pinned to a one-line fix (self-recall loop → **P1** at `wiring.rs:1024`; broken reblock dedup →
+**P6** at `gh_client.rs:37`) plus the now-larger standing stale-park driver (**P2**, five parks). The residual
+value is **entirely in execution, not investigation**. Recommendation (unchanged and maximally supported): **mark
+this investigation resolved and hand P1 → P2 → P6 to the builder queue; do not schedule a round-27 verification
+pass.** Confidence **High**.
+
+---
+
 ## 8. Provenance
 
 Investigation-only follow-up (investigation-workflow, rounds 1–25). No production
@@ -3609,6 +3736,21 @@ at zero drift. Live board (2026-07-07 ~21:41Z): the whole kgpacks-rs board stays
 the verbatim tail holds at exactly 10 (#2669…#2875, no 11th after #17's 19:19:47Z closure — §7ag/§7ah's
 falsifiable follow-on still pending), and the broken-dedup `recurring_goal_reblock` flood grew **101 → 110**
 open (a fresh catch of the still-firing malformed-query channel, `gh_client.rs:37`). No finding overturned;
+endorses the close-and-execute verdict (residual value is execution of P1 → P2 → P6). Confidence remains High.
+Round-26 (§7aj) is the **ninth consolidation** — it unified the four dives accumulated since §7ae (§7af
+emission-map re-anchor, §7ag length bound, §7ah #17-closure/H3→H2 fold, §7ai count bound) at HEAD `499d2868` and
+independently re-ran `overseer::tests_memory_recall` 36/0 + `overseer::sensor` 9/0 +
+`cognitive_memory::tests_ranked_episodic` 5/0 (**50 passed, 0 failed**; incl. `recall_budget_default_is_5_5_3_5`
+and `sanitize_recalled_caps_length`) with every canonical anchor re-resolved verbatim at zero `src/` drift (19
+commits since `85245e87`, all docs/config). Three net-new facts fold in cleanly: (1) the emitted composite is
+proven **doubly bounded** — a bounded-magnitude integer `N ∈ [2, 5]` (§7ai) over a bounded-length blob ≤ 8192 B
+(§7ag), both magnitude/length-hygiene, **neither severing the loop** (P1 at `wiring.rs:1024` stays the sole
+load-bearing cut); (2) the whole kgpacks-rs board (#16/#17/#18/#21/#22/#23) now reads **CLOSED** (#17 @
+19:19:47Z), folding **H3 into H2** as a fifth stale park and enlarging **P2**; (3) the #2875 composite is
+canonically 4895 B / 12 in-composite generations (13 whole-body — §7ag's "13" was the whole-body count). Live
+board (~22:07Z): whole kgpacks board CLOSED, verbatim tail steady at exactly 10 (#2669…#2875, no 11th after #17's
+closure — the falsifiable no-reconciliation follow-on still pending), and the broken-dedup `recurring_goal_reblock`
+flood grew **110 → 113** open (a fresh burst-of-3, still firing at `gh_client.rs:37`). No finding overturned;
 endorses the close-and-execute verdict (residual value is execution of P1 → P2 → P6). Confidence remains High.
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
