@@ -57,7 +57,8 @@ This document answers the **semantic** questions round 1 left open:
 
 Every claim below is grounded in source (`file:line`) or in the live GitHub state
 of `rysweet/agent-kgpacks-rs` and `rysweet/Simard` at the time of investigation
-(2026-07-07 ~08:14 UTC).
+(2026-07-07 ~08:14 UTC). Each section states an explicit **confidence level**
+(High/Medium); Section 6 consolidates these into a single ratings table.
 
 ---
 
@@ -123,6 +124,14 @@ they report did not exist at file time. This is exactly the stale-goal-board +
 self-recall interaction: nine issues, a growing/nesting key, none deduped, none
 resolved.
 
+**Confidence: High.** Grounded in (a) the live closed/open state and timestamps of
+kgpacks-rs #16/#18/#21/#22/#17, (b) the exact code path that projects `goal:blocked`
+from parked goals (`sensor.rs:204,209`; `no_progress_breaker.rs:58,69`;
+`completion_gate.rs:31,380`), and (c) the disprovable smoking-gun timing (issues
+filed *after* the backing issue closed). The only inferential leap — that no
+component re-runs the done-gate post-closure — is corroborated by the observed
+9-issue tail that a reconciliation step would have suppressed.
+
 ---
 
 ## 2. `quality:gym_skipped` and `workstream-gap` — independent ambient co-signals
@@ -153,6 +162,11 @@ completely independent of any kgpacks-rs workstream. Its doubling in the signatu
 (`quality:gym_skipped` ×2) is the round-1 recalled+fresh duplication, not two
 distinct skips.
 
+**Confidence: High.** The whole chain is a single deterministic, source-traced flag
+path (`provider.rs:61` → `sensor.rs:125` → `signal.rs:398` → `mod.rs:1292`) with no
+branching ambiguity; the only environmental assumption — that `SIMARD_SKIP_GYM` is
+in fact set in the running daemon — is entailed by the signal firing at all.
+
 ### 2b. `workstream-gap` — uncovered backlog, and it **cannot** overlap a blocked goal
 
 `Signal::WorkstreamGap` (`src/overseer/signal.rs:475`) carries every genuine
@@ -178,6 +192,13 @@ work (a p1/p2 goal or a high-signal issue with no live engineer and no open PR),
 condition — *a high-signal item with no live engineer making progress* — but views
 a different slice of the board. It co-recurs in the signature only because it, too,
 gets nested by the self-recall loop.
+
+**Confidence: High.** The disjointness of `workstream-gap` and `goal:blocked` is a
+hard code invariant, not an inference: the explicit guard
+`if matches!(g.status, GoalProgress::Blocked(_)) { continue; }` (`sensor.rs:300`)
+makes it impossible for a blocked goal to be counted as a gap. The exact identity of
+the currently-uncovered item is not pinned down here (Medium on *that* detail), but
+it is immaterial to the diagnosis.
 
 ---
 
@@ -216,6 +237,16 @@ signature are dominated by **stale** parks for already-delivered work (Section 1
 which spawn contention cannot explain. Treat `resource:engineer_spawn` as a
 health/amplifier signal, not the blockage's root cause.
 
+**Confidence: Medium.** The *negative* claim — spawn pressure is **not** the root
+cause — is High: it is proven by Section 1's stale-park evidence, which is
+independent of engineer count. The *positive* mechanism — that AIMD `current_max`
+contraction below `live_engineers` starves genuinely-open work of a coverage slot —
+is Medium: the code path (`cycle.rs:310–334`, `decide.rs:41`, `types.rs:288`) is
+verified, but whether an actual contraction-below-live-count episode occurred was
+**not** confirmed from runtime telemetry, so this remains a plausible-but-unobserved
+contributor. This is the weakest link in the diagnosis, which is why the
+corresponding remediation (P5) is explicitly conditional.
+
 ---
 
 ## 4. Why it recurred (2×) instead of resolving
@@ -236,6 +267,13 @@ Confirmed in round 1 and reinforced here:
 
 The empirical tail (9 open near-duplicate issues, growing keys) is the observable
 consequence.
+
+**Confidence: High.** The structural cause is confirmed by round-1 **and**
+reproduced here through the real code path by the executable H1/H2
+CONFIRM / REFUTE-by-fix tests added in `src/overseer/tests_memory_recall.rs`
+(round 2): H1 shows `RecurringSignature` is re-emitted purely from the Overseer's
+own write-backs, and H2 shows `observation_signature` stacks a prefix unboundedly.
+The semantic cause follows directly from the High-confidence Sections 1–2.
 
 ---
 
@@ -269,9 +307,39 @@ Ordered by leverage. P1/P2 sever the mechanism; P3/P4 clear the standing inputs.
    waits, raise the floor / tune the scaler so genuinely-open workstreams are not
    starved of a coverage slot. Not required to fix the recurring signature.
 
+**Confidence in remediation efficacy:** High for **P1–P3** — they sever the verified
+mechanism (P1) and clear the verified stale inputs (P2/P3), each tied to a confirmed
+root cause. Medium for **P4** (down-ranking `gym_skipped` is High; the correct
+disposition of #17 is a product decision, not a diagnostic certainty) and **P5**
+(gated on the Medium-confidence, unobserved AIMD-contraction claim in Section 3).
+
 ---
 
-## 6. Provenance
+## 6. Confidence assessment
+
+Overall confidence in the diagnosis: **High.** Five of the six findings rest on
+disprovable, source-grounded or live-state evidence; the single Medium item (§3's
+positive spawn-contention mechanism) is explicitly isolated and its dependent
+remediation (P5) is gated behind an observation that has not yet been made.
+
+| # | Finding | Confidence | Primary evidence | Residual uncertainty |
+|---|---|---|---|---|
+| 1 | Blocked segments are **stale safeguard-parks** for delivered work (#16/#18/#21/#22); #17 is an intentional gate | **High** | Live closed/open issue states + timestamps; `sensor.rs:204,209`, `no_progress_breaker.rs:58,69`, `completion_gate.rs:31,380`; smoking-gun timing (#2768/#2841 filed after #16 closed) | "No component re-runs the done-gate post-closure" is inferred (corroborated by the 9-issue tail) |
+| 2a | `quality:gym_skipped` = ambient `SIMARD_SKIP_GYM` operator flag, not a workstream failure | **High** | Deterministic flag path `provider.rs:61`→`sensor.rs:125`→`signal.rs:398`→`mod.rs:1292` | None material (flag-set state entailed by the signal firing) |
+| 2b | `workstream-gap` is disjoint from `goal:blocked` (uncovered *other* backlog) | **High** | Hard code invariant `sensor.rs:300` excludes blocked goals; `sensor.rs:288`, `signal.rs:475`, `mod.rs:1381` | Exact identity of the uncovered item not pinned (immaterial) |
+| 3 | `resource:engineer_spawn` is an amplifier under AIMD contraction, **not** the root cause | **Medium** | Negative claim proven by §1; mechanism path `cycle.rs:310–334`, `decide.rs:41`, `types.rs:288` verified | A contraction-below-live-count episode was **not** confirmed from runtime telemetry |
+| 4 | Recurrence (2×) = unfiltered self-recall + unbounded re-wrap over standing inputs | **High** | Round-1 finding **reproduced** by executable H1/H2 tests (`tests_memory_recall.rs`, round 2) | None material |
+| 5 | Remediation P1–P3 sever the mechanism / clear stale inputs; P4–P5 conditional | **High (P1–P3)**, **Medium (P4–P5)** | Each action mapped to a confirmed root cause; P5 gated on §3 | P4 #17 disposition is a product decision; P5 depends on §3's Medium claim |
+
+**Method note:** confidence is graded against how disprovable each claim is —
+"High" means grounded in source (`file:line`) or live GitHub/board state that a
+reviewer can independently re-check and that would falsify the claim if wrong;
+"Medium" means the causal *path* is verified but a required runtime condition was
+not directly observed.
+
+---
+
+## 7. Provenance
 
 Investigation-only follow-up (investigation-workflow, round 2). No production
 behavior was changed by this document. Source references were verified against the
