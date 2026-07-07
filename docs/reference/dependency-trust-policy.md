@@ -101,6 +101,14 @@ Properties, identical to the other guardrail jobs:
   explicit `tool: cargo-vet` input that selects the tool. Do **not** pin
   `taiki-e`'s per-tool convenience tags (`# cargo-vet`): their commits are
   diverged from the default branch and break Dependabot (`no such commit …`).
+- **SHA-pinned** `dtolnay/rust-toolchain` (used by `coverage.yml`, `release.yml`
+  and the `rust-runner-prep` composite action) — pinned to its **`v1` release**
+  commit (`# v1`, reachable from the action's default branch so Dependabot can
+  resolve and bump it) with an explicit `toolchain: stable` / `toolchain: nightly`
+  input that selects the channel. Do **not** pin dtolnay's per-channel *branch*
+  HEADs (`# stable`, `# nightly`): those commits are diverged from the default
+  branch and break Dependabot the same way (`no such commit …`), failing the
+  default-branch `dependabot-updates` run.
 - **`--locked`** — fails on a dirty `Cargo.lock`.
 
 `cargo vet --locked` passes when every third-party crate in the locked graph is
