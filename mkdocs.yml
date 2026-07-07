@@ -388,6 +388,7 @@ nav:
     - Creative Ideas Trigger-Scoped Read: reference/creative-ideas-trigger-scoped-read.md
     - Creative-Ideas Semantic Dedup-Gate API: reference/creative-ideas-dedup-gate-api.md
     - Creative-Idea Dedup Recipe & Prompt Schema: reference/creative-idea-dedup-recipe.md
+    - COIN Benchmark Reference: reference/coin-benchmark.md
   - Operations:
     - Overview: operations/index.md
     - Verified Backups of the Live Store: operations/verified-backups.md
