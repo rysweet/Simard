@@ -66,8 +66,10 @@ never `--admin`/`--no-verify`). You normally don't need to touch them.
 Check on them with:
 
 ```bash
+# Every steward PR carries the `supply-chain` label (branch `chore/advisory-<id>`,
+# title `chore(deps): <id> — …`), so list by label:
 gh pr list --repo rysweet/Simard --state open \
-  --search 'in:title "chore(advisory)"' \
+  --label supply-chain \
   --json number,title,headRefName,labels
 ```
 
@@ -141,8 +143,10 @@ This prints the `Decision` (`Bump` / `JustifiedIgnore` / `Escalate` /
 
 The PR gate is pinned so upstream churn can't break you — but the pin must not
 drift stale. When the daily scan finds DB HEAD **clean** (no advisory the gate
-would otherwise miss), it opens a `chore(deps): bump advisory-db pin` PR that
-advances `.github/advisory-db.sha` to HEAD:
+would otherwise miss), it **logs the advanceable DB HEAD SHA** so
+`.github/advisory-db.sha` can be moved forward via a
+`chore(deps): bump advisory-db pin` PR (a separate, deliberate step — the scan
+does not open that PR itself):
 
 ```bash
 # See the current pin:

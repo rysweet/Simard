@@ -363,3 +363,144 @@ fn decision_to_json(adv: &Advisory, decision: &Decision) -> serde_json::Value {
     };
     json!({ "advisory": adv.id, "crate": adv.crate_name, "decision": detail })
 }
+
+// ─────────────────────────────── tests ───────────────────────────────
+//
+// The pure I/O-glue helpers this driver layers over the (already exhaustively
+// tested) `decide()` reasoner. `lowest_version_token` picks the bump target, so
+// a regression there would mis-target a bump — and `decide-only` prints it with
+// no `cargo update --dry-run` guard — which is exactly why it is pinned here.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── lowest_version_token ──────────────────────────────────────────────
+
+    #[test]
+    fn lowest_version_token_reads_simple_lower_bound() {
+        assert_eq!(lowest_version_token(">= 0.9.20").as_deref(), Some("0.9.20"));
+        assert_eq!(lowest_version_token(">= 1.2.5").as_deref(), Some("1.2.5"));
+    }
+
+    #[test]
+    fn lowest_version_token_takes_the_floor_of_a_compound_requirement() {
+        // The lower bound (the minimal fixed version) is the first version-like
+        // token in a `>= a, < b` patched requirement.
+        assert_eq!(
+            lowest_version_token(">= 0.7.4, < 0.8.0").as_deref(),
+            Some("0.7.4")
+        );
+    }
+
+    #[test]
+    fn lowest_version_token_reads_a_bare_version() {
+        assert_eq!(lowest_version_token("1.0.0").as_deref(), Some("1.0.0"));
+    }
+
+    #[test]
+    fn lowest_version_token_is_none_for_no_concrete_version() {
+        assert_eq!(lowest_version_token(""), None);
+        assert_eq!(lowest_version_token("*"), None);
+        assert_eq!(lowest_version_token(">= "), None);
+    }
+
+    // ── is_git_sourced ────────────────────────────────────────────────────
+
+    #[test]
+    fn is_git_sourced_matches_only_exact_name_and_version() {
+        let pkgs = vec![("moka".to_string(), "0.12.0".to_string())];
+        assert!(is_git_sourced(&pkgs, "moka", "0.12.0"));
+        // Same crate, different version → not the git-pinned one.
+        assert!(!is_git_sourced(&pkgs, "moka", "0.11.0"));
+        // Different crate → no match.
+        assert!(!is_git_sourced(&pkgs, "other", "0.12.0"));
+        // Empty set → nothing is git-sourced.
+        assert!(!is_git_sourced(&[], "moka", "0.12.0"));
+    }
+
+    // ── git_sourced_packages ──────────────────────────────────────────────
+
+    #[test]
+    fn git_sourced_packages_returns_only_git_plus_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.lock"),
+            "version = 3\n\n\
+             [[package]]\n\
+             name = \"gitcrate\"\n\
+             version = \"1.0.0\"\n\
+             source = \"git+https://github.com/example/gitcrate?rev=abc#abc\"\n\n\
+             [[package]]\n\
+             name = \"regcrate\"\n\
+             version = \"2.0.0\"\n\
+             source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\n\
+             [[package]]\n\
+             name = \"localcrate\"\n\
+             version = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let pkgs = git_sourced_packages(dir.path());
+        assert_eq!(pkgs, vec![("gitcrate".to_string(), "1.0.0".to_string())]);
+    }
+
+    #[test]
+    fn git_sourced_packages_degrades_to_empty_when_lockfile_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(git_sourced_packages(dir.path()).is_empty());
+    }
+
+    // ── decision_to_json ──────────────────────────────────────────────────
+
+    fn advisory(id: &str, krate: &str) -> Advisory {
+        Advisory {
+            id: id.to_string(),
+            crate_name: krate.to_string(),
+            installed: "1.0.0".to_string(),
+            patched: PatchStatus::None,
+            title: "t".to_string(),
+            url: format!("https://rustsec.org/advisories/{id}"),
+        }
+    }
+
+    #[test]
+    fn decision_to_json_renders_each_variant() {
+        let adv = advisory("RUSTSEC-2026-0204", "crossbeam-epoch");
+
+        let bump = decision_to_json(
+            &adv,
+            &Decision::Bump {
+                crate_name: "crossbeam-epoch".to_string(),
+                from: "0.9.18".to_string(),
+                to: "0.9.20".to_string(),
+            },
+        );
+        assert_eq!(bump["decision"]["action"], "bump");
+        assert_eq!(bump["decision"]["to"], "0.9.20");
+        assert_eq!(bump["advisory"], "RUSTSEC-2026-0204");
+
+        let ignore = decision_to_json(
+            &adv,
+            &Decision::JustifiedIgnore {
+                advisory_id: "RUSTSEC-2023-0071".to_string(),
+                crate_name: "rsa".to_string(),
+                reason: "no fix".to_string(),
+            },
+        );
+        assert_eq!(ignore["decision"]["action"], "justified-ignore");
+        assert_eq!(ignore["decision"]["advisory"], "RUSTSEC-2023-0071");
+
+        let escalate = decision_to_json(
+            &adv,
+            &Decision::Escalate {
+                advisory_id: "RUSTSEC-2025-0009".to_string(),
+                reason: "unresolvable".to_string(),
+            },
+        );
+        assert_eq!(escalate["decision"]["action"], "escalate");
+
+        let none = decision_to_json(&adv, &Decision::NoAction);
+        assert_eq!(none["decision"]["action"], "no-action");
+    }
+}
