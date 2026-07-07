@@ -88,6 +88,7 @@ nav:
     - "Eliminate deterministic fallbacks": design/eliminate-deterministic-fallbacks.md
   - Research:
     - "COIN benchmark — Phase 1 primer": research/coin-benchmark.md
+    - "COIN benchmark — Phase 1 completion record": research/coin-benchmark-phase1.md
     - "skwaq self-improvement loop — Phase 2 study": research/skwaq-self-improvement-loop.md
     - "COIN benchmark & skwaq gym study": research/coin-benchmark-and-skwaq-study.md
   - Concepts:
