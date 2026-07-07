@@ -1877,6 +1877,107 @@ plausible mis-anchorings of the composite. Confidence **High**.
 
 ---
 
+### 7v. Round-15 primary-investigator deep dive (parallel to §7u) — the QUANTIZATION of "seen 2×" and the one-line provenance-filter fix-seam (HEAD `15122557`)
+
+This pass owns the assigned focus verbatim — **signal mechanics + the unfiltered recall→write-back
+self-amplification loop** — and runs parallel to §7u's emission-map dive (same round-15, disjoint
+question). It is anchored at HEAD `15122557` and is strictly additive: it **sharpens** §4's loose
+"`2×` = recalled-episode count" into a mechanistic *quantization* proof and **pins P1 to an exact,
+already-feasible one-line seam**; it overturns nothing. `git diff --name-only 85245e87..HEAD -- src/`
+is **empty** (zero source drift since the §7p anchor base), so every anchor below re-resolved
+**verbatim** by reading the file at this HEAD; `cargo test --lib overseer::tests_memory_recall` →
+**36 passed, 0 failed**, `…::h` → **4/0**, `overseer::sensor` → **9/0**.
+
+**A. The loop in four anchored hops (minimal restatement; the mechanism §4/§7j/§7p established).**
+(1) **Write** — each Observe tick with ≥1 problem persists ONE episode `"{content} [sig:{S}]"`
+tagged `source_label = "overseer"` (`OVERSEER_SOURCE_LABEL`, `wiring.rs:952`), stored at
+`wiring.rs:1088`; `S = observation_signature(problems) = "overseer-obs:" + sorted-deduped problem
+dedup_keys` (`mod.rs:1081-1085`). (2) **Recall** — a later tick calls `recall_episodes_ranked`
+(`wiring.rs:1020`) and projects each hit into `RecalledEpisode` (`wiring.rs:1022-1030`), parsing the
+`[sig:…]` marker back into `failure_signature` (`parse_failure_signature`, `wiring.rs:976`). (3)
+**Count** — `signals_from` tallies episodes by `failure_signature` and emits
+`Signal::RecurringSignature{signature, occurrences}` when a tally reaches
+`RECURRING_SIGNATURE_THRESHOLD` (`= 2`, `signal.rs:362`; tally/gate `:455-469`). (4) **Fold-back** —
+`classify_signal` renders that signal's `dedup_key` as the *entire recalled composite*
+(`sanitize_recalled(signature)`, `mod.rs:1372`), so on the next tick `observation_signature`
+(`mod.rs:1082`) collects it **alongside** the short fresh tokens → the composite **nests and grows**,
+and the grown string is a fresh key `WhisperGate` cannot dedup (`guardrails.rs:312-316`).
+
+**B. NET-NEW — why the count is pinned at exactly, and *uniformly*, `2×` (not 3×, not the cap).**
+The threshold is not merely a floor; **crossing it is the same event that retires the generation**.
+Trace one composite `S_G` (recall reads the store at Observe, *before* that tick's own write):
+
+| Tick | Recall sees | `RecurringSignature`? | Composite this tick | Write-back (gate ≥900 s) |
+|---|---|---|---|---|
+| a | 0×`S_G` | no | `S_G` (first appearance) | writes `S_G` (episode #1) |
+| b | 1×`S_G` | no (1 < 2) | `S_G` again | writes `S_G` (episode #2) |
+| c | **2×`S_G`** | **yes → `{S_G, 2}`** | folds `{S_G}`-problem in → `S_{G+1}` | writes `S_{G+1}` (#1) |
+
+From tick c on, `observation_signature` yields `S_{G+1} ⊋ S_G`, so **`S_G` is never written a third
+time** — its tally is frozen at 2. The count therefore equals `RECURRING_SIGNATURE_THRESHOLD` **by
+construction**, and this holds for every generation, giving a uniform `2×`. Crucially, three
+independent "≈5" ceilings are demonstrably **NOT** the limiter: the episodic recall budget
+(`RecallBudget::episodic = 5`, `capabilities.rs:501`) and the write-back `WhisperGate` per-hour cap
+(`WhisperGate::new(900, 5)`, `mod.rs:297`) both sit at 5, yet the observed count rests at 2 — well
+below all of them. **Falsifiable prediction:** the open tail is a *chain of distinct, progressively
+nested `2×` signatures*, never a single issue whose count climbs. **Live-confirmed (2026-07-07,
+`rysweet/Simard`, 269 open):** all **10/10** `recurring signature` issues read exactly `seen 2×`
+(#2669/#2672/#2678/#2691/#2744/#2750/#2757/#2768/#2841/#2875), each carrying a *different* composite —
+the four oldest still lead with an `anomaly:distill parse-fail rate 100%` token that the six newer
+ones have shed, and the newest three (#2768/#2841/#2875) lead with `issue-16` vs. the `issue-17` lead
+of #2744/#2750/#2757. A chain, not a climb — exactly as the quantization predicts. (Caveat, per the
+§6 method note: a *recall miss* that failed to surface both `S_G` copies could transiently delay
+supersession and permit a 3rd write; the uniform 10/10 `2×` is direct evidence recall surfaces both
+promptly, so this is not occurring in practice.)
+
+**C. NET-NEW — the loop CANNOT be closed at the counting site, but the fix is one line because the
+provenance is already in hand.** A reader might reach for a guard in `signals_from` (`signal.rs:455`)
+— but that site is **provenance-blind**: `RecalledEpisode` (`capabilities.rs:607-616`) carries only
+`{id, summary, failure_signature, score}` — **no `source_label`** — so the tally physically cannot
+tell a self-authored write-back from a foreign episode. The provenance is discarded exactly one hop
+upstream: the store's own return type **`CognitiveEpisode` DOES carry `source_label: String`**
+(`memory_cognitive.rs:47-53`, field `:50`), and `recall_episodes_ranked` returns
+`Vec<CognitiveEpisode>` (`cognitive_memory/mod.rs:542-550`) — the `source_label` is live all the way
+to `recall_episodic`'s `.into_iter().map(…)` (`wiring.rs:1022-1030`) and is dropped by the projection
+itself. Therefore **P1 is not a design change; it is a one-line filter at the seam symmetric to the
+write tag**:
+
+```rust
+// wiring.rs recall_episodic, before the .map(|e| RecalledEpisode { … })
+.filter(|e| e.source_label != OVERSEER_SOURCE_LABEL)
+```
+
+This severs the self-recall at its source, needs **no** cognitive-memory-library API change
+(guideline G2 satisfied — the field already crosses the seam), and is the exact inverse of the
+`wiring.rs:1088` write tag. A complementary **belt-and-suspenders P1b** bounds the *length* even if a
+self-episode ever slips the filter: have `observation_signature` (`mod.rs:1081`) drop any
+`overseer-obs:`-prefixed key before the `join('|')`, so a recalled composite can never re-nest into
+the next composite. **Guard gap to close with the fix:** the executable H1/H2 tests
+(`tests_memory_recall.rs`) currently *CONFIRM* the loop (self-recall re-emits, prefix stacks) but
+**none asserts the loop is broken**; landing P1 should invert one to assert an `overseer`-authored
+episode is excluded from the recurrence tally, so the fake can never again mask a regression — the
+same fake-hides-defect discipline §7t applied to P6.
+
+**Consequence for remediation (sharpens P1; no re-weighting).** §5-P1 already prescribes "drop
+episodes whose `source_label == OVERSEER_SOURCE_LABEL`"; this dive **proves that prescription is
+mechanically feasible today at a single named line** (`wiring.rs:1022-1030`), adds the length-bounding
+belt (P1b at `mod.rs:1081`), and supplies the missing regression assertion. P2/P3 (reconcile + clear
+the stale `goal:blocked` inputs) remain independently required so the amplifier has nothing standing
+to nest; P1 stops the *amplification*, P2 stops the *input regeneration*.
+
+**Verification footer.** HEAD `15122557`; `git diff --name-only 85245e87..HEAD -- src/` **empty**
+(zero source drift — every A/B/C anchor re-resolved verbatim at this HEAD); `cargo test --lib
+overseer::tests_memory_recall` **36/0**, `…::h` **4/0**, `overseer::sensor` **9/0**; live board read
+`rysweet/Simard` **269 open**, the **10** `recurring signature` issues all reading `seen 2×`
+(#2669…#2875) with distinct/evolving composites; `rysweet/agent-kgpacks-rs` #16/#18/#21/#22 **CLOSED**
+(07-06), #17 **OPEN**. **No prior finding overturned**; §7v sharpens §4 (`2×` is a *quantization at
+the threshold*, not merely a raw count) and pins P1 to a proven one-line seam with a belt (P1b) and a
+regression-guard requirement. Confidence **High** (the quantization mechanism is source-grounded and
+its falsifiable prediction is live-confirmed 10/10; the fix-seam feasibility is a direct type-level
+fact — `CognitiveEpisode.source_label` exists and reaches the projection).
+
+---
+
 ## 8. Provenance
 
 Investigation-only follow-up (investigation-workflow, rounds 1–14). No production
@@ -2012,6 +2113,21 @@ Act-phase whisper key `workstream-gap:{sig}` (`mod.rs:904/945`), and the `dedup_
 same-stemmed recall keywords in `signal_keyword` (`capabilities.rs:562/564`) — and confirms the
 cross-repo `fix-rustsec-2026-0204` goal shares the one `mod.rs:1349` source, so no emission line is
 itself defective and no finding is overturned; confidence remains High.
+A parallel round-15 primary-investigator deep dive (§7v, HEAD `15122557`) took the disjoint
+signal-mechanics focus: it sharpens §4 by proving the "seen `2×`" count is a *quantization at the
+recall threshold* — crossing `RECURRING_SIGNATURE_THRESHOLD` (`= 2`, `signal.rs:362`) is the same
+event that supersedes the generation (`RecurringSignature` folds into the next `observation_signature`,
+`mod.rs:1082/1372`), so every composite is written exactly twice then retired, well below the three
+independent `= 5` ceilings (`RecallBudget::episodic` `capabilities.rs:501`, `WhisperGate::new(900, 5)`
+`mod.rs:297`) — a falsifiable prediction live-confirmed 10/10 (all `recurring signature` issues
+#2669…#2875 read `2×` with distinct, generationally-evolving composites; 269 open); and it pins §5-P1
+to a proven one-line seam — `CognitiveEpisode` carries `source_label` (`memory_cognitive.rs:50`) all
+the way to `recall_episodic`'s projection (`wiring.rs:1022-1030`), which discards it, so a single
+`.filter(|e| e.source_label != OVERSEER_SOURCE_LABEL)` (symmetric to the write tag `wiring.rs:1088`,
+no memory-lib API change) severs the loop, with a length-bounding belt P1b at `observation_signature`
+(`mod.rs:1081`) and a missing regression-assertion to add when P1 lands; 36/0 + 4/0 + 9/0 on
+`tests_memory_recall`/`::h`/`sensor`, zero `src/` drift since `85245e87`, no finding overturned,
+confidence remains High.
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
