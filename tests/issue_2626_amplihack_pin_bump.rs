@@ -41,7 +41,7 @@ use std::path::PathBuf;
 // ── Target / stale pin constants (verified against upstream `main`) ──────────
 
 /// amplihack-rs `main` HEAD carrying the `amplihack-agent-eval` crate to adopt.
-const AGENT_EVAL_TARGET_REV: &str = "2a93441d1837f9f853d5dddc56cc1088353a8872";
+const AGENT_EVAL_TARGET_REV: &str = "14dc30b10e87764120c6f2bae7f3630522c29e5d";
 /// amplihack-memory-lib `main` commit carrying the `amplihack-memory` crate:
 /// PR #120's squash-merge (the first-class `creative_idea` prospective memory
 /// type — CreativeIdeaStatus lifecycle + typed MemoryLink/MemoryLinkKind — which
