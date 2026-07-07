@@ -244,7 +244,9 @@ pub(crate) const PART_01: &str = r#"
         </select>
         <button class="btn" onclick="searchCreativeIdeas()">Search</button>
         <button class="btn" onclick="loadCreativeIdeas()">Refresh</button>
+        <button class="btn" id="ci-run-btn" onclick="runCreativeIdeas()" title="Generate ideas now instead of waiting for the daily scheduled run">Run now</button>
       </div>
+      <div id="ci-run-status" data-testid="ci-run-status" style="min-height:1.1rem;font-size:.78rem;margin-bottom:.5rem"></div>
       <div id="ci-counts" data-testid="ci-counts" style="display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.75rem"></div>
       <div id="ci-list" data-testid="ci-list" style="min-height:220px"><span class="loading">Loading…</span></div>
     </div>
@@ -260,6 +262,10 @@ pub(crate) const PART_01: &str = r#"
           ImplementationCompleted:'#238636', Deferred:'#8b949e', Rejected:'#f85149'
         })[s]||'#8b949e';
       }
+      /* Mirror the server-side state machine: Promote = →AcceptedForImplementation,
+         Prune = →Rejected. Only offer edges the store will actually allow. */
+      function canPromote(s){ return s==='New'||s==='NeedsHumanReview'; }
+      function canPrune(s){ return s!=='Rejected'&&s!=='ImplementationCompleted'; }
       function renderCounts(counts){
         const box=document.getElementById('ci-counts');
         if(!counts){box.innerHTML='';return;}
@@ -273,13 +279,19 @@ pub(crate) const PART_01: &str = r#"
         box.innerHTML=items.map(it=>{
           const c=statusColor(it.status);
           const metric=it.has_metric?'<span style="color:#3fb950;font-size:.7rem"> · metric: '+esc(it.metric||'yes')+'</span>':'';
+          const when=it.created_epoch?'<span style="color:#6e7681;font-size:.7rem"> · '+esc(formatTime(it.created_epoch))+'</span>':'';
+          let actions='';
+          if(canPromote(it.status)) actions+='<button class="btn ci-act" data-act="promote" data-id="'+esc(it.idea_id)+'" style="font-size:.7rem;padding:.15rem .5rem">Promote</button>';
+          if(canPrune(it.status)) actions+='<button class="btn ci-act" data-act="prune" data-id="'+esc(it.idea_id)+'" style="font-size:.7rem;padding:.15rem .5rem;margin-left:.35rem">Prune</button>';
+          const actionRow=actions?'<div style="margin-top:.4rem;display:flex;gap:.25rem">'+actions+'</div>':'';
           return '<div style="padding:.5rem .6rem;border:1px solid #21262d;border-radius:6px;margin-bottom:.5rem">'
             +'<div style="display:flex;justify-content:space-between;gap:.5rem;align-items:center">'
             +'<strong>'+esc(it.idea)+'</strong>'
             +'<span style="font-size:.7rem;padding:.1rem .4rem;border-radius:10px;background:'+c+'22;color:'+c+';border:1px solid '+c+'">'+esc(it.status)+'</span>'
             +'</div>'
             +'<div style="color:#8b949e;font-size:.78rem;margin-top:.25rem">'+esc(it.rationale||'')+'</div>'
-            +'<div style="color:#6e7681;font-size:.7rem;margin-top:.25rem">'+esc(String(it.reviews))+' review(s) · '+esc(String(it.links))+' link(s)'+metric+'</div>'
+            +'<div style="color:#6e7681;font-size:.7rem;margin-top:.25rem">'+esc(String(it.reviews))+' review(s) · '+esc(String(it.links))+' link(s)'+metric+when+'</div>'
+            +actionRow
             +'</div>';
         }).join('');
       }
@@ -304,14 +316,56 @@ pub(crate) const PART_01: &str = r#"
           renderIdeas(d.results||[]);
         }catch(e){box.innerHTML='<span class="err">Search failed — check /api/creative-ideas/search</span>';}
       }
+      function setRunStatus(msg,cls){
+        const el=document.getElementById('ci-run-status');
+        if(el) el.innerHTML=msg?'<span class="'+(cls||'')+'">'+esc(msg)+'</span>':'';
+      }
+      async function runCreativeIdeas(){
+        const btn=document.getElementById('ci-run-btn');
+        if(btn) btn.disabled=true;
+        setRunStatus('Generating ideas…','loading');
+        try{
+          const d=await apiFetch('/api/creative-ideas/run',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+          if(d&&d.error){ setRunStatus('Run failed: '+d.error,'err'); }
+          else{
+            const r=(d&&d.report)||{};
+            setRunStatus('Run complete — '+(r.persisted||0)+' new idea(s) persisted, '+(r.reviewed||0)+' reviewed.','ok');
+            await loadCreativeIdeas();
+          }
+        }catch(e){ setRunStatus('Run failed — check /api/creative-ideas/run','err'); }
+        finally{ if(btn) btn.disabled=false; }
+      }
+      async function transitionIdea(action,ideaId){
+        setRunStatus((action==='promote'?'Promoting':'Pruning')+' idea…','loading');
+        try{
+          const d=await apiFetch('/api/creative-ideas/'+encodeURIComponent(ideaId)+'/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+          if(d&&d.error){ setRunStatus((action==='promote'?'Promote':'Prune')+' failed: '+d.error,'err'); }
+          else{
+            const st=(d&&d.idea&&d.idea.status)||'';
+            let msg='Idea '+(action==='promote'?'promoted':'pruned')+' → '+st;
+            if(d&&d.goal_error) msg+=' (accepted, but goal routing failed: '+d.goal_error+')';
+            setRunStatus(msg, d&&d.goal_error?'err':'ok');
+            await loadCreativeIdeas();
+          }
+        }catch(e){ setRunStatus(action+' failed — check /api/creative-ideas','err'); }
+      }
       window.loadCreativeIdeas=loadCreativeIdeas;
       window.searchCreativeIdeas=searchCreativeIdeas;
+      window.runCreativeIdeas=runCreativeIdeas;
       const ct=document.querySelector('.tab[data-tab="creative-ideas"]');
       if(ct) ct.addEventListener('click',()=>{ if(!ciLoaded) loadCreativeIdeas(); });
       const cs=document.getElementById('ci-search-input');
       if(cs) cs.addEventListener('keypress',e=>{if(e.key==='Enter')searchCreativeIdeas();});
       const cf=document.getElementById('ci-status-filter');
       if(cf) cf.addEventListener('change',()=>searchCreativeIdeas());
+      /* Delegated Promote/Prune clicks so per-idea buttons survive re-render. */
+      const cl=document.getElementById('ci-list');
+      if(cl) cl.addEventListener('click',e=>{
+        const b=e.target.closest('.ci-act');
+        if(!b) return;
+        const act=b.getAttribute('data-act'), id=b.getAttribute('data-id');
+        if(act&&id) transitionIdea(act,id);
+      });
     })();
   </script>
 

@@ -370,6 +370,7 @@ nav:
     - Azlin Tmux Sessions Panel: operator-dashboard/azlin-tmux-sessions.md
     - Event-Bus Stats in Cluster Topology: operator-dashboard/event-bus-stats.md
     - Agent Terminal Agent Picker: operator-dashboard/agent-terminal-agent-picker.md
+    - Creative Ideas Tab — Live View & Operator Controls: operator-dashboard/creative-ideas-operator-controls.md
     - Hive Event Bus: hive_event_bus/README.md
   - Testing:
     - Test-Coverage Baseline: testing/COVERAGE_BASELINE.md

@@ -1,7 +1,7 @@
 ---
 title: Dashboard
-description: Read-only web dashboard for inspecting the autonomous OODA daemon across ten tabs — Overview, Goals, Activity, Workers, Pull Requests, Resources, Chat, Overseer, Journal, and Creative Ideas — mirrored by a consistent terminal UI (TUI).
-last_updated: 2026-07-06
+description: Read-only inspection plus lightweight operator controls for the autonomous OODA daemon across ten tabs — Overview, Goals, Activity, Workers, Pull Requests, Resources, Chat, Overseer, Journal, and Creative Ideas (with Run now / Promote / Prune) — mirrored by a consistent terminal UI (TUI).
+last_updated: 2026-07-07
 owner: simard
 doc_type: howto
 ---
@@ -37,7 +37,7 @@ order:
 | **Chat** | — | Direct chat with Simard. Conversations are saved as durable, resumable **sessions**: a sidebar lists every saved chat, the panel fills the page, and assistant replies stream in incrementally. See [Chat: durable, resumable sessions](#chat-tab-durable-resumable-sessions). |
 | **Overseer** | — | The overseer goal-board health view: per-goal health, staleness, and the intervention signals that decide when a stalled goal needs attention. |
 | **Journal** | — | The daemon's narrative journal — a human-readable, chronological record of what Simard decided and why, newest entries first. |
-| **Creative Ideas** | — | The pool of candidate self-improvement ideas Simard generates for herself, each reviewed for feasibility, worth, and measurability. Browse and search by review status (new · needs-revision · needs-human-review · accepted · in-progress · completed · deferred · rejected). |
+| **Creative Ideas** | — | The pool of candidate self-improvement ideas Simard generates for herself, each reviewed for feasibility, worth, and measurability. Browse and search by review status (new · needs-revision · needs-human-review · accepted · in-progress · completed · deferred · rejected), generate a fresh batch on demand with **Run now**, and **Promote** (accept → goal) or **Prune** (reject) any idea inline — see [Creative Ideas tab — live view and operator controls](operator-dashboard/creative-ideas-operator-controls.md). |
 
 **Overseer**, **Journal**, and **Creative Ideas** are standalone tabs with no
 sub-sections; they are owned by separate features and are kept intact by the
@@ -134,6 +134,40 @@ history) — and the live conversation runs over `GET /ws/chat` (optionally
 WebSocket wire protocol (handshake, `restore`, `chunk`/`done`, and the
 non-streaming fallback frame) are documented in the
 [Dashboard Chat reference](reference/dashboard-chat.md).
+
+### Creative Ideas tab: live view + Run now / Promote / Prune (#2805)
+
+The **Creative Ideas** tab renders the **live** pool of candidate ideas the
+Creative Ideas thread has generated and persisted — each card shows the idea
+text, a colour-coded **status pill** (`New` · `NeedsRevision` ·
+`NeedsHumanReview` · `AcceptedForImplementation` · `ImplementationStarted` ·
+`ImplementationCompleted` · `Deferred` · `Rejected`), its **created time**, and
+the reviewer/synthesis signals (review count and success-metric name). The view
+reads the actual persisted ideas through a single shared reader
+(`GET /api/creative-ideas`); it never shows a hard-coded or stale list, and an
+empty pool renders an explicit empty-state message rather than a blank panel.
+
+Three operator controls sit on top of the view:
+
+- **Run now** generates a fresh batch **on demand** — an un-gated generation
+  pass against the live daemon store, bypassing the 24-hour scheduler (which a
+  daemon restart resets). It is guarded against concurrent runs and surfaces any
+  failure in a visible banner (never a silent no-op).
+- **Promote** (per idea) accepts an idea (`AcceptedForImplementation`) and, by
+  default, routes it onto the goal board (advancing it to
+  `ImplementationStarted`, tagged `source:creative-ideas`).
+- **Prune** (per idea) rejects an idea (`Rejected`, terminal).
+
+Both per-idea controls respect the `IdeaStatus` state machine: a control is only
+offered when the transition is valid from the idea's current status, and the
+server re-validates every write — an invalid edge surfaces a clear error and is
+never applied silently. All writes flow through the same cognitive-memory store
+the daemon reads, so actions show up on the next refresh. Full request/response
+JSON, the valid-transition gating table, the DOM contract, and end-to-end
+examples are in the
+[Creative Ideas tab — live view and operator controls](operator-dashboard/creative-ideas-operator-controls.md)
+guide and the
+[Creative Ideas subsystem API reference](reference/creative-ideas-api.md#dashboard-http-api-operator-controls).
 
 ### Overview tab: plain-English action details (#2358)
 
@@ -704,3 +738,4 @@ The `SIMARD_DASHBOARD_URL` environment variable is honored by `conftest.py` (def
 - [Overview Health & live memory-consolidation (Open PRs card removal, live Last Memory Compaction)](reference/dashboard-overview-health-and-live-memory.md)
 - [Background tab prefetch and refresh (instant tab switches)](reference/dashboard-background-tab-prefetch.md)
 - [Header deployment datetime (build number + PST/PDT deploy time)](reference/dashboard-header-deployment-datetime.md)
+- [Creative Ideas tab — live view and operator controls (Run now / Promote / Prune)](operator-dashboard/creative-ideas-operator-controls.md)
