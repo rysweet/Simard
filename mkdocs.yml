@@ -114,6 +114,7 @@ nav:
     - Semantic Dedup + Enhance for Creative Ideas: concepts/semantic-creative-ideas-dedup.md
     - Rust Domain-Expertise Gym (first experiment): concepts/rust-expertise-gym.md
     - Hybrid Cognition Measurement (benchmark + live): concepts/hybrid-cognition-measurement.md
+    - Enrichment Observability (is recall reaching decisions?): concepts/enrichment-observability.md
     - Copilot Launch-Log Preamble Stripping: concepts/copilot-launcher-preamble-stripping.md
     - Self-Diagnose on Step Error (ask WHY): concepts/self-diagnose-on-step-error.md
     - Journal E2BIG Recipe-Spawn (file the context): concepts/journal-recipe-spawn-e2big.md
@@ -221,6 +222,7 @@ nav:
     - Verify the Distillation Semantic Handoff: howto/verify-the-distillation-semantic-handoff.md
     - Verify the Journal's Clean Narrative: howto/verify-the-journal-clean-narrative.md
     - Measure Recall Precision (Hybrid): howto/measure-recall-precision-hybrid.md
+    - Verify Recall Is Reaching Decisions: howto/verify-recall-reaches-decisions.md
     - Read Simard Status: howto/simard-status.md
     - Watch Overseer Activity: howto/watch-overseer-activity.md
     - Configure Overseer Goal-Board Health: howto/configure-overseer-goal-board-health.md
@@ -236,6 +238,7 @@ nav:
     - CLI Reference: reference/simard-cli.md
     - Telemetry Metrics: reference/telemetry-metrics.md
     - Recall-Precision Hybrid Measurement: reference/recall-precision-hybrid-api.md
+    - Enrichment Observability API: reference/enrichment-observability-api.md
     - StatusSnapshot API: reference/status-snapshot-api.md
     - Daily-Budget Display Guard: reference/daily-budget-display-guard.md
     - Overseer Activity Feed: reference/overseer-activity-feed.md

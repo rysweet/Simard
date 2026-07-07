@@ -76,6 +76,12 @@ pub struct MetricsSnapshot {
     /// cardinality bound — a non-zero value signals emitter misuse.
     #[serde(default)]
     pub overflow_series: u64,
+    /// Additive enrichment-observability rollup section (#2942), drained once per
+    /// OODA cycle by the daemon and read by the dashboard `GET /api/enrichment`.
+    /// `None` (omitted) until at least one enrichment decision has been observed;
+    /// `#[serde(default)]` so pre-#2942 readers tolerate its absence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrichment: Option<serde_json::Value>,
 }
 
 impl MetricsSnapshot {
@@ -88,6 +94,7 @@ impl MetricsSnapshot {
             gauges: Vec::new(),
             histograms: Vec::new(),
             overflow_series: 0,
+            enrichment: None,
         }
     }
 

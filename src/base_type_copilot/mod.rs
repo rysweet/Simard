@@ -285,6 +285,8 @@ impl CopilotSdkSession {
         self.enrichment = EnrichmentClients {
             memory: memory_client,
             knowledge: knowledge_client,
+            // Test-injected bridges represent configured enrichment (#2942).
+            expected: true,
         };
         self
     }

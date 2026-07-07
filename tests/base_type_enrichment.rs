@@ -243,3 +243,81 @@ fn production_wiring_launches_bridges_for_builder_adapters() {
         assert_wired(name, session.as_ref());
     }
 }
+
+/// Injected-path observability (issue #2942).
+///
+/// The adapter-parity tests above prove the recalled memory is *rendered* into
+/// the preamble. This module proves the complementary observability contract:
+/// when enrichment is configured (`expected=true`) and the memory bridge
+/// attaches, the shared `enrich_turn_input` seam emits the per-decision
+/// telemetry that lets an operator see recall is reaching decisions —
+/// `simard.enrichment.decisions{attached=true}` plus non-zero injected-count
+/// histograms. This exercises the new 4-argument `enrich_turn_input(.., expected)`
+/// signature #2942 adds; it is compile-red until that lands.
+mod injected_path_observability {
+    use serial_test::serial;
+
+    use simard::base_types::BaseTypeTurnInput;
+    use simard::enrich_turn_input;
+    use simard::telemetry::{self, names};
+
+    use super::{OBJECTIVE, mock_memory_client};
+
+    #[test]
+    #[serial(telemetry_registry)]
+    fn injected_path_emits_attached_true_with_nonzero_injected_counts() {
+        telemetry::reset();
+
+        let input = BaseTypeTurnInput::objective_only(OBJECTIVE);
+        let mem = mock_memory_client();
+
+        // Enrichment configured (expected=true) and the memory bridge attached.
+        let enriched = enrich_turn_input(&input, Some(&*mem), None, true)
+            .expect("enrich_turn_input must succeed with a live bridge");
+
+        // The recalled payload is rendered (both sections present).
+        assert!(
+            enriched
+                .prompt_preamble
+                .contains("## Relevant Memory Facts")
+        );
+        assert!(enriched.prompt_preamble.contains("## Known Procedures"));
+
+        // The observed signal: attached=true + non-zero injected counts.
+        let snap = telemetry::capture();
+        assert_eq!(
+            snap.counter(
+                names::ENRICHMENT_DECISIONS,
+                &[(names::ATTR_ATTACHED, "true")]
+            ),
+            Some(1),
+            "an injected decision must be counted with attached=true"
+        );
+        let facts = snap
+            .histogram(names::ENRICHMENT_FACTS_INJECTED, &[])
+            .expect("facts_injected histogram must be recorded");
+        assert_eq!(facts.count, 1);
+        assert!(
+            facts.sum >= 1.0,
+            "at least one fact was injected, got sum={}",
+            facts.sum
+        );
+        let procs = snap
+            .histogram(names::ENRICHMENT_PROCEDURES_INJECTED, &[])
+            .expect("procedures_injected histogram must be recorded");
+        assert_eq!(procs.count, 1);
+        assert!(
+            procs.sum >= 1.0,
+            "at least one procedure was injected, got sum={}",
+            procs.sum
+        );
+        let bytes = snap
+            .histogram(names::ENRICHMENT_PREAMBLE_BYTES, &[])
+            .expect("preamble_bytes histogram must be recorded");
+        assert!(
+            bytes.sum > 0.0,
+            "a non-empty preamble was injected, got sum={}",
+            bytes.sum
+        );
+    }
+}

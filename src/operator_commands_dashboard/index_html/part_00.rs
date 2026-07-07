@@ -434,6 +434,16 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       </div>
     </div>
 
+    <div class="card" id="enrichment-panel-card" data-testid="enrichment-panel-card" style="margin-top:1rem;border:1px solid #238636;background:linear-gradient(135deg,#0d1117,#0f1a12)">
+      <div style="display:flex;align-items:center;gap:1rem;margin-bottom:.5rem">
+        <h2 style="margin:0;color:#3fb950;font-size:1rem">Recall reaching decisions</h2>
+        <span id="enrichment-freshness" style="font-size:.8rem;color:#8b949e"></span>
+        <button class="btn" onclick="fetchEnrichment()" style="font-size:.75rem;margin-left:auto">Refresh</button>
+      </div>
+      <p class="card-lede" style="margin:0 0 .75rem;color:#8b949e;font-size:.8rem;line-height:1.5">Live evidence (issue #2942) that recalled memory is actually injected into Simard's OODA decisions: the share of decisions the memory bridge <strong>attached</strong> to, the average facts/procedures/preamble-bytes injected per decision, and any bridge degrades — so a silent recall outage is visible at a glance.</p>
+      <div id="enrichment-panel"><span class="loading">Loading…</span></div>
+    </div>
+
     <div style="display:flex;gap:1rem;margin-top:1rem">
       <div class="card" style="flex:1">
         <h2>Memory Search</h2>

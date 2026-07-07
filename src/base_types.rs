@@ -235,7 +235,9 @@ pub trait BaseTypeSession: Send {
     fn enrich_input(&self, input: &BaseTypeTurnInput) -> SimardResult<BaseTypeTurnInput> {
         match self.enrichment() {
             Some(bridges) => bridges.enrich(input),
-            None => crate::base_type_turn::enrich_turn_input(input, None, None),
+            // No enrichment configured for this session → expected=false so the
+            // observability seam logs a benign INFO, never a degrade WARN (#2942).
+            None => crate::base_type_turn::enrich_turn_input(input, None, None, false),
         }
     }
 }

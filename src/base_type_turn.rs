@@ -203,6 +203,17 @@ pub fn render_enrichment_block(context: &TurnContext) -> String {
 pub struct EnrichmentClients {
     pub memory: Option<Box<dyn CognitiveMemoryOps>>,
     pub knowledge: Option<KnowledgeClient>,
+    /// Whether enrichment was *configured* for this session (the source was
+    /// [`EnrichmentSource::Native`], not [`EnrichmentSource::Disabled`]).
+    ///
+    /// Captured at resolve time and forwarded to [`enrich_turn_input`] as the
+    /// `expected` flag (issue #2942): it distinguishes an *expected-but-degraded*
+    /// memory bridge (`expected=true, memory=None` → a loud per-turn WARN, counted
+    /// in the attach-rate) from a session that never wired one (`expected=false`
+    /// → benign INFO, uncounted). `attached = memory.is_some()` alone cannot tell
+    /// the two apart, because a fully-degraded `Native` source collapses both
+    /// bridges to `None` exactly like `Disabled` does.
+    pub expected: bool,
 }
 
 impl EnrichmentClients {
@@ -219,7 +230,12 @@ impl EnrichmentClients {
     /// Enrich `input` with recalled memory + knowledge using the configured
     /// bridges, returning a new [`BaseTypeTurnInput`].
     pub fn enrich(&self, input: &BaseTypeTurnInput) -> SimardResult<BaseTypeTurnInput> {
-        enrich_turn_input(input, self.memory.as_deref(), self.knowledge.as_ref())
+        enrich_turn_input(
+            input,
+            self.memory.as_deref(),
+            self.knowledge.as_ref(),
+            self.expected,
+        )
     }
 }
 
@@ -229,6 +245,7 @@ impl std::fmt::Debug for EnrichmentClients {
         f.debug_struct("EnrichmentClients")
             .field("memory", &self.memory.is_some())
             .field("knowledge", &self.knowledge.is_some())
+            .field("expected", &self.expected)
             .finish()
     }
 }
@@ -272,7 +289,15 @@ impl EnrichmentSource {
             EnrichmentSource::Disabled => EnrichmentClients::new(),
             EnrichmentSource::Native { state_root } => {
                 let (memory, knowledge) = launch_enrichment_bridges(state_root);
-                EnrichmentClients { memory, knowledge }
+                // A `Native` source is *expected* enrichment even when a bridge
+                // degrades to `None` — the provenance must survive the collapse so
+                // a degraded turn stays in the attach-rate instead of silently
+                // reading as "never configured" (issue #2942).
+                EnrichmentClients {
+                    memory,
+                    knowledge,
+                    expected: true,
+                }
             }
         }
     }
@@ -300,9 +325,14 @@ pub fn launch_enrichment_bridges(
     let memory = match crate::ooda_loop::connect_memory(state_root) {
         Ok(memory) => Some(memory),
         Err(error) => {
-            eprintln!(
-                "[simard] base-type adapter: cognitive-memory bridge unavailable — memory \
-                 enrichment disabled for this session: {error}"
+            // Fail-LOUD (issue #2942): a structured WARN under `simard::enrichment`
+            // carrying the bounded reason (the raw error goes to DEBUG only) plus a
+            // `simard.enrichment.degraded{reason=memory_ipc}` increment, so a
+            // memory-ipc degrade is visible and metered — never the silent
+            // `eprintln!` this replaces.
+            crate::enrichment_observability::observe_degrade(
+                crate::enrichment_observability::DegradeReason::MemoryIpc,
+                &error.to_string(),
             );
             None
         }
@@ -311,9 +341,9 @@ pub fn launch_enrichment_bridges(
     let knowledge = match crate::rpc_subprocess_launcher::launch_knowledge_client_native() {
         Ok(knowledge) => Some(knowledge),
         Err(error) => {
-            eprintln!(
-                "[simard] base-type adapter: knowledge bridge unavailable — knowledge \
-                 enrichment disabled for this session: {error}"
+            crate::enrichment_observability::observe_degrade(
+                crate::enrichment_observability::DegradeReason::KnowledgeLaunch,
+                &error.to_string(),
             );
             None
         }
@@ -343,13 +373,35 @@ pub fn launch_enrichment_bridges(
 /// When no bridges are configured (or they return nothing) the input is
 /// returned unchanged — identical to the previous unenriched behavior, just
 /// reachable from every adapter.
+///
+/// `expected` records whether enrichment was *configured* for this session
+/// ([`EnrichmentSource::Native`]) so the observability seam (issue #2942) can
+/// tell an expected-but-degraded memory bridge (a loud, counted per-turn WARN)
+/// from a benign unconfigured turn (INFO, uncounted). It changes no recall,
+/// rendering, or dispatch behaviour — only what is observed.
 pub fn enrich_turn_input(
     input: &BaseTypeTurnInput,
     memory_client: Option<&dyn CognitiveMemoryOps>,
     knowledge_client: Option<&KnowledgeClient>,
+    expected: bool,
 ) -> SimardResult<BaseTypeTurnInput> {
     let context = prepare_turn_context(&input.objective, memory_client, knowledge_client)?;
     let block = render_enrichment_block(&context);
+
+    // Observe what actually reached this decision (issue #2942), BEFORE the block
+    // is folded into the preamble. `attached` binds to the *memory* bridge (the
+    // recall path); counts/bytes are measured from the rendered block, so they
+    // reflect what is injected, never what was merely prepared.
+    crate::enrichment_observability::observe(
+        crate::enrichment_observability::EnrichmentObservation {
+            objective: &input.objective,
+            attached: memory_client.is_some(),
+            expected,
+            facts_injected: context.memory_facts.len(),
+            procedures_injected: context.procedures.len(),
+            preamble_bytes: block.len(),
+        },
+    );
 
     let prompt_preamble = if block.is_empty() {
         input.prompt_preamble.clone()
@@ -544,7 +596,7 @@ CONFIDENCE: 0.85";
     #[test]
     fn enrich_turn_input_without_bridges_returns_input_unchanged() {
         let input = BaseTypeTurnInput::objective_only("implement the widget");
-        let enriched = enrich_turn_input(&input, None, None).unwrap();
+        let enriched = enrich_turn_input(&input, None, None, false).unwrap();
         // No bridges => objective + preamble unchanged, no memory block.
         assert_eq!(enriched.objective, "implement the widget");
         assert!(enriched.prompt_preamble.is_empty());
@@ -562,7 +614,7 @@ CONFIDENCE: 0.85";
             identity_context: "you are an engineer".to_string(),
             prompt_preamble: "conversation so far".to_string(),
         };
-        let enriched = enrich_turn_input(&input, None, None).unwrap();
+        let enriched = enrich_turn_input(&input, None, None, false).unwrap();
         // Without bridges the input is returned verbatim.
         assert_eq!(enriched.objective, "do the task");
         assert_eq!(enriched.identity_context, "you are an engineer");
