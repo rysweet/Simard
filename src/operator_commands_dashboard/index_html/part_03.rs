@@ -113,14 +113,28 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
               <td><span style="color:#8b949e;font-size:.75rem">tracking node</span></td>
             </tr>`;
           }
-          const rowsHtml=groupGoalsByParent(activeFiltered,d.backlog).map(entry=>{
+          // Issue #2743 review follow-up (Finding #2): group the FULL active
+          // list first, THEN filter at the group level. Grouping the already
+          // goal-filtered list would drop a parent whose only match is a
+          // child-only tag (e.g. source:decomposition), orphaning its children
+          // at depth 0. Here an entry survives when its root OR any child
+          // matches, and within a surviving entry only matching children are
+          // rendered — so children always appear under their real umbrella /
+          // parent header instead of floating to the top level.
+          function entryMatchesTagFilter(entry){
+            if(!window.goalsTagFilter) return true;
+            const rootMatch=entry.kind==='goal'&&goalMatchesTagFilter(entry.goal);
+            return rootMatch||(entry.children||[]).some(goalMatchesTagFilter);
+          }
+          const rowsHtml=groupGoalsByParent(d.active||[],d.backlog).filter(entryMatchesTagFilter).map(entry=>{
+            const kids=window.goalsTagFilter?(entry.children||[]).filter(goalMatchesTagFilter):(entry.children||[]);
             let html;
             if(entry.kind==='umbrella'){
-              html=renderUmbrellaHeader(entry.header,entry.children.length,entry.rep);
+              html=renderUmbrellaHeader(entry.header,kids.length,entry.rep);
             }else{
               html=renderGoalRow(entry.goal,0);
             }
-            for(const child of entry.children){ html+=renderGoalRow(child,1); }
+            for(const child of kids){ html+=renderGoalRow(child,1); }
             return html;
           }).join('');
           document.getElementById('goals-active').innerHTML=`<table class="proc-table">

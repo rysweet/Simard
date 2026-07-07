@@ -1194,10 +1194,17 @@ fn rendered_html_goals_render_label_chips_and_tag_filter() {
             && INDEX_HTML.contains("window.setGoalTagFilter"),
         "the Goals tab must filter goals client-side by the selected tag"
     );
-    // Filtering runs over the fetched goal data, not a server round-trip.
+    // Filtering runs over the fetched goal data, not a server round-trip, and
+    // is applied at the GROUP level (#2743 review Finding #2): the full active
+    // list is grouped first, then whole entries are kept when the root or any
+    // child matches, so a child-only tag can never orphan children from their
+    // parent/umbrella header.
     assert!(
-        INDEX_HTML.contains("groupGoalsByParent(activeFiltered"),
-        "the render must group/render the tag-filtered goal list"
+        INDEX_HTML.contains("function entryMatchesTagFilter(")
+            && INDEX_HTML.contains(
+                "groupGoalsByParent(d.active||[],d.backlog).filter(entryMatchesTagFilter)"
+            ),
+        "the render must group the full active list and filter at the group level"
     );
     // Review hardening (#2743): a tag is user-influenced text emitted into the
     // `value="…"` attribute of each <option>. It must be attribute-escaped with

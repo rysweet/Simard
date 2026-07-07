@@ -264,8 +264,7 @@ fn parse_list_tags(args: impl Iterator<Item = String>) -> Result<Vec<String>, Bo
             )
             .into());
         };
-        let tag = labels::normalize_tag(&raw)
-            .ok_or_else(|| -> Box<dyn Error> { "tag cannot be empty".into() })?;
+        let tag = labels::validate_tag(&raw)?;
         tags.push(tag);
     }
     Ok(tags)
@@ -378,9 +377,14 @@ fn handle_label(
 }
 
 fn handle_label_add(goal_id: &str, raw_tag: &str) -> Result<(), Box<dyn Error>> {
-    let tag = labels::normalize_tag(raw_tag).ok_or_else(|| -> Box<dyn Error> {
-        "tag cannot be empty (whitespace-only after trimming)".into()
-    })?;
+    let tag = labels::validate_tag(raw_tag)?;
+    if labels::is_source_tag(&tag) {
+        return Err(format!(
+            "tag '{tag}' is in the reserved 'source:*' provenance namespace, \
+             which is stamped automatically at goal creation and cannot be added by hand"
+        )
+        .into());
+    }
     let added = with_board(|board| {
         let goal = board
             .active
@@ -400,6 +404,13 @@ fn handle_label_add(goal_id: &str, raw_tag: &str) -> Result<(), Box<dyn Error>> 
 }
 
 fn handle_label_remove(goal_id: &str, raw_tag: &str) -> Result<(), Box<dyn Error>> {
+    let tag = labels::validate_tag(raw_tag)?;
+    if labels::is_source_tag(&tag) {
+        return Err(format!(
+            "tag '{tag}' is a code-managed 'source:*' provenance label and cannot be removed by hand"
+        )
+        .into());
+    }
     let removed = with_board(|board| {
         let goal = board
             .active
@@ -408,13 +419,12 @@ fn handle_label_remove(goal_id: &str, raw_tag: &str) -> Result<(), Box<dyn Error
             .ok_or_else(|| -> Box<dyn Error> {
                 format!("goal '{goal_id}' not found on active board").into()
             })?;
-        Ok(labels::remove_label(&mut goal.labels, raw_tag))
+        Ok(labels::remove_label(&mut goal.labels, &tag))
     })?;
-    let shown = raw_tag.trim();
     if removed {
-        eprintln!("[simard] goal label: removed '{shown}' from '{goal_id}'");
+        eprintln!("[simard] goal label: removed '{tag}' from '{goal_id}'");
     } else {
-        eprintln!("[simard] goal label: '{goal_id}' has no '{shown}' (no-op)");
+        eprintln!("[simard] goal label: '{goal_id}' has no '{tag}' (no-op)");
     }
     Ok(())
 }
@@ -948,6 +958,59 @@ mod tests {
         assert!(parse_list_tags(["oops"].into_iter().map(String::from)).is_err());
         // --tag without a value is an error.
         assert!(parse_list_tags(["--tag"].into_iter().map(String::from)).is_err());
+    }
+
+    #[test]
+    fn parse_list_tags_rejects_overlong_and_control_char_tags() {
+        // H2: the --tag filter is an operator-input boundary, so it enforces the
+        // same length cap and control-char rejection as label add.
+        let over = "x".repeat(labels::MAX_TAG_LEN + 1);
+        assert!(parse_list_tags(["--tag".to_string(), over].into_iter()).is_err());
+        assert!(
+            parse_list_tags(["--tag".to_string(), "area:\u{1b}bad".to_string()].into_iter())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn parse_list_tags_allows_source_namespace_for_filtering() {
+        // H1 guards *mutation*, not filtering: you can still filter by provenance.
+        let tags =
+            parse_list_tags(["--tag".to_string(), "source:operator".to_string()].into_iter())
+                .expect("filtering by a source:* tag is allowed");
+        assert_eq!(tags, vec!["source:operator".to_string()]);
+    }
+
+    #[test]
+    fn label_add_rejects_reserved_source_namespace() {
+        // H1: an operator cannot forge a provenance chip. Rejection happens
+        // before any board I/O, so no state root is needed.
+        let err = handle_label_add("g1", "source:operator")
+            .expect_err("adding a source:* label must be rejected");
+        assert!(err.to_string().contains("source:*"), "got: {err}");
+    }
+
+    #[test]
+    fn label_add_rejects_overlong_tag() {
+        let long = "a".repeat(labels::MAX_TAG_LEN + 1);
+        let err = handle_label_add("g1", &long).expect_err("over-long tag must be rejected");
+        assert!(err.to_string().contains("too long"), "got: {err}");
+    }
+
+    #[test]
+    fn label_add_rejects_control_char_tag() {
+        let err = handle_label_add("g1", "area:\u{1b}[31mbad")
+            .expect_err("control-char tag must be rejected");
+        assert!(err.to_string().contains("control"), "got: {err}");
+    }
+
+    #[test]
+    fn label_remove_rejects_reserved_source_namespace() {
+        // H1: provenance is immutable from the operator CLI — it cannot be
+        // stripped by hand either.
+        let err = handle_label_remove("g1", "source:seed")
+            .expect_err("removing a source:* label must be rejected");
+        assert!(err.to_string().contains("source:*"), "got: {err}");
     }
 
     #[test]

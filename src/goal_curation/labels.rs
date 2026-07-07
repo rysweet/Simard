@@ -36,13 +36,36 @@ pub const SOURCE_SEED: &str = "source:seed";
 /// `source:creative-ideas` goal stays discoverable as creative-ideas-originated.
 pub const SOURCE_DECOMPOSITION: &str = "source:decomposition";
 
+/// The reserved provenance namespace prefix. Every `SOURCE_*` constant begins
+/// with this. Labels in this namespace are stamped **only** by code at the
+/// goal-creation sites; operator input may *filter* by them but must never
+/// forge (add) or strip (remove) one — see [`is_source_tag`], enforced at the
+/// operator-CLI mutation boundary. Keeping this authoritative means a
+/// `source:*` chip on the dashboard always reflects a genuine, code-stamped
+/// origin (security hardening H1, issue #2743).
+pub const SOURCE_PREFIX: &str = "source:";
+
+/// Maximum length, in Unicode scalar values, of an operator-supplied tag.
+/// Tags are short human labels, so a modest cap keeps the persisted board
+/// snapshot bounded (storage/DoS hardening H2) and the TSV/console/dashboard
+/// output well-formed. Every `SOURCE_*` provenance constant is far shorter.
+pub const MAX_TAG_LEN: usize = 128;
+
+/// `true` iff `tag` sits in the reserved `source:*` provenance namespace.
+/// Used at the operator-CLI mutation boundary to reject hand-forged or
+/// hand-removed provenance labels, so provenance stays code-authoritative.
+pub fn is_source_tag(tag: &str) -> bool {
+    tag.starts_with(SOURCE_PREFIX)
+}
+
 /// Trim surrounding whitespace from `raw`. Returns `None` when the tag is empty
-/// after trimming — the *only* validation Simard imposes, since tags are
-/// otherwise opaque tokens.
+/// after trimming — the low-level normalization every label op shares.
 ///
 /// Deliberately does **not** lowercase: labels are matched by exact,
 /// case-sensitive equality, so forcing a case would silently rewrite operator
-/// input.
+/// input. Richer operator-input validation (length/charset) lives in
+/// [`validate_tag`]; this primitive stays minimal for internal callers that
+/// stamp trusted `source:*` constants.
 pub fn normalize_tag(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -50,6 +73,29 @@ pub fn normalize_tag(raw: &str) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+/// Validate an **operator-supplied** tag before it enters a label set or a
+/// `--tag` filter: [`normalize_tag`] (trim + reject empty), then enforce the
+/// [`MAX_TAG_LEN`] length cap and reject interior control characters (which
+/// would corrupt TSV/console output and the dashboard). Returns the normalized
+/// tag or a human-readable rejection reason.
+///
+/// This is the boundary guard for operator text. It deliberately does **not**
+/// touch the reserved `source:*` namespace, because filtering *by* provenance
+/// is a first-class use; the forge/strip guard is applied separately at the
+/// mutation sites via [`is_source_tag`].
+pub fn validate_tag(raw: &str) -> Result<String, String> {
+    let tag = normalize_tag(raw)
+        .ok_or_else(|| "tag cannot be empty (whitespace-only after trimming)".to_string())?;
+    let len = tag.chars().count();
+    if len > MAX_TAG_LEN {
+        return Err(format!("tag is too long ({len} chars; max {MAX_TAG_LEN})"));
+    }
+    if tag.chars().any(char::is_control) {
+        return Err("tag must not contain control characters".to_string());
+    }
+    Ok(tag)
 }
 
 /// Add `raw` (after [`normalize_tag`]) to `labels` if not already present.
@@ -131,6 +177,60 @@ mod tests {
             Some("Area:Meeting".to_string())
         );
         assert_eq!(normalize_tag("Research"), Some("Research".to_string()));
+    }
+
+    #[test]
+    fn is_source_tag_detects_reserved_namespace() {
+        assert!(is_source_tag(SOURCE_OPERATOR));
+        assert!(is_source_tag(SOURCE_CREATIVE_IDEAS));
+        assert!(is_source_tag("source:anything"));
+        // Non-provenance labels are not in the reserved namespace.
+        assert!(!is_source_tag("area:dashboard"));
+        assert!(!is_source_tag("research"));
+        // Prefix must be at the very start.
+        assert!(!is_source_tag("x-source:operator"));
+    }
+
+    #[test]
+    fn validate_tag_trims_and_rejects_empty() {
+        assert_eq!(
+            validate_tag("  area:dashboard  "),
+            Ok("area:dashboard".to_string())
+        );
+        assert!(validate_tag("").is_err());
+        assert!(validate_tag("   ").is_err());
+    }
+
+    #[test]
+    fn validate_tag_enforces_length_cap() {
+        // Exactly at the cap is accepted; one over is rejected.
+        let at_cap = "a".repeat(MAX_TAG_LEN);
+        assert_eq!(validate_tag(&at_cap), Ok(at_cap.clone()));
+        let over = "a".repeat(MAX_TAG_LEN + 1);
+        let err = validate_tag(&over).expect_err("over-long tag must be rejected");
+        assert!(err.contains("too long"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_tag_rejects_control_characters() {
+        // Interior control chars (ANSI escape, tab, newline, NUL) are rejected;
+        // surrounding whitespace is still just trimmed.
+        assert!(validate_tag("area:\u{1b}[31mred").is_err());
+        assert!(validate_tag("area\tdashboard").is_err());
+        assert!(validate_tag("area\ndashboard").is_err());
+        assert!(validate_tag("area\u{0}dashboard").is_err());
+        assert_eq!(validate_tag("  area:ok  "), Ok("area:ok".to_string()));
+    }
+
+    #[test]
+    fn validate_tag_allows_source_namespace_for_filtering() {
+        // validate_tag does NOT reject the reserved namespace — filtering *by*
+        // provenance (goal list --tag source:*) is a first-class use. The
+        // forge/strip guard is is_source_tag, applied only at mutation sites.
+        assert_eq!(
+            validate_tag("source:creative-ideas"),
+            Ok("source:creative-ideas".to_string())
+        );
     }
 
     #[test]
