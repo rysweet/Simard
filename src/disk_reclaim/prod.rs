@@ -65,9 +65,11 @@ fn worktree_branch(worktree: &Path) -> Option<String> {
     }
 }
 
-/// `Some(true)` iff `gh` reports at least one MERGED or CLOSED PR whose head is
-/// `branch`. `Some(false)` when `gh` answered with none; `None` when `gh` could
-/// not be consulted (fail-closed at the call site). `gh` is invoked in the
+/// `Some(true)` iff `gh` reports **at least one** PR whose head is `branch` and
+/// **every** such PR is MERGED or CLOSED (none OPEN). `Some(false)` when there
+/// are no PRs, or *any* PR is still OPEN — an actively-reviewed worktree must
+/// never be reclaimed. `None` when `gh` could not be consulted or its output
+/// could not be parsed (fail-closed at the call site). `gh` is invoked in the
 /// worktree so it infers the repo from the checkout; it is read-only and its
 /// token is never logged.
 fn branch_pr_merged_or_closed(worktree: &Path, branch: &str) -> Option<bool> {
@@ -82,11 +84,32 @@ fn branch_pr_merged_or_closed(worktree: &Path, branch: &str) -> Option<bool> {
     if !out.status.success() {
         return None;
     }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    // Tiny scan for `"state":"MERGED"` / `"state":"CLOSED"` to avoid dragging a
-    // JSON parse into this leaf (mirrors GhClientShell's approach).
-    let upper = stdout.to_uppercase();
-    Some(upper.contains("\"STATE\":\"MERGED\"") || upper.contains("\"STATE\":\"CLOSED\""))
+    all_prs_merged_or_closed(&out.stdout)
+}
+
+/// Decide reclaimability from the raw `gh pr list --json state` stdout (a JSON
+/// array of `{"state": "..."}`). `Some(true)` iff at least one PR exists and
+/// every PR is MERGED or CLOSED; `Some(false)` for no PRs or any OPEN/unexpected
+/// state; `None` if the JSON cannot be parsed (fail-closed at the call site).
+///
+/// This is a real parse rather than a substring scan on purpose: a single branch
+/// head can carry **both** a historical MERGED/CLOSED PR **and** a currently
+/// OPEN one (merged-then-reused, or closed-then-reopened as a new PR). A
+/// substring OR over the whole payload would see `"MERGED"` and reclaim the
+/// still-open PR's worktree. The safety question is "are *all* PRs for this head
+/// done?", never "is *some* PR done?".
+fn all_prs_merged_or_closed(gh_stdout: &[u8]) -> Option<bool> {
+    #[derive(serde::Deserialize)]
+    struct PrState {
+        state: String,
+    }
+    let prs: Vec<PrState> = serde_json::from_slice(gh_stdout).ok()?;
+    // At least one PR must exist AND none may be OPEN. Any non-terminal state
+    // (OPEN, or anything unexpected) fails closed to human review.
+    let all_terminal = prs
+        .iter()
+        .all(|p| matches!(p.state.to_uppercase().as_str(), "MERGED" | "CLOSED"));
+    Some(!prs.is_empty() && all_terminal)
 }
 
 /// Capture stdout of a hardened `git -C <dir> <args>` invocation, or `None` on
@@ -152,6 +175,52 @@ mod tests {
         // A path that is not a git repo yields no branch (fail-closed).
         let tmp = tempfile::tempdir().unwrap();
         assert!(worktree_branch(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn pr_state_no_prs_is_not_reclaimable() {
+        // An empty array means no PR references this head — never reclaimable.
+        assert_eq!(all_prs_merged_or_closed(b"[]"), Some(false));
+    }
+
+    #[test]
+    fn pr_state_all_terminal_is_reclaimable() {
+        // At least one PR and every PR MERGED/CLOSED → reclaimable.
+        assert_eq!(
+            all_prs_merged_or_closed(br#"[{"state":"MERGED"}]"#),
+            Some(true)
+        );
+        assert_eq!(
+            all_prs_merged_or_closed(br#"[{"state":"CLOSED"}]"#),
+            Some(true)
+        );
+        assert_eq!(
+            all_prs_merged_or_closed(br#"[{"state":"MERGED"},{"state":"CLOSED"}]"#),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn pr_state_any_open_is_not_reclaimable() {
+        // THE BYPASS THIS FIX CLOSES: a head with a historical MERGED PR AND a
+        // currently OPEN PR must NOT be reclaimed — the substring OR used to see
+        // "MERGED" and remove the in-review worktree.
+        assert_eq!(
+            all_prs_merged_or_closed(br#"[{"state":"MERGED"},{"state":"OPEN"}]"#),
+            Some(false)
+        );
+        assert_eq!(
+            all_prs_merged_or_closed(br#"[{"state":"OPEN"}]"#),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn pr_state_unparseable_is_inconclusive() {
+        // Malformed / non-JSON output cannot answer the safety question → None,
+        // which the call site maps to UnknownPrState (fail-closed).
+        assert_eq!(all_prs_merged_or_closed(b"not json"), None);
+        assert_eq!(all_prs_merged_or_closed(b""), None);
     }
 
     #[test]
