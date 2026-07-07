@@ -69,6 +69,8 @@ pub mod whisper_ops;
 pub mod wiring;
 
 #[cfg(test)]
+mod tests_diagnosis;
+#[cfg(test)]
 mod tests_gap_scan;
 #[cfg(test)]
 mod tests_goal_health;
