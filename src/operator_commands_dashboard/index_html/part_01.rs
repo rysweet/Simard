@@ -25,6 +25,11 @@ pub(crate) const PART_01: &str = r#"
         with <strong>Disconnect</strong>.
       </div>
       <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.75rem">
+        <label for="agent-terminal-select" style="color:#8b949e;font-size:.85rem">Agent</label>
+        <select id="agent-terminal-select" onchange="onAgentTerminalSelect()"
+                style="padding:.35rem .5rem;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-family:monospace;min-width:16rem">
+          <option value="" disabled selected>no agents available</option>
+        </select>
         <label for="agent-log-name" style="color:#8b949e;font-size:.85rem">Agent name</label>
         <input id="agent-log-name" type="text" placeholder="e.g. planner" maxlength="64"
                style="padding:.35rem .5rem;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-family:monospace;min-width:14rem">
@@ -746,6 +751,9 @@ pub(crate) const PART_01: &str = r#"
       return 'tmux attach -t '+s.session_name;
     }
     function renderSubagentSessions(){
+      // Keep the Agent Terminal picker (Workers tab) in sync with the live
+      // registry on every 5s poll (issue #2717).
+      populateAgentSelect();
       const el=document.getElementById('subagent-sessions-list');
       if(!el) return;
       const live=subagentSessionsCache.live||[];
@@ -772,6 +780,80 @@ pub(crate) const PART_01: &str = r#"
         const prev=btn.textContent;btn.textContent='Copied!';
         setTimeout(()=>{btn.textContent=prev;},900);
       },()=>{});
+    }
+    /* Memoized fingerprint of the last-rendered live roster so
+       populateAgentSelect() can no-op when the attachable set is unchanged
+       (avoids per-poll DOM churn and never disrupts an open dropdown). */
+    let agentSelectSig=null;
+    /* --- Agent Terminal available-agents picker (issue #2717) ---
+       populateAgentSelect() is a pure reader of the shared live registry
+       (subagentSessionsCache.live[]) — the SAME source the Workers tab uses to
+       list workers — so the dropdown always reflects reality. It rides the
+       existing 5s refresh via renderSubagentSessions(). Options carry the real
+       host + tmux session_name as data attributes so the attach target never
+       comes from the human-readable label. */
+    function populateAgentSelect(){
+      const sel=document.getElementById('agent-terminal-select');
+      if(!sel) return;
+      const live=subagentSessionsCache.live||[];
+      // Fingerprint the attach-relevant fields; when the live roster is
+      // unchanged, skip the full option rebuild so a stable set costs nothing
+      // each 5s poll and an open dropdown is never disrupted.
+      const sig=live.map(s=>[s.agent_id,s.host,s.session_name,s.goal_id].join('\x1f')).join('\x1e');
+      if(sig===agentSelectSig) return;
+      agentSelectSig=sig;
+      const prev=sel.value;
+      sel.replaceChildren();
+      if(!live.length){
+        const opt=document.createElement('option');
+        opt.value='';opt.disabled=true;opt.selected=true;
+        opt.textContent='no agents available';
+        sel.appendChild(opt);
+        sel.disabled=true;
+        return;
+      }
+      sel.disabled=false;
+      /* Neutral prompt kept as options[0] so a stale (or not-yet-made) pick never
+         silently repoints the dropdown at an unrelated live agent — which would
+         leave the label naming a different agent than the terminal is attached to.
+         It is disabled, so onAgentTerminalSelect() never treats it as a target. */
+      const prompt=document.createElement('option');
+      prompt.value='';prompt.disabled=true;prompt.textContent='select an agent';
+      sel.appendChild(prompt);
+      for(const s of live){
+        const opt=document.createElement('option');
+        opt.value=s.agent_id||'';
+        opt.dataset.host=s.host||'';
+        opt.dataset.session=s.session_name||'';
+        let label=s.agent_id||'(unknown)';
+        if(s.goal_id) label+=' — '+s.goal_id;
+        label+=' — live';
+        opt.textContent=label;
+        sel.appendChild(opt);
+      }
+      /* Restore the operator's prior pick across the 5s rebuild only when it is
+         still live (a programmatic .value assignment never dispatches 'change',
+         so this never fires an attach). When the prior pick has left live[], keep
+         the neutral prompt selected rather than jumping the label to a different
+         agent than the terminal is attached to (matches the empty-state intent). */
+      const stillPresent=prev!==''&&Array.prototype.some.call(sel.options,o=>o.value===prev);
+      if(stillPresent) sel.value=prev; else prompt.selected=true;
+    }
+    /* Fires only on a genuine user change (never the programmatic rebuild
+       above). Reads the chosen option's data-host/data-session and switches the
+       shared terminal to that session via the existing openTmuxAttach(). */
+    function onAgentTerminalSelect(){
+      const sel=document.getElementById('agent-terminal-select');
+      if(!sel) return;
+      const opt=sel.options[sel.selectedIndex];
+      if(!opt||opt.disabled) return;
+      const host=opt.dataset.host||'';
+      const session=opt.dataset.session||'';
+      if(!host||!session){
+        setAgentLogStatus('selected agent has no attachable session','#f85149');
+        return;
+      }
+      openTmuxAttach(host, session);
     }
     /* Shared renderer for Recent Actions outcome.detail strings.
        Detects agent='engineer-...' references and, when a matching tmux
@@ -886,7 +968,7 @@ pub(crate) const PART_01: &str = r#"
           <div class="stat"><span class="label">Active Processes</span><span class="value">${d.active_processes??0}</span></div>
           <div class="stat"><span class="label">Disk Usage</span><span class="value ${dc}">${d.disk_usage_pct??'?'}%</span></div>
           <div class="stat"><span class="label">Updated</span><span class="value">${timeAgo(d.timestamp)}</span></div>`;
-        document.getElementById('header-version').textContent='v'+d.version+' ('+shortHash+')';
+        document.getElementById('header-version').textContent='v'+d.version+' ('+shortHash+')'+(d.deployed?' · deployed '+d.deployed:'');
       }catch(e){document.getElementById('status').innerHTML='<span class="err">Failed to reach /api/status — is the dashboard server running?</span>';}
     }
 

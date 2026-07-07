@@ -981,13 +981,22 @@ pub mod scheduler;
 #[cfg(test)]
 mod distillation_tests;
 
-// Perpetual-cognition sub-goal: raise distillation fact-yield. A deterministic,
-// DB-free benchmark that records a baseline facts-per-consolidation-input number
-// over a fixed sample corpus and proves the concept-canonicalization change
-// raises yield without lowering precision. See
-// `docs/architecture/episode-distillation.md` §"Fact-yield benchmark".
+// TDD (RED) for issue #2679: the semantic agent→agent handoff replacing the
+// brittle JSON extraction/deserialization gate. Pins that the result path is an
+// exit-status check (no stdout parse), that the agentic step commits facts via
+// the shared gated write boundary, and that noisy/trailing-comma output can no
+// longer fail the pipeline. Symbols (`interpret_recipe_exit`, `run_agentic`)
+// land in the implementation step; until then this module is the red signal.
 #[cfg(test)]
-mod distillation_fact_yield_bench;
+mod distillation_semantic_handoff_tests;
+
+// Perpetual-cognition sub-goal: raise distillation fact-yield. RETIRED by issue
+// #2679: the benchmark measured the yield of the `parse_facts_document` +
+// `assess_fact_reliability` parse/filter path, which no longer exists — the
+// distiller now writes facts DIRECTLY through the memory write boundary, so there
+// is nothing to parse and the corroboration-bearing batch scorer was replaced by
+// the shared per-fact `crate::fact_reliability` scorer. See
+// `docs/architecture/distillation-semantic-handoff.md`.
 
 // PR-C (issue #2281, problem 4): episodic recall tests for
 // `preparation_memory_operations`. Pins the tokenizer rules,

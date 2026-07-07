@@ -74,6 +74,7 @@ nav:
     - Cognitive Memory — Library Adapter: architecture/cognitive-memory-library-adapter.md
     - Episode Ingestion Policy & Promotion: architecture/episode-ingestion-policy.md
     - Episode Distillation: architecture/episode-distillation.md
+    - Distillation Semantic Handoff: architecture/distillation-semantic-handoff.md
     - Gym Eval Engine — Library Adapter: architecture/gym-eval-library-adapter.md
     - Unified Meeting Backend: architecture/unified-meeting-backend.md
     - Conversation Channels: architecture/conversation-channel.md
@@ -198,6 +199,7 @@ nav:
     - View Agent Terminal Logs: howto/view-agent-terminal-logs.md
     - Run Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
     - Capture and Diagnose a Failing Distill Sample: howto/capture-and-diagnose-a-failing-distill-sample.md
+    - Verify the Distillation Semantic Handoff: howto/verify-the-distillation-semantic-handoff.md
     - Measure Recall Precision (Hybrid): howto/measure-recall-precision-hybrid.md
     - Read Simard Status: howto/simard-status.md
     - Watch Overseer Activity: howto/watch-overseer-activity.md
@@ -259,6 +261,8 @@ nav:
     - Distill Recipe-Output Capture: reference/distill-recipe-output-capture.md
     - Base-Type Adapters: reference/base-type-adapters.md
     - Memory Introspection CLI: reference/simard-memory-cli.md
+    - Memory Write CLI (remember): reference/simard-memory-remember-cli.md
+    - Distill Write-Boundary Gate: reference/distill-write-boundary-gate.md
     - Cognitive-Memory Provenance (DERIVES_FROM): reference/cognitive-memory-provenance.md
     - Cognitive-Memory Bootstrap Procedures: reference/cognitive-memory-bootstrap-procedures.md
     - Cognitive-Memory Client Helpers: reference/cognitive-memory-client-helpers.md
@@ -284,6 +288,7 @@ nav:
     - Goal Coverage Allocation: reference/goal-coverage-allocation.md
     - spawn_agent_for_goal API: reference/spawn-agent-for-goal.md
     - Stewardship API: reference/stewardship-api.md
+    - CI-Health Sweep: reference/ci-health-sweep.md
     - Simard Whisperer API: reference/simard-whisperer-api.md
     - Maximum Safe Parallelism: reference/maximum-safe-parallelism.md
     - Concurrent Engineer Dispatch: reference/concurrent-engineer-dispatch.md
@@ -328,6 +333,7 @@ nav:
     - Dashboard Activity Cycle Reports: reference/dashboard-activity-cycle-reports.md
     - Dashboard Background Tab Prefetch: reference/dashboard-background-tab-prefetch.md
     - Dashboard Overview Health & Live Memory: reference/dashboard-overview-health-and-live-memory.md
+    - Dashboard Header Deployment Datetime: reference/dashboard-header-deployment-datetime.md
     - Azlin Hosts Self-Membership: reference/azlin-hosts-self-membership.md
     - Azure DevOps ACL Self-Escalation Guard: reference/ado-acl-self-escalation-guard.md
     - Supply-Chain Audit & Guardrails: reference/supply-chain-audit.md
@@ -349,6 +355,7 @@ nav:
   - Operator Dashboard:
     - Azlin Tmux Sessions Panel: operator-dashboard/azlin-tmux-sessions.md
     - Event-Bus Stats in Cluster Topology: operator-dashboard/event-bus-stats.md
+    - Agent Terminal Agent Picker: operator-dashboard/agent-terminal-agent-picker.md
     - Hive Event Bus: hive_event_bus/README.md
   - Testing:
     - Test-Coverage Baseline: testing/COVERAGE_BASELINE.md
