@@ -13,6 +13,7 @@ owner: simard
 doc_type: concept
 related:
   - ../reference/journal-api.md
+  - ../reference/journal-narrative-result-channel.md
   - ../howto/browse-the-simard-journal.md
   - ../tutorials/read-simards-daily-journal.md
   - ../architecture/cognitive-memory.md

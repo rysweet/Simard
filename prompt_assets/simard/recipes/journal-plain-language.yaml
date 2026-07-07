@@ -20,8 +20,18 @@
 #     into argv, so a full-length draft can never overflow ARG_MAX / fail the
 #     spawn with E2BIG. The agent READS this file.
 #
-# Output: the rewritten, plain-language report as Markdown text (NOT JSON),
-# returned verbatim as the final narrative.
+#   plain_output — ABSOLUTE path to the result FILE the agent must write its
+#     FINAL rewritten report to (bug #2679). The agent writes ONLY the finished
+#     plain-language Markdown to this file; the Rust caller reads the narrative
+#     from this file and NEVER from recipe-runner stdout, so the copilot launcher
+#     banner (WARN nested amplihack session / INFO launching copilot /
+#     ℹ NODE_OPTIONS=…) and the agent's own tool-call trace (● Read … / │ / └ N
+#     lines read) can never leak into the stored journal. Mirrors the
+#     clean-result-file channel proven for goal decomposition (#2708).
+#
+# Output: the rewritten, plain-language report is written to the file at
+# `plain_output` as Markdown text (NOT JSON), and read from that file verbatim
+# as the final narrative; recipe-runner stdout is inert.
 
 name: "journal-plain-language"
 description: "Rewrite a journal report draft into plain, layperson-readable language"
@@ -31,6 +41,9 @@ tags: ["simard", "journal", "plain-language"]
 
 context:
   draft_path: ""
+  # ABSOLUTE path to the clean result file the agent writes its rewrite to (bug
+  # #2679). Declared so `{{plain_output}}` always resolves.
+  plain_output: ""
 
 steps:
   - id: "dejargon"
@@ -71,3 +84,18 @@ steps:
 
       Output ONLY the rewritten Markdown report — no preamble, no code fence,
       nothing before or after it.
+
+      ## Where to put the report (bug #2679 — clean result channel)
+
+      Write ONLY the finished rewritten Markdown report to the result file at
+      this absolute path, using your file-writing tool:
+
+      ```
+      {{plain_output}}
+      ```
+
+      The file must contain the rewritten report and NOTHING ELSE — no preamble,
+      no status lines, no tool-call narration, no code fence. Your terminal
+      output (stdout) is IGNORED; only the contents of this file become the final
+      journal narrative. If you cannot write the file, stop and report the
+      failure — do not emit the report to stdout instead.

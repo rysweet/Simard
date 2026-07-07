@@ -27,6 +27,7 @@ related:
   - ../design/overseer.md
   - ../architecture/episode-distillation.md
   - ./recipe-context-file-transport.md
+  - ./journal-narrative-result-channel.md
   - ../concepts/journal-recipe-spawn-e2big.md
   - ../howto/diagnose-journal-e2big-spawn-failures.md
 ---
