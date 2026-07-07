@@ -1,0 +1,54 @@
+name: "Dependabot-resolvable taiki-e/install-action pins"
+description: "Outside-in verification that every taiki-e/install-action pin in the CI workflows is SHA-pinned to a default-branch-reachable version-tag release (# v2...) with the tool selected via the `with: tool:` input, so GitHub's Dependabot github_actions updater can resolve it. Guards against reintroducing the per-tool-tag pins whose diverged commits made the default-branch dependabot-updates run fail with 'no such commit'."
+version: "1.0.0"
+
+config:
+  timeout: 600000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 600000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "install-action pins are SHA + version-tag (Dependabot-resolvable)"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/dependabot-action-pins-resolvable.sh"
+    timeout: 600000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "ci-health"
+    - "dependabot"
+    - "supply-chain"
+    - "guardrail"
+    - "github-actions"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

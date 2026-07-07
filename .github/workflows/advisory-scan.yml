@@ -46,10 +46,15 @@ jobs:
           save-if: "false"
 
       - name: Install cargo-audit
-        uses: taiki-e/install-action@754bf4dbae00ad1b16b244717154b96ba27d2416 # cargo-audit
+        # SHA-pins the reachable `v2` release + selects the tool via `tool:` (a
+        # diverged per-tool tag commit breaks Dependabot's github_actions updater).
+        uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2.82.10
+        with:
+          tool: cargo-audit
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@4e4e4d1450e58bef95d6f394ac20d46ad7d24ebf # cargo-deny
+        # SHA-pins the reachable `v2` release; `tool:` pins the cargo-deny version.
+        uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2.82.10
         with:
           tool: cargo-deny@0.19.9
 
