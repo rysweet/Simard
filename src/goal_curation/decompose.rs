@@ -312,24 +312,66 @@ fn sibling_dependency_signals(
 
 const RECIPE_FILENAME: &str = "goal-decomposition.yaml";
 
-/// Resolve the recipe YAML path: hot-reload dir first, then in-tree.
+/// The context-var marker that proves a `goal-decomposition.yaml` speaks the
+/// post-#2708 dedicated-result-file transport: the agent is told to WRITE its
+/// `{"sub_goals":[…]}` envelope to the file at `sub_goals_output`, not to print
+/// it to recipe-runner's noisy stdout. A recipe lacking this marker predates the
+/// fix and, under the new code, would silently produce no result file.
+const RESULT_FILE_CONTRACT_MARKER: &str = "sub_goals_output";
+
+/// Resolve the recipe YAML path, preferring the hot-reload dir over the in-tree
+/// copy — but NEVER letting a **stale** deployed recipe (one that predates the
+/// #2708 file-channel transport) shadow a compatible one.
+///
+/// Before #2708 a stale `~/.simard` recipe was harmless: it still told the agent
+/// to print JSON to stdout, which the old scraper read. Now the code reads a
+/// dedicated result FILE, so a stale recipe (which never writes that file) would
+/// turn every decomposition into a "result file was not written" failure. To
+/// keep hot-reload useful without that footgun, the candidates are searched in
+/// priority order (hot, then in-tree) for the first that BOTH exists and
+/// declares the [`RESULT_FILE_CONTRACT_MARKER`]; only if none is contract-aware
+/// does it fall back to the first existing recipe (so the run still surfaces a
+/// loud, explicit error rather than silently doing nothing).
 fn resolve_recipe_path(repo_root: &Path) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::with_capacity(2);
     if let Some(home) = dirs::home_dir() {
-        let hot = home
-            .join(".simard")
+        candidates.push(
+            home.join(".simard")
+                .join("prompt_assets/simard/recipes")
+                .join(RECIPE_FILENAME),
+        );
+    }
+    candidates.push(
+        repo_root
             .join("prompt_assets/simard/recipes")
-            .join(RECIPE_FILENAME);
-        if hot.is_file() {
-            return Some(hot);
-        }
-    }
-    let in_tree = repo_root
-        .join("prompt_assets/simard/recipes")
-        .join(RECIPE_FILENAME);
-    if in_tree.is_file() {
-        return Some(in_tree);
-    }
-    None
+            .join(RECIPE_FILENAME),
+    );
+    select_recipe(&candidates)
+}
+
+/// Whether the recipe at `path` declares the post-#2708 result-file contract
+/// ([`RESULT_FILE_CONTRACT_MARKER`]). An unreadable file is treated as
+/// non-compatible so it can never win the selection.
+fn recipe_declares_result_file(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .map(|contents| contents.contains(RESULT_FILE_CONTRACT_MARKER))
+        .unwrap_or(false)
+}
+
+/// Choose which recipe to run from `candidates`, given in descending priority.
+///
+/// Returns the first candidate that exists AND declares the result-file
+/// contract, so a stale (pre-#2708) recipe can never shadow a compatible one.
+/// If no candidate declares the contract, falls back to the highest-priority
+/// existing recipe (the run then surfaces a loud "result file was not written"
+/// error). Returns `None` only when no candidate exists at all.
+fn select_recipe(candidates: &[PathBuf]) -> Option<PathBuf> {
+    let existing: Vec<&PathBuf> = candidates.iter().filter(|p| p.is_file()).collect();
+    existing
+        .iter()
+        .find(|p| recipe_declares_result_file(p))
+        .or_else(|| existing.first())
+        .map(|p| (*p).clone())
 }
 
 /// A [`GoalDecomposer`] that delegates to `recipe-runner-rs` executing the
@@ -875,5 +917,94 @@ mod tests {
                 .is_empty(),
             "no DependsOn edge may be forged from an out-of-range or self index"
         );
+    }
+
+    // ── Group D: recipe selection (issue #2708 deployment coupling). A STALE
+    //    hot-reload recipe (one that predates the file-channel transport and
+    //    still tells the agent to print to stdout) must NEVER shadow a
+    //    contract-compatible recipe, or every decomposition fails with "result
+    //    file was not written". `select_recipe` searches candidates in priority
+    //    order for the first that declares the `sub_goals_output` marker. ──────
+
+    /// A compatible recipe writes to the dedicated result file; a stale one only
+    /// mentions stdout. `recipe_declares_result_file` keys off the marker.
+    const COMPATIBLE_RECIPE: &str =
+        "name: goal-decomposition\ncontext:\n  sub_goals_output: \"\"\nsteps: []\n";
+    const STALE_RECIPE: &str = "name: goal-decomposition\n# Output: agent stdout — a single JSON object\ncontext: {}\nsteps: []\n";
+
+    #[test]
+    fn recipe_declares_result_file_detects_the_contract_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let compat = dir.path().join("compat.yaml");
+        let stale = dir.path().join("stale.yaml");
+        std::fs::write(&compat, COMPATIBLE_RECIPE).unwrap();
+        std::fs::write(&stale, STALE_RECIPE).unwrap();
+        assert!(recipe_declares_result_file(&compat));
+        assert!(!recipe_declares_result_file(&stale));
+        // An unreadable/absent path is never treated as compatible.
+        assert!(!recipe_declares_result_file(
+            &dir.path().join("missing.yaml")
+        ));
+    }
+
+    #[test]
+    fn select_recipe_never_lets_a_stale_hot_recipe_shadow_a_compatible_one() {
+        // Highest-priority (hot) candidate is STALE; the lower-priority (in-tree)
+        // candidate is COMPATIBLE. The #2708 regression: the old resolver picked
+        // the hot path unconditionally and the run failed. `select_recipe` must
+        // skip the stale hot recipe and choose the compatible in-tree one.
+        let dir = tempfile::tempdir().unwrap();
+        let hot = dir.path().join("hot.yaml");
+        let in_tree = dir.path().join("in_tree.yaml");
+        std::fs::write(&hot, STALE_RECIPE).unwrap();
+        std::fs::write(&in_tree, COMPATIBLE_RECIPE).unwrap();
+
+        let chosen = select_recipe(&[hot.clone(), in_tree.clone()])
+            .expect("a compatible recipe exists and must be chosen");
+        assert_eq!(
+            chosen, in_tree,
+            "a stale hot recipe must not shadow the compatible in-tree recipe"
+        );
+    }
+
+    #[test]
+    fn select_recipe_prefers_a_compatible_hot_recipe() {
+        // When the hot recipe IS compatible it stays preferred (hot-reload is
+        // preserved for contract-aware recipes).
+        let dir = tempfile::tempdir().unwrap();
+        let hot = dir.path().join("hot.yaml");
+        let in_tree = dir.path().join("in_tree.yaml");
+        std::fs::write(&hot, COMPATIBLE_RECIPE).unwrap();
+        std::fs::write(&in_tree, COMPATIBLE_RECIPE).unwrap();
+        assert_eq!(
+            select_recipe(&[hot.clone(), in_tree]).unwrap(),
+            hot,
+            "a compatible hot recipe stays preferred"
+        );
+    }
+
+    #[test]
+    fn select_recipe_falls_back_to_first_existing_when_none_declare_the_contract() {
+        // No candidate is contract-aware: fall back to the highest-priority
+        // existing recipe so the run surfaces a loud error rather than silently
+        // doing nothing (and so behaviour never regresses to "no recipe found").
+        let dir = tempfile::tempdir().unwrap();
+        let hot = dir.path().join("hot.yaml");
+        let in_tree = dir.path().join("in_tree.yaml");
+        std::fs::write(&hot, STALE_RECIPE).unwrap();
+        std::fs::write(&in_tree, STALE_RECIPE).unwrap();
+        assert_eq!(
+            select_recipe(&[hot.clone(), in_tree]).unwrap(),
+            hot,
+            "with no compatible recipe, fall back to the first existing one"
+        );
+    }
+
+    #[test]
+    fn select_recipe_returns_none_when_no_candidate_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_a = dir.path().join("a.yaml");
+        let missing_b = dir.path().join("b.yaml");
+        assert!(select_recipe(&[missing_a, missing_b]).is_none());
     }
 }
