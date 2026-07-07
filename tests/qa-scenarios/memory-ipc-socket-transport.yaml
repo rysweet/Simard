@@ -1,0 +1,57 @@
+name: memory-ipc-socket-transport
+app_type: cli
+description: |
+  Verify the cross-process cognitive-memory Unix-socket transport
+  (`memory_ipc::client::RemoteCognitiveMemory` ⇄ `memory_ipc::server`) end to
+  end. Before this change the socket path — the whole reason `memory_ipc`
+  exists — was almost untested (client.rs ~29% / server.rs ~43% line coverage):
+  every other test drove the in-process tier-0/tier-2 launcher ladder, never
+  the wire. A protocol break there would silently sever cross-process memory
+  reads/writes (meeting REPL / engineer subprocess / dashboard ⇄ OODA daemon)
+  with no failing test — the "hollow success" class the launcher's
+  no-read-only-fallback rule exists to prevent.
+
+  This scenario runs the new hermetic transport suite (real in-memory backend
+  behind a TempDir socket; no disk, no network, no env, no global state) plus
+  the two existing memory_ipc tests audited in the same change. All are
+  behaviour-verifying: they assert payloads round-trip intact and that backend
+  errors surface as typed `RpcCallFailed`, not silent `Ok`.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+steps:
+  # (1) The new socket-transport suite: per-op round-trips for the whole
+  # CognitiveMemoryOps surface, the every-op error-encoding seam, ServerHandle
+  # drop unlinking the socket, malformed-frame robustness, SharedMemory
+  # forwarding, and the live-owner stale-lock branch. The first invocation may
+  # compile the lib test binary.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_ipc::tests_transport_roundtrip"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # (2) The two existing tests improved by the same PR's test-quality audit:
+  # the fresh-writer launcher test now asserts the store is empty (was a
+  # value-discarding smoke check), and the stale-lock reap test is renamed to
+  # describe the branch it actually exercises (unowned/flock), not a "dead pid".
+  - action: run
+    params:
+      command: "cargo test --locked --lib -- memory_ipc::tests_launcher::launch_writer_client_succeeds_on_fresh_state_root_without_daemon tests_memory_ipc::reap_stale_lock_removes_unowned_empty_lock_via_flock_probe"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
