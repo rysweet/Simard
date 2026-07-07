@@ -7,7 +7,8 @@ use crate::{CognitiveStatistics, GoalProgress};
 #[test]
 fn ooda_config_default_values() {
     let config = OodaConfig::default();
-    assert_eq!(config.max_concurrent_actions, 5);
+    // Issue #2935: raised from 5 to 24 (env-configurable via SIMARD_OODA_MAX_CONCURRENT).
+    assert_eq!(config.max_concurrent_actions, 24);
     assert!(
         (config.improvement_threshold - 0.02).abs() < f64::EPSILON,
         "improvement_threshold should be 0.02"
@@ -163,9 +164,10 @@ fn ooda_config_gym_suite_id_is_progressive() {
 }
 
 #[test]
-fn ooda_config_max_concurrent_is_three() {
+fn ooda_config_max_concurrent_defaults_to_24() {
     let config = OodaConfig::default();
-    assert_eq!(config.max_concurrent_actions, 5);
+    // Issue #2935: raised from 5 to 24 (env-configurable via SIMARD_OODA_MAX_CONCURRENT).
+    assert_eq!(config.max_concurrent_actions, 24);
 }
 
 // --- report field accessors ---

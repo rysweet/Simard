@@ -412,4 +412,36 @@ mod tests {
             "non-AdapterInvocationFailed errors must not affect scaler"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Issue #2935: AIMD adaptivity is preserved at the raised ceiling of 24.
+    // The algorithm is unchanged; only the ceiling rises. A scaler that starts
+    // at the raised ceiling still halves on a 429 (back-off) and additively
+    // recovers back up to — but never beyond — 24.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn backs_off_and_recovers_within_raised_ceiling_of_24() {
+        let s = AdaptiveScaler::new(24, 1, 24);
+        assert_eq!(s.current_max(), 24, "starts at the raised ceiling of 24");
+
+        // High system pressure halves the limit (multiplicative back-off). Uses
+        // a fresh per-cycle pressure sample rather than a 429 so recovery is not
+        // blocked by the sticky 300s error window.
+        let after_pressure = s.adjust_with_samples(Some(0.95), None);
+        assert_eq!(
+            after_pressure, 12,
+            "high pressure must still halve even at the raised ceiling (24 → 12)"
+        );
+
+        // With pressure relieved, additive +1 per cycle recovers back toward the
+        // ceiling, clamped at 24 — never beyond.
+        for _ in 0..20 {
+            s.adjust_with_samples(None, None);
+        }
+        assert_eq!(
+            s.current_max(),
+            24,
+            "additive recovery must climb back to but never exceed the 24 ceiling"
+        );
+    }
 }
