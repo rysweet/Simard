@@ -30,6 +30,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [How to configure bootstrap and inspect reflection](./howto/configure-bootstrap-and-inspect-reflection.md) - Bootstrap an explicit runtime selection and inspect the truthful runtime snapshot.
 - [How to reclaim disk space and run low-space Rust builds](./howto/reclaim-disk-space-and-run-low-space-rust-builds.md) - Reclaim stale build artifacts and run Cargo through one shared low-space target dir across worktrees.
 - [How to configure and monitor the disk health check](./howto/configure-disk-health-check.md) - Tune the per-cycle automated disk cleanup that prevents ENOSPC crashes (#2020).
+- [How to configure and run disk reclamation](./howto/configure-disk-reclamation.md) - Run the agentic, self-healing disk-reclamation capability (agent proposes, Rust disposes) with hard safety rails (#2704).
 - [How to diagnose and prevent handoff accumulation](./howto/diagnose-handoff-accumulation.md) - Detect, resolve, and prevent unbounded meeting handoff file growth (#2268).
 - [How to start a meeting with Simard](./howto/start-a-meeting.md) - Have a natural conversation with Simard from CLI or dashboard, with full history and memory.
 - [How to set up the Signal channel](./howto/set-up-the-signal-channel.md) - Command Simard and receive her notifications over Signal, via a locally-run signal-cli JSON-RPC daemon, with an operator allowlist and high-risk sign-off gating (#2527).
@@ -103,6 +104,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [Concept: truthful runtime metadata](./concepts/truthful-runtime-metadata.md) - Read the design rationale behind the stricter runtime contract.
 - [Concept: improvement context — denser execution evidence for the engineer loop](./concepts/improvement-context-execution-evidence-gap.md) - Captured improvement-curation context preserving the active "Capture denser execution evidence" goal and the observation that the legacy `simard_operator_probe` surface does not yet expose a terminal engineer-loop probe.
 - [Concept: automated disk health management](./concepts/automated-disk-health.md) - Design rationale for the per-cycle disk health check that prevents disk exhaustion (#2020).
+- [Concept: agentic disk reclamation](./concepts/agentic-disk-reclamation.md) - Design rationale for the self-healing reclamation capability where an agent proposes candidates and a deterministic Rust executor disposes of them behind non-bypassable safety rails (#2704).
 - [Concept: prompt-driven TDD discipline](./concepts/prompt-driven-tdd-discipline.md) - Why TDD commit ordering is enforced through the engineer system prompt, not CI scripts or git history parsing.
 - [Concept: pluggable identity](./concepts/pluggable-identity.md) - Design rationale for TOML-driven agent personas that let different repos define distinct identities (#2242).
 - [How to configure pluggable identities](./howto/configure-pluggable-identity.md) - Create an `identity.toml` file for custom agent personas, operating modes, and prompt assets.

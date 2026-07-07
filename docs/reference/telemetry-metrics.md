@@ -13,6 +13,7 @@ related:
   - ./daily-budget-display-guard.md
   - ../architecture/distillation-semantic-handoff.md
   - ./distill-write-boundary-gate.md
+  - ./disk-reclaim-telemetry.md
 ---
 
 # Telemetry metrics reference
@@ -191,6 +192,24 @@ Like the memory gauges, `simard.goal.active` is **daemon-sampled** from the goal
 board each OODA cycle. `simard.goal.completed` / `.progress` are reserved (see
 **Emission status**). The status `GOAL BOARD` list is rendered from the goal
 board itself in the daemon-hosted surfaces (dashboard / TUI goal tabs).
+
+### Disk reclaim — `simard.disk.reclaim.*`
+
+Emitted once per agentic disk-reclamation run (the daemon self-heal path and
+`simard disk-reclaim`). Full details and dashboard suggestions live in the
+dedicated [disk reclaim telemetry reference](./disk-reclaim-telemetry.md).
+
+| Metric | Type | Attributes | Meaning |
+|---|---|---|---|
+| `simard.disk.reclaim.bytes_freed` | counter | — | bytes actually reclaimed this run (0 on dry-run / no-op) |
+| `simard.disk.reclaim.paths_removed` | counter | `kind` = `tracked_worktree` \| `orphan_dir` \| `stale_build_cache` | paths removed, by reclamation primitive |
+| `simard.disk.reclaim.candidates_skipped` | counter | `reason` = `protected_path` \| `live_process` \| `uncommitted_or_unpushed` \| `active_worktree` \| `outside_allow_root` \| `unknown_pr_state` \| `other` | candidates a hard rail refused (the human-review list) — every increment is a path that was **not** deleted |
+| `simard.disk.reclaim.used_pct_before` | gauge | — | home-partition `%-used` at run start (0–100) |
+| `simard.disk.reclaim.used_pct_after` | gauge | — | home-partition `%-used` after the run (0–100) |
+
+The agent's free-text candidate `reason` is **never** used as an attribute; only
+the enum `RejectReason` (`reason=`) is. See
+[Agentic disk reclamation](../concepts/agentic-disk-reclamation.md).
 
 ## In-process registry and the on-disk snapshot
 

@@ -427,16 +427,25 @@ pub fn dispatch_spawn_engineer(
             resource_admission::ResourceAdmissionOutcome::ReclaimFirst { detail } => {
                 // Best-effort reclaim; a reclaim error is warn-logged, never a
                 // cycle failure (issue #2706). `repo_root` is the DAEMON's repo
-                // (locates the disk-health recipe's in-tree fallback), not the
-                // goal's resolved target repo.
-                if let Err(e) =
-                    crate::disk_health::run_disk_health_check(repo_root, &state_root_resource, None)
-                {
+                // (locates the reclaim recipe's in-tree fallback), not the goal's
+                // resolved target repo. Drives the agentic disk-reclaim capability
+                // (issue #2704): dry-run + human-review unless the operator opts
+                // into `SIMARD_DISK_RECLAIM_DAEMON_APPLY=1`.
+                let mode = crate::disk_reclaim::daemon_apply_from_env();
+                let target_pct = crate::disk_reclaim::reclaim_pct_from_env();
+                if let Err(e) = crate::disk_reclaim::run_disk_reclaim(
+                    repo_root,
+                    &state_root_resource,
+                    None,
+                    mode,
+                    target_pct,
+                    crate::disk_reclaim::ReclaimSource::Daemon,
+                ) {
                     tracing::warn!(
                         target: "simard::ooda_brain",
                         goal = %goal_id,
                         error = %e,
-                        "resource-admission reclaim_first: disk-health reclaim failed; deferring anyway",
+                        "resource-admission reclaim_first: disk reclaim failed; deferring anyway",
                     );
                 }
                 eprintln!("[simard] spawn_engineer reclaim-first for goal '{goal_id}': {detail}");

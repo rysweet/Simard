@@ -927,6 +927,55 @@ pub fn run_ooda_daemon(
                     );
                 }
             }
+            // Tier 3 (issue #2704): agentic self-healing disk reclamation. A
+            // cheap deterministic `df` `%-used` probe gates the launch; only when
+            // usage crosses `SIMARD_DISK_RECLAIM_PCT` do we invoke the agentic
+            // reclaim capability (an analysis agent proposes candidates, a
+            // deterministic Rust executor disposes behind hard safety rails).
+            // Ships in dry-run + human-review by default: the daemon only deletes
+            // when `SIMARD_DISK_RECLAIM_DAEMON_APPLY=1`. This supersedes the
+            // ad-hoc per-cycle disk-guard heuristics — no more re-deriving
+            // cleanup logic in scheduler prompts.
+            {
+                use crate::disk_pressure::check::DiskStatProvider as _;
+                let reclaim_pct = crate::disk_reclaim::reclaim_pct_from_env();
+                let used_now = crate::disk_pressure::RealDiskStatProvider
+                    .stat(&state_root)
+                    .ok()
+                    .and_then(|s| crate::disk_pressure::used_pct(&s))
+                    .map(|p| p.round().clamp(0.0, 100.0) as u8);
+                match used_now {
+                    Some(used) if crate::disk_reclaim::daemon_should_trigger(used, reclaim_pct) => {
+                        let mode = crate::disk_reclaim::daemon_apply_from_env();
+                        match crate::disk_reclaim::run_disk_reclaim(
+                            &bridges.repo_root,
+                            &state_root,
+                            None,
+                            mode,
+                            reclaim_pct,
+                            crate::disk_reclaim::ReclaimSource::Daemon,
+                        ) {
+                            Ok(report) => {
+                                daemon_log(&state_root, &format!("[simard] {}", report.summary()));
+                            }
+                            Err(e) => daemon_log(
+                                &state_root,
+                                &format!("[simard] WARN: disk reclaim failed: {e}"),
+                            ),
+                        }
+                    }
+                    Some(used) => daemon_log(
+                        &state_root,
+                        &format!(
+                            "[simard] disk reclaim: {used}% used, under threshold ({reclaim_pct}%), no run"
+                        ),
+                    ),
+                    None => daemon_log(
+                        &state_root,
+                        "[simard] WARN: disk reclaim probe could not read disk usage; skipping",
+                    ),
+                }
+            }
             last_disk_health = Instant::now();
         }
         // -------------------------------------------------------------------
