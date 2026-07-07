@@ -839,6 +839,110 @@ anchors, H2/H3 by live GitHub state + the terminal-park/no-reconciliation code p
 anchor resolves at HEAD `1190abb5` with **zero drift**; live state is **unchanged**. No
 finding changed; overall confidence remains **High**.
 
+### 7j. Round-7 primary-investigator deep dive — literal token decode, deterministic ordering, cross-goal contamination & whisper rule-out (HEAD `c868d6bd`)
+
+This pass owns the two assigned focus areas — **(A/C) signature-token decode + emission-site
+mapping** and **(D) the self-recall/write-back amplification loop across
+`signal.rs`/`mod.rs`/`wiring.rs`/`whisper_ops.rs`** — and adds four facts not in §7f/§7i:
+the *literal* token multiplicities of the observed key, a **proof that the token order is
+deterministic**, a **seventh `goal:blocked:` contamination token** in the newest generation,
+and the first analysis of **`whisper_ops.rs`**, which is **ruled out** as an amplifier.
+Anchored at the repo's actual HEAD `c868d6bd`; §7h/§7i prose cites `941f40cc`/`1190abb5`, but
+every commit since `941f40cc` is **docs-only**, so all source lines are identical — verified
+by re-resolving each anchor below.
+
+**A. Literal token decode (10 distinct tokens).** Splitting the observed composite on `|`
+yields exactly ten distinct tokens; each maps to one authoritative emission (file:line @
+`c868d6bd`):
+
+| Token | Decodes to | Signal (`signal.rs`) | dedup_key (`mod.rs`) | Ultimate source |
+|---|---|---|---|---|
+| `overseer-obs:` (leads each generation) | one **self-recall generation** boundary | — | `observation_signature` `:1085` | self write-back re-wrap |
+| `goal:blocked:advance-…-full-parity-f29bb15c` | parity umbrella parked | `GoalBlocked` `:441` | `goal:blocked:{id}` `:1349` | no-progress park `no_progress_breaker.rs:69` |
+| `…issue-16-ws1-full-pack-cve-…` | ws1 (#16 **CLOSED**) | `GoalBlocked` `:441` | `:1349` | **stale** park |
+| `…issue-17-ws2-int8-pq-embed-…` | ws2 (#17 OPEN, gated spike) | `GoalBlocked` `:441` | `:1349` | stale-premise dep-block |
+| `…issue-18-ws3-versioned-rel-…` | ws3 (#18 **CLOSED**) | `GoalBlocked` `:441` | `:1349` | **stale** park |
+| `…issue-21-ws6-resumable-pip-…` | ws6 (#21 **CLOSED**) | `GoalBlocked` `:441` | `:1349` | **stale** park |
+| `…issue-22-ws7-sign-the-rele-…` | ws7 (#22 **CLOSED**) | `GoalBlocked` `:441` | `:1349` | **stale** park |
+| `goal:blocked:fix-rustsec-2026-0204-in-amplihack-xpia-defende-…` | **unrelated** xpia-defender goal, `NOT_A_REPO` park | `GoalBlocked` `:441` | `:1349` | resolver park `error/display.rs:158` — **contamination (new)** |
+| `quality:gym_skipped` | gym self-eval skipped (operator flag) | `GymSkipped` `:398-399` | `quality:gym_skipped` `:1295` | `env_flag("SIMARD_SKIP_GYM")` `provider.rs:61` |
+| `resource:engineer_spawn` | ≥8 live engineers | `EngineerSpawnRate` `:393-396` | `resource:engineer_spawn` `:1283` | `live_engineers` `capabilities.rs:81` |
+| `workstream-gap` | uncovered backlog (disjoint from blocked) | `WorkstreamGap` `:475` | `workstream-gap` `:1384` | `detect_workstream_gaps` `sensor.rs:288` |
+
+The `2×` in the prompt summary is the recall **occurrences** count (`signal.rs:462-467`,
+threshold `= 2` `:362`) rendered verbatim by the signal→problem summary
+`format!("recurring signature seen {occurrences}× in cognitive memory ({signature})")`
+(`mod.rs:1373-1375`) — the prompt text *is* this line's output. It is **not** a retry
+counter and is orthogonal to the visible nesting depth.
+
+**B. The token order is deterministic — a provable consequence of `observation_signature`.**
+`observation_signature` sorts the dedup_keys (`keys.sort_unstable()` `mod.rs:1083`) then
+prefixes `overseer-obs:` (`:1085`). Under byte ordering the token *classes* sort strictly:
+`goal:blocked:*` (`g`) < the recalled `overseer-obs:*` composite (`o`) < `quality:*` (`q`) <
+`resource:*` (`r`) < `workstream-gap` (`w`) — verified empirically (`LC_ALL=C sort`). This
+exactly predicts the observed left-to-right layout of **every** generation: all
+`goal:blocked:` tokens first (umbrella `advance-…` sorts before `fix-…`, and `fix-agent-…`
+before `fix-rustsec-…`), then the nested prior composite, then the ambient
+`gym_skipped`/`resource`/`workstream-gap` tail. The layout is not incidental — it *is* the
+sort.
+
+**C. Nesting decode + generational growth (new).** Each `overseer-obs:` prefix marks one
+recalled generation folded in whole (the `RecurringSignature` dedup_key is the *entire* prior
+composite, `mod.rs:1372`). In the observed key the **inner (older) generations carry only
+`goal:blocked:` tokens** (no ambient tail) while a **single ambient tail sits at the
+outermost** — consistent with §1's issue timeline (parity-only #2669 → +issue-17 #2744 →
++issue-16 #2768). Decisively, the **outermost generation carries a seventh `goal:blocked:`
+token — `fix-rustsec-2026-0204-in-amplihack-xpia-defende-…` — that the inner generations
+lack.** That token is an **unrelated** goal parking with a `NOT_A_REPO` resolver error
+(`error/display.rs:158`), not a kgpacks park. Its appearance in only the newest generation is
+direct, disprovable evidence that (i) the signature **grows per generation** (a new board row
+appeared between recalls) and (ii) the composite **cross-contaminates across unrelated goals**
+— *any* goal `Blocked` on the board at recall time is swept into the same self-amplifying key.
+
+**D. The closed amplification loop across the four focus files (one cycle).**
+1. `mod.rs:544` `observation_signature(problems)` → `:1081-1085` build
+   `overseer-obs:{sorted, dedup'd dedup_keys}`.
+2. `mod.rs:552` `record_observation` → `wiring.rs:1076-1090`
+   `store_episode(content⧺"[sig:…]", OVERSEER_SOURCE_LABEL="overseer", {signature})`.
+   `WhisperGate::new(900,5)` (`mod.rs:297`, peeked `:546`) dedups only an **identical**
+   signature within the 900 s window.
+3. next tick: `mod.rs:496-513` `recall_pass` → `wiring.rs:1013-1031` `recall_episodic` →
+   `RecalledEpisode { failure_signature = parse_failure_signature(content), … }` —
+   **`source_label` is dropped** (`capabilities.rs:607-616` has no such field). ← the H1 gap.
+4. `signal.rs:455-469` `signals_from` tallies episodes by `failure_signature`; ≥2 →
+   `Signal::RecurringSignature { signature, occurrences }` (`:362`, `:464`).
+5. `mod.rs:1366-1376` signal→problem: `dedup_key = sanitize_recalled(signature)` = the
+   **whole** prior composite; summary = the prompt's verbatim line.
+6. GOTO 1: that giant dedup_key folds back as **one** element, re-wrapped with a fresh
+   `overseer-obs:` → strictly-longer signature → distinct `WhisperGate` key → never deduped.
+   A closed, monotonically-growing loop. Test-proven: `h1_confirm…` / `h2_confirm…` green
+   (36/36).
+
+**E. `whisper_ops.rs` ruled OUT as an amplifier (new negative finding).** The whisper channel
+— the fourth focus file — does **not** feed the loop, on three independent grounds:
+- It writes **`MeetingHandoff`s** via `write_meeting_handoff` (`whisper_ops.rs:94-105`) and
+  **never calls `store_episode`** — so `recall_episodic` (which reads *episodic* memory) can
+  never surface a whisper. The amplifier is the episodic write-back path exclusively.
+- Whisper handoffs carry **empty `decisions`/`action_items`** (`whisper_ops.rs:119-121`), so
+  `curate` can never promote one into a goal/backlog → a whisper can **never create a
+  `goal:blocked` token**.
+- They are `WHISPER_THEME`-tagged (`:28,135`) and drained by `drain_overseer_whispers`
+  (`curate.rs:384-385`), so Observe ignores the Overseer's own whispers.
+Conclusion: `whisper_ops.rs` is a **non-amplifying sibling** steering channel; it neither
+manufactures `goal:blocked` inputs nor re-enters recall. This removes "whispers feed the
+signature" as a candidate mechanism.
+
+**F. Two independent cut-points (both already test-encoded → P1).** (i) Carry `source_label`
+onto `RecalledEpisode` and drop `== "overseer"` before the tally (`h1_refute_by_fix…` green);
+(ii) make `observation_signature` idempotent — don't re-wrap an already-`overseer-obs:`-
+prefixed recalled key (`h2_refute_by_fix…` green). Either severs the closed loop in D; either
+alone halts the growth in C.
+
+**Verification footer.** HEAD `c868d6bd`; `cargo test --lib overseer::tests_memory_recall` →
+**36 passed, 0 failed**; every anchor above re-resolved verbatim; token sort-order confirmed
+empirically (`g < o < q < r < w`). No prior finding changed; the decode and loop trace are
+additive. Confidence **High**.
+
 ---
 
 ## 8. Provenance
@@ -867,7 +971,12 @@ re-executed the per-hypothesis practical tests at HEAD `1190abb5` — H1 via
 `tests_memory_recall` (36 passed, 0 failed) + verbatim source anchors, and H2/H3 via live
 GitHub state (kgpacks-rs #16/#18/#21/#22 CLOSED, #17 OPEN) plus the
 terminal-park/no-reconciliation code path — re-confirming all three hypotheses with zero
-drift and an unchanged 10-issue Simard tail.**
+drift and an unchanged 10-issue Simard tail; a round-7 primary-investigator deep dive (§7j,
+HEAD `c868d6bd`) added the literal 10-token decode + deterministic sort-ordering proof
+(`g<o<q<r<w`), identified a seventh cross-goal contamination token
+(`fix-rustsec-…-amplihack-xpia-defende`, `NOT_A_REPO` park), traced the closed amplification
+loop across `signal.rs`/`mod.rs`/`wiring.rs`, and ruled `whisper_ops.rs` OUT as a
+non-amplifying sibling channel (36/36 tests green).**
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
