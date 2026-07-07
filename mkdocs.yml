@@ -204,6 +204,7 @@ nav:
     - Run Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
     - Capture and Diagnose a Failing Distill Sample: howto/capture-and-diagnose-a-failing-distill-sample.md
     - Verify the Distillation Semantic Handoff: howto/verify-the-distillation-semantic-handoff.md
+    - Verify the Journal's Clean Narrative: howto/verify-the-journal-clean-narrative.md
     - Measure Recall Precision (Hybrid): howto/measure-recall-precision-hybrid.md
     - Read Simard Status: howto/simard-status.md
     - Watch Overseer Activity: howto/watch-overseer-activity.md
@@ -231,6 +232,7 @@ nav:
     - simard-engineer-step CLI: reference/simard-engineer-step.md
     - simard-tui Dashboard: reference/simard-tui.md
     - Journal API: reference/journal-api.md
+    - Journal Narrative Result Channel: reference/journal-narrative-result-channel.md
     - npx / npm Install: reference/npx-npm-install.md
     - Update Check: reference/update-check.md
     - amplihack Freshness Gate: reference/amplihack-freshness-gate.md
