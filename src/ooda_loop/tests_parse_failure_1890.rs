@@ -154,6 +154,7 @@ fn observation_with_no_signals() -> Observation {
 fn board_with_one_goal(id: &str) -> GoalBoard {
     let mut board = GoalBoard::default();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,

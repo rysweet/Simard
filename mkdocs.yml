@@ -168,6 +168,7 @@ nav:
     - Inspect the Durable Goal Register: howto/inspect-durable-goal-register.md
     - Inspect and Verify the OODA Cycle Counter: howto/inspect-the-ooda-cycle-counter.md
     - Decompose a Large Goal: howto/decompose-a-large-goal.md
+    - Label and Filter Goals: howto/label-and-filter-goals.md
     - Route a Goal to its Target Repo: howto/route-a-goal-to-its-target-repo.md
     - Diagnose a Rejected Goal Completion: howto/diagnose-a-rejected-goal-completion.md
     - Diagnose Rejected Progress Claims: howto/diagnose-rejected-progress-claims.md
@@ -285,6 +286,7 @@ nav:
     - Goal-Board API: reference/goal-board-api.md
     - Goal-Board Corruption-Guard API: reference/goal-board-corruption-guard-api.md
     - Goal Decomposition & Goal Graph: reference/goal-decomposition.md
+    - Goal Labels & Tags: reference/goal-labels.md
     - Goal-Decompose Result Channel: reference/goal-decompose-result-channel.md
     - Goal Target-Repo Routing: reference/goal-target-repo-routing.md
     - Goal Coverage Allocation: reference/goal-coverage-allocation.md

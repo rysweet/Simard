@@ -196,6 +196,7 @@ fn goal_node_round_trips() {
         "goal-p",
         "Ship the umbrella goal",
         Some("all children done"),
+        Vec::new(),
     );
     let json = serde_json::to_string(&node).expect("serialize GoalNode");
     let back: GoalNode = serde_json::from_str(&json).expect("deserialize GoalNode");
