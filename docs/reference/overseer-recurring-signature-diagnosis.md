@@ -1,0 +1,280 @@
+---
+title: Overseer recurring-signature blockage diagnosis (kgpacks-rs parity)
+description: >
+  Investigation follow-up decoding the recurring Overseer composite signature
+  `overseer-obs:goal:blocked:…|quality:gym_skipped|workstream-gap|resource:engineer_spawn`
+  observed for the `advance-rysweet-agent-kgpacks-rs-to-full-parity` goal and its
+  child workstreams. Identifies the concrete per-workstream blocker for each
+  goal:blocked segment (stale safeguard-park vs. genuine open item), gives the
+  code-verified semantic root cause of the `quality:gym_skipped` and
+  `workstream-gap` co-signals, and assesses whether `resource:engineer_spawn`
+  contention contributes to the blockage. Complements the round-1 finding that
+  the signature self-amplifies via an unfiltered write-back → recall → re-signal
+  loop.
+last_updated: 2026-07-07
+review_schedule: as-needed
+owner: simard
+doc_type: reference
+related:
+  - ./overseer-goal-board-health-api.md
+  - ./overseer-memory-recall-api.md
+  - ./overseer-workstream-gap-scan.md
+  - ./no-progress-breaker-api.md
+  - ../concepts/overseer-goal-board-health.md
+  - ../howto/unblock-stuck-ooda-goals.md
+  - ../howto/recover-goal-board.md
+  - ../howto/configure-overseer-memory-recall.md
+---
+
+# Overseer recurring-signature blockage diagnosis (kgpacks-rs parity)
+
+## Scope
+
+The Overseer repeatedly observed — and auto-filed GitHub issues for — the composite
+signature:
+
+```
+overseer-obs:goal:blocked:advance-rysweet-agent-kgpacks-rs-to-full-parity-…|
+goal:blocked:fix-agent-kgpacks-rs-issue-17-ws2-int8-pq-embed-…|…|
+quality:gym_skipped|workstream-gap|quality:gym_skipped|
+resource:engineer_spawn|workstream-gap
+```
+
+Round 1 ([`overseer-memory-recall-api`](./overseer-memory-recall-api.md), issue
+#2628 follow-up) established the **structural** cause: the signature self-amplifies
+because `recall_episodic` recalls the Overseer's own `source_label = "overseer"`
+write-backs with no provenance filter, and `observation_signature` folds the
+resulting `RecurringSignature` problem back into the next write-back. The `2×`
+count is the recalled-episode count; a grown/nested signature is a distinct
+`WhisperGate` key, so dedup never suppresses it.
+
+This document answers the **semantic** questions round 1 left open:
+
+1. What is the concrete blocker behind each `goal:blocked:…` segment?
+2. What do `quality:gym_skipped` and `workstream-gap` mean, and how do they relate
+   to the blocked state?
+3. Does `resource:engineer_spawn` (spawn contention) contribute to the blockage?
+
+Every claim below is grounded in source (`file:line`) or in the live GitHub state
+of `rysweet/agent-kgpacks-rs` and `rysweet/Simard` at the time of investigation
+(2026-07-07 ~08:14 UTC).
+
+---
+
+## 1. Per-workstream concrete blockers — mostly **stale safeguard-parks**
+
+### The finding
+
+The five workstreams named in the signature are, in reality, **four delivered +
+one intentionally-gated**. Only one is a live open item, and it is optional by
+design:
+
+| Segment (kgpacks-rs) | Issue | State @ investigation | Concrete blocker |
+|---|---|---|---|
+| ws1 `full-pack-cve` | #16 | **CLOSED** 2026-07-06 20:16Z | None — delivered. `goal:blocked` is **stale**. |
+| ws2 `int8-pq-embed` | #17 | OPEN (unchanged since 2026-07-02) | **Intentional gate**: "spike… Ship behind a flag ONLY if parity holds." Optional, not a failure. |
+| ws3 `versioned-rel` | #18 | **CLOSED** 2026-07-06 10:33Z | None — delivered. Stale. |
+| ws6 `resumable-pip` | #21 | **CLOSED** 2026-07-06 13:29Z | None — delivered. Stale. |
+| ws7 `sign-the-release` | #22 | **CLOSED** 2026-07-06 12:07Z | None — delivered. Stale. |
+| parity umbrella | — | Substantially complete | 4/5 children delivered; the 5th (#17) and the only other open item (#32, "optional semantic-embeddings, non-default") are both explicitly optional. |
+
+So **four of the five `goal:blocked` segments cite work that was already
+finished** — in three cases 6–13 hours *before* the Overseer filed the issue for
+it. The remaining one (#17) is a deliberately deferred, flag-gated spike, not a
+blockage.
+
+### Why the goal board still says "blocked" (root cause)
+
+A `goal:blocked:{id}` signal is a pure projection of the goal board:
+`sensor::blocked_goals_from_board` (`src/overseer/sensor.rs:204`) →
+`blocked_goal_of` (`:209`) emits one `BlockedGoal` per goal whose status is
+`GoalProgress::Blocked(reason)`. `needs_review` is set when the reason carries a
+safeguard sentinel (`is_no_progress_marker || is_brain_failure_marker`).
+
+These goals were parked by the **no-progress breaker**
+(`src/goal_curation/no_progress_breaker.rs`). After
+`NO_PROGRESS_BREAKER_THRESHOLD = 3` (`:58`) consecutive no-action cycles it runs
+the done-gate **once** and, when it cannot certify completion, sets
+`GoalProgress::Blocked` to the `NO_PROGRESS_BLOCKED_PREFIX` "…needs human review"
+sentinel (`:69`). The done-gate requires hard evidence — a merged PR **and** a
+closed issue **and** a deploy — and short-circuits to *not done* when
+`!issue_closed` (`src/goal_curation/completion_gate.rs:31,380`).
+
+The key defect: **a safeguard `Blocked` is terminal for the breaker** — the goal
+"leaves the no-action loop and cannot accumulate another cycle" and waits for a
+human (`simard goal unblock-all`). Nothing **re-runs the done-gate to auto-close
+the goal once its issue is closed later.** So when ws1/ws3/ws6/ws7 shipped and
+their issues closed hours after the park, the goal board kept the stale `Blocked`
+rows, `blocked_goals_from_board` kept emitting `goal:blocked:{id}`, and — via the
+round-1 self-recall loop — the composite signature kept recurring.
+
+### Empirical confirmation
+
+The Overseer auto-filed **9 near-duplicate** `rysweet/Simard` issues for this one
+signature between 2026-07-06 11:01Z and 2026-07-07 08:21Z (all still OPEN):
+
+- parity-only signature: #2669, #2672, #2678, #2691
+- nesting `issue-17`: #2744, #2750, #2757
+- nesting `issue-16`: #2768 (2026-07-07 02:02Z), #2841 (2026-07-07 08:21Z)
+
+**Smoking gun:** #2768 and #2841 were filed for `goal:blocked:…issue-16…`
+**≈6 h and ≈12 h after kgpacks-rs #16 was closed** (2026-07-06 20:16Z). The blocker
+they report did not exist at file time. This is exactly the stale-goal-board +
+self-recall interaction: nine issues, a growing/nesting key, none deduped, none
+resolved.
+
+---
+
+## 2. `quality:gym_skipped` and `workstream-gap` — independent ambient co-signals
+
+Both are folded into the **same Observe tick** as the `goal:blocked` signals and
+then swept up by the same self-recall nesting. Neither is a *cause* of the block;
+each is an independent, separately-sourced indicator.
+
+### 2a. `quality:gym_skipped` — an operator configuration, not a workstream failure
+
+`Signal::GymSkipped` (`src/overseer/signal.rs:398`) fires whenever
+`ObservedState.gym_skipped` is true, and maps to a **`QualityRegression`,
+`Priority::Low`** problem with dedup key `quality:gym_skipped`
+(`src/overseer/mod.rs:1292`).
+
+`gym_skipped` is set in `sensor::observed_from_snapshot`
+(`src/overseer/sensor.rs:125`) as `snap.gym.skip_gym || telemetry.gym_skipped` —
+and both trace back to a single environment flag:
+`let gym_skipped = env_flag("SIMARD_SKIP_GYM")` (`src/status/provider.rs:61`).
+When that flag is set, `gym_runner_client::skip_gym()` short-circuits the gym to a
+synthetic success (`src/gym_runner_client.rs:45,259,286`) — the self-eval never
+runs.
+
+**Semantic root cause:** the daemon is running with `SIMARD_SKIP_GYM` set, so
+**every** Observe pass emits `quality:gym_skipped`. It is an *ambient, standing*
+low-priority quality-regression signal (self-eval turned off deployment-wide),
+completely independent of any kgpacks-rs workstream. Its doubling in the signature
+(`quality:gym_skipped` ×2) is the round-1 recalled+fresh duplication, not two
+distinct skips.
+
+### 2b. `workstream-gap` — uncovered backlog, and it **cannot** overlap a blocked goal
+
+`Signal::WorkstreamGap` (`src/overseer/signal.rs:475`) carries every genuine
+backlog-coverage gap the tick surfaced and maps to a **`WorkstreamCoverage`,
+`Priority::High`** problem, dedup key `workstream-gap` (`src/overseer/mod.rs:1381`).
+
+The gaps come from `sensor::detect_workstream_gaps`
+(`src/overseer/sensor.rs:288`): a candidate is a gap iff it has **no active
+workstream AND no open PR** (and, for anomalies, no fix in flight). It surveys
+p1/p2 goals, high-signal open issues (labels `bug`/`P1`/`workflow:default`), and
+live anomalies.
+
+Crucially, **blocked goals are explicitly excluded** from the gap-scan and
+delegated to goal-health instead (`:280`, and the guard at `:300`:
+`if matches!(g.status, GoalProgress::Blocked(_)) { continue; }`). Therefore
+`workstream-gap` and `goal:blocked:{id}` are **disjoint** — the same goal is never
+counted as both. The `workstream-gap` segment is **other** uncovered high-priority
+work (a p1/p2 goal or a high-signal issue with no live engineer and no open PR),
+*not* the parity workstreams.
+
+**Relation to the blocked state:** none causally. `workstream-gap` is a co-occurring
+"we are under-covered somewhere" signal. It shares the blocked goals' underlying
+condition — *a high-signal item with no live engineer making progress* — but views
+a different slice of the board. It co-recurs in the signature only because it, too,
+gets nested by the self-recall loop.
+
+---
+
+## 3. `resource:engineer_spawn` — an amplifier under AIMD contraction, not the root cause
+
+`Signal::EngineerSpawnRate { live }` (`src/overseer/signal.rs:393`) fires when
+`ObservedState.live_engineers >= ENGINEER_SPAWN_THRESHOLD = 8` (`:351`), sourced
+from `StatusSnapshot.resources.live_engineers`
+(`src/overseer/capabilities.rs:81`). It maps to a **`ResourcePressure`,
+`Priority::Normal`** problem, dedup key `resource:engineer_spawn`
+(`src/overseer/mod.rs:1280`) — i.e. "≥8 engineers are live right now."
+
+Does that contention block the parity workstreams? **It can, but only as a
+secondary amplifier — it is not the root cause.**
+
+- New engineer starts are bounded per cycle to `coverage_cap`
+  (`src/ooda_loop/cycle.rs:316–334`), which is the AIMD scaler's `current_max()`
+  (or `max_concurrent_actions`, default `SIMARD_MAX_CONCURRENT_ACTIONS = 5`,
+  `src/ooda_loop/types.rs:288`; auto-scaling ceiling `= 4 ×` base). Decide applies
+  the same `limit` (`src/ooda_loop/decide.rs:41`).
+- `ensure_goal_coverage` **prioritizes** giving every uncovered incomplete goal
+  exactly one engine *ahead of* extra parallelism for already-covered goals
+  (`cycle.rs:310–322`). So coverage starvation bites **only** when the cap is the
+  binding constraint — i.e. when more goals need coverage than `coverage_cap`
+  slots, which under `SIMARD_SCALING=auto` happens after AIMD has *contracted* the
+  cap in response to failures/budget pressure.
+- With `live_engineers ≥ 8` the cap must have expanded above base 5 at some point,
+  so the signal marks a system running hot in its upper range. If AIMD then
+  contracts below the live count, genuinely-open work (e.g. #17) can be starved of
+  a slot and make no progress — feeding the no-progress breaker that produces the
+  *next* safeguard park.
+
+**Bottom line:** spawn pressure is a plausible **contributor to fresh no-progress
+parks** under AIMD contraction, but the recurring `goal:blocked` segments in this
+signature are dominated by **stale** parks for already-delivered work (Section 1),
+which spawn contention cannot explain. Treat `resource:engineer_spawn` as a
+health/amplifier signal, not the blockage's root cause.
+
+---
+
+## 4. Why it recurred (2×) instead of resolving
+
+Confirmed in round 1 and reinforced here:
+
+- **Structural:** unfiltered self-recall (`recall_episodic` has no `source_label`
+  filter) + re-wrap (`observation_signature` folds the recalled
+  `RecurringSignature` back in) → the key grows/nests each generation; each grown
+  key is distinct, so `WhisperGate` dedup can't suppress it. `2×` = recalled-episode
+  count, not a retry counter.
+- **Semantic (this doc):** the `goal:blocked` inputs are themselves **stale** —
+  safeguard parks for work that later shipped but was never reconciled — so the
+  Observe pass keeps regenerating the same segments every tick. `gym_skipped`
+  (env-flag) and `workstream-gap` (standing coverage gap) are likewise ambient, so
+  they persist tick-over-tick. A self-referential loop fed by standing inputs
+  recurs indefinitely.
+
+The empirical tail (9 open near-duplicate issues, growing keys) is the observable
+consequence.
+
+---
+
+## 5. Prioritized remediation
+
+Ordered by leverage. P1/P2 sever the mechanism; P3/P4 clear the standing inputs.
+
+1. **P1 — Cut the self-recall loop (root cause; round-1 Option A).** In
+   `recall_episodic` (`src/overseer/wiring.rs`), drop episodes whose
+   `source_label == OVERSEER_SOURCE_LABEL` before mapping to `RecalledEpisode`, so
+   the Overseer stops recalling its own write-backs. Invert the H1–H4 tests to
+   assert the loop is broken. This alone stops the growth/nesting and the
+   dedup-escaping issue floods.
+2. **P2 — Reconcile stale safeguard-parks against issue/PR closure.** Add a
+   goal-board reconciliation step that re-runs the done-gate for
+   safeguard-`Blocked` goals whose backing issue is now closed / PR merged, and
+   auto-archives (or drops) them instead of holding a terminal park forever. This
+   removes the *stale* `goal:blocked` segments for #16/#18/#21/#22 at the source
+   (see `howto/recover-goal-board.md`, `howto/unblock-stuck-ooda-goals.md`).
+3. **P3 — Clear the current backlog.** Run `simard goal unblock-all` (or
+   equivalent) to clear the four stale parks now; bulk-close the 9 duplicate
+   `rysweet/Simard` issues (#2669, #2672, #2678, #2691, #2744, #2750, #2757,
+   #2768, #2841) as artifacts of this loop, referencing this diagnosis.
+4. **P4 — Resolve the ambient co-signals.** Decide `#17` (ws2 int8-pq-embed)
+   explicitly — either run its parity gate and ship-behind-flag or mark it
+   obsolete/deferred so it stops reading as open work. If the gym is intentionally
+   off in this deployment, suppress or down-rank `quality:gym_skipped` so an
+   expected config stops adding perpetual noise; otherwise unset `SIMARD_SKIP_GYM`.
+5. **P5 — Spawn headroom (only if AIMD contraction is observed).** If telemetry
+   shows the AIMD `current_max` contracting below `live_engineers` while open work
+   waits, raise the floor / tune the scaler so genuinely-open workstreams are not
+   starved of a coverage slot. Not required to fix the recurring signature.
+
+---
+
+## 6. Provenance
+
+Investigation-only follow-up (investigation-workflow, round 2). No production
+behavior was changed by this document. Source references were verified against the
+working tree at commit-time; GitHub states were read from `rysweet/agent-kgpacks-rs`
+and `rysweet/Simard` on 2026-07-07. The P1/P2/P5 code changes are recommendations
+for follow-up development tasks.
