@@ -1,0 +1,57 @@
+name: "Hermetic ooda_loop decide + base_type_copilot meeting_turn tests (issue #2732)"
+description: "Outside-in proof that two pre-existing non-hermetic tests are now deterministic regardless of host env / installed copilot / auth state. (1) ooda_loop::decide::tests::decide_respects_max_concurrent_actions is run under a HOSTILE env (SIMARD_SCALING=auto, SIMARD_MAX_CONCURRENT_ACTIONS=10) and must still cap at the explicit max_concurrent_actions (the old ..Default::default() let an env-seeded AIMD scaler override it). (2) base_type_copilot meeting_turn_* tests are run with a DECOY `copilot` first on PATH whose output would break the exact-match assertion if the production meeting path ever resolved copilot from PATH — passing proves the test-injected fake (an absolute path) is used and no real/PATH/auth-dependent copilot subprocess is consulted. (3) A source guard asserts the copilot_on_path() skip-guard is gone and the hermetic seam + fake remain."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Hermeticity: decide cap under hostile env + meeting_turn ignores decoy PATH copilot"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/hermetic-ooda-decide-meeting-turn-2732.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "ooda"
+    - "decide"
+    - "base-type-copilot"
+    - "meeting-mode"
+    - "hermeticity"
+    - "issue-2732"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

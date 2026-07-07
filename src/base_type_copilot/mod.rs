@@ -74,6 +74,12 @@ pub struct CopilotSdkAdapter {
     descriptor: BaseTypeDescriptor,
     config: CopilotAdapterConfig,
     enrichment: EnrichmentSource,
+    /// Test-only seam: override the meeting-mode copilot binary
+    /// ([`MEETING_COPILOT_BINARY`]) with an explicit program — typically an
+    /// absolute path to a fake `copilot` used by hermetic meeting-turn tests
+    /// (issue #2732). `None` in production, so live meeting turns always exec
+    /// the real `copilot` binary; there is no production behavior change.
+    meeting_binary_override: Option<String>,
 }
 
 impl CopilotSdkAdapter {
@@ -109,7 +115,20 @@ impl CopilotSdkAdapter {
             },
             config,
             enrichment: EnrichmentSource::default(),
+            meeting_binary_override: None,
         })
+    }
+
+    /// Test-only seam: override the meeting-mode copilot binary with `binary`
+    /// (typically an absolute path to a fake `copilot`) so meeting-turn tests
+    /// exercise the real `run_meeting_turn` path hermetically, without spawning
+    /// the real `copilot` subprocess or depending on its auth/network state
+    /// (issue #2732). Not used on any production path.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_meeting_binary_override(mut self, binary: impl Into<String>) -> Self {
+        self.meeting_binary_override = Some(binary.into());
+        self
     }
 
     /// Access the adapter configuration.
@@ -165,6 +184,7 @@ impl CopilotSdkAdapter {
             is_closed: false,
             turn_count: 0,
             session_uuid: None,
+            meeting_binary_override: self.meeting_binary_override.clone(),
         })
     }
 }
@@ -198,6 +218,9 @@ struct CopilotSdkSession {
     /// `copilot` invocation so that copilot maintains conversation context
     /// across turns without needing a persistent interactive process.
     session_uuid: Option<String>,
+    /// Test-only seam inherited from the adapter (issue #2732). `None` in
+    /// production → meeting turns exec the real [`MEETING_COPILOT_BINARY`].
+    meeting_binary_override: Option<String>,
 }
 
 impl std::fmt::Debug for CopilotSdkSession {
@@ -247,6 +270,7 @@ impl CopilotSdkSession {
             is_closed: false,
             turn_count: 0,
             session_uuid: None,
+            meeting_binary_override: None,
         }
     }
 
@@ -372,10 +396,20 @@ impl CopilotSdkSession {
         // Render the enriched prompt once; it is streamed on stdin below.
         let formatted = self.render_enriched_prompt(&input)?;
 
+        // Resolve the meeting binary. Production always uses the const
+        // `MEETING_COPILOT_BINARY` ("copilot"); hermetic tests inject a fake
+        // via `with_meeting_binary_override` so no real `copilot` subprocess
+        // (and no auth/network dependency) is spawned in the default test run
+        // (#2732).
+        let meeting_binary = self
+            .meeting_binary_override
+            .as_deref()
+            .unwrap_or(MEETING_COPILOT_BINARY);
+
         // Direct exec of the copilot binary with only bounded flags — the prompt
         // is NOT on the command line (issue #2640).
         let mut command = build_meeting_command(
-            MEETING_COPILOT_BINARY,
+            meeting_binary,
             &session_id,
             self.config.working_directory.as_deref(),
         );
