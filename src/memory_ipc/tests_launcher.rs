@@ -49,11 +49,18 @@ fn launch_writer_client_succeeds_on_fresh_state_root_without_daemon() {
     let root = fresh_state_root("writer-fresh");
     let writer = launch_writer_client(&root)
         .expect("launch_writer_client must succeed without a daemon when state root is writable");
-    // ops() must hand back a usable trait object.
+    // ops() must hand back a usable trait object whose fresh-store state is
+    // concretely correct — a brand-new tier-2 store must hold zero facts. (The
+    // earlier version discarded the stats via `let _ =`, verifying only that the
+    // call did not error; asserting the count turns it into a behaviour check.)
     let ops: &dyn CognitiveMemoryOps = writer.ops();
-    let _ = ops
+    let stats = ops
         .get_statistics()
         .expect("get_statistics must work on a fresh writer bridge");
+    assert_eq!(
+        stats.semantic_count, 0,
+        "a freshly opened tier-2 writer must front an empty store (no facts)"
+    );
 }
 
 #[test]
@@ -149,6 +156,7 @@ fn writer_bridge_is_compatible_with_save_and_load_goal_board() {
 
     let mut board = GoalBoard::new();
     board.active.push(crate::goal_curation::ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -182,6 +190,7 @@ fn writer_bridge_does_not_create_legacy_goal_records_json_on_save() {
 
     let mut board = GoalBoard::new();
     board.active.push(crate::goal_curation::ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,

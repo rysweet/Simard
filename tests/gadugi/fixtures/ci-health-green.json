@@ -1,0 +1,30 @@
+{
+  "repos": [
+    {
+      "slug": "rysweet/azlin",
+      "default_branch": "main",
+      "workflows": [
+        {"name": "CI", "state": "active", "latest_run": {"status": "completed", "conclusion": "success", "event": "push", "created_at": "2026-07-04T20:24:06Z", "database_id": 28718588578}},
+        {"name": "Rust CI", "state": "active", "latest_run": {"status": "completed", "conclusion": "success", "event": "push", "created_at": "2026-07-04T20:24:06Z", "database_id": 28718588579}},
+        {"name": "Code Quality Tracker", "state": "disabled_manually", "latest_run": {"status": "completed", "conclusion": "failure", "event": "schedule", "created_at": "2026-06-15T11:08:17Z", "database_id": 27542084782}},
+        {"name": "CI/CD Workflow Health Monitor", "state": "disabled_manually", "latest_run": {"status": "completed", "conclusion": "failure", "event": "schedule", "created_at": "2026-06-15T10:04:55Z", "database_id": 27538870063}}
+      ]
+    },
+    {
+      "slug": "rysweet/agent-kgpacks",
+      "default_branch": "main",
+      "workflows": [
+        {"name": "CI", "state": "active", "latest_run": {"status": "completed", "conclusion": "success", "event": "push", "created_at": "2026-06-30T00:10:53Z", "database_id": 28411188790}},
+        {"name": "Build Knowledge Pack", "state": "active", "latest_run": {"status": "completed", "conclusion": "cancelled", "event": "issues", "created_at": "2026-03-06T21:56:54Z", "database_id": 22783611001}}
+      ]
+    },
+    {
+      "slug": "rysweet/Simard",
+      "default_branch": "main",
+      "workflows": [
+        {"name": "verify", "state": "active", "latest_run": {"status": "in_progress", "conclusion": null, "event": "push", "created_at": "2026-07-06T20:06:02Z", "database_id": 28819793406}},
+        {"name": "docs", "state": "active", "latest_run": {"status": "completed", "conclusion": "success", "event": "push", "created_at": "2026-07-06T20:06:02Z", "database_id": 28819793431}}
+      ]
+    }
+  ]
+}

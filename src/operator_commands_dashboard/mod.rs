@@ -67,6 +67,14 @@ mod tests_routes_b;
 #[cfg(test)]
 mod tests_recall_precision_correlation;
 
+// Issue #2798 — Layer B: pins that the dashboard resolver (`resolve_state_root`)
+// equals the daemon resolver (`simard_state_root` / `default_state_root`) for
+// every `SIMARD_STATE_ROOT` input class, so reader tier-0 shares the daemon's
+// live writer. The empty/relative env cases fail RED on the pre-fix divergent
+// resolver.
+#[cfg(test)]
+mod tests_state_root_parity;
+
 use std::net::SocketAddr;
 use std::path::Path;
 

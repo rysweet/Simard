@@ -8,6 +8,7 @@ doc_type: reference
 status: active
 related:
   - ./dependency-trust-policy.md
+  - ./supply-chain-advisory-stewardship.md
   - ./release-integrity.md
   - ../howto/self-maintain-dependency-pins.md
   - ./pr-finalization-pipeline.md
@@ -380,10 +381,25 @@ Both honour the same `RUSTSEC-2023-0071` (`rsa`) exemption, expressed once in
 `.cargo/audit.toml` and once in `deny.toml`, each with the identical
 justification and tracking link, so the two cannot drift into disagreement.
 
+> **Proactively kept current (#2741).** The `cargo-audit` job runs **offline
+> against a pinned advisory DB** (`.github/advisory-db.sha`) so a
+> freshly-published upstream advisory cannot retroactively fail unrelated PRs.
+> `cargo-deny` cannot pin its advisory DB to a revision (it always fetches HEAD),
+> so at PR time it runs only the DB-independent **licenses/bans/sources** policy;
+> the pinned `cargo-audit` job is the authoritative advisory gate. A **daily
+> scheduled scan** tracks the DB HEAD and files bump-or-justified-ignore fixes —
+> writing to **both** ignore files in sync — before an advisory would ever block
+> other work. See
+> [Supply-chain advisory stewardship](./supply-chain-advisory-stewardship.md).
+
 ## See also
 
 - [Dependency trust policy](./dependency-trust-policy.md) — `cargo-vet`
   certification, trusted-crate criteria, and the advisory-resolution workflow.
+- [Supply-chain advisory stewardship](./supply-chain-advisory-stewardship.md) —
+  the proactive layer on top of this policy (#2741): the pinned PR-time advisory
+  DB, the daily scheduled scan, and the bump-or-justified-ignore remediation
+  reasoner that files fixes before a new advisory can block unrelated PRs.
 - [Release integrity](./release-integrity.md) — SBOM generation, cosign
   signing, and build-reproducibility caveats.
 - [Keep Simard's dependency pins up to date](../howto/self-maintain-dependency-pins.md) —

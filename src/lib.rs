@@ -16,6 +16,7 @@ pub mod base_types;
 pub mod bootstrap;
 pub mod build_lock;
 pub mod cargo_jobs;
+pub mod ci_health;
 pub mod cmd_cleanup;
 pub mod cmd_ensure_deps;
 pub mod cmd_install;
@@ -58,13 +59,28 @@ pub mod disk_pressure;
 pub mod engineer_loop;
 pub mod engineer_worktree;
 pub mod error;
+// Issue #2679: the shared per-fact reliability scorer, homed here so both
+// write-boundary seams (the IPC `StoreFactGated` handler and the in-process
+// distill sink) apply the identical store/quarantine decision.
 pub mod eval_watchdog;
 pub mod evidence;
+pub mod fact_reliability;
+#[cfg(test)]
+mod fact_reliability_tests;
 pub mod git_guardrails;
 pub mod goal_board_store;
 pub mod goal_curation;
 pub mod goals;
 pub mod greeting_banner;
+// Phase 4 of issue #2713: the LOCAL "COIN Gym" harness — runs the COIN
+// benchmark shape locally, scores vs. the published leaderboard, and A/Bs a
+// single-model baseline against a multi-agent team, mirroring skwaq's
+// failure-analysis + overfitting-reviewer gating. The harness executor delegates
+// to `coin evaluate` (Docker + instrumented replay is Phase 3/VM); a mock oracle
+// exercises the whole pipeline offline. See
+// `docs/research/coin-benchmark-and-skwaq-study.md` (design) and
+// `docs/howto/run-the-coin-gym-harness.md` (usage).
+pub mod coin_gym;
 pub mod gym;
 pub mod gym_client;
 pub mod gym_history;
@@ -165,6 +181,12 @@ pub mod spawn_payload;
 pub mod state_root;
 pub mod stewardship;
 pub mod subagent_sessions;
+// Issue #2741: proactive RUSTSEC/cargo-deny advisory stewardship. The pure
+// remediation-decision reasoner (bump-or-justified-ignore behind a
+// deterministic rail) lives here; it reuses `stewardship::dedup` and
+// `stewardship::merge_authority`. See
+// docs/reference/supply-chain-advisory-stewardship.md.
+pub mod supply_chain_steward;
 // Issue #2528: unified telemetry facade + one `simard status` snapshot. The
 // `telemetry` module is the OpenTelemetry-backed metric facade + in-process
 // registry; `status` is the single typed StatusSnapshot the CLI, dashboard, and
@@ -341,6 +363,7 @@ pub use rpc_circuit_breaker::{CircuitBreakerConfig, CircuitBreakerTransport, Cir
 pub use rpc_transport::{InMemoryRpcTransport, SubprocessRpcTransport};
 pub use test_support::TestAdapter;
 
+pub use coin_gym::{coin_gym_usage, dispatch_coin_gym_cli};
 pub use engineer_handoff::{
     ENGINEER_HANDOFF_FILE_NAME, ENGINEER_MODE_BOUNDARY, EngineerHandoffContext,
     SHARED_DEFAULT_STATE_ROOT_SOURCE, SHARED_EXPLICIT_STATE_ROOT_SOURCE,

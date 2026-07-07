@@ -281,31 +281,44 @@ pub(crate) async fn ws_tmux_attach_handler(
     ws.on_upgrade(move |socket| handle_tmux_attach_ws(socket, safe_host, safe_session))
 }
 
+/// Configure the Agent Terminal attach child for piped, **no-PTY** stdio.
+///
+/// Piped stdin/stdout/stderr is the load-bearing invariant of the Workers-tab
+/// Agent Terminal (issue #2717): the browser's xterm.js is the *only* terminal,
+/// so the server must never allocate a PTY / `script(1)` wrapper for the attach
+/// process. This mirrors the issue #2179 "thin proxy" design (piped stdio, no
+/// PTY overhead). `kill_on_drop` guarantees the azlin/tmux child is reaped when
+/// the WebSocket task ends.
+fn configure_piped_no_pty_stdio(command: &mut tokio::process::Command) {
+    command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+}
+
 async fn handle_tmux_attach_ws(mut socket: WebSocket, host: String, session: String) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::process::Command;
 
-    let mut child = match Command::new("systemd-run")
-        .args([
-            "--user",
-            "--pipe",
-            "--quiet",
-            "azlin",
-            "connect",
-            &host,
-            "--no-tmux",
-            "--",
-            "tmux",
-            "attach",
-            "-t",
-            &session,
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-    {
+    let mut command = Command::new("systemd-run");
+    command.args([
+        "--user",
+        "--pipe",
+        "--quiet",
+        "azlin",
+        "connect",
+        &host,
+        "--no-tmux",
+        "--",
+        "tmux",
+        "attach",
+        "-t",
+        &session,
+    ]);
+    // Piped, non-PTY stdio is the load-bearing Agent Terminal invariant.
+    configure_piped_no_pty_stdio(&mut command);
+    let mut child = match command.spawn() {
         Ok(c) => c,
         Err(e) => {
             let _ = socket
@@ -391,4 +404,41 @@ async fn handle_tmux_attach_ws(mut socket: WebSocket, host: String, session: Str
     let _ = socket.send(Message::Close(None)).await;
     let _ = stdin.shutdown().await;
     let _ = child.kill().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No-PTY invariant (Agent Terminal, issue #2717 — mirroring the #2179
+    /// thin-proxy design): the tmux-attach bridge must spawn its child over
+    /// piped, non-PTY stdio so the browser xterm.js owns the *only* terminal.
+    ///
+    /// A child that probes its own descriptors through the SAME
+    /// `configure_piped_no_pty_stdio()` config the WebSocket handler uses must
+    /// therefore observe NON-tty stdin/stdout/stderr. If a PTY / `script(1)`
+    /// wrapper ever leaked back into the attach path, `[ -t N ]` would report a
+    /// terminal and this assertion would fail — guarding the invariant.
+    #[tokio::test]
+    async fn tmux_attach_stdio_is_piped_no_pty() {
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg(
+            "printf 'stdin='; if [ -t 0 ]; then printf 'tty'; else printf 'notty'; fi; \
+             printf ' stdout='; if [ -t 1 ]; then printf 'tty'; else printf 'notty'; fi; \
+             printf ' stderr='; if [ -t 2 ]; then printf 'tty'; else printf 'notty'; fi",
+        );
+        // Exercise the exact stdio configuration the live attach handler applies.
+        configure_piped_no_pty_stdio(&mut command);
+
+        let output = command
+            .output()
+            .await
+            .expect("no-PTY probe child must spawn and exit");
+        let observed = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            observed, "stdin=notty stdout=notty stderr=notty",
+            "Agent Terminal attach must use piped (non-PTY) stdio — a PTY/script(1) \
+             wrapper leaked back into the bridge (issue #2717 / #2179)"
+        );
+    }
 }

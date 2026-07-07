@@ -1,0 +1,89 @@
+{
+  "snapshot": "you/coin@v1-sample",
+  "note": "Illustrative Phase-4 scaffold fixture. Inputs are placeholder UTF-8 strings, not real COIN byte payloads; real grading requires `coin evaluate` on a Docker host (Phase 3). The `oracle` and `script` sections drive the offline demo run and the unit tests only.",
+  "targets": {
+    "pinned": [
+      {
+        "id": "libraw-fuji-480",
+        "project": "libraw",
+        "commit": "d4c1f0a",
+        "harness": "libraw_raf_fuzzer",
+        "file": "src/metadata/fuji.cpp",
+        "line": 480,
+        "family": "frontier"
+      },
+      {
+        "id": "libraw-crx-221",
+        "project": "libraw",
+        "commit": "d4c1f0a",
+        "harness": "libraw_crx_fuzzer",
+        "file": "src/decoders/crx.cpp",
+        "line": 221,
+        "family": "non-trivial-reachable"
+      },
+      {
+        "id": "liboqs-kem-88",
+        "project": "liboqs",
+        "commit": "9a3be21",
+        "harness": "kem_fuzzer",
+        "file": "src/kem/kem.c",
+        "line": 88,
+        "family": "non-trivial-reachable"
+      },
+      {
+        "id": "zstd-huf-1207",
+        "project": "zstd",
+        "commit": "0f1e2d3",
+        "harness": "decompress_fuzzer",
+        "file": "lib/decompress/huf_decompress.c",
+        "line": 1207,
+        "family": "frontier"
+      },
+      {
+        "id": "harfbuzz-shape-540",
+        "project": "harfbuzz",
+        "commit": "77ac0de",
+        "harness": "hb_shape_fuzzer",
+        "file": "src/hb-ot-shape.cc",
+        "line": 540,
+        "family": "non-trivial-reachable"
+      }
+    ],
+    "held_out_fresh": [
+      {
+        "id": "libpng-idat-903",
+        "project": "libpng",
+        "commit": "5b1e7f2",
+        "harness": "libpng_read_fuzzer",
+        "file": "pngrutil.c",
+        "line": 903,
+        "family": "frontier"
+      },
+      {
+        "id": "openssl-asn1-1442",
+        "project": "openssl",
+        "commit": "e88a1c4",
+        "harness": "asn1_fuzzer",
+        "file": "crypto/asn1/tasn_dec.c",
+        "line": 1442,
+        "family": "non-trivial-reachable"
+      }
+    ]
+  },
+  "oracle": {
+    "libraw-fuji-480": "FUJIFILMCCD-RAW\u0000header+deep-branch",
+    "libraw-crx-221": "CRX\u0000frame+huff-table",
+    "liboqs-kem-88": "kem-seed:decaps-branch",
+    "zstd-huf-1207": "\u0028\u00b5\u002f\u00fd+huffman-weights",
+    "harfbuzz-shape-540": "GSUB-lookup:contextual",
+    "libpng-idat-903": "\u0089PNG+malformed-idat",
+    "openssl-asn1-1442": "30:82:constructed-indefinite"
+  },
+  "script": {
+    "libraw-fuji-480": { "input": "FUJIFILMCCD-RAW\u0000header+deep-branch", "confidence": 0.82, "rationale": "satisfied RAF magic header, then drove the Fuji metadata parser into the deep branch" },
+    "libraw-crx-221": { "input": "CRX\u0000frame+huff-table", "confidence": 0.71, "rationale": "constructed a minimal CRX frame with a populated Huffman table" },
+    "liboqs-kem-88": { "input": "kem-seed:wrong-branch", "confidence": 0.44, "rationale": "guessed a decapsulation seed; unsure it flips the target branch" },
+    "zstd-huf-1207": { "input": "\u0028\u00b5\u002f\u00fd+wrong-weights", "confidence": 0.35, "rationale": "valid zstd magic but Huffman weights likely do not reach line 1207" },
+    "harfbuzz-shape-540": { "input": "GSUB-lookup:contextual", "confidence": 0.66, "rationale": "contextual GSUB lookup should exercise the shaping path" }
+  }
+}

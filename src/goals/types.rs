@@ -119,6 +119,14 @@ pub struct GoalRecord {
     /// snapshots written before this field existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<EvidenceRef>,
+    /// Free-form labels (tags) for categorization, filtering, and provenance
+    /// (issue #2743). Empty for legacy/seed records and for records built via
+    /// [`GoalRecord::from_update`]; the creative-ideas routing site sets
+    /// `labels: vec![labels::SOURCE_CREATIVE_IDEAS]` inline on its direct struct
+    /// literal. Additive and serde-back-compatible — pre-#2743 goal-store
+    /// snapshots with no `labels` key load with an empty list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
 }
 
 impl GoalRecord {
@@ -139,6 +147,7 @@ impl GoalRecord {
             source_session_id,
             updated_in,
             evidence: update.evidence,
+            labels: Vec::new(),
         })
     }
 

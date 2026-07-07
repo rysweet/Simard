@@ -215,6 +215,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
           <button class="btn" onclick="document.getElementById('add-goal-form').style.display='none'" style="background:#21262d">Cancel</button>
         </div>
       </div>
+      <div id="goals-tag-filter" style="margin:.4rem 0;font-size:.8rem;color:#8b949e"></div>
       <div id="goals-active"><span class="loading">Loading…</span></div>
     </div>
     <div class="card">

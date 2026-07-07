@@ -166,6 +166,19 @@ fn display_stewardship_invalid_run_summary() {
     assert!(msg.contains("run_id"), "{msg}");
 }
 
+// --- Display: CiHealthGhCommandFailed ---
+
+#[test]
+fn display_ci_health_gh_command_failed() {
+    let err = SimardError::CiHealthGhCommandFailed {
+        reason: "gh run list exited 1".to_string(),
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("ci-health"), "{msg}");
+    assert!(msg.contains("gh"), "{msg}");
+    assert!(msg.contains("gh run list exited 1"), "{msg}");
+}
+
 // --- Display: MergeAuthorityGhCommandFailed ---
 
 #[test]
@@ -225,6 +238,49 @@ fn dirty_worktree_equality() {
     };
     let b = SimardError::DirtyWorktree {
         changed_files: vec!["a.rs".to_string()],
+    };
+    assert_eq!(a, b);
+}
+
+// --- Display: supply-chain steward variants (#2741) ---
+
+#[test]
+fn display_supply_chain_audit_parse_failed() {
+    let err = SimardError::SupplyChainAuditParseFailed {
+        reason: "missing `vulnerabilities` key".to_string(),
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("cargo-audit"), "{msg}");
+    assert!(msg.contains("missing `vulnerabilities` key"), "{msg}");
+}
+
+#[test]
+fn display_supply_chain_remediation_failed() {
+    let err = SimardError::SupplyChainRemediationFailed {
+        reason: "cargo update -p crossbeam-epoch exited 101".to_string(),
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("remediation failed"), "{msg}");
+    assert!(msg.contains("crossbeam-epoch"), "{msg}");
+}
+
+#[test]
+fn display_supply_chain_suppression_without_tracker() {
+    let err = SimardError::SupplyChainSuppressionWithoutTracker {
+        advisory_id: "RUSTSEC-2026-0204".to_string(),
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("RUSTSEC-2026-0204"), "{msg}");
+    assert!(msg.contains("hard rail"), "{msg}");
+}
+
+#[test]
+fn supply_chain_suppression_without_tracker_equality() {
+    let a = SimardError::SupplyChainSuppressionWithoutTracker {
+        advisory_id: "RUSTSEC-2026-0204".to_string(),
+    };
+    let b = SimardError::SupplyChainSuppressionWithoutTracker {
+        advisory_id: "RUSTSEC-2026-0204".to_string(),
     };
     assert_eq!(a, b);
 }

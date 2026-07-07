@@ -109,6 +109,7 @@ fn scenario_2_preparation_path() -> bool {
         source_session_id: session_id(),
         updated_in: SessionPhase::Reflection,
         evidence: Vec::new(),
+        labels: Vec::new(),
     };
     mem.store_fact(
         GOAL_STORE_FACT_CONCEPT,

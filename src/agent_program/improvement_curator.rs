@@ -176,6 +176,7 @@ mod tests {
             "review-id: review-002\nreview-target: gym-eval\nproposal: Add scenario | category=coverage | rationale=more tests | suggested_change=write new gym scenarios\napprove: Add scenario | priority=1 | status=active | rationale=more tests",
         );
         context.active_goals = vec![GoalRecord {
+            labels: Vec::new(),
             slug: "improve-scores".to_string(),
             title: "Improve Scores".to_string(),
             rationale: "low gym".to_string(),

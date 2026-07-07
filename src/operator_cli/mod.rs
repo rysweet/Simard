@@ -1,4 +1,5 @@
 mod args;
+mod ci_health;
 mod curation;
 mod dashboard;
 mod decisions;
@@ -129,6 +130,7 @@ Product modes:
   update
   self-test
   self-health            — post-deploy probes (version/memory/board/brains/quarantine)
+  ci-health [--json]     — sweep active default-branch CI across the governed fleet
   self-deploy [--check]  — close the merged-but-not-running gap (operator-only)
   safe-update            — drain → snapshot → pre-test → swap → exec
   rollback               — restore the latest backup over the install path
@@ -286,6 +288,14 @@ where
                 return Ok(());
             }
             self_health::dispatch_self_health_command(args)
+        }
+        "ci-health" => {
+            let mut args = args.peekable();
+            if let Some(help) = check_help_flag(&mut args, ci_health::CI_HEALTH_HELP) {
+                print!("{help}");
+                return Ok(());
+            }
+            ci_health::dispatch_ci_health_command(args)
         }
         "self-deploy" => {
             let mut args = args.peekable();

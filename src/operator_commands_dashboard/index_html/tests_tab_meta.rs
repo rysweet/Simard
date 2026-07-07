@@ -1170,3 +1170,54 @@ fn rendered_html_goals_render_parent_child_hierarchy() {
          grouped/nested under their active parent (orphans/backlog-parent children at root)"
     );
 }
+
+#[test]
+fn rendered_html_goals_render_label_chips_and_tag_filter() {
+    // Issue #2743: the Goals tab renders each goal's labels as chips and offers
+    // a client-side tag filter over the already-fetched live goal data.
+    assert!(
+        INDEX_HTML.contains("goalLabelChips(g.labels)"),
+        "each goal row must render its labels as chips via goalLabelChips(g.labels)"
+    );
+    assert!(
+        INDEX_HTML.contains("goal-label-chip"),
+        "label chips must carry the goal-label-chip class for styling/testing"
+    );
+    // The tag filter is client-side: a filter control + a predicate over the
+    // fetched goals. No new route is added.
+    assert!(
+        INDEX_HTML.contains("id=\"goals-tag-filter\""),
+        "the Goals tab must host a tag-filter control container"
+    );
+    assert!(
+        INDEX_HTML.contains("function goalMatchesTagFilter(")
+            && INDEX_HTML.contains("window.setGoalTagFilter"),
+        "the Goals tab must filter goals client-side by the selected tag"
+    );
+    // Filtering runs over the fetched goal data, not a server round-trip, and
+    // is applied at the GROUP level (#2743 review Finding #2): the full active
+    // list is grouped first, then whole entries are kept when the root or any
+    // child matches, so a child-only tag can never orphan children from their
+    // parent/umbrella header.
+    assert!(
+        INDEX_HTML.contains("function entryMatchesTagFilter(")
+            && INDEX_HTML.contains(
+                "groupGoalsByParent(d.active||[],d.backlog).filter(entryMatchesTagFilter)"
+            ),
+        "the render must group the full active list and filter at the group level"
+    );
+    // Review hardening (#2743): a tag is user-influenced text emitted into the
+    // `value="…"` attribute of each <option>. It must be attribute-escaped with
+    // escAttr() (which also neutralises the `\"` that closes the attribute), not
+    // plain esc() — otherwise a tag containing a double-quote could break out of
+    // the attribute and inject markup.
+    assert!(
+        INDEX_HTML.contains("'<option value=\"'+escAttr(t)+'\"'"),
+        "the tag-filter <option> value must be attribute-hardened with escAttr(t)"
+    );
+    assert!(
+        !INDEX_HTML.contains("'<option value=\"'+esc(t)+'\"'"),
+        "the tag-filter <option> value must not use plain esc(t) in the \
+         attribute context (attribute-injection risk)"
+    );
+}

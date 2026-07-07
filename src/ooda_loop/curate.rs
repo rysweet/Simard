@@ -190,6 +190,7 @@ pub fn check_meeting_handoffs(
                     current_activity: None,
                     wip_refs: vec![],
                     last_progress_update_at: None,
+                    labels: vec![crate::goal_curation::labels::SOURCE_MEETING.to_string()],
                 });
             } else {
                 let score = 1.0 - (i as f64 * 0.1).min(0.9);
@@ -722,6 +723,7 @@ mod tests {
         let mut board = GoalBoard::new();
         for i in 0..crate::goal_curation::MAX_ACTIVE_GOALS {
             board.active.push(ActiveGoal {
+                labels: Vec::new(),
                 parent_goal_id: None,
                 priority_explicit: false,
                 repo: None,

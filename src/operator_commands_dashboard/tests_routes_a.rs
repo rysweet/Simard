@@ -1299,4 +1299,322 @@ mod tests {
              datum so the operator sees consolidation actively running (#26)"
         );
     }
+
+    // ===================================================================
+    // Issue #2727 — deployment datetime in the dashboard header (PT/DST).
+    //
+    // TDD contract (Step 7): these tests are written BEFORE the
+    // implementation and specify the behavior of the deployment-datetime
+    // feature. Until `routes::{format_deployed_pt, deployed_timestamp_utc,
+    // deployed_pt}` and the header JS append exist, they fail — first as a
+    // compile error for the missing helpers, then (once stubs exist) as
+    // assertion failures. They pass only when the feature is implemented
+    // per the design spec.
+    //
+    // The pure formatter `format_deployed_pt` owns ALL timezone/DST logic
+    // and is exercised with FIXED UTC instants so the assertions are
+    // deterministic and independent of the build machine's clock/timezone.
+    // Two of the cases (summer PDT, winter PST) directly prove daylight-
+    // saving handling; two more pin the exact PST<->PDT transition edges.
+    // ===================================================================
+
+    /// Build a fixed `DateTime<Utc>` from an RFC3339 string for use as a
+    /// deterministic test instant.
+    fn utc(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(rfc3339)
+            .expect("valid RFC3339 test instant")
+            .with_timezone(&chrono::Utc)
+    }
+
+    /// Summer instant → America/Los_Angeles is Pacific DAYLIGHT time
+    /// (UTC-7). Proves the abbreviation is the date-correct daylight name,
+    /// NOT a hardcoded "PST" or a fixed -08:00 offset.
+    #[test]
+    fn deployment_datetime_summer_renders_pdt() {
+        // 2026-07-06 18:03:00 UTC == 11:03 local in Los Angeles (PDT, UTC-7).
+        let dt = utc("2026-07-06T18:03:00Z");
+        assert_eq!(
+            format_deployed_pt(dt),
+            "2026-07-06 11:03 PDT",
+            "July in Los Angeles is Pacific DAYLIGHT time (UTC-7); the header \
+             must show 11:03 PDT, proving DST is applied (not hardcoded PST)"
+        );
+    }
+
+    /// Winter instant → America/Los_Angeles is Pacific STANDARD time
+    /// (UTC-8).
+    #[test]
+    fn deployment_datetime_winter_renders_pst() {
+        // 2026-01-06 19:03:00 UTC == 11:03 local in Los Angeles (PST, UTC-8).
+        let dt = utc("2026-01-06T19:03:00Z");
+        assert_eq!(
+            format_deployed_pt(dt),
+            "2026-01-06 11:03 PST",
+            "January in Los Angeles is Pacific STANDARD time (UTC-8); the \
+             header must show 11:03 PST"
+        );
+    }
+
+    /// Spring-forward edge: at 2026-03-08 02:00 local the clock jumps to
+    /// 03:00 PDT. An instant just after the gap must render in PDT (UTC-7).
+    #[test]
+    fn deployment_datetime_spring_forward_edge_is_pdt() {
+        // 2026-03-08 10:00 UTC is the 02:00 PST -> 03:00 PDT jump.
+        // 10:30 UTC therefore == 03:30 PDT (UTC-7), just past the gap.
+        let dt = utc("2026-03-08T10:30:00Z");
+        assert_eq!(
+            format_deployed_pt(dt),
+            "2026-03-08 03:30 PDT",
+            "just after the spring-forward gap the zone is PDT (UTC-7)"
+        );
+    }
+
+    /// Fall-back edge: at 2026-11-01 02:00 local the clock falls back to
+    /// 01:00 PST. An instant just after the transition must render in PST
+    /// (UTC-8).
+    #[test]
+    fn deployment_datetime_fall_back_edge_is_pst() {
+        // 2026-11-01 09:00 UTC is the 02:00 PDT -> 01:00 PST fall-back.
+        // 09:30 UTC therefore == 01:30 PST (UTC-8), just past the transition.
+        let dt = utc("2026-11-01T09:30:00Z");
+        assert_eq!(
+            format_deployed_pt(dt),
+            "2026-11-01 01:30 PST",
+            "just after the fall-back transition the zone is PST (UTC-8)"
+        );
+    }
+
+    /// The formatter's output shape is exactly `YYYY-MM-DD HH:MM ABBR`
+    /// (24-hour, minute precision, single-space separated, PST/PDT
+    /// abbreviation). This is the shape rendered into the header and the
+    /// additive `/api/status` `deployed` field.
+    #[test]
+    fn deployment_datetime_format_shape_is_stable() {
+        let s = format_deployed_pt(utc("2026-07-06T18:03:00Z"));
+        let parts: Vec<&str> = s.split(' ').collect();
+        assert_eq!(parts.len(), 3, "expected `date time abbr`, got {s:?}");
+        assert_eq!(parts[0].len(), 10, "date part must be YYYY-MM-DD: {s:?}");
+        assert_eq!(parts[1].len(), 5, "time part must be HH:MM: {s:?}");
+        assert!(
+            parts[2] == "PST" || parts[2] == "PDT",
+            "abbreviation must be PST or PDT (real DST-aware zone), got {s:?}"
+        );
+    }
+
+    /// build.rs bakes a compile-time deployment timestamp into the binary
+    /// (issue #2727), mirroring SIMARD_BUILD_NUMBER / SIMARD_GIT_HASH. A
+    /// normal build therefore always exposes it, so the `deployed` datetime
+    /// is available to the header by default (real signal, not a placeholder).
+    #[test]
+    fn deployment_timestamp_is_baked_in_at_build_time() {
+        assert!(
+            deployed_timestamp_utc().is_some(),
+            "build.rs must emit SIMARD_BUILD_TIMESTAMP so the running binary \
+             knows when it was built/deployed (#2727)"
+        );
+        assert!(
+            deployed_pt().is_some(),
+            "with the build timestamp baked in, the header-ready `deployed` \
+             string must be available (#2727)"
+        );
+    }
+
+    /// End-to-end env path: `deployed_pt()` is exactly the string surfaced as
+    /// the additive `/api/status` `deployed` field. When the compile-time
+    /// timestamp is present it must equal `format_deployed_pt` applied to the
+    /// parsed instant and carry the stable shape. When absent (unusual
+    /// toolchains) the pipeline degrades to `None` — the back-compatible,
+    /// silently-omitted contract.
+    #[test]
+    fn deployed_pt_matches_formatter_over_env_timestamp() {
+        match deployed_timestamp_utc() {
+            Some(dt) => {
+                let composed =
+                    deployed_pt().expect("deployed_pt() must be Some when the timestamp parses");
+                assert_eq!(
+                    composed,
+                    format_deployed_pt(dt),
+                    "deployed_pt() must equal format_deployed_pt(deployed_timestamp_utc())"
+                );
+                let parts: Vec<&str> = composed.split(' ').collect();
+                assert_eq!(parts.len(), 3, "deployed string shape: {composed:?}");
+                assert!(
+                    parts[2] == "PST" || parts[2] == "PDT",
+                    "deployed abbreviation must be PST or PDT: {composed:?}"
+                );
+            }
+            None => {
+                assert!(
+                    deployed_pt().is_none(),
+                    "deployed_pt() must be None when the build-timestamp env is absent"
+                );
+            }
+        }
+    }
+
+    /// Header rendering contract (issue #2727): the dashboard header must show
+    /// BOTH the build/version number (existing behavior) AND the deployment
+    /// datetime, sourced from the additive `/api/status` `deployed` field. The
+    /// header JS reads `d.deployed` and appends it to the `header-version`
+    /// element alongside the existing `v<version> (<hash>)` build string.
+    #[test]
+    fn index_html_header_shows_build_number_and_deployment_datetime() {
+        // Build-number location is retained (this change is additive).
+        assert!(
+            INDEX_HTML.contains("header-version"),
+            "the header build-number element must be retained (#2727 is additive)"
+        );
+        assert!(
+            INDEX_HTML.contains("d.version"),
+            "the header must keep rendering the build/version number (#2727)"
+        );
+        // Deployment datetime is now rendered from the additive `deployed` field.
+        assert!(
+            INDEX_HTML.contains("d.deployed"),
+            "the header JS must render the deployment datetime from the additive \
+             /api/status `deployed` field, alongside the build number (#2727)"
+        );
+    }
+
+    /// Integration wiring (issue #2727) — closes the two review-flagged gaps the
+    /// pure-helper unit tests above cannot reach, in a single end-to-end test
+    /// against the REAL `build_router()`:
+    ///
+    /// * **Security:** an *unauthenticated* `GET /api/status` must be denied
+    ///   with `401`, so the additive `deployed` field never leaks past the auth
+    ///   layer (defends the posture against future router/middleware refactors).
+    /// * **Philosophy:** the private `status()` handler must actually *wire* the
+    ///   `deployed` string into the response JSON when the compile-time build
+    ///   timestamp is present — the single `json!()` insertion the unit tests
+    ///   can't exercise. The surfaced value must equal the canonical
+    ///   `deployed_pt()` and carry the DST-aware `YYYY-MM-DD HH:MM PST|PDT` shape.
+    ///
+    /// Runs the router over an ephemeral loopback server and speaks raw HTTP/1.1
+    /// so no extra test dependency is needed. Authenticates via the deterministic
+    /// `SIMARD_DASHBOARD_TOKEN` bearer path (independent of the process-global
+    /// `LOGIN_CODE` value). Carries the `cognitive_memory` serial key because it
+    /// mutates a process-global env var and the `status` handler reads the
+    /// state-root env — the #2360/#2375 env-tearing surface.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn api_status_denies_unauth_and_wires_deployed_2727() {
+        use crate::operator_commands_dashboard::auth;
+        use std::net::SocketAddr;
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // One-shot HTTP/1.1 GET over a raw socket: returns (status_code, body).
+        // `Connection: close` lets the server delimit the body by EOF so
+        // `read_to_end` completes without an HTTP client dependency.
+        async fn http_get(addr: SocketAddr, path: &str, bearer: Option<&str>) -> (u16, String) {
+            let mut stream = tokio::net::TcpStream::connect(addr)
+                .await
+                .expect("connect to ephemeral dashboard server");
+            let mut req =
+                format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n");
+            if let Some(b) = bearer {
+                req.push_str(&format!("Authorization: Bearer {b}\r\n"));
+            }
+            req.push_str("\r\n");
+            stream
+                .write_all(req.as_bytes())
+                .await
+                .expect("write request");
+            let mut raw = Vec::new();
+            stream.read_to_end(&mut raw).await.expect("read response");
+            let text = String::from_utf8_lossy(&raw).into_owned();
+            let code = text
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .and_then(|c| c.parse::<u16>().ok())
+                .unwrap_or(0);
+            let body = text
+                .split_once("\r\n\r\n")
+                .map(|(_, b)| b.to_string())
+                .unwrap_or_default();
+            (code, body)
+        }
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        rt.block_on(async {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .expect("bind ephemeral loopback port");
+            let addr: SocketAddr = listener.local_addr().expect("local addr");
+            let server = tokio::spawn(async move {
+                let _ = axum::serve(listener, build_router()).await;
+            });
+
+            // --- Security: unauthenticated request is denied (401). ---
+            let (unauth_code, _) =
+                tokio::time::timeout(Duration::from_secs(30), http_get(addr, "/api/status", None))
+                    .await
+                    .expect("unauthenticated /api/status request timed out");
+            assert_eq!(
+                unauth_code, 401,
+                "unauthenticated GET /api/status must be denied (401) — the additive \
+                 `deployed` field must never bypass the auth layer"
+            );
+
+            // --- Authenticated: the `deployed` field is wired into the JSON. ---
+            // `require_auth` first requires a login code to be configured, then
+            // accepts a bearer equal to SIMARD_DASHBOARD_TOKEN. Configure both;
+            // the bearer path is deterministic regardless of the LOGIN_CODE value.
+            auth::init_login_code();
+            let token = "itest-deployed-2727";
+            // SAFETY: env mutation is serialised by `#[serial_test::serial(
+            // cognitive_memory)]`; the var is set before the request that reads it
+            // and cleared only after the full response has been received.
+            unsafe { std::env::set_var("SIMARD_DASHBOARD_TOKEN", token) };
+
+            let (ok_code, body) = tokio::time::timeout(
+                Duration::from_secs(30),
+                http_get(addr, "/api/status", Some(token)),
+            )
+            .await
+            .expect("authenticated /api/status request timed out");
+
+            // SAFETY: see the paired set_var above; the server has finished
+            // handling the request (its response was fully read) before we clear it.
+            unsafe { std::env::remove_var("SIMARD_DASHBOARD_TOKEN") };
+
+            assert_eq!(
+                ok_code, 200,
+                "authenticated GET /api/status must succeed (200); body={body:?}"
+            );
+            let json: serde_json::Value =
+                serde_json::from_str(&body).expect("/api/status must return a JSON object");
+
+            // The test binary bakes SIMARD_BUILD_TIMESTAMP via build.rs, so
+            // deployed_pt() is Some here and status() must surface exactly it.
+            let expected = deployed_pt()
+                .expect("deployed_pt() is Some in a normal build (build.rs bakes the timestamp)");
+            let deployed = json.get("deployed").and_then(|v| v.as_str()).expect(
+                "status() must wire the `deployed` field into the JSON when the build \
+                 timestamp is present (#2727)",
+            );
+            assert_eq!(
+                deployed, expected,
+                "the wired `deployed` field must equal the canonical deployed_pt()"
+            );
+            let parts: Vec<&str> = deployed.split(' ').collect();
+            assert_eq!(
+                parts.len(),
+                3,
+                "deployed must be `YYYY-MM-DD HH:MM PST|PDT`: {deployed:?}"
+            );
+            assert!(
+                parts[2] == "PST" || parts[2] == "PDT",
+                "the wired `deployed` must carry a DST-aware PST/PDT abbreviation: {deployed:?}"
+            );
+
+            server.abort();
+        });
+    }
 }

@@ -27,7 +27,10 @@ use super::orient::{
     FAILURE_PENALTY_PER_CONSECUTIVE, OodaOrientBrain, OrientContext, OrientJudgment,
 };
 use super::sanitize::sanitize_context_var;
-use super::{BrainPhase, EngineerLifecycleCtx, EngineerLifecycleDecision, OodaBrain};
+use super::{
+    BrainPhase, EngineerAdmissionCtx, EngineerAdmissionDecision, EngineerLifecycleCtx,
+    EngineerLifecycleDecision, GoalOutcomeCtx, GoalOutcomeDecision, OodaBrain,
+};
 use crate::error::{SimardError, SimardResult};
 
 #[cfg(test)]
@@ -37,6 +40,11 @@ use super::orient::DeterministicOrientBrain;
 const DECIDE_ADAPTER_TAG: &str = "recipe-decide-brain";
 const ORIENT_ADAPTER_TAG: &str = "recipe-orient-brain";
 const LIFECYCLE_ADAPTER_TAG: &str = "recipe-engineer-lifecycle-brain";
+/// Adapter tag for the dependency/overlap-aware admission recipe (issue #2690).
+const ADMISSION_ADAPTER_TAG: &str = "recipe-engineer-admission-brain";
+/// Recipe filename for the admission reasoning step (issue #2690). Resolved as a
+/// sibling of the lifecycle recipe the act-phase [`RecipeBrain`] already holds.
+const ADMISSION_RECIPE_FILENAME: &str = "ooda-engineer-admission.yaml";
 
 /// Cap on raw response text embedded in error messages and rationale fields.
 const MAX_RATIONALE_CHARS: usize = 500;
@@ -1171,6 +1179,409 @@ impl OodaBrain for RecipeBrain {
             attempts,
         )
     }
+
+    /// Closed-loop outcome verification (issue #2751). Runs the
+    /// `ooda-goal-outcome-verification.yaml` recipe over the goal's real success
+    /// criteria, the artifact-level signals (INPUT), and the freshly-gathered
+    /// live signals, then parses the `{"decision", "rationale"[, "replan_hint"]}`
+    /// envelope into a [`GoalOutcomeDecision`].
+    ///
+    /// NO-FALLBACK (operator zero-fallback contract, #2580 / #1711): a recipe
+    /// invocation failure OR an unparseable decision surfaces as an explicit
+    /// `Err`. The seam records it as a visible cycle failure and keeps the goal
+    /// open — never a silent `keep_open_and_report` masquerading as a reasoned
+    /// decision. A genuine "it is really achieved, live" answer is a real,
+    /// model-emitted `mark_achieved` (which the Rust Rail-3 then still gates on
+    /// >=1 verified live signal).
+    fn decide_goal_outcome_verification(
+        &self,
+        ctx: &GoalOutcomeCtx,
+    ) -> SimardResult<GoalOutcomeDecision> {
+        let raw = self.invoke_outcome_verify_raw(ctx)?;
+        parse_outcome_decision(&raw).ok_or_else(|| SimardError::VerificationFailed {
+            reason: format!(
+                "{}: outcome-verify recipe output had no parseable decision envelope: {}",
+                self.adapter_tag,
+                truncate(&raw, MAX_RATIONALE_CHARS)
+            ),
+        })
+    }
+
+    /// Dependency/overlap-aware engineer admission (issue #2690). Resolves the
+    /// admission recipe as a sibling of this act-phase brain's recipe, renders
+    /// the overlap context, runs the recipe, and parses the
+    /// `{"decision", "rationale", "blocked_by"?, "after_goal_id"?, "overlap_files"?}`
+    /// envelope into an [`EngineerAdmissionDecision`].
+    ///
+    /// FAIL-**OPEN** polarity (opposite the outcome verifier): a recipe
+    /// invocation failure OR an unparseable decision surfaces as an `Err`, which
+    /// the spawn seam's Rail-2 turns into a loud `Admit`. Scheduling is an
+    /// optimization — a broken reasoner must never stall a spawn. The one hard
+    /// guarantee that survives is the seam's deterministic exact-path rail.
+    fn decide_engineer_admission(
+        &self,
+        ctx: &EngineerAdmissionCtx,
+    ) -> SimardResult<EngineerAdmissionDecision> {
+        let raw = self.invoke_admission_raw(ctx)?;
+        parse_admission_decision(&raw).ok_or_else(|| SimardError::AdapterInvocationFailed {
+            base_type: ADMISSION_ADAPTER_TAG.to_string(),
+            reason: format!(
+                "engineer-admission recipe output had no parseable decision envelope: {}",
+                truncate(&raw, MAX_RATIONALE_CHARS)
+            ),
+        })
+    }
+}
+
+impl RecipeBrain {
+    /// Invoke the outcome-verification recipe once and return the raw decision
+    /// text (the recipe's final step output). Errors surface loudly (NO-FALLBACK).
+    fn invoke_outcome_verify_raw(&self, ctx: &GoalOutcomeCtx) -> SimardResult<String> {
+        let artifact = format!(
+            "pr_merged={} issue_closed={} self_affecting={} deployed={}",
+            ctx.artifact_signals.pr_merged,
+            ctx.artifact_signals.issue_closed,
+            ctx.artifact_signals.self_affecting,
+            ctx.artifact_signals.deployed,
+        );
+        let live = render_live_signals(&ctx.live_signals);
+
+        let output = Command::new("recipe-runner-rs")
+            .arg(self.recipe_path.as_os_str())
+            .arg("--output-format")
+            .arg("json")
+            .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
+            .arg("-c")
+            .arg(format!(
+                "goal_id={}",
+                sanitize_context_var(&ctx.goal_id, 500)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "goal_title={}",
+                sanitize_context_var(&ctx.goal_title, 500)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "success_criteria={}",
+                sanitize_context_var(&ctx.success_criteria, 2000)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "artifact_signals={}",
+                sanitize_context_var(&artifact, 500)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "live_signals={}",
+                sanitize_context_var(&live, 8000)
+            ))
+            .arg("-c")
+            .arg(format!("reverify_count={}", ctx.reverify_count))
+            .output();
+
+        let output = match output {
+            Ok(o) => o,
+            Err(e) => {
+                return Err(SimardError::AdapterInvocationFailed {
+                    base_type: self.adapter_tag.to_string(),
+                    reason: format!("recipe-runner-rs spawn failed: {e}"),
+                });
+            }
+        };
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(SimardError::AdapterInvocationFailed {
+                base_type: self.adapter_tag.to_string(),
+                reason: format!(
+                    "recipe exited with {}: {}",
+                    output.status,
+                    truncate(&stderr, MAX_RATIONALE_CHARS)
+                ),
+            });
+        }
+
+        extract_recipe_decision_output(&output.stdout, self.adapter_tag)
+    }
+
+    /// Invoke the engineer-admission recipe once and return the raw decision
+    /// text. The recipe is resolved as a **sibling** of this brain's own recipe
+    /// (the act-phase [`RecipeBrain`] holds the lifecycle recipe; the admission
+    /// recipe lives beside it in the same `recipes/` dir, whether that resolved
+    /// to the hot-reload `~/.simard/...` copy or the in-tree copy). Every ctx
+    /// field is routed through [`sanitize_context_var`] before it becomes a `-c`
+    /// arg. Errors surface as `Err` (the seam fails OPEN).
+    fn invoke_admission_raw(&self, ctx: &EngineerAdmissionCtx) -> SimardResult<String> {
+        let admission_recipe = self
+            .recipe_path
+            .parent()
+            .map(|d| d.join(ADMISSION_RECIPE_FILENAME))
+            .filter(|p| p.is_file())
+            .ok_or_else(|| SimardError::AdapterInvocationFailed {
+                base_type: ADMISSION_ADAPTER_TAG.to_string(),
+                reason: format!(
+                    "admission recipe '{ADMISSION_RECIPE_FILENAME}' not found beside {}",
+                    self.recipe_path.display()
+                ),
+            })?;
+
+        let scope = ctx.candidate.predicted_scope.join(", ");
+        let live = render_admission_engineers(&ctx.live_engineers);
+
+        let output = Command::new("recipe-runner-rs")
+            .arg(admission_recipe.as_os_str())
+            .arg("--output-format")
+            .arg("json")
+            .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
+            .arg("-c")
+            .arg(format!(
+                "candidate_goal_id={}",
+                sanitize_context_var(&ctx.candidate.id, 500)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "candidate_goal_title={}",
+                sanitize_context_var(&ctx.candidate.title, 2000)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "candidate_predicted_scope={}",
+                sanitize_context_var(&scope, 8000)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "live_engineers={}",
+                sanitize_context_var(&live, 8000)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "repo_root={}",
+                sanitize_context_var(&ctx.repo_root, 500)
+            ))
+            .output();
+
+        let output = match output {
+            Ok(o) => o,
+            Err(e) => {
+                return Err(SimardError::AdapterInvocationFailed {
+                    base_type: ADMISSION_ADAPTER_TAG.to_string(),
+                    reason: format!("recipe-runner-rs spawn failed: {e}"),
+                });
+            }
+        };
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(SimardError::AdapterInvocationFailed {
+                base_type: ADMISSION_ADAPTER_TAG.to_string(),
+                reason: format!(
+                    "recipe exited with {}: {}",
+                    output.status,
+                    truncate(&stderr, MAX_RATIONALE_CHARS)
+                ),
+            });
+        }
+
+        extract_recipe_decision_output(&output.stdout, ADMISSION_ADAPTER_TAG)
+    }
+}
+
+/// Render the live engineer set for the admission recipe's `live_engineers`
+/// context var. Capped at 32 engineers (prompt-cost DoS guard); each engineer's
+/// `changed_files` / `overlap_with_candidate` list is capped at 200 paths and
+/// every field is control/ANSI-stripped + length-capped so an injected path or
+/// goal id cannot corrupt the prompt. The exact-path rail (not the prompt) is
+/// the hard decider, so this rendering is advisory context only.
+fn render_admission_engineers(engineers: &[EngineerAdmissionSignalView]) -> String {
+    engineers
+        .iter()
+        .take(32)
+        .map(|e| {
+            let changed = e
+                .changed_files
+                .iter()
+                .take(200)
+                .map(|p| sanitize_context_var(p, 500))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let overlap = e
+                .overlap_with_candidate
+                .iter()
+                .take(200)
+                .map(|p| sanitize_context_var(p, 500))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "[goal_id={} depended_on={} overlap=[{}] changed_files=[{}]]",
+                sanitize_context_var(&e.goal_id, 500),
+                e.depended_on,
+                overlap,
+                changed,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The subset of [`super::LiveEngineerSignal`] fields the recipe renderer reads.
+/// A local view keeps `render_admission_engineers` decoupled from the full ctx
+/// type and trivially unit-testable.
+type EngineerAdmissionSignalView = super::LiveEngineerSignal;
+
+/// A structured engineer-admission decision envelope. Unlike the shared
+/// [`DecisionEnvelope`], this reads the load-bearing `blocked_by` /
+/// `after_goal_id` / `overlap_files` / `retry_after_secs` fields explicitly so a
+/// `defer` / `serialize_after` decision carries its target (the base shim would
+/// default every struct-variant field to empty — see #2690 API reference).
+#[derive(Debug, Clone, serde::Deserialize)]
+struct AdmissionEnvelope {
+    decision: String,
+    #[serde(default)]
+    rationale: String,
+    #[serde(default)]
+    blocked_by: Vec<String>,
+    #[serde(default)]
+    after_goal_id: String,
+    #[serde(default)]
+    overlap_files: Vec<String>,
+    #[serde(default)]
+    retry_after_secs: Option<u64>,
+}
+
+/// Parse the admission recipe output into an [`EngineerAdmissionDecision`], or
+/// `None` when no balanced JSON object with a known `decision` variant is
+/// present (the caller surfaces that as a fail-open `Err`). Routes through the
+/// shared sanitizing chokepoint so a banner-polluted envelope still parses.
+fn parse_admission_decision(text: &str) -> Option<EngineerAdmissionDecision> {
+    let payload = crate::recipe_output::extract_json_payload(text)?;
+    let env: AdmissionEnvelope = serde_json::from_str(&payload).ok()?;
+    if env.decision.trim().is_empty() {
+        return None;
+    }
+    let rationale = {
+        let r = env.rationale.trim();
+        if r.is_empty() {
+            truncate(env.decision.trim(), MAX_RATIONALE_CHARS)
+        } else {
+            truncate(r, MAX_RATIONALE_CHARS)
+        }
+    };
+    admission_decision_from_variant(&env, rationale)
+}
+
+/// Map an admission decision variant token (case-insensitive) to an
+/// [`EngineerAdmissionDecision`]; `None` for an unknown token. `blocked_by` /
+/// `after_goal_id` / `overlap_files` / `retry_after_secs` are carried only by
+/// the variants that own them.
+fn admission_decision_from_variant(
+    env: &AdmissionEnvelope,
+    rationale: String,
+) -> Option<EngineerAdmissionDecision> {
+    let w = env.decision.trim();
+    if w.eq_ignore_ascii_case("admit") {
+        Some(EngineerAdmissionDecision::Admit { rationale })
+    } else if w.eq_ignore_ascii_case("defer") {
+        Some(EngineerAdmissionDecision::Defer {
+            blocked_by: env.blocked_by.clone(),
+            rationale,
+            retry_after_secs: env.retry_after_secs,
+        })
+    } else if w.eq_ignore_ascii_case("serialize_after") {
+        Some(EngineerAdmissionDecision::SerializeAfter {
+            after_goal_id: env.after_goal_id.clone(),
+            overlap_files: env.overlap_files.clone(),
+            rationale,
+        })
+    } else {
+        None
+    }
+}
+
+/// Render the gathered live signals into a single bounded, sanitized string for
+/// the recipe's `live_signals` context var. Capped at 32 signals (prompt-cost
+/// DoS guard, #2751); each field is control/ANSI-stripped and length-capped so
+/// an injected `detail` cannot corrupt the prompt. The `verified` boolean is
+/// rendered from the adapter-set flag — the recipe treats `detail` as untrusted,
+/// and the Rust Rail-3 (not the prompt) is the decider.
+fn render_live_signals(signals: &[crate::goal_curation::live_signal::LiveSignal]) -> String {
+    signals
+        .iter()
+        .take(32)
+        .map(|s| {
+            format!(
+                "[source={} kind={} verified={} detail={}]",
+                sanitize_context_var(&s.source, 500),
+                sanitize_context_var(&s.kind, 500),
+                s.verified,
+                sanitize_context_var(&s.detail, 2000),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A structured outcome-verification decision envelope. Unlike the shared
+/// [`DecisionEnvelope`], this reads the optional `replan_hint` explicitly so a
+/// `replan` decision carries its load-bearing re-scope guidance (the shared shim
+/// would default every struct-variant field to empty — see #2751 API reference).
+#[derive(Debug, Clone, serde::Deserialize)]
+struct OutcomeEnvelope {
+    decision: String,
+    #[serde(default)]
+    rationale: String,
+    #[serde(default)]
+    replan_hint: String,
+}
+
+/// Parse the outcome-verify recipe output into a [`GoalOutcomeDecision`], or
+/// `None` when no balanced JSON object with a known `decision` variant is
+/// present (the caller surfaces that as a NO-FALLBACK `Err`). Routes through the
+/// shared sanitizing chokepoint so a banner-polluted envelope still parses.
+fn parse_outcome_decision(text: &str) -> Option<GoalOutcomeDecision> {
+    let payload = crate::recipe_output::extract_json_payload(text)?;
+    let env: OutcomeEnvelope = serde_json::from_str(&payload).ok()?;
+    if env.decision.trim().is_empty() {
+        return None;
+    }
+    let rationale = {
+        let r = env.rationale.trim();
+        if r.is_empty() {
+            truncate(env.decision.trim(), MAX_RATIONALE_CHARS)
+        } else {
+            truncate(r, MAX_RATIONALE_CHARS)
+        }
+    };
+    outcome_decision_from_variant(
+        &env.decision,
+        rationale,
+        truncate(env.replan_hint.trim(), MAX_RATIONALE_CHARS),
+    )
+}
+
+/// Map an outcome-verify decision variant token (case-insensitive) to a
+/// [`GoalOutcomeDecision`]; `None` for an unknown token. `replan_hint` is only
+/// carried by the `replan` variant.
+fn outcome_decision_from_variant(
+    word: &str,
+    rationale: String,
+    replan_hint: String,
+) -> Option<GoalOutcomeDecision> {
+    let w = word.trim();
+    if w.eq_ignore_ascii_case("mark_achieved") {
+        Some(GoalOutcomeDecision::MarkAchieved { rationale })
+    } else if w.eq_ignore_ascii_case("reopen") {
+        Some(GoalOutcomeDecision::Reopen { rationale })
+    } else if w.eq_ignore_ascii_case("replan") {
+        Some(GoalOutcomeDecision::Replan {
+            rationale,
+            replan_hint,
+        })
+    } else if w.eq_ignore_ascii_case("keep_open_and_report") {
+        Some(GoalOutcomeDecision::KeepOpenAndReport { rationale })
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2137,6 +2548,82 @@ mod tests {
         assert!(
             msg.contains("recipe-engineer-lifecycle-brain"),
             "error should contain the adapter tag; got: {msg}"
+        );
+    }
+
+    // ===================================================================
+    // Engineer-admission (issue #2690) — envelope parser + fail-open error
+    // ===================================================================
+
+    #[test]
+    fn parse_admission_admit_envelope() {
+        let d =
+            parse_admission_decision(r#"{"decision": "admit", "rationale": "independent files"}"#)
+                .expect("parses");
+        assert!(matches!(d, EngineerAdmissionDecision::Admit { .. }));
+        assert_eq!(d.rationale(), "independent files");
+    }
+
+    #[test]
+    fn parse_admission_defer_carries_blocked_by() {
+        let d = parse_admission_decision(
+            r#"{"decision": "defer", "blocked_by": ["fix-goals-status"], "rationale": "shared goals_status.rs"}"#,
+        )
+        .expect("parses");
+        match d {
+            EngineerAdmissionDecision::Defer {
+                blocked_by,
+                retry_after_secs,
+                ..
+            } => {
+                assert_eq!(blocked_by, vec!["fix-goals-status".to_string()]);
+                assert!(retry_after_secs.is_none());
+            }
+            other => panic!("expected Defer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_admission_serialize_after_carries_target_and_files() {
+        let d = parse_admission_decision(
+            r#"{"decision": "serialize_after", "after_goal_id": "g1", "overlap_files": ["src/a.rs"], "rationale": "rebase first"}"#,
+        )
+        .expect("parses");
+        match d {
+            EngineerAdmissionDecision::SerializeAfter {
+                after_goal_id,
+                overlap_files,
+                ..
+            } => {
+                assert_eq!(after_goal_id, "g1");
+                assert_eq!(overlap_files, vec!["src/a.rs".to_string()]);
+            }
+            other => panic!("expected SerializeAfter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_admission_unknown_variant_is_none() {
+        assert!(parse_admission_decision(r#"{"decision": "nope"}"#).is_none());
+        assert!(parse_admission_decision("not json at all").is_none());
+        assert!(parse_admission_decision(r#"{"decision": ""}"#).is_none());
+    }
+
+    #[test]
+    fn decide_engineer_admission_error_includes_adapter_tag() {
+        // Recipe path with no sibling admission recipe ⇒ the resolve fails and
+        // the error carries the admission adapter tag (the seam then fails open).
+        let brain = RecipeBrain {
+            recipe_path: PathBuf::from("/nonexistent/recipes/ooda-engineer-lifecycle.yaml"),
+            agent_binary: "copilot",
+            adapter_tag: "recipe-engineer-lifecycle-brain",
+        };
+        let ctx = crate::ooda_brain::EngineerAdmissionCtx::default();
+        let err = brain.decide_engineer_admission(&ctx).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("recipe-engineer-admission-brain"),
+            "error should contain the admission adapter tag; got: {msg}"
         );
     }
 

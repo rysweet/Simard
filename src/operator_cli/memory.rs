@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::SimardResult;
 use crate::memory_cognitive::{CognitiveStatistics, GraphStats};
-use crate::memory_ipc::{open_reader_client, socket_path_for};
+use crate::memory_ipc::{RemoteCognitiveMemory, open_reader_client, socket_path_for};
 
 pub(super) const MEMORY_HELP: &str = "\
 Simard memory subcommand — cognitive-memory introspection & restore
@@ -168,7 +168,345 @@ pub(crate) fn dispatch_memory_command(
         "stats" => run_stats(args),
         "dump" => run_dump(args),
         "import" => run_import(args),
+        "remember" => {
+            // The distiller's per-fact WRITE tool (issue #2679). `run_remember_fact`
+            // returns a precise exit code (0 stored / 2 usage / 3 no-daemon /
+            // 4 quarantined); honour it by exiting the process directly so a
+            // mis-invoking or blocked agent is diagnosable. `--help` short-circuits
+            // before any daemon contact.
+            let argv: Vec<String> = args.collect();
+            if argv
+                .iter()
+                .any(|a| a == "--help" || a == "-h" || a == "help")
+            {
+                print!("{REMEMBER_HELP}");
+                return Ok(());
+            }
+            std::process::exit(run_remember_fact(argv));
+        }
+        "remember-procedure" => {
+            let argv: Vec<String> = args.collect();
+            if argv
+                .iter()
+                .any(|a| a == "--help" || a == "-h" || a == "help")
+            {
+                print!("{REMEMBER_PROCEDURE_HELP}");
+                return Ok(());
+            }
+            std::process::exit(run_remember_procedure(argv));
+        }
         other => Err(format!("unsupported command 'memory {other}'").into()),
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// `simard memory remember` — the distiller's per-fact WRITE tool (issue #2679)
+// ───────────────────────────────────────────────────────────────────────────
+
+// Process exit codes for the `remember` / `remember-procedure` write tools
+// (issue #2679). Named so a mis-invoking or blocked distiller agent is
+// diagnosable from the exit status alone, and so every `return` site reads its
+// intent instead of a bare integer.
+//
+// Note on the shared `EXIT_NO_DAEMON` (3): a failed daemon round-trip — whether
+// the socket was unreachable OR the gated write itself errored — is reported
+// with the *same* code on purpose. Both mean "the write never committed via the
+// daemon"; they are deliberately distinct from `EXIT_QUARANTINED` (4), which is
+// a *successful* round-trip whose gate disposition was "rejected". Collapsing
+// the two transport-failure cases keeps the documented, stable exit-code
+// contract (0/2/3/4) rather than proliferating codes for callers to branch on.
+
+/// The fact/procedure cleared the gate and was persisted.
+const EXIT_STORED: i32 = 0;
+/// A required flag was missing or malformed.
+const EXIT_USAGE: i32 = 2;
+/// The daemon write round-trip did not commit: no reachable daemon, or the
+/// gated write itself returned an error. There is no un-gated fallback.
+const EXIT_NO_DAEMON: i32 = 3;
+/// The gate completed a round-trip and blocked the fact
+/// (ungrounded / empty / below the reliability threshold).
+const EXIT_QUARANTINED: i32 = 4;
+
+const REMEMBER_HELP: &str = "\
+Simard memory remember — write ONE semantic fact into cognitive memory.
+
+Usage:
+  simard memory remember --concept <LABEL> --content <TEXT>
+        [--source-episode-id <ID> ...] [--confidence <0..1>]
+        [--tags <a,b,c>] [--pass-id <ID>] [state-root]
+
+One process writes exactly one fact. There is no batch/array/JSON-body form —
+that is the point of #2679: no Simard-side document is ever deserialized. Emit N
+facts with N calls.
+
+The write routes ONLY through the OODA daemon's memory socket, where the single
+authoritative write-boundary gate grounds, scores, quarantines, and dedups the
+fact server-side. The client-supplied --confidence is a hint the server ignores;
+the server re-derives confidence from provenance grounding + content + concept.
+
+Exit codes:
+  0  stored          the fact cleared the gate and was persisted
+  2  usage error     a required flag was missing or malformed
+  3  no daemon       no reachable memory daemon (no un-gated fallback exists)
+  4  quarantined     the gate blocked the fact (ungrounded/empty/below threshold)
+";
+
+const REMEMBER_PROCEDURE_HELP: &str = "\
+Simard memory remember-procedure — write ONE procedure into cognitive memory.
+
+Usage:
+  simard memory remember-procedure --name <NAME> --step <TEXT> [--step <TEXT> ...]
+        [--prerequisite <TEXT> ...] [--source-episode-id <ID> ...]
+        [--pass-id <ID>] [state-root]
+
+Exit codes: 0 stored, 2 usage error, 3 no reachable daemon.
+";
+
+/// Parsed `simard memory remember` invocation (issue #2679). Scalar flags only —
+/// one process writes one fact, so there is no envelope to deserialize.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RememberFactArgs {
+    pub concept: String,
+    pub content: String,
+    pub source_episode_ids: Vec<String>,
+    /// A hint only; the server re-derives the stored confidence.
+    pub confidence: Option<f64>,
+    pub tags: Vec<String>,
+    pub pass_id: Option<String>,
+    pub state_root: Option<PathBuf>,
+}
+
+/// Take a flag's value: inline (`--flag=value`) if present, else the next argv
+/// token (`--flag value`). Errors if neither is available.
+fn flag_value(
+    flag: &str,
+    inline: Option<String>,
+    next: &mut dyn Iterator<Item = String>,
+) -> Result<String, String> {
+    match inline {
+        Some(v) => Ok(v),
+        None => next
+            .next()
+            .ok_or_else(|| format!("--{flag} requires a value")),
+    }
+}
+
+/// Parse `simard memory remember` argv into typed [`RememberFactArgs`], packing
+/// scalar flags straight into fields the CLI hands to a typed IPC request. No
+/// free text is ever re-parsed as JSON.
+pub(crate) fn parse_remember_fact_args(args: Vec<String>) -> Result<RememberFactArgs, String> {
+    let mut concept: Option<String> = None;
+    let mut content: Option<String> = None;
+    let mut source_episode_ids: Vec<String> = Vec::new();
+    let mut confidence: Option<f64> = None;
+    let mut tags: Vec<String> = Vec::new();
+    let mut pass_id: Option<String> = None;
+    let mut state_root: Option<PathBuf> = None;
+
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if let Some(rest) = arg.strip_prefix("--") {
+            let (key, inline) = match rest.split_once('=') {
+                Some((k, v)) => (k.to_string(), Some(v.to_string())),
+                None => (rest.to_string(), None),
+            };
+            match key.as_str() {
+                "concept" => concept = Some(flag_value("concept", inline, &mut iter)?),
+                "content" => content = Some(flag_value("content", inline, &mut iter)?),
+                "source-episode-id" => {
+                    source_episode_ids.push(flag_value("source-episode-id", inline, &mut iter)?)
+                }
+                "confidence" => {
+                    let v = flag_value("confidence", inline, &mut iter)?;
+                    let parsed = v.parse::<f64>().map_err(|_| {
+                        format!("--confidence must be a number in [0,1], got {v:?}")
+                    })?;
+                    confidence = Some(parsed);
+                }
+                "tags" => {
+                    let v = flag_value("tags", inline, &mut iter)?;
+                    tags.extend(
+                        v.split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty()),
+                    );
+                }
+                "pass-id" => pass_id = Some(flag_value("pass-id", inline, &mut iter)?),
+                other => return Err(format!("unknown flag --{other}")),
+            }
+        } else if state_root.is_none() {
+            state_root = Some(PathBuf::from(arg));
+        } else {
+            return Err(format!("unexpected extra positional argument '{arg}'"));
+        }
+    }
+
+    let concept = concept.ok_or_else(|| "missing required --concept".to_string())?;
+    let content = content.ok_or_else(|| "missing required --content".to_string())?;
+    Ok(RememberFactArgs {
+        concept,
+        content,
+        source_episode_ids,
+        confidence,
+        tags,
+        pass_id,
+        state_root,
+    })
+}
+
+/// Run `simard memory remember`, returning the process exit code
+/// ([`EXIT_STORED`] / [`EXIT_USAGE`] / [`EXIT_NO_DAEMON`] / [`EXIT_QUARANTINED`]).
+/// Routes ONLY through the daemon socket: a direct on-disk open would bypass the
+/// authoritative gate, so no daemon means no gated write path.
+pub(crate) fn run_remember_fact(args: Vec<String>) -> i32 {
+    let parsed = match parse_remember_fact_args(args) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[simard] memory remember: {e}");
+            return EXIT_USAGE;
+        }
+    };
+
+    let state_root = resolve_state_root(parsed.state_root.clone());
+    let sock = socket_path_for(&state_root);
+    let client = match RemoteCognitiveMemory::connect(&sock) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "[simard] memory remember: no reachable memory daemon at {} ({e}); \
+                 not writing un-gated",
+                sock.display()
+            );
+            return EXIT_NO_DAEMON;
+        }
+    };
+
+    // A stable provenance label for the fact's `source_id`; the gate verifies
+    // the episode ids separately for grounding.
+    let source_id = match parsed.source_episode_ids.first() {
+        Some(id) => format!("distill:{id}"),
+        None => "distill".to_string(),
+    };
+    let pass_id = resolve_pass_id(parsed.pass_id.as_deref());
+    // The confidence is a hint the server ignores; pass 0.0 when unset.
+    let confidence_hint = parsed.confidence.unwrap_or(0.0);
+
+    match client.remember_fact_gated(
+        &parsed.concept,
+        &parsed.content,
+        confidence_hint,
+        &parsed.tags,
+        &source_id,
+        &parsed.source_episode_ids,
+        &pass_id,
+    ) {
+        Ok(outcome) if outcome.stored => {
+            println!(
+                "[simard] memory remember: stored concept={} confidence={:.2}{}",
+                parsed.concept,
+                outcome.confidence,
+                outcome
+                    .node_id
+                    .as_deref()
+                    .map(|id| format!(" node_id={id}"))
+                    .unwrap_or_default()
+            );
+            EXIT_STORED
+        }
+        Ok(outcome) => {
+            eprintln!(
+                "[simard] memory remember: quarantined concept={} confidence={:.2} (below gate)",
+                parsed.concept, outcome.confidence
+            );
+            EXIT_QUARANTINED
+        }
+        Err(e) => {
+            eprintln!("[simard] memory remember: gated write failed: {e}");
+            EXIT_NO_DAEMON
+        }
+    }
+}
+
+/// Run `simard memory remember-procedure`, returning the process exit code
+/// (0 stored, 2 usage error, 3 no reachable daemon).
+pub(crate) fn run_remember_procedure(args: Vec<String>) -> i32 {
+    let mut name: Option<String> = None;
+    let mut steps: Vec<String> = Vec::new();
+    let mut prerequisites: Vec<String> = Vec::new();
+    let mut source_episode_ids: Vec<String> = Vec::new();
+    let mut pass_id: Option<String> = None;
+    let mut state_root: Option<PathBuf> = None;
+
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if let Some(rest) = arg.strip_prefix("--") {
+            let (key, inline) = match rest.split_once('=') {
+                Some((k, v)) => (k.to_string(), Some(v.to_string())),
+                None => (rest.to_string(), None),
+            };
+            let res = match key.as_str() {
+                "name" => flag_value("name", inline, &mut iter).map(|v| name = Some(v)),
+                "step" => flag_value("step", inline, &mut iter).map(|v| steps.push(v)),
+                "prerequisite" => {
+                    flag_value("prerequisite", inline, &mut iter).map(|v| prerequisites.push(v))
+                }
+                "source-episode-id" => flag_value("source-episode-id", inline, &mut iter)
+                    .map(|v| source_episode_ids.push(v)),
+                "pass-id" => flag_value("pass-id", inline, &mut iter).map(|v| pass_id = Some(v)),
+                other => Err(format!("unknown flag --{other}")),
+            };
+            if let Err(e) = res {
+                eprintln!("[simard] memory remember-procedure: {e}");
+                return EXIT_USAGE;
+            }
+        } else if state_root.is_none() {
+            state_root = Some(PathBuf::from(arg));
+        } else {
+            eprintln!("[simard] memory remember-procedure: unexpected extra argument '{arg}'");
+            return EXIT_USAGE;
+        }
+    }
+
+    let name = match name {
+        Some(n) => n,
+        None => {
+            eprintln!("[simard] memory remember-procedure: missing required --name");
+            return EXIT_USAGE;
+        }
+    };
+    if steps.is_empty() {
+        eprintln!("[simard] memory remember-procedure: at least one --step is required");
+        return EXIT_USAGE;
+    }
+
+    let state_root = resolve_state_root(state_root);
+    let sock = socket_path_for(&state_root);
+    let client = match RemoteCognitiveMemory::connect(&sock) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "[simard] memory remember-procedure: no reachable memory daemon at {} ({e})",
+                sock.display()
+            );
+            return EXIT_NO_DAEMON;
+        }
+    };
+    let pass_id = resolve_pass_id(pass_id.as_deref());
+    match client.remember_procedure_provenance(
+        &name,
+        &steps,
+        &prerequisites,
+        &source_episode_ids,
+        &pass_id,
+    ) {
+        Ok(id) => {
+            println!("[simard] memory remember-procedure: stored name={name} node_id={id}");
+            EXIT_STORED
+        }
+        Err(e) => {
+            eprintln!("[simard] memory remember-procedure: write failed: {e}");
+            EXIT_NO_DAEMON
+        }
     }
 }
 
@@ -176,6 +514,34 @@ pub(crate) fn dispatch_memory_command(
 /// the daemon uses (`$SIMARD_STATE_ROOT`, then `$HOME/.simard`).
 fn resolve_state_root(explicit: Option<PathBuf>) -> PathBuf {
     explicit.unwrap_or_else(crate::state_root::simard_state_root)
+}
+
+/// Resolve the distillation pass id for a `remember` / `remember-procedure`
+/// write (issue #2679).
+///
+/// Precedence: a non-empty explicit `--pass-id` flag wins; otherwise fall back
+/// to the [`DISTILL_PASS_ID_ENV`] environment variable the distill runner
+/// exports to every remember subprocess. An empty result (neither source set)
+/// means "no ledger participation" — the server's ledger deliberately no-ops.
+///
+/// The env fallback is the fix for the silent metrics-degradation regression:
+/// the distiller agent runs `simard memory remember` with only the content
+/// flags and no `--pass-id`, so without this fallback the pass id resolved
+/// empty, the server ledger dropped the write, and `drain_pass_ledger` returned
+/// 0 — making every distill pass report `fact_count = 0` / `reduction_pct =
+/// 100%` even though facts were stored. Only tests (which pass `--pass-id`
+/// explicitly) exercised the ledger, hiding the production breakage.
+fn resolve_pass_id(explicit: Option<&str>) -> String {
+    if let Some(p) = explicit
+        && !p.is_empty()
+    {
+        return p.to_string();
+    }
+    std::env::var(crate::memory_ipc::DISTILL_PASS_ID_ENV)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_default()
 }
 
 /// Best-effort access-tier label for the banner. The daemon socket is
@@ -594,11 +960,18 @@ fn render_json(report: &MemoryReport, include_samples: bool) -> String {
     serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
 }
 
+// TDD (RED) for issue #2679: tests for the agent-facing `simard memory remember`
+// write tool (scalar-flag parsing + exit codes + daemon-down). The subcommand,
+// `parse_remember_fact_args`, `RememberFactArgs`, and `run_remember_fact` land
+// in the implementation step; until then the unresolved paths are the red
+// signal. `#[cfg(test)]` so production builds never compile it.
+#[cfg(test)]
+mod remember_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
-
     /// Seed a temp store with at least one row of every introspectable type so
     /// the report has non-zero counts to assert against.
     fn seeded_store() -> (tempfile::TempDir, LibraryCognitiveMemory) {
