@@ -5,7 +5,7 @@
 //! Per-goal single-flight (`find_live_engineer_for_goal` in
 //! [`super::spawn`]) stops two engineers on the SAME goal. But two DIFFERENT
 //! goals routinely touch the SAME files (`goals_status.rs`; the duplicate
-//! multi-line-chat PRs #2698/#2696; the broken-main Bridge-rename incident), so
+//! multi-line-chat PRs #2698/#2696; the broken-main Adapter-rename incident), so
 //! parallel engineers collide at merge — rebase churn, or broken main. There was
 //! no cross-goal file-footprint awareness. This module adds it.
 //!

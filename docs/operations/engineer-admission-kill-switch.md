@@ -79,7 +79,7 @@ Because the gate is fail-open, the legitimate uses are narrow:
 
 - **"To force two engineers onto overlapping goals faster."** That re-introduces
   exactly the merge collisions this gate prevents — the duplicate PRs (#2698 /
-  #2696) and the broken-main Bridge-rename class. A `defer` costs one cycle of
+  #2696) and the broken-main Adapter-rename class. A `defer` costs one cycle of
   latency and self-clears when the overlapping engineer finishes; a collision
   costs a rebase or a broken `main`.
 - **"Because a goal keeps deferring."** Repeated deferral means a long-running

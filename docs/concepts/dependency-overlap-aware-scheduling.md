@@ -4,7 +4,7 @@ description: >
   Why Simard reasons about file-footprint overlap before spawning an engineer.
   Per-goal single-flight stops two engineers on the SAME goal, but two engineers
   on DIFFERENT goals routinely edit the SAME files (goals_status.rs; the
-  duplicate multi-line-chat PRs #2698/#2696; the broken-main Bridge-rename
+  duplicate multi-line-chat PRs #2698/#2696; the broken-main Adapter-rename
   incident) and collide at merge. A structured-reasoning brain step runs at the
   spawn-admission point each relevant cycle, reasons over the candidate goal's
   predicted file footprint vs. the in-flight engineers' touched paths, and
@@ -80,7 +80,7 @@ The concrete failures that motivated this step:
 - **The duplicate multi-line-chat PRs (#2698 / #2696).** Two engineers on
   overlapping goals produced two PRs for the *same* dashboard chat change —
   duplicated work, and a merge race between them.
-- **The broken-main Bridge-rename incident.** One engineer renamed a `Bridge`
+- **The broken-main Adapter-rename incident.** One engineer renamed a `Adapter`
   symbol while another edited the same call sites on a different goal; both PRs
   were individually green, but their union broke `main`.
 

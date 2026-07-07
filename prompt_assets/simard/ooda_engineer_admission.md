@@ -13,7 +13,7 @@ You are the brain of Simard's OODA daemon. The Act phase is about to spawn a NEW
 engineer for a candidate goal while one or more OTHER engineers are already in
 flight on DIFFERENT goals. Two different goals that touch the SAME files collide
 at merge — rebase churn, duplicate PRs, or a broken `main` (the `goals_status.rs`
-collisions, the duplicate multi-line-chat PRs #2698/#2696, the Bridge-rename
+collisions, the duplicate multi-line-chat PRs #2698/#2696, the Adapter-rename
 broken-main incident). Decide whether admitting this new engineer now is safe, or
 whether it should be deferred or serialized behind an in-flight engineer to avoid
 a file-footprint collision.
@@ -93,8 +93,8 @@ The `goals_status.rs` collision — defer behind the live engineer:
 {"decision": "defer", "blocked_by": ["fix-goals-status-render"], "rationale": "live engineer already rewriting src/operator_commands_ooda/goals_status.rs, the file this goal must edit"}
 ```
 
-The Bridge-rename incident — serialize behind the in-flight rename:
+The Adapter-rename incident — serialize behind the in-flight rename:
 
 ```json
-{"decision": "serialize_after", "after_goal_id": "rename-bridge-to-clients", "overlap_files": ["src/ooda_loop/types.rs"], "rationale": "an in-flight engineer is renaming Bridge→OodaClients across these files; rebase onto its landed work before editing them to avoid breaking main"}
+{"decision": "serialize_after", "after_goal_id": "rename-adapter-to-clients", "overlap_files": ["src/ooda_loop/types.rs"], "rationale": "an in-flight engineer is renaming Adapter→OodaClients across these files; rebase onto its landed work before editing them to avoid breaking main"}
 ```

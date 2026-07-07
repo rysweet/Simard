@@ -368,7 +368,7 @@ Output envelope (a fenced ```json block is fine; the shim strips banners):
 ```
 
 where `decision` is exactly one of `admit`, `defer`, `serialize_after`. The
-recipe's few-shot set **includes the goals_status.rs and Bridge-rename cases** so
+recipe's few-shot set **includes the goals_status.rs and Adapter-rename cases** so
 the reasoning is anchored on the exact collisions this gate exists to catch. A
 genuine "these are independent, parallelize" answer is a real decision — emit
 `admit` explicitly; an unparseable output is a `brain_parse_error` that the

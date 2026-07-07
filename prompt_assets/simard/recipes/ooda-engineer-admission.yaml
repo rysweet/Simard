@@ -44,7 +44,7 @@ steps:
       in flight on DIFFERENT goals. Two different goals that touch the SAME files
       collide at merge — rebase churn, duplicate PRs, or broken `main` (the
       goals_status.rs collisions, the duplicate multi-line-chat PRs #2698/#2696,
-      the Bridge-rename broken-main incident). Your job: decide whether admitting
+      the Adapter-rename broken-main incident). Your job: decide whether admitting
       this new engineer now is safe, or whether it should be deferred or
       serialized behind an in-flight engineer to avoid a file-footprint collision.
 
@@ -133,9 +133,9 @@ steps:
       {"decision": "defer", "blocked_by": ["fix-goals-status-render"], "rationale": "live engineer already rewriting src/operator_commands_ooda/goals_status.rs, the file this goal must edit — parallel edits would collide at merge"}
       ```
 
-      The Bridge-rename incident — a broad rename is in flight; serialize behind it:
+      The Adapter-rename incident — a broad rename is in flight; serialize behind it:
 
       ```json
-      {"decision": "serialize_after", "after_goal_id": "rename-bridge-to-clients", "overlap_files": ["src/ooda_loop/types.rs", "src/ooda_actions/mod.rs"], "rationale": "an in-flight engineer is renaming Bridge→OodaClients across these files; rebase onto its landed work before editing them to avoid breaking main"}
+      {"decision": "serialize_after", "after_goal_id": "rename-adapter-to-clients", "overlap_files": ["src/ooda_loop/types.rs", "src/ooda_actions/mod.rs"], "rationale": "an in-flight engineer is renaming Adapter→OodaClients across these files; rebase onto its landed work before editing them to avoid breaking main"}
       ```
     output: "admission_result"

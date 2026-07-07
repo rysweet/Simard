@@ -1811,7 +1811,7 @@ fn engineer_admission_prompt_is_embedded_and_pins_overlap_contract() {
         "few-shot must anchor on the goals_status.rs collision"
     );
     assert!(
-        lower.contains("bridge"),
-        "few-shot must anchor on the Bridge-rename incident"
+        lower.contains("adapter"),
+        "few-shot must anchor on the Adapter-rename incident"
     );
 }

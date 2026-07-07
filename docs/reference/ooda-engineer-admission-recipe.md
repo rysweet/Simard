@@ -5,7 +5,7 @@ description: >
   source of truth for the overlap-aware admission reasoning. Context variables,
   the JSON decision envelope ({admit, defer, serialize_after}), the extra-field
   contract for defer/serialize_after, few-shot examples anchored on the real
-  collisions (goals_status.rs, PRs #2698/#2696, the Bridge-rename broken-main),
+  collisions (goals_status.rs, PRs #2698/#2696, the Adapter-rename broken-main),
   hot-reload resolution order, the "daemon fails OPEN, does NOT default on your
   behalf" contract, versioning, and tests.
 last_updated: 2026-07-07
@@ -95,7 +95,7 @@ steps:
       - Large or exact overlap on hot shared files (e.g.
         `src/operator_commands_ooda/goals_status.rs`) → collision is likely.
       - A rename/move an engineer is doing that the candidate also touches (the
-        broken-main Bridge-rename class) → collision is likely even if line
+        broken-main Adapter-rename class) → collision is likely even if line
         ranges differ.
       - Empty scope / empty overlap → parallelize; you cannot know a collision.
 
@@ -143,7 +143,7 @@ steps:
       ```
 
       ```json
-      {"decision": "serialize_after", "after_goal_id": "rename-bridge-symbol", "overlap_files": ["src/agent_supervisor/bridge.rs"], "rationale": "candidate edits call sites that engineer rename-bridge-symbol is moving; rebase after it to avoid a broken-main union"}
+      {"decision": "serialize_after", "after_goal_id": "rename-adapter-symbol", "overlap_files": ["src/agent_supervisor/adapter.rs"], "rationale": "candidate edits call sites that engineer rename-adapter-symbol is moving; rebase after it to avoid a broken-main union"}
       ```
 
       ```json
