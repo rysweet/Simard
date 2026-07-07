@@ -146,7 +146,7 @@ fn display_clock_before_unix_epoch() {
 // --- Display: RPC errors ---
 
 #[test]
-fn display_bridge_spawn_failed() {
+fn display_rpc_spawn_failed() {
     let err = SimardError::RpcSpawnFailed {
         endpoint: "memory".to_string(),
         reason: "python not found".to_string(),
@@ -157,7 +157,7 @@ fn display_bridge_spawn_failed() {
 }
 
 #[test]
-fn display_bridge_transport_error() {
+fn display_rpc_transport_error() {
     let err = SimardError::RpcTransportError {
         endpoint: "knowledge".to_string(),
         reason: "connection refused".to_string(),
@@ -168,7 +168,7 @@ fn display_bridge_transport_error() {
 }
 
 #[test]
-fn display_bridge_protocol_error() {
+fn display_rpc_protocol_error() {
     let err = SimardError::RpcProtocolError {
         endpoint: "gym".to_string(),
         reason: "invalid json".to_string(),
@@ -179,7 +179,7 @@ fn display_bridge_protocol_error() {
 }
 
 #[test]
-fn display_bridge_call_failed() {
+fn display_rpc_call_failed() {
     let err = SimardError::RpcCallFailed {
         endpoint: "memory".to_string(),
         method: "store_episode".to_string(),
@@ -353,11 +353,11 @@ fn fmt_field_reason_improvement_record() {
 }
 
 #[test]
-fn display_bridge_error() {
-    let err = SimardError::RpcError("general bridge failure".to_string());
+fn display_rpc_error() {
+    let err = SimardError::RpcError("general rpc failure".to_string());
     let msg = err.to_string();
-    assert!(msg.contains("general bridge failure"), "{msg}");
-    assert!(msg.contains("bridge error"), "{msg}");
+    assert!(msg.contains("general rpc failure"), "{msg}");
+    assert!(msg.contains("rpc error"), "{msg}");
 }
 
 #[test]
@@ -374,11 +374,11 @@ fn display_gym_history_db() {
 #[test]
 fn display_runtime_init_failed() {
     let err = SimardError::RuntimeInitFailed {
-        component: "memory-bridge".to_string(),
+        component: "memory-ipc".to_string(),
         reason: "port in use".to_string(),
     };
     let msg = err.to_string();
-    assert!(msg.contains("memory-bridge"), "{msg}");
+    assert!(msg.contains("memory-ipc"), "{msg}");
     assert!(msg.contains("port in use"), "{msg}");
 }
 

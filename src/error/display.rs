@@ -444,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_transport_error_display() {
+    fn rpc_transport_error_display() {
         let err = SimardError::RpcTransportError {
             endpoint: "subprocess".into(),
             reason: "child missing".into(),

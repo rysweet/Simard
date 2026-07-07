@@ -45,10 +45,10 @@ fn validate_action_item(item: &ActionItem) -> SimardResult<()> {
 
 /// Start a new meeting session. Records a sensory observation in cognitive
 /// memory so the meeting start is captured for recall.
-pub fn start_meeting(topic: &str, bridge: &dyn CognitiveMemoryOps) -> SimardResult<MeetingSession> {
+pub fn start_meeting(topic: &str, memory: &dyn CognitiveMemoryOps) -> SimardResult<MeetingSession> {
     required_field("topic", topic)?;
 
-    bridge.record_sensory("meeting-start", &format!("Meeting started: {topic}"), 3600)?;
+    memory.record_sensory("meeting-start", &format!("Meeting started: {topic}"), 3600)?;
 
     Ok(MeetingSession {
         topic: topic.to_string(),
@@ -285,7 +285,7 @@ pub fn remove_item(
 /// and a semantic fact in cognitive memory.
 pub fn close_meeting(
     mut session: MeetingSession,
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
 ) -> SimardResult<MeetingSession> {
     if session.status != MeetingSessionStatus::Open {
         return Err(SimardError::InvalidMeetingRecord {
@@ -298,7 +298,7 @@ pub fn close_meeting(
     let summary = session.durable_summary();
 
     // Store as an episodic memory for future recall.
-    bridge.store_episode(
+    memory.store_episode(
         &summary,
         "meeting-facilitator",
         Some(&json!({"topic": session.topic})),
@@ -312,7 +312,7 @@ pub fn close_meeting(
             .map(|d| d.description.as_str())
             .collect::<Vec<_>>()
             .join("; ");
-        bridge.store_fact(
+        memory.store_fact(
             &format!("meeting:{}", session.topic),
             &format!("Decisions: {decision_text}"),
             0.85,
@@ -323,7 +323,7 @@ pub fn close_meeting(
 
     // Store action items as a prospective memory so they trigger later.
     for item in &session.action_items {
-        bridge.store_prospective(
+        memory.store_prospective(
             &format!("Action: {}", item.description),
             &format!("owner={} starts work", item.owner),
             &format!("remind {} about: {}", item.owner, item.description),

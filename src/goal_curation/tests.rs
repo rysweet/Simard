@@ -3,7 +3,7 @@ use crate::memory_client::CognitiveMemoryClient;
 use crate::rpc_transport::InMemoryRpcTransport;
 use serde_json::json;
 
-fn mock_bridge() -> CognitiveMemoryClient {
+fn mock_memory() -> CognitiveMemoryClient {
     let transport = InMemoryRpcTransport::new("test-goals", |method, _params| match method {
         "memory.search_facts" => Ok(json!({"facts": []})),
         "memory.store_fact" => Ok(json!({"id": "sem_g1"})),
@@ -74,7 +74,7 @@ fn update_progress_and_archive() {
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn load_empty_board_from_bridge() {
+fn load_empty_board_from_memory() {
     // Point SIMARD_STATE_ROOT at a temp dir with no goal_records.json so the
     // disk-first tier misses and falls through to cognitive memory (also empty).
     let tmp = std::env::temp_dir().join(format!(
@@ -90,8 +90,8 @@ fn load_empty_board_from_bridge() {
     unsafe {
         std::env::set_var("SIMARD_STATE_ROOT", &tmp);
     }
-    let bridge = mock_bridge();
-    let board = load_goal_board(&bridge).unwrap();
+    let memory = mock_memory();
+    let board = load_goal_board(&memory).unwrap();
     unsafe {
         std::env::remove_var("SIMARD_STATE_ROOT");
     }

@@ -321,7 +321,7 @@ pub trait RecipeLauncher {
 /// `evaluate_objective_gates` (`:495`) for CI-green/mergeable/base-allowlist;
 /// `crate::review_pipeline::{review_diff, should_commit}` for the review gate;
 /// `crate::git_guardrails::check_git_safety` (`src/git_guardrails.rs:41`) around
-/// any conflict-resolution push. The no-`bridge`-naming/`print!`/additive/PRD checklist items
+/// any conflict-resolution push. The no-`memory`-naming/`print!`/additive/PRD checklist items
 /// are NEW additive diff-scans (see the design doc §pr-verify checklist).
 pub trait PrOps {
     fn verify(&self, repo: &str, pr: u32) -> Result<VerifyReport, OverseerError>;

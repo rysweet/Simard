@@ -149,7 +149,7 @@ fn production_factory_routes_to_the_caller_supplied_in_process_handle() {
 
 /// A backend that ACKS writes (so `put` reports success, mirroring the bug's
 /// "0 review error(s)") but FAILS reads with a memory-ipc transport error,
-/// mirroring the "bridge 'memory-ipc' transport error: write-len: Broken pipe"
+/// mirroring the "memory 'memory-ipc' transport error: write-len: Broken pipe"
 /// lines in the live logs.
 struct WriteOkReadFaultMemory;
 

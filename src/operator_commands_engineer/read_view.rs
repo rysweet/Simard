@@ -35,7 +35,7 @@ pub(super) struct EngineerReadView {
     changed_files_after_action: String,
     verification_status: String,
     verification_summary: String,
-    terminal_bridge_context: Option<EngineerHandoffContext>,
+    terminal_handoff_context: Option<EngineerHandoffContext>,
     memory_record_count: usize,
     evidence_record_count: usize,
 }
@@ -163,7 +163,7 @@ impl EngineerReadView {
                 &handoff_source,
             )?
             .to_string(),
-            terminal_bridge_context: EngineerHandoffContext::from_engineer_evidence(
+            terminal_handoff_context: EngineerHandoffContext::from_engineer_evidence(
                 &handoff.evidence_records,
             )?,
             memory_record_count: handoff.memory_records.len(),
@@ -243,7 +243,7 @@ impl EngineerReadView {
         lines.push(s("Verification summary", &self.verification_summary));
 
         // --- Section 6: Transcript or continuity summary ---
-        match &self.terminal_bridge_context {
+        match &self.terminal_handoff_context {
             Some(context) => {
                 lines.push(s("Mode boundary", TERMINAL_MODE_BOUNDARY));
                 lines.push(s("Terminal continuity available", "yes"));
@@ -383,7 +383,7 @@ mod tests {
             changed_files_after_action: "<none>".to_string(),
             verification_status: "passed".to_string(),
             verification_summary: "all checks passed".to_string(),
-            terminal_bridge_context: None,
+            terminal_handoff_context: None,
             memory_record_count: 0,
             evidence_record_count: 0,
         };
@@ -473,7 +473,7 @@ mod tests {
             changed_files_after_action: "<none>".to_string(),
             verification_status: "passed".to_string(),
             verification_summary: "all checks passed".to_string(),
-            terminal_bridge_context: None,
+            terminal_handoff_context: None,
             memory_record_count: 3,
             evidence_record_count: 5,
         };
@@ -535,7 +535,7 @@ mod tests {
             changed_files_after_action: "<none>".to_string(),
             verification_status: "passed".to_string(),
             verification_summary: "all checks passed".to_string(),
-            terminal_bridge_context: None,
+            terminal_handoff_context: None,
             memory_record_count: 0,
             evidence_record_count: 0,
         };
@@ -583,7 +583,7 @@ mod tests {
             changed_files_after_action: "<none>".to_string(),
             verification_status: "p".to_string(),
             verification_summary: "s".to_string(),
-            terminal_bridge_context: None,
+            terminal_handoff_context: None,
             memory_record_count: 0,
             evidence_record_count: 0,
         };
@@ -599,10 +599,10 @@ mod tests {
         );
     }
 
-    // --- render_lines: terminal bridge context branches ---
+    // --- render_lines: terminal memory context branches ---
 
-    fn make_view_with_bridge(
-        bridge: Option<EngineerHandoffContext>,
+    fn make_view_with_memory(
+        memory: Option<EngineerHandoffContext>,
         goals: Vec<String>,
         decisions: Vec<String>,
         memory_count: usize,
@@ -630,15 +630,15 @@ mod tests {
             changed_files_after_action: "<none>".to_string(),
             verification_status: "passed".to_string(),
             verification_summary: "all checks passed".to_string(),
-            terminal_bridge_context: bridge,
+            terminal_handoff_context: memory,
             memory_record_count: memory_count,
             evidence_record_count: evidence_count,
         }
     }
 
     #[test]
-    fn render_lines_terminal_bridge_some_with_last_output() {
-        let bridge = EngineerHandoffContext {
+    fn render_lines_terminal_memory_some_with_last_output() {
+        let memory = EngineerHandoffContext {
             continuity_source: "state-root".to_string(),
             handoff_file_name: "terminal-handoff.json".to_string(),
             working_directory: "/home/user/project".to_string(),
@@ -646,7 +646,7 @@ mod tests {
             wait_count: "2".to_string(),
             last_output_line: Some("Build succeeded".to_string()),
         };
-        let view = make_view_with_bridge(Some(bridge), vec![], vec![], 0, 0);
+        let view = make_view_with_memory(Some(memory), vec![], vec![], 0, 0);
         let output = view.render_lines().join("\n");
 
         assert!(
@@ -680,8 +680,8 @@ mod tests {
     }
 
     #[test]
-    fn render_lines_terminal_bridge_some_without_last_output() {
-        let bridge = EngineerHandoffContext {
+    fn render_lines_terminal_memory_some_without_last_output() {
+        let memory = EngineerHandoffContext {
             continuity_source: "state-root".to_string(),
             handoff_file_name: "terminal-handoff.json".to_string(),
             working_directory: "/home/user/project".to_string(),
@@ -689,7 +689,7 @@ mod tests {
             wait_count: "0".to_string(),
             last_output_line: None,
         };
-        let view = make_view_with_bridge(Some(bridge), vec![], vec![], 0, 0);
+        let view = make_view_with_memory(Some(memory), vec![], vec![], 0, 0);
         let output = view.render_lines().join("\n");
 
         assert!(
@@ -703,8 +703,8 @@ mod tests {
     }
 
     #[test]
-    fn render_lines_terminal_bridge_none_shows_not_available() {
-        let view = make_view_with_bridge(None, vec![], vec![], 0, 0);
+    fn render_lines_terminal_memory_none_shows_not_available() {
+        let view = make_view_with_memory(None, vec![], vec![], 0, 0);
         let output = view.render_lines().join("\n");
 
         assert!(
@@ -713,7 +713,7 @@ mod tests {
         );
         assert!(
             !output.contains("Terminal continuity handoff:"),
-            "should not show handoff details when bridge is None"
+            "should not show handoff details when memory is None"
         );
     }
 
@@ -726,7 +726,7 @@ mod tests {
             "goal-beta".to_string(),
             "goal-gamma".to_string(),
         ];
-        let view = make_view_with_bridge(None, goals, vec![], 0, 0);
+        let view = make_view_with_memory(None, goals, vec![], 0, 0);
         let output = view.render_lines().join("\n");
 
         assert!(
@@ -749,7 +749,7 @@ mod tests {
 
     #[test]
     fn render_lines_zero_active_goals() {
-        let view = make_view_with_bridge(None, vec![], vec![], 0, 0);
+        let view = make_view_with_memory(None, vec![], vec![], 0, 0);
         let output = view.render_lines().join("\n");
 
         assert!(
@@ -770,7 +770,7 @@ mod tests {
             "Use strategy X".to_string(),
             "Defer Y to next sprint".to_string(),
         ];
-        let view = make_view_with_bridge(None, vec![], decisions, 0, 0);
+        let view = make_view_with_memory(None, vec![], decisions, 0, 0);
         let output = view.render_lines().join("\n");
 
         assert!(
@@ -789,7 +789,7 @@ mod tests {
 
     #[test]
     fn render_lines_zero_carried_decisions() {
-        let view = make_view_with_bridge(None, vec![], vec![], 0, 0);
+        let view = make_view_with_memory(None, vec![], vec![], 0, 0);
         let output = view.render_lines().join("\n");
 
         assert!(
@@ -802,7 +802,7 @@ mod tests {
 
     #[test]
     fn render_lines_shows_memory_and_evidence_counts() {
-        let view = make_view_with_bridge(None, vec![], vec![], 7, 14);
+        let view = make_view_with_memory(None, vec![], vec![], 7, 14);
         let output = view.render_lines().join("\n");
 
         assert!(
@@ -819,7 +819,7 @@ mod tests {
 
     #[test]
     fn render_lines_next_step_includes_state_root_path() {
-        let view = make_view_with_bridge(None, vec![], vec![], 0, 0);
+        let view = make_view_with_memory(None, vec![], vec![], 0, 0);
         let output = view.render_lines().join("\n");
 
         assert!(
@@ -828,11 +828,11 @@ mod tests {
         );
     }
 
-    // --- render_lines: section 6 mode boundary appears for bridge context ---
+    // --- render_lines: section 6 mode boundary appears for memory context ---
 
     #[test]
-    fn render_lines_bridge_context_emits_terminal_mode_boundary() {
-        let bridge = EngineerHandoffContext {
+    fn render_lines_handoff_context_emits_terminal_mode_boundary() {
+        let memory = EngineerHandoffContext {
             continuity_source: "src".to_string(),
             handoff_file_name: "h.json".to_string(),
             working_directory: "/wd".to_string(),
@@ -840,7 +840,7 @@ mod tests {
             wait_count: "0".to_string(),
             last_output_line: None,
         };
-        let view = make_view_with_bridge(Some(bridge), vec![], vec![], 0, 0);
+        let view = make_view_with_memory(Some(memory), vec![], vec![], 0, 0);
         let lines = view.render_lines();
         let output = lines.join("\n");
 
@@ -851,7 +851,7 @@ mod tests {
             .count();
         assert_eq!(
             terminal_boundary_count, 1,
-            "terminal mode boundary should appear exactly once in bridge context section"
+            "terminal mode boundary should appear exactly once in memory context section"
         );
         // And it should appear after action audit (section 5)
         let action_pos = output.find("Verification summary:").unwrap();

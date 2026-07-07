@@ -812,7 +812,7 @@ mod tests {
     }
 
     #[test]
-    fn refuse_if_draining_returns_bridge_error_when_flag_present() {
+    fn refuse_if_draining_returns_memory_error_when_flag_present() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("draining.flag"), b"").unwrap();
         let err = refuse_if_draining(dir.path()).unwrap_err();

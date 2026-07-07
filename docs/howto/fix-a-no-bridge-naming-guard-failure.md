@@ -4,7 +4,7 @@ description: >
   Step-by-step guide for a contributor whose PR failed tests/no_bridge_naming.rs
   because they introduced (or left behind) the word "bridge" in src/. Explains how
   to read the failure, pick a meaningful replacement from the RPC / client /
-  reader / server / handoff vocabulary (never a synonym that still hides meaning),
+  reader / endpoint / handoff vocabulary (never a synonym that still hides meaning),
   apply the rename as a behavior-preserving change, recognize the small set of
   frozen wire / persisted / CLI values that are allowlisted rather than renamed
   (starting with bridge.health), and re-run the guard — without ever using
@@ -63,7 +63,7 @@ git grep -niE '\bbridge\b' -- 'src/**/*.rs'
 
 First check whether the straggler is one of the small set of **frozen external
 values** the guard allowlists — these are *not* renamed (see
-[Step 4](#step-4--frozen-values-you-do-not-rename)). If it is a name or
+[Step 4](#step-4-frozen-values-you-do-not-rename)). If it is a name or
 operator-facing string **we control**, rename it.
 
 ## Step 3 — Pick a meaningful name
@@ -75,7 +75,7 @@ for a synonym that still hides meaning ("connector", "link", "conduit",
 | If the thing… | Name it… |
 |---------------|----------|
 | speaks the JSON-line RPC protocol to a server | `rpc` / `*RpcTransport` / `rpc_transport` |
-| is the named remote endpoint an RPC error reports | `server` (the error field) |
+| is the named remote peer an RPC error reports | `endpoint` (the error field) |
 | reads recalled memory for enrichment | "memory recall reader" / `memory` (a memory-ipc client) |
 | reads knowledge packs for enrichment | "knowledge-pack reader" / `knowledge` (a knowledge client) |
 | talks to the cognitive-memory store | `memory_client` / "memory store" |
@@ -100,16 +100,16 @@ pub fn launch_enrichment_clients(state_root: &Path) -> (Option<..>, Option<..>) 
 ```
 
 **Operator log / error strings** — rename the printed word too. The `SimardError`
-RPC variants carry a `server` field (renamed from `bridge`) and print "rpc
-server" — the remote peer the client failed to reach:
+RPC variants carry an `endpoint` field (renamed from `bridge`) and print "rpc
+endpoint" — the remote peer the client failed to reach:
 
 ```rust
 // before
 Self::RpcTransportError { bridge, reason } =>
     write!(f, "bridge '{bridge}' transport error: {reason}"),
 // after
-Self::RpcTransportError { server, reason } =>
-    write!(f, "rpc server '{server}' transport error: {reason}"),
+Self::RpcTransportError { endpoint, reason } =>
+    write!(f, "rpc endpoint '{endpoint}' transport error: {reason}"),
 ```
 
 **Comments / test assertions** — reword them ("reader bridge" → "reader client",
@@ -137,14 +137,16 @@ your straggler is one of these, leave the value alone:
 | Frozen value | Why |
 |--------------|-----|
 | `bridge.health` | JSON-RPC method name on the wire to the external `amplihack-memory-lib` server |
-| `bridge_timeout` | serialized wire value in `PartialReason::as_wire_str()` |
-| `load-bridge-context` | persisted / parsed `SessionPhase` token |
-| `--terminal-bridge-json` | published CLI flag |
-| `cognitive-bridge` | registered runtime-port name + log tag |
-| `bridge::native::{}` | telemetry trace label |
+| `bridge_timeout` | stable wire value emitted to operator logs / scrapers (`PartialReason::as_wire_str()`) |
+| `--terminal-bridge-json` | published CLI flag other tooling invokes |
 
-For `bridge.health`, reference it through the single `HEALTH_METHOD` constant in
-`src/rpc.rs` so the literal lives in one place:
+Internal identities you produce *and* consume — descriptor / runtime-port labels
+like `cognitive-bridge` and `bridge:subprocess:…`, or the persisted
+`load-bridge-context` phase name — are **not** frozen: rename them consistently on
+both sides (that preserves behavior) rather than allowlisting them.
+
+For `bridge.health`, prefer referencing it through a single named constant so the
+literal lives in one place (optional, but tidy):
 
 ```rust
 // src/rpc.rs
@@ -199,7 +201,7 @@ git push     # CI runs cargo test; the guard must be green
   identifier but left the word in a nearby comment or string on another line.
   Re-read the full straggler list — the guard reports every occurrence.
 - **"I need to keep a persisted `bridge` string for format compatibility."** Check
-  it against the [frozen-value list](#step-4--frozen-values-you-do-not-rename). If
+  it against the [frozen-value list](#step-4-frozen-values-you-do-not-rename). If
   it is genuinely a wire/persisted/CLI value owned by another system, it is
   already allowlisted — leave it. Internal wire tokens (produced and consumed only
   within this repo) are renamed in lockstep with their producers/consumers; they

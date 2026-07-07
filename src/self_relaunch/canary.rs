@@ -169,7 +169,7 @@ pub fn handover(current_pid: u32, canary_binary: &Path) -> SimardResult<()> {
         Command::new(canary_binary)
             .spawn()
             .map_err(|e| SimardError::RpcCallFailed {
-                bridge: "self-relaunch".to_string(),
+                rpc: "self-relaunch".to_string(),
                 method: "handover".to_string(),
                 reason: format!("failed to spawn canary '{}': {e}", canary_binary.display()),
             })?;

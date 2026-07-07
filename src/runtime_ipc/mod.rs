@@ -42,9 +42,9 @@ fn ipc_err(action: &str, err: &dyn std::fmt::Display) -> SimardError {
     }
 }
 
-fn io_err(bridge: &str, action: &str, err: &std::io::Error) -> SimardError {
+fn io_err(endpoint: &str, action: &str, err: &std::io::Error) -> SimardError {
     SimardError::RpcTransportError {
-        endpoint: bridge.to_string(),
+        endpoint: endpoint.to_string(),
         reason: format!("{action}: {err}"),
     }
 }

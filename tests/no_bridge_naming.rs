@@ -32,24 +32,32 @@
 //! suffixes still match. The classifier is a pure function so its boundary
 //! logic is unit-tested (`guard_classifier_*`) independent of the tree.
 //!
-//! ## The allowlist is essentially empty (by design)
+//! ## The allowlist is minimal and fully documented (by design)
 //!
-//! Exactly one runtime survivor: the JSON-RPC method NAME `bridge.health`. It
-//! is the wire-protocol method the EXTERNAL memory / knowledge server
-//! (`amplihack-memory-lib`'s `simard_memory_bridge.py`) answers to; renaming it
-//! would break interop and is out of scope. It is exempted per-occurrence (not
-//! per-line) and ONLY as the method *name* — a quoted literal `"bridge.health"`
-//! or a doc reference to it — so a local variable named `bridge` that merely
-//! calls `.health()`, and a renameable "a bridge server" comment sharing the
-//! same line, are BOTH still flagged.
+//! Exactly three frozen runtime survivors, each a value some system OUTSIDE
+//! this repo depends on (renaming would break an external contract, not one of
+//! our own names):
+//!
+//!  1. `bridge.health` — the JSON-RPC method NAME the EXTERNAL memory / knowledge
+//!     server (`amplihack-memory-lib`'s `simard_memory_bridge.py`) answers to.
+//!  2. `bridge_timeout` — the stable, machine-parseable wire value emitted to
+//!     operator logs / scrapers by `PartialReason::as_wire_str()`.
+//!  3. `--terminal-bridge-json` — the published CLI flag other tooling invokes
+//!     (`src/bin/simard_engineer_step.rs`).
+//!
+//! Each is exempted per-occurrence (not per-line) and only as the exact frozen
+//! token — so a local variable named `bridge` that merely calls `.health()`, and
+//! a renameable "a bridge server" comment sharing a line with `bridge.health`,
+//! are BOTH still flagged. Everything else — log strings, telemetry / descriptor
+//! identities, config keys, comments, identifiers, module-internal names — is
+//! in-repo and renameable, so the guard flags it until the mechanical rename
+//! lands.
 //!
 //! The only excluded files are the no-`Bridge` linter and its own fixtures —
 //! `src/overseer/pr_verify.rs`, `src/overseer/merge_ops.rs`,
 //! `src/operator_commands_dashboard/index_html/tests_tab_meta.rs` — which must
 //! keep the literal `"Bridge"` / `"bridge"` as their detection substrings, plus
-//! this test file itself. Everything else — log strings, telemetry identities,
-//! config keys, comments, identifiers, module-internal names — is in-repo and
-//! renameable, so the guard flags it until the mechanical rename lands.
+//! this test file itself.
 //!
 //! ## TDD status
 //!
@@ -141,16 +149,37 @@ fn lowercase_bridge_components(line: &str) -> Vec<usize> {
     hits
 }
 
-/// The single documented allowlist entry: the EXTERNAL JSON-RPC method NAME
-/// `bridge.health` (answered by `amplihack-memory-lib`'s memory / knowledge
-/// server). Renaming it would break wire interop, so it is exempted
-/// per-occurrence — but ONLY as the method name (a quoted literal or a doc
-/// reference), never as a local variable named `bridge` that invokes
-/// `.health()`, which must still be renamed.
-fn is_external_health_method(lower_line: &str, at: usize) -> bool {
-    const NAME: &str = "bridge.health";
+/// The documented, minimal allowlist of frozen external-contract `bridge`
+/// values (issue #2951). A stem occurrence at byte `at` on `lower_line` (the
+/// already-lowercased line) is exempt ONLY when it begins one of these frozen
+/// tokens — every OTHER `bridge` on the same line still flags (per-occurrence,
+/// not per-line). Each entry is a value some system OUTSIDE this repo depends
+/// on, so renaming it would break an external contract, not one of our names:
+///
+///  * `bridge.health` — JSON-RPC method NAME answered by the external
+///    `amplihack-memory-lib` server. Exempt only as the method name; a
+///    `bridge.health()` call on a local variable named `bridge` is NOT the
+///    method name (it is followed by `(`) and still flags.
+///  * `bridge_timeout` — stable wire value emitted to operator logs / scrapers
+///    (`PartialReason::as_wire_str`).
+///  * `--terminal-bridge-json` — published CLI flag other tooling invokes; the
+///    `bridge` component sits inside `terminal-bridge-json`.
+fn is_allowlisted_frozen(lower_line: &str, at: usize) -> bool {
     let tail = &lower_line[at..];
-    tail.starts_with(NAME) && !tail[NAME.len()..].starts_with('(')
+    // 1. External JSON-RPC method NAME (not a `.health()` call).
+    const HEALTH: &str = "bridge.health";
+    if tail.starts_with(HEALTH) && !tail[HEALTH.len()..].starts_with('(') {
+        return true;
+    }
+    // 2. Frozen wire value for a meeting-close reason.
+    if tail.starts_with("bridge_timeout") {
+        return true;
+    }
+    // 3. Published CLI flag `--terminal-bridge-json` (stem inside `terminal-bridge-json`).
+    if tail.starts_with("bridge-json") && lower_line[..at].ends_with("terminal-") {
+        return true;
+    }
+    false
 }
 
 #[test]
@@ -259,7 +288,7 @@ fn no_lowercase_bridge_word_in_src() {
             let low = line.to_ascii_lowercase();
             let has_straggler = lowercase_bridge_components(line)
                 .into_iter()
-                .any(|at| !is_external_health_method(&low, at));
+                .any(|at| !is_allowlisted_frozen(&low, at));
             if has_straggler {
                 stragglers.push(format!("{}:{}:{}", file.display(), idx + 1, line.trim()));
             }
@@ -283,8 +312,8 @@ fn no_lowercase_bridge_word_in_src() {
          identifiers and module-internal names. Rename each to an intent-revealing \
          term (memory-ipc client/transport, memory recall reader/source, \
          knowledge-pack reader/source, rpc client/transport, engineer handoff, \
-         ...). The only permitted survivor is the external JSON-RPC method name \
-         `bridge.health`.\n\
+         ...). The only permitted survivors are the three documented frozen \
+         external values: `bridge.health`, `bridge_timeout`, `--terminal-bridge-json`.\n\
          Showing first {} of {} straggler line(s):\n{}",
         stragglers.len(),
         sample.lines().count(),
@@ -347,16 +376,30 @@ fn guard_planted_lowercase_bridge_is_detected() {
 }
 
 #[test]
-fn guard_allowlists_only_external_health_method_name() {
-    // The quoted external method name is the one exempt survivor.
-    let literal = "method: \"bridge.health\".to_string(),";
-    let low = literal.to_ascii_lowercase();
-    let hits = lowercase_bridge_components(literal);
-    assert_eq!(hits.len(), 1, "the health method is a bridge component");
-    assert!(
-        hits.iter().all(|&at| is_external_health_method(&low, at)),
-        "the quoted `bridge.health` method name must be allowlisted"
-    );
+fn guard_allowlists_only_documented_frozen_values() {
+    // Each of the three frozen external values is exempt as its exact token.
+    for (literal, why) in [
+        (
+            "method: \"bridge.health\".to_string(),",
+            "the external JSON-RPC method name",
+        ),
+        (
+            "PartialReason::RpcTimeout => \"bridge_timeout\",",
+            "the frozen meeting-close wire value",
+        ),
+        (
+            "let ctx = arg(args, \"--terminal-bridge-json\");",
+            "the published CLI flag",
+        ),
+    ] {
+        let low = literal.to_ascii_lowercase();
+        let hits = lowercase_bridge_components(literal);
+        assert_eq!(hits.len(), 1, "{why}: exactly one bridge component");
+        assert!(
+            hits.iter().all(|&at| is_allowlisted_frozen(&low, at)),
+            "{why} must be allowlisted: {literal}"
+        );
+    }
 
     // A LOCAL VARIABLE named `bridge` invoking `.health()` is NOT the external
     // method name — it must still be flagged for rename.
@@ -365,8 +408,19 @@ fn guard_allowlists_only_external_health_method_name() {
     assert!(
         lowercase_bridge_components(call)
             .into_iter()
-            .any(|at| !is_external_health_method(&low_call, at)),
+            .any(|at| !is_allowlisted_frozen(&low_call, at)),
         "a `bridge`-named variable calling .health() must still be flagged"
+    );
+
+    // A non-frozen `bridge` component is never allowlisted, even when it looks
+    // superficially similar to a frozen token (`bridge_name`, not `bridge_timeout`).
+    let nonfrozen = "let bridge_name = endpoint;";
+    let low_nf = nonfrozen.to_ascii_lowercase();
+    assert!(
+        lowercase_bridge_components(nonfrozen)
+            .into_iter()
+            .any(|at| !is_allowlisted_frozen(&low_nf, at)),
+        "a non-frozen `bridge` component must still be flagged"
     );
 
     // A line MIXING the allowlisted method name with a renameable "a bridge
@@ -375,7 +429,7 @@ fn guard_allowlists_only_external_health_method_name() {
     let low_mixed = mixed.to_ascii_lowercase();
     let non_allowlisted = lowercase_bridge_components(mixed)
         .into_iter()
-        .filter(|&at| !is_external_health_method(&low_mixed, at))
+        .filter(|&at| !is_allowlisted_frozen(&low_mixed, at))
         .count();
     assert_eq!(
         non_allowlisted, 1,

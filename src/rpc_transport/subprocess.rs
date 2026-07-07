@@ -12,7 +12,7 @@ use crate::rpc::{
 
 use crate::rpc::RpcTransport;
 
-/// A bridge transport that spawns a Python subprocess and communicates via
+/// A rpc transport that spawns a Python subprocess and communicates via
 /// newline-delimited JSON on stdin/stdout.
 ///
 /// The subprocess is expected to read one JSON request per line from stdin
@@ -20,7 +20,7 @@ use crate::rpc::RpcTransport;
 ///
 /// Lifecycle: the subprocess is spawned on first `call()` and killed on drop.
 pub struct SubprocessRpcTransport {
-    bridge_name: String,
+    endpoint_name: String,
     python_script: PathBuf,
     extra_args: Vec<String>,
     timeout: Duration,
@@ -38,20 +38,20 @@ struct ManagedChild {
 }
 
 impl SubprocessRpcTransport {
-    /// Create a new subprocess bridge transport.
+    /// Create a new subprocess rpc transport.
     ///
-    /// - `bridge_name`: human-readable name for error reporting
-    /// - `python_script`: path to the Python bridge server script
+    /// - `endpoint_name`: human-readable name for error reporting
+    /// - `python_script`: path to the Python rpc server script
     /// - `extra_args`: additional arguments passed to the script
     /// - `timeout`: maximum time to wait for a response
     pub fn new(
-        bridge_name: impl Into<String>,
+        endpoint_name: impl Into<String>,
         python_script: impl Into<PathBuf>,
         extra_args: Vec<String>,
         timeout: Duration,
     ) -> Self {
         Self {
-            bridge_name: bridge_name.into(),
+            endpoint_name: endpoint_name.into(),
             python_script: python_script.into(),
             extra_args,
             timeout,
@@ -70,7 +70,7 @@ impl SubprocessRpcTransport {
         let mut child = command
             .spawn()
             .map_err(|error| SimardError::RpcSpawnFailed {
-                endpoint: self.bridge_name.clone(),
+                endpoint: self.endpoint_name.clone(),
                 reason: format!(
                     "failed to spawn python3 {}: {error}",
                     self.python_script.display()
@@ -80,14 +80,14 @@ impl SubprocessRpcTransport {
             .stdin
             .take()
             .ok_or_else(|| SimardError::RpcSpawnFailed {
-                endpoint: self.bridge_name.clone(),
+                endpoint: self.endpoint_name.clone(),
                 reason: "child stdin is not available".to_string(),
             })?;
         let stdout = child
             .stdout
             .take()
             .ok_or_else(|| SimardError::RpcSpawnFailed {
-                endpoint: self.bridge_name.clone(),
+                endpoint: self.endpoint_name.clone(),
                 reason: "child stdout is not available".to_string(),
             })?;
         Ok(ManagedChild {
@@ -142,7 +142,7 @@ impl SubprocessRpcTransport {
         child: &mut ManagedChild,
         expected_id: &str,
         timeout: Duration,
-        bridge_name: &str,
+        endpoint_name: &str,
     ) -> SimardResult<RpcResponse> {
         let deadline = Instant::now() + timeout;
 
@@ -154,7 +154,7 @@ impl SubprocessRpcTransport {
                     result: None,
                     error: Some(RpcErrorPayload {
                         code: RPC_ERROR_TIMEOUT,
-                        message: format!("bridge '{bridge_name}' timed out after {timeout:?}"),
+                        message: format!("rpc '{endpoint_name}' timed out after {timeout:?}"),
                     }),
                 });
             }
@@ -165,7 +165,7 @@ impl SubprocessRpcTransport {
             match read_result {
                 Ok(0) => {
                     return Err(SimardError::RpcTransportError {
-                        endpoint: bridge_name.to_string(),
+                        endpoint: endpoint_name.to_string(),
                         reason: "child process closed stdout (process exited?)".to_string(),
                     });
                 }
@@ -176,7 +176,7 @@ impl SubprocessRpcTransport {
                     }
                     let response: RpcResponse = serde_json::from_str(trimmed).map_err(|error| {
                         SimardError::RpcProtocolError {
-                            endpoint: bridge_name.to_string(),
+                            endpoint: endpoint_name.to_string(),
                             reason: format!("malformed response line: {error}"),
                         }
                     })?;
@@ -192,7 +192,7 @@ impl SubprocessRpcTransport {
                 }
                 Err(error) => {
                     return Err(SimardError::RpcTransportError {
-                        endpoint: bridge_name.to_string(),
+                        endpoint: endpoint_name.to_string(),
                         reason: format!("failed to read from child stdout: {error}"),
                     });
                 }
@@ -250,12 +250,12 @@ impl RpcTransport for SubprocessRpcTransport {
             .state
             .lock()
             .map_err(|_| SimardError::StoragePoisoned {
-                store: format!("bridge:{}", self.bridge_name),
+                store: format!("rpc:{}", self.endpoint_name),
             })?;
         let expected_id = request.id.clone();
         let child = self.ensure_child(&mut state)?;
         Self::send_request(child, &request)?;
-        let response = Self::read_response(child, &expected_id, self.timeout, &self.bridge_name)?;
+        let response = Self::read_response(child, &expected_id, self.timeout, &self.endpoint_name)?;
         if let Some(ref error) = response.error
             && error.code == RPC_ERROR_TRANSPORT
         {
@@ -267,11 +267,11 @@ impl RpcTransport for SubprocessRpcTransport {
     fn descriptor(&self) -> BackendDescriptor {
         BackendDescriptor::for_runtime_type::<Self>(
             format!(
-                "bridge:subprocess:{}:{}",
-                self.bridge_name,
+                "rpc:subprocess:{}:{}",
+                self.endpoint_name,
                 self.python_script.display()
             ),
-            format!("bridge::subprocess::{}", self.bridge_name),
+            format!("rpc::subprocess::{}", self.endpoint_name),
             Freshness::now().unwrap_or(Freshness {
                 state: crate::metadata::FreshnessState::Stale,
                 observed_at_unix_ms: 0,
@@ -298,14 +298,10 @@ mod tests {
 
     #[test]
     fn subprocess_transport_descriptor_includes_script_path() {
-        let transport = SubprocessRpcTransport::new(
-            "test",
-            "/tmp/test_bridge.py",
-            vec![],
-            Duration::from_secs(5),
-        );
+        let transport =
+            SubprocessRpcTransport::new("test", "/tmp/test_rpc.py", vec![], Duration::from_secs(5));
         let desc = transport.descriptor();
-        assert!(desc.identity.contains("test_bridge.py"));
+        assert!(desc.identity.contains("test_rpc.py"));
     }
 
     #[test]
@@ -333,7 +329,7 @@ mod tests {
             &mut managed,
             "test-id-1",
             Duration::from_millis(200),
-            "silent-bridge",
+            "silent-rpc",
         );
         let elapsed = start.elapsed();
 

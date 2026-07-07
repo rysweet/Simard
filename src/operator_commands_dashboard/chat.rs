@@ -33,7 +33,7 @@ pub(crate) struct ChatWsParams {
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket chat — bridges to Simard's meeting facilitator conversation model
+// WebSocket chat — connects to Simard's meeting facilitator conversation model
 // ---------------------------------------------------------------------------
 
 /// Load the meeting system prompt from disk.

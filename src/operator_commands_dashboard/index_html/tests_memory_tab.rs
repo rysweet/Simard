@@ -68,8 +68,8 @@ fn memory_tab_registered_in_metadata() {
         "the memory tab's page-h1 must be \"Memory\", got {:?}",
         meta.h1
     );
-    assert!(
-        !meta.slug.contains("bridge"),
+    assert_eq!(
+        meta.slug, "memory",
         "the memory tab slug must use accurate, non-legacy vocabulary (binding constraint)"
     );
 }

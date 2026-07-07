@@ -59,7 +59,7 @@ fn seed_cycle_count(persistent_cycle_count: u32, state_root: &std::path::Path) -
 
 /// Run one or more OODA cycles as a daemon-style loop.
 ///
-/// Launches all bridges, opens a RustyClawd session via [`SessionBuilder`]
+/// Launches all memories, opens a RustyClawd session via [`SessionBuilder`]
 /// for real autonomous work, loads the goal board from cognitive memory,
 /// and runs OODA cycles until `max_cycles` is reached (0 = infinite).
 ///
@@ -71,7 +71,7 @@ fn seed_cycle_count(persistent_cycle_count: u32, state_root: &std::path::Path) -
 /// cleanly, and the daemon exits without orphaning PTY subprocesses.
 ///
 /// If no LLM adapter is available (e.g. no API key, no Copilot SDK),
-/// the daemon exits with an error — no silent degradation to bridge-only mode.
+/// the daemon exits with an error — no silent degradation to memory-only mode.
 pub fn run_ooda_daemon(
     max_cycles: u32,
     state_root_override: Option<PathBuf>,
@@ -94,7 +94,7 @@ pub fn run_ooda_daemon(
     }
     // --------------------------------------------------------------------
 
-    // Auto-ensure runtime dependencies before launching bridges
+    // Auto-ensure runtime dependencies before launching memories
     if let Err(e) = crate::cmd_ensure_deps::handle_ensure_deps() {
         eprintln!("Warning: some dependencies could not be verified: {e}");
     }
@@ -365,7 +365,7 @@ pub fn run_ooda_daemon(
 
     // Closed-loop outcome verification (issue #2751). Secure default is ON; the
     // operator kill-switch `SIMARD_OUTCOME_VERIFY=off` restores the artifact-only
-    // curate path by leaving the bridge pair `None`. The pair is installed only
+    // curate path by leaving the memory pair `None`. The pair is installed only
     // when the reasoning recipe brain is available (recipe file + recipe-runner-rs
     // present); otherwise the daemon logs the degradation and stays on the legacy
     // path (never a silent fallback). `live_signals` is wired iff the brain is.
@@ -407,7 +407,7 @@ pub fn run_ooda_daemon(
         None
     };
 
-    let mut bridges = OodaClients {
+    let mut memories = OodaClients {
         memory,
         knowledge,
         gym,
@@ -432,8 +432,8 @@ pub fn run_ooda_daemon(
     // restored into `OodaState` so the no-progress breaker's per-goal counters
     // survive the daemon's periodic restarts (the production bug where the
     // counter reset to zero every ~hour before it could reach the threshold).
-    let persistent =
-        crate::goal_board_store::load_or_migrate(&state_root, &*bridges.memory).unwrap_or_default();
+    let persistent = crate::goal_board_store::load_or_migrate(&state_root, &*memories.memory)
+        .unwrap_or_default();
     let tombstones = crate::ooda_loop::load_tombstones(&state_root);
     let board = crate::goal_board_store::filter_tombstoned(persistent.board, &tombstones);
     // Issue #2589: self-heal any stale [OODA-SAFEGUARD] no-progress block an
@@ -568,7 +568,7 @@ pub fn run_ooda_daemon(
 
     // De-fork Phase 2b (issue #2307): the native lbug-WAL file-copy backup was
     // removed. Issue #2420 reintroduces a periodic **verified** backup below —
-    // it snapshots the live store through the bridge (so it inherently targets
+    // it snapshots the live store through the memory (so it inherently targets
     // the migrated `state_root/cognitive` path), verifies the backup re-opens
     // before pruning, and is best-effort (a failure WARNs, never aborts the
     // cycle). The library backend still owns its own WAL durability.
@@ -679,7 +679,7 @@ pub fn run_ooda_daemon(
         .unwrap_or(false);
     let creative_ideas_cfg = crate::creative_ideas::CreativeIdeasConfig::from_env();
     let creative_ideas_enabled = creative_ideas_cfg.enabled();
-    let cognitive_repo_root = bridges.repo_root.clone();
+    let cognitive_repo_root = memories.repo_root.clone();
     // Build the shared runtime when EITHER gate wants a thread to run.
     let cognitive_runtime = if cognitive_threads_enabled || creative_ideas_enabled {
         match tokio::runtime::Builder::new_multi_thread()
@@ -771,7 +771,7 @@ pub fn run_ooda_daemon(
     let mut overseer_gap_scan_tick_idx: u64 = 0;
     // Prevents overlapping ticks from stacking up if one runs long.
     let overseer_tick_running = Arc::new(AtomicBool::new(false));
-    let overseer_repo_root = bridges.repo_root.clone();
+    let overseer_repo_root = memories.repo_root.clone();
     daemon_log(
         &state_root,
         &format!(
@@ -848,7 +848,7 @@ pub fn run_ooda_daemon(
                 "[simard] OODA daemon: on-disk binary is a genuinely different image (content hash changed) — reloading via exec()",
             );
             // Close the LLM session before exec so we don't leak resources.
-            if let Some(ref mut session) = bridges.session {
+            if let Some(ref mut session) = memories.session {
                 let _ = session.close();
             }
             exec_self_reload()?;
@@ -892,7 +892,7 @@ pub fn run_ooda_daemon(
         if last_disk_health.elapsed() >= Duration::from_secs(disk_health_interval_secs) {
             // Tier 1: deterministic emergency cleanup (no LLM, no recipe)
             if let Some(emergency_report) =
-                crate::disk_health::emergency_cleanup(&bridges.repo_root, &state_root)
+                crate::disk_health::emergency_cleanup(&memories.repo_root, &state_root)
             {
                 daemon_log(
                     &state_root,
@@ -910,7 +910,8 @@ pub fn run_ooda_daemon(
                 );
             }
             // Tier 2: recipe-based LLM cleanup (moderate pressure, nuanced decisions)
-            match crate::disk_health::run_disk_health_check(&bridges.repo_root, &state_root, None) {
+            match crate::disk_health::run_disk_health_check(&memories.repo_root, &state_root, None)
+            {
                 Ok(report) => {
                     daemon_log(&state_root, &format!("[simard] {}", report.summary()));
                     if report.cleanup_performed() {
@@ -948,7 +949,7 @@ pub fn run_ooda_daemon(
                     Some(used) if crate::disk_reclaim::daemon_should_trigger(used, reclaim_pct) => {
                         let mode = crate::disk_reclaim::daemon_apply_from_env();
                         match crate::disk_reclaim::run_disk_reclaim(
-                            &bridges.repo_root,
+                            &memories.repo_root,
                             &state_root,
                             None,
                             mode,
@@ -1051,8 +1052,8 @@ pub fn run_ooda_daemon(
             brain_introspection_interval_secs,
         ) {
             match crate::brain_introspection::run_brain_introspection(
-                &*bridges.memory,
-                &bridges.repo_root,
+                &*memories.memory,
+                &memories.repo_root,
                 &state_root,
                 None,
             ) {
@@ -1087,7 +1088,7 @@ pub fn run_ooda_daemon(
                 "[simard] self quality-audit: firing 5-wave crusty-gated self-audit of rysweet/Simard",
             );
             match crate::self_quality_audit::run_self_quality_audit(
-                &bridges.repo_root,
+                &memories.repo_root,
                 &state_root,
                 None,
             ) {
@@ -1140,7 +1141,7 @@ pub fn run_ooda_daemon(
             );
             state.no_progress_tracker = persistent.no_progress;
             if let Err(e) =
-                crate::goal_curation::overwrite_memory_cache(&state.active_goals, &*bridges.memory)
+                crate::goal_curation::overwrite_memory_cache(&state.active_goals, &*memories.memory)
             {
                 daemon_log(
                     &state_root,
@@ -1184,7 +1185,7 @@ pub fn run_ooda_daemon(
             );
         }
 
-        match run_ooda_cycle(&mut state, &mut bridges, &config) {
+        match run_ooda_cycle(&mut state, &mut memories, &config) {
             Ok(report) => {
                 let cycle_elapsed = cycle_start.elapsed();
                 let summary = summarize_cycle_report(&report);
@@ -1206,7 +1207,7 @@ pub fn run_ooda_daemon(
                 //    memory cache from the committed board.
                 {
                     let mut newly_done: Vec<String> = Vec::new();
-                    if let Some(evidence) = &bridges.completion_evidence {
+                    if let Some(evidence) = &memories.completion_evidence {
                         newly_done = crate::goal_board_store::sweep_done_goals(
                             &mut state.active_goals,
                             evidence.as_ref(),
@@ -1262,7 +1263,7 @@ pub fn run_ooda_daemon(
                             state.active_goals = committed;
                             if let Err(e) = crate::goal_curation::overwrite_memory_cache(
                                 &state.active_goals,
-                                &*bridges.memory,
+                                &*memories.memory,
                             ) {
                                 daemon_log(
                                     &state_root,
@@ -1284,7 +1285,7 @@ pub fn run_ooda_daemon(
                 // duration-trend chart has real data to render (issue #21).
                 persist_cycle_report_timed(&state_root, &report, Some(cycle_elapsed));
                 // Persist the cycle summary to cognitive memory as an episode.
-                persist_cycle_to_memory(&bridges, &report);
+                persist_cycle_to_memory(&memories, &report);
                 // Write daemon health file for dashboard
                 {
                     let health_dir = dirs::data_local_dir()
@@ -1337,7 +1338,7 @@ pub fn run_ooda_daemon(
                         state.active_goals.active.len() as i64,
                         &[],
                     );
-                    if let Ok(stats) = bridges.memory.get_statistics() {
+                    if let Ok(stats) = memories.memory.get_statistics() {
                         telemetry::gauge_set(
                             names::MEMORY_NODES,
                             stats.episodic_count as i64,
@@ -1369,7 +1370,7 @@ pub fn run_ooda_daemon(
                             &[(names::ATTR_TYPE, "sensory")],
                         );
                     }
-                    if let Ok(g) = bridges.memory.graph_stats() {
+                    if let Ok(g) = memories.memory.graph_stats() {
                         telemetry::gauge_set(
                             names::MEMORY_EDGES,
                             g.derives_from_edges as i64,
@@ -1603,7 +1604,7 @@ pub fn run_ooda_daemon(
                 let running = Arc::clone(&journal_tick_running);
                 let mem_for_journal = Arc::clone(&shared_mem);
                 let state_root_for_journal = state_root.clone();
-                let repo_root_for_journal = bridges.repo_root.clone();
+                let repo_root_for_journal = memories.repo_root.clone();
                 let spawn = std::thread::Builder::new()
                     .name("journal-tick".to_string())
                     .spawn(move || {
@@ -1675,14 +1676,14 @@ pub fn run_ooda_daemon(
     }
 
     // Final shutdown: flush board, drop in-process writer registration,
-    // close session, then drop bridges (triggers Database::drop ->
+    // close session, then drop memories (triggers Database::drop ->
     // force_checkpoint_on_close). Errors at this point only get warned —
     // we are exiting anyway and cannot recover.
     if let Err(e) = shutdown_daemon(
         &state_root,
         &shared_mem,
         &mut state,
-        &mut bridges,
+        &mut memories,
         /* signal_driven */ true,
     ) {
         daemon_log(
@@ -1708,7 +1709,7 @@ pub fn run_ooda_daemon(
 /// 4. Clear the in-process writer registration so the global `Weak` no
 ///    longer holds a path that would prevent the writer Arc from being
 ///    dropped by name elsewhere.
-/// 5. Drop the caller-owned bridges (the daemon's `bridges.memory` Box,
+/// 5. Drop the caller-owned memories (the daemon's `memories.memory` Box,
 ///    other Arc<dyn> references). Once the last strong Arc to the
 ///    `lbug::Database` drops, `Database::drop` runs
 ///    `force_checkpoint_on_close` as a defense-in-depth backstop.
@@ -1720,7 +1721,7 @@ fn shutdown_daemon(
     state_root: &std::path::Path,
     shared_mem: &Arc<dyn CognitiveMemoryOps>,
     state: &mut OodaState,
-    bridges: &mut OodaClients,
+    memories: &mut OodaClients,
     signal_driven: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     daemon_log(state_root, "[simard] OODA daemon: shutdown sequence start");
@@ -1742,7 +1743,7 @@ fn shutdown_daemon(
     }
 
     // 1. Persist the goal board through the live writer.
-    if let Err(e) = persist_board(&state.active_goals, &*bridges.memory) {
+    if let Err(e) = persist_board(&state.active_goals, &*memories.memory) {
         let msg = format!("[simard] shutdown: persist_board failed: {e}");
         daemon_log(state_root, &msg);
         if !signal_driven {
@@ -1760,7 +1761,7 @@ fn shutdown_daemon(
     }
 
     // 3. Close the LLM session.
-    if let Some(ref mut session) = bridges.session
+    if let Some(ref mut session) = memories.session
         && let Err(e) = session.close()
     {
         let msg = format!("[simard] shutdown: session.close failed: {e}");
@@ -1852,7 +1853,7 @@ mod tests {
         )))
     }
 
-    fn test_bridges() -> OodaClients {
+    fn test_memories() -> OodaClients {
         OodaClients {
             memory: mock_memory(),
             knowledge: mock_knowledge(),
@@ -1881,9 +1882,9 @@ mod tests {
         let dir = hermetic.state_root();
         let shared_mem = mock_shared_mem();
         let mut state = OodaState::new(GoalBoard::new());
-        let mut bridges = test_bridges();
+        let mut memories = test_memories();
 
-        let result = shutdown_daemon(dir, &shared_mem, &mut state, &mut bridges, false);
+        let result = shutdown_daemon(dir, &shared_mem, &mut state, &mut memories, false);
         assert!(
             result.is_ok(),
             "shutdown with empty state must succeed: {result:?}"
@@ -1897,9 +1898,9 @@ mod tests {
         let dir = hermetic.state_root();
         let shared_mem = mock_shared_mem();
         let mut state = OodaState::new(GoalBoard::new());
-        let mut bridges = test_bridges();
+        let mut memories = test_memories();
 
-        let _ = shutdown_daemon(dir, &shared_mem, &mut state, &mut bridges, true);
+        let _ = shutdown_daemon(dir, &shared_mem, &mut state, &mut memories, true);
 
         let log = std::fs::read_to_string(dir.join("ooda.log")).unwrap_or_default();
         assert!(
@@ -1919,8 +1920,8 @@ mod tests {
         let dir = hermetic.state_root();
         let shared_mem = mock_shared_mem();
         let mut state = OodaState::new(GoalBoard::new());
-        let mut bridges = test_bridges();
-        let result = shutdown_daemon(dir, &shared_mem, &mut state, &mut bridges, true);
+        let mut memories = test_memories();
+        let result = shutdown_daemon(dir, &shared_mem, &mut state, &mut memories, true);
         assert!(
             result.is_ok(),
             "signal-driven shutdown must not propagate errors: {result:?}"
@@ -1949,9 +1950,9 @@ mod tests {
             last_progress_update_at: None,
         });
         let mut state = OodaState::new(board);
-        let mut bridges = test_bridges();
+        let mut memories = test_memories();
 
-        let result = shutdown_daemon(dir, &shared_mem, &mut state, &mut bridges, false);
+        let result = shutdown_daemon(dir, &shared_mem, &mut state, &mut memories, false);
         assert!(
             result.is_ok(),
             "shutdown with active goals must succeed: {result:?}"

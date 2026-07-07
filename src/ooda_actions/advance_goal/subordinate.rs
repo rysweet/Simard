@@ -16,7 +16,7 @@ use crate::ooda_actions::make_outcome;
 /// and validating output artifacts.
 pub fn advance_goal_with_subordinate(
     action: &PlannedAction,
-    bridges: &mut OodaClients,
+    memories: &mut OodaClients,
     state: &mut OodaState,
     goal_id: &str,
     sub_name: &str,
@@ -42,18 +42,18 @@ pub fn advance_goal_with_subordinate(
         session_name: String::new(),
     };
 
-    match check_heartbeat(&handle, &*bridges.memory) {
+    match check_heartbeat(&handle, &*memories.memory) {
         Ok(HeartbeatStatus::Alive { phase, .. }) => {
             // Check if subordinate reported completion with an outcome.
             if let Ok(Some(progress)) =
-                crate::agent_goal_assignment::poll_progress(sub_name, &*bridges.memory)
+                crate::agent_goal_assignment::poll_progress(sub_name, &*memories.memory)
                 && progress.outcome.is_some()
             {
                 // Subordinate claims completion — validate artifacts.
                 return validate_subordinate_completion(
                     action,
-                    &*bridges.progress_evidence,
-                    &*bridges.memory,
+                    &*memories.progress_evidence,
+                    &*memories.memory,
                     state,
                     goal_id,
                     sub_name,
@@ -73,8 +73,8 @@ pub fn advance_goal_with_subordinate(
                 &mut state.active_goals,
                 goal_id,
                 new_progress,
-                &*bridges.progress_evidence,
-                &*bridges.memory,
+                &*memories.progress_evidence,
+                &*memories.memory,
                 Utc::now(),
             ) {
                 Ok(EvidenceDecision::Accept { .. }) => {}
@@ -112,13 +112,13 @@ pub fn advance_goal_with_subordinate(
             // Subordinate is stale — check if it left behind any artifacts
             // before marking as failed.
             if let Ok(Some(progress)) =
-                crate::agent_goal_assignment::poll_progress(sub_name, &*bridges.memory)
+                crate::agent_goal_assignment::poll_progress(sub_name, &*memories.memory)
                 && progress.outcome.is_some()
             {
                 return validate_subordinate_completion(
                     action,
-                    &*bridges.progress_evidence,
-                    &*bridges.memory,
+                    &*memories.progress_evidence,
+                    &*memories.memory,
                     state,
                     goal_id,
                     sub_name,
@@ -138,7 +138,7 @@ pub fn advance_goal_with_subordinate(
                     "[simard] OODA advance_goal FAILED to clear assignment for \
                      goal '{goal_id}': {e}"
                 );
-            } else if let Err(e) = save_goal_board(&state.active_goals, &*bridges.memory) {
+            } else if let Err(e) = save_goal_board(&state.active_goals, &*memories.memory) {
                 eprintln!(
                     "[simard] OODA advance_goal FAILED to persist goal board after \
                      clearing stale assignment for goal '{goal_id}': {e}"
@@ -157,13 +157,13 @@ pub fn advance_goal_with_subordinate(
         Ok(HeartbeatStatus::Dead) => {
             // Subordinate is dead — check if it produced anything before dying.
             if let Ok(Some(progress)) =
-                crate::agent_goal_assignment::poll_progress(sub_name, &*bridges.memory)
+                crate::agent_goal_assignment::poll_progress(sub_name, &*memories.memory)
             {
                 if progress.outcome.is_some() {
                     return validate_subordinate_completion(
                         action,
-                        &*bridges.progress_evidence,
-                        &*bridges.memory,
+                        &*memories.progress_evidence,
+                        &*memories.memory,
                         state,
                         goal_id,
                         sub_name,
@@ -203,7 +203,7 @@ pub fn advance_goal_with_subordinate(
                     ),
                 );
             }
-            if let Err(e) = save_goal_board(&state.active_goals, &*bridges.memory) {
+            if let Err(e) = save_goal_board(&state.active_goals, &*memories.memory) {
                 eprintln!(
                     "[simard] OODA advance_goal FAILED to persist goal board after \
                      clearing dead assignment for goal '{goal_id}': {e}"

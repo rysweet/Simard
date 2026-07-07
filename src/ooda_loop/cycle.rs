@@ -27,7 +27,7 @@ use super::{
 #[tracing::instrument(skip_all, fields(cycle = state.cycle_count))]
 pub fn run_ooda_cycle(
     state: &mut OodaState,
-    bridges: &mut OodaClients,
+    memories: &mut OodaClients,
     config: &OodaConfig,
 ) -> SimardResult<CycleReport> {
     // Install per-cycle brain-judgment task-local. Was a `thread_local!`
@@ -35,7 +35,7 @@ pub fn run_ooda_cycle(
     // session adapter, so pushes landed on different OS threads than the
     // eventual `take_all()` — daemon `d69c411c52f1` cycle_2 showed
     // `planned_actions: 3` but `brain_judgments: []`.
-    crate::ooda_brain::with_brain_judgment_scope(|| run_ooda_cycle_inner(state, bridges, config))
+    crate::ooda_brain::with_brain_judgment_scope(|| run_ooda_cycle_inner(state, memories, config))
 }
 
 /// Build the OODA objective probe from the active goals.
@@ -73,7 +73,7 @@ fn build_objective_probe(active: &[crate::goal_curation::ActiveGoal]) -> String 
 
 fn run_ooda_cycle_inner(
     state: &mut OodaState,
-    bridges: &mut OodaClients,
+    memories: &mut OodaClients,
     config: &OodaConfig,
 ) -> SimardResult<CycleReport> {
     crate::ooda_brain::clear_brain_judgments();
@@ -110,7 +110,7 @@ fn run_ooda_cycle_inner(
             eprintln!("[simard] OODA start: failed to remove .reseed_goals marker: {e}");
         }
         state.active_goals = crate::goal_curation::GoalBoard::new();
-    } else if let Ok(board) = load_goal_board(&*bridges.memory)
+    } else if let Ok(board) = load_goal_board(&*memories.memory)
         && !board.active.is_empty()
     {
         if let Some(reason) = board_integrity_suspect(&board) {
@@ -163,7 +163,7 @@ fn run_ooda_cycle_inner(
     if let Err(e) = memory_consolidation::intake_memory_operations(
         &cycle_objective,
         &cycle_session_id,
-        &*bridges.memory,
+        &*memories.memory,
     ) {
         eprintln!("[simard] OODA consolidation: intake failed: {e}");
     }
@@ -171,7 +171,7 @@ fn run_ooda_cycle_inner(
     match memory_consolidation::consolidation_intake(
         &cycle_session_id,
         &cycle_objective,
-        &*bridges.memory,
+        &*memories.memory,
     ) {
         Ok(n) if n > 0 => {
             eprintln!("[simard] OODA consolidation: hydrated {n} prior-session facts");
@@ -221,7 +221,7 @@ fn run_ooda_cycle_inner(
     // --- Observe ---
     state.current_phase = OodaPhase::Observe;
     eprintln!("[simard] OODA cycle: entering Observe phase");
-    let observation = observe(state, bridges)?;
+    let observation = observe(state, memories)?;
     eprintln!("[simard] OODA cycle: Observe complete");
 
     // --- Prepare: gather relevant context from cognitive memory ---
@@ -250,7 +250,7 @@ fn run_ooda_cycle_inner(
     // prospect for every still-active goal each cycle). Failures are logged but
     // non-fatal — a reconcile hiccup must not abort the cycle.
     if let Err(e) =
-        crate::goals::reconcile_board_prospectives(&state.active_goals, &*bridges.memory)
+        crate::goals::reconcile_board_prospectives(&state.active_goals, &*memories.memory)
     {
         eprintln!("[simard] OODA cycle: board-sourced prospective reconcile failed: {e}");
     }
@@ -261,7 +261,7 @@ fn run_ooda_cycle_inner(
     let ctx = preparation_memory_operations_with_active_slugs_phased(
         &objective_summary,
         &cycle_session_id,
-        &*bridges.memory,
+        &*memories.memory,
         Some(&active_slugs),
         crate::ooda_loop::phase_weights::weights_for_phase(OodaPhase::Observe),
     )?;
@@ -277,7 +277,7 @@ fn run_ooda_cycle_inner(
     // --- Orient ---
     state.current_phase = OodaPhase::Orient;
     eprintln!("[simard] OODA cycle: entering Orient phase");
-    let priorities = match bridges.orient_brain.as_ref() {
+    let priorities = match memories.orient_brain.as_ref() {
         Some(brain) => orient_with_brain(
             &observation,
             &state.active_goals,
@@ -298,7 +298,7 @@ fn run_ooda_cycle_inner(
     // --- Decide ---
     state.current_phase = OodaPhase::Decide;
     eprintln!("[simard] OODA cycle: entering Decide phase");
-    let mut planned_actions = match bridges.decide_brain.as_ref() {
+    let mut planned_actions = match memories.decide_brain.as_ref() {
         Some(brain) => decide_with_brain(&priorities, config, brain.as_ref())?,
         None => decide(&priorities, config)?,
     };
@@ -331,7 +331,7 @@ fn run_ooda_cycle_inner(
     let act_start = Instant::now();
     // Bound concurrent engineer starts to the same AIMD cap coverage used to
     // allocate them, so dispatch concurrency stays resource-aware.
-    let outcomes = act(&planned_actions, bridges, state, coverage_cap)?;
+    let outcomes = act(&planned_actions, memories, state, coverage_cap)?;
     let act_elapsed = act_start.elapsed();
     eprintln!(
         "[simard] OODA cycle: Act complete ({} outcomes, {:.1}s)",
@@ -398,7 +398,7 @@ fn run_ooda_cycle_inner(
         if let Err(e) = memory_consolidation::execution_memory_operations(
             &outcome.detail,
             &cycle_session_id,
-            &*bridges.memory,
+            &*memories.memory,
         ) {
             eprintln!("[simard] OODA consolidation: execution memory failed: {e}");
         }
@@ -425,14 +425,15 @@ fn run_ooda_cycle_inner(
             // never re-created. Probe first so the log distinguishes the two —
             // otherwise frozen procedural memory reads as fresh learning. A
             // recall failure is non-fatal and defaults to the "stored" wording.
-            let already_present = bridges
-                .memory
-                .procedure_exists(&proc_name)
-                .unwrap_or_else(|e| {
-                    eprintln!("[simard] OODA consolidation: procedural recall failed: {e}");
-                    false
-                });
-            match bridges.memory.store_procedure(&proc_name, &steps, &[]) {
+            let already_present =
+                memories
+                    .memory
+                    .procedure_exists(&proc_name)
+                    .unwrap_or_else(|e| {
+                        eprintln!("[simard] OODA consolidation: procedural recall failed: {e}");
+                        false
+                    });
+            match memories.memory.store_procedure(&proc_name, &steps, &[]) {
                 Err(e) => {
                     tracing::warn!(
                         procedure_name = %proc_name,
@@ -482,17 +483,17 @@ fn run_ooda_cycle_inner(
             &transcript,
             &[],
             &cycle_session_id,
-            &*bridges.memory,
+            &*memories.memory,
         ) {
             eprintln!("[simard] OODA consolidation: reflection failed: {e}");
         }
     }
 
     // --- Consolidate: best-effort memory maintenance after each cycle ---
-    if let Err(e) = bridges.memory.consolidate_episodes(10) {
+    if let Err(e) = memories.memory.consolidate_episodes(10) {
         eprintln!("[simard] OODA consolidate: episode consolidation failed: {e}");
     }
-    if let Err(e) = bridges.memory.prune_expired_sensory() {
+    if let Err(e) = memories.memory.prune_expired_sensory() {
         eprintln!("[simard] OODA consolidate: sensory prune failed: {e}");
     }
 
@@ -503,7 +504,7 @@ fn run_ooda_cycle_inner(
         );
         // Persist proposals to cognitive memory (best-effort).
         for directive in &review_proposals {
-            if let Err(e) = bridges.memory.store_fact(
+            if let Err(e) = memories.memory.store_fact(
                 &format!("improvement-{}", crate::goals::goal_slug(&directive.title)),
                 &format!(
                     "priority={} status={} rationale={}",
@@ -556,7 +557,7 @@ fn run_ooda_cycle_inner(
     // `breaker_dropped` carries goals removed from the board as obsolete so the
     // corruption guard treats them as a legitimate departure (not a "vanished"
     // goal) and the persist step force-removes them from the snapshot.
-    let breaker_dropped: Vec<String> = if let Some(source) = &bridges.completion_evidence {
+    let breaker_dropped: Vec<String> = if let Some(source) = &memories.completion_evidence {
         if crate::ooda_loop::no_progress::no_progress_investigation_enabled() {
             // Root-cause investigation (issue #16): before authoring any block,
             // the breaker classifies WHY a stalled goal made no shippable
@@ -597,8 +598,8 @@ fn run_ooda_cycle_inner(
             // existing capability rather than building a parallel spawner.
             let requests = dispatcher.into_requests();
             if !requests.is_empty() {
-                let brain = bridges.brain.clone();
-                let repo_root = bridges.repo_root.clone();
+                let brain = memories.brain.clone();
+                let repo_root = memories.repo_root.clone();
                 let guarded = std::sync::Mutex::new(&mut *state);
                 for (goal_id, task) in requests {
                     let action = PlannedAction {
@@ -646,7 +647,7 @@ fn run_ooda_cycle_inner(
     };
 
     // --- Outcome verification: gate archival on a verified LIVE effect (#2751) ---
-    // When the outcome-verify bridge pair is wired (production daemon,
+    // When the outcome-verify memory pair is wired (production daemon,
     // `SIMARD_OUTCOME_VERIFY` on), every completion-candidate goal is verified
     // LIVE before the archive step below can complete it. The framing invariant:
     // an ARTIFACT (a merged PR / a deploy) is NOT an OUTCOME — a goal is
@@ -656,14 +657,14 @@ fn run_ooda_cycle_inner(
     // `mark_achieved` goals stay `Completed` and thus archivable by the step
     // below. Absent the pair (tests / non-daemon callers), this is a no-op.
     if let (Some(ov_brain), Some(signals)) = (
-        bridges.outcome_verify_brain.clone(),
-        bridges.live_signals.clone(),
+        memories.outcome_verify_brain.clone(),
+        memories.live_signals.clone(),
     ) {
         let reports = crate::goal_curation::verify_completion_candidates(
             &mut state.active_goals,
             ov_brain.as_ref(),
             signals.as_ref(),
-            bridges.completion_evidence.as_deref(),
+            memories.completion_evidence.as_deref(),
         );
         for r in &reports {
             match &r.error {
@@ -699,7 +700,7 @@ fn run_ooda_cycle_inner(
     // issue, and (for self-affecting changes) a verified deploy; blocked goals
     // stay active with a recorded blocker. Without one (tests / non-daemon
     // callers), this is the legacy unguarded archive.
-    let archived = match &bridges.completion_evidence {
+    let archived = match &memories.completion_evidence {
         Some(source) => {
             let (archived, blocked) = crate::goal_curation::archive_completed_evidence_aware(
                 &mut state.active_goals,
@@ -726,7 +727,7 @@ fn run_ooda_cycle_inner(
             // objectives recall. Best-effort: never blocks curation.
             learn_from_refuted_goals(
                 &blocked,
-                &*bridges.memory,
+                &*memories.memory,
                 config.lesson_recurrence_threshold,
             );
 
@@ -794,12 +795,12 @@ fn run_ooda_cycle_inner(
                 archived.iter().map(|g| g.id.clone()).collect();
             archived_goal_ids.extend(breaker_dropped.iter().cloned());
             let persist_result = if archived_goal_ids.is_empty() {
-                crate::goal_curation::persist_board(&state.active_goals, &*bridges.memory)
+                crate::goal_curation::persist_board(&state.active_goals, &*memories.memory)
             } else {
                 save_goal_board_with_removals(
                     &state.active_goals,
                     &archived_goal_ids,
-                    &*bridges.memory,
+                    &*memories.memory,
                 )
                 .and_then(|()| {
                     // Goal-board curation with force-removals is a durable
@@ -835,7 +836,7 @@ fn run_ooda_cycle_inner(
                                 serde_json::json!(archived_goal_ids.len()),
                             );
                         }
-                        bridges
+                        memories
                             .memory
                             .store_episode(&summary, "goal-curator", Some(&json))?;
                     }
@@ -851,12 +852,12 @@ fn run_ooda_cycle_inner(
     // --- Memory consolidation: persistence at cycle end ---
     // Flush working memory to episodes before final persistence.
     if let Err(e) =
-        memory_consolidation::consolidation_persistence(&cycle_session_id, &*bridges.memory)
+        memory_consolidation::consolidation_persistence(&cycle_session_id, &*memories.memory)
     {
         eprintln!("[simard] OODA consolidation: flush failed: {e}");
     }
     if let Err(e) =
-        memory_consolidation::persistence_memory_operations(&cycle_session_id, &*bridges.memory)
+        memory_consolidation::persistence_memory_operations(&cycle_session_id, &*memories.memory)
     {
         eprintln!("[simard] OODA consolidation: persistence failed: {e}");
     }
@@ -876,8 +877,8 @@ fn run_ooda_cycle_inner(
         };
         let cycles_since_last = state.cycle_count.saturating_sub(state.last_distill_cycle);
         match crate::memory_consolidation::scheduler::run_scheduled_distillation(
-            &*bridges.memory,
-            &bridges.repo_root,
+            &*memories.memory,
+            &memories.repo_root,
             &schedule,
             cycles_since_last,
         ) {

@@ -29,7 +29,7 @@ fn run_gate(binary: &Path, gate: RelaunchGate, config: &RelaunchConfig) -> GateR
         RelaunchGate::Smoke => run_smoke_gate(binary),
         RelaunchGate::UnitTest => run_unit_test_gate(config),
         RelaunchGate::GymBaseline => run_gym_baseline_gate(binary),
-        RelaunchGate::RpcHealth => run_bridge_health_gate(binary, config),
+        RelaunchGate::RpcHealth => run_rpc_health_gate(binary, config),
     }
 }
 
@@ -116,22 +116,22 @@ fn run_gym_baseline_gate(binary: &Path) -> GateResult {
     }
 }
 
-fn run_bridge_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
+fn run_rpc_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
     let timeout_secs = config.health_timeout.as_secs().to_string();
     match Command::new(binary)
-        .args(["probe", "bridge", "--timeout", &timeout_secs])
+        .args(["probe", "rpc", "--timeout", &timeout_secs])
         .output()
     {
         Ok(output) if output.status.success() => GateResult {
             gate: RelaunchGate::RpcHealth,
             passed: true,
-            detail: "bridge health check passed".to_string(),
+            detail: "rpc health check passed".to_string(),
         },
         Ok(output) => GateResult {
             gate: RelaunchGate::RpcHealth,
             passed: false,
             detail: format!(
-                "bridge health failed (exit {}): {}",
+                "rpc health failed (exit {}): {}",
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
             ),
@@ -139,7 +139,7 @@ fn run_bridge_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult 
         Err(e) => GateResult {
             gate: RelaunchGate::RpcHealth,
             passed: false,
-            detail: format!("bridge health probe failed to run: {e}"),
+            detail: format!("rpc health probe failed to run: {e}"),
         },
     }
 }

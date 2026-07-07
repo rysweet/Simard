@@ -108,10 +108,10 @@ struct RealLocalHarnessSession {
     descriptor: BaseTypeDescriptor,
     config: HarnessConfig,
     request: BaseTypeSessionRequest,
-    /// Memory + knowledge bridges exposed through the shared enrichment entry
+    /// Memory + knowledge memories exposed through the shared enrichment entry
     /// point (issue #1665). The harness executes literal shell commands rather
     /// than natural-language LLM prompts, so it does not fold enrichment into
-    /// its command stream; the bridges are surfaced via
+    /// its command stream; the memories are surfaced via
     /// [`BaseTypeSession::enrich_input`] for contract uniformity and testing.
     enrichment: EnrichmentClients,
     is_open: bool,

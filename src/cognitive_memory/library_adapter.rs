@@ -17,7 +17,7 @@
 //!   [`SimardError::StoragePoisoned`].
 //! * **Error mapping.** `open` failures map to
 //!   [`SimardError::PersistentStoreIo`]; per-operation failures map to
-//!   [`SimardError::RpcCallFailed`] with `bridge = "cognitive-memory-library"`,
+//!   [`SimardError::RpcCallFailed`] with `memory = "cognitive-memory-library"`,
 //!   preserving the upstream `MemoryError` message. No new `SimardError` variant
 //!   is introduced — this keeps the change additive.
 //! * **Documented divergences (A3/A6/A7).** `check_triggers`,

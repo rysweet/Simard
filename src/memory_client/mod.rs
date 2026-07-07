@@ -2,7 +2,7 @@
 //!
 //! `CognitiveMemoryClient` wraps a `RpcTransport` and provides typed
 //! methods for each of the six cognitive memory types. Each method serializes
-//! parameters to JSON, sends them over the bridge, and deserializes the
+//! parameters to JSON, sends them over the memory, and deserializes the
 //! response into the corresponding Rust type from `memory_cognitive`.
 //!
 //! Wire methods use the `memory.*` namespace (e.g. `memory.store_fact`).
@@ -19,10 +19,10 @@ use crate::rpc::{RpcRequest, RpcTransport, new_request_id, unpack_rpc_response};
 
 const CLIENT_NAME: &str = "cognitive-memory";
 
-/// Typed client for the cognitive memory bridge server.
+/// Typed client for the cognitive memory memory server.
 ///
 /// All methods are synchronous and block on the underlying transport. Errors
-/// from the bridge server (e.g. invalid parameters, database failures) are
+/// from the memory server (e.g. invalid parameters, database failures) are
 /// returned as `SimardError::RpcCallFailed`.
 pub struct CognitiveMemoryClient {
     transport: Box<dyn RpcTransport>,
@@ -33,7 +33,7 @@ impl CognitiveMemoryClient {
         Self { transport }
     }
 
-    /// Call a bridge method and deserialize the response.
+    /// Call a memory method and deserialize the response.
     fn call<T: serde::de::DeserializeOwned>(
         &self,
         method: &str,
@@ -245,7 +245,7 @@ impl CognitiveMemoryClient {
     }
 
     /// PR-C (issue #2281, problem 4): forward episodic-recall keyword
-    /// search to the bridge server. The server-side handler routes to
+    /// search to the memory server. The server-side handler routes to
     /// the trait method on the underlying memory backend.
     pub fn search_episodes_by_keywords(
         &self,

@@ -27,7 +27,7 @@
 //!     `consolidated_facts` is the post−pre `(semantic+procedural)` stats delta
 //!     (the call returns `Option<String>`, not a count).
 //!   * NO destructive superseded/semantic deletes happen daemon-side
-//!     (`prune_superseded` over the IPC bridge is a `Ok(0)` no-op — calling it
+//!     (`prune_superseded` over the IPC memory is a `Ok(0)` no-op — calling it
 //!     would be a silent-degradation hazard, so the hook must not call it).
 //!
 //! ```ignore
@@ -206,7 +206,7 @@ impl CognitiveMemoryOps for HygieneStub {
     }
 
     // SAFETY assertion seam: the first increment must NOT call this over the
-    // daemon's IPC bridge (it is a `Ok(0)` no-op there — a silent-degradation
+    // daemon's IPC memory (it is a `Ok(0)` no-op there — a silent-degradation
     // hazard). Any call flips the flag and the `no_destructive_value_prune`
     // test fails.
     fn prune_superseded(&self) -> SimardResult<usize> {
@@ -572,7 +572,7 @@ fn hygiene_sensory_prune_is_unbounded_by_cap() {
 #[test]
 fn hygiene_performs_no_destructive_value_prune() {
     // The first increment must never call the destructive superseded-prune
-    // daemon-side (it is a no-op over the IPC bridge — a silent-degradation
+    // daemon-side (it is a no-op over the IPC memory — a silent-degradation
     // hazard). Value-bearing pruning is recommendation-only via the recipe.
     let stub = HygieneStub::new(stats(10, 1, 5, 5, 2, 0), 1, 5);
     let _ = run_memory_hygiene(&stub, 50).unwrap();

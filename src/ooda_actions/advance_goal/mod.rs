@@ -48,7 +48,7 @@ pub use subordinate::validate_subordinate_completion;
 /// progress percentage.
 pub(super) fn dispatch_advance_goal(
     action: &PlannedAction,
-    bridges: &mut OodaClients,
+    memories: &mut OodaClients,
     state: &mut OodaState,
 ) -> ActionOutcome {
     let goal_id = match &action.goal_id {
@@ -72,7 +72,7 @@ pub(super) fn dispatch_advance_goal(
 
     // If the goal has a subordinate, check heartbeat.
     if let Some(ref sub_name) = goal.assigned_to {
-        return advance_goal_with_subordinate(action, bridges, state, &goal_id, sub_name);
+        return advance_goal_with_subordinate(action, memories, state, &goal_id, sub_name);
     }
 
     // Blocked and completed goals short-circuit before session dispatch.
@@ -150,23 +150,23 @@ pub(super) fn dispatch_advance_goal(
     }
 
     // Clone the brain Arc up-front so we don't fight the borrow checker
-    // when we mutably borrow `bridges.session` below (issue #1266).
-    let brain = std::sync::Arc::clone(&bridges.brain);
+    // when we mutably borrow `memories.session` below (issue #1266).
+    let brain = std::sync::Arc::clone(&memories.brain);
 
     // Same pattern for the progress-evidence checker (issue #1967): clone
     // the Arc up-front so it lives across the inner mutable session
-    // borrow without colliding with the bridges field-borrow check.
-    let checker = std::sync::Arc::clone(&bridges.progress_evidence);
+    // borrow without colliding with the memories field-borrow check.
+    let checker = std::sync::Arc::clone(&memories.progress_evidence);
 
-    // Split-borrow disjoint fields of `bridges` so we can hold `&mut
-    // session` and `&dyn memory` simultaneously. `&mut *bridges` flattens
+    // Split-borrow disjoint fields of `memories` so we can hold `&mut
+    // session` and `&dyn memory` simultaneously. `&mut *memories` flattens
     // the deref so Rust tracks the per-field borrows.
     let OodaClients {
         ref mut session,
         ref memory,
         ref repo_root,
         ..
-    } = *bridges;
+    } = *memories;
 
     // If a base-type session is available, use run_turn for real agent work.
     if let Some(sess) = session {

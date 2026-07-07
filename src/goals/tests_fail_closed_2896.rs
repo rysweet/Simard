@@ -34,7 +34,7 @@ use crate::memory_ipc::{clear_in_process_writer, register_in_process_writer};
 use crate::session::{SessionId, SessionPhase};
 
 /// A cognitive-memory backend that simulates a memory-ipc transport failure on
-/// the read and/or write path, mirroring the real "bridge 'memory-ipc' transport
+/// the read and/or write path, mirroring the real "memory 'memory-ipc' transport
 /// error: write-len: Broken pipe" the bug reports. Non-faulted operations return
 /// benign values so the store can reach the faulted call.
 struct FaultyMemory {

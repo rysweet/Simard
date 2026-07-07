@@ -1,6 +1,6 @@
 //! src/gym_runner_client.rs
 //!
-//! Thin Simard adapter that backs the `simard-gym-eval` bridge with the
+//! Thin Simard adapter that backs the `simard-gym-eval` client with the
 //! upstream `amplihack-agent-eval` crate's native `GymRunner`.
 //!
 //! `register_gym_handlers` registers the three `gym.*` methods
@@ -9,7 +9,7 @@
 //! `amplihack_agent_eval::gym::GymRunner` and mapping the library's result
 //! types onto Simard's existing, byte-stable wire JSON. The engine itself —
 //! formerly the private `src/native_gym.rs` fork — now lives entirely in the
-//! library; this module is *only* the bridge wiring.
+//! library; this module is *only* the client wiring.
 //!
 //! See `docs/architecture/gym-eval-library-adapter.md` for the full contract.
 
@@ -66,7 +66,7 @@ fn id_is_safe(id: &str) -> bool {
 
 /// Map the library's optional, sparsely-populated per-scenario dimensions
 /// (`HashMap<String, Option<f64>>`) onto the five non-nullable
-/// [`ScoreDimensions`] fields the bridge wire contract requires.
+/// [`ScoreDimensions`] fields the client wire contract requires.
 ///
 /// Contract (see the design doc, "Dimension mapping"):
 /// 1. All five `ALL_DIMENSIONS` keys are always present in the output.
@@ -188,7 +188,7 @@ fn skip_suite(suite_id: &str) -> Value {
     })
 }
 
-/// Map a library [`GymScenarioResult`] onto the bridge wire JSON, overriding
+/// Map a library [`GymScenarioResult`] onto the client wire JSON, overriding
 /// the engine's compact `scenario_id` with `wire_id`.
 fn scenario_value(wire_id: &str, r: &GymScenarioResult) -> Value {
     json!({
@@ -288,7 +288,7 @@ pub fn register_gym_handlers(transport: &mut NativeRpcTransport) {
             }
 
             // The library's run_suite joins suite_id onto output_dir with no
-            // traversal check of its own, so the bridge must validate it here.
+            // traversal check of its own, so the client must validate it here.
             if !id_is_safe(suite_id) {
                 return Ok(fail_suite(
                     suite_id,
@@ -347,7 +347,7 @@ mod tests {
         transport
     }
 
-    /// Issue a bridge call and return the raw response (so error envelopes are
+    /// Issue a client call and return the raw response (so error envelopes are
     /// inspectable).
     fn raw_call(transport: &NativeRpcTransport, method: &str, params: Value) -> RpcResponse {
         let request = RpcRequest {
@@ -360,7 +360,7 @@ mod tests {
             .expect("native transport.call must not surface a SimardError")
     }
 
-    /// Issue a bridge call and return the `result` payload, asserting success.
+    /// Issue a client call and return the `result` payload, asserting success.
     fn result_of(transport: &NativeRpcTransport, method: &str, params: Value) -> Value {
         raw_call(transport, method, params)
             .result
@@ -532,7 +532,7 @@ mod tests {
     #[serial]
     fn run_suite_rejects_path_traversal() {
         // The library's run_suite does `output_dir.join(suite_id)` with NO
-        // traversal check; the bridge must reject it itself.
+        // traversal check; the client must reject it itself.
         let _g = SkipGuard::clear();
         let transport = make_transport();
         let r = result_of(

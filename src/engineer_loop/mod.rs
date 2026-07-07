@@ -193,7 +193,7 @@ pub fn run_local_engineer_loop(
         objective: objective.to_string(),
         completed_phase: SessionPhase::Intake,
         inspection: Some(inspection.clone()),
-        terminal_bridge_context: None,
+        terminal_handoff_context: None,
         execution_plan: None,
         action: None,
         verification: None,
@@ -210,27 +210,27 @@ pub fn run_local_engineer_loop(
     session.advance(SessionPhase::Preparation)?;
 
     let phase_start = Instant::now();
-    let terminal_bridge_context = EngineerHandoffContext::load_from_state_root(
+    let terminal_handoff_context = EngineerHandoffContext::load_from_state_root(
         &state_root,
         SHARED_EXPLICIT_STATE_ROOT_SOURCE,
     );
-    match &terminal_bridge_context {
+    match &terminal_handoff_context {
         Ok(_) => {
             phase_traces.push(PhaseTrace {
-                name: "load-bridge-context".to_string(),
+                name: "load-handoff-context".to_string(),
                 duration: phase_start.elapsed(),
                 outcome: PhaseOutcome::Success,
             });
         }
         Err(e) => {
             phase_traces.push(PhaseTrace {
-                name: "load-bridge-context".to_string(),
+                name: "load-handoff-context".to_string(),
                 duration: phase_start.elapsed(),
                 outcome: PhaseOutcome::Failed(e.to_string()),
             });
         }
     }
-    let terminal_bridge_context = match terminal_bridge_context {
+    let terminal_handoff_context = match terminal_handoff_context {
         Ok(ctx) => ctx,
         Err(e) => {
             let _ = session.advance(SessionPhase::Failed);
@@ -238,7 +238,7 @@ pub fn run_local_engineer_loop(
                 &state_root,
                 &SessionErrorReflection {
                     objective: objective.to_string(),
-                    failed_phase: "load-bridge-context".to_string(),
+                    failed_phase: "load-handoff-context".to_string(),
                     error_message: e.to_string(),
                     phase_traces: phase_traces.clone(),
                     session_id: Some(session_id_str.clone()),
@@ -255,8 +255,8 @@ pub fn run_local_engineer_loop(
     // goals curated in the meeting may have silently vanished.
     let phase_start = Instant::now();
     match crate::memory_ipc::launch_writer_client(&state_root) {
-        Ok(bridge) => match crate::goal_curation::load_goal_board(bridge.ops()) {
-            Ok(board) => match crate::goal_curation::verify_goal_carryover(&board, bridge.ops()) {
+        Ok(memory) => match crate::goal_curation::load_goal_board(memory.ops()) {
+            Ok(board) => match crate::goal_curation::verify_goal_carryover(&board, memory.ops()) {
                 Ok(crate::goal_curation::CarryoverVerification::Drifted {
                     meeting_id,
                     missing_goal_ids,
@@ -330,7 +330,7 @@ pub fn run_local_engineer_loop(
         Err(e) => {
             tracing::debug!(
                 error = %e,
-                "engineer loop: could not launch bridge for carryover check"
+                "engineer loop: could not launch memory for carryover check"
             );
             phase_traces.push(PhaseTrace {
                 name: "goal-carryover-verify".to_string(),
@@ -346,7 +346,7 @@ pub fn run_local_engineer_loop(
         objective: objective.to_string(),
         completed_phase: SessionPhase::Preparation,
         inspection: Some(inspection.clone()),
-        terminal_bridge_context: terminal_bridge_context.clone(),
+        terminal_handoff_context: terminal_handoff_context.clone(),
         execution_plan: None,
         action: None,
         verification: None,
@@ -385,7 +385,7 @@ pub fn run_local_engineer_loop(
         objective: objective.to_string(),
         completed_phase: SessionPhase::Planning,
         inspection: Some(inspection.clone()),
-        terminal_bridge_context: terminal_bridge_context.clone(),
+        terminal_handoff_context: terminal_handoff_context.clone(),
         execution_plan: Some(execution_plan.clone()),
         action: None,
         verification: None,
@@ -470,7 +470,7 @@ pub fn run_local_engineer_loop(
         objective: objective.to_string(),
         completed_phase: SessionPhase::Execution,
         inspection: Some(inspection.clone()),
-        terminal_bridge_context: terminal_bridge_context.clone(),
+        terminal_handoff_context: terminal_handoff_context.clone(),
         execution_plan: Some(execution_plan.clone()),
         action: Some(action.clone()),
         verification: Some(verification.clone()),
@@ -545,7 +545,7 @@ pub fn run_local_engineer_loop(
         &inspection,
         &action,
         &verification,
-        terminal_bridge_context.as_ref(),
+        terminal_handoff_context.as_ref(),
     );
     match &persist_result {
         Ok(()) => {
@@ -591,7 +591,7 @@ pub fn run_local_engineer_loop(
         action,
         verification,
         summary: Some(session_summary),
-        terminal_bridge_context,
+        terminal_handoff_context,
         elapsed_duration: loop_start.elapsed(),
         phase_traces,
         session_record: Some(session),

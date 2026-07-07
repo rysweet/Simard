@@ -1,9 +1,9 @@
-//! Cognitive-memory bridge launchers shared by dashboard, meeting, and
+//! Cognitive-memory client launchers shared by dashboard, meeting, and
 //! engineer call sites (issue #1590, spec recommendation C / A2).
 //!
 //! Two opaque types — [`WriterClient`] and [`ReaderClient`] — wrap a boxed
-//! [`CognitiveMemoryOps`] trait object so callers can write `let bridge =
-//! launch_writer_client(state_root)?;` and pass `bridge.ops()` straight
+//! [`CognitiveMemoryOps`] trait object so callers can write `let client =
+//! launch_writer_client(state_root)?;` and pass `client.ops()` straight
 //! into [`crate::goal_curation::save_goal_board`] / `load_goal_board`.
 //!
 //! Writer ladder:
@@ -39,14 +39,14 @@ use crate::error::{SimardError, SimardResult};
 
 use super::{RemoteCognitiveMemory, SharedMemory, reap_stale_open_lock, socket_path_for};
 
-/// Writer bridge to cognitive memory. Holds a `Box<dyn CognitiveMemoryOps>`
+/// Writer client to cognitive memory. Holds a `Box<dyn CognitiveMemoryOps>`
 /// underneath; callers should use [`WriterClient::ops`] to access it.
 pub struct WriterClient {
     inner: Box<dyn CognitiveMemoryOps>,
 }
 
 impl WriterClient {
-    /// Construct a writer bridge, asserting the wrapped backend is not
+    /// Construct a writer client, asserting the wrapped backend is not
     /// read-only.
     ///
     /// Wrapping a read-only handle as a `WriterClient` is exactly the
@@ -61,7 +61,7 @@ impl WriterClient {
         assert!(
             !inner.is_read_only(),
             "WriterClient: refusing to wrap a read-only handle (silent-degradation hazard — \
-             writes against this bridge would no-op without surfacing an error)"
+             writes against this client would no-op without surfacing an error)"
         );
         Self { inner }
     }
@@ -72,8 +72,8 @@ impl WriterClient {
         &*self.inner
     }
 
-    /// Consume the bridge and return the underlying boxed ops. Used by
-    /// legacy call sites (e.g. `launch_real_meeting_bridge`) that hold a
+    /// Consume the client and return the underlying boxed ops. Used by
+    /// legacy call sites (e.g. `launch_real_meeting_client`) that hold a
     /// `Box<dyn CognitiveMemoryOps>` directly.
     pub fn into_box(self) -> Box<dyn CognitiveMemoryOps> {
         self.inner
@@ -87,7 +87,7 @@ impl WriterClient {
     }
 }
 
-/// Reader bridge to cognitive memory. Either the daemon's IPC client (which
+/// Reader client to cognitive memory. Either the daemon's IPC client (which
 /// serializes through the daemon) or a direct [`LibraryCognitiveMemory::open`].
 pub struct ReaderClient {
     inner: Box<dyn CognitiveMemoryOps>,
@@ -222,7 +222,7 @@ fn lookup_in_process_writer(state_root: &Path) -> Option<Arc<dyn CognitiveMemory
 // on-disk view from another writer must go through the daemon socket.
 //
 // Lifetime / memory: the cache holds a strong `Arc`, so the handle survives
-// across the short-lived bridges that come and go between operations (that
+// across the short-lived clients that come and go between operations (that
 // persistence is the whole point). To bound growth — the test suite allocates a
 // fresh `TempDir` state_root per hermetic test — a lookup whose directory has
 // been removed falls through to the slow path, which prunes every entry whose
@@ -301,7 +301,7 @@ pub fn clear_tier2_store_cache() {
     cache.clear();
 }
 
-/// Launch a cognitive-memory writer bridge against `state_root`.
+/// Launch a cognitive-memory writer client against `state_root`.
 ///
 /// Resolution ladder:
 ///   0. In-process Arc shortcut.
@@ -313,7 +313,7 @@ pub fn clear_tier2_store_cache() {
 ///      [#1925](https://github.com/rysweet/Simard/issues/1925)).
 ///   2. Reap any stale lock and `LibraryCognitiveMemory::open` directly.
 ///
-/// **No read-only fallback.** A writer bridge that cannot write is a
+/// **No read-only fallback.** A writer client that cannot write is a
 /// silent-degradation hazard (the dashboard hollow-success bug from
 /// issue #1590); if no tier yields a writer, the launcher returns `Err`.
 pub fn launch_writer_client(state_root: &Path) -> SimardResult<WriterClient> {
@@ -383,7 +383,7 @@ pub fn launch_writer_client(state_root: &Path) -> SimardResult<WriterClient> {
     ))))
 }
 
-/// Open a cognitive-memory reader bridge against `state_root`.
+/// Open a cognitive-memory reader client against `state_root`.
 ///
 /// Resolution ladder:
 ///   0. In-process Arc shortcut.

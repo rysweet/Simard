@@ -16,7 +16,7 @@ pub enum CircuitState {
     HalfOpen,
 }
 
-/// A bridge transport wrapper that implements the circuit breaker pattern.
+/// A rpc transport wrapper that implements the circuit breaker pattern.
 ///
 /// When the inner transport fails repeatedly, the circuit opens and rejects
 /// all calls immediately until a cooldown period passes. After cooldown,
@@ -114,7 +114,7 @@ impl<T: RpcTransport> RpcTransport for CircuitBreakerTransport<T> {
                 .state
                 .lock()
                 .map_err(|_| SimardError::StoragePoisoned {
-                    store: "bridge-circuit".to_string(),
+                    store: "rpc-circuit".to_string(),
                 })?;
             if !self.should_allow_call(&mut state) {
                 return Err(SimardError::RpcCircuitOpen {
@@ -133,7 +133,7 @@ impl<T: RpcTransport> RpcTransport for CircuitBreakerTransport<T> {
                     .state
                     .lock()
                     .map_err(|_| SimardError::StoragePoisoned {
-                        store: "bridge-circuit".to_string(),
+                        store: "rpc-circuit".to_string(),
                     })?;
                 if is_transport_error {
                     self.record_failure(&mut state);

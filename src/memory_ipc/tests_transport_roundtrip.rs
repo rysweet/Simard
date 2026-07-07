@@ -797,7 +797,7 @@ fn malformed_request_frame_does_not_kill_the_server() {
 // ---------------------------------------------------------------------------
 // SharedMemory adapter: forwards the whole CognitiveMemoryOps surface to the
 // wrapped store. A missing forward is a silent-empty-read hazard (issue #2320 /
-// #2331) — the daemon (tier-0) and every tier-2 bridge read through this.
+// #2331) — the daemon (tier-0) and every tier-2 client read through this.
 // ---------------------------------------------------------------------------
 
 #[test]

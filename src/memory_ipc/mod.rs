@@ -1,4 +1,4 @@
-//! IPC bridge between clients (meeting, engineer, etc.) and the
+//! IPC transport between clients (meeting, engineer, etc.) and the
 //! OODA daemon's cognitive memory.
 //!
 //! The daemon holds an exclusive lock on the cognitive-memory store. To let

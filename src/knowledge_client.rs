@@ -1,4 +1,4 @@
-//! Knowledge Graph Pack bridge for querying agent-kgpacks from Simard.
+//! Knowledge Graph Pack knowledge for querying agent-kgpacks from Simard.
 //!
 //! This module wraps a [`RpcTransport`] to provide a typed interface for
 //! querying knowledge graph packs, listing available packs, and retrieving
@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::error::SimardResult;
 use crate::rpc::{RpcHealth, RpcRequest, RpcTransport, new_request_id, unpack_rpc_response};
 
-/// Name used in error messages for this bridge.
+/// Name used in error messages for this knowledge.
 const CLIENT_NAME: &str = "knowledge";
 
 /// Wire-protocol wrapper for `list_packs` response consistency.
@@ -56,17 +56,17 @@ pub struct KnowledgePackInfo {
     pub section_count: u32,
 }
 
-/// Typed client for the knowledge graph pack bridge.
+/// Typed client for the knowledge graph pack knowledge.
 ///
 /// All methods delegate to the underlying [`RpcTransport`] using the
-/// bridge JSON-line protocol. The native Rust transport maps these to
+/// knowledge JSON-line protocol. The native Rust transport maps these to
 /// pack registry and query operations.
 pub struct KnowledgeClient {
     transport: Box<dyn RpcTransport>,
 }
 
 impl KnowledgeClient {
-    /// Create a new knowledge bridge wrapping the given transport.
+    /// Create a new knowledge knowledge wrapping the given transport.
     pub fn new(transport: Box<dyn RpcTransport>) -> Self {
         Self { transport }
     }
@@ -107,7 +107,7 @@ impl KnowledgeClient {
         unpack_rpc_response(CLIENT_NAME, "knowledge.pack_info", response)
     }
 
-    /// Check whether the bridge server is alive and responsive.
+    /// Check whether the knowledge server is alive and responsive.
     pub fn health(&self) -> SimardResult<RpcHealth> {
         self.transport.health()
     }
@@ -209,8 +209,8 @@ mod tests {
 
     #[test]
     fn query_returns_typed_result() {
-        let bridge = KnowledgeClient::new(Box::new(mock_transport()));
-        let result = bridge
+        let knowledge = KnowledgeClient::new(Box::new(mock_transport()));
+        let result = knowledge
             .query("rust-expert", "What is ownership?", 5)
             .unwrap();
         assert!(result.answer.contains("ownership"));
@@ -221,8 +221,8 @@ mod tests {
 
     #[test]
     fn query_unknown_pack_returns_error() {
-        let bridge = KnowledgeClient::new(Box::new(mock_transport()));
-        let result = bridge.query("nonexistent", "anything", 5);
+        let knowledge = KnowledgeClient::new(Box::new(mock_transport()));
+        let result = knowledge.query("nonexistent", "anything", 5);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("not found"));
@@ -230,16 +230,16 @@ mod tests {
 
     #[test]
     fn query_empty_question_returns_low_confidence() {
-        let bridge = KnowledgeClient::new(Box::new(mock_transport()));
-        let result = bridge.query("rust-expert", "", 5).unwrap();
+        let knowledge = KnowledgeClient::new(Box::new(mock_transport()));
+        let result = knowledge.query("rust-expert", "", 5).unwrap();
         assert!(result.confidence < f64::EPSILON);
         assert!(result.sources.is_empty());
     }
 
     #[test]
     fn list_packs_returns_all() {
-        let bridge = KnowledgeClient::new(Box::new(mock_transport()));
-        let packs = bridge.list_packs().unwrap();
+        let knowledge = KnowledgeClient::new(Box::new(mock_transport()));
+        let packs = knowledge.list_packs().unwrap();
         assert_eq!(packs.len(), 2);
         assert_eq!(packs[0].name, "rust-expert");
         assert_eq!(packs[1].name, "python-expert");
@@ -247,23 +247,23 @@ mod tests {
 
     #[test]
     fn pack_info_returns_metadata() {
-        let bridge = KnowledgeClient::new(Box::new(mock_transport()));
-        let info = bridge.pack_info("rust-expert").unwrap();
+        let knowledge = KnowledgeClient::new(Box::new(mock_transport()));
+        let info = knowledge.pack_info("rust-expert").unwrap();
         assert_eq!(info.name, "rust-expert");
         assert_eq!(info.article_count, 120);
     }
 
     #[test]
     fn pack_info_unknown_returns_error() {
-        let bridge = KnowledgeClient::new(Box::new(mock_transport()));
-        let result = bridge.pack_info("nonexistent");
+        let knowledge = KnowledgeClient::new(Box::new(mock_transport()));
+        let result = knowledge.pack_info("nonexistent");
         assert!(result.is_err());
     }
 
     #[test]
     fn health_check_succeeds() {
-        let bridge = KnowledgeClient::new(Box::new(mock_transport()));
-        let health = bridge.health().unwrap();
+        let knowledge = KnowledgeClient::new(Box::new(mock_transport()));
+        let health = knowledge.health().unwrap();
         assert_eq!(health.server_name, "simard-knowledge");
         assert!(health.healthy);
     }

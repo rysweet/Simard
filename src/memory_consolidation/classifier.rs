@@ -339,18 +339,18 @@ pub fn global_intake_counters() -> &'static IntakeCounters {
 }
 
 /// Classify-then-store IO seam every intake site calls instead of
-/// `bridge.store_episode`.
+/// `memory.store_episode`.
 ///
 /// 1. [`classify`] the episode.
 /// 2. On [`IntakeDecision::Drop`]: bump the dropped counter, return `Ok(None)`
-///    — the bridge is never touched.
+///    — the memory is never touched.
 /// 3. On `Store` / `DownScope`: write the metadata JSON via `store_episode`,
 ///    bump the matching counter, and return `Ok(Some(episode_id))`.
 ///
 /// The returned id is the same id used downstream for
 /// `store_fact_with_provenance` / `store_procedure_with_provenance`.
 pub fn store_episode_classified(
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
     content: &str,
     source_label: &str,
     ctx: &IntakeContext,
@@ -361,7 +361,7 @@ pub fn store_episode_classified(
         None => Ok(None),
         Some(meta) => {
             let json = meta.to_json();
-            let id = bridge.store_episode(content, source_label, Some(&json))?;
+            let id = memory.store_episode(content, source_label, Some(&json))?;
             Ok(Some(id))
         }
     }
@@ -373,7 +373,7 @@ pub fn store_episode_classified(
 /// classifier would otherwise drop it as noise). A `Drop` decision is
 /// converted to a down-scoped store so the id always exists.
 pub fn store_episode_for_provenance(
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
     content: &str,
     source_label: &str,
     ctx: &IntakeContext,
@@ -388,5 +388,5 @@ pub fn store_episode_for_provenance(
         .metadata()
         .expect("non-Drop decision always carries metadata");
     let json = meta.to_json();
-    bridge.store_episode(content, source_label, Some(&json))
+    memory.store_episode(content, source_label, Some(&json))
 }

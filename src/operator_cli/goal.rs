@@ -172,9 +172,9 @@ pub(super) fn dispatch_goal_command(
 /// live board. Surfaces I/O / parse failures as `Err` so the CLI exits non-zero.
 fn load_board() -> Result<crate::goal_curation::GoalBoard, Box<dyn Error>> {
     let state_root = simard_state_root();
-    let bridge = launch_writer_client(&state_root)
-        .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
-    let persistent = crate::goal_board_store::load_or_migrate(&state_root, bridge.ops())
+    let memory = launch_writer_client(&state_root)
+        .map_err(|e| format!("failed to open cognitive memory writer memory: {e}"))?;
+    let persistent = crate::goal_board_store::load_or_migrate(&state_root, memory.ops())
         .map_err(|e| format!("failed to load authoritative goal store: {e}"))?;
     Ok(persistent.board)
 }
@@ -193,9 +193,9 @@ fn with_board<R>(
     f: impl FnOnce(&mut crate::goal_curation::GoalBoard) -> Result<R, Box<dyn Error>>,
 ) -> Result<R, Box<dyn Error>> {
     let state_root = simard_state_root();
-    let bridge = launch_writer_client(&state_root)
-        .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
-    crate::goal_board_store::load_or_migrate(&state_root, bridge.ops())
+    let memory = launch_writer_client(&state_root)
+        .map_err(|e| format!("failed to open cognitive memory writer memory: {e}"))?;
+    crate::goal_board_store::load_or_migrate(&state_root, memory.ops())
         .map_err(|e| format!("failed to load authoritative goal store: {e}"))?;
     let out = crate::goal_board_store::mutate(&state_root, move |s| {
         let snapshot = s.board.clone();
@@ -211,7 +211,7 @@ fn with_board<R>(
         format!("failed to persist authoritative goal store: {e}").into()
     })??;
     let committed = crate::goal_board_store::load(&state_root).board;
-    if let Err(e) = crate::goal_curation::overwrite_memory_cache(&committed, bridge.ops()) {
+    if let Err(e) = crate::goal_curation::overwrite_memory_cache(&committed, memory.ops()) {
         eprintln!("[simard] goal: warning: memory cache refresh failed: {e}");
     }
     Ok(out)
@@ -228,9 +228,9 @@ fn commit_board_blind(board: &crate::goal_curation::GoalBoard) -> Result<(), Box
         s.board = b;
     })
     .map_err(|e| format!("failed to persist goal board: {e}"))?;
-    let bridge = launch_writer_client(&state_root)
-        .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
-    if let Err(e) = crate::goal_curation::overwrite_memory_cache(board, bridge.ops()) {
+    let memory = launch_writer_client(&state_root)
+        .map_err(|e| format!("failed to open cognitive memory writer memory: {e}"))?;
+    if let Err(e) = crate::goal_curation::overwrite_memory_cache(board, memory.ops()) {
         eprintln!("[simard] goal: warning: memory cache refresh failed: {e}");
     }
     Ok(())
@@ -732,7 +732,7 @@ fn handle_remove(ids: &[String]) -> Result<(), Box<dyn Error>> {
 
 /// `simard goal decompose <goal-id> [--max-children <N>] [--dry-run]` — break a
 /// large active goal into 2-6 bounded sub-goals (issue #2405). Routes through
-/// the same cognitive-memory **writer bridge** as `goal add` / `goal remove`,
+/// the same cognitive-memory **writer memory** as `goal add` / `goal remove`,
 /// so the write is serialized by the daemon when one is running and takes the
 /// local writer lock otherwise. The parent->child `decomposes_into` edges are
 /// written into the graph (and are queryable back), then the mutated board is
@@ -767,11 +767,11 @@ fn handle_decompose(goal_id: &str, flags: &[String]) -> Result<(), Box<dyn Error
     }
 
     let state_root = simard_state_root();
-    let bridge = launch_writer_client(&state_root)
-        .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
-    let ops = bridge.ops();
+    let memory = launch_writer_client(&state_root)
+        .map_err(|e| format!("failed to open cognitive memory writer memory: {e}"))?;
+    let ops = memory.ops();
 
-    // Load from the authoritative store (issue #1); the memory bridge is still
+    // Load from the authoritative store (issue #1); the memory memory is still
     // used below for the durable graph-edge writes performed by decompose_goal.
     let mut board = load_board()?;
     let parent = board
@@ -1256,7 +1256,7 @@ mod tests {
         // `decompose` must be a recognized verb that requires a goal id —
         // NOT fall through to the `unsupported command` arm. Reaching the
         // missing-id error proves the verb is wired without touching the
-        // cognitive-memory writer bridge.
+        // cognitive-memory writer memory.
         let args = vec!["decompose".to_string()];
         let result = dispatch_goal_command(args.into_iter());
         assert!(result.is_err());

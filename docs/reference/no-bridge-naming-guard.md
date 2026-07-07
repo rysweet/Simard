@@ -8,13 +8,13 @@ description: >
   lowercase-word absence added by #2951), the exact component-boundary matching
   rule that flags a standalone `bridge` while ignoring `abridged`/`Cambridge`, the
   documented allowlist (the guard's own fixtures excluded by basename, plus the
-  small set of frozen wire / persisted / CLI string values), the planted
+  small set of frozen wire / CLI string values), the planted
   self-tests, how to run it, and how CI enforces it. Extends #2636; tracks #2951.
 last_updated: 2026-07-07
 review_schedule: as-needed
 owner: simard
 doc_type: reference
-status: proposed
+status: current
 related:
   - ../concepts/bridge-terminology-elimination.md
   - ../howto/fix-a-no-bridge-naming-guard-failure.md
@@ -25,12 +25,12 @@ related:
 
 # No-`bridge` naming guard reference
 
-> **Status: proposed (design spec).** This page is the target contract for
-> [`tests/no_bridge_naming.rs`](../../tests/no_bridge_naming.rs), the guard that
+> **Status: current.** This page is the contract for
+> `tests/no_bridge_naming.rs`, the guard that
 > makes the operator rule *"nothing we control may be named `bridge`"* executable.
 > The CamelCase and module-path checks already ship (issue #2636); the
 > **lowercase-word check and the frozen-string allowlist described here are the
-> #2951 addition** and are not yet implemented. The guard is an integration test
+> #2951 addition** and are now implemented. The guard is an integration test
 > auto-discovered by Cargo (no `[[test]]` entry needed) and runs under
 > `cargo test` and in CI. Narrative and rationale live in
 > [Eliminating "bridge" terminology](../concepts/bridge-terminology-elimination.md).
@@ -52,7 +52,7 @@ related:
 The guard scans `src/**/*.rs` and fails if it finds the word `bridge` — as a
 standalone component of a **name or operator-facing string**, in either case — in
 identifiers, comments, or string literals, *except* the small documented
-allowlist of frozen wire / persisted / CLI values. It also runs a structural
+allowlist of frozen wire / CLI values. It also runs a structural
 check that the misleadingly-named modules were renamed on disk. It is deliberately
 *shell-grep-shaped*: an operator running the equivalent `git grep` gets the same
 answer the test does.
@@ -65,7 +65,7 @@ The guard is three `#[test]` functions:
 |------|------|--------|------------|
 | `no_camelcase_bridge_naming_in_src` | content scan | #2636 (shipped) | any case-sensitive `Bridge` substring remains in `src/` (types/traits/variants, e.g. `RpcBridge`, `EnrichmentBridges`), outside the excluded files |
 | `misnamed_bridge_modules_are_renamed_on_disk` | path scan | #2636 (shipped) | a `*bridge*` module path still exists, or its accurate replacement path is missing |
-| `no_lowercase_bridge_word_in_src` | content scan | **#2951 (proposed)** | any lowercase/standalone `bridge` remains at a component boundary in `src/` — string literals, comments, snake_case identifiers — outside the allowlist |
+| `no_lowercase_bridge_word_in_src` | content scan | **#2951** | any lowercase/standalone `bridge` remains at a component boundary in `src/` — string literals, comments, snake_case identifiers — outside the allowlist |
 
 `no_lowercase_bridge_word_in_src` is the check added for #2951. The other two are
 already implemented and unchanged.
@@ -150,32 +150,39 @@ they are exempted by token — a line is exempt only for the listed occurrence; 
 
 | Allowed token | Where | Why unavoidable |
 |---------------|-------|-----------------|
-| `bridge.health` | `HEALTH_METHOD` const in `src/rpc.rs` + wire test fixtures | frozen **JSON-RPC method name** to the external `amplihack-memory-lib` server |
-| `bridge_timeout` | `PartialReason::as_wire_str()` in `src/meeting_backend/close_guard.rs` | serialized **wire value** for a meeting-close reason |
-| `load-bridge-context` | `SessionPhase` token in `src/engineer_loop/…` | **persisted / parsed** phase name; changing it breaks stored + in-flight sessions |
-| `--terminal-bridge-json` | CLI flag in `src/bin/simard_engineer_step.rs` | **command-line interface** other tooling invokes |
-| `cognitive-bridge` | runtime-port name + log tag in `src/memory_store_adapter/store.rs` | registered `runtime-port:…:cognitive-bridge` identifier |
-| `bridge::native::{}` / `bridge:native:{}` | telemetry descriptor in `src/rpc_transport/native.rs` | trace label consumed by external observability |
+| `bridge.health` | wire call site in `src/rpc.rs` + transports / test fixtures that answer it | frozen **JSON-RPC method name** to the external `amplihack-memory-lib` server |
+| `bridge_timeout` | `PartialReason::as_wire_str()` in `src/meeting_backend/close_guard.rs` | stable, machine-parseable **wire value** emitted to operator logs / scrapers |
+| `--terminal-bridge-json` | CLI flag in `src/bin/simard_engineer_step.rs` | **published command-line interface** other tooling invokes |
 
-For `bridge.health`, centralizing behind `HEALTH_METHOD` keeps production
-references to a single line; the value may still appear in test fixtures that
-match the wire method, which the same token-scoped allowance covers. See
-[RPC Wire Protocol](../reference/rpc-wire-protocol.md) for why wire/persisted
-values are frozen while Rust names are not.
+Internal identities we produce *and* consume — descriptor / runtime-port labels
+(`cognitive-bridge`, `bridge:subprocess:…`) and the persisted `load-bridge-context`
+phase name — are **not** frozen. They are renamed consistently on both the
+producing and consuming side, which preserves behavior, so they are *not* on the
+allowlist.
+
+For `bridge.health`, the literal appears at the single wire call site in
+`src/rpc.rs` and in the transports / test fixtures that answer the method; each
+occurrence is covered by the same per-token allowance. Centralizing it behind a
+single named constant (e.g. `HEALTH_METHOD`) is a reasonable optional follow-up.
+See [RPC Wire Protocol](../reference/rpc-wire-protocol.md) for why wire values are
+frozen while Rust names are not.
 
 ## Self-tests (planted fixtures)
 
 To prove the scanner is real (and not vacuously passing), the guard includes
 self-tests that run against in-test fixture strings, not the tree:
 
-- `boundary_rule_flags_standalone_bridge` — planted lines containing a lowercase
-  standalone `bridge` (and variants `bridges`, `memory_bridge`, `"reader bridge"`)
-  are flagged.
-- `boundary_rule_ignores_bridge_inside_words` — `abridged`, `unabridged`,
-  `Cambridge`, and `abridge` are **not** flagged.
-- `frozen_tokens_are_allowlisted` — a line whose only `bridge` is a frozen value
-  (e.g. `bridge.health`, `bridge_timeout`) is exempt, while the same line with an
-  *extra* `bridge` still flags.
+- `guard_classifier_flags_real_components` — planted lines containing a lowercase
+  standalone `bridge` (and variants `bridges`, `memory_bridge`, a `"…bridge…"`
+  string, `mod memory_bridge;`) are flagged.
+- `guard_classifier_ignores_embedded_stems` — `abridged`, `Cambridge`, and
+  `Bainbridge` are **not** flagged.
+- `guard_planted_lowercase_bridge_is_detected` — a planted straggler of each
+  shape (log string, `launch_enrichment_bridges`, a comment) fires the RED signal.
+- `guard_allowlists_only_documented_frozen_values` — a line whose only `bridge`
+  is a frozen value (`bridge.health`, `bridge_timeout`, `--terminal-bridge-json`)
+  is exempt, while the same line with an *extra* non-frozen `bridge` still flags,
+  and a `bridge.health()` call on a local `bridge` variable is still flagged.
 
 These fixtures live inside the test binary (temp strings / a temp dir), never in
 `src/`, so they require no allowlist entry of their own.
@@ -213,7 +220,7 @@ Illustrative of the intended output: each content test lists every straggler as
 Rename incomplete: 3 lowercase `bridge` word reference(s) remain in `src/`.
 The operator rule is absolute — nothing we control may be named `bridge`. Rename
 to the accurate RPC / client / reader / server / handoff vocabulary (see #2951).
-Frozen wire/persisted/CLI values are allowlisted, not renamed.
+Frozen wire/CLI values are allowlisted, not renamed.
 Stragglers:
 src/error/display.rs:225:                write!(f, "bridge '{bridge}' transport error: {reason}")
 src/error/mod.rs:205:        bridge: String,

@@ -8,9 +8,10 @@ description: >
   how an anti-regression guard (tests/no_bridge_naming.rs) keeps it from coming
   back. "Bridge" conveyed no meaning: renameable sites become the accurate RPC /
   client / reader / handoff vocabulary, so operator logs read
-  `rpc server 'memory-ipc' transport error: …` instead of
+  `rpc endpoint 'memory-ipc' transport error: …` instead of
   `bridge 'memory-ipc' transport error: …`. A small, explicit set of frozen wire /
-  persisted / CLI string values (starting with the JSON-RPC method `bridge.health`)
+  CLI string values (the JSON-RPC method `bridge.health`, the meeting-close wire
+  value `bridge_timeout`, and the published CLI flag `--terminal-bridge-json`)
   is NOT renamed — those are external contracts, and they are catalogued on the
   guard's documented allowlist. Extends #2636; tracks #2951.
 last_updated: 2026-07-07
@@ -44,8 +45,9 @@ related:
 
 > **Nothing we control may be named "bridge."** The word conveys no meaning — a
 > "bridge" between what and what, doing what? Every component that was called a
-> "bridge" is really an **RPC client**, a **transport**, a **reader**, a
-> **server**, or a **handoff**. Naming it accurately is the whole point.
+> "bridge" is really an **RPC client**, a **transport**, a **reader**, an
+> **endpoint** (the remote peer an RPC error names), or a **handoff**. Naming it
+> accurately is the whole point.
 
 The rule targets **names and operator-facing text** — the things we own and can
 change without breaking anything outside this repository:
@@ -91,7 +93,7 @@ substitute a synonym that still hides meaning (no "connector", "link", "conduit"
 | Role | Accurate term | Example |
 |------|---------------|---------|
 | Speaks the JSON-line RPC protocol to a server | **RPC / RPC client / transport** | `RpcTransport`, `NativeRpcTransport`, `rpc_transport/` |
-| The named remote endpoint an RPC client talks to | **server** (as seen in errors) | `rpc server 'memory-ipc'` |
+| The named remote peer an RPC client talks to | **endpoint** (as named in errors) | `rpc endpoint 'memory-ipc'` |
 | Reads recalled memory for enrichment | **memory recall reader** (a memory-ipc client) | `EnrichmentClients.memory` |
 | Reads knowledge packs for enrichment | **knowledge-pack reader** (a knowledge client) | `EnrichmentClients.knowledge` |
 | Talks to the cognitive-memory store | **memory client / store** | `memory_client/`, `memory_store_adapter/` |
@@ -100,8 +102,8 @@ substitute a synonym that still hides meaning (no "connector", "link", "conduit"
 
 Note the deliberate two-sided vocabulary: **our** components that call out are
 *clients* (`memory_client`, `knowledge_client`, `gym_client`, `EnrichmentClients`,
-`OodaClients`); the **remote peer** an error names is the *server*. An error means
-"our client could not talk to the named server."
+`OodaClients`); the **remote peer** an error names is the *endpoint*. An error means
+"our client could not talk to the named endpoint."
 
 ### Module & file renames (on disk — landed under #2636)
 
@@ -124,17 +126,17 @@ test — the old path must be gone and the accurate path must exist.
 ### Operator-facing strings (the #2951 work)
 
 The change operators feel most is the error family in `src/error/display.rs`.
-The `SimardError::Rpc*` variants carry a `server` field (renamed from `bridge`),
-and every `Display` string names an **rpc server** — the remote peer the RPC
+The `SimardError::Rpc*` variants carry an `endpoint` field (renamed from `bridge`),
+and every `Display` string names an **rpc endpoint** — the remote peer the RPC
 client failed to reach:
 
 | Before (printed) | After (printed) |
 |------------------|-----------------|
-| `bridge '{b}' failed to spawn: {reason}` | `rpc server '{server}' failed to spawn: {reason}` |
-| `bridge '{b}' transport error: {reason}` | `rpc server '{server}' transport error: {reason}` |
-| `bridge '{b}' protocol error: {reason}` | `rpc server '{server}' protocol error: {reason}` |
-| `bridge '{b}' call to '{m}' failed: {reason}` | `rpc server '{server}' call to '{m}' failed: {reason}` |
-| `bridge '{b}' circuit is open — …until the bridge recovers` | `rpc server '{server}' circuit is open — …until the server recovers` |
+| `bridge '{b}' failed to spawn: {reason}` | `rpc endpoint '{endpoint}' failed to spawn: {reason}` |
+| `bridge '{b}' transport error: {reason}` | `rpc endpoint '{endpoint}' transport error: {reason}` |
+| `bridge '{b}' protocol error: {reason}` | `rpc endpoint '{endpoint}' protocol error: {reason}` |
+| `bridge '{b}' call to '{m}' failed: {reason}` | `rpc endpoint '{endpoint}' call to '{m}' failed: {reason}` |
+| `bridge '{b}' circuit is open — …until the bridge recovers` | `rpc endpoint '{endpoint}' circuit is open — …until the endpoint recovers` |
 | `bridge error: {msg}` | `rpc error: {msg}` |
 
 `Display` output is operator-facing text, not a wire or on-disk contract, so
@@ -142,36 +144,39 @@ renaming it is safe and behavior-preserving. The log line the issue was filed
 against now reads:
 
 ```
-[simard] memory-ipc: connection error: rpc server 'memory-ipc' transport error: write-len: Broken pipe
+[simard] memory-ipc: connection error: rpc endpoint 'memory-ipc' transport error: write-len: Broken pipe
 ```
 
 Other renameable sites include snake_case identifiers such as
 `launch_enrichment_bridges` → `launch_enrichment_clients`, the transport's
-internal `bridge_name` field → `server_name`, and the many `bridges:` parameters
+internal `bridge_name` field → `endpoint_name`, the runtime-port / descriptor
+identity strings (`memory::cognitive-bridge` → `memory::cognitive-memory`,
+`bridge:subprocess:…` → `rpc:subprocess:…`), and the many `bridges:` parameters
 that carry an `OodaClients` / `EnrichmentClients` value.
 
 ## The frozen strings (NOT renamed)
 
-Some lowercase `bridge` strings are **values other systems depend on**. Renaming
-them is *not* behavior-preserving — it is a compatibility break — so #2951 does
-**not** touch them. Each is documented and placed on the guard's allowlist. This
-is the boundary between the rename (names, which mean nothing to other systems)
-and the wire / on-disk / CLI (values, which other systems depend on).
+Some lowercase `bridge` strings are **values a system OUTSIDE this repo depends
+on**. Renaming them is *not* behavior-preserving — it is a compatibility break —
+so #2951 does **not** touch them. Each is documented and placed on the guard's
+allowlist. This is the boundary between the rename (names, which mean nothing to
+other systems) and the external wire / CLI (values, which other systems depend
+on). Internal identities we produce *and* consume (descriptor labels like
+`cognitive-bridge`, the persisted `load-bridge-context` phase name) are **not**
+frozen — they are renamed consistently on both sides, which preserves behavior.
 
 | Frozen value | Where | Why it is frozen |
 |--------------|-------|------------------|
 | `bridge.health` | JSON-RPC method on the wire (`src/rpc.rs`, transports, clients) | protocol method name the external `amplihack-memory-lib` server understands; renaming breaks interop |
-| `bridge_timeout` | `PartialReason::as_wire_str()` (`src/meeting_backend/close_guard.rs`) | serialized **wire value** for a meeting-close reason |
-| `load-bridge-context` | `SessionPhase` token (`src/engineer_loop/…`) | **persisted / parsed** phase name; changing it breaks stored + in-flight sessions |
-| `--terminal-bridge-json` | CLI flag (`src/bin/simard_engineer_step.rs`) | **command-line interface** other tooling invokes |
-| `cognitive-bridge` | runtime-port name + log tag (`src/memory_store_adapter/store.rs`) | registered `runtime-port:…:cognitive-bridge` identifier |
-| `bridge::native::{}` / `bridge:native:{}` | transport telemetry descriptor (`src/rpc_transport/native.rs`) | trace label consumed by external observability |
+| `bridge_timeout` | `PartialReason::as_wire_str()` (`src/meeting_backend/close_guard.rs`) | stable, machine-parseable **wire value** emitted to operator logs / scrapers |
+| `--terminal-bridge-json` | CLI flag (`src/bin/simard_engineer_step.rs`) | **published command-line interface** other tooling invokes |
 
-For `bridge.health` specifically, the design **centralizes the value behind a
-single `HEALTH_METHOD` constant in `src/rpc.rs`** so production code references it
-in one place; the literal may still appear in test fixtures that match the wire
-method, and those are covered by the same token-scoped allowlist. The other frozen
-values already live at a single producing site each.
+The literal `bridge.health` appears at the wire call site in `src/rpc.rs` and in
+the transports / test fixtures that answer the method; each occurrence is exempt
+by the guard's per-token allowlist. (Centralizing it behind a single
+`HEALTH_METHOD` constant is a reasonable optional follow-up, but not required for
+correctness.) The other two frozen values already live at a single producing site
+each.
 
 If a future change needs to rename one of these, it must ship a real migration
 story (versioned tokens, a CLI alias, a coordinated server release) — that is

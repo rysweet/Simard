@@ -2,7 +2,7 @@
 //!
 //! A sibling of `self-test`. Reports the five self-deploy health probes
 //! (version, memory, goal board, brains LLM-backed, no quarantine) against the
-//! live store, opened through the canonical reader bridge (daemon socket when
+//! live store, opened through the canonical reader memory (daemon socket when
 //! up, else a direct on-disk open). Exit code 0 when every probe is healthy,
 //! non-zero otherwise. The self-deploy orchestrator runs the same probe
 //! internally; this is the operator-facing entry point.

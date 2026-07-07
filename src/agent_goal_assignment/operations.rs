@@ -7,13 +7,13 @@ use super::types::SubordinateProgress;
 use super::{DIRECTIVE_CONFIDENCE, GOAL_CONCEPT, PROGRESS_CONCEPT};
 use super::{goal_source_id, progress_source_id, sub_tag};
 
-/// Assign a goal to a subordinate by writing a semantic fact via the bridge.
+/// Assign a goal to a subordinate by writing a semantic fact via the memory.
 ///
 /// The supervisor calls this to tell a subordinate what to work on. The fact
 /// is stored with concept `goal-assignment` and tagged with the subordinate's
 /// ID for retrieval.
-pub fn assign_goal(sub_id: &str, goal: &str, bridge: &dyn CognitiveMemoryOps) -> SimardResult<()> {
-    bridge.store_fact(
+pub fn assign_goal(sub_id: &str, goal: &str, memory: &dyn CognitiveMemoryOps) -> SimardResult<()> {
+    memory.store_fact(
         GOAL_CONCEPT,
         goal,
         DIRECTIVE_CONFIDENCE,
@@ -30,9 +30,9 @@ pub fn assign_goal(sub_id: &str, goal: &str, bridge: &dyn CognitiveMemoryOps) ->
 /// (e.g. re-assignment), returns the most recently stored one.
 pub fn read_assigned_goal(
     my_id: &str,
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
 ) -> SimardResult<Option<String>> {
-    let facts = bridge.search_facts(&sub_tag(my_id), 10, 0.0)?;
+    let facts = memory.search_facts(&sub_tag(my_id), 10, 0.0)?;
 
     let goal = facts
         .into_iter()
@@ -49,7 +49,7 @@ pub fn read_assigned_goal(
 pub fn report_progress(
     sub_id: &str,
     progress: &SubordinateProgress,
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
     let content =
         serde_json::to_string(progress).map_err(|e| crate::error::SimardError::RpcCallFailed {
@@ -58,7 +58,7 @@ pub fn report_progress(
             reason: format!("failed to serialize progress: {e}"),
         })?;
 
-    bridge.store_fact(
+    memory.store_fact(
         PROGRESS_CONCEPT,
         &content,
         DIRECTIVE_CONFIDENCE,
@@ -74,9 +74,9 @@ pub fn report_progress(
 /// `None` if no progress has been reported yet.
 pub fn poll_progress(
     sub_id: &str,
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
 ) -> SimardResult<Option<SubordinateProgress>> {
-    let facts = bridge.search_facts(&sub_tag(sub_id), 10, 0.0)?;
+    let facts = memory.search_facts(&sub_tag(sub_id), 10, 0.0)?;
 
     let fact = facts
         .into_iter()
@@ -104,7 +104,7 @@ mod tests {
     use crate::rpc::RpcErrorPayload;
     use crate::rpc_transport::InMemoryRpcTransport;
 
-    fn mock_bridge_store_ok() -> CognitiveMemoryClient {
+    fn mock_memory_store_ok() -> CognitiveMemoryClient {
         let transport = InMemoryRpcTransport::new("test-ops", |method, _params| match method {
             "memory.store_fact" => Ok(serde_json::json!({"id": "fact_1"})),
             "memory.search_facts" => Ok(serde_json::json!({"facts": []})),
@@ -116,7 +116,7 @@ mod tests {
         CognitiveMemoryClient::new(Box::new(transport))
     }
 
-    fn mock_bridge_store_fail() -> CognitiveMemoryClient {
+    fn mock_memory_store_fail() -> CognitiveMemoryClient {
         let transport = InMemoryRpcTransport::new("test-fail", |_method, _params| {
             Err(RpcErrorPayload {
                 code: -1,
@@ -130,22 +130,22 @@ mod tests {
 
     #[test]
     fn assign_goal_empty_goal_string() {
-        let bridge = mock_bridge_store_ok();
-        let result = assign_goal("agent-x", "", &bridge);
+        let memory = mock_memory_store_ok();
+        let result = assign_goal("agent-x", "", &memory);
         assert!(result.is_ok());
     }
 
     #[test]
     fn assign_goal_empty_sub_id() {
-        let bridge = mock_bridge_store_ok();
-        let result = assign_goal("", "some goal", &bridge);
+        let memory = mock_memory_store_ok();
+        let result = assign_goal("", "some goal", &memory);
         assert!(result.is_ok());
     }
 
     #[test]
-    fn assign_goal_bridge_failure_propagates() {
-        let bridge = mock_bridge_store_fail();
-        let result = assign_goal("agent-1", "goal", &bridge);
+    fn assign_goal_memory_failure_propagates() {
+        let memory = mock_memory_store_fail();
+        let result = assign_goal("agent-1", "goal", &memory);
         assert!(result.is_err());
     }
 
@@ -153,15 +153,15 @@ mod tests {
 
     #[test]
     fn read_assigned_goal_empty_id() {
-        let bridge = mock_bridge_store_ok();
-        let result = read_assigned_goal("", &bridge).unwrap();
+        let memory = mock_memory_store_ok();
+        let result = read_assigned_goal("", &memory).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
-    fn read_assigned_goal_bridge_failure_propagates() {
-        let bridge = mock_bridge_store_fail();
-        let result = read_assigned_goal("agent-1", &bridge);
+    fn read_assigned_goal_memory_failure_propagates() {
+        let memory = mock_memory_store_fail();
+        let result = read_assigned_goal("agent-1", &memory);
         assert!(result.is_err());
     }
 
@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn report_progress_serializes_correctly() {
-        let bridge = mock_bridge_store_ok();
+        let memory = mock_memory_store_ok();
         let progress = SubordinateProgress {
             sub_id: "a".to_string(),
             phase: "planning".to_string(),
@@ -182,13 +182,13 @@ mod tests {
             prs_produced: 0,
             exit_status: None,
         };
-        let result = report_progress("a", &progress, &bridge);
+        let result = report_progress("a", &progress, &memory);
         assert!(result.is_ok());
     }
 
     #[test]
-    fn report_progress_bridge_failure_propagates() {
-        let bridge = mock_bridge_store_fail();
+    fn report_progress_memory_failure_propagates() {
+        let memory = mock_memory_store_fail();
         let progress = SubordinateProgress {
             sub_id: "a".to_string(),
             phase: "p".to_string(),
@@ -201,7 +201,7 @@ mod tests {
             prs_produced: 0,
             exit_status: None,
         };
-        let result = report_progress("a", &progress, &bridge);
+        let result = report_progress("a", &progress, &memory);
         assert!(result.is_err());
     }
 
@@ -209,15 +209,15 @@ mod tests {
 
     #[test]
     fn poll_progress_empty_id() {
-        let bridge = mock_bridge_store_ok();
-        let result = poll_progress("", &bridge).unwrap();
+        let memory = mock_memory_store_ok();
+        let result = poll_progress("", &memory).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
-    fn poll_progress_bridge_failure_propagates() {
-        let bridge = mock_bridge_store_fail();
-        let result = poll_progress("agent-1", &bridge);
+    fn poll_progress_memory_failure_propagates() {
+        let memory = mock_memory_store_fail();
+        let result = poll_progress("agent-1", &memory);
         assert!(result.is_err());
     }
 }

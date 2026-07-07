@@ -117,7 +117,7 @@ impl EngineerHandoffContext {
             return Err(SimardError::InvalidHandoffSnapshot {
                 field: "session".to_string(),
                 reason: format!(
-                    "{consumer_label} requires {handoff_file_name} to contain a persisted session snapshot before terminal continuity can be bridged"
+                    "{consumer_label} requires {handoff_file_name} to contain a persisted session snapshot before terminal continuity can be handed off"
                 ),
             });
         }

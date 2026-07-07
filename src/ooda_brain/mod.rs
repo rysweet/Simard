@@ -611,7 +611,7 @@ pub struct IdeaCluster {
 // ---------------------------------------------------------------------------
 
 /// Single-decision-site trait. Sync on purpose: the act-phase dispatcher is
-/// sync, and the LLM-backed impl bridges to async internally so callers do
+/// sync, and the LLM-backed impl adapts to async internally so callers do
 /// not see a runtime requirement.
 pub trait OodaBrain: Send + Sync {
     fn decide_engineer_lifecycle(

@@ -371,8 +371,8 @@ mod tests {
                     "wip_refs": []
                 },
                 {
-                    "id": "goal-refactor-bridge",
-                    "description": "Refactor bridge layer",
+                    "id": "goal-refactor-memory",
+                    "description": "Refactor memory layer",
                     "priority": 2,
                     "status": {"Blocked": "Waiting on lbug 0.16 release"}
                 }

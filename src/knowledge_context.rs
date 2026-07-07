@@ -33,18 +33,18 @@ impl PlanningContext {
 /// Enrich the planning phase by querying relevant knowledge packs.
 ///
 /// The function:
-/// 1. Lists available packs from the bridge.
+/// 1. Lists available packs from the knowledge.
 /// 2. Scores each pack by keyword overlap with the objective.
 /// 3. Queries the top [`MAX_PACKS_PER_OBJECTIVE`] packs.
 /// 4. Returns the aggregated results as a [`PlanningContext`].
 ///
-/// If the bridge is unavailable or no packs match, an empty context is returned
+/// If the knowledge is unavailable or no packs match, an empty context is returned
 /// rather than hiding errors — knowledge enrichment failures propagate per PHILOSOPHY.md.
 pub fn enrich_planning_context(
     objective: &str,
-    bridge: &KnowledgeClient,
+    knowledge: &KnowledgeClient,
 ) -> SimardResult<PlanningContext> {
-    let packs = bridge.list_packs()?;
+    let packs = knowledge.list_packs()?;
 
     if packs.is_empty() {
         return Ok(PlanningContext {
@@ -67,7 +67,7 @@ pub fn enrich_planning_context(
     let mut pack_sources = Vec::new();
 
     for (_score, pack) in &scored {
-        match bridge.query(&pack.name, objective, DEFAULT_QUERY_LIMIT) {
+        match knowledge.query(&pack.name, objective, DEFAULT_QUERY_LIMIT) {
             Ok(result) if result.confidence > 0.0 => {
                 pack_sources.push(pack.name.clone());
                 relevant_knowledge.push(result);
@@ -165,33 +165,33 @@ mod tests {
         InMemoryRpcTransport::new("knowledge-fail", |method, _params| {
             Err(RpcErrorPayload {
                 code: -32603,
-                message: format!("bridge down: {method}"),
+                message: format!("knowledge down: {method}"),
             })
         })
     }
 
     #[test]
     fn enrich_picks_relevant_packs() {
-        let bridge = KnowledgeClient::new(Box::new(mock_transport()));
-        let ctx = enrich_planning_context("Fix Rust ownership bug", &bridge).unwrap();
+        let knowledge = KnowledgeClient::new(Box::new(mock_transport()));
+        let ctx = enrich_planning_context("Fix Rust ownership bug", &knowledge).unwrap();
         assert!(ctx.pack_sources.contains(&"rust-expert".to_string()));
         assert!(!ctx.relevant_knowledge.is_empty());
     }
 
     #[test]
-    fn enrich_returns_error_when_bridge_unavailable() {
-        let bridge = KnowledgeClient::new(Box::new(failing_transport()));
-        let result = enrich_planning_context("anything", &bridge);
+    fn enrich_returns_error_when_knowledge_unavailable() {
+        let knowledge = KnowledgeClient::new(Box::new(failing_transport()));
+        let result = enrich_planning_context("anything", &knowledge);
         assert!(
             result.is_err(),
-            "should propagate bridge error, not silently degrade"
+            "should propagate knowledge error, not silently degrade"
         );
     }
 
     #[test]
     fn enrich_returns_empty_for_unrelated_objective() {
-        let bridge = KnowledgeClient::new(Box::new(mock_transport()));
-        let ctx = enrich_planning_context("xyzzy plugh", &bridge).unwrap();
+        let knowledge = KnowledgeClient::new(Box::new(mock_transport()));
+        let ctx = enrich_planning_context("xyzzy plugh", &knowledge).unwrap();
         assert!(ctx.is_empty());
     }
 
@@ -231,10 +231,10 @@ mod tests {
     #[test]
     fn max_packs_capped() {
         // Even with many matching packs, we cap at MAX_PACKS_PER_OBJECTIVE.
-        let bridge = KnowledgeClient::new(Box::new(mock_transport()));
+        let knowledge = KnowledgeClient::new(Box::new(mock_transport()));
         let ctx = enrich_planning_context(
             "Rust Python Docker containers programming language",
-            &bridge,
+            &knowledge,
         )
         .unwrap();
         assert!(ctx.pack_sources.len() <= MAX_PACKS_PER_OBJECTIVE);

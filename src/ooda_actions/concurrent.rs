@@ -3,7 +3,7 @@
 //! The Act phase plans up to `cap = scaler.current_max()` `AdvanceGoal`
 //! actions per OODA round (one per uncovered incomplete goal). Before this
 //! module, every `AdvanceGoal` dispatch serialized on a single global
-//! `bridges`+`state` `Mutex` held across the slow goal-action LLM `run_turn`
+//! `memories`+`state` `Mutex` held across the slow goal-action LLM `run_turn`
 //! (~30-90s) — so only ~1 engineer started per round even when the plan was
 //! parallel.
 //!
@@ -123,26 +123,26 @@ struct AdvanceCtx<'a> {
 pub(super) fn dispatch_advance_concurrent(
     actions: &[PlannedAction],
     indices: &[usize],
-    bridges: &mut OodaClients,
+    memories: &mut OodaClients,
     state: &mut OodaState,
     max_concurrency: usize,
     results: &mut [Option<ActionOutcome>],
 ) {
-    // Decompose the `Send + Sync` bridge pieces (everything AdvanceGoal needs
+    // Decompose the `Send + Sync` memory pieces (everything AdvanceGoal needs
     // except the single non-`Sync` session). Disjoint field borrows.
-    let memory: &dyn CognitiveMemoryOps = &*bridges.memory;
-    let checker: &dyn ProgressEvidenceChecker = &*bridges.progress_evidence;
-    let brain: &dyn OodaBrain = &*bridges.brain;
+    let memory: &dyn CognitiveMemoryOps = &*memories.memory;
+    let checker: &dyn ProgressEvidenceChecker = &*memories.progress_evidence;
+    let brain: &dyn OodaBrain = &*memories.brain;
     let session_factory: Option<&dyn OrchestratorSessionFactory> =
-        bridges.session_factory.as_deref();
+        memories.session_factory.as_deref();
     // Daemon repo root for the resource-admission reclaim path (issue #2706).
-    let repo_root: &Path = &bridges.repo_root;
+    let repo_root: &Path = &memories.repo_root;
 
     // Take ownership of the shared fallback session for the duration of the
     // round so the per-thread context can lend it out by `Box` (avoids tying a
     // `&mut` into the ctx struct). Restored afterwards so daemon shutdown can
     // still close it.
-    let shared_session = Mutex::new(bridges.session.take());
+    let shared_session = Mutex::new(memories.session.take());
 
     let state_mx = Mutex::new(&mut *state);
     let claims = Mutex::new(HashSet::new());
@@ -188,7 +188,7 @@ pub(super) fn dispatch_advance_concurrent(
     });
 
     // Restore the shared session so the daemon can close it on shutdown.
-    bridges.session = shared_session
+    memories.session = shared_session
         .into_inner()
         .unwrap_or_else(|p| p.into_inner());
 }
