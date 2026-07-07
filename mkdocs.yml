@@ -140,6 +140,7 @@ nav:
     - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md
     - Read Simard's Daily Journal: tutorials/read-simards-daily-journal.md
   - How-To Guides:
+    - Run the LOCAL COIN Gym Harness: howto/run-the-coin-gym-harness.md
     - Terminal to Engineer: howto/move-from-terminal-recipes-into-engineer-runs.md
     - Use the Agent-Orchestration Engineer Loop: howto/use-agent-orchestration-engineer-loop.md
     - Bootstrap and Reflection: howto/configure-bootstrap-and-inspect-reflection.md
