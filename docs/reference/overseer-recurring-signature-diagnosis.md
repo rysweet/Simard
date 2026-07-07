@@ -30,7 +30,11 @@ description: >
   tests at HEAD `0196c4f6` (H1: `tests_memory_recall` 36 passed/0 failed + the four hypothesis
   tests 4/4 in isolation + verbatim source anchors; H2: live #16/#18/#21/#22 CLOSED +
   terminal-park/no-reconciliation path; H3: #17 OPEN with a live-timestamp staleness proof) —
-  all three re-confirmed, 10-issue Simard tail unchanged, zero drift (§7m).
+  all three re-confirmed, 10-issue Simard tail unchanged, zero drift (§7m). Round-11
+  re-anchored **all** signature-token emission points in `src/overseer/` at HEAD `85245e87` —
+  the six cognitive-memory-channel anchors re-resolved verbatim plus a two-channel enumeration
+  proving the byte-similar Act-phase `workstream-gap` strings and recall-query keys sit outside
+  the self-amplifying composite (§7p); 36/36 + 4/4 tests green, live board unchanged, zero drift.
 last_updated: 2026-07-07
 review_schedule: as-needed
 owner: simard
@@ -1323,11 +1327,87 @@ by the live-timestamp staleness proof. Every anchor resolves at HEAD `1e394dc6` 
 drift**; live state is **unchanged** (fifth consecutive identical board read across rounds 8→11).
 No finding changed; overall confidence remains **High**.
 
+### 7p. Round-11 primary-investigator deep dive — full signature-token emission-point re-anchoring at HEAD `85245e87` (all channels enumerated)
+
+This pass owns the assigned focus — **re-anchor _all_ signature-token emission points in
+`src/overseer/`** — and is anchored at HEAD `85245e87` (the round-10 consolidation commit named
+in §7n). It parallels §7o's practical-verification track the way §7l paralleled §7m: §7o
+re-runs the hypothesis tests, this dive re-resolves the emission map. Every line below was
+**independently re-resolved by reading the file at this HEAD**, not inherited from §7f/§7j/§7l.
+`git diff --name-only ca20e29b..85245e87 -- src/overseer/` returns **nothing** (all commits
+since `ca20e29b` are docs-only), so every Rust anchor is byte-identical to §7l's — re-verified
+line-by-line here. `cargo test --lib overseer::tests_memory_recall` → **36 passed, 0 failed**;
+`…::tests_memory_recall::h` → **4 passed, 0 failed**.
+
+**A. Cognitive-memory channel — the tokens that enter the self-amplifying recalled composite.**
+Every token in the recalled key is a `classify_signal` `dedup_key` (`mod.rs:1251`) assembled by
+`observation_signature` (`mod.rs:1081`, prefix fmt `:1085`) from problems built out of the
+`Signal`s that `signals_from` (`signal.rs:366`) pushes. Anchors cite the exact `out.push(…)` /
+`format!(…)` emission line, re-resolved at `85245e87`:
+
+| Token | `Signal` variant — emission `out.push` (`signal.rs`) | `dedup_key` (`mod.rs`) | Root input (provenance) |
+|---|---|---|---|
+| `overseer-obs:` prefix | — (assembler, not a signal): `observation_signature` fn `:1081`, prefix `format!("overseer-obs:{}", …)` `:1085`, called on the write-back path `record_observation` `:544`→`:552` | — | self write-back re-wrap (§4) |
+| `goal:blocked:{id}` (×7) | `GoalBlocked` push `:441` (loop `:440`) | `format!("goal:blocked:{goal_id}")` `:1349` | `blocked_goals_from_board` `sensor.rs:204` → `blocked_goal_of` `:209` |
+| `quality:gym_skipped` | `GymSkipped` push `:399` (gate `:398`) | `"quality:gym_skipped"` `:1295` | `gym_skipped` OR-fold `sensor.rs:125-126` ← `SIMARD_SKIP_GYM` |
+| `resource:engineer_spawn` | `EngineerSpawnRate` push `:396` (gate `:393-394`) | `"resource:engineer_spawn"` `:1283` | `live_engineers` `capabilities.rs:81` |
+| `workstream-gap` | `WorkstreamGap` push `:476` (gate `:475`) | `"workstream-gap"` `:1384` | `detect_workstream_gaps` `sensor.rs:288`; blocked goals excluded `:300` |
+| recalled composite (**the `2×` driver**) | `RecurringSignature` push `:464` (per-`failure_signature` tally `:456-460`; threshold gate `:463` = `RECURRING_SIGNATURE_THRESHOLD` `:362` = `2`) | `sanitize_recalled(signature)` `:1372` — the whole prior key; summary `:1373-1375` | unfiltered self-recall `recall_episodic` `wiring.rs:1013`; the `.map` **drops `source_label`** `:1024-1030` (`failure_signature` set `:1025`); `RecalledEpisode` has **no `source_label`** field `capabilities.rs:607-616`; own write-back tagged `OVERSEER_SOURCE_LABEL` `wiring.rs:952`, stored `:1088` |
+
+All six re-resolve **verbatim** at `85245e87` — identical to §7l-A/§7n's canonical anchors, zero
+drift. `observer.rs` still emits **no** token (grep for `goal:blocked`/`overseer-obs`/the four
+`dedup_key` literals / `out.push(Signal` → **no match**): it is a Decide-phase consumer only.
+
+**B. Act-phase gap channel — byte-similar `workstream-gap` strings that are NOT in the recalled
+composite (new, disambiguating re-anchoring).** A naive grep for `workstream-gap` in
+`src/overseer/` returns five *more* hit-sites beyond the `mod.rs:1384` `dedup_key` above. This
+dive confirms they belong to a **separate Act-phase notify/dedup channel** that never reaches
+`observation_signature`, so they are correctly **excluded** from the table in A and **cannot** be
+the recurrence amplifier:
+
+| String literal | Site | Role | In recalled composite? |
+|---|---|---|---|
+| `format!("workstream-gap:{}", g.signature)` | `mod.rs:904` (peek) & `:945` (commit) | per-gap `gap_gate` **dedup key** for the consolidated operator notification | **No** — gates notification/filing, never written to episodic memory |
+| `failed_step: "workstream-gap-scan"` | `mod.rs:939` | `OrchestratorRunBrief` label on the **filed stewardship issue** | **No** — GitHub issue field, not a `dedup_key` |
+| `kind: "workstream-gap"` | `notify.rs:204` (`OperatorNotification::workstream_gap`), rendered `notify.rs:98` (`plain_text`) | notification **render/type tag** | **No** — email/Signal body only |
+
+Only `classify_signal`'s `dedup_key`s flow into `observation_signature` (`mod.rs:544`) →
+episodic write-back (`wiring.rs:1088`) → self-recall (`wiring.rs:1013`); the Act-phase strings
+above flow into `gap_gate`/`notifier`/`issues` instead. This resolves a latent ambiguity the
+prior token→source maps left open ("are the `mod.rs:904/939/945` `workstream-gap` strings part of
+the loop?" → **No**): the single loop-bearing `workstream-gap` token is the `mod.rs:1384`
+`dedup_key`, exactly as §7l-A/§7n state.
+
+**C. Recall-query keywords are input builders, not emitted tokens (re-anchored).** `signal_keyword`
+(`capabilities.rs:556`) maps `EngineerSpawnRate → "engineer_spawn"` (`:562`) and
+`GymSkipped → "gym_skipped"` (`:564`). These feed the recall **query** (`RecallKeys`), i.e. they
+are read-side keys used to *fetch* prior episodes — not write-side `dedup_key`s and not part of
+any emitted composite. Included here for completeness so the full inventory of `src/overseer/`
+`gym_skipped`/`engineer_spawn` occurrences is accounted for.
+
+**D. Deterministic composite ordering re-confirmed.** `observation_signature` sorts + dedups the
+keys (`mod.rs:1082-1084`) before the `overseer-obs:` prefix (`:1085`); with the live token set the
+lexical order is `goal:blocked:* < quality:gym_skipped < resource:engineer_spawn < workstream-gap`
+(`g<q<r<w`), matching the observed composite and §7j-B's ordering proof. The `RecurringSignature`
+`dedup_key` is the *entire* prior composite (`sanitize_recalled(signature)`, `mod.rs:1372`), so on
+the next tick it survives `keys.dedup()` (`:1084`) alongside the short fresh tokens and the whole
+string re-prefixes — the nesting mechanism, unchanged.
+
+**Verification footer.** HEAD `85245e87`; `cargo test --lib overseer::tests_memory_recall` →
+**36 passed, 0 failed**; `…::h` → **4 passed, 0 failed**; every A/B/C anchor re-resolved verbatim
+by reading the file at this HEAD (zero source drift since `ca20e29b`, `git diff` name-only empty);
+live GitHub re-read (kgpacks-rs **#16 CLOSED** 07-06T20:16:25Z / **#18 CLOSED** 10:33:04Z /
+**#21 CLOSED** 13:29:03Z / **#22 CLOSED** 12:07:33Z / **#17 OPEN** `updatedAt` 07-02T23:22:49Z;
+`rysweet/Simard` tail **exactly 10 open** — #2669/#2672/#2678/#2691/#2744/#2750/#2757/#2768/#2841/#2875,
+no 11th; **#2707** open). No prior finding overturned — §7p is strictly additive: it re-anchors the
+full emission inventory at `85245e87` and adds the **two-channel** enumeration (A vs. B) proving the
+byte-similar Act-phase `workstream-gap` strings are outside the self-amplifying loop. Confidence **High**.
+
 ---
 
 ## 8. Provenance
 
-Investigation-only follow-up (investigation-workflow, rounds 1–10). No production
+Investigation-only follow-up (investigation-workflow, rounds 1–11). No production
 behavior was changed by this document. Round-1 established the structural cause
 ([`overseer-memory-recall-api`](./overseer-memory-recall-api.md)); round-2 added the
 semantic diagnosis and the executable H1/H2 tests; round-3 consolidated the parallel
@@ -1404,6 +1484,14 @@ and H3 via #17 OPEN with a live-timestamp staleness proof (`updatedAt` 07-02T23:
 `closedAt` 07-06T20:16:25Z) — all three re-confirmed, verified every commit since `85245e87` is
 docs-only (zero source drift), 10-issue Simard tail unchanged (#2707 open, no 11th),
 `rysweet/amplihack-xpia-defender` re-confirmed a live public repo, confidence remains High.
+A round-11 primary-investigator deep dive (§7p, HEAD `85245e87`) re-anchored **all** signature-token
+emission points in `src/overseer/` — independently re-resolving the six cognitive-memory-channel
+anchors (`signal.rs:362/393-399/440-476`, `mod.rs:1081-1085/1283/1295/1349/1372-1375/1384`,
+`sensor.rs:125-126/204/209/288/300`, `capabilities.rs:81/607-616`, `wiring.rs:952/1013-1030/1088`)
+verbatim, and adding a **two-channel** enumeration that proves the byte-similar Act-phase
+`workstream-gap` strings (`mod.rs:904/939/945`, `notify.rs:98/204`) and the `signal_keyword` recall
+keys (`capabilities.rs:562/564`) are outside the self-amplifying recalled composite (36/36 module +
+4/4 hypothesis tests green; live board unchanged) — no finding overturned, confidence remains High.
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
