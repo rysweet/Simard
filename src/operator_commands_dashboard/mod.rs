@@ -97,7 +97,7 @@ use crate::goal_curation::{
     BoardPlacement, GoalBoard, load_goal_board, record_as_active_goal, save_goal_board,
     save_goal_board_with_removals,
 };
-use crate::goals::{CognitiveMemoryGoalStore, GoalStore, goal_slug};
+use crate::goals::{goal_slug, list_via_ops};
 use crate::memory_ipc::{launch_writer_client, open_reader_client};
 
 /// Read the cognitive-memory `goal-board:snapshot` for the dashboard.
@@ -148,15 +148,17 @@ pub(crate) fn dashboard_save_goal_board_with_removals(
 /// Proposed goal, a meeting goal, an unblocked goal, …) appears immediately
 /// instead of lagging up to a ~5-min snapshot cycle.
 ///
-/// Two live sources, deduped by slug with the **base winning**:
-/// - **Base** — [`dashboard_goal_board_snapshot`], the operator read-your-writes
-///   snapshot board carrying the daemon-OODA active/backlog goals with their
-///   rich fields (`current_activity`, `wip_refs`, `repo`, …).
-/// - **Overlay** — [`CognitiveMemoryGoalStore::list`], the same shared live
-///   store the creative-ideas / meeting / runtime / seed writers `put` into. A
-///   record whose slug is already on the base board is dropped (the base carries
-///   the richer, authoritative fields); only records *absent* from the base are
-///   mapped in via [`record_as_active_goal`].
+/// Two live sources — both read off a SINGLE shared reader bridge (issue #2922
+/// perf) and deduped by slug with the **base winning**:
+/// - **Base** — [`load_goal_board`], the operator read-your-writes snapshot
+///   board (identical to [`dashboard_goal_board_snapshot`]) carrying the
+///   daemon-OODA active/backlog goals with their rich fields (`current_activity`,
+///   `wip_refs`, `repo`, …).
+/// - **Overlay** — [`list_via_ops`] over the same reader, the shared live
+///   goal-store the creative-ideas / meeting / runtime / seed writers `put`
+///   into. A record whose slug is already on the base board is dropped (the base
+///   carries the richer, authoritative fields); only records *absent* from the
+///   base are mapped in via [`record_as_active_goal`].
 ///
 /// **Fail-closed** (issues #2922 / #2896): either leg failing — the snapshot
 /// base read or the overlay `list()` — propagates as `Err`. There is no fallback
@@ -164,8 +166,19 @@ pub(crate) fn dashboard_save_goal_board_with_removals(
 /// empty board; the caller surfaces the error rather than serving silently-stale
 /// or partial data.
 pub(crate) fn dashboard_live_goal_board(state_root: &Path) -> SimardResult<GoalBoard> {
+    // Issue #2922 perf: open the reader bridge ONCE and serve BOTH live legs
+    // (the snapshot base and the goal-store overlay) from the same handle. Both
+    // legs already resolve to the same `state_root` reader, so a single open is
+    // behaviorally identical — but in the standalone-dashboard tier each open is
+    // a fresh Unix-socket connect plus a synchronous Ping/Pong handshake, so
+    // collapsing two opens into one removes a full round-trip from every Goals /
+    // Memory poll. Fail-closed: a reader-open or transport fault on either leg
+    // still propagates as `Err`, never a stale or partial board.
+    let reader = open_reader_client(state_root)?;
+    let ops = reader.ops();
+
     // Base: authoritative snapshot board. Fail-closed — never unwrap_or_default.
-    let mut board = dashboard_goal_board_snapshot(state_root)?;
+    let mut board = load_goal_board(ops)?;
 
     // Index the base by slug so the overlay dedup is O(overlay). Slugs are
     // derived with `goal_slug` (the SAME function the forward adapter uses),
@@ -179,9 +192,9 @@ pub(crate) fn dashboard_live_goal_board(state_root: &Path) -> SimardResult<GoalB
         .chain(board.backlog.iter().map(|b| goal_slug(&b.id)))
         .collect();
 
-    // Overlay: LIVE goal-store records. `list()` is fail-closed (#2896); a
-    // reader-open or `search_facts` transport fault propagates as `Err`.
-    let overlay = CognitiveMemoryGoalStore::new(state_root.to_path_buf())?.list()?;
+    // Overlay: LIVE goal-store records off the SAME reader handle. The read is
+    // fail-closed (#2896); a `search_facts` transport fault propagates as `Err`.
+    let overlay = list_via_ops(ops)?;
     for record in overlay {
         if seen.contains(&record.slug) {
             continue;
