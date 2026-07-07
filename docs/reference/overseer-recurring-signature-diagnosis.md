@@ -92,6 +92,18 @@ description: >
   the pass) while the deduped verbatim tail holds at 10 and the malformed query re-reproduced 0-vs-25
   rows — confirming remediation (P6/P1/P2), not verification, is the residual work. No finding
   overturned, confidence High.
+  Round-23 (§7af, HEAD `e3bc8944`) re-anchored **all** signature-token emission points to `file:line` at
+  the current HEAD by reading the source directly (not inheriting §7l/§7u): the six IN-LOOP composite
+  anchors (`mod.rs:1085/1283/1295/1349/1372/1384`, pushes `signal.rs:396/399/441/464/476`, threshold
+  `signal.rs:362`=2), the two OUT-OF-LOOP look-alikes (Act-phase whisper `mod.rs:904/945`; recall keywords
+  `capabilities.rs:562/564/572`), the sibling reblock channel (`mod.rs:1646`, gate `root_cause.rs:33`,
+  malformed query `gh_client.rs:37` vs `dedup.rs:79`), and the P1/P6 seams (`wiring.rs:1024`,
+  `memory_cognitive.rs:50`, `capabilities.rs:607-616`) all re-resolved **verbatim** at thirteenth-consecutive
+  zero source drift (`git diff 85245e87..HEAD -- src/` empty), with `tests_memory_recall` 36/0 + `sensor`
+  9/0 + four hypothesis tests 4/0 green. The one net change: **corrected** the round-20/21/22 composite-recall
+  citation from `mod.rs:1374` to **`mod.rs:1372`** — `:1372` is the `sanitize_recalled(signature)` `dedup_key`
+  (the re-entry token); `:1374` is the summary-body line in the same arm — a 2-line prose drift, not a source
+  change. No finding overturned, confidence High.
 last_updated: 2026-07-07
 review_schedule: as-needed
 owner: simard
@@ -2891,6 +2903,82 @@ standing stale-park driver (**P2**). The residual value is **entirely in executi
 ongoing cost is now quantified at ~3 new dead issues per overseer cycle (irregular ~27–51 min) until P6
 lands. Recommendation (unchanged and now maximally supported): **mark this investigation resolved and hand
 P6 → P1 → P2 to the builder queue; do not schedule a round-23 verification pass.**
+
+---
+
+### 7af. Round-23 primary-investigator deep dive — every signature-token emission point re-anchored to file:line at current HEAD `e3bc8944` (one 2-line citation drift corrected; source still byte-identical)
+
+This pass owns the assigned focus verbatim — **re-anchor _all_ signature-token emission points to
+`file:line` at the current HEAD** — anchored at `e3bc8944` (the round-22/§7ae consolidation commit).
+Unlike the round-8/§7l and round-15/§7u maps (anchored at `ca20e29b`/`38c39d5f`), every line below was
+**independently re-resolved by reading the source at this HEAD**, not inherited. `git diff --name-only
+85245e87..HEAD -- src/` is **empty** (16 commits, all docs/config; `85245e87` is an ancestor of HEAD),
+so the tree is **byte-identical** to the §7l/§7u anchor base — the Jul-7 file mtimes are checkout
+artifacts, not content changes. Practical evidence at this HEAD: `overseer::tests_memory_recall`
+**36 passed / 0 failed**, `overseer::sensor` **9 passed / 0 failed**, and the four hypothesis tests
+(`h1_confirm`/`h1_refute`/`h2_confirm`/`h2_refute`) **4 passed / 0 failed**. Strictly additive; no prior
+finding overturned.
+
+**A. The complete emission map, re-anchored at `e3bc8944` (assigned focus).** The recalled composite
+decomposes into exactly the six IN-LOOP `dedup_key` families below; each maps to **one** authoritative
+literal-emitting line in `classify_signal`/`observation_signature` (`src/overseer/mod.rs`), fed by one
+`out.push(Signal::…)` in `signals_from` (`src/overseer/signal.rs`). All re-resolved verbatim:
+
+| # | Signature token | `Signal` push (`signal.rs`) | Authoritative `dedup_key`/wrapper emission @ `e3bc8944` | Root input (provenance) |
+|---|---|---|---|---|
+| 1 | `overseer-obs:` (composite wrapper) | — (assembler, not a signal) | **`mod.rs:1085`** `format!("overseer-obs:{}", keys.join("\|"))` (fn `1081`–`1086`) | self write-back re-wrap |
+| 2 | `goal:blocked:{id}` (×7) | push **`signal.rs:441`** | **`mod.rs:1349`** `format!("goal:blocked:{goal_id}")` | `blocked_goal_of` `sensor.rs:209/215` |
+| 3 | `quality:gym_skipped` | push **`signal.rs:399`** (gate `:398`) | **`mod.rs:1295`** `"quality:gym_skipped".to_string()` | `gym_skipped` OR-fold `sensor.rs:125-126` |
+| 4 | `resource:engineer_spawn` | push **`signal.rs:396`** (gate `:394`, const `ENGINEER_SPAWN_THRESHOLD` `:351`=8) | **`mod.rs:1283`** `"resource:engineer_spawn".to_string()` | `live_engineers` |
+| 5 | `workstream-gap` | push **`signal.rs:476`** | **`mod.rs:1384`** `"workstream-gap".to_string()` | `detect_workstream_gaps` |
+| 6 | recalled composite (the `2×` re-entry driver) | push **`signal.rs:464`** (tally `:462`, threshold gate `:463` = `RECURRING_SIGNATURE_THRESHOLD` **`signal.rs:362`**=2) | **`mod.rs:1372`** `sanitize_recalled(signature)` (the `Signal::RecurringSignature` arm `1366`–`1376`) | unfiltered self-recall `wiring.rs:1024` (drops `source_label`); `RecalledEpisode` `capabilities.rs:607-616` has **no** `source_label` field; own write-back tagged `OVERSEER_SOURCE_LABEL` `wiring.rs:952`, stored `wiring.rs:1088` |
+
+**B. Correction — the composite-recall anchor is `mod.rs:1372`, not `mod.rs:1374`.** The round-8/§7l
+and round-15/§7u maps correctly pinned the `RecurringSignature` `dedup_key` to `sanitize_recalled(signature)`
+at **`mod.rs:1372`**. The round-20/§7ac, round-21/§7ad and round-22/§7ae consolidation prose instead
+list `mod.rs:1374` among the "canonical composite anchors." Reading the arm verbatim at this HEAD:
+`mod.rs:1372` is `sanitize_recalled(signature),` (the third tuple element — the **`dedup_key`**, i.e. the
+token that re-enters memory), whereas `mod.rs:1373-1375` is the *summary-body* `sanitize_recalled(&format!(
+"recurring signature seen {occurrences}× in cognitive memory ({signature})"))` (the fourth tuple element —
+the human-readable text). Both sit inside the same `Signal::RecurringSignature` arm (`1366`–`1376`) and both
+call `sanitize_recalled`, so this is a **2-line transcription drift in the prose, not a source change** (the
+tree is byte-identical since `85245e87`). The load-bearing anchor for "the composite as its own token" is
+**`mod.rs:1372`**; `:1374` is the summary line. Corrected here; §7l/§7u stand unchanged.
+
+**C. Two OUT-OF-LOOP look-alikes re-confirmed (same bare words, different function — do NOT anchor the
+signature tokens here).**
+- **D — Act-phase whisper key ≠ the bare `workstream-gap` token.** `format!("workstream-gap:{}",
+  g.signature)` at **`mod.rs:904`** and **`mod.rs:945`** is the per-gap `WhisperGate` operator-notification
+  rate-limit key inside `act_flag_workstream_gaps`; it never enters `observation_signature`. The signature
+  token is the **bare** `workstream-gap` at `mod.rs:1384` (row 5).
+- **E — recall-query keywords ≠ the prefixed `dedup_key` tokens.** `signal_keyword` returns the bare stems
+  `"engineer_spawn"` (**`capabilities.rs:562`**) and `"gym_skipped"` (**`capabilities.rs:564`**), and the
+  recurring-signature recall key `signature.clone()` (**`capabilities.rs:572`**). These feed
+  `RecallKeys::query` (recall matching, e.g. `library_adapter.rs:1296`), **not** the `resource:`/`quality:`-
+  prefixed `dedup_key`s emitted by `classify_signal` (`mod.rs:1283/1295`). Same stem, disjoint role.
+
+**D. Sibling escalation channel (not in the composite, re-anchored for completeness).** The
+`recurring_goal_reblock` stewardship failure is authored at **`mod.rs:1646`** (`failure_kind:
+"recurring_goal_reblock"`), gated on `RECURRENCE_ESCALATION_THRESHOLD` = 3 at **`root_cause.rs:33`**. Its
+present-but-broken dedup key is the malformed **`stewardship/gh_client.rs:37`** query
+`format!("stewardship-signature:{signature} in:body")` (colon, **no space** → parsed as an unknown GitHub
+qualifier → 0 rows) versus the correct-form comparison at **`stewardship/dedup.rs:79`**
+`format!("stewardship-signature: {signature}")` (colon **+ space**) — the P6 defect, unchanged.
+
+**E. Remediation seams re-anchored.** **P1** (provenance filter) acts at **`wiring.rs:1024`** — the
+`.map(|e| RecalledEpisode { failure_signature, id, summary, score })` projection that **omits**
+`source_label`; the field is present upstream on `CognitiveEpisode.source_label` at **`memory_cognitive.rs:50`**
+and dropped at this projection, so the one-line fix is `.filter(|e| e.source_label != OVERSEER_SOURCE_LABEL)`
+after plumbing the field through `RecalledEpisode` (`capabilities.rs:607-616`). **P6** acts at
+**`gh_client.rs:37`**. Both seams re-resolve verbatim at this HEAD.
+
+**Verification footer.** HEAD `e3bc8944`; `git diff --name-only 85245e87..HEAD -- src/` **empty**
+(thirteenth consecutive round of zero source drift; every §7l/§7u/§7ac anchor re-resolved verbatim by
+reading the source at this HEAD). `overseer::tests_memory_recall` **36/0**, `overseer::sensor` **9/0**,
+four hypothesis tests **4/0**. **No prior finding overturned**; the only net change is the §B correction of
+the composite-recall citation from `mod.rs:1374` → **`mod.rs:1372`** (prose drift, not source). The
+re-anchoring re-confirms the close-and-execute verdict: residual value is execution (P6 → P1 → P2), not
+verification. Confidence **High**.
 
 ---
 
