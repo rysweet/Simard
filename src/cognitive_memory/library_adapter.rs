@@ -1155,6 +1155,29 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
             .collect())
     }
 
+    fn list_prospective_by_trigger(
+        &self,
+        trigger: &str,
+        limit: u32,
+    ) -> SimardResult<Vec<CognitiveProspective>> {
+        // Issue #122: trigger-scoped enumeration of prospective memories, all
+        // statuses, priority-ordered. Routes through the library's
+        // `get_prospective_by_trigger`, which pushes the `trigger_condition`
+        // equality filter into the node query so the `limit` bounds only
+        // matching nodes — unlike `get_all_prospective`, whose window is
+        // applied across every trigger. This is what keeps the creative-ideas
+        // dashboard complete in a large store. **Fail-closed**: the library
+        // returns a `Result`, so a genuine backend read error is propagated
+        // (mapped onto `RpcCallFailed`), never masked as an empty `Ok`.
+        Ok(self
+            .lock()?
+            .get_prospective_by_trigger(trigger, limit as usize)
+            .map_err(|e| map_op_err("list_prospective_by_trigger", e))?
+            .into_iter()
+            .map(to_prospective)
+            .collect())
+    }
+
     fn mark_episode_distilled(&self, node_id: &str) -> SimardResult<()> {
         // De-fork Phase 2b (issue #2307): the library now exposes a persistent,
         // one-way distilled latch. Delegate to it. The library returns `false`

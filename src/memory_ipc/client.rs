@@ -360,6 +360,20 @@ impl CognitiveMemoryOps for RemoteCognitiveMemory {
         }
     }
 
+    fn list_prospective_by_trigger(
+        &self,
+        trigger: &str,
+        limit: u32,
+    ) -> SimardResult<Vec<CognitiveProspective>> {
+        match self.call(MemoryRequest::ListProspectiveByTrigger {
+            trigger: trigger.into(),
+            limit,
+        })? {
+            MemoryResponse::Prospectives(v) => Ok(v),
+            other => Err(Self::unexpected("list_prospective_by_trigger", other)),
+        }
+    }
+
     fn search_episodes_by_keywords(
         &self,
         keywords: &[String],

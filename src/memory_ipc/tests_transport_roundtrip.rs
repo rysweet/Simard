@@ -446,6 +446,56 @@ fn prospective_store_trigger_and_resolve_over_socket() {
         .expect("resolve_prospective over socket must be acknowledged");
 }
 
+/// The #122 dashboard fix must work over the Unix-socket transport too: the
+/// dashboard reads through the IPC client (tier-1), so
+/// `list_prospective_by_trigger` has to round-trip end-to-end (client request →
+/// server dispatch → backend trigger-scoped query) rather than silently fall
+/// back to the empty trait default (the exact silent-empty-read hazard that
+/// left the dashboard showing 0 ideas).
+#[test]
+fn list_prospective_by_trigger_round_trips_over_socket() {
+    let fx = in_memory_fixture();
+
+    // A non-matching decoy under a different trigger — must NOT come back,
+    // proving the trigger filter is applied server-side, not on the client.
+    let decoy = fx
+        .client
+        .store_prospective("decoy", "unrelated-trigger", "{}", 9)
+        .expect("store decoy over socket");
+
+    // A handful of matching nodes under the creative-idea trigger.
+    let mut matching = Vec::new();
+    for i in 0i64..5 {
+        matching.push(
+            fx.client
+                .store_prospective(&format!("creative {i}"), "creative-idea", "{}", i)
+                .expect("store matching over socket"),
+        );
+    }
+
+    let got: Vec<CognitiveProspective> = fx
+        .client
+        .list_prospective_by_trigger("creative-idea", 512)
+        .expect("list_prospective_by_trigger over socket");
+
+    for id in &matching {
+        assert!(
+            got.iter().any(|p| &p.node_id == id),
+            "matching prospective {id} must round-trip back over the socket, not \
+             be dropped to the empty default"
+        );
+    }
+    assert!(
+        !got.iter().any(|p| p.node_id == decoy),
+        "the decoy under a different trigger must be filtered server-side"
+    );
+    assert_eq!(
+        got.len(),
+        matching.len(),
+        "exactly the trigger-matching nodes cross the wire"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Error paths.
 // ---------------------------------------------------------------------------
@@ -977,4 +1027,38 @@ fn shared_memory_forwards_the_whole_ops_surface_to_the_inner_store() {
 
     // checkpoint forwards (durability flush) without error.
     shared.checkpoint().expect("checkpoint must forward");
+}
+
+/// Tier-0 (in-process) path: the daemon's own dashboard reader goes through
+/// [`SharedMemory`], so it must forward `list_prospective_by_trigger` to the
+/// inner store rather than returning the empty trait default — the same
+/// silent-empty-read hazard (#2320 / #2331) that a missing forward would
+/// reintroduce, now on the #122 creative-ideas read path.
+#[test]
+fn shared_memory_forwards_list_prospective_by_trigger() {
+    use super::SharedMemory;
+
+    let inner: Arc<dyn CognitiveMemoryOps> =
+        Arc::new(LibraryCognitiveMemory::in_memory().expect("in-memory store"));
+    let shared = SharedMemory(Arc::clone(&inner));
+
+    let decoy = shared
+        .store_prospective("decoy", "unrelated-trigger", "{}", 1)
+        .expect("store decoy");
+    let target = shared
+        .store_prospective("idea", "creative-idea", "{}", 7)
+        .expect("store target");
+
+    let got = shared
+        .list_prospective_by_trigger("creative-idea", 512)
+        .expect("list_prospective_by_trigger must forward");
+
+    assert!(
+        got.iter().any(|p| p.node_id == target),
+        "SharedMemory must forward list_prospective_by_trigger to the inner store"
+    );
+    assert!(
+        !got.iter().any(|p| p.node_id == decoy),
+        "the forwarded call must preserve the inner store's trigger filtering"
+    );
 }

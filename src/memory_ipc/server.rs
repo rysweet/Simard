@@ -298,6 +298,12 @@ fn dispatch(memory: &dyn CognitiveMemoryOps, req: MemoryRequest) -> MemoryRespon
                 Err(e) => MemoryResponse::Error(e.to_string()),
             }
         }
+        MemoryRequest::ListProspectiveByTrigger { trigger, limit } => {
+            match memory.list_prospective_by_trigger(&trigger, limit) {
+                Ok(v) => MemoryResponse::Prospectives(v),
+                Err(e) => MemoryResponse::Error(e.to_string()),
+            }
+        }
         MemoryRequest::SearchEpisodesByKeywords { keywords, limit } => {
             match memory.search_episodes_by_keywords(&keywords, limit) {
                 Ok(v) => MemoryResponse::Episodes(v),

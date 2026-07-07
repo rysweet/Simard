@@ -21,6 +21,7 @@ related:
   - ../design/creative-ideas-thread.md
   - ../howto/configure-creative-ideas-thread.md
   - ./creative-ideas-durable-read-after-write.md
+  - ./creative-ideas-trigger-scoped-read.md
   - ./cognitive-thread-scheduling.md
   - ./goal-board-api.md
   - ./stewardship-api.md
@@ -283,12 +284,20 @@ pub trait CreativeIdeaStore {
 pub struct ProspectiveCreativeIdeaStore<'a> { /* mem: &'a dyn CognitiveMemoryOps */ }
 ```
 
-`store`/`update` call `store_prospective`; `list` calls `list_all_prospective`,
-keeps rows whose `trigger_condition == CREATIVE_IDEA_TRIGGER`, and deserializes
-the payload; `get` filters `list` by `node_id`. Tests use an in-memory
-`FakeCreativeIdeaStore` **and** a round-trip test through a fake
-`CognitiveMemoryOps` that asserts `trigger_condition == "creative-idea"` and
-payload fidelity (`links`, `context`, `success_metric`).
+`store`/`update` call `store_prospective`; `list` calls
+`list_prospective_by_trigger(CREATIVE_IDEA_TRIGGER, limit)` — a trigger-scoped,
+priority-ordered read whose `limit` bounds only creative-idea nodes — then keeps
+rows whose `trigger_condition == CREATIVE_IDEA_TRIGGER` (a cheap fail-closed
+guard) and deserializes the payload; `get` filters `list` by `node_id`. Before
+issue #122 `list` used the unfiltered `list_all_prospective` + post-filter, so on
+a live store the fixed read window filled with unrelated prospective memories and
+the idea nodes were truncated away — see
+[Creative Ideas trigger-scoped read](./creative-ideas-trigger-scoped-read.md).
+Tests use an in-memory `FakeCreativeIdeaStore` **and** a round-trip test through a
+fake `CognitiveMemoryOps` that asserts `trigger_condition == "creative-idea"` and
+payload fidelity (`links`, `context`, `success_metric`), plus a `>512`-node
+regression test that proves the pool survives a store full of unrelated
+prospectives.
 
 ## The generator thread
 
@@ -729,6 +738,7 @@ for the full list of assertions.
 - [Creative Ideas background thread — design](../design/creative-ideas-thread.md)
 - [Configure and operate the Creative Ideas thread](../howto/configure-creative-ideas-thread.md)
 - [Creative Ideas durable read-after-write](./creative-ideas-durable-read-after-write.md) — the persistence/read seam that keeps the dashboard tab non-empty and durable across restart (#2798)
+- [Creative Ideas trigger-scoped read](./creative-ideas-trigger-scoped-read.md) — the trigger-scoped, priority-ordered read that keeps the pool visible on a live store full of unrelated prospectives (#122)
 - [Cognitive-thread scheduling](./cognitive-thread-scheduling.md)
 - [Add a new cognitive thread](../howto/add-a-new-cognitive-thread.md)
 - [Goal board API](./goal-board-api.md) · [Stewardship API](./stewardship-api.md)
