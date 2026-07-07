@@ -71,6 +71,8 @@ simard
 |- act-on-decisions
 |- spawn <agent-name> <goal> <worktree-path>
 |- handover [--canary-dir=PATH]
+|- disk-reclaim [--apply] [--report-json] [--target-pct=N]
+|  `- exec --candidates <json|@file|@-> [--apply] [--report-json]
 |- update
 `- install
 ```
@@ -448,6 +450,43 @@ source repo. See
 [run self-deploy from any directory](../howto/run-self-deploy-from-any-directory.md),
 [self-deploy source-prep](self-deploy-source-prep.md), and
 [verify and roll back a self-deploy](../howto/verify-and-roll-back-a-self-deploy.md).
+
+## Disk reclamation command
+
+### `simard disk-reclaim [--apply] [--report-json] [--target-pct=N]`
+
+Run the agentic disk-reclamation capability: an analysis-only agent proposes
+reclaimable candidates (worktrees mapped to merged/closed PRs, orphaned
+de-registered dirs, stale build caches) and a deterministic Rust executor
+disposes of them behind non-bypassable safety rails, largest-first, until the
+home partition is under the target `%-used`.
+
+**Dry-run is the default** — with no flags it performs the full analysis and
+guard vetting but makes **zero** destructive changes, printing a would-remove
+report plus the human-review list. `--apply` performs the guarded reclamation;
+`--report-json` emits the `ReclaimReport` as JSON; `--target-pct=N` overrides
+`SIMARD_DISK_RECLAIM_PCT` for the run (clamped `1..=99`).
+
+Safety rails (deterministic, cannot be bypassed by the agent): never removes
+`worktrees/main` or a daemon `WorkingDirectory`, a path referenced by a live
+PID, a worktree with uncommitted/unpushed work not in a merged/closed PR, or an
+active recipe/engineer worktree. Anything a rail refuses is reported for human
+review, never deleted. `--apply` is refused when `geteuid() == 0`. No `--admin`
+/ `--no-verify` is ever passed to git.
+
+Exit codes: `0` success / already under threshold; `1` failure; `2` refused
+(e.g. `--apply` as root).
+
+### `simard disk-reclaim exec --candidates <json|@file|@-> [--apply] [--report-json]`
+
+The Rust-gated executor entry point that the `disk-reclaim.yaml` recipe calls
+internally, also usable directly. Reads a candidate list (inline JSON, `@file`,
+or `@-` for stdin) and feeds it to the guarded executor. **Every path is
+re-validated through the protected-path guard** regardless of what the JSON
+claims — a hand-edited candidate list cannot make it delete a protected path.
+
+See [Configure disk reclamation](../howto/configure-disk-reclamation.md) and the
+[Disk reclaim API reference](disk-reclaim-api.md).
 
 ## Compatibility mapping
 

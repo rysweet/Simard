@@ -56,6 +56,7 @@ pub mod cost_tracking;
 pub mod creative_ideas;
 pub mod disk_health;
 pub mod disk_pressure;
+pub mod disk_reclaim;
 pub mod engineer_loop;
 pub mod engineer_worktree;
 pub mod error;

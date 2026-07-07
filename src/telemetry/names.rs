@@ -86,6 +86,20 @@ pub const GOAL_COMPLETED: &str = "simard.goal.completed";
 /// Aggregate progress signal 0–100 (gauge).
 pub const GOAL_PROGRESS: &str = "simard.goal.progress";
 
+// ── Disk reclaim — simard.disk.reclaim.* ────────────────────────────────────
+
+/// Bytes actually reclaimed this run (counter). `0` on a dry-run / no-op.
+pub const DISK_RECLAIM_BYTES_FREED: &str = "simard.disk.reclaim.bytes_freed";
+/// Paths actually removed this run (counter), tagged by [`ATTR_KIND`].
+pub const DISK_RECLAIM_PATHS_REMOVED: &str = "simard.disk.reclaim.paths_removed";
+/// Candidates a hard rail refused (counter), tagged by [`ATTR_REASON`]. Every
+/// increment is a path that was **not** deleted (the human-review list).
+pub const DISK_RECLAIM_CANDIDATES_SKIPPED: &str = "simard.disk.reclaim.candidates_skipped";
+/// Home-partition `%-used` measured at the start of the run (gauge, 0–100).
+pub const DISK_RECLAIM_USED_PCT_BEFORE: &str = "simard.disk.reclaim.used_pct_before";
+/// Home-partition `%-used` after the run (gauge, 0–100).
+pub const DISK_RECLAIM_USED_PCT_AFTER: &str = "simard.disk.reclaim.used_pct_after";
+
 // ── Attribute keys ──────────────────────────────────────────────────────────
 
 /// Attribute key: outcome/result discriminator (`ok`/`parse_fail`, parse
@@ -101,6 +115,13 @@ pub const ATTR_TYPE: &str = "type";
 pub const ATTR_DIR: &str = "dir";
 /// Attribute key: token cache status.
 pub const ATTR_CACHED: &str = "cached";
+/// Attribute key: disk-reclaim run source (`daemon` \| `cli`).
+pub const ATTR_SOURCE: &str = "source";
+/// Attribute key: reclamation candidate kind (`tracked_worktree` \|
+/// `orphan_dir` \| `stale_build_cache`).
+pub const ATTR_KIND: &str = "kind";
+/// Attribute key: reclamation reject reason (mirrors `RejectReason`).
+pub const ATTR_REASON: &str = "reason";
 
 /// Sentinel bucket an out-of-catalog attribute value is folded into.
 pub const OTHER_BUCKET: &str = "other";

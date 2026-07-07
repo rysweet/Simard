@@ -9,6 +9,8 @@ related:
   - ../index.md
   - ../tutorials/run-your-first-local-session.md
   - ../reference/runtime-contracts.md
+  - ../howto/configure-disk-reclamation.md
+  - ../concepts/agentic-disk-reclamation.md
 ---
 
 # How to reclaim disk space and run low-space Rust builds
@@ -113,8 +115,11 @@ Whole-worktree cleanup still needs a judgment call about:
 
 Use `git worktree list --porcelain`, `git status --porcelain`, and branch/merge checks before removing whole worktrees.
 
-For automated per-cycle cleanup of stale worktrees and build artifacts, see
-[Configure the disk health check](./configure-disk-health-check.md).
+For automated, self-healing cleanup of stale worktrees and build artifacts —
+with hard safety rails that never delete `worktrees/main`, a daemon working
+directory, a live-PID path, or a worktree with unpushed work — see
+[Configure disk reclamation](./configure-disk-reclamation.md). It supersedes the
+older per-cycle [disk health check](./configure-disk-health-check.md).
 
 ## Suggested operating pattern
 

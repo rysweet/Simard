@@ -135,6 +135,7 @@ nav:
     - Goal Stewardship Mode: concepts/stewardship-mode.md
     - The Simard Whisperer: concepts/simard-whisperer.md
     - Automated Disk-Health Management: concepts/automated-disk-health.md
+    - Agentic Disk Reclamation: concepts/agentic-disk-reclamation.md
     - Update-Check Design: concepts/update-check-design.md
     - The amplihack Freshness Gate: concepts/amplihack-freshness-gate.md
     - The Simard Journal: concepts/simard-journal.md
@@ -207,6 +208,7 @@ nav:
     - Configure the Simard Whisperer: howto/configure-the-simard-whisperer.md
     - Configure the Monthly Self-Quality-Audit: howto/configure-self-quality-audit.md
     - Configure the Disk-Health Check: howto/configure-disk-health-check.md
+    - Configure Disk Reclamation: howto/configure-disk-reclamation.md
     - Reclaim Disk Space (Low-Space Rust Builds): howto/reclaim-disk-space-and-run-low-space-rust-builds.md
     - Fix CI Linker OOM: howto/fix-ci-linker-oom.md
     - Triage Stale Pull Requests: howto/triage-stale-pull-requests.md
@@ -359,6 +361,8 @@ nav:
     - Brain Introspection API: reference/brain-introspection-api.md
     - Self-Quality-Audit API: reference/self-quality-audit-api.md
     - Disk-Health API: reference/disk-health-api.md
+    - Disk Reclaim API: reference/disk-reclaim-api.md
+    - Disk Reclaim Telemetry: reference/disk-reclaim-telemetry.md
     - Dashboard E2E Tests: reference/dashboard-e2e-tests.md
     - Dashboard Action-Detail Humanization: reference/dashboard-action-detail-humanization.md
     - Dashboard Goal Lifecycle-Status Badges: reference/dashboard-goal-lifecycle-status.md
