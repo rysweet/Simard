@@ -335,7 +335,11 @@ pub(crate) const PART_01: &str = r#"
         }catch(e){ setRunStatus('Run failed — check /api/creative-ideas/run','err'); }
         finally{ if(btn) btn.disabled=false; }
       }
-      async function transitionIdea(action,ideaId){
+      async function transitionIdea(action,ideaId,btn){
+        /* Disable the clicked control while in flight (same pattern as Run now)
+           so a rapid double-click can't fire a duplicate transition — the second
+           would hit an already-applied edge and surface a spurious error. */
+        if(btn) btn.disabled=true;
         setRunStatus((action==='promote'?'Promoting':'Pruning')+' idea…','loading');
         try{
           const d=await apiFetch('/api/creative-ideas/'+encodeURIComponent(ideaId)+'/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
@@ -348,6 +352,7 @@ pub(crate) const PART_01: &str = r#"
             await loadCreativeIdeas();
           }
         }catch(e){ setRunStatus(action+' failed — check /api/creative-ideas','err'); }
+        finally{ if(btn) btn.disabled=false; }
       }
       window.loadCreativeIdeas=loadCreativeIdeas;
       window.searchCreativeIdeas=searchCreativeIdeas;
@@ -364,7 +369,7 @@ pub(crate) const PART_01: &str = r#"
         const b=e.target.closest('.ci-act');
         if(!b) return;
         const act=b.getAttribute('data-act'), id=b.getAttribute('data-id');
-        if(act&&id) transitionIdea(act,id);
+        if(act&&id) transitionIdea(act,id,b);
       });
     })();
   </script>
