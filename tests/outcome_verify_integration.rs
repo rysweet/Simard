@@ -202,6 +202,7 @@ fn candidate_goal(id: &str) -> ActiveGoal {
         repo: None,
         current_activity: None,
         wip_refs: vec![],
+        labels: vec![],
         last_progress_update_at: None,
         parent_goal_id: None,
         priority_explicit: false,
