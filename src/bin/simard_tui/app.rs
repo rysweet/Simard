@@ -180,13 +180,13 @@ pub struct App {
     update_rx: Option<mpsc::Receiver<String>>,
     pub update_notice: Option<String>,
     pub waiting_for_response: bool,
+    /// Active Goals-tab tag filter (issue #2743). `None` = show all goals;
+    /// `Some(tag)` = show only goals carrying that exact label. Cycled with `t`.
+    pub goals_tag_filter: Option<String>,
     /// When true, the next non-filtered stdout line is the user's own echo
     /// (the REPL prints the user message back before sending to the LLM).
     /// We skip clearing `waiting_for_response` on the echo line so the
     /// spinner stays visible during the actual LLM wait.
-    /// Active Goals-tab tag filter (issue #2743). `None` = show all goals;
-    /// `Some(tag)` = show only goals carrying that exact label. Cycled with `t`.
-    pub goals_tag_filter: Option<String>,
     echo_pending: bool,
 }
 
