@@ -1500,7 +1500,7 @@ pub fn record_as_active_goal(record: &crate::goals::GoalRecord) -> BoardPlacemen
             BoardPlacement::Backlog(BacklogItem {
                 id: record.slug.clone(),
                 description: record.title.clone(),
-                source: super::labels::human_source_label(&record.labels).to_string(),
+                source: super::labels::provenance_source_label(&record.labels).to_string(),
                 score: backlog_score_for_priority(record.priority),
             })
         }

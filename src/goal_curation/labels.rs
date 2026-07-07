@@ -158,7 +158,11 @@ pub fn source_for_backlog(backlog_source: &str) -> &'static str {
 /// `goal-store:record` as a backlog `source`, so the raw `source:creative-ideas`
 /// token never leaks to the operator surface. Falls back to `"From goals"` when
 /// no recognized `source:*` tag is present (e.g. legacy/seed records).
-pub fn human_source_label(labels: &[String]) -> &'static str {
+///
+/// Named to stay distinct from the unrelated
+/// `operator_commands_dashboard::goals::human_source_label`, which maps a
+/// cognitive-memory *concept* string (not a `source:*` provenance label).
+pub fn provenance_source_label(labels: &[String]) -> &'static str {
     for label in labels {
         match label.as_str() {
             SOURCE_CREATIVE_IDEAS => return "From creative ideas",
