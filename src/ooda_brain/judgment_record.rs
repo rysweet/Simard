@@ -105,10 +105,17 @@ const CONTEXT_SUMMARY_MAX: usize = 200;
 fn truncate(s: &str) -> String {
     let trimmed = s.trim();
     if trimmed.len() <= CONTEXT_SUMMARY_MAX {
-        trimmed.to_string()
-    } else {
-        format!("{}…", &trimmed[..CONTEXT_SUMMARY_MAX])
+        return trimmed.to_string();
     }
+    // Byte-slicing at CONTEXT_SUMMARY_MAX can split a multi-byte UTF-8 char and
+    // panic (callers such as `from_goal_outcome` feed arbitrary `goal_id`).
+    // Back off to the nearest char boundary at or below the byte cap, matching
+    // the boundary-safe truncation in `sanitize::sanitize_context_var`.
+    let mut end = CONTEXT_SUMMARY_MAX;
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &trimmed[..end])
 }
 
 impl BrainJudgmentRecord {
@@ -489,6 +496,18 @@ mod tests {
         };
         let rec = BrainJudgmentRecord::from_engineer_lifecycle(&long, &dec, false, "");
         assert!(rec.context_summary.len() <= CONTEXT_SUMMARY_MAX + 4);
+    }
+
+    #[test]
+    fn truncate_multibyte_on_byte_cap_does_not_panic() {
+        // Regression (#2751): a multi-byte char straddling the CONTEXT_SUMMARY_MAX
+        // byte boundary must truncate on a char boundary rather than panic. The
+        // '€' at bytes 198..201 makes byte 200 an invalid slice index.
+        let s = format!("{}{}", "x".repeat(198), "€".repeat(10));
+        assert!(!s.is_char_boundary(CONTEXT_SUMMARY_MAX));
+        let out = truncate(&s);
+        assert!(out.len() <= CONTEXT_SUMMARY_MAX + 4);
+        assert!(out.ends_with('…'));
     }
 
     #[tokio::test]
