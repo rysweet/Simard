@@ -9,6 +9,7 @@ related:
   - ../memory.md
   - ./dashboard-background-tab-prefetch.md
   - ./dashboard-overview-health-and-live-memory.md
+  - ./dashboard-memory-recent-last-hour-count.md
   - ./cognitive-memory-client-helpers.md
 ---
 
@@ -368,3 +369,4 @@ pre-existing tooltip guard:
 - [Background tab prefetch and refresh](./dashboard-background-tab-prefetch.md) — how the Memory tab is pre-warmed and refreshed.
 - [Cognitive-memory client helpers](./cognitive-memory-client-helpers.md) — `open_reader_client` and the read path.
 - [Overview Health & live memory-consolidation](./dashboard-overview-health-and-live-memory.md) — the sibling live-memory display fix.
+- [Honest "items remembered in the last hour" count](./dashboard-memory-recent-last-hour-count.md) — the `GET /api/memory/recent` `last_hour_count` fix on the same live read path.

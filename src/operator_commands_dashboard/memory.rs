@@ -14,6 +14,10 @@ use crate::memory_ipc::open_reader_client;
 const HISTORY_MAX_SNAPSHOTS: usize = 500;
 /// Minimum seconds between auto-recorded snapshots (5 minutes).
 const SNAPSHOT_MIN_INTERVAL_SECS: i64 = 300;
+/// Trailing window, in seconds, for the "remembered in the last hour" metric
+/// (#2679). A snapshot whose `epoch_secs` is at-or-before `now - this` is the
+/// one-hour-ago baseline the live long-term total is diffed against.
+const TRAILING_WINDOW_SECS: f64 = 3600.0;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct MemorySnapshot {
@@ -226,6 +230,35 @@ pub(crate) async fn memory_history() -> Json<Value> {
 // Recent memories — plain-English view for #1997
 // ---------------------------------------------------------------------------
 
+/// Select the long-term total of the snapshot that best represents "one hour
+/// ago" for the trailing-hour delta (#2679).
+///
+/// Rule (pins the window edge against off-by-one / cause d):
+///   1. Prefer the **most-recent** snapshot whose `epoch_secs` is
+///      **at-or-before** the window edge `now_secs - TRAILING_WINDOW_SECS`
+///      (`<= cutoff`), i.e. the tightest available "≥1 h old" reference.
+///   2. If every snapshot is *inside* the hour (sub-hour uptime), fall back to
+///      the **earliest** snapshot — an honest partial-window under-count.
+///   3. Empty history has no baseline (`None`); the caller then diffs the live
+///      total against itself, yielding an honest `0`.
+pub(crate) fn select_last_hour_baseline(history: &[MemorySnapshot], now_secs: f64) -> Option<u64> {
+    if history.is_empty() {
+        return None;
+    }
+    let cutoff = now_secs - TRAILING_WINDOW_SECS;
+    let cmp_epoch = |a: &&MemorySnapshot, b: &&MemorySnapshot| {
+        a.epoch_secs
+            .partial_cmp(&b.epoch_secs)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    };
+    history
+        .iter()
+        .filter(|s| s.epoch_secs <= cutoff)
+        .max_by(cmp_epoch)
+        .or_else(|| history.iter().min_by(cmp_epoch))
+        .map(|s| s.long_term_total)
+}
+
 /// `GET /api/memory/recent` — recent-memory listing.
 ///
 /// De-fork Phase 2b (issue #2307): this panel previously enumerated every
@@ -238,21 +271,83 @@ pub(crate) async fn memory_history() -> Json<Value> {
 /// `get_statistics()` path that `/api/memory/history` uses. We surface it as
 /// `total` so the Memory tab can stop telling a human "No memories stored yet"
 /// while tens of thousands of memories are actually held (#2358). The per-item
-/// list and the last-hour window stay empty/unavailable on this backend.
+/// list stays empty/unavailable on this backend.
+///
+/// `last_hour_count` (#2679): this field previously returned a hardcoded literal
+/// `0` — a placeholder left by de-fork Phase 2b (#2307) — so the dashboard told
+/// operators "remembered 0 items in the last hour" even while long-term memory
+/// was actively growing. It now reports the LIVE net growth of long-term memory
+/// over the trailing hour, computed by [`memory_recent_at`].
 pub(crate) async fn memory_recent() -> Json<Value> {
-    let state_root = resolve_state_root();
-    let total = open_reader_client(&state_root)
-        .and_then(|reader| reader.ops().get_statistics())
-        .map(|stats| stats.total())
-        .unwrap_or(0);
+    memory_recent_at(&resolve_state_root()).await
+}
+
+/// Env-free core of [`memory_recent`]: build the recent-memory payload from the
+/// EXPLICIT `state_root` rather than resolving `SIMARD_STATE_ROOT` ambiently
+/// (mirrors the [`goals`](super::goals::goals) → `goals_at` split), so the
+/// trailing-hour delta can be driven deterministically in tests.
+///
+/// `last_hour_count` is `max(0, live_long_term_total − baseline_long_term_total)`
+/// where the live long-term total (episodic + semantic + procedural +
+/// prospective) is read through the single shared reader
+/// (`open_reader_client` → `get_statistics`) and the baseline is the
+/// most-recent `memory_history.json` snapshot at-or-before `now − 1h`
+/// (see [`select_last_hour_baseline`]). The read fails closed: on a live-read
+/// error it returns an `error` payload with `last_hour_count: null` — never a
+/// misleading `0`.
+pub(crate) async fn memory_recent_at(state_root: &std::path::Path) -> Json<Value> {
+    // Preserved back-compat note describing the per-item listing limitation.
+    let note = "Per-item recent-memory listing is unavailable on the library \
+                backend (de-fork Phase 2b, #2307); `total` is the live aggregate \
+                stored count. See /api/memory/history for the per-type breakdown.";
+
+    // Live read via the SAME shared reader path `/api/memory/history` uses so
+    // the count reflects real writes, not a divergent store.
+    let stats =
+        match open_reader_client(state_root).and_then(|reader| reader.ops().get_statistics()) {
+            Ok(s) => s,
+            Err(e) => {
+                // Fail closed (#2561 prior art): surface the error and emit a null
+                // count so the frontend renders "—", never a misleading 0.
+                return Json(json!({
+                    "items": [],
+                    "total": Value::Null,
+                    "last_hour_count": Value::Null,
+                    "available": false,
+                    "note": note,
+                    "error": format!("Cannot read cognitive memory: {e}"),
+                    "server_time": chrono::Utc::now().to_rfc3339(),
+                }));
+            }
+        };
+
+    let total = stats.total();
+    // "Remembered" ⇒ consolidated long-term memory (facts + procedures +
+    // records/events + intentions); excludes transient sensory/working churn.
+    let live_long_term = stats.episodic_count
+        + stats.semantic_count
+        + stats.procedural_count
+        + stats.prospective_count;
+
+    // Accumulate the trailing-hour baseline in the shared history ring buffer so
+    // the metric self-heals across polls (the same file `/api/memory/history`
+    // maintains).
+    let history_path = state_root.join("memory_history.json");
+    let history = append_snapshot_if_due(&history_path, &stats);
+
+    let now_secs = chrono::Utc::now().timestamp() as f64;
+    // Absent a one-hour-ago baseline (empty history), diff the live total
+    // against itself → honest 0. `saturating_sub` clamps a pruning-dominated
+    // (net-negative) interval to 0 without underflowing.
+    let baseline = select_last_hour_baseline(&history, now_secs).unwrap_or(live_long_term);
+    let last_hour_count = live_long_term.saturating_sub(baseline);
+
     Json(json!({
         "items": [],
         "total": total,
-        "last_hour_count": 0,
+        "last_hour_count": last_hour_count,
         "available": false,
-        "note": "Per-item recent-memory listing is unavailable on the library \
-                 backend (de-fork Phase 2b, #2307); `total` is the live aggregate \
-                 stored count. See /api/memory/history for the per-type breakdown.",
+        "note": note,
         "server_time": chrono::Utc::now().to_rfc3339(),
     }))
 }
