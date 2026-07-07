@@ -380,6 +380,11 @@ fn t4a_from_goal_outcome_builds_outcome_verify_record() {
 }
 
 #[test]
+// Emits the process-global `goal_live_outcome_verification` metric, so it must
+// share the `cognitive_memory` serial group with `t4c`. Otherwise this test can
+// run concurrently with `t4c`'s HOME-override window and land its own metric row
+// in `t4c`'s temp `metrics.jsonl`, breaking `t4c`'s exactly-one-entry assertion.
+#[serial_test::serial(cognitive_memory)]
 fn t4b_record_outcome_verification_pushes_judgment() {
     let decision = GoalOutcomeDecision::KeepOpenAndReport {
         rationale: "live effect unconfirmed this cycle".to_string(),
