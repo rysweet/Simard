@@ -32,6 +32,9 @@ primer is deliberately self-contained on the four questions above.
 | Published dataset (snapshots) | <https://huggingface.co/datasets/COIN-Bench/coin> | HTTP 200 |
 | License | repo `LICENSE` | MIT |
 
+_All sources above were verified directly (not via summarizers) on 2026-07-07;
+the COIN repo was cloned at commit `83261b0` and its CLI run in the sandbox._
+
 ---
 
 ## 1. What COIN measures
