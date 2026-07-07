@@ -15,13 +15,11 @@
 //! - [`daemon_dir`] — the protected daemon-directory union.
 //! - [`executor`] — the largest-first, threshold-stop, TOCTOU-reasserting disposer.
 //! - [`recipe`] — invoke the analysis recipe; strict parse; no fallback.
-//! - [`sandbox`] — recipe-step confinement helpers + reconciliation diff.
 
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::disk_pressure::check::DiskStatProvider;
 use crate::error::SimardResult;
 
 pub mod candidate;
@@ -30,7 +28,6 @@ pub mod executor;
 pub mod guard;
 pub mod prod;
 pub mod recipe;
-pub mod sandbox;
 
 pub use candidate::{CandidateKind, MAX_CANDIDATES, ReclaimCandidate, parse_candidates};
 pub use daemon_dir::resolve_daemon_working_dirs;
@@ -44,7 +41,6 @@ pub use guard::{
 };
 pub use prod::{DerivingPathRemover, RealTrackedWorktreeProbe, main_worktree_of};
 pub use recipe::{RecipeInvoker, RecipeRunnerInvoker, resolve_recipe_path, run_reclaim_recipe};
-pub use sandbox::{ConfinementBreach, reconcile, scrub_analysis_path};
 
 /// The hardcoded daemon working directory that is **always** protected — even if
 /// the live service is relocated. Removing it crash-loops the daemon with
@@ -148,29 +144,47 @@ impl ReclaimSource {
 
 /// `true` iff the process's effective UID is 0 (root). Running the apply path as
 /// root would nullify the path-ownership policy the rails rely on.
-fn is_root() -> bool {
+pub(crate) fn is_root() -> bool {
     // SAFETY: `geteuid` is always safe — it takes no arguments, reads no memory,
     // and cannot fail.
     unsafe { libc::geteuid() == 0 }
 }
 
-/// Orchestrate recipe → parse → executor with injectable seams. **No fallback:**
-/// a recipe or parse failure propagates as
-/// [`crate::error::SimardError::AdapterInvocationFailed`].
-#[allow(clippy::too_many_arguments)]
-pub fn run_disk_reclaim_with(
-    invoker: &dyn RecipeInvoker,
-    ctx: &GuardContext<'_>,
+/// Build the production guard context + remover and run the guarded executor over
+/// an explicit candidate list, emitting telemetry. Shared by the recipe-driven
+/// [`run_disk_reclaim`] and the operator `exec` form so the production wiring
+/// (allow-roots, deny-set, live/worktree probes, remover) lives in exactly one
+/// place. **Every** candidate is re-vetted by [`guard::vet_candidate`]; nothing
+/// here can widen the rails.
+pub fn reclaim_candidates(
+    candidates: Vec<ReclaimCandidate>,
+    state_root: &Path,
     mode: ReclaimMode,
     target_pct: u8,
-    disk: &dyn DiskStatProvider,
-    disk_path: &Path,
-    remover: &dyn PathRemover,
-) -> SimardResult<ReclaimReport> {
-    let (candidates, _used_pct) = run_reclaim_recipe(invoker)?;
-    Ok(exec_reclaim(
-        candidates, ctx, mode, target_pct, disk, disk_path, remover,
-    ))
+    source: ReclaimSource,
+) -> ReclaimReport {
+    let allow = allow_roots(state_root);
+    let protected = ProtectedDenySet::resolve(Path::new("/proc"));
+    let live = crate::worktree_gc::ProcfsLiveProcessProbe::new();
+    let wt = RealTrackedWorktreeProbe;
+    let measurer = DuSizeMeasurer;
+    let ctx = GuardContext {
+        allow_roots: &allow,
+        protected: &protected,
+        live_probe: &live,
+        wt_probe: &wt,
+        measurer: &measurer,
+    };
+    let remover = DerivingPathRemover {
+        allow_roots: allow.clone(),
+    };
+    let disk = crate::disk_pressure::RealDiskStatProvider;
+
+    let report = exec_reclaim(
+        candidates, &ctx, mode, target_pct, &disk, state_root, &remover,
+    );
+    emit_reclaim_telemetry(&report, source);
+    report
 }
 
 /// Production top-level orchestrator: invoke the analysis recipe, vet every
@@ -204,29 +218,9 @@ pub fn run_disk_reclaim(
     };
     let (candidates, _used_pct) = run_reclaim_recipe(&invoker)?;
 
-    let allow = allow_roots(state_root);
-    let protected = ProtectedDenySet::resolve(Path::new("/proc"));
-    let live = crate::worktree_gc::ProcfsLiveProcessProbe::new();
-    let wt = RealTrackedWorktreeProbe;
-    let measurer = DuSizeMeasurer;
-    let ctx = GuardContext {
-        allow_roots: &allow,
-        protected: &protected,
-        live_probe: &live,
-        wt_probe: &wt,
-        measurer: &measurer,
-    };
-
-    let remover = DerivingPathRemover {
-        allow_roots: allow.clone(),
-    };
-    let disk = crate::disk_pressure::RealDiskStatProvider;
-
-    let report = exec_reclaim(
-        candidates, &ctx, mode, target_pct, &disk, state_root, &remover,
-    );
-    emit_reclaim_telemetry(&report, source);
-    Ok(report)
+    Ok(reclaim_candidates(
+        candidates, state_root, mode, target_pct, source,
+    ))
 }
 
 /// Whether the daemon self-heal trigger should fire: the measured home-partition

@@ -45,8 +45,9 @@ steps:
       You have read-only shell tools (`df`, `git` read subcommands, `gh`, `du`,
       `cat`, `ls`). **Do NOT run any destructive command** (`rm`, `rmdir`,
       `git worktree remove`, `truncate`, `find -delete`, redirection that
-      truncates). If you attempt one it will fail — the step runs confined — and
-      it would be a confinement breach. Just inspect and emit markers.
+      truncates). Deleting anything yourself is a contract violation — the
+      executor is the only component permitted to remove paths. Just inspect and
+      emit markers.
 
       ## Procedure
 

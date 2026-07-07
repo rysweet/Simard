@@ -38,7 +38,6 @@ for operator usage.
 | `daemon_dir.rs` | `resolve_daemon_working_dirs` — the protected daemon-directory union |
 | `executor.rs` | `exec_reclaim` — largest-first, threshold-stop, TOCTOU-reasserting executor + `ReclaimReport` |
 | `recipe.rs` | Invoke `disk-reclaim.yaml`, strict marker parse, no-fallback error path |
-| `sandbox.rs` | Recipe-step confinement helpers + the post-run reconciliation diff (see [Recipe-step sandboxing](#recipe-step-sandboxing)) |
 
 ## Data flow
 
@@ -300,9 +299,10 @@ Reads `SIMARD_DISK_RECLAIM_PCT`, defaults to `85`, clamps to `[1, 99]`.
 Reads `SIMARD_DISK_RECLAIM_DAEMON_APPLY`. Returns `ReclaimMode::Apply` **only**
 when it is set to `1`/`true`; otherwise `ReclaimMode::DryRun`. This is the knob
 that keeps the **daemon** self-heal trigger disabled (dry-run + human-review)
-until the recipe-step sandboxing is verified in production
-(see [Recipe-step sandboxing](#recipe-step-sandboxing)). It governs the daemon
-path only — the CLI derives its mode from `--apply`, never from this variable.
+until OS-level recipe-step confinement is implemented
+(see [Recipe-step sandboxing](#recipe-step-sandboxing); not yet wired in). It
+governs the daemon path only — the CLI derives its mode from `--apply`, never
+from this variable.
 
 ### `run_disk_reclaim(repo_root, state_root, home_override, mode, target_pct, source) → SimardResult<ReclaimReport>`
 
@@ -318,7 +318,7 @@ for its exit-2 mapping).
 | `mode` | Behavior |
 | ------ | -------- |
 | `ReclaimMode::DryRun` | Full analysis + guard vetting, **zero** destructive ops. The default everywhere — including the daemon, unless `SIMARD_DISK_RECLAIM_DAEMON_APPLY=1`. |
-| `ReclaimMode::Apply` | Guarded reclamation. Refused when `geteuid() == 0`. Reached via CLI `--apply` or the daemon knob once sandboxing is verified. |
+| `ReclaimMode::Apply` | Guarded reclamation. Refused when `geteuid() == 0`. Reached via CLI `--apply` or the daemon knob once recipe-step confinement is implemented. |
 
 ### `daemon_should_trigger(used_pct, threshold_pct) → bool`
 
@@ -334,10 +334,12 @@ inline in the maintenance loop.
 and feeds `step_results[0].output` to `parse_candidates`.
 
 The recipe is **a single analysis-only agent step**. Its prompt **forbids
-destructive shell commands** — but a prompt-level ban is necessary, not
-sufficient (see [Recipe-step sandboxing](#recipe-step-sandboxing) below, which is
-what actually keeps the delete primitive out of the agent's hands). The step
-instructs the agent to:
+destructive shell commands**. A prompt-level ban is necessary but not sufficient
+on its own; what actually keeps the delete primitive out of the agent's hands
+today is that the executor owns the only delete path and re-vets every candidate
+through the guard (planned OS-level confinement is tracked under
+[Recipe-step sandboxing](#recipe-step-sandboxing) below). The step instructs the
+agent to:
 
 1. inspect `df --output=pcent,avail`,
 2. run `git worktree list --porcelain` across all managed repos
@@ -361,38 +363,40 @@ Same precedence as the disk-health resolver:
 
 ## Recipe-step sandboxing
 
-The "agent proposes, Rust disposes" guarantee is only sound if the analysis
-agent genuinely **cannot** delete anything itself. The recipe runner may hand
-the analysis step a daemon-privilege shell; if that shell is unrestricted, the
-capability confinement degrades to *prompt-requested* ("please don't run `rm`"),
-which an errant or adversarial completion can ignore. This is the capability's
-**highest-priority risk** and the reason the daemon ships in dry-run
-(`SIMARD_DISK_RECLAIM_DAEMON_APPLY` unset) until the following are verified in
-production. These are first-class deliverables of the recipe step, not
-assumptions:
+The "agent proposes, Rust disposes" guarantee rests on two properties that **are**
+implemented and tested today:
 
-1. **`PATH` scrubbing.** The analysis step runs with a minimal `PATH` that
-   exposes only the read-only inspection tools it needs (`df`, `git` read
-   subcommands via a wrapper, `gh`, `du`, `cat`). Mutating binaries — `rm`,
-   `find` (with `-delete`/`-exec`), `git worktree remove`, `truncate`, shell
-   redirection helpers — are **not on `PATH`**, so the agent cannot invoke them
-   even if the prompt guard is bypassed.
-2. **Read-only / seccomp confinement.** The step executes under a confinement
-   that makes the filesystem read-only outside a scratch dir (bind/overlay
-   read-only mounts, or a seccomp profile denying `unlink`/`unlinkat`/`rmdir`/
-   `rename`). Destructive syscalls fail at the kernel boundary, not the prompt.
-3. **Post-run reconciliation diff.** After the analysis step returns, the
-   orchestrator compares a cheap pre/post inventory of the managed roots (e.g.
-   `git worktree list` sets and top-level dir listings). If **anything**
-   disappeared that the executor did not remove under the guard, the run is
-   flagged as a confinement breach: it is logged loudly via `daemon_log`, and
-   apply mode is refused until investigated.
+1. The `disk-reclaim.yaml` step is **analysis-only** — its prompt forbids
+   destructive shell commands and instructs the agent to emit candidate markers
+   and stop.
+2. The **executor holds the only delete primitive**, and every candidate is
+   re-vetted by `vet_candidate` at the syscall boundary. Nothing the agent emits
+   can widen the rails.
 
-Only the deterministic executor (`executor.rs`) holds the delete primitive, and
-every one of its removals passes `vet_candidate` (above). The sandboxing here
-ensures the *agent* side of the split cannot open a second, unguarded deletion
-path. Documented so it is implemented — and not silently dropped as "the prompt
-says not to."
+A prompt-level ban is necessary but not *sufficient* on its own: if the recipe
+runner hands the analysis step an unrestricted daemon-privilege shell, an errant
+or adversarial completion could in principle invoke `rm` directly, opening a
+second deletion path the guard never sees. Closing that gap with OS-level
+recipe-step confinement is the capability's **highest-priority follow-up** and the
+reason the daemon ships in dry-run (`SIMARD_DISK_RECLAIM_DAEMON_APPLY` unset). The
+planned hardening — **not yet wired in** — is:
+
+1. **`PATH` scrubbing.** Run the analysis step with a minimal `PATH` that exposes
+   only the read-only inspection tools it needs (`df`, `git` read subcommands,
+   `gh`, `du`, `cat`), with mutating binaries — `rm`, `find` (with
+   `-delete`/`-exec`), `git worktree remove`, `truncate` — removed.
+2. **Read-only / seccomp confinement.** Execute the step under a confinement that
+   makes the filesystem read-only outside a scratch dir (bind/overlay read-only
+   mounts, or a seccomp profile denying `unlink`/`unlinkat`/`rmdir`/`rename`) so
+   destructive syscalls fail at the kernel boundary.
+3. **Post-run reconciliation diff.** After the analysis step returns, compare a
+   cheap pre/post inventory of the managed roots. If anything disappeared that the
+   guarded executor did not remove, flag the run as a confinement breach — log it
+   loudly and refuse apply until investigated.
+
+Until these land, the daemon defaults to dry-run + human-review and operators
+reclaim by hand with `simard disk-reclaim --apply`. The wired guard above remains
+authoritative for everything the executor removes.
 
 ## CLI surface (`src/operator_cli/disk_reclaim.rs`)
 
@@ -418,7 +422,7 @@ daemon trigger uses `daemon_log` (→ `ooda.log` + stderr) — no bare `println!
 
 | Site | Behavior |
 | ---- | -------- |
-| `src/operator_commands_ooda/daemon/mod.rs` | Within the disk-health maintenance block, **Tier 1** `emergency_cleanup` runs first (deterministic, no LLM); then **Tier 2** on the `SIMARD_DISK_HEALTH_INTERVAL_SECS` cadence (default `900`) a cheap `df` `%-used` probe ≥ `SIMARD_DISK_RECLAIM_PCT` calls `run_disk_reclaim(mode)`. The daemon passes `mode = Apply` **only** when `SIMARD_DISK_RECLAIM_DAEMON_APPLY=1`; otherwise `DryRun` (ships disabled until sandboxing is verified — see the [risk note](#recipe-step-sandboxing)). Output goes through `daemon_log` → `{state_root}/ooda.log` + stderr (dashboard-visible), **not** `tracing`/`journalctl`. |
+| `src/operator_commands_ooda/daemon/mod.rs` | Within the disk-health maintenance block, **Tier 1** `emergency_cleanup` runs first (deterministic, no LLM); then **Tier 2** on the `SIMARD_DISK_HEALTH_INTERVAL_SECS` cadence (default `900`) a cheap `df` `%-used` probe ≥ `SIMARD_DISK_RECLAIM_PCT` calls `run_disk_reclaim(mode)`. The daemon passes `mode = Apply` **only** when `SIMARD_DISK_RECLAIM_DAEMON_APPLY=1`; otherwise `DryRun` (ships disabled until OS-level recipe-step confinement is implemented — see the [risk note](#recipe-step-sandboxing)). Output goes through `daemon_log` → `{state_root}/ooda.log` + stderr (dashboard-visible), **not** `tracing`/`journalctl`. |
 | `src/ooda_actions/advance_goal/spawn.rs` | The admission `ReclaimFirst` continuation calls `run_disk_reclaim` before retrying a deferred engineer spawn. This path is best-effort: a reclaim error is `tracing::warn!`-logged (`target: simard::ooda_brain`) and never fails the cycle. |
 
 ## Test coverage
@@ -435,7 +439,6 @@ tempdirs, a fabricated `/proc` root, and `FakeLiveProcessProbe` / fake
 | `tests_executor.rs` | Largest-first ordering; threshold stop; dry-run zero-ops; TOCTOU re-assert; fake `DiskStatProvider`. |
 | `tests_daemon_dir.rs` | Union resolution with injected `proc_root`; hardcoded `main` always present. |
 | `tests_recipe.rs` | Marker parse; no-fallback `AdapterInvocationFailed` on recipe/parse failure. |
-| `tests_sandbox.rs` | Recipe-step confinement: mutating binaries absent from the step `PATH`; the post-run reconciliation diff flags a fabricated out-of-band disappearance as a confinement breach and refuses apply. |
 | `tests_env.rs` | `reclaim_pct_from_env` clamping; `daemon_apply_from_env` returns `DryRun` unless `SIMARD_DISK_RECLAIM_DAEMON_APPLY=1`. |
 
 ## Related

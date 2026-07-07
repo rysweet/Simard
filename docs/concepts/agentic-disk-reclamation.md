@@ -88,17 +88,18 @@ set).
 
 The guard is **authoritative for the disposal path**: nothing the executor
 removes bypasses it. But the guard only governs the delete primitive it owns —
-it cannot govern a shell the *agent* holds. So the "agent cannot delete a
-protected path" guarantee holds **provided the analysis recipe step is
-sandboxed** so the agent never holds a delete primitive of its own. That
-sandboxing is a first-class part of the security model, not an assumption — see
+it cannot govern a shell the *agent* holds. Today the "agent cannot delete a
+protected path" property holds because the analysis recipe step is
+**analysis-only** (its prompt forbids destructive commands and it emits candidate
+markers, nothing more) and the executor owns the *only* delete primitive,
+re-vetting every candidate through the guard. A prompt that merely *asks* the
+agent not to run `rm` is necessary but not sufficient on its own; hardening the
+recipe step with OS-level confinement — scrubbing *mutating* binaries (`rm`,
+`find -delete`/`-exec`, `git worktree remove`) from `PATH`, running the analysis
+under a read-only/seccomp confinement, and a post-run reconciliation diff that
+asserts nothing was removed outside the executor's guarded path — is a planned
+follow-up, **not yet wired in**. See
 [Recipe-step sandboxing](../reference/disk-reclaim-api.md#recipe-step-sandboxing).
-A prompt that merely *asks* the agent not to run `rm` is necessary but not
-sufficient; the recipe step additionally scrubs *mutating* binaries (`rm`,
-`find -delete`/`-exec`, `git worktree remove`) from `PATH` while leaving the
-read-only inspection tools it needs, runs the analysis under a read-only/seccomp
-confinement, and a post-run reconciliation diff asserts that nothing was removed
-outside the executor's guarded path.
 
 ## The hard rails (deterministic, non-bypassable)
 
@@ -175,14 +176,15 @@ explicitly opts in by setting `SIMARD_DISK_RECLAIM_DAEMON_APPLY=1`.
 
 This is deliberate and matches the capability's highest-priority risk: the
 elegant "agent proposes, Rust disposes" guarantee is only as strong as the
+analysis recipe step being confined so it cannot open a second, unguarded
+deletion path. OS-level
 [recipe-step sandboxing](../reference/disk-reclaim-api.md#recipe-step-sandboxing)
-that keeps the delete primitive out of the agent's hands. Until that sandboxing
-is verified in production, automatic deletion stays off; the daemon surfaces the
-would-remove set and the human-review list, and an operator can reclaim by hand
-with `simard disk-reclaim --apply`. Once the confinement is verified, flipping
-`SIMARD_DISK_RECLAIM_DAEMON_APPLY=1` promotes the daemon to closed-loop
-self-healing. `emergency_cleanup` (below) remains the deterministic hard stop
-regardless of this flag.
+is a planned follow-up that is **not yet wired in**. Until it lands, automatic
+deletion stays off; the daemon surfaces the would-remove set and the human-review
+list, and an operator can reclaim by hand with `simard disk-reclaim --apply`. Once
+that confinement is implemented, flipping `SIMARD_DISK_RECLAIM_DAEMON_APPLY=1`
+promotes the daemon to closed-loop self-healing. `emergency_cleanup` (below)
+remains the deterministic hard stop regardless of this flag.
 
 ## Layered defense
 

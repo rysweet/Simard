@@ -22,11 +22,9 @@ use std::io::Read;
 use std::path::Path;
 
 use crate::disk_reclaim::{
-    DerivingPathRemover, DuSizeMeasurer, GuardContext, ProtectedDenySet, RealTrackedWorktreeProbe,
-    ReclaimCandidate, ReclaimMode, ReclaimReport, ReclaimSource, allow_roots,
-    emit_reclaim_telemetry, exec_reclaim, reclaim_pct_from_env, run_disk_reclaim,
+    ReclaimCandidate, ReclaimMode, ReclaimReport, ReclaimSource, is_root, reclaim_candidates,
+    reclaim_pct_from_env, run_disk_reclaim,
 };
-use crate::worktree_gc::ProcfsLiveProcessProbe;
 
 use super::args::reject_extra_args;
 
@@ -94,42 +92,23 @@ pub(crate) fn dispatch_disk_reclaim_command(
     Ok(())
 }
 
-/// Build the production guard context and run the executor over an
-/// already-parsed candidate list. Exposed for the `exec` form and the tests.
+/// Run the guarded executor over an already-parsed candidate list via the shared
+/// production wiring in [`crate::disk_reclaim::reclaim_candidates`]. Exposed for
+/// the `exec` form and its tests. Every path is still re-vetted through the
+/// non-bypassable guard.
 fn execute_candidates(
     candidates: &[ReclaimCandidate],
     state_root: &Path,
     mode: ReclaimMode,
     target_pct: u8,
 ) -> ReclaimReport {
-    let allow = allow_roots(state_root);
-    let protected = ProtectedDenySet::resolve(Path::new("/proc"));
-    let live = ProcfsLiveProcessProbe::new();
-    let wt = RealTrackedWorktreeProbe;
-    let measurer = DuSizeMeasurer;
-    let ctx = GuardContext {
-        allow_roots: &allow,
-        protected: &protected,
-        live_probe: &live,
-        wt_probe: &wt,
-        measurer: &measurer,
-    };
-    let remover = DerivingPathRemover {
-        allow_roots: allow.clone(),
-    };
-    let disk = crate::disk_pressure::RealDiskStatProvider;
-
-    let report = exec_reclaim(
+    reclaim_candidates(
         candidates.to_vec(),
-        &ctx,
+        state_root,
         mode,
         target_pct,
-        &disk,
-        state_root,
-        &remover,
-    );
-    emit_reclaim_telemetry(&report, ReclaimSource::Cli);
-    report
+        ReclaimSource::Cli,
+    )
 }
 
 /// Resolve the `--candidates <src>` value into a candidate list. `@file` reads a
@@ -220,12 +199,6 @@ fn reason_label(reason: crate::disk_reclaim::RejectReason) -> &'static str {
 
 fn human_bytes(bytes: u64) -> String {
     crate::disk_pressure::human_bytes(bytes)
-}
-
-/// `true` iff the process's effective UID is 0.
-fn is_root() -> bool {
-    // SAFETY: `geteuid` takes no arguments, reads no memory, and cannot fail.
-    unsafe { libc::geteuid() == 0 }
 }
 
 fn parse_args(

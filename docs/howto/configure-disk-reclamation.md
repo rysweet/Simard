@@ -131,7 +131,7 @@ The single knob is the `%-used` trigger and target, set via environment:
 | Variable | Effect | Default |
 | -------- | ------ | ------- |
 | `SIMARD_DISK_RECLAIM_PCT` | `df` `%-used` at which the daemon trigger fires, and the target the executor reclaims down to. Clamped to `[1, 99]`. | `85` |
-| `SIMARD_DISK_RECLAIM_DAEMON_APPLY` | Whether the **daemon** self-heal trigger is allowed to *delete*. Unset/`0` = daemon runs dry-run + human-review only (default, ships disabled until sandboxing is verified). `1` = daemon reclaims for real. Does not affect the CLI (`--apply` is always honored there). | unset (dry-run) |
+| `SIMARD_DISK_RECLAIM_DAEMON_APPLY` | Whether the **daemon** self-heal trigger is allowed to *delete*. Unset/`0` = daemon runs dry-run + human-review only (default, ships disabled until OS-level recipe-step confinement is implemented). `1` = daemon reclaims for real. Does not affect the CLI (`--apply` is always honored there). | unset (dry-run) |
 | `SIMARD_DISK_HEALTH_INTERVAL_SECS` | Cadence of the cheap daemon `df` probe that decides whether to launch reclamation (reused from the disk-health check). | `900` |
 | `SIMARD_GIT_PROTECTED_REPOS` | Comma-separated extra repo roots added to the protected deny-set (never reclaimable). | unset |
 | `SIMARD_STATE_ROOT` | State root (`~/.simard`) — where engineer worktrees, backups, and shared cargo targets live. | `$HOME/.simard` |
@@ -166,8 +166,8 @@ the full analysis and guard vetting and logs what it *would* reclaim, but
 deletes **nothing** until you opt in:
 
 ```bash
-# Promote the daemon to closed-loop self-healing (only after you've verified
-# the recipe-step sandboxing described in the concept/API docs).
+# Promote the daemon to closed-loop self-healing (only after the OS-level
+# recipe-step confinement described in the concept/API docs is implemented).
 systemctl --user set-environment SIMARD_DISK_RECLAIM_DAEMON_APPLY=1
 systemctl --user restart simard-ooda
 ```
