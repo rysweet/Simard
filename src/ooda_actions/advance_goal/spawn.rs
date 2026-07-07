@@ -14,6 +14,8 @@ use crate::ooda_loop::{ActionOutcome, OodaState, PlannedAction};
 
 use crate::ooda_actions::make_outcome;
 
+use super::admission;
+
 // ── Issue #1911: brain-failure auto-recovery marker ────────────────────────
 //
 // The deterministic safeguard in `dispatch_spawn_engineer` writes a
@@ -336,6 +338,53 @@ pub fn dispatch_spawn_engineer(
             );
         }
     };
+
+    // Issue #2690: dependency/overlap-aware engineer ADMISSION gate. Runs at the
+    // spawn/admission decision point — reached only for a genuinely NEW engineer
+    // on a DIFFERENT goal (same-goal single-flight was enforced by the live-
+    // engineer branch above; the depth guard and repo-resolve are already past).
+    // It reasons about the FILE-FOOTPRINT overlap between this candidate goal and
+    // the in-flight engineers and decides Admit / Defer / SerializeAfter. A THIN
+    // deterministic exact-path rail blocks a CERTAIN collision regardless of the
+    // brain; a brain error fails OPEN (admits). Gather runs OFF the state lock
+    // (best-effort `gh`/`git`), so we snapshot the goal under a short lock first.
+    //
+    // `Defer` reuses the benign spawn-skip outcome shape (`success=true`, no
+    // worktree, `goal_failure_counts` untouched) — retried naturally next cycle.
+    // `SerializeAfter` threads a rebase-after hint into the engineer `task`.
+    let engineer_task_base = {
+        let goal_snapshot = lock_state(state)
+            .active_goals
+            .active
+            .iter()
+            .find(|g| g.id == goal_id)
+            .cloned();
+        match goal_snapshot {
+            Some(goal) => {
+                let state_root_admission = engineer_worktree_state_root();
+                match admission::run_admission_gate(
+                    &state_root_admission,
+                    &goal,
+                    &parent_repo,
+                    task,
+                    brain,
+                ) {
+                    admission::AdmissionOutcome::Defer { detail } => {
+                        eprintln!(
+                            "[simard] spawn_engineer deferred for goal '{goal_id}': {detail}"
+                        );
+                        return make_outcome(action, true, detail);
+                    }
+                    admission::AdmissionOutcome::Admit { task: augmented } => augmented,
+                }
+            }
+            // Goal vanished from the board between the earlier checks and here —
+            // nothing to admit against; fall through with the base task
+            // (worktree allocation will surface any real inconsistency).
+            None => task.to_string(),
+        }
+    };
+    let task = engineer_task_base.as_str();
 
     // Allocate a per-engineer git worktree (issue #1197) so concurrent
     // engineers never share the same checkout. The worktree lives under

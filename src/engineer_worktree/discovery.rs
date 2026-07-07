@@ -9,7 +9,7 @@
 //! never registers a tmux subagent session (the telemetry gap that made the
 //! gauge read ZERO while the daemon was actively running engineers).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::WORKTREES_SUBDIR;
 use super::claim::{claim_is_live, read_engineer_claim_full};
@@ -21,6 +21,11 @@ pub struct LiveEngineerWorktree {
     pub goal_id: String,
     /// PID recorded in the claim sentinel (the allocating daemon/engineer).
     pub pid: i32,
+    /// Absolute worktree path (the dir the enumerator already scans). Populated
+    /// so callers — the issue-#2690 overlap gate — can compute the engineer's
+    /// changed-file set without re-walking the worktrees root. Additive: the
+    /// dashboard "Active Engineers" gauge ignores it.
+    pub worktree_path: PathBuf,
 }
 
 /// Enumerate every engineer worktree under `<state_root>/engineer-worktrees/`
@@ -55,6 +60,7 @@ pub fn live_claimed_engineers(state_root: &Path) -> Vec<LiveEngineerWorktree> {
         out.push(LiveEngineerWorktree {
             goal_id,
             pid: claim.pid,
+            worktree_path: path,
         });
     }
     out
