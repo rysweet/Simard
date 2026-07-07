@@ -166,7 +166,7 @@ url = { version = "=2.5.8", optional = true }
 # SMTP credentials come solely from the environment.
 base64 = "=0.22.1"
 rustls = { version = "=0.23.38", features = ["ring"] }
-rustls-native-certs = "=0.8.3"
+rustls-native-certs = "=0.8.4"
 webpki-roots = "=1.0.7"
 
 [target.'cfg(unix)'.dependencies]
