@@ -25,6 +25,8 @@ mod tests_client_isolation;
 mod tests_default_state_root_1967;
 #[cfg(test)]
 mod tests_launcher;
+#[cfg(test)]
+mod tests_launcher_fail_closed_2896;
 // TDD (RED) for issue #2679: additive gated-write protocol (StoreFactGated /
 // StoreProcedureProvenance / FactWriteOutcome), the MAX_FRAME cap, and the
 // RemoteCognitiveMemory remember_* client wrappers. Symbols are added in the

@@ -21,6 +21,7 @@ use axum::extract::Path as AxumPath;
 use serde_json::{Value, json};
 
 use super::routes::resolve_state_root;
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::cognitive_memory::creative_idea::{
     CreativeIdea, CreativeIdeaStore, IdeaStatus, ProspectiveCreativeIdeaStore, parse_idea_status,
 };
@@ -287,7 +288,7 @@ fn promote_idea(state_root: &Path, idea_id: &str, route_to_goal: bool) -> Value 
 
     // Best-effort route to a goal. Failure surfaces `goal_error` WITHOUT rolling
     // back the (already-persisted) acceptance.
-    match route_accepted_idea_to_goal(state_root, &store, &mut idea) {
+    match route_accepted_idea_to_goal(writer.ops(), state_root, &store, &mut idea) {
         Ok(goal) => {
             // Audit the goal injection into the autonomous executor (F4/R4.3),
             // recording the resulting goal_id. Resolve it before the macro so the
@@ -356,11 +357,12 @@ fn load_idea(
 /// a compact goal summary. Any failure is returned as `Err` (surfaced as
 /// `goal_error` by the caller, without rolling back the acceptance).
 fn route_accepted_idea_to_goal(
+    memory: &dyn CognitiveMemoryOps,
     state_root: &Path,
     store: &ProspectiveCreativeIdeaStore<'_>,
     idea: &mut CreativeIdea,
 ) -> SimardResult<Value> {
-    let goals = CognitiveMemoryGoalStoreFactory.open(state_root)?;
+    let goals = CognitiveMemoryGoalStoreFactory.open(memory, state_root)?;
     let record = route_idea_to_goal(idea, goals.as_ref(), now_epoch())?;
     idea.try_transition(IdeaStatus::ImplementationStarted)?;
     store.update(idea)?;
