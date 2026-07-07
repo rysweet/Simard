@@ -316,6 +316,7 @@ Output is structured `tracing` only — no `println!`/`eprintln!` beyond the
 | Guardrail | Knob / hook | Behavior |
 |-----------|-------------|----------|
 | Dedup / novelty | `dedup::is_near_duplicate(new, prior, threshold)` | Rejects a near-duplicate of a prior idea (token/shingle similarity). |
+| Semantic dedup + enhance _(planned, #2925 — not yet implemented)_ | `dedup_gate::plan_candidate(...)` + the `creative-idea-dedup` recipe | Agentic per-candidate SKIP / ENHANCE-EXISTING / CREATE-NEW decision that catches paraphrased duplicates the lexical filter misses; fail-closed. See [configure semantic dedup](./configure-creative-ideas-semantic-dedup.md). |
 | Diversity / portfolio | `portfolio::select_balanced(candidates, budget)` | Spreads the batch across risk/novelty buckets. |
 | Rate-limit / budget | `budget::within_budget(now, cfg)` + `SIMARD_DAILY_BUDGET_USD` | Skips an expensive tick when over budget. |
 | High-risk → human | synthesis policy + `try_transition` | High-risk/irreversible ideas can never auto-become a goal. |

@@ -1,5 +1,6 @@
 mod args;
 mod ci_health;
+mod creative_ideas;
 mod curation;
 mod dashboard;
 mod decisions;
@@ -97,6 +98,7 @@ Product modes:
                            inspect a probe-isolated sandbox instead
   improvement-curation run <base-type> <topology> <objective> [state-root]
   improvement-curation read <base-type> <topology> <state-root>
+  creative-ideas consolidate [--apply]  — cluster + merge semantically-duplicate ideas (#2925)
   gym list
   gym run <scenario-id>
   gym compare <scenario-id>
@@ -242,6 +244,7 @@ where
         "goal" => goal::dispatch_goal_command(args),
         "goal-curation" => curation::dispatch_goal_curation_command(args),
         "improvement-curation" => curation::dispatch_improvement_curation_command(args),
+        "creative-ideas" => creative_ideas::dispatch_creative_ideas_command(args),
         "review" => review::dispatch_review_command(args),
         "gym" => gym::dispatch_gym_command(args),
         "ooda" => ooda::dispatch_ooda_command(args),

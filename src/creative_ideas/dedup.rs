@@ -25,6 +25,17 @@ pub fn is_near_duplicate(candidate: &str, prior: &str, threshold: f64) -> bool {
     jaccard(candidate, prior) >= threshold
 }
 
+/// Coarse word-set similarity in `[0.0, 1.0]` between two idea texts. This is
+/// the v1 primitive (deterministic, no network) the semantic dedup gate reuses
+/// **only** as a cheap pre-filter (Stage-1 shortlist ranking) and as the
+/// fail-closed backstop — never as the semantic authority (issue #2925). If a
+/// store-layer embedding similarity is ever added it swaps this scorer without
+/// changing the gate contract.
+#[must_use]
+pub(crate) fn similarity(a: &str, b: &str) -> f64 {
+    jaccard(a, b)
+}
+
 /// Keep only candidates that are **not** a near-duplicate of any previous idea.
 #[must_use]
 pub fn reject_duplicates(

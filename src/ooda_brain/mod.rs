@@ -511,6 +511,102 @@ impl ResourceAdmissionDecision {
 }
 
 // ---------------------------------------------------------------------------
+// Creative-ideas semantic dedup + enhance (issue #2925)
+// ---------------------------------------------------------------------------
+
+/// One existing idea, rendered as advisory context for the dedup brain. The
+/// `node_id` is the ENHANCE target handle. Every string field is sanitised and
+/// length-capped by the seam before it becomes a recipe `-c` variable — pool
+/// content is **untrusted**.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExistingIdeaView {
+    /// The memory node id — the handle an ENHANCE decision names.
+    pub node_id: String,
+    /// The stable idea id (revisions share it).
+    pub idea_id: String,
+    /// The idea text (sanitised before templating).
+    pub idea: String,
+    /// The idea's stored rationale (sanitised, capped).
+    pub rationale: String,
+}
+
+/// The structured context the brain reasons over for **one** candidate idea.
+/// `existing_shortlist` is the bounded set of nearest existing ideas produced by
+/// the coarse pre-filter, so the prompt stays small regardless of pool size.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct IdeaDedupCtx {
+    /// The candidate idea's text.
+    pub candidate_idea: String,
+    /// The candidate idea's rationale/context.
+    pub candidate_rationale: String,
+    /// The nearest existing ideas (coarse pre-filtered, bounded to K).
+    pub existing_shortlist: Vec<ExistingIdeaView>,
+}
+
+/// What the brain decided for one candidate. serde-tagged on `choice`
+/// (snake_case) so an **unknown tag fails to parse** → the seam fails closed.
+/// There is **no `Default`**: the fail-closed path is chosen explicitly by the
+/// seam, never by defaulting a decision on the brain's behalf.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "choice", rename_all = "snake_case")]
+pub enum IdeaDedupDecision {
+    /// Genuinely novel — persist as a new `New` idea (today's default path).
+    CreateNew { rationale: String },
+    /// True duplicate that adds nothing — drop the candidate.
+    Skip { rationale: String },
+    /// Merge into the existing idea identified by `target_node_id`.
+    EnhanceExisting {
+        target_node_id: String,
+        rationale: String,
+    },
+}
+
+impl IdeaDedupDecision {
+    /// Stable snake_case label — identical to the serde `choice` tag.
+    pub fn variant_label(&self) -> &'static str {
+        match self {
+            Self::CreateNew { .. } => "create_new",
+            Self::Skip { .. } => "skip",
+            Self::EnhanceExisting { .. } => "enhance_existing",
+        }
+    }
+
+    /// The rationale the brain carried on the chosen variant.
+    pub fn rationale(&self) -> &str {
+        match self {
+            Self::CreateNew { rationale }
+            | Self::Skip { rationale }
+            | Self::EnhanceExisting { rationale, .. } => rationale,
+        }
+    }
+}
+
+/// The whole existing pool, fed to the consolidation brain to cluster by
+/// semantic duplication (the one-time cleanup of the pre-existing ~104 ideas).
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct IdeaConsolidationCtx {
+    /// The current idea pool (latest revision per idea), rendered as views.
+    pub pool: Vec<ExistingIdeaView>,
+}
+
+/// One semantic-duplication cluster the consolidation brain identified: a
+/// canonical idea to keep + the redundant ideas to fold into it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IdeaCluster {
+    /// `node_id` of the idea to keep and strengthen.
+    pub canonical_id: String,
+    /// `node_id`s of the redundant ideas to transition to `Rejected`.
+    #[serde(default)]
+    pub redundant_ids: Vec<String>,
+    /// Rationale to append to the canonical idea when merging the cluster.
+    #[serde(default)]
+    pub merged_rationale: String,
+    /// Optional supporting evidence text/links appended to the canonical.
+    #[serde(default)]
+    pub evidence: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
 // The trait
 // ---------------------------------------------------------------------------
 
@@ -582,6 +678,36 @@ pub trait OodaBrain: Send + Sync {
         Ok(GoalOutcomeDecision::KeepOpenAndReport {
             rationale: "outcome-verification not implemented by this brain".into(),
         })
+    }
+
+    /// Decide SKIP / ENHANCE-EXISTING / CREATE-NEW for one candidate creative
+    /// idea, given the nearest existing ideas (issue #2925). Called per candidate
+    /// in the generation tick, before it is persisted — repeated structured
+    /// evaluation of "is this the same underlying idea?".
+    ///
+    /// Defaulted to the no-op-preserving [`IdeaDedupDecision::CreateNew`] so
+    /// every existing `OodaBrain` impl and test double compiles unchanged and an
+    /// un-migrated brain can NEVER silently *drop* an idea; novelty then falls to
+    /// the seam's deterministic Jaccard rail (identical to today). The production
+    /// [`RecipeBrain`] overrides this to run the reasoning recipe.
+    fn decide_idea_dedup(&self, _ctx: &IdeaDedupCtx) -> SimardResult<IdeaDedupDecision> {
+        Ok(IdeaDedupDecision::CreateNew {
+            rationale: "semantic idea-dedup not implemented by this brain".into(),
+        })
+    }
+
+    /// Cluster the existing idea pool by semantic duplication for the one-time
+    /// consolidation maintenance pass (issue #2925). Returns the clusters to
+    /// merge; an empty result means "nothing to consolidate".
+    ///
+    /// Defaulted to `Ok(vec![])` (a safe no-op) so every existing `OodaBrain`
+    /// impl and test double compiles unchanged. The production [`RecipeBrain`]
+    /// overrides this to run the consolidation recipe.
+    fn decide_idea_consolidation(
+        &self,
+        _ctx: &IdeaConsolidationCtx,
+    ) -> SimardResult<Vec<IdeaCluster>> {
+        Ok(Vec::new())
     }
 }
 
