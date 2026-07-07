@@ -113,6 +113,18 @@ pub const TAB_METADATA: &[TabMeta] = &[
         lede: "Every pull request Simard is managing — the merge judge's approve, reject, and defer decisions plus the CI, review, and blocker status that shows what is ready to merge.",
         tooltip: "Merge decisions and per-PR readiness for managed PRs",
     },
+    // #2627 regression fix: the memory-graph visualization dropped during the
+    // 17->9 tab consolidation (folded into Resources as a collapsed sub-section
+    // and a deep-link alias) is restored here as its OWN dedicated top-level tab,
+    // sitting alongside Resources (which keeps the memory recall summary).
+    TabMeta {
+        slug: "memory",
+        label: "Memory",
+        title: "Memory · Simard",
+        h1: "Memory",
+        lede: "A living map of what Simard knows — an interactive graph of the facts, events, procedures, and plans it holds, colour-coded by memory type and drawn live from what it currently remembers.",
+        tooltip: "Interactive live graph of what Simard remembers, by memory type",
+    },
     TabMeta {
         slug: "resources",
         label: "Resources",
@@ -158,7 +170,7 @@ pub const TAB_METADATA: &[TabMeta] = &[
 /// Browser title shown on first page load. The client-side tab handler
 /// updates this when a different tab is activated. Uses `TAB_METADATA[0]`
 /// directly because [`tab_meta_slugs_unique`] asserts the table has
-/// exactly nine entries — an empty table would already fail other tests.
+/// exactly eleven entries — an empty table would already fail other tests.
 pub fn default_title() -> &'static str {
     TAB_METADATA[0].title
 }

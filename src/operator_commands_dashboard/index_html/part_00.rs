@@ -384,8 +384,25 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       </div>
     </div>
 
-    <details id="mem-advanced-toggle">
-      <summary style="cursor:pointer;color:var(--accent);font-size:.85rem;margin-bottom:1rem;user-select:none">▸ Show advanced memory view (graph, search, raw data)</summary>
+    <span class="section-anchor" id="section-costs"></span>
+    <h2 class="subsection">Costs</h2>
+    <div class="grid">
+      <div class="card"><h2>Daily Costs <button class="btn" onclick="fetchCosts()">Refresh</button></h2><div id="costs-daily"><span class="loading">Loading…</span></div></div>
+      <div class="card"><h2>Weekly Costs</h2><div id="costs-weekly"><span class="loading">Loading…</span></div></div>
+      <div class="card"><h2>Budget Settings</h2>
+        <div style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap">
+          <label>Daily $<input id="budget-daily" type="number" step="0.01" style="width:8rem;padding:4px;background:#1a1a2e;border:1px solid #333;color:#e0e0e0;border-radius:4px"></label>
+          <label>Weekly $<input id="budget-weekly" type="number" step="0.01" style="width:8rem;padding:4px;background:#1a1a2e;border:1px solid #333;color:#e0e0e0;border-radius:4px"></label>
+          <button class="btn" onclick="saveBudget()">Save</button>
+          <span id="budget-status"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="tab-content" id="tab-memory">
+    <h1 class="page-h1">Memory</h1>
+    <p class="page-lede">A living map of what Simard knows — an interactive graph of the facts, events, procedures, and plans it holds, colour-coded by memory type and drawn live from what it currently remembers.</p>
 
     <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem">
       <h2 style="margin:0">Memory Graph</h2>
@@ -427,21 +444,6 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       </div>
       <div class="card" style="flex:1"><h2>Memory Overview</h2><div id="mem-overview"><span class="loading">Loading…</span></div></div>
       <div class="card" style="flex:1"><h2>Memory Files</h2><div id="mem-files"><span class="loading">Loading…</span></div></div>
-    </div>
-    </details>
-    <span class="section-anchor" id="section-costs"></span>
-    <h2 class="subsection">Costs</h2>
-    <div class="grid">
-      <div class="card"><h2>Daily Costs <button class="btn" onclick="fetchCosts()">Refresh</button></h2><div id="costs-daily"><span class="loading">Loading…</span></div></div>
-      <div class="card"><h2>Weekly Costs</h2><div id="costs-weekly"><span class="loading">Loading…</span></div></div>
-      <div class="card"><h2>Budget Settings</h2>
-        <div style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap">
-          <label>Daily $<input id="budget-daily" type="number" step="0.01" style="width:8rem;padding:4px;background:#1a1a2e;border:1px solid #333;color:#e0e0e0;border-radius:4px"></label>
-          <label>Weekly $<input id="budget-weekly" type="number" step="0.01" style="width:8rem;padding:4px;background:#1a1a2e;border:1px solid #333;color:#e0e0e0;border-radius:4px"></label>
-          <button class="btn" onclick="saveBudget()">Save</button>
-          <span id="budget-status"></span>
-        </div>
-      </div>
     </div>
   </div>
 "#;

@@ -303,6 +303,27 @@ impl CognitiveMemoryOps for RemoteCognitiveMemory {
         }
     }
 
+    fn list_all_episodes(&self, limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
+        // Additive socket forward (issue #2627): mirror the library override so a
+        // reader on the daemon-socket tier enumerates live episodes instead of the
+        // empty `list_all_episodes` trait default — the dashboard Memory-tab graph
+        // relies on this to render per-item episode nodes over the wire.
+        match self.call(MemoryRequest::ListAllEpisodes { limit })? {
+            MemoryResponse::Episodes(v) => Ok(v),
+            other => Err(Self::unexpected("list_all_episodes", other)),
+        }
+    }
+
+    fn list_all_prospective(&self, limit: u32) -> SimardResult<Vec<CognitiveProspective>> {
+        // Additive socket forward (issue #2627): companion of `list_all_episodes`
+        // so prospective memories enumerate over the wire for the Memory-tab
+        // graph instead of collapsing to the empty trait default.
+        match self.call(MemoryRequest::ListAllProspective { limit })? {
+            MemoryResponse::Prospectives(v) => Ok(v),
+            other => Err(Self::unexpected("list_all_prospective", other)),
+        }
+    }
+
     fn store_prospective(
         &self,
         description: &str,
