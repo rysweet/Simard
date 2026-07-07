@@ -127,8 +127,8 @@ pub(crate) async fn creative_ideas_run() -> Json<Value> {
             "ok": true,
             "report": serde_json::to_value(report).unwrap_or(Value::Null),
         })),
-        Ok(Err(e)) => Json(json!({ "error": e.to_string() })),
-        Err(join_err) => Json(json!({ "error": format!("generation run failed: {join_err}") })),
+        Ok(Err(e)) => Json(error_json(e)),
+        Err(join_err) => Json(error_json(format!("generation run failed: {join_err}"))),
     }
 }
 
@@ -185,61 +185,64 @@ pub(crate) async fn creative_ideas_prune(AxumPath(id): AxumPath<String>) -> Json
     Json(prune_idea(&resolve_state_root(), &id))
 }
 
-/// Accept `idea_id` and (optionally) route it to a goal. Returns the operator
-/// response value (`{ok, idea, goal?/goal_error?}` or `{error}`).
-fn promote_idea(state_root: &Path, idea_id: &str, route_to_goal: bool) -> Value {
-    let writer = match launch_writer_client(state_root) {
-        Ok(w) => w,
-        Err(e) => return json!({ "error": e.to_string() }),
-    };
+/// Standard operator error payload: `{"error": "<message>"}`.
+fn error_json(e: impl std::fmt::Display) -> Value {
+    json!({ "error": e.to_string() })
+}
+
+/// Load `idea_id` from the LIVE writer store, apply the `target` transition, and
+/// persist the resulting revision. Returns the updated idea, or an operator
+/// error `Value`.
+///
+/// Fail-closed: an unknown id, or an edge not in the [`IdeaStatus`] transition
+/// table, surfaces loudly as `Err(json!({"error": ...}))` — never a silent
+/// no-op or a corrupted store.
+fn transition_and_persist(
+    state_root: &Path,
+    idea_id: &str,
+    target: IdeaStatus,
+) -> Result<CreativeIdea, Value> {
+    let writer = launch_writer_client(state_root).map_err(error_json)?;
     let store = ProspectiveCreativeIdeaStore::new(writer.ops());
     let mut idea = match load_idea(&store, idea_id) {
         Ok(Some(i)) => i,
-        Ok(None) => return json!({ "error": "idea not found" }),
-        Err(e) => return json!({ "error": e.to_string() }),
+        Ok(None) => return Err(json!({ "error": "idea not found" })),
+        Err(e) => return Err(error_json(e)),
     };
+    idea.try_transition(target).map_err(error_json)?;
+    store.update(&idea).map_err(error_json)?;
+    Ok(idea)
+}
 
-    // 1. Accept + persist FIRST. Fail-closed: an invalid edge surfaces loudly.
-    if let Err(e) = idea.try_transition(IdeaStatus::AcceptedForImplementation) {
-        return json!({ "error": e.to_string() });
-    }
-    if let Err(e) = store.update(&idea) {
-        return json!({ "error": e.to_string() });
-    }
+/// Accept `idea_id` and (optionally) route it to a goal. Returns the operator
+/// response value (`{ok, idea, goal?/goal_error?}` or `{error}`).
+fn promote_idea(state_root: &Path, idea_id: &str, route_to_goal: bool) -> Value {
+    // Accept + persist FIRST. Fail-closed: an invalid edge surfaces loudly.
+    let mut idea =
+        match transition_and_persist(state_root, idea_id, IdeaStatus::AcceptedForImplementation) {
+            Ok(i) => i,
+            Err(e) => return e,
+        };
 
     if !route_to_goal {
         return json!({ "ok": true, "idea": idea_summary(&idea) });
     }
 
-    // 2. Best-effort route to a goal. Failure surfaces `goal_error` WITHOUT
-    //    rolling back the (already-persisted) acceptance.
+    // Best-effort route to a goal. Failure surfaces `goal_error` WITHOUT rolling
+    // back the (already-persisted) acceptance.
     match route_accepted_idea_to_goal(state_root, &mut idea) {
         Ok(goal) => json!({ "ok": true, "idea": idea_summary(&idea), "goal": goal }),
         Err(e) => json!({ "ok": true, "idea": idea_summary(&idea), "goal_error": e.to_string() }),
     }
 }
 
-/// Reject `idea_id`. Returns `{ok, idea}` or `{error}`.
+/// Reject `idea_id` (terminal [`IdeaStatus::Rejected`]). Returns `{ok, idea}` or
+/// `{error}`.
 fn prune_idea(state_root: &Path, idea_id: &str) -> Value {
-    let writer = match launch_writer_client(state_root) {
-        Ok(w) => w,
-        Err(e) => return json!({ "error": e.to_string() }),
-    };
-    let store = ProspectiveCreativeIdeaStore::new(writer.ops());
-    let mut idea = match load_idea(&store, idea_id) {
-        Ok(Some(i)) => i,
-        Ok(None) => return json!({ "error": "idea not found" }),
-        Err(e) => return json!({ "error": e.to_string() }),
-    };
-    // Fail-closed: only edges in the transition table are applied; a terminal
-    // idea (already Rejected) surfaces an InvalidIdeaTransition error.
-    if let Err(e) = idea.try_transition(IdeaStatus::Rejected) {
-        return json!({ "error": e.to_string() });
+    match transition_and_persist(state_root, idea_id, IdeaStatus::Rejected) {
+        Ok(idea) => json!({ "ok": true, "idea": idea_summary(&idea) }),
+        Err(e) => e,
     }
-    if let Err(e) = store.update(&idea) {
-        return json!({ "error": e.to_string() });
-    }
-    json!({ "ok": true, "idea": idea_summary(&idea) })
 }
 
 /// Look up one idea in the live pool by its stable `idea_id` (latest revision).
