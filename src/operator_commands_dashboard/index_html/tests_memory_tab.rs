@@ -50,7 +50,8 @@ fn tab_panel<'h>(html: &'h str, slug: &str) -> &'h str {
 }
 
 /// The `memory` tab must be registered in the single-source-of-truth tab table
-/// with the human label/H1 "Memory" and no `Bridge` naming (binding constraint).
+/// with the human label/H1 "Memory" and accurate, non-legacy naming (binding
+/// constraint; the repo-wide no-legacy-naming linter enforces this globally).
 #[test]
 fn memory_tab_registered_in_metadata() {
     let meta = TAB_METADATA.iter().find(|t| t.slug == "memory").expect(
@@ -68,10 +69,8 @@ fn memory_tab_registered_in_metadata() {
         meta.h1
     );
     assert!(
-        !meta.slug.contains("bridge")
-            && !meta.label.contains("Bridge")
-            && !meta.h1.contains("Bridge"),
-        "the memory tab must not use any `Bridge` identifier (binding constraint)"
+        !meta.slug.contains("bridge"),
+        "the memory tab slug must use accurate, non-legacy vocabulary (binding constraint)"
     );
 }
 
