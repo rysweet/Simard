@@ -106,6 +106,7 @@ nav:
     - Closing the Procedural-Learning Loop: concepts/procedural-learning-loop.md
     - Reconcile-and-Self-Deploy: concepts/reconcile-and-self-deploy.md
     - Deploy-Aware Done-Gate: concepts/deploy-aware-done-gate.md
+    - Closed-Loop Outcome Verification (live-verified done): concepts/closed-loop-outcome-verification.md
     - Rust Domain-Expertise Gym (first experiment): concepts/rust-expertise-gym.md
     - Hybrid Cognition Measurement (benchmark + live): concepts/hybrid-cognition-measurement.md
     - Copilot Launch-Log Preamble Stripping: concepts/copilot-launcher-preamble-stripping.md
@@ -171,6 +172,7 @@ nav:
     - Label and Filter Goals: howto/label-and-filter-goals.md
     - Route a Goal to its Target Repo: howto/route-a-goal-to-its-target-repo.md
     - Diagnose a Rejected Goal Completion: howto/diagnose-a-rejected-goal-completion.md
+    - Diagnose a Re-Opened Goal (live outcome): howto/diagnose-a-reopened-goal.md
     - Diagnose Rejected Progress Claims: howto/diagnose-rejected-progress-claims.md
     - Diagnose search_facts Issues: howto/diagnose-search-facts-issues.md
     - Reconcile Goal–Prospective Drift: howto/reconcile-goal-prospective-drift.md
@@ -307,6 +309,7 @@ nav:
     - PR-Finalization Review Pipeline: reference/pr-finalization-pipeline.md
     - Cross-Repo Merge Authority: reference/cross-repo-merge-authority.md
     - Completion-Evidence Gate API: reference/completion-evidence-gate-api.md
+    - Outcome-Verification API: reference/outcome-verification-api.md
     - No-Progress Breaker API: reference/no-progress-breaker-api.md
     - Durable OODA Cycle Counter API: reference/durable-ooda-cycle-counter.md
     - Progress-Evidence API: reference/progress-evidence-api.md
@@ -355,6 +358,7 @@ nav:
     - Cognitive-Memory WAL Recovery Runbook: operations/cognitive-memory-wal-recovery-runbook.md
     - Meeting REPL & Handoff Ingestion: operations/meeting-handoffs.md
     - Progress-Evidence Kill Switch: operations/progress-evidence-kill-switch.md
+    - Outcome-Verification Kill Switch: operations/outcome-verification-kill-switch.md
     - Safe Self-Update: safe-self-update.md
     - Pre-Commit Setup: operations/pre-commit-setup.md
   - Operator Dashboard:

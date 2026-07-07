@@ -363,6 +363,50 @@ pub fn run_ooda_daemon(
         None
     };
 
+    // Closed-loop outcome verification (issue #2751). Secure default is ON; the
+    // operator kill-switch `SIMARD_OUTCOME_VERIFY=off` restores the artifact-only
+    // curate path by leaving the bridge pair `None`. The pair is installed only
+    // when the reasoning recipe brain is available (recipe file + recipe-runner-rs
+    // present); otherwise the daemon logs the degradation and stays on the legacy
+    // path (never a silent fallback). `live_signals` is wired iff the brain is.
+    let outcome_verify_on = crate::goal_curation::outcome_verify_enabled();
+    let outcome_verify_brain: Option<std::sync::Arc<dyn crate::ooda_brain::OodaBrain>> =
+        if outcome_verify_on {
+            crate::ooda_brain::RecipeBrain::new(
+                &repo_root,
+                "ooda-goal-outcome-verification.yaml",
+                "recipe-outcome-verify-brain",
+            )
+            .map(|b| std::sync::Arc::new(b) as std::sync::Arc<dyn crate::ooda_brain::OodaBrain>)
+        } else {
+            None
+        };
+    if !outcome_verify_on {
+        daemon_log(
+            &state_root,
+            "[simard] outcome-verify: DISABLED (SIMARD_OUTCOME_VERIFY=off) -- artifact-only curate path",
+        );
+    } else if outcome_verify_brain.is_some() {
+        daemon_log(
+            &state_root,
+            "[simard] outcome-verify: enabled (live outcome verification gates archival)",
+        );
+    } else {
+        daemon_log(
+            &state_root,
+            "[simard] outcome-verify: recipe brain unavailable (recipe/binary missing) -- artifact-only curate path",
+        );
+    }
+    let live_signals: Option<
+        std::sync::Arc<dyn crate::goal_curation::live_signal::LiveSignalSource>,
+    > = if outcome_verify_brain.is_some() {
+        Some(std::sync::Arc::new(
+            crate::goal_curation::DaemonLiveSignals::new(repo_root.clone(), state_root.clone()),
+        ))
+    } else {
+        None
+    };
+
     let mut bridges = OodaClients {
         memory,
         knowledge,
@@ -375,6 +419,8 @@ pub fn run_ooda_daemon(
         repo_root,
         progress_evidence,
         completion_evidence,
+        outcome_verify_brain,
+        live_signals,
     };
 
     // Issue #1: the authoritative goal board lives in
@@ -1763,6 +1809,8 @@ mod tests {
                 crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
             ),
             completion_evidence: None,
+            outcome_verify_brain: None,
+            live_signals: None,
         }
     }
 

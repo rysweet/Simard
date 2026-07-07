@@ -12,17 +12,30 @@
 /// Sanitize a string for use as a recipe-runner-rs `-c` context variable.
 ///
 /// Steps:
+/// 0. Strip ANSI escape sequences (ESC + CSI …) and non-whitespace C0/DEL
+///    control bytes. `\t`, `\n`, `\r` are preserved here so step 1 folds them
+///    into single spaces rather than deleting them outright — they are
+///    semantically whitespace, unlike the raw control bytes (BEL, NUL, VT, FF,
+///    BS) that a journald / log-tail live-signal detail can smuggle in.
 /// 1. Replace `\n` and `\r` with a single space.
 /// 2. Collapse consecutive whitespace (`split_whitespace().join(" ")`).
 /// 3. Truncate to `max_len` characters on a char boundary, appending `…`
 ///    if truncation occurred.
 ///
+/// The ANSI/control strip (issue #2751) prevents a `LiveSignal.detail` from
+/// corrupting terminal-rendered logs or smuggling escape sequences into the
+/// reasoner prompt. It is the sanitization boundary the closed-loop
+/// outcome-verification step relies on.
+///
 /// Returns an owned `String` that is safe to embed in `-c key=value` args.
 pub fn sanitize_context_var(s: &str, max_len: usize) -> String {
+    // Step 0: strip ANSI escape sequences + non-whitespace control bytes.
+    let filtered = strip_ansi_and_control(s);
+
     // Step 1+2: split_whitespace handles \n, \r, \t, and consecutive spaces.
     // Push directly into a pre-sized String — avoids intermediate Vec<&str>.
-    let mut collapsed = String::with_capacity(s.len());
-    for word in s.split_whitespace() {
+    let mut collapsed = String::with_capacity(filtered.len());
+    for word in filtered.split_whitespace() {
         if !collapsed.is_empty() {
             collapsed.push(' ');
         }
@@ -36,6 +49,44 @@ pub fn sanitize_context_var(s: &str, max_len: usize) -> String {
         collapsed.push('…');
     }
     collapsed
+}
+
+/// Remove ANSI escape sequences and non-whitespace C0/DEL control characters.
+///
+/// - `ESC [ … <final>` CSI sequences (colour, cursor movement, clear-screen)
+///   are consumed whole: `ESC`, `[`, any parameter/intermediate bytes
+///   (`0x20..=0x3F`), and a single final byte (`0x40..=0x7E`).
+/// - A lone `ESC` (not starting a CSI) is dropped.
+/// - `\t`, `\n`, `\r` are preserved (folded to spaces downstream).
+/// - Every other C0 control (`0x00..=0x1F`) and `DEL` (`0x7F`) is dropped.
+fn strip_ansi_and_control(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => {
+                // ANSI escape. Consume a CSI sequence if one follows; else the
+                // lone ESC is simply dropped.
+                if chars.peek() == Some(&'[') {
+                    chars.next(); // consume '['
+                    // Parameter + intermediate bytes: 0x20..=0x3F.
+                    while matches!(chars.peek(), Some(&p) if ('\u{20}'..='\u{3f}').contains(&p)) {
+                        chars.next();
+                    }
+                    // Final byte: 0x40..=0x7E — consume one if present.
+                    if matches!(chars.peek(), Some(&f) if ('\u{40}'..='\u{7e}').contains(&f)) {
+                        chars.next();
+                    }
+                }
+            }
+            // Preserve tab/newline/CR for the whitespace-collapse step.
+            '\t' | '\n' | '\r' => out.push(c),
+            // Drop other C0 controls (0x00-0x1F) and DEL (0x7F).
+            c if (c as u32) < 0x20 || c == '\u{7f}' => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -290,5 +341,88 @@ mod tests {
         let first = sanitize_context_var(input, 500);
         let second = sanitize_context_var(&first, 500);
         assert_eq!(first, second, "sanitize must be idempotent");
+    }
+
+    // =======================================================================
+    // T-sec1 (issue #2751) — ANSI escape + control-character neutralization.
+    //
+    // TDD: these specify the UPGRADED contract needed by the closed-loop
+    // outcome-verification step. `LiveSignal` details come from journald / log
+    // tails that can embed ANSI colour codes and raw control bytes. When those
+    // strings become recipe `-c` context vars they must be stripped so they can
+    // neither corrupt terminal-rendered logs nor smuggle escape sequences into
+    // the reasoner prompt. The current implementation collapses whitespace but
+    // does NOT strip ESC (0x1b) or other C0 control bytes, so these FAIL until
+    // the sanitizer is extended (design: "add ANSI strip + length caps").
+    // =======================================================================
+
+    #[test]
+    fn ansi_color_codes_stripped() {
+        // SGR colour: ESC [ 3 1 m ... ESC [ 0 m
+        let input = "\u{1b}[31mALERT\u{1b}[0m disk full";
+        let result = sanitize_context_var(input, 500);
+        assert!(
+            !result.contains('\u{1b}'),
+            "ESC (0x1b) must be stripped; got {result:?}"
+        );
+        assert_eq!(
+            result, "ALERT disk full",
+            "ANSI SGR sequences must be removed, leaving only the visible text"
+        );
+    }
+
+    #[test]
+    fn ansi_cursor_movement_stripped() {
+        // ESC [ 2 J (clear screen) + ESC [ H (cursor home)
+        let input = "before\u{1b}[2J\u{1b}[Hafter";
+        let result = sanitize_context_var(input, 500);
+        assert!(!result.contains('\u{1b}'), "ESC must be stripped");
+        assert!(
+            !result.contains("[2J"),
+            "CSI payload must not leak: {result:?}"
+        );
+        assert_eq!(result, "beforeafter");
+    }
+
+    #[test]
+    fn c0_control_bytes_stripped() {
+        // Bell (0x07), NUL (0x00), vertical tab (0x0b), form feed (0x0c),
+        // and a stray backspace (0x08) — none are whitespace, so the current
+        // split_whitespace pass preserves them.
+        let input = "a\u{07}b\u{00}c\u{0b}d\u{0c}e\u{08}f";
+        let result = sanitize_context_var(input, 500);
+        for ch in ['\u{07}', '\u{00}', '\u{0b}', '\u{0c}', '\u{08}'] {
+            assert!(
+                !result.contains(ch),
+                "control char {:?} must be stripped; got {result:?}",
+                ch
+            );
+        }
+        assert_eq!(result, "abcdef");
+    }
+
+    #[test]
+    fn ansi_and_newline_injection_combined_neutralized() {
+        // A live-signal detail that tries BOTH a colour code and a newline-based
+        // YAML/context injection must be fully neutralised.
+        let input = "\u{1b}[1;32mOK\u{1b}[0m\nmalicious_key: injected";
+        let result = sanitize_context_var(input, 500);
+        assert!(!result.contains('\u{1b}'), "ESC stripped");
+        assert!(!result.contains('\n'), "newline neutralised");
+        assert_eq!(result, "OK malicious_key: injected");
+    }
+
+    #[test]
+    fn tab_newline_still_treated_as_whitespace_after_ansi_upgrade() {
+        // Regression guard: the ANSI/control upgrade must not change the
+        // existing whitespace handling for \t, \n, \r (which are C0 controls
+        // but are semantically whitespace and must become a single space, not
+        // be deleted outright).
+        let input = "a\tb\nc\rd";
+        let result = sanitize_context_var(input, 500);
+        assert_eq!(
+            result, "a b c d",
+            "\\t \\n \\r must remain whitespace separators, not be deleted"
+        );
     }
 }

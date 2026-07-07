@@ -107,6 +107,8 @@ pub fn clients_from_state_root(state_root: &Path) -> SimardResult<OodaClients> {
             crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
         ),
         completion_evidence: None,
+        outcome_verify_brain: None,
+        live_signals: None,
     })
 }
 
