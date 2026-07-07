@@ -59,6 +59,7 @@ fn isolated_state_root() -> (TempDir, PathBuf) {
 
 fn active_goal_with_desc(id: &str, description: &str) -> ActiveGoal {
     ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,

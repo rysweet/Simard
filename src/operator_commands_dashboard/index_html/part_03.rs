@@ -1,4 +1,38 @@
 pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals');
+        // Issue #2743: label (tag) chips + a client-side tag filter for the
+        // Goals tab. Filtering is purely client-side over the already-fetched
+        // live goal data — no new route, no new auth surface.
+        window.goalsTagFilter = window.goalsTagFilter || '';
+        window.setGoalTagFilter = function(tag){ window.goalsTagFilter = tag||''; fetchGoals(); };
+        function goalLabelChips(labels){
+          if(!Array.isArray(labels)||!labels.length) return '';
+          return '<div class="goal-labels" style="margin-top:3px;display:flex;flex-wrap:wrap;gap:3px">'+
+            labels.map(function(l){
+              const isSrc=String(l).indexOf('source:')===0;
+              const bg=isSrc?'#1f6feb':'#30363d';
+              return '<span class="goal-label-chip" style="display:inline-block;padding:0 6px;border-radius:8px;background:'+bg+';color:#fff;font-size:.68rem;white-space:nowrap">'+esc(l)+'</span>';
+            }).join('')+'</div>';
+        }
+        function goalMatchesTagFilter(g){
+          if(!window.goalsTagFilter) return true;
+          return Array.isArray(g.labels)&&g.labels.indexOf(window.goalsTagFilter)>=0;
+        }
+        function renderGoalTagFilter(active){
+          const el=document.getElementById('goals-tag-filter');
+          if(!el) return;
+          const set={};
+          (active||[]).forEach(function(g){ (g.labels||[]).forEach(function(l){ set[l]=1; }); });
+          const tags=Object.keys(set).sort();
+          if(!tags.length){ el.innerHTML=''; return; }
+          const cur=window.goalsTagFilter;
+          const opts='<option value="">All tags ('+tags.length+')</option>'+
+            tags.map(function(t){ return '<option value="'+esc(t)+'"'+(t===cur?' selected':'')+'>'+esc(t)+'</option>'; }).join('');
+          el.innerHTML='<label style="margin-right:6px">Filter by tag:</label>'+
+            '<select id="goals-tag-select" onchange="setGoalTagFilter(this.value)" style="padding:.25rem;background:var(--card);color:var(--fg);border:1px solid var(--border);border-radius:4px">'+opts+'</select>'+
+            (cur?' <button class="btn" style="font-size:.7rem;padding:2px 6px;margin-left:6px" onclick="setGoalTagFilter(\'\')">Clear</button>':'');
+        }
+        renderGoalTagFilter(d.active||[]);
+        const activeFiltered=(d.active||[]).filter(goalMatchesTagFilter);
         if(d.active?.length){
           // Issue #2695 follow-up: render the active goals as a priority-ordered
           // TREE — decomposed sub-goals nested under their parent (an active
@@ -54,7 +88,7 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
               return `<tr>
               <td style="text-align:center">${prioPill}</td>
               <td style="${indent}">${nestMark}<code>${esc(g.id)}</code></td>
-              <td>${esc(g.description)}</td>
+              <td>${esc(g.description)}${goalLabelChips(g.labels)}</td>
               <td>${statusBadge}</td>
               <td>${wipHtml}</td>
               <td>
@@ -79,7 +113,7 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
               <td><span style="color:#8b949e;font-size:.75rem">tracking node</span></td>
             </tr>`;
           }
-          const rowsHtml=groupGoalsByParent(d.active,d.backlog).map(entry=>{
+          const rowsHtml=groupGoalsByParent(activeFiltered,d.backlog).map(entry=>{
             let html;
             if(entry.kind==='umbrella'){
               html=renderUmbrellaHeader(entry.header,entry.children.length,entry.rep);
@@ -93,7 +127,7 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
             <tr><th>Priority</th><th>ID</th><th>Description</th><th>Status</th><th>Current Activity</th><th>Actions</th></tr>
             ${rowsHtml}
           </table>
-          <div style="margin-top:.5rem;color:#8b949e;font-size:.8rem">${d.active_count} active goal(s)</div>`;
+          <div style="margin-top:.5rem;color:#8b949e;font-size:.8rem">${window.goalsTagFilter?(activeFiltered.length+' / '+d.active_count+' active goal(s) (filtered by tag)'):(d.active_count+' active goal(s)')}</div>`;
         }else{document.getElementById('goals-active').innerHTML='<span style="color:#8b949e">No active goals. Use "Seed Default Goals" or run the agent daemon to generate goals from meetings.</span>';}
         if(d.backlog?.length){
           document.getElementById('goals-backlog').innerHTML=`<table class="proc-table">

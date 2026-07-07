@@ -180,6 +180,19 @@ pub struct ActiveGoal {
     /// lets legacy JSON without the key load as non-explicit (pass-eligible).
     #[serde(default, skip_serializing_if = "is_false")]
     pub priority_explicit: bool,
+    /// Free-form labels (tags) for categorization, filtering, and provenance
+    /// (issue #2743). Defaults to empty. Exactly one `source:*` provenance tag
+    /// is stamped at the goal's first materialization (see
+    /// [`crate::goal_curation::labels`]); operators may add `area:…` / topical
+    /// tags alongside it. Tags are matched by exact, case-sensitive equality.
+    ///
+    /// `#[serde(default, skip_serializing_if = "Vec::is_empty")]` keeps the
+    /// change additive and back-compatible: pre-#2743 snapshots with no
+    /// `labels` key load as empty, and an unlabelled goal serializes
+    /// byte-identically (the key is omitted), so the board snapshot hash is
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
 }
 
 /// `skip_serializing_if` predicate: omit a `bool` field when it is `false` so
@@ -206,6 +219,7 @@ impl ActiveGoal {
             last_progress_update_at: None,
             parent_goal_id: None,
             priority_explicit: false,
+            labels: Vec::new(),
         }
     }
 
@@ -231,6 +245,24 @@ impl ActiveGoal {
     #[must_use]
     pub fn with_priority_explicit(mut self, explicit: bool) -> Self {
         self.priority_explicit = explicit;
+        self
+    }
+
+    /// Builder: replace this goal's label set wholesale. Used at seed and
+    /// provenance-stamping sites (issue #2743) — e.g. a decomposition child is
+    /// built with its inherited parent labels plus `source:decomposition`.
+    #[must_use]
+    pub fn with_labels(mut self, labels: Vec<String>) -> Self {
+        self.labels = labels;
+        self
+    }
+
+    /// Builder: add a single label, idempotently and order-preservingly (via
+    /// [`crate::goal_curation::labels::add_label`]). A duplicate or
+    /// empty-after-trim tag is a no-op.
+    #[must_use]
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        super::labels::add_label(&mut self.labels, &label.into());
         self
     }
 
@@ -389,20 +421,31 @@ pub struct GoalNode {
     /// of its children rather than a single criterion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_criterion: Option<String>,
+    /// The goal's labels, projected onto the graph node (issue #2743) so
+    /// provenance and categorization are queryable from the decomposition graph
+    /// too. This is a **snapshot copy** taken when the node is written; the
+    /// live `ActiveGoal` on the board remains the source of truth. Additive and
+    /// serde-back-compatible (pre-#2743 nodes load with empty labels).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
 }
 
 impl GoalNode {
     /// Construct a goal node. `done_criterion` is `Option<impl Into<String>>`
-    /// so call sites can pass `Some("…")`, `Some(string)`, or `None`.
+    /// so call sites can pass `Some("…")`, `Some(string)`, or `None`. `labels`
+    /// is the goal's label snapshot (empty for call sites without labels to
+    /// hand).
     pub fn new(
         id: impl Into<String>,
         description: impl Into<String>,
         done_criterion: Option<impl Into<String>>,
+        labels: Vec<String>,
     ) -> Self {
         Self {
             id: id.into(),
             description: description.into(),
             done_criterion: done_criterion.map(Into::into),
+            labels,
         }
     }
 }
@@ -573,6 +616,7 @@ mod tests {
 
     fn sample_goal() -> ActiveGoal {
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -607,6 +651,7 @@ mod tests {
     #[test]
     fn active_goal_assigned_to_none() {
         let g = ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -754,6 +799,7 @@ mod tests {
     fn goal_board_active_slots_remaining_full() {
         let goals: Vec<ActiveGoal> = (0..MAX_ACTIVE_GOALS)
             .map(|i| ActiveGoal {
+                labels: Vec::new(),
                 parent_goal_id: None,
                 priority_explicit: false,
                 repo: None,
@@ -778,6 +824,7 @@ mod tests {
     fn goal_board_active_slots_remaining_overflow_saturates() {
         let goals: Vec<ActiveGoal> = (0..MAX_ACTIVE_GOALS + 2)
             .map(|i| ActiveGoal {
+                labels: Vec::new(),
                 parent_goal_id: None,
                 priority_explicit: false,
                 repo: None,

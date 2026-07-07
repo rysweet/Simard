@@ -184,6 +184,9 @@ pub struct App {
     /// (the REPL prints the user message back before sending to the LLM).
     /// We skip clearing `waiting_for_response` on the echo line so the
     /// spinner stays visible during the actual LLM wait.
+    /// Active Goals-tab tag filter (issue #2743). `None` = show all goals;
+    /// `Some(tag)` = show only goals carrying that exact label. Cycled with `t`.
+    pub goals_tag_filter: Option<String>,
     echo_pending: bool,
 }
 
@@ -231,8 +234,40 @@ impl App {
             update_rx,
             update_notice: None,
             waiting_for_response: false,
+            goals_tag_filter: None,
             echo_pending: false,
         }
+    }
+
+    /// Distinct labels across the active board, sorted — the cycle order for
+    /// the Goals-tab tag filter (issue #2743).
+    fn distinct_goal_tags(&self) -> Vec<String> {
+        let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for g in &self.goal_board.active {
+            for l in &g.labels {
+                set.insert(l.clone());
+            }
+        }
+        set.into_iter().collect()
+    }
+
+    /// Cycle the Goals-tab tag filter: `None` → first tag → … → last → `None`.
+    /// A no-op that stays `None` when the board carries no labels. If the
+    /// current filter tag is no longer present (the board changed), the cycle
+    /// resets to `None` (show all).
+    pub fn cycle_goals_tag_filter(&mut self) {
+        let tags = self.distinct_goal_tags();
+        if tags.is_empty() {
+            self.goals_tag_filter = None;
+            return;
+        }
+        self.goals_tag_filter = match &self.goals_tag_filter {
+            None => Some(tags[0].clone()),
+            Some(cur) => match tags.iter().position(|t| t == cur) {
+                Some(i) if i + 1 < tags.len() => Some(tags[i + 1].clone()),
+                _ => None,
+            },
+        };
     }
 
     /// Handle a key press event.
@@ -408,6 +443,16 @@ impl App {
                 }
                 _ => {}
             }
+        }
+
+        // Goals tab: `t` cycles the tag filter through the distinct labels on
+        // the board (None -> tag1 -> ... -> None), so the operator can narrow
+        // the board to e.g. `source:creative-ideas` (issue #2743).
+        if self.active_tab == Tab::Goals
+            && let KeyCode::Char('t') = code
+        {
+            self.cycle_goals_tag_filter();
+            return;
         }
 
         // Left/Right arrow tab cycling (outside active meeting)
@@ -2680,5 +2725,58 @@ mod tests {
             Some(Tab::Journal),
             "Ctrl+7 should switch to Journal"
         );
+    }
+
+    // ── #2743: Goals-tab tag filter cycling ────────────────────────────────
+
+    fn labelled_board() -> crate::types::GoalBoard {
+        let mk = |id: &str, labels: Vec<&str>| crate::types::ActiveGoal {
+            id: id.to_string(),
+            description: format!("desc {id}"),
+            priority: 1,
+            status: crate::types::GoalProgress::NotStarted,
+            assigned_to: None,
+            repo: None,
+            current_activity: None,
+            wip_refs: Vec::new(),
+            labels: labels.into_iter().map(String::from).collect(),
+        };
+        crate::types::GoalBoard {
+            active: vec![
+                mk("g1", vec!["source:creative-ideas", "area:dashboard"]),
+                mk("g2", vec!["source:operator"]),
+            ],
+            backlog: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn goals_tag_filter_cycles_through_distinct_tags_then_back_to_none() {
+        let mut app = App::new("simard-ooda.service".to_string(), None);
+        app.goal_board = labelled_board();
+        app.active_tab = Tab::Goals;
+        assert_eq!(app.goals_tag_filter, None, "starts unfiltered");
+
+        // Distinct tags sorted: area:dashboard, source:creative-ideas, source:operator
+        app.handle_key(key('t'));
+        assert_eq!(app.goals_tag_filter.as_deref(), Some("area:dashboard"));
+        app.handle_key(key('t'));
+        assert_eq!(
+            app.goals_tag_filter.as_deref(),
+            Some("source:creative-ideas")
+        );
+        app.handle_key(key('t'));
+        assert_eq!(app.goals_tag_filter.as_deref(), Some("source:operator"));
+        // Past the last tag -> back to unfiltered.
+        app.handle_key(key('t'));
+        assert_eq!(app.goals_tag_filter, None);
+    }
+
+    #[test]
+    fn goals_tag_filter_is_noop_when_board_has_no_labels() {
+        let mut app = App::new("simard-ooda.service".to_string(), None);
+        app.active_tab = Tab::Goals;
+        app.cycle_goals_tag_filter();
+        assert_eq!(app.goals_tag_filter, None, "no labels -> stays unfiltered");
     }
 }

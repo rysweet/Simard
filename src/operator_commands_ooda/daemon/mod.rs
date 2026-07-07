@@ -1829,6 +1829,7 @@ mod tests {
         let shared_mem = mock_shared_mem();
         let mut board = GoalBoard::new();
         board.active.push(crate::goal_curation::ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,

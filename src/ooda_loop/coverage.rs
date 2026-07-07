@@ -173,6 +173,7 @@ mod tests {
 
     fn goal(id: &str, priority: u32, status: GoalProgress, assigned: Option<&str>) -> ActiveGoal {
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,

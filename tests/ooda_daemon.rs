@@ -111,6 +111,7 @@ fn board_with_active_goals() -> GoalBoard {
     add_active_goal(
         &mut board,
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -128,6 +129,7 @@ fn board_with_active_goals() -> GoalBoard {
     add_active_goal(
         &mut board,
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -372,6 +374,7 @@ fn daemon_degrades_gracefully_when_no_provider() {
 #[test]
 fn goal_objective_contains_goal_id_and_description() {
     let goal = ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,

@@ -1170,3 +1170,33 @@ fn rendered_html_goals_render_parent_child_hierarchy() {
          grouped/nested under their active parent (orphans/backlog-parent children at root)"
     );
 }
+
+#[test]
+fn rendered_html_goals_render_label_chips_and_tag_filter() {
+    // Issue #2743: the Goals tab renders each goal's labels as chips and offers
+    // a client-side tag filter over the already-fetched live goal data.
+    assert!(
+        INDEX_HTML.contains("goalLabelChips(g.labels)"),
+        "each goal row must render its labels as chips via goalLabelChips(g.labels)"
+    );
+    assert!(
+        INDEX_HTML.contains("goal-label-chip"),
+        "label chips must carry the goal-label-chip class for styling/testing"
+    );
+    // The tag filter is client-side: a filter control + a predicate over the
+    // fetched goals. No new route is added.
+    assert!(
+        INDEX_HTML.contains("id=\"goals-tag-filter\""),
+        "the Goals tab must host a tag-filter control container"
+    );
+    assert!(
+        INDEX_HTML.contains("function goalMatchesTagFilter(")
+            && INDEX_HTML.contains("window.setGoalTagFilter"),
+        "the Goals tab must filter goals client-side by the selected tag"
+    );
+    // Filtering runs over the fetched goal data, not a server round-trip.
+    assert!(
+        INDEX_HTML.contains("groupGoalsByParent(activeFiltered"),
+        "the render must group/render the tag-filtered goal list"
+    );
+}

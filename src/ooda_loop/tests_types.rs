@@ -45,6 +45,7 @@ fn ooda_state_new_defaults() {
 fn ooda_state_new_with_goals() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -66,6 +67,7 @@ fn ooda_state_new_with_goals() {
 fn populated_state() -> OodaState {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -166,6 +168,7 @@ fn snapshot_into_state_constructs_fresh_state() {
 #[test]
 fn goal_snapshot_from_active_goal() {
     let goal = ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -190,6 +193,7 @@ fn goal_snapshot_from_active_goal() {
 #[test]
 fn goal_snapshot_from_blocked_goal() {
     let goal = ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -282,6 +286,7 @@ fn action_outcome_construction() {
 fn prune_stale_failure_counts_removes_absent_goals() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -315,6 +320,7 @@ fn prune_stale_failure_counts_removes_absent_goals() {
 fn prune_stale_failure_counts_noop_when_all_present() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,

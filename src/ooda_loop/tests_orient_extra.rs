@@ -146,6 +146,7 @@ fn orient_includes_scenario_count_in_improvement_priority_reason() {
 fn orient_priorities_sorted_by_urgency_descending() {
     let goals = vec![
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -159,6 +160,7 @@ fn orient_priorities_sorted_by_urgency_descending() {
             last_progress_update_at: None,
         },
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -172,6 +174,7 @@ fn orient_priorities_sorted_by_urgency_descending() {
             last_progress_update_at: None,
         },
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -196,6 +199,7 @@ fn orient_priorities_sorted_by_urgency_descending() {
 #[test]
 fn orient_failure_cooldown_demotes_urgency() {
     let goals = vec![ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -228,6 +232,7 @@ fn orient_failure_cooldown_demotes_urgency() {
 #[test]
 fn orient_failure_cooldown_clamps_to_zero() {
     let goals = vec![ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -253,6 +258,7 @@ fn orient_failure_cooldown_clamps_to_zero() {
 #[test]
 fn orient_no_demotion_when_failure_count_zero() {
     let goals = vec![ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,

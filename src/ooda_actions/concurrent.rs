@@ -398,6 +398,7 @@ pub(super) fn is_concurrent_advance_candidate(action: &PlannedAction, state: &Oo
 #[cfg(test)]
 fn active_goal_for_test(id: &str) -> crate::goal_curation::ActiveGoal {
     crate::goal_curation::ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,

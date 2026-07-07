@@ -98,6 +98,7 @@ pub fn route_idea_to_goal(
         source_session_id: creative_idea_session_id(),
         updated_in: SessionPhase::Planning,
         evidence,
+        labels: vec![crate::goal_curation::labels::SOURCE_CREATIVE_IDEAS.to_string()],
     };
     goals.put(record.clone())?;
     Ok(record)

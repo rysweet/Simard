@@ -866,6 +866,7 @@ pub fn promote_to_active(
             reason: format!("backlog item '{backlog_id}' not found"),
         })?;
     let item = board.backlog.remove(position);
+    let promoted_source = crate::goal_curation::labels::source_for_backlog(&item.source);
     board.active.push(ActiveGoal {
         parent_goal_id: None,
         priority_explicit: false,
@@ -878,6 +879,7 @@ pub fn promote_to_active(
         current_activity: None,
         wip_refs: vec![],
         last_progress_update_at: None,
+        labels: vec![promoted_source.to_string()],
     });
     Ok(())
 }
@@ -1350,6 +1352,7 @@ pub fn seed_default_board(board: &mut GoalBoard) -> usize {
             current_activity: None,
             wip_refs: vec![],
             last_progress_update_at: None,
+            labels: vec![crate::goal_curation::labels::SOURCE_SEED.to_string()],
         });
     }
 
@@ -1421,6 +1424,7 @@ pub fn active_goals_as_records(board: &GoalBoard) -> Vec<crate::goals::GoalRecor
                 source_session_id: SENTINEL_SESSION_ID.clone(),
                 updated_in: crate::session::SessionPhase::Persistence,
                 evidence: Vec::new(),
+                labels: active.labels.clone(),
             }
         })
         .collect()

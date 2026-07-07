@@ -90,20 +90,92 @@ same snapshot.
 
 ### `simard goal list`
 
+```text
+simard goal list [--tag <tag>]...
+```
+
 Print the persisted goal board to stdout. Output is a header line plus
 one tab-separated row per active goal, then a one-line backlog summary
-followed (when non-empty) by tab-separated backlog rows:
+followed (when non-empty) by tab-separated backlog rows. Each active-goal
+row ends with a trailing `LABELS` column (the goal's tags, comma-joined),
+appended **after** the existing columns so scripts that parse the first
+five fields keep working:
 
 ```text
 active goals: 5 / 5
-ID	PRIORITY	STATUS	ASSIGNED	DESCRIPTION
-enhance-simard-meeting-experience	p1	blocked: 🔒 [OODA-SAFEGUARD] OODA brain failing for 3 consecutive cycles; needs human review	-	enhance simard meeting experience
+ID	PRIORITY	STATUS	ASSIGNED	DESCRIPTION	LABELS
+enhance-simard-meeting-experience	p1	blocked: 🔒 [OODA-SAFEGUARD] OODA brain failing for 3 consecutive cycles; needs human review	-	enhance simard meeting experience	source:meeting
 …
 backlog: 0 item(s)
 ```
 
-Exits non-zero on client-open / persistence errors. An empty board prints
-`(none)` and exits zero.
+`--tag <tag>` (optional, **repeatable**) filters the active board to goals
+that carry the tag. Repeated `--tag` flags combine with **AND** — a goal must
+carry **all** requested tags to be listed. Matching is exact and
+case-sensitive. When any `--tag` is present the header annotates the filtered
+count, e.g. `active goals: 2 / 7 (filtered by tag)`:
+
+```bash
+# All goals promoted from creative ideas:
+simard goal list --tag source:creative-ideas
+
+# Creative-ideas goals that are ALSO tagged area:dashboard (AND):
+simard goal list --tag source:creative-ideas --tag area:dashboard
+```
+
+See [Goal labels / tags](./goal-labels.md) (issue
+[#2743](https://github.com/rysweet/Simard/issues/2743)) for the label model,
+the automatic `source:*` provenance tags, and the dashboard / TUI surfaces.
+
+Exits non-zero on client-open / persistence errors. An empty board (or an
+empty filter result) prints `(none)` and exits zero.
+
+### `simard goal label`
+
+```text
+simard goal label <goal-id> add <tag>
+simard goal label <goal-id> remove <tag>
+simard goal label <goal-id> list
+```
+
+Deterministic CRUD for a goal's free-form labels (tags). The `<goal-id>`
+follows the `label` verb, matching the `simard goal unblock <goal-id>` /
+`simard goal remove <goal-id>` style. Labels are short, free-form tags
+(`area:dashboard`, `research`, `security`) plus the automatic `source:*`
+provenance tag stamped at creation; they are matched by exact, case-sensitive
+string equality.
+
+- **`add <tag>`** — normalizes the tag (trims surrounding whitespace; an
+  empty-after-trim tag is rejected with a clear stderr message and a non-zero
+  exit), then adds it. **Idempotent** and order-preserving: re-adding an
+  existing tag is a successful no-op.
+- **`remove <tag>`** — removes the tag if present. Removing an absent tag is a
+  **no-op that still exits `0`** (with a short stderr note), so the command is
+  safe to rerun.
+- **`list`** — prints the goal's tags to **stdout**, one per line, or `(none)`
+  when the goal has no labels.
+
+Mutations persist through the same flock-guarded goal-board store as
+`simard goal add` / `simard goal remove`, so the operator never needs to pause
+the daemon and concurrent unrelated writers are preserved. An unknown
+`<goal-id>` exits non-zero; a short audit line is logged to stderr in the
+established pattern (no goal payloads on stdout). See
+[Goal labels / tags](./goal-labels.md) for the full contract and
+[How to label, categorize, and filter goals](../howto/label-and-filter-goals.md)
+for a walkthrough.
+
+```bash
+# Tag a goal, confirm the round-trip:
+simard goal label enhance-simard-meeting-experience add area:meeting
+simard goal label enhance-simard-meeting-experience list          # -> area:meeting
+
+# Remove is idempotent:
+simard goal label enhance-simard-meeting-experience remove area:meeting
+simard goal label enhance-simard-meeting-experience remove area:meeting   # no-op, exit 0
+```
+
+Exits non-zero on unknown goal id, an empty `add` tag, or client-open /
+persistence failure.
 
 ### `simard goal add`
 

@@ -7,6 +7,7 @@
 //! ([`decompose`]) that breaks one large goal into bounded sub-goals.
 
 pub mod completion_gate;
+pub mod labels;
 pub mod no_progress_breaker;
 mod operations;
 pub mod progress_evidence;
@@ -62,6 +63,8 @@ mod tests;
 mod tests_adapter;
 #[cfg(test)]
 mod tests_carryover;
+#[cfg(test)]
+mod tests_labels;
 #[cfg(test)]
 mod tests_no_progress_breaker;
 #[cfg(test)]

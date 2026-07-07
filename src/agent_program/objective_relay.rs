@@ -94,6 +94,7 @@ mod tests {
         let program = ObjectiveRelayProgram::try_default().unwrap();
         let mut context = test_context("build it");
         context.active_goals = vec![GoalRecord {
+            labels: Vec::new(),
             slug: "ship-v1".to_string(),
             title: "Ship v1".to_string(),
             rationale: "deadline".to_string(),

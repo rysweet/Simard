@@ -1153,6 +1153,7 @@ mod tests_refuted_lessons {
     /// signal), not `UnverifiedNoSignal`. `id` is the per-occurrence dedup key.
     fn refuted_goal(id: &str, desc: &str) -> ActiveGoal {
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -1286,6 +1287,7 @@ mod tests_sweep {
 
     fn make_goal(id: &str, session: Option<&str>) -> ActiveGoal {
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -1424,6 +1426,7 @@ mod tests_board_integrity {
 
     fn make_goal(id: &str, desc: &str) -> ActiveGoal {
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -1708,6 +1711,7 @@ mod tests_objective_probe {
 
     fn active_goal(id: &str, description: &str) -> ActiveGoal {
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
