@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::SimardResult;
 
-use super::types::{ActiveGoal, GoalBoard, GoalProgress};
+use super::types::{ActiveGoal, GoalBoard};
 
 /// The verified facts the gate gathered for one goal.
 #[derive(Clone, Debug, PartialEq)]
@@ -473,11 +473,7 @@ pub fn completion_evidence_enabled() -> bool {
 /// Standing/perpetual goals (issue #2580) are never candidates: they have no
 /// terminal done-state, so the gate must not archive them regardless of status.
 fn is_complete_candidate(goal: &ActiveGoal) -> bool {
-    if goal.is_perpetual() {
-        return false;
-    }
-    matches!(goal.status, GoalProgress::Completed)
-        || matches!(goal.status, GoalProgress::InProgress { percent } if percent >= 100)
+    !goal.is_perpetual() && goal.status.is_terminal()
 }
 
 /// True when a goal's status *looks* terminal (`Completed`, or `InProgress` at
@@ -485,8 +481,7 @@ fn is_complete_candidate(goal: &ActiveGoal) -> bool {
 /// standing goal whose unit of work finished so it can be rolled to a fresh
 /// cycle instead of stalling in a done-looking state.
 fn has_dominant_progress(goal: &ActiveGoal) -> bool {
-    matches!(goal.status, GoalProgress::Completed)
-        || matches!(goal.status, GoalProgress::InProgress { percent } if percent >= 100)
+    goal.status.is_terminal()
 }
 
 /// Archive only goals the gate certifies `Complete`. Goals that fail the gate

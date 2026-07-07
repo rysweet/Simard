@@ -1116,8 +1116,7 @@ pub fn clear_goal_assignment(board: &mut GoalBoard, goal_id: &str) -> SimardResu
 pub fn archive_completed(board: &mut GoalBoard) -> Vec<ActiveGoal> {
     let mut archived = Vec::new();
     board.active.retain_mut(|goal| {
-        let dominated = matches!(goal.status, GoalProgress::Completed)
-            || matches!(goal.status, GoalProgress::InProgress { percent } if percent >= 100);
+        let dominated = goal.status.is_terminal();
         if !dominated {
             return true;
         }

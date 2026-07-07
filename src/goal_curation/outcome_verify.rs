@@ -54,6 +54,13 @@ use super::types::{ActiveGoal, GoalBoard, GoalProgress};
 /// count, and the (scrubbed) reasoning string.
 pub const GOAL_LIVE_OUTCOME_VERIFICATION_METRIC: &str = "goal_live_outcome_verification";
 
+/// Progress a re-opened or errored completion-candidate is demoted to. Below
+/// 100 so [`GoalProgress::is_terminal`] no longer re-selects it as a verify /
+/// archive candidate next cycle, yet high enough to record that the artifact
+/// landed and only the *live outcome* is unproven — the engineer re-works from
+/// here, and the loop re-verifies once work lands again.
+const DEMOTED_PROGRESS_PERCENT: u32 = 90;
+
 /// Environment kill-switch: `SIMARD_OUTCOME_VERIFY=off` disables live outcome
 /// verification (the daemon leaves the bridge pair `None`, restoring the legacy
 /// curate path). Secure default is **ON**.
@@ -194,14 +201,6 @@ pub fn record_outcome_verification(
     );
 }
 
-/// True for goals whose status makes them a live-verification candidate: work
-/// has landed (`Completed`, or `InProgress` at >= 100%). Perpetual goals are
-/// filtered separately by the caller (Rail-1).
-fn is_completion_candidate(goal: &ActiveGoal) -> bool {
-    matches!(goal.status, GoalProgress::Completed)
-        || matches!(goal.status, GoalProgress::InProgress { percent } if percent >= 100)
-}
-
 /// One goal's outcome-verification result at the curate seam, for the caller to
 /// log. `archived_eligible` is `true` only for a `MarkAchieved` that survived
 /// Rail-3 — the sole decision that permits archival.
@@ -244,7 +243,7 @@ pub fn verify_completion_candidates(
     for goal in board.active.iter_mut() {
         // Rail-1 (skip perpetual) + candidacy: only verify goals whose work has
         // landed. Perpetual rolling stays with the downstream archive step.
-        if goal.is_perpetual() || !is_completion_candidate(goal) {
+        if goal.is_perpetual() || !goal.status.is_terminal() {
             continue;
         }
 
@@ -280,7 +279,9 @@ pub fn verify_completion_candidates(
                     // downstream archive step retains it, and annotate why. An
                     // engineer re-works it, re-completes it, and the loop
                     // re-verifies next time it lands.
-                    goal.status = GoalProgress::InProgress { percent: 90 };
+                    goal.status = GoalProgress::InProgress {
+                        percent: DEMOTED_PROGRESS_PERCENT,
+                    };
                     goal.current_activity = Some(annotation(&outcome.decision));
                 }
 
@@ -296,7 +297,9 @@ pub fn verify_completion_candidates(
                 // Rail-2 (NO-FALLBACK): keep the goal open, fail-closed. Demote
                 // off candidacy so it cannot be archived on an unverified cycle.
                 let reason = e.to_string();
-                goal.status = GoalProgress::InProgress { percent: 90 };
+                goal.status = GoalProgress::InProgress {
+                    percent: DEMOTED_PROGRESS_PERCENT,
+                };
                 goal.current_activity = Some(format!(
                     "outcome-verify FAILED (kept open, no-fallback): {reason}"
                 ));

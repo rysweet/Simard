@@ -35,6 +35,19 @@ pub enum GoalProgress {
     Completed,
 }
 
+impl GoalProgress {
+    /// True when the goal's work has landed to a terminal-looking state:
+    /// `Completed`, or `InProgress` at ≥ 100%. This is the shared
+    /// "archive / outcome-verification candidate" predicate — the single home of
+    /// a rule that was previously duplicated across the completion gate, the
+    /// archival pass, and the #2751 outcome-verify seam. It is independent of
+    /// whether the goal is perpetual; callers add that guard where they need it.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, GoalProgress::Completed)
+            || matches!(self, GoalProgress::InProgress { percent } if *percent >= 100)
+    }
+}
+
 impl Display for GoalProgress {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
@@ -532,6 +545,18 @@ mod tests {
     fn goal_progress_display_in_progress_hundred() {
         let p = GoalProgress::InProgress { percent: 100 };
         assert_eq!(p.to_string(), "in-progress(100%)");
+    }
+
+    #[test]
+    fn goal_progress_is_terminal() {
+        assert!(GoalProgress::Completed.is_terminal());
+        assert!(GoalProgress::InProgress { percent: 100 }.is_terminal());
+        assert!(GoalProgress::InProgress { percent: 150 }.is_terminal());
+        assert!(!GoalProgress::InProgress { percent: 99 }.is_terminal());
+        assert!(!GoalProgress::NotStarted.is_terminal());
+        assert!(!GoalProgress::Proposed.is_terminal());
+        assert!(!GoalProgress::Paused.is_terminal());
+        assert!(!GoalProgress::Blocked("x".into()).is_terminal());
     }
 
     #[test]
