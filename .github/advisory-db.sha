@@ -5,7 +5,8 @@
 # freshly-published upstream advisory can never retroactively fail an open PR.
 # The daily .github/workflows/advisory-scan.yml job fetches the DB HEAD, is the
 # source of truth for "is there a new advisory?", and — when HEAD is otherwise
-# clean — opens a `chore(deps): bump advisory-db pin` PR advancing this SHA.
+# clean — logs the advanceable SHA so this pin can be moved forward via a
+# `chore(deps): bump advisory-db pin` PR.
 #
 # Format: the first non-comment, non-blank line is the full 40-char commit SHA.
 # See docs/reference/supply-chain-advisory-stewardship.md.

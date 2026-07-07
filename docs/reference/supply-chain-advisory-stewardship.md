@@ -75,8 +75,9 @@ revision for the gate and bump it deliberately, or make the PR-time check a
   retroactively fail an open PR.
 - The **scheduled** job fetches the DB **HEAD**, is the single source of truth
   for "is there a new advisory?", and — when the fresh DB is otherwise clean —
-  opens a PR that **bumps `.github/advisory-db.sha`** so the pin advances
-  deliberately, reviewed like any other change.
+  **surfaces the advanceable DB HEAD SHA** so the pin in `.github/advisory-db.sha`
+  can be moved forward via a `chore(deps): bump advisory-db pin` PR, reviewed
+  like any other change.
 
 > **Why pin, not soft-warn.** A soft-warning PR gate would let a *real* new
 > vulnerability land silently on a green PR. Pinning keeps the gate a true
@@ -100,7 +101,8 @@ evaluates against:
 ```text
 # .github/advisory-db.sha
 # Pinned rustsec/advisory-db revision for the PR-time advisory gate (#2741).
-# Advanced deliberately by the scheduled advisory-scan job when DB HEAD is clean.
+# Advanced deliberately via a `chore(deps): bump advisory-db pin` PR once the
+# scheduled advisory-scan job reports DB HEAD is clean.
 a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0
 ```
 
@@ -190,7 +192,7 @@ on:
   workflow_dispatch: {}    # manual trigger for testing / on-demand sweeps
 
 permissions:
-  contents: write        # bump advisory-db.sha / deny.toml / Cargo.lock on a branch
+  contents: write        # push deny.toml / Cargo.lock remediation branches
   issues: write          # file tracking issues
   pull-requests: write   # open remediation PRs
 
@@ -232,8 +234,9 @@ What a run does, in order:
    and, per the decision, **open a remediation PR** (a bump) or leave it
    issue-only (escalate / justified-ignore).
 4. When the fresh DB is otherwise **clean** (no un-pinned advisory the gate would
-   miss), open a `chore(deps): bump advisory-db pin` PR advancing
-   [`.github/advisory-db.sha`](#githubadvisory-dbsha) to DB HEAD.
+   miss), **log the advanceable DB HEAD SHA** so
+   [`.github/advisory-db.sha`](#githubadvisory-dbsha) can be advanced to DB HEAD
+   via a `chore(deps): bump advisory-db pin` PR.
 5. **Self-merge only its own green-CI remediation PRs** (see
    [self-merge](#self-merge)).
 

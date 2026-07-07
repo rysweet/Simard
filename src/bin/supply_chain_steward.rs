@@ -10,8 +10,8 @@
 //!   scan          Run cargo audit against DB HEAD on the default branch and,
 //!                 for each new vulnerability: decide → file issue → open a
 //!                 bump PR / justified-ignore / escalate. When the DB is clean,
-//!                 propose an advisory-db.sha pin bump. Self-merges only its own
-//!                 green-CI PRs.
+//!                 log the advanceable advisory-db.sha pin SHA. Self-merges only
+//!                 its own green-CI PRs.
 //!   decide-only   Parse `cargo audit --json` from stdin and print the decision
 //!                 for each advisory as JSON. No side effects — for inspection.
 //! ```
@@ -274,10 +274,14 @@ fn run_cargo_audit_json() -> SimardResult<String> {
 
 // ─────────────────────────── advisory-db pin advance ───────────────────────────
 
-/// When DB HEAD is clean, advance `.github/advisory-db.sha` to it and open a
-/// `chore(deps): bump advisory-db pin` PR. Best-effort: any failure is a
-/// non-fatal `warn` — the scan's primary job (remediating vulnerabilities) has
-/// already succeeded when this runs.
+/// When DB HEAD is clean, detect the advanceable `.github/advisory-db.sha`
+/// revision and **log** it. Advancing the pin — writing the SHA and opening the
+/// `chore(deps): bump advisory-db pin` PR — is a separate, deliberate step (the
+/// logged SHA is what that PR records); this driver stays side-effect-light and
+/// never force-pushes a branch or opens a PR from the scheduled default-branch
+/// checkout itself. Best-effort: any failure is a non-fatal `warn`, since the
+/// scan's primary job (remediating vulnerabilities) has already succeeded when
+/// this runs.
 fn advance_pin_best_effort(root: &Path) -> SimardResult<()> {
     let head = advisory_db_head()?;
     let pin_path = root.join(".github").join("advisory-db.sha");
@@ -286,10 +290,11 @@ fn advance_pin_best_effort(root: &Path) -> SimardResult<()> {
         info!(sha = %head, "advisory-db pin already at DB HEAD");
         return Ok(());
     }
-    info!(sha = %head, "advisory-db HEAD is clean; a pin bump to this SHA can be proposed");
-    // Writing the pin + opening the bump PR is left to the scheduled workflow's
-    // commit step to keep this driver side-effect-light; the SHA is logged so a
-    // human or the workflow can advance it deliberately.
+    info!(
+        sha = %head,
+        "advisory-db HEAD is clean and ahead of the pin; advance \
+         .github/advisory-db.sha to this SHA via a `chore(deps): bump advisory-db pin` PR"
+    );
     Ok(())
 }
 

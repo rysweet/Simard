@@ -18,7 +18,7 @@ on:
   workflow_dispatch: {} # manual trigger for testing / on-demand sweeps
 
 permissions:
-  contents: write # bump advisory-db.sha / deny.toml / Cargo.lock on a branch
+  contents: write # push deny.toml / Cargo.lock remediation branches
   issues: write # file tracking issues
   pull-requests: write # open remediation PRs
 
