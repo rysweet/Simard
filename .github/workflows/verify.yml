@@ -190,6 +190,12 @@ jobs:
           retention-days: 7
 
   cargo-audit:
+    # Advisory gate, pinned + offline (issue #2741). `cargo audit` normally
+    # fetches the LATEST RUSTSEC DB at CI time, so a brand-new upstream advisory
+    # would retroactively fail this required check on every open PR. Instead the
+    # DB is checked out at the revision recorded in .github/advisory-db.sha and
+    # run with `--no-fetch`, so the pin — not upstream HEAD — is authoritative.
+    # The daily advisory-scan.yml job tracks DB HEAD and advances the pin.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -199,18 +205,42 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Read pinned advisory-db SHA
+        id: pin
+        # First non-comment, non-blank line of the pin file is the full SHA.
+        run: echo "sha=$(grep -vE '^\s*(#|$)' .github/advisory-db.sha | head -n1)" >> "$GITHUB_OUTPUT"
+
+      - name: Check out pinned advisory database
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: rustsec/advisory-db
+          ref: ${{ steps.pin.outputs.sha }}
+          path: .advisory-db
+
       - name: Install cargo-audit
         uses: taiki-e/install-action@754bf4dbae00ad1b16b244717154b96ba27d2416 # cargo-audit
 
-      - name: Run cargo audit
-        run: cargo audit
+      - name: Run cargo audit (offline, against the pinned DB)
+        # `--no-fetch` disables the network fetch; `--db` points at the pinned
+        # checkout. A vulnerability present *in the pinned DB* still fails the
+        # PR — only the timing coupling to upstream publication is removed.
+        run: cargo audit --no-fetch --db .advisory-db
 
   cargo-deny:
-    # Supply-chain policy gate (issue #2260): advisories + licenses + bans +
-    # sources, enforced by the repo-root deny.toml. Lockfile-only — it reads
+    # Supply-chain policy gate (issue #2260): licenses + bans + sources,
+    # enforced by the repo-root deny.toml. Lockfile-only — it reads
     # Cargo.lock + deny.toml and never compiles the crate, so it is a separate
     # job (not folded into the memory-sensitive pre-commit build) and never
     # writes the shared rust-cache.
+    #
+    # ADVISORIES are deliberately NOT checked here (issue #2741). `cargo deny`
+    # cannot pin the advisory DB to a revision — it always fetches upstream HEAD
+    # — so a brand-new advisory would retroactively fail this required check on
+    # every open PR. The authoritative advisory gate is the `cargo-audit` job
+    # above, which runs OFFLINE against the SHA pinned in .github/advisory-db.sha
+    # and so is immune to upstream DB churn. The daily advisory-scan.yml job
+    # tracks DB HEAD and files proactive fixes. licenses/bans/sources are
+    # advisory-DB-independent and stay a hard, deterministic, network-free gate.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -229,10 +259,12 @@ jobs:
         with:
           tool: cargo-deny@0.19.9
 
-      - name: Run cargo deny check
+      - name: Run cargo deny check (licenses + bans + sources)
         # `--locked` is a top-level flag (before the subcommand): it fails on a
         # dirty Cargo.lock so the check always reflects the committed graph.
-        run: cargo deny --locked check
+        # advisories is intentionally omitted — see the job comment above; the
+        # pinned, offline cargo-audit job is the authoritative advisory gate.
+        run: cargo deny --locked check licenses bans sources
 
   cargo-vet:
     # Transitive-dependency trust gate (issue #2262): every third-party crate

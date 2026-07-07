@@ -1,0 +1,30 @@
+# Dependabot configuration for Simard (issue #2741).
+#
+# Complements the proactive advisory reasoner (src/supply_chain_steward/): the
+# reasoner reacts to published *advisories* with a bump-or-justified-ignore
+# decision, while Dependabot proactively proposes *version* bumps so a patched
+# crate is usually already offered before an advisory ever lands. Dependabot
+# security-update PRs ride the same pinned, offline advisory PR gate as any
+# other PR and are merged through the normal PR-finalization pipeline.
+#
+# See docs/reference/supply-chain-advisory-stewardship.md § Dependabot.
+version: 2
+updates:
+  # Rust crates: security updates (enabled by default for the ecosystem) plus
+  # weekly routine lockfile/version maintenance, so a patched crate is proposed
+  # before an advisory ever blocks CI.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+
+  # Keep the SHA-pinned GitHub Actions current (they still receive bump PRs).
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(ci)"

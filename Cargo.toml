@@ -46,6 +46,12 @@ required-features = ["dashboard-audit"]
 name = "simard-tui"
 path = "src/bin/simard_tui/main.rs"
 
+# Issue #2741: scheduled supply-chain advisory remediation driver. Thin wrapper
+# over `simard::supply_chain_steward`; run daily by .github/workflows/advisory-scan.yml.
+[[bin]]
+name = "supply-chain-steward"
+path = "src/bin/supply_chain_steward.rs"
+
 [dependencies]
 # De-fork phase 2b (issue #2307): the amplihack-memory-lib `CognitiveMemory`
 # (persistent, lbug-backed `GraphStore`) is now the SOLE cognitive-memory

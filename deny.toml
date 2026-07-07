@@ -22,6 +22,14 @@
 targets = [{ triple = "x86_64-unknown-linux-gnu" }]
 
 # ── Advisories (RUSTSEC) ─────────────────────────────────────────────────────
+# NOTE (#2741): the PR-time gate no longer runs `cargo deny check advisories`
+# (cargo-deny always fetches the DB HEAD and so would let a brand-new upstream
+# advisory retroactively fail unrelated PRs). At PR time the authoritative
+# advisory gate is the pinned, OFFLINE `cargo audit` job (see
+# .github/advisory-db.sha + verify.yml); the daily advisory-scan workflow runs
+# `cargo deny check advisories` against DB HEAD and files proactive fixes. This
+# `[advisories]` policy — the ignore list below — is still the source of truth
+# and is exercised by that scheduled job and by any local `cargo deny check`.
 [advisories]
 db-urls = ["https://github.com/rustsec/advisory-db"]
 # Yanked crate versions always fail — they signal a withdrawn release.
