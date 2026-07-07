@@ -9,6 +9,7 @@ related:
   - ../concepts/goal-board-persistence.md
   - ../concepts/ooda-loop-self-detection.md
   - ./goal-board-api.md
+  - ./goal-decompose-result-channel.md
   - ./cognitive-memory-provenance.md
   - ./goal-target-repo-routing.md
   - ./maximum-safe-parallelism.md
@@ -363,19 +364,36 @@ The decomposition itself is prompt-driven, consistent with Simard's
 
 | Asset | Path | Role |
 |---|---|---|
-| Prompt | `prompt_assets/simard/goal_decomposition.md` | Takes one large goal; emits 2–6 bounded sub-goals, each with an explicit done-criterion and optional `depends_on` ordering. Hot-reloads — no redeploy needed for wording changes. |
-| Recipe | `prompt_assets/simard/recipes/goal-decomposition.yaml` | Wires the prompt into the recipe-runner so the brain and the CLI share one decomposition path. |
+| Prompt | `prompt_assets/simard/goal_decomposition.md` | Takes one large goal; emits 2–6 bounded sub-goals, each with an explicit done-criterion and optional `depends_on` ordering. Instructs the agent to write its `{ "sub_goals": [...] }` JSON **only** to the `{{sub_goals_output}}` file. Hot-reloads — no redeploy needed for wording changes. |
+| Recipe | `prompt_assets/simard/recipes/goal-decomposition.yaml` | Wires the prompt into the recipe-runner so the brain and the CLI share one decomposition path, and interpolates the `{{sub_goals_output}}` result-file path. |
 
 The prompt fences the incoming goal description as untrusted **data**, not
 instructions, so a goal whose text contains "ignore your instructions and …"
-cannot steer the decomposer. Its output is a fenced JSON block: a list of
-2–6 objects, each `{ "description", "done_criterion", "depends_on"? }`. The
-driver function `goal_curation::decompose_goal` parses that block, clamps the
-list to `[2, 6]`, mints a child goal id per entry, then writes each child
-goal + its `decomposes_into` edge (and any `depends_on` edges) through the
-client. The prompt wording is pinned by a content-pin test
-(`src/ooda_brain/prompt_store_tests.rs`) so the parser contract cannot drift
-silently.
+cannot steer the decomposer. The agent writes a single JSON object — a list of
+2–6 entries, each `{ "description", "done_criterion", "depends_on"? }` — to a
+**dedicated result file**, not to stdout. The driver function
+`goal_curation::decompose_goal` reads that file, clamps the list to `[2, 6]`,
+mints a child goal id per entry, then writes each child goal + its
+`decomposes_into` edge (and any `depends_on` edges) through the client. The
+agent → Simard transport is the [goal-decompose result
+channel](./goal-decompose-result-channel.md): a clean, per-invocation file
+that structurally eliminates the stdout-scrape parse failure fixed in
+[#2708](https://github.com/rysweet/Simard/issues/2708). The prompt wording is
+pinned by a content-pin test (`src/ooda_brain/prompt_store_tests.rs`) so the
+parser contract cannot drift silently.
+
+> **Transport (issue #2708).** Earlier increments captured the agent's
+> `{ "sub_goals": [...] }` from `recipe-runner-rs` **stdout** and brace-scanned
+> it for the outermost `{…}` / `[…]` slice. Because the copilot launcher banner,
+> ANSI codes, and tracing lines share stdout, that slice was often not valid
+> JSON and a **successful** (~48 s) decomposition was discarded with
+> `could not parse sub-goals from decomposition output`. The transport now
+> routes the answer through a dedicated `sub_goals_output` file the agent
+> writes; stdout is captured only for the non-zero-exit diagnostic and is never
+> parsed. A missing / empty / malformed file surfaces a **loud**
+> `InvalidGoalRecord { field: "sub_goals", … }` — never a silent empty
+> decomposition. See the [goal-decompose result
+> channel](./goal-decompose-result-channel.md) for the full contract.
 
 ## Operator CLI
 
@@ -489,6 +507,12 @@ $ simard memory dump --type=facts --limit=200 | grep 'goal-edge:decomposes_into'
   re-serialize unchanged when the new fields are unset.
 - All existing brain/parser output contracts are preserved; the new prompt
   is guarded by a content-pin test.
+- The agent's proposed sub-goals reach Simard over a **clean result-file
+  channel** ([#2708](https://github.com/rysweet/Simard/issues/2708)), not an
+  stdout scrape, so launcher-banner / ANSI / log noise on stdout can no longer
+  discard a successful decomposition; a missing / empty / malformed structured
+  result surfaces a **loud** error rather than a silent empty decomposition.
+  See the [goal-decompose result channel](./goal-decompose-result-channel.md).
 
 **Not guaranteed (follow-ups tracked off #2405):**
 
@@ -516,6 +540,7 @@ $ simard memory dump --type=facts --limit=200 | grep 'goal-edge:decomposes_into'
 - [Goal board persistence — cognitive-memory single source of truth](../concepts/goal-board-persistence.md)
 - [Goal board API reference](./goal-board-api.md)
 - [Cognitive-memory provenance (`DERIVES_FROM` edges)](./cognitive-memory-provenance.md) — the precedent for typed graph edges over a previously flat node store
+- [Goal-decompose result channel](./goal-decompose-result-channel.md) — how the decomposition agent's `{ "sub_goals": [...] }` reaches Simard over a clean result file (issue #2708), replacing the retired stdout scrape
 - [OODA loop self-detection](../concepts/ooda-loop-self-detection.md) — when the brain decides to decompose
 - [Maximum safe parallelism](./maximum-safe-parallelism.md) — the **prompt-only** decomposition that predated this capability (`simard goal add` fanned an umbrella goal into per-issue sibling goals with no recorded relationship); this page is the first-class, edge-recorded form of that same behavior
 - [Goal coverage allocation](./goal-coverage-allocation.md) — the per-cycle allocator that parallelizes the distinct child goals decomposition produces, up to the AIMD cap
