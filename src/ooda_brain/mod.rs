@@ -15,6 +15,7 @@ use crate::error::SimardResult;
 use crate::ooda_loop::OodaState;
 use std::path::PathBuf;
 
+mod admission;
 pub mod confidence;
 mod context;
 mod decide;
@@ -28,6 +29,8 @@ mod rustyclawd;
 mod sanitize;
 
 #[cfg(test)]
+mod admission_tests;
+#[cfg(test)]
 mod decide_tests;
 #[cfg(test)]
 mod orient_tests;
@@ -36,6 +39,12 @@ mod prompt_store_tests;
 #[cfg(test)]
 mod tests;
 
+pub use admission::{
+    AdmissionDecision, AdmissionGate, CEILING_ENV, CEILING_MAX, CEILING_MIN, DEFAULT_CEILING_PCT,
+    DeterministicAdmissionBrain, OodaAdmissionBrain, RECIPE_NAME as ADMISSION_RECIPE_NAME,
+    ResourceAdmissionCtx, clamp_ceiling, configured_ceiling_pct, judge_and_resolve, parse_ceiling,
+    resolve_admission,
+};
 pub use confidence::{
     CalibrationWindow, ECE_BINS, ECE_METRIC, ECE_WINDOW, HIGH_STAKES_URGENCY, JudgedDecision,
     JudgedLifecycle, LOW_TRUST_CONFIDENCE, SELF_CONSISTENCY_K, Vote, confidence_or_low_trust,
