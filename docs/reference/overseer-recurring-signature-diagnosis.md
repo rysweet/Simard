@@ -66,6 +66,24 @@ description: >
   masked by the `(repo,signature)`-keyed test fake (`stewardship/tests.rs:68-82`). Adds one-line
   **P6** (fix the query + real-query integration test) which collapses the 79→~5 flood independent of
   the upstream reconciliation P2. No finding overturned, confidence High.
+  Round-15 added two parallel primary-investigator dives: §7u consolidated the full
+  signature-token→emission map into one table (five families, each one authoritative line) with two
+  disambiguations (Act-phase `workstream-gap:{sig}` whisper key `mod.rs:904/945` and `signal_keyword`
+  stems `capabilities.rs:562/564` sit outside the loop); §7v proved the `2×` is a **quantization at the
+  recall threshold** (crossing `= 2` is the same event that supersedes the generation, so each composite
+  is written exactly twice then retired — a chain, not a climb, live-confirmed 10/10) and pinned P1 to a
+  proven one-line seam (`CognitiveEpisode.source_label` `memory_cognitive.rs:50` reaches
+  `wiring.rs:1022-1030` and is dropped there → `.filter(|e| e.source_label != OVERSEER_SOURCE_LABEL)`),
+  adding belt **P1b** and a regression-assertion requirement. Round-16 consolidation (§7w, HEAD
+  `6ca9f779`) unified §7s/§7t/§7u/§7v, independently re-verified the module (36/0) + hypothesis (4/0) +
+  sensor (9/0) suites with zero `src/` drift since `85245e87`, **reproduced §7t's malformed-query defect
+  live** (`stewardship-signature:{sig} in:body` → **0 rows** vs bare `{sig} in:body` → **24**) at
+  `src/stewardship/gh_client.rs:37`, re-confirmed the kgpacks board and the split channels — verbatim
+  tail steady at **10**, escalation flood **grown 79→82** (#2899, still firing) — adopted **P6** and
+  **P1b** as canonical, corrected §7r/§7s's "un-deduplicated by design" framing to §7t's
+  "present-but-broken dedup," and flagged **diagnostic saturation** (eighth identical board read;
+  further verification rounds add no value — route P1/P6/P2 to execution). No finding overturned,
+  confidence High.
 last_updated: 2026-07-07
 review_schedule: as-needed
 owner: simard
@@ -404,14 +422,34 @@ Ordered by leverage. P1/P2 sever the mechanism; P3/P4 clear the standing inputs.
    reasonable *throughput* improvement — but treat `resource:engineer_spawn` like
    `gym_skipped`: a standing ambient signal. P1's provenance filter already stops it
    being nested/amplified, so it needs no dedicated remediation for this signature.
+6. **P6 — Fix the `recurring_goal_reblock` dedup query (round-14 §7t; trivial, high
+   blast-radius; independent of P2).** The stewardship reblock filer's dedup key is
+   stable, but `RealGhClient::search_issues` (`src/stewardship/gh_client.rs:37`) searches
+   `format!("stewardship-signature:{signature} in:body")` — a **colon-qualifier form with
+   no space** that GitHub parses as an unknown qualifier and answers with **zero rows
+   deterministically**, while the body needle written by `find_existing`
+   (`src/stewardship/dedup.rs:79`) is `stewardship-signature: {signature}` **with a
+   space**. So every reblock cycle sees an empty list and files a fresh duplicate,
+   yielding the **~82-issue open flood** (#2688…#2899, still firing). Fix the query to the
+   indexed token — `format!("{signature} in:body")` or the quoted phrase
+   `format!("\"stewardship-signature: {signature}\" in:body")` (both live-proven to return
+   all rows) — **and add a real-query integration test** (or assert the constructed
+   `--search` string) so the `(repo,signature)`-keyed test fake (`stewardship/tests.rs:68-82`)
+   can never again mask it. This collapses the channel from ~82→~5 (one issue per live
+   stale goal) **without** touching the OODA loop, complementary to P2 (P6 caps the
+   symptom today; P2 removes the driver). **P1b (belt for P1, round-15 §7v):** have
+   `observation_signature` (`src/overseer/mod.rs:1081`) drop any `overseer-obs:`-prefixed
+   key before `join('|')`, so a recalled composite can never re-nest even if a
+   self-episode slips the P1 filter.
 
-**Confidence in remediation efficacy:** High for **P1–P3** — they sever the verified
-mechanism (P1) and clear the verified stale inputs (P2/P3), each tied to a confirmed
-root cause. Medium for **P4** (down-ranking `gym_skipped` is High; the correct
-disposition of #17 is a product decision, not a diagnostic certainty). **P5 is
-optional** and no longer gated on an unobserved AIMD claim — round-4 (§3b) shows spawn
-contention cannot produce a park in this signature at all, so P5 is a throughput
-nicety, not a fix.
+**Confidence in remediation efficacy:** High for **P1–P3** and **P6** — they sever the
+verified mechanisms (P1 the recall amplifier at a proven one-line seam §7v; P6 the
+live-reproduced malformed-query flood §7t/§7w) and clear the verified stale inputs
+(P2/P3), each tied to a confirmed root cause. Medium for **P4** (down-ranking
+`gym_skipped` is High; the correct disposition of #17 is a product decision, not a
+diagnostic certainty). **P5 is optional** and no longer gated on an unobserved AIMD
+claim — round-4 (§3b) shows spawn contention cannot produce a park in this signature at
+all, so P5 is a throughput nicety, not a fix.
 
 ---
 
@@ -429,7 +467,7 @@ remediation (P5) downgraded to an optional throughput nicety.
 | 2b | `workstream-gap` is disjoint from `goal:blocked` (uncovered *other* backlog) | **High** | Hard code invariant `sensor.rs:300` excludes blocked goals; `sensor.rs:288`, `signal.rs:475`, `mod.rs:1384` | Exact identity of the uncovered item not pinned (immaterial) |
 | 3 | `resource:engineer_spawn` is a **passenger health signal**, not the root cause **and not a park contributor** (round-4 refutation) | **High** | Two hard decoupling gaps: deferral produces no outcome (`coverage.rs:156`, `no_progress.rs:166`); 429 failure → `goal_failure_counts` demotion, excluded from breaker (`advance.rs:433`, `cycle.rs:360`, `orient.rs:93–117`); `live_engineers` census decoupled from `current_max` (`context.rs:111`) | None material — the runtime AIMD-contraction question is now immaterial (contraction cannot park a goal regardless) |
 | 4 | Recurrence (2×) = unfiltered self-recall + unbounded re-wrap over standing inputs | **High** | Round-1 finding **reproduced** by executable H1/H2 tests (`tests_memory_recall.rs`, round 2) | None material |
-| 5 | Remediation: **P1** severs the amplifier, **P2** removes standing stale inputs and is required for the fix to *stick*, **P3** clears the 10-issue backlog only when paired with P2, P4 conditional, **P5 optional** | **High (P1–P3)**, **Medium (P4)**, **P5 optional** | Each action mapped to a confirmed root cause; #2707 shows bare unblock (P3-alone) re-parks; P5 no longer gated on §3 | P4 #17 disposition is a product decision |
+| 5 | Remediation: **P1** severs the recall amplifier (proven one-line seam §7v), **P2** removes standing stale inputs and is required for the fix to *stick*, **P3** clears the ~10-verbatim + ~82-escalation backlog only when paired with P2+P6, P4 conditional, **P5 optional**, **P6** caps the reblock flood via a one-line query fix (§7t, live-reproduced §7w) | **High (P1–P3, P6)**, **Medium (P4)**, **P5 optional** | Each action mapped to a confirmed root cause; #2707 shows bare unblock (P3-alone) re-parks; P6's malformed query reproduced live (0 vs 24 rows); P5 no longer gated on §3 | P4 #17 disposition is a product decision |
 
 **Method note:** confidence is graded against how disprovable each claim is —
 "High" means grounded in source (`file:line`) or live GitHub/board state that a
@@ -439,7 +477,7 @@ not directly observed.
 
 ---
 
-## 7. Consolidation & verification (rounds 3–14)
+## 7. Consolidation & verification (rounds 3–16)
 
 The consolidation pass (rounds 3–4, this update) reconciled the parallel deep dives
 against the live working tree at **HEAD `20fb7539`** and **executed** the round-2
@@ -1976,6 +2014,138 @@ regression-guard requirement. Confidence **High** (the quantization mechanism is
 its falsifiable prediction is live-confirmed 10/10; the fix-seam feasibility is a direct type-level
 fact — `CognitiveEpisode.source_label` exists and reaches the projection).
 
+### 7w. Round-16 consolidation — parallel dives unified (HEAD `6ca9f779`)
+
+This pass unifies the **four** deep dives accumulated since the last consolidation (§7r, round-13)
+— **§7s** (round-14 per-hypothesis practical re-verification at `e5bd3a1b`), **§7t** (round-14
+primary-investigator deep dive at `56160966`: the SECOND self-amplifying channel
+`recurring_goal_reblock` + the malformed-query dedup defect + the stale-park chain through the
+sensor), **§7u** (round-15 primary-investigator deep dive at `38c39d5f`: the complete
+signature-token → emission map as one table + two disambiguations), and **§7v** (round-15
+parallel primary-investigator deep dive at `15122557`: the `2×` quantization proof + the pinned
+one-line P1 fix-seam) — into one conclusion, and folds their net-new facts into the canonical
+findings (§1/§5/§6). HEAD is now `6ca9f779`; **every commit since round-10's `85245e87` is
+docs-only** (verified: `git diff --name-only 85245e87..HEAD -- src/` returns **empty**), so **no
+source line drifted** and every §7b/§3b/§7f/§7j/§7l/§7p/§7t/§7u/§7v anchor still resolves verbatim.
+
+**Independent re-verification (this consolidation, 2026-07-07 ~14:40 UTC)** — re-run by the
+consolidator at HEAD `6ca9f779`, not inherited:
+
+- `cargo test --lib overseer::tests_memory_recall` → **36 passed, 0 failed**; the four hypothesis
+  tests in isolation (`…::tests_memory_recall::h`) → **4 passed, 0 failed** (CONFIRM +
+  REFUTE-by-fix all green); `overseer::sensor` → **9 passed, 0 failed**. The structural root cause
+  (§4/§7a) stays proven green.
+- Canonical composite anchors spot-checked verbatim: `RECURRING_SIGNATURE_THRESHOLD = 2`
+  (`signal.rs:362`), the `format!("overseer-obs:{}", keys.join("|"))` re-prefix (`mod.rs:1085`),
+  the five `dedup_key` literals `goal:blocked:{goal_id}` (`mod.rs:1349`), `resource:engineer_spawn`
+  (`:1283`), `quality:gym_skipped` (`:1295`), `workstream-gap` (`:1384`), and the recall
+  `.map(|e| RecalledEpisode { failure_signature, id, summary, score })` that **drops
+  `source_label`** (`wiring.rs:1024-1030`). All identical to §7s/§7u/§7v.
+- **§7t's malformed-query root cause re-resolved in the real source tree and independently
+  REPRODUCED live.** The stewardship dedup pipeline lives at **`src/stewardship/`** (the §7t/§7u/§7v
+  bare `stewardship/…` prefix resolves there — it is *not* under `src/overseer/`; pinned so the P6
+  edit target is unambiguous). `RealGhClient::search_issues` builds
+  `format!("stewardship-signature:{signature} in:body")` **without a space, as a colon qualifier**
+  (`gh_client.rs:37`), while `find_existing` matches the body needle
+  `format!("stewardship-signature: {signature}")` **with a space** (`dedup.rs:79`), and
+  `FakeGhClient` is keyed on `(repo, signature)` and never constructs the real `--search` string
+  (`tests.rs:68-82`). Live proof at ~14:40 UTC (`rysweet/Simard`, sig `c5109c2fbe04b255`): the
+  production form `stewardship-signature:c5109c2fbe04b255 in:body` → **0 rows**; the bare token
+  `c5109c2fbe04b255 in:body` → **24 rows** (ground truth). §7t's defect is **substantiated and
+  consolidator-reproduced**, not a hallucinated anchor.
+- **§7u's disambiguations (D/E) and §7v's P1 fix-seam re-resolved verbatim.** The Act-phase whisper
+  key `format!("workstream-gap:{}", g.signature)` (`mod.rs:904/945`) and the `signal_keyword` bare
+  stems `"engineer_spawn"`/`"gym_skipped"` (`capabilities.rs:562/564`) sit **outside** the composite;
+  and `CognitiveEpisode` **carries `pub source_label: String`** (`memory_cognitive.rs:50`) which
+  `recall_episodes_ranked` returns (`cognitive_memory/mod.rs:542`) all the way to the projection that
+  discards it (`wiring.rs:1022-1030`) — so §7v's one-line `.filter(|e| e.source_label !=
+  OVERSEER_SOURCE_LABEL)` P1 is **feasible today with no memory-lib API change** (a direct type-level
+  fact, re-verified).
+- `rysweet/agent-kgpacks-rs`: **#16 CLOSED** 2026-07-06T20:16:25Z, **#18 CLOSED** 10:33:04Z,
+  **#21 CLOSED** 13:29:03Z, **#22 CLOSED** 12:07:33Z, **#17 OPEN** (`updatedAt`
+  2026-07-02T23:22:49Z) — matching §1/§7s/§7t to the second. **4 of the 6 kgpacks blockers reference
+  already-CLOSED issues**; #17's block premise stays timestamp-provably stale (`updatedAt_17` ≺
+  `closedAt_16` by ≈3.8 days).
+
+**Zero contradictions across the four dives — with one framing supersedure.** §7s/§7t/§7u/§7v agree
+on every shared claim: the test results (36/36 module, 4/4 hypothesis, 9/9 sensor), the H1
+recall-path anchors, the terminal-park / no-close-reconciliation path
+(`no_progress_breaker.rs:58/69/74`, `sensor.rs:204/209`), the five-family composite token map, the
+`2×` count, and the live #16/#18/#21/#22-CLOSED + #17-OPEN board. They are strictly additive
+**except** on one point: §7r-net-new-#1 and §7s framed the `recurring_goal_reblock` escalation
+channel as **"un-deduplicated / no equivalent dedup"** (a design omission); §7t proves the
+opposite — the channel **has** a complete dedup pipeline with a correctly-stable key **silently
+defeated by one malformed GitHub search query** (a concrete one-line code defect). **This
+consolidation adopts §7t's corrected framing as canonical** and supersedes the "un-deduplicated by
+design" wording in §7r/§7s. No *finding* is overturned; one *characterization* is sharpened from
+"missing dedup" to "present-but-broken dedup."
+
+**Net-new facts folded into the canonical findings:**
+
+1. **The escalation channel is live and MEASURABLY GROWING — first consolidation to catch it
+   advancing (most significant this pass).** Rounds 13–14 read the flood as **79 open** (#2688…#2894,
+   newest #2894 @ 14:05:18Z) and §7s called both channels "momentarily quiescent." A fresh direct
+   count this pass shows **82 open** (#2688 … **#2899**, newest **2026-07-07T14:37:19Z**) — **three
+   new escalation issues filed in the ≈32 min since round-14**; the flood is **not** quiescent, it is
+   **unbounded and still firing**. The WhisperGate-deduped verbatim tail, by contrast, holds at
+   **exactly 10** (#2669…#2875 — still **no 11th**). The split is exactly what the mechanism predicts:
+   the RecurringSignature composite is dedup-capped by its `WhisperGate`, while the reblock path's
+   dedup is **broken** (§7t), so it re-files every cycle.
+2. **§7t's malformed-query defect promoted from claim to consolidator-reproduced fact** (0-vs-24 live
+   rows, above). The **24 (was 23 at round-14)** independently corroborates the +1 escalation growth.
+3. **New remediation P6 adopted as canonical (§7t).** Fix `src/stewardship/gh_client.rs:37` to query
+   the indexed token + add a real-query integration test. A trivial, high-blast-radius cap that
+   collapses the channel from 82→~5 **independent of** the upstream reconciliation P2. P3's backlog
+   scope is now **≈10 verbatim + ~82 escalation**; the reblock dupes are safe to bulk-close **only
+   after P6 lands**.
+4. **The full emission map (§7u) + the `2×` quantization and pinned P1 seam (§7v) adopted as
+   canonical.** The composite decomposes into exactly **five token families**, each one authoritative
+   emitting line — **no emission line is itself defective**; each faithfully tokenizes a standing,
+   self-refreshing input. The `2×` is a **quantization at the recall threshold** (each composite is
+   written exactly twice, then superseded as it nests into the next generation — a chain, not a climb,
+   live-confirmed 10/10). **P1 is pinned to a proven one-line seam** (`wiring.rs:1022-1030` filter on
+   `source_label`) plus belt **P1b** (`mod.rs:1081` drop `overseer-obs:` keys) and a
+   regression-assertion requirement (invert one H1/H2 test to assert the loop is broken — the same
+   fake-hides-defect discipline §7t applied to P6).
+
+**Diagnostic saturation — recommend closing the investigation and routing to remediation.** This is
+the **eighth consecutive** re-confirmation of the same board (rounds 8→16) and the **fifth** full
+consolidation (§7g/§7k/§7n/§7r/§7w) to reach an identical verdict, with **zero source drift for six
+rounds** (no `src/` change since `85245e87`). The only thing that changes round-to-round is the
+escalation counter ticking upward (…79→82) because the diagnosed defect remains **unfixed** — the
+investigation is itself exhibiting the recurring-signature pathology it documents. The diagnosis is
+**complete**: all six findings are High-confidence and source- or live-state-grounded, with a fully
+enumerated emission map and **two** code-level root causes each pinned to a one-line fix (self-recall
+loop → P1 at `wiring.rs:1022-1030`; broken reblock dedup → P6 at `gh_client.rs:37`) plus the standing
+stale-park driver (P2). **Further verification rounds add no diagnostic value** — they re-derive
+settled facts while the live harm (the growing #2688… flood) continues. The residual value is in
+**execution, not investigation**: open development tasks for **P6** (cheapest, stops the live flood
+today), **P1** (severs the amplifier at the proven seam), and **P2** (done-gate/park reconciliation +
+perpetual tagging — required for P1/P3 to *stick*). Recommendation: **mark this investigation
+resolved and hand off P6/P1/P2 to the builder queue; do not schedule a round-17 verification pass.**
+
+**Consolidated verdict (rounds 1–16).** Unchanged and further strengthened — **High** confidence,
+all six findings source- or live-state-grounded, no remaining Medium diagnostic item. **Two**
+code-level mechanisms, both test- or live-proven: (1) the unfiltered self-recall loop —
+`recall_episodic` drops `source_label` (`wiring.rs:1024-1030`) + unbounded re-wrap re-prefixing
+`overseer-obs:` (`mod.rs:1085`), **H1/H2 test-proven** (36/36 module, 4/4 hypothesis), **fully
+decoded and emission-mapped** (§7u), its `2×` a **threshold quantization** (§7v); and (2) the
+`recurring_goal_reblock` stewardship flood — a **present-but-broken** dedup defeated by the malformed
+`gh_client.rs:37` query (§7t), **consolidator-reproduced live** (0-vs-24 rows). Both are fed by
+standing, time-varying inputs: four **stale safeguard-parks** (#16/#18/#21/#22), one
+**stale-premise dep-block** (#17, timestamp-proven), an ambient **`gym_skipped`** flag, and a
+disjoint **`workstream-gap`**; **`engineer_spawn` is a passenger** (round-4), **`whisper_ops.rs` a
+non-amplifying sibling** (round-7), and the cross-goal **xpia-defender** token a **local-worktree
+park whose underlying RUSTSEC-2026-0204 vuln is verifiably remediated** (§7q). The loop is **live and
+the escalation path is accelerating** — verbatim tail steady at 10 (#2875 newest) while the reblock
+flood has swelled 79→**82** (#2899, still firing) — and symptom-level unblocks **do not stick**.
+Action set: **P1** (provenance filter, proven one-line seam) severs the recall amplifier; **P6**
+(one-line reblock-query fix + real-query test) caps the flood today, independent of P2; **P2**
+(done-gate/park reconciliation + perpetual tagging) removes the standing stale inputs and is required
+for the fix to *stick*; **P3** clears the auto-filed backlog (≈10 verbatim + ~82 escalation) only when
+paired with P2+P6; **P4** conditional (#17 disposition + `gym_skipped` down-rank); **P5** optional. No
+new remediation is introduced beyond the now-canonical P6/P1b.
+
 ---
 
 ## 8. Provenance
@@ -2128,6 +2298,27 @@ no memory-lib API change) severs the loop, with a length-bounding belt P1b at `o
 (`mod.rs:1081`) and a missing regression-assertion to add when P1 lands; 36/0 + 4/0 + 9/0 on
 `tests_memory_recall`/`::h`/`sensor`, zero `src/` drift since `85245e87`, no finding overturned,
 confidence remains High.
+Round-16 consolidation (§7w, HEAD `6ca9f779`) unified the four dives since round-13 (§7s/§7t/§7u/§7v),
+independently re-verified the full module (36 passed, 0 failed) + the four hypothesis tests in
+isolation (4 passed, 0 failed) + the sensor suite (9 passed, 0 failed) and spot-checked the canonical
+composite anchors verbatim (`signal.rs:362`, `mod.rs:1085/1283/1295/1349/1384`, `wiring.rs:1024-1030`),
+confirmed **every commit since `85245e87` is docs-only** (zero source drift), and **reproduced §7t's
+malformed-query dedup defect live** — the production form `stewardship-signature:{sig} in:body` returns
+**0 rows** while the bare token `{sig} in:body` returns **24** (ground truth) at
+`src/stewardship/gh_client.rs:37` (the pipeline lives at `src/stewardship/`, not under `src/overseer/`).
+Its net-new facts: the `recurring_goal_reblock` escalation flood has **grown 79→82** open
+(#2688…#2899, newest #2899 @ 2026-07-07T14:37:19Z, still firing) — first consolidation to catch it
+advancing rather than quiescent — while the WhisperGate-deduped verbatim tail holds at exactly 10
+(#2875 newest, no 11th); it **adopts P6** (one-line reblock-query fix + real-query integration test,
+collapsing the flood ~82→~5 independent of P2) and **P1b** (length-bound belt) as canonical, folds the
+§7u five-family emission map and §7v `2×`-quantization + pinned one-line P1 seam
+(`CognitiveEpisode.source_label` `memory_cognitive.rs:50` → dropped at `wiring.rs:1022-1030`) into
+§5/§6, and **corrects** the §7r/§7s "un-deduplicated by design" framing to §7t's "present-but-broken
+dedup." It flags **diagnostic saturation** (eighth identical board read across rounds 8→16; fifth
+consolidation to identical verdict; six rounds of zero source drift) and recommends **closing the
+investigation and routing P6/P1/P2 to execution rather than scheduling a round-17 verification pass** —
+no finding overturned, no remediation-weighting change beyond canonicalizing P6/P1b, confidence remains
+High.
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
