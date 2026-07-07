@@ -406,3 +406,84 @@ pub struct TelemetrySignals {
     /// Named anomalies (panics / segv / corruption / fallback / budget).
     pub anomalies: Vec<String>,
 }
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::*;
+
+    #[test]
+    fn live_and_stale_carry_data_and_freshness() {
+        let live = SectionEnvelope::live(Gym::default(), Some("t".to_string()));
+        assert!(live.is_present());
+        assert_eq!(live.availability, Availability::Ok);
+        assert_eq!(live.freshness, Freshness::Live);
+        assert_eq!(live.as_of.as_deref(), Some("t"));
+
+        let stale = SectionEnvelope::stale(Gym::default(), None);
+        assert!(stale.is_present());
+        assert_eq!(stale.availability, Availability::Ok);
+        assert_eq!(stale.freshness, Freshness::Stale);
+    }
+
+    #[test]
+    fn absent_and_error_carry_note_and_no_data() {
+        let absent = SectionEnvelope::<Gym>::absent("gone");
+        assert!(!absent.is_present());
+        assert_eq!(absent.availability, Availability::Unavailable);
+        assert_eq!(absent.freshness, Freshness::Absent);
+        assert_eq!(absent.note.as_deref(), Some("gone"));
+        assert!(absent.data.is_none());
+
+        let err = SectionEnvelope::<Gym>::error("boom");
+        assert!(!err.is_present());
+        assert_eq!(err.availability, Availability::Error);
+        assert_eq!(err.note.as_deref(), Some("boom"));
+        assert!(err.data.is_none());
+    }
+
+    #[test]
+    fn default_envelope_is_unavailable_and_absent() {
+        let env = SectionEnvelope::<Gym>::default();
+        assert_eq!(env.availability, Availability::Unavailable);
+        assert_eq!(env.freshness, Freshness::Absent);
+        assert!(!env.is_present());
+    }
+
+    #[test]
+    fn is_present_is_false_when_ok_but_data_missing() {
+        let env: SectionEnvelope<Gym> = SectionEnvelope {
+            availability: Availability::Ok,
+            freshness: Freshness::Live,
+            as_of: None,
+            note: None,
+            data: None,
+        };
+        assert!(!env.is_present());
+    }
+
+    #[test]
+    fn empty_snapshot_defaults_every_section_absent() {
+        let snap = StatusSnapshot::empty();
+        assert_eq!(snap.schema_version, SCHEMA_VERSION);
+        assert!(!snap.generated_at.is_empty());
+        assert!(!snap.daemon.is_present());
+        assert!(!snap.resources.is_present());
+        assert!(!snap.llm.is_present());
+        assert!(!snap.memory.is_present());
+        assert!(!snap.gym.is_present());
+        assert!(!snap.goals.is_present());
+        assert!(!snap.workstreams.is_present());
+        assert!(!snap.completed.is_present());
+        assert!(!snap.self_improvement.is_present());
+        assert!(!snap.telemetry.is_present());
+        assert!(!snap.overseer.is_present());
+    }
+
+    #[test]
+    fn default_snapshot_matches_empty_shape() {
+        let d = StatusSnapshot::default();
+        assert_eq!(d.schema_version, SCHEMA_VERSION);
+        assert!(!d.daemon.is_present());
+        assert!(!d.overseer.is_present());
+    }
+}

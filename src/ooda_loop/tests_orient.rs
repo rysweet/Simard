@@ -24,6 +24,7 @@ fn make_observation(env: EnvironmentSnapshot) -> Observation {
 fn orient_blocked_goals_have_highest_urgency() {
     let goals = vec![
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -37,6 +38,7 @@ fn orient_blocked_goals_have_highest_urgency() {
             last_progress_update_at: None,
         },
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -60,6 +62,7 @@ fn orient_blocked_goals_have_highest_urgency() {
 #[test]
 fn orient_completed_goals_have_zero_urgency() {
     let goals = vec![ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -85,6 +88,7 @@ fn orient_completed_goals_have_zero_urgency() {
 fn orient_not_started_higher_urgency_than_in_progress() {
     let goals = vec![
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -98,6 +102,7 @@ fn orient_not_started_higher_urgency_than_in_progress() {
             last_progress_update_at: None,
         },
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -123,6 +128,7 @@ fn orient_not_started_higher_urgency_than_in_progress() {
 fn orient_in_progress_urgency_decreases_with_percent() {
     let goals = vec![
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -136,6 +142,7 @@ fn orient_in_progress_urgency_decreases_with_percent() {
             last_progress_update_at: None,
         },
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -160,6 +167,7 @@ fn orient_in_progress_urgency_decreases_with_percent() {
 #[test]
 fn orient_boosts_urgency_when_goal_mentioned_in_issues() {
     let goals = vec![ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -199,6 +207,7 @@ fn orient_boosts_urgency_when_goal_mentioned_in_issues() {
 #[test]
 fn orient_boosts_in_progress_when_dirty_tree() {
     let goals = vec![ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -237,6 +246,7 @@ fn orient_boosts_in_progress_when_dirty_tree() {
 #[test]
 fn orient_adds_memory_consolidation_when_episodic_exceeds_100() {
     let goals = vec![ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,

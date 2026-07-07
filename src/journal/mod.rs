@@ -45,6 +45,8 @@ pub mod types;
 
 #[cfg(test)]
 mod test_support;
+#[cfg(all(test, unix))]
+mod tests_clean_result_channel;
 #[cfg(test)]
 mod tests_dejargon_teeth;
 #[cfg(test)]

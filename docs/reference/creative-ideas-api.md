@@ -8,10 +8,11 @@ description: >
   four-reviewer pipeline (Reviewer, Review, FeedbackSynthesizer,
   SynthesisOutcome, SuccessMetric), the routing functions (route_idea_to_goal,
   route_idea_to_issue, mark_idea_pr) with the IdeaGhClient seam, the two new
-  SimardError variants, configuration (SIMARD_CREATIVE_IDEAS_*), telemetry, and
-  the test fakes. Subsystem is wired into the running daemon — default-ON, opt-out
-  via SIMARD_CREATIVE_IDEAS_ENABLED.
-last_updated: 2026-07-06
+  SimardError variants, configuration (SIMARD_CREATIVE_IDEAS_*), telemetry, the
+  test fakes, the un-gated run_now manual entrypoint, and the dashboard HTTP
+  surface (Run now / Promote / Prune). Subsystem is wired into the running
+  daemon — default-ON, opt-out via SIMARD_CREATIVE_IDEAS_ENABLED.
+last_updated: 2026-07-07
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -19,6 +20,7 @@ status: implemented — wired into the daemon (default-ON, opt-out)
 related:
   - ../design/creative-ideas-thread.md
   - ../howto/configure-creative-ideas-thread.md
+  - ./creative-ideas-durable-read-after-write.md
   - ./cognitive-thread-scheduling.md
   - ./goal-board-api.md
   - ./stewardship-api.md
@@ -312,6 +314,41 @@ pub fn register(mind: &mut Mind, config: CreativeIdeasConfig);
 pub fn register_creative_ideas_if_enabled(mind: &mut Mind, cfg: &CreativeIdeasConfig) -> bool;
 ```
 
+### Manual generation — `run_now` (operator "Run now")
+
+`tick` is **gated** (it no-ops when `enabled()` is false or the 24-hour interval
+is not yet due) and **total** (it swallows errors into `ThreadOutcome::failed`).
+Neither is what an operator wants when clicking **Run now**: they want one pass
+**now**, and they want any failure surfaced. `run_now` is the un-gated,
+error-returning entrypoint for exactly that.
+
+```rust
+impl CreativeIdeasThread {
+    /// Run ONE generation pass unconditionally, ignoring `enabled()` and the
+    /// interval schedule, and RETURN the outcome (unlike the total `tick`).
+    /// Side effects are identical to a scheduled tick: it persists via the
+    /// injected `ctx.memory` and may route accepted ideas to goals/issues.
+    /// Used by the dashboard "Run now" control; surfaces errors loudly.
+    pub fn run_now(&mut self, ctx: &mut ThreadContext<'_>) -> SimardResult<GenerationReport>;
+}
+```
+
+- **Un-gated by design.** The scheduler gate (`enabled()` + interval) would
+  silently skip a manual run; `run_now` bypasses it so an operator always gets a
+  pass. A daemon restart resets the 24-hour timer, which is a primary reason a
+  manual run exists.
+- **Loud, never silent.** It returns `Err` (e.g. `ReviewUnavailable`,
+  `PersistentStoreIo`) instead of folding into a `failed` outcome, so callers can
+  surface the exact cause.
+- **Additive.** `tick`, `run_tick` (private), and the `CognitiveThread` trait
+  impl are unchanged. `GenerationReport` is the same struct a tick produces
+  (`generated`, `surviving`, `persisted`, `reviewed`, `routed_goal`,
+  `routed_issue`, `review_errors`).
+
+This is the seam the dashboard `POST /api/creative-ideas/run` handler invokes
+(against the live daemon store, guarded against concurrent runs) — see
+[Dashboard HTTP API](#dashboard-http-api-operator-controls) below.
+
 ### Daemon registration
 
 The thread is registered from the OODA daemon's cognitive-thread setup
@@ -589,8 +626,10 @@ never aborts the batch or the daemon.
 
 ## Operation surface (the "endpoints")
 
-This subsystem has no HTTP/REST/GraphQL surface — it is an in-process Rust
-library, so its "API" is its public trait methods and free functions.
+The subsystem is an in-process Rust library, so its core "API" is its public
+trait methods and free functions (below). In addition, the **operator dashboard**
+exposes a small HTTP surface over this library for the Creative Ideas tab — see
+[Dashboard HTTP API](#dashboard-http-api-operator-controls).
 
 | Operation | Request (input) | Response (`Ok`) | Primary error variants |
 |-----------|-----------------|-----------------|------------------------|
@@ -607,6 +646,32 @@ library, so its "API" is its public trait methods and free functions.
 | `mark_idea_pr` | `pr: u64, &CreativeIdea, &dyn IdeaGhClient, repo: &str` | `IdeaPrGate` | `ActionExecutionFailed`, `GitCommandFailed`, `CommandTimeout` |
 | `mark_completed` | `&mut CreativeIdea, metric_met: bool` | `()` | `InvalidIdeaTransition` |
 | `CreativeIdeasThread::tick` | `&mut ThreadContext` | `ThreadOutcome` | **never `Err`** — folds into `ThreadOutcome::failed` |
+| `CreativeIdeasThread::run_now` | `&mut ThreadContext` | `GenerationReport` | `ReviewUnavailable`, `PersistentStoreIo`, `InvalidIdeaTransition` (returned, not folded) |
+
+### Dashboard HTTP API (operator controls)
+
+The operator dashboard layers three write endpoints (plus the pre-existing two
+read endpoints) over this library for the **Creative Ideas** tab. All are under
+`/api/creative-ideas`, return `application/json`, and sit behind `require_auth`.
+Ideas are addressed by their stable **`idea_id`**. Reads degrade to
+`{"error": …}` at HTTP 200; writes return an explicit success or an
+`{"error": …}` (also HTTP 200) that the UI renders as a visible banner — no edge
+is applied silently. Full request/response JSON, gating rules, and examples live
+in the operator guide:
+[Creative Ideas tab — live view and operator controls](../operator-dashboard/creative-ideas-operator-controls.md).
+
+| Method & path | Backs onto | Notes |
+|---------------|-----------|-------|
+| `GET /api/creative-ideas` | `CreativeIdeaStore::list` (shared live reader) | Live pool (latest revision per idea) + per-status counts. |
+| `POST /api/creative-ideas/search` | `CreativeIdeaStore::list` + in-memory filter | Filter by `status` and/or free-text `query`. |
+| `POST /api/creative-ideas/run` | `CreativeIdeasThread::run_now` | **Run now.** Un-gated pass against the live daemon store; process-level re-entrancy guard returns `{"running": true}` if one is in flight. |
+| `POST /api/creative-ideas/{id}/promote` | `try_transition(AcceptedForImplementation)` + `store.update` [+ `route_idea_to_goal`] | Body `{"route_to_goal"?: bool}` (default `true`). Persists acceptance before best-effort goal routing; routing failure surfaces `goal_error` without rolling back acceptance. |
+| `POST /api/creative-ideas/{id}/prune` | `try_transition(Rejected)` + `store.update` | Rejects the idea (terminal). |
+
+Writes flow through the same `CognitiveMemoryOps` the daemon holds (the tier-0
+in-process writer), so the tab reflects operator actions on the next refresh with
+no split-brain, and — per operator preference — **no type, module, or identifier
+introduced for this surface contains the word `Bridge`**.
 
 ## Versioning
 
@@ -660,8 +725,10 @@ for the full list of assertions.
 
 ## See also
 
+- [Creative Ideas tab — live view and operator controls](../operator-dashboard/creative-ideas-operator-controls.md)
 - [Creative Ideas background thread — design](../design/creative-ideas-thread.md)
 - [Configure and operate the Creative Ideas thread](../howto/configure-creative-ideas-thread.md)
+- [Creative Ideas durable read-after-write](./creative-ideas-durable-read-after-write.md) — the persistence/read seam that keeps the dashboard tab non-empty and durable across restart (#2798)
 - [Cognitive-thread scheduling](./cognitive-thread-scheduling.md)
 - [Add a new cognitive thread](../howto/add-a-new-cognitive-thread.md)
 - [Goal board API](./goal-board-api.md) · [Stewardship API](./stewardship-api.md)

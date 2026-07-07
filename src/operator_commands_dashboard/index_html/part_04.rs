@@ -170,7 +170,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
         appendMsg('system','Not connected. Click Reconnect to establish a session.');
         return;
       }
-      appendMsg('user',txt); ws.send(txt); inp.value='';
+      appendMsg('user',txt); ws.send(txt); inp.value=''; inp.style.height='';
       showTypingIndicator(); setChatBusy(true);
     }
 
@@ -240,6 +240,10 @@ pub(crate) const PART_04: &str = r#"            let fmt;
     }
     document.getElementById('chat-input').addEventListener('keydown',e=>{
       if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat();}
+    });
+    /* Auto-grow the textarea up to 150px (coupled to max-height in part_00.rs), then scroll. */
+    document.getElementById('chat-input').addEventListener('input',e=>{
+      const inp=e.target; inp.style.height='auto'; inp.style.height=Math.min(inp.scrollHeight,150)+'px';
     });
 
 

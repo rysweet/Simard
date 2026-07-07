@@ -263,6 +263,11 @@ pub enum SimardError {
     StewardshipInvalidRunSummary {
         field: &'static str,
     },
+    /// CI-health sweep: a `gh` subprocess invocation failed (non-zero exit,
+    /// missing binary, malformed JSON) or a report could not be serialized.
+    CiHealthGhCommandFailed {
+        reason: String,
+    },
     /// Merge authority: a `gh pr` subprocess invocation failed.
     MergeAuthorityGhCommandFailed {
         reason: String,
@@ -297,6 +302,25 @@ pub enum SimardError {
     IdentityPathNotUnderPromptRoot {
         identity_path: PathBuf,
         prompt_root: PathBuf,
+    },
+    /// Supply-chain steward (#2741): `cargo audit --json` output could not be
+    /// parsed into advisories (malformed / unexpected JSON shape).
+    SupplyChainAuditParseFailed {
+        reason: String,
+    },
+    /// Supply-chain steward (#2741): a remediation step (issue filing, cargo
+    /// update, PR open, or ignore-list write) failed; `reason` names the step
+    /// and carries the underlying diagnostic.
+    SupplyChainRemediationFailed {
+        reason: String,
+    },
+    /// Supply-chain steward (#2741) HARD-RAIL guard: an advisory ignore write
+    /// was attempted with no tracking-issue URL. Unreachable through
+    /// `decide()` (a fixable advisory never yields `JustifiedIgnore`); this
+    /// guards a future execution-path bug so the reasoner can never silently
+    /// suppress an advisory without an open tracker.
+    SupplyChainSuppressionWithoutTracker {
+        advisory_id: String,
     },
 }
 

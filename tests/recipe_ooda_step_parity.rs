@@ -78,6 +78,7 @@ fn make_goal(id: &str, status: GoalProgress) -> ActiveGoal {
         current_activity: None,
         wip_refs: vec![],
         last_progress_update_at: None,
+        labels: Vec::new(),
     }
 }
 

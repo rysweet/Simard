@@ -461,6 +461,39 @@ pub trait CognitiveMemoryOps: Send + Sync {
         Ok(())
     }
 
+    /// Report whether an episode with `node_id` exists in this store (issue
+    /// #2679).
+    ///
+    /// This is the **grounding** primitive for the distillation write-boundary
+    /// gate: when the distiller agent commits a fact through the memory IPC
+    /// socket, the server holds no in-memory batch, so it grounds the fact by an
+    /// existence lookup — the fact is grounded iff at least one of its cited
+    /// `source_episode_ids` resolves to a real episode node here.
+    ///
+    /// Default impl returns `false` (fail-closed: an unresolvable id is treated
+    /// as ungrounded) so non-graph backends (legacy Python bridge, IPC client,
+    /// test stubs) keep compiling; only [`LibraryCognitiveMemory`] overrides it
+    /// to look the episode up in the store.
+    fn episode_exists(&self, _node_id: &str) -> SimardResult<bool> {
+        Ok(false)
+    }
+
+    /// Batch grounding check: report whether *any* of `node_ids` resolves to a
+    /// real episode node in this store (issue #2679).
+    ///
+    /// This is the batch form of [`episode_exists`](Self::episode_exists) the
+    /// distillation write-boundary gate uses to ground a fact against *all* of
+    /// its cited `source_episode_ids` at once. The default impl simply probes
+    /// each id via [`episode_exists`](Self::episode_exists) (fail-closed per id),
+    /// so every backend keeps working unchanged; [`LibraryCognitiveMemory`]
+    /// overrides it to materialize the episode set ONCE per call instead of once
+    /// per cited id, avoiding an O(cited·episodes) re-scan on the write hot path.
+    fn any_episode_exists(&self, node_ids: &[String]) -> SimardResult<bool> {
+        Ok(node_ids
+            .iter()
+            .any(|id| self.episode_exists(id).unwrap_or(false)))
+    }
+
     /// Return up to `limit` undistilled episodes, newest first.
     ///
     /// Default impl returns empty, which makes the distillation pass a

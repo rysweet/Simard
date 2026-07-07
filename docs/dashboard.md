@@ -1,7 +1,7 @@
 ---
 title: Dashboard
-description: Read-only web dashboard for inspecting the autonomous OODA daemon across ten tabs — Overview, Goals, Activity, Workers, Pull Requests, Resources, Chat, Overseer, Journal, and Creative Ideas — mirrored by a consistent terminal UI (TUI).
-last_updated: 2026-07-06
+description: Read-only inspection plus lightweight operator controls for the autonomous OODA daemon across ten tabs — Overview, Goals, Activity, Workers, Pull Requests, Resources, Chat, Overseer, Journal, and Creative Ideas (with Run now / Promote / Prune) — mirrored by a consistent terminal UI (TUI).
+last_updated: 2026-07-07
 owner: simard
 doc_type: howto
 ---
@@ -31,13 +31,13 @@ order:
 | **Overview** | Summary · Health · Stats | Daemon status (OODA loop active / stopped), current cycle number, top-priority goal, last cycle's actions, and the recent-actions stream (**Summary**); system status — version, daemon state, active process count, disk usage — per-PR **Merge Readiness** (the single Overview PR surface — the duplicative "Open PRs" card was removed, see [Overview → Health: Open PRs card removed](#overview-tab-health-open-prs-card-removed-26)), open issues, and the **Machines & Memory Sharing** card, i.e. whether Simard runs on one machine or a group and how they share what they've learned (**Health**); and aggregate run counters and rollups (**Stats**). |
 | **Goals** | Goals · Work Board | The full goal register — active top-N goals with priority, status, and current activity, plus the proposed backlog with promote/dismiss controls (**Goals**) — and the shared scratch canvas with Task Memory and Recent Actions (**Work Board**). |
 | **Activity** | Logs · Traces · Thinking · Failures | The **Background Service Log** (live activity from Simard's always-on background process), the cost ledger, and the **Cycle Reports** card — recent OODA cycles with their live cycle number, real per-cycle tree status, and Observe/Orient/Decide/Act detail, collapsed with a `×N` repeat-count and refreshed live, see [Activity: Cycle Reports](#activity-tab-logs-cycle-reports-26) — with a severity menu (All / Errors / Warnings / Info) and free-text search (**Logs**); recent agent traces from the cost ledger, journald, and in-process spans, plus OTEL status, each row read as plain language — **when**, **what**, **who** (**Traces**); the **Thinking** panel's two halves — a **Cycle History** table (collapsed per-cycle timeline with real timestamps, a `×N` repeat-count for runs of equivalent cycles, difference-carrying summaries, and a self-hiding duration-trend chart) and the **Agent Internal Reasoning** OODA Observe/Orient/Decide/Act breakdown, see [Thinking: Cycle History](#thinking-tab-cycle-history-21) (**Thinking**); and brain-fallback and decision failures (**Failures**). |
-| **Workers** | Processes · Engineers · Terminal | The live process tree under the daemon — engineer subprocesses, LLM sessions, tmux sessions, and their resource usage (**Processes** / **Engineers**) — and a browser-attached PTY into the daemon host (**Terminal**). |
+| **Workers** | Processes · Engineers · Terminal | The live process tree under the daemon — engineer subprocesses, LLM sessions, tmux sessions, and their resource usage (**Processes** / **Engineers**) — and a browser-attached PTY into the daemon host, with an [agent picker](operator-dashboard/agent-terminal-agent-picker.md) drop-down for choosing which live agent to attach to (**Terminal**). |
 | **Pull Requests** | Merge Decisions · Readiness | Automated merge decisions and the rationale behind each (**Merge Decisions**), and per-PR readiness checks covering CI, review, and mergeability (**Readiness**). |
 | **Resources** | Memory · Costs | The cognitive memory graph (Working / Semantic / Episodic / Procedural / Prospective / Sensory) with per-type filters, full-text search, the live **Memory Store** counts, and the **Memory Files** panel (**Memory**); and per-provider, per-model token spend across the active session (**Costs**). See [Memory architecture](memory.md). |
 | **Chat** | — | Direct chat with Simard. Conversations are saved as durable, resumable **sessions**: a sidebar lists every saved chat, the panel fills the page, and assistant replies stream in incrementally. See [Chat: durable, resumable sessions](#chat-tab-durable-resumable-sessions). |
 | **Overseer** | — | The overseer goal-board health view: per-goal health, staleness, and the intervention signals that decide when a stalled goal needs attention. |
 | **Journal** | — | The daemon's narrative journal — a human-readable, chronological record of what Simard decided and why, newest entries first. |
-| **Creative Ideas** | — | The pool of candidate self-improvement ideas Simard generates for herself, each reviewed for feasibility, worth, and measurability. Browse and search by review status (new · needs-revision · needs-human-review · accepted · in-progress · completed · deferred · rejected). |
+| **Creative Ideas** | — | The pool of candidate self-improvement ideas Simard generates for herself, each reviewed for feasibility, worth, and measurability. Browse and search by review status (new · needs-revision · needs-human-review · accepted · in-progress · completed · deferred · rejected), generate a fresh batch on demand with **Run now**, and **Promote** (accept → goal) or **Prune** (reject) any idea inline — see [Creative Ideas tab — live view and operator controls](operator-dashboard/creative-ideas-operator-controls.md). |
 
 **Overseer**, **Journal**, and **Creative Ideas** are standalone tabs with no
 sub-sections; they are owned by separate features and are kept intact by the
@@ -108,6 +108,12 @@ horizontal space. The transcript scrolls inside a flex-grown message area while
 the input row stays anchored at the bottom, and the panel grows with the browser
 window — no fixed small box.
 
+**Multi-line composer.** The message box is a multi-line text area: press
+**Enter** to send and **Shift+Enter** to add a newline. It starts at a single
+line, grows automatically as you type or paste additional lines (up to a capped
+height, then scrolls), and collapses back to one line after each message is
+sent. See [Dashboard Chat — multi-line message input](reference/dashboard-chat-multiline-input.md).
+
 **Streaming with graceful fallback.** Assistant replies appear **incrementally**,
 word-by-word, rather than all at once. A client that only understands the legacy
 single-message shape still works — it simply receives the reply as one complete
@@ -128,6 +134,40 @@ history) — and the live conversation runs over `GET /ws/chat` (optionally
 WebSocket wire protocol (handshake, `restore`, `chunk`/`done`, and the
 non-streaming fallback frame) are documented in the
 [Dashboard Chat reference](reference/dashboard-chat.md).
+
+### Creative Ideas tab: live view + Run now / Promote / Prune (#2805)
+
+The **Creative Ideas** tab renders the **live** pool of candidate ideas the
+Creative Ideas thread has generated and persisted — each card shows the idea
+text, a colour-coded **status pill** (`New` · `NeedsRevision` ·
+`NeedsHumanReview` · `AcceptedForImplementation` · `ImplementationStarted` ·
+`ImplementationCompleted` · `Deferred` · `Rejected`), its **created time**, and
+the reviewer/synthesis signals (review count and success-metric name). The view
+reads the actual persisted ideas through a single shared reader
+(`GET /api/creative-ideas`); it never shows a hard-coded or stale list, and an
+empty pool renders an explicit empty-state message rather than a blank panel.
+
+Three operator controls sit on top of the view:
+
+- **Run now** generates a fresh batch **on demand** — an un-gated generation
+  pass against the live daemon store, bypassing the 24-hour scheduler (which a
+  daemon restart resets). It is guarded against concurrent runs and surfaces any
+  failure in a visible banner (never a silent no-op).
+- **Promote** (per idea) accepts an idea (`AcceptedForImplementation`) and, by
+  default, routes it onto the goal board (advancing it to
+  `ImplementationStarted`, tagged `source:creative-ideas`).
+- **Prune** (per idea) rejects an idea (`Rejected`, terminal).
+
+Both per-idea controls respect the `IdeaStatus` state machine: a control is only
+offered when the transition is valid from the idea's current status, and the
+server re-validates every write — an invalid edge surfaces a clear error and is
+never applied silently. All writes flow through the same cognitive-memory store
+the daemon reads, so actions show up on the next refresh. Full request/response
+JSON, the valid-transition gating table, the DOM contract, and end-to-end
+examples are in the
+[Creative Ideas tab — live view and operator controls](operator-dashboard/creative-ideas-operator-controls.md)
+guide and the
+[Creative Ideas subsystem API reference](reference/creative-ideas-api.md#dashboard-http-api-operator-controls).
 
 ### Overview tab: plain-English action details (#2358)
 
@@ -697,3 +737,5 @@ The `SIMARD_DASHBOARD_URL` environment variable is honored by `conftest.py` (def
 - [Activity tab — Cycle Reports (live cycle number, accurate tree status, shared detail)](reference/dashboard-activity-cycle-reports.md)
 - [Overview Health & live memory-consolidation (Open PRs card removal, live Last Memory Compaction)](reference/dashboard-overview-health-and-live-memory.md)
 - [Background tab prefetch and refresh (instant tab switches)](reference/dashboard-background-tab-prefetch.md)
+- [Header deployment datetime (build number + PST/PDT deploy time)](reference/dashboard-header-deployment-datetime.md)
+- [Creative Ideas tab — live view and operator controls (Run now / Promote / Prune)](operator-dashboard/creative-ideas-operator-controls.md)

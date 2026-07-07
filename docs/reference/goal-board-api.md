@@ -575,6 +575,16 @@ Appends an active goal. Fails if:
 > [Goal target-repo routing](./goal-target-repo-routing.md) (issue
 > [#2359](https://github.com/rysweet/Simard/issues/2359)).
 
+> **Labels (`labels` field).** Each `ActiveGoal` also carries a
+> `labels: Vec<String>` of free-form tags for categorization, filtering, and
+> provenance. It is `#[serde(default, skip_serializing_if = "Vec::is_empty")]`,
+> so pre-#2743 snapshots load with `labels = []` and unlabelled goals serialize
+> byte-identically (no migration, stable board snapshot hash). Every creation
+> path stamps exactly one `source:*` provenance tag at first materialization
+> (creative-ideas-promoted goals get `source:creative-ideas`). See
+> [Goal labels / tags](./goal-labels.md) (issue
+> [#2743](https://github.com/rysweet/Simard/issues/2743)).
+
 ### `add_backlog_item`
 
 ```rust
