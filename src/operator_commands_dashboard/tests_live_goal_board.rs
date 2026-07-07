@@ -468,3 +468,157 @@ async fn memory_metrics_goal_count_reflects_live_union_and_relabels_source() {
     );
     drop(mem);
 }
+
+// ---------------------------------------------------------------------------
+// Outside-in end-to-end (Step 13): drive the REAL dashboard router over raw
+// HTTP/1.1 on an ephemeral loopback port, exactly as the browser Goals tab
+// does. Unlike the handler-fn tests above, this exercises the FULL consumer
+// path — route registration, the `require_auth` layer, `resolve_state_root`,
+// the live in-process goal store, and JSON serialization — proving that a
+// freshly-persisted Proposed goal is visible over HTTP WITHOUT a snapshot
+// cycle (issue #2922). Auth uses the deterministic `SIMARD_DASHBOARD_TOKEN`
+// bearer, independent of the process `LOGIN_CODE`.
+// ---------------------------------------------------------------------------
+
+use std::net::SocketAddr;
+use std::time::Duration;
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+const ITEST_TOKEN: &str = "itest-live-goal-board";
+
+/// One-shot HTTP/1.1 request over a raw socket → `(status_code, body)`.
+/// `Connection: close` lets the server delimit the body by EOF so
+/// `read_to_end` completes with no HTTP-client dependency.
+async fn http_request(addr: SocketAddr, path: &str, bearer: Option<&str>) -> (u16, String) {
+    let mut stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connect to ephemeral dashboard server");
+    let mut req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n");
+    if let Some(b) = bearer {
+        req.push_str(&format!("Authorization: Bearer {b}\r\n"));
+    }
+    req.push_str("\r\n");
+    stream
+        .write_all(req.as_bytes())
+        .await
+        .expect("write request");
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.expect("read response");
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let code = text
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|c| c.parse::<u16>().ok())
+        .unwrap_or(0);
+    let body = text
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b.to_string())
+        .unwrap_or_default();
+    (code, body)
+}
+
+/// [`http_request`] wrapped in a 30s timeout so a wiring bug can never hang the
+/// suite.
+async fn http(addr: SocketAddr, path: &str, bearer: Option<&str>) -> (u16, String) {
+    tokio::time::timeout(Duration::from_secs(30), http_request(addr, path, bearer))
+        .await
+        .unwrap_or_else(|_| panic!("GET {path} timed out"))
+}
+
+/// Boot the real [`build_router`](super::routes::build_router) on an ephemeral
+/// loopback port (auth initialized) and return its address.
+async fn spawn_dashboard() -> SocketAddr {
+    super::auth::init_login_code();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind ephemeral loopback port");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, super::routes::build_router()).await;
+    });
+    addr
+}
+
+// SAFETY (both fns): env mutation is serialised by
+// `#[serial_test::serial(cognitive_memory)]`; the token is set before any
+// request that reads it and cleared only after all responses are received.
+fn set_dashboard_token() {
+    unsafe { std::env::set_var("SIMARD_DASHBOARD_TOKEN", ITEST_TOKEN) };
+}
+fn clear_dashboard_token() {
+    unsafe { std::env::remove_var("SIMARD_DASHBOARD_TOKEN") };
+}
+
+/// Outside-in acceptance (#2922): over the REAL router, a promoted creative-idea
+/// Proposed goal persisted to the LIVE store surfaces on `GET /api/goals`
+/// (backlog + count) and is counted by the `GET /api/memory` goal-records tile
+/// (relabeled off the stale snapshot) — all WITHOUT any snapshot write, and
+/// gated behind auth (unauthenticated ⇒ 401, so goal data never leaks).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(cognitive_memory)]
+async fn http_goals_board_surfaces_live_proposed_goal_without_snapshot() {
+    let state = HermeticState::new();
+    let root = state.state_root().to_path_buf();
+    let mem = SharedMem::register(&root);
+    // Base snapshot is EMPTY — the goal must arrive purely via the live overlay.
+    save_goal_board(&GoalBoard::new(), mem.ops()).expect("seed empty snapshot base");
+
+    let title = "Ship the live goal-board read over HTTP (2922 e2e)";
+    let store = CognitiveMemoryGoalStore::new(root.clone()).expect("construct goal store");
+    store
+        .put(proposed_record(title))
+        .expect("persist Proposed goal record via the live store");
+
+    let addr = spawn_dashboard().await;
+
+    // Auth-gated: no bearer ⇒ 401, so the board never leaks past the auth layer.
+    let (unauth, _) = http(addr, "/api/goals", None).await;
+    assert_eq!(unauth, 401, "the goal-board endpoint must sit behind auth");
+
+    set_dashboard_token();
+    // Deliberately NO snapshot write between the put and the HTTP read.
+    let (code, body) = http(addr, "/api/goals", Some(ITEST_TOKEN)).await;
+    let (mem_code, mem_body) = http(addr, "/api/memory", Some(ITEST_TOKEN)).await;
+    clear_dashboard_token();
+
+    assert_eq!(
+        code, 200,
+        "authenticated goal-board load must succeed; body={body:?}"
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(&body).expect("/api/goals returns a JSON object");
+    let backlog = v["backlog"].as_array().expect("backlog must be an array");
+    assert!(
+        backlog.iter().any(|b| b["description"] == title),
+        "GET /api/goals must surface the freshly-promoted Proposed goal in backlog WITHOUT a \
+         snapshot cycle (issue #2922); got {v}"
+    );
+    assert!(
+        v["backlog_count"].as_u64().unwrap_or(0) >= 1,
+        "backlog_count must reflect the live union over HTTP; got {v}"
+    );
+    assert!(
+        v.get("error").map(|e| e.is_null()).unwrap_or(true),
+        "a successful live read must not carry an error field; got {v}"
+    );
+
+    // The Memory tab's Goal-Records tile counts the same live union, relabeled.
+    assert_eq!(
+        mem_code, 200,
+        "authenticated memory load must succeed; body={mem_body:?}"
+    );
+    let mv: serde_json::Value =
+        serde_json::from_str(&mem_body).expect("/api/memory returns a JSON object");
+    let gr = &mv["goal_records"];
+    assert_eq!(
+        gr["source"], "cognitive-memory:live-goal-board",
+        "goal_records.source must be relabeled off the snapshot over HTTP; got {gr}"
+    );
+    assert!(
+        gr["count"].as_u64().unwrap_or(0) >= 1,
+        "goal_records.count must include the live goal-store record over HTTP; got {gr}"
+    );
+    drop(mem);
+}
