@@ -16,6 +16,7 @@ fn t(id: &str, family: TargetFamily) -> Target {
         harness: "h".to_string(),
         file: "src/x.c".to_string(),
         line: 10,
+        line_end: None,
         family,
     }
 }

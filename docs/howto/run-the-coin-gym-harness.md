@@ -1,7 +1,7 @@
 ---
 title: Run the LOCAL COIN Gym harness
 description: Operator guide for the coin-gym CLI — a local harness that runs the COIN benchmark shape, scores vs. the published leaderboard, and A/Bs a single-model baseline against a multi-agent team.
-last_updated: 2026-07-06
+last_updated: 2026-07-08
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -45,6 +45,7 @@ coin-gym run <model> [--strategy baseline|team] [--profile <name>] [--targets <p
 coin-gym score   <run-id> [--profile <name>]
 coin-gym compare <run-id> [--profile <name>]
 coin-gym improve <run-id> [--profile <name>]
+coin-gym contract [--dataset <repo>] [--revision <tag>] [--split a,b] [--project x,y] [--source rebuild|image]
 coin-gym profiles
 ```
 
@@ -118,6 +119,36 @@ Applying an accepted tactic, re-running on held-out **fresh** targets, and
 keeping it only if reach improves without a precision regression (else rolling
 back) requires live grading and is **Phase 5**.
 
+### `contract` — show the real `coin evaluate` / `coin verify` wiring
+
+```bash
+coin-gym contract
+coin-gym contract --dataset COIN-Bench/coin --revision v2026-07 \
+  --split codeql_only --project cups --source image
+```
+
+Prints — **without running anything** — exactly how the harness drives COIN's
+own oracle for a snapshot (issue #3001):
+
+```text
+LOCAL-ONLY: true (no external submission, no leaderboard entry, no VM provisioning)
+evaluate: coin evaluate --dataset COIN-Bench/coin --revision v2026-07 --source rebuild
+verify:   coin verify --experiment <experiment-id>
+submission-contract:
+  attempt:  /answer/blob.bin + /answer/blob.harness
+  abstain:  /answer/UNREACHABLE.md  (and NO blob.bin)
+verdict:  read `reached` from each result.json (never re-checked locally)
+```
+
+This is the **code-verified contract** from
+[`docs/reference/coin-benchmark.md`](../reference/coin-benchmark.md): the Gym
+never re-implements reach-checking — `coin verify` writes `reached` into each
+`result.json` and the harness only reads it. `--split` / `--project` narrow the
+target set (comma-separate to repeat), and `--source` picks rebuild-vs-image.
+The executor (`src/coin_gym/executor.rs`) builds this exact argv, writes the
+`/answer/` submission per the contract, and reads back `reached`; the live
+Docker invocation itself is gated behind Phase 3.
+
 ### `profiles` — list isolated per-model run state
 
 ```bash
@@ -148,11 +179,23 @@ cross-contaminate.
 The `oracle` and `script` sections drive the **offline** demo run only. A real
 run gets its oracle from `coin evaluate` and its candidates from a live model.
 
+> **Real COIN dataset schema.** The compact manifest above is the offline-demo
+> shape. The library also parses COIN's **published** dataset schema — rows with
+> `target_id` (`<project>:<harness>:<file>:<line_start>[-<line_end>]`),
+> `coin_version`, `project`, `harness`, `file`, `line_start`/`line_end`, and a
+> `split` (`codeql_only` → frontier, `gcs_reachable` → non-trivial-reachable) —
+> via `DatasetSource` in `src/coin_gym/target_loader.rs`, pinned by `revision`
+> and reserving a held-out fresh slice as the anti-overfit oracle.
+
 ## What is deferred
 
 | Phase | Work | Status |
 |-------|------|--------|
-| 3 | Provision an `azlin` VM + Docker host, pull a COIN snapshot, wire the real `coin evaluate` executor | follow-up (HIGH-RISK, operator-gated) |
-| 5 | Live self-improvement loop: apply tactic → verify on held-out fresh targets → keep-or-roll-back; durable tactic memory | follow-up |
+| 3 | Provision an `azlin` VM + Docker host and pull a COIN snapshot, then run the **already-wired** `coin evaluate` / `coin verify` executor live (see `contract`) | follow-up (HIGH-RISK, operator-gated; #2823) |
+| 5 | Live self-improvement loop: apply tactic → verify on held-out fresh targets → keep-or-roll-back; durable tactic memory | follow-up (#2825) |
 
-Both remain unchecked on issue #2713.
+Both remain unchecked on issue #2713. The **executor contract** itself — the
+`coin evaluate` / `coin verify` argv, the `/answer/blob.bin` +
+`/answer/blob.harness` (or `/answer/UNREACHABLE.md`) submission, and reading
+`reached` from each `result.json` — is implemented and unit-tested offline
+(issue #3001); only the live Docker invocation is gated behind Phase 3.

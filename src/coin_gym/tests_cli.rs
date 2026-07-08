@@ -181,7 +181,7 @@ fn explicit_profile_name_is_sanitised() {
 #[test]
 fn usage_lists_all_subcommands() {
     let usage = coin_gym_usage();
-    for cmd in ["run", "score", "compare", "improve", "profiles"] {
+    for cmd in ["run", "score", "compare", "improve", "contract", "profiles"] {
         assert!(usage.contains(cmd), "usage should mention {cmd}");
     }
 }
@@ -246,4 +246,37 @@ fn run_rejects_manifest_with_disjoint_script_keys() {
     let err =
         dispatch_with_home(dir.path(), args(&["run", "m", "--targets", &manifest])).unwrap_err();
     assert!(err.to_string().contains("pinned target"));
+}
+
+#[test]
+fn contract_command_runs_with_defaults_and_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    // Default snapshot.
+    dispatch_with_home(home, args(&["contract"])).unwrap();
+    // Explicit snapshot + repeated split/project (comma-separated) + source.
+    dispatch_with_home(
+        home,
+        args(&[
+            "contract",
+            "--dataset",
+            "COIN-Bench/coin",
+            "--revision",
+            "v2026-07",
+            "--split",
+            "codeql_only,gcs_reachable",
+            "--project",
+            "cups,libraw",
+            "--source",
+            "image",
+        ]),
+    )
+    .unwrap();
+}
+
+#[test]
+fn contract_rejects_unknown_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let err = dispatch_with_home(dir.path(), args(&["contract", "--source", "magic"])).unwrap_err();
+    assert!(err.to_string().contains("unknown --source"));
 }

@@ -14,7 +14,11 @@
 #   4. The overfitting-reviewer gate ACCEPTs the analyst's general tactics, and
 #      `improve` flags the live verify/rollback loop as Phase 5.
 #   5. `profiles` lists isolated per-model run state.
-#   6. An unknown command exits non-zero with usage.
+#   6. `contract` prints the real `coin evaluate`/`coin verify` wiring (snapshot
+#      argv, the /answer/ submission contract, and the LOCAL-ONLY guardrail)
+#      without running anything, and never leaks the fictional --target/--input
+#      flags (issue #3001).
+#   7. An unknown command exits non-zero with usage.
 #
 # Hermetic: COIN_GYM_HOME is a throwaway temp dir; nothing touches the real
 # ~/.simard state or the network.
@@ -76,7 +80,34 @@ PROFILES="$(run_gym profiles)"
 printf '%s\n' "$PROFILES"
 printf '%s\n' "$PROFILES" | grep -F "opus" >/dev/null
 
-# --- 6. unknown command exits non-zero with usage -----------------------------
+# --- 6. contract: the real coin evaluate/verify wiring (issue #3001) -----------
+# `contract` prints exactly how the harness drives COIN's own oracle, without
+# running anything. Asserts the real snapshot-mode argv (no fictional
+# --target/--input), the verify step, the /answer/ submission contract, and the
+# LOCAL-ONLY guardrail.
+CONTRACT="$(run_gym contract --split codeql_only --project cups --source image)"
+printf '%s\n' "$CONTRACT"
+printf '%s\n' "$CONTRACT" | grep -F "LOCAL-ONLY: true" >/dev/null
+printf '%s\n' "$CONTRACT" | \
+  grep -F "coin evaluate --dataset COIN-Bench/coin --revision v2026-07 --split codeql_only --project cups --source image" >/dev/null
+printf '%s\n' "$CONTRACT" | grep -F "coin verify --experiment" >/dev/null
+printf '%s\n' "$CONTRACT" | grep -F "/answer/blob.bin + /answer/blob.harness" >/dev/null
+printf '%s\n' "$CONTRACT" | grep -F "/answer/UNREACHABLE.md" >/dev/null
+printf '%s\n' "$CONTRACT" | grep -F "read \`reached\` from each result.json" >/dev/null
+# The fictional per-input flags must never appear.
+if printf '%s\n' "$CONTRACT" | grep -Eq -- "--target|--input"; then
+  echo "ERROR: contract argv leaked fictional --target/--input flags" >&2
+  exit 1
+fi
+# An unknown --source is rejected.
+if run_gym contract --source bogus >/tmp/coin-gym-src.out 2>&1; then
+  echo "ERROR: unknown --source should have failed" >&2
+  exit 1
+fi
+grep -F "unknown --source" /tmp/coin-gym-src.out >/dev/null
+rm -f /tmp/coin-gym-src.out
+
+# --- 7. unknown command exits non-zero with usage -----------------------------
 if run_gym frobnicate >/tmp/coin-gym-bogus.out 2>&1; then
   echo "ERROR: unknown command should have failed" >&2
   exit 1
