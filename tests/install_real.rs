@@ -67,9 +67,11 @@ fn install_packages_runs_and_self_installs() {
 
     // ── Step 3: ensure-deps actually runs against installed binary ──
     //
-    // ensure-deps is the runtime probe for required tools (git,
-    // python3, gh) and the optional kuzu Python package. It's the
-    // first real subcommand any operator runs after install. If the
+    // ensure-deps is the runtime probe for the required external tools
+    // (git, gh). Simard is a pure-Rust daemon with no Python runtime
+    // dependency, and its graph store is the embedded `lbug` (LadybugDB)
+    // crate, so ensure-deps checks no Python interpreter or package. It's
+    // the first real subcommand any operator runs after install. If the
     // packaged binary can't reach this code path, the install is
     // broken even if --version works.
     let ensure_status = Command::new(&installed_simard)
