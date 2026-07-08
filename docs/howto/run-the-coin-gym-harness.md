@@ -7,6 +7,7 @@ owner: simard
 doc_type: howto
 related:
   - ../research/coin-benchmark-and-skwaq-study.md
+  - ../research/coin-gym-baseline-vs-team-measurement.md
 ---
 
 # Run the LOCAL COIN Gym harness
@@ -77,6 +78,10 @@ the team's abstention gate lifts precision from 60% to 100%:
 baseline  reach 60.0% (3/5)   precision 60.0% (3/5)   R:3/W:2/A:0/T:0/N:0/E:0
 team      reach 60.0% (3/5)   precision 100.0% (3/3)  R:3/W:0/A:2/T:0/N:0/E:0
 ```
+
+For the per-target breakdown, the reproduction commands, and the leaderboard-
+comparison caveat, see
+[COIN Gym — baseline vs. team measurement](../research/coin-gym-baseline-vs-team-measurement.md).
 
 ### `score` — reach / precision + family split
 
