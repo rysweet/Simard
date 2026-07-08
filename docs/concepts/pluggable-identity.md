@@ -11,6 +11,7 @@ related:
   - ../architecture/agent-composition.md
   - ./multi-identity-host-isolation.md
   - ./write-authority-posture.md
+  - ./identity-scoped-cognition.md
 ---
 
 # Pluggable identity — TOML-driven agent personas
