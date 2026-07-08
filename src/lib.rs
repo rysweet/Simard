@@ -78,6 +78,10 @@ pub mod goal_board_store;
 pub mod goal_curation;
 pub mod goals;
 pub mod greeting_banner;
+// The guarded external-service command seam (Step 8b): screens `gh`/`az`/HTTP
+// commands against the observe-only floor before spawning, mirroring how
+// `git_guardrails` wires the git write seam. See `src/guarded_command.rs`.
+pub mod guarded_command;
 // Phase 4 of issue #2713: the LOCAL "COIN Gym" harness — runs the COIN
 // benchmark shape locally, scores vs. the published leaderboard, and A/Bs a
 // single-model baseline against a multi-agent team, mirroring skwaq's

@@ -280,13 +280,12 @@ impl RealIdeaGhClient {
 
 /// Run `gh` with `argv`, returning its output or an [`SimardError`].
 fn run_gh(action: &str, argv: &[String]) -> SimardResult<std::process::Output> {
-    let output = std::process::Command::new("gh")
-        .args(argv)
-        .output()
-        .map_err(|e| SimardError::ActionExecutionFailed {
+    let output = crate::guarded_command::run_output("gh", argv).map_err(|e| {
+        SimardError::ActionExecutionFailed {
             action: action.to_string(),
             reason: format!("failed to spawn `{action}`: {e}"),
-        })?;
+        }
+    })?;
     if !output.status.success() {
         return Err(SimardError::ActionExecutionFailed {
             action: action.to_string(),

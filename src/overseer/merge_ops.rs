@@ -137,10 +137,8 @@ impl PrSource for RealPrSource {
 }
 
 fn run_gh(args: &[&str]) -> Result<String, OverseerError> {
-    let out = std::process::Command::new("gh")
-        .args(args)
-        .output()
-        .map_err(|e| OverseerError::Capability {
+    let out =
+        crate::guarded_command::run_output("gh", args).map_err(|e| OverseerError::Capability {
             what: "gh",
             detail: e.to_string(),
         })?;

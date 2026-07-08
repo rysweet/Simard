@@ -313,8 +313,9 @@ fn maybe_escalate_to_gh_issue(record: &ParseFailureRecord) {
         return;
     }
 
-    match std::process::Command::new("gh")
-        .args([
+    match crate::guarded_command::run_output(
+        "gh",
+        &[
             "issue",
             "create",
             "--repo",
@@ -325,9 +326,8 @@ fn maybe_escalate_to_gh_issue(record: &ParseFailureRecord) {
             &body_file.path().to_string_lossy(),
             "--label",
             "ooda-brain-parse-failure",
-        ])
-        .output()
-    {
+        ],
+    ) {
         Ok(out) if out.status.success() => {
             tracing::info!(
                 target: "simard::ooda_brain",

@@ -223,12 +223,11 @@ fn retry_transient_gh_inner<T>(
 /// spawn-failure and non-zero-exit branches return the same error variant the
 /// retry classifier inspects, so transient-retry behaviour is unchanged.
 fn run_gh_checked(label: &str, args: &[&str]) -> SimardResult<Vec<u8>> {
-    let output = std::process::Command::new("gh")
-        .args(args)
-        .output()
-        .map_err(|e| SimardError::MergeAuthorityGhCommandFailed {
+    let output = crate::guarded_command::run_output("gh", args).map_err(|e| {
+        SimardError::MergeAuthorityGhCommandFailed {
             reason: format!("failed to spawn `{label}`: {e}"),
-        })?;
+        }
+    })?;
     if !output.status.success() {
         return Err(SimardError::MergeAuthorityGhCommandFailed {
             reason: format!(

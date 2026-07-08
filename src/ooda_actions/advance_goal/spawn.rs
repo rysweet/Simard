@@ -249,8 +249,9 @@ pub fn dispatch_spawn_engineer(
                     }
                     // File tracking issue. Failure to file is logged but
                     // does NOT swallow the original brain failure.
-                    match std::process::Command::new("gh")
-                        .args([
+                    match crate::guarded_command::run_output(
+                        "gh",
+                        &[
                             "issue",
                             "create",
                             "--title",
@@ -259,9 +260,8 @@ pub fn dispatch_spawn_engineer(
                             &body,
                             "--label",
                             "ooda-stuck",
-                        ])
-                        .output()
-                    {
+                        ],
+                    ) {
                         Ok(out) if out.status.success() => {
                             eprintln!(
                                 "[simard] DETERMINISTIC SAFEGUARD: goal '{}' marked Blocked + tracking issue filed",
@@ -785,8 +785,9 @@ fn apply_lifecycle_decision(
     }
 
     if let EngineerLifecycleDecision::OpenTrackingIssue { title, body, .. } = &decision {
-        let result = std::process::Command::new("gh")
-            .args([
+        let result = crate::guarded_command::run_status(
+            "gh",
+            &[
                 "issue",
                 "create",
                 "--title",
@@ -795,8 +796,8 @@ fn apply_lifecycle_decision(
                 body,
                 "--label",
                 "ooda-stuck",
-            ])
-            .status();
+            ],
+        );
         if let Err(e) = result {
             tracing::warn!(
                 target: "simard::ooda_brain",

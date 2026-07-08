@@ -35,8 +35,9 @@ impl RealGhClient {
 impl GhClient for RealGhClient {
     fn search_issues(&self, repo: &str, signature: &str) -> SimardResult<Vec<GhIssue>> {
         let search = format!("stewardship-signature:{signature} in:body");
-        let output = std::process::Command::new("gh")
-            .args([
+        let output = crate::guarded_command::run_output(
+            "gh",
+            &[
                 "issue",
                 "list",
                 "-R",
@@ -47,11 +48,11 @@ impl GhClient for RealGhClient {
                 &search,
                 "--json",
                 "number,url,title,body",
-            ])
-            .output()
-            .map_err(|e| SimardError::StewardshipGhCommandFailed {
-                reason: format!("failed to spawn `gh issue list`: {e}"),
-            })?;
+            ],
+        )
+        .map_err(|e| SimardError::StewardshipGhCommandFailed {
+            reason: format!("failed to spawn `gh issue list`: {e}"),
+        })?;
         if !output.status.success() {
             return Err(SimardError::StewardshipGhCommandFailed {
                 reason: format!(
@@ -85,14 +86,15 @@ impl GhClient for RealGhClient {
     }
 
     fn create_issue(&self, repo: &str, title: &str, body: &str) -> SimardResult<GhIssue> {
-        let output = std::process::Command::new("gh")
-            .args([
+        let output = crate::guarded_command::run_output(
+            "gh",
+            &[
                 "issue", "create", "-R", repo, "--title", title, "--body", body,
-            ])
-            .output()
-            .map_err(|e| SimardError::StewardshipGhCommandFailed {
-                reason: format!("failed to spawn `gh issue create`: {e}"),
-            })?;
+            ],
+        )
+        .map_err(|e| SimardError::StewardshipGhCommandFailed {
+            reason: format!("failed to spawn `gh issue create`: {e}"),
+        })?;
         if !output.status.success() {
             return Err(SimardError::StewardshipGhCommandFailed {
                 reason: format!(
