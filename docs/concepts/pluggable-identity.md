@@ -9,6 +9,8 @@ related:
   - ../howto/configure-pluggable-identity.md
   - ../reference/runtime-contracts.md
   - ../architecture/agent-composition.md
+  - ./multi-identity-host-isolation.md
+  - ./write-authority-posture.md
 ---
 
 # Pluggable identity — TOML-driven agent personas

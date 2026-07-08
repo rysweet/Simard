@@ -75,6 +75,32 @@ pub(crate) fn lock_state<'g, 'a>(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Observe-only dispatch floor (issue #1, Crocutus).
+///
+/// Returns `Some(refusal_outcome)` when the process runs under a read-only
+/// identity (`SIMARD_OBSERVE_ONLY` truthy), signalling that no write-bearing
+/// engineer may be dispatched; returns `None` for the ordinary engineer
+/// identity so dispatch proceeds unchanged. Extracted as a pure function so the
+/// short-circuit is unit-testable without constructing a full brain/session.
+///
+/// The outcome is `success = true`: for an observer, *declining to act* is the
+/// correct behaviour, not a failure — it must not bump goal-failure counters or
+/// trip the no-progress breaker.
+fn observe_only_dispatch_refusal(action: &PlannedAction, goal_id: &str) -> Option<ActionOutcome> {
+    if !crate::read_only_guard::observe_only_enabled() {
+        return None;
+    }
+    Some(make_outcome(
+        action,
+        true,
+        format!(
+            "observe-only: refused to dispatch a write-bearing engineer for goal '{goal_id}'. \
+             This read-only identity proposes repo-hygiene goals but dispatches 0 write \
+             actions (no clone-and-push, no PR). Guardrail: SIMARD_OBSERVE_ONLY."
+        ),
+    ))
+}
+
 /// Spawn a subordinate engineer for a goal that the LLM picked
 /// `spawn_engineer` for, then mutate the active board to record the
 /// assignment.
@@ -100,6 +126,18 @@ pub fn dispatch_spawn_engineer(
     brain: &dyn OodaBrain,
     repo_root: &Path,
 ) -> ActionOutcome {
+    // ── Observe-only floor (issue #1, Crocutus) ─────────────────────────────
+    // A read-only identity (SIMARD_OBSERVE_ONLY=1) is a bounded OBSERVER: it may
+    // reason about goals but must never dispatch a write-bearing engineer, which
+    // would clone-and-push/PR against a target repo. Short-circuit BEFORE any
+    // worktree is allocated or subprocess launched — fail closed. This is the
+    // capability layer that makes "proposes goals, changes nothing anywhere"
+    // structural, not merely prompt-deep. The engineer identity (env unset) is
+    // unaffected.
+    if let Some(refusal) = observe_only_dispatch_refusal(action, goal_id) {
+        return refusal;
+    }
+
     // Re-check assignment under a short exclusive state lock to prevent a
     // double-spawn race (two cycles/threads parsing spawn_engineer for the
     // same goal). The per-round claim set in the dispatcher is the primary
@@ -980,5 +1018,56 @@ mod tests {
         let tmp2 = tempfile::tempdir().unwrap();
         write_claim(tmp2.path(), "not-a-pid\n0\n");
         assert_eq!(read_sentinel_pid(tmp2.path()), None);
+    }
+
+    // ── observe_only_dispatch_refusal (issue #1, Crocutus) ──────────────────
+    // Serialize env mutation: cargo runs unit tests in parallel.
+    static OBSERVE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn advance_action(goal_id: &str) -> PlannedAction {
+        PlannedAction {
+            kind: crate::ooda_loop::ActionKind::AdvanceGoal,
+            goal_id: Some(goal_id.to_string()),
+            description: format!("advance {goal_id}"),
+        }
+    }
+
+    #[test]
+    fn observe_only_refuses_engineer_dispatch_when_enabled() {
+        let _g = OBSERVE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var(crate::read_only_guard::OBSERVE_ONLY_ENV, "1");
+        }
+        let action = advance_action("tidy-stale-branches");
+        let refusal = observe_only_dispatch_refusal(&action, "tidy-stale-branches");
+        unsafe {
+            std::env::remove_var(crate::read_only_guard::OBSERVE_ONLY_ENV);
+        }
+        let outcome = refusal.expect("read-only identity must refuse engineer dispatch");
+        // Declining to act is correct behaviour, not a failure.
+        assert!(
+            outcome.success,
+            "observer refusal must not count as a failure"
+        );
+        assert!(
+            outcome.detail.contains("observe-only")
+                && outcome.detail.contains("0 write")
+                && outcome.detail.contains("SIMARD_OBSERVE_ONLY"),
+            "refusal detail must be explicit and auditable, got: {}",
+            outcome.detail
+        );
+    }
+
+    #[test]
+    fn engineer_identity_dispatches_normally_when_env_unset() {
+        let _g = OBSERVE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var(crate::read_only_guard::OBSERVE_ONLY_ENV);
+        }
+        let action = advance_action("ship-feature");
+        assert!(
+            observe_only_dispatch_refusal(&action, "ship-feature").is_none(),
+            "engineer identity (env unset) must not be short-circuited"
+        );
     }
 }

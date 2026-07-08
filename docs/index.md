@@ -112,6 +112,12 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [Concept: pluggable identity](./concepts/pluggable-identity.md) - Design rationale for TOML-driven agent personas that let different repos define distinct identities (#2242).
 - [How to configure pluggable identities](./howto/configure-pluggable-identity.md) - Create an `identity.toml` file for custom agent personas, operating modes, and prompt assets.
 - [Pluggable identity API reference](./reference/pluggable-identity-api.md) - Rust API for `FileIdentityLoader`, TOML types, `load_watches_from_file`, and error variants.
+- [Concept: multi-identity host isolation](./concepts/multi-identity-host-isolation.md) - How a second autonomous identity (e.g. the read-only `crocutus`) runs side-by-side with the primary `simard` daemon on one host via the `SIMARD_HOME` instance root, without colliding on state, ports, sockets, systemd units, or the cognitive-memory exclusive lock (#1).
+- [Concept: write-authority posture](./concepts/write-authority-posture.md) - The identity-level `read-only` / `scoped-write` / `full` contract that makes a second identity a bounded observer, enforced fail-closed at the git/ADO/GitHub guardrail seams (#1).
+- [Agent instance-isolation reference](./reference/agent-instance-isolation.md) - `SIMARD_HOME`, `instance_home()`, the per-instance environment matrix, systemd unit-name templating, and `simard debug instance`.
+- [Write-authority posture API reference](./reference/write-authority-posture-api.md) - The `IdentityAuthority` manifest field, the `[identities.authority]` TOML block, posture-aware `check_git_safety` / `check_ado_write_safety`, and `simard debug authority`.
+- [How to run a second agent identity side-by-side](./howto/run-a-second-agent-identity.md) - Configure a distinct instance root, endpoints, posture, and systemd unit, verify isolation, and launch a second daemon.
+- [Tutorial: Deploy Crocutus, a read-only observer of an Azure DevOps project](./tutorials/deploy-crocutus-read-only-observer.md) - End-to-end deployment of the `crocutus` identity observing the `acs-mdash` project (hyenas + sisters) read-only on host `dev`, with the guardrail proof (#1).
 
 ## Canonical executable surface
 
