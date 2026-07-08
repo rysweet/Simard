@@ -1358,6 +1358,76 @@ pub fn seed_default_board(board: &mut GoalBoard) -> usize {
     DEFAULT_SEED_GOALS.len()
 }
 
+/// `DEFAULT_SEED_GOALS` projected as owned [`crate::identity::SeedGoal`] values.
+///
+/// This is the single shape shared by Simard's baked-in defaults and an
+/// identity's declared seed goals (#3125), so the seeding site can treat both
+/// uniformly. `title` is the tuple's `id_source` (the slug source).
+pub fn default_seed_goals() -> Vec<crate::identity::SeedGoal> {
+    DEFAULT_SEED_GOALS
+        .iter()
+        .map(|(priority, title, description, repo)| {
+            crate::identity::SeedGoal::new(
+                *priority,
+                *title,
+                *description,
+                repo.map(str::to_string),
+            )
+        })
+        .collect()
+}
+
+/// Resolve which seed goals to use at the OODA cold-start seeding site (#3125).
+///
+/// When the identity declares a non-empty `seed_goals` list it **overrides**
+/// Simard's baked-in `DEFAULT_SEED_GOALS` (no merge); an empty list falls
+/// through to [`default_seed_goals`], so Simard herself is unchanged.
+pub fn resolve_seed_goals(
+    identity_seed_goals: &[crate::identity::SeedGoal],
+) -> Vec<crate::identity::SeedGoal> {
+    if identity_seed_goals.is_empty() {
+        default_seed_goals()
+    } else {
+        identity_seed_goals.to_vec()
+    }
+}
+
+/// Seed the board from an explicit list of [`crate::identity::SeedGoal`] if it
+/// has no active goals. Returns the number of goals added. Mirrors
+/// [`seed_default_board`] exactly (same `SOURCE_SEED` label, same empty-board
+/// guard), differing only in that the goals come from the resolved identity /
+/// default list rather than the baked-in `DEFAULT_SEED_GOALS` tuple. A goal's
+/// `repo` slug scopes it to the identity's target repo (#3125), never to
+/// `rysweet/Simard`.
+pub fn seed_board_from_seed_goals(
+    board: &mut GoalBoard,
+    goals: &[crate::identity::SeedGoal],
+) -> usize {
+    if !board.active.is_empty() {
+        return 0;
+    }
+
+    for goal in goals {
+        let id = crate::goals::goal_slug(&goal.title);
+        board.active.push(ActiveGoal {
+            parent_goal_id: None,
+            priority_explicit: false,
+            id,
+            description: goal.description.clone(),
+            priority: goal.priority,
+            status: GoalProgress::NotStarted,
+            assigned_to: None,
+            repo: goal.repo.clone(),
+            current_activity: None,
+            wip_refs: vec![],
+            last_progress_update_at: None,
+            labels: vec![crate::goal_curation::labels::SOURCE_SEED.to_string()],
+        });
+    }
+
+    goals.len()
+}
+
 // ---------------------------------------------------------------------------
 // GoalBoard -> Vec<GoalRecord> adapter
 // ---------------------------------------------------------------------------

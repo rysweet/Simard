@@ -14,7 +14,9 @@ mod coverage_tests;
 pub use contract::ManifestContract;
 pub use file_loader::FileIdentityLoader;
 pub use loader::{BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader};
-pub use manifest::{IdentityManifest, compose_with_precedence};
+pub use manifest::{
+    IdentityAuthority, IdentityManifest, SeedGoal, WritePosture, compose_with_precedence,
+};
 pub use types::{MemoryPolicy, OperatingMode};
 
 #[cfg(test)]

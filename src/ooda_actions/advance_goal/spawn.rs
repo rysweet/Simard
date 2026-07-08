@@ -101,6 +101,65 @@ fn observe_only_dispatch_refusal(action: &PlannedAction, goal_id: &str) -> Optio
     ))
 }
 
+/// Deterministic spawn rail (#3125) — the thin, pure, default-DENY predicate the
+/// agentic Act cognition runs behind.
+///
+/// Returns `true` only for a definitively *writing* posture (`Full` /
+/// `ScopedWrite`). Semantics:
+///
+/// - `None` — no identity is resolved. This deterministically resolves to
+///   `Full` (Simard's own default), so Simard is unaffected and spawns proceed.
+/// - `Some(Full | ScopedWrite)` — a writing identity: spawn permitted.
+/// - `Some(ReadOnly)` — a bounded observer: spawn denied.
+///
+/// An *unresolved* posture under a named identity must be encoded by the caller
+/// as `Some(IdentityAuthority::read_only())` so it too denies — the rail never
+/// spawns when authority is uncertain (fail-closed). There is no wall-clock
+/// timeout and no fallback-to-dispatch anywhere on this path.
+///
+/// This mirrors the existing `dispatch_spawn_engineer` pattern of an agentic
+/// brain decision paired with a deterministic safeguard: here the safeguard is
+/// this predicate rather than the 3-strikes counter.
+pub fn posture_permits_spawn(authority: Option<&crate::identity::IdentityAuthority>) -> bool {
+    match authority {
+        None => true,
+        Some(a) => a.permits_spawn(),
+    }
+}
+
+/// Cognition-level observe-only refusal (#3125). Returns `Some(outcome)` when the
+/// resolved identity's write-authority posture forbids dispatching a
+/// write-bearing engineer, so the Act phase takes the observe-only branch
+/// *before* ever reaching the shipped `observe_only_dispatch_refusal` floor.
+///
+/// The outcome is `success = true`: for a read-only observer, *declining to
+/// dispatch* is the correct behaviour — it must not bump goal-failure counters
+/// or trip the no-progress breaker. Records which identity/posture refused.
+fn posture_observe_only_refusal(
+    action: &PlannedAction,
+    goal_id: &str,
+    authority: Option<&crate::identity::IdentityAuthority>,
+    identity_name: Option<&str>,
+) -> Option<ActionOutcome> {
+    if posture_permits_spawn(authority) {
+        return None;
+    }
+    let who = identity_name.unwrap_or("identity");
+    let posture = authority
+        .map(|a| a.posture.to_string())
+        .unwrap_or_else(|| "read-only".to_string());
+    Some(make_outcome(
+        action,
+        true,
+        format!(
+            "observe-only (cognition): {who} write-authority posture is '{posture}', so goal \
+             '{goal_id}' takes the observe-only branch — proposes/observes on its own \
+             target-scoped board and dispatches 0 engineer(s). No write-bearing engineer is \
+             spawned. Rail: posture_permits_spawn."
+        ),
+    ))
+}
+
 /// Spawn a subordinate engineer for a goal that the LLM picked
 /// `spawn_engineer` for, then mutate the active board to record the
 /// assignment.
@@ -126,6 +185,38 @@ pub fn dispatch_spawn_engineer(
     brain: &dyn OodaBrain,
     repo_root: &Path,
 ) -> ActionOutcome {
+    // ── Cognition-level observe-only rail (#3125) ───────────────────────────
+    // Defense in depth ABOVE the shipped write-primitive floor below. If the
+    // resolved identity's write-authority posture does not permit a
+    // write-bearing engineer (posture = read-only, or an unresolved posture
+    // under a named identity, encoded fail-closed), take the observe-only branch
+    // BEFORE any brain decision, worktree, or subprocess: the identity observes
+    // and proposes on its own target-scoped board and dispatches 0 engineers.
+    // A read-only identity therefore never even *reaches* the env floor for a
+    // write-bearing action, saving the credits the brain would burn deciding to
+    // spawn. No identity (None) resolves to `full`, so Simard is unaffected.
+    {
+        let (authority, identity_name) = {
+            let guard = lock_state(state);
+            (
+                guard.identity_cognition.authority.clone(),
+                guard.identity_cognition.identity_name.clone(),
+            )
+        };
+        if let Some(refusal) = posture_observe_only_refusal(
+            action,
+            goal_id,
+            authority.as_ref(),
+            identity_name.as_deref(),
+        ) {
+            eprintln!(
+                "[simard] Act: observe-only posture ({}) — refusing engineer dispatch for goal '{goal_id}', dispatched 0 engineer(s)",
+                identity_name.as_deref().unwrap_or("identity")
+            );
+            return refusal;
+        }
+    }
+
     // ── Observe-only floor (issue #1, Crocutus) ─────────────────────────────
     // A read-only identity (SIMARD_OBSERVE_ONLY=1) is a bounded OBSERVER: it may
     // reason about goals but must never dispatch a write-bearing engineer, which
@@ -1069,6 +1160,164 @@ mod tests {
         assert!(
             observe_only_dispatch_refusal(&action, "ship-feature").is_none(),
             "engineer identity (env unset) must not be short-circuited"
+        );
+    }
+
+    // ── #3125: cognition-level observe-only rail (posture_permits_spawn) ──────
+    // Pure-function coverage plus an end-to-end proof that dispatch_spawn_engineer
+    // takes the observe-only branch under a read-only posture WITHOUT ever
+    // consulting the brain or spawning a worktree. These are hermetic (no env, no
+    // subprocess) — the read-only rail returns before any of that.
+
+    use crate::identity::{IdentityAuthority, WritePosture};
+
+    fn authority(posture: WritePosture) -> IdentityAuthority {
+        IdentityAuthority {
+            posture,
+            ..IdentityAuthority::default()
+        }
+    }
+
+    #[test]
+    fn posture_permits_spawn_default_deny_matrix() {
+        // No identity resolves deterministically to `full` => Simard spawns.
+        assert!(posture_permits_spawn(None));
+        // A writing posture permits spawn.
+        assert!(posture_permits_spawn(Some(&authority(WritePosture::Full))));
+        assert!(posture_permits_spawn(Some(&authority(
+            WritePosture::ScopedWrite
+        ))));
+        // A read-only posture NEVER permits spawn (fail-closed cognition rail).
+        assert!(!posture_permits_spawn(
+            Some(&IdentityAuthority::read_only())
+        ));
+        assert!(!posture_permits_spawn(Some(&authority(
+            WritePosture::ReadOnly
+        ))));
+    }
+
+    #[test]
+    fn posture_observe_only_refusal_none_for_writing_postures() {
+        let action = advance_action("observe-hyenas");
+        assert!(
+            posture_observe_only_refusal(&action, "observe-hyenas", None, None).is_none(),
+            "no identity (full) must not take the observe-only branch"
+        );
+        assert!(
+            posture_observe_only_refusal(
+                &action,
+                "observe-hyenas",
+                Some(&authority(WritePosture::Full)),
+                Some("simard-engineer"),
+            )
+            .is_none(),
+            "a full identity must not take the observe-only branch"
+        );
+    }
+
+    #[test]
+    fn posture_observe_only_refusal_records_read_only_branch() {
+        let action = advance_action("observe-hyenas");
+        let outcome = posture_observe_only_refusal(
+            &action,
+            "observe-hyenas",
+            Some(&IdentityAuthority::read_only()),
+            Some("crocutus"),
+        )
+        .expect("read-only posture must take the observe-only branch");
+        // Declining to dispatch is correct behaviour, not a failure.
+        assert!(
+            outcome.success,
+            "observer refusal must not count as failure"
+        );
+        assert!(
+            outcome.detail.contains("observe-only (cognition)")
+                && outcome.detail.contains("crocutus")
+                && outcome.detail.contains("read-only")
+                && outcome.detail.contains("0 engineer")
+                && outcome.detail.contains("posture_permits_spawn"),
+            "refusal detail must name the identity, posture, and rail; got: {}",
+            outcome.detail
+        );
+    }
+
+    /// A brain that panics on any decision — proves the read-only rail
+    /// short-circuits BEFORE any (credit-spending) brain reasoning.
+    struct PanicBrain;
+
+    impl crate::ooda_brain::OodaBrain for PanicBrain {
+        fn decide_engineer_lifecycle(
+            &self,
+            _ctx: &crate::ooda_brain::EngineerLifecycleCtx,
+        ) -> crate::error::SimardResult<crate::ooda_brain::EngineerLifecycleDecision> {
+            panic!("read-only cognition rail must not consult the brain");
+        }
+    }
+
+    #[test]
+    fn dispatch_spawn_engineer_read_only_cognition_never_spawns_or_reasons() {
+        let cognition = crate::ooda_loop::IdentityCognition {
+            identity_name: Some("crocutus".to_string()),
+            seed_goals: Vec::new(),
+            target_repos: vec!["hyenas".to_string()],
+            authority: Some(IdentityAuthority::read_only()),
+        };
+        let mut state = OodaState::new(crate::goal_curation::GoalBoard::new())
+            .with_identity_cognition(cognition);
+        let state_mx = std::sync::Mutex::new(&mut state);
+        let action = advance_action("observe-hyenas-branch-hygiene");
+        let repo_root = tempfile::tempdir().unwrap();
+
+        // If the cognition rail works, PanicBrain is never called and no
+        // worktree/subprocess is launched.
+        let outcome = dispatch_spawn_engineer(
+            &action,
+            &state_mx,
+            "observe-hyenas-branch-hygiene",
+            "propose repo-hygiene goals for hyenas",
+            &PanicBrain,
+            repo_root.path(),
+        );
+
+        assert!(
+            outcome.success,
+            "observe-only dispatch must be a success outcome, got: {}",
+            outcome.detail
+        );
+        assert!(
+            outcome.detail.contains("observe-only (cognition)")
+                && outcome.detail.contains("0 engineer"),
+            "read-only identity must take the observe-only branch; got: {}",
+            outcome.detail
+        );
+        // No engineer was assigned or worktree registered.
+        assert!(state.engineer_worktrees.is_empty());
+        assert!(
+            state
+                .active_goals
+                .active
+                .iter()
+                .all(|g| g.assigned_to.is_none())
+        );
+    }
+
+    #[test]
+    fn identity_cognition_default_permits_spawn_simard_unchanged() {
+        // The default carrier (no identity) must permit spawn so Simard's Act
+        // phase is byte-for-byte unchanged.
+        let cognition = crate::ooda_loop::IdentityCognition::default();
+        assert!(cognition.permits_spawn());
+        assert!(cognition.authority.is_none());
+        let action = advance_action("ship-feature");
+        assert!(
+            posture_observe_only_refusal(
+                &action,
+                "ship-feature",
+                cognition.authority.as_ref(),
+                cognition.identity_name.as_deref(),
+            )
+            .is_none(),
+            "Simard (no identity) must never take the observe-only branch"
         );
     }
 }
