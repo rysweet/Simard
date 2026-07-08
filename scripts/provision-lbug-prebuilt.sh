@@ -38,8 +38,21 @@ static_lib_name="liblbug.a"
 # unauthenticated `releases/latest` API call and no version skew with the crate
 # we actually compile against.
 lbug_version() {
-  sed -nE 's/^lbug[[:space:]]*=[[:space:]]*"=?([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' \
-    "$REPO_ROOT/Cargo.toml" | head -n1
+  # 1) Inline registry version in Cargo.toml (e.g. `lbug = "=0.17.1"`).
+  local v
+  v="$(sed -nE 's/^lbug[[:space:]]*=[[:space:]]*"=?([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' \
+    "$REPO_ROOT/Cargo.toml" | head -n1)"
+  # 2) Fallback for a git/path dependency (e.g. lbug repointed to a fork,
+  #    `lbug = { git = "…", rev = "…" }` — issue #3119): the inline regex above
+  #    matches nothing, so resolve the version Cargo actually locked from
+  #    Cargo.lock's `[[package]] name = "lbug"` entry. The prebuilt asset is
+  #    still published against that version tag on the release repo, so the
+  #    version-pinned download stays deterministic regardless of the source.
+  if [ -z "$v" ] && [ -f "$REPO_ROOT/Cargo.lock" ]; then
+    v="$(awk '/^name = "lbug"$/ { f = 1 } f && /^version = / { gsub(/[^0-9.]/, ""); print; exit }' \
+      "$REPO_ROOT/Cargo.lock")"
+  fi
+  printf '%s' "$v"
 }
 
 # Name of the prebuilt static archive for this OS/arch, mirroring lbug's own
