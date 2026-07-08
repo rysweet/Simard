@@ -81,3 +81,26 @@ pub fn backoff_until_epoch(
 pub fn clamp_interval_secs(raw: u64) -> u64 {
     raw.max(MIN_INTERVAL_SECS)
 }
+
+/// Env var applying a single global multiplier to every cognitive-thread
+/// interval — the cheap "slow all ten at once" cost-control knob.
+pub const INTERVAL_SCALE_ENV: &str = "SIMARD_THREAD_INTERVAL_SCALE";
+
+/// Apply the global [`INTERVAL_SCALE_ENV`] multiplier (float, default `1.0`;
+/// non-finite / non-positive / unparseable values are ignored) to `raw`, then
+/// clamp to [`MIN_INTERVAL_SECS`]. Applied once in each thread's `from_env` so
+/// the floor still holds after scaling.
+pub fn scale_and_clamp_interval_secs(raw: u64) -> u64 {
+    let scale = std::env::var(INTERVAL_SCALE_ENV)
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .unwrap_or(1.0);
+    let scaled = (raw as f64 * scale).round();
+    let scaled = if scaled.is_finite() && scaled >= 0.0 {
+        scaled as u64
+    } else {
+        raw
+    };
+    clamp_interval_secs(scaled)
+}

@@ -125,6 +125,7 @@ nav:
     - Unified Telemetry and Status: concepts/unified-telemetry-and-status.md
     - Goal-Board Persistence: concepts/goal-board-persistence.md
     - Keeping the OODA Daemon Steerable: concepts/steerable-ooda-daemon.md
+    - Salience and the OODA Decide Handoff: concepts/salience-and-decide.md
     - Perpetual Goals Exempt from No-Progress Hard-Block: concepts/perpetual-goal-no-progress-exemption.md
     - No-Progress Breaker Explains WHY and Self-Resolves: concepts/no-progress-root-cause-resolution.md
     - Overseer Goal-Board Health: concepts/overseer-goal-board-health.md
@@ -241,6 +242,7 @@ nav:
     - Configure Overseer Root-Cause Principle: howto/configure-overseer-root-cause-why.md
     - Configure Cognitive-Thread Scheduling: howto/configure-cognitive-thread-scheduling.md
     - Add a New Cognitive Thread: howto/add-a-new-cognitive-thread.md
+    - Configure the Cognitive-Thread Batch: howto/configure-cognitive-thread-batch.md
     - Configure the Creative Ideas Thread: howto/configure-creative-ideas-thread.md
     - Record an Investigation Finding (issue/memory, not a repo doc): howto/record-an-investigation-finding.md
     - Configure Creative-Ideas Semantic Dedup: howto/configure-creative-ideas-semantic-dedup.md
@@ -401,6 +403,8 @@ nav:
     - Release Integrity (SBOM + Signing): reference/release-integrity.md
     - Distill Raw-Capture on Parse Failure: reference/distill-raw-capture-on-parse-failure.md
     - Cognitive-Thread Scheduling: reference/cognitive-thread-scheduling.md
+    - Cognitive-Threads Catalog (ten reflective threads): reference/cognitive-threads-catalog.md
+    - The RecipeInvoker Seam: reference/recipe-invoker-seam.md
     - Creative Ideas Subsystem API: reference/creative-ideas-api.md
     - Creative Ideas Durable Read-After-Write: reference/creative-ideas-durable-read-after-write.md
     - Creative-Ideas Goal Routing — Fail-Closed Persistence: reference/creative-ideas-goal-routing-fail-closed.md

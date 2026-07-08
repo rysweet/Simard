@@ -710,6 +710,15 @@ pub fn run_ooda_daemon(
             mind.register(Box::new(
                 crate::cognitive_threads::EngineerLogAnalysisThread::from_env(),
             ));
+            // Issue #5: the ten reflective threads. Each is additive and OFF by
+            // default behind its own per-thread gate; registered only under the
+            // master gate (this block), so with it unset nothing registers, and a
+            // registered-but-disabled thread never ticks. Recipes over new plumbing.
+            crate::cognitive_threads::threads::register_reflective_threads(
+                &mut mind,
+                &cognitive_repo_root,
+                &state_root,
+            );
         }
         // Creative Ideas generator thread (issue #2647): a divergent
         // idea-generation background thread, default-ON opt-out via
