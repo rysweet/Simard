@@ -108,7 +108,17 @@ path = "src/bin/supply_chain_steward.rs"
 # fix the creative-ideas dashboard read path (ideas fell outside the unscoped
 # 512-row window in a large store). Still an upstream-`main` commit; store format
 # stays v41 (no lbug/engine change).
-amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "901f63ad79eb0c2d87cd8263d26025877af43cc5", features = ["persistent"] }
+#
+# Bumped again (issue #40) to the squash-merge commit of amplihack-memory-lib
+# PR #126 on `main` (1 commit ahead of the #125 pin): the bulk graph-adjacency
+# index for ranked recall. Ranked declarative/episodic recall previously computed
+# the graph-proximity term with a per-node `query_neighbors` BFS — an N+1 fan-out
+# of ~3N lock-serialized Cypher scans per recall that made the OODA daemon's
+# prepare-context spin ~11 min/cycle at ~7,590 facts. The fix serves that term
+# from one bulk edge scan per type: a pure performance refactor with
+# byte-identical ranking. Still an upstream-`main` commit; store format stays v41
+# (no lbug/engine change).
+amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "72c5ea1bfcca7e6f3e314dfd99fbe4998378ffe8", features = ["persistent"] }
 rustyclawd-core = { git = "https://github.com/rysweet/RustyClawd.git", rev = "ddae0fdf1b922ae8604b0a4e178a3634ada7e350" }
 rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git", rev = "ddae0fdf1b922ae8604b0a4e178a3634ada7e350" }
 # De-fork (issue #2323): the gym/eval RUNNER is now the upstream

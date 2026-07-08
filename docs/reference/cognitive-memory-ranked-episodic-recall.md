@@ -550,3 +550,6 @@ assert):
   `record_access`
 - [Cognitive Memory Architecture](../architecture/cognitive-memory.md) —
   canonical spec
+- [Bulk graph-adjacency index for ranked recall](./cognitive-memory-graph-adjacency-index.md) —
+  the per-recall bulk adjacency load that makes the graph-proximity signal fast
+  for episodic recall too (byte-identical ordering, seconds not minutes)
