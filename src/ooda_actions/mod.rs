@@ -11,6 +11,10 @@
 pub(crate) mod advance_goal;
 mod concurrent;
 mod goal_session;
+// Simard #3125: OBSERVE-ONLY Act phase for read-only identities. `pub(crate)`
+// so the cognition branch in `crate::ooda_loop::act` and the cross-module
+// tests in `tests_observe_only` can reach it.
+pub(crate) mod observe_only;
 mod session;
 mod simple_actions;
 
@@ -29,6 +33,11 @@ mod tests_dispatch;
 mod tests_dispatch_concurrency;
 #[cfg(test)]
 mod tests_goal_session;
+// Simard #3125: observe-only Act-phase tests. Depend on the (to-be-added)
+// `observe_only` implementation module; registered here so `cargo test`
+// compiles and runs them once that module lands.
+#[cfg(test)]
+mod tests_observe_only;
 
 use crate::error::SimardResult;
 use crate::ooda_loop::{ActionKind, ActionOutcome, OodaBridges, OodaState, PlannedAction};

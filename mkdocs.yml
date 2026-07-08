@@ -89,6 +89,7 @@ nav:
     - Operational Autonomy Model: concepts/operational-autonomy-model.md
     - Adaptive Scaling: concepts/adaptive-scaling.md
     - Pluggable Identity: concepts/pluggable-identity.md
+    - Identity Write-Authority (Observer Posture): concepts/identity-write-authority.md
     - OODA Loop Self-Detection: concepts/ooda-loop-self-detection.md
     - Unified RecipeBrain: concepts/unified-recipe-brain.md
     - Prompt-Driven OODA Brain: concepts/prompt-driven-ooda-brain.md
@@ -165,6 +166,7 @@ nav:
     - Self-Maintain Dependency Pins: howto/self-maintain-dependency-pins.md
     - Configure Adaptive Scaling: howto/configure-adaptive-scaling.md
     - Configure Pluggable Identity: howto/configure-pluggable-identity.md
+    - Configure a Read-Only Observer Identity: howto/configure-observer-identity.md
     - Configure Episode Hygiene and Promotion: howto/configure-episode-hygiene-and-promotion.md
     - Inspect Improvement Curation State: howto/inspect-improvement-curation-state.md
     - Inspect the Procedural-Learning Loop: howto/inspect-the-procedural-learning-loop.md
@@ -276,6 +278,7 @@ nav:
     - Meeting Handoff Schema: reference/meeting-handoff-schema.md
     - Handoff Lifecycle API: reference/handoff-lifecycle-api.md
     - Pluggable Identity API: reference/pluggable-identity-api.md
+    - Identity Posture & Observer Act Phase: reference/identity-posture-observer.md
     - Adaptive Scaling API: reference/adaptive-scaling-api.md
     - Brain Introspection API: reference/brain-introspection-api.md
     - Self-Quality-Audit API: reference/self-quality-audit-api.md

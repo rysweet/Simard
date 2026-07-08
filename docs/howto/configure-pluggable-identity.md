@@ -10,6 +10,7 @@ related:
   - ../reference/pluggable-identity-api.md
   - ../reference/simard-cli.md
   - ../howto/move-from-terminal-recipes-into-engineer-runs.md
+  - ../howto/configure-observer-identity.md
 ---
 
 # How to configure pluggable identities

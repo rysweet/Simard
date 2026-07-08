@@ -128,10 +128,25 @@ fn run_ooda_cycle_inner(
     // to avoid false-positive clearing in non-tmux environments.
     sweep_stale_assignments(&mut state.active_goals);
 
-    // Seed with default goals if the board is still empty.
-    let seeded = crate::goal_curation::seed_default_board(&mut state.active_goals);
-    if seeded > 0 {
-        eprintln!("[simard] OODA start: seeded {seeded} default goal(s)");
+    // Seed with default goals if the board is still empty. Simard #3125: when
+    // the active identity declared its own seed goals they OVERRIDE Simard's
+    // baked-in DEFAULT_SEED_GOALS and are seeded target-scoped + unassigned;
+    // Simard herself (no identity seeds) keeps her exact 5 defaults unchanged.
+    if state.identity_seed_goals.is_empty() {
+        let n = crate::goal_curation::seed_default_board(&mut state.active_goals);
+        if n > 0 {
+            eprintln!("[simard] OODA start: seeded {n} default goal(s)");
+        }
+    } else {
+        let n = crate::goal_curation::seed_identity_board(
+            &mut state.active_goals,
+            &state.identity_seed_goals,
+        );
+        if n > 0 {
+            eprintln!(
+                "[simard] OODA start: seeded {n} identity goal(s) — overriding defaults, target-scoped observe-only (issue #3125)"
+            );
+        }
     }
 
     // Ingest meeting handoff decisions as new goals.

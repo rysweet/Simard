@@ -4,7 +4,7 @@ use crate::base_types::BaseTypeId;
 use crate::error::{SimardError, SimardResult};
 use crate::prompt_assets::PromptAssetRef;
 
-use super::{IdentityManifest, ManifestContract, OperatingMode};
+use super::{IdentityManifest, ManifestContract, OperatingMode, SeedGoal, WriteAuthority};
 
 impl IdentityManifest {
     pub fn compose(
@@ -68,6 +68,34 @@ impl IdentityManifest {
             });
         }
 
+        // Write posture (Simard #3125): most-restrictive authority wins — a
+        // single read-only component makes the whole composed identity
+        // read-only (defense in depth: a composite can never be more
+        // permissive than its least-trusted part). Targets are the de-duped
+        // union; seed goals are concatenated. Because the union ⊇ each
+        // component's own (already-validated) target set, every concatenated
+        // seed goal stays within scope.
+        let write_authority = if components
+            .iter()
+            .any(|c| c.write_authority == WriteAuthority::ReadOnly)
+        {
+            WriteAuthority::ReadOnly
+        } else {
+            WriteAuthority::ReadWrite
+        };
+        let mut targets: Vec<String> = Vec::new();
+        for component in &components {
+            for target in &component.targets {
+                if !targets.contains(target) {
+                    targets.push(target.clone());
+                }
+            }
+        }
+        let seed_goals: Vec<SeedGoal> = components
+            .iter()
+            .flat_map(|c| c.seed_goals.iter().cloned())
+            .collect();
+
         IdentityManifest::new(
             name,
             version,
@@ -78,7 +106,8 @@ impl IdentityManifest {
             memory_policy,
             contract,
         )?
-        .with_components(component_names)
+        .with_components(component_names)?
+        .with_posture(write_authority, targets, seed_goals)
     }
 }
 

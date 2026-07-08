@@ -3,6 +3,7 @@ mod contract;
 mod file_loader;
 mod loader;
 mod manifest;
+mod posture;
 mod toml_types;
 mod types;
 
@@ -15,7 +16,8 @@ pub use contract::ManifestContract;
 pub use file_loader::FileIdentityLoader;
 pub use loader::{BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader};
 pub use manifest::{IdentityManifest, compose_with_precedence};
-pub use types::{MemoryPolicy, OperatingMode};
+pub use posture::{IdentityPosture, ResolvedPosture};
+pub use types::{MemoryPolicy, OperatingMode, SeedGoal, WriteAuthority};
 
 #[cfg(test)]
 mod tests {

@@ -8,6 +8,7 @@ related:
   - ../concepts/pluggable-identity.md
   - ../howto/configure-pluggable-identity.md
   - ../reference/runtime-contracts.md
+  - ./identity-posture-observer.md
 ---
 
 # Pluggable identity API reference

@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use crate::base_types::{BaseTypeDescriptor, BaseTypeOutcome, BaseTypeSession, BaseTypeTurnInput};
 use crate::error::{SimardError, SimardResult};
 use crate::goal_curation::{GoalBoard, GoalProgress, add_active_goal};
+use crate::identity::WriteAuthority;
 use crate::ooda_actions::dispatch_actions_bounded;
 use crate::ooda_actions::test_helpers::{active_goal, test_bridges};
 use crate::ooda_loop::{ActionKind, OodaState, OrchestratorSessionFactory, PlannedAction};
@@ -265,4 +266,62 @@ fn one_failing_advance_does_not_abort_others() {
     assert_eq!(outcomes[0].action.goal_id.as_deref(), Some("adv-ok-a"));
     assert_eq!(outcomes[1].action.goal_id.as_deref(), Some("adv-fail-b"));
     assert_eq!(outcomes[2].action.goal_id.as_deref(), Some("adv-ok-c"));
+}
+
+// ── Simard #3125: the read-only rail holds on the CONCURRENT spawn path ──────
+//
+// AC3: the concurrent `AdvanceGoal` dispatch reaches `dispatch_spawn_engineer`
+// through a different call site than the serialized path. A read-only posture
+// must hard-block engineer spawns on BOTH sites — a concurrent-path escape
+// would defeat the whole feature. Here every goal's session returns
+// spawn-triggering prose (NOT `NO ACTION`), so absent the rail each would
+// dispatch a real engineer; with `write_authority = ReadOnly` none may.
+
+#[test]
+fn read_only_posture_blocks_concurrent_spawn_path() {
+    let ids = ["obs-a", "obs-b", "obs-c"];
+    let actions: Vec<PlannedAction> = ids.iter().map(|id| advance_action(id)).collect();
+
+    let instr = Arc::new(Instrumentation::default());
+    let mut bridges = test_bridges();
+    bridges.session_factory = Some(Arc::new(FakeFactory {
+        instr: Arc::clone(&instr),
+        sleep: Duration::from_millis(20),
+        // Non-`NO ACTION` prose => parses to GoalAction::SpawnEngineer, which
+        // (absent the rail) would fork a write-bearing engineer subprocess.
+        response: "Fix branch hygiene in the target repo".to_string(),
+        fail_substring: None,
+    }));
+
+    let mut state = OodaState::new(board_with_unassigned_goals(&ids));
+    state.write_authority = WriteAuthority::ReadOnly;
+
+    let outcomes = dispatch_actions_bounded(&actions, &mut bridges, &mut state, ids.len()).unwrap();
+
+    assert_eq!(outcomes.len(), ids.len());
+    for o in &outcomes {
+        assert!(
+            o.success,
+            "read-only spawn block is a benign skip (success): {}",
+            o.detail
+        );
+    }
+    // The rail fired on the concurrent path for every spawn attempt.
+    assert!(
+        outcomes.iter().all(|o| {
+            let d = o.detail.to_lowercase();
+            d.contains("read-only") || d.contains("read only") || d.contains("observe")
+        }),
+        "every concurrent spawn attempt must report the read-only skip: {:?}",
+        outcomes.iter().map(|o| &o.detail).collect::<Vec<_>>()
+    );
+    // No engineer was dispatched: every goal is still unassigned.
+    assert!(
+        state
+            .active_goals
+            .active
+            .iter()
+            .all(|g| g.assigned_to.is_none()),
+        "read-only posture must never assign an engineer on the concurrent path"
+    );
 }

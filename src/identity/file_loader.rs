@@ -14,7 +14,9 @@ use tracing::warn;
 
 use super::loader::BuiltinIdentityLoader;
 use super::toml_types::{TomlIdentity, TomlIdentityFile};
-use super::{IdentityLoadRequest, IdentityLoader, IdentityManifest, MemoryPolicy, OperatingMode};
+use super::{
+    IdentityLoadRequest, IdentityLoader, IdentityManifest, MemoryPolicy, OperatingMode, SeedGoal,
+};
 use crate::base_types::{BaseTypeCapability, BaseTypeId};
 use crate::error::{SimardError, SimardResult};
 use crate::memory::MemoryScope;
@@ -227,6 +229,23 @@ impl FileIdentityLoader {
             None => MemoryPolicy::default(),
         };
 
+        // Write posture (Simard #3125): the identity's declared authority +
+        // target scope + seed goals, attached via `with_posture`, which
+        // fail-closed-validates read-only seed-goal scoping. A validation
+        // failure is surfaced as a parse error (never a silent re-scope to
+        // Simard). `write_authority` deserialized directly off the TOML
+        // (absent ⇒ read-write; unknown value ⇒ a toml parse error already).
+        let seed_goals: Vec<SeedGoal> = identity
+            .seed_goals
+            .iter()
+            .map(|g| SeedGoal {
+                priority: g.priority,
+                title: g.title.clone(),
+                description: g.description.clone(),
+                repo: g.repo.clone(),
+            })
+            .collect();
+
         IdentityManifest::new(
             &identity.name,
             &request.package_version,
@@ -236,7 +255,16 @@ impl FileIdentityLoader {
             default_mode,
             memory_policy,
             request.contract.clone(),
+        )?
+        .with_posture(
+            identity.write_authority,
+            identity.targets.clone(),
+            seed_goals,
         )
+        .map_err(|e| SimardError::IdentityTomlParseError {
+            path: toml_path.to_path_buf(),
+            reason: format!("{e}"),
+        })
     }
 }
 

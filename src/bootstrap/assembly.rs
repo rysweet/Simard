@@ -17,7 +17,7 @@ use crate::goals::{CognitiveMemoryGoalStore, GoalStore};
 use crate::handoff::{FileBackedHandoffStore, RuntimeHandoffSnapshot, RuntimeHandoffStore};
 use crate::identity::{
     BuiltinIdentityLoader, FileIdentityLoader, IdentityLoadRequest, IdentityLoader,
-    IdentityManifest, ManifestContract, OperatingMode,
+    IdentityManifest, IdentityPosture, ManifestContract, OperatingMode, ResolvedPosture,
 };
 use crate::memory::{FileBackedMemoryStore, MemoryStore};
 use crate::memory_bridge_adapter::CognitiveBridgeMemoryStore;
@@ -343,4 +343,51 @@ pub(crate) fn load_identity(
         Some(path) => FileIdentityLoader::new(path, prompt_root).load(request),
         None => BuiltinIdentityLoader.load(request),
     }
+}
+
+/// Resolve the active identity's write posture at daemon boot (Simard #3125).
+///
+/// `SIMARD_IDENTITY_PATH` is the "identity present" signal (A1):
+///   * unset ⇒ [`ResolvedPosture::None`] — Simard's own read-write default; no
+///     behavior change (AC1).
+///   * set + resolves ⇒ [`ResolvedPosture::Identity`] with the identity's
+///     declared authority / targets / seed goals.
+///   * set but resolution fails (missing config, parse error, threading gap)
+///     ⇒ [`ResolvedPosture::Undetermined`], which fails CLOSED to read-only so
+///     a mis-wired observer can never spawn engineers (AC5). NO fallback to a
+///     read-write default.
+pub(crate) fn resolve_boot_posture() -> ResolvedPosture {
+    if std::env::var_os("SIMARD_IDENTITY_PATH").is_none() {
+        return ResolvedPosture::None;
+    }
+    match resolve_boot_manifest() {
+        Ok(manifest) => ResolvedPosture::Identity(IdentityPosture::from_manifest(&manifest)),
+        Err(e) => {
+            eprintln!(
+                "[simard] identity posture UNDETERMINED — failing CLOSED to read-only (no engineer dispatch): {e} (issue #3125)"
+            );
+            ResolvedPosture::Undetermined
+        }
+    }
+}
+
+/// Resolve the active identity manifest from the environment, reusing the same
+/// contract + loader plumbing as [`assemble_parts`].
+fn resolve_boot_manifest() -> SimardResult<IdentityManifest> {
+    let config = BootstrapConfig::from_env()?;
+    let contract = ManifestContract::new(
+        super::bootstrap_entrypoint(),
+        "bootstrap-config -> identity-loader -> ooda-posture",
+        config.manifest_precedence(),
+        Provenance::new(
+            "bootstrap",
+            format!("{}:{}", super::bootstrap_entrypoint(), config.identity),
+        ),
+        Freshness::now()?,
+    )?;
+    load_identity(
+        config.identity_path.as_ref().map(|cv| &cv.value),
+        &config.prompt_root.value,
+        &IdentityLoadRequest::new(config.identity.clone(), env!("CARGO_PKG_VERSION"), contract),
+    )
 }

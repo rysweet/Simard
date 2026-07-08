@@ -6,6 +6,8 @@
 
 use serde::Deserialize;
 
+use super::WriteAuthority;
+
 /// Top-level structure of an identity.toml file.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,6 +45,28 @@ pub(crate) struct TomlIdentity {
     pub components: Vec<String>,
     #[serde(default)]
     pub memory_policy: Option<TomlMemoryPolicy>,
+    /// Write posture (Simard #3125). Absent ⇒ read-write (Simard unchanged).
+    /// Deserializes the kebab tokens `read-only` / `read-write`; an unknown
+    /// value is a hard parse error (surfaced as `IdentityTomlParseError`).
+    #[serde(default)]
+    pub write_authority: WriteAuthority,
+    /// Target repo slugs this identity is scoped to (Simard #3125).
+    #[serde(default)]
+    pub targets: Vec<String>,
+    /// Identity-declared seed goals (Simard #3125). Override `DEFAULT_SEED_GOALS`.
+    #[serde(default)]
+    pub seed_goals: Vec<TomlSeedGoal>,
+}
+
+/// A `[[identities.seed_goals]]` entry (Simard #3125).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TomlSeedGoal {
+    pub priority: u32,
+    pub title: String,
+    pub description: String,
+    #[serde(default)]
+    pub repo: Option<String>,
 }
 
 /// A `[[identities.prompt_assets]]` entry.

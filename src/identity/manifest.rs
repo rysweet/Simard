@@ -4,7 +4,7 @@ use crate::base_types::{BaseTypeCapability, BaseTypeId};
 use crate::error::{SimardError, SimardResult};
 use crate::prompt_assets::PromptAssetRef;
 
-use super::{ManifestContract, MemoryPolicy, OperatingMode};
+use super::{ManifestContract, MemoryPolicy, OperatingMode, SeedGoal, WriteAuthority};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IdentityManifest {
@@ -17,6 +17,16 @@ pub struct IdentityManifest {
     pub default_mode: OperatingMode,
     pub memory_policy: MemoryPolicy,
     pub contract: ManifestContract,
+    /// Write posture (Simard #3125). Defaults to [`WriteAuthority::ReadWrite`]
+    /// so an identity that declares no posture — and Simard herself — is
+    /// behaviorally unchanged.
+    pub write_authority: WriteAuthority,
+    /// Target repo slugs this identity is scoped to (Simard #3125). Empty for
+    /// the Simard-unchanged default.
+    pub targets: Vec<String>,
+    /// Identity-declared seed goals (Simard #3125). When non-empty these
+    /// OVERRIDE Simard's baked-in `DEFAULT_SEED_GOALS`. Empty for the default.
+    pub seed_goals: Vec<SeedGoal>,
 }
 
 impl IdentityManifest {
@@ -46,6 +56,9 @@ impl IdentityManifest {
             default_mode,
             memory_policy,
             contract,
+            write_authority: WriteAuthority::ReadWrite,
+            targets: Vec::new(),
+            seed_goals: Vec::new(),
         })
     }
 
@@ -78,6 +91,44 @@ impl IdentityManifest {
             normalized.push(component);
         }
         self.components = normalized;
+        Ok(self)
+    }
+
+    /// Attach a write posture (Simard #3125): authority, target repo set, and
+    /// seed goals.
+    ///
+    /// Fail-closed contract: for a [`WriteAuthority::ReadOnly`] identity EVERY
+    /// seed goal MUST be scoped to a repo within `targets`. A seed goal whose
+    /// `repo` is `None` (which would default to Simard's own repo — the exact
+    /// bug #3125 fixes) or points outside `targets` is a hard error, never
+    /// silently re-scoped. A `ReadWrite` identity keeps the existing
+    /// own-repo (`repo = None`) semantics and is not scope-validated.
+    pub fn with_posture(
+        mut self,
+        write_authority: WriteAuthority,
+        targets: Vec<String>,
+        seed_goals: Vec<SeedGoal>,
+    ) -> SimardResult<Self> {
+        if write_authority == WriteAuthority::ReadOnly {
+            for goal in &seed_goals {
+                let scoped = goal
+                    .repo
+                    .as_deref()
+                    .is_some_and(|repo| targets.iter().any(|t| t == repo));
+                if !scoped {
+                    return Err(SimardError::InvalidIdentityComposition {
+                        identity: self.name.clone(),
+                        reason: format!(
+                            "read-only seed goal '{}' must be scoped to a repo within targets {:?}, got {:?}",
+                            goal.title, targets, goal.repo
+                        ),
+                    });
+                }
+            }
+        }
+        self.write_authority = write_authority;
+        self.targets = targets;
+        self.seed_goals = seed_goals;
         Ok(self)
     }
 

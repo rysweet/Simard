@@ -1354,6 +1354,40 @@ pub fn seed_default_board(board: &mut GoalBoard) -> usize {
     DEFAULT_SEED_GOALS.len()
 }
 
+/// Seed the board with an identity's declared seed goals (Simard #3125) if it
+/// has no active goals. Returns the number of goals added.
+///
+/// This is the identity-scoped counterpart of [`seed_default_board`]: when an
+/// identity declares its own `seed_goals` they OVERRIDE Simard's baked-in
+/// `DEFAULT_SEED_GOALS`. Each goal is seeded UNASSIGNED (no engineer dispatch)
+/// and scoped to the seed goal's own `repo` (a target slug), never
+/// `rysweet/Simard`. Read-only scope validation happens upstream at identity
+/// load (`IdentityManifest::with_posture`); this function trusts the already-
+/// validated `repo` field.
+pub fn seed_identity_board(board: &mut GoalBoard, seeds: &[crate::identity::SeedGoal]) -> usize {
+    if !board.active.is_empty() {
+        return 0;
+    }
+
+    for seed in seeds {
+        let id = crate::goals::goal_slug(&seed.title);
+        board.active.push(ActiveGoal {
+            parent_goal_id: None,
+            id,
+            description: seed.description.clone(),
+            priority: seed.priority,
+            status: GoalProgress::NotStarted,
+            assigned_to: None,
+            repo: seed.repo.clone(),
+            current_activity: None,
+            wip_refs: vec![],
+            last_progress_update_at: None,
+        });
+    }
+
+    seeds.len()
+}
+
 // ---------------------------------------------------------------------------
 // GoalBoard -> Vec<GoalRecord> adapter
 // ---------------------------------------------------------------------------

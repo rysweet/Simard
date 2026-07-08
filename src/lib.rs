@@ -235,8 +235,9 @@ pub use goal_curation::{
     ActiveGoal, BacklogItem, CARRYOVER_CONCEPT, CarryoverVerification, DEFAULT_SEED_GOALS,
     GoalBoard, GoalCarryoverRecord, GoalProgress, MAX_ACTIVE_GOALS, WipRef, add_active_goal,
     add_backlog_item, archive_completed, board_snapshot_hash, load_goal_board, persist_board,
-    promote_to_active, read_latest_carryover, seed_default_board, update_goal_progress,
-    update_goal_progress_with_evidence, verify_goal_carryover, write_goal_carryover,
+    promote_to_active, read_latest_carryover, seed_default_board, seed_identity_board,
+    update_goal_progress, update_goal_progress_with_evidence, verify_goal_carryover,
+    write_goal_carryover,
 };
 pub use goals::{
     FileBackedGoalStore, GoalRecord, GoalStatus, GoalStore, GoalUpdate, InMemoryGoalStore,

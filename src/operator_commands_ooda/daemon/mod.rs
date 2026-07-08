@@ -367,6 +367,32 @@ pub fn run_ooda_daemon(
     let board = crate::goal_board_store::heal_stale_no_progress_blocks(board);
     let mut state = OodaState::new(board);
     state.no_progress_tracker = persistent.no_progress;
+
+    // Simard #3125: resolve the active identity's write posture at boot and
+    // thread it into the OODA state. `SIMARD_IDENTITY_PATH` unset ⇒ no identity
+    // ⇒ Simard's read-write default (unchanged). A read-only observer identity
+    // (e.g. Crocutus watching the hyenas repos) runs an observe-only Act phase
+    // and its declared seed goals OVERRIDE Simard's baked-in defaults, scoped to
+    // the identity's target repos — never rysweet/Simard. An identity that is
+    // present but cannot be resolved fails CLOSED to read-only.
+    let posture = crate::bootstrap::assembly::resolve_boot_posture();
+    state.write_authority = posture.write_authority();
+    state.observer_targets = posture.targets().to_vec();
+    state.identity_seed_goals = posture.seed_goals().to_vec();
+    daemon_log(
+        &state_root,
+        &format!(
+            "[simard] OODA daemon: identity write posture = {} (targets: {}; identity seed goals: {}) (issue #3125)",
+            state.write_authority,
+            if state.observer_targets.is_empty() {
+                "none".to_string()
+            } else {
+                state.observer_targets.join(", ")
+            },
+            state.identity_seed_goals.len(),
+        ),
+    );
+
     let config = OodaConfig::default();
 
     // Issue #1197: sweep orphaned engineer worktrees from prior crashed

@@ -80,6 +80,23 @@ pub struct OodaState {
     /// done-gate ladder (mark done / drop / escalate). See
     /// `docs/concepts/steerable-ooda-daemon.md` ("The no-progress breaker (Fix 3)").
     pub no_progress_tracker: crate::goal_curation::NoProgressTracker,
+    /// Active identity's write posture (Simard #3125). Set once at daemon boot
+    /// from the resolved identity; [`WriteAuthority::ReadWrite`] by default so
+    /// Simard — and any read-write identity — is behaviorally unchanged. When
+    /// [`WriteAuthority::ReadOnly`] the Act phase runs an observe-only branch
+    /// and the deterministic spawn rail in
+    /// [`crate::ooda_actions::advance_goal::spawn::dispatch_spawn_engineer`]
+    /// hard-blocks every engineer dispatch (defense in depth).
+    pub write_authority: crate::identity::WriteAuthority,
+    /// Target repo slugs the active identity is scoped to (Simard #3125). Empty
+    /// for Simard herself; populated at boot for a scoped observer identity so
+    /// the observe-only Act branch reasons over the identity's repos, never
+    /// `rysweet/Simard`.
+    pub observer_targets: Vec<String>,
+    /// Identity-declared seed goals (Simard #3125). Empty for Simard (keeps her
+    /// baked-in `DEFAULT_SEED_GOALS`); when non-empty the cycle seeds the board
+    /// from these — OVERRIDING the defaults — via `seed_identity_board`.
+    pub identity_seed_goals: Vec<crate::identity::SeedGoal>,
 }
 
 impl OodaState {
@@ -98,6 +115,9 @@ impl OodaState {
             engineer_worktrees: HashMap::new(),
             last_distill_cycle: 0,
             no_progress_tracker: crate::goal_curation::NoProgressTracker::new(),
+            write_authority: crate::identity::WriteAuthority::ReadWrite,
+            observer_targets: Vec::new(),
+            identity_seed_goals: Vec::new(),
         }
     }
 

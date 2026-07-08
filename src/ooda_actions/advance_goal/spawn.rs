@@ -101,6 +101,35 @@ pub fn dispatch_spawn_engineer(
     admission: &dyn OodaAdmissionBrain,
     repo_root: &Path,
 ) -> ActionOutcome {
+    // ── Simard #3125: deterministic read-only spawn rail (L2 defense) ────────
+    //
+    // The single write-bearing chokepoint the Act phase funnels through. When
+    // the active identity's posture is read-only (an OBSERVER identity such as
+    // Crocutus), hard-block BEFORE any assignment re-check, admission gate,
+    // worktree allocation, or subprocess spawn — so no write-bearing engineer
+    // is ever dispatched and no AI credits are burned on work the read_only
+    // guard would block anyway. This is defense-in-depth beneath the
+    // observe-only Act branch (L1): even if control reaches here, the write is
+    // refused. Fail-closed: the posture is read STRAIGHT off the shared state,
+    // and a read-only posture is a benign skip (`success == true`) so the
+    // 3-strikes brain-failure safeguard is never tripped by an observer.
+    {
+        let guard = lock_state(state);
+        if !guard.write_authority.may_dispatch_engineers() {
+            eprintln!(
+                "[simard] spawn_engineer BLOCKED for goal '{goal_id}': identity posture is {} (deny-by-default: only read-write may dispatch engineers) — no write-bearing engineer dispatched (issue #3125)",
+                guard.write_authority
+            );
+            return make_outcome(
+                action,
+                true,
+                format!(
+                    "spawn_engineer skipped: identity posture is read-only (observe-only) for goal '{goal_id}' — no engineer dispatched"
+                ),
+            );
+        }
+    }
+
     // Re-check assignment under a short exclusive state lock to prevent a
     // double-spawn race (two cycles/threads parsing spawn_engineer for the
     // same goal). The per-round claim set in the dispatcher is the primary

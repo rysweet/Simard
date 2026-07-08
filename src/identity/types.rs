@@ -55,6 +55,69 @@ impl FromStr for OperatingMode {
     }
 }
 
+/// Write posture of an identity (Simard #3125).
+///
+/// A read-only OBSERVER identity (e.g. Crocutus watching the hyenas repos) is
+/// authorized to observe and propose goals but NEVER to spawn write-bearing
+/// engineers. `ReadWrite` is the default so Simard herself — and any identity
+/// that does not declare a posture — is behaviorally unchanged.
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum WriteAuthority {
+    /// OBSERVE ONLY: may record observations and propose goals, but the Act
+    /// phase must not dispatch engineers or write to any target repo.
+    ReadOnly,
+    /// Full authority — the Simard-unchanged default. May spawn engineers and
+    /// open PRs against the goal's target repo.
+    #[default]
+    ReadWrite,
+}
+
+impl Display for WriteAuthority {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::ReadOnly => "read-only",
+            Self::ReadWrite => "read-write",
+        };
+        f.write_str(label)
+    }
+}
+
+impl WriteAuthority {
+    /// `true` only for [`WriteAuthority::ReadWrite`].
+    ///
+    /// The deterministic spawn rail matches on this (deny-by-default): it
+    /// authorizes engineer dispatch ONLY for the proven read-write case, so any
+    /// read-only — or, should a future variant appear, any non-read-write —
+    /// posture fails closed and cannot spawn a write-bearing engineer.
+    pub fn may_dispatch_engineers(&self) -> bool {
+        matches!(self, Self::ReadWrite)
+    }
+
+    /// `true` for [`WriteAuthority::ReadOnly`] — an observe-only posture.
+    pub fn is_read_only(&self) -> bool {
+        matches!(self, Self::ReadOnly)
+    }
+}
+
+/// A single identity-declared seed goal (Simard #3125).
+///
+/// When an identity declares seed goals they OVERRIDE Simard's baked-in
+/// `DEFAULT_SEED_GOALS`. `repo` is the target-repo slug the goal is scoped to
+/// (e.g. `"hyenas/repo-a"`); for a read-only identity every seed goal MUST be
+/// scoped to a repo within the identity's target set (enforced by
+/// [`IdentityManifest::with_posture`]) so a goal can never silently escape to
+/// `rysweet/Simard`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SeedGoal {
+    pub priority: u32,
+    pub title: String,
+    pub description: String,
+    pub repo: Option<String>,
+}
+
 /// Controls what a session is allowed to write to long-term memory.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MemoryPolicy {
@@ -101,6 +164,53 @@ mod tests {
     #[test]
     fn default_memory_policy_validates_successfully() {
         MemoryPolicy::default().validate().unwrap();
+    }
+
+    // --- WriteAuthority (Simard #3125) ---
+
+    #[test]
+    fn write_authority_default_is_read_write() {
+        assert_eq!(WriteAuthority::default(), WriteAuthority::ReadWrite);
+    }
+
+    #[test]
+    fn write_authority_display_is_kebab() {
+        assert_eq!(WriteAuthority::ReadOnly.to_string(), "read-only");
+        assert_eq!(WriteAuthority::ReadWrite.to_string(), "read-write");
+    }
+
+    #[test]
+    fn write_authority_may_dispatch_only_read_write() {
+        assert!(WriteAuthority::ReadWrite.may_dispatch_engineers());
+        assert!(!WriteAuthority::ReadOnly.may_dispatch_engineers());
+    }
+
+    #[test]
+    fn write_authority_is_read_only_only_read_only() {
+        assert!(WriteAuthority::ReadOnly.is_read_only());
+        assert!(!WriteAuthority::ReadWrite.is_read_only());
+    }
+
+    #[test]
+    fn write_authority_serde_kebab_roundtrip() {
+        assert_eq!(
+            serde_json::to_string(&WriteAuthority::ReadOnly).unwrap(),
+            "\"read-only\""
+        );
+        let back: WriteAuthority = serde_json::from_str("\"read-write\"").unwrap();
+        assert_eq!(back, WriteAuthority::ReadWrite);
+    }
+
+    #[test]
+    fn seed_goal_holds_target_scope() {
+        let g = SeedGoal {
+            priority: 80,
+            title: "Observe branch hygiene".to_string(),
+            description: "OBSERVE ONLY".to_string(),
+            repo: Some("hyenas/repo-a".to_string()),
+        };
+        assert_eq!(g.repo.as_deref(), Some("hyenas/repo-a"));
+        assert_eq!(g.priority, 80);
     }
 
     #[test]

@@ -90,6 +90,19 @@ pub fn act(
     state: &mut OodaState,
     max_concurrency: usize,
 ) -> SimardResult<Vec<ActionOutcome>> {
+    // Simard #3125: read-only identity ⇒ OBSERVE-ONLY Act phase (L1 cognition
+    // branch). Records observations + proposes target-scoped goals and returns
+    // benign outcomes WITHOUT ever reaching the engineer-dispatching path, so
+    // an OBSERVER identity burns no AI credits on doomed, guardrail-blocked
+    // engineer dispatch. The deterministic spawn rail inside
+    // `dispatch_spawn_engineer` is the independent L2 backstop that also
+    // hard-blocks writes if control ever reaches the chokepoint.
+    if state.write_authority.is_read_only() {
+        eprintln!(
+            "[simard] OODA Act: identity posture is read-only — running observe-only branch (no engineer dispatch, issue #3125)"
+        );
+        return crate::ooda_actions::observe_only::run_observe_only_act(actions, state);
+    }
     crate::ooda_actions::dispatch_actions_bounded(actions, bridges, state, max_concurrency)
 }
 
