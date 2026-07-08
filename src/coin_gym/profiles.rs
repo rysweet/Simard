@@ -19,7 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use super::target_loader::TargetSet;
+use super::target_loader::{OfflineScaffold, TargetSet};
 use super::types::{CoinGymError, CoinGymResult, RunReport};
 
 /// Default (relative) home when `COIN_GYM_HOME` is unset.
@@ -49,6 +49,13 @@ pub struct PersistedRun {
     pub report: RunReport,
     /// The target set the run was evaluated against.
     pub targets: TargetSet,
+    /// The offline mock context (oracle + base script) that graded this run,
+    /// persisted so the offline self-improvement loop (`improve --holdout
+    /// fresh`) can re-grade held-out fresh targets without the manifest. Empty
+    /// (and omitted) for real (`coin verify`-graded) runs. `#[serde(default)]`
+    /// keeps runs written before this field was added loadable.
+    #[serde(default, skip_serializing_if = "OfflineScaffold::is_empty")]
+    pub offline: OfflineScaffold,
 }
 
 /// Directory for a named profile under `home`.

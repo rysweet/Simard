@@ -1,0 +1,55 @@
+name: "COIN Gym Phase-5 self-improvement loop (#2825)"
+description: "Outside-in coverage for `coin-gym improve --holdout fresh`: a full self-improvement cycle (failure-analyst → overfitting-reviewer gate → apply → verify on held-out fresh targets → keep-or-roll-back). Tactics that generalise to held-out fresh targets are kept and banked to durable memory keyed by general family; a tactic that lifts only training reach is rolled back with an overfitting-warning; banked tactics are reused on a second cycle without double-banking. Hermetic and network-free; held-out grading uses a mock oracle (a real held-out grade is Phase 3, #2823)."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "COIN Gym self-improvement loop end-to-end"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/coin-gym-self-improve.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "coin-gym"
+    - "self-improvement"
+    - "overfitting-gate"
+    - "held-out-verification"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

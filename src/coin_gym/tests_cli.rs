@@ -70,6 +70,7 @@ fn score_compare_improve_load_a_saved_run() {
         &PersistedRun {
             report: report.clone(),
             targets: scenario.targets.clone(),
+            offline: scenario.offline_scaffold(),
         },
     )
     .unwrap();
@@ -279,4 +280,78 @@ fn contract_rejects_unknown_source() {
     let dir = tempfile::tempdir().unwrap();
     let err = dispatch_with_home(dir.path(), args(&["contract", "--source", "magic"])).unwrap_err();
     assert!(err.to_string().contains("unknown --source"));
+}
+
+/// The Phase-5 loop fixture (decoder+crypto generalise; generic overfits).
+const LOOP_SNAPSHOT: &str = include_str!("fixtures/improve_loop_snapshot.json");
+
+/// The single run-id under a profile's runs directory.
+fn only_run_id(home: &std::path::Path, profile: &str) -> String {
+    let runs = runs_dir(home, profile);
+    let mut ids: Vec<String> = std::fs::read_dir(&runs)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .map(|e| e.path().file_stem().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(ids.len(), 1, "expected exactly one run under {profile}");
+    ids.pop().unwrap()
+}
+
+#[test]
+fn improve_holdout_fresh_runs_full_cycle_via_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let manifest = write_manifest(home, "loop.json", LOOP_SNAPSHOT);
+
+    // A baseline run persists the offline scaffold (oracle + script) the loop needs.
+    dispatch_with_home(
+        home,
+        args(&["run", "m", "--targets", &manifest, "--profile", "loop"]),
+    )
+    .unwrap();
+    let run_id = only_run_id(home, "loop");
+
+    // The live self-improvement cycle runs end-to-end and banks durable tactics.
+    dispatch_with_home(
+        home,
+        args(&[
+            "improve",
+            &run_id,
+            "--profile",
+            "loop",
+            "--holdout",
+            "fresh",
+        ]),
+    )
+    .unwrap();
+
+    let tactics = super::improve_loop::load_tactic_memory(home, "loop").unwrap();
+    assert_eq!(tactics.tactics.len(), 2, "decoder + crypto tactics banked");
+}
+
+#[test]
+fn improve_holdout_rejects_unknown_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let manifest = write_manifest(home, "loop.json", LOOP_SNAPSHOT);
+    dispatch_with_home(
+        home,
+        args(&["run", "m", "--targets", &manifest, "--profile", "loop"]),
+    )
+    .unwrap();
+    let run_id = only_run_id(home, "loop");
+    let err = dispatch_with_home(
+        home,
+        args(&[
+            "improve",
+            &run_id,
+            "--profile",
+            "loop",
+            "--holdout",
+            "stale",
+        ]),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("only supports 'fresh'"));
 }

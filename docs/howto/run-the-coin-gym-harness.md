@@ -17,17 +17,20 @@ target line, grades the result, scores reach/precision against the published
 leaderboard, and compares a **single-model baseline** against a **multi-agent
 team** — mirroring skwaq's failure-analysis + overfitting-reviewer gating.
 
-This guide covers **Phase 4** (the local scaffold). The full design and the
-phase plan live in
-[COIN benchmark & skwaq gym study](../research/coin-benchmark-and-skwaq-study.md)
-and are tracked in issue #2713.
+This guide covers **Phase 4** (the local scaffold) and the **Phase 5**
+self-improvement loop (`improve --holdout fresh`). The full design and the phase
+plan live in
+[COIN benchmark & skwaq gym study](../research/coin-benchmark-and-skwaq-study.md);
+Phase 5 is tracked in issue #2825.
 
 > **Offline by default.** In Phase 4 the harness grades against a **mock oracle**
 > so the whole pipeline runs without a VM. Runs are clearly labelled
 > `OFFLINE SCAFFOLD`. Real grading delegates to `coin evaluate` (Docker +
-> instrumented replay) and needs a provisioned host — that is **Phase 3**. The
-> live self-improvement loop (apply → verify on held-out fresh targets →
-> keep-or-roll-back) is **Phase 5**.
+> instrumented replay) and needs a provisioned host — that is **Phase 3**
+> (#2823). The **Phase 5** self-improvement loop (apply → verify on held-out
+> fresh targets → keep-or-roll-back, with durable tactic memory) runs the same
+> way — offline against the mock oracle — behind `improve --holdout fresh`; a
+> real held-out grade comes from `coin verify` on the Phase-3 VM.
 
 ## Build the CLI
 
@@ -44,7 +47,7 @@ default, overridable with the `COIN_GYM_HOME` environment variable.
 coin-gym run <model> [--strategy baseline|team] [--profile <name>] [--targets <path>]
 coin-gym score   <run-id> [--profile <name>]
 coin-gym compare <run-id> [--profile <name>]
-coin-gym improve <run-id> [--profile <name>]
+coin-gym improve <run-id> [--profile <name>] [--holdout fresh]
 coin-gym contract [--dataset <repo>] [--revision <tag>] [--split a,b] [--project x,y] [--source rebuild|image]
 coin-gym profiles
 ```
@@ -106,7 +109,7 @@ reproduce leaderboard numbers).
 coin-gym improve <run-id>
 ```
 
-Runs the **Phase-4 slice** of the self-improvement loop over a saved run:
+Runs the **offline slice** of the self-improvement loop over a saved run:
 
 1. **Failure-analyst** turns each unreached target (`W`/`T`/`N`) into a
    **general** reachability tactic (e.g. "for format-gated decoders, satisfy the
@@ -115,9 +118,65 @@ Runs the **Phase-4 slice** of the self-improvement loop over a saved run:
    input or keys off a specific target id / project / locator, accepting only
    tactics that plausibly generalise.
 
-Applying an accepted tactic, re-running on held-out **fresh** targets, and
-keeping it only if reach improves without a precision regression (else rolling
-back) requires live grading and is **Phase 5**.
+This is the analysis-only view; it does **not** apply, verify, or roll back
+tactics. For that, add `--holdout fresh`.
+
+### `improve --holdout fresh` — the Phase-5 self-improvement loop
+
+```bash
+# A run persists its offline scaffold (oracle + script), which the loop needs.
+coin-gym run "Claude Opus 4.6" --targets my_snapshot.json --profile loop
+coin-gym improve <run-id> --profile loop --holdout fresh
+```
+
+Runs the **live loop** (Phase 5, #2825), mirroring skwaq's
+`failure-analyst → overfitting-reviewer → verify` cycle:
+
+1. **Analyse + gate** the run's failures into general tactics (as above);
+   memorising / target-specific tactics are rejected *before* verification.
+2. **Apply + measure on held-out fresh targets.** Each accepted tactic is applied
+   and the agent is re-run on the snapshot's **held-out fresh** slice — targets
+   the tactic's motivating failure never saw. The tactic is **kept iff held-out
+   reach improves and precision does not drop**; otherwise it is **rolled back**.
+   (Offline, the held-out grade is synthesised from the mock oracle — see the
+   note below.)
+3. **Train/held-out-gap warning** (the issue's "overfitting-warning"). If a tactic
+   lifts *training* reach but not *held-out* reach, the gap is flagged and the
+   tactic is rolled back as **UNPROVEN**; a definitive overfit-vs-coverage verdict
+   is left to the Phase-3 verifier.
+4. **Durable tactic memory.** Kept tactics are persisted per **general family**
+   (never per project/target — that would be overfitting) to
+   `<home>/profiles/<name>/tactics.json` and **reused** on subsequent runs.
+
+On the bundled `improve_loop_snapshot.json` fixture — pinned failures across a
+decoder, a crypto state machine, and a generic guard, with a held-out slice that
+covers the decoder + crypto families but **not** the generic one — one cycle
+keeps the two decoder/crypto tactics, rolls back the generic one, and warns:
+
+```text
+gate:     3 accepted  0 rejected
+holdout:  reach 0.0% → 100.0%   (kept 2, rolled back 1, train/held-out-gap warnings 1)
+memory:   0 → 2 durable tactic(s)
+  [KEEP]     dec-a (format-gated-decoder) — held-out reach 0.0% → 50.0% …
+  [KEEP]     cry-a (crypto-state-machine) — held-out reach 50.0% → 100.0% …
+  [ROLLBACK] gen-a (generic) — train/held-out reach GAP: lifts TRAINING reach but no held-out gain; rolled back as UNPROVEN
+```
+
+A second `improve --holdout fresh` **reuses** the banked tactics: the held-out
+baseline already reaches 100%, nothing new is banked (`memory: 2 → 2`), and the
+memorisation-resistant design never double-counts a family.
+
+> **Offline scaffold — an *idealized* effect model, honestly.** The held-out
+> grade here is synthesised from the **same mock oracle**: applying a tactic of
+> family `F` is *assumed* to produce the oracle's reaching input for every
+> in-scope target of `F` (including held-out ones). This exercises the loop's
+> **control flow** — analyse → gate → apply → measure held-out → keep/rollback +
+> durable memory — but it does **not** prove the tactic *text* would solve fresh
+> targets. A train/held-out gap is therefore reported as **UNPROVEN** (a coverage
+> gap), not a definitive overfit verdict. **Real** empirical held-out
+> verification — a live model graded by `coin verify` — is **Phase 3** (#2823).
+> **LOCAL-ONLY**: nothing is ever submitted externally, and the stored oracle is
+> a test double, never a real verdict source.
 
 ### `contract` — show the real `coin evaluate` / `coin verify` wiring
 
@@ -178,6 +237,9 @@ cross-contaminate.
 
 The `oracle` and `script` sections drive the **offline** demo run only. A real
 run gets its oracle from `coin evaluate` and its candidates from a live model.
+For `improve --holdout fresh`, include a non-empty `held_out_fresh` slice **and**
+`oracle` entries covering it, so the loop has fresh lines to verify tactics
+against (see `src/coin_gym/fixtures/improve_loop_snapshot.json`).
 
 > **Real COIN dataset schema.** The compact manifest above is the offline-demo
 > shape. The library also parses COIN's **published** dataset schema — rows with
@@ -192,10 +254,13 @@ run gets its oracle from `coin evaluate` and its candidates from a live model.
 | Phase | Work | Status |
 |-------|------|--------|
 | 3 | Provision an `azlin` VM + Docker host and pull a COIN snapshot, then run the **already-wired** `coin evaluate` / `coin verify` executor live (see `contract`) | follow-up (HIGH-RISK, operator-gated; #2823) |
-| 5 | Live self-improvement loop: apply tactic → verify on held-out fresh targets → keep-or-roll-back; durable tactic memory | follow-up (#2825) |
+| 5 | Live self-improvement loop: apply tactic → verify on held-out fresh targets → keep-or-roll-back; durable tactic memory | **implemented offline** (`improve --holdout fresh`, #2825) |
 
-Both remain unchecked on issue #2713. The **executor contract** itself — the
-`coin evaluate` / `coin verify` argv, the `/answer/blob.bin` +
-`/answer/blob.harness` (or `/answer/UNREACHABLE.md`) submission, and reading
-`reached` from each `result.json` — is implemented and unit-tested offline
-(issue #3001); only the live Docker invocation is gated behind Phase 3.
+Phase 5 lands the loop **offline** against the mock oracle; a **real** held-out
+grade (and therefore a real leaderboard delta) depends on the Phase-3 `azlin` VM
+(#2823), which stays the critical path for the final done-gate. The **executor
+contract** itself — the `coin evaluate` / `coin verify` argv, the
+`/answer/blob.bin` + `/answer/blob.harness` (or `/answer/UNREACHABLE.md`)
+submission, and reading `reached` from each `result.json` — is implemented and
+unit-tested offline (issue #3001); only the live Docker invocation is gated
+behind Phase 3.

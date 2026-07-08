@@ -8,10 +8,11 @@
 //!
 //! The **live** part of the loop — apply an accepted tactic, re-run on held-out
 //! *fresh* targets, and keep it iff reach improves without a precision
-//! regression (else roll back) — needs real grading and is **Phase 5**
-//! (tracked on issue #2713). It is intentionally NOT implemented here.
+//! regression (else roll back), plus durable tactic memory — is **Phase 5**
+//! (issue #2825) and lives in [`super::improve_loop`]. It composes the
+//! analyst + gate defined here.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::target_loader::TargetSet;
 use super::types::{OutcomeCode, RunReport, Target, TargetFamily};
@@ -79,14 +80,43 @@ pub struct ImproveReport {
 }
 
 /// Broad heuristic class a target falls into, used to pick a *general* tactic.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TacticCategory {
+///
+/// The class is a **general** target family (format-gated decoder,
+/// cryptographic state machine, or a generic guard) — never a specific project
+/// or target id — so tactics keyed to it stay generalisable and durable-memory
+/// entries are shared across projects. Exposed to the live self-improvement loop
+/// ([`super::improve_loop`]) which keys accepted tactics by this category.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum TacticCategory {
     FormatGatedDecoder,
     CryptoStateMachine,
     Generic,
 }
 
-fn categorize(target: &Target) -> TacticCategory {
+impl TacticCategory {
+    /// Stable kebab-case label used in reports, memory keys, and CLI output.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::FormatGatedDecoder => "format-gated-decoder",
+            Self::CryptoStateMachine => "crypto-state-machine",
+            Self::Generic => "generic",
+        }
+    }
+
+    /// Parse a [`Self::label`] back into a category (used to rehydrate durable
+    /// tactic memory). Returns `None` for an unrecognised label.
+    pub(crate) fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "format-gated-decoder" => Some(Self::FormatGatedDecoder),
+            "crypto-state-machine" => Some(Self::CryptoStateMachine),
+            "generic" => Some(Self::Generic),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) fn categorize(target: &Target) -> TacticCategory {
     let hay = format!(
         "{} {} {}",
         target.project.to_ascii_lowercase(),
@@ -120,7 +150,7 @@ fn categorize(target: &Target) -> TacticCategory {
     }
 }
 
-fn tactic_text(category: TacticCategory) -> &'static str {
+pub(crate) fn tactic_text(category: TacticCategory) -> &'static str {
     match category {
         TacticCategory::FormatGatedDecoder => {
             "For format-gated decoders, first satisfy the container's magic-byte / header \
@@ -259,8 +289,9 @@ fn reject(proposal: &TacticProposal, reason: String) -> ReviewedProposal {
 }
 
 /// Run one **offline** analysis cycle: failure-analysis → overfitting-review.
-/// This does NOT apply, verify, or roll back tactics — that live loop needs real
-/// grading on held-out fresh targets and is Phase 5 (issue #2713).
+/// This does NOT apply, verify, or roll back tactics — that live loop lives in
+/// [`super::improve_loop`] (`improve --holdout fresh`, Phase 5, issue #2825),
+/// which composes this analyst + gate with held-out verification.
 #[must_use]
 pub fn analyze_and_review(report: &RunReport, targets: &TargetSet) -> ImproveReport {
     let reviewed: Vec<ReviewedProposal> = analyze_failures(report, targets)
@@ -280,7 +311,8 @@ pub fn analyze_and_review(report: &RunReport, targets: &TargetSet) -> ImproveRep
         rejected,
         note: "offline analysis only — applying an accepted tactic, re-running on held-out \
                fresh targets, and keeping it iff reach improves without a precision regression \
-               (else roll back) requires live `coin evaluate` grading and is Phase 5 (issue #2713)"
+               (else roll back) is the live loop `improve --holdout fresh` (Phase 5, issue \
+               #2825); real `coin evaluate` grading still needs the Phase-3 VM (issue #2823)"
             .to_string(),
     }
 }
