@@ -669,6 +669,7 @@ COIN is *already* the ideal substrate for a skwaq-style loop:
 
 ```bash
 coin-gym run    <model> [--strategy baseline|team]   # evaluate on the target set
+coin-gym benchmark <model> [--margin <pct>] [--json]  # baseline vs team head-to-head + verdict
 coin-gym score  <run-id>                             # reach/precision + family split
 coin-gym compare <run-id>                            # local vs published leaderboard
 coin-gym improve <suite> --holdout fresh             # one self-improvement cycle
@@ -680,7 +681,14 @@ coin-gym profiles                                    # list per-model isolated s
 > `score|compare|improve <run-id> [--profile <name>]`, and `profiles`. The
 > `improve` command runs the **offline** failure-analyst + overfitting-reviewer
 > gate over a saved run; the live `--holdout fresh` verify/rollback cycle
-> sketched above needs live grading and is Phase 5. See
+> gate over a saved run; the live `--holdout fresh` verify/rollback cycle
+> sketched above needs live grading and is Phase 5.
+> `coin-gym benchmark <model>` runs the single-model baseline and the multi-agent
+> team **head-to-head** on one target set and prints a **verdict** — does the team
+> *measurably* beat the baseline (reach/precision diff against a material
+> `--margin`)? — persisting both runs so the baseline feeds straight into
+> `improve --holdout fresh` (the iterative climb). `--json` emits the Signal
+> milestone-report payload. See
 > [Run the LOCAL COIN Gym harness](../howto/run-the-coin-gym-harness.md). The
 > reproducible baseline-vs-team result on the bundled sample target set — the
 > abstention gate lifting precision from 60% to 100% at equal reach — is recorded

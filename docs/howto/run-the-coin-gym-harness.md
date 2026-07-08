@@ -46,6 +46,7 @@ default, overridable with the `COIN_GYM_HOME` environment variable.
 
 ```text
 coin-gym run <model> [--strategy baseline|team] [--profile <name>] [--targets <path>]
+coin-gym benchmark <model> [--profile <name>] [--targets <path>] [--margin <pct>] [--json]
 coin-gym score   <run-id> [--profile <name>]
 coin-gym compare <run-id> [--profile <name>]
 coin-gym improve <run-id> [--profile <name>] [--holdout fresh]
@@ -82,6 +83,48 @@ team      reach 60.0% (3/5)   precision 100.0% (3/3)  R:3/W:0/A:2/T:0/N:0/E:0
 For the per-target breakdown, the reproduction commands, and the leaderboard-
 comparison caveat, see
 [COIN Gym — baseline vs. team measurement](../research/coin-gym-baseline-vs-team-measurement.md).
+
+### `benchmark` — head-to-head baseline vs. team (does the team *measurably* win?)
+
+```bash
+coin-gym benchmark claude-opus-4.6 --profile opus
+coin-gym benchmark claude-opus-4.6 --profile opus --margin 2 --json
+```
+
+`run` evaluates one strategy at a time; `benchmark` runs **both** on the *same*
+target set and prints a single **verdict** on whether the multi-agent team
+*measurably* beats the single-model baseline — the goal's done-gate. It diffs
+COIN's two headline metrics (reach and precision) and classifies the result
+against a material `--margin` (default `1.0` percentage points) so a sub-noise
+wiggle is never mistaken for a capability win:
+
+| Verdict | Meaning |
+|---------|---------|
+| `TEAM-BEATS-BASELINE` | Team improved ≥1 headline metric beyond the margin and regressed neither. |
+| `BASELINE-BEATS-TEAM` | Team regressed ≥1 metric and improved none — the scaffold is a net regression. |
+| `TIE` | Both metrics stayed within ±margin — no measurable difference. |
+| `MIXED-TRADEOFF` | Team improved one metric beyond the margin but regressed the other — no dominant winner. |
+
+On the bundled sample the team ties on reach (60%) but lifts precision 60% → 100%
+via the abstain gate, so the verdict is `TEAM-BEATS-BASELINE`:
+
+```text
+baseline:  reach 60.0%  precision 60.0%   R:3/W:2/A:0/T:0/N:0/E:0   [claude-opus-4-6-baseline-…]
+team:      reach 60.0%  precision 100.0%  R:3/W:0/A:2/T:0/N:0/E:0   [claude-opus-4-6-team-…]
+delta:     reach +0.0 pts (flat)   precision +40.0 pts (improved)   [margin 1.0 pts]
+verdict:   TEAM-BEATS-BASELINE
+signal:    COIN Gym (offline scaffold): claude-opus-4.6 — team vs baseline on you/coin@v1-sample → TEAM-BEATS-BASELINE (Δreach +0.0, Δprecision +40.0 pts)
+```
+
+`benchmark` **persists both runs** under the profile, so you can drive the
+**iterative climb** by feeding the baseline run straight into
+`improve --holdout fresh` (below). `--json` emits the full head-to-head as the
+**Signal milestone-report payload** (verdict, deltas, both per-family scores);
+the `signal:` line is a ready-to-post one-line headline. Like every Phase-4
+command the grade is an offline mock oracle — a *real* baseline-vs-team result
+needs a `coin evaluate` grade on the Phase-3 VM (#2823); the output labels this
+explicitly.
+
 
 ### `score` — reach / precision + family split
 

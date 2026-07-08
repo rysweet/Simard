@@ -1,0 +1,32 @@
+name: simard-coin-gym-benchmark-verdict
+app_type: cli
+description: |
+  Verify `coin-gym benchmark` runs the single-model baseline and the multi-agent
+  team head-to-head on the bundled sample snapshot and reports the goal's
+  done-gate verdict: the multi-agent team *measurably* beats the single-model
+  baseline. On the sample, reach ties at 60% but the team's abstain gate lifts
+  precision 60% -> 100%, so the verdict is TEAM-BEATS-BASELINE. The scenario also
+  exercises the `--json` Signal milestone-report payload.
+
+  Schema note: the pinned @gadugi/agentic-test CLI runner only gates on run-step
+  exit codes and reads command text from params.command, so the assertions are
+  encoded in a `bash -lc` wrapper that exits zero only when (a) the human verdict
+  line is TEAM-BEATS-BASELINE with precision 100.0%, and (b) the JSON payload
+  carries "verdict": "team-beats-baseline". A temp COIN_GYM_HOME keeps the run
+  hermetic (no leaked profiles under target/coin-gym).
+metadata:
+  tags:
+    - cli
+    - coin-gym
+agents:
+  - name: cli-agent
+    type: cli
+    command: bash
+steps:
+  # Build once, then run the human and JSON benchmarks against a temp home. The
+  # wrapper fails (non-zero exit) if any expected assertion string is missing, so
+  # the runner's exit-code gate enforces the verdict end-to-end.
+  - action: run
+    params:
+      command: "bash -lc 'set -e; H=$(mktemp -d); HUMAN=$(COIN_GYM_HOME=$H cargo run --quiet --bin coin-gym -- benchmark claude-opus-4.6 --profile qa 2>&1); echo \"$HUMAN\"; echo \"$HUMAN\" | grep -q \"verdict:   TEAM-BEATS-BASELINE\"; echo \"$HUMAN\" | grep -q \"precision 100.0%\"; JSON=$(COIN_GYM_HOME=$H cargo run --quiet --bin coin-gym -- benchmark claude-opus-4.6 --profile qajson --json 2>&1); echo \"$JSON\"; echo \"$JSON\" | grep -q \"\\\"verdict\\\": \\\"team-beats-baseline\\\"\"; echo \"$JSON\" | grep -q \"\\\"precision_delta_pct\\\": 40.0\"'"
+    timeout: 600000
