@@ -127,6 +127,7 @@ nav:
     - No-Progress Breaker Explains WHY and Self-Resolves: concepts/no-progress-root-cause-resolution.md
     - Overseer Goal-Board Health: concepts/overseer-goal-board-health.md
     - Overseer Root-Cause (WHY) Principle: concepts/overseer-root-cause-why.md
+    - Re-Investigating Already-Blocked OODA Goals: concepts/ooda-reinvestigate-blocked-goals.md
     - Authoritative Goal-Board Store: concepts/authoritative-goal-board-store.md
     - Brain-Relative OODA Cycle Counter: concepts/brain-relative-ooda-cycle-counter.md
     - Goal-Board Corruption Guards: concepts/goal-board-corruption-guards.md
@@ -162,6 +163,7 @@ nav:
     - Configure Resource-Aware Engineer Admission: howto/configure-resource-aware-admission.md
     - Unblock Stuck OODA Goals: howto/unblock-stuck-ooda-goals.md
     - Diagnose a No-Progress Block and Read Its WHY: howto/diagnose-a-no-progress-block.md
+    - Re-Investigate Bare-Blocked OODA Goals: howto/reinvestigate-bare-blocked-goals.md
     - Add a New Recipe-Brain Phase: howto/add-a-new-recipe-brain-phase.md
     - Edit the OODA Brain Prompt: howto/edit-the-ooda-brain-prompt.md
     - Diagnose Brain Decision Parse Failures: howto/diagnose-brain-decision-parse-failures.md
@@ -347,6 +349,7 @@ nav:
     - No-Progress Root-Cause Resolution API: reference/no-progress-root-cause-resolution-api.md
     - OODA No-Progress WHY Recipe: reference/ooda-no-progress-why-recipe.md
     - Durable OODA Cycle Counter API: reference/durable-ooda-cycle-counter.md
+    - No-Progress Re-Investigation API: reference/no-progress-reinvestigation-api.md
     - Progress-Evidence API: reference/progress-evidence-api.md
     - Trustworthy-Confidence API: reference/trustworthy-confidence-api.md
     - External-Signal Completion Gate: reference/external-signal-completion-gate.md

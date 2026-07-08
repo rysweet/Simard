@@ -88,6 +88,11 @@ mod tests_no_progress_breaker;
 // WHY-aware block-reason renderer, and the class -> resolution map).
 #[cfg(test)]
 mod tests_no_progress_why;
+// Issue #17 (TDD): pure primitives of the already-blocked re-investigation pass
+// — the `is_bare_no_progress_block` deterministic rail and the
+// `NoProgressTracker` persisted `reinvestigated` dedupe set (lifecycle + serde).
+#[cfg(test)]
+mod tests_no_progress_reinvestigation;
 #[cfg(test)]
 mod tests_operations;
 #[cfg(test)]
