@@ -59,17 +59,47 @@ pub struct Target {
     pub harness: String,
     /// Source file containing the target line.
     pub file: String,
-    /// 1-based target line number `ℓ`.
+    /// 1-based start of the target line range `ℓ` (the canonical target line).
     pub line: u32,
+    /// 1-based end of the target line range, when the target spans multiple
+    /// lines. `None` means a single-line target (`line_end == line`). Kept
+    /// optional so single-line fixtures/snapshots stay valid without the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_end: Option<u32>,
     /// Target family (frontier vs. non-trivial reachable).
     pub family: TargetFamily,
 }
 
 impl Target {
     /// `project:file:line` — a human-readable locator for logs and reports.
+    /// A multi-line target renders its range as `project:file:start-end`.
     #[must_use]
     pub fn locator(&self) -> String {
-        format!("{}:{}:{}", self.project, self.file, self.line)
+        let end = self.line_end_inclusive();
+        if end > self.line {
+            format!("{}:{}:{}-{}", self.project, self.file, self.line, end)
+        } else {
+            format!("{}:{}:{}", self.project, self.file, self.line)
+        }
+    }
+
+    /// The 1-based start line of the target range (alias for [`Self::line`]).
+    #[must_use]
+    pub fn line_start(&self) -> u32 {
+        self.line
+    }
+
+    /// The inclusive 1-based end line of the target range. Falls back to
+    /// [`Self::line`] for single-line targets. Never less than the start.
+    #[must_use]
+    pub fn line_end_inclusive(&self) -> u32 {
+        self.line_end.unwrap_or(self.line).max(self.line)
+    }
+
+    /// Number of lines the target range spans (`>= 1`).
+    #[must_use]
+    pub fn line_count(&self) -> u32 {
+        self.line_end_inclusive() - self.line + 1
     }
 }
 

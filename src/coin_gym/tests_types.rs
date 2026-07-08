@@ -8,6 +8,7 @@ fn target(id: &str, family: TargetFamily) -> Target {
         harness: "h".to_string(),
         file: "src/x.c".to_string(),
         line: 42,
+        line_end: None,
         family,
     }
 }

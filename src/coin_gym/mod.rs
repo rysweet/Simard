@@ -50,7 +50,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use agent_runner::{AgentRunner, BaselineStrategy, FixtureReasoner, TeamStrategy};
-use executor::MockHarnessExecutor;
+use executor::{
+    ANSWER_BLOB_BIN, ANSWER_BLOB_HARNESS, ANSWER_UNREACHABLE_MD, CoinEvaluateConfig,
+    CoinEvaluateExecutor, EvaluateSource, LOCAL_ONLY, MockHarnessExecutor,
+};
 use improve::analyze_and_review;
 use leaderboard::compare_to_leaderboard;
 use profiles::{PersistedRun, default_home, ensure_profile, list_profiles, load_run, save_run};
@@ -68,11 +71,14 @@ pub fn coin_gym_usage() -> &'static str {
      \x20 score <run-id> [--profile <name>]\n\
      \x20 compare <run-id> [--profile <name>]\n\
      \x20 improve <run-id> [--profile <name>]\n\
+     \x20 contract [--dataset <repo>] [--revision <tag>] [--split a,b] [--project x,y] [--source rebuild|image]\n\
      \x20 profiles\n\
      \n\
      Offline scaffold (Phase 4): runs grade against a mock oracle. Live grading\n\
      needs `coin evaluate` on a Docker host (Phase 3); the self-improvement\n\
-     verify/rollback loop is Phase 5. See docs/howto/run-the-coin-gym-harness.md."
+     verify/rollback loop is Phase 5. `contract` prints the real coin\n\
+     evaluate/verify wiring without running anything (LOCAL-ONLY). See\n\
+     docs/howto/run-the-coin-gym-harness.md."
 }
 
 /// Dispatch the `coin-gym` CLI over an argument iterator (argv minus the
@@ -105,6 +111,7 @@ where
         "score" => cmd_score(home, rest),
         "compare" => cmd_compare(home, rest),
         "improve" => cmd_improve(home, rest),
+        "contract" => cmd_contract(rest),
         "profiles" => cmd_profiles(home, rest),
         other => Err(CoinGymError::Usage(format!(
             "unknown command '{other}'\n{}",
@@ -326,6 +333,79 @@ fn cmd_improve(home: &Path, rest: &[String]) -> CoinGymResult<()> {
         println!("        tactic: {}", reviewed.proposal.tactic);
     }
     println!("note: {}", report.note);
+    Ok(())
+}
+
+// ── contract ─────────────────────────────────────────────────────────────────
+
+/// Print the **real** `coin evaluate` / `coin verify` wiring the harness would
+/// drive for a snapshot — without running anything. Makes the Phase-4 executor
+/// wiring (issue #3001) observable and copy-pasteable, and states the LOCAL-ONLY
+/// guardrail explicitly. Defaults to the published `COIN-Bench/coin@v2026-07`.
+fn cmd_contract(rest: &[String]) -> CoinGymResult<()> {
+    let parsed = parse_args(
+        rest,
+        &[
+            "dataset",
+            "revision",
+            "split",
+            "project",
+            "source",
+            "experiment",
+        ],
+    )?;
+    let dataset = parsed
+        .flags
+        .get("dataset")
+        .cloned()
+        .unwrap_or_else(|| "COIN-Bench/coin".to_string());
+    let revision = parsed
+        .flags
+        .get("revision")
+        .cloned()
+        .unwrap_or_else(|| "v2026-07".to_string());
+    let mut config = CoinEvaluateConfig::new(dataset, revision);
+    if let Some(splits) = parsed.flags.get("split") {
+        for s in splits.split(',').filter(|s| !s.is_empty()) {
+            config = config.with_split(s);
+        }
+    }
+    if let Some(projects) = parsed.flags.get("project") {
+        for p in projects.split(',').filter(|s| !s.is_empty()) {
+            config = config.with_project(p);
+        }
+    }
+    if let Some(src) = parsed.flags.get("source") {
+        let source = match src.as_str() {
+            "rebuild" => EvaluateSource::Rebuild,
+            "image" => EvaluateSource::Image,
+            other => {
+                return Err(CoinGymError::Usage(format!(
+                    "unknown --source '{other}' (expected 'rebuild' or 'image')"
+                )));
+            }
+        };
+        config = config.with_source(source);
+    }
+    let experiment = parsed
+        .flags
+        .get("experiment")
+        .cloned()
+        .unwrap_or_else(|| "<experiment-id>".to_string());
+    let exec = CoinEvaluateExecutor::new(config);
+
+    println!(
+        "LOCAL-ONLY: {LOCAL_ONLY} (no external submission, no leaderboard entry, no VM provisioning)"
+    );
+    println!("evaluate: {}", exec.build_evaluate_argv().join(" "));
+    println!(
+        "verify:   {}",
+        exec.build_verify_argv(&experiment, None).join(" ")
+    );
+    println!("submission-contract:");
+    println!("  attempt:  /answer/{ANSWER_BLOB_BIN} + /answer/{ANSWER_BLOB_HARNESS}");
+    println!("  abstain:  /answer/{ANSWER_UNREACHABLE_MD}  (and NO {ANSWER_BLOB_BIN})");
+    println!("verdict:  read `reached` from each result.json (never re-checked locally)");
     Ok(())
 }
 
