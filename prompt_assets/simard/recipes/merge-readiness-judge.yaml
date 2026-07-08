@@ -61,14 +61,14 @@ steps:
       You do NOT need to verify CI status, mergeability, or base branch — the deterministic
       gate has already done that. You are judging evidence quality only.
 
-      ## Engineering-guideline flags (G1/G2/G3) — advisory
+      ## Engineering-guideline flags (G1/G2/G3/G4) — advisory
 
       Beyond the six skill criteria, raise an advisory flag (a `blocker` entry with a
       `fix`, or a note in `rationale`) when a PR trips one of Simard's durable
       engineering guidelines (canonical in `CONTRIBUTING.md`, "Engineering Guidelines
-      (G1/G2/G3)"). These are soft — they do NOT by themselves change the `verdict`
+      (G1/G2/G3/G4)"). These are soft — they do NOT by themselves change the `verdict`
       enum (`ready`/`not_ready`/`unclear`); they surface a finding the author
-      addresses or justifies.
+      addresses or justifies. (G4 additionally has a hard deterministic backstop.)
 
       - **G1 flag** — the PR improves cognition (recall/distillation/ranking) and
         reports only a fixed **benchmark** corpus number or a coarse proxy, with no
@@ -81,6 +81,12 @@ steps:
       - **G3 flag** — the diff adds or extends line/substring **brittle parsing** of
         model/tool output where a structured/JSON contract read by an **agentic step**
         would be robust, or writes new code where recipes/prompts would suffice.
+      - **G4 flag** — the diff ADDS a new point-in-time investigation/testing/diagnosis/
+        benchmark-snapshot report doc (`no-point-in-time-docs`) where the finding
+        belongs in a GitHub issue and/or memory, not a committed repo doc. Durable
+        feature/architecture docs are fine (doc type, not topic). This one is also
+        hard-blocked by the deterministic pr-verify scan
+        `scan_no_point_in_time_report_docs` (check #8).
 
       ## Inputs
 

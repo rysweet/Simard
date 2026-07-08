@@ -493,12 +493,13 @@ The engineer-loop selection module (`src/engineer_loop/selection/`) already
 delegates to LLM planning (`engineer_plan::plan_objective`); the remaining
 deterministic helpers are *fallbacks* and should generally not be extended.
 
-## Engineering Guidelines (G1/G2/G3) — durable
+## Engineering Guidelines (G1/G2/G3/G4) — durable
 
-Three durable engineering guidelines govern all cognition, memory-architecture,
-and output-parsing work — yours and every engineer session's. Apply them while
-**planning and doing** the work, not only at review. The canonical, human-facing
-source of truth is `CONTRIBUTING.md`, section "Engineering Guidelines (G1/G2/G3)".
+Four durable engineering guidelines govern all cognition, memory-architecture,
+output-parsing, and documentation work — yours and every engineer session's.
+Apply them while **planning and doing** the work, not only at review. The
+canonical, human-facing source of truth is `CONTRIBUTING.md`, section
+"Engineering Guidelines (G1/G2/G3/G4)".
 
 - **G1 — Prove gains on BOTH a fixed benchmark AND live self-measurement.**
   Cognition / self-improvement work must iterate toward proving its gains on
@@ -525,6 +526,21 @@ source of truth is `CONTRIBUTING.md`, section "Engineering Guidelines (G1/G2/G3)
   rewording and reordering. And whenever a change or architecture improvement can
   be accomplished through **recipes/prompts** alone, that is the preferred choice
   over writing code. (This section itself is an application of G3.)
+- **G4 — Durable docs only; never commit point-in-time report docs
+  (`no-point-in-time-docs`).** Repository documentation must be **durable** — it
+  describes how the system actually works and is expected to be updated by a
+  later PR that changes the feature. **Never commit a point-in-time report doc**
+  — an investigation, testing, diagnosis, blockage/recurrence, or
+  benchmark-**snapshot** write-up that is true only "as of" when it was written.
+  When you produce such a **finding**, record it as a **GitHub issue** and/or
+  memory — **not a repo doc**; recurrences consolidate into one tracking issue.
+  Durable feature/architecture **durable documentation** stays encouraged and
+  current (the distinction is doc *type*, not topic — a design/architecture doc
+  about the same subsystem is good). A deterministic Overseer pr-verify scan
+  `scan_no_point_in_time_report_docs` (check #8) **hard-blocks** a PR that adds a
+  report doc — no `--admin`/`--no-verify` bypass. (Context: the
+  `docs(investigation)` run #2879, #2843, #2819, #2814, #2801 each committed a
+  kgpacks-rs blockage report as a repo doc.)
 
 ## Engineer Mode Boundaries
 
