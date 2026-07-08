@@ -38,8 +38,19 @@ static_lib_name="liblbug.a"
 # unauthenticated `releases/latest` API call and no version skew with the crate
 # we actually compile against.
 lbug_version() {
-  sed -nE 's/^lbug[[:space:]]*=[[:space:]]*"=?([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' \
-    "$REPO_ROOT/Cargo.toml" | head -n1
+  # Direct crates.io version-pin form: `lbug = "=0.17.1"`.
+  local v
+  v="$(sed -nE 's/^lbug[[:space:]]*=[[:space:]]*"=?([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' \
+    "$REPO_ROOT/Cargo.toml" | head -n1)"
+  # Git-dep form (`lbug = { git = ..., rev = ... }`, issue #3119): the version is
+  # not on the manifest line, so resolve it from the lockfile's `[[package]]`
+  # entry instead. Cargo.lock lists `name = "lbug"` immediately followed by
+  # `version = "X.Y.Z"`, so advance one line and extract it.
+  if [ -z "$v" ] && [ -f "$REPO_ROOT/Cargo.lock" ]; then
+    v="$(sed -nE '/^name = "lbug"$/{n; s/^version = "([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p;}' \
+      "$REPO_ROOT/Cargo.lock" | head -n1)"
+  fi
+  printf '%s\n' "$v"
 }
 
 # Name of the prebuilt static archive for this OS/arch, mirroring lbug's own
@@ -93,7 +104,7 @@ download_prebuilt() {
   # build/coverage jobs consume.
   local version asset repo url
   version="$(lbug_version || true)"
-  [ -n "$version" ] || die "could not determine lbug version from Cargo.toml"
+  [ -n "$version" ] || die "could not determine lbug version from Cargo.toml or Cargo.lock"
   asset="$(prebuilt_asset_name || true)"
   [ -n "$asset" ] || die "unsupported OS/arch for prebuilt liblbug ($(uname -sm))"
   repo="${LBUG_GITHUB_REPOSITORY:-LadybugDB/ladybug}"
