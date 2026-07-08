@@ -20,6 +20,7 @@
 //! [`improve_loop`] behind `coin-gym improve --holdout fresh`.
 
 pub mod agent_runner;
+pub mod benchmark;
 pub mod executor;
 pub mod improve;
 pub mod improve_loop;
@@ -31,6 +32,8 @@ pub mod types;
 
 #[cfg(test)]
 mod tests_agent_runner;
+#[cfg(test)]
+mod tests_benchmark;
 #[cfg(test)]
 mod tests_cli;
 #[cfg(test)]
@@ -54,6 +57,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use agent_runner::{AgentRunner, BaselineStrategy, FixtureReasoner, TeamStrategy};
+use benchmark::{DEFAULT_MARGIN_PCT, HeadToHead};
 use executor::{
     ANSWER_BLOB_BIN, ANSWER_BLOB_HARNESS, ANSWER_UNREACHABLE_MD, CoinEvaluateConfig,
     CoinEvaluateExecutor, EvaluateSource, LOCAL_ONLY, MockHarnessExecutor,
@@ -73,6 +77,7 @@ pub fn coin_gym_usage() -> &'static str {
      \n\
      commands:\n\
      \x20 run <model> [--strategy baseline|team] [--profile <name>] [--targets <path>]\n\
+     \x20 benchmark <model> [--profile <name>] [--targets <path>] [--margin <pct>] [--json]\n\
      \x20 score <run-id> [--profile <name>]\n\
      \x20 compare <run-id> [--profile <name>]\n\
      \x20 improve <run-id> [--profile <name>] [--holdout fresh]\n\
@@ -80,7 +85,10 @@ pub fn coin_gym_usage() -> &'static str {
      \x20 profiles\n\
      \n\
      Offline scaffold (Phase 4): runs grade against a mock oracle. Live grading\n\
-     needs `coin evaluate` on a Docker host (Phase 3, issue #2823). `improve\n\
+     needs `coin evaluate` on a Docker host (Phase 3, issue #2823). `benchmark`\n\
+     runs the single-model baseline and the multi-agent team head-to-head on one\n\
+     target set and prints whether the team *measurably* beats the baseline\n\
+     (`--json` emits the Signal milestone-report payload). `improve\n\
      --holdout fresh` runs the Phase-5 self-improvement loop (failure-analyst →\n\
      overfitting gate → verify on held-out fresh → keep/rollback + durable tactic\n\
      memory) offline. `contract` prints the real coin evaluate/verify wiring\n\
@@ -115,6 +123,7 @@ where
     let rest = &argv[1..];
     match command.as_str() {
         "run" => cmd_run(home, rest),
+        "benchmark" => cmd_benchmark(home, rest),
         "score" => cmd_score(home, rest),
         "compare" => cmd_compare(home, rest),
         "improve" => cmd_improve(home, rest),
@@ -263,6 +272,84 @@ pub(crate) fn execute_run(
             AgentRunner::new(&s, &executor, model, snapshot).run(&scenario.targets.pinned)
         }
     }
+}
+
+// ── benchmark ────────────────────────────────────────────────────────────────
+
+/// Run the single-model **baseline** and the multi-agent **team** head-to-head
+/// on one target set and report whether the team *measurably* beats the
+/// baseline — the goal's done-gate. Persists both runs under the profile (so
+/// `score`/`compare`/`improve` can reuse them for the iterative climb) and, with
+/// `--json`, emits the machine-readable Signal milestone-report payload.
+fn cmd_benchmark(home: &Path, rest: &[String]) -> CoinGymResult<()> {
+    // `--json` is a bare boolean switch; strip it before the value-pairing parser
+    // (which requires every `--flag` to be followed by a value).
+    let mut as_json = false;
+    let filtered: Vec<String> = rest
+        .iter()
+        .filter(|a| {
+            if a.as_str() == "--json" {
+                as_json = true;
+                false
+            } else {
+                true
+            }
+        })
+        .cloned()
+        .collect();
+    let parsed = parse_args(&filtered, &["profile", "targets", "margin"])?;
+    let model = parsed
+        .positionals
+        .first()
+        .ok_or_else(|| CoinGymError::Usage("benchmark: expected <model>".to_string()))?
+        .clone();
+    let margin = match parsed.flags.get("margin") {
+        Some(v) => {
+            let m: f64 = v.parse().map_err(|_| {
+                CoinGymError::Usage(format!("--margin expects a number (got '{v}')"))
+            })?;
+            if !m.is_finite() || m < 0.0 {
+                return Err(CoinGymError::Usage(format!(
+                    "--margin must be a non-negative number (got '{v}')"
+                )));
+            }
+            m
+        }
+        None => DEFAULT_MARGIN_PCT,
+    };
+    let scenario = match parsed.flags.get("targets") {
+        Some(path) => DemoScenario::from_path(Path::new(path))?,
+        None => DemoScenario::sample()?,
+    };
+    validate_offline_scenario(&scenario)?;
+    let profile_name = parsed.flags.get("profile").map_or_else(
+        || profiles::sanitize_name(&model),
+        |p| profiles::sanitize_name(p),
+    );
+
+    let baseline_report = execute_run(&model, Strategy::Baseline, &scenario)?;
+    let team_report = execute_run(&model, Strategy::Team, &scenario)?;
+    let head_to_head = HeadToHead::from_reports(&baseline_report, &team_report, margin);
+
+    ensure_profile(home, &profile_name, &model)?;
+    for report in [&baseline_report, &team_report] {
+        let persisted = PersistedRun {
+            report: report.clone(),
+            targets: scenario.targets.clone(),
+            offline: scenario.offline_scaffold(),
+        };
+        save_run(home, &profile_name, &persisted)?;
+    }
+
+    if as_json {
+        let json = serde_json::to_string_pretty(&head_to_head)
+            .map_err(|e| CoinGymError::Parse(format!("serialize head-to-head: {e}")))?;
+        println!("{json}");
+    } else {
+        println!("profile:   {profile_name}");
+        println!("{}", head_to_head.render());
+    }
+    Ok(())
 }
 
 // ── score ────────────────────────────────────────────────────────────────────

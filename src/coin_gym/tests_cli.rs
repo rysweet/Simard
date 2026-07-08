@@ -182,9 +182,100 @@ fn explicit_profile_name_is_sanitised() {
 #[test]
 fn usage_lists_all_subcommands() {
     let usage = coin_gym_usage();
-    for cmd in ["run", "score", "compare", "improve", "contract", "profiles"] {
+    for cmd in [
+        "run",
+        "benchmark",
+        "score",
+        "compare",
+        "improve",
+        "contract",
+        "profiles",
+    ] {
         assert!(usage.contains(cmd), "usage should mention {cmd}");
     }
+}
+
+#[test]
+fn benchmark_command_persists_two_runs_and_reports_verdict() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    dispatch_with_home(
+        home,
+        args(&["benchmark", "claude-opus-4.6", "--profile", "duel"]),
+    )
+    .unwrap();
+
+    // Exactly two runs are persisted (baseline + team) under the profile.
+    let runs = runs_dir(home, "duel");
+    let entries: Vec<_> = std::fs::read_dir(&runs)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .collect();
+    assert_eq!(entries.len(), 2, "baseline + team runs should be persisted");
+}
+
+#[test]
+fn benchmark_json_and_margin_flags_are_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    // Bare `--json` switch plus an explicit margin.
+    dispatch_with_home(
+        home,
+        args(&[
+            "benchmark",
+            "claude-opus-4.6",
+            "--profile",
+            "duel",
+            "--margin",
+            "2.5",
+            "--json",
+        ]),
+    )
+    .unwrap();
+    let runs = runs_dir(home, "duel");
+    let count = std::fs::read_dir(&runs)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .count();
+    assert_eq!(count, 2);
+}
+
+#[test]
+fn benchmark_requires_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let err = dispatch_with_home(dir.path(), args(&["benchmark"])).unwrap_err();
+    assert!(err.to_string().contains("expected <model>"));
+}
+
+#[test]
+fn benchmark_rejects_bad_margin() {
+    let dir = tempfile::tempdir().unwrap();
+    for bad in ["-1", "abc"] {
+        let err =
+            dispatch_with_home(dir.path(), args(&["benchmark", "m", "--margin", bad])).unwrap_err();
+        assert!(
+            err.to_string().contains("--margin"),
+            "should reject margin '{bad}'"
+        );
+    }
+}
+
+#[test]
+fn benchmark_rejects_empty_pinned_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = write_manifest(
+        dir.path(),
+        "empty.json",
+        r#"{"snapshot":"s","targets":{"pinned":[],"held_out_fresh":[]}}"#,
+    );
+    let err = dispatch_with_home(
+        dir.path(),
+        args(&["benchmark", "m", "--targets", &manifest]),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("no pinned targets"));
 }
 
 fn write_manifest(dir: &std::path::Path, name: &str, body: &str) -> String {
