@@ -426,7 +426,11 @@ Confirmed in round 1 and reinforced here:
 
 The empirical tail (10 open near-duplicate issues, growing but **doubly-bounded** keys —
 length ≤ 8192 B §7ag, count `N ∈ [2, 5]` §7ai) is the observable
-consequence.
+consequence. The loop is **additionally** rate-bounded (`WhisperGate::new(900, 5)`
+`mod.rs:297` — ≤ 1/identical-sig/900 s and ≤ 5/hr) and multiplicity-bounded (orient
+`min`-merges a recalled `RecurringSignature` into the same-key in-cycle problem,
+`mod.rs:1224-1233`, §7al) — **four bounds in all, none of which severs the loop; only
+P1 does**.
 
 **Confidence: High.** The structural cause is confirmed by round-1 **and**
 reproduced here through the real code path by the executable H1/H2
@@ -456,7 +460,14 @@ Ordered by leverage. P1/P2 sever the mechanism; P3/P4 clear the standing inputs.
    auto-archives (or drops) them instead of holding a terminal park forever. This
    removes the *stale* `goal:blocked` segments for #16/#17/#18/#21/#22 at the source
    — **all five now reference CLOSED issues after #17 closed 2026-07-07T19:19:47Z (round-24
-   §7ah, whole board CLOSED), so the stale-park set grew 4→5 and P2's scope/urgency rose**
+   §7ah, whole board CLOSED), so the stale-park set grew 4→5 and P2's scope/urgency rose**.
+   **The live goal-board (round-26/27 §7ak/§7am) refines this**: the parked set has *rotated*
+   (#16 reconciled **and removed** from the board; #23 added and parked) and splits by
+   **driver** — **5 safeguard parks** (parent/#18/#21/#22/#23, `needs_review=true`,
+   `consecutive=3`, High) **+ 1 genuine-but-stale-premise dependency block** (#17, engineer
+   `record_blocker`, `needs_review=false`, `Normal` arm) — so P2's done-gate re-run/auto-archive
+   applies to the safeguard parks while #17 needs a dependency-narrative refresh (its premise
+   asserts #16 OPEN though #16 closed 07-06T20:16:25Z)
    (see `howto/recover-goal-board.md`, `howto/unblock-stuck-ooda-goals.md`).
 3. **P3 — Clear the current backlog (only durable when paired with P2).** Run
    `simard goal unblock-all` (or equivalent) to clear the stale parks now; bulk-close
@@ -487,12 +498,12 @@ Ordered by leverage. P1/P2 sever the mechanism; P3/P4 clear the standing inputs.
    deterministically**, while the body needle written by `find_existing`
    (`src/stewardship/dedup.rs:79`) is `stewardship-signature: {signature}` **with a
    space**. So every reblock cycle sees an empty list and files a fresh duplicate,
-   yielding the **~113-issue open flood** (#2688…#2932+, still firing; 113 open at round-26 §7aj). Fix the query to the
+   yielding the **~125-issue open flood** (#2688…#2932+, still firing; 113 open at round-26 §7aj → **125 at round-27 §7am**). Fix the query to the
    indexed token — `format!("{signature} in:body")` or the quoted phrase
    `format!("\"stewardship-signature: {signature}\" in:body")` (both live-proven to return
    all rows) — **and add a real-query integration test** (or assert the constructed
    `--search` string) so the `(repo,signature)`-keyed test fake (`stewardship/tests.rs:68-82`)
-   can never again mask it. This collapses the channel from ~113→~5 (one issue per live
+   can never again mask it. This collapses the channel from ~125→~5 (one issue per live
    stale goal) **without** touching the OODA loop, complementary to P2 (P6 caps the
    symptom today; P2 removes the driver). **P1b (belt for P1, round-15 §7v):** have
    `observation_signature` (`src/overseer/mod.rs:1081`) drop any `overseer-obs:`-prefixed
@@ -519,12 +530,12 @@ remediation (P5) downgraded to an optional throughput nicety.
 
 | # | Finding | Confidence | Primary evidence | Residual uncertainty |
 |---|---|---|---|---|
-| 1 | Blocked segments are **stale safeguard-parks** for delivered work; as of 2026-07-07 **all five** backing issues #16/#17/#18/#21/#22 are CLOSED (#17 closed 19:19:47Z, round-24 §7ah), so H3's former "#17 stale-premise dep-block" **folds into this row as a fifth stale park** — enlarging **P2** and raising its urgency | **High** | Live CLOSED issue states + timestamps (whole board CLOSED, §7ah/§7ai/§7aj); direct `simard goal list` board read (§7f); `sensor.rs:204,209`, `no_progress_breaker.rs:58,69`, `completion_gate.rs:31,380`; smoking-gun timing (#2768/#2841/#2875 filed after #16 closed) | "No component re-runs the done-gate post-closure" is inferred (corroborated by the 10-issue tail + #2707 re-park escalation); falsifiable — an 11th tail issue carrying an `issue-17` token filed after 19:19:47Z would confirm (none yet) |
+| 1 | Blocked segments are **stale safeguard-parks** for delivered work; as of 2026-07-07 **all five** backing issues #16/#17/#18/#21/#22 are CLOSED (#17 closed 19:19:47Z, round-24 §7ah), so H3's former "#17 stale-premise dep-block" **folds into this row as a fifth stale park** — enlarging **P2** and raising its urgency. **Live goal-board (§7ak/§7am) refines the driver split**: the parked set *rotated* (#16 removed, #23 added) into **5 safeguard parks (parent/#18/#21/#22/#23) + 1 genuine-but-stale-premise block (#17, `Normal` arm)** | **High** | Live CLOSED issue states + timestamps (whole board CLOSED, §7ah/§7ai/§7aj); direct `simard goal list` board read (§7f/§7ak); `sensor.rs:204,209,213,215,219`, `no_progress_breaker.rs:58,69`, `completion_gate.rs:31,380`; smoking-gun timing (#2768/#2841/#2875 filed after #16 closed) | "No component re-runs the done-gate post-closure" is inferred (corroborated by the 10-issue tail + #2707 re-park escalation); falsifiable — an 11th tail issue carrying an `issue-17` token (or, per §7ak, gaining `issue-23` and dropping `issue-16`) filed after 19:19:47Z would confirm (none yet) |
 | 2a | `quality:gym_skipped` = ambient `SIMARD_SKIP_GYM` operator flag, not a workstream failure | **High** | Deterministic flag path `provider.rs:61`→`sensor.rs:125`→`signal.rs:398`→`mod.rs:1295` | None material (flag-set state entailed by the signal firing) |
 | 2b | `workstream-gap` is disjoint from `goal:blocked` (uncovered *other* backlog) | **High** | Hard code invariant `sensor.rs:300` excludes blocked goals; `sensor.rs:288`, `signal.rs:475`, `mod.rs:1384` | Exact identity of the uncovered item not pinned (immaterial) |
 | 3 | `resource:engineer_spawn` is a **passenger health signal**, not the root cause **and not a park contributor** (round-4 refutation) | **High** | Two hard decoupling gaps: deferral produces no outcome (`coverage.rs:156`, `no_progress.rs:166`); 429 failure → `goal_failure_counts` demotion, excluded from breaker (`advance.rs:433`, `cycle.rs:360`, `orient.rs:93–117`); `live_engineers` census decoupled from `current_max` (`context.rs:111`) | None material — the runtime AIMD-contraction question is now immaterial (contraction cannot park a goal regardless) |
 | 4 | Recurrence (2×) = unfiltered self-recall + unbounded re-wrap over standing inputs | **High** | Round-1 finding **reproduced** by executable H1/H2 tests (`tests_memory_recall.rs`, round 2) | None material |
-| 5 | Remediation: **P1** severs the recall amplifier (proven one-line seam §7v), **P2** removes standing stale inputs and is required for the fix to *stick* (now **five** stale parks after #17 closed, §7ah/§7aj), **P3** clears the ~10-verbatim + ~113-escalation backlog only when paired with P2+P6, P4 conditional, **P5 optional**, **P6** caps the reblock flood via a one-line query fix (§7t, live-reproduced §7w) | **High (P1–P3, P6)**, **Medium (P4)**, **P5 optional** | Each action mapped to a confirmed root cause; #2707 shows bare unblock (P3-alone) re-parks; P6's malformed query reproduced live (0 vs 24 rows); P5 no longer gated on §3 | P4 #17 disposition is a product decision |
+| 5 | Remediation: **P1** severs the recall amplifier (proven one-line seam §7v), **P2** removes standing stale inputs and is required for the fix to *stick* (now **five** stale parks after #17 closed, §7ah/§7aj), **P3** clears the ~10-verbatim + ~125-escalation backlog only when paired with P2+P6, P4 conditional, **P5 optional**, **P6** caps the reblock flood via a one-line query fix (§7t, live-reproduced §7w) | **High (P1–P3, P6)**, **Medium (P4)**, **P5 optional** | Each action mapped to a confirmed root cause; #2707 shows bare unblock (P3-alone) re-parks; P6's malformed query reproduced live (0 vs 24 rows); P5 no longer gated on §3 | P4 #17 disposition is a product decision |
 
 **Method note:** confidence is graded against how disprovable each claim is —
 "High" means grounded in source (`file:line`) or live GitHub/board state that a
@@ -534,7 +545,7 @@ not directly observed.
 
 ---
 
-## 7. Consolidation & verification (rounds 3–26)
+## 7. Consolidation & verification (rounds 3–27)
 
 The consolidation pass (rounds 3–4, this update) reconciled the parallel deep dives
 against the live working tree at **HEAD `20fb7539`** and **executed** the round-2
@@ -3424,9 +3435,304 @@ pass.** Confidence **High**.
 
 ---
 
+### 7ak. Round-26 primary-investigator deep dive (parallel to the §7aj consolidation) — the FIRST live goal-board segment classification since §7f: each of the six `goal:blocked` segments resolved to its driver class + emitting code-arm; refines §7aj's "five stale parks" to a live **5-park + 1-genuine-dependency** split and catches the **#16-removed / #23-still-parked** board rotation (HEAD `499d2868`)
+
+This pass owns the assigned focus verbatim — **signature-token → `file:line` emission mapping (Area 1) AND
+live `goal:blocked` segment classification** — and runs **parallel to the §7aj consolidation** (same round-26,
+disjoint question: §7aj unifies §7af–§7ai and reads GitHub *issue* state; this dive reads the live **goal board**
+via `simard goal list` and classifies each emitted `goal:blocked:{id}` segment by its actual block-*driver*).
+Anchored at HEAD `499d2868`; `git diff --name-only 85245e87..HEAD -- src/` is **empty** (19 commits, all
+docs/config — the zero-`src/`-drift streak unbroken since round 8), so every anchor below re-resolved **verbatim**
+by reading the source at this HEAD. Practical evidence, independently re-run this pass:
+`overseer::tests_memory_recall` **36 passed / 0 failed**, `overseer::sensor` **9 passed / 0 failed**,
+`cognitive_memory::tests_ranked_episodic` **5 passed / 0 failed**. Strictly additive; no prior finding overturned.
+
+**A. The `goal:blocked` emission + classification chain re-anchored verbatim (assigned focus, Area 1 —
+classification-side detail the §7af/§7u map compresses into one row).** The `goal:blocked:{id}` token is produced
+by a five-hop chain, every hop re-resolved at this HEAD:
+
+1. `blocked_goals_from_board` (`sensor.rs:204-206`) filters the active board through
+   `blocked_goal_of` (`sensor.rs:209`), which matches `GoalProgress::Blocked(reason)` (`sensor.rs:210`) and
+   projects `BlockedGoal { id: goal.id (sensor.rs:215), reason (:216), perpetual: goal.is_perpetual() (:217),
+   needs_review (:213), consecutive_no_action (:219) }`.
+2. `needs_review` ← `is_no_progress_marker(reason) || is_brain_failure_marker(reason)` (`sensor.rs:213`).
+3. `consecutive_no_action` ← `safeguard_marker_count(reason).unwrap_or(0)` (`sensor.rs:219`); the parser
+   (`sensor.rs:227-232`) strips whichever safeguard prefix matches and reads the leading digits, returning
+   `None` (→ `0`) for a non-safeguard block.
+4. `signals_from` iterates `for bg in &state.blocked_goals` (`signal.rs:440`) and pushes
+   `Signal::GoalBlocked { … }` (`signal.rs:441`).
+5. `classify_signal`'s `GoalBlocked` arm (`mod.rs:1337-1358`) emits `dedup_key = format!("goal:blocked:{goal_id}")`
+   (**`mod.rs:1349`** — the §7af row-2 anchor) at `Priority::High` **iff** `needs_review`, else `Priority::Normal`
+   (`mod.rs:1344-1348`).
+
+The two safeguard predicates are the classifiers: `is_no_progress_marker` (`no_progress_breaker.rs:78-79`) tests
+`starts_with(NO_PROGRESS_BLOCKED_PREFIX)` (`:69-70` = `"🔒 [OODA-SAFEGUARD] OODA goal made no shippable progress
+for "`) `&& contains(NO_PROGRESS_BLOCKED_SUFFIX)` (`:74` = `" consecutive no-action cycles; needs human review"`),
+rendered by `no_progress_blocked_reason` (`:86-87` = `{PREFIX}{count}{SUFFIX}`); `is_brain_failure_marker`
+(`spawn.rs:45-48`) tests the distinct `"…OODA brain failing for "` prefix (`spawn.rs:35`). Every anchor verbatim.
+
+**B. NET-NEW — the FIRST live goal-board segment classification since §7f (`simard goal list`, ~22:13Z): exactly
+6 blocked goals, splitting into TWO driver classes, not one.** Since §7f (round-5) every round has read GitHub
+*issue* state; this pass reads the live *goal board* directly. The 6 goals in `GoalProgress::Blocked`, classified
+through the §A predicates:
+
+| # | Live blocked goal (`goal:blocked:` segment stem) | Reason class | `needs_review` | `consec.` | Priority arm |
+|---|---|---|---|---|---|
+| 1 | `advance-…-parity` (parent) | no-progress safeguard park (`NO_PROGRESS_BLOCKED_PREFIX` verbatim) | `true` | 3 | High (`mod.rs:1345`) |
+| 2 | `…issue-18-ws3-versioned-rel` | no-progress safeguard park | `true` | 3 | High |
+| 3 | `…issue-21-ws6-resumable-pip` | no-progress safeguard park | `true` | 3 | High |
+| 4 | `…issue-22-ws7-sign-the-rele` | no-progress safeguard park | `true` | 3 | High |
+| 5 | `…issue-23-ws8-scalable-enti` | no-progress safeguard park | `true` | 3 | High |
+| 6 | `…issue-17-ws2-int8-pq-embed` | **genuine live-engineer `record_blocker`** (free-text: *"WS2 #17's done-criterion is 'gated on eval recall parity,' which depends on WS1 #16's eval baseline … a genuine hard upstream dependency"*) | **`false`** | **0** | **Normal (`mod.rs:1347`)** |
+
+So **5 of the 6 live segments are stale no-progress parks** (matching §7aj's "five parks" *count*), but **the
+sixth — #17 — is NOT a park: it is the lone genuine dependency-block**, the only live segment taking the
+`needs_review=false → Priority::Normal` arm (`mod.rs:1347`). This **refines** §7aj-point-3's "#17 persists as a
+fifth stale park": at goal-board granularity #17's driver is an engineer-authored dependency narrative, **not** a
+deterministic `OODA-SAFEGUARD` sentinel. Both hold simultaneously — #17's *GitHub issue* is closed (so §7aj's
+issue-level "stale" is true) **while** its *goal-board reason* is a genuine block (so it emits at **Normal**, not
+High). Sub-finding: #17's narrative is *itself* second-order stale — it asserts *"#16 is still OPEN … no landed
+baseline"* though #16's issue closed 07-06T20:16:25Z; the stale block-reason encodes a stale view of its upstream.
+
+**C. NET-NEW — the blocked-board membership has ROTATED since the newest tail issue: #16's goal is fully REMOVED,
+#23's goal remains blocked.** The 6 KGPACKS-variant tail issues (#2744…#2875) carry the segment set
+`{parent, #16, #17, #18, #21, #22}` (verified by re-reading each body: #2744/#2750/#2757 carry the narrower
+`{parent, #17, #21}`; #2768/#2841/#2875 carry all six — **none carry #23**). The **live** board (~22:13Z) carries
+`{parent, #17, #18, #21, #22, #23}`. The delta: **`issue-16-ws1` is now entirely absent from the goal board**
+(`simard goal list | grep -c issue-16-ws1` → **0** — the goal was reconciled/removed, not merely unblocked),
+while **`issue-23-ws8` is present-and-blocked**. This is a clean live **A/B of the §1 reconciliation gap**:
+- **#16 — positive control:** GitHub-closed 20:16:25Z **and** reconciled off the board → its token correctly
+  *stopped* (which is exactly why the newest generations still carry it only because they were emitted 6–12 h
+  *before* the removal, matching §7aj-point-3's "#16 smoking gun").
+- **#23/#18/#21/#22/parent — negative controls:** GitHub-closed (#23 @ 07-06T12:45:45Z) yet **not** reconciled →
+  still parked with a stale `OODA-SAFEGUARD` marker → their `goal:blocked:…` tokens keep emitting from
+  `mod.rs:1349` regardless of GitHub state — the §1/§7t no-reconciliation mechanism, now caught **live at
+  per-segment granularity**. Notably **`issue-23-ws8` was never enumerated as a board member by any prior round**
+  (§7ag/§7ai/§7ah listed only #16/#17/#18/#21/#22; every earlier doc "#23" is the *amplihack-xpia* PR); §7aj
+  first named it (as a GitHub issue), and this pass first classifies it as a **live stale park**.
+
+**D. NET-NEW — a sharper, directional falsifiable prediction.** §7ag/§7ah/§7ai/§7aj predict an 11th tail issue
+"still carrying an `issue-17` token." The live board delta sharpens this to a **directional** prediction: the
+next tail issue, when it fires, will carry the *current* live blocked set — i.e. it will **gain `issue-23-ws8`
+and DROP `issue-16-ws1`** relative to #2875, with #17 still rendering at the `2×` floor (§7ai). Confirming
+instance: any recurring-signature issue filed after ~22:13Z whose composite contains `issue-23-ws8` **and** omits
+`issue-16-ws1`. None yet — tail still **exactly 10**, newest #2875 @ 11:31:36Z.
+
+**E. Live board (independent re-read, ~22:13Z).** WhisperGate-deduped verbatim tail steady at **10** (#2669…#2875,
+no 11th) — the two-variant split (**4** `anomaly:distill parse-fail` #2669/#2672/#2678/#2691 + **6** kgpacks
+`goal:blocked:` #2744/#2750/#2757/#2768/#2841/#2875) re-confirmed per §7l/§7v. `recurring_goal_reblock in:title`
+`search/issues` `total_count` = **113 open** (byte-matching the §7aj consolidator's ~22:07Z read; **+3** since
+§7ai's 110 — a fresh modally-3 burst, still firing at `gh_client.rs:37`). #2875 composite re-measured ≈4.9 KB
+across **12** in-composite `overseer-obs:` generations (byte-consistent with §7ai/§7aj's canonical **4895 B / 12
+gen**; the small extraction-boundary delta is not a source change). All of kgpacks-rs #16/#17/#18/#21/#22/#23
+CLOSED on GitHub (per §7aj) — yet **5 of their goal-board parks remain live-blocked plus #17's genuine block**:
+the GitHub-closed / goal-board-blocked divergence, made concrete per segment.
+
+**Verification footer.** HEAD `499d2868`; `git diff --name-only 85245e87..HEAD -- src/` **empty** (zero-`src/`-drift
+streak unbroken — the §A `goal:blocked` chain `sensor.rs:204/209/213/215/219/227-232` → `signal.rs:440-441` →
+`mod.rs:1337-1358` + marker constants `no_progress_breaker.rs:69-74/78-79` + `spawn.rs:35/45-48` all re-resolved
+verbatim). `overseer::tests_memory_recall` **36/0**, `overseer::sensor` **9/0**,
+`cognitive_memory::tests_ranked_episodic` **5/0** (independently re-run). **No prior finding overturned.** Net-new:
+(§B) the FIRST live goal-board segment classification since §7f — 6 blocked goals split **5 no-progress parks + 1
+genuine dependency block (#17)**, refining §7aj's "five parks" to a driver-precise split and pinning each segment
+to its `needs_review → Priority` arm (`mod.rs:1344-1348`); (§C) the blocked-board rotated **#16-removed /
+#23-still-parked** since #2875 — a live A/B of the §1 reconciliation gap (#16 positive control, #23/#18/#21/#22/
+parent negative), with #23 first classified as a live stale park; (§D) a sharpened directional prediction (next
+tail gains #23, drops #16). Complements the parallel §7aj consolidation; **endorses its close-and-execute
+verdict** — residual value is execution of **P1 → P2 (now 5 live parks + 1 genuine block) → P6**, not
+verification. Confidence **High**.
+
+---
+
+### 7al. Round-26 tertiary-investigator deep dive (architect focus, parallel to §7aj/§7ak) — feedback-loop **boundedness** of the recall↔write-back seam and the **current-vs-stale** goal-board read: the self-amplification condition is architecturally **CLOSED at HEAD** by four independent guards, all intrinsic to unchanged source (HEAD `da650542`)
+
+This pass owns the **tertiary architect focus verbatim**: *feedback-loop boundedness review of the recall↔write-back
+seam and current-vs-stale goal-board reads, verifying whether the self-amplification condition is closed at HEAD*.
+It runs **parallel** to the §7aj consolidation (which reads GitHub issue state) and §7ak (which classifies live
+goal-board segments); this dive is orthogonal — it treats the seam as an architecture and asks one question: **can
+the recall→orient→write-back→recall round-trip amplify without bound on UNCHANGED state?** Anchored at HEAD
+`da650542`; `git diff --name-only 85245e87..HEAD -- src/` and `db02dd7b..HEAD -- src/overseer/` are **both empty**
+(zero-`src/`-drift streak intact — every bound below is byte-identical to the source analyzed since round 5).
+Practical evidence: `cargo test -p simard --lib overseer::` → **316 passed / 0 failed**. Strictly additive.
+
+**A. The loop physically closes (selection-side, re-confirming §7aa at HEAD).** The recall query is keyed off the
+CURRENT tick's pre-recall problems (`RecallKeys::from_signals`, `capabilities.rs:528-541`; query join
+`capabilities.rs:547-551`), whose `blocked:{id}` keyword (`capabilities.rs:571`) and
+`goal:blocked:{id}` dedup_key (`mod.rs:1349`) are **substrings of the Overseer's own prior write-back content** — stored as
+`"{summary} [sig:overseer-obs:…]"` (`wiring.rs:1084`) and re-parsed via `parse_failure_signature`
+(`wiring.rs:976-986`). So ranked episodic recall (`wiring.rs:1013-1031`) **positively self-selects the Overseer's
+own episodes**: the loop is real, not theoretical.
+
+```
+            ┌────────────────────────── ONE TICK ──────────────────────────┐
+  board ──▶ signals_from (pre-recall, recall=None)  ──▶ RecallKeys::from_signals
+ (CURRENT)      signal.rs:366                              capabilities.rs:528
+                                                                 │ query()  ← CURRENT-state keyed
+                                                                 ▼
+                                          recall_pass ─▶ recall_episodic(limit=budget.episodic=5)
+                                          mod.rs:496       wiring.rs:1013  ⟵ GUARD-2 (count≤5)
+                                                                 │  episodes carry STALE [sig:…]
+                                                                 ▼
+   signals_from (post-recall) counts ep.failure_signature; if ≥2 ⇒ Signal::RecurringSignature
+        signal.rs:455-470   (RECURRING_SIGNATURE_THRESHOLD=2, signal.rs:362)  ⟵ 2 ≤ N ≤ 5
+                                                                 │
+                                                                 ▼
+   classify_signal → dedup_key = sanitize_recalled(sig)  ⟵ GUARD-1 (length ≤ 8192 B)
+        mod.rs:1372 · capabilities.rs:468-480 (RECALLED_TEXT_MAX_LEN=8192, :455)
+                                                                 │  orient MERGES by key (raise-only)
+                                                                 ▼  mod.rs:1224-1233  ⟵ GUARD-4
+   observation_signature(problems) = "overseer-obs:" + sorted dedup_keys.join("|")
+        mod.rs:1081-1086   (nests the recalled composite as ONE segment)
+                                                                 │
+                                                                 ▼
+   write_back_observation ─ WhisperGate::new(900,5).peek ⟵ GUARD-3 (≤1/sig/900s, ≤5/hr)
+        mod.rs:544-560 · guardrails.rs:312-333            ──▶ store_episode ──▶ (next tick)
+```
+
+**B. The four independent bound-guards (each closes one amplification axis).**
+
+| # | Amplification axis | Guard | Location | Bound |
+|---|---|---|---|---|
+| 1 | **Composite LENGTH** (recalled `overseer-obs:…` nests into the next `observation_signature`) | `sanitize_recalled` UTF-8-boundary truncation of the RecurringSignature dedup_key | `capabilities.rs:468-480` (`RECALLED_TEXT_MAX_LEN=8192`, `:455`) applied at `mod.rs:1372` | ≤ 8192 B per segment ⇒ nesting reaches a **byte-identical fixed point**; `observation_signature` stops growing (§7ag) |
+| 2 | **Occurrence COUNT** (`seen N×`) | episodic recall budget caps the episode pool the count is taken over | `RecallBudget::default().episodic = 5` (`capabilities.rs:501`) → `recall_episodic(limit=5)` (`wiring.rs:1013-1020`); floor `RECURRING_SIGNATURE_THRESHOLD=2` (`signal.rs:362-463`) | **2 ≤ N ≤ 5**, independent of true graph population (§7ai) |
+| 3 | **Write RATE** (episode accrual speed) | `write_back_gate` dedup window + rolling-hour cap | `WhisperGate::new(900, 5)` (`mod.rs:297`); `peek/commit` (`guardrails.rs:312-333`) | ≤ 1 write / identical-signature / 900 s **and** ≤ 5 writes / hour |
+| 4 | **Problem MULTIPLICITY** (new problem per recall) | orient **merges** a RecurringSignature into the same-key in-cycle problem, `min`-raising priority only | `mod.rs:1224-1233` | a matching current problem absorbs it (no new node); it only stands alone when the board no longer matches |
+
+Guards 1–3 are the *doubly-bounded* result (length × count) plus the rate limiter; guard 4 is the structural
+damper that means on **matched** state the composite does not even grow. **All four hold in unchanged source** —
+there is **no open remediation commit**: closure is an intrinsic property of the code, which is exactly why 20+
+docs-only commits could prove it without a `src/` patch.
+
+**C. Current-vs-stale determination (the assigned second half).** The seam mixes two provenance classes in one
+string, and the distinction is the whole answer:
+
+- **Recall QUERY keys — CURRENT.** Built from *pre-recall* `signals_from` (`mod.rs:421-424`), i.e. this tick's
+  fresh board read (`blocked_goals`, `gym_skipped`, `workstream_gaps` computed at `mod.rs:398-402`). RecurringSignature
+  is **absent** here (recall has not run yet), so the query is small and current-state-shaped — it can never carry
+  the growing composite.
+- **Write-back FRESH tokens — CURRENT.** The `goal:blocked:{id}` / `quality:gym_skipped` / `workstream-gap`
+  segments contributed by *this tick's* problems reflect the live board.
+- **Recalled episode `[sig:…]` — STALE.** A frozen point-in-time snapshot from whenever that episode was written;
+  this is the only stale input, and it is precisely where §7ak's **#16-removed-but-still-emitted** leak enters. It
+  re-surfaces a `goal:blocked` segment for a goal that may since have been unblocked or reconciled off the board.
+
+So the emitted composite is a **CURRENT-keyed recall of a STALE snapshot, re-mixed with CURRENT fresh tokens** —
+and the staleness is bounded by guards 1–3 (fixed-point length, count ≤ 5, rate ≤ 5/hr). Gap detection specifically
+reads **current** state (`workstream_gaps(&observed.anomalies)`, `mod.rs:400-402`; and per §2b cannot overlap a
+blocked goal); only the *nested recalled* composite can carry a stale `workstream-gap` token.
+
+**D. Architect verdict — CLOSED (bounded); residual is benign observability, not a live feedback defect.** The
+self-amplification condition is **architecturally closed at HEAD**: the round-trip is bounded on all three
+amplifiable axes (length/count/rate) plus the merge damper, with **zero source drift** — so "recent commits closing
+the loop" are *not* an open item; the loop was never unbounded in this source. The observed *"seen 2×"* is the
+`RECURRING_SIGNATURE_THRESHOLD` **floor** (guard-2's minimum) — the signal is firing at its designed-in lower bound,
+the classic signature of **expected observability behavior**, not a runaway. **One optional hardening seam** (hygiene,
+not correctness — the bounds already hold): exclude RecurringSignature-derived problems from `observation_signature`
+(`mod.rs:1081-1086`), so the write-back signature is composed only of *fresh* board tokens and the recalled composite
+never nests at all — collapsing guard-1's fixed-point to "no growth," and eliminating the stale-snapshot re-mix at its
+source. This complements §7v's provenance-filter fix-seam and **endorses §7aj/§7ak's close-and-execute verdict**:
+residual value is execution (P1→P2→P6), not further loop-safety verification. Confidence **High**.
+
+---
+
+### 7am. Round-27 consolidation — the three parallel dives since §7aj unified (§7ak goal-board classification / §7al architect-boundedness / the primary-investigator end-to-end trace): the recall↔write-back loop is bounded on FOUR axes yet **P1** stays the only loop-severing cut, and #17 resolves to a goal-board **5-park + 1-genuine-block** split (HEAD `da650542`)
+
+This pass unifies the **three** parallel deep dives accumulated since the §7aj consolidation (round-26): **§7ak**
+(round-26 primary-investigator — the first live `simard goal list` segment classification since §7f), **§7al**
+(round-26 tertiary-investigator — architect boundedness review of the recall↔write-back seam), and the **round-27
+primary-investigator end-to-end trace** handed to this consolidator (a full select→count→emit→write-back re-walk at
+HEAD, verdict: *"the `2×` is expected, bounded observability behaviour — the `RECURRING_SIGNATURE_THRESHOLD` floor
+over a real but doubly-bounded self-amplifying loop, present-and-unfixed at HEAD, pinned by regression tests; it is
+ONE composite recall key (`|`-delimited co-emitted problem `dedup_key`s from a single tick), not concatenated
+signals, and not two distinct failures"*). HEAD is `da650542` (§7al's commit); `git diff --name-only 85245e87..HEAD
+-- src/` is **empty** (20 commits, all docs/config — the zero-`src/`-drift streak unbroken since round 8), so every
+§7ak/§7al/§7af/§7ag/§7ai/§7u/§7v/§7aa anchor re-resolves verbatim.
+
+**Independent re-verification (this consolidation, 2026-07-08 ~00:26 UTC)** — re-run by the consolidator at HEAD
+`da650542`, not inherited:
+
+- `cargo test --lib -- overseer::tests_memory_recall overseer::sensor cognitive_memory::tests_ranked_episodic` →
+  **50 passed, 0 failed** (`tests_memory_recall` **36/0** + `sensor` **9/0** + `tests_ranked_episodic` **5/0**),
+  including the four hypothesis tests, the four write-back round-trip tests, and both magnitude backings
+  (`recall_budget_default_is_5_5_3_5` — the §7ai count ceiling; `sanitize_recalled_caps_length` — the §7ag length cap).
+- Canonical anchors spot-checked **verbatim by reading source at this HEAD**: `RECURRING_SIGNATURE_THRESHOLD: u32 = 2`
+  (`signal.rs:362`); `observation_signature` → `format!("overseer-obs:{}", keys.join("|"))` (`mod.rs:1081-1086`);
+  the composite-recall `dedup_key` `sanitize_recalled(signature)` (`mod.rs:1372`); the `source_label`-dropping recall
+  projection `.map(|e| RecalledEpisode { … })` (`wiring.rs:1024`, the P1 seam); `RECALLED_TEXT_MAX_LEN: usize = 8192`
+  (`capabilities.rs:455`) + `episodic: 5` (`capabilities.rs:501`); and — **independently verifying §7al's two
+  newly-cited guards** — `write_back_gate: WhisperGate::new(900, 5)` (`mod.rs:297`, guard-3 rate) and the orient-merge
+  `existing.priority = existing.priority.min(priority)` taken only `if matches!(s, Signal::RecurringSignature { .. })`
+  (`mod.rs:1224-1233`, guard-4 multiplicity). Every anchor verbatim.
+- **Live board (~00:26 UTC, independently re-read):** whole kgpacks-rs board **CLOSED** — #16 CLOSED 07-06T20:16:25Z,
+  #17 CLOSED 07-07T19:19:47Z (both re-confirmed by direct `gh issue view`), #18/#21/#22/#23 CLOSED, only optional #32
+  OPEN. The WhisperGate-deduped verbatim tail holds at **exactly 10** (`"recurring signature seen"` `search/issues`
+  `total_count` = 10, no 11th — §7ak's directional follow-on still pending). The broken-dedup `recurring_goal_reblock`
+  flood reads **125 open** (`search/issues` `total_count`), up **113 → 125** since §7aj/§7ak (~2.2 h; still firing at
+  `gh_client.rs:37`, P6 unfixed).
+
+**Zero contradictions across the three dives; two apparent tensions resolved here (not inherited).**
+
+1. **§7al's "architecturally CLOSED / bounded" and the primary trace's "real but doubly-bounded loop, unfixed at HEAD"
+   are the SAME claim from two vantage points — magnitude vs. severance — and both agree with §4/§7aj.** "Closed"
+   (§7al) means *bounded-magnitude on every amplifiable axis*, **not** *loop-severed*: a self-authored episode still
+   self-selects (§7aa) and is still counted as foreign (`source_label` dropped, §7af/§7z). The primary trace states the
+   identical fact in severance language (the loop is present and unfixed; only P1 cuts it). Unified canonical statement
+   (**sharpens §4, overturns nothing**): the recall↔write-back round-trip is **bounded on FOUR independent axes** —
+   (1) composite LENGTH ≤ 8192 B (`sanitize_recalled`→`RECALLED_TEXT_MAX_LEN`, §7ag); (2) occurrence COUNT `N ∈ [2, 5]`
+   (`RecallBudget.episodic=5` ceiling `capabilities.rs:501` / `THRESHOLD=2` floor `signal.rs:362`, §7ai); (3) write
+   RATE ≤ 1/identical-sig/900 s and ≤ 5/hr (`WhisperGate::new(900,5)`, `mod.rs:297` — **guard-3**); and (4) problem
+   MULTIPLICITY (orient MERGES a recalled `RecurringSignature` into the same-key in-cycle problem, `min`-raising
+   priority only, `mod.rs:1224-1233` — **guard-4, §7al's net-new bound**) — **yet none of the four severs the loop;
+   P1 at `wiring.rs:1024` remains the uniquely load-bearing cut.** Guard-4 is the net addition: on *matched* board
+   state the recalled composite does not even stand up as a new problem node, surfacing standalone only when the live
+   board no longer carries the recalled segment.
+2. **§7ak's "#17 is a genuine live-engineer dependency block at `Normal`" REFINES (does not overturn) §7aj/§1's "#17
+   folds into H2 as a fifth stale park" — the two hold at different layers.** #17's *GitHub issue* is CLOSED
+   (issue-level stale, §7aj) **while** its *goal-board reason* is an engineer `record_blocker` taking the
+   `needs_review=false → Priority::Normal` arm (`mod.rs:1347`), **not** a deterministic `OODA-SAFEGUARD` sentinel
+   (§7ak-B). Both are simultaneously true: #17 still emits its `goal:blocked:…issue-17…` token from the one
+   `mod.rs:1349` source regardless of priority arm, and its block-narrative is itself second-order stale (asserts #16
+   OPEN though #16 closed 07-06T20:16:25Z). Net effect on P2 — the reconciliation target is *unchanged in scope but
+   split by driver*: done-gate re-run/auto-archive for the **safeguard parks** (parent/#18/#21/#22/#23,
+   `needs_review=true`, `consecutive=3`, High) vs. dependency-narrative refresh for the **one genuine block** (#17).
+   §7ak also caught the live board **rotation** since #2875 — **#16 fully removed** (reconciled off the board — the
+   positive control) vs. **#23 present-and-parked** (GitHub-closed 07-06T12:45:45Z yet not reconciled — a negative
+   control, first classified live this round) — a per-segment live A/B of the §1 reconciliation gap.
+
+**Net-new facts folded into the canonical findings (§4/§5/§6):** (a) the loop is bounded on **four** axes (length §7ag
++ count §7ai + write-rate + orient-merge multiplicity §7al), refining §4's "doubly bounded" — **P1** still the only
+loop-severing cut, guard-4 the reason a matched-state recall does not even create a node; (b) the live parked set has
+**rotated** (#16 removed, #23 added) and #17 is a `Normal`-arm genuine-but-stale-premise block, not a safeguard park —
+refining §1/§6 row 1's driver classification and splitting **P2**'s target by driver class (§5-P2); (c) §7al's optional
+hardening seam — exclude `RecurringSignature`-derived problems from `observation_signature` (`mod.rs:1081-1086`) so the
+recalled composite never nests — is the **same seam as §7v's P1b belt**, re-endorsed; (d) the `recurring_goal_reblock`
+flood continues its monotone growth (now **125**, §5-P6/§6 row 5 figure refreshed ~113 → ~125) because the P6 defect
+(`gh_client.rs:37`) is unfixed.
+
+**Meta-observation — this consolidation is once again the loop's next tick.** Like §7ae/§7ah/§7aj, round-27 was
+triggered by the exact composite under investigation (`recurring signature seen 2× in cognitive memory
+(overseer-obs:goal:blocked:…)`) — the §7aa-E identity, live-confirmed — with the `N = 2` in the trigger directly
+corroborating §7ai's proven floor. The one quantity still moving anywhere — the reblock counter stepping **113 → 125**
+in ~2.2 h — is downstream proof the diagnosed one-line P6 defect is live and unfixed: the investigation keeps
+exhibiting the exact pathology it documents.
+
+**Diagnostic saturation — TENTH consolidation; the board has read wholly-CLOSED for five consecutive passes; zero
+source drift persists. Close the investigation.** §7am is the **tenth** full consolidation
+(§7g/§7k/§7n/§7r/§7w/§7y/§7ac/§7ae/§7aj/§7am) to reach an identical verdict. All three loop sides remain code-proven
+(select §7aa, count §7v/§7ai, emit §7u/§7af), the write-back is a proven closed round-trip (§7z), and the emitted
+artifact is now proven bounded on **four** axes (length/count/rate/multiplicity) — **yet no bound severs the loop;
+only P1 does.** **No finding is overturned; no confidence rating changes; no new remediation is introduced.** Two
+code-level root causes remain each pinned to a one-line fix (self-recall loop → **P1** at `wiring.rs:1024`; broken
+reblock dedup → **P6** at `gh_client.rs:37`) plus the standing stale-park driver (**P2**, now a rotated live set of
+**5 safeguard parks + 1 genuine-but-stale-premise block**). The residual value is **entirely execution, not
+investigation**. Recommendation (unchanged and maximally supported): **mark this investigation resolved and hand
+P1 → P2 → P6 to the builder queue; do not schedule a round-28 verification pass.** Confidence **High**.
+
+---
+
 ## 8. Provenance
 
-Investigation-only follow-up (investigation-workflow, rounds 1–25). No production
+Investigation-only follow-up (investigation-workflow, rounds 1–27). No production
 behavior was changed by this document. Round-1 established the structural cause
 ([`overseer-memory-recall-api`](./overseer-memory-recall-api.md)); round-2 added the
 semantic diagnosis and the executable H1/H2 tests; round-3 consolidated the parallel
@@ -3752,6 +4058,49 @@ board (~22:07Z): whole kgpacks board CLOSED, verbatim tail steady at exactly 10 
 closure — the falsifiable no-reconciliation follow-on still pending), and the broken-dedup `recurring_goal_reblock`
 flood grew **110 → 113** open (a fresh burst-of-3, still firing at `gh_client.rs:37`). No finding overturned;
 endorses the close-and-execute verdict (residual value is execution of P1 → P2 → P6). Confidence remains High.
+Round-26 primary-investigator deep dive (§7ak, HEAD `499d2868`, parallel to the §7aj consolidation) ran the
+**first live goal-board segment classification since §7f** via `simard goal list` (~22:13Z): the six live
+`GoalProgress::Blocked` goals split into **5 no-progress safeguard parks** (parent + #18/#21/#22/#23, each
+`needs_review=true`, `consecutive_no_action=3`, High) **+ 1 genuine live-engineer dependency block** (#17,
+`needs_review=false`, `0`, Normal — an engineer `record_blocker`, not an `OODA-SAFEGUARD` sentinel), refining
+§7aj's "five stale parks" to a driver-precise split and pinning each segment to its emitting arm
+(`sensor.rs:204/209/213/215/219` → `signal.rs:440-441` → `mod.rs:1337-1358/1349`, markers
+`no_progress_breaker.rs:69-74/78-79` + `spawn.rs:45-48`); it also caught the blocked-board **rotation
+#16-removed / #23-still-parked** since the newest tail #2875 (a live A/B of the §1 reconciliation gap — #16
+reconciled *and* removed vs #23 GitHub-closed 07-06T12:45:45Z yet still parked, the first round to classify #23
+as a live stale park) and sharpened the falsifiable follow-on to a directional prediction (next tail gains #23,
+drops #16). Re-ran `overseer::tests_memory_recall` 36/0 + `overseer::sensor` 9/0 +
+`cognitive_memory::tests_ranked_episodic` 5/0 at zero `src/` drift; verbatim tail steady at 10 (no 11th),
+reblock flood re-confirmed 113 open — no finding overturned, endorses close-and-execute, confidence High.
+Round-26 tertiary-investigator deep dive (§7al, HEAD `da650542`, architect focus, parallel to §7aj/§7ak) reviewed
+the feedback-loop boundedness of the recall↔write-back seam and confirmed the self-amplification condition is
+architecturally **CLOSED (bounded, not severed)** at HEAD by **four** independent guards — composite LENGTH ≤ 8192 B
+(`sanitize_recalled`/`RECALLED_TEXT_MAX_LEN`, `capabilities.rs:455/468-480` applied at `mod.rs:1372`), occurrence
+COUNT `2 ≤ N ≤ 5` (`RecallBudget.episodic=5` `capabilities.rs:501` / `RECURRING_SIGNATURE_THRESHOLD=2` `signal.rs:362`),
+write RATE ≤ 1/sig/900 s & ≤ 5/hr (`WhisperGate::new(900,5)` `mod.rs:297`, `guardrails.rs:312-333`), and problem
+MULTIPLICITY via the orient merge that `min`-raises a recalled `RecurringSignature` into the same-key in-cycle problem
+(`mod.rs:1224-1233`) — all intrinsic to unchanged source (no remediation commit), which is why 20+ docs-only commits
+could prove closure without a `src/` patch; it also mapped the current-vs-stale provenance mix (CURRENT recall-query
+keys + CURRENT fresh write-back tokens + the single STALE recalled `[sig:…]` snapshot, the §7ak #16-removed leak point)
+and re-endorsed §7v's P1b belt as an optional hardening seam. `cargo test -p simard --lib overseer::` 316/0. No finding
+overturned, confidence High.
+Round-27 (§7am) is the **tenth consolidation** — it unified the three parallel dives since §7aj (§7ak goal-board
+segment classification, §7al architect boundedness, and a round-27 primary-investigator end-to-end trace) at HEAD
+`da650542` and independently re-ran `overseer::tests_memory_recall` 36/0 + `overseer::sensor` 9/0 +
+`cognitive_memory::tests_ranked_episodic` 5/0 (**50 passed, 0 failed**; incl. `recall_budget_default_is_5_5_3_5` and
+`sanitize_recalled_caps_length`) with every canonical anchor — including §7al's guard-3 `WhisperGate::new(900,5)`
+(`mod.rs:297`) and guard-4 orient-merge (`mod.rs:1224-1233`) — re-resolved verbatim at zero `src/` drift (20 commits
+since `85245e87`, all docs/config). Net-new folds: (1) the loop is bounded on **four** axes (length §7ag + count §7ai
++ write-rate + orient-merge multiplicity §7al), refining §4's "doubly bounded," with **P1** still the only
+loop-severing cut and guard-4 the reason a matched-state recall does not even create a problem node; (2) §7al's
+"architecturally closed/bounded" and the primary trace's "real-but-doubly-bounded, unfixed" are one claim (magnitude
+vs. severance), both agreeing with §4/§7aj; (3) §7ak's #17-as-`Normal`-genuine-block refines (does not overturn) §1's
+"fifth stale park" — #17 is issue-level stale AND goal-board genuine-but-stale-premise, splitting **P2**'s target by
+driver, with the live parked set rotated #16-removed / #23-added. Live board (~00:26Z): whole kgpacks board CLOSED
+(#16 07-06T20:16:25Z, #17 07-07T19:19:47Z, #18/#21/#22/#23 CLOSED, only optional #32 OPEN), verbatim tail steady at
+**exactly 10** (no 11th), broken-dedup `recurring_goal_reblock` flood grew **113 → 125** open (still firing at
+`gh_client.rs:37`). Tenth consolidation to reach an identical verdict; no finding overturned; endorses
+close-and-execute (P1 → P2 → P6); recommends **not** scheduling round-28. Confidence High.
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
