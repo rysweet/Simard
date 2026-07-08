@@ -171,7 +171,6 @@ fn looks_like_implementation(text: &str) -> bool {
         "cargo run",
         "npm install",
         "npm run",
-        "pip install",
         "git commit",
         "git push",
         "make build",

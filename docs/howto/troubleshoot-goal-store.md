@@ -80,7 +80,7 @@ on process crash).
 ## 3. Inspect the goal store contents
 
 ```bash
-cat "$STATE_ROOT/state/goal_store.json" | python3 -m json.tool
+cat "$STATE_ROOT/state/goal_store.json" | jq .
 ```
 
 Expected: a JSON array of `GoalRecord` objects:
@@ -132,12 +132,8 @@ This fallback runs in both the normal `close()` path and the
 To verify what happened:
 
 ```bash
-cat "$STATE_ROOT/meeting_handoffs/meeting_handoff.json" | python3 -c "
-import json, sys
-h = json.load(sys.stdin)
-print(f'decisions: {len(h.get(\"decisions\", []))}')
-print(f'action_items: {len(h.get(\"action_items\", []))}')
-"
+jq -r '"decisions: \(.decisions | length)\naction_items: \(.action_items | length)"' \
+  "$STATE_ROOT/meeting_handoffs/meeting_handoff.json"
 ```
 
 If `decisions: 0` **and** you did not set `/goal` during the meeting,
@@ -164,12 +160,7 @@ processes the meeting handoff.
 This is expected behavior, not a bug. To verify the GoalBoard:
 
 ```bash
-simard goals inspect --json 2>/dev/null | python3 -c "
-import json, sys
-board = json.load(sys.stdin)
-print(f'active goals: {len(board.get(\"active\", []))}')
-print(f'backlog items: {len(board.get(\"backlog\", []))}')
-"
+simard goals inspect --json 2>/dev/null | jq -r '"active goals: \(.active | length)\nbacklog items: \(.backlog | length)"'
 ```
 
 ---

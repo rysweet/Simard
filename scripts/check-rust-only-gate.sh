@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# check-rust-only-gate.sh — Enforce the Rust-only policy (issue #2155).
+# check-rust-only-gate.sh — Enforce the Rust-only policy (issues #2155, #3181).
 #
-# Fails if any .py file under src/ or python/, or any .js/.ts file outside
-# exempted directories, is found that is NOT in the allow-list of pre-existing
-# files. This prevents new non-Rust source files from being added while the
-# migration proceeds.
+# Fails if ANY .py file is found anywhere in the repo, or any .js/.ts file
+# outside exempted directories, that is NOT in the allow-list of pre-existing
+# files. Simard is a pure-Rust daemon (issue #3181) — no Python may be
+# reintroduced under any path.
 #
 # Usage:
 #   scripts/check-rust-only-gate.sh          # check working tree
@@ -68,9 +68,8 @@ violations=()
 while IFS= read -r file; do
   [[ -z "$file" ]] && continue
 
-  # Python files under src/ or python/
-  if [[ "$file" == src/*.py || "$file" == python/*.py ]] || \
-     [[ "$file" == src/**/*.py || "$file" == python/**/*.py ]]; then
+  # Python files ANYWHERE in the repo (issue #3181: Simard is Python-free).
+  if [[ "$file" == *.py ]]; then
     if ! in_array "$file" "${ALLOWED_PY_FILES[@]}"; then
       violations+=("PYTHON  $file")
     fi
@@ -96,8 +95,9 @@ if [[ ${#violations[@]} -gt 0 ]]; then
     echo "  • $v"
   done
   echo ""
-  echo "This project is migrating to Rust-only. New .py files under src/ or python/"
-  echo "and new .js/.ts files outside npm/ and tests/e2e-dashboard/ are not permitted."
+  echo "This project is Rust-only (issue #3181). New .py files anywhere in the"
+  echo "repo, and new .js/.ts files outside npm/ and tests/e2e-dashboard/, are"
+  echo "not permitted."
   echo ""
   echo "If this file is intentionally needed, add it to the allow-list in"
   echo "scripts/check-rust-only-gate.sh and document the reason."

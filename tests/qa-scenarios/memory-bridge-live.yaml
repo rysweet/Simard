@@ -1,9 +1,9 @@
-name: simard-memory-bridge-live
+name: simard-memory-bridge-health
 app_type: cli
-description: Verify Python memory bridge starts and responds to health + store/search
+description: Verify the native (in-process, pure-Rust) memory bridge answers a health check
 steps:
   - action: run
-    command: "echo '{\"id\":\"1\",\"method\":\"bridge.health\",\"params\":{}}' | PYTHONPATH=/home/azureuser/src/amplirusty/amplihack-memory-lib/src python3 python/simard_memory_bridge.py --agent-name qa-test --db-path /tmp/qa-memory-$$"
-    timeout: 15s
+    command: "cargo test --test bridge native_bridge_health_check_roundtrips --no-fail-fast -- --nocapture 2>&1 | tail -5"
+    timeout: 120s
   - action: expect_stdout
-    contains: '"healthy":true'
+    contains: 'test result: ok'

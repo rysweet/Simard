@@ -63,15 +63,12 @@ AUTH=(-H "Authorization: Bearer $TOKEN")
 BASE="http://localhost:$PORT"
 fail() { echo "[recall] FAIL: $1" >&2; cat "$LOG" >&2; exit 1; }
 
-# Extract a JSON field with python (robust vs. grep on JSON).
-jget() { python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get(sys.argv[1],""))' "$1"; }
+# Extract a JSON field with jq (robust vs. grep on JSON).
+jget() { jq -r --arg k "$1" '.[$k] // ""'; }
 # Report whether an active/backlog goal with the given id is present.
 has_id() {
-  python3 -c '
-import sys,json
-d=json.load(sys.stdin); wanted=sys.argv[1]
-ids=[g["id"] for g in d.get("active",[])]+[g["id"] for g in d.get("backlog",[])]
-print("yes" if wanted in ids else "no")' "$1"
+  jq -r --arg w "$1" \
+    '([.active[]?.id] + [.backlog[]?.id]) | if index($w) then "yes" else "no" end'
 }
 
 # ── Seed the 3 baseline active goals (idempotent) ────────────────────────────

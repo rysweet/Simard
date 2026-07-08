@@ -227,7 +227,7 @@ parse error. Inspect the raw output:
 recipe-runner-rs prompt_assets/simard/recipes/brain-introspection.yaml \
   --output-format json \
   -c state_root="$HOME/.simard" -c repo_path="/home/azureuser/src/Simard" \
-  | python3 -m json.tool
+  | jq .
 ```
 
 Check that `~/.simard/metrics/metrics.jsonl` and `~/.simard/ooda.log` exist and

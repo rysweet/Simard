@@ -77,27 +77,33 @@ for key in title description owner doc_type; do
   grep -Eq "^${key}:" <<< "$FRONT_MATTER" \
     || fail "$DOC front-matter missing required key '${key}:'"
 done
-python3 - "$DOC" <<'PY' || fail "front-matter is not valid YAML"
-import sys, yaml
-text = open(sys.argv[1], encoding="utf-8").read()
-parts = text.split("---", 2)
-assert len(parts) >= 3, "no front-matter block"
-yaml.safe_load(parts[1])
-PY
+# Validate the front-matter block structurally with awk (native, no Python):
+# there must be a closing fence and every non-blank line must be a YAML mapping
+# key or list item. (The required keys are already asserted above.)
+[ "$(grep -c '^---$' "$DOC")" -ge 2 ] || fail "front-matter has no closing '---' fence"
+awk '
+  /^[[:space:]]*$/ { next }
+  /^#/ { next }
+  /^[A-Za-z0-9_.-]+:([[:space:]].*)?$/ { next }
+  /^[[:space:]]+- / { next }
+  /^[[:space:]]+[A-Za-z0-9_.-]+:([[:space:]].*)?$/ { next }
+  { print "invalid front-matter line: " $0 > "/dev/stderr"; exit 1 }
+' <<< "$FRONT_MATTER" || fail "front-matter is not valid YAML"
 ok "front-matter is valid YAML with the required keys"
 
 # --- Group 2: check-name accuracy, derived from the LIVE workflows -----------
 # The set of real CI checks is read from the workflow files themselves so the
-# runbook fails this gate the moment CI and the doc drift apart.
-LIVE_CHECKS="$(python3 - "$VERIFY" "$COVERAGE" "$DOCS" <<'PY'
-import sys, yaml
-names = []
-for path in sys.argv[1:]:
-    doc = yaml.safe_load(open(path, encoding="utf-8"))
-    names += list((doc.get("jobs") or {}).keys())
-print("\n".join(names))
-PY
-)"
+# runbook fails this gate the moment CI and the doc drift apart. Job names are
+# the 2-space-indented keys under `jobs:` — enumerated with awk (native, no
+# Python).
+enum_jobs() {
+  awk '
+    /^jobs:[[:space:]]*$/ { inj=1; next }
+    inj && /^[^[:space:]]/ { inj=0 }
+    inj && /^  [A-Za-z0-9_-]+:/ { l=$0; sub(/^  /,"",l); sub(/:.*/,"",l); print l }
+  ' "$1"
+}
+LIVE_CHECKS="$(enum_jobs "$VERIFY"; enum_jobs "$COVERAGE"; enum_jobs "$DOCS")"
 [ -n "$LIVE_CHECKS" ] || fail "could not enumerate live CI job names from the workflows"
 while IFS= read -r check; do
   [ -n "$check" ] || continue
@@ -169,39 +175,44 @@ ok "evergreen + conservative-safety invariants are stated"
 
 # --- Group 6: internal anchors resolve (the bug this suite catches first) -----
 # Every in-page (#slug) link must point at a real heading. Slugs are computed
-# with the same default algorithm mkdocs' toc extension uses, so this matches
-# the rendered HTML ids exactly.
-python3 - "$DOC" <<'PY' || fail "one or more in-page anchor links do not resolve to a heading"
-import sys, re, unicodedata
-
-def slugify(value, sep="-"):
-    value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
-    value = re.sub(r"[^\w\s-]", "", value).strip().lower()
-    return re.sub(r"[%s\s]+" % re.escape(sep), sep, value)
-
-text = open(sys.argv[1], encoding="utf-8").read()
-
-# Ignore fenced code blocks when harvesting headings.
-in_fence = False
-slugs = set()
-for line in text.splitlines():
-    if line.lstrip().startswith("```"):
-        in_fence = not in_fence
-        continue
-    if in_fence:
-        continue
-    m = re.match(r"^(#{1,6})\s+(.*?)\s*$", line)
-    if m:
-        slugs.add(slugify(m.group(2)))
-
-targets = re.findall(r"\]\((#[A-Za-z0-9_-]+)\)", text)
-broken = sorted({t for t in targets if t[1:] not in slugs})
-if broken:
-    print("Unresolved in-page anchors: " + ", ".join(broken), file=sys.stderr)
-    print("Known heading anchors: " + ", ".join(sorted(slugs)), file=sys.stderr)
-    sys.exit(1)
-print(f"all {len(set(targets))} in-page anchor link(s) resolve to headings")
-PY
+# with the same default algorithm mkdocs' toc extension uses (awk port, native,
+# no Python), so this matches the rendered HTML ids exactly.
+awk '
+function slugify(s,   t) {
+  t=s
+  gsub(/[^A-Za-z0-9_ \t-]/,"",t)
+  gsub(/^[ \t]+|[ \t]+$/,"",t)
+  t=tolower(t)
+  gsub(/[- \t]+/,"-",t)
+  return t
+}
+{
+  line=$0
+  stripped=line; sub(/^[ \t]+/,"",stripped)
+  if (stripped ~ /^```/) { infence=!infence; next }
+  if (infence) next
+  if (match(line, /^#{1,6}[ \t]+/)) {
+    h=substr(line, RLENGTH+1); sub(/[ \t]+$/,"",h); slugs[slugify(h)]=1
+  }
+  s=line
+  while (match(s, /\]\(#[A-Za-z0-9_-]+\)/)) {
+    tok=substr(s, RSTART, RLENGTH); a=tok; sub(/^\]\(#/,"",a); sub(/\)$/,"",a)
+    targets[a]=1; s=substr(s, RSTART+RLENGTH)
+  }
+}
+END {
+  broken=""
+  for (t in targets) if (!(t in slugs)) broken=broken " " t
+  if (broken != "") {
+    print "Unresolved in-page anchors:" broken > "/dev/stderr"
+    m=""; for (g in slugs) m=m " " g
+    print "Known heading anchors:" m > "/dev/stderr"
+    exit 1
+  }
+  n=0; for (t in targets) n++
+  print "all " n " in-page anchor link(s) resolve to headings"
+}
+' "$DOC" || fail "one or more in-page anchor links do not resolve to a heading"
 ok "every in-page anchor link resolves to a real heading"
 
 echo "[gadugi] stale-PR triage runbook contract (#810): all ${PASS} checks passed"

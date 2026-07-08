@@ -208,7 +208,7 @@ Confirm the OODA cadence at startup and that cycles are still advancing:
 grep "OODA daemon: cycle interval" ~/.simard/ooda.log | tail -1
 
 # Cycle number is still incrementing once per interval
-python3 -c "import json;print(json.load(open('$HOME/.simard/daemon_health.json'))['cycle_number'])"
+jq -r '.cycle_number' "$HOME/.simard/daemon_health.json"
 ```
 
 The OODA thread carries `Priority::Critical` and is **exempt from the per-tick

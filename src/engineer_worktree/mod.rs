@@ -359,25 +359,26 @@ impl EngineerWorktree {
             );
         }
 
-        // 6. Best-effort `pre-commit install` so engineer commits run the
-        //    same fmt/clippy/test fences locally that CI runs. Several merged
-        //    and pending PRs (#1641, #1581, #1607, #1608, #1629, #1558, #1499)
-        //    failed CI on the `pre-commit` job because the engineer never ran
-        //    the hooks locally before pushing. Fail-loud-but-non-fatal: log at
-        //    WARN and continue; CI is still the source of truth.
+        // 6. Best-effort: wire the worktree's `core.hooksPath` to the repo's
+        //    committed native `hooks/` dir so engineer commits run the same
+        //    fmt/clippy/test fences locally that CI runs. Several merged and
+        //    pending PRs (#1641, #1581, #1607, #1608, #1629, #1558, #1499)
+        //    failed CI because the engineer never ran the hooks locally before
+        //    pushing. Fail-loud-but-non-fatal: log at WARN and continue; CI is
+        //    still the source of truth.
         match precommit::install_hooks(&dir) {
             Ok(true) => {
                 tracing::info!(
                     target: "simard::engineer_worktree",
                     worktree = %dir.display(),
-                    "pre-commit hooks installed in engineer worktree",
+                    "wired core.hooksPath to committed hooks/ dir in engineer worktree",
                 );
             }
             Ok(false) => {
                 tracing::debug!(
                     target: "simard::engineer_worktree",
                     worktree = %dir.display(),
-                    "pre-commit install skipped (no .pre-commit-config.yaml or no pre-commit binary)",
+                    "hook install skipped (no committed hooks/ dir)",
                 );
             }
             Err(e) => {
@@ -385,7 +386,7 @@ impl EngineerWorktree {
                     target: "simard::engineer_worktree",
                     error = %e,
                     worktree = %dir.display(),
-                    "pre-commit install failed; engineer commits will not be locally gated by pre-commit hooks (CI still gates the merge)",
+                    "hook install failed; engineer commits will not be locally gated by hooks (CI still gates the merge)",
                 );
             }
         }

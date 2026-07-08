@@ -323,46 +323,20 @@ Run with:
 cargo test -p simard operator_commands_dashboard
 ```
 
-### Python Playwright smoke test
+### Dashboard tab-clarity coverage
 
-`tests/e2e-dashboard/smoke_python/` is a small pytest suite that exercises the running dashboard end-to-end. It:
+Tab identity/clarity (unique titles/H1s, non-empty jargon-free ledes) is enforced
+by two native surfaces — Simard is a pure-Rust, Python-free daemon (#3181):
 
-1. Reads `~/.simard/.dashkey` (or `SIMARD_DASHKEY`) and POSTs it to `/api/login` as a JSON body (`Content-Type: application/json`, field name `code`) to obtain a session cookie. The encoding matches the existing route handler in `operator_commands_dashboard/auth.rs`.
-2. Discovers every nav button by querying `data-tab` attributes — no hardcoded tab list.
-3. Clicks each button in turn and uses Playwright's `expect(locator).to_be_visible()` on `.tab-panel[data-tab="{slug}"]`. This avoids hard-coding a `.active` class name and lets the contract survive future tab-handler refactors.
-4. Captures `document.title`, the visible `.page-h1` text, and the visible `.page-lede` text.
-5. Asserts: all titles unique and non-empty; all H1s unique and non-empty; every lede non-empty and free of banned jargon.
-6. Prints a markdown table `slug | title | h1 | lede` to stdout. CI uploads this as build evidence and the PR template links it into the description.
+1. **Rust unit tests** in `operator_commands_dashboard/index_html/tests_tab_meta.rs`
+   assert the per-tab metadata and the shared `BANNED_JARGON` list at the source.
+2. **TypeScript Playwright specs** under `tests/e2e-dashboard/specs/` exercise the
+   running dashboard end-to-end (structural project, fully mocked in CI).
 
-The `BANNED_JARGON` constant lives in both `tab_meta.rs` and `test_tab_clarity.py`. They are intentionally duplicated (no shared format file) and contributors are responsible for keeping them in step — both files are referenced from the same line in the "Adding a new tab" checklist, and the two-line list is short enough that drift is unlikely.
-
-Run locally:
-
-```bash
-pip install -r tests/e2e-dashboard/smoke_python/requirements.txt
-python -m playwright install --with-deps chromium
-
-# In another terminal, start the dashboard:
-simard dashboard serve --port=8080
-
-pytest tests/e2e-dashboard/smoke_python/ -v
-```
-
-The smoke test pins `playwright==1.59.0` to match the CI image and the TypeScript Playwright suite.
-
-### CI
-
-The smoke test runs in the existing `e2e-dashboard` job in `.github/workflows/verify.yml`, after the TypeScript Playwright suite has already started the dashboard server and provisioned `~/.simard/.dashkey`. Three steps are appended:
-
-```yaml
-- run: pip install -r tests/e2e-dashboard/smoke_python/requirements.txt
-- run: python -m playwright install --with-deps chromium
-- run: pytest tests/e2e-dashboard/smoke_python/ -v --tb=short
-  env:
-    SIMARD_DASHBOARD_URL: http://localhost:${{ env.PORT }}
-```
-
-The `SIMARD_DASHBOARD_URL` environment variable is honored by `conftest.py` (defaulting to `http://localhost:8080`) so the same suite runs unchanged in CI and locally on a custom port. A failed assertion fails the job. The evidence table is visible in the job's log.
+> The former `tests/e2e-dashboard/smoke_python/` pytest+Playwright smoke suite
+> was removed in #3181. Its tab-identity assertions are covered by the Rust
+> `tests_tab_meta.rs` unit tests plus the TypeScript Playwright suite; no Python
+> runtime is required to validate the dashboard.
 
 ## Related
 

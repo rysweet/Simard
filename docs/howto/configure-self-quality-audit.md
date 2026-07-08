@@ -242,7 +242,7 @@ raw output:
 recipe-runner-rs prompt_assets/simard/recipes/monthly-self-quality-audit.yaml \
   --output-format json \
   -c state_root="$HOME/.simard" -c repo_path="/home/azureuser/src/Simard" \
-  | python3 -m json.tool
+  | jq .
 ```
 
 ### 5. Audit isn't firing when you expect

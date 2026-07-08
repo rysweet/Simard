@@ -21,11 +21,15 @@ All `.ts` files under `tests/e2e-dashboard/` are covered by this exemption:
 - `pages/*.ts` — page object models
 - `specs/*.ts` — test specifications
 
-The `smoke_python/` subdirectory contains Python smoke tests that are
-separately tracked under the Rust-only epic.
+> The former `smoke_python/` subdirectory (pytest + Playwright) was removed in
+> #3181. Simard is a pure-Rust, Python-free daemon; its dashboard tab-identity
+> coverage is now the Rust `tests_tab_meta.rs` unit tests plus these TypeScript
+> Playwright specs. No Python remains under `tests/e2e-dashboard/`.
 
 ## CI Enforcement
 
-A pre-commit hook (`no-new-js-ts`) prevents new `.js`/`.ts` files from being
-added outside the exempted directories (`npm/`, `tests/e2e-dashboard/`, and
-the root-level distribution shims). See `.pre-commit-config.yaml`.
+The committed native `hooks/pre-commit` (wired via `core.hooksPath`, see
+`hooks/README.md`) and the CI `verify.yml` Rust-only gate
+(`scripts/check-rust-only-gate.sh`) prevent new `.py` files anywhere, and new
+`.js`/`.ts` files outside the exempted directories (`npm/`,
+`tests/e2e-dashboard/`, and the root-level distribution shims).

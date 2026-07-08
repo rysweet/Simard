@@ -22,13 +22,14 @@ they are the same gates CI enforces.
 
 ## Rust-Only Policy
 
-Simard is migrating to a Rust-only codebase ([#2155](https://github.com/rysweet/Simard/issues/2155)).
-**New `.py` files under `src/` or `python/`, and new `.js`/`.ts` files outside
+Simard is a Rust-only, Python-free daemon ([#3181](https://github.com/rysweet/Simard/issues/3181),
+completing [#2155](https://github.com/rysweet/Simard/issues/2155)).
+**New `.py` files anywhere in the repo, and new `.js`/`.ts` files outside
 `npm/` and `tests/e2e-dashboard/`, are not permitted.**
 
 A CI gate (`scripts/check-rust-only-gate.sh`) enforces this on every PR and
-as a pre-commit hook. A small set of pre-existing files is allow-listed until
-they are individually migrated — see the script for the current list.
+via the committed native `hooks/pre-commit`. The `.py` allow-list is empty —
+no Python remains.
 
 If you need to add a non-Rust file that falls outside the allow-list, open an
 issue explaining the need and add the file to the allow-list in
@@ -38,9 +39,10 @@ issue explaining the need and add the file to the allow-list in
 
 ## Local Pre-Commit Workflow
 
-Simard uses the [`pre-commit`](https://pre-commit.com) framework to mirror
-the CI `pre-commit` workflow on every developer machine. The local hooks run
-**the same checks CI runs** — if they pass locally, CI will pass.
+Simard is a pure-Rust, Python-free daemon (issue #3181). Local gating is done
+by **committed native git hooks** (`hooks/pre-commit`, `hooks/pre-push`) wired
+via `core.hooksPath` — there is no Python `pre-commit` framework. The local
+hooks run **the same checks CI runs** — if they pass locally, CI will pass.
 
 ### One-Time Setup
 
@@ -49,36 +51,31 @@ the CI `pre-commit` workflow on every developer machine. The local hooks run
 ./scripts/install-precommit.sh
 ```
 
-The script is idempotent; running it again is a no-op if hooks are already
-installed.
+The script is idempotent; running it again is a no-op if the hooks are already
+wired.
 
 What `install-precommit.sh` does:
 
-1. Verifies `python3` and `pip` (or `pipx`) are available.
-2. Installs the `pre-commit` framework (pinned `>=3.7`) into the user
-   site (`pip install --user pre-commit`) or via `pipx` if available.
-3. Runs `pre-commit install --install-hooks` (the project pins
-   `default_install_hook_types: [pre-commit, pre-push]` in the config so
-   both hook stages are installed in one call).
-4. Performs an initial `pre-commit run --all-files` to warm caches.
+1. Verifies the repo ships committed hooks (`hooks/pre-commit`).
+2. Runs `git config --local core.hooksPath hooks` so git runs the committed
+   `hooks/pre-commit` and `hooks/pre-push` scripts (both stages, one setting).
+3. Prints verification commands.
 
-> **Note on `scripts/install-precommit.sh`** — this installer is part of
-> the issue #1631 hardening work and lands in the same PR as this
-> documentation. If you are reading this on a branch that does not yet
-> contain the script, fall back to the manual install below.
+No Python, `pip`, or `pipx` is required.
 
 ### What Each Hook Runs
 
-The actual configuration is in
-[`.pre-commit-config.yaml`](.pre-commit-config.yaml); the table below is
-a summary, not the source of truth.
+The actual hooks are the committed [`hooks/pre-commit`](hooks/pre-commit) and
+[`hooks/pre-push`](hooks/pre-push) scripts; the table below is a summary, not
+the source of truth.
 
-| Hook id | Stage(s) | Command |
+| Hook | Stage(s) | Command |
 |---|---|---|
-| `cargo-fmt` | `pre-commit`, `pre-push`, `manual` | `cargo fmt --all -- --check` |
-| `cargo-clippy-precommit` | `pre-commit`, `manual` | `cargo clippy --release --no-deps -- -D warnings` (via [`scripts/clippy-precommit-release.sh`](scripts/clippy-precommit-release.sh)) |
-| `cargo-clippy` | `pre-push`, `manual` | `cargo clippy --all-targets --all-features --locked -- -D warnings` |
-| `cargo-test-race-subset` | `pre-push`, `manual` | `cargo test --release --lib -- --test-threads=$(nproc) cognitive_memory bootstrap memory_ipc memory_consolidation` |
+| `rust-only-gate` | `pre-commit`, `pre-push` | `scripts/check-rust-only-gate.sh` (no new `.py`/`.js`/`.ts`) |
+| `cargo-fmt` | `pre-commit`, `pre-push` | `cargo fmt --all -- --check` |
+| `cargo-clippy-precommit` | `pre-commit` | `cargo clippy --release --no-deps -- -D warnings` (via [`scripts/clippy-precommit-release.sh`](scripts/clippy-precommit-release.sh)) |
+| `cargo-clippy` | `pre-push` | `cargo clippy --all-targets --all-features --locked -- -D warnings` |
+| `cargo-test-race-subset` | `pre-push` | `cargo test --release --lib -- --test-threads=$(nproc) cognitive_memory bootstrap memory_ipc memory_consolidation` |
 
 The two-tier clippy gate is intentional: the `--release --no-deps`
 hook gives instant feedback at commit time; the `--all-targets
@@ -120,31 +117,29 @@ ever leaving a developer machine.
 
 ### Manual Invocation
 
+The hooks are plain scripts — run them directly, or run the individual cargo
+gates:
+
 ```bash
-# Run all hooks on all files (recommended before opening a PR)
-pre-commit run --all-files
+# Run the full commit gate (rust-only + fmt + release clippy)
+hooks/pre-commit
 
-# Run a specific hook on all files
-pre-commit run cargo-fmt --all-files
-pre-commit run cargo-clippy-precommit --all-files
-pre-commit run cargo-clippy --all-files --hook-stage pre-push
-pre-commit run cargo-test-race-subset --all-files --hook-stage pre-push
+# Run the full push gate (rust-only + fmt + race-subset tests + full clippy)
+hooks/pre-push
 
-# Run only on staged files (default behavior at commit time)
-pre-commit run
+# Or run a specific gate directly:
+cargo fmt --all -- --check
+scripts/clippy-precommit-release.sh                       # release clippy (-D warnings)
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --release --lib -- --test-threads="$(nproc)" cognitive_memory bootstrap memory_ipc memory_consolidation
 ```
 
 ### Bypassing Hooks (Emergency Only)
 
-The standard `pre-commit` `SKIP=` env var is honored:
+Do **not** bypass the hooks. `git commit --no-verify` / `git push --no-verify`
+are prohibited by policy:
 
-```bash
-# Skip a single hook (DISCOURAGED — use only when actively debugging
-# the hook itself, not the code under change)
-SKIP=cargo-test-race-subset git push
-```
-
-> **PRs pushed with `SKIP=` will be rejected at merge time.** CI re-runs
+> **PRs pushed with `--no-verify` will be rejected at merge time.** CI re-runs
 > the same checks and merge is blocked on red CI. There is no admin
 > override (see [Merge Policy](#merge-policy-no---admin-merges)).
 
@@ -174,14 +169,10 @@ Revert each test change before continuing.
 
 ### Updating Hook Versions
 
-Because every hook is `language: system` (it shells out to the locally
-installed `cargo`), there are no upstream hook revisions to bump. To
-bump the framework itself:
-
-```bash
-pipx upgrade pre-commit          # or: pip install --user --upgrade pre-commit
-pre-commit install --install-hooks
-```
+Every gate shells out to the locally installed `cargo` — there is no framework
+and no upstream hook revisions to bump. The hooks themselves are committed
+under `hooks/`; edit those scripts directly and commit the change (they are
+gated by the Rust-only policy like any other file).
 
 ---
 
@@ -217,7 +208,7 @@ was traced to a chain of admin merges that suppressed warning signals.
 
 Before requesting merge:
 
-- [ ] Local `pre-commit run --all-files` is green.
+- [ ] Local `hooks/pre-commit` and `hooks/pre-push` are green.
 - [ ] Local `cargo fmt --all -- --check && cargo clippy --all-targets --all-features --locked -- -D warnings && cargo test --all-features --locked -- --skip cargo_install_from_repo_succeeds` is green.
 - [ ] CI on the PR is green.
 - [ ] Pre-existing failures inherited from `main` are either fixed in this PR or tracked by a linked GitHub issue.

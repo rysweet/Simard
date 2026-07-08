@@ -216,7 +216,7 @@ pub use bridge::{
     new_request_id, unpack_bridge_response,
 };
 pub use bridge_circuit::{CircuitBreakerConfig, CircuitBreakerTransport, CircuitState};
-pub use bridge_subprocess::{InMemoryBridgeTransport, SubprocessBridgeTransport};
+pub use bridge_subprocess::InMemoryBridgeTransport;
 pub use build_lock::{BuildLock, BuildLockGuard};
 pub use cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
 pub use cost_tracking::{

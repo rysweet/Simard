@@ -170,16 +170,18 @@ the server reaps the subprocess automatically.)
 
 ### Programmatic poller
 
-```python
-import requests, time
-while True:
-    snap = requests.get("http://localhost:8765/api/azlin/tmux-sessions").json()
-    for h in snap["hosts"]:
-        if h["reachable"]:
-            print(h["host"], [s["name"] for s in h["sessions"]])
-        else:
-            print(h["host"], "DOWN:", h["error"])
-    time.sleep(10)
+```bash
+# Poll the tmux-sessions API and print reachable hosts + their session names,
+# or "DOWN" with the error for unreachable hosts.
+while true; do
+  curl -s "http://localhost:8765/api/azlin/tmux-sessions" | jq -r '
+    .hosts[]
+    | if .reachable
+      then "\(.host) \([.sessions[].name] | join(","))"
+      else "\(.host) DOWN: \(.error)"
+      end'
+  sleep 10
+done
 ```
 
 ---

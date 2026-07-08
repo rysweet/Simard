@@ -82,26 +82,21 @@ jobs:
           echo "LBUG_INCLUDE_DIR=$lib_dir" >> "$GITHUB_ENV"
           rm -rf target/*/build/lbug-* target/*/.fingerprint/lbug-* 2>/dev/null || true
 
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.x"
+      - name: Formatting gate (cargo fmt --all -- --check)
+        run: cargo fmt --all -- --check
 
-      - name: Install pre-commit
-        run: python -m pip install --upgrade pip pre-commit
-
-      - name: Run pre-commit stage
+      - name: Release clippy gate (cargo clippy --release -D warnings, lbug link-path wrapper)
         id: precommit_stage
-        # `--verbose` so the cargo-clippy-precommit hook's output (including the
-        # lbug native-lib resolution marker on stderr) is captured even on
-        # success, which the regression-guard step below asserts on. Tee'd to a
-        # log so the assertion runs without re-invoking the expensive release
-        # clippy.
+        # Runs the same `cargo clippy --release --no-deps -- -D warnings` gate the
+        # former Python pre-commit framework ran, directly (issue #3181 — Simard
+        # is Python-free). The wrapper guarantees the `lbug` native static lib is
+        # on the linker search path (#2426). Its resolution + SUCCESS markers are
+        # tee'd to a log the regression-guard step below asserts on, so the guard
+        # runs without re-invoking the expensive release clippy.
         run: |
           set -o pipefail
           mkdir -p target/ci-logs
-          python -m pre_commit run --all-files --show-diff-on-failure --verbose \
-            --hook-stage pre-commit 2>&1 | tee target/ci-logs/precommit-stage.log
+          scripts/clippy-precommit-release.sh 2>&1 | tee target/ci-logs/precommit-stage.log
 
       - name: Assert pre-commit clippy compiled/linked lbug (regression guard #2426)
         # Guards against silent reintroduction of issue #2426 (pre-commit clippy
@@ -148,13 +143,14 @@ jobs:
             -- --skip install_packages_runs_and_self_installs \
             2>&1 | tee target/ci-logs/cargo-test.log
 
-      - name: Run pre-push stage (cargo-clippy only)
+      - name: Full clippy gate (all targets/features, locked, -D warnings)
         # Runs AFTER cargo test on purpose: test compiles the entire crate
         # graph (test profile) into target/debug/deps. Clippy on `--all-targets`
         # with a warm target dir reuses those .rmeta artifacts and takes
         # single-digit minutes instead of the ~17 min cold cost it pays when
-        # run first.
-        run: python -m pre_commit run --all-files --show-diff-on-failure --hook-stage pre-push cargo-clippy
+        # run first. Mirrors hooks/pre-push and the former Python pre-commit
+        # framework's pre-push `cargo-clippy` hook, run directly (issue #3181).
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
       - name: Build minimal binary (--no-default-features contract, issue #2576)
         # Issue #2576 made every runtime feature (signal, dashboard-audit) part
@@ -382,53 +378,6 @@ jobs:
         # require an LLM backend that is intentionally not provisioned in CI;
         # they are validated separately when credentials are available.
         run: npx playwright test --config=tests/e2e-dashboard/playwright.config.ts --project=structural tests/e2e-dashboard/specs/overview.spec.ts tests/e2e-dashboard/specs/logs-filter.spec.ts
-
-      # ---- Python tab-identity smoke test (#1993 / #1994 / #1995) ----
-      # Reuses the binary the TypeScript step downloaded plus the same
-      # ~/.simard/.dashkey provisioned above. The dashboard server is
-      # launched here on a dedicated port so we don't race the TS suite's
-      # webServer lifecycle.
-      - name: Set up Python for tab-identity smoke test
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.x"
-
-      - name: Install tab-identity smoke-test dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r tests/e2e-dashboard/smoke_python/requirements.txt
-          python -m playwright install chromium
-
-      - name: Run tab-identity smoke test
-        env:
-          SIMARD_DASHKEY: testkey1
-          SIMARD_DASHBOARD_URL: http://localhost:18801
-        run: |
-          # Launch the dashboard on a dedicated port and wait for it to
-          # accept connections before invoking pytest. The PID is recorded
-          # so we can shut it down cleanly when the smoke test finishes.
-          target/debug/simard dashboard serve --port=18801 \
-            > /tmp/simard-dashboard-smoke.log 2>&1 &
-          DASH_PID=$!
-          echo "dashboard PID=$DASH_PID"
-          # Wait up to 30 s for the server to start serving HTTP.
-          for i in $(seq 1 30); do
-            if curl -s -o /dev/null -w "%{http_code}" http://localhost:18801/login | grep -q '^200$'; then
-              echo "dashboard ready after ${i}s"
-              break
-            fi
-            sleep 1
-          done
-          # Run the smoke test. `set +e` so we always stop the dashboard
-          # afterwards even if pytest fails.
-          set +e
-          pytest tests/e2e-dashboard/smoke_python/ -v --tb=short -s
-          rc=$?
-          set -e
-          echo "--- dashboard log tail ---"
-          tail -50 /tmp/simard-dashboard-smoke.log || true
-          kill "$DASH_PID" 2>/dev/null || true
-          exit $rc
 
       - name: Upload Playwright report on failure
         if: failure()

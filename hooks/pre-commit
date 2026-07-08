@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+#
+# hooks/pre-commit — native Simard commit gate (issue #3181).
+#
+# Replaces the former Python `pre-commit` framework (.pre-commit-config.yaml).
+# Wired per-checkout via `core.hooksPath=hooks` (see hooks/README.md and
+# `crate::engineer_worktree::precommit::install_hooks`). Runs the SAME fast
+# fences the framework's pre-commit stage ran — the Rust-only gate, `cargo fmt
+# --check`, and the release clippy `-D warnings` gate — with zero Python.
+#
+# Budget: fmt is ~1s incrementally; the release clippy is the heavy step but is
+# fully incremental on a warm target dir. Fail-loud: any gate failing aborts the
+# commit (no --no-verify bypass is sanctioned).
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+cd "$REPO_ROOT"
+
+log() { printf '[simard] pre-commit: %s\n' "$*" >&2; }
+fail() { printf '[simard] pre-commit FAILED: %s\n' "$*" >&2; exit 1; }
+
+# 1. Rust-only gate — no new .py / .js / .ts outside the allow-list.
+log "rust-only gate (staged additions)"
+scripts/check-rust-only-gate.sh --staged || fail "rust-only gate rejected staged files"
+
+# 2. Formatting.
+log "cargo fmt --all -- --check"
+cargo fmt --all -- --check || fail "cargo fmt --check found unformatted code"
+
+# 3. Release clippy at full strictness (routes through the lbug link-path
+#    wrapper so #2426 cannot silently return).
+log "cargo clippy --release --no-deps -- -D warnings (via lbug link-path wrapper)"
+scripts/clippy-precommit-release.sh || fail "cargo clippy --release found lint violations"
+
+log "all pre-commit gates passed"

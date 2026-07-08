@@ -188,7 +188,7 @@ Or inspect the JSON directly:
 
 ```bash
 ls ~/.simard/meetings/
-cat ~/.simard/meetings/20260412T1430_discuss-the-next-simard-milestone.json | python3 -m json.tool
+cat ~/.simard/meetings/20260412T1430_discuss-the-next-simard-milestone.json | jq .
 ```
 
 The JSON transcript contains:

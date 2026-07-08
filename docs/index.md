@@ -133,11 +133,13 @@ If you are tight on disk or working across many Simard worktrees, prefer `script
 
 ## Contributor verification
 
-Repository changes are expected to pass the same checks locally and in CI:
+Repository changes are expected to pass the same checks locally and in CI.
+Simard is a pure-Rust, Python-free daemon (issue #3181); local gating uses
+committed native git hooks (no Python framework):
 
-- `python3 -m pre_commit install --hook-type pre-commit --hook-type pre-push`
-- `python3 -m pre_commit run --all-files --hook-stage pre-commit`
-- `python3 -m pre_commit run --all-files --hook-stage pre-push`
+- `git config core.hooksPath hooks` — wire the committed hooks (or run `./scripts/install-precommit.sh`)
+- `hooks/pre-commit` — runs the commit-stage gates
+- `hooks/pre-push` — runs the push-stage gates
 
 Those hooks enforce `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, and `cargo test --all-features --locked`.
 

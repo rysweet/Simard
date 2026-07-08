@@ -192,7 +192,7 @@ fn bootstrap_and_distilled_pr_merge_procedures_both_surface() {
 /// `derive_triggers_from_objective` and the lowercase string literals in
 /// `BOOTSTRAP_PROCEDURES`). The read path lowercases tokens via
 /// `tokenize_objective`. Cypher `CONTAINS` is case-sensitive in
-/// Kuzu/lbug, so the round-trip only works if both sides agree on
+/// lbug, so the round-trip only works if both sides agree on
 /// lowercase. This gate proves it: store with lowercase, recall with
 /// SHOUTED uppercase, and assert a hit.
 #[test]

@@ -15,10 +15,9 @@ Simard uses a **bridge abstraction** — typed `BridgeTransport` implementations
 | Transport | Use Case | Notes |
 |-----------|----------|-------|
 | **NativeBridgeTransport** | Production (knowledge, gym) | In-process Rust handlers, zero overhead |
-| **SubprocessBridgeTransport** | Testing infrastructure | Spawns a Python subprocess; used only in integration tests |
-| **InMemoryBridgeTransport** | Unit testing | In-memory mock; no I/O |
+| **InMemoryBridgeTransport** | Unit & integration testing | In-memory handler; no I/O, no Python |
 
-> **History**: Prior to #2181, knowledge and gym bridges used Python subprocess transports with a native Rust fallback. The native Rust transports are now the only production path. Cognitive memory is provided by the library-backed `LibraryCognitiveMemory` (over `amplihack-memory-lib`) as the sole on-disk backend after the de-fork (Phase 2b) — see [Cognitive Memory Architecture](cognitive-memory.md) and [Library-backed Cognitive Memory](cognitive-memory-library-adapter.md).
+> **History**: Prior to #2181, knowledge and gym bridges used Python subprocess transports with a native Rust fallback. The native Rust transports became the only production path in #2181, and the `SubprocessBridgeTransport` (a test-only Python subprocess transport) was removed entirely in #3181 — Simard is now a pure-Rust, Python-free daemon. Cognitive memory is provided by the library-backed `LibraryCognitiveMemory` (over `amplihack-memory-lib`) as the sole on-disk backend after the de-fork (Phase 2b) — see [Cognitive Memory Architecture](cognitive-memory.md) and [Library-backed Cognitive Memory](cognitive-memory-library-adapter.md).
 
 ## Wire Protocol
 
@@ -71,8 +70,8 @@ pub trait BridgeTransport: Send + Sync {
 
 | Type | Purpose |
 |------|---------|
-| `SubprocessBridgeTransport` | Spawns Python, manages stdin/stdout, kills on drop |
-| `InMemoryBridgeTransport` | Handler function for unit tests, no Python needed |
+| `NativeBridgeTransport` | In-process Rust handlers (production knowledge/gym bridges) |
+| `InMemoryBridgeTransport` | Handler function for unit/integration tests, no Python needed |
 | `CircuitBreakerTransport<T>` | Wraps any transport with fault tolerance |
 
 ### Circuit Breaker
@@ -92,37 +91,26 @@ stateDiagram-v2
 
 Only transport-level errors (code `-32001`) trip the circuit. Application errors (method not found, internal) do not.
 
-## Python-Side Architecture
+## Rust-Side Handlers
 
-### BridgeServer Base Class
+Bridges are pure Rust and **in-process** — there is no separate server process
+and no Python (the former `SubprocessBridgeTransport` was removed in #3181).
+`NativeBridgeTransport::new(name)` always registers the built-in `bridge.health`
+method; callers register one handler closure per additional method:
 
-```python
-class BridgeServer:
-    def __init__(self, server_name: str) -> None
-    def register(self, method: str, handler: Callable) -> None
-    def run(self) -> None  # stdin/stdout loop
+```rust
+let mut transport = NativeBridgeTransport::new("simard-knowledge");
+transport.register(
+    "knowledge.list_packs",
+    Arc::new(|_params| Ok(serde_json::json!({ "packs": [] }))),
+);
 ```
 
-Each bridge server extends `BridgeServer` and registers method handlers:
-
-```python
-class SimardMemoryBridge(BridgeServer):
-    def __init__(self, agent_name, db_path):
-        super().__init__("simard-memory")
-        self.adapter = CognitiveAdapter(agent_name, db_path)
-        self.register("memory.store_fact", self.handle_store_fact)
-        # ... register all memory methods
-
-    def handle_store_fact(self, params):
-        fact_id = self.adapter.store_fact(
-            context=params["concept"],
-            fact=params["content"],
-            confidence=params.get("confidence", 0.9),
-        )
-        return {"fact_id": fact_id}
-```
-
-The built-in `bridge.health` method is always registered and returns `{"server_name": "...", "healthy": true}`.
+Production bridges register their method sets via helpers such as
+`native_knowledge::register_knowledge_handlers(&mut transport, packs_dir)`.
+Tests use `InMemoryBridgeTransport::new(name, handler)` with the same closure
+shape. The built-in `bridge.health` method always returns
+`{"server_name": "...", "healthy": true}`.
 
 ## Error Handling
 
@@ -130,7 +118,7 @@ The built-in `bridge.health` method is always registered and returns `{"server_n
 
 | Error Type | When | Recovery |
 |-----------|------|----------|
-| `BridgeSpawnFailed` | Python binary not found | Check PATH, install python3 |
+| `BridgeSpawnFailed` | A child simard/bridge process could not be spawned | Check the binary path and permissions |
 | `BridgeTransportError` | Stdin/stdout broken, process exited | Circuit breaker opens, auto-respawn on next call |
 | `BridgeProtocolError` | Malformed JSON, type mismatch | Log and surface to operator |
 | `BridgeCallFailed` | Method returned error payload | Surface to caller with method context |
@@ -166,16 +154,18 @@ let response = transport.call(health_request()).unwrap();
 assert!(response.result.is_some());
 ```
 
-### Integration Tests (subprocess transport)
+### Integration Tests (native circuit breaker)
 
 ```rust
-let transport = SubprocessBridgeTransport::new(
-    "echo-test",
-    "tests/fixtures/echo_bridge.py",
-    vec![],
-    Duration::from_secs(5),
-);
-let health = transport.health().expect("bridge should be healthy");
+let inner = InMemoryBridgeTransport::new("echo", |method, params| {
+    if method == "bridge.health" {
+        Ok(serde_json::json!({ "server_name": "echo", "healthy": true }))
+    } else {
+        Ok(params.clone())
+    }
+});
+let cb = CircuitBreakerTransport::with_defaults(inner);
+let health = cb.health().expect("bridge should be healthy");
 assert_eq!(health.server_name, "echo");
 ```
 

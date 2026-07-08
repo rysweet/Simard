@@ -75,19 +75,19 @@ grep -q 'logLevelAt' <<<"$HTML" \
 grep -q '"daemon_log_levels"' <<<"$(cat "$RESP")" \
   || fail "/api/logs must expose a daemon_log_levels array (#1687)"
 
-python3 - "$RESP" <<'PY'
-import json, sys
-with open(sys.argv[1]) as f:
-    d = json.load(f)
-lines = d.get("daemon_log_lines")
-levels = d.get("daemon_log_levels")
-assert isinstance(lines, list), "daemon_log_lines missing or not a list"
-assert isinstance(levels, list), "daemon_log_levels missing or not a list"
-assert len(lines) == len(levels), f"level count {len(levels)} != line count {len(lines)}"
-allowed = {"error", "warn", "info"}
-bad = [l for l in levels if l not in allowed]
-assert not bad, f"invalid level tokens: {bad[:5]}"
-print(f"[log-filter] api levels ok: {len(lines)} lines, each classified into {sorted(set(levels)) or ['(no lines)']}")
-PY
+# Validate the parallel arrays with jq (native, no Python): daemon_log_lines and
+# daemon_log_levels must both be arrays of equal length, and every level token
+# must be one of error/warn/info.
+jq -e '
+  (.daemon_log_lines | type) == "array" and
+  (.daemon_log_levels | type) == "array" and
+  (.daemon_log_lines | length) == (.daemon_log_levels | length) and
+  (.daemon_log_levels | all(. == "error" or . == "warn" or . == "info"))
+' "$RESP" >/dev/null \
+  || fail "/api/logs daemon_log_lines/daemon_log_levels must be equal-length arrays of error|warn|info tokens"
+
+n_lines="$(jq '.daemon_log_lines | length' "$RESP")"
+distinct_levels="$(jq -r '[.daemon_log_levels[]] | unique | join(",")' "$RESP")"
+echo "[log-filter] api levels ok: ${n_lines} lines, each classified into ${distinct_levels:-(no lines)}"
 
 echo "[log-filter] PASS: Logs level filter is wired end-to-end (#1687)"

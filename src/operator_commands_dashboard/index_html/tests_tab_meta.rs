@@ -1,7 +1,9 @@
 //! Tests for [`super::tab_meta`] and the cross-check between
-//! `TAB_METADATA` and the rendered `INDEX_HTML`. These tests are the
-//! Rust half of the Tab-Identity Contract (#1993 / #1994 / #1995); the
-//! other half is `tests/e2e-dashboard/smoke_python/test_tab_clarity.py`.
+//! `TAB_METADATA` and the rendered `INDEX_HTML`. These tests enforce the
+//! Tab-Identity Contract (#1993 / #1994 / #1995) natively; the end-to-end
+//! side is covered by the TypeScript Playwright specs under
+//! `tests/e2e-dashboard/specs/` (the former Python smoke suite was removed
+//! in #3181 — Simard is a pure-Rust, Python-free daemon).
 
 #![cfg(test)]
 

@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+#
+# hooks/pre-push — native Simard push gate (issue #3181).
+#
+# Replaces the former Python `pre-commit` framework's pre-push stage. Wired via
+# `core.hooksPath=hooks`. Runs the SAME race-catching test subset and the heavy
+# `--all-targets --all-features --locked -D warnings` clippy CI runs, with zero
+# Python. Fail-loud: any gate failing aborts the push (no --no-verify bypass).
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+cd "$REPO_ROOT"
+
+log() { printf '[simard] pre-push: %s\n' "$*" >&2; }
+fail() { printf '[simard] pre-push FAILED: %s\n' "$*" >&2; exit 1; }
+
+# 1. Rust-only gate over the whole tree (nothing is staged at push time).
+log "rust-only gate (tracked tree)"
+scripts/check-rust-only-gate.sh || fail "rust-only gate rejected tracked files"
+
+# 2. Formatting (catch rebase/merge drift before push).
+log "cargo fmt --all -- --check"
+cargo fmt --all -- --check || fail "cargo fmt --check found unformatted code"
+
+# 3. Race-catching lib-test subset (issue #1631). Budget ≤ 90s on a dev host.
+log "cargo test --release --lib race subset (cognitive_memory|bootstrap|memory_ipc|memory_consolidation)"
+cargo test --release --lib -- --test-threads="$(nproc)" \
+  cognitive_memory bootstrap memory_ipc memory_consolidation \
+  || fail "race-subset lib tests failed"
+
+# 4. Full clippy at CI strictness.
+log "cargo clippy --all-targets --all-features --locked -- -D warnings"
+cargo clippy --all-targets --all-features --locked -- -D warnings \
+  || fail "cargo clippy (all targets/features) found lint violations"
+
+log "all pre-push gates passed"

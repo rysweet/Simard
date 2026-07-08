@@ -180,7 +180,7 @@ If values are wrong, check the JSON envelope to see the raw agent output:
 recipe-runner-rs prompt_assets/simard/recipes/disk-health-check.yaml \
   --output-format json \
   -c STATE_ROOT="$HOME/.simard" \
-  -c REPO_ROOT="/home/azureuser/src/Simard" | python3 -m json.tool
+  -c REPO_ROOT="/home/azureuser/src/Simard" | jq .
 ```
 
 Look at `step_results[0].output` — the markers (`DISK_USED_PCT`, `FREED_BYTES`,

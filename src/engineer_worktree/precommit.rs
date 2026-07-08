@@ -1,49 +1,46 @@
-//! Best-effort `pre-commit install` for fresh engineer worktrees.
+//! Wire committed native git hooks into fresh engineer worktrees (#3181).
 //!
-//! When a per-engineer worktree is allocated, install the repo's pre-commit
-//! hooks into it so the engineer's local commits are gated by the same
-//! formatting, lint, and test fences that CI runs (#1641, #1581, #1607,
-//! #1608, #1629, #1558, #1499 and several other PRs all failed CI on the
-//! `pre-commit` job because the engineer never ran the hooks locally before
-//! pushing).
+//! When a per-engineer worktree is allocated, point its `core.hooksPath` at the
+//! repo's committed `hooks/` directory so the engineer's local commits and
+//! pushes are gated by the same formatting, lint, and test fences that CI runs
+//! (#1641, #1581, #1607, #1608, #1629, #1558, #1499 and several other PRs all
+//! failed CI because the engineer never ran the hooks locally before pushing).
 //!
-//! **Non-fatal**: a missing `pre-commit` binary, an absent `.pre-commit-config.yaml`,
-//! or a non-zero exit from `pre-commit install` are all logged at WARN and
-//! the worktree allocation still succeeds. The hooks are a productivity
-//! improvement, not a correctness requirement — engineers can still produce
-//! valid commits without them, and CI will catch anything they miss.
+//! Simard is a pure-Rust daemon: the hooks shell out to `cargo` directly and
+//! there is no Python `pre-commit` framework, no `.pre-commit-config.yaml`, and
+//! no `pip install` — see `hooks/pre-commit` and `hooks/pre-push`.
+//!
+//! **Non-fatal**: a repo without a committed `hooks/` directory simply skips
+//! (`Ok(false)`); only a failed `git config` invocation returns `Err`. The
+//! hooks are a productivity improvement, not a correctness requirement — CI is
+//! still the source of truth.
 //!
 //! **Security**: follows the same `env_clear()` + selective re-injection
 //! pattern as [`crate::engineer_worktree::sweep::git_capture`] so a hostile
-//! environment cannot hijack the subprocess via `LD_PRELOAD`,
-//! `PRE_COMMIT_HOME`, or similar.
+//! environment cannot hijack the `git config` subprocess via `LD_PRELOAD` or
+//! similar.
 
 use std::path::Path;
 use std::process::Command;
 
-/// Install pre-commit hooks into a freshly-allocated worktree.
+/// Wire committed native git hooks into a freshly-allocated worktree.
 ///
-/// Returns `Ok(true)` if hooks were installed, `Ok(false)` if the operation
-/// was skipped (no config, no binary), and `Err(reason)` only if the
-/// subprocess could not be spawned at all. Callers in production treat all
-/// outcomes as best-effort and never propagate the error.
+/// Sets `core.hooksPath` to the repo's committed `hooks/` directory when it
+/// ships a `hooks/pre-commit` hook. Returns `Ok(true)` when the path was wired,
+/// `Ok(false)` when the operation was skipped (no committed `hooks/` dir), and
+/// `Err(reason)` only if `git config` could not be run. Callers in production
+/// treat all outcomes as best-effort and never propagate the error.
 pub fn install_hooks(worktree: &Path) -> Result<bool, String> {
-    // Skip if the repo doesn't use pre-commit.
-    let cfg = worktree.join(".pre-commit-config.yaml");
-    if !cfg.exists() {
+    // Skip if the repo doesn't ship committed native hooks. `hooks/pre-commit`
+    // is the sentinel: without it there is nothing to wire.
+    if !worktree.join("hooks").join("pre-commit").is_file() {
         return Ok(false);
     }
 
-    // Skip if the pre-commit binary isn't on PATH. We don't want to fail
-    // worktree allocation just because a developer hasn't `pip install`'d
-    // pre-commit in this environment.
-    if !pre_commit_on_path() {
-        return Ok(false);
-    }
-
-    let mut cmd = Command::new("pre-commit");
-    cmd.arg("install")
-        .arg("--install-hooks")
+    // Point git at the committed hooks/ dir (relative to the worktree root).
+    // `--local` scopes the setting to this worktree's config.
+    let mut cmd = Command::new("git");
+    cmd.args(["config", "--local", "core.hooksPath", "hooks"])
         .current_dir(worktree)
         .env_clear();
     if let Ok(path) = std::env::var("PATH") {
@@ -55,34 +52,17 @@ pub fn install_hooks(worktree: &Path) -> Result<bool, String> {
 
     let output = cmd
         .output()
-        .map_err(|e| format!("spawn pre-commit install: {e}"))?;
+        .map_err(|e| format!("spawn git config core.hooksPath: {e}"))?;
 
     if !output.status.success() {
         return Err(format!(
-            "pre-commit install exited with {} in {}: {}",
+            "git config core.hooksPath exited with {} in {}: {}",
             output.status,
             worktree.display(),
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
     Ok(true)
-}
-
-/// Return `true` if `pre-commit` is resolvable on `PATH`.
-fn pre_commit_on_path() -> bool {
-    let path = match std::env::var_os("PATH") {
-        Some(p) => p,
-        None => return false,
-    };
-    for dir in std::env::split_paths(&path) {
-        for candidate in ["pre-commit", "pre-commit.exe"] {
-            let p = dir.join(candidate);
-            if p.is_file() {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 #[cfg(test)]

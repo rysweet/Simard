@@ -121,7 +121,7 @@ the meeting, the fallback synthesis may have already written goals:
 
 ```bash
 STATE_ROOT="${SIMARD_STATE_ROOT:-$HOME/.simard}"
-cat "$STATE_ROOT/state/goal_store.json" | python3 -m json.tool | tail -20
+cat "$STATE_ROOT/state/goal_store.json" | jq . | tail -20
 ```
 
 > The same `SIMARD_HANDOFF_DIR > SIMARD_STATE_ROOT > $HOME/.simard`

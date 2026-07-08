@@ -17,11 +17,11 @@ agents:
     type: cli
     command: bash
 steps:
-  # 1. The pre-commit config drives clippy through the wrapper, not a bare
-  #    `cargo clippy` invocation that lacks the lbug link path.
+  # 1. The committed pre-commit hook drives clippy through the wrapper, not a
+  #    bare `cargo clippy` invocation that lacks the lbug link path.
   - action: run
     params:
-      command: "grep -nq 'entry: scripts/clippy-precommit-release.sh' .pre-commit-config.yaml"
+      command: "grep -nq 'scripts/clippy-precommit-release.sh' hooks/pre-commit"
     timeout: 15000
   - action: validate_exit_code
     params:
