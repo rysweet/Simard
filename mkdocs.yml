@@ -119,9 +119,12 @@ nav:
     - Resource-Aware Engineer Admission: concepts/resource-aware-engineer-admission.md
     - Update-Check Design: concepts/update-check-design.md
     - The amplihack Freshness Gate: concepts/amplihack-freshness-gate.md
+    - The Simard Platform Installer: concepts/platform-installer.md
+    - lbug Portability across libstdc++ ABIs: concepts/lbug-portability-libstdcxx-abi.md
   - Tutorials:
     - First Local Session: tutorials/run-your-first-local-session.md
     - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md
+    - Stand Up a Read-Only Observer: tutorials/stand-up-a-read-only-observer.md
   - How-To Guides:
     - Terminal to Engineer: howto/move-from-terminal-recipes-into-engineer-runs.md
     - Use the Agent-Orchestration Engineer Loop: howto/use-agent-orchestration-engineer-loop.md
@@ -162,6 +165,8 @@ nav:
     - Run Self-Deploy from Any Directory: howto/run-self-deploy-from-any-directory.md
     - Check for Updates: howto/check-for-updates.md
     - Configure the amplihack Freshness Gate: howto/configure-amplihack-freshness-gate.md
+    - Install a Simard-Family Agent: howto/install-a-simard-family-agent.md
+    - Run the Installer Preflight Doctor: howto/run-the-installer-preflight-doctor.md
     - Self-Maintain Dependency Pins: howto/self-maintain-dependency-pins.md
     - Configure Adaptive Scaling: howto/configure-adaptive-scaling.md
     - Configure Pluggable Identity: howto/configure-pluggable-identity.md
@@ -198,6 +203,7 @@ nav:
     - amplihack Freshness Gate: reference/amplihack-freshness-gate.md
     - Multi-Binary Self-Update: reference/multi-binary-self-update.md
     - Self-Deploy API: reference/self-deploy-api.md
+    - Platform Installer CLI: reference/platform-installer-cli.md
     - Self-Deploy Source Prep & Warm Target Dir: reference/self-deploy-source-prep.md
     - State-Root Resolution: reference/state-root-resolution.md
     - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md

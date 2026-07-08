@@ -9,6 +9,7 @@ mod meeting;
 mod memory;
 mod merge;
 mod ooda;
+mod platform;
 mod review;
 mod safe_update;
 mod self_deploy;
@@ -101,6 +102,12 @@ Product modes:
   gym compare <scenario-id>
   gym run-suite <suite-id>
   ooda run [--cycles=N] [--no-auto-reload] [state-root]
+  platform install --identity <path> [--local|--remote azlin:<vm>] ...
+                          — stand up / upgrade / uninstall a Simard-family agent
+                            daemon on a host (thin rail to the Crocutus scaffold;
+                            idempotent, fail-closed). See docs/reference/platform-installer-cli.md
+  platform doctor --identity <path> [--check-only]
+                          — run the installer preflight doctor standalone
   dashboard serve [--port=8080]
   signal run             — connect to the configured signal-cli JSON-RPC daemon
                            and run the operator Signal conversation channel
@@ -242,6 +249,7 @@ where
         "review" => review::dispatch_review_command(args),
         "gym" => gym::dispatch_gym_command(args),
         "ooda" => ooda::dispatch_ooda_command(args),
+        "platform" => platform::dispatch_platform_command(args),
         "dashboard" => dashboard::dispatch_dashboard_command(args),
         "signal" => signal::dispatch_signal_command(args),
         "memory" => memory::dispatch_memory_command(args),
@@ -352,7 +360,7 @@ where
 }
 
 pub fn operator_cli_usage() -> &'static str {
-    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|ooda|memory|status|spawn|merge-pr|worktree-gc|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap|signal> ..."
+    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|ooda|platform|memory|status|spawn|merge-pr|worktree-gc|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap|signal> ..."
 }
 
 pub fn operator_cli_help() -> &'static str {
