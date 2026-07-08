@@ -161,6 +161,23 @@ merges components, **all components must agree on `posture`**, or composition
 fails with `InvalidIdentityComposition`. You cannot dilute a read-only
 component by composing it with a full one.
 
+### The daemon bridges the manifest posture to the shipped write floor
+
+So an operator does **not** have to remember the env var, the OODA daemon
+derives the external-service write floor from the resolved posture at boot. When
+`SIMARD_IDENTITY` names an identity whose manifest resolves to `read-only` (or
+whose posture cannot be resolved — the fail-closed case), the daemon engages the
+shipped `SIMARD_OBSERVE_ONLY=1` floor itself, before any subprocess or worker
+thread starts. That floor is wired into `git_guardrails::check_git_safety`
+(git push/commit/branch/tag/merge/…) and `read_only_guard::guard_observe_only`
+(`az` / `gh` / `curl` / `wget`), so the git, Azure DevOps, and GitHub write paths
+all hard-refuse from the manifest posture alone. The bridge only ever turns the
+floor **on** — a manifest that declares `read-only` overrides an operator who
+left it down — and never engages it for a `full` or `scoped-write` posture
+(which permit writes the all-or-nothing floor would otherwise block). Setting
+`SIMARD_OBSERVE_ONLY=1` explicitly remains valid and idempotent: belt for the
+manifest's suspenders.
+
 ## Defense in depth for a read-only identity
 
 Posture is *one* layer. A correctly read-only identity such as `crocutus`

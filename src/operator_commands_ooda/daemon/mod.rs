@@ -152,6 +152,54 @@ fn fail_closed_identity_cognition(identity_name: &str) -> crate::ooda_loop::Iden
     }
 }
 
+/// #3125 external-service integration: engage the process-wide observe-only
+/// **write floor** when the resolved identity's write-authority posture forbids
+/// all writes (`read-only`, including the fail-closed default).
+///
+/// `SIMARD_OBSERVE_ONLY` is the seam already wired into the shipped
+/// external-service guards — [`crate::git_guardrails::check_git_safety`]
+/// (git push/commit/branch/tag/merge/…) and
+/// [`crate::read_only_guard::guard_observe_only`] (az / gh / curl / wget) — so a
+/// read-only identity's git, Azure DevOps, and GitHub write paths all
+/// hard-refuse, fail-closed. Deriving the floor from the resolved manifest
+/// posture makes that posture authoritative over external services **without**
+/// relying on an operator to also remember `SIMARD_OBSERVE_ONLY=1` (the failure
+/// mode the write-authority-posture concept doc calls out: "not merely an
+/// environment variable an operator remembers to set"). It composes with the
+/// cognition rail as defense in depth: the cognition rail already refuses to
+/// *dispatch* a write-bearing engineer under read-only; this floor also refuses
+/// any external write the daemon process itself might attempt outside that path.
+///
+/// Only ever turned ON, never cleared or weakened: a manifest that declares
+/// `read-only` overrides an operator who left the floor down. `full` and
+/// `scoped-write` permit writes, so the all-or-nothing floor is deliberately
+/// **not** engaged for them (it would block their permitted writes too); their
+/// finer-grained enforcement is the typed guardrail API tracked in #3067.
+fn engage_external_write_floor(cognition: &crate::ooda_loop::IdentityCognition) {
+    // Only a posture that forbids ALL writes (read-only / fail-closed) engages
+    // the all-or-nothing floor. `permits_spawn()` is the shared, tested kernel:
+    // `None` (Simard) and `Full`/`ScopedWrite` permit; `ReadOnly` does not.
+    if cognition.permits_spawn() {
+        return;
+    }
+    if crate::read_only_guard::observe_only_enabled() {
+        // Already engaged (operator-set or a prior boot in this process); the
+        // floor is at least as strict as required, so leave it untouched.
+        return;
+    }
+    // SAFETY: called once during sequential daemon boot in `run_ooda_daemon`,
+    // before `memory_ipc::spawn_server` (the first in-process thread) and before
+    // any engineer subprocess, so there is no concurrent `getenv`. Subprocesses
+    // launched later inherit the floor via their environment.
+    unsafe { std::env::set_var(crate::read_only_guard::OBSERVE_ONLY_ENV, "1") };
+    eprintln!(
+        "[simard] OODA daemon: external-service write floor ENGAGED ({}=1) — read-only \
+         identity '{}' refuses all git / Azure DevOps / GitHub writes (fail-closed)",
+        crate::read_only_guard::OBSERVE_ONLY_ENV,
+        cognition.identity_name.as_deref().unwrap_or("identity"),
+    );
+}
+
 /// Run one or more OODA cycles as a daemon-style loop.
 ///
 /// Launches all memories, opens a RustyClawd session via [`SessionBuilder`]
@@ -188,6 +236,18 @@ pub fn run_ooda_daemon(
         .expect("failed to install SIGTERM/SIGINT/SIGHUP handler");
     }
     // --------------------------------------------------------------------
+
+    // #3125 external-service integration: resolve the identity-scoped cognition
+    // (seed goals / target scope / write-authority posture) ONCE, up front and
+    // fail-closed, then — before `memory_ipc::spawn_server` starts the first
+    // in-process thread and before any subprocess launches — engage the
+    // external-service write floor if the resolved posture is read-only. This
+    // makes the manifest posture authoritative over the git / Azure DevOps /
+    // GitHub write paths without depending on an operator to also set
+    // `SIMARD_OBSERVE_ONLY=1`. Resolving here keeps the env mutation
+    // single-threaded (see `engage_external_write_floor`'s SAFETY note).
+    let identity_cognition = resolve_daemon_identity_cognition();
+    engage_external_write_floor(&identity_cognition);
 
     // Auto-ensure runtime dependencies before launching memories
     if let Err(e) = crate::cmd_ensure_deps::handle_ensure_deps() {
@@ -537,11 +597,12 @@ pub fn run_ooda_daemon(
     let board = crate::goal_board_store::heal_stale_no_progress_blocks(board);
     let mut state = OodaState::new(board);
     state.no_progress_tracker = persistent.no_progress;
-    // #3125: resolve identity-scoped cognition (seed goals / target scope /
-    // write-authority posture) once at boot, fail-closed. No identity => Simard
-    // unchanged; a read-only identity seeds its own goals and takes the
-    // observe-only Act branch.
-    state.identity_cognition = resolve_daemon_identity_cognition();
+    // #3125: install the identity-scoped cognition resolved (and, for a
+    // read-only posture, used to engage the external-service write floor) at the
+    // top of boot. No identity => Simard unchanged; a read-only identity seeds
+    // its own goals, takes the observe-only Act branch, and — via the floor
+    // engaged above — hard-refuses every external git/ADO/GitHub write.
+    state.identity_cognition = identity_cognition;
     // Seed the OODA cycle counter from durable brain memory so the cycle number
     // reflects the brain's total lived cognition and CONTINUES across restarts,
     // instead of resetting to 1 on every daemon restart / deploy (issue #1).
@@ -2166,5 +2227,93 @@ mod tests {
 
         assert_eq!(seed_cycle_count(0, tmp.path()), 42);
         assert_eq!(seed_cycle_count(0, tmp.path()), 42);
+    }
+
+    // ── #3125 external-service integration (engage_external_write_floor) ──────
+    //
+    // These tests mutate the process-global OBSERVE_ONLY_ENV var; they carry the
+    // `cognitive_memory` serial key so env mutation is never concurrent with an
+    // env read (same convention as the spawn / read_only_guard env tests).
+
+    fn read_only_cognition() -> crate::ooda_loop::IdentityCognition {
+        crate::ooda_loop::IdentityCognition {
+            identity_name: Some("crocutus".to_string()),
+            seed_goals: Vec::new(),
+            target_repos: Vec::new(),
+            authority: Some(crate::identity::IdentityAuthority::read_only()),
+        }
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn read_only_posture_engages_external_write_floor() {
+        // A resolved read-only identity must engage the shipped external-service
+        // write floor (SIMARD_OBSERVE_ONLY) at boot, so the git / ADO / GitHub
+        // write paths hard-refuse WITHOUT the operator setting the env var.
+        unsafe {
+            std::env::remove_var(crate::read_only_guard::OBSERVE_ONLY_ENV);
+        }
+        assert!(
+            !crate::read_only_guard::observe_only_enabled(),
+            "precondition: floor starts down",
+        );
+        engage_external_write_floor(&read_only_cognition());
+        let engaged = crate::read_only_guard::observe_only_enabled();
+        unsafe {
+            std::env::remove_var(crate::read_only_guard::OBSERVE_ONLY_ENV);
+        }
+        assert!(
+            engaged,
+            "read-only posture must engage the external-service write floor",
+        );
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn writing_postures_leave_external_write_floor_down() {
+        // `full` (default) and "no identity" (Simard) permit writes, so the
+        // all-or-nothing floor must NOT be engaged — it would block their
+        // legitimate writes.
+        for cognition in [
+            crate::ooda_loop::IdentityCognition::default(), // Simard (authority None)
+            crate::ooda_loop::IdentityCognition {
+                identity_name: Some("engineer".to_string()),
+                authority: Some(crate::identity::IdentityAuthority::default()), // Full
+                ..Default::default()
+            },
+        ] {
+            unsafe {
+                std::env::remove_var(crate::read_only_guard::OBSERVE_ONLY_ENV);
+            }
+            engage_external_write_floor(&cognition);
+            let engaged = crate::read_only_guard::observe_only_enabled();
+            unsafe {
+                std::env::remove_var(crate::read_only_guard::OBSERVE_ONLY_ENV);
+            }
+            assert!(
+                !engaged,
+                "a writing posture must leave the external-service floor down, got engaged for {:?}",
+                cognition.authority,
+            );
+        }
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn engage_external_write_floor_is_idempotent_and_never_weakens() {
+        // Engaging twice is a no-op, and an already-engaged floor is left ON
+        // (the helper only ever turns the floor on, never clears it).
+        unsafe {
+            std::env::set_var(crate::read_only_guard::OBSERVE_ONLY_ENV, "1");
+        }
+        engage_external_write_floor(&read_only_cognition());
+        let still_engaged = crate::read_only_guard::observe_only_enabled();
+        unsafe {
+            std::env::remove_var(crate::read_only_guard::OBSERVE_ONLY_ENV);
+        }
+        assert!(
+            still_engaged,
+            "an already-engaged floor must remain engaged after a read-only boot",
+        );
     }
 }

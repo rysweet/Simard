@@ -26,7 +26,10 @@ related:
     **`SIMARD_OBSERVE_ONLY=1`** (read-only floor, enforced fail-closed by
     `read_only_guard` wired into `git_guardrails::check_git_safety` and the OODA
     engineer-dispatch), point the daemon's working directory at a **read-only clone**
-    of the target, and run `simard ooda run`. The concrete, runnable version of this
+    of the target, and run `simard ooda run`. As of #3125 the daemon also **auto-engages**
+    that floor when `SIMARD_IDENTITY` names an identity whose manifest posture resolves to
+    `read-only` (or cannot be resolved — fail-closed), so `SIMARD_OBSERVE_ONLY=1` becomes
+    belt-and-suspenders rather than a required step. The concrete, runnable version of this
     tutorial — including the guardrail proof and systemd unit — is maintained in the
     `rysweet/Crocutus` repo (`README.md`, `scripts/`). Read this tutorial for the design
     intent; run the Crocutus repo for the working procedure.
