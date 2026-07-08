@@ -185,6 +185,29 @@ The [platform installer](./platform-installer.md) makes the guarantee concrete:
 The net result: a **working cognitive-memory store on both Ubuntu 25.10 and
 26.04** from the same install command.
 
+## Proven end-to-end on host `dev` (Ubuntu 26.04)
+
+The installer was run against the real target. The prebuilt binary's
+crash was reproduced (systemd journal: `status=11/SEGV` during startup), then a
+from-source rebuild produced a daemon whose cognitive memory **opens cleanly**
+(no `initBufferManager`/`std::vformat` SIGSEGV) and reaches **live OODA cycles**
+with a stable PID (`NRestarts=0`), side-by-side with the primary identity.
+
+Two *further* lbug 0.17.1 from-source defects surfaced during that run and are
+tracked in [amplihack-memory-lib#130](https://github.com/rysweet/amplihack-memory-lib/issues/130),
+each with a downstream workaround the installer now applies:
+
+1. **Duplicate-symbol link failure** — the from-source static build links its
+   bundled `utf8proc`/`antlr4` objects twice (inside `liblbug.a` and as separate
+   `--whole-archive` libs), so `LBUG_BUILD_FROM_SOURCE=1` alone does not link.
+   The installer adds `RUSTFLAGS=-Clink-arg=-Wl,--allow-multiple-definition`.
+2. **Post-verdict static-teardown SIGSEGV** — a clean from-source binary still
+   SIGSEGVs in C++ global-destructor teardown *after* returning success
+   (reproduces on prebuilt and from-source alike, so it is not the open-time ABI
+   bug). The read-only guardrail gate therefore keys on the explicit affirmative
+   verdict marker (fail-closed preserved) rather than the exit code alone, so a
+   post-verdict teardown crash cannot false-fail a proven-safe gate.
+
 ## Boundaries and ownership
 
 - **Engine/portability *contract* → `amplihack-memory-lib`.** The persistent
