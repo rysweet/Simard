@@ -426,14 +426,14 @@ pub fn build_rustyclawd_brain() -> SimardResult<Box<dyn OodaBrain>> {
 
 // ---------------------------------------------------------------------------
 // Inline tests (issue #1979 — per-source-file coverage of the RustyClawd
-// bridge: the prose-first marker parser, the legacy JSON-object salvage,
-// the UTF-8-safe log truncation, AND the bridge's end-to-end behaviour for
+// brain: the prose-first marker parser, the legacy JSON-object salvage,
+// the UTF-8-safe log truncation, AND the brain's end-to-end behaviour for
 // the four shapes the directive calls out (well-formed JSON, JSON with
 // trailing prose, completely unparseable, and a per-shape end-to-end run
-// through the bridge with a canned-response submitter).
+// through the brain with a canned-response submitter).
 //
 // Sibling `tests.rs` covers higher-level dispatch; these inline tests pin
-// the private parser helpers that the bridge depends on. )
+// the private parser helpers that the brain depends on. )
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -775,10 +775,10 @@ mod tests {
         }
     }
 
-    // ----- (d) RustyClawdBrain bridge: end-to-end with stub submitter ---
+    // ----- (d) RustyClawdBrain brain: end-to-end with stub submitter ---
 
     #[test]
-    fn bridge_returns_decision_on_marker_response() {
+    fn brain_returns_decision_on_marker_response() {
         let stub = StubSubmitter::ok("DECISION: continue_skipping\nhb ok");
         let brain = RustyClawdBrain::new(stub);
         let d = brain.decide_engineer_lifecycle(&ctx()).expect("must Ok");
@@ -789,7 +789,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_rejects_json_only_response() {
+    fn brain_rejects_json_only_response() {
         let stub = StubSubmitter::ok(r#"{"choice":"continue_skipping","rationale":"hb ok"}"#);
         let brain = RustyClawdBrain::new(stub);
         let err = brain
@@ -807,7 +807,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_rejects_json_in_prose_response() {
+    fn brain_rejects_json_in_prose_response() {
         let stub = StubSubmitter::ok(
             "Some thinking...\n```json\n{\"choice\":\"deprioritize\",\"rationale\":\"chronic\"}\n```\nDone.",
         );
@@ -822,7 +822,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_surfaces_adapter_error_on_unparseable_response() {
+    fn brain_surfaces_adapter_error_on_unparseable_response() {
         let stub = StubSubmitter::ok("totally not json at all");
         let brain = RustyClawdBrain::new(stub);
         let err = brain
@@ -841,7 +841,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_propagates_submitter_error_without_panic() {
+    fn brain_propagates_submitter_error_without_panic() {
         let stub = StubSubmitter::err();
         let brain = RustyClawdBrain::new(stub);
         let err = brain
@@ -858,7 +858,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_calls_submitter_exactly_once_per_decision() {
+    fn brain_calls_submitter_exactly_once_per_decision() {
         let stub = StubSubmitter::ok("DECISION: continue_skipping\nok");
         let counter = stub.call_counter();
         let brain = RustyClawdBrain::new(stub);
@@ -866,12 +866,12 @@ mod tests {
         assert_eq!(
             counter.load(std::sync::atomic::Ordering::SeqCst),
             1,
-            "bridge must call submitter exactly once per decision"
+            "brain must call submitter exactly once per decision"
         );
     }
 
     #[test]
-    fn bridge_renders_prompt_with_context_fields() {
+    fn brain_renders_prompt_with_context_fields() {
         let stub = StubSubmitter::ok("DECISION: continue_skipping\nok");
         let brain = RustyClawdBrain::new(stub);
         let prompt = brain.render_prompt(&EngineerLifecycleCtx {
@@ -896,7 +896,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_renders_sentinel_none_as_placeholder() {
+    fn brain_renders_sentinel_none_as_placeholder() {
         let stub = StubSubmitter::ok("DECISION: continue_skipping\nok");
         let brain = RustyClawdBrain::new(stub);
         let prompt = brain.render_prompt(&EngineerLifecycleCtx {

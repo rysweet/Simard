@@ -10,11 +10,11 @@ pub(crate) fn print_display(label: &str, value: impl std::fmt::Display) {
     println!("{label}: {}", sanitize_terminal_text(&value.to_string()));
 }
 
-pub(crate) fn print_terminal_bridge_section(
-    terminal_bridge_context: Option<&EngineerHandoffContext>,
+pub(crate) fn print_terminal_handoff_section(
+    terminal_handoff_context: Option<&EngineerHandoffContext>,
     default_source: &str,
 ) {
-    match terminal_bridge_context {
+    match terminal_handoff_context {
         Some(context) => {
             print_text("Mode boundary", TERMINAL_MODE_BOUNDARY);
             print_text("Terminal continuity available", "yes");
@@ -164,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn print_terminal_bridge_section_none_does_not_panic() {
-        print_terminal_bridge_section(None, "default-source");
+    fn print_terminal_handoff_section_none_does_not_panic() {
+        print_terminal_handoff_section(None, "default-source");
     }
 }

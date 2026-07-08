@@ -30,7 +30,7 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
     let now = super::current_epoch_seconds()?;
 
     let exe = std::env::current_exe().map_err(|e| SimardError::RpcSpawnFailed {
-        bridge: "subordinate".to_string(),
+        endpoint: "subordinate".to_string(),
         reason: format!("cannot resolve current executable: {e}"),
     })?;
 
@@ -106,7 +106,7 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let status = tmux_cmd.status().map_err(|e| SimardError::RpcSpawnFailed {
-            bridge: "subordinate".to_string(),
+            endpoint: "subordinate".to_string(),
             reason: format!(
                 "failed to spawn tmux-wrapped subordinate '{}': {e}",
                 config.agent_name
@@ -115,7 +115,7 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
 
         if !status.success() {
             return Err(SimardError::RpcSpawnFailed {
-                bridge: "subordinate".to_string(),
+                endpoint: "subordinate".to_string(),
                 reason: format!(
                     "tmux new-session for subordinate '{}' exited with {status}",
                     config.agent_name
@@ -134,7 +134,7 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
             "tmux not available; spawning subordinate directly (no attach support)",
         );
         let child = cmd.spawn().map_err(|e| SimardError::RpcSpawnFailed {
-            bridge: "subordinate".to_string(),
+            endpoint: "subordinate".to_string(),
             reason: format!(
                 "failed to spawn subordinate '{}' at '{}': {e}",
                 config.agent_name,

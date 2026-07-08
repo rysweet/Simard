@@ -16,7 +16,7 @@ use crate::memory_ipc::open_reader_client;
 
 /// Load the dashboard's view of the goal board from the EXPLICIT `state_root`
 /// instead of resolving `SIMARD_STATE_ROOT` ambiently. Returns an empty
-/// `GoalBoard` when the snapshot is missing or the bridge cannot be opened —
+/// `GoalBoard` when the snapshot is missing or the memory cannot be opened —
 /// the dashboard always renders rather than 500ing.
 ///
 /// `state_root` is trusted-internal: it originates only from a handler

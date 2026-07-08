@@ -152,7 +152,7 @@ pub(crate) async fn workboard() -> Json<Value> {
     let goal_board = match dashboard_goal_board_snapshot(&state_root) {
         Ok(b) => Some(b),
         Err(e) => {
-            // Surface bridge failures so the dashboard doesn't silently
+            // Surface memory failures so the dashboard doesn't silently
             // render "no goals" when cognitive memory is unreachable.
             // Fail-open returns None (same as before) but logs why.
             tracing::warn!(

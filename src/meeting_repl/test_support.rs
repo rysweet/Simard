@@ -11,7 +11,7 @@ use crate::rpc_transport::InMemoryRpcTransport;
 use crate::runtime::RuntimeTopology;
 use serde_json::json;
 
-pub(super) fn mock_bridge() -> CognitiveMemoryClient {
+pub(super) fn mock_memory() -> CognitiveMemoryClient {
     let transport =
         InMemoryRpcTransport::new("test-meeting-repl", |method, _params| match method {
             "memory.record_sensory" => Ok(json!({"id": "sen_r1"})),

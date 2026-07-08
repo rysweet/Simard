@@ -51,7 +51,7 @@ pub fn spawn_server(
     // without an IPC server while meetings kept falling back to direct open.
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path).map_err(|e| SimardError::RpcSpawnFailed {
-        bridge: "memory-ipc".into(),
+        endpoint: "memory-ipc".into(),
         reason: format!("bind {}: {e}", socket_path.display()),
     })?;
     // Restrict the socket file to owner read/write (0600) so only this user's
@@ -95,7 +95,7 @@ pub fn spawn_server(
             }
         })
         .map_err(|e| SimardError::RpcSpawnFailed {
-            bridge: "memory-ipc".into(),
+            endpoint: "memory-ipc".into(),
             reason: format!("spawn server thread: {e}"),
         })?;
 

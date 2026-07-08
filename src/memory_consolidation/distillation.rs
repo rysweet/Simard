@@ -14,7 +14,7 @@
 //!    derived fact DIRECTLY through the cognitive-memory write boundary — for the
 //!    real subprocess runner that is the agent calling `simard memory remember`
 //!    per fact; for the deterministic test stubs it is the in-process
-//!    [`DistillFactSink`] bridging the stub's returned facts. **There is no
+//!    [`DistillFactSink`] forwarding the stub's returned facts. **There is no
 //!    `{ "facts": [...] }` document scraped back out of recipe stdout and
 //!    hand-deserialized** — the trailing-comma / noisy-banner parse-failure mode
 //!    of #2658/#2679 is therefore structurally impossible: there is nothing left
@@ -107,7 +107,7 @@ pub struct DistillOutput {
 /// Post-#2679 the distiller no longer returns a document Simard parses; it
 /// *commits* each record. Two seams implement this trait: the real subprocess
 /// runner delegates to the daemon's IPC gate (the agent calls
-/// `simard memory remember`), and the deterministic test stubs are bridged to
+/// `simard memory remember`), and the deterministic test stubs are routed to
 /// the in-process [`InProcessFactSink`], which applies the identical shared
 /// [`crate::fact_reliability`] gate so a fact stores/quarantines the same way no
 /// matter which boundary writes it.
@@ -136,7 +136,7 @@ pub struct DistillCommit {
 }
 
 /// In-process implementation of [`DistillFactSink`] used by the deterministic
-/// test stubs (and any run-only runner bridged through the default
+/// test stubs (and any run-only runner routed through the default
 /// [`DistillRecipeRunner::run_agentic`]). Grounds a fact by **batch membership**
 /// — the store-existence check the IPC server does has no meaning in-process, so
 /// the batch it was distilled from is the ground truth — then applies the shared
@@ -224,7 +224,7 @@ impl DistillFactSink for InProcessFactSink<'_> {
 pub trait DistillRecipeRunner {
     /// Legacy fact-only entry point. Required so existing fact-only runners (and
     /// the test stubs) keep working — the default [`run_agentic`](Self::run_agentic)
-    /// bridges the facts they return into the in-process sink.
+    /// memories the facts they return into the in-process sink.
     fn run(&self, episodes: &[CognitiveEpisode]) -> SimardResult<Vec<DistilledFact>>;
 
     /// Full entry point emitting BOTH facts and procedures (issue #2327, R5). The
@@ -241,7 +241,7 @@ pub trait DistillRecipeRunner {
     /// and commits each resulting fact/procedure through `sink` — the write
     /// boundary — rather than returning a document Simard must parse.
     ///
-    /// The **default** bridges a run-only stub's returned facts/procedures into
+    /// The **default** memories a run-only stub's returned facts/procedures into
     /// the in-process [`InProcessFactSink`], so a stub that implements only
     /// [`run`](Self::run) (or [`run_all`](Self::run_all)) keeps working unchanged
     /// — the additive-trait contract. [`RecipeRunnerSubprocess`] **overrides**

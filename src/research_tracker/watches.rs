@@ -52,10 +52,10 @@ pub fn default_developer_watches() -> Vec<DeveloperWatch> {
 
 /// Seed the default developer watches into cognitive memory if not already
 /// tracked. Returns the number of watches stored.
-pub fn seed_developer_watches(bridge: &dyn CognitiveMemoryOps) -> usize {
+pub fn seed_developer_watches(memory: &dyn CognitiveMemoryOps) -> usize {
     let mut seeded = 0;
     for watch in default_developer_watches() {
-        if track_developer(watch, bridge).is_ok() {
+        if track_developer(watch, memory).is_ok() {
             seeded += 1;
         }
     }

@@ -60,6 +60,14 @@ Each transport speaks newline-delimited JSON. One request per line on stdin, one
 > `knowledge.query`, `gym.run_scenario`, the built-in `bridge.health` probe)
 > and on-disk format is byte-for-byte unchanged. Renaming a struct or module
 > never alters what goes on the wire.
+>
+> The wider terminology cleanup (proposed, #2951) — renaming the lowercase
+> "bridge" in log strings, comments, and identifiers we control to the accurate
+> RPC / client / server / handoff vocabulary, while leaving frozen wire /
+> persisted / CLI values like `bridge.health` unchanged — is described in
+> [Eliminating "bridge" terminology](../concepts/bridge-terminology-elimination.md)
+> and enforced by the
+> [No-`bridge` naming guard](../reference/no-bridge-naming-guard.md).
 
 ## Rust-Side Architecture
 

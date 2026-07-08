@@ -148,7 +148,7 @@ pub struct BaseTypeTurnInput {
     /// System-level identity context loaded from the manifest's prompt assets.
     /// Used by LLM-calling adapters to construct system prompts.
     pub identity_context: String,
-    /// Additional prompt preamble for the turn (e.g., from enrichment bridges).
+    /// Additional prompt preamble for the turn (e.g., from enrichment readers).
     pub prompt_preamble: String,
 }
 
@@ -200,7 +200,7 @@ pub trait BaseTypeSession: Send {
 
     fn close(&mut self) -> SimardResult<()>;
 
-    /// Optional memory + knowledge bridges used to enrich each turn.
+    /// Optional memory + knowledge readers used to enrich each turn.
     ///
     /// Defaults to `None` (enrichment not supported / not configured). Adapters
     /// that support memory + knowledge enrichment override this to expose their
@@ -210,7 +210,7 @@ pub trait BaseTypeSession: Send {
     }
 
     /// Mutable access to this session's [`EnrichmentClients`] so the runtime
-    /// (or tests) can inject configured bridges after the session is created.
+    /// (or tests) can inject configured readers after the session is created.
     ///
     /// Defaults to `None` for adapters that do not support enrichment.
     fn enrichment_mut(&mut self) -> Option<&mut EnrichmentClients> {
@@ -221,12 +221,12 @@ pub trait BaseTypeSession: Send {
     /// adapter (issue #1665).
     ///
     /// Recalls memory facts/procedures and domain knowledge for the turn's
-    /// objective using the session's configured bridges, and returns a new
+    /// objective using the session's configured readers, and returns a new
     /// [`BaseTypeTurnInput`] with the rendered enrichment injected into
     /// `prompt_preamble` (the per-turn system/preamble context). The
     /// `objective` and `identity_context` are preserved, so stateful adapters
     /// keep clean conversation history and prompt-folding adapters pick the
-    /// enrichment up automatically. When no bridges are configured the input is
+    /// enrichment up automatically. When no readers are configured the input is
     /// returned unchanged.
     ///
     /// Before #1665 only `CopilotSdkAdapter` enriched its turns; this provided
@@ -234,7 +234,7 @@ pub trait BaseTypeSession: Send {
     /// shared call site, so the behavior cannot silently diverge again.
     fn enrich_input(&self, input: &BaseTypeTurnInput) -> SimardResult<BaseTypeTurnInput> {
         match self.enrichment() {
-            Some(bridges) => bridges.enrich(input),
+            Some(readers) => readers.enrich(input),
             // No enrichment configured for this session → expected=false so the
             // observability seam logs a benign INFO, never a degrade WARN (#2942).
             None => crate::base_type_turn::enrich_turn_input(input, None, None, false),

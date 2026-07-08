@@ -148,7 +148,7 @@ impl MergeJudgeKind {
 }
 
 /// Trait every merge judge implements. Synchronous on purpose to match the
-/// OODA brain pattern — the LLM-backed impl bridges to async internally.
+/// OODA brain pattern — the LLM-backed impl adapts to async internally.
 pub trait MergeJudge: Send + Sync {
     fn judge(
         &self,

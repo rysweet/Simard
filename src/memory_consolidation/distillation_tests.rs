@@ -7,7 +7,7 @@
 //! deterministic in-memory `CognitiveMemoryOps` mock and stub runners.
 //!
 //! Post-#2679 the distiller commits facts through the in-process
-//! `DistillFactSink` (the default `run_agentic` bridges a run-only stub's facts
+//! `DistillFactSink` (the default `run_agentic` memories a run-only stub's facts
 //! into it), applying the SAME shared `crate::fact_reliability` gate the IPC
 //! server uses. The legacy strict-parse / trailing-comma / field-tolerance and
 //! bounded-retry unit tests were RETIRED by #2679 (they asserted a

@@ -95,7 +95,7 @@ pub fn record_cost(
 
     write_entry(&entry)?;
 
-    // Issue #2528: bridge token throughput into the unified telemetry facade
+    // Issue #2528: memory token throughput into the unified telemetry facade
     // alongside the authoritative JSONL ledger (which `simard status` reads for
     // the honest $/token/credit reconciliation). Tokens are naturally integral;
     // dollar cost stays ledger-sourced to avoid a lossy integer counter.

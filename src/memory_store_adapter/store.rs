@@ -1,4 +1,4 @@
-//! [`CognitiveClientMemoryStore`] — the bridge between `MemoryStore` and cognitive memory.
+//! [`CognitiveClientMemoryStore`] — the adapter between `MemoryStore` and cognitive memory.
 
 use std::collections::HashMap;
 
@@ -16,7 +16,7 @@ use crate::session::SessionId;
 use super::convert::{fact_to_record, scope_tag, session_tag};
 use super::{READ_MAX_RETRIES, RETRY_BACKOFF_MS, STORE_NAME};
 
-/// `MemoryStore` implementation backed by cognitive memory via Python bridge.
+/// `MemoryStore` implementation backed by cognitive memory via Python client.
 ///
 /// Stores each `MemoryRecord` as a semantic fact:
 /// - concept = record key
@@ -25,32 +25,32 @@ use super::{READ_MAX_RETRIES, RETRY_BACKOFF_MS, STORE_NAME};
 /// - tags = [scope tag, session tag, phase tag]
 /// - source_id = "memory-store-adapter"
 ///
-/// Dual-writes to both the cognitive bridge and a local `FileBackedMemoryStore` for persistence.
+/// Dual-writes to both the cognitive client and a local `FileBackedMemoryStore` for persistence.
 pub struct CognitiveClientMemoryStore {
-    bridge: Box<dyn CognitiveMemoryOps>,
+    client: Box<dyn CognitiveMemoryOps>,
     local_store: FileBackedMemoryStore,
     /// Track records locally for list/count operations since cognitive memory
     /// search is keyword-based and cannot filter by exact scope/session.
     /// Keyed by record key for O(1) dedup on put.
     pub(super) records: Mutex<HashMap<String, MemoryRecord>>,
-    /// Keys whose bridge write failed — `sync_pending()` retries these.
-    pending_bridge_keys: Mutex<Vec<String>>,
+    /// Keys whose client write failed — `sync_pending()` retries these.
+    pending_client_keys: Mutex<Vec<String>>,
     descriptor: BackendDescriptor,
 }
 
 impl CognitiveClientMemoryStore {
     pub fn new(
-        bridge: impl CognitiveMemoryOps + 'static,
+        client: impl CognitiveMemoryOps + 'static,
         local_store_path: impl Into<PathBuf>,
     ) -> SimardResult<Self> {
         let local_store = FileBackedMemoryStore::try_new(local_store_path)?;
         let mut store = Self {
-            bridge: Box::new(bridge),
+            client: Box::new(client),
             records: Mutex::new(HashMap::new()),
-            pending_bridge_keys: Mutex::new(Vec::new()),
+            pending_client_keys: Mutex::new(Vec::new()),
             descriptor: BackendDescriptor::for_runtime_type::<Self>(
-                "memory::cognitive-bridge",
-                "runtime-port:memory-store:cognitive-bridge",
+                "memory::cognitive-memory",
+                "runtime-port:memory-store:cognitive-memory",
                 Freshness::now()?,
             ),
             local_store,
@@ -85,12 +85,12 @@ impl CognitiveClientMemoryStore {
             }
         }
         if hydrated > 0 {
-            eprintln!("[simard] cognitive-bridge: hydrated {hydrated} records from file store");
+            eprintln!("[simard] cognitive-memory: hydrated {hydrated} records from file store");
         }
         Ok(())
     }
 
-    /// Pull facts from the cognitive bridge (Python subprocess) and merge into
+    /// Pull facts from the cognitive client (Python subprocess) and merge into
     /// the local in-memory index. This supplements file-store hydration by
     /// recovering records that were persisted to the graph but not yet in the
     /// local JSON file (e.g., written by another Simard process).
@@ -112,12 +112,12 @@ impl CognitiveClientMemoryStore {
             }
         }
         if hydrated > 0 {
-            eprintln!("[simard] cognitive-bridge: hydrated {hydrated} records from bridge");
+            eprintln!("[simard] cognitive-memory: hydrated {hydrated} records from client");
         }
         Ok(())
     }
 
-    /// Search facts via the cognitive bridge with retry logic.
+    /// Search facts via the cognitive client with retry logic.
     fn search_facts_with_retry(
         &self,
         query: &str,
@@ -126,12 +126,12 @@ impl CognitiveClientMemoryStore {
     ) -> SimardResult<Vec<CognitiveFact>> {
         let mut last_err = None;
         for attempt in 0..=READ_MAX_RETRIES {
-            match self.bridge.search_facts(query, limit, min_confidence) {
+            match self.client.search_facts(query, limit, min_confidence) {
                 Ok(facts) => return Ok(facts),
                 Err(e) => {
                     if attempt < READ_MAX_RETRIES {
                         eprintln!(
-                            "[simard] cognitive-bridge: search_facts retry {}/{} after error: {e}",
+                            "[simard] cognitive-memory: search_facts retry {}/{} after error: {e}",
                             attempt + 1,
                             READ_MAX_RETRIES
                         );
@@ -144,9 +144,9 @@ impl CognitiveClientMemoryStore {
         Err(last_err.expect("retry loop ensures last_err is set on all-failures path"))
     }
 
-    /// Query the bridge for records matching a scope, converting facts back to
+    /// Query the client for records matching a scope, converting facts back to
     /// `MemoryRecord`s. Used when the local index has no results.
-    fn bridge_list(&self, scope: MemoryScope) -> SimardResult<Vec<MemoryRecord>> {
+    fn client_list(&self, scope: MemoryScope) -> SimardResult<Vec<MemoryRecord>> {
         let query = format!("scope:{scope:?}");
         let facts = self.search_facts_with_retry(&query, 200, 0.0)?;
         let records: Vec<MemoryRecord> = facts
@@ -170,12 +170,12 @@ impl CognitiveClientMemoryStore {
         Ok(records)
     }
 
-    /// Retry bridge writes for records that were persisted to the local file
-    /// store but failed to reach the cognitive bridge. Returns the number of
+    /// Retry client writes for records that were persisted to the local file
+    /// store but failed to reach the cognitive client. Returns the number of
     /// successfully synced records.
     pub fn sync_pending(&self) -> usize {
         let keys: Vec<String> = {
-            let Ok(pending) = self.pending_bridge_keys.lock() else {
+            let Ok(pending) = self.pending_client_keys.lock() else {
                 return 0;
             };
             pending.clone()
@@ -197,7 +197,7 @@ impl CognitiveClientMemoryStore {
                     Ok(_) => synced += 1,
                     Err(e) => {
                         eprintln!(
-                            "[simard] cognitive-bridge: sync_pending retry failed \
+                            "[simard] cognitive-memory: sync_pending retry failed \
                              for key {:?}: {e}",
                             key,
                         );
@@ -207,11 +207,11 @@ impl CognitiveClientMemoryStore {
             }
         }
 
-        if let Ok(mut pending) = self.pending_bridge_keys.lock() {
+        if let Ok(mut pending) = self.pending_client_keys.lock() {
             *pending = still_pending;
         }
         if synced > 0 {
-            eprintln!("[simard] cognitive-bridge: sync_pending synced {synced} records");
+            eprintln!("[simard] cognitive-memory: sync_pending synced {synced} records");
         }
         synced
     }
@@ -223,7 +223,7 @@ impl CognitiveClientMemoryStore {
             session_tag(&record.session_id),
             format!("phase:{:?}", record.recorded_in),
         ];
-        self.bridge.store_fact(
+        self.client.store_fact(
             &record.key,
             &record.value,
             1.0,
@@ -245,7 +245,7 @@ impl MemoryStore for CognitiveClientMemoryStore {
             record.created_at = Some(Utc::now());
         }
 
-        // Write to cognitive bridge — failure is an error, not silently swallowed.
+        // Write to cognitive client — failure is an error, not silently swallowed.
         self.store_as_fact(&record)?;
 
         // Also persist to local file store for handoff/recovery.
@@ -280,9 +280,9 @@ impl MemoryStore for CognitiveClientMemoryStore {
         if !local.is_empty() {
             return Ok(local);
         }
-        // Local miss — query bridge for cross-session data.
-        drop(records); // release lock before bridge call
-        self.bridge_list(scope)
+        // Local miss — query client for cross-session data.
+        drop(records); // release lock before client call
+        self.client_list(scope)
     }
 
     fn list_for_session(&self, session_id: &SessionId) -> SimardResult<Vec<MemoryRecord>> {

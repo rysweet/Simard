@@ -500,7 +500,7 @@ pub trait OrchestratorSessionFactory: Send + Sync {
     ) -> crate::error::SimardResult<Box<dyn crate::base_types::BaseTypeSession>>;
 }
 
-/// All bridges needed by the OODA loop.
+/// All memories needed by the OODA loop.
 pub struct OodaClients {
     pub memory: Box<dyn CognitiveMemoryOps>,
     pub knowledge: KnowledgeClient,

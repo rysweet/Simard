@@ -79,7 +79,7 @@ where
 pub enum PartialReason {
     /// The master `MeetingBackend::close()` budget (default 60s,
     /// configurable via `SIMARD_MEETING_CLOSE_TIMEOUT_SECS`) expired
-    /// before all phases completed. Remaining LLM/bridge phases are
+    /// before all phases completed. Remaining LLM/memory phases are
     /// skipped and the close proceeds straight to persistence with the
     /// best-known partial data.
     CloseTimeout,
@@ -102,10 +102,10 @@ pub enum PartialReason {
     /// review the transcript by hand.
     SummaryEmpty,
 
-    /// The cognitive-memory bridge `store_enriched_*` call exceeded
+    /// The cognitive-memory memory `store_enriched_*` call exceeded
     /// its inner budget. Currently a no-op in production (no caller
-    /// wires a bridge into `MeetingBackend::new_session`) but reserved
-    /// for the future bridge-aware close pipeline.
+    /// wires a memory into `MeetingBackend::new_session`) but reserved
+    /// for the future memory-aware close pipeline.
     RpcTimeout,
 
     /// A non-recoverable I/O error occurred while persisting the
@@ -125,6 +125,9 @@ impl PartialReason {
             PartialReason::AgentCloseTimeout => "agent_close_timeout",
             PartialReason::SummaryTimeout => "summary_timeout",
             PartialReason::SummaryEmpty => "summary_empty",
+            // Frozen external wire value: emitted to operator logs / scrapers that
+            // rely on it being stable (#2951 allowlist). Not renamed with the
+            // `RpcTimeout` variant to preserve the on-the-wire contract.
             PartialReason::RpcTimeout => "bridge_timeout",
             PartialReason::PersistenceError => "persistence_error",
         }

@@ -51,7 +51,7 @@ pub fn snapshot_dir(override_dir: Option<&Path>) -> Option<PathBuf> {
 /// Errors are returned but callers should treat them as non-fatal.
 #[allow(deprecated)] // we intentionally use the legacy snapshot API
 pub fn save_session_snapshot(
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
     agent_name: &str,
     dir: &Path,
 ) -> SimardResult<PathBuf> {
@@ -65,7 +65,7 @@ pub fn save_session_snapshot(
     let filename = format!("{agent_name}-{epoch}.{SNAPSHOT_EXT}");
     let path = dir.join(&filename);
 
-    crate::remote_transfer::export_memory_snapshot(bridge, agent_name, Some(&path))?;
+    crate::remote_transfer::export_memory_snapshot(memory, agent_name, Some(&path))?;
 
     Ok(path)
 }
@@ -185,18 +185,18 @@ pub fn prune_snapshots(dir: &Path, keep: usize) {
     }
 }
 
-/// Import a previously saved snapshot into the cognitive bridge.
+/// Import a previously saved snapshot into the cognitive memory.
 ///
 /// Returns the number of items imported.
 #[allow(deprecated)] // we intentionally use the legacy snapshot API
 pub fn restore_snapshot(
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
     snapshot: &MemorySnapshot,
 ) -> SimardResult<usize> {
-    crate::remote_transfer::import_memory_snapshot(bridge, snapshot)
+    crate::remote_transfer::import_memory_snapshot(memory, snapshot)
 }
 
-/// Hydrate `bridge` from `snapshot` **only when the store is confirmed empty**,
+/// Hydrate `memory` from `snapshot` **only when the store is confirmed empty**,
 /// failing closed on a read error (issue #2561).
 ///
 /// This is the **intended** guarded entry point for a session/daemon startup to
@@ -243,18 +243,18 @@ pub fn restore_snapshot(
 /// memories. Activation outside a single-writer context must wrap the call in the
 /// store's cross-process lock (cf. `goal_board_store`'s advisory `flock`, #2514).
 pub fn auto_restore_if_empty(
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
     snapshot: &MemorySnapshot,
 ) -> SimardResult<Option<usize>> {
     // `?` propagates a read failure BEFORE `restore_snapshot` runs — the
     // fail-closed guarantee that protects durable memory (issue #2561).
-    match bridge.probe_emptiness()? {
-        StoreEmptiness::ConfirmedEmpty => Ok(Some(restore_snapshot(bridge, snapshot)?)),
+    match memory.probe_emptiness()? {
+        StoreEmptiness::ConfirmedEmpty => Ok(Some(restore_snapshot(memory, snapshot)?)),
         StoreEmptiness::NonEmpty => Ok(None),
     }
 }
 
-/// Load the most recent snapshot from `dir` and hydrate `bridge` from it **only
+/// Load the most recent snapshot from `dir` and hydrate `memory` from it **only
 /// when the store is confirmed empty**, failing closed on a read error (issue
 /// #2561).
 ///
@@ -273,18 +273,18 @@ pub fn auto_restore_if_empty(
 /// * store non-empty → `Ok(None)` (skip; re-importing would duplicate).
 /// * probe read failure → `Err(..)`, nothing imported (fail closed).
 pub fn auto_restore_latest_if_empty(
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
     dir: &Path,
 ) -> SimardResult<Option<usize>> {
     // Fail closed BEFORE touching a snapshot: only a confirmed-empty store is
     // eligible for hydration.
-    match bridge.probe_emptiness()? {
+    match memory.probe_emptiness()? {
         StoreEmptiness::NonEmpty => return Ok(None),
         StoreEmptiness::ConfirmedEmpty => {}
     }
     match load_latest_snapshot(dir) {
         // Emptiness is already confirmed above, so restore directly.
-        Some(snapshot) => Ok(Some(restore_snapshot(bridge, &snapshot)?)),
+        Some(snapshot) => Ok(Some(restore_snapshot(memory, &snapshot)?)),
         None => Ok(None),
     }
 }
@@ -348,14 +348,14 @@ mod tests {
                     message: format!("unknown: {method}"),
                 }),
             });
-        let bridge = CognitiveMemoryClient::new(Box::new(transport));
+        let memory = CognitiveMemoryClient::new(Box::new(transport));
 
         let dir = std::env::temp_dir().join("simard-test-roundtrip-snapshots");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create test dir");
 
         // Save
-        let path = save_session_snapshot(&bridge, "test-agent", &dir).expect("save snapshot");
+        let path = save_session_snapshot(&memory, "test-agent", &dir).expect("save snapshot");
         assert!(path.exists());
 
         // Load
@@ -365,7 +365,7 @@ mod tests {
         assert_eq!(loaded.source_agent, "test-agent");
 
         // Restore
-        let count = restore_snapshot(&bridge, &loaded).expect("restore snapshot");
+        let count = restore_snapshot(&memory, &loaded).expect("restore snapshot");
         assert_eq!(count, 1);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -478,7 +478,7 @@ mod tests {
     // ────────────────────────────────────────────────────────────────────
     // Auto-restore fail-closed regression tests (issue #2561)
     //
-    // These are fully hermetic: they drive an in-memory bridge transport and
+    // These are fully hermetic: they drive an in-memory memory transport and
     // (for the disk-sourced path) a per-test tempdir. Nothing touches
     // `$HOME/.simard` or any real cognitive store.
     // ────────────────────────────────────────────────────────────────────
@@ -518,11 +518,11 @@ mod tests {
         .expect("construct snapshot")
     }
 
-    /// Build a destination bridge whose `memory.get_statistics` response is
+    /// Build a destination memory whose `memory.get_statistics` response is
     /// produced by `stats`, and whose write ops (`store_fact` /
     /// `store_procedure`) bump the returned counter. The counter is the
     /// "durable memory touched" probe: a fail-closed restore must leave it at 0.
-    fn dest_bridge(
+    fn dest_memory(
         stats: impl Fn() -> Result<serde_json::Value, RpcErrorPayload> + Send + Sync + 'static,
     ) -> (CognitiveMemoryClient, Arc<AtomicUsize>) {
         let writes = Arc::new(AtomicUsize::new(0));
@@ -561,10 +561,10 @@ mod tests {
     fn auto_restore_hydrates_a_confirmed_empty_store() {
         // Path (a): a store that reads cleanly as all-zeros is genuinely empty,
         // so the snapshot is applied in full.
-        let (bridge, writes) = dest_bridge(|| Ok(zero_stats()));
+        let (memory, writes) = dest_memory(|| Ok(zero_stats()));
         let snapshot = two_item_snapshot();
 
-        let restored = auto_restore_if_empty(&bridge, &snapshot).expect("confirmed-empty restore");
+        let restored = auto_restore_if_empty(&memory, &snapshot).expect("confirmed-empty restore");
 
         assert_eq!(restored, Some(2), "both snapshot items should be restored");
         assert_eq!(
@@ -580,7 +580,7 @@ mod tests {
         // as an error). The gate must propagate the error and perform NO writes,
         // so still-present-but-unreadable durable memory is never overwritten or
         // duplicated. This is the core #2561 regression guard.
-        let (bridge, writes) = dest_bridge(|| {
+        let (memory, writes) = dest_memory(|| {
             Err(RpcErrorPayload {
                 code: -32000,
                 message: "transient read failure at startup".to_string(),
@@ -588,7 +588,7 @@ mod tests {
         });
         let snapshot = two_item_snapshot();
 
-        let result = auto_restore_if_empty(&bridge, &snapshot);
+        let result = auto_restore_if_empty(&memory, &snapshot);
 
         assert!(
             result.is_err(),
@@ -605,7 +605,7 @@ mod tests {
     fn auto_restore_skips_a_non_empty_store() {
         // Path (c): a store that already holds memories must not be re-imported —
         // doing so would duplicate every memory.
-        let (bridge, writes) = dest_bridge(|| {
+        let (memory, writes) = dest_memory(|| {
             Ok(json!({
                 "sensory_count": 0,
                 "working_count": 0,
@@ -617,7 +617,7 @@ mod tests {
         });
         let snapshot = two_item_snapshot();
 
-        let restored = auto_restore_if_empty(&bridge, &snapshot).expect("non-empty skip is Ok");
+        let restored = auto_restore_if_empty(&memory, &snapshot).expect("non-empty skip is Ok");
 
         assert_eq!(restored, None, "a non-empty store must be left untouched");
         assert_eq!(
@@ -650,9 +650,9 @@ mod tests {
         )
         .expect("write snapshot file");
 
-        let (bridge, writes) = dest_bridge(|| Ok(zero_stats()));
+        let (memory, writes) = dest_memory(|| Ok(zero_stats()));
         let restored =
-            auto_restore_latest_if_empty(&bridge, &dir).expect("confirmed-empty latest restore");
+            auto_restore_latest_if_empty(&memory, &dir).expect("confirmed-empty latest restore");
 
         assert_eq!(restored, Some(2), "the latest snapshot should be restored");
         assert_eq!(writes.load(Ordering::SeqCst), 2, "both items written");
@@ -681,13 +681,13 @@ mod tests {
         )
         .expect("write snapshot file");
 
-        let (bridge, writes) = dest_bridge(|| {
+        let (memory, writes) = dest_memory(|| {
             Err(RpcErrorPayload {
                 code: -32000,
                 message: "transient read failure at startup".to_string(),
             })
         });
-        let result = auto_restore_latest_if_empty(&bridge, &dir);
+        let result = auto_restore_latest_if_empty(&memory, &dir);
 
         assert!(result.is_err(), "probe error must abort the restore");
         assert_eq!(
@@ -721,7 +721,7 @@ mod tests {
         )
         .expect("write snapshot file");
 
-        let (bridge, writes) = dest_bridge(|| {
+        let (memory, writes) = dest_memory(|| {
             Ok(json!({
                 "sensory_count": 0,
                 "working_count": 0,
@@ -732,7 +732,7 @@ mod tests {
             }))
         });
         let restored =
-            auto_restore_latest_if_empty(&bridge, &dir).expect("non-empty latest skip is Ok");
+            auto_restore_latest_if_empty(&memory, &dir).expect("non-empty latest skip is Ok");
 
         assert_eq!(
             restored, None,
@@ -762,8 +762,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create test dir");
 
-        let (bridge, writes) = dest_bridge(|| Ok(zero_stats()));
-        let restored = auto_restore_latest_if_empty(&bridge, &dir)
+        let (memory, writes) = dest_memory(|| Ok(zero_stats()));
+        let restored = auto_restore_latest_if_empty(&memory, &dir)
             .expect("confirmed-empty with no snapshot is Ok");
 
         assert_eq!(

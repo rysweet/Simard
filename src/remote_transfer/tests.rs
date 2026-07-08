@@ -9,7 +9,7 @@ struct MockStore {
     procedures: Vec<CognitiveProcedure>,
 }
 
-fn mock_bridge() -> CognitiveMemoryClient {
+fn mock_memory() -> CognitiveMemoryClient {
     let store: &'static Mutex<MockStore> = Box::leak(Box::new(Mutex::new(MockStore {
         facts: vec![],
         procedures: vec![],
@@ -98,9 +98,9 @@ fn mock_bridge() -> CognitiveMemoryClient {
 }
 
 #[test]
-fn export_empty_bridge_returns_empty_snapshot() {
-    let bridge = mock_bridge();
-    let snapshot = export_memory_snapshot(&bridge, "test-agent", None).unwrap();
+fn export_empty_memory_returns_empty_snapshot() {
+    let memory = mock_memory();
+    let snapshot = export_memory_snapshot(&memory, "test-agent", None).unwrap();
     assert!(snapshot.is_empty());
     assert_eq!(snapshot.total_items(), 0);
     assert_eq!(snapshot.source_agent, "test-agent");
@@ -109,15 +109,15 @@ fn export_empty_bridge_returns_empty_snapshot() {
 
 #[test]
 fn export_rejects_empty_agent_name() {
-    let bridge = mock_bridge();
-    let err = export_memory_snapshot(&bridge, "", None).unwrap_err();
+    let memory = mock_memory();
+    let err = export_memory_snapshot(&memory, "", None).unwrap_err();
     assert!(matches!(err, SimardError::InvalidConfigValue { .. }));
 }
 
 #[test]
 fn round_trip_export_import() {
-    let source = mock_bridge();
-    // Store some data in the source bridge.
+    let source = mock_memory();
+    // Store some data in the source memory.
     source
         .store_fact("rust", "systems language", 0.9, &[], "ep-1")
         .unwrap();
@@ -130,8 +130,8 @@ fn round_trip_export_import() {
     assert_eq!(snapshot.procedures.len(), 1);
     assert_eq!(snapshot.total_items(), 2);
 
-    // Import into a fresh target bridge.
-    let target = mock_bridge();
+    // Import into a fresh target memory.
+    let target = mock_memory();
     let count = import_memory_snapshot(&target, &snapshot).unwrap();
     assert_eq!(count, 2);
 
@@ -179,8 +179,8 @@ fn snapshot_display_is_readable() {
 
 #[test]
 fn export_to_file_and_load() {
-    let bridge = mock_bridge();
-    bridge
+    let memory = mock_memory();
+    memory
         .store_fact("rust", "fast language", 0.95, &[], "")
         .unwrap();
 
@@ -188,7 +188,7 @@ fn export_to_file_and_load() {
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("snapshot.json");
 
-    let snapshot = export_memory_snapshot(&bridge, "file-agent", Some(&path)).unwrap();
+    let snapshot = export_memory_snapshot(&memory, "file-agent", Some(&path)).unwrap();
     assert_eq!(snapshot.facts.len(), 1);
 
     let loaded = load_snapshot_from_file(&path).unwrap();
@@ -203,7 +203,7 @@ fn export_to_file_and_load() {
 /// `MAX_EXPORT_FACTS` cap, [`export_full_memory_snapshot`] returns all of them
 /// while the capped [`export_memory_snapshot`] truncates — proving the backup
 /// can no longer silently drop the tail as the live store grows past a fixed
-/// cap (the failure that broke verified backups from Jun 20). The mock bridge
+/// cap (the failure that broke verified backups from Jun 20). The mock memory
 /// ignores `limit`, so this exercises the real library backend where the cap is
 /// actually enforced.
 #[test]

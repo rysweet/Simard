@@ -9,7 +9,7 @@
 //!
 //! Kept in `ooda_loop` (the goal-selection / curate path) rather than the
 //! reasoners, per the incident's coordination constraint (the
-//! `ooda_brain`/reasoner/bridge files are owned by the naming-cleanup rename).
+//! `ooda_brain`/reasoner/memory files are owned by the naming-cleanup rename).
 //!
 //! See `docs/concepts/steerable-ooda-daemon.md` ("The no-progress breaker
 //! (Fix 3)").

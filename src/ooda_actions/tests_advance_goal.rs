@@ -111,7 +111,7 @@ fn failures_then_success_clears_marker_and_counter() {
 
     let marker = format!("{BRAIN_FAILURE_BLOCKED_PREFIX}3{BRAIN_FAILURE_BLOCKED_SUFFIX}");
     let board = board_with_goal("g-locked", GoalProgress::Blocked(marker.clone()), None);
-    let mut bridges = test_bridges(); // session: None — auto-recovery happens before session check
+    let mut memories = test_memories(); // session: None — auto-recovery happens before session check
     let mut state = OodaState::new(board);
 
     // Seed the counter to simulate the 3-failure history that produced
@@ -123,7 +123,7 @@ fn failures_then_success_clears_marker_and_counter() {
         goal_id: Some("g-locked".into()),
         description: "advance".into(),
     };
-    let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+    let outcomes = dispatch_actions(&[action], &mut memories, &mut state).unwrap();
 
     // The outcome itself is still success=false (no session in this test
     // setup), BUT the failure must NOT be the "blocked" short-circuit:
@@ -185,7 +185,7 @@ fn auto_recovery_skipped_when_blocked_reason_is_not_marker() {
         GoalProgress::Blocked("waiting for human review".into()),
         None,
     );
-    let mut bridges = test_bridges();
+    let mut memories = test_memories();
     let mut state = OodaState::new(board);
     state
         .goal_failure_counts
@@ -196,7 +196,7 @@ fn auto_recovery_skipped_when_blocked_reason_is_not_marker() {
         goal_id: Some("g-operator-blocked".into()),
         description: "advance".into(),
     };
-    let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+    let outcomes = dispatch_actions(&[action], &mut memories, &mut state).unwrap();
 
     // Operator-set Blocked must still surface the existing "blocked"
     // short-circuit — auto-recovery did NOT fire.
@@ -279,7 +279,7 @@ fn cycle_rs_257_reset_preserved() {
 
 #[test]
 fn dispatch_advance_goal_without_session_fails() {
-    let mut bridges = test_bridges(); // session: None
+    let mut memories = test_memories(); // session: None
     let board = board_with_goal("g1", GoalProgress::NotStarted, None);
     let mut state = OodaState::new(board);
     let action = PlannedAction {
@@ -287,7 +287,7 @@ fn dispatch_advance_goal_without_session_fails() {
         goal_id: Some("g1".into()),
         description: "advance".into(),
     };
-    let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+    let outcomes = dispatch_actions(&[action], &mut memories, &mut state).unwrap();
     assert!(
         !outcomes[0].success,
         "advance without LLM session must fail"
@@ -303,7 +303,7 @@ fn dispatch_advance_goal_blocked_fails() {
     // operator-set, scope-blocked, dependency-blocked, or
     // subordinate-blocked reason continues to short-circuit dispatch
     // with the existing "blocked" failure detail.
-    let mut bridges = test_bridges();
+    let mut memories = test_memories();
     let board = board_with_goal("g1", GoalProgress::Blocked("waiting".into()), None);
     let mut state = OodaState::new(board);
     let action = PlannedAction {
@@ -311,21 +311,21 @@ fn dispatch_advance_goal_blocked_fails() {
         goal_id: Some("g1".into()),
         description: "advance".into(),
     };
-    let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+    let outcomes = dispatch_actions(&[action], &mut memories, &mut state).unwrap();
     assert!(!outcomes[0].success);
     assert!(outcomes[0].detail.contains("blocked"));
 }
 
 #[test]
 fn dispatch_advance_goal_missing_id_fails() {
-    let mut bridges = test_bridges();
+    let mut memories = test_memories();
     let mut state = OodaState::new(crate::goal_curation::GoalBoard::new());
     let action = PlannedAction {
         kind: ActionKind::AdvanceGoal,
         goal_id: None,
         description: "advance".into(),
     };
-    let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+    let outcomes = dispatch_actions(&[action], &mut memories, &mut state).unwrap();
     assert!(!outcomes[0].success);
     assert!(outcomes[0].detail.contains("requires a goal_id"));
 }
@@ -337,7 +337,7 @@ fn dispatch_advance_goal_with_dead_subordinate_blocks() {
     // guard in save_goal_board does not trip when dispatch_actions
     // persists a blocked-status update.
     let _hermetic = crate::test_support::HermeticState::new();
-    let mut bridges = test_bridges();
+    let mut memories = test_memories();
     let board = board_with_goal("g1", GoalProgress::NotStarted, Some("sub-1"));
     let mut state = OodaState::new(board);
     let action = PlannedAction {
@@ -345,7 +345,7 @@ fn dispatch_advance_goal_with_dead_subordinate_blocks() {
         goal_id: Some("g1".into()),
         description: "advance".into(),
     };
-    let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+    let outcomes = dispatch_actions(&[action], &mut memories, &mut state).unwrap();
     // No progress facts in memory means Dead heartbeat — should report no artifacts.
     assert!(!outcomes[0].success);
     assert!(

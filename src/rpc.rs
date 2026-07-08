@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::error::{SimardError, SimardResult};
 use crate::metadata::BackendDescriptor;
 
-/// A request sent from Simard to a bridge server.
+/// A request sent from Simard to a rpc server.
 ///
 /// The wire format is one JSON object per line on stdin:
 /// `{"id":"<uuid>","method":"<name>","params":{...}}\n`
@@ -17,7 +17,7 @@ pub struct RpcRequest {
     pub params: Value,
 }
 
-/// A response received from a bridge server on stdout.
+/// A response received from a rpc server on stdout.
 ///
 /// Exactly one of `result` or `error` is present.
 /// `{"id":"<uuid>","result":{...}}\n`
@@ -37,20 +37,20 @@ pub struct RpcErrorPayload {
     pub message: String,
 }
 
-/// Well-known bridge error codes, loosely following JSON-RPC conventions.
+/// Well-known rpc error codes, loosely following JSON-RPC conventions.
 pub const RPC_ERROR_METHOD_NOT_FOUND: i32 = -32601;
 pub const RPC_ERROR_INTERNAL: i32 = -32603;
 pub const RPC_ERROR_TIMEOUT: i32 = -32000;
 pub const RPC_ERROR_TRANSPORT: i32 = -32001;
 
-/// Health status reported by a bridge server in response to `bridge.health`.
+/// Health status reported by a rpc server in response to `bridge.health`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RpcHealth {
     pub server_name: String,
     pub healthy: bool,
 }
 
-/// Identifies a bridge server by name for error reporting and descriptor use.
+/// Identifies a rpc server by name for error reporting and descriptor use.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct RpcId(pub String);
 
@@ -60,7 +60,7 @@ impl Display for RpcId {
     }
 }
 
-/// The transport layer for communicating with a bridge server.
+/// The transport layer for communicating with a rpc server.
 ///
 /// Implementations manage connection lifecycle (subprocess, socket, etc.)
 /// and handle the JSON-line framing.
@@ -71,7 +71,7 @@ pub trait RpcTransport: Send + Sync {
     /// Return descriptive metadata for reflection.
     fn descriptor(&self) -> BackendDescriptor;
 
-    /// Check whether the bridge server is alive and responsive.
+    /// Check whether the rpc server is alive and responsive.
     fn health(&self) -> SimardResult<RpcHealth> {
         let request = RpcRequest {
             id: new_request_id(),
@@ -82,7 +82,7 @@ pub trait RpcTransport: Send + Sync {
         match response.result {
             Some(value) => {
                 serde_json::from_value(value).map_err(|error| SimardError::RpcProtocolError {
-                    bridge: "health".to_string(),
+                    endpoint: "health".to_string(),
                     reason: format!("malformed health response: {error}"),
                 })
             }
@@ -92,7 +92,7 @@ pub trait RpcTransport: Send + Sync {
                     .map(|e| e.message)
                     .unwrap_or_else(|| "no result in health response".to_string());
                 Err(SimardError::RpcCallFailed {
-                    bridge: "health".to_string(),
+                    endpoint: "health".to_string(),
                     method: "bridge.health".to_string(),
                     reason: message,
                 })
@@ -103,13 +103,13 @@ pub trait RpcTransport: Send + Sync {
 
 /// Unpack a `RpcResponse` into a typed result or a `SimardError`.
 pub fn unpack_rpc_response<T: serde::de::DeserializeOwned>(
-    bridge_name: &str,
+    endpoint_name: &str,
     method: &str,
     response: RpcResponse,
 ) -> SimardResult<T> {
     if let Some(error) = response.error {
         return Err(SimardError::RpcCallFailed {
-            bridge: bridge_name.to_string(),
+            endpoint: endpoint_name.to_string(),
             method: method.to_string(),
             reason: error.message,
         });
@@ -117,11 +117,11 @@ pub fn unpack_rpc_response<T: serde::de::DeserializeOwned>(
     let value = response
         .result
         .ok_or_else(|| SimardError::RpcProtocolError {
-            bridge: bridge_name.to_string(),
+            endpoint: endpoint_name.to_string(),
             reason: format!("response to '{method}' has neither result nor error"),
         })?;
     serde_json::from_value(value).map_err(|error| SimardError::RpcProtocolError {
-        bridge: bridge_name.to_string(),
+        endpoint: endpoint_name.to_string(),
         reason: format!("cannot deserialize '{method}' result: {error}"),
     })
 }
@@ -136,7 +136,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bridge_request_serializes_to_single_json_line() {
+    fn rpc_request_serializes_to_single_json_line() {
         let request = RpcRequest {
             id: "test-001".to_string(),
             method: "memory.store_fact".to_string(),
@@ -149,7 +149,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_response_success_omits_error_field() {
+    fn rpc_response_success_omits_error_field() {
         let response = RpcResponse {
             id: "test-002".to_string(),
             result: Some(serde_json::json!({"ok": true})),
@@ -160,7 +160,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_response_error_omits_result_field() {
+    fn rpc_response_error_omits_result_field() {
         let response = RpcResponse {
             id: "test-003".to_string(),
             result: None,
@@ -187,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn unpack_rpc_response_returns_error_for_bridge_error() {
+    fn unpack_rpc_response_returns_error_for_rpc_error() {
         let response = RpcResponse {
             id: "test-005".to_string(),
             result: None,

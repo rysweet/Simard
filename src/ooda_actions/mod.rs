@@ -53,7 +53,7 @@ fn make_outcome(action: &PlannedAction, success: bool, detail: String) -> Action
     }
 }
 
-/// Dispatch a batch of planned actions against live bridges and state.
+/// Dispatch a batch of planned actions against live memories and state.
 ///
 /// Spawn-path `AdvanceGoal` actions (goals with no live subordinate) run
 /// concurrently, each with its own LLM session, so multiple engineers start
@@ -72,10 +72,10 @@ fn make_outcome(action: &PlannedAction, success: bool, detail: String) -> Action
 /// `scaler.current_max()` cap.
 pub fn dispatch_actions(
     actions: &[PlannedAction],
-    bridges: &mut OodaClients,
+    memories: &mut OodaClients,
     state: &mut OodaState,
 ) -> SimardResult<Vec<ActionOutcome>> {
-    dispatch_actions_bounded(actions, bridges, state, usize::MAX)
+    dispatch_actions_bounded(actions, memories, state, usize::MAX)
 }
 
 /// Like [`dispatch_actions`], but bounds the number of `AdvanceGoal`
@@ -83,12 +83,12 @@ pub fn dispatch_actions(
 ///
 /// `max_concurrency` is the AIMD safety cap (`scaler.current_max()`): a hard
 /// ceiling on concurrent engineer starts per round, keeping the
-/// resource-aware backoff intact. The global `bridges`+`state` lock is NEVER
+/// resource-aware backoff intact. The global `memories`+`state` lock is NEVER
 /// held across the slow goal-action LLM call or the engineer spawn (see
 /// [`crate::ooda_actions::concurrent`]).
 pub fn dispatch_actions_bounded(
     actions: &[PlannedAction],
-    bridges: &mut OodaClients,
+    memories: &mut OodaClients,
     state: &mut OodaState,
     max_concurrency: usize,
 ) -> SimardResult<Vec<ActionOutcome>> {
@@ -114,7 +114,7 @@ pub fn dispatch_actions_bounded(
 
     // ── Phase 1: serialized actions (today's behavior over the subset) ───
     if !serialized_idx.is_empty() {
-        let bridges_mx = Mutex::new(&mut *bridges);
+        let memories_mx = Mutex::new(&mut *memories);
         let state_mx = Mutex::new(&mut *state);
 
         std::thread::scope(|s| {
@@ -123,7 +123,7 @@ pub fn dispatch_actions_bounded(
                     .iter()
                     .map(|&i| {
                         let action = &actions[i];
-                        let bridges_mx = &bridges_mx;
+                        let memories_mx = &memories_mx;
                         let state_mx = &state_mx;
                         (
                             i,
@@ -137,12 +137,12 @@ pub fn dispatch_actions_bounded(
                                     simple_actions::dispatch_safe_update(action)
                                 }
                                 // All other serialized actions take both locks
-                                // briefly (fast bridge calls). Recover from a
+                                // briefly (fast memory calls). Recover from a
                                 // poisoned lock instead of panicking so one
                                 // failed action never crashes the daemon.
                                 _ => {
                                     let mut bg =
-                                        bridges_mx.lock().unwrap_or_else(|p| p.into_inner());
+                                        memories_mx.lock().unwrap_or_else(|p| p.into_inner());
                                     let mut sg = state_mx.lock().unwrap_or_else(|p| p.into_inner());
                                     dispatch_one(action, &mut bg, &mut sg)
                                 }
@@ -169,7 +169,7 @@ pub fn dispatch_actions_bounded(
         concurrent::dispatch_advance_concurrent(
             actions,
             &concurrent_idx,
-            bridges,
+            memories,
             state,
             max_concurrency,
             &mut results,
@@ -185,23 +185,23 @@ pub fn dispatch_actions_bounded(
 /// Dispatch a single planned action and return its outcome.
 fn dispatch_one(
     action: &PlannedAction,
-    bridges: &mut OodaClients,
+    memories: &mut OodaClients,
     state: &mut OodaState,
 ) -> ActionOutcome {
     match action.kind {
         ActionKind::ConsolidateMemory => {
-            simple_actions::dispatch_consolidate_memory(action, bridges)
+            simple_actions::dispatch_consolidate_memory(action, memories)
         }
-        ActionKind::ResearchQuery => simple_actions::dispatch_research_query(action, bridges),
-        ActionKind::RunImprovement => simple_actions::dispatch_run_improvement(action, bridges),
-        ActionKind::AdvanceGoal => advance_goal::dispatch_advance_goal(action, bridges, state),
-        ActionKind::RunGymEval => simple_actions::dispatch_run_gym_eval(action, bridges),
-        ActionKind::BuildSkill => simple_actions::dispatch_build_skill(action, bridges),
+        ActionKind::ResearchQuery => simple_actions::dispatch_research_query(action, memories),
+        ActionKind::RunImprovement => simple_actions::dispatch_run_improvement(action, memories),
+        ActionKind::AdvanceGoal => advance_goal::dispatch_advance_goal(action, memories, state),
+        ActionKind::RunGymEval => simple_actions::dispatch_run_gym_eval(action, memories),
+        ActionKind::BuildSkill => simple_actions::dispatch_build_skill(action, memories),
         ActionKind::LaunchSession => session::dispatch_launch_session(action),
         ActionKind::PollDeveloperActivity => {
-            simple_actions::dispatch_poll_developer_activity(action, bridges)
+            simple_actions::dispatch_poll_developer_activity(action, memories)
         }
-        ActionKind::ExtractIdeas => simple_actions::dispatch_extract_ideas(action, bridges),
+        ActionKind::ExtractIdeas => simple_actions::dispatch_extract_ideas(action, memories),
         ActionKind::SafeUpdate => simple_actions::dispatch_safe_update(action),
     }
 }

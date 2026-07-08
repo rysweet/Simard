@@ -1,4 +1,4 @@
-//! Native Rust implementation of the knowledge bridge.
+//! Native Rust implementation of the knowledge knowledge.
 //!
 //! Replaces `python/simard_knowledge_client.py` with in-process Rust logic.
 //! Reads knowledge pack manifests from disk and queries pack databases via
@@ -258,7 +258,7 @@ fn estimate_confidence(answer: &str, sources: &[SourceInfo]) -> f64 {
     (raw * 100.0).round() / 100.0
 }
 
-/// Register all knowledge bridge method handlers on a NativeRpcTransport.
+/// Register all knowledge knowledge method handlers on a NativeRpcTransport.
 pub fn register_knowledge_handlers(transport: &mut NativeRpcTransport, packs_dir: PathBuf) {
     let packs_dir_list = packs_dir.clone();
     let packs_dir_info = packs_dir.clone();

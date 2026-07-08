@@ -3,7 +3,7 @@ use crate::rpc_transport::InMemoryRpcTransport;
 
 /// Create a `CognitiveMemoryClient` backed by an in-memory stub that
 /// returns empty results for all `search_facts` queries.
-pub fn empty_bridge() -> CognitiveMemoryClient {
+pub fn empty_memory() -> CognitiveMemoryClient {
     let transport = InMemoryRpcTransport::new("test-empty", |method, _params| match method {
         "memory.search_facts" => Ok(serde_json::json!({"facts": []})),
         "memory.get_statistics" => Ok(serde_json::json!({
@@ -18,9 +18,9 @@ pub fn empty_bridge() -> CognitiveMemoryClient {
     CognitiveMemoryClient::new(Box::new(transport))
 }
 
-/// Create a bridge that returns a single meeting fact for `"meeting:"`
+/// Create a memory that returns a single meeting fact for `"meeting:"`
 /// queries and empty results for everything else.
-pub fn bridge_with_meeting_facts() -> CognitiveMemoryClient {
+pub fn memory_with_meeting_facts() -> CognitiveMemoryClient {
     let transport = InMemoryRpcTransport::new("test-facts", |method, params| match method {
         "memory.search_facts" => {
             let query = params["query"].as_str().unwrap_or("");
@@ -47,8 +47,8 @@ pub fn bridge_with_meeting_facts() -> CognitiveMemoryClient {
     CognitiveMemoryClient::new(Box::new(transport))
 }
 
-/// Create a bridge that returns facts for a specific query prefix.
-pub fn bridge_with_specific_facts(
+/// Create a memory that returns facts for a specific query prefix.
+pub fn memory_with_specific_facts(
     prefix: &'static str,
     concept: &'static str,
     content: &'static str,
@@ -80,9 +80,9 @@ pub fn bridge_with_specific_facts(
     CognitiveMemoryClient::new(Box::new(transport))
 }
 
-/// Create a bridge that returns facts for all query prefixes used by
+/// Create a memory that returns facts for all query prefixes used by
 /// `build_live_meeting_context`.
-pub fn bridge_with_all_fact_types() -> CognitiveMemoryClient {
+pub fn memory_with_all_fact_types() -> CognitiveMemoryClient {
     let transport = InMemoryRpcTransport::new("test-all", |method, params| match method {
         "memory.search_facts" => {
             let query = params["query"].as_str().unwrap_or("");

@@ -448,13 +448,13 @@ fn load_or_migrate_writes_file_from_memory_snapshot() {
     let root = state.state_root();
 
     // Seed the legacy cognitive-memory snapshot (the pre-#1 source of truth).
-    let bridge = launch_writer_client(root).expect("writer bridge");
-    crate::goal_curation::save_goal_board(&board(vec![goal("legacy", 1, None)]), bridge.ops())
+    let memory = launch_writer_client(root).expect("writer memory");
+    crate::goal_curation::save_goal_board(&board(vec![goal("legacy", 1, None)]), memory.ops())
         .expect("seed memory snapshot");
 
     // First adoption: no goal_board.json yet, so migrate from memory.
     assert!(!store_path(root).exists());
-    let migrated = load_or_migrate(root, bridge.ops()).expect("migrate");
+    let migrated = load_or_migrate(root, memory.ops()).expect("migrate");
     assert!(
         store_path(root).exists(),
         "migration must create the authoritative file"
@@ -471,7 +471,7 @@ fn load_or_migrate_writes_file_from_memory_snapshot() {
     );
 
     // Second call is a pure read of the now-authoritative file.
-    let again = load_or_migrate(root, bridge.ops()).expect("reload");
+    let again = load_or_migrate(root, memory.ops()).expect("reload");
     assert_eq!(again.board.active.len(), 1);
 }
 

@@ -440,7 +440,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
         <span id="enrichment-freshness" style="font-size:.8rem;color:#8b949e"></span>
         <button class="btn" onclick="fetchEnrichment()" style="font-size:.75rem;margin-left:auto">Refresh</button>
       </div>
-      <p class="card-lede" style="margin:0 0 .75rem;color:#8b949e;font-size:.8rem;line-height:1.5">Live evidence (issue #2942) that recalled memory is actually injected into Simard's OODA decisions: the share of decisions the memory bridge <strong>attached</strong> to, the average facts/procedures/preamble-bytes injected per decision, and any bridge degrades — so a silent recall outage is visible at a glance.</p>
+      <p class="card-lede" style="margin:0 0 .75rem;color:#8b949e;font-size:.8rem;line-height:1.5">Live evidence (issue #2942) that recalled memory is actually injected into Simard's OODA decisions: the share of decisions the memory reader <strong>attached</strong> to, the average facts/procedures/preamble-bytes injected per decision, and any reader degrades — so a silent recall outage is visible at a glance.</p>
       <div id="enrichment-panel"><span class="loading">Loading…</span></div>
     </div>
 

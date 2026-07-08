@@ -155,7 +155,7 @@ fn nonzero_exit_is_a_surfaced_terminal_failure() {
 // ───────────────────────────────────────────────────────────────────────────
 
 /// A deterministic stub that implements ONLY the legacy `run` (returning facts).
-/// It must keep working unchanged: the new default `run_agentic` bridges its
+/// It must keep working unchanged: the new default `run_agentic` memories its
 /// returned facts to the in-process gated `DistillFactSink`. Each fact cites a
 /// real batch episode id so it is grounded.
 struct GroundedFactsRunner {

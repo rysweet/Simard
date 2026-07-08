@@ -1,6 +1,6 @@
 //! Real CopilotSdkAdapter — a base type that drives `amplihack copilot` via
 //! the existing PTY terminal infrastructure and integrates with the memory
-//! and knowledge bridges to enrich turn input with relevant context.
+//! and knowledge readers to enrich turn input with relevant context.
 //!
 //! The adapter launches a copilot subprocess through the PTY `script` wrapper
 //! (reusing `terminal_session::execute_terminal_turn`), formats each turn's
@@ -68,7 +68,7 @@ impl Default for CopilotAdapterConfig {
 /// lightweight callers and unit tests incur no filesystem side effects, and
 /// [`EnrichmentSource::Native`] (opted into via [`CopilotSdkAdapter::with_enrichment`])
 /// for the live production path, wiring the same cognitive-memory store and
-/// native knowledge bridge the rest of the runtime uses (issue #1664).
+/// native knowledge reader the rest of the runtime uses (issue #1664).
 #[derive(Debug)]
 pub struct CopilotSdkAdapter {
     descriptor: BaseTypeDescriptor,
@@ -139,7 +139,7 @@ impl CopilotSdkAdapter {
     /// Enable per-turn memory + knowledge enrichment for sessions opened by
     /// this adapter, reading cognitive memory from `state_root`.
     ///
-    /// Without this, sessions are created with both bridges set to `None` and
+    /// Without this, sessions are created with both readers set to `None` and
     /// every turn runs `prepare_turn_context(objective, None, None)` — the
     /// hardcoded-`None` regression of issue #1664 that silently dropped all
     /// memory and knowledge enrichment in the primary production adapter.
@@ -147,17 +147,17 @@ impl CopilotSdkAdapter {
     /// Clients are launched lazily in [`BaseTypeFactory::open_session`]; a
     /// launch failure logs and degrades to `None` so a missing knowledge pack
     /// or an unavailable memory store never breaks turn dispatch (see
-    /// [`crate::base_type_turn::launch_enrichment_bridges`]).
+    /// [`crate::base_type_turn::launch_enrichment_clients`]).
     #[must_use]
     pub fn with_enrichment(mut self, state_root: PathBuf) -> Self {
         self.enrichment = EnrichmentSource::Native { state_root };
         self
     }
 
-    /// Build a concrete [`CopilotSdkSession`], resolving enrichment bridges.
+    /// Build a concrete [`CopilotSdkSession`], resolving enrichment readers.
     ///
     /// Shared by [`BaseTypeFactory::open_session`] (which boxes the result)
-    /// and unit tests that need to inspect the wired bridges directly.
+    /// and unit tests that need to inspect the wired readers directly.
     fn build_session(&self, request: BaseTypeSessionRequest) -> SimardResult<CopilotSdkSession> {
         if !self.descriptor.supports_topology(request.topology) {
             return Err(SimardError::UnsupportedTopology {
@@ -166,9 +166,9 @@ impl CopilotSdkAdapter {
             });
         }
 
-        // Issue #1664: wire real memory + knowledge bridges instead of the
+        // Issue #1664: wire real memory + knowledge readers instead of the
         // previously-hardcoded `None`/`None`. When enrichment is configured
-        // the bridges are launched here (with graceful degradation) via the
+        // the readers are launched here (with graceful degradation) via the
         // shared [`EnrichmentSource::resolve`] and stored in the normalized
         // `EnrichmentClients` bundle (issue #1665) so that the shared
         // `enrich_input` entry point actually injects memory facts, procedures,
@@ -274,10 +274,10 @@ impl CopilotSdkSession {
         }
     }
 
-    /// Test-only builder that injects pre-constructed enrichment bridges so a
+    /// Test-only builder that injects pre-constructed enrichment readers so a
     /// test can assert that `enrich_input` consumes them (issues #1664/#1665).
     #[cfg(test)]
-    fn with_test_bridges(
+    fn with_test_readers(
         mut self,
         memory_client: Option<Box<dyn CognitiveMemoryOps>>,
         knowledge_client: Option<KnowledgeClient>,
@@ -285,7 +285,7 @@ impl CopilotSdkSession {
         self.enrichment = EnrichmentClients {
             memory: memory_client,
             knowledge: knowledge_client,
-            // Test-injected bridges represent configured enrichment (#2942).
+            // Test-injected readers represent configured enrichment (#2942).
             expected: true,
         };
         self
@@ -326,7 +326,7 @@ impl CopilotSdkSession {
     /// objective into a single prompt body and wraps it with the standard
     /// objective/instructions scaffold via [`format_turn_input`].
     ///
-    /// With no bridges configured (the production default until #1664 wires
+    /// With no readers configured (the production default until #1664 wires
     /// them through), `enrich_input` returns the input unchanged, so the output
     /// is byte-identical to the pre-#1665 Copilot prompt.
     ///

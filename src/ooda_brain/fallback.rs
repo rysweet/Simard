@@ -23,7 +23,7 @@ impl OodaBrain for DeterministicLifecycleBrain {
 
 // ---------------------------------------------------------------------------
 // Inline tests (issue #1979 — per-source-file coverage of the fallback brain
-// that consumers depend on when the LLM bridge returns unparseable JSON or
+// that consumers depend on when the LLM brain returns unparseable JSON or
 // otherwise errors. Sibling tests cover the end-to-end behaviour; these pin
 // the per-file public contract so coverage tools see #[test]s in this file.)
 // ---------------------------------------------------------------------------
@@ -70,7 +70,7 @@ mod tests {
         // Pin the documented contract: the fallback brain never panics and
         // never returns anything other than ContinueSkipping, regardless of
         // context (the consumer relies on this exact shape after a
-        // JSON-parse failure in the LLM bridge).
+        // JSON-parse failure in the LLM brain).
         let brain = DeterministicLifecycleBrain;
         let contexts = [
             EngineerLifecycleCtx {

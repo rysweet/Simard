@@ -17,7 +17,7 @@
 //! - Persists via `save_goal_board_with_removals` so the PR #1926
 //!   resurrection failure mode is defeated.
 //! - Idempotent — unknown ids are silent no-ops, no error.
-//! - Exits non-zero on bridge-open / persistence failure (not tested
+//! - Exits non-zero on memory-open / persistence failure (not tested
 //!   here; covered by load_board failure-mode unit tests).
 //! - No goal ids or descriptions are echoed to stdout — surface is
 //!   scriptable.
@@ -91,13 +91,13 @@ fn seed(root: &Path, active: Vec<ActiveGoal>, backlog: Vec<BacklogItem>) {
     for b in backlog {
         add_backlog_item(&mut board, b).expect("add backlog");
     }
-    let bridge = launch_writer_client(root).expect("writer bridge");
-    save_goal_board(&board, bridge.ops()).expect("save");
+    let memory = launch_writer_client(root).expect("writer memory");
+    save_goal_board(&board, memory.ops()).expect("save");
 }
 
 fn reload(root: &Path) -> GoalBoard {
-    let bridge = launch_writer_client(root).expect("reader bridge");
-    load_goal_board(bridge.ops()).expect("load_goal_board")
+    let memory = launch_writer_client(root).expect("reader memory");
+    load_goal_board(memory.ops()).expect("load_goal_board")
 }
 
 fn cli(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {

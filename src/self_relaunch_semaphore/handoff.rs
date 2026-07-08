@@ -69,13 +69,13 @@ pub fn coordinated_handoff(my_pid: u32, config: &HandoffConfig) -> SimardResult<
         .semaphore
         .read_state()?
         .ok_or_else(|| SimardError::RpcCallFailed {
-            bridge: "handoff".to_string(),
+            endpoint: "handoff".to_string(),
             method: "coordinated_handoff".to_string(),
             reason: "no leader state — acquire semaphore first".to_string(),
         })?;
     if current.pid != my_pid {
         return Err(SimardError::RpcCallFailed {
-            bridge: "handoff".to_string(),
+            endpoint: "handoff".to_string(),
             method: "coordinated_handoff".to_string(),
             reason: format!(
                 "caller {} is not current leader (leader: {})",
@@ -96,7 +96,7 @@ pub fn coordinated_handoff(my_pid: u32, config: &HandoffConfig) -> SimardResult<
             .map(|g| g.to_string())
             .collect();
         return Err(SimardError::RpcCallFailed {
-            bridge: "handoff".to_string(),
+            endpoint: "handoff".to_string(),
             method: "verify_gates".to_string(),
             reason: format!("gate failures: {}", failures.join("; ")),
         });
@@ -113,7 +113,7 @@ pub fn coordinated_handoff(my_pid: u32, config: &HandoffConfig) -> SimardResult<
         .arg(sem_dir)
         .spawn()
         .map_err(|e| SimardError::RpcSpawnFailed {
-            bridge: "handoff-child".to_string(),
+            endpoint: "handoff-child".to_string(),
             reason: format!("failed to spawn canary: {e}"),
         })?;
     let child_pid = child.id();
@@ -146,7 +146,7 @@ pub(crate) fn wait_for_ready(ready_path: &Path, timeout: Duration) -> SimardResu
         }
         if std::time::Instant::now() >= deadline {
             return Err(SimardError::RpcCallFailed {
-                bridge: "handoff".to_string(),
+                endpoint: "handoff".to_string(),
                 method: "wait_for_ready".to_string(),
                 reason: format!(
                     "child did not signal readiness within {}s at {}",

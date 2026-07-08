@@ -62,5 +62,5 @@ fn sync_pending_returns_zero_when_empty() {
 fn descriptor_has_correct_identity() {
     let store = test_store();
     let desc = store.descriptor();
-    assert!(desc.identity.contains("cognitive-bridge"));
+    assert!(desc.identity.contains("cognitive-memory"));
 }

@@ -16,7 +16,7 @@ use super::types::{
 
 /// Process-local critical section for the merge-on-write pipeline in
 /// [`save_goal_board`]. Serializes the read-merge-write window inside a
-/// single Simard process so two concurrent in-process bridge clients
+/// single Simard process so two concurrent in-process memory clients
 /// (daemon + dashboard, two engineer worktrees in one cargo build, …)
 /// cannot both observe the same persisted snapshot and then each store a
 /// stale-derived snapshot that drops the other writer's goals (issue
@@ -290,7 +290,7 @@ pub fn is_placeholder_description(desc: &str) -> bool {
 /// the file. Migration failures are logged and non-fatal — a corrupt or
 /// unreadable file is left in place for operator inspection and the caller
 /// proceeds to the cognitive-memory read path.
-fn migrate_legacy_disk_file_if_present(bridge: &dyn CognitiveMemoryOps) {
+fn migrate_legacy_disk_file_if_present(memory: &dyn CognitiveMemoryOps) {
     let goal_path = simard_state_root().join("goal_records.json");
     if !goal_path.exists() {
         return;
@@ -325,7 +325,7 @@ fn migrate_legacy_disk_file_if_present(bridge: &dyn CognitiveMemoryOps) {
             return;
         }
     };
-    if let Err(e) = bridge.store_fact_with_caller_key(
+    if let Err(e) = memory.store_fact_with_caller_key(
         "goal-board:snapshot",
         "goal-board:snapshot",
         &snapshot,
@@ -350,8 +350,8 @@ fn migrate_legacy_disk_file_if_present(bridge: &dyn CognitiveMemoryOps) {
 /// Load the goal board from cognitive memory.
 ///
 /// Cognitive memory is the single source of truth: the board is stored as a
-/// `goal-board:snapshot` fact via `bridge.store_fact()` and read back via
-/// `bridge.search_facts()`.
+/// `goal-board:snapshot` fact via `memory.store_fact()` and read back via
+/// `memory.search_facts()`.
 ///
 /// On every call this also performs an idempotent one-time migration: if a
 /// legacy `goal_records.json` file exists on disk (from before the move to
@@ -362,26 +362,26 @@ fn migrate_legacy_disk_file_if_present(bridge: &dyn CognitiveMemoryOps) {
 /// `Err` from migration.
 ///
 /// Resolution order after migration:
-/// 1. [`read_latest_snapshot`] — `bridge.search_facts("goal-board:snapshot", 64, 0.0)`
+/// 1. [`read_latest_snapshot`] — `memory.search_facts("goal-board:snapshot", 64, 0.0)`
 ///    filtered by `concept == "goal-board:snapshot"`, `max_by(node_id)`, parsed.
 /// 2. `GoalBoard::new()` — empty board when no snapshot exists or parsing fails.
-pub fn load_goal_board(bridge: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoard> {
-    migrate_legacy_disk_file_if_present(bridge);
+pub fn load_goal_board(memory: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoard> {
+    migrate_legacy_disk_file_if_present(memory);
 
     // Primary read path: cognitive memory snapshot via the shared helper.
-    // The helper returns `None` on bridge error, on zero results, or on a
+    // The helper returns `None` on memory error, on zero results, or on a
     // payload parse failure — load_goal_board folds all three into the
     // legacy "empty board" fallback so callers see a stable contract.
-    Ok(read_latest_snapshot(bridge).unwrap_or_default())
+    Ok(read_latest_snapshot(memory).unwrap_or_default())
 }
 
 /// Read the most recent `goal-board:snapshot` fact from cognitive memory,
 /// or `None` if no snapshot is available.
 ///
 /// Shared by [`load_goal_board`] (initial read) and [`save_goal_board`]
-/// (merge-on-write read). All failure modes (bridge error, empty result,
+/// (merge-on-write read). All failure modes (memory error, empty result,
 /// payload deserialization failure) return `None` with a `warn!` log line
-/// that records the bridge operation and error kind only — never the
+/// that records the memory operation and error kind only — never the
 /// payload, never goal descriptions.
 ///
 /// `search_facts` is called with `limit=64, min_confidence=0.0` so that
@@ -389,8 +389,8 @@ pub fn load_goal_board(bridge: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoar
 /// accumulated. Fact ids are uuid-v7 (see `new_id()` in
 /// `cognitive_memory/mod.rs`), so the lexicographically-largest id is the
 /// most recent snapshot.
-pub(super) fn read_latest_snapshot(bridge: &dyn CognitiveMemoryOps) -> Option<GoalBoard> {
-    let facts = match bridge.search_facts("goal-board:snapshot", 64, 0.0) {
+pub(super) fn read_latest_snapshot(memory: &dyn CognitiveMemoryOps) -> Option<GoalBoard> {
+    let facts = match memory.search_facts("goal-board:snapshot", 64, 0.0) {
         Ok(f) => f,
         Err(e) => {
             warn!(
@@ -536,7 +536,7 @@ pub(super) fn merge_boards(persisted: GoalBoard, in_flight: GoalBoard) -> GoalBo
 /// 3. Call [`merge_boards`] to union by `id` (in-flight wins on collision)
 ///    and truncate the active set to [`MAX_ACTIVE_GOALS`] using the
 ///    deterministic sort key documented on `merge_boards`.
-/// 4. `bridge.store_fact("goal-board:snapshot", &serde_json::to_string(&merged)?, 1.0, &["goal-board"], "goal-curator")`.
+/// 4. `memory.store_fact("goal-board:snapshot", &serde_json::to_string(&merged)?, 1.0, &["goal-board"], "goal-curator")`.
 ///    Fact metadata is constant — only the `GoalBoard` payload is merged.
 ///
 /// **Best-effort guarantee.** No goal *added* on a disjoint subset
@@ -546,7 +546,7 @@ pub(super) fn merge_boards(persisted: GoalBoard, in_flight: GoalBoard) -> GoalBo
 /// the earlier writer's most recent fact; same-id concurrent edits
 /// resolve field-level last-writer-wins. Callers needing strict
 /// serializability must route through the daemon IPC socket.
-pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> SimardResult<()> {
+pub fn save_goal_board(board: &GoalBoard, memory: &dyn CognitiveMemoryOps) -> SimardResult<()> {
     // NOTE: hermetic guard removed from this call-site. The env-var-based
     // `simard_state_root()` check raced with parallel tests that unset
     // SIMARD_STATE_ROOT (see CI failure on PR #2017). The
@@ -589,7 +589,7 @@ pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Si
     let _board_lock = BoardWriteLock::acquire();
 
     // Step 2: read latest persisted snapshot (None on any failure).
-    let persisted = read_latest_snapshot(bridge);
+    let persisted = read_latest_snapshot(memory);
 
     // Step 3: merge in-flight on top of persisted. On read failure /
     // empty store, persist the in-flight board unchanged.
@@ -621,7 +621,7 @@ pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Si
     // Issue #2329: route the board snapshot through CallerKey dedup so each save
     // supersedes the prior board image instead of piling up a new revision every
     // cycle. The caller key and the concept are the same stable string.
-    bridge.store_fact_with_caller_key(
+    memory.store_fact_with_caller_key(
         "goal-board:snapshot",
         "goal-board:snapshot",
         &snapshot,
@@ -664,7 +664,7 @@ pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Si
 pub fn save_goal_board_with_removals(
     board: &GoalBoard,
     force_remove_ids: &[String],
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
     // NOTE: hermetic guard removed — same reasoning as save_goal_board.
     // The launch_writer_client guard covers the hermetic property without
@@ -687,7 +687,7 @@ pub fn save_goal_board_with_removals(
     #[cfg(all(unix, not(test)))]
     let _board_lock = BoardWriteLock::acquire();
 
-    let persisted = read_latest_snapshot(bridge);
+    let persisted = read_latest_snapshot(memory);
     let mut merged = match persisted {
         Some(p) => merge_boards(p, board.clone()),
         None => board.clone(),
@@ -722,7 +722,7 @@ pub fn save_goal_board_with_removals(
         reason: format!("failed to serialize goal board: {e}"),
     })?;
     // Issue #2329: CallerKey dedup — supersede the prior board image.
-    bridge.store_fact_with_caller_key(
+    memory.store_fact_with_caller_key(
         "goal-board:snapshot",
         "goal-board:snapshot",
         &snapshot,
@@ -734,9 +734,9 @@ pub fn save_goal_board_with_removals(
 }
 
 /// Persist the board state and record an episode for recall.
-pub fn persist_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> SimardResult<()> {
-    save_goal_board(board, bridge)?;
-    bridge.store_episode(
+pub fn persist_board(board: &GoalBoard, memory: &dyn CognitiveMemoryOps) -> SimardResult<()> {
+    save_goal_board(board, memory)?;
+    memory.store_episode(
         &board.durable_summary(),
         "goal-curator",
         Some(&json!({"active_count": board.active.len(), "backlog_count": board.backlog.len()})),
@@ -759,13 +759,13 @@ pub fn persist_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Sima
 /// authoritative file governs, so a cache-write failure is non-fatal.
 pub fn overwrite_memory_cache(
     board: &GoalBoard,
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
     let snapshot = serde_json::to_string(board).map_err(|e| SimardError::InvalidGoalRecord {
         field: "board".to_string(),
         reason: format!("failed to serialize goal board: {e}"),
     })?;
-    bridge.store_fact_with_caller_key(
+    memory.store_fact_with_caller_key(
         "goal-board:snapshot",
         "goal-board:snapshot",
         &snapshot,
@@ -1168,7 +1168,7 @@ pub fn board_snapshot_hash(board: &GoalBoard) -> String {
 pub fn write_goal_carryover(
     board: &GoalBoard,
     meeting_id: &str,
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
     let record = GoalCarryoverRecord {
         meeting_id: meeting_id.to_string(),
@@ -1182,7 +1182,7 @@ pub fn write_goal_carryover(
         field: "carryover".to_string(),
         reason: format!("failed to serialize carryover record: {e}"),
     })?;
-    bridge.store_fact(
+    memory.store_fact(
         CARRYOVER_CONCEPT,
         &payload,
         1.0,
@@ -1199,9 +1199,9 @@ pub fn write_goal_carryover(
 
 /// Read the most recent carryover record from cognitive memory, if any.
 pub fn read_latest_carryover(
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
 ) -> SimardResult<Option<GoalCarryoverRecord>> {
-    let facts = bridge.search_facts(CARRYOVER_CONCEPT, 64, 0.0)?;
+    let facts = memory.search_facts(CARRYOVER_CONCEPT, 64, 0.0)?;
     let latest = facts
         .iter()
         .filter(|f| f.concept == CARRYOVER_CONCEPT)
@@ -1258,9 +1258,9 @@ pub enum CarryoverVerification {
 /// surfaces as a clear warning rather than silent data disappearance.
 pub fn verify_goal_carryover(
     board: &GoalBoard,
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
 ) -> SimardResult<CarryoverVerification> {
-    let record = match read_latest_carryover(bridge)? {
+    let record = match read_latest_carryover(memory)? {
         Some(r) => r,
         None => return Ok(CarryoverVerification::NoRecord),
     };

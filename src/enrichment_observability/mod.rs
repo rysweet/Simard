@@ -2,7 +2,7 @@
 //! recalled memory is actually injected into Simard's OODA decisions.
 //!
 //! Recall is *computed* by [`crate::base_type_turn::enrich_turn_input`] and
-//! rendered into each turn's prompt preamble, but whether the memory bridge
+//! rendered into each turn's prompt preamble, but whether the memory reader
 //! **attached** (resolved to `Some`) or silently **degraded** (`None`) was
 //! previously invisible: `EnrichmentSource::resolve` dropped a launch failure to
 //! `eprintln!` and no per-turn signal recorded what actually reached the model.
@@ -10,14 +10,14 @@
 //!
 //! * [`observe`] — one structured `simard::enrichment` tracing line per decision
 //!   (INFO on attach, INFO for an unconfigured turn, **WARN** for an
-//!   expected-but-degraded memory bridge) plus the `simard.enrichment.*` metrics
+//!   expected-but-degraded memory reader) plus the `simard.enrichment.*` metrics
 //!   (`decisions{attached}`, and the `facts_injected` / `procedures_injected` /
 //!   `preamble_bytes` histograms). The choke point is content-free: it carries
 //!   counts and byte sizes, never fact/procedure text; the `objective` is
 //!   truncated + control-stripped and only ever a *log field*, never a metric
 //!   attribute.
 //! * [`observe_degrade`] — the fail-LOUD replacement for the old silent
-//!   `eprintln!` at `launch_enrichment_bridges`: a WARN carrying the bounded
+//!   `eprintln!` at `launch_enrichment_clients`: a WARN carrying the bounded
 //!   `reason` enum (the raw error goes to DEBUG only) plus a
 //!   `simard.enrichment.degraded{reason}` increment.
 //! * An in-process rollup drained once per OODA cycle via [`snapshot_section`]
@@ -50,7 +50,7 @@ pub struct EnrichmentObservation<'a> {
     /// The turn's objective/slug, for correlation. Sanitised (control-stripped,
     /// truncated) before it ever reaches a log line; never a metric attribute.
     pub objective: &'a str,
-    /// Did the cognitive-memory bridge resolve to `Some`? `true` means recalled
+    /// Did the cognitive-memory reader resolve to `Some`? `true` means recalled
     /// *memory* reached the decision. This is `memory_client.is_some()`, NOT the
     /// combined memory-or-knowledge bundle.
     pub attached: bool,
@@ -67,7 +67,7 @@ pub struct EnrichmentObservation<'a> {
     pub preamble_bytes: usize,
 }
 
-/// The bounded cause of a bridge-launch degrade.
+/// The bounded cause of a reader-launch degrade.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DegradeReason {
     /// `crate::ooda_loop::connect_memory` failed (e.g. memory-ipc Broken pipe).
@@ -108,7 +108,7 @@ fn sanitize_field(raw: &str, max_bytes: usize) -> String {
 /// Level encodes the outcome so "any `WARN` under `simard::enrichment` is a real
 /// degrade" is a safe operator rule:
 /// * `attached` → INFO (`enrichment applied`),
-/// * `expected && !attached` → **WARN** (memory bridge expected but degraded),
+/// * `expected && !attached` → **WARN** (memory reader expected but degraded),
 /// * `!expected` → INFO (`enrichment not configured`), and **uncounted**.
 pub fn observe(obs: EnrichmentObservation<'_>) {
     let objective = sanitize_field(obs.objective, MAX_OBJECTIVE_BYTES);
@@ -137,7 +137,7 @@ pub fn observe(obs: EnrichmentObservation<'_>) {
             procedures,
             preamble_bytes,
             objective = %objective,
-            "enrichment degraded — memory bridge expected but not attached; \
+            "enrichment degraded — memory reader expected but not attached; \
              decision proceeding without recalled memory",
         );
     } else {
@@ -188,17 +188,17 @@ pub fn observe(obs: EnrichmentObservation<'_>) {
     }
 }
 
-/// Fail-LOUD bridge-launch degrade: a WARN carrying the bounded `reason` enum
+/// Fail-LOUD reader-launch degrade: a WARN carrying the bounded `reason` enum
 /// (the raw error goes to DEBUG only, never the WARN) plus a
 /// `simard.enrichment.degraded{reason}` increment. Replaces the old silent
-/// `eprintln!` degrade paths in `launch_enrichment_bridges`.
+/// `eprintln!` degrade paths in `launch_enrichment_clients`.
 pub fn observe_degrade(reason: DegradeReason, raw_error: &str) {
     let message = match reason {
         DegradeReason::MemoryIpc => {
-            "cognitive-memory bridge unavailable — memory enrichment disabled for this session"
+            "cognitive-memory reader unavailable — memory enrichment disabled for this session"
         }
         DegradeReason::KnowledgeLaunch => {
-            "knowledge bridge unavailable — knowledge enrichment disabled for this session"
+            "knowledge reader unavailable — knowledge enrichment disabled for this session"
         }
     };
     tracing::warn!(
@@ -212,7 +212,7 @@ pub fn observe_degrade(reason: DegradeReason, raw_error: &str) {
         target: "simard::enrichment",
         reason = reason.as_str(),
         raw = %sanitize_field(raw_error, MAX_RAW_ERROR_BYTES),
-        "enrichment bridge degrade detail",
+        "enrichment reader degrade detail",
     );
     telemetry::counter_add(
         names::ENRICHMENT_DEGRADED,
@@ -412,11 +412,11 @@ pub fn run_enrichment_ablation(
     objective: &str,
     memory: &dyn CognitiveMemoryOps,
 ) -> SimardResult<EnrichmentAblationOutcome> {
-    // recall ON: the memory bridge attaches and recalls facts/procedures.
+    // recall ON: the memory reader attaches and recalls facts/procedures.
     let ctx_on = prepare_turn_context(objective, Some(memory), None)?;
     let on_block = render_enrichment_block(&ctx_on);
 
-    // recall OFF: recall suppressed (no memory bridge) → nothing is injected.
+    // recall OFF: recall suppressed (no memory reader) → nothing is injected.
     let ctx_off = prepare_turn_context(objective, None, None)?;
     let off_block = render_enrichment_block(&ctx_off);
 

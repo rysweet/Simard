@@ -510,8 +510,8 @@ fn connect_returns_spawn_error_when_socket_absent() {
         Err(e) => e,
     };
     match err {
-        SimardError::RpcSpawnFailed { bridge, reason } => {
-            assert_eq!(bridge, "memory-ipc-client");
+        SimardError::RpcSpawnFailed { endpoint, reason } => {
+            assert_eq!(endpoint, "memory-ipc-client");
             assert!(
                 reason.contains("not present"),
                 "error must explain the socket is absent; got: {reason}"
@@ -530,7 +530,7 @@ struct AlwaysErrBackend;
 impl AlwaysErrBackend {
     fn boom(op: &str) -> SimardError {
         SimardError::RpcCallFailed {
-            bridge: "test-backend".into(),
+            endpoint: "test-backend".into(),
             method: op.into(),
             reason: "synthetic backend failure".into(),
         }
@@ -617,11 +617,11 @@ fn assert_backend_err<T: std::fmt::Debug>(result: SimardResult<T>, method: &str)
             "{method}: expected a backend error, but got Ok({v:?}) — a failing IPC op must never silently succeed"
         ),
         Err(SimardError::RpcCallFailed {
-            bridge,
+            endpoint,
             method: got,
             reason,
         }) => {
-            assert_eq!(bridge, "memory-ipc", "{method}: bridge label");
+            assert_eq!(endpoint, "memory-ipc", "{method}: endpoint label");
             assert_eq!(
                 got, method,
                 "the failure must be attributed to the method the client called"
@@ -797,7 +797,7 @@ fn malformed_request_frame_does_not_kill_the_server() {
 // ---------------------------------------------------------------------------
 // SharedMemory adapter: forwards the whole CognitiveMemoryOps surface to the
 // wrapped store. A missing forward is a silent-empty-read hazard (issue #2320 /
-// #2331) — the daemon (tier-0) and every tier-2 bridge read through this.
+// #2331) — the daemon (tier-0) and every tier-2 client read through this.
 // ---------------------------------------------------------------------------
 
 #[test]

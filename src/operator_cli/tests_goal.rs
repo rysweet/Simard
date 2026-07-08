@@ -31,7 +31,7 @@ use crate::operator_cli::dispatch_operator_cli;
 fn isolated_state_root() -> (TempDir, PathBuf) {
     let tmp = tempfile::tempdir().expect("create tempdir");
     let root = tmp.path().to_path_buf();
-    // Set BEFORE launching any bridge so the writer + reader land in the
+    // Set BEFORE launching any memory so the writer + reader land in the
     // same isolated directory.
     // SAFETY: tests are serialised via `#[serial_test::serial(cognitive_memory)]`,
     // so concurrent env mutation is excluded by the harness.
@@ -48,7 +48,7 @@ fn seed_board(root: &Path, goals: Vec<ActiveGoal>) {
     for goal in goals {
         add_active_goal(&mut board, goal).expect("add goal under MAX_ACTIVE_GOALS");
     }
-    let writer = launch_writer_client(root).expect("writer bridge");
+    let writer = launch_writer_client(root).expect("writer memory");
     save_goal_board(&board, writer.ops()).expect("save board");
 }
 
@@ -75,7 +75,7 @@ fn active_goal(id: &str, status: GoalProgress) -> ActiveGoal {
 
 /// Re-read the persisted goal board from cognitive memory at `root`.
 fn load_board(root: &Path) -> GoalBoard {
-    let writer = launch_writer_client(root).expect("writer bridge");
+    let writer = launch_writer_client(root).expect("writer memory");
     crate::goal_curation::load_goal_board(writer.ops()).expect("load board")
 }
 
@@ -378,8 +378,8 @@ fn operator_remove_via_cli_survives_daemon_cycle_and_restart() {
     );
 
     // Daemon adopts the board; its in-flight copy holds BOTH goals.
-    let bridge = launch_writer_client(&root).expect("writer bridge");
-    let daemon_in_flight = crate::goal_board_store::load_or_migrate(&root, bridge.ops())
+    let memory = launch_writer_client(&root).expect("writer memory");
+    let daemon_in_flight = crate::goal_board_store::load_or_migrate(&root, memory.ops())
         .expect("migrate")
         .board;
     assert_eq!(daemon_in_flight.active.len(), 2);

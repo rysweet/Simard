@@ -483,7 +483,7 @@ pub(crate) fn refuse_if_draining(state_dir: &Path) -> SimardResult<()> {
             flag.display()
         );
         return Err(SimardError::RpcCallFailed {
-            bridge: "engineer".to_string(),
+            endpoint: "engineer".to_string(),
             method: "spawn_agent_for_goal".to_string(),
             reason: format!(
                 "safe-update in progress: draining flag {} is present",
@@ -812,13 +812,15 @@ mod tests {
     }
 
     #[test]
-    fn refuse_if_draining_returns_bridge_error_when_flag_present() {
+    fn refuse_if_draining_returns_memory_error_when_flag_present() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("draining.flag"), b"").unwrap();
         let err = refuse_if_draining(dir.path()).unwrap_err();
         match err {
-            SimardError::RpcCallFailed { bridge, method, .. } => {
-                assert_eq!(bridge, "engineer");
+            SimardError::RpcCallFailed {
+                endpoint, method, ..
+            } => {
+                assert_eq!(endpoint, "engineer");
                 assert_eq!(method, "spawn_agent_for_goal");
             }
             other => panic!("expected RpcCallFailed, got {other:?}"),

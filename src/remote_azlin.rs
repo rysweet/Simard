@@ -62,14 +62,14 @@ impl AzlinExecutor for RealAzlinExecutor {
                 .args(args)
                 .output()
                 .map_err(|e| SimardError::RpcSpawnFailed {
-                    bridge: "azlin".to_string(),
+                    endpoint: "azlin".to_string(),
                     reason: format!("failed to execute azlin: {e}"),
                 })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(SimardError::RpcTransportError {
-                bridge: "azlin".to_string(),
+                endpoint: "azlin".to_string(),
                 reason: format!(
                     "azlin {} exited with {}: {}",
                     args.first().unwrap_or(&"<unknown>"),
@@ -80,7 +80,7 @@ impl AzlinExecutor for RealAzlinExecutor {
         }
 
         String::from_utf8(output.stdout).map_err(|e| SimardError::RpcProtocolError {
-            bridge: "azlin".to_string(),
+            endpoint: "azlin".to_string(),
             reason: format!("azlin output was not valid UTF-8: {e}"),
         })
     }
@@ -160,7 +160,7 @@ pub fn azlin_create(
 pub fn azlin_ssh(vm: &AzlinVm, executor: &dyn AzlinExecutor) -> SimardResult<String> {
     if vm.status != "running" {
         return Err(SimardError::RpcTransportError {
-            bridge: "azlin".to_string(),
+            endpoint: "azlin".to_string(),
             reason: format!("cannot SSH to VM '{}' in status '{}'", vm.name, vm.status),
         });
     }
@@ -169,7 +169,7 @@ pub fn azlin_ssh(vm: &AzlinVm, executor: &dyn AzlinExecutor) -> SimardResult<Str
     let trimmed = output.trim().to_string();
     if trimmed.is_empty() {
         return Err(SimardError::RpcProtocolError {
-            bridge: "azlin".to_string(),
+            endpoint: "azlin".to_string(),
             reason: "azlin ssh returned empty output".to_string(),
         });
     }
@@ -207,7 +207,7 @@ fn parse_azlin_create_output(expected_name: &str, output: &str) -> SimardResult<
     }
 
     let ip = ip.ok_or_else(|| SimardError::RpcProtocolError {
-        bridge: "azlin".to_string(),
+        endpoint: "azlin".to_string(),
         reason: format!("azlin create output missing 'ip=' field for VM '{expected_name}'"),
     })?;
 
@@ -253,7 +253,7 @@ mod tests {
             Some("ssh") => Ok("ssh azureuser@10.0.0.1".to_string()),
             Some("destroy") => Ok(String::new()),
             _ => Err(SimardError::RpcTransportError {
-                bridge: "azlin".to_string(),
+                endpoint: "azlin".to_string(),
                 reason: format!("unexpected command: {args:?}"),
             }),
         })

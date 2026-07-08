@@ -41,7 +41,7 @@
 //! [`NoProgressResolution`], exactly as the completion-gate archive path leaves
 //! its `(archived, blocked)` side effects to its caller. This keeps the breaker
 //! hermetically testable and contained to `src/goal_curation/` — the incident's
-//! coordination constraint (the `ooda_brain`/reasoner/bridge files are owned by
+//! coordination constraint (the `ooda_brain`/reasoner/memory files are owned by
 //! the naming-cleanup rename, so they are left untouched).
 //!
 //! See `docs/concepts/steerable-ooda-daemon.md` ("The no-progress breaker

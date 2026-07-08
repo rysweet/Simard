@@ -198,24 +198,24 @@ pub enum SimardError {
         reason: String,
     },
     RpcSpawnFailed {
-        bridge: String,
+        endpoint: String,
         reason: String,
     },
     RpcTransportError {
-        bridge: String,
+        endpoint: String,
         reason: String,
     },
     RpcProtocolError {
-        bridge: String,
+        endpoint: String,
         reason: String,
     },
     RpcCallFailed {
-        bridge: String,
+        endpoint: String,
         method: String,
         reason: String,
     },
     RpcCircuitOpen {
-        bridge: String,
+        endpoint: String,
     },
     RpcError(String),
     PlanningUnavailable {

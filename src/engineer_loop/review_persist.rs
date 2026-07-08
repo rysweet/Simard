@@ -99,7 +99,7 @@ pub fn persist_engineer_loop_artifacts(
     inspection: &RepoInspection,
     action: &ExecutedEngineerAction,
     verification: &VerificationReport,
-    terminal_bridge_context: Option<&EngineerHandoffContext>,
+    terminal_handoff_context: Option<&EngineerHandoffContext>,
 ) -> SimardResult<()> {
     let session_ids = UuidSessionIdGenerator;
     let mut session = SessionRecord::new(
@@ -121,7 +121,7 @@ pub fn persist_engineer_loop_artifacts(
         inspection,
         action,
         verification,
-        terminal_bridge_context,
+        terminal_handoff_context,
     )
 }
 
@@ -141,7 +141,7 @@ pub(crate) fn persist_artifacts_with_session(
     inspection: &RepoInspection,
     action: &ExecutedEngineerAction,
     verification: &VerificationReport,
-    terminal_bridge_context: Option<&EngineerHandoffContext>,
+    terminal_handoff_context: Option<&EngineerHandoffContext>,
 ) -> SimardResult<()> {
     let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
     let evidence_store =
@@ -216,8 +216,8 @@ pub(crate) fn persist_artifacts_with_session(
         format!("verification-summary={}", verification.summary),
     ];
     let mut evidence_details = evidence_details;
-    if let Some(terminal_bridge_context) = terminal_bridge_context {
-        evidence_details.extend(terminal_bridge_context.engineer_evidence_details());
+    if let Some(terminal_handoff_context) = terminal_handoff_context {
+        evidence_details.extend(terminal_handoff_context.engineer_evidence_details());
     }
 
     for (index, detail) in evidence_details.into_iter().enumerate() {

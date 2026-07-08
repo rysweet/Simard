@@ -6,32 +6,32 @@ use crate::ooda_loop::ActionKind;
 
 #[test]
 fn persist_cycle_to_memory_succeeds_for_minimal_report() {
-    let bridges = crate::ooda_actions::test_helpers::test_bridges();
+    let memories = crate::ooda_actions::test_helpers::test_memories();
     let report = make_test_report(1);
     // Should not panic — best-effort persistence
-    super::super::persistence::persist_cycle_to_memory(&bridges, &report);
+    super::super::persistence::persist_cycle_to_memory(&memories, &report);
 }
 
 #[test]
 fn persist_cycle_to_memory_with_goals_and_outcomes() {
-    let bridges = crate::ooda_actions::test_helpers::test_bridges();
+    let memories = crate::ooda_actions::test_helpers::test_memories();
     let report = make_report_with_goals_and_outcomes();
-    super::super::persistence::persist_cycle_to_memory(&bridges, &report);
+    super::super::persistence::persist_cycle_to_memory(&memories, &report);
 }
 
 #[test]
 fn persist_cycle_to_memory_with_zero_outcomes() {
-    let bridges = crate::ooda_actions::test_helpers::test_bridges();
+    let memories = crate::ooda_actions::test_helpers::test_memories();
     let mut report = make_test_report(5);
     report.outcomes.clear();
-    super::super::persistence::persist_cycle_to_memory(&bridges, &report);
+    super::super::persistence::persist_cycle_to_memory(&memories, &report);
 }
 
 #[test]
 fn persist_cycle_to_memory_with_all_failed_outcomes() {
     use crate::ooda_loop::{ActionOutcome, PlannedAction};
 
-    let bridges = crate::ooda_actions::test_helpers::test_bridges();
+    let memories = crate::ooda_actions::test_helpers::test_memories();
     let mut report = make_test_report(10);
     report.outcomes = vec![
         ActionOutcome {
@@ -53,17 +53,17 @@ fn persist_cycle_to_memory_with_all_failed_outcomes() {
             detail: "timeout".to_string(),
         },
     ];
-    super::super::persistence::persist_cycle_to_memory(&bridges, &report);
+    super::super::persistence::persist_cycle_to_memory(&memories, &report);
 }
 
 #[test]
 fn persist_cycle_report_and_memory_together() {
-    let bridges = crate::ooda_actions::test_helpers::test_bridges();
+    let memories = crate::ooda_actions::test_helpers::test_memories();
     let dir = tempfile::tempdir().unwrap();
     let report = make_report_with_goals_and_outcomes();
 
     persist_cycle_report(dir.path(), &report);
-    super::super::persistence::persist_cycle_to_memory(&bridges, &report);
+    super::super::persistence::persist_cycle_to_memory(&memories, &report);
 
     // File should exist from persist_cycle_report
     let path = dir.path().join("cycle_reports").join("cycle_7.json");
@@ -74,7 +74,7 @@ fn persist_cycle_report_and_memory_together() {
 fn persist_cycle_to_memory_with_open_issues() {
     use crate::ooda_loop::{EnvironmentSnapshot, GoalSnapshot, Observation};
 
-    let bridges = crate::ooda_actions::test_helpers::test_bridges();
+    let memories = crate::ooda_actions::test_helpers::test_memories();
     let mut report = make_test_report(3);
     report.observation = Observation {
         goal_statuses: vec![GoalSnapshot {
@@ -92,5 +92,5 @@ fn persist_cycle_to_memory_with_open_issues() {
         },
         eval_watchdog: None,
     };
-    super::super::persistence::persist_cycle_to_memory(&bridges, &report);
+    super::super::persistence::persist_cycle_to_memory(&memories, &report);
 }

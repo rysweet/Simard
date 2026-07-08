@@ -3,7 +3,7 @@
 //! # Deprecated
 //!
 //! This module's JSON-snapshot replication approach is superseded by the
-//! amplihack hive-mind DHT+bloom gossip protocol. The memory bridge now
+//! amplihack hive-mind DHT+bloom gossip protocol. The memory memory now
 //! uses `Memory('simard', topology='distributed')` which handles cross-agent
 //! replication automatically via the `DistributedHiveGraph`.
 //!
@@ -16,7 +16,7 @@
 //! When an agent migrates to a remote VM, it needs to carry its cognitive
 //! memory state. This module exports facts and procedures from a local
 //! `CognitiveMemoryClient`, serializes them into a `MemorySnapshot`, and
-//! can import that snapshot into a remote bridge.
+//! can import that snapshot into a remote memory.
 //!
 //! Only facts and procedures are replicated. Sensory and working memory
 //! are ephemeral and session-local. Episodes are too large for migration
@@ -46,9 +46,9 @@ const MAX_EXPORT_PROCEDURES: u32 = 200;
 /// semantic facts (durable knowledge) and procedures (reusable workflows).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MemorySnapshot {
-    /// Semantic facts exported from the source bridge.
+    /// Semantic facts exported from the source memory.
     pub facts: Vec<CognitiveFact>,
-    /// Procedural memories exported from the source bridge.
+    /// Procedural memories exported from the source memory.
     pub procedures: Vec<CognitiveProcedure>,
     /// Unix epoch seconds when this snapshot was created.
     pub exported_at: u64,
@@ -440,17 +440,17 @@ pub fn load_full_snapshot_from_file(path: &Path) -> SimardResult<FullMemorySnaps
     })
 }
 
-/// Export a memory snapshot from a cognitive memory bridge.
+/// Export a memory snapshot from a cognitive memory memory.
 ///
 /// # Deprecated
-/// Use the hive-mind distributed topology instead. The memory bridge now
+/// Use the hive-mind distributed topology instead. The memory memory now
 /// replicates facts automatically via DHT+bloom gossip.
 #[deprecated(
     since = "0.13.0",
     note = "Use Memory('simard', topology='distributed') hive-mind replication instead of JSON snapshots"
 )]
 pub fn export_memory_snapshot(
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
     agent_name: &str,
     path: Option<&Path>,
 ) -> SimardResult<MemorySnapshot> {
@@ -463,8 +463,8 @@ pub fn export_memory_snapshot(
     }
 
     // Query all facts with minimum confidence threshold of 0.0 to get everything.
-    let facts = bridge.search_facts("*", MAX_EXPORT_FACTS, 0.0)?;
-    let procedures = bridge.recall_procedure("*", MAX_EXPORT_PROCEDURES)?;
+    let facts = memory.search_facts("*", MAX_EXPORT_FACTS, 0.0)?;
+    let procedures = memory.recall_procedure("*", MAX_EXPORT_PROCEDURES)?;
 
     let now = current_epoch_seconds()?;
 
@@ -499,7 +499,7 @@ pub fn export_memory_snapshot(
     Ok(snapshot)
 }
 
-/// Import a memory snapshot into a cognitive memory bridge.
+/// Import a memory snapshot into a cognitive memory memory.
 ///
 /// # Deprecated
 /// Use the hive-mind distributed topology instead.
@@ -508,13 +508,13 @@ pub fn export_memory_snapshot(
     note = "Use Memory('simard', topology='distributed') hive-mind replication instead of JSON snapshots"
 )]
 pub fn import_memory_snapshot(
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
     snapshot: &MemorySnapshot,
 ) -> SimardResult<usize> {
     let mut imported = 0;
 
     for fact in &snapshot.facts {
-        bridge.store_fact(
+        memory.store_fact(
             &fact.concept,
             &fact.content,
             fact.confidence,
@@ -525,7 +525,7 @@ pub fn import_memory_snapshot(
     }
 
     for proc in &snapshot.procedures {
-        bridge.store_procedure(&proc.name, &proc.steps, &proc.prerequisites)?;
+        memory.store_procedure(&proc.name, &proc.steps, &proc.prerequisites)?;
         imported += 1;
     }
 

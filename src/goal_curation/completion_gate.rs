@@ -197,7 +197,7 @@ pub fn classify_from_missing(
 /// same refutation always yields the same class. [`MissingEvidence::CouldNotVerify`]
 /// is excluded — it routes to [`VerificationOutcome::Error`], never `Refuted`.
 ///
-/// This is the bridge from FU1's external failure signal to #2458's failure→
+/// This is the memory from FU1's external failure signal to #2458's failure→
 /// lesson loop: the returned class is the `error_class` half of the
 /// `(goal_type, error_class)` recurrence key
 /// ([`crate::memory_consolidation::reflection_lessons`]).

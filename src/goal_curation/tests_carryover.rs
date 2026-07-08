@@ -77,16 +77,16 @@ fn board_snapshot_hash_empty_board() {
 #[serial(cognitive_memory)]
 fn carryover_round_trip_succeeds() {
     let (_tmp, root) = isolated_state_root();
-    let bridge = launch_writer_client(&root).expect("writer bridge");
+    let memory = launch_writer_client(&root).expect("writer memory");
 
     let mut board = GoalBoard::new();
     add_active_goal(&mut board, active_goal("goal-alpha", 1)).unwrap();
     add_active_goal(&mut board, active_goal("goal-beta", 2)).unwrap();
-    save_goal_board(&board, bridge.ops()).expect("save board");
+    save_goal_board(&board, memory.ops()).expect("save board");
 
-    write_goal_carryover(&board, "meeting-2026-01-01", bridge.ops()).expect("write carryover");
+    write_goal_carryover(&board, "meeting-2026-01-01", memory.ops()).expect("write carryover");
 
-    let record = read_latest_carryover(bridge.ops())
+    let record = read_latest_carryover(memory.ops())
         .expect("read carryover")
         .expect("carryover record must exist");
 
@@ -103,10 +103,10 @@ fn carryover_round_trip_succeeds() {
 #[serial(cognitive_memory)]
 fn verify_no_record_on_fresh_state() {
     let (_tmp, root) = isolated_state_root();
-    let bridge = launch_writer_client(&root).expect("writer bridge");
+    let memory = launch_writer_client(&root).expect("writer memory");
 
     let board = GoalBoard::new();
-    let result = verify_goal_carryover(&board, bridge.ops()).expect("verify");
+    let result = verify_goal_carryover(&board, memory.ops()).expect("verify");
     assert_eq!(result, CarryoverVerification::NoRecord);
 }
 
@@ -114,16 +114,16 @@ fn verify_no_record_on_fresh_state() {
 #[serial(cognitive_memory)]
 fn verify_succeeds_when_board_matches() {
     let (_tmp, root) = isolated_state_root();
-    let bridge = launch_writer_client(&root).expect("writer bridge");
+    let memory = launch_writer_client(&root).expect("writer memory");
 
     let mut board = GoalBoard::new();
     add_active_goal(&mut board, active_goal("g1", 1)).unwrap();
-    save_goal_board(&board, bridge.ops()).expect("save");
-    write_goal_carryover(&board, "mtg-001", bridge.ops()).expect("carryover");
+    save_goal_board(&board, memory.ops()).expect("save");
+    write_goal_carryover(&board, "mtg-001", memory.ops()).expect("carryover");
 
-    // Reload board from same bridge — should match.
-    let loaded = load_goal_board(bridge.ops()).expect("load");
-    let result = verify_goal_carryover(&loaded, bridge.ops()).expect("verify");
+    // Reload board from same memory — should match.
+    let loaded = load_goal_board(memory.ops()).expect("load");
+    let result = verify_goal_carryover(&loaded, memory.ops()).expect("verify");
     match result {
         CarryoverVerification::Verified {
             meeting_id,
@@ -140,22 +140,22 @@ fn verify_succeeds_when_board_matches() {
 #[serial(cognitive_memory)]
 fn verify_detects_drift_when_goals_missing() {
     let (_tmp, root) = isolated_state_root();
-    let bridge = launch_writer_client(&root).expect("writer bridge");
+    let memory = launch_writer_client(&root).expect("writer memory");
 
     // Meeting produces board with 3 goals.
     let mut meeting_board = GoalBoard::new();
     add_active_goal(&mut meeting_board, active_goal("g1", 1)).unwrap();
     add_active_goal(&mut meeting_board, active_goal("g2", 2)).unwrap();
     add_active_goal(&mut meeting_board, active_goal("g3", 3)).unwrap();
-    save_goal_board(&meeting_board, bridge.ops()).expect("save meeting board");
-    write_goal_carryover(&meeting_board, "mtg-drift", bridge.ops()).expect("write carryover");
+    save_goal_board(&meeting_board, memory.ops()).expect("save meeting board");
+    write_goal_carryover(&meeting_board, "mtg-drift", memory.ops()).expect("write carryover");
 
     // Engineer board has only 1 of the 3 goals (simulates state-root
     // divergence where g2 and g3 were lost).
     let mut engineer_board = GoalBoard::new();
     add_active_goal(&mut engineer_board, active_goal("g1", 1)).unwrap();
 
-    let result = verify_goal_carryover(&engineer_board, bridge.ops()).expect("verify");
+    let result = verify_goal_carryover(&engineer_board, memory.ops()).expect("verify");
     match result {
         CarryoverVerification::Drifted {
             meeting_id,
@@ -184,20 +184,20 @@ fn goals_survive_same_state_root() {
     let (_tmp, root) = isolated_state_root();
 
     // Meeting writes goals + carryover.
-    let meeting_bridge = launch_writer_client(&root).expect("meeting bridge");
+    let meeting_memory = launch_writer_client(&root).expect("meeting memory");
     let mut board = GoalBoard::new();
     add_active_goal(&mut board, active_goal("survive-1", 1)).unwrap();
     add_active_goal(&mut board, active_goal("survive-2", 2)).unwrap();
-    save_goal_board(&board, meeting_bridge.ops()).expect("save");
-    write_goal_carryover(&board, "mtg-survive", meeting_bridge.ops()).expect("carryover");
-    drop(meeting_bridge);
+    save_goal_board(&board, meeting_memory.ops()).expect("save");
+    write_goal_carryover(&board, "mtg-survive", meeting_memory.ops()).expect("carryover");
+    drop(meeting_memory);
 
     // Engineer reads from same state root — should verify clean.
-    let eng_bridge = launch_writer_client(&root).expect("eng bridge");
-    let loaded = load_goal_board(eng_bridge.ops()).expect("load");
+    let eng_memory = launch_writer_client(&root).expect("eng memory");
+    let loaded = load_goal_board(eng_memory.ops()).expect("load");
     assert_eq!(loaded.active.len(), 2, "both goals must survive");
 
-    let result = verify_goal_carryover(&loaded, eng_bridge.ops()).expect("verify");
+    let result = verify_goal_carryover(&loaded, eng_memory.ops()).expect("verify");
     match result {
         CarryoverVerification::Verified { meeting_id, .. } => {
             assert_eq!(meeting_id, "mtg-survive");
@@ -215,12 +215,12 @@ fn diverged_state_root_produces_no_record() {
     let (_tmp1, root1) = isolated_state_root();
 
     // Meeting writes to root1.
-    let bridge1 = launch_writer_client(&root1).expect("bridge1");
+    let memory1 = launch_writer_client(&root1).expect("memory1");
     let mut board = GoalBoard::new();
     add_active_goal(&mut board, active_goal("lost-goal", 1)).unwrap();
-    save_goal_board(&board, bridge1.ops()).expect("save");
-    write_goal_carryover(&board, "mtg-lost", bridge1.ops()).expect("carryover");
-    drop(bridge1);
+    save_goal_board(&board, memory1.ops()).expect("save");
+    write_goal_carryover(&board, "mtg-lost", memory1.ops()).expect("carryover");
+    drop(memory1);
 
     // Engineer reads from root2 — different state root entirely.
     let tmp2 = tempfile::tempdir().expect("tempdir2");
@@ -228,14 +228,14 @@ fn diverged_state_root_produces_no_record() {
     unsafe {
         std::env::set_var(STATE_ROOT_ENV, &root2);
     }
-    let bridge2 = launch_writer_client(&root2).expect("bridge2");
-    let loaded = load_goal_board(bridge2.ops()).expect("load from new root");
+    let memory2 = launch_writer_client(&root2).expect("memory2");
+    let loaded = load_goal_board(memory2.ops()).expect("load from new root");
 
     // Board is empty because the new state root has no data.
     assert!(loaded.active.is_empty(), "new root should have no goals");
 
     // Carryover record is also absent on the new root.
-    let result = verify_goal_carryover(&loaded, bridge2.ops()).expect("verify");
+    let result = verify_goal_carryover(&loaded, memory2.ops()).expect("verify");
     assert_eq!(
         result,
         CarryoverVerification::NoRecord,
@@ -248,29 +248,29 @@ fn diverged_state_root_produces_no_record() {
 #[serial(cognitive_memory)]
 fn latest_carryover_record_wins() {
     let (_tmp, root) = isolated_state_root();
-    let bridge = launch_writer_client(&root).expect("bridge");
+    let memory = launch_writer_client(&root).expect("memory");
 
     // First meeting writes 1 goal.
     let mut board1 = GoalBoard::new();
     add_active_goal(&mut board1, active_goal("old-goal", 1)).unwrap();
-    save_goal_board(&board1, bridge.ops()).expect("save1");
-    write_goal_carryover(&board1, "mtg-old", bridge.ops()).expect("carryover1");
+    save_goal_board(&board1, memory.ops()).expect("save1");
+    write_goal_carryover(&board1, "mtg-old", memory.ops()).expect("carryover1");
 
     // Second meeting writes 2 goals (supersedes first).
     let mut board2 = GoalBoard::new();
     add_active_goal(&mut board2, active_goal("new-g1", 1)).unwrap();
     add_active_goal(&mut board2, active_goal("new-g2", 2)).unwrap();
-    save_goal_board(&board2, bridge.ops()).expect("save2");
-    write_goal_carryover(&board2, "mtg-new", bridge.ops()).expect("carryover2");
+    save_goal_board(&board2, memory.ops()).expect("save2");
+    write_goal_carryover(&board2, "mtg-new", memory.ops()).expect("carryover2");
 
-    let record = read_latest_carryover(bridge.ops())
+    let record = read_latest_carryover(memory.ops())
         .expect("read")
         .expect("must have record");
     assert_eq!(record.meeting_id, "mtg-new");
     assert_eq!(record.active_goal_count, 2);
 
     // Verify against the latest board.
-    let result = verify_goal_carryover(&board2, bridge.ops()).expect("verify");
+    let result = verify_goal_carryover(&board2, memory.ops()).expect("verify");
     match result {
         CarryoverVerification::Verified { meeting_id, .. } => {
             assert_eq!(meeting_id, "mtg-new");

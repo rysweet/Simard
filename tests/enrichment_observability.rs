@@ -489,7 +489,7 @@ fn observe_degrade_knowledge_launch_is_tagged_distinctly() {
     );
 }
 
-// ── launch_enrichment_bridges: the degrade is loud at the real seam ─────────
+// ── launch_enrichment_clients: the degrade is loud at the real seam ─────────
 
 /// A regular file as `state_root` makes `<state_root>/cognitive` uncreatable,
 /// so `connect_memory` fails and the memory bridge degrades to `None`. The
@@ -498,7 +498,7 @@ fn observe_degrade_knowledge_launch_is_tagged_distinctly() {
 /// silent `eprintln!` this replaces.
 #[test]
 #[serial(telemetry_registry)]
-fn launch_enrichment_bridges_degrade_is_loud_and_metered() {
+fn launch_enrichment_clients_degrade_is_loud_and_metered() {
     use tempfile::NamedTempFile;
 
     telemetry::reset();
@@ -506,7 +506,7 @@ fn launch_enrichment_bridges_degrade_is_loud_and_metered() {
 
     let mut memory_present = true;
     let events = capture_enrichment_events(|| {
-        let (memory, _knowledge) = simard::base_type_turn::launch_enrichment_bridges(file.path());
+        let (memory, _knowledge) = simard::base_type_turn::launch_enrichment_clients(file.path());
         memory_present = memory.is_some();
     });
 

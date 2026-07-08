@@ -538,7 +538,7 @@ fn blocked_missing(v: &CompletionVerdict) -> Vec<MissingEvidence> {
     }
 }
 
-// --- error_class_from_missing (#2458 bridge to the failure→lesson loop) ------
+// --- error_class_from_missing (#2458 link to the failure→lesson loop) ------
 
 #[test]
 fn error_class_from_missing_maps_each_kind_to_a_stable_token() {

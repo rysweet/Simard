@@ -17,7 +17,7 @@
 //!   [`SimardError::StoragePoisoned`].
 //! * **Error mapping.** `open` failures map to
 //!   [`SimardError::PersistentStoreIo`]; per-operation failures map to
-//!   [`SimardError::RpcCallFailed`] with `bridge = "cognitive-memory-library"`,
+//!   [`SimardError::RpcCallFailed`] with `memory = "cognitive-memory-library"`,
 //!   preserving the upstream `MemoryError` message. No new `SimardError` variant
 //!   is introduced — this keeps the change additive.
 //! * **Documented divergences (A3/A6/A7).** `check_triggers`,
@@ -295,7 +295,7 @@ impl LibraryCognitiveMemory {
 /// preserving the upstream message.
 fn map_op_err(method: &str, err: MemoryError) -> SimardError {
     SimardError::RpcCallFailed {
-        bridge: STORE_NAME.to_string(),
+        endpoint: STORE_NAME.to_string(),
         method: method.to_string(),
         reason: err.to_string(),
     }

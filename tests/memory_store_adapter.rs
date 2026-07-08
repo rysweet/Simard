@@ -210,8 +210,8 @@ fn live_adapter_descriptor_identifies_backend() {
     let fixture = TestFixture::new("adapter-desc");
     let desc = fixture.store.descriptor();
     assert!(
-        desc.identity.contains("cognitive-bridge"),
-        "descriptor should identify cognitive bridge backend, got: {}",
+        desc.identity.contains("cognitive-memory"),
+        "descriptor should identify cognitive memory backend, got: {}",
         desc.identity
     );
 }

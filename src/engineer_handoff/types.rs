@@ -75,7 +75,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_bridge_context_construction() {
+    fn terminal_handoff_context_construction() {
         let ctx = EngineerHandoffContext {
             continuity_source: "src".to_string(),
             handoff_file_name: "f.json".to_string(),

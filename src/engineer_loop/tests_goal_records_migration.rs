@@ -6,8 +6,8 @@
 //! `.active_top_goals(5)?`. That must become:
 //!
 //! ```ignore
-//! let bridge = launch_writer_client(state_root)?;
-//! let board = load_goal_board(bridge.ops())?;
+//! let memory = launch_writer_client(state_root)?;
+//! let board = load_goal_board(memory.ops())?;
 //! let records = active_goals_as_records(&board);
 //! records.into_iter().take(5).collect()
 //! ```

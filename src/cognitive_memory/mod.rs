@@ -4,7 +4,7 @@
 //! deleted. The [`CognitiveMemoryOps`] trait defines the backend-agnostic API;
 //! the only implementation is [`LibraryCognitiveMemory`], which delegates to the
 //! upstream `amplihack-memory-lib` `CognitiveMemory` (persistent, lbug-backed).
-//! The legacy bridge client
+//! The legacy memory client
 //! ([`CognitiveMemoryClient`](crate::memory_client::CognitiveMemoryClient)) and
 //! the IPC client also implement the trait so callers stay backend-agnostic.
 
@@ -266,7 +266,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     ///
     /// The default implementation delegates to
     /// [`search_facts`](Self::search_facts) (ignoring `weights`) so non-library
-    /// backends (legacy Python bridge, IPC client, test mocks) keep working with
+    /// backends (legacy Python memory, IPC client, test mocks) keep working with
     /// confidence-ranked keyword recall. Only [`LibraryCognitiveMemory`]
     /// overrides this to call the library's ranked recall.
     fn recall_facts_ranked(
@@ -349,7 +349,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     ///
     /// The default implementation ignores `caller_key` and delegates to
     /// [`store_fact`](Self::store_fact), so backends without caller-key dedup
-    /// (legacy Python bridge, IPC client, test mocks) keep storing the fact
+    /// (legacy Python memory, IPC client, test mocks) keep storing the fact
     /// (without dedup). Only [`LibraryCognitiveMemory`] performs the dedup.
     fn store_fact_with_caller_key(
         &self,
@@ -396,7 +396,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// is visible.
     ///
     /// The default implementation is a safe no-op (`Ok(ForgetReport::default())`)
-    /// for backends without a retention pass (legacy bridge, IPC client, test
+    /// for backends without a retention pass (legacy memory, IPC client, test
     /// stubs); only [`LibraryCognitiveMemory`] forgets.
     fn forget_low_value_facts(&self, _dry_run: bool) -> SimardResult<ForgetReport> {
         Ok(ForgetReport::default())
@@ -448,14 +448,14 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// `check_triggers`. Used when a goal is completed or paused.
     ///
     /// Default implementation is a no-op for backends that do not support
-    /// status transitions (legacy Python bridge, test stubs).
+    /// status transitions (legacy Python memory, test stubs).
     fn resolve_prospective(&self, _node_id: &str) -> SimardResult<()> {
         Ok(())
     }
 
     /// Mark an episode as distilled so subsequent distillation passes
     /// skip it. Default impl is a no-op for backends that do not
-    /// support metadata mutation (legacy Python bridge, test stubs).
+    /// support metadata mutation (legacy Python memory, test stubs).
     /// Issue #2281, PR-B.
     fn mark_episode_distilled(&self, _node_id: &str) -> SimardResult<()> {
         Ok(())
@@ -471,7 +471,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// `source_episode_ids` resolves to a real episode node here.
     ///
     /// Default impl returns `false` (fail-closed: an unresolvable id is treated
-    /// as ungrounded) so non-graph backends (legacy Python bridge, IPC client,
+    /// as ungrounded) so non-graph backends (legacy Python memory, IPC client,
     /// test stubs) keep compiling; only [`LibraryCognitiveMemory`] overrides it
     /// to look the episode up in the store.
     fn episode_exists(&self, _node_id: &str) -> SimardResult<bool> {
@@ -534,7 +534,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     ///
     /// The default implementation splits `query` on whitespace into keywords and
     /// delegates to [`search_episodes_by_keywords`](Self::search_episodes_by_keywords)
-    /// (ignoring `weights`), so non-library backends (legacy Python bridge, IPC
+    /// (ignoring `weights`), so non-library backends (legacy Python memory, IPC
     /// client, test mocks) keep working with newest-first keyword recall. Only
     /// [`LibraryCognitiveMemory`] overrides this to call the library's ranked
     /// recall (relevance-gated, with a UNION backfill that keeps compressed
@@ -561,7 +561,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// sequence prefix; episode / procedure ids are raw).
     ///
     /// The default implementation is a no-op (`Ok(())`) for backends without
-    /// access tracking (legacy Python bridge, IPC client, test mocks); only
+    /// access tracking (legacy Python memory, IPC client, test mocks); only
     /// [`LibraryCognitiveMemory`] records the access.
     fn reinforce_access(&self, _node_id: &str, _kind: MemoryKind) -> SimardResult<()> {
         Ok(())
@@ -645,7 +645,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// [`StoreEmptiness::ConfirmedEmpty`]. The default implementation derives the
     /// answer from [`get_statistics`](Self::get_statistics) — which already
     /// returns a `Result`, so any backend that surfaces its read/transport
-    /// errors (the bridge and IPC clients, test mocks) fails closed for free, and
+    /// errors (the memory and IPC clients, test mocks) fails closed for free, and
     /// this is the single seam a future error-propagating count plugs into.
     ///
     /// # Backend note
@@ -680,7 +680,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     ///
     /// Default impl drops the provenance (and metadata) and delegates to
     /// [`store_fact`](Self::store_fact) so non-graph backends (legacy Python
-    /// bridge, IPC client, test stubs) keep compiling and still store the fact;
+    /// memory, IPC client, test stubs) keep compiling and still store the fact;
     /// only [`LibraryCognitiveMemory`] records the edges. Mirrors the
     /// `mark_episode_distilled` / `list_undistilled_episodes` extension pattern.
     #[allow(clippy::too_many_arguments)]
@@ -729,7 +729,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// callers tolerate facts that predate provenance wiring.
     ///
     /// Default impl returns empty so backends without a provenance graph
-    /// (legacy Python bridge, IPC client, test stubs) keep compiling;
+    /// (legacy Python memory, IPC client, test stubs) keep compiling;
     /// [`LibraryCognitiveMemory`] overrides it to traverse the graph.
     fn episodes_for_fact(&self, _fact_id: &str) -> SimardResult<Vec<String>> {
         Ok(vec![])
@@ -745,7 +745,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// powers the "edges / connections" section of `simard memory stats`.
     ///
     /// Default impl returns an all-zero [`GraphStats`] so backends without a
-    /// provenance graph (IPC client, bridge clients, test stubs) keep
+    /// provenance graph (IPC client, memory clients, test stubs) keep
     /// compiling; only [`LibraryCognitiveMemory`](crate::cognitive_memory::LibraryCognitiveMemory)
     /// overrides it to traverse the graph. Read-only — never mutates the store.
     fn graph_stats(&self) -> SimardResult<GraphStats> {
@@ -790,7 +790,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// Force a WAL checkpoint, collapsing the WAL into the main DB file.
     ///
     /// Defaults to a no-op for backends where this is not meaningful
-    /// (IPC client, bridge clients). Overridden by [`LibraryCognitiveMemory`]
+    /// (IPC client, memory clients). Overridden by [`LibraryCognitiveMemory`]
     /// to flush the library's lbug-backed store via `close`.
     ///
     /// Call this **before** taking a backup or shutting down the host

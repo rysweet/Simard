@@ -123,11 +123,11 @@ fn subprocess_bridge_missing_script_fails_with_bridge_error() {
     // RpcSpawnFailed (if python3 itself isn't found) or
     // RpcTransportError (python3 exits after failing to open the file).
     match error {
-        SimardError::RpcSpawnFailed { bridge, .. } => {
-            assert_eq!(bridge, "missing");
+        SimardError::RpcSpawnFailed { endpoint, .. } => {
+            assert_eq!(endpoint, "missing");
         }
-        SimardError::RpcTransportError { bridge, reason } => {
-            assert_eq!(bridge, "missing");
+        SimardError::RpcTransportError { endpoint, reason } => {
+            assert_eq!(endpoint, "missing");
             assert!(
                 reason.contains("closed stdout") || reason.contains("process exited"),
                 "reason: {reason}"

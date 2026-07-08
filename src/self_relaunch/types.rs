@@ -34,7 +34,7 @@ impl Display for RelaunchGate {
             Self::Smoke => "smoke",
             Self::UnitTest => "unit-test",
             Self::GymBaseline => "gym-baseline",
-            Self::RpcHealth => "bridge-health",
+            Self::RpcHealth => "rpc-health",
         };
         f.write_str(label)
     }
@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn relaunch_gate_display() {
         assert_eq!(RelaunchGate::Smoke.to_string(), "smoke");
-        assert_eq!(RelaunchGate::RpcHealth.to_string(), "bridge-health");
+        assert_eq!(RelaunchGate::RpcHealth.to_string(), "rpc-health");
     }
 
     #[test]
@@ -117,7 +117,7 @@ mod tests {
         assert_eq!(RelaunchGate::Smoke.to_string(), "smoke");
         assert_eq!(RelaunchGate::UnitTest.to_string(), "unit-test");
         assert_eq!(RelaunchGate::GymBaseline.to_string(), "gym-baseline");
-        assert_eq!(RelaunchGate::RpcHealth.to_string(), "bridge-health");
+        assert_eq!(RelaunchGate::RpcHealth.to_string(), "rpc-health");
     }
 
     #[test]
