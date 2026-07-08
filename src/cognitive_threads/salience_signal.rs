@@ -8,9 +8,9 @@
 //! **fail-closed** consumer (staleness + schema + size guards). See
 //! `docs/concepts/salience-and-decide.md`.
 //!
-//! **Status (issue #5, TDD):** the types are the stable studs; [`write_signal`]
-//! and [`read_valid_signal`] are `todo!()` stubs pinned RED by
-//! `tests_catalog` until the implementation step fills them in.
+//! **Status (issue #5):** implemented; [`write_signal`] and
+//! [`read_valid_signal`] are covered by the hermetic unit tests in
+//! `tests_catalog`.
 #![allow(dead_code)]
 
 use std::collections::HashSet;
@@ -72,7 +72,7 @@ pub fn signal_path(state_root: &Path) -> PathBuf {
 
 /// Write the Decide-facing signal atomically (temp file + rename).
 ///
-/// Contract (pinned by tests, `todo!()` until implemented):
+/// Contract (pinned by tests):
 /// - only `valid_goal_ids` are written; entries with an unknown `goal_id` are
 ///   dropped (S1 — no unvalidated ids reach Decide);
 /// - every `valence`/`urgency` is re-clamped before write (defense in depth);

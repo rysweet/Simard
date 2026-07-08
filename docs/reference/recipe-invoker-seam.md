@@ -8,8 +8,9 @@ description: >
   production `RecipeRunnerInvoker` (a faithful extraction of the existing
   progress-checker subprocess logic), the offline `FakeRecipeInvoker` test
   double, and the security contract the brick enforces on behalf of every
-  thread (argv discipline, control-char stripping, output-size cap, secret
-  scrub, hot-vs-in-tree path resolution). This is the one place the SR-4/6/7/8/9/11
+  thread (argv discipline, control-char stripping, out-of-band file transport for
+  unbounded memory payloads, output-size cap, secret scrub, hot-vs-in-tree path
+  resolution). This is the one place the SR-4/6/7/8/9/11/13
   requirements converge.
 last_updated: 2026-07-08
 review_schedule: as-needed
@@ -91,34 +92,49 @@ asserts the asymmetry in its own test.
 
 ## Production impl — `RecipeRunnerInvoker`
 
-`RecipeRunnerInvoker` mirrors the existing progress-checker subprocess path
-exactly, adding the security contract:
+`RecipeRunnerInvoker` mirrors the existing `recipe-runner-rs` subprocess seams,
+adding the security contract:
 
-1. **Sanitize each value** — strip `\n`, `\r`, `NUL`, and other control
-   characters before it can reach an argv or the prompt context (SR-7, SR-8).
-2. **Resolve the recipe path** — check the hot-reload dir
+1. **Resolve the recipe path** — check the hot-reload dir
    `~/.simard/prompt_assets/simard/recipes/<name>.yaml` **first**, then the
    in-tree `<repo_root>/prompt_assets/simard/recipes/<name>.yaml`; **log which
    one was used** (hot vs. in-tree). If the hot dir is **group- or
    world-writable**, reject it, fall back to in-tree, and warn (SR-4). The
    residual risk of a trusted, correctly-permissioned hot dir is accepted in
    writing.
-3. **Verify the binary** — `recipe-runner-rs --version` with
-   `AMPLIHACK_AGENT_BINARY` set via `LlmProvider::resolve_agent_binary`.
-4. **Spawn with distinct argv pairs** — one `.arg("-c").arg(format!("{k}={v}"))`
-   per variable, **no shell** (SR-8). A single value therefore cannot smuggle a
-   second `-c` pair or a newline into prompt context.
+2. **Verify the binary** — `AMPLIHACK_AGENT_BINARY` is set via
+   `RuntimeConfig::load` before the spawn.
+3. **Build the `-c` context args by transport class** (`build_context_args`):
+   - a **fenced untrusted-memory** payload (`is_fenced_payload`, i.e. the output
+     of `fence_untrusted`) is *unbounded*, so it is written verbatim to a private
+     per-invocation `0700` temp file via `ContextFile`
+     (`src/recipe_context_file.rs`) and only
+     `-c <key>_path=<abs>` rides on argv — the payload never touches argv, so
+     `execve` can never fail with `E2BIG`/"Argument list too long" (SR-13,
+     issues #2640/#2692), and the recipe reads `{{<key>_path}}` to see the full
+     recall byte-for-byte (no truncation → no silent degradation);
+   - a **small scalar** (`state_root`, `repo_path`, counts) is passed inline as
+     `-c <key>=<sanitize_value>`, control-char stripped so it can never smuggle a
+     second `-c` pair or a newline into prompt context (SR-7, SR-8).
+4. **Spawn with distinct argv pairs** — one `.arg("-c").arg(value)` per variable,
+   **no shell** (SR-8). The `ContextFile` guards outlive the spawn so the payload
+   files exist while the recipe reads them.
 5. **Read stdout with a cap** — enforce `MAX_OUTPUT_BYTES` on the parsed output
    so a runaway recipe cannot exhaust memory or flood a durable sink (SR-11).
-6. **Classify** — into `Json | SemanticMiss | InfraFailure` (SR-9).
+6. **Classify** — into `Json | SemanticMiss | InfraFailure` (SR-9). A
+   context-file write failure (e.g. `ENOSPC`) is itself an `InfraFailure`, never
+   swallowed.
 
 ```
 RecipeInvoker::invoke(recipe_name, &[(k, v), …]):
-  1. sanitize each v: strip \n \r NUL + other control chars    (SR-7, SR-8)
-  2. resolve_recipe_path: log hot|in-tree; reject writable hot dir (SR-4)
-  3. spawn recipe-runner-rs, distinct .arg("-c").arg("{k}={v}"), no shell (SR-8)
-  4. read stdout; enforce MAX_OUTPUT_BYTES cap                  (SR-11)
-  5. classify -> Json | SemanticMiss | InfraFailure            (SR-9)
+  1. resolve_recipe_path: log hot|in-tree; reject writable hot dir     (SR-4)
+  2. build_context_args:
+       fenced payload  -> ContextFile; argv carries only k_path=<abs>  (SR-13)
+       small scalar    -> inline -c k=sanitize_value(v)                (SR-7/8)
+  3. spawn recipe-runner-rs, distinct .arg("-c").arg(value), no shell  (SR-8)
+     (ContextFile guards held alive until output())
+  4. read stdout; enforce MAX_OUTPUT_BYTES cap                         (SR-11)
+  5. classify -> Json | SemanticMiss | InfraFailure                   (SR-9)
 ```
 
 ## Offline test double — `FakeRecipeInvoker`
@@ -153,24 +169,26 @@ re-implemented ten times:
 
 | Helper | Purpose | Requirement |
 |--------|---------|-------------|
-| `sanitize_value(&str) -> String` | strip control chars / newlines from a value bound for argv or prompt context | SR-7, SR-8 |
+| `sanitize_value(&str) -> String` | strip control chars / newlines from a scalar value bound for argv or prompt context | SR-7, SR-8 |
 | `fence_untrusted(&str) -> String` | wrap memory-sourced text in the `<<UNTRUSTED_MEMORY>>…<<END_UNTRUSTED>>` data region | SR-2 |
+| `is_fenced_payload(&str) -> bool` | recognize a fenced payload so the invoker routes it off argv through a `ContextFile` (E2BIG-safe) | SR-13 |
 | `secret_scrub(&str) -> String` | redact token-shaped substrings before writing to a fact, metric line, or issue body | SR-6 |
 
 ## The security contract in one place
 
-This brick is the single point at which six security requirements converge; it
-is tested directly (argv spy, path-permission fixture, size-cap fixture) so
-per-thread regressions are impossible to introduce silently:
+This brick is the single point at which seven security requirements converge; it
+is tested directly (context-transport unit tests, path-permission fixture,
+size-cap fixture) so per-thread regressions are impossible to introduce silently:
 
 | SR | What the brick guarantees | Test |
 |----|---------------------------|------|
 | SR-4 | resolved recipe path is logged (hot vs. in-tree); a group/world-writable hot dir is rejected with fallback + warning | writable-hot-dir fixture ⇒ rejected, falls back, warns; path logged |
 | SR-6 | `secret_scrub` available and applied by rails before durable writes | seeded fake token not echoed into a stored fact / issue / metrics line |
-| SR-7 | control-char / separator sanitization of values and LLM-derived keys | over-long / control-char / `..` key rejected |
+| SR-7 | control-char / separator sanitization of scalar values and LLM-derived keys | over-long / control-char / `..` key rejected |
 | SR-8 | distinct argv `-c k=v` pairs, no shell; no second-pair or newline smuggling | value `foo\n-c evil=1` ⇒ exactly one `-c` pair, sanitized |
 | SR-9 | `SemanticMiss` / `InfraFailure` are non-success; caller writes nothing | non-JSON envelope ⇒ zero writes, `failed()` surfaced |
 | SR-11 | parsed output size-bounded via `MAX_OUTPUT_BYTES` | recipe returning 10k items ⇒ ≤ cap facts/issues written |
+| SR-13 | an unbounded fenced payload is delivered out-of-band via a private `0700` `ContextFile`; only `<key>_path=<abs>` rides on argv, so `execve` never fails with `E2BIG` and the recall is byte-for-byte (no truncation, no silent degradation) — issues #2640/#2692 | fenced value ⇒ argv carries only `k_path=<abs>`; file holds the payload verbatim; scalar stays inline |
 
 For the salience-specific fence (numeric-only Decide projection) and the
 overseer-vs-values separation of powers, see

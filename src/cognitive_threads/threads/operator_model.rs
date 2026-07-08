@@ -6,9 +6,9 @@
 //! parse a strict-JSON envelope, then scrub + size-cap and write through the
 //! declared `operator:` prefix only. OFF by default behind the double env gate.
 //!
-//! **Status (issue #5, TDD):** the config/type surface + the constructors are
-//! real studs; [`OperatorModelThread::tick`] is a `todo!()` pinned RED by
-//! `tests_catalog` until the implementation step fills it in.
+//! **Status (issue #5):** implemented; [`OperatorModelThread::tick`] is covered
+//! by the hermetic offline unit tests in `tests_catalog` (fake recipe invoker)
+//! plus a gated live-smoke check.
 #![allow(dead_code)]
 
 use std::time::{Duration, Instant};

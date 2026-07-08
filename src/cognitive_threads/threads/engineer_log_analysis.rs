@@ -5,9 +5,9 @@
 //! state root for recurring failure signatures and files a **deduplicated**
 //! GitHub issue via the existing deterministic stewardship path. Its durable
 //! artifact is a dedup'd issue (or, when `gh` is unavailable/dry-run,
-//! structured telemetry) — never a repo snapshot doc. Behaviour bodies are
-//! `todo!()` stubs during TDD; the config/type surface and the security-
-//! critical `build_issue_*` seams are pinned by tests in `super::super::tests`.
+//! structured telemetry) — never a repo snapshot doc. The behaviour is
+//! implemented; the config/type surface and the security-critical
+//! `build_issue_*` seams are pinned by tests in `super::super::tests`.
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;

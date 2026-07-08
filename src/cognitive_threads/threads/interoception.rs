@@ -11,9 +11,9 @@
 //! health goal. Issue bodies carry summarized status, never raw command/env
 //! output (S5). It also proves the abstraction hosts a recipe-free thread.
 //!
-//! **Status (issue #5, TDD):** the config/type surface + constructors are real
-//! studs; [`InteroceptionThread::tick`] is a `todo!()` pinned RED by
-//! `tests_catalog` until the implementation step fills it in.
+//! **Status (issue #5):** implemented; [`InteroceptionThread::tick`] (recipe-free
+//! deterministic sensing) is covered by the hermetic offline unit tests in
+//! `tests_catalog`.
 #![allow(dead_code)]
 
 use std::time::{Duration, Instant};

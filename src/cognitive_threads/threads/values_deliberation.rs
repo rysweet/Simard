@@ -6,9 +6,9 @@
 //! parse a strict-JSON envelope, then scrub + size-cap and write through the
 //! declared `values:` prefix only. OFF by default behind the double env gate.
 //!
-//! **Status (issue #5, TDD):** the config/type surface + the constructors are
-//! real studs; [`ValuesDeliberationThread::tick`] is a `todo!()` pinned RED by
-//! `tests_catalog` until the implementation step fills it in.
+//! **Status (issue #5):** implemented; [`ValuesDeliberationThread::tick`] is
+//! covered by the hermetic offline unit tests in `tests_catalog` (fake recipe
+//! invoker) plus a gated live-smoke check.
 #![allow(dead_code)]
 
 use std::time::{Duration, Instant};

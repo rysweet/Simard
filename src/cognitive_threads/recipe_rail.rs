@@ -10,19 +10,25 @@
 //! the concept-key validator ([`validate_concept_key`]), and the double
 //! env-gate predicate ([`env_gate_open`]).
 //!
-//! **Status (issue #5, TDD):** the type surface, the trait, and the offline
-//! classification helpers are the stable studs; the security-bearing bodies
-//! ([`sanitize_value`], [`fence_untrusted`], [`secret_scrub`],
-//! [`validate_concept_key`], [`env_gate_open`], and
-//! [`RecipeRunnerInvoker::invoke`]) are `todo!()` stubs pinned RED by the tests
-//! in `tests_catalog` until the implementation step fills them in.
+//! **Transport (issue #5):** small scalar context vars (`state_root`,
+//! `repo_path`, counts) ride inline on `argv` as `-c k=v`, control-char
+//! sanitized so a value can never smuggle a second `-c` pair (SR-7/SR-8). A
+//! *fenced untrusted-memory* payload (see [`fence_untrusted`]) is unbounded, so
+//! it is delivered out-of-band through a private temp file via [`ContextFile`] —
+//! only `-c <key>_path=<abs>` touches `argv` — exactly like the journal /
+//! episode-distillation seams. That keeps a large recall byte-for-byte (no
+//! truncation, so no silent degradation) while `execve` can never fail with
+//! `E2BIG`/"Argument list too long" (issues #2640/#2692).
 #![allow(dead_code)]
 
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
 use serde_json::Value;
+
+use crate::recipe_context_file::ContextFile;
 
 use super::thread::ThreadOutcome;
 
@@ -101,7 +107,7 @@ impl InvokeResult {
 /// Strip newlines, carriage returns, NUL, and other control characters from a
 /// value before it can reach an argv pair or the prompt context (SR-7, SR-8).
 ///
-/// Contract (pinned by tests, `todo!()` until implemented):
+/// Contract (pinned by tests):
 /// - removes `\n`, `\r`, `\0`, and all other C0/C1 control characters;
 /// - a value like `foo\n-c evil=1` therefore cannot smuggle a second `-c` pair
 ///   or a newline into prompt context;
@@ -113,6 +119,13 @@ pub fn sanitize_value(raw: &str) -> String {
     raw.chars().filter(|c| !c.is_control()).collect()
 }
 
+/// Opening delimiter of the untrusted-memory data region emitted by
+/// [`fence_untrusted`]. A context value beginning with this marker is treated as
+/// an unbounded memory payload and transported out-of-band via [`ContextFile`].
+pub const UNTRUSTED_OPEN: &str = "<<UNTRUSTED_MEMORY>>";
+/// Closing delimiter of the untrusted-memory data region.
+pub const UNTRUSTED_CLOSE: &str = "<<END_UNTRUSTED>>";
+
 /// Wrap memory-sourced text in the recipe's untrusted-data region so a recipe
 /// treats it as data, never instructions (SR-2). The returned string is bounded
 /// by the region delimiters `<<UNTRUSTED_MEMORY>> … <<END_UNTRUSTED>>` and any
@@ -123,9 +136,16 @@ pub fn fence_untrusted(raw: &str) -> String {
     // underscore inside the token so the exact delimiter no longer appears, yet
     // the content stays human-readable.
     let neutralized = raw
-        .replace("<<END_UNTRUSTED>>", "<<END_UNTRUSTED_>>")
-        .replace("<<UNTRUSTED_MEMORY>>", "<<UNTRUSTED_MEMORY_>>");
-    format!("<<UNTRUSTED_MEMORY>>\n{neutralized}\n<<END_UNTRUSTED>>")
+        .replace(UNTRUSTED_CLOSE, "<<END_UNTRUSTED_>>")
+        .replace(UNTRUSTED_OPEN, "<<UNTRUSTED_MEMORY_>>");
+    format!("{UNTRUSTED_OPEN}\n{neutralized}\n{UNTRUSTED_CLOSE}")
+}
+
+/// Whether a context value is a fenced untrusted-memory payload (the output of
+/// [`fence_untrusted`]). Such a value is unbounded and MUST ride off `argv`
+/// through a private temp file ([`build_context_args`]), never inline.
+pub fn is_fenced_payload(value: &str) -> bool {
+    value.starts_with(UNTRUSTED_OPEN)
 }
 
 /// Redact token-shaped substrings before writing to a fact, metric line, or
@@ -283,7 +303,7 @@ fn looks_high_entropy(run: &str) -> bool {
 /// Validate + normalize an LLM-derived concept key (SR-7). Returns `Some(key)`
 /// when the key is safe, or `None` when it must be rejected.
 ///
-/// Rejection rules (pinned by tests, `todo!()` until implemented):
+/// Rejection rules (pinned by tests):
 /// - reject anything containing a path separator (`/` or `\`) or a `..` segment;
 /// - reject keys longer than [`MAX_CONCEPT_KEY_LEN`] (no truncation — reject);
 /// - strip control characters; reject if empty after stripping.
@@ -440,21 +460,14 @@ impl RecipeRunnerInvoker {
 }
 
 impl RecipeInvoker for RecipeRunnerInvoker {
-    fn invoke(&self, _recipe_name: &str, _ctx_vars: &[(&str, String)]) -> InvokeResult {
-        // 1. Sanitize every context value so no newline/NUL can smuggle a second
-        //    `-c` pair or a fresh prompt instruction (SR-7/SR-8).
-        let sanitized: Vec<(String, String)> = _ctx_vars
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), sanitize_value(v)))
-            .collect();
-
-        // 2. Resolve hot-vs-in-tree (SR-4).
-        let (path, _from_hot) = match self.resolve_recipe_path(_recipe_name) {
+    fn invoke(&self, recipe_name: &str, ctx_vars: &[(&str, String)]) -> InvokeResult {
+        // 1. Resolve hot-vs-in-tree (SR-4).
+        let (path, _from_hot) = match self.resolve_recipe_path(recipe_name) {
             Some(p) => p,
             None => {
                 return InvokeResult::InfraFailure {
                     detail: format!(
-                        "recipe `{_recipe_name}` not found in hot-reload or in-tree paths"
+                        "recipe `{recipe_name}` not found in hot-reload or in-tree paths"
                     ),
                 };
             }
@@ -469,15 +482,30 @@ impl RecipeInvoker for RecipeRunnerInvoker {
             }
         };
 
-        // 3. Spawn with argv discipline — each `-c k=v` is a DISTINCT argv pair,
+        // 2. Build the `-c` argv values. A fenced untrusted-memory payload is
+        //    unbounded, so it is written to a private temp file and only its
+        //    `<key>_path=<abs>` rides on argv (E2BIG-safe, #2640/#2692); a small
+        //    scalar is passed inline, control-char sanitized so it cannot smuggle
+        //    a second `-c` pair (SR-7/SR-8). The `_guards` MUST outlive the spawn
+        //    so the payload files exist while the recipe reads them.
+        let (arg_values, _guards) = match build_context_args(recipe_name, ctx_vars) {
+            Ok(pair) => pair,
+            Err(e) => {
+                return InvokeResult::InfraFailure {
+                    detail: format!("recipe context-file write failed: {e}"),
+                };
+            }
+        };
+
+        // 3. Spawn with argv discipline — each `-c …` is a DISTINCT argv pair,
         //    never a shell string (SR-8).
         let mut cmd = Command::new("recipe-runner-rs");
         cmd.arg(path.as_os_str())
             .arg("--output-format")
             .arg("json")
             .env("AMPLIHACK_AGENT_BINARY", agent_binary);
-        for (k, v) in &sanitized {
-            cmd.arg("-c").arg(format!("{k}={v}"));
+        for value in &arg_values {
+            cmd.arg("-c").arg(value);
         }
 
         let output = match cmd.output() {
@@ -513,6 +541,40 @@ impl RecipeInvoker for RecipeRunnerInvoker {
         }
         classify_recipe_stdout(&raw)
     }
+}
+
+/// Build the ordered `-c` argv values for a recipe call, transporting each
+/// context var by the rule tied to the security fence:
+///
+/// - a **fenced untrusted-memory** payload ([`is_fenced_payload`]) is unbounded,
+///   so it is written verbatim to a private per-invocation `0700` temp file via
+///   [`ContextFile`] and only `<key>_path=<abs>` rides on argv — the payload
+///   never touches argv, so `execve` can never fail with `E2BIG`/"Argument list
+///   too long" (issues #2640/#2692), and the recipe reads `{{<key>_path}}` to
+///   see the full recall byte-for-byte (no truncation → no silent degradation);
+/// - a **small scalar** (paths, counts) is passed inline as
+///   `<key>=<sanitize_value>`, control-char stripped so it can never smuggle a
+///   second `-c` pair or a newline into prompt context (SR-7/SR-8).
+///
+/// Returns the argv values plus the [`ContextFile`] guards, which the caller
+/// MUST keep alive until `recipe-runner-rs` has finished (each guard unlinks its
+/// file and directory on drop).
+fn build_context_args(
+    base_type: &str,
+    ctx_vars: &[(&str, String)],
+) -> io::Result<(Vec<String>, Vec<ContextFile>)> {
+    let mut arg_values = Vec::with_capacity(ctx_vars.len());
+    let mut guards = Vec::new();
+    for (key, value) in ctx_vars {
+        if is_fenced_payload(value) {
+            let cf = ContextFile::write(base_type, key, value)?;
+            arg_values.push(cf.arg_value());
+            guards.push(cf);
+        } else {
+            arg_values.push(format!("{key}={}", sanitize_value(value)));
+        }
+    }
+    Ok((arg_values, guards))
 }
 
 /// Bound a diagnostic string so an error path can never itself flood a log or a
@@ -624,5 +686,74 @@ mod secret_scrub_tests {
             let out = secret_scrub(input);
             assert_eq!(out, input, "prose must pass through unchanged: {input:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod context_transport_tests {
+    use super::{build_context_args, fence_untrusted, is_fenced_payload};
+
+    #[test]
+    fn fenced_payload_is_recognized_scalar_is_not() {
+        assert!(is_fenced_payload(&fence_untrusted("recalled fact")));
+        assert!(!is_fenced_payload("/home/user/.simard"));
+        assert!(!is_fenced_payload("42"));
+        assert!(!is_fenced_payload(""));
+    }
+
+    #[test]
+    fn scalar_vars_ride_inline_and_are_sanitized() {
+        // A scalar is passed inline as `key=value`; a smuggled newline + `-c`
+        // pair is stripped so it stays exactly one argv value (SR-7/SR-8).
+        let vars = vec![
+            ("state_root", "/home/user/.simard".to_string()),
+            ("repo_path", "foo\n-c evil=1".to_string()),
+        ];
+        let (args, guards) = build_context_args("unit-test", &vars).expect("build args");
+        assert!(guards.is_empty(), "no temp files for scalars");
+        assert_eq!(args[0], "state_root=/home/user/.simard");
+        assert_eq!(
+            args[1], "repo_path=foo-c evil=1",
+            "the newline is stripped, so `-c evil=1` stays inert text inside this \
+             one argv value and can never become a second `-c` pair"
+        );
+        assert!(!args[1].contains('\n'), "no newline survives on argv");
+    }
+
+    #[test]
+    fn fenced_payload_rides_off_argv_via_a_file_verbatim() {
+        // A fenced (unbounded) payload must NOT ride on argv: only
+        // `<key>_path=<abs>` does, and the file holds the payload byte-for-byte
+        // (newlines preserved, no truncation) so a large recall can never fail
+        // the spawn with E2BIG (#2640/#2692).
+        let payload = fence_untrusted("line one\nline two\nline three");
+        let vars = vec![("prior_operator_model", payload.clone())];
+        let (args, guards) = build_context_args("unit-test", &vars).expect("build args");
+        assert_eq!(guards.len(), 1, "one temp file backs the fenced payload");
+
+        let arg = &args[0];
+        assert!(
+            arg.starts_with("prior_operator_model_path="),
+            "argv carries only the file path key: {arg}"
+        );
+        assert!(
+            !arg.contains(&payload),
+            "the payload itself never touches argv"
+        );
+
+        let abs = arg
+            .strip_prefix("prior_operator_model_path=")
+            .expect("path value");
+        let on_disk = std::fs::read_to_string(abs).expect("read context file");
+        assert_eq!(
+            on_disk, payload,
+            "the recipe reads the full fenced payload byte-for-byte from the file"
+        );
+        // Guard drop unlinks the file.
+        drop(guards);
+        assert!(
+            !std::path::Path::new(abs).exists(),
+            "the per-invocation payload file is removed when the guard drops"
+        );
     }
 }

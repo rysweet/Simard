@@ -1,11 +1,10 @@
-//! TDD contract for the ten reflective cognitive threads and their shared seam
-//! (issue #5). Authored **tests-first**: the data/type surface, constructors,
-//! and the `InvokeResult` classification are real, so the metadata / naming /
-//! numeric-projection / serialize tests pass today; the behaviour tests exercise
-//! `todo!()` stubs (`recipe_rail::{sanitize_value, fence_untrusted,
-//! secret_scrub, validate_concept_key, env_gate_open}`,
+//! Executable contract for the ten reflective cognitive threads and their shared
+//! seam (issue #5). Authored **tests-first**; the behaviour is now implemented,
+//! so the whole suite — the metadata / naming / numeric-projection / serialize
+//! checks plus the security helpers (`recipe_rail::{sanitize_value,
+//! fence_untrusted, secret_scrub, validate_concept_key, env_gate_open}`),
 //! `salience_signal::{write_signal, read_valid_signal}`, and every thread's
-//! `tick`) and therefore FAIL (red) until the implementation step fills them in.
+//! `tick` — passes.
 //!
 //! Every non-ignored test is hermetic: an injected `now_epoch` clock (no
 //! sleeps), an in-memory cognitive store, a fake recipe invoker / `gh` client
@@ -209,7 +208,7 @@ fn assert_meta(t: &dyn CognitiveThread, id: &str, kind: ThreadKind, prio: Priori
 }
 
 // ---------------------------------------------------------------------------
-// Shared seam — security helpers (RED: `todo!()` until Step 8)
+// Shared seam — security helpers
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -627,11 +626,10 @@ fn narrative_metadata_matches_catalog() {
 }
 
 // ---------------------------------------------------------------------------
-// Per-thread rail behaviour (RED: `tick` is `todo!()` until Step 8)
+// Per-thread rail behaviour
 //
 // Each rail, given a canned strict-JSON envelope, must write through its
-// declared prefix. These panic on the `todo!()` today and pass once the rail is
-// implemented — the TDD contract for each thread's durable write.
+// declared prefix — the contract for each thread's durable write.
 // ---------------------------------------------------------------------------
 
 #[test]
