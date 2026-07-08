@@ -16,7 +16,7 @@ they are the same gates CI enforces.
 5. [Local Data Retention Disclosure](#local-data-retention-disclosure)
 6. [Pre-Existing Test Failure Disposition](#pre-existing-test-failure-disposition)
 7. [Real-Meeting & Dashboard E2E Verification](#real-meeting--dashboard-e2e-verification)
-8. [Engineering Guidelines (G1/G2/G3)](#engineering-guidelines-g1g2g3)
+8. [Engineering Guidelines (G1/G2/G3/G4)](#engineering-guidelines-g1g2g3g4)
 
 ---
 
@@ -572,22 +572,27 @@ durability and ingestion regressions before they reach production.
 
 ---
 
-## Engineering Guidelines (G1/G2/G3)
+## Engineering Guidelines (G1/G2/G3/G4)
 
 These are **durable engineering principles**, not a point-in-time
 snapshot. They apply to human contributors *and* to Simard's own OODA
 reasoners and engineer sessions. They are encoded declaratively in the
 hot-reloaded prompt assets under `prompt_assets/simard/` (mirrored into
-the recipe YAML the daemon runs), enforced as soft review gates in the
+the recipe YAML the daemon runs), enforced as soft review flags in the
 merge-readiness judge and the code-review reasoner, and pinned by a
 presence test at
 [`tests/engineering_guidelines_prompts.rs`](tests/engineering_guidelines_prompts.rs).
+G1–G3 are **soft advisory flags**; **G4 additionally has a hard
+deterministic backstop** — the Overseer pr-verify scan
+`scan_no_point_in_time_report_docs` (pr-verify check #8) — that **blocks**
+a merge which would commit a new point-in-time report doc.
 
-> **Why these three?** Each guideline is a lesson learned from a
-> specific merged PR where a change looked complete but left a durable
-> gap. The guidelines exist so the same class of gap is caught the next
-> time — by a reviewer, by the merge-judge, or by Simard herself while
-> planning the work.
+> **Why these four?** Each guideline is a lesson learned from a
+> specific merged PR (or a run of them) where a change looked complete
+> but left a durable gap. The guidelines exist so the same class of gap
+> is caught the next time — by a reviewer, by the merge-judge, by Simard
+> herself while planning the work, or (for G4) by the deterministic
+> merge-gate scan.
 
 > **Terminology.** Simard runs a single **Brain** (the one-Brain
 > model). The interpretive reasoners named below — OODA Orient, Decide,
@@ -700,14 +705,78 @@ and which fails **closed** to `unclear` on a parse-miss — is the
 of model/tool output through that same fail-closed, structured path rather
 than adding fresh line/substring slicing.
 
+### G4 — Durable docs only; never commit point-in-time report docs
+
+Simard's repository documentation must be **accurate** and **durable**:
+it describes how the system *actually works today* and is expected to be
+**updated** by a later PR that changes the feature. The repo must
+**never** carry **point-in-time report docs** — investigation, testing,
+diagnosis, blockage/recurrence, or benchmark-**snapshot** write-ups that
+are true only "as of" the moment they were written.
+
+Decide by **doc type, not topic**. The same subsystem can be the subject
+of both a good durable doc and a banned report doc:
+
+- **Durable → keep it, and keep it current.** If a later PR that changes
+  the feature would be expected to update the doc (architecture, design,
+  reference, how-to), it is durable. Durable documentation is
+  **explicitly encouraged** — G4 never discourages keeping the real docs
+  accurate.
+- **Point-in-time → issue and/or memory, not a repo doc.** If the doc is
+  only ever true as of the day it was written ("what I found while
+  diagnosing X", a testing write-up, a measured-rate snapshot), its
+  findings belong in a **GitHub issue** (the authoritative, trackable,
+  dedup-able sink) and/or Simard's memory. Recurrences consolidate into a
+  single tracking issue, not a new doc per occurrence.
+
+Unlike G1–G3, G4 has **two rails**. The soft rail is the same
+prompt/review guidance that discourages authoring a report doc. The hard
+rail is a **deterministic backstop** — the Overseer pr-verify scan
+`scan_no_point_in_time_report_docs` (pr-verify check #8) — that blocks a
+merge whose diff **adds** a report doc. The scan is deliberately narrow:
+it is **added-only** (edits to existing docs are never flagged) and
+**report-typed** (it flags a newly added `.md` only when it sits under a
+reserved report directory — `docs/investigation/`, `docs/reports/`,
+`docs/runs/` — or carries a report-typed *title*, never merely
+report-flavored body prose). It uses **no `--admin` / `--no-verify`
+bypass**: a flagged PR does not merge until the report doc is removed and
+its content moved to an issue/memory.
+
+**Motivating context.** A run of `docs(investigation)` / `docs(overseer)`
+PRs — #2879, #2843, #2819, #2814, #2801 — each committed a kgpacks-rs
+blockage investigation/diagnosis report as a repo doc. Point-in-time
+reports go stale immediately, **poison Simard's own context** when she
+reads her repo as grounding, and bury the durable docs. G4 routes that
+content to issues/memory and keeps the doc tree durable.
+
+**What "done" looks like for a G4-affected change:**
+
+- An investigation/testing/diagnosis **finding** is recorded as a GitHub
+  issue and/or memory — not as a new repo doc; recurrences consolidate
+  into one tracking issue.
+- Any durable documentation the change warrants is written or updated
+  under `docs/` with a **feature/architecture title**, not a report
+  title.
+- If the pr-verify scan flags an added report doc, the content is moved
+  to an issue and the doc removed from the PR — the gate is resolved,
+  never overridden.
+
+See [Durable-Documentation Policy (G4)](docs/concepts/durable-documentation-policy.md)
+for the rationale and two-rail architecture,
+[No point-in-time report docs — pr-verify scan](docs/reference/no-point-in-time-docs-scan.md)
+for the deterministic behavior, and
+[Record an investigation finding](docs/howto/record-an-investigation-finding.md)
+for the step-by-step.
+
 ### Where the guidelines are encoded
 
 | Layer | Assets | Effect |
 |---|---|---|
-| Engineer + OODA reasoner prompts | `engineer_system.md`, `engineer_planning.md`, `ooda_orient.md`, `ooda_decide.md`, `ooda_brain.md` (+ mirrored recipes `ooda-orient.yaml`, `ooda-decide.yaml`, `ooda-engineer-lifecycle.yaml`) | Simard's engineers and OODA Brain apply G1/G2/G3 while planning and doing cognition/memory/parsing work. |
-| Review gates (soft) | `merge_readiness_judge.md` (+ `merge-readiness-judge.yaml`), `review_pipeline.md`, `progress_assessment_reviewer.md` (+ `progress-assessment.yaml`) | Reviewers FLAG (a) cognition changes with no live self-measurement, (b) memory-arch changes in Simard's repo that belong in `amplihack-memory-lib`, (c) new/extended brittle output-parsing where an agentic step is cleaner. |
+| Engineer + OODA reasoner prompts | `engineer_system.md`, `engineer_planning.md`, `ooda_orient.md`, `ooda_decide.md`, `ooda_brain.md` (+ mirrored recipes `ooda-orient.yaml`, `ooda-decide.yaml`, `ooda-engineer-lifecycle.yaml`) | Simard's engineers and OODA Brain apply G1/G2/G3/G4 while planning and doing cognition/memory/parsing/documentation work. |
+| Review gates (soft) | `merge_readiness_judge.md` (+ `merge-readiness-judge.yaml`), `review_pipeline.md`, `progress_assessment_reviewer.md` (+ `progress-assessment.yaml`), `overseer/pr_verify.md` | Reviewers FLAG (a) cognition changes with no live self-measurement, (b) memory-arch changes in Simard's repo that belong in `amplihack-memory-lib`, (c) new/extended brittle output-parsing where an agentic step is cleaner, (d) a PR that ADDS a point-in-time investigation/testing/diagnosis report doc that belongs in an issue/memory (G4). |
+| Deterministic backstop (G4) | `src/overseer/pr_verify.rs` — pr-verify check #8, `scan_no_point_in_time_report_docs` | Hard-**blocks** a merge whose diff ADDS a new point-in-time report doc. Unlike the soft flags above, this fails the merge gate with `ready: false`; there is no `--admin` / `--no-verify` bypass. |
 | Goal framing | `goal_session_objective.md`, `goal_decomposition.md` (+ `goal-decomposition.yaml`), `goal_curator_system.md` | Standing cognition/self-improvement goals inherit G1 (hybrid benchmark + live) and G2 (route memory-arch upstream) in their success criteria. Those goals are **seeded at runtime into `~/.simard` state**, not stored as repo assets — so the presence test pins the G1/G2 framing in the goal *prompts*, not any specific goal slug. |
-| Durable doc | this section | Human-facing source of truth for G1/G2/G3. |
+| Durable doc | this section | Human-facing source of truth for G1/G2/G3/G4. |
 | Presence test | `tests/engineering_guidelines_prompts.rs` | Pins keyword invariants so a future prompt edit cannot silently drop a guideline. |
 
 **Why not `AGENTS.md`?** `AGENTS.md` is regenerated amplihack boilerplate —
@@ -715,7 +784,7 @@ its body is overwritten on each agent-context sync (the file even opens with
 a corrupted marker line). It is therefore **deliberately excluded** as a
 durable layer: a cross-reference added there would not survive regeneration.
 This `CONTRIBUTING.md` section is the single canonical, human-facing source
-of truth for G1/G2/G3, and no `AGENTS.md` edit is required for parity.
+of truth for G1/G2/G3/G4, and no `AGENTS.md` edit is required for parity.
 
 **Hot reload.** The `prompt_assets/simard/` files hot-reload from
 `~/.simard/prompt_assets/`. After this PR merges, the operator syncs
@@ -727,7 +796,7 @@ daemon — the merge alone does not change live behaviour.
 The review gates add **advisory flags** — they do not change the
 machine verdict enum (`ready` / `not_ready` / `unclear` for the
 merge-judge, and the severity scale for the code reviewer). A reviewer
-or the merge-judge raises a G1/G2/G3 flag as a finding or blocker with a
+or the merge-judge raises a G1/G2/G3/G4 flag as a finding or blocker with a
 `fix` suggestion; the author either addresses it or justifies why it
 does not apply. What fires a flag:
 
@@ -740,6 +809,16 @@ does not apply. What fires a flag:
 - **G3 flag** — a new or extended line/substring parser over model/tool
   output where a structured JSON contract + agent extraction would be
   cleaner.
+- **G4 flag** — a PR that ADDS a new point-in-time investigation/testing/
+  diagnosis report doc instead of recording the finding in a GitHub
+  issue and/or memory.
+
+**G4 is the exception to "soft flags only."** In addition to the advisory
+flag above, G4 has a **hard deterministic backstop**: even if the soft
+flag is missed, the Overseer pr-verify scan `scan_no_point_in_time_report_docs`
+(check #8) fails the merge gate for a PR that adds a report doc — no
+`--admin` / `--no-verify` bypass. The soft flag catches it earlier and
+more helpfully; the scan guarantees it cannot slip through.
 
 ### Verifying the guidelines are present
 
@@ -750,7 +829,8 @@ cargo test --test engineering_guidelines_prompts
 The test reads the prompt assets, lowercases them, and asserts stable
 keyword invariants for each guideline (for example `live
 self-measurement` and `trended over time` for G1, `amplihack-memory-lib`
-for G2, `brittle parsing` and `agentic step` for G3), asserts each
+for G2, `brittle parsing` and `agentic step` for G3, and
+`no-point-in-time-docs` / `point-in-time` for G4), asserts each
 edited reasoner `.md` stays in parity with its recipe `.yaml` mirror,
 and asserts the edited reasoner regions do not rename the one-Brain
 OODA phases as a "Bridge". It asserts **keywords, not full sentences**,

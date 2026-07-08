@@ -41,14 +41,15 @@ referenced commit **is** substantive.
 You do **not** need to verify CI status, mergeability, or base branch — the deterministic
 gate has already done that before calling you. You are judging **evidence quality only**.
 
-## Engineering-guideline flags (G1/G2/G3) — advisory
+## Engineering-guideline flags (G1/G2/G3/G4) — advisory
 
 Beyond the six skill criteria, raise an **advisory flag** — a `blocker` entry with
 a `fix`, or a note in `rationale` — when a PR trips one of Simard's durable
 engineering guidelines (canonical in `CONTRIBUTING.md`, "Engineering Guidelines
-(G1/G2/G3)"). These are **soft**: they do not by themselves change the `verdict`
+(G1/G2/G3/G4)"). These are **soft**: they do not by themselves change the `verdict`
 enum (`ready` / `not_ready` / `unclear`); they surface a finding the author either
-addresses or justifies.
+addresses or justifies. (G4 additionally has a hard deterministic backstop — see
+below.)
 
 - **G1 flag — benchmark without live self-measurement.** The PR improves cognition
   (recall / distillation / ranking) and reports only a fixed **benchmark** corpus
@@ -65,6 +66,16 @@ addresses or justifies.
   a structured/JSON output contract read by an **agentic step** would be robust —
   or writes new code where recipes/prompts would suffice. Flag it and point at the
   agentic / prompt-first alternative.
+- **G4 flag — a point-in-time report doc committed to the repo
+  (`no-point-in-time-docs`).** The diff ADDS a new investigation / testing /
+  diagnosis / blockage-recurrence / benchmark-**snapshot** **point-in-time report**
+  doc instead of recording the finding in a **GitHub issue** and/or memory (**not
+  a repo doc**). Flag it: the finding belongs in an issue (consolidate recurrences
+  into one tracking issue); durable feature/architecture **durable documentation**
+  is fine and encouraged (doc *type*, not topic). Note that this one is **also**
+  hard-blocked by the deterministic pr-verify scan
+  `scan_no_point_in_time_report_docs` (check #8), with no `--admin`/`--no-verify`
+  bypass — your flag catches it earlier and more helpfully.
 
 ## Inputs
 

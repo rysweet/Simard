@@ -329,7 +329,7 @@ impl PrOps for MergePrOps {
             },
         );
 
-        // #3–6 additive diff-scans.
+        // #3–6 + #8 additive diff-scans.
         let diff = self.source.diff(repo, pr)?;
         checks.extend(run_diff_scans(&diff));
 
