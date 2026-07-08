@@ -207,6 +207,89 @@ impl DemoScenario {
             .map_err(|e| CoinGymError::Io(format!("read {}: {e}", path.display())))?;
         Self::from_manifest(&raw)
     }
+
+    /// The serialisable offline mock context (oracle + script) this scenario
+    /// grades against, so a persisted run stays self-contained for the offline
+    /// self-improvement loop (`improve --holdout fresh`). This is **mock
+    /// ground-truth only** (a test double); real runs get their verdicts from
+    /// `coin verify`, never from a stored oracle.
+    #[must_use]
+    pub fn offline_scaffold(&self) -> OfflineScaffold {
+        let script = self
+            .script
+            .iter()
+            .map(|(id, c)| {
+                (
+                    id.clone(),
+                    OfflineScriptEntry {
+                        input: c.input.clone(),
+                        confidence: c.confidence,
+                        rationale: c.rationale.clone(),
+                    },
+                )
+            })
+            .collect();
+        OfflineScaffold {
+            oracle: self.oracle.clone(),
+            script,
+        }
+    }
+}
+
+/// The offline mock context (oracle + scripted candidates) that graded an
+/// offline scaffold run. Persisted alongside a run so the offline
+/// self-improvement loop can re-grade held-out fresh targets and reconstruct the
+/// agent's base candidates without re-reading the manifest. **Mock ground-truth
+/// only**: empty for real (`coin verify`-graded) runs.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OfflineScaffold {
+    /// Ground-truth reaching input per target id (the mock oracle).
+    #[serde(default)]
+    pub oracle: HashMap<String, String>,
+    /// The agent's base scripted candidate per target id.
+    #[serde(default)]
+    pub script: HashMap<String, OfflineScriptEntry>,
+}
+
+impl OfflineScaffold {
+    /// Whether this scaffold carries no mock context (a real run, or an empty
+    /// scenario). The self-improvement loop refuses to run on such a run.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.oracle.is_empty() && self.script.is_empty()
+    }
+
+    /// Reconstruct the base scripted candidates as a `target_id -> Candidate`
+    /// map (the reasoner's script), so the loop can replay the agent offline.
+    #[must_use]
+    pub fn base_candidates(&self) -> HashMap<String, Candidate> {
+        self.script
+            .iter()
+            .map(|(id, e)| {
+                (
+                    id.clone(),
+                    Candidate {
+                        input: e.input.clone(),
+                        confidence: e.confidence,
+                        rationale: e.rationale.clone(),
+                    },
+                )
+            })
+            .collect()
+    }
+}
+
+/// A serialisable scripted candidate (the persistable twin of
+/// [`Candidate`], which is intentionally not `serde`-derived).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OfflineScriptEntry {
+    /// The candidate input (placeholder UTF-8 in the scaffold).
+    pub input: String,
+    /// The agent's self-reported confidence in `0.0..=1.0`.
+    pub confidence: f64,
+    /// Free-text rationale.
+    #[serde(default)]
+    pub rationale: String,
 }
 
 // ── Real COIN dataset schema (Hugging Face rows) ─────────────────────────────

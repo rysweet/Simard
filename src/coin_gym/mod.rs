@@ -15,12 +15,14 @@
 //! overfitting-reviewer gate, profiles, and the
 //! `coin-gym run|score|compare|improve|profiles` CLI. The whole pipeline runs
 //! offline against a mock oracle so it is exercised without a VM. Live grading
-//! (Phase 3 VM) and the live self-improvement loop with verify/rollback
-//! (Phase 5) remain follow-ups on issue #2713.
+//! (Phase 3 VM) remains a follow-up on issue #2823; the live self-improvement
+//! loop with verify/rollback (Phase 5, issue #2825) is implemented offline in
+//! [`improve_loop`] behind `coin-gym improve --holdout fresh`.
 
 pub mod agent_runner;
 pub mod executor;
 pub mod improve;
+pub mod improve_loop;
 pub mod leaderboard;
 pub mod profiles;
 pub mod scorer;
@@ -35,6 +37,8 @@ mod tests_cli;
 mod tests_executor;
 #[cfg(test)]
 mod tests_improve;
+#[cfg(test)]
+mod tests_improve_loop;
 #[cfg(test)]
 mod tests_leaderboard;
 #[cfg(test)]
@@ -55,6 +59,7 @@ use executor::{
     CoinEvaluateExecutor, EvaluateSource, LOCAL_ONLY, MockHarnessExecutor,
 };
 use improve::analyze_and_review;
+use improve_loop::{SelfImproveReport, run_self_improvement};
 use leaderboard::compare_to_leaderboard;
 use profiles::{PersistedRun, default_home, ensure_profile, list_profiles, load_run, save_run};
 use scorer::{Score, score_run};
@@ -70,14 +75,16 @@ pub fn coin_gym_usage() -> &'static str {
      \x20 run <model> [--strategy baseline|team] [--profile <name>] [--targets <path>]\n\
      \x20 score <run-id> [--profile <name>]\n\
      \x20 compare <run-id> [--profile <name>]\n\
-     \x20 improve <run-id> [--profile <name>]\n\
+     \x20 improve <run-id> [--profile <name>] [--holdout fresh]\n\
      \x20 contract [--dataset <repo>] [--revision <tag>] [--split a,b] [--project x,y] [--source rebuild|image]\n\
      \x20 profiles\n\
      \n\
      Offline scaffold (Phase 4): runs grade against a mock oracle. Live grading\n\
-     needs `coin evaluate` on a Docker host (Phase 3); the self-improvement\n\
-     verify/rollback loop is Phase 5. `contract` prints the real coin\n\
-     evaluate/verify wiring without running anything (LOCAL-ONLY). See\n\
+     needs `coin evaluate` on a Docker host (Phase 3, issue #2823). `improve\n\
+     --holdout fresh` runs the Phase-5 self-improvement loop (failure-analyst →\n\
+     overfitting gate → verify on held-out fresh → keep/rollback + durable tactic\n\
+     memory) offline. `contract` prints the real coin evaluate/verify wiring\n\
+     without running anything (LOCAL-ONLY). See\n\
      docs/howto/run-the-coin-gym-harness.md."
 }
 
@@ -175,6 +182,7 @@ fn cmd_run(home: &Path, rest: &[String]) -> CoinGymResult<()> {
     let persisted = PersistedRun {
         report: report.clone(),
         targets: scenario.targets.clone(),
+        offline: scenario.offline_scaffold(),
     };
     let path = save_run(home, &profile_name, &persisted)?;
     let score = score_run(&report);
@@ -312,10 +320,26 @@ fn cmd_compare(home: &Path, rest: &[String]) -> CoinGymResult<()> {
 // ── improve ──────────────────────────────────────────────────────────────────
 
 fn cmd_improve(home: &Path, rest: &[String]) -> CoinGymResult<()> {
-    let parsed = parse_args(rest, &["profile"])?;
+    let parsed = parse_args(rest, &["profile", "holdout"])?;
     let run_id = require_run_id(&parsed, "improve")?;
     let profile = sanitized_profile(&parsed);
     let persisted = load_run(home, profile.as_deref(), &run_id)?;
+
+    if let Some(holdout) = parsed.flags.get("holdout") {
+        if holdout != "fresh" {
+            return Err(CoinGymError::Usage(format!(
+                "improve --holdout only supports 'fresh' (got '{holdout}')"
+            )));
+        }
+        // Tactic memory is banked under a concrete profile: the explicit
+        // `--profile`, else the run's model-derived default (matching `run`).
+        let mem_profile =
+            profile.unwrap_or_else(|| profiles::sanitize_name(&persisted.report.model));
+        let report = run_self_improvement(home, &mem_profile, &persisted)?;
+        print_self_improve(&mem_profile, &report);
+        return Ok(());
+    }
+
     let report = analyze_and_review(&persisted.report, &persisted.targets);
     println!("run-id:   {run_id}");
     println!("analyzed: {} unreached target(s)", report.analyzed);
@@ -334,6 +358,42 @@ fn cmd_improve(home: &Path, rest: &[String]) -> CoinGymResult<()> {
     }
     println!("note: {}", report.note);
     Ok(())
+}
+
+/// Render a live self-improvement (`improve --holdout fresh`) report.
+fn print_self_improve(profile: &str, report: &SelfImproveReport) {
+    println!("run-id:   {}", report.run_id);
+    println!("model:    {}", report.model);
+    println!("profile:  {profile}");
+    println!(
+        "gate:     {} accepted  {} rejected",
+        report.gate_accepted, report.gate_rejected
+    );
+    println!(
+        "holdout:  reach {:.1}% → {:.1}%   (kept {}, rolled back {}, train/held-out-gap warnings {})",
+        report.holdout_reach_before_pct,
+        report.holdout_reach_after_pct,
+        report.kept,
+        report.rolled_back,
+        report.overfitting_warnings
+    );
+    println!(
+        "memory:   {} → {} durable tactic(s)",
+        report.memory_before, report.memory_after
+    );
+    for v in &report.verified {
+        println!(
+            "  [{}] {} ({}) — {}",
+            v.decision.label(),
+            v.source_target_id,
+            v.category,
+            v.reason
+        );
+        if let Some(w) = &v.overfitting_warning {
+            println!("        ⚠ train/held-out gap: {w}");
+        }
+    }
+    println!("note: {}", report.note);
 }
 
 // ── contract ─────────────────────────────────────────────────────────────────
