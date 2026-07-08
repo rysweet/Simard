@@ -3,6 +3,9 @@
 //! Replaces `python/simard_knowledge_client.py` with in-process Rust logic.
 //! Reads knowledge pack manifests from disk and queries pack databases via
 //! rusqlite, eliminating the Python subprocess dependency.
+//!
+//! Parity with the Python agent-kgpacks contract is tracked by a measurable
+//! criteria checklist in `Specs/agent-kgpacks-rs-parity.md`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -147,7 +150,31 @@ struct SourceInfo {
     url: Option<String>,
 }
 
+/// Whether `table` has a column named `col` (case-insensitive; best-effort —
+/// any error, e.g. a missing table, degrades to `false`).
+///
+/// `table` is always drawn from the fixed allowlist in [`query_articles`], so
+/// interpolating it into the `PRAGMA` (which cannot bind an identifier
+/// parameter) introduces no injection surface.
+fn table_has_column(conn: &Connection, table: &str, col: &str) -> bool {
+    let sql = format!("PRAGMA table_info({table})");
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return false;
+    };
+    // PRAGMA table_info column 1 (`name`) is the column name.
+    let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(1)) else {
+        return false;
+    };
+    rows.flatten().any(|name| name.eq_ignore_ascii_case(col))
+}
+
 /// Query the articles table for matching content.
+///
+/// When the matched table carries a `url` column, each returned [`SourceInfo`]
+/// is populated with the article's source URL so answers trace back to a
+/// specific source article — the agent-kgpacks citation guarantee. Packs whose
+/// schema has no `url` column degrade gracefully to `url: None` (unchanged
+/// behaviour).
 fn query_articles(conn: &Connection, keywords: &[&str], limit: usize) -> Vec<SourceInfo> {
     // Build a LIKE-based search (pack databases don't always have FTS).
     let like_clauses: Vec<String> = keywords
@@ -166,8 +193,16 @@ fn query_articles(conn: &Connection, keywords: &[&str], limit: usize) -> Vec<Sou
 
     // Try "articles" table first, then "nodes"/"entities" as fallback.
     for table in &["articles", "nodes", "entities"] {
+        // Select the real `url` column when the schema has one; otherwise
+        // project a literal NULL so the row shape (and the reader closure
+        // below) stays uniform across pack schemas.
+        let url_col = if table_has_column(conn, table, "url") {
+            "url"
+        } else {
+            "NULL AS url"
+        };
         let sql = format!(
-            "SELECT title, COALESCE(section, '') as section FROM {table} WHERE {clauses} LIMIT {limit}",
+            "SELECT title, COALESCE(section, '') as section, {url_col} FROM {table} WHERE {clauses} LIMIT {limit}",
             table = table,
             clauses = like_clauses.join(" OR "),
             limit = limit,
@@ -176,10 +211,15 @@ fn query_articles(conn: &Connection, keywords: &[&str], limit: usize) -> Vec<Sou
         if let Ok(mut stmt) = conn.prepare(&sql) {
             let mut sources = Vec::new();
             if let Ok(rows) = stmt.query_map([], |row| {
+                let url = row
+                    .get::<_, Option<String>>(2)
+                    .unwrap_or(None)
+                    // Treat a present-but-empty URL as "no citation".
+                    .filter(|u| !u.is_empty());
                 Ok(SourceInfo {
                     title: row.get::<_, String>(0).unwrap_or_default(),
                     section: row.get::<_, String>(1).unwrap_or_default(),
-                    url: None,
+                    url,
                 })
             }) {
                 for row in rows.flatten() {
@@ -459,6 +499,36 @@ mod tests {
         pack_dir
     }
 
+    /// Like [`create_test_pack`] but the `articles` schema carries a `url`
+    /// column, mirroring a real agent-kgpacks pack whose articles cite a
+    /// source URL. Used to prove the native knowledge reader surfaces those citations.
+    fn create_test_pack_with_urls(packs_dir: &Path, name: &str) -> PathBuf {
+        let pack_dir = packs_dir.join(name);
+        fs::create_dir_all(&pack_dir).unwrap();
+
+        let manifest = serde_json::json!({
+            "name": name,
+            "description": format!("{name} knowledge pack"),
+            "graph_stats": { "articles": 2, "entities": 4, "relationships": 3, "size_mb": 0.1 }
+        });
+        fs::write(
+            pack_dir.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let db_path = pack_dir.join("pack.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE articles (title TEXT, section TEXT, content TEXT, url TEXT);
+             INSERT INTO articles VALUES ('Ownership in Rust', 'Basics', 'Ownership is a set of rules that govern how a Rust program manages memory.', 'https://doc.rust-lang.org/book/ch04-01-what-is-ownership.html');
+             INSERT INTO articles VALUES ('Borrowing', 'References', 'References let you refer to a value without taking ownership.', '');",
+        )
+        .unwrap();
+
+        pack_dir
+    }
+
     #[test]
     fn discover_packs_finds_packs_with_manifests() {
         let tmp = TempDir::new().unwrap();
@@ -590,6 +660,100 @@ mod tests {
         let result = response.result.unwrap();
         assert!(!result["answer"].as_str().unwrap().is_empty());
         assert!(result["confidence"].as_f64().unwrap() > 0.0);
+    }
+
+    #[test]
+    fn query_pack_db_returns_source_urls_when_present() {
+        // Parity criterion KGP-Q1: a pack whose articles carry a `url` column
+        // yields source citations with that URL, so answers trace back to a
+        // specific source article (the agent-kgpacks guarantee).
+        let tmp = TempDir::new().unwrap();
+        let pack_dir = create_test_pack_with_urls(tmp.path(), "url-pack");
+        let db_path = pack_dir.join("pack.db");
+
+        let (_answer, sources, _confidence) =
+            query_pack_db(&db_path, "What is ownership in Rust?", 5).unwrap();
+
+        let cited = sources
+            .iter()
+            .find(|s| s.title.contains("Ownership"))
+            .expect("the Ownership article must match");
+        assert_eq!(
+            cited.url.as_deref(),
+            Some("https://doc.rust-lang.org/book/ch04-01-what-is-ownership.html"),
+            "a matched article with a url column must surface its citation URL"
+        );
+    }
+
+    #[test]
+    fn query_pack_db_treats_empty_url_as_no_citation() {
+        // A present-but-empty url column value is not a usable citation and
+        // must degrade to `None`, not `Some("")`.
+        let tmp = TempDir::new().unwrap();
+        let pack_dir = create_test_pack_with_urls(tmp.path(), "url-pack");
+        let db_path = pack_dir.join("pack.db");
+
+        let (_answer, sources, _confidence) =
+            query_pack_db(&db_path, "References borrowing", 5).unwrap();
+
+        let borrowing = sources
+            .iter()
+            .find(|s| s.title.contains("Borrowing"))
+            .expect("the Borrowing article must match");
+        assert_eq!(
+            borrowing.url, None,
+            "an empty url value must be reported as no citation (None)"
+        );
+    }
+
+    #[test]
+    fn query_pack_db_omits_urls_when_column_absent() {
+        // Backward compatibility: packs whose schema has no `url` column keep
+        // the prior behaviour (url: None) rather than erroring.
+        let tmp = TempDir::new().unwrap();
+        let pack_dir = create_test_pack(tmp.path(), "no-url-pack");
+        let db_path = pack_dir.join("pack.db");
+
+        let (_answer, sources, _confidence) =
+            query_pack_db(&db_path, "What is ownership in Rust?", 5).unwrap();
+
+        assert!(
+            !sources.is_empty(),
+            "the query must still match without urls"
+        );
+        assert!(
+            sources.iter().all(|s| s.url.is_none()),
+            "a urlless pack schema must yield no citation URLs, not an error"
+        );
+    }
+
+    #[test]
+    fn native_knowledge_transport_query_surfaces_source_url() {
+        // End-to-end: the citation URL propagates through the RPC handler into
+        // the `sources[].url` field of the wire response.
+        let tmp = TempDir::new().unwrap();
+        create_test_pack_with_urls(tmp.path(), "url-pack");
+
+        let mut transport = NativeRpcTransport::new("simard-knowledge");
+        register_knowledge_handlers(&mut transport, tmp.path().to_path_buf());
+
+        let request = crate::rpc::RpcRequest {
+            id: crate::rpc::new_request_id(),
+            method: "knowledge.query".to_string(),
+            params: serde_json::json!({
+                "pack_name": "url-pack",
+                "question": "What is ownership in Rust?",
+                "limit": 5,
+            }),
+        };
+        let response = crate::rpc::RpcTransport::call(&transport, request).unwrap();
+        let result = response.result.expect("query must succeed");
+        let sources = result["sources"].as_array().expect("sources array");
+        assert!(
+            sources.iter().any(|s| s["url"].as_str()
+                == Some("https://doc.rust-lang.org/book/ch04-01-what-is-ownership.html")),
+            "the wire response must include the article's source citation URL; got: {sources:?}"
+        );
     }
 
     #[test]
