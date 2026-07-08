@@ -89,6 +89,29 @@ pub fn is_no_progress_marker(reason: &str) -> bool {
     reason.starts_with(NO_PROGRESS_BLOCKED_PREFIX)
 }
 
+/// True when `reason` is a **bare** no-progress safeguard block (issue #17): it
+/// carries the [`NO_PROGRESS_BLOCKED_PREFIX`] marker (so
+/// [`is_no_progress_marker`] holds) but has **no** [`NoProgressClass`] WHY token
+/// attached — i.e. the legacy `{PREFIX}{count}{SUFFIX}` "needs human review"
+/// shape a pre-#17 daemon parked stalled goals with, or a block a reasoner error
+/// left un-classified.
+///
+/// This is the thin deterministic rail that gates the agentic re-investigation
+/// pass ([`crate::ooda_loop::no_progress::reinvestigate_bare_blocked_goals`]): it
+/// selects exactly the bare-blocked population and never mistakes a WHY-bearing
+/// block (authored by [`no_progress_blocked_reason_with_why`], which always
+/// embeds a [`NoProgressClass::token`]) or any other kind of block
+/// (operator-set, scope, dependency, brain-failure) for one. Keying on "marker
+/// present AND no class token" makes the WHY-rewrite its own idempotency
+/// guarantee: once re-investigation attaches a WHY the reason is no longer bare,
+/// so the pass never re-processes it.
+pub fn is_bare_no_progress_block(reason: &str) -> bool {
+    is_no_progress_marker(reason)
+        && !NoProgressClass::ALL
+            .iter()
+            .any(|class| reason.contains(class.token()))
+}
+
 /// Render the sentinel [`GoalProgress::Blocked`] reason for a goal escalated
 /// after `consecutive` no-action cycles.
 ///
@@ -416,6 +439,20 @@ pub struct NoProgressTracker {
     /// engineer. `#[serde(default)]` keeps pre-#16 snapshots deserializable.
     #[serde(default)]
     guided_retries: HashSet<String>,
+    /// Goals whose **bare** no-progress block has already been re-investigated to
+    /// a terminal resolution for a given [`NoProgressClass`] (issue #17). Keyed on
+    /// `(goal_id, class_token)`; the class is stored as its stable
+    /// [`NoProgressClass::token`] **string** (never an enum-tagged form) so an
+    /// older / rolled-back binary can still parse the snapshot and the
+    /// fail-to-empty goal-board store never turns a parse miss into a full board
+    /// wipe. This is the belt-and-suspenders dedupe: the WHY-rewrite already
+    /// removes a re-investigated goal from the bare population next cycle, but this
+    /// persisted set additionally bounds re-investigation to **one** terminal
+    /// action per `(goal, class)` even if a crash/restart re-parks the goal bare
+    /// between the board rewrite and the tracker persist. `#[serde(default)]`
+    /// keeps pre-#17 snapshots deserializable (loads as an empty set).
+    #[serde(default)]
+    reinvestigated: HashSet<(String, String)>,
 }
 
 impl NoProgressTracker {
@@ -438,6 +475,7 @@ impl NoProgressTracker {
     pub fn record_progress(&mut self, goal_id: &str) {
         self.counts.remove(goal_id);
         self.guided_retries.remove(goal_id);
+        self.reinvestigated.retain(|(id, _)| id != goal_id);
     }
 
     /// Reset only `goal_id`'s no-action counter, **preserving** any spent
@@ -458,6 +496,25 @@ impl NoProgressTracker {
         self.guided_retries.contains(goal_id)
     }
 
+    /// Record that `goal_id`'s bare no-progress block has been re-investigated to
+    /// a terminal resolution for `class` (issue #17). Idempotent. Called **only**
+    /// after a terminal action succeeds (never on a fail-closed reasoner error),
+    /// so a re-park after a restart cannot trigger a second terminal action for
+    /// the same `(goal, class)`.
+    pub fn mark_reinvestigated(&mut self, goal_id: &str, class: NoProgressClass) {
+        self.reinvestigated
+            .insert((goal_id.to_string(), class.token().to_string()));
+    }
+
+    /// Whether `goal_id`'s bare block has already been re-investigated to a
+    /// terminal resolution for `class` (issue #17) — the belt-and-suspenders
+    /// dedupe guard the re-investigation pass consults before taking any terminal
+    /// action, bounding it to one per `(goal, class)` across daemon restarts.
+    pub fn reinvestigated(&self, goal_id: &str, class: NoProgressClass) -> bool {
+        self.reinvestigated
+            .contains(&(goal_id.to_string(), class.token().to_string()))
+    }
+
     /// Current consecutive no-action count for `goal_id` (`0` when untracked).
     pub fn consecutive(&self, goal_id: &str) -> u32 {
         self.counts.get(goal_id).copied().unwrap_or(0)
@@ -468,6 +525,7 @@ impl NoProgressTracker {
     pub fn retain_goals(&mut self, live: &HashSet<String>) {
         self.counts.retain(|id, _| live.contains(id));
         self.guided_retries.retain(|id| live.contains(id));
+        self.reinvestigated.retain(|(id, _)| live.contains(id));
     }
 
     /// Record a no-action cycle for `goal_id` and return the breaker's

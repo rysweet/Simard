@@ -277,14 +277,14 @@ fn status_of<'a>(state: &'a OodaState, id: &str) -> &'a GoalProgress {
 /// (I1: no bare survivors). Completed / removed / NotStarted / Paused /
 /// Blocked-with-why all satisfy it.
 fn assert_not_bare(state: &OodaState, id: &str) {
-    if let Some(g) = state.active_goals.active.iter().find(|g| g.id == id) {
-        if let GoalProgress::Blocked(reason) = &g.status {
-            assert!(
-                !is_bare_no_progress_block(reason),
-                "goal {id} must NEVER remain a bare '[OODA-SAFEGUARD] … needs human review' block; \
-                 got: {reason}"
-            );
-        }
+    if let Some(g) = state.active_goals.active.iter().find(|g| g.id == id)
+        && let GoalProgress::Blocked(reason) = &g.status
+    {
+        assert!(
+            !is_bare_no_progress_block(reason),
+            "goal {id} must NEVER remain a bare '[OODA-SAFEGUARD] … needs human review' block; \
+             got: {reason}"
+        );
     }
 }
 

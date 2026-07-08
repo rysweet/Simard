@@ -571,7 +571,8 @@ fn run_ooda_cycle_inner(
             let reasoner =
                 crate::ooda_loop::no_progress::DeterministicNoProgressReasoner::new(source_ref);
             let healer = crate::ooda_loop::no_progress::CloneRepoHealer::new("rysweet");
-            let dispatcher = crate::ooda_loop::no_progress::QueueingEngineerDispatcher::new();
+            let transition_dispatcher =
+                crate::ooda_loop::no_progress::QueueingEngineerDispatcher::new();
 
             let report = crate::ooda_loop::no_progress::apply_no_progress_breaker_investigated(
                 state,
@@ -579,7 +580,7 @@ fn run_ooda_cycle_inner(
                 source_ref,
                 &reasoner,
                 &healer,
-                &dispatcher,
+                &transition_dispatcher,
                 &crate::ooda_loop::no_progress::GhIssueFiler,
                 crate::ooda_loop::no_progress::INVESTIGATED_BREAKER_THRESHOLD,
             );
@@ -590,13 +591,45 @@ fn run_ooda_cycle_inner(
                     "OODA no-progress breaker (root-cause) ran",
                 );
             }
-            let dropped = report.dropped.clone();
 
-            // Drain the guided-engineer spawn requests and dispatch each through
-            // the SAME `dispatch_spawn_engineer` the Act phase uses (the state
-            // borrow is free now that the breaker pass has returned). Reuses the
-            // existing capability rather than building a parallel spawner.
-            let requests = dispatcher.into_requests();
+            // Already-blocked re-investigation (issue #17): after the
+            // on-transition breaker, scan the board for goals still parked in a
+            // BARE `[OODA-SAFEGUARD] … needs human review` block — parked by a
+            // pre-#16 daemon build, or left bare by a reasoner error on the
+            // transition cycle — and re-run the SAME WHY reasoner + ladder over
+            // them, so no goal is ever stranded with a bare, unexplained block.
+            // Uses its own spawn queue; both queues drain through the shared
+            // dispatch below.
+            let reinvestigate_dispatcher =
+                crate::ooda_loop::no_progress::QueueingEngineerDispatcher::new();
+            let reinvestigate_report =
+                crate::ooda_loop::no_progress::reinvestigate_bare_blocked_goals(
+                    state,
+                    source_ref,
+                    &reasoner,
+                    &healer,
+                    &reinvestigate_dispatcher,
+                    &crate::ooda_loop::no_progress::GhIssueFiler,
+                    crate::ooda_loop::no_progress::INVESTIGATED_BREAKER_THRESHOLD,
+                );
+            if reinvestigate_report.fired() || !reinvestigate_report.reinvestigated.is_empty() {
+                tracing::info!(
+                    target: "simard::ooda",
+                    summary = %reinvestigate_report.log_line(),
+                    "OODA no-progress re-investigation (already-blocked) ran",
+                );
+            }
+
+            let mut dropped = report.dropped.clone();
+            dropped.extend(reinvestigate_report.dropped.clone());
+
+            // Drain the guided-engineer spawn requests from BOTH passes and
+            // dispatch each through the SAME `dispatch_spawn_engineer` the Act
+            // phase uses (the state borrow is free now that both passes have
+            // returned). Reuses the existing capability rather than building a
+            // parallel spawner.
+            let mut requests = transition_dispatcher.into_requests();
+            requests.extend(reinvestigate_dispatcher.into_requests());
             if !requests.is_empty() {
                 let brain = memories.brain.clone();
                 let repo_root = memories.repo_root.clone();
