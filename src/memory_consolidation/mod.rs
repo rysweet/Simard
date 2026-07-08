@@ -174,6 +174,13 @@ pub fn preparation_memory_operations_with_active_slugs_phased(
     // and search each separately. The old code passed the full joined string to
     // search_facts() which uses Cypher CONTAINS — no fact matches a giant
     // concatenated string. Issue #2270.
+    // Issue #40: per-sub-step timing for OODA prepare-context. Emits
+    // counts/timings only (never memory content) so the ~11-min-per-cycle
+    // pathology — and the engine-side fix that removes it — is attributable
+    // from a live log without a profiler. The `graph_path` (indexed|legacy)
+    // field is emitted by the engine's ranked recall, not here.
+    let prep_start = std::time::Instant::now();
+
     let fragments: Vec<&str> = objective
         .split("; ")
         .map(|s| s.trim())
@@ -183,6 +190,7 @@ pub fn preparation_memory_operations_with_active_slugs_phased(
     let mut relevant_facts: Vec<CognitiveFact> = Vec::new();
     let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    let declarative_start = std::time::Instant::now();
     for fragment in &fragments {
         // Issue #2329: gather candidate facts via ranked recall (relevance +
         // recency + confidence + …, phase-weighted) instead of a plain
@@ -203,6 +211,14 @@ pub fn preparation_memory_operations_with_active_slugs_phased(
     }
     // Cap total results at 10 to match the original per-query limit.
     relevant_facts.truncate(10);
+    tracing::debug!(
+        target: "simard::memory_consolidation::prepare_context",
+        step = "recall_facts_ranked",
+        fragment_count = fragments.len(),
+        candidate_count = relevant_facts.len(),
+        elapsed_ms = declarative_start.elapsed().as_millis() as u64,
+        "prepare-context: ranked declarative recall (per fragment)"
+    );
 
     // Always load goal facts so goals are accessible from memory even when
     // the objective text doesn't substring-match "goal-store:record".
@@ -266,7 +282,15 @@ pub fn preparation_memory_operations_with_active_slugs_phased(
     }
 
     // Check if any prospective memories are triggered by the objective.
+    let triggers_start = std::time::Instant::now();
     let triggered_prospectives = memory.check_triggers(objective)?;
+    tracing::debug!(
+        target: "simard::memory_consolidation::prepare_context",
+        step = "check_triggers",
+        triggered = triggered_prospectives.len(),
+        elapsed_ms = triggers_start.elapsed().as_millis() as u64,
+        "prepare-context: prospective trigger scan"
+    );
 
     // PR-C (issue #2281, problem 3 + 4): both procedural and episodic
     // recall benefit from breaking the objective into trigger
@@ -283,8 +307,17 @@ pub fn preparation_memory_operations_with_active_slugs_phased(
     // cycle by `ooda_loop::cycle::compose_procedure_name` go through the
     // exact same `memory.recall_procedure(token, …)` Cypher CONTAINS path
     // so neither class can win or lose recall relative to the other.
+    let procedures_start = std::time::Instant::now();
     let recalled_procedures =
         recall_procedures_for_objective_with_tokens(memory, objective, &tokens, 5)?;
+    tracing::debug!(
+        target: "simard::memory_consolidation::prepare_context",
+        step = "recall_procedures",
+        token_count = tokens.len(),
+        recalled = recalled_procedures.len(),
+        elapsed_ms = procedures_start.elapsed().as_millis() as u64,
+        "prepare-context: tokenized procedure recall"
+    );
 
     // PR-C (issue #2281, problem 4) + issue #2395: episodic recall.
     //
@@ -306,6 +339,7 @@ pub fn preparation_memory_operations_with_active_slugs_phased(
     let (raw_recall_count, session_filtered_count, episodic_recall) = if tokens.is_empty() {
         (0usize, 0usize, Vec::<CognitiveEpisode>::new())
     } else {
+        let episodic_start = std::time::Instant::now();
         let query = tokens.join(" ");
         let raw = memory.recall_episodes_ranked(&query, 5, weights)?;
         let raw_len = raw.len();
@@ -314,6 +348,13 @@ pub fn preparation_memory_operations_with_active_slugs_phased(
             .filter(|e| !e.source_label.starts_with("session-"))
             .collect();
         let filtered = raw_len - kept.len();
+        tracing::debug!(
+            target: "simard::memory_consolidation::prepare_context",
+            step = "recall_episodes_ranked",
+            candidate_count = kept.len(),
+            elapsed_ms = episodic_start.elapsed().as_millis() as u64,
+            "prepare-context: ranked episodic recall"
+        );
         (raw_len, filtered, kept)
     };
 
@@ -338,6 +379,17 @@ pub fn preparation_memory_operations_with_active_slugs_phased(
         episodic_recall.len(),
         raw_recall_count,
         session_filtered_count,
+    );
+
+    tracing::debug!(
+        target: "simard::memory_consolidation::prepare_context",
+        step = "prepare_context",
+        facts = relevant_facts.len(),
+        triggers = triggered_prospectives.len(),
+        procedures = recalled_procedures.len(),
+        episodes = episodic_recall.len(),
+        elapsed_ms = prep_start.elapsed().as_millis() as u64,
+        "prepare-context: complete"
     );
 
     Ok(PreparedContext {
@@ -922,6 +974,15 @@ pub fn consolidation_persistence(
 
 #[cfg(test)]
 mod tests;
+
+// Issue #40: OODA prepare-context orchestration-perf + observability guards.
+// Locks the invariant that prepare-context issues a small, constant number of
+// expensive recall calls (O(objective fragments), never O(fact-store size)) and
+// preserves the "Prepared context: …" working-memory summary. The substantive
+// per-cycle latency fix is engine-side (amplihack-memory bulk graph-adjacency
+// index); this guards the orchestration layer across that dependency bump.
+#[cfg(test)]
+mod tests_prepare_context_perf;
 
 // Issue #2329: OODA preparation gathers `relevant_facts` via ranked recall
 // (relevance/recency/confidence) rather than a confidence-sorted `search_facts`.

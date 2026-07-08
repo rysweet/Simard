@@ -305,6 +305,7 @@ nav:
     - Cognitive-Memory Ranked Recall: reference/cognitive-memory-ranked-recall.md
     - Cognitive-Memory Episodic Recall: reference/cognitive-memory-episodic-recall.md
     - Cognitive-Memory Ranked Episodic Recall: reference/cognitive-memory-ranked-episodic-recall.md
+    - Cognitive-Memory Graph-Adjacency Index: reference/cognitive-memory-graph-adjacency-index.md
     - Cognitive-Memory Procedural Idempotency: reference/cognitive-memory-procedural-idempotency.md
     - Cognitive-Memory Goal Store (superseded): reference/cognitive-memory-goal-store.md
     - Backup-Pruning API: reference/backup-pruning-api.md

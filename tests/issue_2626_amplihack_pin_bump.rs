@@ -9,12 +9,13 @@
 //! `main` and run the new code. The pins are advanced as upstream lands work:
 //!
 //!   * `amplihack-agent-eval`  59548a96… → **2a93441d…** (amplihack-rs main)
-//!   * `amplihack-memory`       e005a596… → **901f63ad…** (memory-lib main —
-//!     the squash-merge of PR #125, which adds the trigger-scoped, priority-
-//!     ordered `get_prospective_by_trigger(trigger, limit)` recall — whose LIMIT
-//!     bounds only matching nodes — and makes `get_all_prospective` sort-then-
-//!     truncate; Simard consumes it to fix the creative-ideas dashboard read
-//!     path, issue #122)
+//!   * `amplihack-memory`       901f63ad… → **72c5ea1b…** (memory-lib main —
+//!     the squash-merge of PR #126, which serves the ranked-recall graph term
+//!     from a single bulk graph-adjacency scan per edge type instead of a
+//!     per-node `query_neighbors` BFS; cuts OODA prepare-context from ~11 min/
+//!     cycle toward seconds at ~7,590 facts with byte-identical ranking, no
+//!     store-format change; Simard consumes it to fix the "memory graph never
+//!     loads" pathology, issue #40)
 //!
 //! These are the exact 40-char SHAs verified against `git ls-remote … main`
 //! at authoring time.
@@ -45,17 +46,18 @@ use std::path::PathBuf;
 /// amplihack-rs `main` HEAD carrying the `amplihack-agent-eval` crate to adopt.
 const AGENT_EVAL_TARGET_REV: &str = "14dc30b10e87764120c6f2bae7f3630522c29e5d";
 /// amplihack-memory-lib `main` commit carrying the `amplihack-memory` crate:
-/// PR #125's squash-merge — the trigger-scoped, priority-ordered
-/// `get_prospective_by_trigger(trigger, limit)` prospective recall (whose LIMIT
-/// bounds only nodes matching the trigger) plus a sort-then-truncate
-/// `get_all_prospective`. Simard consumes it to fix the creative-ideas
-/// dashboard read path (issue #122). Two commits ahead of the prior #120 pin,
-/// no regression.
-const MEMORY_TARGET_REV: &str = "901f63ad79eb0c2d87cd8263d26025877af43cc5";
+/// PR #126's squash-merge — the bulk graph-adjacency index for ranked recall,
+/// which serves the graph-proximity term from one bulk edge scan per type
+/// instead of a per-node `query_neighbors` BFS (N+1 fan-out of ~3N Cypher scans
+/// per recall). Cuts OODA prepare-context from ~11 min/cycle toward seconds at
+/// ~7,590 facts with byte-identical ranking; no store-format change (v41).
+/// Simard consumes it to fix the "memory graph never loads" pathology
+/// (issue #40). One commit ahead of the prior #125 pin, no regression.
+const MEMORY_TARGET_REV: &str = "72c5ea1bfcca7e6f3e314dfd99fbe4998378ffe8";
 
 /// The stale revs the bump must move *off of* (anti-regression sentinels).
 const AGENT_EVAL_STALE_REV: &str = "59548a96049ab8d558110bcaf9c82a4316f1bbf0";
-const MEMORY_STALE_REV: &str = "e005a5963b38bc02610fa5b0bef7e52625dcd092";
+const MEMORY_STALE_REV: &str = "901f63ad79eb0c2d87cd8263d26025877af43cc5";
 
 /// The only git remotes these two crates may resolve from. A bump must never
 /// introduce a *new* git source (typosquat / allowlist-bypass guard, R1).
