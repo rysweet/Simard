@@ -21,8 +21,9 @@ use crate::goal_curation::completion_gate::{
     CompletionEvidenceGate, CompletionVerdict, DependencyState, EvidenceSource,
 };
 use crate::goal_curation::no_progress_breaker::{
-    NO_PROGRESS_BREAKER_THRESHOLD, NoProgressResolution, no_progress_blocked_reason_with_why,
-    obsolescence_reason, resolution_for_why, verify_stuck_goal,
+    NO_PROGRESS_BREAKER_THRESHOLD, NoProgressResolution, NoProgressTracker,
+    is_bare_no_progress_block, no_progress_blocked_reason_with_why, obsolescence_reason,
+    resolution_for_why, verify_stuck_goal,
 };
 use crate::goal_curation::no_progress_why::{
     Evidence, NoProgressClass, NoProgressWhy, NoProgressWhyReasoner,
@@ -124,6 +125,15 @@ pub(crate) struct NoProgressBreakerReport {
     /// breaker fails **closed** (no terminal action, counter preserved) rather
     /// than silently blocking or completing on an unknown cause (issue #16).
     pub investigation_errors: Vec<String>,
+    /// Goals whose **bare** `[OODA-SAFEGUARD] … needs human review` block was
+    /// re-investigated this cycle by the already-blocked re-investigation pass
+    /// (issue #17) and upgraded away from bare — completed / dropped / healed /
+    /// deferred / handed to a fixer / blocked WITH the concrete why. Recorded per
+    /// goal that the reasoner successfully classified (a fail-closed reasoner
+    /// error is surfaced via [`investigation_errors`](Self::investigation_errors),
+    /// not here). Housekeeping-style bookkeeping; does not itself constitute a
+    /// [`fired`](Self::fired) — the terminal-action buckets do.
+    pub reinvestigated: Vec<String>,
     /// Standing/perpetual goals (issue #2589) that produced a no-action ("idle")
     /// cycle. Such a goal is inherently bursty — it ships a durable improvement
     /// periodically and idles between — so it is **exempt** from the breaker:
@@ -152,7 +162,7 @@ impl NoProgressBreakerReport {
     pub fn log_line(&self) -> String {
         format!(
             "done={} dropped={} escalated={} healed={} deferred={} engineer={} \
-             auto_cleared={} errors={} perpetual_idled={}",
+             auto_cleared={} reinvestigated={} errors={} perpetual_idled={}",
             self.marked_done.len(),
             self.dropped.len(),
             self.escalated.len(),
@@ -160,6 +170,7 @@ impl NoProgressBreakerReport {
             self.deferred.len(),
             self.engineer_spawned.len(),
             self.auto_cleared.len(),
+            self.reinvestigated.len(),
             self.investigation_errors.len(),
             self.perpetual_idled.len(),
         )
@@ -510,173 +521,394 @@ pub(crate) fn apply_no_progress_breaker_investigated(
         let guided_retry_used = tracker.guided_retry_used(goal_id);
         let resolution = resolution_for_why(consecutive, why, guided_retry_used);
 
-        match resolution {
-            NoProgressResolution::Continue => {}
-            NoProgressResolution::MarkDone => {
-                if let Some(g) = state
-                    .active_goals
-                    .active
-                    .iter_mut()
-                    .find(|g| g.id == goal_id)
-                {
-                    g.status = GoalProgress::Completed;
+        // On-transition path: the goal is not in a Blocked state, so the
+        // non-terminal `Heal` / `SpawnEngineer` rungs leave its status untouched
+        // (`unblock_nonterminal = false`).
+        apply_resolution_side_effects(
+            state,
+            goal_id,
+            consecutive,
+            resolution,
+            healer,
+            dispatcher,
+            filer,
+            &mut tracker,
+            &mut report,
+            false,
+        );
+    }
+
+    // Prune counters/flags for goals no longer on the active board.
+    let live: HashSet<String> = state
+        .active_goals
+        .active
+        .iter()
+        .map(|g| g.id.clone())
+        .collect();
+    tracker.retain_goals(&live);
+
+    state.no_progress_tracker = tracker;
+    report
+}
+
+/// Drive one classified [`NoProgressResolution`] to its board mutation, tracker
+/// update, injected side effect (heal / spawn / file issue), and report entry.
+///
+/// Shared by BOTH the on-transition breaker
+/// ([`apply_no_progress_breaker_investigated`]) and the already-blocked
+/// re-investigation pass ([`reinvestigate_bare_blocked_goals`], issue #17) so the
+/// class → action mapping can never drift between the two populations.
+/// `consecutive` renders into any authored block reason / clone-error escalation.
+///
+/// `unblock_nonterminal` distinguishes the callers' starting state. The
+/// on-transition path acts on a goal that is *not* Blocked, so the non-terminal
+/// `Heal` / `SpawnEngineer` rungs leave its status untouched (`false`). The
+/// re-investigation path acts on a goal already parked in a BARE `Blocked` state,
+/// so those same rungs must additionally UN-BLOCK it to
+/// [`GoalProgress::NotStarted`] (`true`) — otherwise the brain would never
+/// re-select it and the heal / spawned fixer could never advance it. The terminal
+/// rungs (MarkDone / Drop / Defer / Escalate) set a definitive non-bare status
+/// regardless of the flag.
+#[allow(clippy::too_many_arguments)]
+fn apply_resolution_side_effects(
+    state: &mut OodaState,
+    goal_id: &str,
+    consecutive: u32,
+    resolution: NoProgressResolution,
+    healer: &dyn PreconditionHealer,
+    dispatcher: &dyn NoProgressEngineerDispatcher,
+    filer: &dyn NoProgressIssueFiler,
+    tracker: &mut NoProgressTracker,
+    report: &mut NoProgressBreakerReport,
+    unblock_nonterminal: bool,
+) {
+    match resolution {
+        NoProgressResolution::Continue => {}
+        NoProgressResolution::MarkDone => {
+            if let Some(g) = state
+                .active_goals
+                .active
+                .iter_mut()
+                .find(|g| g.id == goal_id)
+            {
+                g.status = GoalProgress::Completed;
+            }
+            tracker.reset_count(goal_id);
+            report.marked_done.push(goal_id.to_string());
+            tracing::warn!(
+                target: "simard::ooda",
+                goal = %goal_id,
+                "no-progress breaker: ALREADY-COMPLETE — marking goal DONE (no block)",
+            );
+        }
+        NoProgressResolution::Drop { reason } => {
+            state.active_goals.active.retain(|g| g.id != goal_id);
+            state.active_goals.backlog.retain(|b| b.id != goal_id);
+            tracker.reset_count(goal_id);
+            report.dropped.push(goal_id.to_string());
+            tracing::warn!(
+                target: "simard::ooda",
+                goal = %goal_id,
+                reason = %reason,
+                "no-progress breaker: OBSOLETE — DROPPING from the board (no block)",
+            );
+        }
+        NoProgressResolution::Heal { why } => {
+            let goal = match state.active_goals.active.iter().find(|g| g.id == goal_id) {
+                Some(g) => g.clone(),
+                None => {
+                    tracker.reset_count(goal_id);
+                    return;
                 }
-                tracker.reset_count(goal_id);
-                report.marked_done.push(goal_id.to_string());
-                tracing::warn!(
-                    target: "simard::ooda",
-                    goal = %goal_id,
-                    "no-progress breaker: ALREADY-COMPLETE — marking goal DONE (no block)",
-                );
-            }
-            NoProgressResolution::Drop { reason } => {
-                state.active_goals.active.retain(|g| g.id != goal_id);
-                state.active_goals.backlog.retain(|b| b.id != goal_id);
-                tracker.reset_count(goal_id);
-                report.dropped.push(goal_id.to_string());
-                tracing::warn!(
-                    target: "simard::ooda",
-                    goal = %goal_id,
-                    reason = %reason,
-                    "no-progress breaker: OBSOLETE — DROPPING from the board (no block)",
-                );
-            }
-            NoProgressResolution::Heal { why } => {
-                let goal = match state.active_goals.active.iter().find(|g| g.id == goal_id) {
-                    Some(g) => g.clone(),
-                    None => {
-                        tracker.reset_count(goal_id);
-                        continue;
-                    }
-                };
-                match healer.heal(&goal, &why) {
-                    Ok(()) => {
-                        // Precondition established; give a genuine fresh window.
-                        tracker.reset_count(goal_id);
-                        report.healed.push(goal_id.to_string());
-                        tracing::warn!(
-                            target: "simard::ooda",
-                            goal = %goal_id,
-                            "no-progress breaker: MISSING-PRECONDITION healed — retrying (no block)",
-                        );
-                    }
-                    Err(err) => {
-                        // A failed heal must not loop forever: escalate WITH the
-                        // clone error attached as evidence (fail closed, with WHY).
-                        let mut why_err = why;
-                        why_err
-                            .evidence
-                            .push(Evidence::new("clone-error", goal_id, err.clone()));
-                        let blocked_reason =
-                            no_progress_blocked_reason_with_why(consecutive, &why_err);
-                        if let Some(g) = state
+            };
+            match healer.heal(&goal, &why) {
+                Ok(()) => {
+                    // Precondition established; give a genuine fresh window.
+                    tracker.reset_count(goal_id);
+                    if unblock_nonterminal
+                        && let Some(g) = state
                             .active_goals
                             .active
                             .iter_mut()
                             .find(|g| g.id == goal_id)
-                        {
-                            g.status = GoalProgress::Blocked(blocked_reason.clone());
-                        }
-                        filer.file_issue(
-                            &format!(
-                                "OODA no-progress breaker: precondition heal failed for '{goal_id}'"
-                            ),
-                            &format!(
-                                "Healing the MISSING-PRECONDITION for goal `{goal_id}` failed: \
-                                 {err}\n\nThe goal has been Blocked with the WHY attached."
-                            ),
-                        );
-                        tracker.reset_count(goal_id);
-                        report.escalated.push(goal_id.to_string());
-                        tracing::error!(
-                            target: "simard::ooda",
-                            goal = %goal_id,
-                            error = %err,
-                            "no-progress breaker: precondition heal FAILED — escalating WITH why",
-                        );
+                    {
+                        g.status = GoalProgress::NotStarted;
                     }
-                }
-            }
-            NoProgressResolution::Defer {
-                blocking_ref,
-                evidence: _ev,
-            } => {
-                if let Some(g) = state
-                    .active_goals
-                    .active
-                    .iter_mut()
-                    .find(|g| g.id == goal_id)
-                {
-                    g.status = GoalProgress::Paused;
-                    // Record the specific blocking upstream as the WHY so the
-                    // auto-clear pass can resume the goal when it resolves.
-                    if !g.wip_refs.iter().any(is_breaker_defer_ref) {
-                        g.wip_refs.push(WipRef {
-                            kind: DEPENDENCY_WIP_KIND.to_string(),
-                            ref_id: blocking_ref.clone(),
-                            label: format!("{NO_PROGRESS_DEFER_LABEL_PREFIX}{blocking_ref}"),
-                            url: None,
-                        });
-                    }
-                }
-                tracker.reset_count(goal_id);
-                report.deferred.push(goal_id.to_string());
-                tracing::warn!(
-                    target: "simard::ooda",
-                    goal = %goal_id,
-                    blocking_ref = %blocking_ref,
-                    "no-progress breaker: UPSTREAM-DEPENDENCY — deferring (Paused), \
-                     will auto-clear (no block)",
-                );
-            }
-            NoProgressResolution::SpawnEngineer { task, why } => {
-                let spawned = dispatcher.spawn_engineer(goal_id, &task);
-                // Bound the guided retry to one regardless of accept/reject: a
-                // rejected spawn escalates (WITH why) on the next threshold rather
-                // than spawning forever.
-                tracker.mark_guided_retry(goal_id);
-                tracker.reset_count(goal_id);
-                if spawned {
-                    report.engineer_spawned.push(goal_id.to_string());
+                    report.healed.push(goal_id.to_string());
                     tracing::warn!(
                         target: "simard::ooda",
                         goal = %goal_id,
-                        why = %why.class.token(),
-                        "no-progress breaker: {} — spawned ONE guided engineer (no block yet)",
-                        why.class.token(),
+                        "no-progress breaker: MISSING-PRECONDITION healed — retrying (no block)",
                     );
-                } else {
+                }
+                Err(err) => {
+                    // A failed heal must not loop forever: escalate WITH the
+                    // clone error attached as evidence (fail closed, with WHY).
+                    let mut why_err = why;
+                    why_err
+                        .evidence
+                        .push(Evidence::new("clone-error", goal_id, err.clone()));
+                    let blocked_reason = no_progress_blocked_reason_with_why(consecutive, &why_err);
+                    if let Some(g) = state
+                        .active_goals
+                        .active
+                        .iter_mut()
+                        .find(|g| g.id == goal_id)
+                    {
+                        g.status = GoalProgress::Blocked(blocked_reason.clone());
+                    }
+                    filer.file_issue(
+                        &format!(
+                            "OODA no-progress breaker: precondition heal failed for '{goal_id}'"
+                        ),
+                        &format!(
+                            "Healing the MISSING-PRECONDITION for goal `{goal_id}` failed: \
+                             {err}\n\nThe goal has been Blocked with the WHY attached."
+                        ),
+                    );
+                    tracker.reset_count(goal_id);
+                    report.escalated.push(goal_id.to_string());
                     tracing::error!(
                         target: "simard::ooda",
                         goal = %goal_id,
-                        "no-progress breaker: guided engineer spawn was rejected — \
-                         will escalate WITH why on next stall",
+                        error = %err,
+                        "no-progress breaker: precondition heal FAILED — escalating WITH why",
                     );
                 }
             }
-            NoProgressResolution::Escalate {
-                blocked_reason,
-                issue_title,
-                issue_body,
-            } => {
-                if let Some(g) = state
+        }
+        NoProgressResolution::Defer {
+            blocking_ref,
+            evidence: _ev,
+        } => {
+            if let Some(g) = state
+                .active_goals
+                .active
+                .iter_mut()
+                .find(|g| g.id == goal_id)
+            {
+                g.status = GoalProgress::Paused;
+                // Record the specific blocking upstream as the WHY so the
+                // auto-clear pass can resume the goal when it resolves.
+                if !g.wip_refs.iter().any(is_breaker_defer_ref) {
+                    g.wip_refs.push(WipRef {
+                        kind: DEPENDENCY_WIP_KIND.to_string(),
+                        ref_id: blocking_ref.clone(),
+                        label: format!("{NO_PROGRESS_DEFER_LABEL_PREFIX}{blocking_ref}"),
+                        url: None,
+                    });
+                }
+            }
+            tracker.reset_count(goal_id);
+            report.deferred.push(goal_id.to_string());
+            tracing::warn!(
+                target: "simard::ooda",
+                goal = %goal_id,
+                blocking_ref = %blocking_ref,
+                "no-progress breaker: UPSTREAM-DEPENDENCY — deferring (Paused), \
+                 will auto-clear (no block)",
+            );
+        }
+        NoProgressResolution::SpawnEngineer { task, why } => {
+            let spawned = dispatcher.spawn_engineer(goal_id, &task);
+            // Bound the guided retry to one regardless of accept/reject: a
+            // rejected spawn escalates (WITH why) on the next threshold rather
+            // than spawning forever.
+            tracker.mark_guided_retry(goal_id);
+            tracker.reset_count(goal_id);
+            // Re-investigation path: the goal was BARE-blocked — un-block it so the
+            // brain can re-select it and the spawned fixer can advance it.
+            if unblock_nonterminal
+                && let Some(g) = state
                     .active_goals
                     .active
                     .iter_mut()
                     .find(|g| g.id == goal_id)
-                {
-                    g.status = GoalProgress::Blocked(blocked_reason);
-                }
-                filer.file_issue(&issue_title, &issue_body);
-                tracker.reset_count(goal_id);
-                report.escalated.push(goal_id.to_string());
+            {
+                g.status = GoalProgress::NotStarted;
+            }
+            if spawned {
+                report.engineer_spawned.push(goal_id.to_string());
                 tracing::warn!(
                     target: "simard::ooda",
                     goal = %goal_id,
-                    "no-progress breaker: stuck after guided retry — BLOCKED WITH why + issue filed",
+                    why = %why.class.token(),
+                    "no-progress breaker: {} — spawned ONE guided engineer (no block yet)",
+                    why.class.token(),
+                );
+            } else {
+                tracing::error!(
+                    target: "simard::ooda",
+                    goal = %goal_id,
+                    "no-progress breaker: guided engineer spawn was rejected — \
+                     will escalate WITH why on next stall",
                 );
             }
         }
+        NoProgressResolution::Escalate {
+            blocked_reason,
+            issue_title,
+            issue_body,
+        } => {
+            if let Some(g) = state
+                .active_goals
+                .active
+                .iter_mut()
+                .find(|g| g.id == goal_id)
+            {
+                g.status = GoalProgress::Blocked(blocked_reason);
+            }
+            filer.file_issue(&issue_title, &issue_body);
+            tracker.reset_count(goal_id);
+            report.escalated.push(goal_id.to_string());
+            tracing::warn!(
+                target: "simard::ooda",
+                goal = %goal_id,
+                "no-progress breaker: stuck after guided retry — BLOCKED WITH why + issue filed",
+            );
+        }
+    }
+}
+
+// ===========================================================================
+// Already-blocked re-investigation pass (issue #17)
+// ===========================================================================
+
+/// Re-investigate goals already parked in a **bare** `[OODA-SAFEGUARD] … needs
+/// human review` block and drive each away from bare (issue #17).
+///
+/// The on-transition breaker ([`apply_no_progress_breaker_investigated`])
+/// investigates WHY a goal is stuck **only at the cycle it crosses the
+/// threshold**. That leaves goals parked bare by a pre-#16 daemon build — or on a
+/// cycle the reasoner erred — stranded forever with an unexplained "needs human
+/// review" marker, never re-examined. This population-driven pass closes that
+/// gap: every cycle it scans the ACTIVE board (independent of this cycle's
+/// `outcomes`, mirroring the auto-clear scan) for goals in a **bare** blocked
+/// state ([`is_bare_no_progress_block`]) and runs the SAME injected WHY reasoner +
+/// [`resolution_for_why`] ladder over them via the shared
+/// [`apply_resolution_side_effects`], so no goal is ever left bare — each is
+/// upgraded to a concrete WHY and, when the WHY is actionable, completed /
+/// dropped / healed / deferred / handed to a spawned fixer.
+///
+/// Invariants:
+/// * **Perpetual exemption** (I5): standing/perpetual goals are excluded before
+///   investigation, mirroring the on-transition path.
+/// * **Fail closed** (I2): a reasoner error takes NO terminal action, leaves the
+///   bare marker exactly as-is (retried next cycle), and records nothing in the
+///   dedupe set.
+/// * **Un-block on non-terminal resolution**: a re-investigated goal handed to a
+///   fixer or healed is set [`GoalProgress::NotStarted`] so the brain can
+///   re-select it (`unblock_nonterminal = true`).
+/// * **Idempotency** (I3/I4): the WHY-rewrite removes the goal from the bare
+///   population next cycle (primary), and the persisted `(goal, class)` dedupe set
+///   in [`NoProgressTracker`] prevents a duplicate terminal action if a restart
+///   re-parks the goal bare (belt-and-suspenders) — at most ONE fixer per
+///   `(goal, class)`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn reinvestigate_bare_blocked_goals(
+    state: &mut OodaState,
+    _evidence: &dyn EvidenceSource,
+    reasoner: &dyn NoProgressWhyReasoner,
+    healer: &dyn PreconditionHealer,
+    dispatcher: &dyn NoProgressEngineerDispatcher,
+    filer: &dyn NoProgressIssueFiler,
+    threshold: u32,
+) -> NoProgressBreakerReport {
+    let mut report = NoProgressBreakerReport::default();
+
+    // Detach the tracker so the board can be borrowed while the tracker mutates.
+    let mut tracker = std::mem::take(&mut state.no_progress_tracker);
+
+    // The bare-blocked, non-perpetual population, captured up front. The
+    // perpetual exemption (I5) runs BEFORE investigation, so a standing goal's
+    // reasoner is never consulted. Collecting ids first keeps the board free to
+    // mutate as each goal is resolved.
+    let bare_ids: Vec<String> = state
+        .active_goals
+        .active
+        .iter()
+        .filter(|g| !g.is_perpetual())
+        .filter_map(|g| match &g.status {
+            GoalProgress::Blocked(reason) if is_bare_no_progress_block(reason) => {
+                Some(g.id.clone())
+            }
+            _ => None,
+        })
+        .collect();
+
+    for goal_id in bare_ids {
+        // Investigate the bare goal ONCE. Fail closed on error: no terminal
+        // action, marker left exactly as-is, nothing recorded in the dedupe set.
+        let why = {
+            let Some(goal) = state.active_goals.active.iter().find(|g| g.id == goal_id) else {
+                continue;
+            };
+            match reasoner.investigate(goal) {
+                Ok(why) => why,
+                Err(e) => {
+                    report.investigation_errors.push(goal_id.clone());
+                    tracing::error!(
+                        target: "simard::ooda",
+                        goal = %goal_id,
+                        error = %e,
+                        "no-progress re-investigation: root-cause investigation errored — \
+                         leaving the bare block untouched (fail closed), will retry next cycle",
+                    );
+                    continue;
+                }
+            }
+        };
+
+        let class = why.class;
+        report.reinvestigated.push(goal_id.clone());
+
+        // Belt-and-suspenders dedupe (I3): a terminal action was already taken for
+        // this (goal, class) — possibly before a restart that re-parked the goal
+        // bare. Do NOT repeat the side effect (e.g. spawn a second fixer), but
+        // never leave the goal bare: rewrite it to the WHY-bearing block so the
+        // rail excludes it next cycle.
+        if tracker.reinvestigated(&goal_id, class) {
+            let blocked_reason = no_progress_blocked_reason_with_why(threshold, &why);
+            if let Some(g) = state
+                .active_goals
+                .active
+                .iter_mut()
+                .find(|g| g.id == goal_id)
+            {
+                g.status = GoalProgress::Blocked(blocked_reason);
+            }
+            tracing::info!(
+                target: "simard::ooda",
+                goal = %goal_id,
+                why = %class.token(),
+                "no-progress re-investigation: (goal, class) already resolved — \
+                 rewriting to the WHY-bearing block, taking NO new terminal action (dedupe)",
+            );
+            continue;
+        }
+
+        let guided_retry_used = tracker.guided_retry_used(&goal_id);
+        let resolution = resolution_for_why(threshold, why, guided_retry_used);
+
+        // Re-investigation path: the goal starts BARE-blocked, so a non-terminal
+        // `Heal` / `SpawnEngineer` rung must UN-BLOCK it to NotStarted.
+        apply_resolution_side_effects(
+            state,
+            &goal_id,
+            threshold,
+            resolution,
+            healer,
+            dispatcher,
+            filer,
+            &mut tracker,
+            &mut report,
+            true,
+        );
+
+        // A terminal action was taken for this (goal, class); record it so a
+        // re-park after a restart cannot trigger a second one. Only recorded on a
+        // successful classification (never on a fail-closed error above).
+        tracker.mark_reinvestigated(&goal_id, class);
     }
 
     // Prune counters/flags for goals no longer on the active board.

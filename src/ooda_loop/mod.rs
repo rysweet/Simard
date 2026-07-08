@@ -43,6 +43,13 @@ mod tests_no_progress;
 #[cfg(test)]
 mod tests_no_progress_investigation;
 
+// Issue #17 (TDD): integration tests for the already-blocked re-investigation
+// pass — each cycle scans the board for goals parked in a BARE `[OODA-SAFEGUARD]
+// … needs human review` block and re-runs the WHY reasoner + resolution ladder
+// over them, so no goal is ever stranded with a bare, unexplained block.
+#[cfg(test)]
+mod tests_no_progress_reinvestigation;
+
 // Issue #2329: Observe-vs-Decide phase weights yield different ranked-recall
 // ordering of the same fact set, exercised against the real lbug-backed
 // `LibraryCognitiveMemory` adapter.

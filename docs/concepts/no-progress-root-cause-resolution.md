@@ -33,6 +33,12 @@ related:
 > `SIMARD_NO_PROGRESS_INVESTIGATE=off` to fall back to the base verify-once
 > ladder. For the exact types and functions see the
 > [root-cause resolution API reference](../reference/no-progress-root-cause-resolution-api.md).
+>
+> **Extended (issue #17):** the same investigation now also runs each cycle over
+> goals **already** parked in a bare block — not only at the transition cycle — so
+> a goal parked bare by a pre-#16 build (or left bare by a reasoner error) is
+> re-investigated and upgraded away from bare instead of stranding forever. See
+> [Re-investigating already-blocked goals](#re-investigating-already-blocked-goals-issue-17).
 
 ## The defect this fixes
 
@@ -142,6 +148,50 @@ a goal has already burned its one guided retry and stalled again. Even then the
 **appends** the classified WHY token plus the evidence links. A human sees the
 concrete cause and the artifacts, never a bare "needs human review". See the
 [block-reason contract](../reference/no-progress-root-cause-resolution-api.md#block-reason-contract).
+
+## Re-investigating already-blocked goals (issue #17)
+
+The ladder above investigates a stall **only at the cycle the goal crosses the
+threshold** — the block *transition*. That leaves a gap: a goal parked in the
+**bare** sentinel by a daemon build that predates the root-cause investigation
+(issue #16), or one left bare because the reasoner erred on the transition cycle,
+sits `Blocked` with the unexplained "needs human review" reason forever and is
+never re-examined. The live deploy-#41 incident surfaced exactly this — several
+`kgpacks-rs` goals stranded with the bare marker while newer goals got a proper
+WHY.
+
+`reinvestigate_bare_blocked_goals` (in `src/ooda_loop/no_progress.rs`) closes the
+gap. Each cycle, **after** the on-transition breaker and independent of this
+cycle's action outcomes (mirroring the auto-clear scan), it:
+
+1. selects the **bare-blocked, non-perpetual** population via the thin
+   deterministic rail
+   [`is_bare_no_progress_block`](../reference/no-progress-breaker-api.md) — a
+   reason that carries the `🔒 [OODA-SAFEGUARD]` marker but **no**
+   `NoProgressClass` WHY token;
+2. runs the **same** injected reasoner and the **same**
+   [`resolution_for_why`](../reference/no-progress-root-cause-resolution-api.md#extended-noprogressresolution)
+   ladder over each — through the shared `apply_resolution_side_effects` driver,
+   so the transition and re-investigation populations can never diverge;
+3. **un-blocks** a goal handed to a fixer or healed back to `NotStarted` (an
+   already-`Blocked` goal the brain would never re-select would otherwise strand
+   its own fix), and rewrites every other outcome to its terminal non-bare status
+   (`Completed` / dropped / `Paused` / `Blocked`-WITH-why).
+
+The result: **no goal ever remains a bare "needs human review"** — each is
+re-classified to a concrete WHY and, when the WHY is actionable, completed,
+deferred behind its named upstream, healed, or handed to a spawned fixer.
+
+**Idempotency is two-layered.** The WHY-rewrite is the *primary* guarantee: once
+a goal's reason carries a class token it is no longer bare, so the rail excludes
+it next cycle. A persisted `(goal, class)` dedupe set on the tracker
+(`NoProgressTracker::reinvestigated`, serialized as the stable class **token**
+string alongside the no-action counter) is the *belt-and-suspenders* guard: if a
+crash/restart re-parks a goal bare after a fixer was already spawned, the dedupe
+set short-circuits the terminal action so **at most one fixer is spawned per
+`(goal, class)`** across restarts. Re-investigation is **fail-closed**: a reasoner
+error leaves the bare marker exactly as-is, records nothing in the dedupe set,
+and retries next cycle.
 
 ## Classification is deterministic-first, agentic-enriched
 

@@ -59,9 +59,9 @@ pub use completion_gate::{
 
 pub use no_progress_breaker::{
     NO_PROGRESS_BLOCKED_PREFIX, NO_PROGRESS_BLOCKED_SUFFIX, NO_PROGRESS_BREAKER_THRESHOLD,
-    NoProgressResolution, NoProgressTracker, StuckGoalDisposition, is_no_progress_marker,
-    no_progress_blocked_reason, no_progress_blocked_reason_with_why, obsolescence_reason,
-    resolution_for_why, resolve_no_progress, verify_stuck_goal,
+    NoProgressResolution, NoProgressTracker, StuckGoalDisposition, is_bare_no_progress_block,
+    is_no_progress_marker, no_progress_blocked_reason, no_progress_blocked_reason_with_why,
+    obsolescence_reason, resolution_for_why, resolve_no_progress, verify_stuck_goal,
 };
 
 pub use no_progress_why::{Evidence, NoProgressClass, NoProgressWhy, NoProgressWhyReasoner};
@@ -88,6 +88,11 @@ mod tests_no_progress_breaker;
 // WHY-aware block-reason renderer, and the class -> resolution map).
 #[cfg(test)]
 mod tests_no_progress_why;
+// Issue #17 (TDD): pure primitives of the already-blocked re-investigation pass
+// — the `is_bare_no_progress_block` deterministic rail and the
+// `NoProgressTracker` persisted `reinvestigated` dedupe set (lifecycle + serde).
+#[cfg(test)]
+mod tests_no_progress_reinvestigation;
 #[cfg(test)]
 mod tests_operations;
 #[cfg(test)]
