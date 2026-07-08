@@ -875,6 +875,7 @@ mod tests {
 
     // --- env gate ---
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn env_gate_only_enforces_when_enabled() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

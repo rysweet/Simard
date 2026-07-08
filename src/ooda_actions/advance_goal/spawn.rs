@@ -1021,8 +1021,9 @@ mod tests {
     }
 
     // ── observe_only_dispatch_refusal (issue #1, Crocutus) ──────────────────
-    // Serialize env mutation: cargo runs unit tests in parallel.
-    static OBSERVE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // These tests mutate the process-global OBSERVE_ONLY_ENV var; they carry the
+    // `cognitive_memory` serial key so env mutation is never concurrent with an
+    // env read (enforced by test_support::serial_guard).
 
     fn advance_action(goal_id: &str) -> PlannedAction {
         PlannedAction {
@@ -1032,9 +1033,9 @@ mod tests {
         }
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn observe_only_refuses_engineer_dispatch_when_enabled() {
-        let _g = OBSERVE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var(crate::read_only_guard::OBSERVE_ONLY_ENV, "1");
         }
@@ -1058,9 +1059,9 @@ mod tests {
         );
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn engineer_identity_dispatches_normally_when_env_unset() {
-        let _g = OBSERVE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::remove_var(crate::read_only_guard::OBSERVE_ONLY_ENV);
         }
