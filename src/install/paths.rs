@@ -144,7 +144,10 @@ pub fn validate_install_path(label: &str, path: &Path) -> InstallResult<()> {
         ));
     }
     let value = os_str_to_unit_path(label, path.as_os_str())?;
-    if let Some(ch) = value.chars().find(|ch| matches!(ch, '\n' | '\r' | '%')) {
+    if let Some(ch) = value
+        .chars()
+        .find(|ch| matches!(ch, '\n' | '\r' | '%') || ch.is_ascii_whitespace())
+    {
         return err(format!(
             "{label} contains unsafe character '{ch}' for systemd unit rendering: {}",
             path.display()

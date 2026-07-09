@@ -467,6 +467,36 @@ fn invalid_simard_home_fails_closed_before_any_systemctl_call() {
 
 #[cfg(unix)]
 #[test]
+fn simard_home_with_spaces_fails_before_any_mutation_or_systemctl_call() {
+    let temp = TempDir::new().expect("tempdir");
+    let simard_home = temp.path().join("simard home");
+    let unit_dir = temp.path().join("systemd-user");
+    let (systemctl, systemctl_log) = fake_systemctl(temp.path());
+
+    let assert = simard()
+        .args(["install", "--simard-home"])
+        .arg(&simard_home)
+        .args(["--systemd-user-dir"])
+        .arg(&unit_dir)
+        .arg("--systemctl")
+        .arg(&systemctl)
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("SIMARD_HOME") && stderr.contains("unsafe character"),
+        "whitespace in SIMARD_HOME should fail with a precise validation error; stderr:\n{stderr}"
+    );
+    assert!(
+        !simard_home.exists(),
+        "invalid SIMARD_HOME must fail before creating install directories"
+    );
+    assert_no_systemctl_invocation(&systemctl_log);
+}
+
+#[cfg(unix)]
+#[test]
 fn unsafe_systemd_path_characters_fail_closed_before_any_live_swap() {
     let temp = TempDir::new().expect("tempdir");
     let simard_home = temp.path().join("bad%nhome");

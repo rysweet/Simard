@@ -89,7 +89,7 @@ pub fn stage_prompt_assets(source: &Path, staged: &Path) -> InstallResult<()> {
 pub fn replace_live_prompt_assets(staged: &Path, layout: &InstallLayout) -> InstallResult<()> {
     validate_live_prompt_target(&layout.prompt_assets_dir)?;
 
-    if layout.prompt_assets_dir.exists() {
+    let backup = if layout.prompt_assets_dir.exists() {
         let backup = backup_path(layout, "prompt_assets");
         fs::rename(&layout.prompt_assets_dir, &backup).map_err(|error| {
             InstallError::new(format!(
@@ -98,15 +98,37 @@ pub fn replace_live_prompt_assets(staged: &Path, layout: &InstallLayout) -> Inst
                 backup.display()
             ))
         })?;
-    }
+        Some(backup)
+    } else {
+        None
+    };
 
-    fs::rename(staged, &layout.prompt_assets_dir).map_err(|error| {
-        InstallError::new(format!(
+    if let Err(error) = fs::rename(staged, &layout.prompt_assets_dir) {
+        if let Some(backup) = backup {
+            let restore = fs::rename(&backup, &layout.prompt_assets_dir);
+            return match restore {
+                Ok(()) => Err(InstallError::new(format!(
+                    "failed atomic prompt_assets replacement from {} to {}; restored previous prompt_assets from {}: {error}",
+                    staged.display(),
+                    layout.prompt_assets_dir.display(),
+                    backup.display()
+                ))),
+                Err(restore_error) => Err(InstallError::new(format!(
+                    "failed atomic prompt_assets replacement from {} to {}: {error}; additionally failed to restore previous prompt_assets from {}: {restore_error}",
+                    staged.display(),
+                    layout.prompt_assets_dir.display(),
+                    backup.display()
+                ))),
+            };
+        }
+        return Err(InstallError::new(format!(
             "failed atomic prompt_assets replacement from {} to {}: {error}",
             staged.display(),
             layout.prompt_assets_dir.display()
-        ))
-    })
+        )));
+    }
+
+    Ok(())
 }
 
 fn has_required_assets(root: &Path) -> bool {
@@ -187,4 +209,57 @@ fn validate_asset_path(path: &Path, root: &Path) -> InstallResult<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::install::paths::InstallLayout;
+
+    fn layout(root: &Path) -> InstallLayout {
+        InstallLayout {
+            simard_home: root.to_path_buf(),
+            bin_dir: root.join("bin"),
+            binary_path: root.join("bin/simard"),
+            prompt_assets_dir: root.join("prompt_assets"),
+            staging_root: root.join(".install-staging"),
+            backup_root: root.join(".install-backups"),
+            systemd_user_dir: root.join("systemd"),
+            ooda_unit_path: root.join("systemd/simard-ooda.service"),
+            signal_unit_path: root.join("systemd/simard-signal.service"),
+            transaction_id: "test-tx".to_string(),
+        }
+    }
+
+    #[test]
+    fn prompt_assets_restore_previous_tree_when_staged_rename_fails() {
+        let root =
+            std::env::temp_dir().join(format!("simard-prompt-rollback-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let layout = layout(&root);
+        fs::create_dir_all(layout.prompt_assets_dir.join("simard/recipes")).unwrap();
+        fs::create_dir_all(&layout.backup_root).unwrap();
+        fs::write(
+            layout.prompt_assets_dir.join("simard/ooda_orient.md"),
+            "previous prompt",
+        )
+        .unwrap();
+
+        let missing_staged = root.join(".install-staging/missing/prompt_assets");
+        let error =
+            replace_live_prompt_assets(&missing_staged, &layout).expect_err("missing staged tree");
+
+        assert!(
+            error
+                .to_string()
+                .contains("restored previous prompt_assets"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read_to_string(layout.prompt_assets_dir.join("simard/ooda_orient.md")).unwrap(),
+            "previous prompt"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }
