@@ -26,7 +26,7 @@ use crate::agent_roles::AgentRole;
 use crate::agent_supervisor::{SubordinateConfig, spawn_subordinate};
 use crate::cmd_cleanup::handle_cleanup;
 use crate::cmd_ensure_deps::handle_ensure_deps;
-use crate::cmd_install::handle_install;
+use crate::cmd_install::{INSTALL_HELP, handle_install};
 use crate::cmd_self_update::{handle_self_test, handle_self_update};
 use crate::operator_commands::run_bootstrap_probe;
 use crate::self_relaunch::{
@@ -214,14 +214,6 @@ Usage: simard cleanup
 Remove stale state files and temporary artifacts.
 ";
 
-const INSTALL_HELP: &str = "\
-Simard install subcommand
-
-Usage: simard install
-
-Install or reinstall the Simard binary to the standard path.
-";
-
 pub fn dispatch_operator_cli<I>(args: I) -> Result<(), Box<dyn std::error::Error>>
 where
     I: IntoIterator<Item = String>,
@@ -364,8 +356,7 @@ where
                 print!("{help}");
                 return Ok(());
             }
-            reject_extra_args(args)?;
-            handle_install()
+            handle_install(args)
         }
         other => Err(format!("unsupported command '{other}'").into()),
     }

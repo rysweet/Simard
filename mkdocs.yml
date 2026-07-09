@@ -248,6 +248,7 @@ nav:
     - Configure Creative-Ideas Semantic Dedup: howto/configure-creative-ideas-semantic-dedup.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
+    - Simard Installer: reference/simard-installer.md
     - Telemetry Metrics: reference/telemetry-metrics.md
     - Recall-Precision Hybrid Measurement: reference/recall-precision-hybrid-api.md
     - Enrichment Observability API: reference/enrichment-observability-api.md

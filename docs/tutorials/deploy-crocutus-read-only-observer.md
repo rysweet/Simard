@@ -180,14 +180,19 @@ write token (it is a Simard-owned variable, not the `az`-native
 ## Step 4 — Build and install Crocutus's own binary copy
 
 Crocutus depends on Simard; it does not vendor Simard's source. Build the
-downstream crate (which pulls Simard as a git dependency) and install into the
-Crocutus instance root:
+downstream crate (which pulls Simard as a git dependency). Do not use the
+primary-host installer for this side-by-side identity yet:
 
 ```bash
 cd ~/crocutus && cargo build --release --quiet
 SIMARD_HOME=$HOME/.crocutus SIMARD_INSTANCE=crocutus \
-  ./target/release/simard install     # → ~/.crocutus/bin/simard
+  ./target/release/simard install     # writes the fixed primary Simard unit names
 ```
+
+The generic installer must grow instance-aware unit names or a `--no-activate`
+rail before it can safely deploy side-by-side identities. Until then, use the
+concrete Crocutus repo procedure for the runnable binary placement and systemd
+unit.
 
 ## Step 5 — Verify isolation and posture BEFORE starting
 

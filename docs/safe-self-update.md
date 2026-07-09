@@ -13,6 +13,11 @@ and react. It is *not* fine for an autonomous OODA daemon: a bad upgrade
 that fails to start, or starts but immediately stops making progress,
 leaves the operator with a host whose Simard daemon is silently broken.
 
+`simard install` provides the host-level staging, prompt-asset, systemd
+activation, and rollback transaction. Until `simard update` delegates into that
+installer transaction, this page describes the existing safe wrapper around the
+legacy self-update rail.
+
 `simard safe-update` adds the missing safety rails:
 
 1. **Drain** in-flight engineer dispatches before swapping.

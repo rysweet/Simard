@@ -120,8 +120,9 @@ jobs:
             echo "::error::Release build did not produce expected binaries: ${missing[*]}" >&2
             exit 1
           fi
-          # Tar exactly the built binaries that exist for this platform.
-          tar czf simard-linux-x86_64.tar.gz "${BIN_TARGETS[@]}"
+          # Tar exactly the built binaries that exist for this platform plus
+          # prompt assets required by the canonical installer.
+          tar czf simard-linux-x86_64.tar.gz "${BIN_TARGETS[@]}" -C ../.. prompt_assets
           sha256sum simard-linux-x86_64.tar.gz > simard-linux-x86_64.tar.gz.sha256
 
       # ---- SBOM (CycloneDX) — issue #2261 -------------------------------------
