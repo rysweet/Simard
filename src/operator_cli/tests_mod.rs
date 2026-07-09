@@ -57,7 +57,7 @@ fn test_install_rejects_extra_args() {
         result
             .unwrap_err()
             .to_string()
-            .contains("unexpected trailing arguments")
+            .contains("unexpected argument")
     );
 }
 

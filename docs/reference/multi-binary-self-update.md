@@ -1,7 +1,7 @@
 ---
 title: Multi-binary self-update reference
 description: Reference for the multi-binary self-update path that replaces every Simard executable (simard plus simard-tui, simard-gym, and the rest of the auxiliary binary set) on `simard update`, the dynamic binary discovery, the InstallReport main-fatal/aux-best-effort contract, the SHA-256 checksum gate, the zip-slip and https-only transport hardening, and the matching release-packaging producer contract.
-last_updated: 2026-06-28
+last_updated: 2026-07-09
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -32,6 +32,11 @@ related:
 > lives in
 > [`.github/workflows/release.yml`](https://github.com/rysweet/Simard/blob/main/.github/workflows/release.yml).
 > Closes [#2252](https://github.com/rysweet/Simard/issues/2252).
+>
+> `simard install` gives host deployments a safer staging, rollback,
+> prompt-asset, and systemd activation transaction. Until `simard update` is
+> wired into that installer transaction, this page describes the existing legacy
+> self-update rail.
 
 This reference specifies the behaviour, public API, configuration, security
 model, and the producer/consumer contract for the multi-binary self-update

@@ -1,7 +1,7 @@
 ---
 title: Simard CLI reference
-description: Reference for the shipped `simard` command tree, the shared-state-root client between terminal sessions and the repo-grounded engineer loop, the `engineer read` audit companion, the shipped bounded `engineer copilot-submit` contract, and the legacy compatibility binaries that still expose selected older runtime behaviors.
-last_updated: 2026-04-03
+description: Reference for the shipped `simard` command tree, the installer-based deployment path, the shared-state-root client between terminal sessions and the repo-grounded engineer loop, the `engineer read` audit companion, the shipped bounded `engineer copilot-submit` contract, and the legacy compatibility binaries that still expose selected older runtime behaviors.
+last_updated: 2026-07-09
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -74,7 +74,7 @@ simard
 |- disk-reclaim [--apply] [--report-json] [--target-pct=N]
 |  `- exec --candidates <json|@file|@-> [--apply] [--report-json]
 |- update
-`- install
+`- install [--simard-home PATH] [--dry-run] [--systemd-user-dir PATH] [--systemctl PATH]  # planned
 ```
 
 Bare `simard` prints this operator surface directly.
@@ -415,11 +415,36 @@ metric catalog behind it.
 
 ### `simard update`
 
-Self-update the binary to the latest GitHub release. Downloads the release asset matching the current platform and replaces the running binary.
+Self-update the binary to the latest GitHub release. Today this downloads the
+release asset matching the current platform and replaces the running binary.
+The planned installer integration is for `simard update` to hand the verified
+release binary and matching prompt assets to the same staging, backup, and
+systemd activation flow as `simard install`.
 
 ### `simard install`
 
-Install the Simard binary to `~/.simard/bin`. Used by the npx wrapper (`npx github:rysweet/Simard install`) to persist the binary for direct CLI use.
+Canonical host deployment rail. This command installs the currently executing
+Simard binary to `$SIMARD_HOME/bin/simard`, installs matching prompt assets to
+`$SIMARD_HOME/prompt_assets`, writes the user systemd units
+`simard-ooda.service` and `simard-signal.service`, preserves the previous live
+binary under `$SIMARD_HOME/.install-backups/`, and restarts both services via
+`systemctl --user`.
+
+```text
+simard install [--simard-home PATH] [--dry-run] [--systemd-user-dir PATH] [--systemctl PATH]
+```
+
+`SIMARD_HOME` defaults to `~/.simard`; `--simard-home` overrides it for this
+install. The generated unit `WorkingDirectory` is the resolved
+`SIMARD_HOME`, never a source checkout, `target/`, or `worktrees/main`. The live
+binary is replaced by staging then atomic rename, not by copying over a running
+file.
+
+Use `--dry-run` to validate and print the plan without mutating live files or
+invoking systemd. Use `--systemd-user-dir` and `--systemctl` only for isolated
+hosts and hermetic tests.
+
+Contract: [Simard installer reference](./simard-installer.md).
 
 ### `simard self-health [--json] [--pre-deploy-facts=N]`
 

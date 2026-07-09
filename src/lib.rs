@@ -99,6 +99,7 @@ pub mod identity_auth;
 pub mod identity_composition;
 pub mod identity_precedence;
 pub mod improvements;
+pub mod install;
 pub mod journal;
 pub mod knowledge_client;
 pub mod knowledge_context;
