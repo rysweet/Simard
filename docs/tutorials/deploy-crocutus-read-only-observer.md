@@ -7,6 +7,7 @@ doc_type: tutorial
 related:
   - ../concepts/multi-identity-host-isolation.md
   - ../concepts/write-authority-posture.md
+  - ../concepts/identity-scoped-cognition.md
   - ../reference/agent-instance-isolation.md
   - ../reference/write-authority-posture-api.md
   - ../howto/run-a-second-agent-identity.md
@@ -336,12 +337,17 @@ than the two small parameterizations
 [write-authority posture](../concepts/write-authority-posture.md)), that is an
 abstraction gap. Record it as a Simard issue and fix the abstraction upstream —
 do not fork. A correctly abstracted Simard makes a second identity *mostly
-configuration*, which is exactly what this tutorial demonstrates.
+configuration*, which is exactly what this tutorial demonstrates. The cognition
+half of that abstraction — seeding Crocutus's own hyenas-observation goals and
+running an [observe-only Act phase](../concepts/identity-scoped-cognition.md)
+instead of inheriting Simard's defaults and dispatching engineers — is
+[identity-scoped cognition](../concepts/identity-scoped-cognition.md).
 
 ## See also
 
 - [Multi-identity host isolation](../concepts/multi-identity-host-isolation.md)
 - [Write-authority posture](../concepts/write-authority-posture.md)
+- [Identity-scoped cognition](../concepts/identity-scoped-cognition.md) — seed goals, target scope, and the observe-only Act phase
 - [How to run a second agent identity](../howto/run-a-second-agent-identity.md)
 - [How to configure pluggable identities](../howto/configure-pluggable-identity.md)
 - [Write-authority posture API reference](../reference/write-authority-posture-api.md)

@@ -300,8 +300,8 @@ pub use handoff::{
     RuntimeHandoffStore,
 };
 pub use identity::{
-    BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, IdentityManifest, ManifestContract,
-    MemoryPolicy, OperatingMode,
+    BuiltinIdentityLoader, IdentityAuthority, IdentityLoadRequest, IdentityLoader,
+    IdentityManifest, ManifestContract, MemoryPolicy, OperatingMode, SeedGoal, WritePosture,
 };
 pub use identity_auth::{
     AuthIdentity, DualIdentityConfig, env_for_identity, identity_for_operation,

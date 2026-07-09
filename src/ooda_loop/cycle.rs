@@ -128,10 +128,32 @@ fn run_ooda_cycle_inner(
     // to avoid false-positive clearing in non-tmux environments.
     sweep_stale_assignments(&mut state.active_goals);
 
-    // Seed with default goals if the board is still empty.
-    let seeded = crate::goal_curation::seed_default_board(&mut state.active_goals);
-    if seeded > 0 {
-        eprintln!("[simard] OODA start: seeded {seeded} default goal(s)");
+    // Seed with the identity's seed goals (override) or the defaults if the
+    // board is still empty (#3125). When the resolved identity declares its own
+    // `seed_goals` they REPLACE Simard's baked-in DEFAULT_SEED_GOALS at this
+    // cold-start seeding site; with no identity (or a `full` identity that
+    // declares none) the five defaults seed exactly as before — Simard herself
+    // is unchanged. Goals carry the identity's target-repo slug, so they are
+    // scoped to its targets, never to rysweet/Simard.
+    let identity_seed_goals = &state.identity_cognition.seed_goals;
+    if !identity_seed_goals.is_empty() {
+        let goals = crate::goal_curation::resolve_seed_goals(identity_seed_goals);
+        let n = crate::goal_curation::seed_board_from_seed_goals(&mut state.active_goals, &goals);
+        if n > 0 {
+            let who = state
+                .identity_cognition
+                .identity_name
+                .as_deref()
+                .unwrap_or("identity");
+            eprintln!(
+                "[simard] OODA start: seeded {n} identity seed goal(s) ({who}) — overriding defaults"
+            );
+        }
+    } else {
+        let n = crate::goal_curation::seed_default_board(&mut state.active_goals);
+        if n > 0 {
+            eprintln!("[simard] OODA start: seeded {n} default goal(s)");
+        }
     }
 
     // Ingest meeting handoff decisions as new goals.
