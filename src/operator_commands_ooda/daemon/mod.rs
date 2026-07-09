@@ -825,6 +825,20 @@ pub fn run_ooda_daemon(
         ),
     );
 
+    // ── Cognitive-thread pass overlap guard (issue #5) ──────────────────
+    // The reflective threads invoke agentic recipes via `recipe-runner-rs`,
+    // which are minutes-long and BLOCKING (`Command::output`). Running the
+    // scheduler pass inline on this loop thread would delay the NEXT
+    // authoritative OODA cycle by the full recipe duration — the exact stall the
+    // Overseer and Journal threads deliberately avoid. So the cognitive pass
+    // runs on a background thread (below) AFTER the authoritative OODA cycle, and
+    // this guard drops a tick if the previous pass is still running. `Mind` is
+    // shared behind a mutex so the background pass can mutate its scheduler
+    // bookkeeping while the main loop only ever `try_lock`s it for a read-only,
+    // never-blocking health snapshot.
+    let mind = Arc::new(std::sync::Mutex::new(mind));
+    let cognitive_pass_running = Arc::new(AtomicBool::new(false));
+
     let mut cycles_run = 0u32;
 
     loop {
@@ -1424,34 +1438,81 @@ pub fn run_ooda_daemon(
 
         cycles_run += 1;
 
-        // ── Cognitive-thread scheduler tick (issue #2419) ───────────────
-        // Runs AFTER the authoritative OODA cycle so OODA is never starved.
-        // Background threads (maintenance, engineer-log analysis) run on their
-        // own cadence under the `Mind`'s priority/failure-isolation budget; a
-        // thread erroring or panicking is caught and backed off, never taking
-        // down the daemon or the OODA loop. No-op unless explicitly enabled.
+        // ── Cognitive-thread scheduler tick (issue #2419 / #5) ──────────
+        // Runs AFTER the authoritative OODA cycle so OODA is never starved, and
+        // on a BACKGROUND thread — never inline — because the reflective threads
+        // invoke minutes-long blocking agentic recipes; running them on this loop
+        // thread would delay the next OODA cycle by the full recipe duration. An
+        // overlap guard drops this tick if the previous cognitive pass is still
+        // running, so passes never stack. A thread erroring or panicking is
+        // caught and backed off inside `run_due`, never taking down the daemon or
+        // the OODA loop. No-op unless explicitly enabled.
         if let Some(ref rt) = cognitive_runtime {
-            let now_epoch = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let mut ctx = crate::cognitive_threads::ThreadContext {
-                state_root: &state_root,
-                repo_root: &cognitive_repo_root,
-                memory: shared_mem.as_ref(),
-                runtime: rt.handle().clone(),
-                shutdown: &shutdown,
-                now_epoch,
-                dry_run: false,
-            };
-            for outcome in mind.run_due(&mut ctx) {
-                if outcome.ran {
-                    daemon_log(
-                        &state_root,
-                        &format!("[simard] cognitive-thread: {}", outcome.summary),
-                    );
+            if cognitive_pass_running
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                let now_epoch = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let running = Arc::clone(&cognitive_pass_running);
+                let mind_for_pass = Arc::clone(&mind);
+                let state_root_for_pass = state_root.clone();
+                let repo_root_for_pass = cognitive_repo_root.clone();
+                let mem_for_pass = Arc::clone(&shared_mem);
+                let shutdown_for_pass = Arc::clone(&shutdown);
+                let rt_handle = rt.handle().clone();
+                let spawn = std::thread::Builder::new()
+                    .name("cognitive-threads".to_string())
+                    .spawn(move || {
+                        // Always clear the overlap guard, even on panic.
+                        struct ClearOnDrop(Arc<AtomicBool>);
+                        impl Drop for ClearOnDrop {
+                            fn drop(&mut self) {
+                                self.0.store(false, Ordering::SeqCst);
+                            }
+                        }
+                        let _clear = ClearOnDrop(running);
+
+                        // Build the context from owned/Arc'd data so it outlives
+                        // the pass on this thread (the references point at these
+                        // locals). OODA (Critical) is NOT a Mind thread here — it
+                        // runs on the authoritative inline cycle above — so every
+                        // thread on this Mind is non-critical background work.
+                        let mut ctx = crate::cognitive_threads::ThreadContext {
+                            state_root: &state_root_for_pass,
+                            repo_root: &repo_root_for_pass,
+                            memory: mem_for_pass.as_ref(),
+                            runtime: rt_handle,
+                            shutdown: &shutdown_for_pass,
+                            now_epoch,
+                            dry_run: false,
+                        };
+                        // A poisoned lock means a prior pass panicked OUTSIDE
+                        // run_due's per-thread catch_unwind (rare); skip this pass
+                        // rather than propagate — the next tick retries.
+                        let outcomes = match mind_for_pass.lock() {
+                            Ok(mut m) => m.run_due(&mut ctx),
+                            Err(_) => Vec::new(),
+                        };
+                        for outcome in outcomes {
+                            if outcome.ran {
+                                daemon_log(
+                                    &state_root_for_pass,
+                                    &format!("[simard] cognitive-thread: {}", outcome.summary),
+                                );
+                            }
+                        }
+                    });
+                if spawn.is_err() {
+                    // Could not spawn the pass thread; clear the guard so the next
+                    // tick can retry (the ClearOnDrop guard never armed).
+                    cognitive_pass_running.store(false, Ordering::SeqCst);
                 }
             }
+            // else: previous cognitive pass still running — drop this tick so the
+            // OODA loop never waits on a long recipe.
         }
 
         // ── Acting Overseer meta-OODA tick (issue #2539 wiring) ─────────
@@ -1483,8 +1544,10 @@ pub fn run_ooda_daemon(
                 // Capture the cognitive-thread heartbeats + feed context on the
                 // main loop thread (before the tick spawns) so the Overseer
                 // activity feed (#2419) lists every operator/steward thread, not
-                // just the Overseer meta-thread. Cheap, additive, read-only.
-                let thread_healths = mind.health();
+                // just the Overseer meta-thread. `try_lock` so a long in-flight
+                // cognitive pass never blocks this loop — the feed simply omits
+                // cognitive heartbeats for that tick (advisory, read-only).
+                let thread_healths = mind.try_lock().map(|m| m.health()).unwrap_or_default();
                 let feed_cadence_secs = crate::overseer::config::overseer_interval_secs();
                 let feed_author_login = crate::overseer::config::overseer_author_login();
                 let spawn = std::thread::Builder::new()
