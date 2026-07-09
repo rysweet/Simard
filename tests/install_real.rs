@@ -4,7 +4,8 @@
 //! production code paths and asserts a concrete observable outcome
 //! against the binary it just installed:
 //!
-//!   1. `cargo install --path .` packages the crate into a tempdir.
+//!   1. `cargo install --path . --no-default-features --features signal`
+//!      packages the runtime daemon into a tempdir.
 //!   2. The installed binary's `--version` output is parsed and matches
 //!      `CARGO_PKG_VERSION` (catches any drift between Cargo metadata
 //!      and the runtime CLI dispatch — the previous test compared two
@@ -36,12 +37,22 @@ fn install_packages_runs_and_self_installs() {
     // ── Step 1: cargo install ───────────────────────────────────────
     //
     // `--debug` switches to the dev profile so cold-cache install in
-    // CI doesn't take ~40min building release. We're verifying the
-    // packaging + entry points work, not optimization.
+    // CI doesn't take ~40min building release. `--no-default-features
+    // --features signal` keeps this test scoped to the runtime daemon install
+    // path; the default `dashboard-audit` feature pulls a build-time
+    // headless_chrome code generator that performs network fetches and is
+    // exercised by the dashboard jobs, not by this install contract.
     let install_status = Command::new(env!("CARGO"))
         .args(["install", "--path", ".", "--root"])
         .arg(&install_root)
-        .args(["--no-track", "--quiet", "--debug"])
+        .args([
+            "--no-track",
+            "--quiet",
+            "--debug",
+            "--no-default-features",
+            "--features",
+            "signal",
+        ])
         .status()
         .expect("failed to launch cargo install");
     assert!(install_status.success(), "cargo install --path . failed");
@@ -67,9 +78,11 @@ fn install_packages_runs_and_self_installs() {
 
     // ── Step 3: ensure-deps actually runs against installed binary ──
     //
-    // ensure-deps is the runtime probe for required tools (git,
-    // python3, gh) and the optional kuzu Python package. It's the
-    // first real subcommand any operator runs after install. If the
+    // ensure-deps is the runtime probe for the required external tools
+    // (git, gh). Simard is a pure-Rust daemon with no Python runtime
+    // dependency, and its graph store is the embedded `lbug` (LadybugDB)
+    // crate, so ensure-deps checks no Python interpreter or package. It's
+    // the first real subcommand any operator runs after install. If the
     // packaged binary can't reach this code path, the install is
     // broken even if --version works.
     let ensure_status = Command::new(&installed_simard)
