@@ -367,7 +367,7 @@ pub use rpc::{
     unpack_rpc_response,
 };
 pub use rpc_circuit_breaker::{CircuitBreakerConfig, CircuitBreakerTransport, CircuitState};
-pub use rpc_transport::{InMemoryRpcTransport, SubprocessRpcTransport};
+pub use rpc_transport::InMemoryRpcTransport;
 pub use test_support::TestAdapter;
 
 pub use coin_gym::{coin_gym_usage, dispatch_coin_gym_cli};

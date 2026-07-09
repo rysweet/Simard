@@ -174,13 +174,13 @@ If you are tight on disk or working across many Simard worktrees, prefer `script
 
 ## Contributor verification
 
-Repository changes are expected to pass the same checks locally and in CI:
+Repository changes are expected to pass the same checks locally and in CI. Enroll the native git hooks once, then commit/push normally:
 
-- `python3 -m pre_commit install --hook-type pre-commit --hook-type pre-push`
-- `python3 -m pre_commit run --all-files --hook-stage pre-commit`
-- `python3 -m pre_commit run --all-files --hook-stage pre-push`
+- `git config core.hooksPath hooks` (one-time; or run `./scripts/install-precommit.sh`)
+- the `pre-commit` hook runs `cargo fmt --all -- --check` and `cargo clippy --release --no-deps -- -D warnings`
+- the `pre-push` hook runs the race-subset `cargo test` and `cargo clippy --all-targets --all-features --locked -- -D warnings`
 
-Those hooks enforce `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, and `cargo test --all-features --locked`.
+The hooks are Python-free committed shell scripts under `hooks/` (see [Local Commit Gates](./operations/pre-commit-setup.md)). CI (`.github/workflows/verify.yml`) runs the identical `cargo` commands directly — no `pre-commit` framework, no `pip`, no `python3`. Those gates enforce `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, and `cargo test --all-features --locked`.
 
 ## Reading paths
 

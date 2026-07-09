@@ -384,7 +384,7 @@ There is no silent default — leaving both the env var and the config-file key 
 - `src/` — Rust runtime, CLI, modes, base-type adapters, memory layers, gym
 - `prompt_assets/` — versioned prompt files kept separate from runtime code
 - `Specs/ProductArchitecture.md` — the product architecture and design contract
-- `docs/` — operator and contributor documentation (mkdocs)
+- `docs/` — operator and contributor documentation (Markdown; navigation manifest in `mkdocs.yml`, validated by a Rust test — no Python build step)
 - `tests/` — integration tests
 - `scripts/` — developer tooling (low-space builds, disk reclamation, etc.)
 
@@ -404,7 +404,7 @@ cargo fmt --all
 cargo run -- gym run repo-exploration-local
 ```
 
-Pre-commit and pre-push hooks enforce `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, and `cargo test --all-features --locked`.
+Native git hooks (Python-free) mirror the CI gates locally. Enroll once with `git config core.hooksPath hooks` (or `./scripts/install-precommit.sh`); the `pre-commit` hook runs `cargo fmt --all -- --check` plus a fast `cargo clippy --release --no-deps -- -D warnings`, and the `pre-push` hook runs the race-subset `cargo test` plus the full `cargo clippy --all-targets --all-features --locked -- -D warnings`. CI (`.github/workflows/verify.yml`) runs those same commands plus the full `cargo test --all-features --locked`. There is no `pre-commit` framework, `pip`, or `python3` dependency — see [Local Commit Gates](docs/operations/pre-commit-setup.md).
 
 ## Documentation
 

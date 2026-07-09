@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+#
+# Native pre-push git hook (Python-free) — issue #3181.
+#
+# Wired via `git config core.hooksPath hooks`. Replaces the Python `pre-commit`
+# framework's pre-push stage: calls `cargo` directly so the local push gate has
+# no Python runtime dependency. Mirrors the CI `verify` workflow's race-catching
+# test subset plus the full `--all-targets --all-features --locked` clippy that
+# CI runs.
+#
+# Budget: the race-subset test targets ~90s on a dev host; the full clippy is
+# the same heavy variant CI runs and is intentionally push-time only.
+#
+# Follows the [simard] operator-diagnostic logging convention.
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+# CPU count for the race-subset test threads (portable: Linux nproc, macOS
+# sysctl, else a safe default).
+threads="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
+
+echo "[simard] pre-push: Rust-only gate (no new .py/.js/.ts outside allow-list)" >&2
+scripts/check-rust-only-gate.sh
+
+echo "[simard] pre-push: cargo fmt --all -- --check" >&2
+cargo fmt --all -- --check
+
+echo "[simard] pre-push: race-subset cargo test (threads=${threads})" >&2
+# Runs the cognitive_memory / bootstrap / memory_ipc / memory_consolidation lib
+# tests in parallel so race conditions surface locally before push (issue #1631).
+cargo test --release --lib -- --test-threads="${threads}" \
+    cognitive_memory bootstrap memory_ipc memory_consolidation
+
+echo "[simard] pre-push: cargo clippy --all-targets --all-features --locked -- -D warnings" >&2
+cargo clippy --all-targets --all-features --locked -- -D warnings
+
+echo "[simard] pre-push: all push-stage gates passed" >&2
