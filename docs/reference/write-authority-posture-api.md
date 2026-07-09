@@ -6,6 +6,8 @@ owner: simard
 doc_type: reference
 related:
   - ../concepts/write-authority-posture.md
+  - ../concepts/identity-scoped-cognition.md
+  - ../reference/identity-scoped-cognition-api.md
   - ../reference/pluggable-identity-api.md
   - ../reference/ado-acl-self-escalation-guard.md
   - ../reference/agent-instance-isolation.md
@@ -316,3 +318,6 @@ can gate CI/acceptance.
   — the pre-existing fail-closed guard that posture generalizes.
 - [Agent instance-isolation reference](./agent-instance-isolation.md) — the
   per-instance isolation that pairs with posture.
+- [Identity-scoped cognition API reference](./identity-scoped-cognition-api.md)
+  — the cognition-level `seed_goals` / `target_repos` surface and the observe-only
+  Act phase that reuses this posture's `read-only` value as its switch.

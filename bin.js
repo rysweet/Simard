@@ -85,7 +85,16 @@ if (process.argv[2] === "install") {
   const tag = latestTag();
   console.error(`Installing simard to ${bin}...`);
   download(bin, tag);
-  console.error(`Installed: ${bin} (${tag || "latest"})`);
+  const env = { ...process.env };
+  const packagedAssets = join(__dirname, "prompt_assets");
+  const downloadedAssets = join(installDir(), "prompt_assets");
+  if (existsSync(packagedAssets)) {
+    env.SIMARD_INSTALL_PROMPT_ASSETS_ROOT = packagedAssets;
+  } else if (existsSync(downloadedAssets)) {
+    env.SIMARD_INSTALL_PROMPT_ASSETS_ROOT = downloadedAssets;
+  }
+  try { execFileSync(bin, process.argv.slice(2), { stdio: "inherit", env }); }
+  catch (err) { process.exit(err.status || 1); }
   process.exit(0);
 }
 

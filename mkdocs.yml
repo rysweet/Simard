@@ -91,12 +91,14 @@ nav:
     - "COIN benchmark — Phase 1 completion record": research/coin-benchmark-phase1.md
     - "skwaq self-improvement loop — Phase 2 study": research/skwaq-self-improvement-loop.md
     - "COIN benchmark & skwaq gym study": research/coin-benchmark-and-skwaq-study.md
+    - "COIN Gym — baseline vs. team measurement": research/coin-gym-baseline-vs-team-measurement.md
   - Concepts:
     - Operational Autonomy Model: concepts/operational-autonomy-model.md
     - Adaptive Scaling: concepts/adaptive-scaling.md
     - Pluggable Identity: concepts/pluggable-identity.md
     - Multi-Identity Host Isolation: concepts/multi-identity-host-isolation.md
     - Write-Authority Posture: concepts/write-authority-posture.md
+    - Identity-Scoped Cognition (Seed Goals, Observe-Only Act): concepts/identity-scoped-cognition.md
     - OODA Loop Self-Detection: concepts/ooda-loop-self-detection.md
     - Unified RecipeBrain: concepts/unified-recipe-brain.md
     - Prompt-Driven OODA Brain: concepts/prompt-driven-ooda-brain.md
@@ -248,6 +250,7 @@ nav:
     - Configure Creative-Ideas Semantic Dedup: howto/configure-creative-ideas-semantic-dedup.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
+    - Simard Installer: reference/simard-installer.md
     - Telemetry Metrics: reference/telemetry-metrics.md
     - Recall-Precision Hybrid Measurement: reference/recall-precision-hybrid-api.md
     - Enrichment Observability API: reference/enrichment-observability-api.md
@@ -378,6 +381,7 @@ nav:
     - Pluggable Identity API: reference/pluggable-identity-api.md
     - Agent Instance Isolation: reference/agent-instance-isolation.md
     - Write-Authority Posture API: reference/write-authority-posture-api.md
+    - Identity-Scoped Cognition API: reference/identity-scoped-cognition-api.md
     - Adaptive Scaling API: reference/adaptive-scaling-api.md
     - Brain Introspection API: reference/brain-introspection-api.md
     - Self-Quality-Audit API: reference/self-quality-audit-api.md

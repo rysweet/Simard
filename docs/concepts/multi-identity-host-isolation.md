@@ -7,6 +7,7 @@ doc_type: concept
 related:
   - ./pluggable-identity.md
   - ./write-authority-posture.md
+  - ./identity-scoped-cognition.md
   - ../reference/agent-instance-isolation.md
   - ../howto/run-a-second-agent-identity.md
   - ../tutorials/deploy-crocutus-read-only-observer.md
@@ -174,6 +175,10 @@ isolation before starting the second daemon.
 - [Write-authority posture](./write-authority-posture.md) — the read-only /
   scoped-write / full contract that makes a second identity a *bounded*
   observer rather than a second full-write actor.
+- [Identity-scoped cognition](./identity-scoped-cognition.md) — the cognition
+  layer above isolation: identity seed goals, target scope, and the observe-only
+  Act phase that keep a read-only identity's *reasoning* on its own target, not
+  just its writes.
 - [Agent instance-isolation reference](../reference/agent-instance-isolation.md)
   — `SIMARD_HOME`, `instance_home()`, the env matrix, and unit templating.
 - [How to run a second agent identity](../howto/run-a-second-agent-identity.md)

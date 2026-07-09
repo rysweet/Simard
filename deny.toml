@@ -146,11 +146,14 @@ deny = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# Git sources are an explicit allowlist. Simard pins four crates by exact rev
-# across THREE upstream repositories (rustyclawd-core + rustyclawd-tools share
-# one). Any other git source — a typosquat or hijacked transitive dep — fails.
+# Git sources are an explicit allowlist. Simard pins crates by exact rev across
+# upstream repositories (rustyclawd-core + rustyclawd-tools share one; lbug comes
+# from the rysweet/ladybug-rust fork that fixes the from-source link + libstdc++
+# ABI, see amplihack-memory docs/lbug_libstdcxx_abi.md). Any other git source — a
+# typosquat or hijacked transitive dep — fails.
 allow-git = [
     "https://github.com/rysweet/RustyClawd.git",
     "https://github.com/rysweet/amplihack-memory-lib.git",
     "https://github.com/rysweet/amplihack-rs.git",
+    "https://github.com/rysweet/ladybug-rust",
 ]

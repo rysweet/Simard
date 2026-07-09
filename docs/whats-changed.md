@@ -27,8 +27,8 @@ The documentation had three classes of drift:
    cognitive-memory fork (`NativeCognitiveMemory`) as if it were the live
    backend and API.
 2. **Discoverability gap.** 118 of the 208 Markdown pages existed on disk but
-   were absent from the MkDocs navigation, so they were effectively invisible
-   to readers.
+   were absent from the navigation manifest (`mkdocs.yml`), so they were
+   effectively invisible to readers.
 3. **Broken internal links.** A handful of cross-page `#anchor` links pointed
    at anchors that no longer existed.
 
@@ -104,12 +104,16 @@ and [Troubleshoot Goal Store](howto/troubleshoot-goal-store.md).
 
 ### 6. Discoverability: every page is now in the nav
 
-All 118 previously-orphaned pages were added to `mkdocs.yml` under logical
-sections, including new **Operations**, **Operator Dashboard**, **Testing**,
-and **Ecosystem & Audits** sections. A native MkDocs
-[`validation`](https://www.mkdocs.org/user-guide/configuration/#validation)
-block now makes `mkdocs build --strict` fail on future orphaned pages and dead
-anchors, so discoverability cannot silently regress.
+All 118 previously-orphaned pages were added to the navigation manifest
+`mkdocs.yml` under logical sections, including new **Operations**, **Operator
+Dashboard**, **Testing**, and **Ecosystem & Audits** sections. Discoverability
+is enforced natively in Rust: `tests/docs_integrity.rs` (run by `cargo test`)
+walks `docs/**/*.md`, fails on dead intra-repo links, and fails on any
+`mkdocs.yml` nav entry that points at a missing file, while
+`tests/supply_chain_hardening.rs` additionally asserts the supply-chain
+reference pages stay linked from the nav — so orphaned pages and dead anchors
+cannot silently regress. There is no Python `mkdocs build` step; `mkdocs.yml`
+is retained only as the inert nav manifest those Rust tests read.
 
 ### 7. amplihack freshness gate before each engineer spawn (#439)
 
@@ -166,5 +170,6 @@ documented in `docs/` as current reality and the PRD is left unchanged.
   ("as of N reports") snapshots.
 - Keep new pages under `docs/`, add them to the `nav`, and cross-link them.
 - Follow Diataxis: tutorial / how-to / reference / explanation.
-- Run `mkdocs build --strict` — it now also enforces zero orphans and no dead
-  anchors.
+- Run `cargo test docs_integrity supply_chain` — the native Rust docs-integrity
+  gate enforces zero dead intra-repo links and that every `mkdocs.yml` nav entry
+  resolves to a real file. No Python `mkdocs build` is required.

@@ -248,43 +248,35 @@ graph TB
 
 The runtime ships as a single Rust binary. There is no Python runtime requirement and no `pip install` step.
 
-## Install
+## Host install
 
-### With npx (easiest)
-
-Requires [GitHub CLI](https://cli.github.com/) authenticated with repo access.
+`simard install` is the canonical deployment path. It installs the current
+Simard binary and matching prompt assets into `SIMARD_HOME` (default
+`~/.simard`), writes the user systemd units for `simard-ooda.service` and
+`simard-signal.service`, preserves the previous binary for rollback, and
+restarts both services through `systemctl --user`.
 
 ```bash
-# Run Simard directly
-npx github:rysweet/Simard meeting repl
-
-# Install the binary locally (~/.simard/bin)
+# Release install through npm/npx
 npx github:rysweet/Simard install
-```
 
-### From GitHub Releases
-
-```bash
-# Download the latest release binary
-curl -L https://github.com/rysweet/Simard/releases/latest/download/simard-linux-x86_64.tar.gz | tar xz
-chmod +x simard
-sudo mv simard /usr/local/bin/
-```
-
-### From Source
-
-```bash
-git clone https://github.com/rysweet/Simard.git
-cd Simard
+# Or install a locally built candidate
 cargo build --release
-# Binary at target/release/simard
+./target/release/simard install
 ```
 
-### With Cargo
+Use `--simard-home` or `SIMARD_HOME` to install to a non-default home:
 
 ```bash
-cargo install --git https://github.com/rysweet/Simard.git
+./target/release/simard install --simard-home "$HOME/.simard-prod"
 ```
+
+The operator contract is: do not deploy by copying over
+`~/.simard/bin/simard`, moving a binary into `/usr/local/bin`, or pointing
+systemd at `target/release` or a worktree. The installer stages files first and
+then uses atomic replacement for the live binary and prompt assets.
+
+Contract: [Simard installer reference](docs/reference/simard-installer.md).
 
 ## Quick Start
 
@@ -341,7 +333,7 @@ simard gym run-suite <suite-id>        # run a suite
 ### Self-management
 ```bash
 simard update                          # self-update to the latest release
-simard install                         # install binary to ~/.simard/bin
+simard install                         # install binary/assets and restart user services
 ```
 
 ### Other commands
@@ -358,6 +350,7 @@ simard bootstrap run <identity> <base-type> <topology> <objective>
 | `SIMARD_LLM_PROVIDER` | Override the LLM provider selected from `~/.simard/config.toml` |
 | `SIMARD_COPILOT_GH_ACCOUNT` | GitHub account for Copilot auth (e.g., `rysweet_microsoft`) |
 | `SIMARD_COMMIT_GH_ACCOUNT` | GitHub account for git commits (e.g., `rysweet`) |
+| `SIMARD_HOME` | Install root for `simard install`; defaults to `~/.simard` and becomes the systemd unit `WorkingDirectory` |
 | `SIMARD_OODA_MAX_CONCURRENT` | Per-OODA-cycle goal-coverage parallelism ceiling — how many independent goals a cycle may cover. Default `24`, range `1..=64`, fail-closed to `24` on an invalid value (logged via `tracing::warn!`). Seeds the AIMD scaler base and ceiling. Legacy `SIMARD_MAX_CONCURRENT_ACTIONS` is honoured when this is unset. Raising it only *allows* more coverage — the resource-admission and overlap gates still bound actual spawns. See [OODA coverage parallelism ceiling](docs/reference/ooda-coverage-parallelism-ceiling.md). |
 
 Runtime configuration lives at `~/.simard/config.toml`. The runtime fails loudly when required configuration is missing — there are no silent defaults.
@@ -384,7 +377,7 @@ There is no silent default — leaving both the env var and the config-file key 
 - `src/` — Rust runtime, CLI, modes, base-type adapters, memory layers, gym
 - `prompt_assets/` — versioned prompt files kept separate from runtime code
 - `Specs/ProductArchitecture.md` — the product architecture and design contract
-- `docs/` — operator and contributor documentation (mkdocs)
+- `docs/` — operator and contributor documentation (Markdown; navigation manifest in `mkdocs.yml`, validated by a Rust test — no Python build step)
 - `tests/` — integration tests
 - `scripts/` — developer tooling (low-space builds, disk reclamation, etc.)
 
@@ -404,7 +397,7 @@ cargo fmt --all
 cargo run -- gym run repo-exploration-local
 ```
 
-Pre-commit and pre-push hooks enforce `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, and `cargo test --all-features --locked`.
+Native git hooks (Python-free) mirror the CI gates locally. Enroll once with `git config core.hooksPath hooks` (or `./scripts/install-precommit.sh`); the `pre-commit` hook runs `cargo fmt --all -- --check` plus a fast `cargo clippy --release --no-deps -- -D warnings`, and the `pre-push` hook runs the race-subset `cargo test` plus the full `cargo clippy --all-targets --all-features --locked -- -D warnings`. CI (`.github/workflows/verify.yml`) runs those same commands plus the full `cargo test --all-features --locked`. There is no `pre-commit` framework, `pip`, or `python3` dependency — see [Local Commit Gates](docs/operations/pre-commit-setup.md).
 
 ## Documentation
 
@@ -417,6 +410,7 @@ Pre-commit and pre-push hooks enforce `cargo fmt --all -- --check`, `cargo clipp
 - [Architecture overview](docs/architecture/overview.md)
 - [Cognitive Memory (canonical)](docs/architecture/cognitive-memory.md)
 - [Simard CLI reference](docs/reference/simard-cli.md)
+- [Simard installer reference](docs/reference/simard-installer.md)
 - [Runtime contracts reference](docs/reference/runtime-contracts.md)
 - [Base type adapters reference](docs/reference/base-type-adapters.md)
 - [Agent composition](docs/architecture/agent-composition.md)

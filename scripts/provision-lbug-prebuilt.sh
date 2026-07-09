@@ -33,13 +33,31 @@ LIB_DIR="${1:-${SIMARD_LBUG_LIB_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/simard-lbug
 LIB_FILE="$LIB_DIR/liblbug.a"
 static_lib_name="liblbug.a"
 
-# lbug crate version (== matching LadybugDB native release tag) parsed from
-# Cargo.toml, so the prebuilt asset is fetched deterministically — no
+# lbug crate version (== matching LadybugDB native release tag), resolved from
+# Cargo.lock so the prebuilt asset is fetched deterministically — no
 # unauthenticated `releases/latest` API call and no version skew with the crate
-# we actually compile against.
+# we actually compile against. Cargo.lock records the *resolved* version whether
+# lbug is a semver-pinned crates.io dep (`lbug = "=0.17.1"`) or a git/fork
+# dependency (`lbug = { git = "…ladybug-rust", rev = "…" }`, issue #3119) that
+# carries no version string in Cargo.toml. Falls back to a semver-pinned
+# Cargo.toml line for robustness.
 lbug_version() {
-  sed -nE 's/^lbug[[:space:]]*=[[:space:]]*"=?([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' \
-    "$REPO_ROOT/Cargo.toml" | head -n1
+  local v=""
+  if [ -f "$REPO_ROOT/Cargo.lock" ]; then
+    v="$(awk '
+      $0 == "[[package]]" { inpkg = 1; islbug = 0; next }
+      inpkg && $0 == "name = \"lbug\"" { islbug = 1 }
+      inpkg && islbug && /^version = / {
+        line = $0; sub(/^version = "/, "", line); sub(/"$/, "", line)
+        print line; exit
+      }
+    ' "$REPO_ROOT/Cargo.lock")"
+  fi
+  if [ -z "$v" ]; then
+    v="$(sed -nE 's/^lbug[[:space:]]*=[[:space:]]*"=?([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' \
+      "$REPO_ROOT/Cargo.toml" | head -n1)"
+  fi
+  printf '%s' "$v"
 }
 
 # Name of the prebuilt static archive for this OS/arch, mirroring lbug's own
@@ -93,7 +111,7 @@ download_prebuilt() {
   # build/coverage jobs consume.
   local version asset repo url
   version="$(lbug_version || true)"
-  [ -n "$version" ] || die "could not determine lbug version from Cargo.toml"
+  [ -n "$version" ] || die "could not determine lbug version from Cargo.lock/Cargo.toml"
   asset="$(prebuilt_asset_name || true)"
   [ -n "$asset" ] || die "unsupported OS/arch for prebuilt liblbug ($(uname -sm))"
   repo="${LBUG_GITHUB_REPOSITORY:-LadybugDB/ladybug}"

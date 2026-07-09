@@ -1,7 +1,7 @@
 ---
 title: How to run a second agent identity side-by-side
 description: Configure and launch a second autonomous Simard identity (its own SIMARD_HOME instance root, state, port, socket, systemd unit, credentials, and write-authority posture) on the same host as the primary simard daemon, without interference.
-last_updated: 2026-07-08
+last_updated: 2026-07-09
 review_schedule: as-needed
 owner: simard
 related:
@@ -124,12 +124,20 @@ github_write_check=REFUSED (read-only)
 
 ## 5. Install the second identity's binary copy
 
-`simard install` writes to `$SIMARD_HOME/bin/simard`, so with `SIMARD_HOME`
-set it installs the second instance's own copy without touching the primary's:
+The planned v1 installer writes the primary unit names `simard-ooda.service`
+and `simard-signal.service`. Do not run it against the normal user systemd
+directory for a side-by-side identity unless your intent is to retarget those
+primary units.
 
-```bash
-simard install     # installs to $SIMARD_HOME/bin/simard
-```
+The generic side-by-side installer flow is not designed yet. It needs
+first-class instance support such as `--no-activate`, `--unit-prefix`, or
+instance-aware unit names before this page can use `simard install` as normal
+operator guidance for a second identity.
+
+Until that exists, use the concrete Crocutus procedure as the runnable source of
+truth and create the instance-specific unit below manually. Do not use a fake
+`systemctl` wrapper as a production workaround; fake activation is only a
+hermetic test technique for installer tests.
 
 ## 6. Create the systemd unit
 

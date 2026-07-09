@@ -118,7 +118,21 @@ path = "src/bin/supply_chain_steward.rs"
 # from one bulk edge scan per type: a pure performance refactor with
 # byte-identical ranking. Still an upstream-`main` commit; store format stays v41
 # (no lbug/engine change).
-amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "72c5ea1bfcca7e6f3e314dfd99fbe4998378ffe8", features = ["persistent"] }
+#
+# Bumped again (issue #3119) to the squash-merge commit of amplihack-memory-lib
+# PR #129 on `main` (1 commit ahead of the #126 pin): the lbug portability fix.
+# The published crates.io `lbug 0.17.1` SIGSEGVs in `std::vformat` during
+# `Database::initBufferManager` on hosts whose libstdc++ `std::format` ABI differs
+# from the prebuilt's (e.g. Ubuntu 26.04), and its build.rs also double-links the
+# bundled third-party archives in source-build mode (duplicate symbols). #129 pins
+# `lbug` to the `rysweet/ladybug-rust` fork (build.rs keeps `link_bundled_deps=false`
+# and links only the self-contained `liblbug.a`), so building from source both cures
+# the ABI SIGSEGV and links cleanly with no unsafe `--allow-multiple-definition`.
+# The fork engine writes on-disk storage format v42 (forward-only from v41; the
+# v40->v41+ no-data-loss gate now accepts v41-or-newer). Simard's direct `lbug` dep
+# below is repointed at the SAME fork rev in lockstep so the final binary links
+# exactly one engine. Still an upstream-`main` commit.
+amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "5807d056112b8e6f73dae9c1fac05f214f9c6ece", features = ["persistent"] }
 rustyclawd-core = { git = "https://github.com/rysweet/RustyClawd.git", rev = "ddae0fdf1b922ae8604b0a4e178a3634ada7e350" }
 rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git", rev = "ddae0fdf1b922ae8604b0a4e178a3634ada7e350" }
 # De-fork (issue #2323): the gym/eval RUNNER is now the upstream
@@ -136,10 +150,12 @@ amplihack-agent-eval = { git = "https://github.com/rysweet/amplihack-rs.git", re
 # `lbug` is still a direct dependency of the standalone `simard-tui` binary
 # (`src/bin/simard_tui/goals.rs`), which opens a LadybugDB read-only to render
 # the goal board. The cognitive-memory backend itself no longer uses lbug
-# directly — it goes through the amplihack-memory library. Bumped to 0.17.1 in
-# lockstep with the amplihack-memory pin so the final binary links exactly one
-# engine and one storage format (v41).
-lbug = "=0.17.1"
+# directly — it goes through the amplihack-memory library. Pinned to the
+# `rysweet/ladybug-rust` fork (issue #3119) at the SAME rev amplihack-memory uses,
+# so cargo unifies to exactly one `lbug` crate / one engine / one storage format.
+# The fork fixes the from-source duplicate-symbol link and the libstdc++
+# std::format ABI SIGSEGV; see amplihack-memory docs/lbug_libstdcxx_abi.md.
+lbug = { git = "https://github.com/rysweet/ladybug-rust", rev = "202352434642e683fdf008b68004d0645a57cd35" }
 rusqlite = { version = "=0.31.0", features = ["bundled"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.149"

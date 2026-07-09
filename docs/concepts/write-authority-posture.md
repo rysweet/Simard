@@ -7,6 +7,7 @@ doc_type: concept
 related:
   - ./pluggable-identity.md
   - ./multi-identity-host-isolation.md
+  - ./identity-scoped-cognition.md
   - ../reference/write-authority-posture-api.md
   - ../reference/ado-acl-self-escalation-guard.md
   - ../tutorials/deploy-crocutus-read-only-observer.md
@@ -141,6 +142,13 @@ reports `dispatched 0 actions (read-only), 0 writes` (see the
 Delivering that guarantee is an implementation acceptance criterion, not an
 emergent property of the guardrail functions alone.
 
+Posture is the *write-primitive* half of a read-only identity. The *cognition*
+half — seeding the identity's own goals and taking an observe-only Act branch so
+the loop never even *decides* to dispatch a write-bearing engineer — is
+[identity-scoped cognition](./identity-scoped-cognition.md). The two compose as
+defense in depth: cognition prevents the doomed decision, this posture guarantees
+no write if anything slips past.
+
 ## Why a contract, not just an env var
 
 Posture must be enforced *inside the code* at the guardrail layer, so it has
@@ -197,6 +205,9 @@ refuses + a dry-run check) is a required acceptance step, documented in the
 - [Multi-identity host isolation](./multi-identity-host-isolation.md) — the
   per-instance isolation that keeps a read-only identity away from the
   primary's credentials and state.
+- [Identity-scoped cognition](./identity-scoped-cognition.md) — the cognition
+  half: identity seed goals, target scope, and the observe-only Act phase that
+  sits on top of this posture.
 - [Azure DevOps ACL self-escalation guard](../reference/ado-acl-self-escalation-guard.md)
   — the pre-existing fail-closed guard that posture extends.
 - [Deploy Crocutus as a read-only observer](../tutorials/deploy-crocutus-read-only-observer.md)

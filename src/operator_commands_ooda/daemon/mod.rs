@@ -57,6 +57,101 @@ fn seed_cycle_count(persistent_cycle_count: u32, state_root: &std::path::Path) -
     }
 }
 
+/// Resolve the identity-scoped cognition (#3125) for the daemon from the
+/// environment, **fail-closed**.
+///
+/// - `SIMARD_IDENTITY` unset/blank → no identity → [`crate::ooda_loop::IdentityCognition::default`]
+///   (Simard herself: default seed goals + engineer-dispatching Act phase — unchanged).
+/// - `SIMARD_IDENTITY` set and the manifest resolves → project its seed goals,
+///   target scope, and write-authority posture via
+///   [`crate::ooda_loop::IdentityCognition::from_manifest`].
+/// - `SIMARD_IDENTITY` set but the manifest CANNOT be resolved → fail-closed:
+///   install a `read-only` posture so the observe-only rail denies every engineer
+///   dispatch. A named identity whose posture is uncertain never spawns (operator
+///   constraint #3125). There is no wall-clock timeout and no fallback-to-dispatch.
+fn resolve_daemon_identity_cognition() -> crate::ooda_loop::IdentityCognition {
+    use crate::ooda_loop::IdentityCognition;
+
+    let identity_name = match std::env::var("SIMARD_IDENTITY") {
+        Ok(name) if !name.trim().is_empty() => name,
+        _ => return IdentityCognition::default(),
+    };
+
+    let prompt_root = std::env::var_os("SIMARD_PROMPT_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets"));
+    let identity_path = std::env::var_os("SIMARD_IDENTITY_PATH").map(PathBuf::from);
+
+    let freshness = match crate::Freshness::now() {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!(
+                "[simard] OODA daemon: identity cognition FAIL-CLOSED for '{identity_name}': \
+                 freshness error: {e}; installing read-only posture (0 engineer dispatch)"
+            );
+            return fail_closed_identity_cognition(&identity_name);
+        }
+    };
+    let contract = match crate::ManifestContract::new(
+        concat!(module_path!(), "::resolve_daemon_identity_cognition"),
+        "ooda-daemon -> identity-loader -> identity-cognition",
+        vec![format!("identity:{identity_name}")],
+        crate::Provenance::runtime(format!("ooda-daemon/identity-cognition/{identity_name}")),
+        freshness,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "[simard] OODA daemon: identity cognition FAIL-CLOSED for '{identity_name}': \
+                 contract error: {e}; installing read-only posture (0 engineer dispatch)"
+            );
+            return fail_closed_identity_cognition(&identity_name);
+        }
+    };
+
+    match crate::bootstrap::assembly::load_identity(
+        identity_path.as_ref(),
+        &prompt_root,
+        &crate::IdentityLoadRequest::new(
+            identity_name.clone(),
+            env!("CARGO_PKG_VERSION"),
+            contract,
+        ),
+    ) {
+        Ok(manifest) => {
+            let cognition = IdentityCognition::from_manifest(&manifest);
+            eprintln!(
+                "[simard] OODA daemon: resolved identity cognition for '{}' — posture={}, \
+                 {} seed goal(s), targets={:?}",
+                manifest.name,
+                manifest.authority.posture,
+                cognition.seed_goals.len(),
+                cognition.target_repos,
+            );
+            cognition
+        }
+        Err(e) => {
+            eprintln!(
+                "[simard] OODA daemon: identity cognition FAIL-CLOSED for '{identity_name}': \
+                 manifest load error: {e}; installing read-only posture (0 engineer dispatch)"
+            );
+            fail_closed_identity_cognition(&identity_name)
+        }
+    }
+}
+
+/// The fail-closed identity cognition: a named identity with a `read-only`
+/// posture and no seed-goal override, so the observe-only rail denies every
+/// engineer dispatch while leaving Simard's default seeding in place.
+fn fail_closed_identity_cognition(identity_name: &str) -> crate::ooda_loop::IdentityCognition {
+    crate::ooda_loop::IdentityCognition {
+        identity_name: Some(identity_name.to_string()),
+        seed_goals: Vec::new(),
+        target_repos: Vec::new(),
+        authority: Some(crate::identity::IdentityAuthority::read_only()),
+    }
+}
+
 /// Run one or more OODA cycles as a daemon-style loop.
 ///
 /// Launches all memories, opens a RustyClawd session via [`SessionBuilder`]
@@ -442,6 +537,11 @@ pub fn run_ooda_daemon(
     let board = crate::goal_board_store::heal_stale_no_progress_blocks(board);
     let mut state = OodaState::new(board);
     state.no_progress_tracker = persistent.no_progress;
+    // #3125: resolve identity-scoped cognition (seed goals / target scope /
+    // write-authority posture) once at boot, fail-closed. No identity => Simard
+    // unchanged; a read-only identity seeds its own goals and takes the
+    // observe-only Act branch.
+    state.identity_cognition = resolve_daemon_identity_cognition();
     // Seed the OODA cycle counter from durable brain memory so the cycle number
     // reflects the brain's total lived cognition and CONTINUES across restarts,
     // instead of resetting to 1 on every daemon restart / deploy (issue #1).

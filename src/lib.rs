@@ -99,6 +99,7 @@ pub mod identity_auth;
 pub mod identity_composition;
 pub mod identity_precedence;
 pub mod improvements;
+pub mod install;
 pub mod journal;
 pub mod knowledge_client;
 pub mod knowledge_context;
@@ -300,8 +301,8 @@ pub use handoff::{
     RuntimeHandoffStore,
 };
 pub use identity::{
-    BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, IdentityManifest, ManifestContract,
-    MemoryPolicy, OperatingMode,
+    BuiltinIdentityLoader, IdentityAuthority, IdentityLoadRequest, IdentityLoader,
+    IdentityManifest, ManifestContract, MemoryPolicy, OperatingMode, SeedGoal, WritePosture,
 };
 pub use identity_auth::{
     AuthIdentity, DualIdentityConfig, env_for_identity, identity_for_operation,
@@ -367,7 +368,7 @@ pub use rpc::{
     unpack_rpc_response,
 };
 pub use rpc_circuit_breaker::{CircuitBreakerConfig, CircuitBreakerTransport, CircuitState};
-pub use rpc_transport::{InMemoryRpcTransport, SubprocessRpcTransport};
+pub use rpc_transport::InMemoryRpcTransport;
 pub use test_support::TestAdapter;
 
 pub use coin_gym::{coin_gym_usage, dispatch_coin_gym_cli};
