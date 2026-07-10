@@ -111,6 +111,7 @@ struct AdvanceCtx<'a> {
     /// The daemon's own repository root (for the resource-admission gate's
     /// `reclaim_first` disk-health recipe lookup — issue #2706).
     repo_root: &'a Path,
+    observe_only: bool,
 }
 
 /// Dispatch the spawn-path `AdvanceGoal` actions at `indices` concurrently,
@@ -137,6 +138,8 @@ pub(super) fn dispatch_advance_concurrent(
         memories.session_factory.as_deref();
     // Daemon repo root for the resource-admission reclaim path (issue #2706).
     let repo_root: &Path = &memories.repo_root;
+    let observe_only =
+        crate::read_only_guard::observe_only_enabled() || !state.identity_cognition.permits_spawn();
 
     // Take ownership of the shared fallback session for the duration of the
     // round so the per-thread context can lend it out by `Box` (avoids tying a
@@ -158,6 +161,7 @@ pub(super) fn dispatch_advance_concurrent(
         claims: &claims,
         sem: &sem,
         repo_root,
+        observe_only,
     };
     let ctx_ref = &ctx;
 
@@ -318,7 +322,12 @@ fn dispatch_advance_goal_concurrent(action: &PlannedAction, ctx: &AdvanceCtx) ->
     let run_result = match ctx.session_factory {
         Some(factory) => match factory.open_session() {
             Ok(mut session) => {
-                let input = build_goal_advance_input(ctx.memory, prepared_context.as_ref(), &goal);
+                let input = build_goal_advance_input(
+                    ctx.memory,
+                    prepared_context.as_ref(),
+                    &goal,
+                    ctx.observe_only,
+                );
                 let result = session.run_turn(input);
                 // Best-effort close; failure to close never masks the turn.
                 if let Err(e) = session.close() {
@@ -347,8 +356,12 @@ fn dispatch_advance_goal_concurrent(action: &PlannedAction, ctx: &AdvanceCtx) ->
             let mut sess_guard = ctx.shared_session.lock().unwrap_or_else(|p| p.into_inner());
             match sess_guard.as_deref_mut() {
                 Some(session) => {
-                    let input =
-                        build_goal_advance_input(ctx.memory, prepared_context.as_ref(), &goal);
+                    let input = build_goal_advance_input(
+                        ctx.memory,
+                        prepared_context.as_ref(),
+                        &goal,
+                        ctx.observe_only,
+                    );
                     session.run_turn(input)
                 }
                 None => {
@@ -374,6 +387,7 @@ fn dispatch_advance_goal_concurrent(action: &PlannedAction, ctx: &AdvanceCtx) ->
             &mut guard.active_goals,
             &goal,
             run_result,
+            ctx.observe_only,
         )
     };
 

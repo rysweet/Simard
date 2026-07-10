@@ -1025,6 +1025,32 @@ fn progress_assessment_recipe_mirrors_done_gate() {
     );
 }
 
+#[test]
+fn progress_reviewer_accepts_observe_only_evidence_progress() {
+    let content = embedded_fallback("progress_assessment_reviewer.md")
+        .expect("progress_assessment_reviewer.md must be registered");
+    let norm = normalize_ws(content).to_lowercase();
+    assert!(
+        norm.contains("observe-only / read-only audit goal"),
+        "progress reviewer must treat read-only audit evidence as progress"
+    );
+    assert!(
+        norm.contains("do not require a write artifact"),
+        "observe-only progress must not require forbidden target writes"
+    );
+
+    let recipe = include_str!("../../prompt_assets/simard/recipes/progress-assessment.yaml");
+    let recipe_norm = normalize_ws(recipe).to_lowercase();
+    assert!(
+        recipe_norm.contains("observe-only / read-only audit goal"),
+        "progress-assessment.yaml must mirror the observe-only evidence rule"
+    );
+    assert!(
+        recipe_norm.contains("do not require a write artifact"),
+        "recipe mirror must not require forbidden target writes"
+    );
+}
+
 // ── PR-finalization review pipeline (#2410 follow-on) ───────────────────────
 //
 // These tests pin the prompt-content contract for the new, bounded, ordered
