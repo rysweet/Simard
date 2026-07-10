@@ -244,15 +244,21 @@ fn parse_action_verdict_response(s: &str) -> Option<ReviewerResponse> {
     let mut rationale = None;
     for line in s.lines() {
         let trimmed = line.trim();
-        let rest = trimmed
+        let Some(rest) = trimmed
             .strip_prefix("ACTION:")
             .or_else(|| trimmed.strip_prefix("Action:"))
-            .or_else(|| trimmed.strip_prefix("action:"))?
-            .trim();
-        let (field, value) = rest
+            .or_else(|| trimmed.strip_prefix("action:"))
+            .map(str::trim)
+        else {
+            continue;
+        };
+        let Some((field, value)) = rest
             .split_once('—')
             .or_else(|| rest.split_once('-'))
-            .or_else(|| rest.split_once(':'))?;
+            .or_else(|| rest.split_once(':'))
+        else {
+            continue;
+        };
         let field = field.trim().to_ascii_lowercase();
         let value = value.trim();
         match field.as_str() {
@@ -550,6 +556,14 @@ mod tests {
             parsed.rationale,
             "Read-only audit produced concrete evidence."
         );
+    }
+
+    #[test]
+    fn parser_handles_action_verdict_response_with_extra_lines() {
+        let raw = "ACTION: verdict — accept\nACTION: rationale — Read-only audit produced concrete evidence.\nEXPLANATION: this line is not part of the schema";
+        let parsed = parse_reviewer_response(raw).expect("parse ok");
+        assert_eq!(parsed.verdict, "accept");
+        assert!(parsed.rationale.contains("Read-only audit"));
     }
 
     #[test]
