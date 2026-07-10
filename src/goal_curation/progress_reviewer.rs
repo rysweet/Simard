@@ -230,10 +230,41 @@ pub fn parse_reviewer_response(raw: &str) -> Result<ReviewerResponse, String> {
     {
         return Ok(parsed);
     }
+    if let Some(parsed) = parse_action_verdict_response(stripped) {
+        return Ok(parsed);
+    }
     Err(format!(
         "{ADAPTER_TAG} response had no parseable JSON object; raw={:?}",
         truncate_for_err(raw)
     ))
+}
+
+fn parse_action_verdict_response(s: &str) -> Option<ReviewerResponse> {
+    let mut verdict = None;
+    let mut rationale = None;
+    for line in s.lines() {
+        let trimmed = line.trim();
+        let rest = trimmed
+            .strip_prefix("ACTION:")
+            .or_else(|| trimmed.strip_prefix("Action:"))
+            .or_else(|| trimmed.strip_prefix("action:"))?
+            .trim();
+        let (field, value) = rest
+            .split_once('—')
+            .or_else(|| rest.split_once('-'))
+            .or_else(|| rest.split_once(':'))?;
+        let field = field.trim().to_ascii_lowercase();
+        let value = value.trim();
+        match field.as_str() {
+            "verdict" => verdict = Some(value.to_string()),
+            "rationale" => rationale = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    verdict.map(|verdict| ReviewerResponse {
+        verdict,
+        rationale: rationale.unwrap_or_default(),
+    })
 }
 
 fn extract_fenced_blocks(s: &str) -> Vec<&str> {
@@ -508,6 +539,17 @@ mod tests {
         let raw = "Brain says: {\"verdict\":\"accept\",\"rationale\":\"ok\"} and that's that.";
         let parsed = parse_reviewer_response(raw).expect("parse ok");
         assert_eq!(parsed.verdict, "accept");
+    }
+
+    #[test]
+    fn parser_handles_action_verdict_response() {
+        let raw = "ACTION: verdict — accept\nACTION: rationale — Read-only audit produced concrete evidence.";
+        let parsed = parse_reviewer_response(raw).expect("parse ok");
+        assert_eq!(parsed.verdict, "accept");
+        assert_eq!(
+            parsed.rationale,
+            "Read-only audit produced concrete evidence."
+        );
     }
 
     #[test]
