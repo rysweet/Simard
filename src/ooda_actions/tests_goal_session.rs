@@ -168,6 +168,55 @@ fn observe_only_prose_response_records_no_action_without_spawn() {
 }
 
 #[test]
+fn read_only_identity_prose_response_records_no_action_without_env_floor() {
+    let _guard = env_lock().lock().unwrap();
+    let old_observe = std::env::var_os("SIMARD_OBSERVE_ONLY");
+    unsafe {
+        std::env::remove_var("SIMARD_OBSERVE_ONLY");
+    }
+
+    let goal_id = "test-goal";
+    let mut state = state_with_goal(goal_id);
+    state.identity_cognition.authority = Some(crate::identity::IdentityAuthority::read_only());
+    let goal = live_goal(&state, goal_id);
+    let action = planned_action(goal_id);
+
+    let task_text = "Spawn engineer to inspect the repository read-only.";
+    let (mut session, captured) = MockSession::new_ok(task_text, vec![]);
+
+    let mem_box = mock_memory();
+    let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
+    let result = advance_goal_with_session(
+        &action,
+        &*mem_box,
+        &checker,
+        &mut session,
+        &mut state,
+        &goal,
+    );
+
+    assert!(result.outcome.success);
+    assert!(result.outcome.detail.contains("no-action"));
+    match result.action {
+        Some(GoalAction::NoAction { reason }) => {
+            assert!(reason.contains("converted spawn request"));
+            assert!(reason.contains(task_text));
+        }
+        other => panic!("expected NoAction, got {other:?}"),
+    }
+    let captured = captured.borrow();
+    let input = captured.as_ref().expect("session must be invoked once");
+    assert!(input.objective.contains("Read-only observer contract"));
+
+    unsafe {
+        match old_observe {
+            Some(value) => std::env::set_var("SIMARD_OBSERVE_ONLY", value),
+            None => std::env::remove_var("SIMARD_OBSERVE_ONLY"),
+        }
+    }
+}
+
+#[test]
 fn progress_marker_in_prose_updates_goal_progress_before_spawn() {
     let _guard = env_lock().lock().unwrap();
     let old_observe = std::env::var_os("SIMARD_OBSERVE_ONLY");

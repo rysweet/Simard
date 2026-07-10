@@ -130,7 +130,10 @@ pub(crate) fn advance_goal_with_session(
     state: &mut OodaState,
     goal: &crate::goal_curation::ActiveGoal,
 ) -> GoalSessionResult {
-    let input = build_goal_advance_input(memory, state.prepared_context.as_ref(), goal);
+    let observe_only =
+        crate::read_only_guard::observe_only_enabled() || !state.identity_cognition.permits_spawn();
+    let input =
+        build_goal_advance_input(memory, state.prepared_context.as_ref(), goal, observe_only);
     let run_result = session.run_turn(input);
     apply_goal_advance_result(
         action,
@@ -139,6 +142,7 @@ pub(crate) fn advance_goal_with_session(
         &mut state.active_goals,
         goal,
         run_result,
+        observe_only,
     )
 }
 
@@ -151,6 +155,7 @@ pub(crate) fn build_goal_advance_input(
     memory: &dyn crate::cognitive_memory::CognitiveMemoryOps,
     prepared_context: Option<&crate::memory_consolidation::PreparedContext>,
     goal: &crate::goal_curation::ActiveGoal,
+    observe_only: bool,
 ) -> crate::base_types::BaseTypeTurnInput {
     use crate::base_types::BaseTypeTurnInput;
     use std::fmt::Write;
@@ -210,7 +215,7 @@ pub(crate) fn build_goal_advance_input(
         }
     }
 
-    if crate::read_only_guard::observe_only_enabled() {
+    if observe_only {
         objective.push_str(
             "\n\n## Read-only observer contract\n\
              This identity is running with SIMARD_OBSERVE_ONLY=1. Do not ask for, \
@@ -297,6 +302,7 @@ pub(crate) fn apply_goal_advance_result(
     board: &mut GoalBoard,
     goal: &crate::goal_curation::ActiveGoal,
     run_result: crate::error::SimardResult<crate::base_types::BaseTypeOutcome>,
+    observe_only: bool,
 ) -> GoalSessionResult {
     match run_result {
         Ok(outcome) => {
@@ -346,7 +352,7 @@ pub(crate) fn apply_goal_advance_result(
                     ref files,
                     issue,
                 } => {
-                    if crate::read_only_guard::observe_only_enabled() {
+                    if observe_only {
                         let reason = format!(
                             "observe-only posture converted spawn request to no-action: {task}"
                         );
