@@ -329,6 +329,25 @@ pub(crate) fn apply_goal_advance_result(
                     ref files,
                     issue,
                 } => {
+                    if crate::read_only_guard::observe_only_enabled() {
+                        let reason = format!(
+                            "observe-only posture converted spawn request to no-action: {task}"
+                        );
+                        let outcome = assess_only_outcome(
+                            action,
+                            memory,
+                            checker,
+                            board,
+                            &goal.id,
+                            &reason,
+                            progress_pct,
+                        );
+                        return GoalSessionResult {
+                            outcome,
+                            action: Some(GoalAction::NoAction { reason }),
+                        };
+                    }
+
                     // Apply the optional progress marker BEFORE spawning,
                     // so even if the engineer subprocess crashes the
                     // orchestrator's progress assessment is recorded.
