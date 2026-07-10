@@ -40,6 +40,12 @@ Accept when the claimed percent is *coherent with the plan*:
   100% — that is fine).
 - The plan field is empty but the WIP summary lists concrete artifacts
   (an open PR, a real engineer branch) and the delta is modest.
+- For an **observe-only / read-only audit goal**, concrete read-only evidence in
+  the plan is itself progress. Accept modest positive claims (roughly 5–25%)
+  when the plan records specific observed facts, files, branches, CI paths, or
+  proposals, even though no target write, PR, or shipped artifact exists. Do
+  not require a write artifact for a goal whose mandate explicitly forbids
+  writes.
 
 Reject when the claimed percent looks hallucinated:
 - A large delta with no matching plan or WIP (e.g. prior 5% → claimed 88%
