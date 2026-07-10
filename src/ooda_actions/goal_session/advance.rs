@@ -64,6 +64,11 @@ pub(crate) fn assess_only_outcome(
         }
     };
 
+    let previous_activity = board
+        .active
+        .iter()
+        .find(|goal| goal.id == goal_id)
+        .and_then(|goal| goal.current_activity.clone());
     if let Some(goal) = board.active.iter_mut().find(|goal| goal.id == goal_id) {
         goal.current_activity = Some(format!("no-action evidence: {reason}"));
     }
@@ -88,6 +93,9 @@ pub(crate) fn assess_only_outcome(
             make_outcome(action, true, detail)
         }
         Ok(EvidenceDecision::Reject { reason: rej }) => {
+            if let Some(goal) = board.active.iter_mut().find(|goal| goal.id == goal_id) {
+                goal.current_activity = previous_activity;
+            }
             eprintln!(
                 "[simard] OODA goal-action no-action REJECTED progress for '{}': {} (proposed={}%, reason={})",
                 goal_id, reason_short, pct, rej,
@@ -99,6 +107,9 @@ pub(crate) fn assess_only_outcome(
             make_outcome(action, true, detail)
         }
         Err(e) => {
+            if let Some(goal) = board.active.iter_mut().find(|goal| goal.id == goal_id) {
+                goal.current_activity = previous_activity;
+            }
             eprintln!(
                 "[simard] OODA goal-action no-action FAILED to update progress for '{}': {} (reason='{}', progress={}%)",
                 goal_id, e, reason_short, pct,
