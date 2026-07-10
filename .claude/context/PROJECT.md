@@ -26,8 +26,8 @@ A terminal-native engineering agent who drives and curates agentic coding system
 
 ### Technology Stack
 
-- **Language**: JavaScript/TypeScript
 - **Language**: Python
+- **Language**: JavaScript/TypeScript
 - **Language**: Rust
 - **Framework**: [Main framework if applicable]
 - **Database**: [Database system if applicable]
