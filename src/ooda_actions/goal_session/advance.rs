@@ -495,7 +495,8 @@ pub(crate) fn outcome_made_no_progress(outcome: &ActionOutcome) -> bool {
     outcome.success
         && outcome.action.goal_id.is_some()
         && outcome.detail.starts_with("no-action:")
-        && (!outcome.detail.contains("(progress=") || outcome.detail.contains("no-progress"))
+        && (!outcome.detail.contains("(progress=")
+            || outcome.detail.contains("(progress=0%, no-progress, goal "))
 }
 
 #[cfg(test)]
@@ -585,6 +586,27 @@ mod tests_no_progress_classifier {
         assert!(
             !outcome_made_no_progress(&outcome),
             "an accepted progress advance must NOT count as no progress: {}",
+            outcome.detail
+        );
+    }
+
+    #[test]
+    fn accepted_positive_progress_can_mention_no_progress_without_counting() {
+        let action = advance_goal_action("g");
+        let mut board = board_with("g");
+        let outcome = assess_only_outcome(
+            &action,
+            &*mem(),
+            &NoopProgressEvidenceChecker,
+            &mut board,
+            "g",
+            "fixed the prior no-progress loop",
+            Some(20),
+        );
+        assert!(outcome.success);
+        assert!(
+            !outcome_made_no_progress(&outcome),
+            "positive progress mentioning no-progress must stay progress: {}",
             outcome.detail
         );
     }
