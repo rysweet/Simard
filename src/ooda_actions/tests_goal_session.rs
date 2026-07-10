@@ -74,6 +74,12 @@ fn no_action_response_records_no_action_outcome_without_spawning() {
 
 #[test]
 fn prose_response_routes_to_spawn_engineer() {
+    let _guard = env_lock().lock().unwrap();
+    let old_observe = std::env::var_os("SIMARD_OBSERVE_ONLY");
+    unsafe {
+        std::env::remove_var("SIMARD_OBSERVE_ONLY");
+    }
+
     let goal_id = "test-goal";
     let mut state = state_with_goal(goal_id);
     let goal = live_goal(&state, goal_id);
@@ -100,6 +106,13 @@ fn prose_response_routes_to_spawn_engineer() {
             assert_eq!(task, task_text);
         }
         other => panic!("expected SpawnEngineer, got {other:?}"),
+    }
+
+    unsafe {
+        match old_observe {
+            Some(value) => std::env::set_var("SIMARD_OBSERVE_ONLY", value),
+            None => std::env::remove_var("SIMARD_OBSERVE_ONLY"),
+        }
     }
 }
 
@@ -154,6 +167,12 @@ fn observe_only_prose_response_records_no_action_without_spawn() {
 
 #[test]
 fn progress_marker_in_prose_updates_goal_progress_before_spawn() {
+    let _guard = env_lock().lock().unwrap();
+    let old_observe = std::env::var_os("SIMARD_OBSERVE_ONLY");
+    unsafe {
+        std::env::remove_var("SIMARD_OBSERVE_ONLY");
+    }
+
     let goal_id = "test-goal";
     let mut state = state_with_goal(goal_id);
     let goal = live_goal(&state, goal_id);
@@ -179,6 +198,13 @@ fn progress_marker_in_prose_updates_goal_progress_before_spawn() {
     match updated.status {
         GoalProgress::InProgress { percent } => assert_eq!(percent, 70),
         other => panic!("expected InProgress(70), got {other:?}"),
+    }
+
+    unsafe {
+        match old_observe {
+            Some(value) => std::env::set_var("SIMARD_OBSERVE_ONLY", value),
+            None => std::env::remove_var("SIMARD_OBSERVE_ONLY"),
+        }
     }
 }
 
@@ -287,4 +313,46 @@ fn objective_includes_goal_metadata_and_environment() {
     assert!(input.objective.contains(goal_id));
     assert!(input.objective.contains(&format!("Goal {goal_id}")));
     assert!(input.objective.contains("Environment context"));
+}
+
+#[test]
+fn observe_only_objective_forbids_engineer_dispatch_and_requires_evidence_protocol() {
+    let _guard = env_lock().lock().unwrap();
+    let old_observe = std::env::var_os("SIMARD_OBSERVE_ONLY");
+    unsafe {
+        std::env::set_var("SIMARD_OBSERVE_ONLY", "1");
+    }
+
+    let goal_id = "test-goal";
+    let mut state = state_with_goal(goal_id);
+    let goal = live_goal(&state, goal_id);
+    let action = planned_action(goal_id);
+
+    let (mut session, captured) = MockSession::new_ok("NO ACTION\nPROGRESS: 0", vec![]);
+
+    let mem_box = mock_memory();
+    let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
+    let _ = advance_goal_with_session(
+        &action,
+        &*mem_box,
+        &checker,
+        &mut session,
+        &mut state,
+        &goal,
+    );
+
+    let captured = captured.borrow();
+    let input = captured.as_ref().expect("session must be invoked once");
+    assert!(input.objective.contains("Read-only observer contract"));
+    assert!(input.objective.contains("Do not ask for"));
+    assert!(input.objective.contains("dispatch an engineer"));
+    assert!(input.objective.contains("NO ACTION"));
+    assert!(input.objective.contains("EVIDENCE/PROPOSALS"));
+
+    unsafe {
+        match old_observe {
+            Some(value) => std::env::set_var("SIMARD_OBSERVE_ONLY", value),
+            None => std::env::remove_var("SIMARD_OBSERVE_ONLY"),
+        }
+    }
 }

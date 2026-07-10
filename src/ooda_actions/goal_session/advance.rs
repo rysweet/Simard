@@ -206,6 +206,19 @@ pub(crate) fn build_goal_advance_input(
         }
     }
 
+    if crate::read_only_guard::observe_only_enabled() {
+        objective.push_str(
+            "\n\n## Read-only observer contract\n\
+             This identity is running with SIMARD_OBSERVE_ONLY=1. Do not ask for, \
+             plan, or dispatch an engineer. Perform the allowed read-only inspection \
+             in this session using only read commands, then respond with a line \
+             containing exactly NO ACTION, a conservative PROGRESS: NN marker when \
+             you have concrete evidence, and EVIDENCE/PROPOSALS bullets. If you \
+             cannot gather new evidence, respond NO ACTION with PROGRESS: 0 and \
+             state why.",
+        );
+    }
+
     // Append recalled memory context (facts, prospectives, procedures) when available.
     if let Some(ctx) = prepared_context {
         if !ctx.relevant_facts.is_empty() {
