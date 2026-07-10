@@ -75,6 +75,7 @@ fn no_action_response_records_no_action_outcome_without_spawning() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn prose_response_routes_to_spawn_engineer() {
     let _guard = env_lock().lock().unwrap();
     let old_observe = std::env::var_os("SIMARD_OBSERVE_ONLY");
@@ -119,6 +120,7 @@ fn prose_response_routes_to_spawn_engineer() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn observe_only_prose_response_records_no_action_without_spawn() {
     let _guard = env_lock().lock().unwrap();
     let old_observe = std::env::var_os("SIMARD_OBSERVE_ONLY");
@@ -168,6 +170,7 @@ fn observe_only_prose_response_records_no_action_without_spawn() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn read_only_identity_prose_response_records_no_action_without_env_floor() {
     let _guard = env_lock().lock().unwrap();
     let old_observe = std::env::var_os("SIMARD_OBSERVE_ONLY");
@@ -217,6 +220,7 @@ fn read_only_identity_prose_response_records_no_action_without_env_floor() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn progress_marker_in_prose_updates_goal_progress_before_spawn() {
     let _guard = env_lock().lock().unwrap();
     let old_observe = std::env::var_os("SIMARD_OBSERVE_ONLY");
@@ -425,6 +429,7 @@ fn objective_includes_goal_metadata_and_environment() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn observe_only_objective_forbids_engineer_dispatch_and_requires_evidence_protocol() {
     let _guard = env_lock().lock().unwrap();
     let old_observe = std::env::var_os("SIMARD_OBSERVE_ONLY");
