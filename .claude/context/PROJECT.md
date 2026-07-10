@@ -10,7 +10,7 @@ Replace the sections below with information about your project.
 
 ---
 
-## Project: observe-only-no-spawn
+## Project: issue-2323-eliminate-the-private-gymeval-fork-in-simard-by-ad
 
 ## Overview
 
@@ -27,6 +27,7 @@ A terminal-native engineering agent who drives and curates agentic coding system
 ### Technology Stack
 
 - **Language**: JavaScript/TypeScript
+- **Language**: Python
 - **Language**: Rust
 - **Framework**: [Main framework if applicable]
 - **Database**: [Database system if applicable]
