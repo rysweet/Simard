@@ -2,10 +2,12 @@
 //! dispatch contract: NO ACTION marker, SpawnEngineer prose, PROGRESS
 //! marker, and empty-response failure.
 
+use crate::goal_curation::progress_evidence::{EvidenceDecision, ProgressEvidenceChecker};
 use crate::goal_curation::{GoalBoard, GoalProgress};
 use crate::ooda_actions::goal_session::{GoalAction, advance_goal_with_session};
 use crate::ooda_actions::test_helpers::*;
 use crate::ooda_loop::{ActionKind, OodaState, PlannedAction};
+use chrono::{DateTime, Utc};
 use std::sync::{Mutex, OnceLock};
 
 fn planned_action(goal_id: &str) -> PlannedAction {
@@ -233,6 +235,64 @@ fn progress_marker_in_no_action_updates_goal_progress() {
     match updated.status {
         GoalProgress::InProgress { percent } => assert_eq!(percent, 95),
         other => panic!("expected InProgress(95), got {other:?}"),
+    }
+}
+
+struct RequiresCurrentEvidence;
+
+impl ProgressEvidenceChecker for RequiresCurrentEvidence {
+    fn check(
+        &self,
+        goal: &crate::goal_curation::ActiveGoal,
+        _old_percent: u32,
+        _new_percent: u32,
+        _since: DateTime<Utc>,
+    ) -> EvidenceDecision {
+        let activity = goal.current_activity.as_deref().unwrap_or("");
+        if activity.contains("EVIDENCE:") {
+            EvidenceDecision::Accept {
+                reason: "current no-action evidence was visible".to_string(),
+            }
+        } else {
+            EvidenceDecision::Reject {
+                reason: format!("missing current no-action evidence; activity={activity:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn no_action_progress_review_sees_current_cycle_evidence() {
+    let goal_id = "test-goal";
+    let mut state = state_with_goal(goal_id);
+    let goal = live_goal(&state, goal_id);
+    let action = planned_action(goal_id);
+
+    let (mut session, _captured) = MockSession::new_ok(
+        "NO ACTION\nPROGRESS: 5\nEVIDENCE:\n- observed CODEOWNERS is missing",
+        vec![],
+    );
+
+    let mem_box = mock_memory();
+    let result = advance_goal_with_session(
+        &action,
+        &*mem_box,
+        &RequiresCurrentEvidence,
+        &mut session,
+        &mut state,
+        &goal,
+    );
+
+    assert!(result.outcome.success);
+    assert!(
+        result.outcome.detail.contains("progress=5%"),
+        "expected accepted progress detail, got: {}",
+        result.outcome.detail
+    );
+    let updated = live_goal(&state, goal_id);
+    match updated.status {
+        GoalProgress::InProgress { percent } => assert_eq!(percent, 5),
+        other => panic!("expected InProgress(5), got {other:?}"),
     }
 }
 

@@ -64,6 +64,10 @@ pub(crate) fn assess_only_outcome(
         }
     };
 
+    if let Some(goal) = board.active.iter_mut().find(|goal| goal.id == goal_id) {
+        goal.current_activity = Some(format!("no-action evidence: {reason}"));
+    }
+
     match update_goal_progress_with_evidence(
         board,
         goal_id,
