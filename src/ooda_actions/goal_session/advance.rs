@@ -54,10 +54,20 @@ pub(crate) fn assess_only_outcome(
         return make_outcome(action, true, detail);
     };
 
+    if pct == 0 {
+        eprintln!(
+            "[simard] OODA goal-action no-action for '{}': {} (progress=0%, no-progress)",
+            goal_id, reason_short,
+        );
+        let detail = format!(
+            "no-action: {} (progress=0%, no-progress, goal '{}')",
+            reason_short, goal_id,
+        );
+        return make_outcome(action, true, detail);
+    }
+
     let new_progress = if pct >= 100 {
         GoalProgress::Completed
-    } else if pct == 0 {
-        GoalProgress::NotStarted
     } else {
         GoalProgress::InProgress {
             percent: pct as u32,
@@ -615,6 +625,9 @@ mod tests_no_progress_classifier {
     fn accepted_zero_progress_marker_is_still_no_progress() {
         let action = advance_goal_action("g");
         let mut board = board_with("g");
+        if let Some(goal) = board.active.iter_mut().find(|goal| goal.id == "g") {
+            goal.status = crate::goal_curation::GoalProgress::InProgress { percent: 20 };
+        }
         let outcome = assess_only_outcome(
             &action,
             &*mem(),
@@ -629,6 +642,19 @@ mod tests_no_progress_classifier {
             outcome_made_no_progress(&outcome),
             "accepted PROGRESS: 0 must not reset no-progress tracking: {}",
             outcome.detail
+        );
+        let status = board
+            .active
+            .iter()
+            .find(|goal| goal.id == "g")
+            .map(|goal| &goal.status)
+            .expect("goal remains");
+        assert!(
+            matches!(
+                status,
+                crate::goal_curation::GoalProgress::InProgress { percent: 20 }
+            ),
+            "PROGRESS: 0 must not reset prior progress, got {status:?}"
         );
     }
 
