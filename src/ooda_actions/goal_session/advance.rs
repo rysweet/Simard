@@ -502,11 +502,20 @@ pub(crate) fn apply_goal_advance_result(
 /// already counted by the brain-failure safeguard's `goal_failure_counts`, so
 /// this predicate excludes it to avoid double-counting.
 pub(crate) fn outcome_made_no_progress(outcome: &ActionOutcome) -> bool {
+    let Some(goal_id) = outcome.action.goal_id.as_deref() else {
+        return false;
+    };
+    let progress_suffix = outcome
+        .detail
+        .rfind(" (progress=")
+        .map(|idx| &outcome.detail[idx..]);
+    let authored_progress =
+        progress_suffix.is_some_and(|suffix| suffix.ends_with(&format!(", goal '{goal_id}')")));
+    let authored_zero_progress = progress_suffix
+        .is_some_and(|suffix| suffix.ends_with(&format!(", no-progress, goal '{goal_id}')")));
     outcome.success
-        && outcome.action.goal_id.is_some()
         && outcome.detail.starts_with("no-action:")
-        && (!outcome.detail.contains("(progress=")
-            || outcome.detail.contains("(progress=0%, no-progress, goal "))
+        && (!authored_progress || authored_zero_progress)
 }
 
 #[cfg(test)]
@@ -568,7 +577,7 @@ mod tests_no_progress_classifier {
             &NoopProgressEvidenceChecker,
             &mut board,
             "g",
-            "I'll verify concretely next cycle",
+            "I'll verify concretely next cycle; prior detail said (progress=20%, goal 'g')",
             None,
         );
         assert!(outcome.success);
