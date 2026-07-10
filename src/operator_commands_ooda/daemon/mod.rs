@@ -386,10 +386,17 @@ pub fn run_ooda_daemon(
     //   2. Direct LLM (LlmReviewerProgressChecker)
     //   3. NoopProgressEvidenceChecker (fallback)
     //
-    // Honors `SIMARD_PROGRESS_EVIDENCE=off` as a kill switch.
-    let kill_switch = std::env::var("SIMARD_PROGRESS_EVIDENCE")
-        .ok()
+    // Honors `SIMARD_PROGRESS_EVIDENCE=off` as a kill switch, and
+    // `SIMARD_PROGRESS_EVIDENCE=direct` as an explicit request to use the
+    // direct LLM reviewer instead of the recipe-runner-backed checker.
+    let progress_mode = std::env::var("SIMARD_PROGRESS_EVIDENCE").ok();
+    let kill_switch = progress_mode
+        .as_deref()
         .map(|v| v.eq_ignore_ascii_case("off"))
+        .unwrap_or(false);
+    let force_direct = progress_mode
+        .as_deref()
+        .map(|v| v.eq_ignore_ascii_case("direct"))
         .unwrap_or(false);
     let progress_evidence: std::sync::Arc<
         dyn crate::goal_curation::progress_evidence::ProgressEvidenceChecker,
@@ -399,8 +406,9 @@ pub fn run_ooda_daemon(
             "[simard] progress-evidence: DISABLED (NoopProgressEvidenceChecker -- SIMARD_PROGRESS_EVIDENCE=off)",
         );
         std::sync::Arc::new(crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker)
-    } else if let Some(recipe_checker) =
-        crate::goal_curation::recipe_progress_checker::RecipeProgressChecker::new(&repo_root)
+    } else if !force_direct
+        && let Some(recipe_checker) =
+            crate::goal_curation::recipe_progress_checker::RecipeProgressChecker::new(&repo_root)
     {
         daemon_log(
             &state_root,
@@ -412,7 +420,11 @@ pub fn run_ooda_daemon(
             Ok(reviewer_provider) => {
                 daemon_log(
                     &state_root,
-                    "[simard] progress-evidence: enabled (LlmReviewerProgressChecker -- direct LLM fallback)",
+                    if force_direct {
+                        "[simard] progress-evidence: enabled (LlmReviewerProgressChecker -- SIMARD_PROGRESS_EVIDENCE=direct)"
+                    } else {
+                        "[simard] progress-evidence: enabled (LlmReviewerProgressChecker -- direct LLM fallback)"
+                    },
                 );
                 let reviewer_submitter =
                     crate::ooda_brain::SessionLlmSubmitter::new(reviewer_provider);
