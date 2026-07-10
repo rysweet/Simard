@@ -1286,12 +1286,12 @@ mod tests_memory_graph {
             text.contains(fact_marker),
             "the live semantic fact {fact_marker:?} must appear in the graph nodes \
              (LIVE data, not a placeholder). Nodes: {}",
-            &v["nodes"]
+            v["nodes"]
         );
         assert!(
             text.contains(ep_marker),
             "the live episode {ep_marker:?} must appear in the graph nodes. Nodes: {}",
-            &v["nodes"]
+            v["nodes"]
         );
         let types = node_types(v);
         assert!(
@@ -1324,13 +1324,13 @@ mod tests_memory_graph {
         assert!(
             text.contains(proc_marker),
             "the live procedure {proc_marker:?} must appear in the graph nodes; nodes: {}",
-            &v["nodes"]
+            v["nodes"]
         );
         assert!(
             text.contains(prosp_marker),
             "the live prospective memory {prosp_marker:?} must appear in the graph \
              nodes; nodes: {}",
-            &v["nodes"]
+            v["nodes"]
         );
     }
 
@@ -1527,7 +1527,7 @@ mod tests_memory_graph {
                 hubs.contains(t),
                 "an in-build failure must keep the six type hubs (legend/filters stay \
                  meaningful); missing hub {t:?}. Nodes: {}",
-                &v["nodes"]
+                v["nodes"]
             );
         }
     }
