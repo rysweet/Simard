@@ -80,6 +80,8 @@ fn render_unit(
 }
 
 fn render_service_path(simard_home: &str) -> InstallResult<String> {
+    validate_unit_env_path("SIMARD_HOME", simard_home)?;
+
     let user_home = std::env::var_os("HOME")
         .ok_or_else(|| InstallError::new("HOME is required to render systemd service PATH"))?;
     let user_home = user_home
@@ -100,7 +102,7 @@ fn validate_unit_env_path(label: &str, value: &str) -> InstallResult<()> {
     }
     if let Some(ch) = value
         .chars()
-        .find(|ch| matches!(ch, '\n' | '\r' | '%') || ch.is_ascii_whitespace())
+        .find(|ch| matches!(ch, '\n' | '\r' | '%' | ':') || ch.is_ascii_whitespace())
     {
         return err(format!(
             "{label} contains unsafe character '{ch}' for systemd unit rendering"
