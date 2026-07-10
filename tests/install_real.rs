@@ -153,6 +153,20 @@ fn install_defaults_simard_home_under_home_and_uses_fake_systemctl() {
     );
     assert!(unit_dir.join("simard-ooda.service").is_file());
     assert!(unit_dir.join("simard-signal.service").is_file());
+    let expected_service_path = format!(
+        "Environment=PATH={}/.local/bin:{}/.cargo/bin:{}/bin:/usr/local/bin:/usr/bin:/bin",
+        fake_home.display(),
+        fake_home.display(),
+        simard_home.display()
+    );
+    assert_file_contains(
+        &unit_dir.join("simard-ooda.service"),
+        &expected_service_path,
+    );
+    assert_file_contains(
+        &unit_dir.join("simard-signal.service"),
+        &expected_service_path,
+    );
     assert_systemctl_logged(&systemctl_log, &["--user", "daemon-reload"]);
     assert_systemctl_logged(&systemctl_log, &["--user", "enable", "simard-ooda.service"]);
     assert_systemctl_logged(
