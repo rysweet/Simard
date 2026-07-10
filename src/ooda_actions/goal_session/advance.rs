@@ -233,9 +233,10 @@ pub(crate) fn build_goal_advance_input(
              plan, or dispatch an engineer. Perform the allowed read-only inspection \
              in this session using only read commands, then respond with a line \
              containing exactly NO ACTION, a conservative PROGRESS: NN marker when \
-             you have concrete evidence, and EVIDENCE/PROPOSALS bullets. If you \
-             cannot gather new evidence, respond NO ACTION with PROGRESS: 0 and \
-             state why.",
+             you have concrete evidence, and EVIDENCE/PROPOSALS bullets. Read-only \
+             means no writes, not no progress: if you gathered concrete evidence, \
+             use a modest positive progress value such as 5-25. If you cannot gather \
+             new evidence, respond NO ACTION with PROGRESS: 0 and state why.",
         );
     }
 

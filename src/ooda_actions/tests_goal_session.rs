@@ -457,6 +457,12 @@ fn observe_only_objective_forbids_engineer_dispatch_and_requires_evidence_protoc
     assert!(input.objective.contains("dispatch an engineer"));
     assert!(input.objective.contains("NO ACTION"));
     assert!(input.objective.contains("EVIDENCE/PROPOSALS"));
+    assert!(
+        input
+            .objective
+            .contains("Read-only means no writes, not no progress")
+    );
+    assert!(input.objective.contains("modest positive progress"));
 
     unsafe {
         match old_observe {
