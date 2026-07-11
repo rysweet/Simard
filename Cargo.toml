@@ -132,7 +132,7 @@ path = "src/bin/supply_chain_steward.rs"
 # v40->v41+ no-data-loss gate now accepts v41-or-newer). Simard's direct `lbug` dep
 # below is repointed at the SAME fork rev in lockstep so the final binary links
 # exactly one engine. Still an upstream-`main` commit.
-amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "ae7a06ba6ce72b86fe223063a0212a574917b74f", features = ["persistent"] }
+amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "1f3ddcb5542d979579055c532d2fd3d5ce761a7e", features = ["persistent"] }
 rustyclawd-core = { git = "https://github.com/rysweet/RustyClawd.git", rev = "ddae0fdf1b922ae8604b0a4e178a3634ada7e350" }
 rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git", rev = "ddae0fdf1b922ae8604b0a4e178a3634ada7e350" }
 # De-fork (issue #2323): the gym/eval RUNNER is now the upstream
