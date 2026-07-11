@@ -68,6 +68,11 @@ simard-ooda.service
 simard-signal.service
 ```
 
+The generated units include a deterministic tool `PATH`:
+`$HOME/.local/bin:$HOME/.cargo/bin:$SIMARD_HOME/bin:/usr/local/bin:/usr/bin:/bin`.
+That lets the daemon find user-installed tools such as `amplihack` without
+depending on interactive shell aliases or profile files.
+
 ## 2. Verify the services
 
 Check systemd first:
@@ -113,6 +118,7 @@ Both unit files should use the resolved `SIMARD_HOME`:
 WorkingDirectory=/home/you/.simard
 ExecStart=/home/you/.simard/bin/simard ooda run
 ExecStart=/home/you/.simard/bin/simard signal run
+Environment=PATH=/home/you/.local/bin:/home/you/.cargo/bin:/home/you/.simard/bin:/usr/local/bin:/usr/bin:/bin
 ```
 
 No unit should reference `target/`, the repository checkout, or `worktrees/main`.
