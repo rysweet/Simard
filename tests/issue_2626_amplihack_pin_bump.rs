@@ -46,14 +46,11 @@ use std::path::PathBuf;
 /// amplihack-rs `main` HEAD carrying the `amplihack-agent-eval` crate to adopt.
 const AGENT_EVAL_TARGET_REV: &str = "14dc30b10e87764120c6f2bae7f3630522c29e5d";
 /// amplihack-memory-lib `main` commit carrying the `amplihack-memory` crate:
-/// PR #129's squash-merge — the lbug portability fix. It pins `lbug` to the
-/// rysweet/ladybug-rust fork (build.rs keeps `link_bundled_deps=false`, links
-/// only the self-contained liblbug.a), so building from source both cures the
-/// libstdc++ std::format ABI SIGSEGV on newer hosts (Ubuntu 26.04) and links
-/// cleanly with no unsafe `--allow-multiple-definition`. One commit ahead of the
-/// prior #126 pin, no regression. The fork engine writes on-disk store format
-/// v42 (forward-only from v41).
-const MEMORY_TARGET_REV: &str = "5807d056112b8e6f73dae9c1fac05f214f9c6ece";
+/// PR #131's squash-merge — the lbug storage-compatibility fix. It pins `lbug`
+/// to the rysweet/ladybug-rust fork commit whose crate version is `0.17.1`, so
+/// Simard does not accidentally link a v41-capable `0.17.0` fork engine against
+/// a live v42 cognitive store.
+const MEMORY_TARGET_REV: &str = "283e9a2f8f38b98343770f219c3f5d16bd1752dc";
 
 /// The stale revs the bump must move *off of* (anti-regression sentinels).
 const AGENT_EVAL_STALE_REV: &str = "59548a96049ab8d558110bcaf9c82a4316f1bbf0";
@@ -68,7 +65,7 @@ const MEMORY_REMOTE: &str = "https://github.com/rysweet/amplihack-memory-lib.git
 /// rysweet/ladybug-rust fork (issue #3119: fixes the from-source duplicate-symbol
 /// link + the libstdc++ std::format ABI SIGSEGV). It must pin the SAME fork rev
 /// amplihack-memory resolves to, so cargo unifies to exactly one lbug engine.
-const LBUG_FORK_TARGET_REV: &str = "202352434642e683fdf008b68004d0645a57cd35";
+const LBUG_FORK_TARGET_REV: &str = "e3872c8f22562d55031726a304e99ef92d1e25ec";
 const LBUG_FORK_REMOTE: &str = "https://github.com/rysweet/ladybug-rust";
 
 // ── Path / IO helpers ───────────────────────────────────────────────────────
