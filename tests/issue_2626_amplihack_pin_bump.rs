@@ -50,7 +50,7 @@ const AGENT_EVAL_TARGET_REV: &str = "14dc30b10e87764120c6f2bae7f3630522c29e5d";
 /// to the rysweet/ladybug-rust fork commit whose crate version is `0.17.1`, so
 /// Simard does not accidentally link a v41-capable `0.17.0` fork engine against
 /// a live v42 cognitive store.
-const MEMORY_TARGET_REV: &str = "283e9a2f8f38b98343770f219c3f5d16bd1752dc";
+const MEMORY_TARGET_REV: &str = "c266e15d1399967c04324370e77cf281990b8be1";
 
 /// The stale revs the bump must move *off of* (anti-regression sentinels).
 const AGENT_EVAL_STALE_REV: &str = "59548a96049ab8d558110bcaf9c82a4316f1bbf0";
@@ -65,7 +65,7 @@ const MEMORY_REMOTE: &str = "https://github.com/rysweet/amplihack-memory-lib.git
 /// rysweet/ladybug-rust fork (issue #3119: fixes the from-source duplicate-symbol
 /// link + the libstdc++ std::format ABI SIGSEGV). It must pin the SAME fork rev
 /// amplihack-memory resolves to, so cargo unifies to exactly one lbug engine.
-const LBUG_FORK_TARGET_REV: &str = "e3872c8f22562d55031726a304e99ef92d1e25ec";
+const LBUG_FORK_TARGET_REV: &str = "5a2c107881879f4d1bb594b14967948870e65cdc";
 const LBUG_FORK_REMOTE: &str = "https://github.com/rysweet/ladybug-rust";
 
 // ── Path / IO helpers ───────────────────────────────────────────────────────
