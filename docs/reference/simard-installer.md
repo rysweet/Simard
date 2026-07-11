@@ -53,12 +53,35 @@ simard install [--simard-home PATH] [--dry-run] [--systemd-user-dir PATH] [--sys
 | --- | --- | --- |
 | `SIMARD_HOME` | `$HOME/.simard` | Install root when `--simard-home` is not supplied. |
 | `XDG_CONFIG_HOME` | `$HOME/.config` | Base directory for the default user systemd unit directory. |
+| `SIMARD_INSTALL_PROMPT_ASSETS_ROOT` | Auto-discovered | Preferred prompt asset source root for packaged installs. Must contain `simard/ooda_orient.md` and `simard/recipes/ooda-orient.yaml`. |
+| `SIMARD_PROMPT_ASSET_ROOT` | Auto-discovered | Compatibility prompt asset source root with the same expected directory shape as `SIMARD_INSTALL_PROMPT_ASSETS_ROOT`. |
+| `SIMARD_PROMPT_ASSETS_DIR` | Auto-discovered | Compatibility prompt asset source. May point either at a root containing `simard/` or directly at the `simard/` asset directory; direct `simard/` values are normalized to their parent root. |
 
 Precedence for the install root is:
 
 1. `--simard-home PATH`
 2. `SIMARD_HOME`
 3. `$HOME/.simard`
+
+Precedence for prompt asset source discovery is:
+
+1. `SIMARD_INSTALL_PROMPT_ASSETS_ROOT`
+2. `SIMARD_PROMPT_ASSET_ROOT`
+3. `SIMARD_PROMPT_ASSETS_DIR`
+4. `prompt_assets` under the current working directory
+5. `prompt_assets` under the compiled Cargo manifest directory
+
+The selected prompt asset source must contain both required files:
+
+```text
+<source-root>/
+`- simard/
+   |- ooda_orient.md
+   `- recipes/
+      `- ooda-orient.yaml
+```
+
+If no candidate has that shape, `simard install` exits non-zero before staging or service activation and reports the checked environment variables and fallback roots.
 
 All installer paths are validated before any live mutation. Empty paths, relative paths, control characters, newlines, carriage returns, and unsafe systemd percent escapes are rejected. Rejection is fail-closed: the installer exits non-zero and does not activate services.
 
@@ -73,6 +96,7 @@ For the default home, the installer owns this layout:
 |- prompt_assets/
 |- cognitive/
 |- config.toml
+|- .install.lock
 |- .install-staging/
 `- .install-backups/
 ```
@@ -81,6 +105,7 @@ For the default home, the installer owns this layout:
 | --- | --- | --- |
 | `$SIMARD_HOME/bin/simard` | Installer | Live Simard binary used by the systemd units. Replaced only by atomic rename. |
 | `$SIMARD_HOME/prompt_assets/` | Installer | Prompt assets that match the installed binary. Installed as a staged tree, then swapped into place through the directory strategy below. |
+| `$SIMARD_HOME/.install.lock` | Installer | Per-`SIMARD_HOME` install lock. A second installer for the same home fails instead of racing live replacements. |
 | `$SIMARD_HOME/.install-staging/` | Installer | Private staging area for the current install attempt. |
 | `$SIMARD_HOME/.install-backups/` | Installer/operator | Previous binary backups and operator-created memory snapshots. |
 | `$SIMARD_HOME/cognitive/` | Runtime | Cognitive memory store. The installer does not delete or rewrite it. |
@@ -143,13 +168,14 @@ services pointed at a half-written binary or partial prompt tree.
 2. Resolve the current executable: the binary running `simard install` is the binary being deployed.
 3. Render both systemd unit files in memory and validate their paths.
 4. Resolve the `systemctl` executable when activation is enabled.
-5. Stage the new binary and prompt assets under `.install-staging/`.
-6. Preserve the previous live binary under `.install-backups/` when one exists and differs from the new binary.
-7. Atomically rename the staged binary into `$SIMARD_HOME/bin/simard`.
-8. Replace `$SIMARD_HOME/prompt_assets/` with the staged asset tree using the prompt-assets swap strategy below.
-9. Atomically rename staged unit files into the user systemd directory.
-10. Print rollback guidance, including memory backup guidance, before any service restart.
-11. Reload, enable, and restart the user services unless `--dry-run` was supplied.
+5. Acquire the per-`SIMARD_HOME` install lock for the live transaction.
+6. Stage the new binary and prompt assets under `.install-staging/`.
+7. Preserve the previous live binary under `.install-backups/` when one exists and differs from the new binary.
+8. Atomically rename the staged binary into `$SIMARD_HOME/bin/simard`.
+9. Replace `$SIMARD_HOME/prompt_assets/` with the staged asset tree using the prompt-assets swap strategy below.
+10. Atomically rename staged unit files into the user systemd directory.
+11. Print rollback guidance, including memory backup guidance, before any service restart.
+12. Reload, enable, and restart the user services unless `--dry-run` was supplied.
 
 The live binary must never be overwritten by copying into the final path. The
 only live-binary replacement operation is a rename from a fully staged file.
@@ -203,8 +229,11 @@ services use the installed binary and assets.
 one:
 
 ```text
-$SIMARD_HOME/.install-backups/simard.<UTC>.bak
+$SIMARD_HOME/.install-backups/simard.<transaction-id>.bak
 ```
+
+The backup is first written to a sibling temporary file and then renamed into
+that final path, so operators never see a partially written final backup.
 
 The installer does not rewrite cognitive memory, but operators should snapshot
 memory before a service swap when they need a rollback point for state as well
@@ -286,6 +315,7 @@ activation when any required step fails, including:
 - invalid `SIMARD_HOME` or override paths
 - missing or non-executable `systemctl` when activation is enabled
 - failure to read the current executable
+- failure to acquire the per-`SIMARD_HOME` install lock
 - failure to stage the binary, prompt assets, or units
 - failure to preserve the previous binary
 - failure to atomically rename a staged live file into place
