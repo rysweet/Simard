@@ -18,10 +18,23 @@ pub fn render_units(layout: &InstallLayout) -> InstallResult<RenderedUnits> {
     let binary = layout.binary_path.to_str().ok_or_else(|| {
         InstallError::new("installed binary path must be valid UTF-8 for systemd unit rendering")
     })?;
+    let service_path = render_service_path(home)?;
 
     Ok(RenderedUnits {
-        ooda: render_unit("Simard OODA daemon", home, binary, "ooda run"),
-        signal: render_unit("Simard Signal service", home, binary, "signal run"),
+        ooda: render_unit(
+            "Simard OODA daemon",
+            home,
+            binary,
+            "ooda run",
+            &service_path,
+        ),
+        signal: render_unit(
+            "Simard Signal service",
+            home,
+            binary,
+            "signal run",
+            &service_path,
+        ),
     })
 }
 
@@ -54,10 +67,48 @@ pub fn activate(systemctl: &Path) -> InstallResult<()> {
     Ok(())
 }
 
-fn render_unit(description: &str, working_directory: &str, binary: &str, args: &str) -> String {
+fn render_unit(
+    description: &str,
+    working_directory: &str,
+    binary: &str,
+    args: &str,
+    service_path: &str,
+) -> String {
     format!(
-        "[Unit]\nDescription={description}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory={working_directory}\nExecStart={binary} {args}\nRestart=on-failure\nRestartSec=10\nEnvironment=SIMARD_HOME={working_directory}\nEnvironment=SIMARD_PROMPT_ASSETS_DIR={working_directory}/prompt_assets/simard\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription={description}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory={working_directory}\nExecStart={binary} {args}\nRestart=on-failure\nRestartSec=10\nEnvironment=SIMARD_HOME={working_directory}\nEnvironment=SIMARD_PROMPT_ASSETS_DIR={working_directory}/prompt_assets/simard\nEnvironment=PATH={service_path}\n\n[Install]\nWantedBy=default.target\n"
     )
+}
+
+fn render_service_path(simard_home: &str) -> InstallResult<String> {
+    validate_unit_env_path("SIMARD_HOME", simard_home)?;
+
+    let user_home = std::env::var_os("HOME")
+        .ok_or_else(|| InstallError::new("HOME is required to render systemd service PATH"))?;
+    let user_home = user_home
+        .to_str()
+        .ok_or_else(|| InstallError::new("HOME must be valid UTF-8 for systemd unit rendering"))?;
+    validate_unit_env_path("HOME", user_home)?;
+
+    Ok(format!(
+        "{user_home}/.local/bin:{user_home}/.cargo/bin:{simard_home}/bin:/usr/local/bin:/usr/bin:/bin"
+    ))
+}
+
+fn validate_unit_env_path(label: &str, value: &str) -> InstallResult<()> {
+    if value.is_empty() {
+        return err(format!(
+            "{label} must not be empty for systemd unit rendering"
+        ));
+    }
+    if let Some(ch) = value
+        .chars()
+        .find(|ch| matches!(ch, '\n' | '\r' | '%' | ':') || ch.is_ascii_whitespace())
+    {
+        return err(format!(
+            "{label} contains unsafe character '{ch}' for systemd unit rendering"
+        ));
+    }
+    Ok(())
 }
 
 fn write_unit_atomically(path: &Path, contents: &str, transaction_id: &str) -> InstallResult<()> {

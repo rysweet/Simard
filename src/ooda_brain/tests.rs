@@ -1037,7 +1037,7 @@ fn t14_large_input_truncated_in_error_message() {
             || msg.contains("...")
             || msg.contains("bytes"),
         "truncated error should signal that truncation occurred, got first 200 bytes: {}",
-        &msg.chars().take(200).collect::<String>()
+        msg.chars().take(200).collect::<String>()
     );
 }
 

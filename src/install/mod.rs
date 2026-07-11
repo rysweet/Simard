@@ -84,6 +84,7 @@ pub fn run(config: InstallConfig) -> InstallResult<InstallOutcome> {
     }
 
     let systemctl = systemd::resolve_systemctl(config.systemctl.as_deref())?;
+    let _install_lock = paths::acquire_install_lock(&layout)?;
     let staging = paths::prepare_staging(&layout)?;
     binary::stage_binary(&current_binary, &staging.binary)?;
     assets::stage_prompt_assets(&prompt_source, &staging.prompt_assets)?;

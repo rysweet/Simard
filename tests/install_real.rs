@@ -153,6 +153,20 @@ fn install_defaults_simard_home_under_home_and_uses_fake_systemctl() {
     );
     assert!(unit_dir.join("simard-ooda.service").is_file());
     assert!(unit_dir.join("simard-signal.service").is_file());
+    let expected_service_path = format!(
+        "Environment=PATH={}/.local/bin:{}/.cargo/bin:{}/bin:/usr/local/bin:/usr/bin:/bin",
+        fake_home.display(),
+        fake_home.display(),
+        simard_home.display()
+    );
+    assert_file_contains(
+        &unit_dir.join("simard-ooda.service"),
+        &expected_service_path,
+    );
+    assert_file_contains(
+        &unit_dir.join("simard-signal.service"),
+        &expected_service_path,
+    );
     assert_systemctl_logged(&systemctl_log, &["--user", "daemon-reload"]);
     assert_systemctl_logged(&systemctl_log, &["--user", "enable", "simard-ooda.service"]);
     assert_systemctl_logged(
@@ -487,6 +501,36 @@ fn simard_home_with_spaces_fails_before_any_mutation_or_systemctl_call() {
     assert!(
         stderr.contains("SIMARD_HOME") && stderr.contains("unsafe character"),
         "whitespace in SIMARD_HOME should fail with a precise validation error; stderr:\n{stderr}"
+    );
+    assert!(
+        !simard_home.exists(),
+        "invalid SIMARD_HOME must fail before creating install directories"
+    );
+    assert_no_systemctl_invocation(&systemctl_log);
+}
+
+#[cfg(unix)]
+#[test]
+fn simard_home_with_path_separator_fails_before_any_mutation_or_systemctl_call() {
+    let temp = TempDir::new().expect("tempdir");
+    let simard_home = temp.path().join("simard:home");
+    let unit_dir = temp.path().join("systemd-user");
+    let (systemctl, systemctl_log) = fake_systemctl(temp.path());
+
+    let assert = simard()
+        .args(["install", "--simard-home"])
+        .arg(&simard_home)
+        .args(["--systemd-user-dir"])
+        .arg(&unit_dir)
+        .arg("--systemctl")
+        .arg(&systemctl)
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("SIMARD_HOME") && stderr.contains("unsafe character ':'"),
+        "PATH separator in SIMARD_HOME should fail with a precise validation error; stderr:\n{stderr}"
     );
     assert!(
         !simard_home.exists(),

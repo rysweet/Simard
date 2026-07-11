@@ -1,5 +1,6 @@
 use std::ffi::OsStr;
 use std::fs;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -27,6 +28,11 @@ pub struct StagingLayout {
     pub root: PathBuf,
     pub binary: PathBuf,
     pub prompt_assets: PathBuf,
+}
+
+#[derive(Debug)]
+pub struct InstallLock {
+    _file: fs::File,
 }
 
 pub fn resolve(config: &InstallConfig) -> InstallResult<InstallLayout> {
@@ -99,6 +105,50 @@ pub fn remove_staging(path: &Path) -> InstallResult<()> {
             path.display()
         ))
     })
+}
+
+pub fn acquire_install_lock(layout: &InstallLayout) -> InstallResult<InstallLock> {
+    create_private_dir(&layout.simard_home)?;
+    let lock_path = layout.simard_home.join(".install.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| {
+            super::InstallError::new(format!(
+                "failed to open installer lock {}: {error}",
+                lock_path.display()
+            ))
+        })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+            super::InstallError::new(format!(
+                "failed to set owner-only permissions on installer lock {}: {error}",
+                lock_path.display()
+            ))
+        })?;
+
+        // SAFETY: flock only uses the open lock-file descriptor; the File stays
+        // alive in InstallLock until the installer transaction ends.
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            return err(format!(
+                "another simard install appears to be running for {}; lock {} could not be acquired: {error}",
+                layout.simard_home.display(),
+                lock_path.display()
+            ));
+        }
+    }
+
+    Ok(InstallLock { _file: file })
 }
 
 pub fn backup_path(layout: &InstallLayout, name: &str) -> PathBuf {
@@ -194,4 +244,44 @@ fn create_private_dir(path: &Path) -> InstallResult<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn layout(root: &Path) -> InstallLayout {
+        InstallLayout {
+            simard_home: root.to_path_buf(),
+            bin_dir: root.join("bin"),
+            binary_path: root.join("bin/simard"),
+            prompt_assets_dir: root.join("prompt_assets"),
+            staging_root: root.join(".install-staging"),
+            backup_root: root.join(".install-backups"),
+            systemd_user_dir: root.join("systemd"),
+            ooda_unit_path: root.join("systemd/simard-ooda.service"),
+            signal_unit_path: root.join("systemd/simard-signal.service"),
+            transaction_id: "test-tx".to_string(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_lock_is_exclusive_per_simard_home() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let layout = layout(&temp.path().join("simard-home"));
+
+        let first = acquire_install_lock(&layout).expect("first lock");
+        let error = acquire_install_lock(&layout)
+            .expect_err("second lock for same SIMARD_HOME should fail")
+            .to_string();
+
+        assert!(
+            error.contains("another simard install appears to be running"),
+            "{error}"
+        );
+
+        drop(first);
+        acquire_install_lock(&layout).expect("lock should be available after guard drop");
+    }
 }

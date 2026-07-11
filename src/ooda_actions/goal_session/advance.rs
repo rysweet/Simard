@@ -54,15 +54,34 @@ pub(crate) fn assess_only_outcome(
         return make_outcome(action, true, detail);
     };
 
+    if pct == 0 {
+        eprintln!(
+            "[simard] OODA goal-action no-action for '{}': {} (progress=0%, no-progress)",
+            goal_id, reason_short,
+        );
+        let detail = format!(
+            "no-action: {} (progress=0%, no-progress, goal '{}')",
+            reason_short, goal_id,
+        );
+        return make_outcome(action, true, detail);
+    }
+
     let new_progress = if pct >= 100 {
         GoalProgress::Completed
-    } else if pct == 0 {
-        GoalProgress::NotStarted
     } else {
         GoalProgress::InProgress {
             percent: pct as u32,
         }
     };
+
+    let previous_activity = board
+        .active
+        .iter()
+        .find(|goal| goal.id == goal_id)
+        .and_then(|goal| goal.current_activity.clone());
+    if let Some(goal) = board.active.iter_mut().find(|goal| goal.id == goal_id) {
+        goal.current_activity = Some(format!("no-action evidence: {reason}"));
+    }
 
     match update_goal_progress_with_evidence(
         board,
@@ -77,13 +96,23 @@ pub(crate) fn assess_only_outcome(
                 "[simard] OODA goal-action no-action for '{}': {} (progress={}%)",
                 goal_id, reason_short, pct,
             );
-            let detail = format!(
-                "no-action: {} (progress={}%, goal '{}')",
-                reason_short, pct, goal_id,
-            );
+            let detail = if pct == 0 {
+                format!(
+                    "no-action: {} (progress=0%, no-progress, goal '{}')",
+                    reason_short, goal_id,
+                )
+            } else {
+                format!(
+                    "no-action: {} (progress={}%, goal '{}')",
+                    reason_short, pct, goal_id,
+                )
+            };
             make_outcome(action, true, detail)
         }
         Ok(EvidenceDecision::Reject { reason: rej }) => {
+            if let Some(goal) = board.active.iter_mut().find(|goal| goal.id == goal_id) {
+                goal.current_activity = previous_activity;
+            }
             eprintln!(
                 "[simard] OODA goal-action no-action REJECTED progress for '{}': {} (proposed={}%, reason={})",
                 goal_id, reason_short, pct, rej,
@@ -95,6 +124,9 @@ pub(crate) fn assess_only_outcome(
             make_outcome(action, true, detail)
         }
         Err(e) => {
+            if let Some(goal) = board.active.iter_mut().find(|goal| goal.id == goal_id) {
+                goal.current_activity = previous_activity;
+            }
             eprintln!(
                 "[simard] OODA goal-action no-action FAILED to update progress for '{}': {} (reason='{}', progress={}%)",
                 goal_id, e, reason_short, pct,
@@ -126,7 +158,10 @@ pub(crate) fn advance_goal_with_session(
     state: &mut OodaState,
     goal: &crate::goal_curation::ActiveGoal,
 ) -> GoalSessionResult {
-    let input = build_goal_advance_input(memory, state.prepared_context.as_ref(), goal);
+    let observe_only =
+        crate::read_only_guard::observe_only_enabled() || !state.identity_cognition.permits_spawn();
+    let input =
+        build_goal_advance_input(memory, state.prepared_context.as_ref(), goal, observe_only);
     let run_result = session.run_turn(input);
     apply_goal_advance_result(
         action,
@@ -135,6 +170,7 @@ pub(crate) fn advance_goal_with_session(
         &mut state.active_goals,
         goal,
         run_result,
+        observe_only,
     )
 }
 
@@ -147,6 +183,7 @@ pub(crate) fn build_goal_advance_input(
     memory: &dyn crate::cognitive_memory::CognitiveMemoryOps,
     prepared_context: Option<&crate::memory_consolidation::PreparedContext>,
     goal: &crate::goal_curation::ActiveGoal,
+    observe_only: bool,
 ) -> crate::base_types::BaseTypeTurnInput {
     use crate::base_types::BaseTypeTurnInput;
     use std::fmt::Write;
@@ -204,6 +241,20 @@ pub(crate) fn build_goal_advance_input(
             }
             objective.push_str(commit);
         }
+    }
+
+    if observe_only {
+        objective.push_str(
+            "\n\n## Read-only observer contract\n\
+             This identity is running with SIMARD_OBSERVE_ONLY=1. Do not ask for, \
+             plan, or dispatch an engineer. Perform the allowed read-only inspection \
+             in this session using only read commands, then respond with a line \
+             containing exactly NO ACTION, a conservative PROGRESS: NN marker when \
+             you have concrete evidence, and EVIDENCE/PROPOSALS bullets. Read-only \
+             means no writes, not no progress: if you gathered concrete evidence, \
+             use a modest positive progress value such as 5-25. If you cannot gather \
+             new evidence, respond NO ACTION with PROGRESS: 0 and state why.",
+        );
     }
 
     // Append recalled memory context (facts, prospectives, procedures) when available.
@@ -280,6 +331,7 @@ pub(crate) fn apply_goal_advance_result(
     board: &mut GoalBoard,
     goal: &crate::goal_curation::ActiveGoal,
     run_result: crate::error::SimardResult<crate::base_types::BaseTypeOutcome>,
+    observe_only: bool,
 ) -> GoalSessionResult {
     match run_result {
         Ok(outcome) => {
@@ -329,6 +381,25 @@ pub(crate) fn apply_goal_advance_result(
                     ref files,
                     issue,
                 } => {
+                    if observe_only {
+                        let reason = format!(
+                            "observe-only posture converted spawn request to no-action: {task}"
+                        );
+                        let outcome = assess_only_outcome(
+                            action,
+                            memory,
+                            checker,
+                            board,
+                            &goal.id,
+                            &reason,
+                            progress_pct,
+                        );
+                        return GoalSessionResult {
+                            outcome,
+                            action: Some(GoalAction::NoAction { reason }),
+                        };
+                    }
+
                     // Apply the optional progress marker BEFORE spawning,
                     // so even if the engineer subprocess crashes the
                     // orchestrator's progress assessment is recorded.
@@ -421,19 +492,30 @@ pub(crate) fn apply_goal_advance_result(
 ///
 /// - pure no-action: `"no-action: {reason} (goal '{id}')"`               → no progress
 /// - accepted bump:  `"no-action: {reason} (progress={pct}%, goal '{id}')"` → progress
+/// - accepted 0%:    `"no-action: {reason} (progress=0%, no-progress, goal '{id}')"` → no progress
 /// - rejected bump:  `"no-action: progress claim rejected (reviewer): … (goal '{id}', proposed={pct}%)"` → no progress
 ///
-/// The accepted-bump branch is the only one that emits the deterministic
-/// `"(progress="` token, so the predicate keys on that token rather than the
-/// free-form reviewer/orchestrator prose. A `success=false` outcome (empty
-/// response, run error, or a failed progress update) is *not* a no-progress
-/// no-op — it is already counted by the brain-failure safeguard's
-/// `goal_failure_counts`, so this predicate excludes it to avoid double-counting.
+/// Positive accepted bumps emit `"(progress="` without the `no-progress` marker;
+/// accepted 0% explicitly keeps the no-progress marker so a stuck observer cannot
+/// reset the breaker forever. A `success=false` outcome (empty response, run
+/// error, or a failed progress update) is *not* a no-progress no-op — it is
+/// already counted by the brain-failure safeguard's `goal_failure_counts`, so
+/// this predicate excludes it to avoid double-counting.
 pub(crate) fn outcome_made_no_progress(outcome: &ActionOutcome) -> bool {
+    let Some(goal_id) = outcome.action.goal_id.as_deref() else {
+        return false;
+    };
+    let progress_suffix = outcome
+        .detail
+        .rfind(" (progress=")
+        .map(|idx| &outcome.detail[idx..]);
+    let authored_progress =
+        progress_suffix.is_some_and(|suffix| suffix.ends_with(&format!(", goal '{goal_id}')")));
+    let authored_zero_progress = progress_suffix
+        .is_some_and(|suffix| suffix.ends_with(&format!(", no-progress, goal '{goal_id}')")));
     outcome.success
-        && outcome.action.goal_id.is_some()
         && outcome.detail.starts_with("no-action:")
-        && !outcome.detail.contains("(progress=")
+        && (!authored_progress || authored_zero_progress)
 }
 
 #[cfg(test)]
@@ -495,7 +577,7 @@ mod tests_no_progress_classifier {
             &NoopProgressEvidenceChecker,
             &mut board,
             "g",
-            "I'll verify concretely next cycle",
+            "I'll verify concretely next cycle; prior detail said (progress=20%, goal 'g')",
             None,
         );
         assert!(outcome.success);
@@ -524,6 +606,64 @@ mod tests_no_progress_classifier {
             !outcome_made_no_progress(&outcome),
             "an accepted progress advance must NOT count as no progress: {}",
             outcome.detail
+        );
+    }
+
+    #[test]
+    fn accepted_positive_progress_can_mention_no_progress_without_counting() {
+        let action = advance_goal_action("g");
+        let mut board = board_with("g");
+        let outcome = assess_only_outcome(
+            &action,
+            &*mem(),
+            &NoopProgressEvidenceChecker,
+            &mut board,
+            "g",
+            "fixed the prior no-progress loop",
+            Some(20),
+        );
+        assert!(outcome.success);
+        assert!(
+            !outcome_made_no_progress(&outcome),
+            "positive progress mentioning no-progress must stay progress: {}",
+            outcome.detail
+        );
+    }
+
+    #[test]
+    fn accepted_zero_progress_marker_is_still_no_progress() {
+        let action = advance_goal_action("g");
+        let mut board = board_with("g");
+        if let Some(goal) = board.active.iter_mut().find(|goal| goal.id == "g") {
+            goal.status = crate::goal_curation::GoalProgress::InProgress { percent: 20 };
+        }
+        let outcome = assess_only_outcome(
+            &action,
+            &*mem(),
+            &NoopProgressEvidenceChecker,
+            &mut board,
+            "g",
+            "no evidence gathered this cycle",
+            Some(0),
+        );
+        assert!(outcome.success);
+        assert!(
+            outcome_made_no_progress(&outcome),
+            "accepted PROGRESS: 0 must not reset no-progress tracking: {}",
+            outcome.detail
+        );
+        let status = board
+            .active
+            .iter()
+            .find(|goal| goal.id == "g")
+            .map(|goal| &goal.status)
+            .expect("goal remains");
+        assert!(
+            matches!(
+                status,
+                crate::goal_curation::GoalProgress::InProgress { percent: 20 }
+            ),
+            "PROGRESS: 0 must not reset prior progress, got {status:?}"
         );
     }
 

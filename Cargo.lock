@@ -70,7 +70,7 @@ dependencies = [
 [[package]]
 name = "amplihack-memory"
 version = "0.4.0"
-source = "git+https://github.com/rysweet/amplihack-memory-lib.git?rev=5807d056112b8e6f73dae9c1fac05f214f9c6ece#5807d056112b8e6f73dae9c1fac05f214f9c6ece"
+source = "git+https://github.com/rysweet/amplihack-memory-lib.git?rev=c266e15d1399967c04324370e77cf281990b8be1#c266e15d1399967c04324370e77cf281990b8be1"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -1759,7 +1759,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -2114,8 +2114,8 @@ dependencies = [
 
 [[package]]
 name = "lbug"
-version = "0.17.0"
-source = "git+https://github.com/rysweet/ladybug-rust?rev=202352434642e683fdf008b68004d0645a57cd35#202352434642e683fdf008b68004d0645a57cd35"
+version = "0.17.1"
+source = "git+https://github.com/rysweet/ladybug-rust?rev=5a2c107881879f4d1bb594b14967948870e65cdc#5a2c107881879f4d1bb594b14967948870e65cdc"
 dependencies = [
  "cmake",
  "cxx",
@@ -3037,7 +3037,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3075,7 +3075,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tracing",
  "windows-sys 0.59.0",
 ]
@@ -5116,7 +5116,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

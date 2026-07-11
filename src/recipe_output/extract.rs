@@ -210,6 +210,46 @@ fn is_noise_line(line: &str) -> bool {
         || t.starts_with("[running]")
 }
 
+/// Strip recipe-runner's per-agent line prefix:
+/// `  [08:25:09] [amplihack:copilot:123] <payload>`.
+///
+/// The prefix is logging metadata, not payload. Removing it lets downstream
+/// extractors see a real verdict when the agent answered, and lets launcher-only
+/// lines collapse to ordinary launcher noise. Non-matching lines are returned
+/// unchanged on the borrowed path.
+fn strip_recipe_agent_prefix(line: &str) -> Cow<'_, str> {
+    let leading = line.len() - line.trim_start().len();
+    let t = &line[leading..];
+    let b = t.as_bytes();
+    if b.len() < "[00:00:00] [amplihack:x:0] ".len() {
+        return Cow::Borrowed(line);
+    }
+    if b.first() != Some(&b'[') {
+        return Cow::Borrowed(line);
+    }
+    let time_ok = b.get(1..9).is_some_and(|time| {
+        time[0].is_ascii_digit()
+            && time[1].is_ascii_digit()
+            && time[2] == b':'
+            && time[3].is_ascii_digit()
+            && time[4].is_ascii_digit()
+            && time[5] == b':'
+            && time[6].is_ascii_digit()
+            && time[7].is_ascii_digit()
+    });
+    if !time_ok || b.get(9) != Some(&b']') || b.get(10) != Some(&b' ') {
+        return Cow::Borrowed(line);
+    }
+    let rest = &t[11..];
+    let Some(after_agent) = rest.strip_prefix("[amplihack:") else {
+        return Cow::Borrowed(line);
+    };
+    let Some(end) = after_agent.find("] ") else {
+        return Cow::Borrowed(line);
+    };
+    Cow::Owned(after_agent[end + 2..].to_string())
+}
+
 /// Strip ANSI escapes **and** drop whole tracing/env_logger log lines,
 /// recipe-runner summary-banner lines, and Copilot CLI launch-log preamble
 /// lines (all via [`is_noise_line`]).
@@ -218,12 +258,26 @@ fn is_noise_line(line: &str) -> bool {
 /// no droppable line), preserving today's behaviour and allocations.
 pub fn strip_recipe_noise(raw: &str) -> Cow<'_, str> {
     let de_ansi = strip_ansi(raw);
-    if !de_ansi.lines().any(is_noise_line) {
+    if !de_ansi
+        .lines()
+        .any(|line| is_noise_line(line) || matches!(strip_recipe_agent_prefix(line), Cow::Owned(_)))
+    {
         // No droppable lines: pass through the ANSI-strip result as-is
         // (`Borrowed` stays `Borrowed` on the fully-clean path).
         return de_ansi;
     }
-    let kept: Vec<&str> = de_ansi.lines().filter(|l| !is_noise_line(l)).collect();
+    let kept: Vec<String> = de_ansi
+        .lines()
+        .filter_map(|line| {
+            let stripped = strip_recipe_agent_prefix(line);
+            let payload = stripped.as_ref();
+            if is_noise_line(payload) {
+                None
+            } else {
+                Some(payload.to_string())
+            }
+        })
+        .collect();
     Cow::Owned(kept.join("\n"))
 }
 
@@ -569,6 +623,37 @@ mod tests {
         assert_eq!(
             strip_recipe_noise(raw),
             "Sure, here is the result:\n{\"facts\":[]}\nThat's all."
+        );
+    }
+
+    #[test]
+    fn strip_recipe_noise_removes_prefixed_launcher_line() {
+        let raw = "Recipe: progress-assessment (v1.0.0)\n\
+                   Steps: 1\n\
+                     [08:26:10] [amplihack:copilot:460198] ℹ NODE_OPTIONS=--max-old-space-size=32768 (saved preference). To change: /home/u/.amplihack/config\n\
+                   Recipe 'progress-assessment': SUCCESS (6.0s)\n\
+                     [completed] assess-progress (6.0s)";
+        assert_eq!(
+            strip_recipe_noise(raw),
+            "Recipe 'progress-assessment': SUCCESS (6.0s)"
+        );
+    }
+
+    #[test]
+    fn strip_recipe_noise_preserves_prefixed_payload() {
+        let raw = "Recipe: progress-assessment (v1.0.0)\n\
+                   Steps: 1\n\
+                     [08:25:09] [amplihack:copilot:1635817] {\"verdict\":\"accept\",\"rationale\":\"evidence-backed\"}\n\
+                   Recipe 'progress-assessment': SUCCESS (14.0s)\n\
+                     [completed] assess-progress (14.0s)";
+        let cleaned = strip_recipe_noise(raw);
+        assert!(
+            cleaned.contains("{\"verdict\":\"accept\""),
+            "payload must survive: {cleaned}"
+        );
+        assert!(
+            !cleaned.contains("amplihack:copilot"),
+            "agent log prefix must be removed: {cleaned}"
         );
     }
 
