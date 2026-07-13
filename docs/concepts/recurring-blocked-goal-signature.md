@@ -5,7 +5,7 @@ description: >
   blocked-goal observations, quality:gym_skipped markers, and workstream-gap
   markers. Identifies the recurrence as stale orchestration and memory state,
   not a remaining kgpacks-rs implementation blockage.
-last_updated: 2026-07-11
+last_updated: 2026-07-13
 review_schedule: as-needed
 owner: simard
 doc_type: investigation
@@ -32,16 +32,19 @@ current evidence does not support a remaining kgpacks-rs implementation block.
 
 ## Decoded signature
 
-The latest decoded signature in `~/.simard/overseer/activity.json` repeats the
-same marker family across recent Overseer ticks:
+The latest decoded signature in `~/.simard/overseer/activity.json` at
+`2026-07-13T02:00:18Z` repeats the same marker family across recent Overseer
+ticks. The key itself says the signature was seen `2x` in cognitive memory; the
+same 117-token key also appeared in the prior two ticks at `2026-07-13T01:40:40Z`
+and `2026-07-13T01:23:08Z`.
 
 | Marker | Count in latest key | Meaning |
 | --- | ---: | --- |
-| `overseer-obs:goal:blocked:fix-agent-kgpacks-rs-issue-17-ws2-int8-pq-embed-7f5afcca` | 50-51 | Recalled historical blocker for WS2/#17. |
+| `overseer-obs:goal:blocked:fix-agent-kgpacks-rs-issue-17-ws2-int8-pq-embed-7f5afcca` | 51 | Recalled historical blocker for WS2/#17. |
 | `goal:blocked:fix-agent-kgpacks-rs-issue-17-ws2-int8-pq-embed-7f5afcca` | 9 | Local board still treats WS2/#17 as blocked. |
 | `goal:blocked:fix-agent-kgpacks-rs-issue-18-ws3-versioned-rel-67828479` | 9 | Local board still emits WS3/#18 as blocked/stale. |
-| `goal:blocked:fix-agent-kgpacks-rs-issue-21-ws6-resumable-pip-39ba30dc` | 8-9 | Local board still emits WS6/#21 as blocked/stale. |
-| `goal:blocked:fix-agent-kgpacks-rs-issue-22-ws7-sign-the-rele-b59dde3e` | 8-9 | Local board still emits WS7/#22 as blocked/stale. |
+| `goal:blocked:fix-agent-kgpacks-rs-issue-21-ws6-resumable-pip-39ba30dc` | 8 | Local board still emits WS6/#21 as blocked/stale. |
+| `goal:blocked:fix-agent-kgpacks-rs-issue-22-ws7-sign-the-rele-b59dde3e` | 8 | Local board still emits WS7/#22 as blocked/stale. |
 | `goal:blocked:fix-agent-kgpacks-rs-issue-23-ws8-scalable-enti-982783ea` | 8 | Local board still emits WS8/#23 as blocked/stale. |
 | `overseer-obs:goal:blocked:advance-rysweet-agent-kgpacks-rs-to-full-parity-f29bb15c` | 9 | Parent parity goal is included in the stale blocked cluster. |
 | `quality:gym_skipped` | 7 | Gym quality work was skipped while the same blocked cluster dominated selection. |
@@ -60,9 +63,9 @@ The affected workstreams are therefore:
 
 Current GitHub issue state checked during the investigation: #12, #16, #17, #18,
 #19, #20, #21, #22, #23, and #25 are all closed in
-`rysweet/agent-kgpacks-rs`. One open PR remains, #45, with green checks, but its
-closing issue reference is #23, which is already closed; treat it as a separate
-PR hygiene item, not as proof that the blocked-goal cluster is still valid.
+`rysweet/agent-kgpacks-rs`. PR #45, which referenced #23, is also merged with
+green checks. There is no current upstream issue or PR state that justifies the
+blocked-goal cluster.
 
 ## Root cause classification
 
@@ -83,16 +86,14 @@ goal board against the authoritative upstream issue/PR state.
 1. Reconcile the local goal board before spawning more kgpacks-rs work: for each
    kgpacks-rs goal, check the upstream issue state and retire or unblock any goal
    whose issue is already closed.
-2. Treat the remaining open PR #45 as PR hygiene: either merge it if it contains
-   still-needed WS8 work despite #23 being closed, or close it as superseded.
-3. Add an Overseer preflight for blocked external-repo goals: if the linked
+2. Add an Overseer preflight for blocked external-repo goals: if the linked
    GitHub issue is closed, suppress `goal:blocked:*`, `workstream-gap`, and
    recipe-launch actions for that goal and emit a reconciliation action instead.
-4. Collapse repeated cognitive-memory keys before comparing recurrence: count
+3. Collapse repeated cognitive-memory keys before comparing recurrence: count
    unique marker families and goal ids rather than comparing the full
    pipe-delimited key, so one stale goal cannot dominate the process-health
-   signal 50 times in one tick.
-5. Keep `quality:gym_skipped` separate from root-cause classification: report it
+   signal 51 times in one tick.
+4. Keep `quality:gym_skipped` separate from root-cause classification: report it
    as a downstream skipped-quality symptom unless a current gym run or gym
    history record shows a concrete validation failure.
 
