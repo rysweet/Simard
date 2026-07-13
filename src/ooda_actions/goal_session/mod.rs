@@ -141,6 +141,13 @@ mod tests {
     }
 
     #[test]
+    fn unicode_line_before_progress_marker_does_not_panic() {
+        let response = "İstanbul status update\nNO ACTION\nREASON: waiting.\nPROGRESS: 45";
+        let decision = parse_orchestrator_response(response).expect("valid no-action");
+        assert_eq!(decision.progress_pct, Some(45));
+    }
+
+    #[test]
     fn progress_word_inside_token_does_not_match() {
         let response = "ACTION: SPAWN_ENGINEER\nTASK:\nBuild inprogress:waiting for tests";
         let decision = parse_orchestrator_response(response).expect("valid spawn");
