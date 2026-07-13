@@ -140,8 +140,9 @@ fn reject_lowercase_markers(s: &str) -> Result<(), GoalSessionParseError> {
                 "invalid goal-session response: use 'NO ACTION', not 'NO_ACTION'",
             ));
         }
-        if line.len() >= "progress:".len()
-            && line[.."progress:".len()].eq_ignore_ascii_case("progress:")
+        if line
+            .get(.."progress:".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("progress:"))
             && !line.starts_with("PROGRESS:")
         {
             return Err(GoalSessionParseError::new(
