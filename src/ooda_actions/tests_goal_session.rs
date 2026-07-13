@@ -493,7 +493,7 @@ fn observe_only_objective_forbids_engineer_dispatch_and_requires_evidence_protoc
     assert!(input.objective.contains("Read-only observer contract"));
     assert!(input.objective.contains("Do not ask for"));
     assert!(input.objective.contains("dispatch an engineer"));
-    assert!(input.objective.contains("NO ACTION"));
+    assert!(input.objective.contains("No action this cycle because"));
     assert!(input.objective.contains("EVIDENCE/PROPOSALS"));
     assert!(
         input

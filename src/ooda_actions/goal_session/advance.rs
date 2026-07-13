@@ -248,12 +248,14 @@ pub(crate) fn build_goal_advance_input(
             "\n\n## Read-only observer contract\n\
              This identity is running with SIMARD_OBSERVE_ONLY=1. Do not ask for, \
              plan, or dispatch an engineer. Perform the allowed read-only inspection \
-             in this session using only read commands, then respond with a line \
-             containing exactly NO ACTION, a conservative PROGRESS: NN marker when \
-             you have concrete evidence, and EVIDENCE/PROPOSALS bullets. Read-only \
+             in this session using only read commands, then respond with a complete \
+             sentence beginning 'No action this cycle because ...', a conservative \
+             PROGRESS: NN marker when you have concrete evidence, and \
+             EVIDENCE/PROPOSALS bullets. Read-only \
              means no writes, not no progress: if you gathered concrete evidence, \
              use a modest positive progress value such as 5-25. If you cannot gather \
-             new evidence, respond NO ACTION with PROGRESS: 0 and state why.",
+             new evidence, respond with 'No action this cycle because ...' and \
+             PROGRESS: 0.",
         );
     }
 
