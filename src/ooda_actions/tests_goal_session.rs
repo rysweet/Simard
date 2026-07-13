@@ -1,14 +1,14 @@
-//! Integration tests for `advance_goal_with_session` covering the prose
-//! dispatch contract: NO ACTION marker, SpawnEngineer prose, PROGRESS
-//! marker, and empty-response failure.
+//! Integration tests for `advance_goal_with_session` covering the strict
+//! goal-session response contract: explicit spawn markers, NO ACTION with
+//! REASON, bounded PROGRESS markers, and loud invalid-response failures.
 
 use crate::goal_curation::progress_evidence::{EvidenceDecision, ProgressEvidenceChecker};
 use crate::goal_curation::{GoalBoard, GoalProgress};
-use crate::ooda_actions::goal_session::{GoalAction, advance_goal_with_session};
+use crate::ooda_actions::goal_session::{GoalAction, GoalSessionResult, advance_goal_with_session};
 use crate::ooda_actions::test_helpers::*;
 use crate::ooda_loop::{ActionKind, OodaState, PlannedAction};
 use chrono::{DateTime, Utc};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 fn planned_action(goal_id: &str) -> PlannedAction {
     PlannedAction {
@@ -38,6 +38,59 @@ fn env_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn lock_env_for_test() -> MutexGuard<'static, ()> {
+    env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+struct ObserveOnlyEnvGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl Drop for ObserveOnlyEnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var("SIMARD_OBSERVE_ONLY", value),
+                None => std::env::remove_var("SIMARD_OBSERVE_ONLY"),
+            }
+        }
+    }
+}
+
+fn set_observe_only_for_test(value: Option<&str>) -> ObserveOnlyEnvGuard {
+    let previous = std::env::var_os("SIMARD_OBSERVE_ONLY");
+    unsafe {
+        match value {
+            Some(value) => std::env::set_var("SIMARD_OBSERVE_ONLY", value),
+            None => std::env::remove_var("SIMARD_OBSERVE_ONLY"),
+        }
+    }
+    ObserveOnlyEnvGuard { previous }
+}
+
+fn run_goal_session_response(response: &str) -> (GoalSessionResult, OodaState) {
+    let goal_id = "test-goal";
+    let mut state = state_with_goal(goal_id);
+    let goal = live_goal(&state, goal_id);
+    let action = planned_action(goal_id);
+    let (mut session, _captured) = MockSession::new_ok(response, vec![]);
+
+    let mem_box = mock_memory();
+    let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
+    let result = advance_goal_with_session(
+        &action,
+        &*mem_box,
+        &checker,
+        &mut session,
+        &mut state,
+        &goal,
+    );
+
+    (result, state)
+}
+
 #[test]
 fn no_action_response_records_no_action_outcome_without_spawning() {
     let goal_id = "test-goal";
@@ -46,7 +99,7 @@ fn no_action_response_records_no_action_outcome_without_spawning() {
     let action = planned_action(goal_id);
 
     let (mut session, _captured) = MockSession::new_ok(
-        "NO ACTION\nAnother subordinate (engineer-foo-1234) is already in flight.",
+        "NO ACTION\nREASON: another subordinate (engineer-foo-1234) is already in flight.",
         vec![],
     );
 
@@ -75,46 +128,10 @@ fn no_action_response_records_no_action_outcome_without_spawning() {
 }
 
 #[test]
-fn action_prefixed_no_action_records_no_action_outcome_without_spawning() {
-    let goal_id = "test-goal";
-    let mut state = state_with_goal(goal_id);
-    let goal = live_goal(&state, goal_id);
-    let action = planned_action(goal_id);
-
-    let (mut session, _captured) = MockSession::new_ok(
-        "ACTIONS:\nACTION: no_action — PR #2958 is already the concrete in-flight artifact.",
-        vec![],
-    );
-
-    let mem_box = mock_memory();
-    let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
-    let result = advance_goal_with_session(
-        &action,
-        &*mem_box,
-        &checker,
-        &mut session,
-        &mut state,
-        &goal,
-    );
-
-    assert!(result.outcome.success);
-    assert!(result.outcome.detail.contains("no-action"));
-    match result.action {
-        Some(GoalAction::NoAction { reason }) => {
-            assert!(reason.contains("PR #2958"));
-        }
-        other => panic!("expected NoAction, got {other:?}"),
-    }
-}
-
-#[test]
 #[serial_test::serial(cognitive_memory)]
-fn prose_response_routes_to_spawn_engineer() {
-    let _guard = env_lock().lock().unwrap();
-    let old_observe = std::env::var_os("SIMARD_OBSERVE_ONLY");
-    unsafe {
-        std::env::remove_var("SIMARD_OBSERVE_ONLY");
-    }
+fn explicit_spawn_response_routes_to_spawn_engineer_and_extracts_task_body() {
+    let _guard = lock_env_for_test();
+    let _env = set_observe_only_for_test(None);
 
     let goal_id = "test-goal";
     let mut state = state_with_goal(goal_id);
@@ -122,7 +139,8 @@ fn prose_response_routes_to_spawn_engineer() {
     let action = planned_action(goal_id);
 
     let task_text = "Run cargo test --lib goal_session and report failing tests.";
-    let (mut session, _captured) = MockSession::new_ok(task_text, vec![]);
+    let response = format!("ACTION: SPAWN_ENGINEER\nTASK:\n{task_text}\nPROGRESS: 20");
+    let (mut session, _captured) = MockSession::new_ok(&response, vec![]);
 
     let mem_box = mock_memory();
     let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
@@ -143,31 +161,22 @@ fn prose_response_routes_to_spawn_engineer() {
         }
         other => panic!("expected SpawnEngineer, got {other:?}"),
     }
-
-    unsafe {
-        match old_observe {
-            Some(value) => std::env::set_var("SIMARD_OBSERVE_ONLY", value),
-            None => std::env::remove_var("SIMARD_OBSERVE_ONLY"),
-        }
-    }
 }
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn observe_only_prose_response_records_no_action_without_spawn() {
-    let _guard = env_lock().lock().unwrap();
-    let old_observe = std::env::var_os("SIMARD_OBSERVE_ONLY");
-    unsafe {
-        std::env::set_var("SIMARD_OBSERVE_ONLY", "1");
-    }
+fn observe_only_explicit_spawn_response_records_no_action_without_spawn() {
+    let _guard = lock_env_for_test();
+    let _env = set_observe_only_for_test(Some("1"));
 
     let goal_id = "test-goal";
     let mut state = state_with_goal(goal_id);
     let goal = live_goal(&state, goal_id);
     let action = planned_action(goal_id);
 
-    let task_text = "Spawn engineer to inspect the repository read-only.";
-    let (mut session, _captured) = MockSession::new_ok(task_text, vec![]);
+    let task_text = "Inspect the repository read-only and report concrete evidence.";
+    let response = format!("ACTION: SPAWN_ENGINEER\nTASK:\n{task_text}\nPROGRESS: 10");
+    let (mut session, _captured) = MockSession::new_ok(&response, vec![]);
 
     let mem_box = mock_memory();
     let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
@@ -193,23 +202,13 @@ fn observe_only_prose_response_records_no_action_without_spawn() {
         }
         other => panic!("expected NoAction, got {other:?}"),
     }
-
-    unsafe {
-        match old_observe {
-            Some(value) => std::env::set_var("SIMARD_OBSERVE_ONLY", value),
-            None => std::env::remove_var("SIMARD_OBSERVE_ONLY"),
-        }
-    }
 }
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn read_only_identity_prose_response_records_no_action_without_env_floor() {
-    let _guard = env_lock().lock().unwrap();
-    let old_observe = std::env::var_os("SIMARD_OBSERVE_ONLY");
-    unsafe {
-        std::env::remove_var("SIMARD_OBSERVE_ONLY");
-    }
+fn read_only_identity_explicit_spawn_response_records_no_action_without_env_floor() {
+    let _guard = lock_env_for_test();
+    let _env = set_observe_only_for_test(None);
 
     let goal_id = "test-goal";
     let mut state = state_with_goal(goal_id);
@@ -217,8 +216,9 @@ fn read_only_identity_prose_response_records_no_action_without_env_floor() {
     let goal = live_goal(&state, goal_id);
     let action = planned_action(goal_id);
 
-    let task_text = "Spawn engineer to inspect the repository read-only.";
-    let (mut session, captured) = MockSession::new_ok(task_text, vec![]);
+    let task_text = "Inspect the repository read-only and report concrete evidence.";
+    let response = format!("ACTION: SPAWN_ENGINEER\nTASK:\n{task_text}\nPROGRESS: 10");
+    let (mut session, captured) = MockSession::new_ok(&response, vec![]);
 
     let mem_box = mock_memory();
     let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
@@ -243,23 +243,13 @@ fn read_only_identity_prose_response_records_no_action_without_env_floor() {
     let captured = captured.borrow();
     let input = captured.as_ref().expect("session must be invoked once");
     assert!(input.objective.contains("Read-only observer contract"));
-
-    unsafe {
-        match old_observe {
-            Some(value) => std::env::set_var("SIMARD_OBSERVE_ONLY", value),
-            None => std::env::remove_var("SIMARD_OBSERVE_ONLY"),
-        }
-    }
 }
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn progress_marker_in_prose_updates_goal_progress_before_spawn() {
-    let _guard = env_lock().lock().unwrap();
-    let old_observe = std::env::var_os("SIMARD_OBSERVE_ONLY");
-    unsafe {
-        std::env::remove_var("SIMARD_OBSERVE_ONLY");
-    }
+fn progress_marker_in_explicit_spawn_updates_goal_progress_before_spawn() {
+    let _guard = lock_env_for_test();
+    let _env = set_observe_only_for_test(None);
 
     let goal_id = "test-goal";
     let mut state = state_with_goal(goal_id);
@@ -267,7 +257,7 @@ fn progress_marker_in_prose_updates_goal_progress_before_spawn() {
     let action = planned_action(goal_id);
 
     let (mut session, _captured) = MockSession::new_ok(
-        "Spawn engineer to finish the dashboard. PROGRESS: 70",
+        "ACTION: SPAWN_ENGINEER\nTASK:\nFinish the dashboard.\nPROGRESS: 70",
         vec![],
     );
 
@@ -287,13 +277,6 @@ fn progress_marker_in_prose_updates_goal_progress_before_spawn() {
         GoalProgress::InProgress { percent } => assert_eq!(percent, 70),
         other => panic!("expected InProgress(70), got {other:?}"),
     }
-
-    unsafe {
-        match old_observe {
-            Some(value) => std::env::set_var("SIMARD_OBSERVE_ONLY", value),
-            None => std::env::remove_var("SIMARD_OBSERVE_ONLY"),
-        }
-    }
 }
 
 #[test]
@@ -303,8 +286,10 @@ fn progress_marker_in_no_action_updates_goal_progress() {
     let goal = live_goal(&state, goal_id);
     let action = planned_action(goal_id);
 
-    let (mut session, _captured) =
-        MockSession::new_ok("NO ACTION\nWaiting on PR review. PROGRESS: 95", vec![]);
+    let (mut session, _captured) = MockSession::new_ok(
+        "NO ACTION\nREASON: waiting on PR review.\nPROGRESS: 95",
+        vec![],
+    );
 
     let mem_box = mock_memory();
     let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
@@ -355,7 +340,7 @@ fn no_action_progress_review_sees_current_cycle_evidence() {
     let action = planned_action(goal_id);
 
     let (mut session, _captured) = MockSession::new_ok(
-        "NO ACTION\nPROGRESS: 5\nEVIDENCE:\n- observed CODEOWNERS is missing",
+        "NO ACTION\nREASON: observed CODEOWNERS is missing.\nPROGRESS: 5\nEVIDENCE:\n- observed CODEOWNERS is missing",
         vec![],
     );
 
@@ -408,6 +393,108 @@ fn empty_response_is_a_visible_failure() {
 }
 
 #[test]
+fn free_form_prose_response_is_a_visible_invalid_contract_failure() {
+    let (result, _state) =
+        run_goal_session_response("Run cargo test --lib goal_session and fix any failures.");
+
+    assert!(!result.outcome.success);
+    assert!(
+        result
+            .outcome
+            .detail
+            .contains("invalid goal-session response")
+            || result.outcome.detail.contains("invalid response contract"),
+        "expected visible invalid-contract failure, got: {}",
+        result.outcome.detail
+    );
+    assert!(result.action.is_none());
+}
+
+#[test]
+fn no_action_without_reason_is_a_visible_invalid_contract_failure() {
+    let (result, _state) = run_goal_session_response("NO ACTION\nPROGRESS: 0");
+
+    assert!(!result.outcome.success);
+    assert!(
+        result.outcome.detail.contains("REASON"),
+        "expected missing-REASON failure, got: {}",
+        result.outcome.detail
+    );
+    assert!(result.action.is_none());
+}
+
+#[test]
+fn conflicting_spawn_and_no_action_markers_are_rejected() {
+    let (result, _state) = run_goal_session_response(
+        "NO ACTION\nREASON: already in flight.\nACTION: SPAWN_ENGINEER\nTASK:\nStart a second engineer.",
+    );
+
+    assert!(!result.outcome.success);
+    assert!(
+        result.outcome.detail.contains("conflicting")
+            || result.outcome.detail.contains("multiple action"),
+        "expected conflicting-marker failure, got: {}",
+        result.outcome.detail
+    );
+    assert!(result.action.is_none());
+}
+
+#[test]
+fn unknown_action_marker_is_rejected() {
+    let (result, _state) = run_goal_session_response(
+        "ACTION: MERGE_PR\nTASK:\nMerge PR #4042 directly.\nPROGRESS: 80",
+    );
+
+    assert!(!result.outcome.success);
+    assert!(
+        result.outcome.detail.contains("unknown action")
+            || result.outcome.detail.contains("ACTION"),
+        "expected unknown-action failure, got: {}",
+        result.outcome.detail
+    );
+    assert!(result.action.is_none());
+}
+
+#[test]
+fn progress_above_100_is_rejected_without_mutating_goal() {
+    let (result, state) =
+        run_goal_session_response("NO ACTION\nREASON: PR is almost landed.\nPROGRESS: 125");
+
+    assert!(!result.outcome.success);
+    assert!(
+        result.outcome.detail.contains("PROGRESS")
+            && (result.outcome.detail.contains("0..=100")
+                || result.outcome.detail.contains("out of range")),
+        "expected out-of-range PROGRESS failure, got: {}",
+        result.outcome.detail
+    );
+    assert!(result.action.is_none());
+
+    let updated = live_goal(&state, "test-goal");
+    assert_eq!(
+        updated.status,
+        GoalProgress::NotStarted,
+        "invalid progress must not be clamped or applied"
+    );
+}
+
+#[test]
+fn duplicate_progress_markers_are_rejected_without_guessing() {
+    let (result, _state) = run_goal_session_response(
+        "NO ACTION\nREASON: evidence is mixed.\nPROGRESS: 40\nPROGRESS: 80",
+    );
+
+    assert!(!result.outcome.success);
+    assert!(
+        result.outcome.detail.contains("duplicate")
+            || result.outcome.detail.contains("multiple PROGRESS"),
+        "expected duplicate-progress failure, got: {}",
+        result.outcome.detail
+    );
+    assert!(result.action.is_none());
+}
+
+#[test]
 fn session_run_turn_error_is_a_visible_failure() {
     let goal_id = "test-goal";
     let mut state = state_with_goal(goal_id);
@@ -441,7 +528,7 @@ fn objective_includes_goal_metadata_and_environment() {
     let goal = live_goal(&state, goal_id);
     let action = planned_action(goal_id);
 
-    let (mut session, captured) = MockSession::new_ok("NO ACTION\n", vec![]);
+    let (mut session, captured) = MockSession::new_ok("NO ACTION\nREASON: smoke test.\n", vec![]);
 
     let mem_box = mock_memory();
     let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
@@ -464,18 +551,18 @@ fn objective_includes_goal_metadata_and_environment() {
 #[test]
 #[serial_test::serial(cognitive_memory)]
 fn observe_only_objective_forbids_engineer_dispatch_and_requires_evidence_protocol() {
-    let _guard = env_lock().lock().unwrap();
-    let old_observe = std::env::var_os("SIMARD_OBSERVE_ONLY");
-    unsafe {
-        std::env::set_var("SIMARD_OBSERVE_ONLY", "1");
-    }
+    let _guard = lock_env_for_test();
+    let _env = set_observe_only_for_test(Some("1"));
 
     let goal_id = "test-goal";
     let mut state = state_with_goal(goal_id);
     let goal = live_goal(&state, goal_id);
     let action = planned_action(goal_id);
 
-    let (mut session, captured) = MockSession::new_ok("NO ACTION\nPROGRESS: 0", vec![]);
+    let (mut session, captured) = MockSession::new_ok(
+        "NO ACTION\nREASON: read-only smoke test.\nPROGRESS: 0",
+        vec![],
+    );
 
     let mem_box = mock_memory();
     let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
@@ -493,7 +580,7 @@ fn observe_only_objective_forbids_engineer_dispatch_and_requires_evidence_protoc
     assert!(input.objective.contains("Read-only observer contract"));
     assert!(input.objective.contains("Do not ask for"));
     assert!(input.objective.contains("dispatch an engineer"));
-    assert!(input.objective.contains("No action this cycle because"));
+    assert!(input.objective.contains("NO ACTION"));
     assert!(input.objective.contains("EVIDENCE/PROPOSALS"));
     assert!(
         input
@@ -501,11 +588,4 @@ fn observe_only_objective_forbids_engineer_dispatch_and_requires_evidence_protoc
             .contains("Read-only means no writes, not no progress")
     );
     assert!(input.objective.contains("modest positive progress"));
-
-    unsafe {
-        match old_observe {
-            Some(value) => std::env::set_var("SIMARD_OBSERVE_ONLY", value),
-            None => std::env::remove_var("SIMARD_OBSERVE_ONLY"),
-        }
-    }
 }

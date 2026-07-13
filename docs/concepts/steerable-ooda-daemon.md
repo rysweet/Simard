@@ -1,391 +1,331 @@
 ---
-title: "Concept: keeping the OODA daemon steerable — read-your-writes, the done-gate, the no-progress breaker, and distillation banner-stripping"
-description: The retcon narrative for the systemic goal-board + OODA-livelock + distillation incident — why the daemon became un-steerable (operator goal edits appeared not to stick), why it livelocked re-selecting already-done supply-chain goals, and why distillation extracted zero facts — and how four coordinated fixes across src/goal_curation, src/goal_curation/completion_gate, the OODA advance-goal path, and src/recipe_output restore read-your-writes, evidence-gated completion, forward progress, and fact extraction.
-last_updated: 2026-07-03
+title: "Concept: prompt-owned OODA semantics and thin Rust rails"
+description: Intended behavior for the steerable OODA daemon: judgment lives in prompt and recipe assets while Rust provides trusted loading, orchestration, validation, subprocess execution, and explicit failure surfacing.
+last_updated: 2026-07-13
 review_schedule: as-needed
 owner: simard
 doc_type: concept
 related:
-  - ./goal-board-persistence.md
-  - ./goal-board-corruption-guards.md
-  - ./deploy-aware-done-gate.md
-  - ./ooda-loop-self-detection.md
-  - ./copilot-launcher-preamble-stripping.md
-  - ../reference/goal-board-api.md
-  - ../reference/completion-evidence-gate-api.md
-  - ../reference/distill-recipe-output-capture.md
-  - ../howto/unblock-stuck-ooda-goals.md
-  - ../howto/recover-goal-board.md
-  - ../howto/diagnose-a-rejected-goal-completion.md
-  - ../howto/diagnose-decide-orient-parse-failures.md
+  - ../howto/run-ooda-daemon.md
+  - ../howto/spawn-engineers-from-ooda-daemon.md
+  - ../reference/simard-cli.md
+  - ../reference/ooda-coverage-parallelism-ceiling.md
+  - ../../prompt_assets/simard/ooda_decide.md
+  - ../../prompt_assets/simard/goal_session_objective.md
+  - ../../prompt_assets/simard/recipes/ooda-decide.yaml
+  - ../../prompt_assets/simard/recipes/ooda-orient.yaml
+  - ../../prompt_assets/simard/recipes/ooda-no-progress-why.yaml
 ---
 
-# Concept: keeping the OODA daemon steerable
+# [PLANNED - Implementation Pending] Concept: prompt-owned OODA semantics and thin Rust rails
 
-> **Update (issue #1):** the fixes narrated here (#2534) were sound in intent
-> but never *fired* in production — the board was still a versioned
-> cognitive-memory snapshot, so operator edits were clobbered, the breaker's
-> counter reset on every ~hourly restart, and done goals were never swept. They
-> are superseded by the
-> [authoritative goal-board store](./authoritative-goal-board-store.md), which
-> makes `goal_board.json` the single durable source of truth. Read that page for
-> the current design.
+This document describes the intended feature behavior. The OODA daemon is
+steerable because its judgment lives in assets operators can read and revise:
+prompts under `prompt_assets/simard/` and recipes under
+`prompt_assets/simard/recipes/`. Rust owns the rails around those assets. It
+loads trusted prompts, builds structured inputs, invokes recipes, validates the
+small response contracts, records outcomes, and surfaces failures.
 
-This document is the **single coherent narrative** for a systemic incident in
-which the autonomous OODA daemon became *un-steerable and stuck*. It ties
-together four fixes that each already have their own focused reference and
-concept pages, and it reconciles the **operator-observed symptoms** with the
-**implementation that actually shipped** — the "retcon" that explains why the
-shipped design resolves what was seen in production.
+Rust does **not** own OODA policy. It must not grow hard-coded decision trees,
+keyword taxonomies, semantic scoring rules, or code-owned "brain" judgment.
 
-If you are here to change one subsystem, jump straight to its authoritative
-page:
+## Why this split exists
 
-| Symptom | Root cause | Authoritative doc |
-|---|---|---|
-| Operator `goal add` / `goal remove` "didn't stick"; the next `goal list` and the next curation cycle read an old board | Stale, unordered snapshot read + a load/save asymmetry + un-serialized cross-process writes | [Goal board persistence](./goal-board-persistence.md) · [Goal board API](../reference/goal-board-api.md) |
-| Goals with objectively-complete evidence (merged PR, filed/closed issue) stayed active at 0% and were re-litigated every cycle | No evidence-driven auto-completion; completion required a subjective LLM claim | [Deploy-aware done-gate](./deploy-aware-done-gate.md) · [Completion-evidence gate API](../reference/completion-evidence-gate-api.md) |
-| Every cycle re-selected the same done goals and the brain emitted "I'll break the loop by verifying concretely…" no-action prose forever | No bounded, per-goal escalation from repeated no-action to a definitive resolution | [No-progress breaker](#the-no-progress-breaker-fix-3) (below) · [OODA loop self-detection](./ooda-loop-self-detection.md) |
-| `distill: 50 episodes -> 0 facts, 0 procedures` | The Copilot CLI launch-log banner polluted the transcript the distill parser reads | [Copilot launch-log preamble stripping](./copilot-launcher-preamble-stripping.md) · [Distill recipe-output capture](../reference/distill-recipe-output-capture.md) |
+OODA behavior changes often: which goal to advance, when to fan out work, when a
+PR is ready to merge, when a goal is looping, and when a no-action cycle is
+honest. Those are semantic judgments. Encoding them as Rust parsers makes the
+daemon brittle and expensive to steer.
 
----
+The daemon therefore treats prompts and recipes as the policy layer:
 
-## The incident
+| Layer | Owns | Examples |
+| --- | --- | --- |
+| Prompt and recipe assets | Semantics, judgment, decision policy, examples, output instructions | `ooda_decide.md`, `goal_session_objective.md`, `recipes/ooda-decide.yaml`, `recipes/ooda-orient.yaml`, `recipes/ooda-no-progress-why.yaml` |
+| Rust rails | Trusted asset resolution, context construction, subprocess boundaries, response-contract validation, state mutation, logs, errors | `src/ooda_brain/recipe_brain.rs`, `src/operator_commands_ooda/daemon/brains.rs`, `src/ooda_actions/goal_session/*` |
 
-A production OODA daemon exhibited three failure modes at once, and they
-compounded each other:
+This makes normal behavior changes prompt edits instead of rebuilds, while still
+giving operators deterministic safety at the IO and state boundaries.
 
-1. **Un-steerable.** An operator ran `simard goal remove <ids>` and
-   `simard goal add …`. Both reported success, yet the next
-   `simard goal list` still showed the *old* goals. Operator intent — the
-   whole point of steering the daemon — was silently lost.
+## The daemon cycle
 
-2. **Livelocked.** Every OODA cycle re-selected the **same four** supply-chain
-   goals — all objectively **done** (two merged hardening PRs, one
-   out-of-scope issue filed) — and the brain, cycle after cycle, emitted
-   variations of *"I'll break the loop by verifying concretely…"* while taking
-   **no shippable action**. The goals stayed `not-started` at 0% forever.
-
-3. **Blind.** Memory distillation reported
-   `distill: 50 episodes -> 0 facts, 0 procedures, 50 marked (100% reduction)`.
-   Fifty episodes went in; nothing came out. The daemon could not learn from
-   its own history, so it kept repeating it.
-
-The three fed one loop: the daemon could not be redirected (1), so it kept
-grinding on stale work (2), and it could not distill the experience into
-memory that would let it notice (3).
-
----
-
-## Fix 1 — Goal-board read-your-writes
-
-**Symptom:** operator edits didn't stick; `goal list` and the next curation
-cycle read an old board.
-
-**Root cause.** The board was persisted as a cognitive-memory
-`goal-board:snapshot` fact, but the *read* did not select the **latest**
-snapshot. A newly-written snapshot became just one more fact node among many;
-an unordered, limited search could return an older revision. A separate
-load/save asymmetry (the loader ignoring what the saver had just written) and
-un-serialized cross-process writes (daemon vs. dashboard vs. `goal`-CLI IPC)
-turned "I added a goal" into "my goal vanished on the next cycle." A tight
-multi-client race could even delete production goals between cycles (issue
-[#1915](https://github.com/rysweet/Simard/issues/1915)).
-
-**What shipped.** The board has a **single source of truth** — the
-`goal-board:snapshot` fact in cognitive memory — and three properties make
-writes observable by the very next read:
-
-- **Newest-snapshot selection.** `load_goal_board` reads a *window* of
-  candidate snapshots and picks the newest deterministically
-  (`search_facts("goal-board:snapshot", 64, 0.0)` → filter →
-  `max_by(node_id)`), instead of trusting an unordered limit-1 result. The
-  loader and saver now share this one `read_latest_snapshot` helper, closing
-  the load/save asymmetry.
-- **Merge-on-write.** `save_goal_board` re-reads the latest persisted snapshot
-  and unions it by goal `id` with the in-flight board (in-flight wins on
-  collision) before storing. An operator- or meeting-added goal is therefore
-  **merged**, never clobbered, by a concurrent curation write — curation can
-  regenerate its own set without deleting operator intent.
-- **Serialized cross-process writes.** When the daemon is running, all writes
-  flow through its IPC socket; when it is not, the writer takes an advisory
-  **`flock`** over the board lock file
-  ([#2514](https://github.com/rysweet/Simard/pull/2514)) so the daemon, the
-  dashboard, and the `goal` CLI never interleave a read-modify-write.
-
-A one-shot bootstrap migration imports any legacy
-`$SIMARD_STATE_ROOT/goal_records.json` on first startup and then removes it, so
-there is exactly one authoritative store afterward.
-
-> **On the operator's "make disk authoritative" diagnosis.** The observed
-> root cause was correct — the board read was returning a stale snapshot and
-> writes were racing. The shipped resolution keeps **cognitive memory** as the
-> authoritative store (issue
-> [#1590](https://github.com/rysweet/Simard/issues/1590)) rather than promoting
-> the disk file, but it delivers the property the operator actually needed:
-> **read-your-writes**. `add` → reload shows it; `remove` → reload omits it;
-> and the next curation cycle observes the same latest board. See
-> [Goal board persistence](./goal-board-persistence.md) for the full consumer
-> matrix and the [`save_goal_board` merge rule](../reference/goal-board-api.md#save_goal_board),
-> and [Goal board corruption guards](./goal-board-corruption-guards.md) for the
-> pre-write validity gate that keeps a hallucinated Decide-phase board from
-> overwriting the snapshot.
-
-**Tests.** `tests_operations.rs`, `tests_snapshot_dedup.rs`, and
-`tests_save_with_removals.rs` cover write→load round-trips, newest-snapshot
-selection over multiple snapshots, add/remove reload behavior, and
-merge-on-write under a concurrent writer/reader.
-
----
-
-## Fix 2 — The evidence-gated done-gate
-
-**Symptom:** goals whose work was objectively finished (a merged PR, a filed
-or closed issue) were never marked done — they stayed active at 0% and were
-re-selected every cycle.
-
-**Root cause.** Completion was a *claim*, not a *verification*. Nothing turned
-"the referenced PR is merged" or "the referenced issue is filed/closed" into an
-automatic `done` transition, so objectively-complete goals lingered on the
-active board and kept feeding the livelock.
-
-**What shipped.** The **deploy-aware done-gate**
-(`src/goal_curation/completion_gate.rs`) makes completion a function of **hard
-evidence** gathered through an injected `EvidenceSource` (so the logic is pure
-and hermetic in tests):
-
-- `CompletionEvidence { pr_merged, issue_closed, self_affecting, deployed }`.
-- A goal is complete only with a **merged PR**, a **closed linked issue**, and
-  — for changes to Simard's own running code — a **verified deploy**
-  (`!DeployDrift::needs_deploy`).
-- Anything short records a specific `MissingEvidence` blocker
-  (`PrNotMerged` / `IssueOpen` / `NotDeployed`) instead of silently archiving.
-- `has_derivable_signal` — true when the goal references a PR, an issue, or is
-  self-affecting — is the trigger that lets the gate auto-resolve a goal from
-  external state rather than re-litigating it at 0%.
-
-Applied to the incident, the four ladybug supply-chain goals each carried a
-derivable signal (a merged hardening PR, or a filed out-of-scope issue), so the
-gate would **auto-complete or auto-drop** them instead of returning them to the
-active set. See [Deploy-aware done-gate](./deploy-aware-done-gate.md) and the
-[Completion-evidence gate API](../reference/completion-evidence-gate-api.md);
-operators diagnosing a *rejected* completion use the
-[rejected-completion runbook](../howto/diagnose-a-rejected-goal-completion.md).
-
-**Tests.** The completion-gate suite exercises the merged-PR / closed-issue /
-self-affecting-not-deployed matrix, including a merged-PR-plus-filed-issue
-fixture that maps directly to the four stuck supply-chain goals.
-
----
-
-## The no-progress breaker (Fix 3)
-
-**Symptom:** the brain kept emitting *"I'll break the loop by verifying
-concretely…"* indefinitely — a healthy brain confidently producing **no
-action** on the same goal, forever.
-
-This is the fix with the least prior documentation, so it is documented in full
-here. It is deliberately layered so that **no single layer has to be perfect**,
-and — per the incident's coordination constraint — it lives in the
-goal-selection / progress path and the OODA advance-goal dispatch, **not** deep
-inside the brain reasoners.
-
-### Why livelock is distinct from a brain failure
-
-A brain *failure* is a transport error, a JSON parse error, or an empty
-response — the brain did not produce a usable decision. A *livelock* is the
-opposite: the brain **succeeds** and emits a well-formed decision whose
-*content* is "take no action, I'll verify later." The daemon looks busy and
-makes zero shippable progress. The two need different breakers.
-
-### The three layers, and the definitive-resolution ladder
-
-1. **Prompt-level self-detection.** The Observe/Orient/Decide prompts carry an
-   explicit *"am I looping?"* judgment: a cycle that only re-triages the same
-   PRs, re-reads the same issue, or re-records the same percentage is **not
-   progress**. This is the first line of defense and requires no rebuild — see
-   [OODA loop self-detection](./ooda-loop-self-detection.md).
-
-2. **No-action classification.** When a decision resolves to a complete
-   no-action sentence (`No action this cycle because ...`) or to a legacy
-   `NO ACTION` / `NO_ACTION` marker on its own line, the goal-session parser
-   (`parse_orchestrator_response` → `has_no_action_marker` in
-   `src/ooda_actions/goal_session/mod.rs`, reached through the advance-goal
-   dispatch) routes it to `GoalAction::NoAction { reason }` and records a no-op
-   cycle via `assess_only_outcome` (rather than spawning an engineer). This
-   gives the progress path a **countable, structured** no-progress signal
-   without requiring Simard to emit machine-looking `ACTION: no_action` fragments.
-
-3. **Bounded escalation to a definitive resolution.** Repeated no-progress on
-   the *same* goal must terminate in a single decisive outcome — never another
-   "I'll verify" cycle. The daemon already ships the analogous safeguard for
-   brain *failures*: after **3 consecutive** failing cycles,
-   `dispatch_spawn_engineer` writes a sentinel-tagged
-   `GoalProgress::Blocked` reason
-   (`BRAIN_FAILURE_BLOCKED_PREFIX` … `BRAIN_FAILURE_BLOCKED_SUFFIX`), files a
-   tracking issue for human review, and heals automatically after one healthy
-   cycle. The **no-progress breaker** applies the same shape to *no-action*
-   cycles: after a small number (N ≈ 2–3) of consecutive no-progress cycles on
-   one goal, force **one** definitive verification, then resolve it exactly
-   once via the ladder below — and stop re-queuing the goal for another
-   "verify" cycle.
-
-```
-consecutive no-progress cycles on goal G reaches N
-        │
-        ▼
-run the concrete verification ONCE (not "I'll verify later")
-        │
-        ├─ evidence present  ──►  mark DONE via the done-gate (Fix 2)
-        ├─ goal obsolete     ──►  DROP from the active board
-        └─ neither           ──►  ESCALATE: file a GitHub issue for
-                                   human review and Block the goal
+```text
+Observe
+  |
+  v
+Orient
+  prompt/recipe judges priority and demotion semantics
+  Rust validates numeric urgency and records parse errors loudly
+  |
+  v
+Decide
+  prompt/recipe selects one action kind
+  Rust accepts only known action variants and rejects ambiguous output
+  |
+  v
+Act / advance goal
+  goal-session prompt decides whether to spawn an engineer or take no action
+  Rust enforces the explicit response contract and performs side effects
 ```
 
-The verification is the **done-gate** from Fix 2: "concretely verify" means
-"ask the `EvidenceSource` whether the referenced PR is merged / the issue is
-closed / the self-change is deployed," and then commit to the answer. The four
-stuck supply-chain goals reach the first branch (evidence present → DONE) or
-the second (out-of-scope issue filed → DROP); they can never reach a fourth
-"I'll verify again" branch, because that branch does not exist.
+The recipes can interpret meaning. The rails can only decide whether the recipe
+returned a valid contract.
 
-### Status and boundaries
+## What prompts and recipes own
 
-Layer 1 (prompt self-detection) and the brain-*failure* escalation of layer 3
-are shipped and documented
-([OODA loop self-detection](./ooda-loop-self-detection.md),
-[Unblock OODA goals stuck after a brain-failure lockout](../howto/unblock-stuck-ooda-goals.md)).
-Layer 2's `NO ACTION` classification is shipped in the goal-session parser
-(`src/ooda_actions/goal_session/`), reached through the advance-goal dispatch.
-The **no-action** counterpart of the layer-3 escalation — a per-goal
-consecutive-no-progress counter that forces the resolution ladder above — is
-**now shipped**: the pure policy lives in
-`src/goal_curation/no_progress_breaker.rs` (`NoProgressTracker`,
-`resolve_no_progress`, `verify_stuck_goal`), and the OODA curate phase applies
-it through `src/ooda_loop/no_progress.rs`
-(`apply_no_progress_breaker`), which turns each
-`NoProgressResolution` into a board mutation (mark done / drop) or a
-sentinel-`Blocked` + `gh`-filed tracking issue. It reuses the existing
-sentinel-`Blocked` + file-an-issue machinery and the done-gate rather than
-introducing a new state-machine in the reasoners, keeping the change inside
-`goal_curation` / `ooda_loop` (the naming-cleanup rename owns the
-`ooda_brain` / reasoner / client files, so those are left untouched).
+### OODA Orient
 
-The no-progress signal is the classifier
-`ooda_actions::outcome_made_no_progress`, co-located with the detail author
-(`assess_only_outcome`) so the two stay in lockstep. The counter lives on
-`OodaState.no_progress_tracker` (the sibling of `goal_failure_counts`) and is
-snapshot-persisted, so a livelock that spans a daemon restart is still bounded.
+`prompt_assets/simard/recipes/ooda-orient.yaml` owns the semantic judgment for
+failure-aware priority adjustment. It receives the current goal id, base urgency,
+base reason, failure count, and any repair prompt text. It decides the adjusted
+urgency and rationale.
 
-**Test shape.** A goal that yields `GoalAction::NoAction` N times in a row
-triggers the breaker exactly once and terminates in DONE / DROP / ESCALATE — it
-must **not** produce an (N+1)th no-action cycle. The pure ladder is unit-tested
-in `goal_curation::tests_no_progress_breaker`; the OODA-curate wiring
-(N no-action cycles → board mutated + one issue filed; real progress resets the
-counter) in `ooda_loop::tests_no_progress`; and the no-progress classifier is
-pinned against its detail author in
-`ooda_actions::goal_session::advance::tests_no_progress_classifier`.
+Rust owns only the bounds:
 
----
+- input fields are rendered as structured recipe context, not shell text;
+- the returned urgency must be numeric and within the documented range;
+- missing, malformed, or out-of-range output is a brain-output failure, not a
+  quiet deterministic default.
 
-## Fix 4 — Distillation banner-stripping
+### OODA Decide
 
-**Symptom:** `distill: 50 episodes -> 0 facts, 0 procedures`.
+`prompt_assets/simard/ooda_decide.md` and
+`prompt_assets/simard/recipes/ooda-decide.yaml` own action-kind routing:
 
-**Root cause.** The transcript the distillation parser reads was prefixed with
-the **Copilot CLI launch-log banner** — the
-`… launching copilot binary=… version="GitHub Copilot CLI …"` line and the
-`ℹ … NODE_OPTIONS=… (saved preference)` info marker (the exact banner visible
-in this session's terminal heartbeat). That preamble sits in front of the
-agent's real `{ "facts": …, "procedures": … }` payload, so the parser sees
-noise and extracts nothing.
+- ordinary goal slugs usually route to `advance_goal`;
+- reserved synthetic ids route to their dedicated action kinds;
+- loop signals are named in the rationale so the goal-session brain can change
+  strategy;
+- merge and self-update policy remain prompt-owned gate descriptions.
 
-**What shipped.** The banner and ANSI noise are stripped at the **single
-shared `recipe_output` chokepoint** (`strip_recipe_noise` /
-`is_copilot_launcher_line` in `src/recipe_output/extract.rs`). Because every
-recipe-backed brain phase **and** the distillation capture path read their
-agent output through this one function, the strip that originally fixed the
-decide/orient deadlock now also cleans the distill transcript — no per-caller
-duplication. `is_copilot_launcher_line` anchors on the launcher-line markers
-and requires *both* `NODE_OPTIONS=` and `(saved preference)` on the info-marker
-line, so genuine prose that merely mentions `NODE_OPTIONS` is never eaten. See
-[Copilot launch-log preamble stripping](./copilot-launcher-preamble-stripping.md)
-and [Distill recipe-output capture](../reference/distill-recipe-output-capture.md);
-operators diagnosing a parse failure use the
-[decide/orient parse-failure runbook](../howto/diagnose-decide-orient-parse-failures.md).
+Rust accepts only the known action variants. It may keep a compatibility reader
+for older first-token output, but the canonical contract is the recipe-owned
+structured decision envelope:
 
-**Tests.** A regression fixture feeds a **banner-prefixed** distill transcript
-through the shared chokepoint and asserts **> 0 facts** are extracted, so a
-re-introduced banner leak fails CI at the distill path, not only at
-decide/orient.
+```json
+{"decision": "advance_goal", "rationale": "ordinary goal slug, default routing"}
+```
 
----
+If no valid decision can be recovered after bounded repair, the daemon records a
+visible parse error. It must not silently pretend the brain chose a default.
 
-## Why these four ship together
+### Goal-session advance
 
-Each fix removes one leg of the same stool:
+`prompt_assets/simard/goal_session_objective.md` owns the judgment for one
+active goal in one cycle:
 
-- **Fix 1** makes the board **steerable** — operator and meeting intent survive
-  and are visible on the next read.
-- **Fix 2** lets objectively-finished goals **leave** the active board on
-  evidence, instead of being re-litigated at 0%.
-- **Fix 3** drives a goal that repeatedly produces no progress toward a
-  **definitive** resolution instead of an endless "I'll verify" loop — shipped
-  for both brain *failures* and the *no-action* livelock counterpart (see
-  [Status and boundaries](#status-and-boundaries)).
-- **Fix 4** restores **learning**, so distillation turns episodes back into the
-  facts and procedures that let the daemon notice it is repeating itself.
+- whether to spawn an engineer;
+- whether to take no action because work is already in flight or externally
+  blocked;
+- what progress percentage is honest;
+- whether the goal should be decomposed, finished, merged, closed, or retired;
+- how to avoid repeated non-progress loops.
 
-Steerable input, evidence-based exit, bounded escalation, and working memory:
-remove any one and the daemon can slide back toward the un-steerable, stuck
-state this incident captured.
+Rust owns only the response contract:
 
----
+```text
+ACTION: SPAWN_ENGINEER
+TASK:
+Drive PR #4042 to merge-readiness: fix confirmed quality-audit findings,
+update evidence, wait for green checks, then merge through `simard merge-pr`.
+PROGRESS: 75
+```
 
-## Guarantees and non-guarantees
+or:
 
-**Guaranteed**
+```text
+NO ACTION
+REASON: engineer simard-4042-finalizer is already repairing the PR branch.
+PROGRESS: 80
+```
 
-- **Read-your-writes** for goal-board edits under the daemon IPC path or the
-  advisory `flock`: an `add`/`remove` is observed by the next `goal list` and
-  the next curation cycle (Fix 1).
-- **No evidence-free completion** and **no evidence-free perpetual re-litigation**:
-  a goal with a derivable signal is auto-resolved by the done-gate rather than
-  returned to the active set at 0% (Fix 2).
-- **Bounded no-progress**: a goal must not emit unbounded consecutive
-  no-action cycles; it terminates in DONE / DROP / ESCALATE (Fix 3). Layer 1
-  (prompt self-detection), the brain-*failure* escalation, **and** the per-goal
-  consecutive-no-action breaker (`ooda_loop::apply_no_progress_breaker`, wired
-  into the curate phase) are all shipped.
-- **Banner-immune distillation**: a launch-banner-prefixed transcript still
-  yields facts, verified by regression fixture (Fix 4).
+The response is still prose-first. The `TASK:` body is handed to the engineer as
+natural language. The markers are small rails so the daemon can reject ambiguous
+or conflicting output instead of guessing. Until the strict contract parser
+lands, the current compatibility path may still dispatch non-empty free-form
+prose as an engineer task; that compatibility behavior is not the final
+contract.
 
-**Not guaranteed**
+### No-progress explanation
 
-- **Strict linearizability** of `save_goal_board` across separate IPC clients —
-  merge-on-write prevents goal *disappearance* in the common race, but a tight
-  read-read-write-write interleaving can still drop the earlier writer's most
-  recent *field* edit on the same `id`. Callers needing strict serializability
-  route through the daemon IPC socket. See the
-  [`save_goal_board` non-guarantees](../reference/goal-board-api.md#save_goal_board).
-- **Escalation cannot manufacture evidence.** If neither completion evidence
-  nor an obsolescence signal exists, the breaker files an issue and blocks the
-  goal for human review — it does not guess.
-- **Prompt-level self-detection is best-effort**; the layer-3 escalation exists
-  precisely because layer 1 can be fooled by a confidently-looping brain.
+`prompt_assets/simard/recipes/ooda-no-progress-why.yaml` owns the human-readable
+explanation for a no-progress escalation. The deterministic breaker decides that
+the goal has produced no progress; the recipe explains why in operator language.
 
----
+The recipe does not grant itself authority to suppress the breaker. It can enrich
+the evidence narrative; it cannot make a looping goal healthy by narration.
+
+## What Rust owns
+
+Rust is deliberately boring. It owns:
+
+1. **Trusted asset resolution.** Prompt and recipe paths are resolved from the
+   packaged Simard install or the repository root. Operator input is never used
+   as an arbitrary prompt path.
+2. **Context construction.** Goal ids, reasons, failure counts, urgency scores,
+   progress state, PR references, and WIP summaries are assembled from known
+   daemon state into structured recipe context.
+3. **Subprocess boundaries.** Recipe invocations use explicit executable and
+   argument vectors, including `-c key=value` context arguments. They do not use
+   shell-interpolated command strings.
+4. **Output capture.** The recipe-runner JSON envelope is decoded and the final
+   step output is extracted. Status, stdout, and stderr are preserved enough to
+   diagnose failures without turning logs into a secret sink.
+5. **Contract enforcement.** The daemon accepts only documented markers and
+   action variants. Missing, unknown, duplicate, or conflicting markers are
+   invalid.
+6. **State mutation.** Rust updates goal progress, records no-action outcomes,
+   spawns engineers, files tracking issues through existing rails, and writes
+   cycle journals.
+7. **Loud failures.** Invalid recipe output, subprocess failure, missing assets,
+   missing tools, and malformed response contracts surface as explicit failures.
+   They are not converted into success-shaped no-ops.
+
+## Planned goal-session module boundary
+
+The goal-session action should be split by responsibility before this planned
+contract is considered implemented:
+
+| Planned module | Responsibility |
+| --- | --- |
+| `src/ooda_actions/goal_session/mod.rs` | Public module boundary and narrow exports for input, advance, and outcome rails. |
+| `src/ooda_actions/goal_session/input.rs` | Build deterministic prompt and recipe input from known goal, board, WIP, and state data. No semantic scoring. |
+| `src/ooda_actions/goal_session/advance.rs` | Run one goal-session turn, call the brain, and route only from explicit output contracts. |
+| `src/ooda_actions/goal_session/outcome.rs` | Validate `ACTION: SPAWN_ENGINEER`, `NO ACTION`, `REASON:`, `TASK:`, and `PROGRESS: NN`; reject ambiguous or conflicting output. |
+
+This boundary is the guardrail against policy creep. If a change needs to decide
+what work matters, it belongs in a prompt or recipe. If it only validates a
+marker or moves bytes between trusted components, it belongs in Rust.
+
+## Response contracts
+
+### Decide contract
+
+Canonical:
+
+```json
+{"decision": "advance_goal", "rationale": "ordinary goal slug, default routing"}
+```
+
+`decision` must be one known variant:
+
+- `advance_goal`
+- `consolidate_memory`
+- `run_improvement`
+- `poll_developer_activity`
+- `extract_ideas`
+- `safe_update`
+- `research_query`
+- `run_gym_eval`
+- `build_skill`
+- `launch_session`
+
+Unknown variants are invalid. Compatibility readers may accept older first-token
+output only as an explicit migration rail; new prompt assets should emit the JSON
+envelope.
+
+### Orient contract
+
+Canonical:
+
+```json
+{"adjusted_urgency": 0.6, "confidence": 0.82, "rationale": "one recent failure; light demotion"}
+```
+
+`adjusted_urgency` must be a number in the allowed range. It must not inflate a
+goal above the base urgency passed to the recipe.
+
+### Goal-session contract
+
+This is the target contract for the feature. It is stricter than the current
+compatibility parser and requires matching prompt-asset changes before the
+planned marker is removed.
+
+Spawn an engineer:
+
+```text
+ACTION: SPAWN_ENGINEER
+TASK:
+Check out PR #4042, fix confirmed quality-audit findings only, update the PR
+body with evidence, and merge through `simard merge-pr` after all gates pass.
+PROGRESS: 70
+```
+
+Take no action:
+
+```text
+NO ACTION
+REASON: PR #4042 is waiting on required checks; spawning another engineer would duplicate work.
+PROGRESS: 85
+```
+
+Rules:
+
+- `ACTION: SPAWN_ENGINEER` and `NO ACTION` are mutually exclusive.
+- `TASK:` is required for `ACTION: SPAWN_ENGINEER`.
+- `REASON:` is required for `NO ACTION`.
+- `PROGRESS: NN` is optional and must be a single integer in `0..=100`; out-of-range values are invalid and must not be clamped.
+- Duplicate progress markers with different values are invalid.
+- Empty output, prose with no action marker, unknown action markers, and
+  conflicting markers are invalid.
+
+## Configuration
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `SIMARD_HOME` | `$HOME/.simard` | Install root for the binary, prompt assets, recipe assets, logs, and systemd working directory. |
+| `SIMARD_LLM_PROVIDER` | config file value | Overrides the provider used by prompt-driven brains. |
+| `SIMARD_ENGINEER_AGENT` | `copilot` | Selects the subordinate engineer agent. Valid values are `copilot` and `rustyclawd`. |
+| `SIMARD_OODA_MAX_CONCURRENT` | `24` | Preferred per-cycle goal coverage ceiling, range `1..=64`. |
+| `SIMARD_MAX_CONCURRENT_ACTIONS` | `24` | Legacy fallback used only when `SIMARD_OODA_MAX_CONCURRENT` is unset. |
+
+The generated user systemd units include a deterministic `PATH` that contains
+`$SIMARD_HOME/bin`, `$HOME/.local/bin`, `$HOME/.cargo/bin`, and standard system
+paths. See [How to run the OODA daemon](../howto/run-ooda-daemon.md).
+
+## Healthy behavior
+
+A healthy daemon reports recipe-backed brains in `ooda.log`, advances distinct
+goals up to the resource ceiling, records no-action outcomes when work is
+already in flight, and fails visibly when a prompt or recipe returns invalid
+output.
+
+Example health signals:
+
+```bash
+SIMARD_HOME="${SIMARD_HOME:-$HOME/.simard}"
+journalctl --user -u simard-ooda.service -n 100 --no-pager
+grep "RecipeBrain" "$SIMARD_HOME/ooda.log"
+```
+
+Expected log lines name recipe-backed phases such as:
+
+```text
+[simard] OODA daemon: decide_brain = RecipeBrain (recipe-runner-rs backed, decide)
+[simard] OODA daemon: orient_brain = RecipeBrain (recipe-runner-rs backed, orient)
+```
+
+`DEGRADED` fallback lines are not healthy. They mean a provider, recipe asset,
+or recipe-runner dependency is missing and the daemon cannot honestly claim the
+agentic OODA architecture is active.
+
+## Anti-patterns
+
+Do not implement OODA judgment by adding:
+
+- Rust keyword scanners for semantic phrases such as "merge-ready", "stuck",
+  "blocked", "safe", or "done";
+- deterministic routing trees that duplicate `ooda_decide.md`;
+- code-owned scoring for whether a goal is important or looping;
+- silent defaults after malformed recipe output;
+- arbitrary prompt path configuration supplied by operator input;
+- shell-joined recipe commands.
+
+The right fix for loose or ambiguous brain output is a clearer prompt/recipe
+contract plus stricter contract validation, not a larger parser.
 
 ## See also
 
-- [Goal board persistence](./goal-board-persistence.md) — the single-source-of-truth
-  design, consumer matrix, and cycle-startup sequence.
-- [Goal board corruption guards](./goal-board-corruption-guards.md) — the
-  pre-write validity gate.
-- [Deploy-aware done-gate](./deploy-aware-done-gate.md) ·
-  [Completion-evidence gate API](../reference/completion-evidence-gate-api.md).
-- [OODA loop self-detection](./ooda-loop-self-detection.md) ·
-  [Unblock OODA goals stuck after a brain-failure lockout](../howto/unblock-stuck-ooda-goals.md).
-- [Copilot launch-log preamble stripping](./copilot-launcher-preamble-stripping.md) ·
-  [Distill recipe-output capture](../reference/distill-recipe-output-capture.md).
-- [How to recover a corrupted or missing goal board](../howto/recover-goal-board.md).
+- [How to run the OODA daemon](../howto/run-ooda-daemon.md)
+- [How OODA spawns engineer agents](../howto/spawn-engineers-from-ooda-daemon.md)
+- [Simard CLI reference](../reference/simard-cli.md)
+- [OODA coverage parallelism ceiling](../reference/ooda-coverage-parallelism-ceiling.md)
