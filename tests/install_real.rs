@@ -107,6 +107,13 @@ fn assert_backup_contains(root: &Path, expected: &[u8]) {
     );
 }
 
+fn find_backup_manifest(root: &Path) -> PathBuf {
+    collect_files(root)
+        .into_iter()
+        .find(|path| path.file_name().is_some_and(|name| name == "manifest.json"))
+        .unwrap_or_else(|| panic!("verified backup manifest missing under {root:?}"))
+}
+
 #[test]
 fn install_help_documents_the_canonical_installer_contract() {
     let assert = simard().args(["install", "--help"]).assert().success();
@@ -352,6 +359,7 @@ fn install_can_source_prompt_assets_from_distribution_env_root() {
     let (systemctl, _systemctl_log) = fake_systemctl(temp.path());
 
     fs::create_dir_all(source_root.join("simard/recipes")).expect("asset dirs");
+    fs::create_dir_all(source_root.join("simard/policies")).expect("policy dir");
     fs::write(
         source_root.join("simard/ooda_orient.md"),
         "packaged orient prompt",
@@ -362,6 +370,16 @@ fn install_can_source_prompt_assets_from_distribution_env_root() {
         "packaged recipe",
     )
     .expect("recipe asset");
+    fs::write(
+        source_root.join("simard/recipes/goal-session-actor.yaml"),
+        "packaged goal-session actor recipe",
+    )
+    .expect("typed actor recipe");
+    fs::write(
+        source_root.join("simard/policies/goal-session-capabilities.toml"),
+        "packaged goal-session policy",
+    )
+    .expect("typed actor policy");
 
     simard()
         .args(["install", "--simard-home"])
@@ -419,6 +437,80 @@ fn install_preserves_prior_binary_and_prints_memory_backup_guidance_before_resta
             "installer should print rollback and memory backup guidance containing {expected:?}; output:\n{output}"
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn rollback_manifest_restores_binary_assets_units_and_state() {
+    let temp = TempDir::new().expect("tempdir");
+    let simard_home = temp.path().join("simard-home");
+    let unit_dir = temp.path().join("systemd-user");
+    let (systemctl, _systemctl_log) = fake_systemctl(temp.path());
+
+    fs::create_dir_all(simard_home.join("bin")).expect("bin");
+    fs::create_dir_all(simard_home.join("prompt_assets/simard/recipes")).expect("assets");
+    fs::create_dir_all(simard_home.join("state")).expect("state");
+    fs::create_dir_all(&unit_dir).expect("units");
+    fs::write(simard_home.join("bin/simard"), b"prior-binary").expect("binary");
+    fs::set_permissions(
+        simard_home.join("bin/simard"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .expect("executable");
+    fs::write(
+        simard_home.join("prompt_assets/simard/recipes/prior.yaml"),
+        b"prior-recipe",
+    )
+    .expect("recipe");
+    fs::write(simard_home.join("state/outcomes.sqlite3"), b"prior-state").expect("state");
+    fs::write(unit_dir.join("simard-ooda.service"), b"prior-ooda-unit").expect("unit");
+    fs::write(unit_dir.join("simard-signal.service"), b"prior-signal-unit").expect("unit");
+
+    simard()
+        .args(["install", "--simard-home"])
+        .arg(&simard_home)
+        .arg("--systemd-user-dir")
+        .arg(&unit_dir)
+        .arg("--systemctl")
+        .arg(&systemctl)
+        .assert()
+        .success();
+
+    let manifest = find_backup_manifest(&simard_home.join(".install-backups"));
+    fs::write(simard_home.join("state/outcomes.sqlite3"), b"mutated-state").expect("mutate");
+
+    simard()
+        .args(["install", "--simard-home"])
+        .arg(&simard_home)
+        .arg("--systemd-user-dir")
+        .arg(&unit_dir)
+        .arg("--systemctl")
+        .arg(&systemctl)
+        .arg("--rollback")
+        .arg(&manifest)
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read(simard_home.join("bin/simard")).unwrap(),
+        b"prior-binary"
+    );
+    assert_eq!(
+        fs::read(simard_home.join("prompt_assets/simard/recipes/prior.yaml")).unwrap(),
+        b"prior-recipe"
+    );
+    assert_eq!(
+        fs::read(simard_home.join("state/outcomes.sqlite3")).unwrap(),
+        b"prior-state"
+    );
+    assert_eq!(
+        fs::read(unit_dir.join("simard-ooda.service")).unwrap(),
+        b"prior-ooda-unit"
+    );
+    assert_eq!(
+        fs::read(unit_dir.join("simard-signal.service")).unwrap(),
+        b"prior-signal-unit"
+    );
 }
 
 #[cfg(unix)]

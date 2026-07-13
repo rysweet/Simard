@@ -12,12 +12,18 @@ use std::path::PathBuf;
 
 use paths::InstallLayout;
 
+pub(crate) const REQUIRED_TYPED_OODA_ASSETS: [&str; 2] = [
+    "simard/recipes/goal-session-actor.yaml",
+    "simard/policies/goal-session-capabilities.toml",
+];
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct InstallConfig {
     pub simard_home: Option<PathBuf>,
     pub dry_run: bool,
     pub systemd_user_dir: Option<PathBuf>,
     pub systemctl: Option<PathBuf>,
+    pub rollback_manifest: Option<PathBuf>,
     help_only: bool,
 }
 
@@ -72,6 +78,20 @@ pub fn run(config: InstallConfig) -> InstallResult<InstallOutcome> {
     }
 
     let layout = paths::resolve(&config)?;
+    if let Some(manifest) = &config.rollback_manifest {
+        if config.dry_run {
+            return err("--dry-run cannot be combined with --rollback");
+        }
+        let systemctl = systemd::resolve_systemctl(config.systemctl.as_deref())?;
+        let _install_lock = paths::acquire_install_lock(&layout)?;
+        rollback::restore_verified_backup(&layout, manifest)?;
+        systemd::activate(&systemctl)?;
+        println!(
+            "Rolled back Simard from verified manifest {}",
+            manifest.display()
+        );
+        return Ok(outcome(&layout, None, true));
+    }
     let current_binary = binary::current_binary()?;
     let prompt_source = assets::discover_prompt_asset_root()?;
     assets::validate_prompt_source(&prompt_source)?;
@@ -88,6 +108,7 @@ pub fn run(config: InstallConfig) -> InstallResult<InstallOutcome> {
     let staging = paths::prepare_staging(&layout)?;
     binary::stage_binary(&current_binary, &staging.binary)?;
     assets::stage_prompt_assets(&prompt_source, &staging.prompt_assets)?;
+    let verified_backup = rollback::create_verified_backup(&layout)?;
 
     let prior_binary_backup = if binary::live_binary_matches_source(&current_binary, &layout)? {
         println!(
@@ -104,7 +125,11 @@ pub fn run(config: InstallConfig) -> InstallResult<InstallOutcome> {
     systemd::install_units(&layout, &rendered_units)?;
     paths::remove_staging(&staging.root)?;
 
-    rollback::print_guidance(&layout, prior_binary_backup.as_deref());
+    rollback::print_guidance(
+        &layout,
+        prior_binary_backup.as_deref(),
+        &verified_backup.manifest_path,
+    );
     systemd::activate(&systemctl)?;
 
     println!("Installed Simard to {}", layout.simard_home.display());

@@ -67,6 +67,7 @@ nav:
   - Architecture:
     - Overview: architecture/overview.md
     - Simard System Architecture: architecture/system-architecture.md
+    - "Planned: Typed-Capability OODA Loop": architecture/typed-ooda-loop.md
     - RPC Transport Pattern: architecture/rpc-pattern.md
     - Agent Composition: architecture/agent-composition.md
     - Engineer-Loop Agent Orchestration: architecture/engineer-agent-orchestration.md
@@ -149,6 +150,7 @@ nav:
     - Journal Report Tone Contract: concepts/journal-report-tone-contract.md
     - Eliminating "bridge" Terminology: concepts/bridge-terminology-elimination.md
   - Tutorials:
+    - "Planned: Complete a Typed OODA Cycle": tutorials/complete-a-typed-ooda-cycle.md
     - First Local Session: tutorials/run-your-first-local-session.md
     - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md
     - Read Simard's Daily Journal: tutorials/read-simards-daily-journal.md
@@ -164,7 +166,7 @@ nav:
     - Grant Engineer Write Permissions: howto/grant-engineer-write-permissions.md
     - Edit the Engineer System Prompt: howto/edit-the-engineer-system-prompt.md
     - Run the OODA Daemon: howto/run-ooda-daemon.md
-    - Spawn Engineers from the OODA Daemon: howto/spawn-engineers-from-ooda-daemon.md
+    - "Planned: Spawn Engineers from the OODA Daemon": howto/spawn-engineers-from-ooda-daemon.md
     - Diagnose a Deferred/Serialized Engineer Spawn (overlap): howto/diagnose-a-deferred-engineer-spawn.md
     - Configure Resource-Aware Engineer Admission: howto/configure-resource-aware-admission.md
     - Unblock Stuck OODA Goals: howto/unblock-stuck-ooda-goals.md
@@ -172,8 +174,9 @@ nav:
     - Re-Investigate Bare-Blocked OODA Goals: howto/reinvestigate-bare-blocked-goals.md
     - Add a New Recipe-Brain Phase: howto/add-a-new-recipe-brain-phase.md
     - Edit the OODA Brain Prompt: howto/edit-the-ooda-brain-prompt.md
-    - Diagnose Brain Decision Parse Failures: howto/diagnose-brain-decision-parse-failures.md
-    - Diagnose Decide/Orient Parse Failures: howto/diagnose-decide-orient-parse-failures.md
+    - "Parser-route diagnostics (legacy after typed cutover)":
+      - Brain Decision Parse Failures: howto/diagnose-brain-decision-parse-failures.md
+      - Decide/Orient Parse Failures: howto/diagnose-decide-orient-parse-failures.md
     - Diagnose and Recover OODA Step Failures: howto/diagnose-and-recover-ooda-step-failures.md
     - Diagnose Journal E2BIG Spawn Failures: howto/diagnose-journal-e2big-spawn-failures.md
     - Diagnose Signal-Meeting E2BIG Spawn Failures: howto/diagnose-signal-meeting-e2big.md
@@ -249,6 +252,7 @@ nav:
   - Reference:
     - CLI Reference: reference/simard-cli.md
     - Simard Installer: reference/simard-installer.md
+    - "Planned: OODA Capability API": reference/ooda-capability-api.md
     - Telemetry Metrics: reference/telemetry-metrics.md
     - Recall-Precision Hybrid Measurement: reference/recall-precision-hybrid-api.md
     - Enrichment Observability API: reference/enrichment-observability-api.md
@@ -285,21 +289,22 @@ nav:
     - Terminal Failure Diagnosis API: reference/terminal-failure-diagnosis-api.md
     - Recipe Context-File Transport: reference/recipe-context-file-transport.md
     - Large-Payload Spawn API: reference/large-payload-spawn-api.md
-    - Text-Parsing Wire Formats: reference/text-parsing-wire-formats.md
     - Recipe Context-Var Sanitization: reference/recipe-context-var-sanitization.md
     - Engineer-Loop argv Sanitization: reference/engineer-loop-argv-sanitization.md
     - String-Truncation Helpers: reference/string-truncation-helpers.md
     - RecipeBrain API: reference/recipe-brain-api.md
-    - OodaBrain API: reference/ooda-brain-api.md
-    - OODA Brain Decision Protocol: reference/ooda-brain-decision-protocol.md
-    - OODA Brain Parse-Failure Record: reference/ooda-brain-parse-failure-record.md
+    - "Planned: OODA Actor API": reference/ooda-brain-api.md
+    - "Parser contracts (legacy for typed OODA after cutover)":
+      - Text-Parsing Wire Formats: reference/text-parsing-wire-formats.md
+      - OODA Brain Decision Protocol: reference/ooda-brain-decision-protocol.md
+      - OODA Brain Parse-Failure Record: reference/ooda-brain-parse-failure-record.md
+      - Recipe-Brain Verdict/Decision Parsing: reference/recipe-brain-verdict-parsing.md
     - OODA Brain Prompt Schema: reference/ooda-brain-prompt.md
     - OODA Decide Prompt Schema: reference/ooda-decide-prompt.md
     - OODA Orient Prompt Schema: reference/ooda-orient-prompt.md
     - OODA Orient Recipe: reference/ooda-orient-recipe.md
     - OODA Engineer-Lifecycle Recipe: reference/ooda-engineer-lifecycle-recipe.md
     - OODA Procedural Memory: reference/ooda-procedural-memory.md
-    - Recipe-Brain Verdict/Decision Parsing: reference/recipe-brain-verdict-parsing.md
     - OODA Binary-Identity Reload Gate: reference/ooda-binary-identity-reload-gate.md
     - Distill Recipe-Output Capture: reference/distill-recipe-output-capture.md
     - Base-Type Adapters: reference/base-type-adapters.md
@@ -414,6 +419,7 @@ nav:
     - COIN Benchmark Reference: reference/coin-benchmark.md
   - Operations:
     - Overview: operations/index.md
+    - "Planned: Deploy and Roll Back Typed OODA": operations/deploy-and-roll-back-typed-ooda.md
     - Verified Backups of the Live Store: operations/verified-backups.md
     - Cognitive-Memory Durability: operations/cognitive-memory-durability.md
     - Cognitive-Memory WAL Recovery Runbook: operations/cognitive-memory-wal-recovery-runbook.md

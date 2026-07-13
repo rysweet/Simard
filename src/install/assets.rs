@@ -60,7 +60,10 @@ pub fn validate_prompt_source(source: &Path) -> InstallResult<()> {
             source.display()
         ));
     }
-    for required in ["simard/ooda_orient.md", "simard/recipes/ooda-orient.yaml"] {
+    for required in ["simard/ooda_orient.md", "simard/recipes/ooda-orient.yaml"]
+        .into_iter()
+        .chain(super::REQUIRED_TYPED_OODA_ASSETS)
+    {
         let path = source.join(required);
         if !path.is_file() {
             return err(format!(
@@ -134,6 +137,12 @@ pub fn replace_live_prompt_assets(staged: &Path, layout: &InstallLayout) -> Inst
 fn has_required_assets(root: &Path) -> bool {
     root.join("simard/ooda_orient.md").is_file()
         && root.join("simard/recipes/ooda-orient.yaml").is_file()
+        && root
+            .join("simard/recipes/goal-session-actor.yaml")
+            .is_file()
+        && root
+            .join("simard/policies/goal-session-capabilities.toml")
+            .is_file()
 }
 
 fn copy_dir_recursive(source: &Path, destination: &Path, root: &Path) -> InstallResult<()> {

@@ -150,6 +150,7 @@ pub(crate) fn assess_only_outcome(
 /// applies the result. Concurrent dispatch (see `ooda_actions::concurrent`)
 /// calls [`build_goal_advance_input`] and [`apply_goal_advance_result`]
 /// directly so the slow `run_turn` happens with no lock held.
+#[cfg(test)]
 pub(crate) fn advance_goal_with_session(
     action: &PlannedAction,
     memory: &dyn crate::cognitive_memory::CognitiveMemoryOps,

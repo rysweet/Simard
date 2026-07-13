@@ -1,7 +1,7 @@
 ---
 title: Recipe-brain verdict/decision parsing
-description: How recipe-backed brain phases turn a recipe-runner-rs subprocess run into a typed decision/verdict. All four phases — engineer-lifecycle, decide, orient, and merge-judge — share one JSON-envelope transport, one confidence-gated escalation ladder, and loud/fail-closed defaults, plus the class-level brain_verdict_parsed_total metric.
-last_updated: 2026-06-29
+description: Current recipe-backed brain parsing contract; OODA use becomes legacy only after verified typed-route cutover.
+last_updated: 2026-07-13
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -18,6 +18,14 @@ related:
 ---
 
 # Recipe-brain verdict/decision parsing
+
+!!! note "Migration condition"
+    Current releases use these parsers. OODA consumers become legacy only after
+    a release implements and selects the typed route and route verification
+    proves them unreachable. They remain authoritative while the route is
+    `legacy` or `shadow`; non-OODA consumers are unaffected by that cutover.
+    See the planned
+    [typed OODA architecture](../architecture/typed-ooda-loop.md).
 
 > **Status — all four phases shipped.**
 > Every recipe-backed brain phase reads the `recipe-runner-rs --output-format

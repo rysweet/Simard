@@ -16,6 +16,7 @@ Options:
   --dry-run                  Validate inputs and print the activation plan without mutation
   --systemd-user-dir <PATH>  User unit directory. Defaults to ~/.config/systemd/user
   --systemctl <PATH|NAME>    systemctl executable for activation and tests
+  --rollback <MANIFEST>      Restore binary, assets, units, config, and state from a verified backup
   --help, -h                 Show this help
 
 Installs:
@@ -57,6 +58,9 @@ where
             "--systemctl" => {
                 config.systemctl = Some(next_path(&mut args, "--systemctl")?);
             }
+            "--rollback" => {
+                config.rollback_manifest = Some(next_path(&mut args, "--rollback")?);
+            }
             _ if arg.starts_with("--simard-home=") => {
                 config.simard_home = Some(PathBuf::from(
                     arg.strip_prefix("--simard-home=").expect("prefix checked"),
@@ -71,6 +75,11 @@ where
             _ if arg.starts_with("--systemctl=") => {
                 config.systemctl = Some(PathBuf::from(
                     arg.strip_prefix("--systemctl=").expect("prefix checked"),
+                ));
+            }
+            _ if arg.starts_with("--rollback=") => {
+                config.rollback_manifest = Some(PathBuf::from(
+                    arg.strip_prefix("--rollback=").expect("prefix checked"),
                 ));
             }
             _ => return Err(format!("unexpected argument: {arg}").into()),
