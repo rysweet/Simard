@@ -75,6 +75,39 @@ fn no_action_response_records_no_action_outcome_without_spawning() {
 }
 
 #[test]
+fn action_prefixed_no_action_records_no_action_outcome_without_spawning() {
+    let goal_id = "test-goal";
+    let mut state = state_with_goal(goal_id);
+    let goal = live_goal(&state, goal_id);
+    let action = planned_action(goal_id);
+
+    let (mut session, _captured) = MockSession::new_ok(
+        "ACTIONS:\nACTION: no_action — PR #2958 is already the concrete in-flight artifact.",
+        vec![],
+    );
+
+    let mem_box = mock_memory();
+    let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
+    let result = advance_goal_with_session(
+        &action,
+        &*mem_box,
+        &checker,
+        &mut session,
+        &mut state,
+        &goal,
+    );
+
+    assert!(result.outcome.success);
+    assert!(result.outcome.detail.contains("no-action"));
+    match result.action {
+        Some(GoalAction::NoAction { reason }) => {
+            assert!(reason.contains("PR #2958"));
+        }
+        other => panic!("expected NoAction, got {other:?}"),
+    }
+}
+
+#[test]
 #[serial_test::serial(cognitive_memory)]
 fn prose_response_routes_to_spawn_engineer() {
     let _guard = env_lock().lock().unwrap();

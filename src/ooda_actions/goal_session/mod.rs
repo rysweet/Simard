@@ -112,14 +112,21 @@ pub(super) fn parse_orchestrator_response(response: &str) -> Option<Orchestrator
 /// Detect the `NO ACTION` marker.
 ///
 /// True when any single line of the input, after trimming, equals
-/// `NO ACTION` or `NO_ACTION` case-insensitively. Requires the marker
-/// to appear on its own line so that prose containing the literal
-/// phrase ("we should take no action against ...") does not accidentally
-/// trigger a no-op.
+/// `NO ACTION` / `NO_ACTION` case-insensitively, or is an action-list
+/// item whose action kind is `no_action`.
+///
+/// Requires the marker to appear as a standalone line or explicit action
+/// kind so prose containing the literal phrase ("we should take no action
+/// against ...") does not accidentally trigger a no-op.
 pub(super) fn has_no_action_marker(s: &str) -> bool {
     s.lines().any(|line| {
         let upper = line.trim().to_uppercase();
-        upper == "NO ACTION" || upper == "NO_ACTION"
+        upper == "NO ACTION"
+            || upper == "NO_ACTION"
+            || upper
+                .strip_prefix("ACTION:")
+                .map(str::trim_start)
+                .is_some_and(|rest| rest.starts_with("NO_ACTION") || rest.starts_with("NO ACTION"))
     })
 }
 
