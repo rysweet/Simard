@@ -126,7 +126,7 @@ fn concurrent_dispatch_parallelizes_and_respects_cap() {
     memories.session_factory = Some(Arc::new(FakeFactory {
         instr: Arc::clone(&instr),
         sleep,
-        response: "NO ACTION".to_string(),
+        response: "NO ACTION\nREASON: concurrency test no-op".to_string(),
         fail_substring: None,
     }));
     let mut state = OodaState::new(board_with_unassigned_goals(&ids));
@@ -190,7 +190,7 @@ fn same_goal_claimed_once_no_double_spawn() {
     memories.session_factory = Some(Arc::new(FakeFactory {
         instr: Arc::clone(&instr),
         sleep: Duration::from_millis(150),
-        response: "NO ACTION".to_string(),
+        response: "NO ACTION\nREASON: duplicate-claim test no-op".to_string(),
         fail_substring: None,
     }));
     let mut state = OodaState::new(board_with_unassigned_goals(&["dup-goal"]));
@@ -233,7 +233,7 @@ fn one_failing_advance_does_not_abort_others() {
     memories.session_factory = Some(Arc::new(FakeFactory {
         instr: Arc::clone(&instr),
         sleep: Duration::from_millis(50),
-        response: "NO ACTION".to_string(),
+        response: "NO ACTION\nREASON: failure-isolation test no-op".to_string(),
         // Only the "adv-fail-b" goal's objective contains "fail-b".
         fail_substring: Some("fail-b".to_string()),
     }));

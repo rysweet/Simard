@@ -637,7 +637,7 @@ fn goal_session_objective_parallelism_is_collision_safe() {
 fn goal_session_objective_parallelism_keeps_response_shapes() {
     // The fan-out must reuse the existing "Spawn an engineer" response shape and
     // must NOT invent a new shape the Rust parser cannot read. Both documented
-    // shapes (Spawn an engineer / NO ACTION) remain intact.
+    // shapes (Spawn an engineer / strict NO ACTION + REASON) remain intact.
     let content = embedded_fallback("goal_session_objective.md")
         .expect("goal_session_objective.md must be registered");
     let lower = content.to_lowercase();
@@ -646,8 +646,25 @@ fn goal_session_objective_parallelism_keeps_response_shapes() {
         "fan-out must use the existing Spawn-an-engineer response shape"
     );
     assert!(
-        content.contains("NO ACTION"),
-        "the NO ACTION response shape must remain documented"
+        content.contains("NO ACTION") && content.contains("REASON:"),
+        "the strict NO ACTION + REASON response shape must remain documented"
+    );
+}
+
+#[test]
+fn goal_session_objective_requires_strict_no_action_contract() {
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        content.contains("NO ACTION")
+            && content.contains("REASON:")
+            && content.contains("PROGRESS:"),
+        "goal-session no-action output must keep the strict parser-owned marker shape"
+    );
+    assert!(
+        lower.contains("`no_action`") && lower.contains("unknown `action:`"),
+        "goal-session prompt must explicitly reject legacy or unknown machine-looking action fragments"
     );
 }
 
@@ -1387,7 +1404,7 @@ fn goal_session_objective_finalization_preserves_prose_contract() {
 // #2405 per-issue fan-out, #2410 own-PRs-to-landing, and #2413 finalization — the
 // dep-bump is a NEW done-gate that runs AFTER landing, alongside #2410. Output
 // contracts are PRESERVED: `goal_session_objective.md` stays prose-only (NO ACTION
-// / PROGRESS markers intact); `progress_assessment_reviewer.md` and its recipe
+// / REASON / PROGRESS markers intact); `progress_assessment_reviewer.md` and its recipe
 // mirror keep the single-line `{"verdict": …}` JSON the Rust parser reads. Phrases
 // are checked after `normalize_ws` + lowercase so Markdown wrapping cannot defeat
 // them. `engineer_system.md` is asserted via `engineer_system_md()` (include_str!),
@@ -1502,8 +1519,8 @@ fn goal_session_objective_has_proactive_dependency_drift_note() {
 #[test]
 fn goal_session_objective_dep_gate_preserves_prose_contract() {
     // Output-contract guard: the new gate must stay additive PROSE — it must NOT
-    // introduce a JSON verdict shape, and must keep the NO ACTION / PROGRESS
-    // markers the goal-session parser reads. (Combined with a new-behaviour
+    // introduce a JSON verdict shape, and must keep the NO ACTION / REASON /
+    // PROGRESS markers the goal-session parser reads. (Combined with a new-behaviour
     // assertion so the test fails until the gate lands.)
     let content = embedded_fallback("goal_session_objective.md")
         .expect("goal_session_objective.md must be registered");
@@ -1517,8 +1534,8 @@ fn goal_session_objective_dep_gate_preserves_prose_contract() {
         "goal_session_objective.md is prose-only — the dep-gate must not add a JSON verdict contract"
     );
     assert!(
-        content.contains("NO ACTION"),
-        "the prose `NO ACTION` marker the parser reads must be preserved"
+        content.contains("NO ACTION") && content.contains("REASON:"),
+        "the strict no-action marker shape the parser reads must be preserved"
     );
     assert!(
         content.contains("PROGRESS:"),
