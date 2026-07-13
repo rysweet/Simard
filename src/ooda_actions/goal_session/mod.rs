@@ -126,7 +126,18 @@ pub(super) fn has_no_action_marker(s: &str) -> bool {
             || upper
                 .strip_prefix("ACTION:")
                 .map(str::trim_start)
-                .is_some_and(|rest| rest.starts_with("NO_ACTION") || rest.starts_with("NO ACTION"))
+                .is_some_and(starts_with_no_action_kind)
+    })
+}
+
+fn starts_with_no_action_kind(rest: &str) -> bool {
+    ["NO_ACTION", "NO ACTION"].iter().any(|marker| {
+        rest.strip_prefix(marker).is_some_and(|after| {
+            after
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
+        })
     })
 }
 
@@ -259,6 +270,13 @@ mod tests {
                 "marker '{marker}' should route to NoAction"
             );
         }
+    }
+
+    #[test]
+    fn action_prefixed_no_action_requires_action_kind_boundary() {
+        let response = "ACTION: no_actionable task still needs implementation";
+        let decision = parse_orchestrator_response(response).expect("yields decision");
+        assert!(matches!(decision.action, GoalAction::SpawnEngineer { .. }));
     }
 
     #[test]
