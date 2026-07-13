@@ -206,14 +206,15 @@ makes zero shippable progress. The two need different breakers.
    progress**. This is the first line of defense and requires no rebuild — see
    [OODA loop self-detection](./ooda-loop-self-detection.md).
 
-2. **No-action classification.** When a decision resolves to a `NO ACTION` /
-   `NO_ACTION` marker on its own line, the goal-session parser
+2. **No-action classification.** When a decision resolves to a complete
+   no-action sentence (`No action this cycle because ...`) or to a legacy
+   `NO ACTION` / `NO_ACTION` marker on its own line, the goal-session parser
    (`parse_orchestrator_response` → `has_no_action_marker` in
    `src/ooda_actions/goal_session/mod.rs`, reached through the advance-goal
    dispatch) routes it to `GoalAction::NoAction { reason }` and records a no-op
    cycle via `assess_only_outcome` (rather than spawning an engineer). This
    gives the progress path a **countable, structured** no-progress signal
-   instead of having to pattern-match free prose.
+   without requiring Simard to emit machine-looking `ACTION: no_action` fragments.
 
 3. **Bounded escalation to a definitive resolution.** Repeated no-progress on
    the *same* goal must terminate in a single decisive outcome — never another

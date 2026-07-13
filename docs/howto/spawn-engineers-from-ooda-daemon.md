@@ -46,26 +46,27 @@ that can run `gh issue create`, `gh pr comment`, edit files, open PRs,
 etc. Do not bother specifying file paths or shell commands in advance —
 the engineer will figure those out.
 
-### 2. NoAction — the `NO ACTION` marker
+### 2. NoAction — a complete no-action sentence
 
 If no work should be done this cycle (e.g., another subordinate is
 already in flight, or the goal is blocked on external review), the
-response must include the literal text `NO ACTION` on its own line:
+preferred response is a complete sentence beginning `No action this cycle
+because ...`:
 
 ```
-NO ACTION
-Another subordinate (engineer-foo-1234) is already working this goal;
+No action this cycle because another subordinate (engineer-foo-1234) is already working this goal;
 spawning a second one would create a merge conflict.
 ```
 
 The dispatcher records the full response (including the prose
-explanation after the marker) as the outcome reason. No subprocess is
+explanation) as the outcome reason. No subprocess is
 spawned.
 
-The marker is recognized case-insensitively and also accepts the
-underscore form `NO_ACTION`. It must be on its own line so that prose
-mentioning the literal phrase ("we should take no action against this")
-does not accidentally trigger a no-op.
+For compatibility, the parser still recognizes legacy `NO ACTION` and
+`NO_ACTION` markers on their own line, plus action-list items whose explicit
+kind is `no_action`. New prompt assets should not emit `ACTIONS:` /
+`ACTION: no_action`; those are machine-looking wire fragments, not operator
+communication.
 
 ## Optional `PROGRESS: NN` marker
 
@@ -73,8 +74,7 @@ Either response shape may include a `PROGRESS: NN` marker (where `NN` is
 0..=100) to update the goal's recorded completion percentage:
 
 ```
-NO ACTION
-Waiting on PR review. PROGRESS: 95
+No action this cycle because the PR is waiting on review. PROGRESS: 95
 ```
 
 The marker is parsed case-insensitively and clamped to 0..=100. The

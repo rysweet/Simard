@@ -123,11 +123,22 @@ pub(super) fn has_no_action_marker(s: &str) -> bool {
         let upper = line.trim().to_uppercase();
         upper == "NO ACTION"
             || upper == "NO_ACTION"
+            || is_complete_no_action_sentence(&upper)
             || upper
                 .strip_prefix("ACTION:")
                 .map(str::trim_start)
                 .is_some_and(starts_with_no_action_kind)
     })
+}
+
+fn is_complete_no_action_sentence(line: &str) -> bool {
+    [
+        "NO ACTION THIS CYCLE BECAUSE",
+        "NO ACTION IS NEEDED THIS CYCLE BECAUSE",
+        "NO ACTION IS REQUIRED THIS CYCLE BECAUSE",
+    ]
+    .iter()
+    .any(|prefix| line.starts_with(prefix))
 }
 
 fn starts_with_no_action_kind(rest: &str) -> bool {
@@ -243,7 +254,7 @@ mod tests {
     fn no_action_marker_inside_a_sentence_does_not_trigger() {
         // Prose that mentions "no action" in the middle of a sentence
         // must NOT be treated as a NoAction signal — the marker must be
-        // on its own line.
+        // on its own line or at the start of an explicit no-action sentence.
         let response = "We should take no action against this issue until QA confirms.";
         let decision = parse_orchestrator_response(response).expect("non-empty yields decision");
         match decision.action {
@@ -277,6 +288,19 @@ mod tests {
         let response = "ACTION: no_actionable task still needs implementation";
         let decision = parse_orchestrator_response(response).expect("yields decision");
         assert!(matches!(decision.action, GoalAction::SpawnEngineer { .. }));
+    }
+
+    #[test]
+    fn complete_no_action_sentence_routes_to_noaction() {
+        let response =
+            "No action this cycle because the assigned engineer is already repairing PR #4042.";
+        let decision = parse_orchestrator_response(response).expect("yields decision");
+        match decision.action {
+            GoalAction::NoAction { reason } => {
+                assert!(reason.contains("assigned engineer"));
+            }
+            other => panic!("expected NoAction, got {other:?}"),
+        }
     }
 
     #[test]
