@@ -117,9 +117,8 @@ pub enum StewardshipOutcome {
 
 `FiledNew` is returned when no existing open issue carried the signature;
 exactly one `gh issue create` was performed. `MatchedExisting` is returned
-when an open issue with the signature was found; no creation occurred.
-
-In both cases, `enqueue_stewardship_issue` was called with the issue handle.
+when an open issue with the signature was found; no creation occurred. Neither
+outcome mutates the goal board.
 
 ## Routing
 
@@ -222,32 +221,11 @@ Test consumers import it from the public surface:
 use simard::stewardship::FakeGhClient;
 ```
 
-## `goal_curation` Helper
+## Goal-board isolation
 
-```rust
-// src/goal_curation/operations.rs
-pub const DEFAULT_STEWARD_SCORE: f64 = 0.6;
-
-pub fn enqueue_stewardship_issue(
-    board: &mut GoalBoard,
-    repo: &str,
-    issue_number: u64,
-    url: &str,
-    signature: &str,
-) -> SimardResult<()>;
-```
-
-Constructs a `BacklogItem`:
-
-| Field         | Value                                                                  |
-|---------------|------------------------------------------------------------------------|
-| `id`          | `stewardship-<repo_with_/_replaced_by_underscore>-<issue_number>`      |
-| `description` | `"Investigate stewardship-filed failure <url> (sig <signature>)"`      |
-| `source`      | `"stewardship:<repo>#<issue_number>"`                                  |
-| `score`       | `DEFAULT_STEWARD_SCORE` (`0.6`)                                        |
-| `url`         | `Some(url.into())`                                                     |
-
-…and calls the existing `add_backlog_item`, which deduplicates by `id`.
+`process_orchestrator_run` has no `GoalBoard` argument. This boundary prevents
+an issue created by stewardship from becoming a new backlog item and triggering
+the same issue pipeline recursively.
 Repeated `MatchedExisting` outcomes therefore do not grow the backlog.
 
 ## Error Variants

@@ -6,7 +6,7 @@ description: >
   and flags BACKLOG-COVERAGE GAPS: high-priority goals, high-signal GitHub
   issues, and live anomalies that SHOULD have an active workstream but do not.
   Covers the Signal::WorkstreamGap / ProblemKind::WorkstreamCoverage data model,
-  the coverage-set detection contract, the deduped NotifyOperator + FileIssue act
+  the coverage-set detection contract, the deduped NotifyOperator act
   path, the SIMARD_OVERSEER_GAP_SCAN configuration, the additive
   OverseerTickReport / ObservedState fields, and how gaps render on the Overseer
   activity surfaces.
@@ -42,14 +42,13 @@ Overseer's normal loop. On each (or every *Nth*) tick, the Overseer surveys the
 anomalies — correlates it against everything already **in flight**, and flags the
 **backlog-coverage gaps**: important work that *should* have an active workstream
 but does not. It then acts on those gaps through the Overseer's **existing**
-escalation plumbing: it notifies the operator (email + Signal) and files a
-deduped stewardship issue, so a genuine gap actually reaches a person exactly
-once.
+escalation plumbing: it notifies the operator (email + Signal), so a genuine
+gap reaches a person exactly once without creating recursive tracking work.
 
 > **This is additive.** The gap-scan adds one Observe→Orient→Act step to the
 > Overseer loop. It does not change how existing interventions decide or act, and
-> it reuses the same notify/file/dedup machinery as `goal_health` and M1
-> issue-filing. Every new field on `ObservedState` and `OverseerTickReport` is
+> it reuses the same notification and dedup machinery as `goal_health`. Every
+> new field on `ObservedState` and `OverseerTickReport` is
 > additive and `#[serde(default)]`, so older readers tolerate a newer file.
 
 > **Modules:** detector `src/overseer/sensor.rs`
@@ -196,7 +195,7 @@ pub enum ProblemKind {
     // … existing variants …
     /// One or more backlog-coverage gaps — uncovered high-priority goals,
     /// high-signal issues, or unaddressed anomalies. Acted on by
-    /// `act_flag_workstream_gaps`: notify the operator + file a deduped issue.
+    /// `act_flag_workstream_gaps`: notify the operator without filing an issue.
     WorkstreamCoverage,
 }
 ```
@@ -372,8 +371,8 @@ pair `goal_health` already added. Because they default, the activity-feed
 
 | Field | Type | Meaning |
 |---|---|---|
-| `OverseerTickReport.workstream_gaps_detected` | `usize` | Genuine, deduped backlog-coverage gaps **flagged** this tick — operator notified + issue filed (after coverage-set dedupe and gate suppression). |
-| `OverseerTickReport.workstream_gaps_suppressed` | `usize` | Gaps whose signature was already committed within the dedup window this tick — **not** re-notified, **not** re-filed. |
+| `OverseerTickReport.workstream_gaps_detected` | `usize` | Genuine, deduped backlog-coverage gaps **flagged** this tick — operator notified after coverage-set dedupe and gate suppression. |
+| `OverseerTickReport.workstream_gaps_suppressed` | `usize` | Gaps whose signature was already committed within the dedup window this tick — not re-notified. |
 | `OverseerTotals.workstream_gaps_detected` / `…_suppressed` | `u64` | The same two, summed over the retained activity window. |
 
 Here is the part the counter flow **must** get right. In the Overseer,
@@ -386,8 +385,8 @@ behaves: `act_escalate_blocked_goal` notifies **both** channels yet returns a
 single `GoalEscalated`, bumping the dedicated `goals_escalated`, never the
 generic `escalations`.
 
-The consolidated gap act does the same. It performs its notify + file **side
-effects** (above) and returns **one** summarising outcome carrying the batch
+The consolidated gap act does the same. It performs its notification side
+effect and returns **one** summarising outcome carrying the batch
 counts, which a **new** `tally_outcome` arm sums into the two dedicated counters.
 `tally_outcome`'s `match` is **exhaustive** (no wildcard arm), so the compiler
 **forces** that new arm — nothing rides an existing counter "for free":
@@ -396,9 +395,9 @@ counts, which a **new** `tally_outcome` arm sums into the two dedicated counters
 pub enum ActOutcome {
     // … existing variants …
     /// The consolidated result of one gap-scan act: `flagged` genuine gaps were
-    /// surfaced (operator notified on both channels + a deduped issue filed per
-    /// gap), and `suppressed` gaps matched an already-committed signature within
-    /// the dedup window (not re-notified, not re-filed). Mirrors how the
+    /// surfaced (operator notified on both channels), and `suppressed` gaps
+    /// matched an already-committed signature within the dedup window (not
+    /// re-notified). Mirrors how the
     /// per-goal `GoalEscalated` / `GoalHealthSuppressed` feed dedicated goal
     /// counters — here batched, because one gap act handles the whole pass.
     WorkstreamGapsFlagged { flagged: usize, suppressed: usize },
@@ -414,7 +413,7 @@ ActOutcome::WorkstreamGapsFlagged { flagged, suppressed } => {
 ```
 
 A tick whose gaps were **all** duplicates returns
-`WorkstreamGapsFlagged { flagged: 0, suppressed: N }` — no notification, no issue,
+`WorkstreamGapsFlagged { flagged: 0, suppressed: N }` — no notification,
 only `workstream_gaps_suppressed` moves.
 
 ## Rendering on the Overseer surfaces

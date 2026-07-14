@@ -1186,8 +1186,8 @@ pub fn build_overseer(
     // SIMARD_OVERSEER_MEMORY_RECALL); a disabled Overseer forces it off.
     .with_memory_recall_enabled(memory_recall_enabled())
     // The recurring backlog-coverage gap-scan: each tick, survey the whole
-    // work picture and flag important work with no active workstream, notify
-    // the operator (email + Signal) + file a deduped issue. Enabled by default
+    // work picture and flag important work with no active workstream, then
+    // notify the operator (email + Signal). Enabled by default
     // (opt-out via SIMARD_OVERSEER_GAP_SCAN); its every-N cadence is applied
     // by the daemon tick loop.
     .with_gap_scan_enabled(gap_scan_enabled())
