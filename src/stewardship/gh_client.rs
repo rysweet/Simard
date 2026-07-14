@@ -246,7 +246,7 @@ printf '%s\n' 'https://github.com/rysweet/Simard/issues/321'
             executable.as_os_str(),
             execute_create_issue,
             "rysweet/Simard",
-            "large diagnostic",
+            "[stewardship] Orchestrator failure",
             &body,
         )
         .unwrap();
@@ -254,6 +254,7 @@ printf '%s\n' 'https://github.com/rysweet/Simard/issues/321'
         assert_eq!(issue.number, 321);
         assert_eq!(fs::read(dir.path().join("stdin")).unwrap(), body.as_bytes());
         let argv = fs::read_to_string(dir.path().join("argv")).unwrap();
+        assert!(argv.contains("--title\n[stewardship] Orchestrator failure\n"));
         assert!(argv.contains("--body-file\n-\n"));
         assert!(!argv.contains("large-body-start"));
         assert!(!argv.contains("large-body-end"));
@@ -262,12 +263,13 @@ printf '%s\n' 'https://github.com/rysweet/Simard/issues/321'
     #[test]
     fn create_issue_reports_spawn_failure_without_body_content() {
         let body = "SECRET_BODY_MUST_NOT_APPEAR";
+        let title = "SECRET_TITLE_MUST_NOT_APPEAR";
 
         let error = create_issue_with(
             OsStr::new("/definitely/missing/simard-test-gh"),
             execute_create_issue,
             "rysweet/Simard",
-            "title",
+            title,
             body,
         )
         .unwrap_err()
@@ -278,6 +280,7 @@ printf '%s\n' 'https://github.com/rysweet/Simard/issues/321'
             "{error}"
         );
         assert!(!error.contains(body));
+        assert!(!error.contains(title));
     }
 
     #[test]
@@ -289,12 +292,13 @@ exit 23
 "#;
         let (_dir, executable) = fake_gh(script);
         let body = "SECRET_BODY_MUST_NOT_APPEAR";
+        let title = "SECRET_TITLE_MUST_NOT_APPEAR";
 
         let error = create_issue_with(
             executable.as_os_str(),
             execute_create_issue,
             "rysweet/Simard",
-            "title",
+            title,
             body,
         )
         .unwrap_err()
@@ -303,6 +307,7 @@ exit 23
         assert!(error.contains("exited"), "{error}");
         assert!(error.contains("fake gh rejected the request"), "{error}");
         assert!(!error.contains(body));
+        assert!(!error.contains(title));
     }
 
     fn write_failure(
@@ -319,12 +324,13 @@ exit 23
     #[test]
     fn create_issue_reports_write_and_reap_failures_without_body_content() {
         let body = "SECRET_BODY_MUST_NOT_APPEAR";
+        let title = "SECRET_TITLE_MUST_NOT_APPEAR";
 
         let error = create_issue_with(
             OsStr::new("gh"),
             write_failure,
             "rysweet/Simard",
-            "title",
+            title,
             body,
         )
         .unwrap_err()
@@ -335,6 +341,7 @@ exit 23
         assert!(error.contains("additionally failed to wait for `gh issue create`"));
         assert!(error.contains("injected reap failure"));
         assert!(!error.contains(body));
+        assert!(!error.contains(title));
     }
 
     fn wait_failure(
@@ -350,12 +357,13 @@ exit 23
     #[test]
     fn create_issue_reports_wait_failure_without_body_content() {
         let body = "SECRET_BODY_MUST_NOT_APPEAR";
+        let title = "SECRET_TITLE_MUST_NOT_APPEAR";
 
         let error = create_issue_with(
             OsStr::new("gh"),
             wait_failure,
             "rysweet/Simard",
-            "title",
+            title,
             body,
         )
         .unwrap_err()
@@ -364,5 +372,6 @@ exit 23
         assert!(error.contains("failed to wait for `gh issue create`"));
         assert!(error.contains("injected wait failure"));
         assert!(!error.contains(body));
+        assert!(!error.contains(title));
     }
 }

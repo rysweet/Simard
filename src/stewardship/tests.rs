@@ -294,18 +294,40 @@ fn process_run_files_new_when_no_match() {
 }
 
 #[test]
-fn process_run_scrubs_secrets_only_from_the_new_issue_body() {
+fn process_run_sanitizes_every_outbound_issue_field_but_deduplicates_raw_input() {
     let gh = FakeGhClient::new();
     let mut run = sample_run();
     let github_token = "ghp_EXAMPLE_FAKE_TOKEN_do_not_use_00";
     let credential = "github_pat_EXAMPLE_FAKE_CREDENTIAL_do_not_use_00";
+    let bearer_token = "EXAMPLE.bearer-token.do-not-use-000000";
+    let authorization_header = "Authorization";
+    let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJleGFtcGxlIn0.signatureDoNotUse000";
+    let password = "example-password-do-not-use";
+    let key_secret = "example-api-key-do-not-use";
+    let cloud_secret = "example-cloud-secret-do-not-use";
+    let cloud_access_key = "AKIAEXAMPLE000000000";
+    let google_api_key = format!("AIza{}", "0".repeat(35));
     let pem_begin = format!("-----BEGIN {} PRIVATE KEY-----", "OPENSSH");
     let pem_end = format!("-----END {} PRIVATE KEY-----", "OPENSSH");
     let pem_body = "EXAMPLEfakeKEYbodyDoNotUse000000000000";
+    run.failure_kind = format!("PanicInStep-{github_token}");
+    run.source_module =
+        format!("simard::engineer_loop DB_PASSWORD={password} source remains readable");
+    run.run_id = format!("run-abc123 Authorization: Bearer {bearer_token}");
+    run.failed_step = format!("step-7-tdd jwt={jwt}");
+    run.recipe_name = format!("smart-orchestrator-{credential}");
     run.error_text = format!(
         "deployment failed while publishing release\n\
          Authorization: Bearer {github_token}\n\
+         github-token={github_token}\n\
+         {authorization_header}: Bearer {bearer_token}\n\
          credential={credential}\n\
+         DB_PASSWORD={password}\n\
+         API_KEY={key_secret}\n\
+         AWS_SECRET_ACCESS_KEY={cloud_secret}\n\
+         cloud access id {cloud_access_key}\n\
+         google api key {google_api_key}\n\
+         request jwt {jwt}\n\
          {pem_begin}\n{pem_body}\n{pem_end}\n\
          retry exhausted after 3 attempts"
     );
@@ -325,18 +347,38 @@ fn process_run_scrubs_secrets_only_from_the_new_issue_body() {
     assert_eq!(
         gh.search_calls.lock().unwrap().as_slice(),
         &[("rysweet/Simard".to_string(), raw_signature.clone())],
-        "deduplication must continue using the raw error text"
+        "deduplication must continue using the raw failure data"
     );
 
     let calls = gh.create_calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    let repo = &calls[0].0;
+    let title = &calls[0].1;
     let body = &calls[0].2;
-    for secret in [github_token, credential, pem_body, pem_begin.as_str()] {
-        assert!(
-            !body.contains(secret),
-            "secret material must not cross the issue-filing boundary"
-        );
+    assert_eq!(repo, "rysweet/Simard");
+    assert_eq!(title, "[stewardship] Orchestrator failure");
+    let diagnostic = format!("{outcome:?} repo={repo:?} title={title:?} body={body:?}");
+    for secret in [
+        github_token,
+        credential,
+        bearer_token,
+        jwt,
+        password,
+        key_secret,
+        cloud_secret,
+        cloud_access_key,
+        google_api_key.as_str(),
+        pem_body,
+        pem_begin.as_str(),
+    ] {
+        assert!(!title.contains(secret), "issue title/argv leaked {secret}");
+        assert!(!body.contains(secret), "issue body leaked {secret}");
+        assert!(!diagnostic.contains(secret), "diagnostics leaked {secret}");
     }
     assert!(body.contains("deployment failed while publishing release"));
     assert!(body.contains("retry exhausted after 3 attempts"));
+    assert!(body.contains("source-module: simard::engineer_loop"));
+    assert!(body.contains("failed-step: step-7-tdd"));
     assert!(body.contains(&format!("stewardship-signature: {raw_signature}")));
+    assert!(body.matches("[redacted secret]").count() >= 10);
 }

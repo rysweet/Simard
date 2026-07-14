@@ -45,6 +45,26 @@ pub use types::{OrchestratorRunSummary, StewardshipOutcome, TargetRepo};
 
 use crate::error::SimardResult;
 
+const ISSUE_TITLE: &str = "[stewardship] Orchestrator failure";
+const REDACTED_SECRET: &str = "[redacted secret]";
+const SENSITIVE_ASSIGNMENT_KEYS: &[&str] = &[
+    "authorization",
+    "password",
+    "passwd",
+    "pwd",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "key",
+    "access_key",
+    "account_key",
+    "accountkey",
+    "private_key",
+    "sig",
+    "credential",
+];
+
 /// Process one orchestrator run summary end-to-end. See the module docstring
 /// for the pipeline.
 pub fn process_orchestrator_run(
@@ -66,13 +86,7 @@ pub fn process_orchestrator_run(
         });
     }
 
-    let title = format!(
-        "[stewardship] {kind} in {src}",
-        kind = run.failure_kind,
-        src = run.source_module
-    );
-    let scrubbed_error = crate::journal::scrub_secrets(&run.error_text);
-    let body = format!(
+    let raw_body = format!(
         "filed-by: simard-stewardship\n\
          stewardship-signature: {sig}\n\
          originating-run: {rid}\n\
@@ -85,13 +99,201 @@ pub fn process_orchestrator_run(
         rid = run.run_id,
         step = run.failed_step,
         src = run.source_module,
-        err = scrubbed_error,
+        err = run.error_text,
     );
-    let new = gh.create_issue(&repo, &title, &body)?;
+    let body = sanitize_issue_text(&raw_body);
+    let new = gh.create_issue(&repo, ISSUE_TITLE, &body)?;
     Ok(StewardshipOutcome::FiledNew {
         repo,
         issue_number: new.number,
         url: new.url,
         signature,
     })
+}
+
+fn sanitize_issue_text(input: &str) -> String {
+    let assignments = redact_sensitive_assignments(input);
+    let bearer_tokens = redact_bearer_tokens(&assignments);
+    let jwt_tokens = redact_jwts(&bearer_tokens);
+    let cloud_keys = redact_cloud_access_keys(&jwt_tokens);
+    crate::journal::scrub_secrets(&cloud_keys)
+}
+
+fn redact_sensitive_assignments(input: &str) -> String {
+    let lower = input.to_ascii_lowercase();
+    let bytes = input.as_bytes();
+    let mut output = String::with_capacity(input.len());
+    let mut copied_through = 0;
+    let mut index = 0;
+
+    while index < input.len() {
+        let Some(key) = SENSITIVE_ASSIGNMENT_KEYS.iter().find(|key| {
+            lower[index..].starts_with(**key)
+                && (index == 0 || !bytes[index - 1].is_ascii_alphanumeric())
+        }) else {
+            index += input[index..]
+                .chars()
+                .next()
+                .expect("non-empty remainder")
+                .len_utf8();
+            continue;
+        };
+
+        let mut separator = index + key.len();
+        while separator < input.len() && bytes[separator].is_ascii_whitespace() {
+            separator += 1;
+        }
+        if separator == input.len() || !matches!(bytes[separator], b':' | b'=') {
+            index += key.len();
+            continue;
+        }
+
+        let mut value_start = separator + 1;
+        while value_start < input.len()
+            && bytes[value_start].is_ascii_whitespace()
+            && bytes[value_start] != b'\n'
+        {
+            value_start += 1;
+        }
+        if value_start == input.len() || bytes[value_start] == b'\n' {
+            index = value_start;
+            continue;
+        }
+
+        let value_end = if *key == "authorization" {
+            input[value_start..]
+                .find('\n')
+                .map_or(input.len(), |offset| value_start + offset)
+        } else {
+            credential_value_end(input, value_start)
+        };
+        output.push_str(&input[copied_through..value_start]);
+        output.push_str(REDACTED_SECRET);
+        copied_through = value_end;
+        index = value_end;
+    }
+
+    output.push_str(&input[copied_through..]);
+    output
+}
+
+fn credential_value_end(input: &str, value_start: usize) -> usize {
+    let bytes = input.as_bytes();
+    let quote = matches!(bytes[value_start], b'\'' | b'"').then_some(bytes[value_start]);
+    let mut end = value_start + usize::from(quote.is_some());
+    while end < input.len() {
+        if quote.is_some_and(|quote| bytes[end] == quote) {
+            return end + 1;
+        }
+        if quote.is_none() && bytes[end].is_ascii_whitespace() {
+            break;
+        }
+        end += input[end..]
+            .chars()
+            .next()
+            .expect("non-empty remainder")
+            .len_utf8();
+    }
+    end
+}
+
+fn redact_bearer_tokens(input: &str) -> String {
+    let lower = input.to_ascii_lowercase();
+    let bytes = input.as_bytes();
+    let mut output = String::with_capacity(input.len());
+    let mut copied_through = 0;
+    let mut index = 0;
+
+    while index < input.len() {
+        if !lower[index..].starts_with("bearer")
+            || (index > 0 && bytes[index - 1].is_ascii_alphanumeric())
+        {
+            index += input[index..]
+                .chars()
+                .next()
+                .expect("non-empty remainder")
+                .len_utf8();
+            continue;
+        }
+        let mut token_start = index + "bearer".len();
+        if token_start == input.len() || !bytes[token_start].is_ascii_whitespace() {
+            index = token_start;
+            continue;
+        }
+        while token_start < input.len() && bytes[token_start].is_ascii_whitespace() {
+            token_start += 1;
+        }
+        if token_start == input.len() {
+            break;
+        }
+        let token_end = credential_value_end(input, token_start);
+        output.push_str(&input[copied_through..token_start]);
+        output.push_str(REDACTED_SECRET);
+        copied_through = token_end;
+        index = token_end;
+    }
+
+    output.push_str(&input[copied_through..]);
+    output
+}
+
+fn redact_jwts(input: &str) -> String {
+    redact_token_shape(input, |candidate| {
+        let mut parts = candidate.split('.');
+        matches!(
+            (parts.next(), parts.next(), parts.next(), parts.next()),
+            (Some(header), Some(payload), Some(signature), None)
+                if header.len() >= 8 && payload.len() >= 8 && signature.len() >= 8
+        )
+    })
+}
+
+fn redact_cloud_access_keys(input: &str) -> String {
+    redact_token_shape(input, |candidate| {
+        let aws_access_key = candidate.len() == 20
+            && (candidate.starts_with("AKIA") || candidate.starts_with("ASIA"))
+            && candidate
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit());
+        let google_api_key = candidate.len() == 39
+            && candidate.starts_with("AIza")
+            && candidate
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
+        aws_access_key || google_api_key
+    })
+}
+
+fn redact_token_shape(input: &str, is_secret: impl Fn(&str) -> bool) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        let ch = input[index..].chars().next().expect("non-empty remainder");
+        if !ch.is_ascii_alphanumeric() {
+            output.push(ch);
+            index += ch.len_utf8();
+            continue;
+        }
+
+        let start = index;
+        while index < input.len() {
+            let ch = input[index..].chars().next().expect("non-empty remainder");
+            if !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')) {
+                break;
+            }
+            index += ch.len_utf8();
+        }
+        let mut end = index;
+        while end > start && input.as_bytes()[end - 1] == b'.' {
+            end -= 1;
+        }
+        let candidate = &input[start..end];
+        if is_secret(candidate) {
+            output.push_str(REDACTED_SECRET);
+            output.push_str(&input[end..index]);
+        } else {
+            output.push_str(&input[start..index]);
+        }
+    }
+    output
 }

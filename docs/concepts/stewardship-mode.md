@@ -106,8 +106,8 @@ design; this precedence is pinned by tests.
 
 When no keyword matches, `route_failure` **does not error**. It returns the
 `DEFAULT_TARGET_REPO` constant (`TargetRepo::Simard` → `rysweet/Simard`) and
-emits a single `tracing::warn!` carrying the unmatched `source_module` and the
-chosen default slug. `DEFAULT_TARGET_REPO` is a compile-time constant — the one
+emits a single `tracing::warn!` carrying only the chosen default slug; the
+free-form source is deliberately excluded from diagnostics. `DEFAULT_TARGET_REPO` is a compile-time constant — the one
 named source of truth for the default — so the fallback can never be an
 attacker-chosen or dynamically-supplied repo. This is what lets the Overseer's
 own `source_module = "overseer"` gap-scan briefs file/upsert tracking issues in
@@ -138,27 +138,26 @@ The hex signature is embedded verbatim in every filed issue body as
 
 ## Issue Body Template
 
-Every issue Simard files looks like this (outer fence shown with `~~~` so the
-inner ```` ``` ```` fence around `<error_text>` renders correctly):
+Every issue uses the fixed title `[stewardship] Orchestrator failure`, keeping
+free-form run metadata out of process arguments. Its body looks like this:
 
-~~~
+```
 filed-by: simard-stewardship
 stewardship-signature: <hex>
 originating-run: <run_id>
-recipe: <recipe_name>
 failed-step: <failed_step>
 source-module: <source_module>
-failure-kind: <failure_kind>
 
 ## Error
-```
 <error_text>
 ```
-~~~
 
-The leading metadata block is intentionally machine-readable so future
-tooling (or a human triager) can re-derive the routing and signature without
-re-running Simard.
+The complete body passes through credential redaction immediately before the
+GitHub client receives it. Redaction covers GitHub tokens, authorization and
+bearer credentials, JWTs, password/key/secret assignments, cloud access keys,
+and PEM material while retaining surrounding diagnostic text. Deduplication
+continues to use the original failure kind and error text so redaction cannot
+collapse distinct failures.
 
 ## Out of Scope
 
