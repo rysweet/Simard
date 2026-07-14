@@ -280,6 +280,7 @@ TerminalOutcome
 ├── request_id
 ├── session_id
 ├── actor_identity
+├── repository: authenticated goal-session repository
 ├── goal_id
 ├── cycle_id
 ├── kind: action | no_action | blocked | completed
@@ -353,7 +354,7 @@ EffectJob
 ├── outcome_id
 ├── request_id
 ├── kind
-├── state: pending | running | succeeded | failed | cancelled
+├── state: pending | running | blocked | succeeded | failed | cancelled
 ├── attempt
 ├── lease_expires_at?
 └── last_error?
@@ -364,6 +365,21 @@ downstream idempotency key. An expired `running` lease is recoverable after a
 crash. A permanent failure is durable and fails cycle execution without
 creating or replacing a terminal. Cancellation is allowed only when the effect
 policy declares it safe and produces an audit record.
+
+Merge and deploy jobs additionally require an append-only server-issued
+authorization decision. Without one, the worker records the denial and moves
+the job to `blocked`; it never emits empty evidence as success. An operator
+issues approval with:
+
+```text
+SIMARD_PRIVILEGED_PRINCIPAL=<principal> \
+SIMARD_PRIVILEGED_APPROVAL_KEY=<owner-controlled-secret> \
+simard ooda approvals issue --state-root <PATH> --effect-id <ID>
+```
+
+The approval binds the principal, effect and outcome, goal, session, cycle,
+action kind, canonical payload hash, exact repository, and policy revision.
+Issuing it returns the blocked job to `pending`.
 
 ## Idempotency
 
@@ -401,9 +417,23 @@ record_blocked
 record_completed
 ```
 
-Repository, environment, identity, and risk policies may narrow this set.
+Repository, environment, identity, and risk policies may narrow this set. Every
+repository mutation must also match the exact repository bound to the
+authenticated goal session; an allowed owner alone is insufficient.
 Direct merge and direct deploy are never granted to a goal-session actor.
 `record_progress` belongs to a separate progress-recorder identity and policy.
+
+`SIMARD_OBSERVE_ONLY` removes action grants when the actor session is created and
+is rechecked immediately before capability commit and effect dispatch. A denied
+action becomes a durable typed blocked terminal. A dispatch-time denial becomes
+a durable blocked effect plus authorization-decision record.
+
+Spawned engineers receive the requested permission subset as an enforced child
+process scope. Scoped Copilot sessions do not receive `--allow-all-tools` or
+`--allow-all-paths`; repository read/write, process execution, GitHub mutation,
+temporary-path access, environment exposure, and credentials are enabled only
+by the corresponding granted permission. Opaque task bytes live in a separate
+private worktree file and are referenced by a trusted server-generated brief.
 
 ## Errors
 
@@ -432,6 +462,12 @@ The installed policy is
 `prompt_assets/simard/policies/goal-session-capabilities.toml`. Runtime limits
 are validated by `CapabilityPolicy`; unsupported configuration does not silently
 change those limits.
+
+The policy asset also declares exact repositories and governed owners,
+permitted engineer capabilities (`repo_read`, `repo_write`, `process_exec`,
+`github_issue_write`, and `github_pr_write`), and allowed deployment
+environments. Runtime actor leases narrow that policy to one exact goal
+repository.
 
 ```toml
 [ooda.goal_session]

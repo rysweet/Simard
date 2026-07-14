@@ -17,6 +17,9 @@ Commands:
                               Read one authoritative typed terminal.
   outcomes list --state-root <PATH> [--limit <N>]
                               List authoritative typed terminals.
+  approvals issue --state-root <PATH> --effect-id <ID>
+                              Issue a privileged merge/deploy approval from
+                              the configured server principal and signing key.
   fixture run --state-root <PATH> --scenario <spawn-engineer|no-action> --request-id <ID>
                               Run a deterministic typed acceptance cycle
                               (requires SIMARD_TYPED_OODA_FIXTURE=1).
@@ -62,8 +65,80 @@ pub(super) fn dispatch_ooda_command(
         }
         "outcomes" => dispatch_outcomes(args),
         "fixture" => dispatch_fixture(args),
+        "actor-run" => dispatch_actor_run(args),
+        "approvals" => dispatch_approvals(args),
         other => Err(format!("unsupported command 'ooda {other}'").into()),
     }
+}
+
+fn dispatch_actor_run(
+    args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let parsed = parse_named_args(args)?;
+    let ledger_path = Path::new(required_named(&parsed, "ledger-path")?);
+    let policy_path = Path::new(required_named(&parsed, "policy-path")?);
+    let session_id = required_named(&parsed, "session-id")?;
+    let cycle_id = required_named(&parsed, "cycle-id")?;
+    let goal_id = required_named(&parsed, "goal-id")?;
+    let policy = crate::typed_ooda::CapabilityPolicy::from_toml_file(policy_path)?;
+    let handler = crate::typed_ooda::CapabilityHandler::open(ledger_path, policy)?;
+    let token = std::fs::read_to_string(required_named(&parsed, "auth-token-path")?)?;
+    let actor = handler.authenticate_actor_session(token.trim(), session_id, cycle_id, goal_id)?;
+    let admission: crate::typed_ooda::AdmissionSnapshot =
+        serde_json::from_slice(&std::fs::read(required_named(&parsed, "admission-path")?)?)?;
+    let invocation = crate::typed_ooda::GoalSessionInvocation {
+        session_id: session_id.to_string(),
+        cycle_id: cycle_id.to_string(),
+        goal_id: goal_id.to_string(),
+        task: crate::typed_ooda::OpaqueBytes::from(std::fs::read(required_named(
+            &parsed,
+            "task-path",
+        )?)?),
+        reason: crate::typed_ooda::OpaqueBytes::from(std::fs::read(required_named(
+            &parsed,
+            "reason-path",
+        )?)?),
+        observe_output: crate::typed_ooda::OpaqueBytes::from(std::fs::read(required_named(
+            &parsed,
+            "observe-output-path",
+        )?)?),
+        orient_output: crate::typed_ooda::OpaqueBytes::from(std::fs::read(required_named(
+            &parsed,
+            "orient-output-path",
+        )?)?),
+        decide_output: crate::typed_ooda::OpaqueBytes::from(std::fs::read(required_named(
+            &parsed,
+            "decide-output-path",
+        )?)?),
+    };
+    let executor = crate::typed_ooda::GoalSessionExecutor::new(
+        handler,
+        actor,
+        admission,
+        Box::new(FixtureEffects),
+    );
+    let actor = crate::typed_ooda::RustyClawdGoalSessionActor::default();
+    let execution =
+        executor.execute_actor_step(&invocation, |received, tools| actor.run(received, tools))?;
+    println!("{}", execution.outcome.outcome_id);
+    Ok(())
+}
+
+fn dispatch_approvals(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let command = next_required(&mut args, "approvals command")?;
+    if command != "issue" {
+        return Err(format!("unsupported command 'ooda approvals {command}'").into());
+    }
+    let parsed = parse_named_args(args)?;
+    let state_root = Path::new(required_named(&parsed, "state-root")?);
+    let effect_id = required_named(&parsed, "effect-id")?;
+    let handler = open_ledger(state_root)?;
+    let authority = crate::typed_ooda::ApprovalAuthority::from_environment()?;
+    let approval = handler.issue_privileged_approval(&authority, effect_id)?;
+    println!("{}", serde_json::to_string(&approval)?);
+    Ok(())
 }
 
 fn dispatch_outcomes(
@@ -133,7 +208,8 @@ fn dispatch_fixture(
             ),
             crate::typed_ooda::CapabilityGrant::RecordNoAction,
         ],
-    );
+    )
+    .scoped_to_repository(crate::typed_ooda::RepositoryRef::new("rysweet", "Simard"));
     let executor = crate::typed_ooda::GoalSessionExecutor::new(
         handler,
         actor,

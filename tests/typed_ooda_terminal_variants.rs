@@ -18,6 +18,7 @@ fn identity(request_id: &str, cycle_id: &str) -> TerminalRequestIdentity {
 
 fn actor(grants: impl IntoIterator<Item = CapabilityGrant>) -> AuthenticatedToolContext {
     AuthenticatedToolContext::new("goal-session-actor", "session-variants", grants)
+        .scoped_to_repository(simard::typed_ooda::RepositoryRef::new("rysweet", "Simard"))
 }
 
 fn handler() -> (tempfile::TempDir, CapabilityHandler) {
@@ -196,7 +197,7 @@ fn merge_and_deploy_actions_create_requests_but_do_not_execute_privileged_effect
                             .to_string(),
                         source_commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
                     },
-                    environment: EnvironmentRef::new("simard-production"),
+                    environment: EnvironmentRef::new("production"),
                     backup_policy: BackupPolicy::VerifiedFull,
                 }),
                 raw_semantic: OpaqueBytes::from(b"request deploy, do not deploy directly".to_vec()),

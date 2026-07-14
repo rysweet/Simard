@@ -12,6 +12,21 @@ capabilities = [
   "record_completed",
 ]
 
+repositories = [
+  { owner = "rysweet", name = "Simard" },
+]
+repository_owners = ["rysweet"]
+
+engineer_permissions = [
+  "repo_read",
+  "repo_write",
+  "process_exec",
+  "github_issue_write",
+  "github_pr_write",
+]
+
+deployment_environments = ["production"]
+
 [limits]
 max_semantic_payload_bytes = 1048576
 max_concurrent_engineers = 8

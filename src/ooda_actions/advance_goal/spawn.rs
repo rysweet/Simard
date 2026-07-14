@@ -623,6 +623,7 @@ pub fn dispatch_spawn_engineer(
         role: AgentRole::Engineer,
         worktree_path,
         current_depth,
+        requested_permissions: None,
     };
 
     // Freshness gate (issue #439): ensure the installed amplihack-rs is current

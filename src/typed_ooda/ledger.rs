@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+use std::io::{self, Write};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -32,6 +34,8 @@ pub struct EffectJob {
     pub effect_id: String,
     pub outcome_id: String,
     pub request_id: String,
+    pub goal_id: String,
+    pub repository: Option<RepositoryRef>,
     pub kind: EffectKind,
     pub state: EffectState,
     pub action: Action,
@@ -40,6 +44,85 @@ pub struct EffectJob {
     pub lease_expires_at_unix_millis: Option<i64>,
     pub error: Option<String>,
     pub result: Option<EffectResult>,
+    pub approval: Option<PrivilegedApproval>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActorSessionLease {
+    pub token: String,
+    pub expires_at_unix_millis: i64,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+pub struct PrivilegedApproval {
+    pub approval_id: String,
+    pub principal: String,
+    pub effect_id: String,
+    pub outcome_id: String,
+    pub session_id: String,
+    pub cycle_id: String,
+    pub goal_id: String,
+    pub action_kind: ActionKind,
+    pub canonical_payload_hash: String,
+    pub repository: Option<RepositoryRef>,
+    pub policy_revision: String,
+    pub issued_at_unix_millis: i64,
+    pub signature: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ApprovalAuthority {
+    principal: String,
+    signing_key: Vec<u8>,
+}
+
+impl ApprovalAuthority {
+    pub fn from_environment() -> CapabilityResult<Self> {
+        let principal = std::env::var("SIMARD_PRIVILEGED_PRINCIPAL").map_err(|_| {
+            CapabilityError::new(
+                CapabilityErrorCode::Unauthenticated,
+                "SIMARD_PRIVILEGED_PRINCIPAL is required to issue an approval",
+            )
+        })?;
+        validate_identifier("privileged principal", &principal)?;
+        let signing_key = std::env::var("SIMARD_PRIVILEGED_APPROVAL_KEY")
+            .map_err(|_| {
+                CapabilityError::new(
+                    CapabilityErrorCode::Unauthenticated,
+                    "SIMARD_PRIVILEGED_APPROVAL_KEY is required to issue an approval",
+                )
+            })?
+            .into_bytes();
+        if signing_key.len() < 32 {
+            return Err(CapabilityError::new(
+                CapabilityErrorCode::Unauthenticated,
+                "SIMARD_PRIVILEGED_APPROVAL_KEY must contain at least 32 bytes",
+            ));
+        }
+        Ok(Self {
+            principal,
+            signing_key,
+        })
+    }
+
+    #[cfg(test)]
+    pub fn for_test(principal: &str) -> Self {
+        Self {
+            principal: principal.to_string(),
+            signing_key: vec![0x5a; 32],
+        }
+    }
+
+    pub fn verifies(&self, approval: &PrivilegedApproval) -> CapabilityResult<bool> {
+        if approval.principal != self.principal {
+            return Ok(false);
+        }
+        let expected = approval_signature(&self.signing_key, approval)?;
+        Ok(constant_time_eq(
+            expected.as_bytes(),
+            approval.signature.as_bytes(),
+        ))
+    }
 }
 
 pub struct CapabilityHandler {
@@ -99,6 +182,32 @@ impl CapabilityHandler {
                     request_id TEXT NOT NULL,
                     FOREIGN KEY(outcome_id) REFERENCES terminal_outcomes(outcome_id)
                 );
+                CREATE TABLE IF NOT EXISTS actor_sessions (
+                    session_id TEXT NOT NULL,
+                    cycle_id TEXT NOT NULL,
+                    goal_id TEXT NOT NULL,
+                    actor_identity TEXT NOT NULL,
+                    repository_json BLOB NOT NULL,
+                    grants_json BLOB NOT NULL,
+                    observe_only INTEGER NOT NULL,
+                    token_hash TEXT NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    PRIMARY KEY(session_id, cycle_id)
+                );
+                CREATE TABLE IF NOT EXISTS authorization_decisions (
+                    decision_id TEXT PRIMARY KEY,
+                    effect_id TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    decision_json BLOB NOT NULL,
+                    recorded_at INTEGER NOT NULL,
+                    FOREIGN KEY(effect_id) REFERENCES effect_jobs(effect_id)
+                );
+                CREATE INDEX IF NOT EXISTS progress_records_cycle_idx
+                    ON progress_records(session_id, cycle_id);
+                CREATE INDEX IF NOT EXISTS effect_jobs_state_lease_idx
+                    ON effect_jobs(state, lease_expires_at);
+                CREATE INDEX IF NOT EXISTS authorization_decisions_effect_idx
+                    ON authorization_decisions(effect_id, recorded_at);
                 ",
             )
             .map_err(persistence)?;
@@ -109,35 +218,267 @@ impl CapabilityHandler {
         })
     }
 
+    pub fn register_actor_session(
+        &self,
+        actor: &AuthenticatedToolContext,
+        cycle_id: &str,
+        goal_id: &str,
+        ttl: Duration,
+    ) -> CapabilityResult<ActorSessionLease> {
+        validate_identifier("actor identity", &actor.actor_identity)?;
+        validate_identifier("session id", &actor.session_id)?;
+        validate_identifier("cycle id", cycle_id)?;
+        validate_identifier("goal id", goal_id)?;
+        let repository = actor.bound_repository().ok_or_else(|| {
+            CapabilityError::new(
+                CapabilityErrorCode::PermissionDenied,
+                "actor session must be bound to one repository",
+            )
+        })?;
+        self.validate_governed_repository(repository)?;
+        let ttl_millis = i64::try_from(ttl.as_millis()).map_err(|_| {
+            CapabilityError::new(
+                CapabilityErrorCode::InvalidArgument,
+                "actor session lease is too long",
+            )
+        })?;
+        if ttl_millis <= 0 {
+            return Err(CapabilityError::new(
+                CapabilityErrorCode::InvalidArgument,
+                "actor session lease must be positive",
+            ));
+        }
+
+        let token = Uuid::new_v4().simple().to_string();
+        let expires_at_unix_millis = now_millis().saturating_add(ttl_millis);
+        let repository_json = serde_json::to_vec(repository).map_err(serialization)?;
+        let grants_json = serde_json::to_vec(actor.grants()).map_err(serialization)?;
+        let token_hash = sha256_hex(token.as_bytes());
+        let connection = self.lock()?;
+        connection
+            .execute(
+                "DELETE FROM actor_sessions WHERE expires_at < ?1",
+                [now_millis()],
+            )
+            .map_err(persistence)?;
+        connection
+            .execute(
+                "INSERT INTO actor_sessions(
+                    session_id, cycle_id, goal_id, actor_identity, repository_json,
+                    grants_json, observe_only, token_hash, expires_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(session_id, cycle_id) DO UPDATE SET
+                    goal_id=excluded.goal_id,
+                    actor_identity=excluded.actor_identity,
+                    repository_json=excluded.repository_json,
+                    grants_json=excluded.grants_json,
+                    observe_only=excluded.observe_only,
+                    token_hash=excluded.token_hash,
+                    expires_at=excluded.expires_at",
+                params![
+                    actor.session_id,
+                    cycle_id,
+                    goal_id,
+                    actor.actor_identity,
+                    repository_json,
+                    grants_json,
+                    actor.is_observe_only(),
+                    token_hash,
+                    expires_at_unix_millis
+                ],
+            )
+            .map_err(persistence)?;
+        Ok(ActorSessionLease {
+            token,
+            expires_at_unix_millis,
+        })
+    }
+
+    pub fn authenticate_actor_session(
+        &self,
+        token: &str,
+        session_id: &str,
+        cycle_id: &str,
+        goal_id: &str,
+    ) -> CapabilityResult<AuthenticatedToolContext> {
+        validate_identifier("session id", session_id)?;
+        validate_identifier("cycle id", cycle_id)?;
+        validate_identifier("goal id", goal_id)?;
+        let connection = self.lock()?;
+        type SessionRow = (String, String, Vec<u8>, Vec<u8>, bool, String, i64);
+        let row: Option<SessionRow> = connection
+            .query_row(
+                "SELECT goal_id, actor_identity, repository_json, grants_json,
+                        observe_only, token_hash, expires_at
+                 FROM actor_sessions WHERE session_id=?1 AND cycle_id=?2",
+                params![session_id, cycle_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(persistence)?;
+        let Some((
+            stored_goal,
+            actor_identity,
+            repository_json,
+            grants_json,
+            observe_only,
+            token_hash,
+            expires_at,
+        )) = row
+        else {
+            return Err(CapabilityError::new(
+                CapabilityErrorCode::Unauthenticated,
+                "actor session lease was not found",
+            ));
+        };
+        if stored_goal != goal_id
+            || expires_at < now_millis()
+            || token_hash != sha256_hex(token.as_bytes())
+        {
+            return Err(CapabilityError::new(
+                CapabilityErrorCode::Unauthenticated,
+                "actor session lease is expired or does not match the invocation",
+            ));
+        }
+        let repository: RepositoryRef =
+            serde_json::from_slice(&repository_json).map_err(serialization)?;
+        let grants: BTreeSet<CapabilityGrant> =
+            serde_json::from_slice(&grants_json).map_err(serialization)?;
+        Ok(
+            AuthenticatedToolContext::new(actor_identity, session_id, grants)
+                .scoped_to_repository(repository)
+                .with_observe_only(observe_only),
+        )
+    }
+
+    pub fn issue_privileged_approval(
+        &self,
+        authority: &ApprovalAuthority,
+        effect_id: &str,
+    ) -> CapabilityResult<PrivilegedApproval> {
+        validate_identifier("effect id", effect_id)?;
+        let connection = self.lock()?;
+        let job = query_effect_by_id(&connection, effect_id)?.ok_or_else(|| {
+            CapabilityError::new(
+                CapabilityErrorCode::InvalidArgument,
+                "effect job was not found",
+            )
+        })?;
+        if !matches!(job.state.as_str(), "pending" | "blocked") {
+            return Err(CapabilityError::new(
+                CapabilityErrorCode::StateTransitionRejected,
+                "privileged approval can be issued only for a pending or blocked effect",
+            ));
+        }
+        if !matches!(
+            job.action,
+            Action::RequestMerge(_) | Action::RequestDeploy(_)
+        ) {
+            return Err(CapabilityError::new(
+                CapabilityErrorCode::PermissionDenied,
+                "only merge and deploy effects require privileged approval",
+            ));
+        }
+        let outcome = terminal_for_outcome_id(&connection, &job.outcome_id)?;
+        let policy_revision = match &outcome.payload {
+            TypedOutcomePayload::Action(payload) => payload.admission.policy_revision.clone(),
+            _ => {
+                return Err(CapabilityError::new(
+                    CapabilityErrorCode::StateTransitionRejected,
+                    "privileged effect is not linked to an action outcome",
+                ));
+            }
+        };
+        let mut approval = PrivilegedApproval {
+            approval_id: Uuid::now_v7().to_string(),
+            principal: authority.principal.clone(),
+            effect_id: job.effect_id,
+            outcome_id: outcome.outcome_id,
+            session_id: outcome.session_id,
+            cycle_id: outcome.cycle_id,
+            goal_id: outcome.goal_id,
+            action_kind: job.action.kind(),
+            canonical_payload_hash: action_payload_hash(&job.action)?,
+            repository: outcome.repository.clone(),
+            policy_revision,
+            issued_at_unix_millis: now_millis(),
+            signature: String::new(),
+        };
+        approval.signature = approval_signature(&authority.signing_key, &approval)?;
+        let json = serde_json::to_vec(&approval).map_err(serialization)?;
+        let transaction = connection.unchecked_transaction().map_err(persistence)?;
+        transaction
+            .execute(
+                "INSERT INTO authorization_decisions(
+                    decision_id, effect_id, decision, decision_json, recorded_at
+                 ) VALUES (?1, ?2, 'approved', ?3, ?4)",
+                params![
+                    approval.approval_id,
+                    approval.effect_id,
+                    json,
+                    approval.issued_at_unix_millis
+                ],
+            )
+            .map_err(persistence)?;
+        transaction
+            .execute(
+                "UPDATE effect_jobs
+                 SET state='pending', error=NULL, lease_owner=NULL, lease_expires_at=NULL
+                 WHERE effect_id=?1 AND state='blocked'",
+                [&approval.effect_id],
+            )
+            .map_err(persistence)?;
+        transaction.commit().map_err(persistence)?;
+        Ok(approval)
+    }
+
     pub fn record_action(
         &self,
         actor: &AuthenticatedToolContext,
         request: RecordActionRequest,
         admission: &AdmissionSnapshot,
     ) -> CapabilityResult<TerminalOutcome> {
-        self.authorize(
-            actor,
-            &request.identity,
-            CapabilityGrant::RecordAction(request.action.kind()),
-        )?;
-        self.validate_common(&request.identity, &request.raw_semantic, &request.evidence)?;
-        self.validate_action(&request.action)?;
+        self.validate_identity(&request.identity)?;
+        if actor.actor_identity.is_empty() || actor.session_id != request.identity.session_id {
+            return Err(CapabilityError::new(
+                CapabilityErrorCode::Unauthenticated,
+                "authenticated actor session does not match request session",
+            ));
+        }
+        let grant = CapabilityGrant::RecordAction(request.action.kind());
+        if actor.is_observe_only()
+            || crate::read_only_guard::observe_only_enabled()
+            || !actor.allows(grant)
+            || !self.policy.allows(grant)
+        {
+            return self.record_action_denied(actor, request, grant);
+        }
+        self.authorize(actor, &request.identity, grant)?;
+        if let Err(error) = self.authorize_action_scope(actor, &request.action) {
+            if error.code() == CapabilityErrorCode::PermissionDenied {
+                return self.record_action_denied(actor, request, grant);
+            }
+            return Err(error);
+        }
+        self.validate_common(&request.raw_semantic, &request.evidence)?;
+        if let Err(error) = self.validate_action(&request.action) {
+            if error.code() == CapabilityErrorCode::PermissionDenied {
+                return self.record_action_denied(actor, request, grant);
+            }
+            return Err(error);
+        }
 
-        let payload = TypedOutcomePayload::Action(ActionOutcomePayload {
-            action: request.action.clone(),
-            admission: AdmissionDecision {
-                policy_revision: admission.policy_revision.clone(),
-            },
-        });
-        let fingerprint = fingerprint(actor, &request)?;
-        let outcome = self.new_outcome(
-            actor,
-            &request.identity,
-            TerminalKind::Action,
-            payload,
-            request.raw_semantic,
-            request.evidence,
-        );
+        let fingerprint = fingerprint(actor, &self.policy.revision, &request)?;
 
         let mut connection = self.lock()?;
         let transaction = connection.transaction().map_err(persistence)?;
@@ -160,8 +501,24 @@ impl CapabilityHandler {
         }
         self.admit(&request.action, admission)?;
         ensure_cycle_open(&transaction, &request.identity)?;
+        let RecordActionRequest {
+            identity,
+            action,
+            raw_semantic,
+            evidence,
+        } = request;
+        let payload = TypedOutcomePayload::Action(ActionOutcomePayload {
+            action,
+            admission: AdmissionDecision {
+                policy_revision: admission.policy_revision.clone(),
+            },
+        });
+        let outcome = self.new_outcome(actor, &identity, payload, raw_semantic, evidence);
         insert_terminal(&transaction, &outcome, &fingerprint)?;
-        if let Action::SpawnEngineer(spawn) = &request.action {
+        let TypedOutcomePayload::Action(action_payload) = &outcome.payload else {
+            unreachable!("record_action always creates an action payload");
+        };
+        if let Action::SpawnEngineer(spawn) = &action_payload.action {
             transaction
                 .execute(
                     "INSERT INTO engineer_claims(claim_key, outcome_id, request_id) VALUES (?1, ?2, ?3)",
@@ -178,7 +535,7 @@ impl CapabilityHandler {
                     }
                 })?;
         }
-        insert_effect(&transaction, &outcome, &request.action)?;
+        insert_effect(&transaction, &outcome, &action_payload.action)?;
         transaction.commit().map_err(persistence)?;
         Ok(outcome)
     }
@@ -189,18 +546,18 @@ impl CapabilityHandler {
         request: RecordNoActionRequest,
     ) -> CapabilityResult<TerminalOutcome> {
         self.authorize(actor, &request.identity, CapabilityGrant::RecordNoAction)?;
-        self.validate_common(&request.identity, &request.raw_semantic, &request.evidence)?;
+        self.validate_common(&request.raw_semantic, &request.evidence)?;
         self.validate_opaque("reason", &request.reason, true)?;
+        let fingerprint = fingerprint(actor, &self.policy.revision, &request)?;
         self.commit_terminal(
             actor,
             &request.identity,
-            TerminalKind::NoAction,
             TypedOutcomePayload::NoAction(NoActionOutcomePayload {
-                reason: request.reason.clone(),
+                reason: request.reason,
             }),
-            request.raw_semantic.clone(),
-            request.evidence.clone(),
-            fingerprint(actor, &request)?,
+            request.raw_semantic,
+            request.evidence,
+            fingerprint,
         )
     }
 
@@ -210,20 +567,20 @@ impl CapabilityHandler {
         request: RecordBlockedRequest,
     ) -> CapabilityResult<TerminalOutcome> {
         self.authorize(actor, &request.identity, CapabilityGrant::RecordBlocked)?;
-        self.validate_common(&request.identity, &request.raw_semantic, &request.evidence)?;
+        self.validate_common(&request.raw_semantic, &request.evidence)?;
         self.validate_opaque("reason", &request.reason, true)?;
+        let fingerprint = fingerprint(actor, &self.policy.revision, &request)?;
         self.commit_terminal(
             actor,
             &request.identity,
-            TerminalKind::Blocked,
             TypedOutcomePayload::Blocked(BlockedOutcomePayload {
-                reason: request.reason.clone(),
-                blocker: request.blocker.clone(),
-                retry: request.retry.clone(),
+                reason: request.reason,
+                blocker: request.blocker,
+                retry: request.retry,
             }),
-            request.raw_semantic.clone(),
-            request.evidence.clone(),
-            fingerprint(actor, &request)?,
+            request.raw_semantic,
+            request.evidence,
+            fingerprint,
         )
     }
 
@@ -233,7 +590,7 @@ impl CapabilityHandler {
         request: RecordCompletedRequest,
     ) -> CapabilityResult<TerminalOutcome> {
         self.authorize(actor, &request.identity, CapabilityGrant::RecordCompleted)?;
-        self.validate_common(&request.identity, &request.raw_semantic, &request.evidence)?;
+        self.validate_common(&request.raw_semantic, &request.evidence)?;
         self.validate_opaque("completion summary", &request.summary, true)?;
         validate_identifier("completion criterion", &request.completion.criterion_id)?;
         validate_evidence(&request.completion.verification_evidence)?;
@@ -254,17 +611,17 @@ impl CapabilityHandler {
                 "completion verification references must also be attached as outcome evidence",
             ));
         }
+        let fingerprint = fingerprint(actor, &self.policy.revision, &request)?;
         self.commit_terminal(
             actor,
             &request.identity,
-            TerminalKind::Completed,
             TypedOutcomePayload::Completed(CompletedOutcomePayload {
-                summary: request.summary.clone(),
-                completion: request.completion.clone(),
+                summary: request.summary,
+                completion: request.completion,
             }),
-            request.raw_semantic.clone(),
-            request.evidence.clone(),
-            fingerprint(actor, &request)?,
+            request.raw_semantic,
+            request.evidence,
+            fingerprint,
         )
     }
 
@@ -274,7 +631,6 @@ impl CapabilityHandler {
         request: RecordProgressRequest,
     ) -> CapabilityResult<ProgressRecord> {
         self.authorize(actor, &request.identity, CapabilityGrant::RecordProgress)?;
-        self.validate_identity(&request.identity)?;
         self.validate_opaque("progress summary", &request.summary, true)?;
         validate_evidence(&request.evidence)?;
         if request.percent > 100 {
@@ -283,35 +639,35 @@ impl CapabilityHandler {
                 "progress percent must be in 0..=100",
             ));
         }
-        let fingerprint = fingerprint(actor, &request)?;
-        let record = ProgressRecord {
-            progress_id: Uuid::now_v7().to_string(),
-            request_id: request.identity.request_id.clone(),
-            session_id: request.identity.session_id.clone(),
-            actor_identity: actor.actor_identity.clone(),
-            goal_id: request.identity.goal_id.clone(),
-            cycle_id: request.identity.cycle_id.clone(),
-            percent: request.percent,
-            summary: request.summary,
-            evidence: request.evidence,
-            recorded_at_unix_millis: now_millis(),
-        };
-        let json = serde_json::to_vec(&record).map_err(serialization)?;
+        let fingerprint = fingerprint(actor, &self.policy.revision, &request)?;
         let connection = self.lock()?;
         let existing: Option<(String, Vec<u8>)> = connection
             .query_row(
                 "SELECT request_hash, progress_json FROM progress_records WHERE request_id=?1",
-                [&record.request_id],
+                [&request.identity.request_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(persistence)?;
         if let Some((stored_hash, stored_json)) = existing {
             if stored_hash != fingerprint {
-                return Err(idempotency_conflict(&record.request_id));
+                return Err(idempotency_conflict(&request.identity.request_id));
             }
             return serde_json::from_slice(&stored_json).map_err(serialization);
         }
+        let record = ProgressRecord {
+            progress_id: Uuid::now_v7().to_string(),
+            request_id: request.identity.request_id,
+            session_id: request.identity.session_id,
+            actor_identity: actor.actor_identity.clone(),
+            goal_id: request.identity.goal_id,
+            cycle_id: request.identity.cycle_id,
+            percent: request.percent,
+            summary: request.summary,
+            evidence: request.evidence,
+            recorded_at_unix_millis: now_millis(),
+        };
+        let json = serde_json::to_vec(&record).map_err(serialization)?;
         connection
             .execute(
                 "INSERT INTO progress_records(request_id, request_hash, session_id, cycle_id, progress_json) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -380,13 +736,14 @@ impl CapabilityHandler {
 
     pub fn terminal_count(&self, session_id: &str, cycle_id: &str) -> CapabilityResult<usize> {
         let connection = self.lock()?;
-        connection
+        let exists: bool = connection
             .query_row(
-                "SELECT COUNT(*) FROM terminal_outcomes WHERE session_id=?1 AND cycle_id=?2",
+                "SELECT EXISTS(SELECT 1 FROM terminal_outcomes WHERE session_id=?1 AND cycle_id=?2)",
                 params![session_id, cycle_id],
                 |row| row.get(0),
             )
-            .map_err(persistence)
+            .map_err(persistence)?;
+        Ok(usize::from(exists))
     }
 
     pub fn progress_for_cycle(
@@ -414,7 +771,18 @@ impl CapabilityHandler {
 
     pub fn effect_for_outcome(&self, outcome_id: &str) -> CapabilityResult<Option<EffectJob>> {
         let connection = self.lock()?;
-        query_effect(&connection, "WHERE outcome_id=?1", [outcome_id])
+        query_effect(
+            &connection,
+            "
+            SELECT effect_id, outcome_id, request_id, kind, state, action_json, attempt,
+                   lease_owner, lease_expires_at, error, result_json,
+                   (SELECT decision_json FROM authorization_decisions
+                    WHERE effect_id=effect_jobs.effect_id AND decision='approved'
+                    ORDER BY recorded_at DESC, rowid DESC LIMIT 1)
+            FROM effect_jobs WHERE outcome_id=?1
+            ",
+            [outcome_id],
+        )
     }
 
     pub fn claim_next_effect(
@@ -431,30 +799,27 @@ impl CapabilityHandler {
                 "effect lease is too long",
             )
         })?;
-        let mut connection = self.lock()?;
-        let transaction = connection.transaction().map_err(persistence)?;
-        let effect_id: Option<String> = transaction
-            .query_row(
-                "SELECT effect_id FROM effect_jobs WHERE state='pending' ORDER BY rowid LIMIT 1",
-                [],
-                |row| row.get(0),
+        let connection = self.lock()?;
+        query_effect(
+            &connection,
+            "
+            UPDATE effect_jobs
+            SET state='running', attempt=attempt+1, lease_owner=?1, lease_expires_at=?2
+            WHERE effect_id = (
+                SELECT effect_id FROM effect_jobs
+                WHERE state='pending'
+                ORDER BY rowid
+                LIMIT 1
             )
-            .optional()
-            .map_err(persistence)?;
-        let Some(effect_id) = effect_id else {
-            transaction.commit().map_err(persistence)?;
-            return Ok(None);
-        };
-        transaction
-            .execute(
-                "UPDATE effect_jobs SET state='running', attempt=attempt+1, lease_owner=?2, lease_expires_at=?3 WHERE effect_id=?1 AND state='pending'",
-                params![effect_id, worker, now.saturating_add(lease_millis)],
-            )
-            .map_err(persistence)?;
-        let job = query_effect(&transaction, "WHERE effect_id=?1", [&effect_id])?
-            .ok_or_else(|| persistence_message("claimed effect disappeared"))?;
-        transaction.commit().map_err(persistence)?;
-        Ok(Some(job))
+            AND state='pending'
+            RETURNING effect_id, outcome_id, request_id, kind, state, action_json, attempt,
+                      lease_owner, lease_expires_at, error, result_json,
+                      (SELECT decision_json FROM authorization_decisions
+                       WHERE effect_id=effect_jobs.effect_id AND decision='approved'
+                       ORDER BY recorded_at DESC, rowid DESC LIMIT 1)
+            ",
+            params![worker, now.saturating_add(lease_millis)],
+        )
     }
 
     pub(crate) fn claim_effect_for_outcome(
@@ -473,22 +838,21 @@ impl CapabilityHandler {
                 "effect lease is too long",
             )
         })?;
-        let mut connection = self.lock()?;
-        let transaction = connection.transaction().map_err(persistence)?;
-        let changed = transaction
-            .execute(
-                "UPDATE effect_jobs SET state='running', attempt=attempt+1, lease_owner=?2, lease_expires_at=?3 WHERE outcome_id=?1 AND state='pending'",
-                params![outcome_id, worker, now.saturating_add(lease_millis)],
-            )
-            .map_err(persistence)?;
-        if changed == 0 {
-            transaction.commit().map_err(persistence)?;
-            return Ok(None);
-        }
-        let job = query_effect(&transaction, "WHERE outcome_id=?1", [outcome_id])?
-            .ok_or_else(|| persistence_message("claimed effect disappeared"))?;
-        transaction.commit().map_err(persistence)?;
-        Ok(Some(job))
+        let connection = self.lock()?;
+        query_effect(
+            &connection,
+            "
+            UPDATE effect_jobs
+            SET state='running', attempt=attempt+1, lease_owner=?2, lease_expires_at=?3
+            WHERE outcome_id=?1 AND state='pending'
+            RETURNING effect_id, outcome_id, request_id, kind, state, action_json, attempt,
+                      lease_owner, lease_expires_at, error, result_json,
+                      (SELECT decision_json FROM authorization_decisions
+                       WHERE effect_id=effect_jobs.effect_id AND decision='approved'
+                       ORDER BY recorded_at DESC, rowid DESC LIMIT 1)
+            ",
+            params![outcome_id, worker, now.saturating_add(lease_millis)],
+        )
     }
 
     pub fn recover_expired_effects(&self, now: SystemTime) -> CapabilityResult<usize> {
@@ -500,6 +864,74 @@ impl CapabilityHandler {
                 [now],
             )
             .map_err(persistence)
+    }
+
+    pub(crate) fn block_effect_authorization(
+        &self,
+        job: &EffectJob,
+        reason: &str,
+    ) -> CapabilityResult<()> {
+        let recorded_at = now_millis();
+        let decision_id = Uuid::now_v7().to_string();
+        let decision = serde_json::to_vec(&serde_json::json!({
+            "decision_id": decision_id,
+            "effect_id": job.effect_id,
+            "outcome_id": job.outcome_id,
+            "request_id": job.request_id,
+            "decision": "blocked",
+            "reason": reason,
+            "recorded_at_unix_millis": recorded_at,
+        }))
+        .map_err(serialization)?;
+        let connection = self.lock()?;
+        let transaction = connection.unchecked_transaction().map_err(persistence)?;
+        transaction
+            .execute(
+                "INSERT INTO authorization_decisions(
+                    decision_id, effect_id, decision, decision_json, recorded_at
+                 ) VALUES (?1, ?2, 'blocked', ?3, ?4)",
+                params![decision_id, job.effect_id, decision, recorded_at],
+            )
+            .map_err(persistence)?;
+        let changed = transaction
+            .execute(
+                "UPDATE effect_jobs
+                 SET state='blocked',
+                     error=?2,
+                     lease_owner=NULL,
+                     lease_expires_at=NULL
+                 WHERE effect_id=?1 AND state IN ('pending', 'running')",
+                params![job.effect_id, reason],
+            )
+            .map_err(persistence)?;
+        if changed != 1 {
+            return Err(persistence_message(
+                "privileged effect did not transition to blocked",
+            ));
+        }
+        transaction.commit().map_err(persistence)
+    }
+
+    pub(crate) fn release_effect_for_retry(
+        &self,
+        effect_id: &str,
+        error: &str,
+    ) -> CapabilityResult<()> {
+        let connection = self.lock()?;
+        let changed = connection
+            .execute(
+                "UPDATE effect_jobs
+                 SET state='pending', error=?2, lease_owner=NULL, lease_expires_at=NULL
+                 WHERE effect_id=?1 AND state='running'",
+                params![effect_id, error],
+            )
+            .map_err(persistence)?;
+        if changed != 1 {
+            return Err(persistence_message(
+                "retryable effect did not return to pending",
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn finish_effect(
@@ -527,43 +959,83 @@ impl CapabilityHandler {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn commit_terminal(
         &self,
         actor: &AuthenticatedToolContext,
         identity: &TerminalRequestIdentity,
-        kind: TerminalKind,
         payload: TypedOutcomePayload,
         raw_semantic: OpaqueBytes,
         evidence: Vec<EvidenceRef>,
         fingerprint: String,
     ) -> CapabilityResult<TerminalOutcome> {
-        let outcome = self.new_outcome(actor, identity, kind, payload, raw_semantic, evidence);
         let mut connection = self.lock()?;
         let transaction = connection.transaction().map_err(persistence)?;
         if let Some(existing) = replay_terminal(&transaction, &identity.request_id, &fingerprint)? {
             return Ok(existing);
         }
         ensure_cycle_open(&transaction, identity)?;
+        let outcome = self.new_outcome(actor, identity, payload, raw_semantic, evidence);
         insert_terminal(&transaction, &outcome, &fingerprint)?;
         transaction.commit().map_err(persistence)?;
         Ok(outcome)
+    }
+
+    fn record_action_denied(
+        &self,
+        actor: &AuthenticatedToolContext,
+        request: RecordActionRequest,
+        grant: CapabilityGrant,
+    ) -> CapabilityResult<TerminalOutcome> {
+        self.validate_common(&request.raw_semantic, &request.evidence)?;
+        let fingerprint = fingerprint(
+            actor,
+            &self.policy.revision,
+            &(
+                "authorization_blocked",
+                grant,
+                &request,
+                crate::read_only_guard::observe_only_enabled(),
+            ),
+        )?;
+        let reason = if actor.is_observe_only() || crate::read_only_guard::observe_only_enabled() {
+            "SIMARD_OBSERVE_ONLY denied the requested mutation"
+        } else {
+            "the authenticated actor is not granted the requested mutation"
+        };
+        self.commit_terminal(
+            actor,
+            &request.identity,
+            TypedOutcomePayload::Blocked(BlockedOutcomePayload {
+                reason: OpaqueBytes::from(reason.as_bytes().to_vec()),
+                blocker: BlockerRef::Authorization {
+                    capability: format!("{grant:?}"),
+                },
+                retry: RetryPolicy::AfterSignal {
+                    provider: "simard-capability-policy".to_string(),
+                    signal_id: self.policy.revision.clone(),
+                },
+            }),
+            request.raw_semantic,
+            request.evidence,
+            fingerprint,
+        )
     }
 
     fn new_outcome(
         &self,
         actor: &AuthenticatedToolContext,
         identity: &TerminalRequestIdentity,
-        kind: TerminalKind,
         payload: TypedOutcomePayload,
         raw_semantic: OpaqueBytes,
         evidence: Vec<EvidenceRef>,
     ) -> TerminalOutcome {
+        let kind = payload.kind();
         TerminalOutcome {
             outcome_id: Uuid::now_v7().to_string(),
             request_id: identity.request_id.clone(),
             session_id: identity.session_id.clone(),
             actor_identity: actor.actor_identity.clone(),
+            repository: actor.bound_repository().cloned(),
             goal_id: identity.goal_id.clone(),
             cycle_id: identity.cycle_id.clone(),
             kind,
@@ -597,6 +1069,32 @@ impl CapabilityHandler {
         Ok(())
     }
 
+    fn authorize_action_scope(
+        &self,
+        actor: &AuthenticatedToolContext,
+        action: &Action,
+    ) -> CapabilityResult<()> {
+        let Some(repository) = action.repository() else {
+            return Ok(());
+        };
+        let Some(bound) = actor.bound_repository() else {
+            return Err(CapabilityError::new(
+                CapabilityErrorCode::PermissionDenied,
+                "mutating actor is not bound to a goal repository",
+            ));
+        };
+        if repository != bound {
+            return Err(CapabilityError::new(
+                CapabilityErrorCode::PermissionDenied,
+                format!(
+                    "requested repository {}/{} does not match authenticated goal repository {}/{}",
+                    repository.owner, repository.name, bound.owner, bound.name
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_identity(&self, identity: &TerminalRequestIdentity) -> CapabilityResult<()> {
         validate_identifier("request id", &identity.request_id)?;
         validate_identifier("session id", &identity.session_id)?;
@@ -606,11 +1104,9 @@ impl CapabilityHandler {
 
     fn validate_common(
         &self,
-        identity: &TerminalRequestIdentity,
         raw_semantic: &OpaqueBytes,
         evidence: &[EvidenceRef],
     ) -> CapabilityResult<()> {
-        self.validate_identity(identity)?;
         self.validate_opaque("raw semantic", raw_semantic, false)?;
         validate_evidence(evidence)
     }
@@ -690,6 +1186,16 @@ impl CapabilityHandler {
             }
             Action::RequestDeploy(value) => {
                 validate_identifier("deployment environment", &value.environment.name)?;
+                if !self
+                    .policy
+                    .allowed_deployment_environments
+                    .contains(&value.environment.name)
+                {
+                    return Err(CapabilityError::new(
+                        CapabilityErrorCode::PermissionDenied,
+                        "deployment environment is outside capability policy",
+                    ));
+                }
                 validate_sha(&value.artifact.source_commit)?;
                 let digest = value.artifact.digest.strip_prefix("sha256:").unwrap_or("");
                 if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -705,10 +1211,11 @@ impl CapabilityHandler {
 
     fn validate_governed_repository(&self, repository: &RepositoryRef) -> CapabilityResult<()> {
         validate_repository(repository)?;
-        if !self
-            .policy
-            .allowed_repository_owners
-            .contains(&repository.owner)
+        if !self.policy.allowed_repositories.contains(repository)
+            && !self
+                .policy
+                .allowed_repository_owners
+                .contains(&repository.owner)
         {
             return Err(CapabilityError::new(
                 CapabilityErrorCode::PermissionDenied,
@@ -778,15 +1285,16 @@ fn insert_terminal(
 }
 
 fn ensure_effect_result_column(connection: &Connection) -> CapabilityResult<()> {
-    let mut statement = connection
-        .prepare("PRAGMA table_info(effect_jobs)")
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('effect_jobs') WHERE name='result_json'
+            )",
+            [],
+            |row| row.get(0),
+        )
         .map_err(persistence)?;
-    let columns = statement
-        .query_map([], |row| row.get::<_, String>(1))
-        .map_err(persistence)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(persistence)?;
-    if !columns.iter().any(|column| column == "result_json") {
+    if !exists {
         connection
             .execute("ALTER TABLE effect_jobs ADD COLUMN result_json BLOB", [])
             .map_err(persistence)?;
@@ -867,7 +1375,7 @@ fn insert_effect(
 
 fn query_effect<P>(
     connection: &Connection,
-    clause: &str,
+    sql: &str,
     parameters: P,
 ) -> CapabilityResult<Option<EffectJob>>
 where
@@ -885,12 +1393,10 @@ where
         Option<i64>,
         Option<String>,
         Option<Vec<u8>>,
-    );
-    let sql = format!(
-        "SELECT effect_id, outcome_id, request_id, kind, state, action_json, attempt, lease_owner, lease_expires_at, error, result_json FROM effect_jobs {clause}"
+        Option<Vec<u8>>,
     );
     let row: Option<EffectRow> = connection
-        .query_row(&sql, parameters, |row| {
+        .query_row(sql, parameters, |row| {
             Ok((
                 row.get(0)?,
                 row.get(1)?,
@@ -903,6 +1409,7 @@ where
                 row.get(8)?,
                 row.get(9)?,
                 row.get(10)?,
+                row.get(11)?,
             ))
         })
         .optional()
@@ -920,11 +1427,15 @@ where
             lease_expires_at_unix_millis,
             error,
             result_json,
+            approval_json,
         )| {
+            let outcome = terminal_for_outcome_id(connection, &outcome_id)?;
             Ok(EffectJob {
                 effect_id,
                 outcome_id,
                 request_id,
+                goal_id: outcome.goal_id,
+                repository: outcome.repository,
                 kind: EffectKind(kind),
                 state: EffectState(state),
                 action: serde_json::from_slice(&action_json).map_err(serialization)?,
@@ -935,19 +1446,154 @@ where
                 result: result_json
                     .map(|json| serde_json::from_slice(&json).map_err(serialization))
                     .transpose()?,
+                approval: approval_json
+                    .map(|json| serde_json::from_slice(&json).map_err(serialization))
+                    .transpose()?,
             })
         },
     )
     .transpose()
 }
 
+fn query_effect_by_id(
+    connection: &Connection,
+    effect_id: &str,
+) -> CapabilityResult<Option<EffectJob>> {
+    query_effect(
+        connection,
+        "
+        SELECT effect_id, outcome_id, request_id, kind, state, action_json, attempt,
+               lease_owner, lease_expires_at, error, result_json,
+               (SELECT decision_json FROM authorization_decisions
+                WHERE effect_id=effect_jobs.effect_id AND decision='approved'
+                ORDER BY recorded_at DESC, rowid DESC LIMIT 1)
+        FROM effect_jobs WHERE effect_id=?1
+        ",
+        [effect_id],
+    )
+}
+
+fn terminal_for_outcome_id(
+    connection: &Connection,
+    outcome_id: &str,
+) -> CapabilityResult<TerminalOutcome> {
+    let json: Vec<u8> = connection
+        .query_row(
+            "SELECT outcome_json FROM terminal_outcomes WHERE outcome_id=?1",
+            [outcome_id],
+            |row| row.get(0),
+        )
+        .map_err(persistence)?;
+    serde_json::from_slice(&json).map_err(serialization)
+}
+
+pub fn action_payload_hash(action: &Action) -> CapabilityResult<String> {
+    let bytes = serde_json::to_vec(action).map_err(serialization)?;
+    Ok(sha256_hex(&bytes))
+}
+
+fn approval_signature(
+    signing_key: &[u8],
+    approval: &PrivilegedApproval,
+) -> CapabilityResult<String> {
+    #[derive(Serialize)]
+    struct UnsignedApproval<'a> {
+        approval_id: &'a str,
+        principal: &'a str,
+        effect_id: &'a str,
+        outcome_id: &'a str,
+        session_id: &'a str,
+        cycle_id: &'a str,
+        goal_id: &'a str,
+        action_kind: ActionKind,
+        canonical_payload_hash: &'a str,
+        repository: &'a Option<RepositoryRef>,
+        policy_revision: &'a str,
+        issued_at_unix_millis: i64,
+    }
+    let unsigned = UnsignedApproval {
+        approval_id: &approval.approval_id,
+        principal: &approval.principal,
+        effect_id: &approval.effect_id,
+        outcome_id: &approval.outcome_id,
+        session_id: &approval.session_id,
+        cycle_id: &approval.cycle_id,
+        goal_id: &approval.goal_id,
+        action_kind: approval.action_kind,
+        canonical_payload_hash: &approval.canonical_payload_hash,
+        repository: &approval.repository,
+        policy_revision: &approval.policy_revision,
+        issued_at_unix_millis: approval.issued_at_unix_millis,
+    };
+    let message = serde_json::to_vec(&unsigned).map_err(serialization)?;
+    Ok(hmac_sha256_hex(signing_key, &message))
+}
+
+fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
+    const BLOCK_SIZE: usize = 64;
+    let mut normalized = [0_u8; BLOCK_SIZE];
+    if key.len() > BLOCK_SIZE {
+        normalized[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        normalized[..key.len()].copy_from_slice(key);
+    }
+    let mut inner_pad = [0x36_u8; BLOCK_SIZE];
+    let mut outer_pad = [0x5c_u8; BLOCK_SIZE];
+    for index in 0..BLOCK_SIZE {
+        inner_pad[index] ^= normalized[index];
+        outer_pad[index] ^= normalized[index];
+    }
+    let mut inner = Sha256::new();
+    inner.update(inner_pad);
+    inner.update(message);
+    let inner_digest = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(outer_pad);
+    outer.update(inner_digest);
+    format!("{:x}", outer.finalize())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
 fn fingerprint<T: Serialize>(
     actor: &AuthenticatedToolContext,
+    policy_revision: &str,
     request: &T,
 ) -> CapabilityResult<String> {
-    let bytes =
-        serde_json::to_vec(&(actor.actor_identity.as_str(), request)).map_err(serialization)?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    let mut writer = HashWriter(Sha256::new());
+    serde_json::to_writer(
+        &mut writer,
+        &(actor.actor_identity.as_str(), policy_revision, request),
+    )
+    .map_err(serialization)?;
+    Ok(format!("{:x}", writer.0.finalize()))
+}
+
+struct HashWriter(Sha256);
+
+impl Write for HashWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn now_millis() -> i64 {
@@ -1006,4 +1652,86 @@ fn is_constraint(error: &rusqlite::Error) -> bool {
 pub enum EffectResult {
     Succeeded { evidence: Vec<EvidenceRef> },
     Failed { error: String },
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::*;
+
+    #[test]
+    fn issued_approval_is_bound_to_the_exact_privileged_effect() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handler = CapabilityHandler::open(
+            dir.path().join("outcomes.sqlite3"),
+            CapabilityPolicy::goal_session_default("policy-v1"),
+        )
+        .expect("handler");
+        let actor = AuthenticatedToolContext::new(
+            "goal-session-actor",
+            "session-approval",
+            [CapabilityGrant::RecordAction(ActionKind::RequestMerge)],
+        )
+        .scoped_to_repository(RepositoryRef::new("rysweet", "Simard"));
+        let outcome = handler
+            .record_action(
+                &actor,
+                RecordActionRequest {
+                    identity: TerminalRequestIdentity::new(
+                        "request-approval",
+                        "session-approval",
+                        "cycle-approval",
+                        "goal-approval",
+                    ),
+                    action: Action::RequestMerge(RequestMergeAction {
+                        pull_request: PullRequestRef {
+                            repository: RepositoryRef::new("rysweet", "Simard"),
+                            number: 42,
+                        },
+                        expected_head_sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
+                        strategy: "squash".to_string(),
+                    }),
+                    raw_semantic: OpaqueBytes::from(b"approved request".to_vec()),
+                    evidence: Vec::new(),
+                },
+                &AdmissionSnapshot {
+                    concurrent_engineers: 0,
+                    disk_used_percent: 1,
+                    active_claims: BTreeSet::new(),
+                    policy_revision: "policy-v1".to_string(),
+                },
+            )
+            .expect("record request");
+        let effect = handler
+            .effect_for_outcome(&outcome.outcome_id)
+            .expect("query effect")
+            .expect("effect");
+        handler
+            .block_effect_authorization(&effect, "approval required")
+            .expect("block effect");
+
+        let approval = handler
+            .issue_privileged_approval(
+                &ApprovalAuthority::for_test("release-operator"),
+                &effect.effect_id,
+            )
+            .expect("issue approval");
+        let approved = handler
+            .effect_for_outcome(&outcome.outcome_id)
+            .expect("query approved effect")
+            .expect("approved effect");
+        assert_eq!(approved.state.as_str(), "pending");
+        assert_eq!(approved.approval.as_ref(), Some(&approval));
+        assert_eq!(approval.goal_id, "goal-approval");
+        assert_eq!(approval.cycle_id, "cycle-approval");
+        assert_eq!(approval.action_kind, ActionKind::RequestMerge);
+        assert_eq!(
+            approval.repository,
+            Some(RepositoryRef::new("rysweet", "Simard"))
+        );
+        assert_eq!(
+            approval.canonical_payload_hash,
+            action_payload_hash(&approved.action).expect("payload hash")
+        );
+        assert!(!approval.signature.is_empty());
+    }
 }

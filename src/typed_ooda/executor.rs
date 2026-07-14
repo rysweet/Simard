@@ -34,7 +34,7 @@ pub struct CycleError {
 }
 
 impl CycleError {
-    fn new(code: CycleErrorCode, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: CycleErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -300,6 +300,19 @@ impl GoalSessionExecutor {
     where
         F: FnOnce(&GoalSessionInvocation, &GoalSessionTools<'_>) -> Result<(), RecipeProcessError>,
     {
+        let execution = self.execute_actor_step(invocation, actor_step)?;
+        self.complete_outcome_effect(&execution.outcome, effects)?;
+        Ok(execution)
+    }
+
+    pub fn execute_actor_step<F>(
+        &self,
+        invocation: &GoalSessionInvocation,
+        actor_step: F,
+    ) -> Result<GoalSessionExecution, CycleError>
+    where
+        F: FnOnce(&GoalSessionInvocation, &GoalSessionTools<'_>) -> Result<(), RecipeProcessError>,
+    {
         if invocation.session_id != self.actor.session_id {
             return Err(CycleError::new(
                 CycleErrorCode::ToolFailed,
@@ -349,24 +362,157 @@ impl GoalSessionExecutor {
                     "recipe completed without a durable terminal outcome",
                 )
             })?;
-        if outcome.kind == TerminalKind::Action {
-            self.execute_effect(&outcome, effects)?;
-        }
         Ok(GoalSessionExecution { outcome })
     }
 
-    fn execute_effect(
+    pub fn complete_outcome_effect(
         &self,
         outcome: &TerminalOutcome,
         effects: &dyn EffectExecutor,
     ) -> Result<(), CycleError> {
+        if outcome.kind != TerminalKind::Action {
+            return Ok(());
+        }
+        let worker = OutboxWorker::new(
+            &self.handler,
+            effects,
+            "goal-session-effect-dispatcher",
+            Duration::from_secs(300),
+        );
+        worker.dispatch_outcome(outcome)
+    }
+}
+
+pub struct OutboxWorker<'a> {
+    handler: &'a CapabilityHandler,
+    effects: &'a dyn EffectExecutor,
+    worker_id: &'a str,
+    lease: Duration,
+}
+
+impl<'a> OutboxWorker<'a> {
+    pub fn new(
+        handler: &'a CapabilityHandler,
+        effects: &'a dyn EffectExecutor,
+        worker_id: &'a str,
+        lease: Duration,
+    ) -> Self {
+        Self {
+            handler,
+            effects,
+            worker_id,
+            lease,
+        }
+    }
+
+    pub fn recover_startup(&self) -> Result<usize, CycleError> {
+        self.handler
+            .recover_expired_effects(SystemTime::now())
+            .map_err(|error| CycleError::new(CycleErrorCode::PersistenceFailed, error.to_string()))
+    }
+
+    pub fn drain_pending(&self, limit: usize) -> Result<usize, CycleError> {
+        self.recover_startup()?;
+        let mut completed = 0;
+        for _ in 0..limit {
+            let Some(job) = self
+                .handler
+                .claim_next_effect(self.worker_id, SystemTime::now(), self.lease)
+                .map_err(|error| {
+                    CycleError::new(CycleErrorCode::PersistenceFailed, error.to_string())
+                })?
+            else {
+                break;
+            };
+            self.execute_claimed(job)?;
+            completed += 1;
+        }
+        Ok(completed)
+    }
+
+    pub fn dispatch_outcome(&self, outcome: &TerminalOutcome) -> Result<(), CycleError> {
+        self.recover_startup()?;
+        let current = self
+            .handler
+            .effect_for_outcome(&outcome.outcome_id)
+            .map_err(|error| CycleError::new(CycleErrorCode::PersistenceFailed, error.to_string()))?
+            .ok_or_else(|| {
+                CycleError::new(
+                    CycleErrorCode::DownstreamFailed,
+                    "action terminal has no durable effect",
+                )
+            })?;
+        match current.state.as_str() {
+            "succeeded" => return Ok(()),
+            "failed" => {
+                return Err(CycleError::new(
+                    CycleErrorCode::DownstreamFailed,
+                    current
+                        .error
+                        .unwrap_or_else(|| "downstream effect permanently failed".to_string()),
+                ));
+            }
+            "blocked" => {
+                return Err(CycleError::new(
+                    CycleErrorCode::DownstreamFailed,
+                    current
+                        .error
+                        .unwrap_or_else(|| "downstream effect is blocked".to_string()),
+                ));
+            }
+            "running" => {
+                return Err(CycleError::new(
+                    CycleErrorCode::DownstreamFailed,
+                    "downstream effect is leased by another worker",
+                ));
+            }
+            "pending" => {}
+            other => {
+                return Err(CycleError::new(
+                    CycleErrorCode::PersistenceFailed,
+                    format!("unknown durable effect state {other:?}"),
+                ));
+            }
+        }
+        if crate::read_only_guard::observe_only_enabled() {
+            self.handler
+                .block_effect_authorization(
+                    &current,
+                    "SIMARD_OBSERVE_ONLY denied mutation at effect dispatch",
+                )
+                .map_err(|error| {
+                    CycleError::new(CycleErrorCode::PersistenceFailed, error.to_string())
+                })?;
+            return Err(CycleError::new(
+                CycleErrorCode::DownstreamFailed,
+                "effect is blocked by SIMARD_OBSERVE_ONLY",
+            ));
+        }
+        if matches!(
+            current.action,
+            Action::RequestMerge(_) | Action::RequestDeploy(_)
+        ) && current.approval.is_none()
+        {
+            self.handler
+                .block_effect_authorization(
+                    &current,
+                    "server-issued privileged approval is required",
+                )
+                .map_err(|error| {
+                    CycleError::new(CycleErrorCode::PersistenceFailed, error.to_string())
+                })?;
+            return Err(CycleError::new(
+                CycleErrorCode::DownstreamFailed,
+                "privileged effect is blocked pending a server-issued approval",
+            ));
+        }
         let job = self
             .handler
             .claim_effect_for_outcome(
                 &outcome.outcome_id,
-                "goal-session-effect-dispatcher",
+                self.worker_id,
                 SystemTime::now(),
-                Duration::from_secs(300),
+                self.lease,
             )
             .map_err(|error| CycleError::new(CycleErrorCode::PersistenceFailed, error.to_string()))?
             .ok_or_else(|| {
@@ -375,9 +521,53 @@ impl GoalSessionExecutor {
                     "action terminal has no pending effect",
                 )
             })?;
-        let result = match effects.execute(&job) {
+        self.execute_claimed(job)
+    }
+
+    fn execute_claimed(&self, job: EffectJob) -> Result<(), CycleError> {
+        if crate::read_only_guard::observe_only_enabled() {
+            self.handler
+                .block_effect_authorization(
+                    &job,
+                    "SIMARD_OBSERVE_ONLY denied mutation at effect dispatch",
+                )
+                .map_err(|error| {
+                    CycleError::new(CycleErrorCode::PersistenceFailed, error.to_string())
+                })?;
+            return Err(CycleError::new(
+                CycleErrorCode::DownstreamFailed,
+                "effect is blocked by SIMARD_OBSERVE_ONLY",
+            ));
+        }
+        if matches!(
+            job.action,
+            Action::RequestMerge(_) | Action::RequestDeploy(_)
+        ) && job.approval.is_none()
+        {
+            self.handler
+                .block_effect_authorization(&job, "server-issued privileged approval is required")
+                .map_err(|error| {
+                    CycleError::new(CycleErrorCode::PersistenceFailed, error.to_string())
+                })?;
+            return Err(CycleError::new(
+                CycleErrorCode::DownstreamFailed,
+                "privileged effect is blocked pending a server-issued approval",
+            ));
+        }
+        let result = match self.effects.execute(&job) {
             Ok(result) => result,
             Err(error) => {
+                if !error.permanent {
+                    self.handler
+                        .release_effect_for_retry(&job.effect_id, &error.to_string())
+                        .map_err(|failure| {
+                            CycleError::new(CycleErrorCode::PersistenceFailed, failure.to_string())
+                        })?;
+                    return Err(CycleError::new(
+                        CycleErrorCode::DownstreamFailed,
+                        format!("retryable downstream effect failure: {error}"),
+                    ));
+                }
                 let result = EffectResult::Failed {
                     error: error.to_string(),
                 };
@@ -386,14 +576,9 @@ impl GoalSessionExecutor {
                     .map_err(|failure| {
                         CycleError::new(CycleErrorCode::PersistenceFailed, failure.to_string())
                     })?;
-                let qualifier = if error.permanent {
-                    "permanent"
-                } else {
-                    "retryable"
-                };
                 return Err(CycleError::new(
                     CycleErrorCode::DownstreamFailed,
-                    format!("{qualifier} downstream effect failure: {error}"),
+                    format!("permanent downstream effect failure: {error}"),
                 ));
             }
         };

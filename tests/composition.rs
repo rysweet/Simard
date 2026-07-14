@@ -81,6 +81,7 @@ fn test_config(name: &str, goal: &str) -> SubordinateConfig {
         role: AgentRole::Engineer,
         worktree_path: PathBuf::from("/tmp/test-worktree"),
         current_depth: 0,
+        requested_permissions: None,
     }
 }
 
@@ -348,6 +349,7 @@ fn spawn_rejects_depth_at_limit() {
         role: AgentRole::Engineer,
         worktree_path: PathBuf::from("/tmp/deep"),
         current_depth: depth_limit,
+        requested_permissions: None,
     };
     let err = spawn_subordinate(&config).expect_err("reject");
     assert!(err.to_string().contains("depth"));

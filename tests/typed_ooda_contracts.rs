@@ -21,6 +21,7 @@ fn identity(request_id: &str, cycle_id: &str) -> TerminalRequestIdentity {
 
 fn actor(grants: impl IntoIterator<Item = CapabilityGrant>) -> AuthenticatedToolContext {
     AuthenticatedToolContext::new("goal-session-actor", "session-4052", grants)
+        .scoped_to_repository(RepositoryRef::new("rysweet", "Simard"))
 }
 
 fn policy() -> CapabilityPolicy {
@@ -287,15 +288,15 @@ fn a_second_request_id_cannot_create_another_terminal_for_the_cycle() {
 }
 
 #[test]
-fn denied_capability_and_session_mismatch_fail_without_a_terminal() {
+fn denied_mutation_records_blocked_while_session_mismatch_fails_without_a_terminal() {
     let (_dir, handler) = handler();
     let denied_actor = actor([]);
     let request = action_request("request-denied-1", "cycle-denied-1", b"task".to_vec());
 
     let denied = handler
         .record_action(&denied_actor, request, &admitted())
-        .expect_err("missing grant must fail");
-    assert_eq!(denied.code(), CapabilityErrorCode::PermissionDenied);
+        .expect("missing mutation grant must become an auditable blocked terminal");
+    assert_eq!(denied.kind, simard::typed_ooda::TerminalKind::Blocked);
 
     let wrong_session_actor = AuthenticatedToolContext::new(
         "goal-session-actor",
@@ -319,13 +320,64 @@ fn denied_capability_and_session_mismatch_fail_without_a_terminal() {
         handler
             .terminal_count("session-4052", "cycle-denied-1")
             .expect("count denied cycle"),
-        0
+        1
     );
     assert_eq!(
         handler
             .terminal_count("session-4052", "cycle-mismatch-1")
             .expect("count mismatch cycle"),
         0
+    );
+}
+
+#[test]
+fn observe_only_and_repository_scope_denials_are_durable_blocked_outcomes() {
+    let (_dir, handler) = handler();
+    let observe_only =
+        actor([CapabilityGrant::RecordAction(ActionKind::SpawnEngineer)]).with_observe_only(true);
+    let blocked = handler
+        .record_action(
+            &observe_only,
+            action_request(
+                "request-observe-only",
+                "cycle-observe-only",
+                b"must not dispatch".to_vec(),
+            ),
+            &admitted(),
+        )
+        .expect("observe-only denial is durable");
+    assert_eq!(blocked.kind, TerminalKind::Blocked);
+    assert!(
+        handler
+            .effect_for_outcome(&blocked.outcome_id)
+            .expect("effect query")
+            .is_none()
+    );
+
+    let scoped = actor([CapabilityGrant::RecordAction(ActionKind::FileIssue)]);
+    let wrong_repo = handler
+        .record_action(
+            &scoped,
+            RecordActionRequest {
+                identity: identity("request-wrong-repo", "cycle-wrong-repo"),
+                action: Action::FileIssue(simard::typed_ooda::FileIssueAction {
+                    repository: RepositoryRef::new("rysweet", "Other"),
+                    title: OpaqueBytes::from(b"wrong scope".to_vec()),
+                    body: OpaqueBytes::from(Vec::new()),
+                    labels: Vec::new(),
+                }),
+                raw_semantic: OpaqueBytes::from(b"must not file".to_vec()),
+                evidence: Vec::new(),
+            },
+            &admitted(),
+        )
+        .expect("repository denial is durable");
+    assert_eq!(wrong_repo.kind, TerminalKind::Blocked);
+    assert!(
+        handler
+            .effect_for_outcome(&wrong_repo.outcome_id)
+            .expect("effect query")
+            .is_none()
     );
 }
 

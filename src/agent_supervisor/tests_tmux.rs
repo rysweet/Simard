@@ -183,6 +183,7 @@ fn make_test_config(name: &str, depth: u32) -> SubordinateConfig {
         role: AgentRole::Engineer,
         worktree_path: PathBuf::from("/fake/worktree"),
         current_depth: depth,
+        requested_permissions: None,
     }
 }
 

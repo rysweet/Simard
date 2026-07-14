@@ -174,6 +174,7 @@ pub struct SelfDeployOrchestrator {
     /// candidate is built from the fetched+checked-out merged commit into the
     /// persistent warm target dir. Additive — preserves the existing contract.
     build_source: Option<Box<dyn SelfDeploySourcePreparer>>,
+    expected_artifact_digest: Option<String>,
 }
 
 impl SelfDeployOrchestrator {
@@ -189,6 +190,7 @@ impl SelfDeployOrchestrator {
             target_commit,
             install_path,
             build_source: None,
+            expected_artifact_digest: None,
         }
     }
 
@@ -210,7 +212,15 @@ impl SelfDeployOrchestrator {
             target_commit,
             install_path,
             build_source: Some(source),
+            expected_artifact_digest: None,
         }
+    }
+
+    /// Require the built candidate to match an approved immutable SHA-256
+    /// artifact digest before any backup, swap, or restart occurs.
+    pub fn with_expected_artifact_digest(mut self, digest: String) -> Self {
+        self.expected_artifact_digest = Some(digest);
+        self
     }
 
     /// The injected source preparer, if any. `None` for the legacy path.
@@ -233,6 +243,7 @@ impl SelfDeployOrchestrator {
             target_commit: &self.target_commit,
             install_path: &self.install_path,
             build_source: self.build_source.as_deref(),
+            expected_artifact_digest: self.expected_artifact_digest.as_deref(),
         };
         run_sequence(&effects)
     }
@@ -250,6 +261,7 @@ struct ProdDeployEffects<'a> {
     /// fetched+checked-out merged commit into the persistent warm target dir;
     /// `None` => the legacy `build_canary` path (cwd checkout, cold temp dir).
     build_source: Option<&'a dyn SelfDeploySourcePreparer>,
+    expected_artifact_digest: Option<&'a str>,
 }
 
 impl ProdDeployEffects<'_> {
@@ -272,14 +284,35 @@ impl DeployEffects for ProdDeployEffects<'_> {
         // fetched+checked-out merged commit (the SHA `--check` reports) into the
         // persistent warm target dir — cwd-independent and incremental. The
         // legacy path (no source) is byte-for-byte preserved.
-        if let Some(source) = self.build_source {
+        let candidate = if let Some(source) = self.build_source {
             let warm = super::source_prep::self_deploy_target_dir();
-            return super::source_prep::prepare_and_build(source, self.target_commit, &warm);
+            super::source_prep::prepare_and_build(source, self.target_commit, &warm)?
+        } else {
+            crate::self_relaunch::build_canary(&crate::self_relaunch::RelaunchConfig::default())
+                .map_err(|e| SafeUpdateError::BuildFailed {
+                    detail: e.to_string(),
+                })?
+        };
+        if let Some(expected) = self.expected_artifact_digest {
+            let bytes = std::fs::read(&candidate).map_err(|error| SafeUpdateError::GateFailed {
+                gate: "artifact-digest".to_string(),
+                detail: format!(
+                    "candidate {} could not be hashed: {error}",
+                    candidate.display()
+                ),
+            })?;
+            use sha2::Digest;
+            let actual = format!("sha256:{:x}", sha2::Sha256::digest(bytes));
+            if actual != expected {
+                return Err(SafeUpdateError::GateFailed {
+                    gate: "artifact-digest".to_string(),
+                    detail: format!(
+                        "approved artifact digest {expected} does not match built candidate {actual}"
+                    ),
+                });
+            }
         }
-        crate::self_relaunch::build_canary(&crate::self_relaunch::RelaunchConfig::default())
-            .map_err(|e| SafeUpdateError::BuildFailed {
-                detail: e.to_string(),
-            })
+        Ok(candidate)
     }
 
     fn gate_candidate(&self, candidate: &Path) -> Result<(), SafeUpdateError> {

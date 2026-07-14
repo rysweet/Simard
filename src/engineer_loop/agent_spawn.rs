@@ -17,6 +17,7 @@
 //! Override binary path with `SIMARD_AMPLIHACK_BIN` (used by tests and
 //! environments where `amplihack` is not on PATH).
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -210,6 +211,15 @@ deployed copy.\n";
 /// scaffolding, not a stable API.
 #[doc(hidden)]
 pub fn engineer_argv(kind: AgentKind, prompt: &str, max_turns: u32) -> Vec<String> {
+    engineer_argv_with_permissions(kind, prompt, max_turns, None)
+}
+
+fn engineer_argv_with_permissions(
+    kind: AgentKind,
+    prompt: &str,
+    max_turns: u32,
+    permissions: Option<&BTreeSet<String>>,
+) -> Vec<String> {
     match kind {
         AgentKind::RustyClawd => vec![
             kind.subcommand().to_string(),
@@ -222,26 +232,53 @@ pub fn engineer_argv(kind: AgentKind, prompt: &str, max_turns: u32) -> Vec<Strin
             "-p".to_string(),
             prompt.to_string(),
         ],
-        AgentKind::Copilot => vec![
-            kind.subcommand().to_string(),
-            // Issue #2640: prompt-less argv. The prompt rides on STDIN (see
-            // `run_engineer_subprocess`), so it never contributes to ARG_MAX.
-            // `--subprocess-safe` skips interactive staging so the headless
-            // subprocess reads its stdin prompt non-interactively — the same
-            // proven `amplihack copilot --subprocess-safe …` stdin invocation
-            // the OODA launch and meeting turns use.
-            "--subprocess-safe".to_string(),
-            // Issue #1717: without --allow-all-tools the Copilot CLI's tool
-            // allow-list defaults to interactive prompting, and a headless
-            // engineer subprocess (no TTY) can only *read*: every file write,
-            // `git commit`, `gh pr create`, `amplihack recipe run`, etc. fail
-            // with "Permission denied". Both permission flags are required, and
-            // --allow-all-tools MUST precede --allow-all-paths (the pinned
-            // #1717 order). `COPILOT_ALLOW_ALL=1` in the child env is the
-            // belt-and-suspenders fallback if the flag is ever renamed.
-            "--allow-all-tools".to_string(),
-            "--allow-all-paths".to_string(),
-        ],
+        AgentKind::Copilot => {
+            let mut argv = vec![
+                kind.subcommand().to_string(),
+                "--subprocess-safe".to_string(),
+            ];
+            let Some(permissions) = permissions else {
+                argv.extend([
+                    "--allow-all-tools".to_string(),
+                    "--allow-all-paths".to_string(),
+                ]);
+                return argv;
+            };
+            argv.extend([
+                "--disallow-temp-dir".to_string(),
+                "--no-remote".to_string(),
+                "--no-remote-export".to_string(),
+                "--secret-env-vars=GH_TOKEN,GITHUB_TOKEN,AZURE_CLIENT_SECRET,OPENAI_API_KEY,ANTHROPIC_API_KEY,AWS_SECRET_ACCESS_KEY".to_string(),
+            ]);
+            if permissions.contains("repo_read") {
+                argv.extend([
+                    "--allow-tool=read".to_string(),
+                    "--allow-tool=search".to_string(),
+                ]);
+            }
+            if permissions.contains("repo_write") {
+                argv.push("--allow-tool=write".to_string());
+            }
+            if permissions.contains("process_exec") {
+                argv.push("--allow-tool=shell".to_string());
+            }
+            if permissions.contains("github_issue_write") || permissions.contains("github_pr_write")
+            {
+                argv.push("--allow-tool=github-mcp-server".to_string());
+                if permissions.contains("github_issue_write") {
+                    argv.push("--add-github-mcp-tool=create_issue".to_string());
+                }
+                if permissions.contains("github_pr_write") {
+                    argv.extend([
+                        "--add-github-mcp-tool=create_pull_request".to_string(),
+                        "--add-github-mcp-tool=update_pull_request".to_string(),
+                    ]);
+                }
+            } else {
+                argv.push("--disable-builtin-mcps".to_string());
+            }
+            argv
+        }
     }
 }
 
@@ -279,7 +316,20 @@ pub fn run_engineer_subprocess(
     kind: AgentKind,
 ) -> SimardResult<String> {
     let bin = amplihack_binary();
-    let argv = engineer_argv(kind, prompt, DEFAULT_MAX_TURNS);
+    let scoped_permissions = std::env::var("SIMARD_ENGINEER_PERMISSIONS")
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<BTreeSet<_>>()
+        });
+    let argv = engineer_argv_with_permissions(
+        kind,
+        prompt,
+        DEFAULT_MAX_TURNS,
+        scoped_permissions.as_ref(),
+    );
     let action_label = format!("{bin} {}", kind.subcommand());
 
     let mut cmd = Command::new(&bin);
@@ -299,11 +349,11 @@ pub fn run_engineer_subprocess(
     //     production-wired, so its path is left byte-identical.
     let prompt_feed = match kind {
         AgentKind::Copilot => {
-            // Belt-and-suspenders permission grant for the Copilot CLI
-            // subprocess (issue #1717): if a future upstream release renames or
-            // removes `--allow-all-tools`, `COPILOT_ALLOW_ALL` keeps the
-            // engineer from regressing to a permission-denied table.
-            cmd.env("COPILOT_ALLOW_ALL", "1");
+            if scoped_permissions.is_none() {
+                cmd.env("COPILOT_ALLOW_ALL", "1");
+            } else {
+                cmd.env_remove("COPILOT_ALLOW_ALL");
+            }
             let applied = crate::spawn_payload::attach_prompt_std(&mut cmd, prompt.as_bytes())
                 .map_err(|e| SimardError::ActionExecutionFailed {
                     action: action_label.clone(),
@@ -795,6 +845,26 @@ mod tests {
         assert_eq!(argv[2], "--allow-all-tools", "exact slot 2: {argv:?}");
         assert_eq!(argv[3], "--allow-all-paths", "exact slot 3: {argv:?}");
         assert_eq!(argv.len(), 4, "copilot argv must be prompt-less: {argv:?}");
+    }
+
+    #[test]
+    fn typed_engineer_permissions_remove_global_tool_path_and_github_access() {
+        let permissions = BTreeSet::from(["repo_read".to_string(), "repo_write".to_string()]);
+        let argv = engineer_argv_with_permissions(
+            AgentKind::Copilot,
+            "opaque task",
+            1,
+            Some(&permissions),
+        );
+
+        assert!(!argv.iter().any(|value| value == "--allow-all-tools"));
+        assert!(!argv.iter().any(|value| value == "--allow-all-paths"));
+        assert!(argv.iter().any(|value| value == "--allow-tool=read"));
+        assert!(argv.iter().any(|value| value == "--allow-tool=write"));
+        assert!(!argv.iter().any(|value| value == "--allow-tool=shell"));
+        assert!(argv.iter().any(|value| value == "--disable-builtin-mcps"));
+        assert!(argv.iter().any(|value| value == "--disallow-temp-dir"));
+        assert!(!argv.iter().any(|value| value == "opaque task"));
     }
 
     #[test]

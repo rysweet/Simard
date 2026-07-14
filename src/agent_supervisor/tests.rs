@@ -13,6 +13,7 @@ fn test_config() -> SubordinateConfig {
         role: AgentRole::Engineer,
         worktree_path: PathBuf::from("/tmp/test-worktree"),
         current_depth: 0,
+        requested_permissions: None,
     }
 }
 

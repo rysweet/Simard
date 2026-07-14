@@ -10,7 +10,7 @@ use simard::typed_ooda::{
     Action, AdmissionSnapshot, AuthenticatedToolContext, CapabilityGrant, CapabilityHandler,
     CapabilityPolicy, CycleErrorCode, EffectExecutionError, EffectExecutor, EffectJob,
     EffectResult, GoalSessionExecutor, GoalSessionInvocation, OpaqueBytes, RecipeProcessError,
-    RepositoryRef, RouteNodeKind, SpawnEngineerAction, TerminalKind, TypedGoalSessionRoute,
+    RepositoryRef, SpawnEngineerAction, TerminalKind, TypedGoalSessionRoute,
 };
 
 struct SucceedingEffects;
@@ -60,7 +60,8 @@ fn executor() -> (tempfile::TempDir, GoalSessionExecutor) {
             CapabilityGrant::RecordBlocked,
             CapabilityGrant::RecordCompleted,
         ],
-    );
+    )
+    .scoped_to_repository(RepositoryRef::new("rysweet", "Simard"));
     let admission = AdmissionSnapshot {
         concurrent_engineers: 0,
         disk_used_percent: 5,
@@ -297,7 +298,8 @@ fn permanent_downstream_failure_fails_the_cycle_but_keeps_the_action_terminal() 
         [CapabilityGrant::RecordAction(
             simard::typed_ooda::ActionKind::SpawnEngineer,
         )],
-    );
+    )
+    .scoped_to_repository(RepositoryRef::new("rysweet", "Simard"));
     let executor = GoalSessionExecutor::new(
         handler,
         actor,
@@ -349,32 +351,81 @@ fn permanent_downstream_failure_fails_the_cycle_but_keeps_the_action_terminal() 
 }
 
 #[test]
-fn migrated_route_graph_has_no_path_to_a_prose_parser_or_legacy_fallback() {
-    let graph = TypedGoalSessionRoute::dependency_graph();
-    let reachable = graph.reachable_from(graph.goal_session_entry());
+fn privileged_effect_without_server_approval_is_blocked_not_reported_successful() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let handler = CapabilityHandler::open(
+        dir.path().join("outcomes.sqlite3"),
+        CapabilityPolicy::goal_session_default("goal-session-policy-v1"),
+    )
+    .expect("handler");
+    let actor = AuthenticatedToolContext::new(
+        "goal-session-actor",
+        "session-workflow",
+        [CapabilityGrant::RecordAction(
+            simard::typed_ooda::ActionKind::RequestMerge,
+        )],
+    )
+    .scoped_to_repository(RepositoryRef::new("rysweet", "Simard"));
+    let executor = GoalSessionExecutor::new(
+        handler,
+        actor,
+        AdmissionSnapshot {
+            concurrent_engineers: 0,
+            disk_used_percent: 5,
+            active_claims: BTreeSet::new(),
+            policy_revision: "goal-session-policy-v1".to_string(),
+        },
+        Box::new(SucceedingEffects),
+    );
+    let invocation = invocation("cycle-unapproved-merge");
+    let error = executor
+        .execute(&invocation, |received, tools| {
+            tools.record_action(
+                "request-unapproved-merge",
+                Action::RequestMerge(simard::typed_ooda::RequestMergeAction {
+                    pull_request: simard::typed_ooda::PullRequestRef {
+                        repository: RepositoryRef::new("rysweet", "Simard"),
+                        number: 4052,
+                    },
+                    expected_head_sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
+                    strategy: "squash".to_string(),
+                }),
+                received.decide_output.clone(),
+                Vec::new(),
+            )?;
+            Ok(())
+        })
+        .expect_err("unapproved merge cannot execute");
+    assert_eq!(error.code(), CycleErrorCode::DownstreamFailed);
+    let outcome = executor
+        .handler()
+        .terminal_for_cycle("session-workflow", "cycle-unapproved-merge")
+        .expect("terminal query")
+        .expect("action remains durable");
+    let effect = executor
+        .handler()
+        .effect_for_outcome(&outcome.outcome_id)
+        .expect("effect query")
+        .expect("durable effect");
+    assert_eq!(effect.state.as_str(), "blocked");
+    assert!(effect.approval.is_none());
+}
 
+#[test]
+fn migrated_route_inspects_the_real_production_recipe_and_policy() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let route = TypedGoalSessionRoute::production(root).expect("production route");
+    assert!(route.recipe_path().ends_with("goal-session-actor.yaml"));
     assert!(
-        reachable
-            .iter()
-            .all(|node| node.kind != RouteNodeKind::ProseParser),
-        "typed goal-session route reached a prose parser: {reachable:#?}"
+        route
+            .policy_path()
+            .ends_with("goal-session-capabilities.toml")
     );
-    assert!(
-        reachable
-            .iter()
-            .all(|node| node.kind != RouteNodeKind::LegacyFallback),
-        "typed failures must never fall back to the parser route: {reachable:#?}"
-    );
-    for required in [
-        RouteNodeKind::RecipeRunner,
-        RouteNodeKind::ScopedCapabilityTools,
-        RouteNodeKind::TerminalHandler,
-        RouteNodeKind::OutcomeLedger,
-        RouteNodeKind::EffectOutbox,
-    ] {
-        assert!(
-            reachable.iter().any(|node| node.kind == required),
-            "typed route must include {required:?}: {reachable:#?}"
-        );
-    }
+    let recipe = std::fs::read_to_string(route.recipe_path()).expect("recipe source");
+    assert!(recipe.contains("ooda actor-run"));
+    assert!(recipe.contains("type: \"bash\""));
+    assert!(!recipe.contains("type: \"agent\""));
+    assert!(!recipe.contains("legacy"));
+    assert!(!recipe.contains("parse_orchestrator_response"));
+    route.load_policy().expect("production capability policy");
 }

@@ -131,9 +131,12 @@ Every branch belongs to exactly one side of the boundary.
 
 ## Goal-session execution
 
-The recipe runner creates a cycle identity and composes the semantic steps. Each
-step receives the previous step's raw output as an opaque input. The final actor
-receives:
+The production dispatcher resolves the installed `goal-session-actor.yaml` and
+its sibling capability policy as one route. It writes each semantic value to a
+separate owner-private file, registers a short-lived actor-session lease in the
+ledger, and runs the YAML through `recipe-runner-rs`. The recipe invokes the
+current Simard binary's authenticated actor bridge; no production call site
+invokes the actor directly. The final actor receives:
 
 - authenticated actor and session context;
 - `goal_id` and `cycle_id`;
@@ -196,6 +199,7 @@ struct TerminalOutcome {
     request_id: RequestId,
     session_id: SessionId,
     actor_identity: IdentityRef,
+    repository: RepositoryRef,
     goal_id: GoalId,
     cycle_id: CycleId,
     kind: OutcomeKind,
@@ -252,8 +256,22 @@ the action terminal intact; the cycle execution fails even though its semantic
 decision is durably recorded.
 
 `RequestMerge` and `RequestDeploy` create requests only. Goal-session actors do
-not receive direct merge or deployment authority. Existing privileged executors
-apply their own authorization and quality gates.
+not receive direct merge or deployment authority. The outbox records them as
+`blocked` until an approval authority issues an approval bound to the principal,
+goal, session, cycle, action kind, canonical payload hash, exact repository, and
+policy revision. Approved merges run the existing merge-readiness authority and
+recheck the PR head SHA. Approved deploys build the exact source commit, verify
+the approved artifact digest before mutation, take the normal protective backup,
+and use the existing health/rollback sequence.
+
+The production outbox worker recovers expired leases before dispatch, drains
+older pending work at cycle startup, and then handles the current action. A
+retryable failure returns the same job to `pending`; permanent failure and
+authorization blocking are durable. External effects reconcile by stable
+request identity before retry: issue bodies carry a hidden idempotency marker,
+engineer spawns check the live claim sentinel, merge dispatch checks whether the
+PR is already merged, and deploy dispatch verifies the running commit and binary
+digest.
 
 ## Failure model
 

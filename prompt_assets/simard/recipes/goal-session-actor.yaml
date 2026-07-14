@@ -14,46 +14,19 @@ context: {}
 
 steps:
   - id: "goal-session-actor"
-    type: "agent"
-    agent: "default"
-    prompt: |
-      You are the final Act actor for one Simard goal-session cycle.
-
-      Read these files without rewriting, trimming, normalizing, or embedding
-      their contents in a response contract:
-
-      - task_path: {{task_path}}
-      - reason_path: {{reason_path}}
-      - observe_output_path: {{observe_output_path}}
-      - orient_output_path: {{orient_output_path}}
-      - decide_output_path: {{decide_output_path}}
-
-      Authenticated identity:
-
-      - session_id: {{session_id}}
-      - cycle_id: {{cycle_id}}
-      - goal_id: {{goal_id}}
-      - actor: goal-session-actor
-
-      Judge the context semantically. Before finishing, invoke exactly one
-      terminal capability:
-
-      - record_action with one typed action variant when a machine request is
-        appropriate;
-      - record_no_action when no machine request is useful this cycle;
-      - record_blocked when a typed dependency prevents progress;
-      - record_completed only when typed completion evidence satisfies the goal.
-
-      For an engineer, pass the task bytes from task_path unchanged to
-      record_action.spawn_engineer. Use file_issue, request_merge, and
-      request_deploy only through their typed request variants. Merge and deploy
-      are requests to privileged workflows, never direct execution.
-
-      Every mutation needs a stable request_id. Reuse it only for an exact retry
-      of the same call. Capability errors, denied authority, admission rejection,
-      and missing evidence are failures; do not turn them into another outcome.
-      Do not invoke a second terminal capability after the first attempt.
-
-      Your prose is diagnostic and has no business authority. The durable typed
-      record created by the capability is the only cycle outcome.
-    output: "diagnostic_only"
+    type: "bash"
+    timeout: 1800
+    command: |
+      "{{simard_binary}}" ooda actor-run \
+        --ledger-path "{{ledger_path}}" \
+        --policy-path "{{policy_path}}" \
+        --session-id "{{session_id}}" \
+        --cycle-id "{{cycle_id}}" \
+        --goal-id "{{goal_id}}" \
+        --task-path "{{task_path}}" \
+        --reason-path "{{reason_path}}" \
+        --observe-output-path "{{observe_output_path}}" \
+        --orient-output-path "{{orient_output_path}}" \
+        --decide-output-path "{{decide_output_path}}" \
+        --auth-token-path "{{auth_token_path}}" \
+        --admission-path "{{admission_path}}"

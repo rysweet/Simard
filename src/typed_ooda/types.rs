@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
+use std::path::Path;
 
 use base64::Engine;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -183,6 +184,15 @@ impl Action {
             _ => None,
         }
     }
+
+    pub fn repository(&self) -> Option<&RepositoryRef> {
+        match self {
+            Self::SpawnEngineer(value) => Some(&value.repository),
+            Self::FileIssue(value) => Some(&value.repository),
+            Self::RequestMerge(value) => Some(&value.pull_request.repository),
+            Self::RequestDeploy(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -356,6 +366,15 @@ pub enum TypedOutcomePayload {
 }
 
 impl TypedOutcomePayload {
+    pub fn kind(&self) -> TerminalKind {
+        match self {
+            Self::Action(_) => TerminalKind::Action,
+            Self::NoAction(_) => TerminalKind::NoAction,
+            Self::Blocked(_) => TerminalKind::Blocked,
+            Self::Completed(_) => TerminalKind::Completed,
+        }
+    }
+
     pub fn action(&self) -> Option<&Action> {
         match self {
             Self::Action(value) => Some(&value.action),
@@ -384,6 +403,8 @@ pub struct TerminalOutcome {
     pub request_id: String,
     pub session_id: String,
     pub actor_identity: String,
+    #[serde(default)]
+    pub repository: Option<RepositoryRef>,
     pub goal_id: String,
     pub cycle_id: String,
     pub kind: TerminalKind,
@@ -449,7 +470,8 @@ impl std::error::Error for CapabilityError {}
 
 pub type CapabilityResult<T> = Result<T, CapabilityError>;
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CapabilityGrant {
     RecordAction(ActionKind),
     RecordNoAction,
@@ -465,6 +487,8 @@ pub struct AuthenticatedToolContext {
     pub actor_identity: String,
     pub session_id: String,
     grants: BTreeSet<CapabilityGrant>,
+    bound_repository: Option<RepositoryRef>,
+    observe_only: bool,
 }
 
 impl AuthenticatedToolContext {
@@ -477,11 +501,35 @@ impl AuthenticatedToolContext {
             actor_identity: actor_identity.into(),
             session_id: session_id.into(),
             grants: grants.into_iter().collect(),
+            bound_repository: None,
+            observe_only: false,
         }
+    }
+
+    pub fn scoped_to_repository(mut self, repository: RepositoryRef) -> Self {
+        self.bound_repository = Some(repository);
+        self
+    }
+
+    pub fn with_observe_only(mut self, observe_only: bool) -> Self {
+        self.observe_only = observe_only;
+        self
     }
 
     pub(crate) fn allows(&self, grant: CapabilityGrant) -> bool {
         self.grants.contains(&grant)
+    }
+
+    pub(crate) fn grants(&self) -> &BTreeSet<CapabilityGrant> {
+        &self.grants
+    }
+
+    pub(crate) fn bound_repository(&self) -> Option<&RepositoryRef> {
+        self.bound_repository.as_ref()
+    }
+
+    pub(crate) fn is_observe_only(&self) -> bool {
+        self.observe_only
     }
 }
 
@@ -492,8 +540,10 @@ pub struct CapabilityPolicy {
     pub max_semantic_payload_bytes: usize,
     pub max_concurrent_engineers: usize,
     pub max_disk_used_percent: u8,
+    pub allowed_repositories: BTreeSet<RepositoryRef>,
     pub allowed_repository_owners: BTreeSet<String>,
     pub allowed_engineer_permissions: BTreeSet<String>,
+    pub allowed_deployment_environments: BTreeSet<String>,
 }
 
 impl CapabilityPolicy {
@@ -515,15 +565,20 @@ impl CapabilityPolicy {
             max_semantic_payload_bytes: 1024 * 1024,
             max_concurrent_engineers: 8,
             max_disk_used_percent: 90,
+            allowed_repositories: [RepositoryRef::new("rysweet", "Simard")]
+                .into_iter()
+                .collect(),
             allowed_repository_owners: ["rysweet".to_string()].into_iter().collect(),
             allowed_engineer_permissions: [
                 "repo_read".to_string(),
                 "repo_write".to_string(),
+                "process_exec".to_string(),
                 "github_issue_write".to_string(),
                 "github_pr_write".to_string(),
             ]
             .into_iter()
             .collect(),
+            allowed_deployment_environments: ["production".to_string()].into_iter().collect(),
         }
     }
 
@@ -538,8 +593,127 @@ impl CapabilityPolicy {
         self
     }
 
+    pub fn from_toml_file(path: impl AsRef<Path>) -> CapabilityResult<Self> {
+        #[derive(Deserialize)]
+        struct PolicyDocument {
+            policy_id: String,
+            actor: String,
+            terminal_calls_per_cycle: u8,
+            capabilities: Vec<String>,
+            limits: PolicyLimits,
+            identity: PolicyIdentity,
+            repositories: Vec<RepositoryRef>,
+            repository_owners: Vec<String>,
+            engineer_permissions: Vec<String>,
+            deployment_environments: Vec<String>,
+        }
+
+        #[derive(Deserialize)]
+        struct PolicyLimits {
+            max_semantic_payload_bytes: usize,
+            max_concurrent_engineers: usize,
+            max_disk_used_percent: u8,
+        }
+
+        #[derive(Deserialize)]
+        struct PolicyIdentity {
+            bind_session: bool,
+            stable_request_id_required: bool,
+        }
+
+        let bytes = std::fs::read(path.as_ref()).map_err(|error| {
+            CapabilityError::new(
+                CapabilityErrorCode::PersistenceFailed,
+                format!(
+                    "capability policy {} could not be read: {error}",
+                    path.as_ref().display()
+                ),
+            )
+        })?;
+        let source = std::str::from_utf8(&bytes).map_err(|error| {
+            CapabilityError::new(
+                CapabilityErrorCode::InvalidArgument,
+                format!(
+                    "capability policy {} is not UTF-8: {error}",
+                    path.as_ref().display()
+                ),
+            )
+        })?;
+        let document: PolicyDocument = toml::from_str(source).map_err(|error| {
+            CapabilityError::new(
+                CapabilityErrorCode::InvalidArgument,
+                format!(
+                    "capability policy {} is invalid: {error}",
+                    path.as_ref().display()
+                ),
+            )
+        })?;
+        if document.actor != "goal-session-actor"
+            || document.terminal_calls_per_cycle != 1
+            || !document.identity.bind_session
+            || !document.identity.stable_request_id_required
+            || (document.repositories.is_empty() && document.repository_owners.is_empty())
+        {
+            return Err(CapabilityError::new(
+                CapabilityErrorCode::InvalidArgument,
+                "capability policy must bind one goal-session actor call to a stable session request and at least one repository",
+            ));
+        }
+        if document.limits.max_semantic_payload_bytes == 0
+            || !(1..=64).contains(&document.limits.max_concurrent_engineers)
+            || !(1..=99).contains(&document.limits.max_disk_used_percent)
+        {
+            return Err(CapabilityError::new(
+                CapabilityErrorCode::InvalidArgument,
+                "capability policy limits are outside supported ranges",
+            ));
+        }
+
+        let mut grants = BTreeSet::new();
+        for capability in document.capabilities {
+            grants.insert(Self::parse_capability_grant(&capability)?);
+        }
+        Ok(Self {
+            revision: document.policy_id,
+            grants,
+            max_semantic_payload_bytes: document.limits.max_semantic_payload_bytes,
+            max_concurrent_engineers: document.limits.max_concurrent_engineers,
+            max_disk_used_percent: document.limits.max_disk_used_percent,
+            allowed_repositories: document.repositories.into_iter().collect(),
+            allowed_repository_owners: document.repository_owners.into_iter().collect(),
+            allowed_engineer_permissions: document.engineer_permissions.into_iter().collect(),
+            allowed_deployment_environments: document.deployment_environments.into_iter().collect(),
+        })
+    }
+
     pub fn allows(&self, grant: CapabilityGrant) -> bool {
         self.grants.contains(&grant)
+    }
+
+    fn parse_capability_grant(value: &str) -> CapabilityResult<CapabilityGrant> {
+        let grant = match value {
+            "record_action.spawn_engineer" => {
+                CapabilityGrant::RecordAction(ActionKind::SpawnEngineer)
+            }
+            "record_action.file_issue" => CapabilityGrant::RecordAction(ActionKind::FileIssue),
+            "record_action.request_merge" => {
+                CapabilityGrant::RecordAction(ActionKind::RequestMerge)
+            }
+            "record_action.request_deploy" => {
+                CapabilityGrant::RecordAction(ActionKind::RequestDeploy)
+            }
+            "record_no_action" => CapabilityGrant::RecordNoAction,
+            "record_blocked" => CapabilityGrant::RecordBlocked,
+            "record_completed" => CapabilityGrant::RecordCompleted,
+            "record_progress" => CapabilityGrant::RecordProgress,
+            _ => {
+                return Err(CapabilityError::new(
+                    CapabilityErrorCode::InvalidArgument,
+                    format!("unknown capability policy grant {value:?}"),
+                ));
+            }
+        };
+        Ok(grant)
     }
 }
 
