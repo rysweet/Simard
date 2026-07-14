@@ -60,9 +60,6 @@ fn goal_session_policy_grants_only_scoped_typed_terminal_capabilities() {
 
     for required in [
         "record_action.spawn_engineer",
-        "record_action.file_issue",
-        "record_action.request_merge",
-        "record_action.request_deploy",
         "record_no_action",
         "record_blocked",
         "record_completed",
@@ -81,6 +78,10 @@ fn goal_session_policy_grants_only_scoped_typed_terminal_capabilities() {
         "execute_deploy",
         "legacy_parser",
         "shell",
+        "process_exec",
+        "record_action.file_issue",
+        "record_action.request_merge",
+        "record_action.request_deploy",
     ] {
         assert!(
             !policy.contains(forbidden),

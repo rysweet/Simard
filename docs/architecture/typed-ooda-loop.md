@@ -98,19 +98,20 @@ tree. Both assets must exist and validate.
 
 The route:
 
-1. registers a 30-minute actor-session lease bound to one actor, session, cycle,
-   goal, repository, grant set, and observe-only state;
+1. registers a long-lived authentication lease bound to one actor, session,
+   cycle, goal, repository, grant set, and observe-only state; the lease never
+   kills the agent step;
 2. writes task, reason, Observe, Orient, Decide, token, and admission values to
    separate private context files;
 3. runs `recipe-runner-rs` with file paths rather than large semantic values in
    argv;
-4. invokes `simard ooda actor-run` through the recipe;
+4. runs an agent step whose only business action is one authenticated
+   `simard ooda terminal` invocation;
 5. requires one durable terminal for the session and cycle before returning.
 
-The actor runtime exposes one read-only semantic-context tool and four terminal
-tools. A tool error is remembered by the executor and fails the cycle. Zero
-terminal attempts, more than one terminal attempt, or a failed recipe process
-also fail.
+The agent reads the private semantic files and invokes one of four terminal
+subcommands. Zero durable terminals, a conflicting second terminal, or a failed
+recipe process fails the cycle.
 
 ## Raw semantic handoff
 
@@ -141,12 +142,9 @@ revision, cycle, and goal. Reuse across mutation types or payloads fails.
 
 ## Action effects
 
-An action terminal and its effect job commit together. Production effects are:
-
-- allocate a worktree and spawn a scoped Copilot subordinate;
-- create an issue with a stable hidden idempotency marker;
-- request merge after signed approval and downstream checks;
-- request deployment after signed approval and downstream checks.
+An action terminal and its effect job commit together. The production goal-session policy permits one effect: allocate a worktree and
+spawn a scoped Copilot subordinate. Issue, merge, and deployment mutations are
+not granted to the goal-session actor.
 
 Jobs move through `pending`, `running`, `blocked`, `succeeded`, `failed`, or
 `indeterminate`. Every claim increments a lease generation. Renewal, retry,
@@ -156,14 +154,9 @@ unexpired lease in one immediate transaction. Expiry marks execution
 
 ## Engineer authority
 
-The typed action's permission set is propagated through
-`SIMARD_ENGINEER_PERMISSIONS`. The Copilot launcher maps it to scoped read,
-search, write, the process broker, and GitHub MCP adapters and removes broad
-allow-all flags.
-
-`process_exec` is reserved, run, and completed through the shared SQLite
-request registry and per-cycle mutation cap. The built-in shell adapter is not
-granted because it would bypass that accounting boundary.
+The typed spawn action receives only `repo_read` and `repo_write`. The
+goal-session actor has no generic process, issue, pull-request, merge, or deploy
+authority.
 See [Engineer Copilot permissions](../reference/engineer-copilot-permissions.md).
 
 ## Failure model

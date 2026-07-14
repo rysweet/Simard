@@ -22,9 +22,9 @@ pub(crate) fn run(
     goal: &crate::goal_curation::ActiveGoal,
     repo_root: &Path,
 ) -> ActionOutcome {
-    let session_id = format!("ooda-process-{}", std::process::id());
     let cycle_number = lock_state(state).cycle_count;
     let cycle_id = format!("cycle-{cycle_number}-{}", goal.id);
+    let session_id = format!("ooda-process-{}-{cycle_id}-{}", std::process::id(), goal.id);
     let (observe_output, orient_output) = {
         let guard = lock_state(state);
         let observe = match serde_json::to_vec(&guard.last_observation) {
@@ -120,12 +120,7 @@ pub(crate) fn run(
         CapabilityGrant::RecordCompleted,
     ];
     if !observe_only {
-        grants.extend([
-            CapabilityGrant::RecordAction(ActionKind::SpawnEngineer),
-            CapabilityGrant::RecordAction(ActionKind::FileIssue),
-            CapabilityGrant::RecordAction(ActionKind::RequestMerge),
-            CapabilityGrant::RecordAction(ActionKind::RequestDeploy),
-        ]);
+        grants.push(CapabilityGrant::RecordAction(ActionKind::SpawnEngineer));
     }
     let repository = match goal_repository(goal) {
         Ok(repository) => repository,
@@ -134,13 +129,7 @@ pub(crate) fn run(
     let actor_context = AuthenticatedToolContext::new("goal-session-actor", &session_id, grants)
         .scoped_to_repository(repository)
         .scoped_to_working_directory(repo_root)
-        .with_engineer_permissions([
-            "repo_read",
-            "repo_write",
-            "process_exec",
-            "github_issue_write",
-            "github_pr_write",
-        ])
+        .with_engineer_permissions(["repo_read", "repo_write"])
         .with_observe_only(observe_only);
     let admission = admission_snapshot(state, repo_root, &policy_revision);
     let effects = LiveGoalSessionEffects { state };

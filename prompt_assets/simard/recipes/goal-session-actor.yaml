@@ -1,8 +1,4 @@
-# Parser-free terminal actor for one goal-session cycle.
-#
-# The recipe runner passes raw semantic values by private file path. The final
-# actor reads those files as opaque context and invokes exactly one scoped
-# terminal capability. Its stdout and stderr are diagnostic only.
+# Parser-free agentic terminal workflow for one goal-session cycle.
 
 name: "goal-session-actor"
 description: "Choose and durably record one typed goal-session terminal"
@@ -14,19 +10,70 @@ context: {}
 
 steps:
   - id: "goal-session-actor"
-    type: "bash"
-    timeout: 1800
-    command: |
-      "{{simard_binary}}" ooda actor-run \
+    type: "agent"
+    agent: "default"
+    prompt: |
+      You are Simard's final goal-session actor. Read the semantic context files
+      below. Interpret their meaning directly. Do not emit or parse a marker,
+      JSON verdict, or command contract from another agent.
+
+      task context path = {{task_path}}
+      reason context path = {{reason_path}}
+      observe context path = {{observe_output_path}}
+      orient context path = {{orient_output_path}}
+      decide context path = {{decide_output_path}}
+
+      Invoke exactly one terminal capability with your bash tool. Use one of:
+
+      "{{simard_binary}}" ooda terminal spawn-engineer \
         --ledger-path "{{ledger_path}}" \
         --policy-path "{{policy_path}}" \
         --session-id "{{session_id}}" \
         --cycle-id "{{cycle_id}}" \
         --goal-id "{{goal_id}}" \
-        --task-path "{{task_path}}" \
-        --reason-path "{{reason_path}}" \
-        --observe-output-path "{{observe_output_path}}" \
-        --orient-output-path "{{orient_output_path}}" \
-        --decide-output-path "{{decide_output_path}}" \
         --auth-token-path "{{auth_token_path}}" \
-        --admission-path "{{admission_path}}"
+        --admission-path "{{admission_path}}" \
+        --request-id "{{cycle_id}}-spawn" \
+        --task-path "{{task_path}}" \
+        --raw-semantic-path "{{decide_output_path}}"
+
+      "{{simard_binary}}" ooda terminal no-action \
+        --ledger-path "{{ledger_path}}" \
+        --policy-path "{{policy_path}}" \
+        --session-id "{{session_id}}" \
+        --cycle-id "{{cycle_id}}" \
+        --goal-id "{{goal_id}}" \
+        --auth-token-path "{{auth_token_path}}" \
+        --admission-path "{{admission_path}}" \
+        --request-id "{{cycle_id}}-no-action" \
+        --reason-path "{{reason_path}}" \
+        --raw-semantic-path "{{decide_output_path}}"
+
+      "{{simard_binary}}" ooda terminal blocked \
+        --ledger-path "{{ledger_path}}" \
+        --policy-path "{{policy_path}}" \
+        --session-id "{{session_id}}" \
+        --cycle-id "{{cycle_id}}" \
+        --goal-id "{{goal_id}}" \
+        --auth-token-path "{{auth_token_path}}" \
+        --admission-path "{{admission_path}}" \
+        --request-id "{{cycle_id}}-blocked" \
+        --reason-path "{{reason_path}}" \
+        --blocker "Describe the blocking dependency or operator decision" \
+        --raw-semantic-path "{{decide_output_path}}"
+
+      "{{simard_binary}}" ooda terminal completed \
+        --ledger-path "{{ledger_path}}" \
+        --policy-path "{{policy_path}}" \
+        --session-id "{{session_id}}" \
+        --cycle-id "{{cycle_id}}" \
+        --goal-id "{{goal_id}}" \
+        --auth-token-path "{{auth_token_path}}" \
+        --admission-path "{{admission_path}}" \
+        --request-id "{{cycle_id}}-completed" \
+        --summary-path "{{reason_path}}" \
+        --criterion-id "goal-session-complete" \
+        --raw-semantic-path "{{decide_output_path}}"
+
+      The capability call is the outcome. Your prose is diagnostic only. If the
+      capability fails, stop; do not invoke another terminal.

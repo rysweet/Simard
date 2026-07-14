@@ -6,14 +6,12 @@
 
 use std::path::{Path, PathBuf};
 
-mod actor;
 mod executor;
 mod ledger;
 mod route;
 mod schema;
 mod types;
 
-pub use actor::*;
 pub use executor::*;
 pub use ledger::*;
 pub use route::*;

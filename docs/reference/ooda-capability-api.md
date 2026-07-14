@@ -20,7 +20,7 @@ agent prose is never inspected to select an action.
 
 ## Actor session
 
-Before launching the recipe, Simard stores a 30-minute actor-session lease
+Before launching the recipe, Simard stores a long-lived authentication lease
 bound to:
 
 - actor identity;
@@ -30,7 +30,7 @@ bound to:
 - observe-only state.
 
 The random token is passed through an owner-private context file. `ooda
-actor-run` must present that token and the exact session, cycle, and goal.
+terminal` must present that token and the exact session, cycle, and goal.
 Expired or mismatched sessions return `Unauthenticated`.
 
 The terminal actor's tool schemas do not accept caller-supplied session, cycle,
@@ -208,7 +208,10 @@ process_exec
 ```
 
 The production goal-session policy omits `record_progress`. Direct merge and
-direct deploy are internal grant variants and are not parsed from policy.
+direct deploy are internal grant variants and are not parsed from policy. It
+also omits file-issue, merge, deploy, and `process_exec`; only
+`record_action.spawn_engineer`, no-action, blocked, and completed terminals are
+available.
 
 Repository actions must match the actor's bound repository. Policy then allows
 the exact repository or its owner. Spawn permissions must be a non-empty subset
@@ -296,9 +299,6 @@ terminal_calls_per_cycle = 1
 
 capabilities = [
   "record_action.spawn_engineer",
-  "record_action.file_issue",
-  "record_action.request_merge",
-  "record_action.request_deploy",
   "record_no_action",
   "record_blocked",
   "record_completed",
@@ -309,11 +309,8 @@ repository_owners = ["rysweet"]
 engineer_permissions = [
   "repo_read",
   "repo_write",
-  "process_exec",
-  "github_issue_write",
-  "github_pr_write",
 ]
-deployment_environments = ["production"]
+deployment_environments = []
 
 [limits]
 max_semantic_payload_bytes = 1048576

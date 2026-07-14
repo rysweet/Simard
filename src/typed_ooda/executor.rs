@@ -235,11 +235,6 @@ impl GoalSessionTools<'_> {
         )
     }
 
-    pub(crate) fn note_tool_failure(&self, error: impl Into<String>) {
-        let mut state = self.state.lock().unwrap_or_else(|value| value.into_inner());
-        state.failed = Some(error.into());
-    }
-
     fn terminal_call<T>(&self, call: impl FnOnce() -> CapabilityResult<T>) -> CapabilityResult<T> {
         {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());

@@ -424,9 +424,10 @@ fn migrated_route_inspects_the_real_production_recipe_and_policy() {
             .ends_with("goal-session-capabilities.toml")
     );
     let recipe = std::fs::read_to_string(route.recipe_path()).expect("recipe source");
-    assert!(recipe.contains("ooda actor-run"));
-    assert!(recipe.contains("type: \"bash\""));
-    assert!(!recipe.contains("type: \"agent\""));
+    assert!(recipe.contains("ooda terminal"));
+    assert!(recipe.contains("type: \"agent\""));
+    assert!(!recipe.contains("type: \"bash\""));
+    assert!(!recipe.contains("ooda actor-run"));
     assert!(!recipe.contains("legacy"));
     assert!(!recipe.contains("parse_orchestrator_response"));
     route.load_policy().expect("production capability policy");

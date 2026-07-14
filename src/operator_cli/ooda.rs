@@ -17,10 +17,12 @@ Commands:
                               Read one authoritative typed terminal.
   outcomes list --state-root <PATH> [--limit <N>]
                               List authoritative typed terminals.
+  terminal <spawn-engineer|no-action|blocked|completed> [SCOPED OPTIONS]
+                              Record exactly one authenticated typed terminal.
   approvals issue --state-root <PATH> --effect-id <ID> --request-id <ID>
                               Issue a privileged merge/deploy approval from
                               the configured server principal and signing key.
-  fixture run --state-root <PATH> --scenario <spawn-engineer|no-action> --request-id <ID>
+  fixture run --state-root <PATH> --scenario <spawn-engineer|no-action|agent-spawn-engineer|agent-no-action> --request-id <ID>
                               Run a deterministic typed acceptance cycle
                               (requires SIMARD_TYPED_OODA_FIXTURE=1).
   help, -h, --help            Show this help message and exit.
@@ -65,15 +67,16 @@ pub(super) fn dispatch_ooda_command(
         }
         "outcomes" => dispatch_outcomes(args),
         "fixture" => dispatch_fixture(args),
-        "actor-run" => dispatch_actor_run(args),
+        "terminal" => dispatch_terminal(args),
         "approvals" => dispatch_approvals(args),
         other => Err(format!("unsupported command 'ooda {other}'").into()),
     }
 }
 
-fn dispatch_actor_run(
-    args: impl Iterator<Item = String>,
+fn dispatch_terminal(
+    mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let terminal = next_required(&mut args, "terminal command")?;
     let parsed = parse_named_args(args)?;
     let ledger_path = Path::new(required_named(&parsed, "ledger-path")?);
     let policy_path = Path::new(required_named(&parsed, "policy-path")?);
@@ -86,42 +89,85 @@ fn dispatch_actor_run(
     let actor = handler.authenticate_actor_session(token.trim(), session_id, cycle_id, goal_id)?;
     let admission: crate::typed_ooda::AdmissionSnapshot =
         serde_json::from_slice(&std::fs::read(required_named(&parsed, "admission-path")?)?)?;
-    let invocation = crate::typed_ooda::GoalSessionInvocation {
-        session_id: session_id.to_string(),
-        cycle_id: cycle_id.to_string(),
-        goal_id: goal_id.to_string(),
-        task: crate::typed_ooda::OpaqueBytes::from(std::fs::read(required_named(
-            &parsed,
-            "task-path",
-        )?)?),
-        reason: crate::typed_ooda::OpaqueBytes::from(std::fs::read(required_named(
-            &parsed,
-            "reason-path",
-        )?)?),
-        observe_output: crate::typed_ooda::OpaqueBytes::from(std::fs::read(required_named(
-            &parsed,
-            "observe-output-path",
-        )?)?),
-        orient_output: crate::typed_ooda::OpaqueBytes::from(std::fs::read(required_named(
-            &parsed,
-            "orient-output-path",
-        )?)?),
-        decide_output: crate::typed_ooda::OpaqueBytes::from(std::fs::read(required_named(
-            &parsed,
-            "decide-output-path",
-        )?)?),
+    let request_id = required_named(&parsed, "request-id")?;
+    let identity =
+        crate::typed_ooda::TerminalRequestIdentity::new(request_id, session_id, cycle_id, goal_id);
+    let raw_semantic = read_opaque(&parsed, "raw-semantic-path")?;
+    let outcome = match terminal.as_str() {
+        "spawn-engineer" => {
+            let repository = actor
+                .bound_repository()
+                .cloned()
+                .ok_or("authenticated actor has no repository scope")?;
+            let claim_key = format!("{}/{}:{goal_id}", repository.owner, repository.name);
+            handler.record_action(
+                &actor,
+                crate::typed_ooda::RecordActionRequest {
+                    identity,
+                    action: crate::typed_ooda::Action::SpawnEngineer(
+                        crate::typed_ooda::SpawnEngineerAction {
+                            task: read_opaque(&parsed, "task-path")?,
+                            repository,
+                            base_type: crate::typed_ooda::BaseType::Copilot,
+                            requested_permissions: actor.engineer_permissions().clone(),
+                            claim_key,
+                        },
+                    ),
+                    raw_semantic,
+                    evidence: Vec::new(),
+                },
+                &admission,
+            )?
+        }
+        "no-action" => handler.record_no_action(
+            &actor,
+            crate::typed_ooda::RecordNoActionRequest {
+                identity,
+                reason: read_opaque(&parsed, "reason-path")?,
+                raw_semantic,
+                evidence: Vec::new(),
+            },
+        )?,
+        "blocked" => handler.record_blocked(
+            &actor,
+            crate::typed_ooda::RecordBlockedRequest {
+                identity,
+                reason: read_opaque(&parsed, "reason-path")?,
+                blocker: crate::typed_ooda::BlockerRef::External {
+                    provider: "goal-session".to_string(),
+                    reference: required_named(&parsed, "blocker")?.to_string(),
+                },
+                retry: crate::typed_ooda::RetryPolicy::Never,
+                raw_semantic,
+                evidence: Vec::new(),
+            },
+        )?,
+        "completed" => handler.record_completed(
+            &actor,
+            crate::typed_ooda::RecordCompletedRequest {
+                identity,
+                summary: read_opaque(&parsed, "summary-path")?,
+                completion: crate::typed_ooda::CompletionRef {
+                    criterion_id: required_named(&parsed, "criterion-id")?.to_string(),
+                    verification_evidence: Vec::new(),
+                },
+                raw_semantic,
+                evidence: Vec::new(),
+            },
+        )?,
+        other => return Err(format!("unsupported command 'ooda terminal {other}'").into()),
     };
-    let executor = crate::typed_ooda::GoalSessionExecutor::new(
-        handler,
-        actor,
-        admission,
-        Box::new(FixtureEffects),
-    );
-    let actor = crate::typed_ooda::RustyClawdGoalSessionActor::default();
-    let execution =
-        executor.execute_actor_step(&invocation, |received, tools| actor.run(received, tools))?;
-    println!("{}", execution.outcome.outcome_id);
+    println!("{}", outcome.outcome_id);
     Ok(())
+}
+
+fn read_opaque(
+    values: &std::collections::BTreeMap<String, String>,
+    key: &str,
+) -> Result<crate::typed_ooda::OpaqueBytes, Box<dyn std::error::Error>> {
+    Ok(crate::typed_ooda::OpaqueBytes::from(std::fs::read(
+        required_named(values, key)?,
+    )?))
 }
 
 fn dispatch_approvals(
@@ -197,6 +243,9 @@ fn dispatch_fixture(
     let state_root = Path::new(required_named(&parsed, "state-root")?);
     let scenario = required_named(&parsed, "scenario")?;
     let request_id = required_named(&parsed, "request-id")?;
+    if matches!(scenario, "agent-spawn-engineer" | "agent-no-action") {
+        return dispatch_agent_fixture(state_root, scenario, request_id);
+    }
     let handler = open_ledger(state_root)?;
     let session_id = "typed-ooda-fixture";
     let cycle_id = format!("cycle-{request_id}");
@@ -278,6 +327,90 @@ fn dispatch_fixture(
             "outcome": execution.outcome,
             "effect": effect,
         }))?
+    );
+    Ok(())
+}
+
+fn dispatch_agent_fixture(
+    state_root: &Path,
+    scenario: &str,
+    request_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let repo_root = std::env::current_dir()?;
+    let route = crate::typed_ooda::TypedGoalSessionRoute::production(&repo_root)?;
+    let policy = route.load_policy()?;
+    let ledger_path = crate::typed_ooda::ledger_path(state_root);
+    std::fs::create_dir_all(
+        ledger_path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("typed-OODA ledger path has no parent"))?,
+    )?;
+    let handler = crate::typed_ooda::CapabilityHandler::open(&ledger_path, policy)?;
+    let session_id = format!("typed-ooda-agent-fixture-{request_id}");
+    let cycle_id = format!("agent-cycle-{request_id}");
+    let goal_id = format!("agent-goal-{request_id}");
+    let actor = crate::typed_ooda::AuthenticatedToolContext::new(
+        "goal-session-actor",
+        &session_id,
+        [
+            crate::typed_ooda::CapabilityGrant::RecordAction(
+                crate::typed_ooda::ActionKind::SpawnEngineer,
+            ),
+            crate::typed_ooda::CapabilityGrant::RecordNoAction,
+            crate::typed_ooda::CapabilityGrant::RecordBlocked,
+            crate::typed_ooda::CapabilityGrant::RecordCompleted,
+        ],
+    )
+    .scoped_to_repository(crate::typed_ooda::RepositoryRef::new("rysweet", "Simard"))
+    .scoped_to_working_directory(&repo_root)
+    .with_engineer_permissions(["repo_read", "repo_write"]);
+    let (task, reason) = match scenario {
+        "agent-spawn-engineer" => (
+            "No engineer, branch, or pull request exists for this bounded goal. Start one engineer to implement it.",
+            "The goal is actionable now and needs a single engineer.",
+        ),
+        "agent-no-action" => (
+            "An engineer is already active for this goal and reported progress moments ago.",
+            "Avoid duplicate work while the active engineer continues.",
+        ),
+        _ => unreachable!("caller restricts agent fixture scenarios"),
+    };
+    let invocation = crate::typed_ooda::GoalSessionInvocation {
+        session_id: session_id.clone(),
+        cycle_id,
+        goal_id,
+        task: crate::typed_ooda::OpaqueBytes::from(task.as_bytes().to_vec()),
+        reason: crate::typed_ooda::OpaqueBytes::from(reason.as_bytes().to_vec()),
+        observe_output: crate::typed_ooda::OpaqueBytes::from(
+            b"Observe found the stated engineer lifecycle facts.".to_vec(),
+        ),
+        orient_output: crate::typed_ooda::OpaqueBytes::from(
+            b"Orient found no conflicting higher-priority constraint.".to_vec(),
+        ),
+        decide_output: crate::typed_ooda::OpaqueBytes::from(
+            b"Decide delegated the semantic terminal choice to this actor.".to_vec(),
+        ),
+    };
+    let execution = route.execute(
+        &repo_root,
+        &ledger_path,
+        &handler,
+        &actor,
+        &crate::typed_ooda::AdmissionSnapshot {
+            concurrent_engineers: usize::from(scenario == "agent-no-action"),
+            disk_used_percent: 0,
+            active_claims: if scenario == "agent-no-action" {
+                BTreeSet::from([format!("rysweet/Simard:{}", invocation.goal_id)])
+            } else {
+                BTreeSet::new()
+            },
+            policy_revision: "goal-session-policy-v1".to_string(),
+        },
+        &invocation,
+    )?;
+    println!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({ "outcome": execution.outcome }))?
     );
     Ok(())
 }

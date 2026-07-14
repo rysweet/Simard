@@ -12,6 +12,7 @@ use super::{
 const RECIPE_FILENAME: &str = "goal-session-actor.yaml";
 const POLICY_FILENAME: &str = "goal-session-capabilities.toml";
 const ADAPTER_TAG: &str = "typed-ooda";
+const ACTOR_SESSION_LEASE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TypedGoalSessionRoute {
@@ -73,7 +74,7 @@ impl TypedGoalSessionRoute {
                 &format!("actor-session:{}", uuid::Uuid::now_v7()),
                 &invocation.cycle_id,
                 &invocation.goal_id,
-                Duration::from_secs(1800),
+                ACTOR_SESSION_LEASE,
             )
             .map_err(|error| CycleError::new(CycleErrorCode::ToolFailed, error.to_string()))?;
 
@@ -180,13 +181,14 @@ impl TypedGoalSessionRoute {
                 ),
             )
         })?;
-        if !recipe.contains("type: \"bash\"")
-            || !recipe.contains("ooda actor-run")
-            || recipe.contains("type: \"agent\"")
+        if !recipe.contains("type: \"agent\"")
+            || !recipe.contains("ooda terminal")
+            || recipe.contains("type: \"bash\"")
+            || recipe.contains("ooda actor-run")
         {
             return Err(CycleError::new(
                 CycleErrorCode::RecipeFailed,
-                "goal-session recipe must launch the authenticated typed actor runtime and may not directly invoke an unscoped agent",
+                "goal-session recipe must be an agent step that invokes the authenticated typed terminal capability",
             ));
         }
         self.load_policy().map(|_| ())

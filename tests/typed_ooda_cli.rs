@@ -1,5 +1,11 @@
 use assert_cmd::Command;
 use serde_json::Value;
+use simard::typed_ooda::{
+    AdmissionSnapshot, AuthenticatedToolContext, CapabilityGrant, CapabilityHandler,
+    CapabilityPolicy, RepositoryRef, TerminalKind,
+};
+use std::collections::BTreeSet;
+use std::time::Duration;
 
 fn simard() -> Command {
     let mut command = Command::cargo_bin("simard").expect("simard binary");
@@ -67,4 +73,87 @@ fn fixture_is_rejected_without_explicit_test_gate() {
         .args(["--scenario", "no-action", "--request-id", "fixture-denied"])
         .assert()
         .failure();
+}
+
+#[test]
+fn scoped_terminal_cli_records_no_action_without_a_rust_hosted_actor() {
+    let state = tempfile::tempdir().expect("state");
+    let ledger = state.path().join("outcomes.sqlite3");
+    let policy_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("prompt_assets/simard/policies/goal-session-capabilities.toml");
+    let policy = CapabilityPolicy::from_toml_file(&policy_path).expect("policy");
+    let handler = CapabilityHandler::open(&ledger, policy).expect("ledger");
+    let session_id = "cli-agent-session";
+    let cycle_id = "cli-agent-cycle";
+    let goal_id = "cli-agent-goal";
+    let actor = AuthenticatedToolContext::new(
+        "goal-session-actor",
+        session_id,
+        [CapabilityGrant::RecordNoAction],
+    )
+    .scoped_to_repository(RepositoryRef::new("rysweet", "Simard"))
+    .bound_to_cycle_goal(cycle_id, goal_id)
+    .with_engineer_permissions(["repo_read", "repo_write"]);
+    let lease = handler
+        .register_actor_session(
+            &actor,
+            "register-cli-agent-session",
+            cycle_id,
+            goal_id,
+            Duration::from_secs(60),
+        )
+        .expect("actor lease");
+    let token_path = state.path().join("token");
+    std::fs::write(&token_path, lease.token).expect("token");
+    let admission_path = state.path().join("admission.json");
+    std::fs::write(
+        &admission_path,
+        serde_json::to_vec(&AdmissionSnapshot {
+            concurrent_engineers: 0,
+            disk_used_percent: 0,
+            active_claims: BTreeSet::new(),
+            policy_revision: "goal-session-policy-v1".to_string(),
+        })
+        .expect("admission JSON"),
+    )
+    .expect("admission");
+    let reason_path = state.path().join("reason");
+    let raw_path = state.path().join("raw");
+    std::fs::write(&reason_path, b"wait for the active engineer").expect("reason");
+    std::fs::write(&raw_path, b"free-form semantic agent context").expect("raw");
+
+    Command::cargo_bin("simard")
+        .expect("simard binary")
+        .args(["ooda", "terminal", "no-action", "--ledger-path"])
+        .arg(&ledger)
+        .args(["--policy-path"])
+        .arg(&policy_path)
+        .args([
+            "--session-id",
+            session_id,
+            "--cycle-id",
+            cycle_id,
+            "--goal-id",
+            goal_id,
+            "--auth-token-path",
+        ])
+        .arg(&token_path)
+        .args(["--admission-path"])
+        .arg(&admission_path)
+        .args(["--request-id", "cli-no-action", "--reason-path"])
+        .arg(&reason_path)
+        .args(["--raw-semantic-path"])
+        .arg(&raw_path)
+        .assert()
+        .success();
+
+    let outcome = handler
+        .terminal_for_cycle(session_id, cycle_id)
+        .expect("terminal query")
+        .expect("durable terminal");
+    assert_eq!(outcome.kind, TerminalKind::NoAction);
+    assert_eq!(
+        outcome.raw_semantic.as_bytes(),
+        b"free-form semantic agent context"
+    );
 }
