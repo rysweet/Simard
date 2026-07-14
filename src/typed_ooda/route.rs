@@ -185,7 +185,7 @@ impl TypedGoalSessionRoute {
         {
             return Err(CycleError::new(
                 CycleErrorCode::RecipeFailed,
-                "goal-session recipe must launch the authenticated typed actor bridge and may not directly invoke an unscoped agent",
+                "goal-session recipe must launch the authenticated typed actor runtime and may not directly invoke an unscoped agent",
             ));
         }
         self.load_policy().map(|_| ())
