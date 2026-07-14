@@ -1,8 +1,6 @@
 //! TDD tests for the stewardship loop (issue #1167).
 //!
-//! These tests are written **before** the implementation. They define the
-//! contract for `src/stewardship/` and the `enqueue_stewardship_issue`
-//! helper in `src/goal_curation/operations.rs`.
+//! These tests define the contract for `src/stewardship/`.
 //!
 //! Test plan (mirrors design spec §7):
 //! - Routing matrix: amplihack / simard / ambiguous / overlap-precedence
@@ -16,7 +14,6 @@
 use std::sync::Mutex;
 
 use crate::error::SimardError;
-use crate::goal_curation::GoalBoard;
 use crate::stewardship::dedup::{failure_signature, find_existing, normalize};
 use crate::stewardship::routing::route_failure;
 use crate::stewardship::{
@@ -262,7 +259,6 @@ fn find_existing_ignores_when_signature_absent() {
 #[test]
 fn process_run_files_new_when_no_match() {
     let gh = FakeGhClient::new();
-    let mut board = GoalBoard::new();
     let run = sample_run();
     let sig = failure_signature(&run.failure_kind, &run.error_text);
 
@@ -277,7 +273,7 @@ fn process_run_files_new_when_no_match() {
         }),
     );
 
-    let outcome = process_orchestrator_run(&run, &gh, &mut board).unwrap();
+    let outcome = process_orchestrator_run(&run, &gh).unwrap();
     match outcome {
         StewardshipOutcome::FiledNew {
             repo,
@@ -295,13 +291,4 @@ fn process_run_files_new_when_no_match() {
 
     assert_eq!(gh.search_call_count(), 1);
     assert_eq!(gh.create_call_count(), 1);
-    assert_eq!(
-        board.backlog.len(),
-        1,
-        "backlog should hold 1 stewardship item"
-    );
-    let item = &board.backlog[0];
-    assert_eq!(item.id, "stewardship-rysweet_Simard-42");
-    assert_eq!(item.source, "stewardship:rysweet/Simard#42");
-    assert!(item.description.contains("42") || item.description.contains(&sig));
 }

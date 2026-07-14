@@ -213,9 +213,9 @@ The WHY is surfaced everywhere the Overseer's activity is visible:
 - **Operator notifications** — `OperatorNotification::goal_blocked_with_why`
   includes the WHY line in the message body, so an escalation reaches a human
   *with* the diagnosed cause, not just the symptom.
-- **Deduped issues** — when a root cause is a recurring systemic defect the
-  Overseer cannot fix in-loop, it files a GitHub issue describing the **root
-  cause** (deduped on the root-cause signature), not the symptom.
+- **Deduped escalation** — when a root cause is a recurring systemic defect the
+  Overseer cannot fix in-loop, it notifies the operator with the **root cause**
+  through the per-goal escalation gate. It does not create another GitHub issue.
 
 ## Always-on, mandatory — no opt-out
 

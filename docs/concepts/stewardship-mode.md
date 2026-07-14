@@ -4,15 +4,14 @@ Simard is the engineering steward over the amplihack ecosystem (see
 `Specs/ProductArchitecture.md` § *Stewardship Mode* and § *Goal Stewardship Mode*). This
 document describes a **new sub-mode of Goal Stewardship**: the autonomous
 loop that turns Simard's own orchestrator failures into tracked, deduplicated
-GitHub issues and feeds those issues back into Simard's curation backlog.
+GitHub issues without feeding those issues back into Simard's curation backlog.
 
 The existing Goal Stewardship Mode (PRD § *Goal Stewardship Mode*) is about maintaining a
 durable backlog and explicit top-5 goals across sessions. The orchestrator
 failure loop documented here extends that mode with an automated
 *failure-to-issue* path: when the orchestrator fails, stewardship turns the
-failure into a tracked upstream issue and a curated backlog item, so the
-durable backlog reflects observed system breakage and not just human-entered
-goals.
+failure into a tracked upstream issue. The issue remains an external tracker;
+automation output is not recycled into the goal board.
 
 ## Purpose
 
@@ -34,8 +33,7 @@ file. The orchestrator-failure sub-mode of Goal Stewardship:
 3. **Deduplicates** the failure against existing open issues using a stable
    SHA-256 signature embedded in each issue body.
 4. **Files** a new issue (or matches an existing one) via the `gh` CLI.
-5. **Enqueues** the resulting issue into Simard's own backlog through
-   `src/goal_curation`, so the next curation cycle can pick it up.
+5. **Returns** the resulting issue handle without mutating the goal board.
 
 The loop **never silently degrades**. Any `gh` failure or invalid input
 surfaces as a `SimardError`, and the loop never files duplicate issues. Routing
@@ -61,9 +59,9 @@ OrchestratorRunSummary
         ▼
   gh.search_issues(repo, signature)      ── non-zero → StewardshipGhCommandFailed
         │
-        ├── match found → enqueue_stewardship_issue → MatchedExisting
+        ├── match found → MatchedExisting
         │
-        └── no match  → gh.create_issue → enqueue_stewardship_issue → FiledNew
+        └── no match  → gh.create_issue → FiledNew
 ```
 
 ## Invariants
@@ -80,8 +78,9 @@ OrchestratorRunSummary
 - **At most one create per call.** Each call yields exactly one of
   `FiledNew` (one create) or `MatchedExisting` (zero creates).
 - **End-to-end idempotency.** Re-running with the same `OrchestratorRunSummary`
-  after a `FiledNew` yields `MatchedExisting` with the same issue number and
-  adds no new backlog row.
+  after a `FiledNew` yields `MatchedExisting` with the same issue number.
+- **No recursive handoff.** Filing or matching an issue never mutates the goal
+  board. External automation output cannot become fresh internal backlog work.
 - **Closed issues do not match.** Signature search is scoped to open issues
   only; recurrence after manual close files a fresh issue.
 - **Fail-loud.** Missing `gh`, non-zero `gh` exit, malformed JSON, or empty
@@ -160,15 +159,6 @@ failure-kind: <failure_kind>
 The leading metadata block is intentionally machine-readable so future
 tooling (or a human triager) can re-derive the routing and signature without
 re-running Simard.
-
-## Backlog Handoff
-
-After filing or matching, Stewardship calls
-`goal_curation::operations::enqueue_stewardship_issue`, which constructs a
-`BacklogItem` with a deterministic id of the form
-`stewardship-<repo_slug_with_underscores>-<issue_number>` and a default
-steward score of `0.6`. Because `add_backlog_item` already deduplicates on
-`id`, repeated `MatchedExisting` outcomes never grow the backlog.
 
 ## Out of Scope
 

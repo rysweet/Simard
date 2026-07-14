@@ -878,14 +878,9 @@ impl Overseer {
         ActOutcome::GoalHealthSuppressed { reason }
     }
 
-    /// FLAG the backlog-coverage gaps the recurring gap-scan found: notify the
-    /// operator on BOTH channels (email + Signal) with ONE consolidated,
-    /// provenance-labelled summary AND file one DEDUPED issue per fresh gap via
-    /// the SAME M1 stewardship path goal-health uses. Fails CLOSED without a
-    /// DISTINCT steward identity (anti-recursion). Deduped per gap signature so a
-    /// recurring gap notifies/files at most once per window; the dedup slot is
-    /// consumed only after a successful file, so a failure retries rather than
-    /// silently losing the gap.
+    /// FLAG the backlog-coverage gaps the recurring gap-scan found by notifying
+    /// the operator on both channels. Routine observations never create GitHub
+    /// issues or stewardship backlog items.
     fn act_flag_workstream_gaps(&mut self, gaps: &[GapItem]) -> Result<ActOutcome, OverseerError> {
         if !self.recursion.is_configured() {
             return Err(OverseerError::Recursion {
@@ -899,7 +894,7 @@ impl Overseer {
         let now = now_secs();
         // Peek every gap first (no commit) so the consolidated notification names
         // exactly the FRESH gaps; a recurring gap within the dedup window is
-        // counted as suppressed and neither re-notified nor re-filed.
+        // counted as suppressed and not re-notified.
         let mut fresh: Vec<GapItem> = Vec::new();
         let mut suppressed = 0usize;
         for g in gaps {
@@ -933,17 +928,7 @@ impl Overseer {
         })?;
         let notification = OperatorNotification::workstream_gap(fresh.len(), &fresh);
         let report = notifier.notify(&notification);
-
-        // One DEDUPED issue per fresh gap via the M1 stewardship path.
         for g in &fresh {
-            let run = OrchestratorRunBrief {
-                recipe_name: "smart-orchestrator".to_string(),
-                failed_step: "workstream-gap-scan".to_string(),
-                source_module: "overseer".to_string(),
-                failure_kind: format!("workstream_gap:{}", g.category.label()),
-                error_text: format!("{} — {}", g.ref_id, g.why_it_matters),
-            };
-            self.caps.issues.file(&run)?;
             let sig = format!("workstream-gap:{}", g.signature);
             self.gap_gate.commit(&sig, now);
         }
@@ -954,7 +939,7 @@ impl Overseer {
             suppressed,
             dispatched = report.dispatched(),
             all_sent = report.all_sent(),
-            "overseer flagged uncovered backlog work: notified the operator + filed deduped issue(s)"
+            "overseer recorded uncovered backlog work and notified the operator"
         );
         Ok(ActOutcome::WorkstreamGapsFlagged {
             flagged: fresh.len(),
@@ -1479,21 +1464,14 @@ pub fn decide(problem: &Problem) -> Intervention {
                 // Root-cause context (issue #2635): the recurrence of this
                 // blocked-goal cause (from memory recall, folded into the WHY),
                 // the one-line WHY string (for the operator escalation), and the
-                // STABLE primary cause label (for a deduped root-cause issue), so
-                // a repeatedly re-parked goal escalates its ROOT CAUSE instead of
-                // being blindly re-unblocked.
+                // repeatedly re-parked goal escalates its ROOT CAUSE to the
+                // operator instead of being blindly re-unblocked.
                 let recurrence = problem.why.as_ref().map(|w| w.recurrence).unwrap_or(0);
                 let why = problem
                     .why
                     .as_ref()
                     .map(|w| w.to_string())
                     .unwrap_or_default();
-                let cause_label = problem
-                    .why
-                    .as_ref()
-                    .and_then(|w| w.primary())
-                    .map(|c| c.label.clone())
-                    .unwrap_or_else(|| "unknown-cause".to_string());
                 return decide_blocked_goal(
                     goal_id,
                     reason,
@@ -1501,7 +1479,6 @@ pub fn decide(problem: &Problem) -> Intervention {
                     needs_review,
                     recurrence,
                     why,
-                    cause_label,
                 );
             }
             Intervention::TransferGoal {
@@ -1553,7 +1530,7 @@ pub fn decide(problem: &Problem) -> Intervention {
             urgency: WhisperUrgency::Normal,
         },
         // Backlog-coverage gaps carry the consolidated `WorkstreamGap` evidence
-        // forward verbatim so Act can notify + file the specific gaps.
+        // forward verbatim so Act can notify about the specific gaps.
         ProblemKind::WorkstreamCoverage => {
             let gaps = problem
                 .evidence
@@ -1610,8 +1587,8 @@ pub fn decide(problem: &Problem) -> Intervention {
 /// - a RECURRING re-park (memory recall shows the SAME cause re-occurring at or
 ///   above [`RECURRENCE_ESCALATION_THRESHOLD`]) is NOT blindly re-unblocked every
 ///   cycle (the operator's rejected antipattern). Instead the ROOT CAUSE is
-///   ESCALATED — a deduplicated issue describing *why it keeps getting re-parked*
-///   — so the systemic defect is fixed rather than the symptom re-patched;
+///   ESCALATED to the operator with the root-cause analysis so the systemic
+///   defect can be fixed without generating another tracking issue;
 /// - a first-time / infrequent PERPETUAL goal false-parked by the **no-progress**
 ///   safeguard is SELF-HEALED — auto-unblocked + reactivated (a root-cause fix
 ///   for a false park, not a symptom patch);
@@ -1630,28 +1607,14 @@ fn decide_blocked_goal(
     needs_review: bool,
     recurrence: u32,
     why: String,
-    cause_label: String,
 ) -> Intervention {
-    // Recurring re-park: escalate the ROOT CAUSE (deduped issue), never re-patch.
-    // The issue's routing + dedup fields are STABLE across recurrences: the
-    // `source_module` routes to Simard (the goal-board/OODA subsystem that
-    // re-parks the goal), and neither `failure_kind` nor `error_text` embeds the
-    // (ever-changing) recurrence count or the rendered WHY — only the stable
-    // `goal_id` + primary `cause_label` — so the same systemic defect is filed
-    // ONCE and deduped by `stewardship::failure_signature`, not once per cycle.
+    // Recurring re-park: notify once through the existing per-goal escalation
+    // gate. Do not turn a goal-board observation into another GitHub issue.
     if recurrence >= RECURRENCE_ESCALATION_THRESHOLD {
-        return Intervention::FileIssue {
-            run: OrchestratorRunBrief {
-                recipe_name: "overseer-root-cause".to_string(),
-                failed_step: format!("goal-unblock:{goal_id}"),
-                source_module: "simard::overseer".to_string(),
-                failure_kind: "recurring_goal_reblock".to_string(),
-                error_text: format!(
-                    "goal `{goal_id}` is repeatedly re-parked despite symptom-level unblocks; \
-                     the systemic root cause is `{cause_label}`. The Overseer escalates the root \
-                     cause instead of re-patching the symptom every cycle."
-                ),
-            },
+        return Intervention::EscalateBlockedGoal {
+            goal_id,
+            reason,
+            why,
         };
     }
     if perpetual && is_no_progress_marker(&reason) {
