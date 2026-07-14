@@ -28,8 +28,12 @@ mod tests_extra;
 #[cfg(test)]
 mod tests_safety;
 
-pub use dedup::{failure_signature, find_existing, normalize};
-pub use gh_client::{GhClient, GhIssue, RealGhClient};
+#[cfg(test)]
+pub use dedup::find_existing;
+pub use dedup::{failure_signature, normalize};
+#[cfg(test)]
+pub use gh_client::GhClient;
+pub use gh_client::{GhIssue, RealGhClient};
 pub use merge_authority::{
     BASE_ALLOWLIST_ENV, DEFAULT_BASE_ALLOWLIST, MergeOutcome, OpenPrSummary, PrGhClient,
     PrSnapshot, RealPrGhClient, base_allowlist_from_env, evaluate_objective_gates,

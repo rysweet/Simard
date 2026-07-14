@@ -75,13 +75,15 @@ group/other permissions, malformed JSON, and unsupported journal versions.
 new identity -> Reserved -> Completed
                        \-> Ambiguous
 ineligible identity -> Rejected
-completed identity -> AlreadyCompleted
+completed identity in a healthy cycle -> AlreadyCompleted
 unfinished issue write -> fatal UnfinishedReservation
 ```
 
 There is no automatic retry from `Reserved` or `Ambiguous`. A transport error is
 persisted as ambiguous because the remote outcome may be uncertain, and the
 cycle is durably failed before another identity can reserve.
+Once a cycle is failed, all executions in that cycle fail, including replay of
+an identity completed before the failure.
 
 ## Errors
 

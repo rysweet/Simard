@@ -92,9 +92,9 @@ impl EngineerLogAnalysisThread {
         Self::with_client(cfg, Box::new(RealGhClient::new()))
     }
 
-    /// Build from an explicit config with an injected [`GhClient`] (test seam —
-    /// a fake client keeps tests offline and credential-free). The client must
-    /// be `Send` so the thread satisfies [`CognitiveThread`]'s `Send` bound.
+    /// Build from an explicit config with an injected issue transport. A fake
+    /// keeps tests offline and credential-free. The transport must be `Send` so
+    /// the thread satisfies [`CognitiveThread`]'s `Send` bound.
     pub(crate) fn with_client(
         cfg: EngineerLogAnalysisConfig,
         gh: Box<dyn StewardshipGh + Send>,

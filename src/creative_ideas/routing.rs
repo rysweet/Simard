@@ -35,10 +35,8 @@ const CREATIVE_IDEA_GOAL_PRIORITY: u8 = 3;
 
 /// The `gh` extension seam needed by the human-review gate.
 ///
-/// The live [`GhClient`](crate::stewardship::gh_client::GhClient) only exposes
-/// `search_issues`/`create_issue`; this seam adds labeled+assigned issue
-/// creation and the PR draft/label/review-request operations without mutating
-/// the daemon's `gh` tooling. FUTURE (M4): a real subprocess impl.
+/// This seam owns creative-idea issue and PR operations independently of the
+/// guarded stewardship issue transport. FUTURE (M4): a real subprocess impl.
 pub(crate) trait IdeaGhClient {
     /// Create an issue with labels and assignees.
     fn create_labeled_issue(

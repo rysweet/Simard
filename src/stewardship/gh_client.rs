@@ -1,6 +1,5 @@
-//! `gh` CLI abstraction. The trait keeps stewardship logic testable; the
-//! [`RealGhClient`] subprocess implementation is the only network-touching
-//! surface in this module.
+//! Guarded `gh` issue mutation transport. [`RealGhClient`] is the only
+//! network-touching surface in this module.
 
 use crate::error::{SimardError, SimardResult};
 use crate::stewardship::types::IssueMutationIdentity;
@@ -14,7 +13,8 @@ pub struct GhIssue {
     pub body: String,
 }
 
-/// Abstract `gh` operations needed by the stewardship loop.
+/// Legacy search seam retained only for signature-normalization tests.
+#[cfg(test)]
 pub trait GhClient {
     /// Search **open** issues in `repo` whose body contains
     /// `stewardship-signature:<signature>`.
@@ -57,9 +57,9 @@ pub(crate) trait IssueMutationTransport {
     }
 }
 
-pub(crate) trait StewardshipGh: GhClient + IssueMutationTransport {}
+pub(crate) trait StewardshipGh: IssueMutationTransport {}
 
-impl<T> StewardshipGh for T where T: GhClient + IssueMutationTransport {}
+impl<T> StewardshipGh for T where T: IssueMutationTransport {}
 
 /// Production implementation that shells out to the `gh` binary.
 #[derive(Default)]
@@ -68,59 +68,6 @@ pub struct RealGhClient;
 impl RealGhClient {
     pub fn new() -> Self {
         Self
-    }
-}
-
-impl GhClient for RealGhClient {
-    fn search_issues(&self, repo: &str, signature: &str) -> SimardResult<Vec<GhIssue>> {
-        let search = format!("stewardship-signature:{signature} in:body");
-        let output = std::process::Command::new("gh")
-            .args([
-                "issue",
-                "list",
-                "-R",
-                repo,
-                "--state",
-                "open",
-                "--search",
-                &search,
-                "--json",
-                "number,url,title,body",
-            ])
-            .output()
-            .map_err(|e| SimardError::StewardshipGhCommandFailed {
-                reason: format!("failed to spawn `gh issue list`: {e}"),
-            })?;
-        if !output.status.success() {
-            return Err(SimardError::StewardshipGhCommandFailed {
-                reason: format!(
-                    "`gh issue list -R {repo}` exited {}: {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
-            });
-        }
-        #[derive(serde::Deserialize)]
-        struct RawIssue {
-            number: u64,
-            url: String,
-            title: String,
-            body: String,
-        }
-        let raws: Vec<RawIssue> = serde_json::from_slice(&output.stdout).map_err(|e| {
-            SimardError::StewardshipGhCommandFailed {
-                reason: format!("failed to parse `gh issue list` JSON: {e}"),
-            }
-        })?;
-        Ok(raws
-            .into_iter()
-            .map(|r| GhIssue {
-                number: r.number,
-                url: r.url,
-                title: r.title,
-                body: r.body,
-            })
-            .collect())
     }
 }
 

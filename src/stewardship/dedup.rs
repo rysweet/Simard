@@ -3,6 +3,7 @@
 
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
 use super::gh_client::GhIssue;
 
 /// Strip ANSI escape sequences and collapse internal whitespace runs to a
@@ -75,6 +76,7 @@ pub fn failure_signature(failure_kind: &str, error_text: &str) -> String {
 }
 
 /// Find the first issue whose body embeds `stewardship-signature: <sig>`.
+#[cfg(test)]
 pub fn find_existing<'a>(issues: &'a [GhIssue], signature: &str) -> Option<&'a GhIssue> {
     let needle = format!("stewardship-signature: {signature}");
     issues.iter().find(|i| i.body.contains(&needle))
