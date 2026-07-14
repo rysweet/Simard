@@ -39,11 +39,12 @@ simard install \
 | `--simard-home PATH` | Absolute install root. Overrides `SIMARD_HOME`. |
 | `--systemd-user-dir PATH` | User unit directory. Defaults to `$XDG_CONFIG_HOME/systemd/user` or `$HOME/.config/systemd/user`. |
 | `--systemctl PATH` | `systemctl` executable override. |
+| `--health-check PATH` | Override the JSON health checker; it must exit zero and return `{"healthy":true}`. |
 | `--dry-run` | Validate inputs and print the install and activation plan without mutation. |
 | `--rollback MANIFEST` | Restore one verified backup. Cannot be combined with `--dry-run`. |
 
-There is no `--health-timeout` option and the installer does not run a
-post-activation health command.
+There is no `--health-timeout` option. The default checker is the installed
+binary's `self-health --json` command.
 
 ## Environment
 
@@ -100,7 +101,7 @@ The version-1 manifest contains:
 - `transaction_id`;
 - `simard_home`;
 - one entry for `binary`, `prompt_assets`, `ooda_unit`, `signal_unit`,
-  `config`, and `state`;
+  `config`, canonical typed-OODA SQLite, and cognitive LadybugDB;
 - each destination and backup path;
 - whether the destination existed;
 - a SHA-256 digest for each existing file or directory tree.
@@ -109,16 +110,10 @@ Rollback accepts only a manifest inside the selected
 `$SIMARD_HOME/.install-backups` tree, with the exact expected surface inventory
 and matching install root. Every backup digest is verified before restoration.
 
-### Snapshot limitation
-
-The current backup implementation recursively copies live files and
-directories. It does not use SQLite's online backup API or a LadybugDB export,
-and it does not stop services before copying.
-
-Digest verification proves that the copied artifact did not change after the
-copy. It does not prove an application-consistent snapshot of a database that
-was being written concurrently. Stop the OODA and Signal services before
-install when state rollback consistency matters.
+Services are quiesced after their exact baseline is captured. Typed OODA uses
+SQLite's online backup API plus `integrity_check`. Cognitive memory uses a
+LadybugDB checkpoint snapshot and verifies it by opening and querying a fresh
+staged store.
 
 ## Install sequence
 
@@ -128,11 +123,11 @@ install when state rollback consistency matters.
 4. For a dry run, print the plan and stop.
 5. Resolve `systemctl` and acquire the per-home install lock.
 6. Stage the binary and prompt assets.
-7. Copy and digest the six backup surfaces; write and verify the manifest.
+7. Snapshot and verify every rollback surface and service baseline.
 8. Replace the binary, prompt assets, and unit files.
-9. Remove staging.
-10. Print the manifest path and rollback command.
-11. Run `systemctl --user daemon-reload`, enable both units, and restart both
+9. Run `systemctl --user daemon-reload`, enable both units, and restart both.
+10. Run the mandatory health check.
+11. On any activation or health error, stage and atomically restore the backup.
     services.
 
 The binary and prompt asset candidates are staged before replacement. Unit
@@ -174,5 +169,5 @@ The installer returns nonzero for invalid paths, missing assets, lock
 contention, staging or backup failure, manifest verification failure, file
 replacement/restoration failure, or a failed `systemctl` command.
 
-Automatic rollback after install or activation failure is not implemented. Use
-the printed verified manifest after correcting the underlying problem.
+Install, activation, transport, malformed-response, timeout, and unhealthy
+failures trigger automatic rollback. A rollback failure is reported separately.

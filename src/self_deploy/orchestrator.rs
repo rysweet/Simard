@@ -102,7 +102,12 @@ pub(crate) fn run_sequence<E: DeployEffects>(
     }
 
     // 6) Post-deploy health check; roll back on any unhealthy probe.
-    let health = effects.health_check(baseline)?;
+    let health = match effects.health_check(baseline) {
+        Ok(health) => health,
+        Err(error) => {
+            return rollback_then(effects, &format!("health check errored: {error}"));
+        }
+    };
     if !health.healthy {
         return rollback_then(
             effects,

@@ -69,7 +69,7 @@ interpret agent prose to select behavior.
 | Merge / deploy request | Typed action plus separately signed approval. | Migrated request boundary; downstream executors remain separate |
 | Progress | `record_progress` capability exists outside the default terminal actor policy. | Implemented API; not part of the terminal actor |
 | Curate, Overseer, cognitive threads, meetings | Existing domain workflows and stores. | Outside this migration slice |
-| Legacy engineer/operator launch | Existing broad Copilot permission contract when no typed permission set is present. | Outside typed OODA |
+| Legacy engineer/operator launch | Least privilege with no implicit tool or path grants when no typed permission set is present. | Outside typed OODA |
 
 This table is the migration boundary. “Outside this slice” does not mean
 parser-free unless that workflow has its own documented typed boundary.
@@ -132,11 +132,12 @@ stderr, and final model text are diagnostic only.
 
 The terminal table has unique constraints on request ID, outcome ID, and
 `(session_id, cycle_id)`. An identical request replay returns the stored
-terminal; conflicting reuse returns `IdempotencyConflict`.
+terminal; conflicting reuse returns `RequestConflict`.
 
-Progress records use a separate table and separate request-ID namespace. The
-current implementation does not have a global mutation registry or
-cross-mutation request-ID conflict detection.
+Terminal, progress, actor-session, approval, effect, and process mutations use
+one versioned request registry. Request fingerprints use SHA-256 over the
+mutation type, complete typed payload, authenticated actor scope, policy
+revision, cycle, and goal. Reuse across mutation types or payloads fails.
 
 ## Action effects
 
@@ -147,22 +148,22 @@ An action terminal and its effect job commit together. Production effects are:
 - request merge after signed approval and downstream checks;
 - request deployment after signed approval and downstream checks.
 
-Jobs move through `pending`, `running`, `blocked`, `succeeded`, or `failed`.
-A lease records owner and expiry and increments `attempt` when claimed.
-
-Current recovery resets expired running jobs to pending. Completion updates by
-effect ID and running state; there is no lease-generation or completing-owner
-fence. This is durable at-least-once recovery, not an exactly-once guarantee for
-arbitrary external effects.
+Jobs move through `pending`, `running`, `blocked`, `succeeded`, `failed`, or
+`indeterminate`. Every claim increments a lease generation. Renewal, retry,
+failure, and completion require the effect ID, owner, generation, and an
+unexpired lease in one immediate transaction. Expiry marks execution
+`indeterminate`; it never makes an external effect safe to repeat.
 
 ## Engineer authority
 
 The typed action's permission set is propagated through
 `SIMARD_ENGINEER_PERMISSIONS`. The Copilot launcher maps it to scoped read,
-search, write, shell, and GitHub MCP adapters and removes broad allow-all flags.
+search, write, the process broker, and GitHub MCP adapters and removes broad
+allow-all flags.
 
-`process_exec` currently enables Copilot's shell adapter. It is not a
-transactional per-command broker and has no per-cycle process mutation cap.
+`process_exec` is reserved, run, and completed through the shared SQLite
+request registry and per-cycle mutation cap. The built-in shell adapter is not
+granted because it would bypass that accounting boundary.
 See [Engineer Copilot permissions](../reference/engineer-copilot-permissions.md).
 
 ## Failure model
@@ -196,10 +197,17 @@ depends on them.
 
 ## Deployment boundary
 
-`simard install` backs up the binary, prompt assets, units, config, and selected
-state tree before replacement. The current backup is a verified recursive copy,
-not an online SQLite/LadybugDB snapshot, and rollback is sequential rather than
-atomic. Stop services before deployment when state consistency matters.
+`simard install` quiesces active services and captures the binary, prompt
+assets, units and service state, config, canonical typed-OODA SQLite database,
+and live LadybugDB cognitive store before replacement. SQLite uses its online
+backup API and integrity checking. LadybugDB is checkpointed, copied while
+quiesced, and verified by opening and querying the staged store.
+
+Rollback stages each surface on the destination filesystem, syncs it, and uses
+rename-based replacement. Every published swap has a synced compensation path;
+any later failure restores earlier surfaces in reverse order. An absent
+first-install service baseline removes newly introduced units without starting
+nonexistent prior services.
 
 See [Deploy and roll back typed OODA](../operations/deploy-and-roll-back-typed-ooda.md).
 
@@ -213,9 +221,9 @@ See [Deploy and roll back typed OODA](../operations/deploy-and-roll-back-typed-o
 6. Merge and deploy effects require separate signed approval.
 7. Typed goal-session failures do not fall back to prose parsing.
 8. Typed Copilot spawns carry an explicit permission set.
-
-Stronger properties such as global mutation request IDs, lease-generation
-fencing, indeterminate-effect reconciliation, transactionally capped process
-execution, application-consistent installer snapshots, and atomic
-reverse-compensating rollback are not implemented by this branch and must not
-be presented as current guarantees.
+9. All mutation request IDs share one versioned transactional registry.
+10. Effect completion, failure, renewal, and retry are fenced by owner,
+    generation, and expiry.
+11. Process execution reserves its scoped cap before running outside SQLite.
+12. Installer snapshots are application-consistent and rollback is staged,
+    atomic per surface, and reverse-compensating across surfaces.

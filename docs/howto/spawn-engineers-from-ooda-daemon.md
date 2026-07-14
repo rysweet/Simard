@@ -84,11 +84,13 @@ permissions, claim, and byte-preserved task. The handler:
 7. commits the terminal, engineer claim, and outbox job
    atomically;
 8. leases and launches the effect from the outbox;
-9. records completion or retry by effect ID while the job is running.
+9. records completion or retry using the effect ID, lease owner, and lease
+   generation while the lease remains current.
 
-The engineer receives scoped Copilot adapters. `process_exec` enables the shell
-adapter; it is not a transactionally capped process broker. Typed launches do
-not add `--allow-all-tools`, `--allow-all-paths`, or `COPILOT_ALLOW_ALL`.
+The engineer receives scoped Copilot adapters. `process_exec` uses the
+transactionally capped Simard process broker; the unrestricted shell adapter is
+not exposed. Typed launches do not add `--allow-all-tools`,
+`--allow-all-paths`, or `COPILOT_ALLOW_ALL`.
 
 ## Verify the durable result
 

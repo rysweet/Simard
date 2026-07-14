@@ -70,6 +70,7 @@ impl TypedGoalSessionRoute {
         let lease = handler
             .register_actor_session(
                 actor,
+                &format!("actor-session:{}", uuid::Uuid::now_v7()),
                 &invocation.cycle_id,
                 &invocation.goal_id,
                 Duration::from_secs(1800),

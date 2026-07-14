@@ -338,7 +338,12 @@ mod fake_sequence {
             _baseline_facts: Option<u64>,
         ) -> Result<SelfHealthReport, SafeUpdateError> {
             self.record("health");
-            Ok(report(self.health != Mode::Unhealthy))
+            match self.health {
+                Mode::Err => Err(SafeUpdateError::HealthCheckFailed {
+                    report: "health transport failed".into(),
+                }),
+                mode => Ok(report(mode != Mode::Unhealthy)),
+            }
         }
         fn rollback(&self, _reason: &str) -> Result<(), SafeUpdateError> {
             self.record("rollback");
@@ -384,6 +389,15 @@ mod fake_sequence {
         // Backups/swap happened before the rollback; health was the last gate.
         let order = fx.order();
         assert_eq!(order.last(), Some(&"rollback"));
+    }
+
+    #[test]
+    fn health_check_error_triggers_rollback() {
+        let mut fx = FakeEffects::new();
+        fx.health = Mode::Err;
+        let err = run_sequence(&fx).unwrap_err();
+        assert!(matches!(err, SafeUpdateError::RolledBack { .. }), "{err:?}");
+        assert_eq!(fx.order().last(), Some(&"rollback"));
     }
 
     #[test]

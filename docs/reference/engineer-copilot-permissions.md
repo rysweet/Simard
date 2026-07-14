@@ -18,7 +18,7 @@ Simard has two Copilot engineer launch contracts:
 | Launch | Permission source | Copilot behavior |
 | --- | --- | --- |
 | Typed OODA spawn | `SpawnEngineer.requested_permissions` propagated through `SIMARD_ENGINEER_PERMISSIONS` | Scoped tool adapters; no allow-all flags |
-| Legacy/operator spawn | No typed permission environment | `--allow-all-tools`, `--allow-all-paths`, and `COPILOT_ALLOW_ALL=1` |
+| Legacy/operator spawn | No typed permission environment | Least privilege; no tools or paths are implicitly allowed |
 
 Do not describe the legacy contract as the security boundary for typed OODA.
 
@@ -30,13 +30,12 @@ A typed `SpawnEngineer` action is accepted only when:
 2. the action repository matches the actor's bound repository;
 3. the repository is allowed by policy;
 4. at least one permission is requested;
-5. every requested permission appears in the policy's top-level
-   `engineer_permissions` list;
+5. every requested permission is in the intersection of actor scope, action
+   scope, the canonical Copilot engineer base type, and policy;
 6. the claim key is `<owner>/<repository>:<goal_id>`;
 7. concurrency, disk, and active-claim admission pass.
 
-The current policy does not define per-base-type or per-action permission
-intersections. The requested set is checked against the single policy ceiling.
+Unknown, broader, or cross-scope permissions are rejected before admission.
 
 ## Scoped Copilot argv
 
@@ -56,7 +55,7 @@ It then maps permissions:
 | --- | --- |
 | `repo_read` | `--allow-tool=read`, `--allow-tool=search` |
 | `repo_write` | `--allow-tool=write` |
-| `process_exec` | `--allow-tool=shell` |
+| `process_exec` | `simard-process-broker(process_exec)` via scoped MCP config |
 | `github_issue_write` | `--allow-tool=github-mcp-server`, `--add-github-mcp-tool=create_issue` |
 | `github_pr_write` | `--allow-tool=github-mcp-server`, pull-request create/update tools |
 
@@ -70,9 +69,10 @@ The supervisor also removes common provider secrets from typed child processes:
 
 ## Process authority
 
-`process_exec` currently grants Copilot's shell tool. Simard does not currently
-broker individual commands, reserve process mutations in SQLite, enforce a
-per-cycle command cap, or make command execution idempotent by request ID.
+`process_exec` does not grant Copilot's shell tool. Simard reserves individual
+commands in the shared SQLite request registry, enforces the policy's
+`process_exec_mutations_per_cycle` cap, and replays only identical request
+payloads. Running or indeterminate records are returned without re-execution.
 
 Repository worktree placement and the child process UID remain additional OS
 boundaries, but they are not substitutes for a command-level broker.
@@ -114,10 +114,11 @@ engineer_permissions = [
 [limits]
 max_concurrent_engineers = 8
 max_disk_used_percent = 90
+process_exec_mutations_per_cycle = 8
 ```
 
-There is no `engineer_base_types`, `action_permissions`, or
-`process_exec_mutations_per_cycle` policy section in the current schema.
+The canonical engineer base type is `copilot`. The action's requested set,
+authenticated actor set, and policy set are intersected before dispatch.
 
 ## Errors
 

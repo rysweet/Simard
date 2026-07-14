@@ -171,25 +171,25 @@ TerminalOutcome
 The terminal table enforces unique `request_id`, unique `outcome_id`, and unique
 `(session_id, cycle_id)`.
 
-`ProgressRecord` has its own table and request-ID namespace. The current schema
-does not provide a global request registry across terminal, progress, approval,
-effect, and process mutations.
+`ProgressRecord` has its own payload table, while its request ID participates in
+the same global registry as terminal, actor-session, approval, effect, and
+process mutations.
 
 ## Idempotency
 
-Terminal and progress fingerprints hash the authenticated actor identity, policy
-revision, and complete serialized request.
+All mutation fingerprints hash the authenticated actor identity and complete
+scope, policy revision, mutation type, and complete serialized request using
+the versioned SHA-256 canonical format.
 
 | Condition | Result |
 | --- | --- |
 | New request ID | Validate and commit. |
-| Same terminal ID and fingerprint | Return the stored terminal. |
-| Same progress ID and fingerprint | Return the stored progress record. |
-| Same ID in the same table with different arguments | `IdempotencyConflict`. |
+| Same mutation type and fingerprint | Return the stored result. |
+| Same ID with a different mutation type or fingerprint | `RequestConflict`. |
 | Different terminal ID for an already closed cycle | `TerminalAlreadyRecorded`. |
 
-Because terminal and progress use separate tables, reusing one string once in
-each table is not currently rejected as a cross-type conflict.
+The shared SQLite registry covers actor registration, terminal, progress,
+approval, effect, and process mutations, so cross-type reuse is rejected.
 
 ## Authorization and admission
 
@@ -204,6 +204,7 @@ record_no_action
 record_blocked
 record_completed
 record_progress
+process_exec
 ```
 
 The production goal-session policy omits `record_progress`. Direct merge and
@@ -232,9 +233,10 @@ EffectJob
 |- goal_id
 |- repository?
 |- kind
-|- state: pending | running | blocked | succeeded | failed
+|- state: pending | running | blocked | succeeded | failed | indeterminate
 |- action
 |- attempt
+|- lease_generation
 |- lease_owner?
 |- lease_expires_at_unix_millis?
 |- error?
@@ -242,21 +244,21 @@ EffectJob
 `- approval?
 ```
 
-A worker atomically changes one pending job to running, increments `attempt`,
-and records a lease owner and expiry. Completion and retry update by
-`effect_id` and require only `state = running`; the current schema has no lease
-generation and does not compare the completing worker with `lease_owner`.
+A worker atomically changes one pending job to running, increments `attempt`
+and `lease_generation`, and records a lease owner and expiry. Renewal,
+completion, failure, and retry require the effect ID, current owner, current
+generation, and an unexpired lease in one immediate transaction.
 
-Startup recovery returns expired running jobs to pending. Retryable executor
-failure also returns a running job to pending. Operators should therefore not
-interpret the current lease as an exactly-once external-effect fence.
+Startup recovery marks expired running jobs `indeterminate`; external effects
+are never repeated merely because their lease expired.
 
 Merge and deploy effects require a signed server-issued approval. Issue it with:
 
 ```bash
 SIMARD_PRIVILEGED_PRINCIPAL=<principal> \
 SIMARD_PRIVILEGED_APPROVAL_KEY=<at-least-32-byte-secret> \
-simard ooda approvals issue --state-root <PATH> --effect-id <ID>
+simard ooda approvals issue --state-root <PATH> --effect-id <ID> \
+  --request-id <ID>
 ```
 
 The approval binds the principal, effect and outcome, session, cycle, goal,
@@ -274,8 +276,12 @@ Capability errors:
 | `PermissionDenied` | Capability, repository, permission, or environment was outside policy. |
 | `AdmissionRejected` | Disk, concurrency, or claim admission failed. |
 | `StateTransitionRejected` | Completion or state transition was invalid. |
-| `IdempotencyConflict` | A request ID was reused with different arguments in the same record table. |
+| `AuthorizationScopeViolation` | Cycle, goal, repository, engineer type, or permission exceeded authenticated scope. |
+| `RequestConflict` | A request ID was reused across mutation types or with a different payload. |
 | `TerminalAlreadyRecorded` | The cycle already has a terminal. |
+| `StaleLease` | Effect owner, generation, state, or expiry did not match. |
+| `MutationCapExhausted` | The scoped process-execution cap was consumed. |
+| `IndeterminateExecution` | A process transition could not prove a safe result. |
 | `PersistenceFailed` | SQLite or record serialization failed. |
 
 Cycle errors separately report `MissingTerminal`, `MultipleTerminalAttempts`,

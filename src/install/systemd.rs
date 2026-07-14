@@ -2,6 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use serde::{Deserialize, Serialize};
+
 use super::paths::{InstallLayout, OODA_UNIT, SIGNAL_UNIT};
 use super::{InstallError, InstallResult, err};
 
@@ -9,6 +11,14 @@ use super::{InstallError, InstallResult, err};
 pub struct RenderedUnits {
     pub ooda: String,
     pub signal: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ServiceBaseline {
+    pub unit: String,
+    pub existed: bool,
+    pub enabled: bool,
+    pub active: bool,
 }
 
 pub fn render_units(layout: &InstallLayout) -> InstallResult<RenderedUnits> {
@@ -64,6 +74,69 @@ pub fn activate(systemctl: &Path) -> InstallResult<()> {
     run_systemctl(systemctl, &["--user", "enable", SIGNAL_UNIT])?;
     run_systemctl(systemctl, &["--user", "restart", OODA_UNIT])?;
     run_systemctl(systemctl, &["--user", "restart", SIGNAL_UNIT])?;
+    Ok(())
+}
+
+pub fn capture_baseline(
+    layout: &InstallLayout,
+    systemctl: &Path,
+) -> InstallResult<Vec<ServiceBaseline>> {
+    [
+        (&layout.ooda_unit_path, OODA_UNIT),
+        (&layout.signal_unit_path, SIGNAL_UNIT),
+    ]
+    .into_iter()
+    .map(|(path, unit)| {
+        let existed = path.is_file();
+        Ok(ServiceBaseline {
+            unit: unit.to_string(),
+            existed,
+            enabled: existed && systemctl_is(systemctl, "is-enabled", unit)?,
+            active: existed && systemctl_is(systemctl, "is-active", unit)?,
+        })
+    })
+    .collect()
+}
+
+pub fn restore_baseline(systemctl: &Path, baselines: &[ServiceBaseline]) -> InstallResult<()> {
+    run_systemctl(systemctl, &["--user", "daemon-reload"])?;
+    for baseline in baselines {
+        if !baseline.existed {
+            run_systemctl_allow_absent(systemctl, &["--user", "stop", &baseline.unit])?;
+            run_systemctl_allow_absent(systemctl, &["--user", "disable", &baseline.unit])?;
+            continue;
+        }
+
+        if baseline.enabled {
+            run_systemctl(systemctl, &["--user", "enable", &baseline.unit])?;
+        } else {
+            run_systemctl(systemctl, &["--user", "disable", &baseline.unit])?;
+        }
+        if baseline.active {
+            run_systemctl(systemctl, &["--user", "restart", &baseline.unit])?;
+        } else {
+            run_systemctl(systemctl, &["--user", "stop", &baseline.unit])?;
+        }
+    }
+    Ok(())
+}
+
+pub fn quiesce_for_snapshot(systemctl: &Path, baselines: &[ServiceBaseline]) -> InstallResult<()> {
+    for baseline in baselines.iter().filter(|baseline| baseline.active) {
+        run_systemctl(systemctl, &["--user", "stop", &baseline.unit])?;
+    }
+    Ok(())
+}
+
+pub fn quiesce_current(layout: &InstallLayout, systemctl: &Path) -> InstallResult<()> {
+    for (path, unit) in [
+        (&layout.ooda_unit_path, OODA_UNIT),
+        (&layout.signal_unit_path, SIGNAL_UNIT),
+    ] {
+        if path.exists() {
+            run_systemctl(systemctl, &["--user", "stop", unit])?;
+        }
+    }
     Ok(())
 }
 
@@ -141,6 +214,14 @@ fn write_unit_atomically(path: &Path, contents: &str, transaction_id: &str) -> I
             staged.display()
         ))
     })?;
+    fs::File::open(&staged)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| {
+            InstallError::new(format!(
+                "failed to sync staged systemd unit {}: {error}",
+                staged.display()
+            ))
+        })?;
 
     #[cfg(unix)]
     {
@@ -159,7 +240,15 @@ fn write_unit_atomically(path: &Path, contents: &str, transaction_id: &str) -> I
             staged.display(),
             path.display()
         ))
-    })
+    })?;
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            InstallError::new(format!(
+                "failed to sync systemd unit directory {}: {error}",
+                parent.display()
+            ))
+        })
 }
 
 fn run_systemctl(systemctl: &Path, args: &[&str]) -> InstallResult<()> {
@@ -181,6 +270,33 @@ fn run_systemctl(systemctl: &Path, args: &[&str]) -> InstallResult<()> {
         ));
     }
     Ok(())
+}
+
+fn run_systemctl_allow_absent(systemctl: &Path, args: &[&str]) -> InstallResult<()> {
+    Command::new(systemctl)
+        .args(args)
+        .status()
+        .map(|_| ())
+        .map_err(|error| {
+            InstallError::new(format!(
+                "failed to run {} {}: {error}",
+                systemctl.display(),
+                args.join(" ")
+            ))
+        })
+}
+
+fn systemctl_is(systemctl: &Path, verb: &str, unit: &str) -> InstallResult<bool> {
+    Command::new(systemctl)
+        .args(["--user", verb, unit])
+        .status()
+        .map(|status| status.success())
+        .map_err(|error| {
+            InstallError::new(format!(
+                "failed to query service baseline with {} --user {verb} {unit}: {error}",
+                systemctl.display()
+            ))
+        })
 }
 
 fn find_in_path(name: &Path) -> InstallResult<PathBuf> {

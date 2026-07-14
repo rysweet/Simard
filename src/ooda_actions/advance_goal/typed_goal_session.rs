@@ -91,7 +91,7 @@ pub(crate) fn run(
         }
     };
     let policy_revision = policy.revision.clone();
-    let ledger_path = typed_ooda_state_root().join("typed-ooda/outcomes.sqlite3");
+    let ledger_path = crate::typed_ooda::ledger_path(&typed_ooda_state_root());
     if let Some(parent) = ledger_path.parent()
         && let Err(error) = std::fs::create_dir_all(parent)
     {
@@ -133,6 +133,14 @@ pub(crate) fn run(
     };
     let actor_context = AuthenticatedToolContext::new("goal-session-actor", &session_id, grants)
         .scoped_to_repository(repository)
+        .scoped_to_working_directory(repo_root)
+        .with_engineer_permissions([
+            "repo_read",
+            "repo_write",
+            "process_exec",
+            "github_issue_write",
+            "github_pr_write",
+        ])
         .with_observe_only(observe_only);
     let admission = admission_snapshot(state, repo_root, &policy_revision);
     let effects = LiveGoalSessionEffects { state };

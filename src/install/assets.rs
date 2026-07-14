@@ -131,7 +131,18 @@ pub fn replace_live_prompt_assets(staged: &Path, layout: &InstallLayout) -> Inst
         )));
     }
 
-    Ok(())
+    let parent = layout
+        .prompt_assets_dir
+        .parent()
+        .ok_or_else(|| InstallError::new("prompt_assets destination has no parent"))?;
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            InstallError::new(format!(
+                "failed to sync prompt_assets parent {}: {error}",
+                parent.display()
+            ))
+        })
 }
 
 fn has_required_assets(root: &Path) -> bool {
@@ -177,6 +188,14 @@ fn copy_dir_recursive(source: &Path, destination: &Path, root: &Path) -> Install
             let child_destination = destination.join(child_name);
             copy_dir_recursive(&child_source, &child_destination, root)?;
         }
+        fs::File::open(destination)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                InstallError::new(format!(
+                    "failed to sync staged prompt_assets directory {}: {error}",
+                    destination.display()
+                ))
+            })?;
         return Ok(());
     }
 
@@ -189,6 +208,14 @@ fn copy_dir_recursive(source: &Path, destination: &Path, root: &Path) -> Install
                 destination.display()
             ))
         })?;
+        fs::File::open(destination)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| {
+                InstallError::new(format!(
+                    "failed to sync staged prompt asset {}: {error}",
+                    destination.display()
+                ))
+            })?;
         return Ok(());
     }
 

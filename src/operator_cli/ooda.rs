@@ -17,7 +17,7 @@ Commands:
                               Read one authoritative typed terminal.
   outcomes list --state-root <PATH> [--limit <N>]
                               List authoritative typed terminals.
-  approvals issue --state-root <PATH> --effect-id <ID>
+  approvals issue --state-root <PATH> --effect-id <ID> --request-id <ID>
                               Issue a privileged merge/deploy approval from
                               the configured server principal and signing key.
   fixture run --state-root <PATH> --scenario <spawn-engineer|no-action> --request-id <ID>
@@ -134,9 +134,10 @@ fn dispatch_approvals(
     let parsed = parse_named_args(args)?;
     let state_root = Path::new(required_named(&parsed, "state-root")?);
     let effect_id = required_named(&parsed, "effect-id")?;
+    let request_id = required_named(&parsed, "request-id")?;
     let handler = open_ledger(state_root)?;
     let authority = crate::typed_ooda::ApprovalAuthority::from_environment()?;
-    let approval = handler.issue_privileged_approval(&authority, effect_id)?;
+    let approval = handler.issue_privileged_approval(&authority, request_id, effect_id)?;
     println!("{}", serde_json::to_string(&approval)?);
     Ok(())
 }
@@ -209,7 +210,8 @@ fn dispatch_fixture(
             crate::typed_ooda::CapabilityGrant::RecordNoAction,
         ],
     )
-    .scoped_to_repository(crate::typed_ooda::RepositoryRef::new("rysweet", "Simard"));
+    .scoped_to_repository(crate::typed_ooda::RepositoryRef::new("rysweet", "Simard"))
+    .with_engineer_permissions(["repo_read"]);
     let executor = crate::typed_ooda::GoalSessionExecutor::new(
         handler,
         actor,
@@ -296,10 +298,14 @@ impl crate::typed_ooda::EffectExecutor for FixtureEffects {
 fn open_ledger(
     state_root: &Path,
 ) -> Result<crate::typed_ooda::CapabilityHandler, Box<dyn std::error::Error>> {
-    let directory = state_root.join("typed-ooda");
-    std::fs::create_dir_all(&directory)?;
+    let ledger_path = crate::typed_ooda::ledger_path(state_root);
+    std::fs::create_dir_all(
+        ledger_path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("typed-OODA ledger path has no parent"))?,
+    )?;
     Ok(crate::typed_ooda::CapabilityHandler::open(
-        directory.join("outcomes.sqlite3"),
+        ledger_path,
         crate::typed_ooda::CapabilityPolicy::goal_session_default("goal-session-policy-v1"),
     )?)
 }

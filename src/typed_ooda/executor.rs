@@ -319,9 +319,26 @@ impl GoalSessionExecutor {
                 "goal-session invocation does not match authenticated actor session",
             ));
         }
+        let actor = match (self.actor.bound_cycle_id(), self.actor.bound_goal_id()) {
+            (Some(cycle_id), Some(goal_id))
+                if cycle_id == invocation.cycle_id && goal_id == invocation.goal_id =>
+            {
+                self.actor.clone()
+            }
+            (None, None) => self
+                .actor
+                .clone()
+                .bound_to_cycle_goal(&invocation.cycle_id, &invocation.goal_id),
+            _ => {
+                return Err(CycleError::new(
+                    CycleErrorCode::ToolFailed,
+                    "goal-session invocation does not match the actor's server-bound cycle and goal",
+                ));
+            }
+        };
         let tools = GoalSessionTools {
             handler: &self.handler,
-            actor: &self.actor,
+            actor: &actor,
             admission: &self.admission,
             invocation,
             state: Mutex::new(ToolCallState {
@@ -407,7 +424,10 @@ impl<'a> OutboxWorker<'a> {
 
     pub fn recover_startup(&self) -> Result<usize, CycleError> {
         self.handler
-            .recover_expired_effects(SystemTime::now())
+            .recover_expired_effects(
+                &format!("{}:recover:{}", self.worker_id, uuid::Uuid::now_v7()),
+                SystemTime::now(),
+            )
             .map_err(|error| CycleError::new(CycleErrorCode::PersistenceFailed, error.to_string()))
     }
 
@@ -417,7 +437,12 @@ impl<'a> OutboxWorker<'a> {
         for _ in 0..limit {
             let Some(job) = self
                 .handler
-                .claim_next_effect(self.worker_id, SystemTime::now(), self.lease)
+                .claim_next_effect(
+                    self.worker_id,
+                    &format!("{}:claim:{}", self.worker_id, uuid::Uuid::now_v7()),
+                    SystemTime::now(),
+                    self.lease,
+                )
                 .map_err(|error| {
                     CycleError::new(CycleErrorCode::PersistenceFailed, error.to_string())
                 })?
@@ -466,6 +491,12 @@ impl<'a> OutboxWorker<'a> {
                     "downstream effect is leased by another worker",
                 ));
             }
+            "indeterminate" => {
+                return Err(CycleError::new(
+                    CycleErrorCode::DownstreamFailed,
+                    "downstream effect execution is indeterminate and will not be repeated",
+                ));
+            }
             "pending" => {}
             other => {
                 return Err(CycleError::new(
@@ -478,6 +509,7 @@ impl<'a> OutboxWorker<'a> {
             self.handler
                 .block_effect_authorization(
                     &current,
+                    &effect_mutation_request_id(&current, "observe-only-block"),
                     "SIMARD_OBSERVE_ONLY denied mutation at effect dispatch",
                 )
                 .map_err(|error| {
@@ -496,6 +528,7 @@ impl<'a> OutboxWorker<'a> {
             self.handler
                 .block_effect_authorization(
                     &current,
+                    &effect_mutation_request_id(&current, "approval-block"),
                     "server-issued privileged approval is required",
                 )
                 .map_err(|error| {
@@ -511,6 +544,7 @@ impl<'a> OutboxWorker<'a> {
             .claim_effect_for_outcome(
                 &outcome.outcome_id,
                 self.worker_id,
+                &format!("{}:claim:{}", self.worker_id, uuid::Uuid::now_v7()),
                 SystemTime::now(),
                 self.lease,
             )
@@ -529,6 +563,7 @@ impl<'a> OutboxWorker<'a> {
             self.handler
                 .block_effect_authorization(
                     &job,
+                    &effect_mutation_request_id(&job, "observe-only-block"),
                     "SIMARD_OBSERVE_ONLY denied mutation at effect dispatch",
                 )
                 .map_err(|error| {
@@ -545,7 +580,11 @@ impl<'a> OutboxWorker<'a> {
         ) && job.approval.is_none()
         {
             self.handler
-                .block_effect_authorization(&job, "server-issued privileged approval is required")
+                .block_effect_authorization(
+                    &job,
+                    &effect_mutation_request_id(&job, "approval-block"),
+                    "server-issued privileged approval is required",
+                )
                 .map_err(|error| {
                     CycleError::new(CycleErrorCode::PersistenceFailed, error.to_string())
                 })?;
@@ -559,7 +598,12 @@ impl<'a> OutboxWorker<'a> {
             Err(error) => {
                 if !error.permanent {
                     self.handler
-                        .release_effect_for_retry(&job.effect_id, &error.to_string())
+                        .release_effect_for_retry(
+                            &job,
+                            &effect_mutation_request_id(&job, "retry"),
+                            SystemTime::now(),
+                            &error.to_string(),
+                        )
                         .map_err(|failure| {
                             CycleError::new(CycleErrorCode::PersistenceFailed, failure.to_string())
                         })?;
@@ -572,7 +616,12 @@ impl<'a> OutboxWorker<'a> {
                     error: error.to_string(),
                 };
                 self.handler
-                    .finish_effect(&job.effect_id, &result)
+                    .finish_effect(
+                        &job,
+                        &effect_mutation_request_id(&job, "failed"),
+                        SystemTime::now(),
+                        &result,
+                    )
                     .map_err(|failure| {
                         CycleError::new(CycleErrorCode::PersistenceFailed, failure.to_string())
                     })?;
@@ -583,7 +632,12 @@ impl<'a> OutboxWorker<'a> {
             }
         };
         self.handler
-            .finish_effect(&job.effect_id, &result)
+            .finish_effect(
+                &job,
+                &effect_mutation_request_id(&job, "complete"),
+                SystemTime::now(),
+                &result,
+            )
             .map_err(|error| {
                 CycleError::new(CycleErrorCode::PersistenceFailed, error.to_string())
             })?;
@@ -594,6 +648,10 @@ impl<'a> OutboxWorker<'a> {
             }
         }
     }
+}
+
+fn effect_mutation_request_id(job: &EffectJob, operation: &str) -> String {
+    format!("{}:{}:{}", job.effect_id, job.lease_generation, operation)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

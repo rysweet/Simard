@@ -1,11 +1,12 @@
 use std::collections::BTreeSet;
 use std::io::{self, Write};
 use std::path::Path;
+use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use serde::Serialize;
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -40,6 +41,7 @@ pub struct EffectJob {
     pub state: EffectState,
     pub action: Action,
     pub attempt: u32,
+    pub lease_generation: u64,
     pub lease_owner: Option<String>,
     pub lease_expires_at_unix_millis: Option<i64>,
     pub error: Option<String>,
@@ -47,7 +49,7 @@ pub struct EffectJob {
     pub approval: Option<PrivilegedApproval>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, Serialize)]
 pub struct ActorSessionLease {
     pub token: String,
     pub expires_at_unix_millis: i64,
@@ -142,6 +144,9 @@ impl CapabilityHandler {
     pub fn open(path: impl AsRef<Path>, policy: CapabilityPolicy) -> CapabilityResult<Self> {
         let connection = Connection::open(path.as_ref()).map_err(persistence)?;
         connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(persistence)?;
+        connection
             .execute_batch(
                 "
                 PRAGMA foreign_keys = ON;
@@ -162,6 +167,14 @@ impl CapabilityHandler {
                     cycle_id TEXT NOT NULL,
                     progress_json BLOB NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS mutation_requests (
+                    request_id TEXT PRIMARY KEY,
+                    mutation_type TEXT NOT NULL,
+                    request_hash TEXT NOT NULL,
+                    result_json BLOB NOT NULL,
+                    request_format_version INTEGER NOT NULL DEFAULT 2,
+                    result_format_version INTEGER NOT NULL DEFAULT 1
+                );
                 CREATE TABLE IF NOT EXISTS effect_jobs (
                     effect_id TEXT PRIMARY KEY,
                     outcome_id TEXT NOT NULL UNIQUE,
@@ -170,6 +183,7 @@ impl CapabilityHandler {
                     state TEXT NOT NULL,
                     action_json BLOB NOT NULL,
                     attempt INTEGER NOT NULL DEFAULT 0,
+                    lease_generation INTEGER NOT NULL DEFAULT 0,
                     lease_owner TEXT,
                     lease_expires_at INTEGER,
                     error TEXT,
@@ -183,16 +197,38 @@ impl CapabilityHandler {
                     FOREIGN KEY(outcome_id) REFERENCES terminal_outcomes(outcome_id)
                 );
                 CREATE TABLE IF NOT EXISTS actor_sessions (
-                    session_id TEXT NOT NULL,
+                    session_id TEXT PRIMARY KEY,
                     cycle_id TEXT NOT NULL,
                     goal_id TEXT NOT NULL,
                     actor_identity TEXT NOT NULL,
                     repository_json BLOB NOT NULL,
                     grants_json BLOB NOT NULL,
+                    engineer_permissions_json BLOB NOT NULL DEFAULT X'5b5d',
+                    working_directory_json BLOB,
                     observe_only INTEGER NOT NULL,
                     token_hash TEXT NOT NULL,
-                    expires_at INTEGER NOT NULL,
-                    PRIMARY KEY(session_id, cycle_id)
+                    expires_at INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS process_executions (
+                    execution_id TEXT PRIMARY KEY,
+                    request_id TEXT NOT NULL UNIQUE,
+                    request_hash TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    cycle_id TEXT NOT NULL,
+                    goal_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    request_json BLOB NOT NULL,
+                    result_json BLOB NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS process_executions_cycle_idx
+                    ON process_executions(session_id, cycle_id);
+                CREATE TABLE IF NOT EXISTS mutation_scope_counters (
+                    session_id TEXT NOT NULL,
+                    cycle_id TEXT NOT NULL,
+                    goal_id TEXT NOT NULL,
+                    mutation_type TEXT NOT NULL,
+                    spent INTEGER NOT NULL,
+                    PRIMARY KEY(session_id, cycle_id, goal_id, mutation_type)
                 );
                 CREATE TABLE IF NOT EXISTS authorization_decisions (
                     decision_id TEXT PRIMARY KEY,
@@ -212,6 +248,81 @@ impl CapabilityHandler {
             )
             .map_err(persistence)?;
         ensure_effect_result_column(&connection)?;
+        ensure_column(
+            &connection,
+            "effect_jobs",
+            "lease_generation",
+            "ALTER TABLE effect_jobs ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_column(
+            &connection,
+            "actor_sessions",
+            "engineer_permissions_json",
+            "ALTER TABLE actor_sessions ADD COLUMN engineer_permissions_json BLOB NOT NULL DEFAULT X'5b5d'",
+        )?;
+        ensure_column(
+            &connection,
+            "actor_sessions",
+            "working_directory_json",
+            "ALTER TABLE actor_sessions ADD COLUMN working_directory_json BLOB",
+        )?;
+        ensure_column(
+            &connection,
+            "mutation_requests",
+            "request_format_version",
+            "ALTER TABLE mutation_requests ADD COLUMN request_format_version INTEGER NOT NULL DEFAULT 1",
+        )?;
+        ensure_column(
+            &connection,
+            "mutation_requests",
+            "result_format_version",
+            "ALTER TABLE mutation_requests ADD COLUMN result_format_version INTEGER NOT NULL DEFAULT 1",
+        )?;
+        connection
+            .execute_batch(
+                "
+                INSERT OR IGNORE INTO mutation_requests(
+                    request_id, mutation_type, request_hash, result_json,
+                    request_format_version, result_format_version
+                )
+                    SELECT request_id, 'terminal', request_hash, outcome_json, 1, 1
+                    FROM terminal_outcomes;
+                INSERT OR IGNORE INTO mutation_requests(
+                    request_id, mutation_type, request_hash, result_json,
+                    request_format_version, result_format_version
+                )
+                    SELECT request_id, 'progress', request_hash, progress_json, 1, 1
+                    FROM progress_records;
+                ",
+            )
+            .map_err(persistence)?;
+        connection
+            .execute(
+                "DELETE FROM actor_sessions WHERE expires_at < ?1",
+                [now_millis()],
+            )
+            .map_err(persistence)?;
+        connection
+            .execute_batch(
+                "
+                DELETE FROM actor_sessions
+                WHERE session_id IN (
+                    SELECT session_id FROM actor_sessions
+                    GROUP BY session_id HAVING COUNT(*) > 1
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS actor_sessions_session_idx
+                    ON actor_sessions(session_id);
+                INSERT INTO mutation_scope_counters(
+                    session_id, cycle_id, goal_id, mutation_type, spent
+                )
+                SELECT session_id, cycle_id, goal_id, 'process_exec', COUNT(*)
+                FROM process_executions
+                GROUP BY session_id, cycle_id, goal_id
+                ON CONFLICT(session_id, cycle_id, goal_id, mutation_type)
+                DO UPDATE SET spent=MAX(spent, excluded.spent);
+                ",
+            )
+            .map_err(persistence)?;
         Ok(Self {
             connection: Mutex::new(connection),
             policy,
@@ -221,10 +332,12 @@ impl CapabilityHandler {
     pub fn register_actor_session(
         &self,
         actor: &AuthenticatedToolContext,
+        request_id: &str,
         cycle_id: &str,
         goal_id: &str,
         ttl: Duration,
     ) -> CapabilityResult<ActorSessionLease> {
+        validate_identifier("actor registration request id", request_id)?;
         validate_identifier("actor identity", &actor.actor_identity)?;
         validate_identifier("session id", &actor.session_id)?;
         validate_identifier("cycle id", cycle_id)?;
@@ -235,6 +348,17 @@ impl CapabilityHandler {
                 "actor session must be bound to one repository",
             )
         })?;
+        match (actor.bound_cycle_id(), actor.bound_goal_id()) {
+            (Some(bound_cycle), Some(bound_goal))
+                if bound_cycle == cycle_id && bound_goal == goal_id => {}
+            (None, None) => {}
+            _ => {
+                return Err(CapabilityError::new(
+                    CapabilityErrorCode::AuthorizationScopeViolation,
+                    "actor registration target does not match its existing cycle and goal binding",
+                ));
+            }
+        }
         self.validate_governed_repository(repository)?;
         let ttl_millis = i64::try_from(ttl.as_millis()).map_err(|_| {
             CapabilityError::new(
@@ -249,29 +373,110 @@ impl CapabilityHandler {
             ));
         }
 
-        let token = Uuid::new_v4().simple().to_string();
-        let expires_at_unix_millis = now_millis().saturating_add(ttl_millis);
+        let fingerprint = fingerprint(
+            actor,
+            &self.policy.revision,
+            &("actor_session_v1", cycle_id, goal_id, ttl_millis),
+        )?;
         let repository_json = serde_json::to_vec(repository).map_err(serialization)?;
         let grants_json = serde_json::to_vec(actor.grants()).map_err(serialization)?;
-        let token_hash = sha256_hex(token.as_bytes());
-        let connection = self.lock()?;
-        connection
+        let engineer_permissions_json =
+            serde_json::to_vec(actor.engineer_permissions()).map_err(serialization)?;
+        let working_directory_json = actor
+            .bound_working_directory()
+            .map(serde_json::to_vec)
+            .transpose()
+            .map_err(serialization)?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(persistence)?;
+        if let Some(existing) =
+            replay_request(&transaction, request_id, "actor_session", &fingerprint)?
+        {
+            return Ok(existing);
+        }
+        transaction
             .execute(
                 "DELETE FROM actor_sessions WHERE expires_at < ?1",
                 [now_millis()],
             )
             .map_err(persistence)?;
-        connection
+        type ExistingActorBinding = (
+            String,
+            String,
+            String,
+            Vec<u8>,
+            Vec<u8>,
+            Vec<u8>,
+            Option<Vec<u8>>,
+            bool,
+        );
+        let existing_binding: Option<ExistingActorBinding> = transaction
+            .query_row(
+                "SELECT cycle_id, goal_id, actor_identity, repository_json, grants_json,
+                        engineer_permissions_json, working_directory_json, observe_only
+                 FROM actor_sessions WHERE session_id=?1",
+                [&actor.session_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(persistence)?;
+        if existing_binding.as_ref().is_some_and(
+            |(
+                cycle,
+                goal,
+                actor_identity,
+                stored_repository,
+                stored_grants,
+                stored_engineer_permissions,
+                stored_working_directory,
+                observe_only,
+            )| {
+                cycle != cycle_id
+                    || goal != goal_id
+                    || actor_identity != &actor.actor_identity
+                    || stored_repository != &repository_json
+                    || stored_grants != &grants_json
+                    || stored_engineer_permissions != &engineer_permissions_json
+                    || stored_working_directory != &working_directory_json
+                    || *observe_only != actor.is_observe_only()
+            },
+        ) {
+            return Err(CapabilityError::new(
+                CapabilityErrorCode::AuthorizationScopeViolation,
+                "actor session is already bound to a different identity or authorization scope",
+            ));
+        }
+        let token = Uuid::new_v4().simple().to_string();
+        let expires_at_unix_millis = now_millis().saturating_add(ttl_millis);
+        let token_hash = sha256_hex(token.as_bytes());
+        transaction
             .execute(
                 "INSERT INTO actor_sessions(
                     session_id, cycle_id, goal_id, actor_identity, repository_json,
-                    grants_json, observe_only, token_hash, expires_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                 ON CONFLICT(session_id, cycle_id) DO UPDATE SET
+                    grants_json, engineer_permissions_json, working_directory_json,
+                    observe_only, token_hash, expires_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(session_id) DO UPDATE SET
+                    cycle_id=excluded.cycle_id,
                     goal_id=excluded.goal_id,
                     actor_identity=excluded.actor_identity,
                     repository_json=excluded.repository_json,
                     grants_json=excluded.grants_json,
+                    engineer_permissions_json=excluded.engineer_permissions_json,
+                    working_directory_json=excluded.working_directory_json,
                     observe_only=excluded.observe_only,
                     token_hash=excluded.token_hash,
                     expires_at=excluded.expires_at",
@@ -282,16 +487,27 @@ impl CapabilityHandler {
                     actor.actor_identity,
                     repository_json,
                     grants_json,
+                    engineer_permissions_json,
+                    working_directory_json,
                     actor.is_observe_only(),
                     token_hash,
                     expires_at_unix_millis
                 ],
             )
             .map_err(persistence)?;
-        Ok(ActorSessionLease {
+        let lease = ActorSessionLease {
             token,
             expires_at_unix_millis,
-        })
+        };
+        record_request(
+            &transaction,
+            request_id,
+            "actor_session",
+            &fingerprint,
+            &lease,
+        )?;
+        transaction.commit().map_err(persistence)?;
+        Ok(lease)
     }
 
     pub fn authenticate_actor_session(
@@ -305,13 +521,25 @@ impl CapabilityHandler {
         validate_identifier("cycle id", cycle_id)?;
         validate_identifier("goal id", goal_id)?;
         let connection = self.lock()?;
-        type SessionRow = (String, String, Vec<u8>, Vec<u8>, bool, String, i64);
+        type SessionRow = (
+            String,
+            String,
+            String,
+            Vec<u8>,
+            Vec<u8>,
+            Vec<u8>,
+            Option<Vec<u8>>,
+            bool,
+            String,
+            i64,
+        );
         let row: Option<SessionRow> = connection
             .query_row(
-                "SELECT goal_id, actor_identity, repository_json, grants_json,
-                        observe_only, token_hash, expires_at
-                 FROM actor_sessions WHERE session_id=?1 AND cycle_id=?2",
-                params![session_id, cycle_id],
+                "SELECT cycle_id, goal_id, actor_identity, repository_json, grants_json,
+                        engineer_permissions_json, working_directory_json, observe_only,
+                        token_hash, expires_at
+                 FROM actor_sessions WHERE session_id=?1",
+                [session_id],
                 |row| {
                     Ok((
                         row.get(0)?,
@@ -321,16 +549,22 @@ impl CapabilityHandler {
                         row.get(4)?,
                         row.get(5)?,
                         row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
                     ))
                 },
             )
             .optional()
             .map_err(persistence)?;
         let Some((
+            stored_cycle,
             stored_goal,
             actor_identity,
             repository_json,
             grants_json,
+            engineer_permissions_json,
+            working_directory_json,
             observe_only,
             token_hash,
             expires_at,
@@ -341,7 +575,8 @@ impl CapabilityHandler {
                 "actor session lease was not found",
             ));
         };
-        if stored_goal != goal_id
+        if stored_cycle != cycle_id
+            || stored_goal != goal_id
             || expires_at < now_millis()
             || token_hash != sha256_hex(token.as_bytes())
         {
@@ -354,21 +589,51 @@ impl CapabilityHandler {
             serde_json::from_slice(&repository_json).map_err(serialization)?;
         let grants: BTreeSet<CapabilityGrant> =
             serde_json::from_slice(&grants_json).map_err(serialization)?;
-        Ok(
-            AuthenticatedToolContext::new(actor_identity, session_id, grants)
-                .scoped_to_repository(repository)
-                .with_observe_only(observe_only),
-        )
+        let engineer_permissions: BTreeSet<String> =
+            serde_json::from_slice(&engineer_permissions_json).map_err(serialization)?;
+        let mut actor = AuthenticatedToolContext::new(actor_identity, session_id, grants)
+            .scoped_to_repository(repository)
+            .bound_to_cycle_goal(cycle_id, goal_id)
+            .with_engineer_permissions(engineer_permissions)
+            .with_observe_only(observe_only);
+        if let Some(json) = working_directory_json {
+            let working_directory: std::path::PathBuf =
+                serde_json::from_slice(&json).map_err(serialization)?;
+            actor = actor.scoped_to_working_directory(working_directory);
+        }
+        Ok(actor)
     }
 
     pub fn issue_privileged_approval(
         &self,
         authority: &ApprovalAuthority,
+        request_id: &str,
         effect_id: &str,
     ) -> CapabilityResult<PrivilegedApproval> {
+        validate_identifier("approval request id", request_id)?;
         validate_identifier("effect id", effect_id)?;
-        let connection = self.lock()?;
-        let job = query_effect_by_id(&connection, effect_id)?.ok_or_else(|| {
+        let fingerprint = fingerprint(
+            &AuthenticatedToolContext::new(
+                &authority.principal,
+                "privileged-approval",
+                std::iter::empty(),
+            ),
+            &self.policy.revision,
+            &("privileged_approval_v1", effect_id),
+        )?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(persistence)?;
+        if let Some(existing) = replay_request(
+            &transaction,
+            request_id,
+            "privileged_approval",
+            &fingerprint,
+        )? {
+            return Ok(existing);
+        }
+        let job = query_effect_by_id(&transaction, effect_id)?.ok_or_else(|| {
             CapabilityError::new(
                 CapabilityErrorCode::InvalidArgument,
                 "effect job was not found",
@@ -389,7 +654,7 @@ impl CapabilityHandler {
                 "only merge and deploy effects require privileged approval",
             ));
         }
-        let outcome = terminal_for_outcome_id(&connection, &job.outcome_id)?;
+        let outcome = terminal_for_outcome_id(&transaction, &job.outcome_id)?;
         let policy_revision = match &outcome.payload {
             TypedOutcomePayload::Action(payload) => payload.admission.policy_revision.clone(),
             _ => {
@@ -416,7 +681,6 @@ impl CapabilityHandler {
         };
         approval.signature = approval_signature(&authority.signing_key, &approval)?;
         let json = serde_json::to_vec(&approval).map_err(serialization)?;
-        let transaction = connection.unchecked_transaction().map_err(persistence)?;
         transaction
             .execute(
                 "INSERT INTO authorization_decisions(
@@ -438,6 +702,13 @@ impl CapabilityHandler {
                 [&approval.effect_id],
             )
             .map_err(persistence)?;
+        record_request(
+            &transaction,
+            request_id,
+            "privileged_approval",
+            &fingerprint,
+            &approval,
+        )?;
         transaction.commit().map_err(persistence)?;
         Ok(approval)
     }
@@ -448,13 +719,7 @@ impl CapabilityHandler {
         request: RecordActionRequest,
         admission: &AdmissionSnapshot,
     ) -> CapabilityResult<TerminalOutcome> {
-        self.validate_identity(&request.identity)?;
-        if actor.actor_identity.is_empty() || actor.session_id != request.identity.session_id {
-            return Err(CapabilityError::new(
-                CapabilityErrorCode::Unauthenticated,
-                "authenticated actor session does not match request session",
-            ));
-        }
+        self.validate_actor_target(actor, &request.identity)?;
         let grant = CapabilityGrant::RecordAction(request.action.kind());
         if actor.is_observe_only()
             || crate::read_only_guard::observe_only_enabled()
@@ -470,6 +735,7 @@ impl CapabilityHandler {
             }
             return Err(error);
         }
+        self.authorize_engineer_scope(actor, &request.action)?;
         self.validate_common(&request.raw_semantic, &request.evidence)?;
         if let Err(error) = self.validate_action(&request.action) {
             if error.code() == CapabilityErrorCode::PermissionDenied {
@@ -481,10 +747,15 @@ impl CapabilityHandler {
         let fingerprint = fingerprint(actor, &self.policy.revision, &request)?;
 
         let mut connection = self.lock()?;
-        let transaction = connection.transaction().map_err(persistence)?;
-        if let Some(existing) =
-            replay_terminal(&transaction, &request.identity.request_id, &fingerprint)?
-        {
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(persistence)?;
+        if let Some(existing) = replay_request(
+            &transaction,
+            &request.identity.request_id,
+            "terminal",
+            &fingerprint,
+        )? {
             return Ok(existing);
         }
         if let Action::SpawnEngineer(spawn) = &request.action {
@@ -515,6 +786,13 @@ impl CapabilityHandler {
         });
         let outcome = self.new_outcome(actor, &identity, payload, raw_semantic, evidence);
         insert_terminal(&transaction, &outcome, &fingerprint)?;
+        record_request(
+            &transaction,
+            &outcome.request_id,
+            "terminal",
+            &fingerprint,
+            &outcome,
+        )?;
         let TypedOutcomePayload::Action(action_payload) = &outcome.payload else {
             unreachable!("record_action always creates an action payload");
         };
@@ -640,21 +918,19 @@ impl CapabilityHandler {
             ));
         }
         let fingerprint = fingerprint(actor, &self.policy.revision, &request)?;
-        let connection = self.lock()?;
-        let existing: Option<(String, Vec<u8>)> = connection
-            .query_row(
-                "SELECT request_hash, progress_json FROM progress_records WHERE request_id=?1",
-                [&request.identity.request_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(persistence)?;
-        if let Some((stored_hash, stored_json)) = existing {
-            if stored_hash != fingerprint {
-                return Err(idempotency_conflict(&request.identity.request_id));
-            }
-            return serde_json::from_slice(&stored_json).map_err(serialization);
+        if let Some(existing) = replay_request(
+            &transaction,
+            &request.identity.request_id,
+            "progress",
+            &fingerprint,
+        )? {
+            return Ok(existing);
         }
+        ensure_cycle_open(&transaction, &request.identity)?;
         let record = ProgressRecord {
             progress_id: Uuid::now_v7().to_string(),
             request_id: request.identity.request_id,
@@ -668,13 +944,222 @@ impl CapabilityHandler {
             recorded_at_unix_millis: now_millis(),
         };
         let json = serde_json::to_vec(&record).map_err(serialization)?;
-        connection
+        transaction
             .execute(
                 "INSERT INTO progress_records(request_id, request_hash, session_id, cycle_id, progress_json) VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![record.request_id, fingerprint, record.session_id, record.cycle_id, json],
             )
             .map_err(persistence)?;
+        record_request(
+            &transaction,
+            &record.request_id,
+            "progress",
+            &fingerprint,
+            &record,
+        )?;
+        transaction.commit().map_err(persistence)?;
         Ok(record)
+    }
+
+    pub fn execute_process(
+        &self,
+        actor: &AuthenticatedToolContext,
+        request: ProcessExecRequest,
+    ) -> CapabilityResult<ProcessExecutionRecord> {
+        let (mut record, should_execute) = self.reserve_process_execution(actor, &request)?;
+        if !should_execute {
+            return Ok(record);
+        }
+        record.status = ProcessExecutionStatus::Running;
+        self.update_process_execution(&record, ProcessExecutionStatus::Reserved)?;
+
+        let output = Command::new(&request.program)
+            .args(&request.args)
+            .current_dir(&request.working_directory)
+            .output();
+        match output {
+            Ok(output) => {
+                record.status = if output.status.success() {
+                    ProcessExecutionStatus::Completed
+                } else {
+                    ProcessExecutionStatus::Failed
+                };
+                record.exit_code = output.status.code();
+                record.stdout = output.stdout;
+                record.stderr = output.stderr;
+            }
+            Err(error) => {
+                record.status = ProcessExecutionStatus::Failed;
+                record.stderr = error.to_string().into_bytes();
+            }
+        }
+        self.update_process_execution(&record, ProcessExecutionStatus::Running)?;
+        Ok(record)
+    }
+
+    fn reserve_process_execution(
+        &self,
+        actor: &AuthenticatedToolContext,
+        request: &ProcessExecRequest,
+    ) -> CapabilityResult<(ProcessExecutionRecord, bool)> {
+        self.authorize(actor, &request.identity, CapabilityGrant::ProcessExec)?;
+        if actor.is_observe_only()
+            || !actor.engineer_permissions().contains("process_exec")
+            || !self
+                .policy
+                .allowed_engineer_permissions
+                .contains("process_exec")
+        {
+            return Err(CapabilityError::new(
+                CapabilityErrorCode::AuthorizationScopeViolation,
+                "process_exec is outside the actor, action, or base-type scope",
+            ));
+        }
+        if !request.program.is_absolute() || !request.program.is_file() {
+            return Err(CapabilityError::new(
+                CapabilityErrorCode::InvalidArgument,
+                "process executable must be an existing absolute file",
+            ));
+        }
+        if actor.bound_working_directory() != Some(request.working_directory.as_path())
+            || !request.working_directory.is_dir()
+        {
+            return Err(CapabilityError::new(
+                CapabilityErrorCode::AuthorizationScopeViolation,
+                "process working directory does not match authenticated action scope",
+            ));
+        }
+        if request.args.len() > 256
+            || request
+                .args
+                .iter()
+                .any(|argument| argument.as_bytes().contains(&0))
+        {
+            return Err(CapabilityError::new(
+                CapabilityErrorCode::InvalidArgument,
+                "process arguments exceed the typed execution boundary",
+            ));
+        }
+
+        let fingerprint = fingerprint(actor, &self.policy.revision, &("process_exec_v1", request))?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(persistence)?;
+        if let Some(existing) = replay_request(
+            &transaction,
+            &request.identity.request_id,
+            "process_exec",
+            &fingerprint,
+        )? {
+            return Ok((existing, false));
+        }
+        let reserved = transaction
+            .query_row(
+                "INSERT INTO mutation_scope_counters(
+                    session_id, cycle_id, goal_id, mutation_type, spent
+                 ) VALUES (?1, ?2, ?3, 'process_exec', 1)
+                 ON CONFLICT(session_id, cycle_id, goal_id, mutation_type)
+                 DO UPDATE SET spent=spent+1
+                 WHERE spent < ?4
+                 RETURNING spent",
+                params![
+                    request.identity.session_id,
+                    request.identity.cycle_id,
+                    request.identity.goal_id,
+                    self.policy.process_exec_mutations_per_cycle
+                ],
+                |row| row.get::<_, usize>(0),
+            )
+            .optional()
+            .map_err(persistence)?;
+        if reserved.is_none() || self.policy.process_exec_mutations_per_cycle == 0 {
+            return Err(CapabilityError::new(
+                CapabilityErrorCode::MutationCapExhausted,
+                "process_exec mutation cap is exhausted for this cycle",
+            ));
+        }
+        let record = ProcessExecutionRecord {
+            execution_id: Uuid::now_v7().to_string(),
+            request_id: request.identity.request_id.clone(),
+            session_id: request.identity.session_id.clone(),
+            cycle_id: request.identity.cycle_id.clone(),
+            goal_id: request.identity.goal_id.clone(),
+            status: ProcessExecutionStatus::Reserved,
+            exit_code: None,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+        let request_json = serde_json::to_vec(request).map_err(serialization)?;
+        let result_json = serde_json::to_vec(&record).map_err(serialization)?;
+        transaction
+            .execute(
+                "INSERT INTO process_executions(
+                    execution_id, request_id, request_hash, session_id, cycle_id,
+                    goal_id, status, request_json, result_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    record.execution_id,
+                    record.request_id,
+                    fingerprint,
+                    record.session_id,
+                    record.cycle_id,
+                    record.goal_id,
+                    record.status.as_str(),
+                    request_json,
+                    result_json
+                ],
+            )
+            .map_err(persistence)?;
+        record_request(
+            &transaction,
+            &record.request_id,
+            "process_exec",
+            &fingerprint,
+            &record,
+        )?;
+        transaction.commit().map_err(persistence)?;
+        Ok((record, true))
+    }
+
+    fn update_process_execution(
+        &self,
+        record: &ProcessExecutionRecord,
+        expected: ProcessExecutionStatus,
+    ) -> CapabilityResult<()> {
+        let result_json = serde_json::to_vec(record).map_err(serialization)?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(persistence)?;
+        let changed = transaction
+            .execute(
+                "UPDATE process_executions SET status=?2, result_json=?3
+                 WHERE execution_id=?1 AND status=?4",
+                params![
+                    record.execution_id,
+                    record.status.as_str(),
+                    result_json,
+                    expected.as_str()
+                ],
+            )
+            .map_err(persistence)?;
+        if changed != 1 {
+            return Err(CapabilityError::new(
+                CapabilityErrorCode::IndeterminateExecution,
+                "process execution state changed concurrently",
+            ));
+        }
+        transaction
+            .execute(
+                "UPDATE mutation_requests SET result_json=?2 WHERE request_id=?1",
+                params![
+                    record.request_id,
+                    serde_json::to_vec(record).map_err(serialization)?
+                ],
+            )
+            .map_err(persistence)?;
+        transaction.commit().map_err(persistence)
     }
 
     pub fn terminal_for_cycle(
@@ -775,7 +1260,7 @@ impl CapabilityHandler {
             &connection,
             "
             SELECT effect_id, outcome_id, request_id, kind, state, action_json, attempt,
-                   lease_owner, lease_expires_at, error, result_json,
+                   lease_generation, lease_owner, lease_expires_at, error, result_json,
                    (SELECT decision_json FROM authorization_decisions
                     WHERE effect_id=effect_jobs.effect_id AND decision='approved'
                     ORDER BY recorded_at DESC, rowid DESC LIMIT 1)
@@ -788,10 +1273,12 @@ impl CapabilityHandler {
     pub fn claim_next_effect(
         &self,
         worker: &str,
+        request_id: &str,
         now: SystemTime,
         lease: Duration,
     ) -> CapabilityResult<Option<EffectJob>> {
         validate_identifier("effect worker", worker)?;
+        validate_identifier("effect claim request id", request_id)?;
         let now = system_time_millis(now)?;
         let lease_millis = i64::try_from(lease.as_millis()).map_err(|_| {
             CapabilityError::new(
@@ -799,12 +1286,26 @@ impl CapabilityHandler {
                 "effect lease is too long",
             )
         })?;
-        let connection = self.lock()?;
-        query_effect(
-            &connection,
+        let fingerprint = fingerprint(
+            &AuthenticatedToolContext::new("effect-claim", worker, std::iter::empty()),
+            &self.policy.revision,
+            &("claim_next_effect_v1", worker, lease_millis),
+        )?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(persistence)?;
+        if let Some(existing) =
+            replay_request(&transaction, request_id, "effect_claim", &fingerprint)?
+        {
+            return Ok(existing);
+        }
+        let claimed = query_effect(
+            &transaction,
             "
             UPDATE effect_jobs
-            SET state='running', attempt=attempt+1, lease_owner=?1, lease_expires_at=?2
+            SET state='running', attempt=attempt+1, lease_generation=lease_generation+1,
+                lease_owner=?1, lease_expires_at=?2
             WHERE effect_id = (
                 SELECT effect_id FROM effect_jobs
                 WHERE state='pending'
@@ -813,24 +1314,35 @@ impl CapabilityHandler {
             )
             AND state='pending'
             RETURNING effect_id, outcome_id, request_id, kind, state, action_json, attempt,
-                      lease_owner, lease_expires_at, error, result_json,
+                      lease_generation, lease_owner, lease_expires_at, error, result_json,
                       (SELECT decision_json FROM authorization_decisions
                        WHERE effect_id=effect_jobs.effect_id AND decision='approved'
                        ORDER BY recorded_at DESC, rowid DESC LIMIT 1)
             ",
             params![worker, now.saturating_add(lease_millis)],
-        )
+        )?;
+        record_request(
+            &transaction,
+            request_id,
+            "effect_claim",
+            &fingerprint,
+            &claimed,
+        )?;
+        transaction.commit().map_err(persistence)?;
+        Ok(claimed)
     }
 
     pub(crate) fn claim_effect_for_outcome(
         &self,
         outcome_id: &str,
         worker: &str,
+        request_id: &str,
         now: SystemTime,
         lease: Duration,
     ) -> CapabilityResult<Option<EffectJob>> {
         validate_identifier("effect worker", worker)?;
         validate_identifier("outcome id", outcome_id)?;
+        validate_identifier("effect claim request id", request_id)?;
         let now = system_time_millis(now)?;
         let lease_millis = i64::try_from(lease.as_millis()).map_err(|_| {
             CapabilityError::new(
@@ -838,39 +1350,195 @@ impl CapabilityHandler {
                 "effect lease is too long",
             )
         })?;
-        let connection = self.lock()?;
-        query_effect(
-            &connection,
+        let fingerprint = fingerprint(
+            &AuthenticatedToolContext::new("effect-claim", worker, std::iter::empty()),
+            &self.policy.revision,
+            &(
+                "claim_effect_for_outcome_v1",
+                outcome_id,
+                worker,
+                lease_millis,
+            ),
+        )?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(persistence)?;
+        if let Some(existing) =
+            replay_request(&transaction, request_id, "effect_claim", &fingerprint)?
+        {
+            return Ok(existing);
+        }
+        let claimed = query_effect(
+            &transaction,
             "
             UPDATE effect_jobs
-            SET state='running', attempt=attempt+1, lease_owner=?2, lease_expires_at=?3
+            SET state='running', attempt=attempt+1, lease_generation=lease_generation+1,
+                lease_owner=?2, lease_expires_at=?3
             WHERE outcome_id=?1 AND state='pending'
             RETURNING effect_id, outcome_id, request_id, kind, state, action_json, attempt,
-                      lease_owner, lease_expires_at, error, result_json,
+                      lease_generation, lease_owner, lease_expires_at, error, result_json,
                       (SELECT decision_json FROM authorization_decisions
                        WHERE effect_id=effect_jobs.effect_id AND decision='approved'
                        ORDER BY recorded_at DESC, rowid DESC LIMIT 1)
             ",
             params![outcome_id, worker, now.saturating_add(lease_millis)],
-        )
+        )?;
+        record_request(
+            &transaction,
+            request_id,
+            "effect_claim",
+            &fingerprint,
+            &claimed,
+        )?;
+        transaction.commit().map_err(persistence)?;
+        Ok(claimed)
     }
 
-    pub fn recover_expired_effects(&self, now: SystemTime) -> CapabilityResult<usize> {
+    pub fn recover_expired_effects(
+        &self,
+        request_id: &str,
+        now: SystemTime,
+    ) -> CapabilityResult<usize> {
+        validate_identifier("effect recovery request id", request_id)?;
         let now = system_time_millis(now)?;
-        let connection = self.lock()?;
-        connection
+        let actor = AuthenticatedToolContext::new("effect-recovery", "system", std::iter::empty());
+        let fingerprint = fingerprint(&actor, &self.policy.revision, &("recover_effects_v1", now))?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(persistence)?;
+        if let Some(existing) =
+            replay_request(&transaction, request_id, "effect_recovery", &fingerprint)?
+        {
+            return Ok(existing);
+        }
+        let recovered = transaction
             .execute(
-                "UPDATE effect_jobs SET state='pending', lease_owner=NULL, lease_expires_at=NULL WHERE state='running' AND lease_expires_at <= ?1",
+                "UPDATE effect_jobs
+                 SET state='indeterminate', error='effect lease expired; execution outcome is unknown'
+                 WHERE state='running' AND lease_expires_at <= ?1",
                 [now],
             )
-            .map_err(persistence)
+            .map_err(persistence)?;
+        record_request(
+            &transaction,
+            request_id,
+            "effect_recovery",
+            &fingerprint,
+            &recovered,
+        )?;
+        transaction.commit().map_err(persistence)?;
+        Ok(recovered)
+    }
+
+    pub fn renew_effect(
+        &self,
+        lease: &EffectJob,
+        request_id: &str,
+        now: SystemTime,
+        extension: Duration,
+    ) -> CapabilityResult<()> {
+        validate_identifier("effect mutation request id", request_id)?;
+        let owner = effect_lease_owner(lease)?;
+        let now = system_time_millis(now)?;
+        let extension = i64::try_from(extension.as_millis()).map_err(|_| {
+            CapabilityError::new(
+                CapabilityErrorCode::InvalidArgument,
+                "effect lease extension is too long",
+            )
+        })?;
+        if extension <= 0 {
+            return Err(CapabilityError::new(
+                CapabilityErrorCode::InvalidArgument,
+                "effect lease extension must be positive",
+            ));
+        }
+        let expires_at = now.saturating_add(extension);
+        let fingerprint = fingerprint(
+            &system_actor(lease),
+            &self.policy.revision,
+            &(
+                "effect_renew_v1",
+                lease.effect_id.as_str(),
+                owner,
+                lease.lease_generation,
+                extension,
+            ),
+        )?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(persistence)?;
+        if replay_request::<serde_json::Value>(
+            &transaction,
+            request_id,
+            "effect_renew",
+            &fingerprint,
+        )?
+        .is_some()
+        {
+            return Ok(());
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE effect_jobs SET lease_expires_at=?5
+                 WHERE effect_id=?1 AND state='running' AND lease_owner=?2
+                   AND lease_generation=?3 AND lease_expires_at>?4",
+                params![
+                    lease.effect_id,
+                    owner,
+                    lease.lease_generation,
+                    now,
+                    expires_at
+                ],
+            )
+            .map_err(persistence)?;
+        if changed != 1 {
+            return Err(stale_lease(&lease.effect_id));
+        }
+        record_request(
+            &transaction,
+            request_id,
+            "effect_renew",
+            &fingerprint,
+            &serde_json::Value::Null,
+        )?;
+        transaction.commit().map_err(persistence)
     }
 
     pub(crate) fn block_effect_authorization(
         &self,
         job: &EffectJob,
+        request_id: &str,
         reason: &str,
     ) -> CapabilityResult<()> {
+        validate_identifier("effect authorization request id", request_id)?;
+        let fingerprint = fingerprint(
+            &system_actor(job),
+            &self.policy.revision,
+            &(
+                "effect_authorization_block_v1",
+                job.effect_id.as_str(),
+                job.lease_owner.as_deref(),
+                job.lease_generation,
+                reason,
+            ),
+        )?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(persistence)?;
+        if replay_request::<serde_json::Value>(
+            &transaction,
+            request_id,
+            "effect_authorization_block",
+            &fingerprint,
+        )?
+        .is_some()
+        {
+            return Ok(());
+        }
         let recorded_at = now_millis();
         let decision_id = Uuid::now_v7().to_string();
         let decision = serde_json::to_vec(&serde_json::json!({
@@ -883,8 +1551,6 @@ impl CapabilityHandler {
             "recorded_at_unix_millis": recorded_at,
         }))
         .map_err(serialization)?;
-        let connection = self.lock()?;
-        let transaction = connection.unchecked_transaction().map_err(persistence)?;
         transaction
             .execute(
                 "INSERT INTO authorization_decisions(
@@ -893,70 +1559,166 @@ impl CapabilityHandler {
                 params![decision_id, job.effect_id, decision, recorded_at],
             )
             .map_err(persistence)?;
-        let changed = transaction
-            .execute(
-                "UPDATE effect_jobs
-                 SET state='blocked',
-                     error=?2,
-                     lease_owner=NULL,
-                     lease_expires_at=NULL
-                 WHERE effect_id=?1 AND state IN ('pending', 'running')",
-                params![job.effect_id, reason],
-            )
-            .map_err(persistence)?;
+        let changed = if job.state.as_str() == "running" {
+            let owner = effect_lease_owner(job)?;
+            transaction
+                .execute(
+                    "UPDATE effect_jobs
+                     SET state='blocked', error=?2, lease_owner=NULL, lease_expires_at=NULL
+                     WHERE effect_id=?1 AND state='running' AND lease_owner=?3
+                       AND lease_generation=?4 AND lease_expires_at>?5",
+                    params![
+                        job.effect_id,
+                        reason,
+                        owner,
+                        job.lease_generation,
+                        now_millis()
+                    ],
+                )
+                .map_err(persistence)?
+        } else {
+            transaction
+                .execute(
+                    "UPDATE effect_jobs
+                     SET state='blocked', error=?2, lease_owner=NULL, lease_expires_at=NULL
+                     WHERE effect_id=?1 AND state='pending'",
+                    params![job.effect_id, reason],
+                )
+                .map_err(persistence)?
+        };
         if changed != 1 {
-            return Err(persistence_message(
-                "privileged effect did not transition to blocked",
-            ));
+            return Err(stale_lease(&job.effect_id));
         }
+        record_request(
+            &transaction,
+            request_id,
+            "effect_authorization_block",
+            &fingerprint,
+            &serde_json::Value::Null,
+        )?;
         transaction.commit().map_err(persistence)
     }
 
-    pub(crate) fn release_effect_for_retry(
+    pub fn release_effect_for_retry(
         &self,
-        effect_id: &str,
+        lease: &EffectJob,
+        request_id: &str,
+        now: SystemTime,
         error: &str,
     ) -> CapabilityResult<()> {
-        let connection = self.lock()?;
-        let changed = connection
+        validate_identifier("effect mutation request id", request_id)?;
+        let owner = effect_lease_owner(lease)?;
+        let now = system_time_millis(now)?;
+        let fingerprint = fingerprint(
+            &system_actor(lease),
+            &self.policy.revision,
+            &(
+                "effect_retry_v1",
+                lease.effect_id.as_str(),
+                owner,
+                lease.lease_generation,
+                error,
+            ),
+        )?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(persistence)?;
+        if replay_request::<serde_json::Value>(
+            &transaction,
+            request_id,
+            "effect_retry",
+            &fingerprint,
+        )?
+        .is_some()
+        {
+            return Ok(());
+        }
+        let changed = transaction
             .execute(
                 "UPDATE effect_jobs
                  SET state='pending', error=?2, lease_owner=NULL, lease_expires_at=NULL
-                 WHERE effect_id=?1 AND state='running'",
-                params![effect_id, error],
+                 WHERE effect_id=?1 AND state='running' AND lease_owner=?3
+                   AND lease_generation=?4 AND lease_expires_at>?5",
+                params![lease.effect_id, error, owner, lease.lease_generation, now],
             )
             .map_err(persistence)?;
         if changed != 1 {
-            return Err(persistence_message(
-                "retryable effect did not return to pending",
-            ));
+            return Err(stale_lease(&lease.effect_id));
         }
-        Ok(())
+        record_request(
+            &transaction,
+            request_id,
+            "effect_retry",
+            &fingerprint,
+            &serde_json::Value::Null,
+        )?;
+        transaction.commit().map_err(persistence)
     }
 
-    pub(crate) fn finish_effect(
+    pub fn finish_effect(
         &self,
-        effect_id: &str,
+        lease: &EffectJob,
+        request_id: &str,
+        now: SystemTime,
         result: &EffectResult,
     ) -> CapabilityResult<()> {
+        validate_identifier("effect mutation request id", request_id)?;
+        let owner = effect_lease_owner(lease)?;
+        let now = system_time_millis(now)?;
+        let fingerprint = fingerprint(
+            &system_actor(lease),
+            &self.policy.revision,
+            &(
+                "effect_finish_v1",
+                lease.effect_id.as_str(),
+                owner,
+                lease.lease_generation,
+                result,
+            ),
+        )?;
         let (state, error) = match result {
             EffectResult::Succeeded { .. } => ("succeeded", None),
             EffectResult::Failed { error } => ("failed", Some(error.as_str())),
         };
         let result_json = serde_json::to_vec(result).map_err(serialization)?;
-        let connection = self.lock()?;
-        let changed = connection
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(persistence)?;
+        if replay_request::<EffectResult>(&transaction, request_id, "effect_finish", &fingerprint)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let changed = transaction
             .execute(
-                "UPDATE effect_jobs SET state=?2, error=?3, result_json=?4, lease_owner=NULL, lease_expires_at=NULL WHERE effect_id=?1 AND state='running'",
-                params![effect_id, state, error, result_json],
+                "UPDATE effect_jobs
+                 SET state=?2, error=?3, result_json=?4, lease_owner=NULL, lease_expires_at=NULL
+                 WHERE effect_id=?1 AND state='running' AND lease_owner=?5
+                   AND lease_generation=?6 AND lease_expires_at>?7",
+                params![
+                    lease.effect_id,
+                    state,
+                    error,
+                    result_json,
+                    owner,
+                    lease.lease_generation,
+                    now
+                ],
             )
             .map_err(persistence)?;
         if changed != 1 {
-            return Err(persistence_message(
-                "effect state transition did not update exactly one running job",
-            ));
+            return Err(stale_lease(&lease.effect_id));
         }
-        Ok(())
+        record_request(
+            &transaction,
+            request_id,
+            "effect_finish",
+            &fingerprint,
+            result,
+        )?;
+        transaction.commit().map_err(persistence)
     }
 
     fn commit_terminal(
@@ -969,13 +1731,24 @@ impl CapabilityHandler {
         fingerprint: String,
     ) -> CapabilityResult<TerminalOutcome> {
         let mut connection = self.lock()?;
-        let transaction = connection.transaction().map_err(persistence)?;
-        if let Some(existing) = replay_terminal(&transaction, &identity.request_id, &fingerprint)? {
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(persistence)?;
+        if let Some(existing) =
+            replay_request(&transaction, &identity.request_id, "terminal", &fingerprint)?
+        {
             return Ok(existing);
         }
         ensure_cycle_open(&transaction, identity)?;
         let outcome = self.new_outcome(actor, identity, payload, raw_semantic, evidence);
         insert_terminal(&transaction, &outcome, &fingerprint)?;
+        record_request(
+            &transaction,
+            &outcome.request_id,
+            "terminal",
+            &fingerprint,
+            &outcome,
+        )?;
         transaction.commit().map_err(persistence)?;
         Ok(outcome)
     }
@@ -1052,6 +1825,21 @@ impl CapabilityHandler {
         identity: &TerminalRequestIdentity,
         grant: CapabilityGrant,
     ) -> CapabilityResult<()> {
+        self.validate_actor_target(actor, identity)?;
+        if !actor.allows(grant) || !self.policy.allows(grant) {
+            return Err(CapabilityError::new(
+                CapabilityErrorCode::PermissionDenied,
+                "actor is not authorized for the requested capability",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_actor_target(
+        &self,
+        actor: &AuthenticatedToolContext,
+        identity: &TerminalRequestIdentity,
+    ) -> CapabilityResult<()> {
         self.validate_identity(identity)?;
         if actor.actor_identity.is_empty() || actor.session_id != identity.session_id {
             return Err(CapabilityError::new(
@@ -1060,11 +1848,15 @@ impl CapabilityHandler {
             ));
         }
         validate_identifier("actor identity", &actor.actor_identity)?;
-        if !actor.allows(grant) || !self.policy.allows(grant) {
-            return Err(CapabilityError::new(
-                CapabilityErrorCode::PermissionDenied,
-                "actor is not authorized for the requested capability",
-            ));
+        match (actor.bound_cycle_id(), actor.bound_goal_id()) {
+            (Some(cycle_id), Some(goal_id))
+                if cycle_id == identity.cycle_id && goal_id == identity.goal_id => {}
+            _ => {
+                return Err(CapabilityError::new(
+                    CapabilityErrorCode::AuthorizationScopeViolation,
+                    "mutation target does not match the actor's server-bound cycle and goal",
+                ));
+            }
         }
         Ok(())
     }
@@ -1090,6 +1882,31 @@ impl CapabilityHandler {
                     "requested repository {}/{} does not match authenticated goal repository {}/{}",
                     repository.owner, repository.name, bound.owner, bound.name
                 ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn authorize_engineer_scope(
+        &self,
+        actor: &AuthenticatedToolContext,
+        action: &Action,
+    ) -> CapabilityResult<()> {
+        let Action::SpawnEngineer(spawn) = action else {
+            return Ok(());
+        };
+        if spawn.base_type != BaseType::Copilot
+            || !spawn
+                .requested_permissions
+                .is_subset(actor.engineer_permissions())
+            || spawn
+                .requested_permissions
+                .iter()
+                .any(|permission| !COPILOT_ENGINEER_PERMISSIONS.contains(&permission.as_str()))
+        {
+            return Err(CapabilityError::new(
+                CapabilityErrorCode::AuthorizationScopeViolation,
+                "engineer base_type or requested permissions exceed authenticated actor scope",
             ));
         }
         Ok(())
@@ -1138,6 +1955,12 @@ impl CapabilityHandler {
     fn validate_action(&self, action: &Action) -> CapabilityResult<()> {
         match action {
             Action::SpawnEngineer(value) => {
+                if value.base_type != BaseType::Copilot {
+                    return Err(CapabilityError::new(
+                        CapabilityErrorCode::AuthorizationScopeViolation,
+                        "engineer dispatch requires the canonical copilot base_type",
+                    ));
+                }
                 self.validate_opaque("engineer task", &value.task, true)?;
                 self.validate_governed_repository(&value.repository)?;
                 validate_identifier("claim key", &value.claim_key)?;
@@ -1302,28 +2125,90 @@ fn ensure_effect_result_column(connection: &Connection) -> CapabilityResult<()> 
     Ok(())
 }
 
-fn replay_terminal(
+fn ensure_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    migration: &str,
+) -> CapabilityResult<()> {
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info(?1) WHERE name=?2
+            )",
+            params![table, column],
+            |row| row.get(0),
+        )
+        .map_err(persistence)?;
+    if !exists {
+        connection.execute(migration, []).map_err(persistence)?;
+    }
+    Ok(())
+}
+
+fn replay_request<T: DeserializeOwned>(
     transaction: &Transaction<'_>,
     request_id: &str,
+    mutation_type: &str,
     fingerprint: &str,
-) -> CapabilityResult<Option<TerminalOutcome>> {
-    let existing: Option<(String, Vec<u8>)> = transaction
+) -> CapabilityResult<Option<T>> {
+    let existing: Option<(String, String, Vec<u8>, u32, u32)> = transaction
         .query_row(
-            "SELECT request_hash, outcome_json FROM terminal_outcomes WHERE request_id=?1",
+            "SELECT mutation_type, request_hash, result_json,
+                    request_format_version, result_format_version
+             FROM mutation_requests WHERE request_id=?1",
             [request_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .optional()
         .map_err(persistence)?;
-    let Some((stored_hash, json)) = existing else {
+    let Some((stored_type, stored_hash, json, request_version, result_version)) = existing else {
         return Ok(None);
     };
-    if stored_hash != fingerprint {
-        return Err(idempotency_conflict(request_id));
+    if stored_type != mutation_type
+        || stored_hash != fingerprint
+        || request_version != 2
+        || result_version != 1
+    {
+        return Err(request_conflict(request_id));
     }
     serde_json::from_slice(&json)
         .map(Some)
         .map_err(serialization)
+}
+
+fn record_request<T: Serialize>(
+    transaction: &Transaction<'_>,
+    request_id: &str,
+    mutation_type: &str,
+    fingerprint: &str,
+    result: &T,
+) -> CapabilityResult<()> {
+    let json = serde_json::to_vec(result).map_err(serialization)?;
+    transaction
+        .execute(
+            "INSERT INTO mutation_requests(
+                request_id, mutation_type, request_hash, result_json,
+                request_format_version, result_format_version
+             ) VALUES (?1, ?2, ?3, ?4, 2, 1)",
+            params![request_id, mutation_type, fingerprint, json],
+        )
+        .map_err(|error| {
+            if is_constraint(&error) {
+                request_conflict(request_id)
+            } else {
+                persistence(error)
+            }
+        })?;
+    Ok(())
 }
 
 fn ensure_cycle_open(
@@ -1389,6 +2274,7 @@ where
         String,
         Vec<u8>,
         u32,
+        u64,
         Option<String>,
         Option<i64>,
         Option<String>,
@@ -1410,6 +2296,7 @@ where
                 row.get(9)?,
                 row.get(10)?,
                 row.get(11)?,
+                row.get(12)?,
             ))
         })
         .optional()
@@ -1423,6 +2310,7 @@ where
             state,
             action_json,
             attempt,
+            lease_generation,
             lease_owner,
             lease_expires_at_unix_millis,
             error,
@@ -1440,6 +2328,7 @@ where
                 state: EffectState(state),
                 action: serde_json::from_slice(&action_json).map_err(serialization)?,
                 attempt,
+                lease_generation,
                 lease_owner,
                 lease_expires_at_unix_millis,
                 error,
@@ -1463,7 +2352,7 @@ fn query_effect_by_id(
         connection,
         "
         SELECT effect_id, outcome_id, request_id, kind, state, action_json, attempt,
-               lease_owner, lease_expires_at, error, result_json,
+               lease_generation, lease_owner, lease_expires_at, error, result_json,
                (SELECT decision_json FROM authorization_decisions
                 WHERE effect_id=effect_jobs.effect_id AND decision='approved'
                 ORDER BY recorded_at DESC, rowid DESC LIMIT 1)
@@ -1577,7 +2466,21 @@ fn fingerprint<T: Serialize>(
     let mut writer = HashWriter(Sha256::new());
     serde_json::to_writer(
         &mut writer,
-        &(actor.actor_identity.as_str(), policy_revision, request),
+        &(
+            "simard-canonical-request-v2",
+            "sha256",
+            actor.actor_identity.as_str(),
+            actor.session_id.as_str(),
+            actor.grants(),
+            actor.bound_repository(),
+            actor.bound_cycle_id(),
+            actor.bound_goal_id(),
+            actor.bound_working_directory(),
+            actor.engineer_permissions(),
+            actor.is_observe_only(),
+            policy_revision,
+            request,
+        ),
     )
     .map_err(serialization)?;
     Ok(format!("{:x}", writer.0.finalize()))
@@ -1633,10 +2536,33 @@ fn serialization(error: serde_json::Error) -> CapabilityError {
     )
 }
 
-fn idempotency_conflict(request_id: &str) -> CapabilityError {
+fn request_conflict(request_id: &str) -> CapabilityError {
     CapabilityError::new(
-        CapabilityErrorCode::IdempotencyConflict,
-        format!("request id {request_id:?} was reused with different arguments"),
+        CapabilityErrorCode::RequestConflict,
+        format!("request id {request_id:?} conflicts with a recorded mutation"),
+    )
+}
+
+fn stale_lease(effect_id: &str) -> CapabilityError {
+    CapabilityError::new(
+        CapabilityErrorCode::StaleLease,
+        format!("effect {effect_id:?} lease owner, generation, or expiry is stale"),
+    )
+}
+
+fn effect_lease_owner(lease: &EffectJob) -> CapabilityResult<&str> {
+    lease
+        .lease_owner
+        .as_deref()
+        .filter(|owner| !owner.is_empty() && lease.lease_generation > 0)
+        .ok_or_else(|| stale_lease(&lease.effect_id))
+}
+
+fn system_actor(lease: &EffectJob) -> AuthenticatedToolContext {
+    AuthenticatedToolContext::new(
+        "effect-worker",
+        format!("effect:{}", lease.effect_id),
+        std::iter::empty(),
     )
 }
 
@@ -1671,7 +2597,8 @@ mod approval_tests {
             "session-approval",
             [CapabilityGrant::RecordAction(ActionKind::RequestMerge)],
         )
-        .scoped_to_repository(RepositoryRef::new("rysweet", "Simard"));
+        .scoped_to_repository(RepositoryRef::new("rysweet", "Simard"))
+        .bound_to_cycle_goal("cycle-approval", "goal-approval");
         let outcome = handler
             .record_action(
                 &actor,
@@ -1706,15 +2633,42 @@ mod approval_tests {
             .expect("query effect")
             .expect("effect");
         handler
-            .block_effect_authorization(&effect, "approval required")
+            .block_effect_authorization(
+                &effect,
+                "request-block-privileged-effect",
+                "approval required",
+            )
             .expect("block effect");
+
+        let authority = ApprovalAuthority::for_test("release-operator");
+        let missing = handler
+            .issue_privileged_approval(&authority, "", &effect.effect_id)
+            .expect_err("approval request id is required");
+        assert_eq!(missing.code(), CapabilityErrorCode::InvalidIdentifier);
+        let cross_type = handler
+            .issue_privileged_approval(
+                &authority,
+                "request-block-privileged-effect",
+                &effect.effect_id,
+            )
+            .expect_err("authorization block request id cannot be reused for approval");
+        assert_eq!(cross_type.code(), CapabilityErrorCode::RequestConflict);
 
         let approval = handler
             .issue_privileged_approval(
-                &ApprovalAuthority::for_test("release-operator"),
+                &authority,
+                "request-approve-privileged-effect",
                 &effect.effect_id,
             )
             .expect("issue approval");
+        let replay = handler
+            .issue_privileged_approval(
+                &authority,
+                "request-approve-privileged-effect",
+                &effect.effect_id,
+            )
+            .expect("approval replay");
+        assert_eq!(replay, approval);
         let approved = handler
             .effect_for_outcome(&outcome.outcome_id)
             .expect("query approved effect")

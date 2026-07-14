@@ -2,13 +2,18 @@
 
 pub mod assets;
 pub mod binary;
+mod health;
 pub mod paths;
 pub mod rollback;
 pub mod systemd;
 
+#[cfg(test)]
+mod health_regressions;
+
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use paths::InstallLayout;
 
@@ -23,6 +28,7 @@ pub struct InstallConfig {
     pub dry_run: bool,
     pub systemd_user_dir: Option<PathBuf>,
     pub systemctl: Option<PathBuf>,
+    pub health_check: Option<PathBuf>,
     pub rollback_manifest: Option<PathBuf>,
     help_only: bool,
 }
@@ -47,14 +53,32 @@ pub struct InstallOutcome {
 
 #[derive(Debug)]
 pub struct InstallError {
+    kind: InstallErrorKind,
     message: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InstallErrorKind {
+    General,
+    SnapshotFailure,
+    HealthCheckFailure,
+    RollbackFailure,
 }
 
 impl InstallError {
     pub fn new(message: impl Into<String>) -> Self {
+        Self::with_kind(InstallErrorKind::General, message)
+    }
+
+    pub fn with_kind(kind: InstallErrorKind, message: impl Into<String>) -> Self {
         Self {
+            kind,
             message: message.into(),
         }
+    }
+
+    pub fn kind(&self) -> InstallErrorKind {
+        self.kind
     }
 }
 
@@ -84,8 +108,9 @@ pub fn run(config: InstallConfig) -> InstallResult<InstallOutcome> {
         }
         let systemctl = systemd::resolve_systemctl(config.systemctl.as_deref())?;
         let _install_lock = paths::acquire_install_lock(&layout)?;
-        rollback::restore_verified_backup(&layout, manifest)?;
-        systemd::activate(&systemctl)?;
+        rollback::restore_verified_backup(&layout, manifest, &systemctl).map_err(|error| {
+            InstallError::with_kind(InstallErrorKind::RollbackFailure, error.to_string())
+        })?;
         println!(
             "Rolled back Simard from verified manifest {}",
             manifest.display()
@@ -108,21 +133,69 @@ pub fn run(config: InstallConfig) -> InstallResult<InstallOutcome> {
     let staging = paths::prepare_staging(&layout)?;
     binary::stage_binary(&current_binary, &staging.binary)?;
     assets::stage_prompt_assets(&prompt_source, &staging.prompt_assets)?;
-    let verified_backup = rollback::create_verified_backup(&layout)?;
+    let verified_backup =
+        rollback::create_verified_backup(&layout, &systemctl).map_err(|error| {
+            InstallError::with_kind(InstallErrorKind::SnapshotFailure, error.to_string())
+        })?;
+    let configured_health_check = config
+        .health_check
+        .clone()
+        .or_else(|| std::env::var_os("SIMARD_INSTALL_HEALTH_CHECK").map(PathBuf::from));
 
-    let prior_binary_backup = if binary::live_binary_matches_source(&current_binary, &layout)? {
-        println!(
-            "Installed binary already matches {}; keeping it in place",
-            layout.binary_path.display()
-        );
-        None
-    } else {
-        let backup = binary::preserve_prior_binary(&layout)?;
-        binary::replace_live_binary(&staging.binary, &layout.binary_path)?;
-        backup
+    let install_result: InstallResult<Option<PathBuf>> = (|| {
+        let prior_binary_backup = if binary::live_binary_matches_source(&current_binary, &layout)? {
+            println!(
+                "Installed binary already matches {}; keeping it in place",
+                layout.binary_path.display()
+            );
+            None
+        } else {
+            let backup = binary::preserve_prior_binary(&layout)?;
+            binary::replace_live_binary(&staging.binary, &layout.binary_path)?;
+            backup
+        };
+        assets::replace_live_prompt_assets(&staging.prompt_assets, &layout)?;
+        systemd::install_units(&layout, &rendered_units)?;
+        systemd::activate(&systemctl)?;
+        let (health_program, health_args): (&std::path::Path, &[&str]) =
+            if let Some(health_check) = configured_health_check.as_deref() {
+                (health_check, &[])
+            } else {
+                (&layout.binary_path, &["self-health", "--json"])
+            };
+        health::run_with_args(health_program, health_args, Duration::from_secs(120)).map_err(
+            |error| {
+                InstallError::with_kind(
+                    InstallErrorKind::HealthCheckFailure,
+                    format!("health check failed: {error}"),
+                )
+            },
+        )?;
+        Ok(prior_binary_backup)
+    })();
+
+    let prior_binary_backup = match install_result {
+        Ok(backup) => backup,
+        Err(install_error) => {
+            let rollback_result = rollback::restore_verified_backup(
+                &layout,
+                &verified_backup.manifest_path,
+                &systemctl,
+            );
+            let _ = paths::remove_staging(&staging.root);
+            return match rollback_result {
+                Ok(()) => err(format!(
+                    "installation failed and was rolled back: {install_error}"
+                )),
+                Err(rollback_error) => Err(InstallError::with_kind(
+                    InstallErrorKind::RollbackFailure,
+                    format!(
+                        "installation failed: {install_error}; rollback failed: {rollback_error}"
+                    ),
+                )),
+            };
+        }
     };
-    assets::replace_live_prompt_assets(&staging.prompt_assets, &layout)?;
-    systemd::install_units(&layout, &rendered_units)?;
     paths::remove_staging(&staging.root)?;
 
     rollback::print_guidance(
@@ -130,8 +203,6 @@ pub fn run(config: InstallConfig) -> InstallResult<InstallOutcome> {
         prior_binary_backup.as_deref(),
         &verified_backup.manifest_path,
     );
-    systemd::activate(&systemctl)?;
-
     println!("Installed Simard to {}", layout.simard_home.display());
     println!(
         "Installed prompt assets to {}",

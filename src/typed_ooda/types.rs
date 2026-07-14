@@ -1,9 +1,17 @@
 use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+pub(crate) const COPILOT_ENGINEER_PERMISSIONS: [&str; 5] = [
+    "repo_read",
+    "repo_write",
+    "process_exec",
+    "github_issue_write",
+    "github_pr_write",
+];
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct OpaqueBytes(Vec<u8>);
@@ -244,6 +252,7 @@ pub struct CompletionRef {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TerminalRequestIdentity {
     pub request_id: String,
     pub session_id: String,
@@ -268,6 +277,7 @@ impl TerminalRequestIdentity {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecordActionRequest {
     pub identity: TerminalRequestIdentity,
     pub action: Action,
@@ -276,6 +286,7 @@ pub struct RecordActionRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecordNoActionRequest {
     pub identity: TerminalRequestIdentity,
     pub reason: OpaqueBytes,
@@ -284,6 +295,7 @@ pub struct RecordNoActionRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecordBlockedRequest {
     pub identity: TerminalRequestIdentity,
     pub reason: OpaqueBytes,
@@ -294,6 +306,7 @@ pub struct RecordBlockedRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecordCompletedRequest {
     pub identity: TerminalRequestIdentity,
     pub summary: OpaqueBytes,
@@ -303,11 +316,56 @@ pub struct RecordCompletedRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecordProgressRequest {
     pub identity: TerminalRequestIdentity,
     pub percent: u8,
     pub summary: OpaqueBytes,
     pub evidence: Vec<EvidenceRef>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessExecRequest {
+    pub identity: TerminalRequestIdentity,
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub working_directory: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessExecutionStatus {
+    Reserved,
+    Running,
+    Completed,
+    Failed,
+    Indeterminate,
+}
+
+impl ProcessExecutionStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Reserved => "reserved",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Indeterminate => "indeterminate",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProcessExecutionRecord {
+    pub execution_id: String,
+    pub request_id: String,
+    pub session_id: String,
+    pub cycle_id: String,
+    pub goal_id: String,
+    pub status: ProcessExecutionStatus,
+    pub exit_code: Option<i32>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -431,13 +489,19 @@ pub struct ProgressRecord {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CapabilityErrorCode {
     InvalidArgument,
+    InvalidIdentifier,
     PayloadTooLarge,
     Unauthenticated,
     PermissionDenied,
+    AuthorizationScopeViolation,
     AdmissionRejected,
     StateTransitionRejected,
     IdempotencyConflict,
+    RequestConflict,
     TerminalAlreadyRecorded,
+    StaleLease,
+    MutationCapExhausted,
+    IndeterminateExecution,
     PersistenceFailed,
 }
 
@@ -478,6 +542,7 @@ pub enum CapabilityGrant {
     RecordBlocked,
     RecordCompleted,
     RecordProgress,
+    ProcessExec,
     DirectMerge,
     DirectDeploy,
 }
@@ -488,6 +553,10 @@ pub struct AuthenticatedToolContext {
     pub session_id: String,
     grants: BTreeSet<CapabilityGrant>,
     bound_repository: Option<RepositoryRef>,
+    bound_cycle_id: Option<String>,
+    bound_goal_id: Option<String>,
+    bound_working_directory: Option<PathBuf>,
+    engineer_permissions: BTreeSet<String>,
     observe_only: bool,
 }
 
@@ -502,12 +571,39 @@ impl AuthenticatedToolContext {
             session_id: session_id.into(),
             grants: grants.into_iter().collect(),
             bound_repository: None,
+            bound_cycle_id: None,
+            bound_goal_id: None,
+            bound_working_directory: None,
+            engineer_permissions: BTreeSet::new(),
             observe_only: false,
         }
     }
 
     pub fn scoped_to_repository(mut self, repository: RepositoryRef) -> Self {
         self.bound_repository = Some(repository);
+        self
+    }
+
+    pub fn bound_to_cycle_goal(
+        mut self,
+        cycle_id: impl Into<String>,
+        goal_id: impl Into<String>,
+    ) -> Self {
+        self.bound_cycle_id = Some(cycle_id.into());
+        self.bound_goal_id = Some(goal_id.into());
+        self
+    }
+
+    pub fn with_engineer_permissions(
+        mut self,
+        permissions: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.engineer_permissions = permissions.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn scoped_to_working_directory(mut self, path: impl Into<PathBuf>) -> Self {
+        self.bound_working_directory = Some(path.into());
         self
     }
 
@@ -528,6 +624,22 @@ impl AuthenticatedToolContext {
         self.bound_repository.as_ref()
     }
 
+    pub(crate) fn bound_cycle_id(&self) -> Option<&str> {
+        self.bound_cycle_id.as_deref()
+    }
+
+    pub(crate) fn bound_goal_id(&self) -> Option<&str> {
+        self.bound_goal_id.as_deref()
+    }
+
+    pub(crate) fn engineer_permissions(&self) -> &BTreeSet<String> {
+        &self.engineer_permissions
+    }
+
+    pub(crate) fn bound_working_directory(&self) -> Option<&Path> {
+        self.bound_working_directory.as_deref()
+    }
+
     pub(crate) fn is_observe_only(&self) -> bool {
         self.observe_only
     }
@@ -544,6 +656,7 @@ pub struct CapabilityPolicy {
     pub allowed_repository_owners: BTreeSet<String>,
     pub allowed_engineer_permissions: BTreeSet<String>,
     pub allowed_deployment_environments: BTreeSet<String>,
+    pub process_exec_mutations_per_cycle: usize,
 }
 
 impl CapabilityPolicy {
@@ -559,6 +672,7 @@ impl CapabilityPolicy {
                 CapabilityGrant::RecordBlocked,
                 CapabilityGrant::RecordCompleted,
                 CapabilityGrant::RecordProgress,
+                CapabilityGrant::ProcessExec,
             ]
             .into_iter()
             .collect(),
@@ -579,6 +693,7 @@ impl CapabilityPolicy {
             .into_iter()
             .collect(),
             allowed_deployment_environments: ["production".to_string()].into_iter().collect(),
+            process_exec_mutations_per_cycle: 8,
         }
     }
 
@@ -590,6 +705,11 @@ impl CapabilityPolicy {
 
     pub fn with_max_semantic_payload_bytes(mut self, bytes: usize) -> Self {
         self.max_semantic_payload_bytes = bytes;
+        self
+    }
+
+    pub fn with_process_exec_mutations_per_cycle(mut self, limit: usize) -> Self {
+        self.process_exec_mutations_per_cycle = limit;
         self
     }
 
@@ -613,6 +733,7 @@ impl CapabilityPolicy {
             max_semantic_payload_bytes: usize,
             max_concurrent_engineers: usize,
             max_disk_used_percent: u8,
+            process_exec_mutations_per_cycle: Option<usize>,
         }
 
         #[derive(Deserialize)]
@@ -662,6 +783,11 @@ impl CapabilityPolicy {
         if document.limits.max_semantic_payload_bytes == 0
             || !(1..=64).contains(&document.limits.max_concurrent_engineers)
             || !(1..=99).contains(&document.limits.max_disk_used_percent)
+            || document
+                .limits
+                .process_exec_mutations_per_cycle
+                .unwrap_or(8)
+                == 0
         {
             return Err(CapabilityError::new(
                 CapabilityErrorCode::InvalidArgument,
@@ -673,6 +799,16 @@ impl CapabilityPolicy {
         for capability in document.capabilities {
             grants.insert(Self::parse_capability_grant(&capability)?);
         }
+        if document
+            .engineer_permissions
+            .iter()
+            .any(|permission| !COPILOT_ENGINEER_PERMISSIONS.contains(&permission.as_str()))
+        {
+            return Err(CapabilityError::new(
+                CapabilityErrorCode::AuthorizationScopeViolation,
+                "capability policy contains a permission outside the canonical Copilot base-type allowlist",
+            ));
+        }
         Ok(Self {
             revision: document.policy_id,
             grants,
@@ -683,6 +819,10 @@ impl CapabilityPolicy {
             allowed_repository_owners: document.repository_owners.into_iter().collect(),
             allowed_engineer_permissions: document.engineer_permissions.into_iter().collect(),
             allowed_deployment_environments: document.deployment_environments.into_iter().collect(),
+            process_exec_mutations_per_cycle: document
+                .limits
+                .process_exec_mutations_per_cycle
+                .unwrap_or(8),
         })
     }
 
@@ -706,6 +846,7 @@ impl CapabilityPolicy {
             "record_blocked" => CapabilityGrant::RecordBlocked,
             "record_completed" => CapabilityGrant::RecordCompleted,
             "record_progress" => CapabilityGrant::RecordProgress,
+            "process_exec" => CapabilityGrant::ProcessExec,
             _ => {
                 return Err(CapabilityError::new(
                     CapabilityErrorCode::InvalidArgument,
@@ -725,7 +866,7 @@ pub(crate) fn validate_identifier(name: &str, value: &str) -> CapabilityResult<(
         })
     {
         return Err(CapabilityError::new(
-            CapabilityErrorCode::InvalidArgument,
+            CapabilityErrorCode::InvalidIdentifier,
             format!("{name} must be 1..=128 safe ASCII characters"),
         ));
     }

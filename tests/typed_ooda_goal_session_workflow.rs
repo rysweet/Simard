@@ -61,7 +61,8 @@ fn executor() -> (tempfile::TempDir, GoalSessionExecutor) {
             CapabilityGrant::RecordCompleted,
         ],
     )
-    .scoped_to_repository(RepositoryRef::new("rysweet", "Simard"));
+    .scoped_to_repository(RepositoryRef::new("rysweet", "Simard"))
+    .with_engineer_permissions(["repo_read", "repo_write"]);
     let admission = AdmissionSnapshot {
         concurrent_engineers: 0,
         disk_used_percent: 5,
@@ -299,7 +300,8 @@ fn permanent_downstream_failure_fails_the_cycle_but_keeps_the_action_terminal() 
             simard::typed_ooda::ActionKind::SpawnEngineer,
         )],
     )
-    .scoped_to_repository(RepositoryRef::new("rysweet", "Simard"));
+    .scoped_to_repository(RepositoryRef::new("rysweet", "Simard"))
+    .with_engineer_permissions(["repo_read"]);
     let executor = GoalSessionExecutor::new(
         handler,
         actor,

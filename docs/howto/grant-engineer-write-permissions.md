@@ -46,12 +46,12 @@ The recognized permission names are:
 | --- | --- |
 | `repo_read` | `--allow-tool=read` and `--allow-tool=search` |
 | `repo_write` | `--allow-tool=write` |
-| `process_exec` | `--allow-tool=shell` |
+| `process_exec` | Simard process-broker MCP tool |
 | `github_issue_write` | GitHub MCP with `create_issue` |
 | `github_pr_write` | GitHub MCP with pull-request create/update tools |
 
-`process_exec` currently enables Copilot's shell tool. It is not a separate
-transactional process broker and has no per-cycle process count.
+`process_exec` never enables Copilot's built-in shell tool. Each command uses a
+typed request ID and consumes one transactionally reserved per-cycle slot.
 
 ## 2. Restrict repository scope
 

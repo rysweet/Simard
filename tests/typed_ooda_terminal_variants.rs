@@ -16,9 +16,13 @@ fn identity(request_id: &str, cycle_id: &str) -> TerminalRequestIdentity {
     TerminalRequestIdentity::new(request_id, "session-variants", cycle_id, "goal-4052")
 }
 
-fn actor(grants: impl IntoIterator<Item = CapabilityGrant>) -> AuthenticatedToolContext {
+fn actor(
+    cycle_id: &str,
+    grants: impl IntoIterator<Item = CapabilityGrant>,
+) -> AuthenticatedToolContext {
     AuthenticatedToolContext::new("goal-session-actor", "session-variants", grants)
         .scoped_to_repository(simard::typed_ooda::RepositoryRef::new("rysweet", "Simard"))
+        .bound_to_cycle_goal(cycle_id, "goal-4052")
 }
 
 fn handler() -> (tempfile::TempDir, CapabilityHandler) {
@@ -43,7 +47,7 @@ fn admitted() -> AdmissionSnapshot {
 #[test]
 fn blocked_terminal_preserves_reason_blocker_and_retry_policy() {
     let (_dir, handler) = handler();
-    let actor = actor([CapabilityGrant::RecordBlocked]);
+    let actor = actor("cycle-blocked-1", [CapabilityGrant::RecordBlocked]);
     let reason = b"Waiting for credential rotation.\nNO ACTION is not a protocol.".to_vec();
     let request = RecordBlockedRequest {
         identity: identity("request-blocked-1", "cycle-blocked-1"),
@@ -73,7 +77,7 @@ fn blocked_terminal_preserves_reason_blocker_and_retry_policy() {
 #[test]
 fn completed_terminal_requires_typed_evidence_and_never_accepts_prose_as_proof() {
     let (_dir, handler) = handler();
-    let actor = actor([CapabilityGrant::RecordCompleted]);
+    let completed_actor = actor("cycle-completed-1", [CapabilityGrant::RecordCompleted]);
     let repository = RepositoryRef::new("rysweet", "Simard");
     let evidence = EvidenceRef::CheckRun {
         repository: repository.clone(),
@@ -92,13 +96,14 @@ fn completed_terminal_requires_typed_evidence_and_never_accepts_prose_as_proof()
     };
 
     let outcome = handler
-        .record_completed(&actor, request)
+        .record_completed(&completed_actor, request)
         .expect("typed completion evidence");
     assert_eq!(outcome.kind, TerminalKind::Completed);
 
+    let missing_actor = actor("cycle-completed-2", [CapabilityGrant::RecordCompleted]);
     let missing = handler
         .record_completed(
-            &actor,
+            &missing_actor,
             RecordCompletedRequest {
                 identity: identity("request-completed-2", "cycle-completed-2"),
                 summary: OpaqueBytes::from(
@@ -119,7 +124,10 @@ fn completed_terminal_requires_typed_evidence_and_never_accepts_prose_as_proof()
 #[test]
 fn file_issue_action_commits_a_request_without_scraping_identifiers_from_text() {
     let (_dir, handler) = handler();
-    let actor = actor([CapabilityGrant::RecordAction(ActionKind::FileIssue)]);
+    let actor = actor(
+        "cycle-issue-1",
+        [CapabilityGrant::RecordAction(ActionKind::FileIssue)],
+    );
     let action = Action::FileIssue(FileIssueAction {
         repository: RepositoryRef::new("rysweet", "Simard"),
         title: OpaqueBytes::from(b"Track typed OODA rollout".to_vec()),
@@ -152,14 +160,17 @@ fn file_issue_action_commits_a_request_without_scraping_identifiers_from_text() 
 #[test]
 fn merge_and_deploy_actions_create_requests_but_do_not_execute_privileged_effects() {
     let (_dir, handler) = handler();
-    let actor = actor([
-        CapabilityGrant::RecordAction(ActionKind::RequestMerge),
-        CapabilityGrant::RecordAction(ActionKind::RequestDeploy),
-    ]);
+    let merge_actor = actor(
+        "cycle-merge-1",
+        [
+            CapabilityGrant::RecordAction(ActionKind::RequestMerge),
+            CapabilityGrant::RecordAction(ActionKind::RequestDeploy),
+        ],
+    );
 
     let merge = handler
         .record_action(
-            &actor,
+            &merge_actor,
             RecordActionRequest {
                 identity: identity("request-merge-1", "cycle-merge-1"),
                 action: Action::RequestMerge(RequestMergeAction {
@@ -186,9 +197,16 @@ fn merge_and_deploy_actions_create_requests_but_do_not_execute_privileged_effect
         "request_merge"
     );
 
+    let deploy_actor = actor(
+        "cycle-deploy-1",
+        [
+            CapabilityGrant::RecordAction(ActionKind::RequestMerge),
+            CapabilityGrant::RecordAction(ActionKind::RequestDeploy),
+        ],
+    );
     let deploy = handler
         .record_action(
-            &actor,
+            &deploy_actor,
             RecordActionRequest {
                 identity: identity("request-deploy-1", "cycle-deploy-1"),
                 action: Action::RequestDeploy(RequestDeployAction {

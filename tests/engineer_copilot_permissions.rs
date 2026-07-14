@@ -72,6 +72,33 @@ impl Drop for AmplihackBinEnv {
     }
 }
 
+struct EngineerPermissionsEnv {
+    prior: Option<String>,
+}
+
+impl EngineerPermissionsEnv {
+    fn set(value: &str) -> Self {
+        let prior = std::env::var("SIMARD_ENGINEER_PERMISSIONS").ok();
+        // SAFETY: guarded by the named serial-test lock below.
+        unsafe {
+            std::env::set_var("SIMARD_ENGINEER_PERMISSIONS", value);
+        }
+        Self { prior }
+    }
+}
+
+impl Drop for EngineerPermissionsEnv {
+    fn drop(&mut self) {
+        // SAFETY: guarded by the named serial-test lock below.
+        unsafe {
+            match self.prior.take() {
+                Some(value) => std::env::set_var("SIMARD_ENGINEER_PERMISSIONS", value),
+                None => std::env::remove_var("SIMARD_ENGINEER_PERMISSIONS"),
+            }
+        }
+    }
+}
+
 /// Write a bash shim at `dir/amplihack` that captures argv + a slice of env
 /// to `dir/observations.log` and exits 0. Returns the path to the shim.
 ///
@@ -136,21 +163,20 @@ fn read_observations(dir: &Path) -> String {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn copilot_argv_contract_includes_both_permission_flags_in_order() {
+fn copilot_argv_contract_does_not_grant_unrestricted_tools_or_paths() {
     let argv = engineer_argv(AgentKind::Copilot, "objective", 7);
 
-    let tools_pos = argv
-        .iter()
-        .position(|a| a == "--allow-all-tools")
-        .expect("--allow-all-tools must be present (issue #1717)");
-    let paths_pos = argv
-        .iter()
-        .position(|a| a == "--allow-all-paths")
-        .expect("--allow-all-paths must be present");
-
     assert!(
-        tools_pos < paths_pos,
-        "--allow-all-tools must precede --allow-all-paths: {argv:?}"
+        !argv.iter().any(|a| a == "--allow-all-tools"),
+        "unrestricted tools bypass scoped authorization: {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|a| a == "--allow-all-paths"),
+        "unrestricted paths bypass repository scope: {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|a| a == "--allow-tool=shell"),
+        "builtin shell bypasses process_exec accounting: {argv:?}"
     );
 
     // Issue #2640: the prompt rides on stdin, so `--subprocess-safe` must be
@@ -195,7 +221,7 @@ fn copilot_argv_contract_includes_both_permission_flags_in_order() {
 
 #[test]
 #[serial(simard_amplihack_bin_env)]
-fn spawned_copilot_subprocess_receives_allow_all_tools_in_argv() {
+fn spawned_copilot_subprocess_receives_no_unrestricted_authorization() {
     let dir = tempfile::tempdir().expect("tempdir");
     let shim = write_amplihack_observation_shim(dir.path());
     let _guard = AmplihackBinEnv::set(&shim);
@@ -208,13 +234,18 @@ fn spawned_copilot_subprocess_receives_allow_all_tools_in_argv() {
 
     let log = read_observations(dir.path());
     assert!(
-        log.contains("ARG: --allow-all-tools"),
-        "spawned subprocess argv must include --allow-all-tools (issue #1717); \
+        !log.contains("ARG: --allow-all-tools"),
+        "spawned subprocess must not receive unrestricted tools; \
          observations:\n{log}"
     );
     assert!(
-        log.contains("ARG: --allow-all-paths"),
-        "spawned subprocess argv must include --allow-all-paths; \
+        !log.contains("ARG: --allow-all-paths"),
+        "spawned subprocess must not receive unrestricted paths; \
+         observations:\n{log}"
+    );
+    assert!(
+        !log.contains("ARG: --allow-tool=shell"),
+        "spawned subprocess shell would bypass the scoped process broker; \
          observations:\n{log}"
     );
     assert!(
@@ -244,20 +275,6 @@ fn spawned_copilot_subprocess_receives_allow_all_tools_in_argv() {
         stdin_section.contains("engineer prompt body"),
         "the prompt body must be delivered on the subprocess STDIN (issue #2640); \
          observations:\n{log}"
-    );
-
-    // Anti-regression (#1717): --allow-all-tools must still precede
-    // --allow-all-paths in the captured argv ordering.
-    let tools_idx = log
-        .find("ARG: --allow-all-tools")
-        .expect("flag presence already asserted");
-    let paths_idx = log
-        .find("ARG: --allow-all-paths")
-        .expect("flag presence already asserted");
-    assert!(
-        tools_idx < paths_idx,
-        "--allow-all-tools must precede --allow-all-paths in the spawned argv \
-         ordering; observations:\n{log}"
     );
 }
 
@@ -290,7 +307,7 @@ fn split_argv_stdin(log: &str) -> (String, String) {
 
 #[test]
 #[serial(simard_amplihack_bin_env)]
-fn spawned_copilot_subprocess_inherits_copilot_allow_all_env() {
+fn spawned_copilot_subprocess_does_not_inherit_copilot_allow_all_env() {
     let dir = tempfile::tempdir().expect("tempdir");
     let shim = write_amplihack_observation_shim(dir.path());
     let _guard = AmplihackBinEnv::set(&shim);
@@ -300,16 +317,37 @@ fn spawned_copilot_subprocess_inherits_copilot_allow_all_env() {
 
     let log = read_observations(dir.path());
     assert!(
-        log.contains("ENV: COPILOT_ALLOW_ALL=1"),
-        "spawned subprocess must have COPILOT_ALLOW_ALL=1 in its environment \
-         (belt-and-suspenders fallback for upstream flag renames; \
-         issue #1717); observations:\n{log}"
+        log.contains("ENV: COPILOT_ALLOW_ALL=<unset>"),
+        "COPILOT_ALLOW_ALL bypasses every scoped tool grant; observations:\n{log}"
     );
     // Sanity check: parent PATH still inherited.
     assert!(
         log.contains("ENV: PATH_SET=yes"),
         "parent PATH must still be inherited by the spawned subprocess; \
          observations:\n{log}"
+    );
+}
+
+#[test]
+#[serial(simard_amplihack_bin_env, simard_engineer_permissions_env)]
+fn typed_dispatch_rejects_unknown_permissions_and_noncanonical_base_type() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shim = write_amplihack_observation_shim(dir.path());
+    let _bin = AmplihackBinEnv::set(&shim);
+    let _permissions = EngineerPermissionsEnv::set("repo_read,shell");
+
+    let unknown = run_engineer_subprocess("prompt", dir.path(), AgentKind::Copilot)
+        .expect_err("unknown permission must fail before spawn");
+    assert!(unknown.to_string().contains("unknown capability"));
+
+    drop(_permissions);
+    let _permissions = EngineerPermissionsEnv::set("repo_read");
+    let wrong_type = run_engineer_subprocess("prompt", dir.path(), AgentKind::RustyClawd)
+        .expect_err("typed permissions require canonical Copilot base type");
+    assert!(wrong_type.to_string().contains("canonical Copilot"));
+    assert!(
+        !dir.path().join("observations.log").exists(),
+        "rejected dispatch must not spawn the agent"
     );
 }
 
@@ -331,7 +369,7 @@ fn spawned_copilot_subprocess_inherits_copilot_allow_all_env() {
 
 #[test]
 #[serial(simard_amplihack_bin_env)]
-fn engineer_dispatch_with_write_commit_pr_prompt_returns_ok_with_full_grant() {
+fn engineer_dispatch_with_write_commit_pr_prompt_stays_least_privilege() {
     let dir = tempfile::tempdir().expect("tempdir");
     let shim = write_amplihack_observation_shim(dir.path());
     let _guard = AmplihackBinEnv::set(&shim);
@@ -352,16 +390,14 @@ fn engineer_dispatch_with_write_commit_pr_prompt_returns_ok_with_full_grant() {
 
     let log = read_observations(dir.path());
 
-    // Verify the contract that allows the real Copilot to actually do the
-    // write/commit/PR work was passed through.
     assert!(
-        log.contains("ARG: --allow-all-tools"),
-        "write/commit/PR engineer dispatch missing --allow-all-tools; \
+        !log.contains("ARG: --allow-all-tools"),
+        "write/commit/PR prompt must not widen tool authorization; \
          observations:\n{log}"
     );
     assert!(
-        log.contains("ENV: COPILOT_ALLOW_ALL=1"),
-        "write/commit/PR engineer dispatch missing COPILOT_ALLOW_ALL=1; \
+        log.contains("ENV: COPILOT_ALLOW_ALL=<unset>"),
+        "write/commit/PR prompt must not set COPILOT_ALLOW_ALL; \
          observations:\n{log}"
     );
     // Issue #2640: the literal prompt reaches the subprocess on STDIN, not argv.

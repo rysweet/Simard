@@ -19,9 +19,20 @@ fn identity(request_id: &str, cycle_id: &str) -> TerminalRequestIdentity {
     TerminalRequestIdentity::new(request_id, "session-4052", cycle_id, "goal-4052")
 }
 
-fn actor(grants: impl IntoIterator<Item = CapabilityGrant>) -> AuthenticatedToolContext {
+fn actor(
+    cycle_id: &str,
+    grants: impl IntoIterator<Item = CapabilityGrant>,
+) -> AuthenticatedToolContext {
     AuthenticatedToolContext::new("goal-session-actor", "session-4052", grants)
         .scoped_to_repository(RepositoryRef::new("rysweet", "Simard"))
+        .bound_to_cycle_goal(cycle_id, "goal-4052")
+        .with_engineer_permissions([
+            "repo_read",
+            "repo_write",
+            "process_exec",
+            "github_issue_write",
+            "github_pr_write",
+        ])
 }
 
 fn policy() -> CapabilityPolicy {
@@ -124,7 +135,10 @@ fn unknown_action_variant_is_rejected_by_the_typed_protocol() {
 #[test]
 fn successful_action_commits_one_authoritative_terminal_and_effect_job() {
     let (_dir, handler) = handler();
-    let actor = actor([CapabilityGrant::RecordAction(ActionKind::SpawnEngineer)]);
+    let actor = actor(
+        "cycle-action-1",
+        [CapabilityGrant::RecordAction(ActionKind::SpawnEngineer)],
+    );
     let request = action_request(
         "request-action-1",
         "cycle-action-1",
@@ -167,7 +181,7 @@ fn successful_action_commits_one_authoritative_terminal_and_effect_job() {
 #[test]
 fn no_action_reason_and_raw_semantic_are_persisted_without_interpretation() {
     let (_dir, handler) = handler();
-    let actor = actor([CapabilityGrant::RecordNoAction]);
+    let actor = actor("cycle-no-action-1", [CapabilityGrant::RecordNoAction]);
     let reason = b"NO ACTION is merely text here.\n{\"looks\":\"structured\"}\0".to_vec();
     let raw = vec![0xff, b'\n', b'A', b'C', b'T', b'I', b'O', b'N', b':'];
     let request = RecordNoActionRequest {
@@ -205,7 +219,7 @@ fn no_action_reason_and_raw_semantic_are_persisted_without_interpretation() {
 fn exact_replay_returns_the_existing_durable_result_even_after_restart() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("outcomes.sqlite3");
-    let actor = actor([CapabilityGrant::RecordNoAction]);
+    let actor = actor("cycle-replay-1", [CapabilityGrant::RecordNoAction]);
     let request = RecordNoActionRequest {
         identity: identity("request-replay-1", "cycle-replay-1"),
         reason: OpaqueBytes::from(b"same reason".to_vec()),
@@ -232,7 +246,7 @@ fn exact_replay_returns_the_existing_durable_result_even_after_restart() {
 #[test]
 fn conflicting_request_id_reuse_fails_without_changing_the_first_record() {
     let (_dir, handler) = handler();
-    let actor = actor([CapabilityGrant::RecordNoAction]);
+    let actor = actor("cycle-conflict-1", [CapabilityGrant::RecordNoAction]);
     let first = RecordNoActionRequest {
         identity: identity("request-conflict-1", "cycle-conflict-1"),
         reason: OpaqueBytes::from(b"first reason".to_vec()),
@@ -249,7 +263,7 @@ fn conflicting_request_id_reuse_fails_without_changing_the_first_record() {
         .record_no_action(&actor, conflicting)
         .expect_err("conflicting replay must fail");
 
-    assert_eq!(error.code(), CapabilityErrorCode::IdempotencyConflict);
+    assert_eq!(error.code(), CapabilityErrorCode::RequestConflict);
     assert_eq!(
         handler
             .terminal_for_cycle("session-4052", "cycle-conflict-1")
@@ -263,7 +277,7 @@ fn conflicting_request_id_reuse_fails_without_changing_the_first_record() {
 #[test]
 fn a_second_request_id_cannot_create_another_terminal_for_the_cycle() {
     let (_dir, handler) = handler();
-    let actor = actor([CapabilityGrant::RecordNoAction]);
+    let actor = actor("cycle-single-terminal", [CapabilityGrant::RecordNoAction]);
     let make_request = |request_id: &str| RecordNoActionRequest {
         identity: identity(request_id, "cycle-single-terminal"),
         reason: OpaqueBytes::from(b"same semantic result".to_vec()),
@@ -290,7 +304,7 @@ fn a_second_request_id_cannot_create_another_terminal_for_the_cycle() {
 #[test]
 fn denied_mutation_records_blocked_while_session_mismatch_fails_without_a_terminal() {
     let (_dir, handler) = handler();
-    let denied_actor = actor([]);
+    let denied_actor = actor("cycle-denied-1", []);
     let request = action_request("request-denied-1", "cycle-denied-1", b"task".to_vec());
 
     let denied = handler
@@ -333,8 +347,11 @@ fn denied_mutation_records_blocked_while_session_mismatch_fails_without_a_termin
 #[test]
 fn observe_only_and_repository_scope_denials_are_durable_blocked_outcomes() {
     let (_dir, handler) = handler();
-    let observe_only =
-        actor([CapabilityGrant::RecordAction(ActionKind::SpawnEngineer)]).with_observe_only(true);
+    let observe_only = actor(
+        "cycle-observe-only",
+        [CapabilityGrant::RecordAction(ActionKind::SpawnEngineer)],
+    )
+    .with_observe_only(true);
     let blocked = handler
         .record_action(
             &observe_only,
@@ -354,7 +371,10 @@ fn observe_only_and_repository_scope_denials_are_durable_blocked_outcomes() {
             .is_none()
     );
 
-    let scoped = actor([CapabilityGrant::RecordAction(ActionKind::FileIssue)]);
+    let scoped = actor(
+        "cycle-wrong-repo",
+        [CapabilityGrant::RecordAction(ActionKind::FileIssue)],
+    );
     let wrong_repo = handler
         .record_action(
             &scoped,
@@ -384,11 +404,14 @@ fn observe_only_and_repository_scope_denials_are_durable_blocked_outcomes() {
 #[test]
 fn invalid_arguments_and_admission_rejection_are_explicit_failures() {
     let (_dir, handler) = handler();
-    let actor = actor([CapabilityGrant::RecordAction(ActionKind::SpawnEngineer)]);
+    let invalid_actor = actor(
+        "cycle-invalid-1",
+        [CapabilityGrant::RecordAction(ActionKind::SpawnEngineer)],
+    );
 
     let invalid = handler
         .record_action(
-            &actor,
+            &invalid_actor,
             action_request("request-invalid-1", "cycle-invalid-1", Vec::new()),
             &admitted(),
         )
@@ -399,9 +422,13 @@ fn invalid_arguments_and_admission_rejection_are_explicit_failures() {
     rejected_snapshot
         .active_claims
         .insert("rysweet/Simard:goal-4052".to_string());
+    let rejected_actor = actor(
+        "cycle-rejected-1",
+        [CapabilityGrant::RecordAction(ActionKind::SpawnEngineer)],
+    );
     let rejected = handler
         .record_action(
-            &actor,
+            &rejected_actor,
             action_request(
                 "request-rejected-1",
                 "cycle-rejected-1",
@@ -432,7 +459,7 @@ fn oversized_semantic_payload_fails_without_truncation_or_a_terminal() {
     let policy = CapabilityPolicy::new("policy-v1").with_max_semantic_payload_bytes(16);
     let handler =
         CapabilityHandler::open(dir.path().join("outcomes.sqlite3"), policy).expect("open handler");
-    let actor = actor([CapabilityGrant::RecordNoAction]);
+    let actor = actor("cycle-oversized-1", [CapabilityGrant::RecordNoAction]);
     let oversized = vec![b'x'; 17];
 
     let error = handler
@@ -459,7 +486,7 @@ fn oversized_semantic_payload_fails_without_truncation_or_a_terminal() {
 #[test]
 fn progress_is_separate_and_does_not_satisfy_the_terminal_requirement() {
     let (_dir, handler) = handler();
-    let actor = actor([CapabilityGrant::RecordProgress]);
+    let progress_actor = actor("cycle-progress-1", [CapabilityGrant::RecordProgress]);
     let request = RecordProgressRequest {
         identity: identity("request-progress-1", "cycle-progress-1"),
         percent: 42,
@@ -471,7 +498,7 @@ fn progress_is_separate_and_does_not_satisfy_the_terminal_requirement() {
     };
 
     let progress = handler
-        .record_progress(&actor, request)
+        .record_progress(&progress_actor, request)
         .expect("authorized progress");
 
     assert_eq!(progress.percent, 42);
@@ -483,9 +510,10 @@ fn progress_is_separate_and_does_not_satisfy_the_terminal_requirement() {
         "progress is durable evidence, not an Act terminal"
     );
 
+    let invalid_actor = actor("cycle-progress-2", [CapabilityGrant::RecordProgress]);
     let invalid = handler
         .record_progress(
-            &actor,
+            &invalid_actor,
             RecordProgressRequest {
                 identity: identity("request-progress-invalid", "cycle-progress-2"),
                 percent: 101,
@@ -510,7 +538,10 @@ fn persistence_open_failure_is_not_converted_to_a_business_outcome() {
 fn expired_running_effect_is_recovered_under_the_original_request_identity() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("outcomes.sqlite3");
-    let actor = actor([CapabilityGrant::RecordAction(ActionKind::SpawnEngineer)]);
+    let actor = actor(
+        "cycle-recovery-1",
+        [CapabilityGrant::RecordAction(ActionKind::SpawnEngineer)],
+    );
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
 
     let outcome = {
@@ -527,7 +558,12 @@ fn expired_running_effect_is_recovered_under_the_original_request_identity() {
             )
             .expect("record action");
         let claimed = handler
-            .claim_next_effect("worker-before-crash", now, Duration::from_secs(30))
+            .claim_next_effect(
+                "worker-before-crash",
+                "request-claim-before-crash",
+                now,
+                Duration::from_secs(30),
+            )
             .expect("claim effect")
             .expect("pending effect");
         assert_eq!(claimed.request_id, "request-recovery-1");
@@ -537,7 +573,7 @@ fn expired_running_effect_is_recovered_under_the_original_request_identity() {
 
     let handler = CapabilityHandler::open(&path, policy()).expect("reopen after crash");
     let recovered = handler
-        .recover_expired_effects(now + Duration::from_secs(31))
+        .recover_expired_effects("request-recover-after-crash", now + Duration::from_secs(31))
         .expect("recover expired leases");
     assert_eq!(recovered, 1);
 
@@ -546,7 +582,7 @@ fn expired_running_effect_is_recovered_under_the_original_request_identity() {
         .expect("effect query")
         .expect("effect remains durable");
     assert_eq!(effect.request_id, "request-recovery-1");
-    assert_eq!(effect.state.as_str(), "pending");
+    assert_eq!(effect.state.as_str(), "indeterminate");
     assert_eq!(
         handler
             .terminal_count("session-4052", "cycle-recovery-1")
