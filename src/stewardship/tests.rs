@@ -292,3 +292,51 @@ fn process_run_files_new_when_no_match() {
     assert_eq!(gh.search_call_count(), 1);
     assert_eq!(gh.create_call_count(), 1);
 }
+
+#[test]
+fn process_run_scrubs_secrets_only_from_the_new_issue_body() {
+    let gh = FakeGhClient::new();
+    let mut run = sample_run();
+    let github_token = "ghp_EXAMPLE_FAKE_TOKEN_do_not_use_00";
+    let credential = "github_pat_EXAMPLE_FAKE_CREDENTIAL_do_not_use_00";
+    let pem_begin = format!("-----BEGIN {} PRIVATE KEY-----", "OPENSSH");
+    let pem_end = format!("-----END {} PRIVATE KEY-----", "OPENSSH");
+    let pem_body = "EXAMPLEfakeKEYbodyDoNotUse000000000000";
+    run.error_text = format!(
+        "deployment failed while publishing release\n\
+         Authorization: Bearer {github_token}\n\
+         credential={credential}\n\
+         {pem_begin}\n{pem_body}\n{pem_end}\n\
+         retry exhausted after 3 attempts"
+    );
+    let raw_signature = failure_signature(&run.failure_kind, &run.error_text);
+
+    let outcome = process_orchestrator_run(&run, &gh).unwrap();
+
+    assert_eq!(
+        outcome,
+        StewardshipOutcome::FiledNew {
+            repo: "rysweet/Simard".to_string(),
+            issue_number: 999,
+            url: "https://github.com/rysweet/Simard/issues/999".to_string(),
+            signature: raw_signature.clone(),
+        }
+    );
+    assert_eq!(
+        gh.search_calls.lock().unwrap().as_slice(),
+        &[("rysweet/Simard".to_string(), raw_signature.clone())],
+        "deduplication must continue using the raw error text"
+    );
+
+    let calls = gh.create_calls.lock().unwrap();
+    let body = &calls[0].2;
+    for secret in [github_token, credential, pem_body, pem_begin.as_str()] {
+        assert!(
+            !body.contains(secret),
+            "secret material must not cross the issue-filing boundary"
+        );
+    }
+    assert!(body.contains("deployment failed while publishing release"));
+    assert!(body.contains("retry exhausted after 3 attempts"));
+    assert!(body.contains(&format!("stewardship-signature: {raw_signature}")));
+}

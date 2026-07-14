@@ -72,6 +72,7 @@ pub fn process_orchestrator_run(
         kind = run.failure_kind,
         src = run.source_module
     );
+    let scrubbed_error = crate::journal::scrub_secrets(&run.error_text);
     let body = format!(
         "filed-by: simard-stewardship\n\
          stewardship-signature: {sig}\n\
@@ -85,7 +86,7 @@ pub fn process_orchestrator_run(
         rid = run.run_id,
         step = run.failed_step,
         src = run.source_module,
-        err = run.error_text,
+        err = scrubbed_error,
     );
     let new = gh.create_issue(&repo, &title, &body)?;
     Ok(StewardshipOutcome::FiledNew {
