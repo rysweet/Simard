@@ -9,7 +9,6 @@ status: implemented
 related:
   - ../reference/ooda-capability-api.md
   - ../howto/spawn-engineers-from-ooda-daemon.md
-  - ../operations/deploy-and-roll-back-typed-ooda.md
   - ../tutorials/complete-a-typed-ooda-cycle.md
 ---
 
@@ -201,8 +200,6 @@ rename-based replacement. Every published swap has a synced compensation path;
 any later failure restores earlier surfaces in reverse order. An absent
 first-install service baseline removes newly introduced units without starting
 nonexistent prior services.
-
-See [Deploy and roll back typed OODA](../operations/deploy-and-roll-back-typed-ooda.md).
 
 ## Verified invariants
 

@@ -419,7 +419,6 @@ nav:
     - COIN Benchmark Reference: reference/coin-benchmark.md
   - Operations:
     - Overview: operations/index.md
-    - Deploy and Roll Back Typed OODA: operations/deploy-and-roll-back-typed-ooda.md
     - Verified Backups of the Live Store: operations/verified-backups.md
     - Cognitive-Memory Durability: operations/cognitive-memory-durability.md
     - Cognitive-Memory WAL Recovery Runbook: operations/cognitive-memory-wal-recovery-runbook.md

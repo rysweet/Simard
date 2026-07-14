@@ -27,7 +27,6 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [Typed-capability OODA architecture](./architecture/typed-ooda-loop.md) - Semantic/typed boundary, actor-session authority, durable terminals, effect outbox, and the explicit remaining migration boundary.
 - [OODA capability API](./reference/ooda-capability-api.md) - Terminal schemas, authorization, replay, effect leases, current limitations, errors, and policy configuration.
 - [Tutorial: Complete a typed OODA cycle](./tutorials/complete-a-typed-ooda-cycle.md) - Deterministic action, no-action, replay, and conflict examples.
-- [Deploy and roll back typed OODA](./operations/deploy-and-roll-back-typed-ooda.md) - Verified filesystem backup, explicit health verification, and deliberate rollback.
 - [Tutorial: Run your first local session](./tutorials/run-your-first-local-session.md) - Exercise the local runtime through the primary CLI.
 - [Simard installer reference](./reference/simard-installer.md) - Shipped deployment contract for the binary, prompt assets, user systemd units, rollback artifacts, and dry-run controls.
 - [How to move from terminal recipes into engineer runs](./howto/move-from-terminal-recipes-into-engineer-runs.md) - Start with a discoverable terminal recipe, then continue into the repo-grounded engineer loop through the same explicit state root.
