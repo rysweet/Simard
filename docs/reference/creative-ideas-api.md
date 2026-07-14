@@ -7,7 +7,7 @@ description: >
   CreativeIdeasThread generator and its GenerationInputs / IdeaSource, the
   four-reviewer pipeline (Reviewer, Review, FeedbackSynthesizer,
   SynthesisOutcome, SuccessMetric), the routing functions (route_idea_to_goal,
-  route_idea_to_issue, mark_idea_pr) with the IdeaGhClient seam, the two new
+  route_idea_to_issue, mark_idea_pr) through the shared GitHub mutation guard, the two new
   SimardError variants, configuration (SIMARD_CREATIVE_IDEAS_*), telemetry, the
   test fakes, the un-gated run_now manual entrypoint, and the dashboard HTTP
   surface (Run now / Promote / Prune). Subsystem is wired into the running
@@ -49,8 +49,9 @@ To turn it on and operate it, see
     routing surface, and the dedup/portfolio/budget helpers **are implemented and
     tested**. The subsystem is **default-ON, opt-out** behind
     `SIMARD_CREATIVE_IDEAS_ENABLED`, is **registered** with the `Mind` scheduler,
-    and its idea source, reviewers, and `gh` routing run for real (tests drive
-    them through deterministic fakes). The creative-idea memory type (status
+    and its idea source, reviewers, and guarded GitHub routing run for real
+    (tests drive them through deterministic mutation-store and transport
+    fakes). The creative-idea memory type (status
     lifecycle + typed links) is owned upstream in `amplihack-memory-lib`
     (guideline G2) and re-exported here. This reference describes the surface as
     built; the
@@ -73,8 +74,8 @@ src/creative_ideas/
   mod.rs         # CreativeIdeasConfig::from_env (gating), const identifiers, re-exports
   reviewers.rs   # Reviewer, Review, ReviewVerdict, ReviewFlags, 4 adapters, fakes
   synthesis.rs   # FeedbackSynthesizer, DefaultSynthesizer, SynthesisOutcome, SuccessMetric
-  routing.rs     # route_idea_to_goal / route_idea_to_issue / mark_idea_pr,
-                 # IdeaGhClient + FakeIdeaGhClient, IdeaPrGate
+  routing.rs     # route_idea_to_goal plus pure guarded issue/PR request adapters,
+                 # IdeaPrGate
   dedup.rs       # is_near_duplicate, select_balanced, within_budget
   dedup_gate.rs  # PLANNED (#2925, not yet implemented): semantic dedup +
                  # enhance gate — plan_candidate, PlannedAction, apply_enhance,
@@ -533,13 +534,16 @@ and timestamps are deterministic under test.
 ### 2. Accepted but flagged → a GitHub Issue tagging the owner
 
 ```rust
-pub fn route_idea_to_issue(idea: &CreativeIdea, gh: &dyn IdeaGhClient, repo: &str)
-    -> SimardResult<GhIssue>;
+pub fn route_idea_to_issue(
+    idea: &CreativeIdea,
+    guard: &mut GitHubMutationGuard,
+    authorization: &AutonomousGitHubAuthorization,
+) -> Result<GitHubMutationOutcome, GitHubMutationError>;
 ```
 
-Applies only to ideas in `NeedsHumanReview`. Creates an issue with label
-`creative-idea` and assignee `rysweet` (`CREATIVE_IDEA_OWNER`). The body embeds
-`idea.node_id` and the synthesized next steps.
+Applies only to ideas in `NeedsHumanReview` whose typed lineage is eligible.
+It constructs the labeled and assigned request; the guard derives mutation
+identity, reserves budget, reconciles restart state, and owns transport.
 
 ### 3. Idea-PR human-review gate
 
@@ -551,14 +555,17 @@ pub struct IdeaPrGate {
     pub originating_idea: String,           // idea.node_id (link back)
 }
 
-pub fn mark_idea_pr(pr_number: u64, idea: &CreativeIdea, gh: &dyn IdeaGhClient, repo: &str)
-    -> SimardResult<IdeaPrGate>;
+pub fn mark_idea_pr(
+    pr_number: u64,
+    idea: &CreativeIdea,
+    guard: &mut GitHubMutationGuard,
+    authorization: &AutonomousGitHubAuthorization,
+) -> Result<IdeaPrGate, GitHubMutationError>;
 ```
 
 A PR arising from a creative-idea goal is blocked from merge by three standard
-GitHub mechanisms — **never** `--admin` or `--no-verify`. `repo` (`owner/name`)
-is required because every `IdeaGhClient` PR method (`set_pr_draft`,
-`add_pr_label`, `request_pr_review`) is repo-scoped:
+GitHub mechanisms - **never** `--admin` or `--no-verify`. Each draft, label,
+body edit, and review request is a repository-scoped guarded operation:
 
 - **Draft** — a draft PR cannot be merged by anyone until marked ready.
 - **Blocking label** — `creative-idea-needs-human-review`; branch protection /
@@ -571,24 +578,18 @@ is required because every `IdeaGhClient` PR method (`set_pr_draft`,
 A unit test asserts the constructed `gh` argument vectors contain neither
 `--admin` nor `--no-verify`.
 
-### `IdeaGhClient` extension seam
+### Pure GitHub request adapter
 
 ```rust
-pub trait IdeaGhClient {
-    fn create_labeled_issue(&self, repo: &str, title: &str, body: &str,
-        labels: &[&str], assignees: &[&str]) -> SimardResult<GhIssue>;
-    fn set_pr_draft(&self, repo: &str, pr: u64, draft: bool) -> SimardResult<()>;
-    fn add_pr_label(&self, repo: &str, pr: u64, label: &str) -> SimardResult<()>;
-    fn request_pr_review(&self, repo: &str, pr: u64, reviewer: &str) -> SimardResult<()>;
-}
+pub fn build_idea_pr_mutations(
+    idea: &CreativeIdea,
+    pull_request: PullRequestNumber,
+) -> Result<Vec<GitHubMutationRequest>, IdeaRoutingError>;
 ```
 
-- **Available now:** `FakeIdeaGhClient` records calls for assertions.
-- **`// FUTURE:`** the real subprocess impl (`gh issue create --label …
-  --assignee …`, `gh pr ready --undo`, `gh pr edit --add-label`, `gh pr edit
-  --add-reviewer`) reusing the `RealGhClient` pattern from
-  `src/stewardship/gh_client.rs`. See the [Stewardship API](./stewardship-api.md)
-  for that pattern.
+- The adapter is pure. Issue and PR writes both use
+  [the stewardship mutation guard](./stewardship-mutation-guard.md).
+- Guard transport fakes assert the shared budget and emitted operations.
 
 ### Outcome feedback
 
@@ -654,8 +655,8 @@ exposes a small HTTP surface over this library for the Creative Ideas tab — se
 | `Reviewer::review` | `&ReviewContext` | `Review` | `ReviewUnavailable` |
 | `FeedbackSynthesizer::synthesize` | `&ReviewContext, &[Review]` | `SynthesisOutcome` | `ReviewBlocked`, `InvalidIdeaTransition` |
 | `route_idea_to_goal` | `&CreativeIdea, &dyn GoalStore, now_epoch: u64` | `GoalRecord` | `InvalidGoalRecord`, `InvalidIdeaTransition` |
-| `route_idea_to_issue` | `&CreativeIdea, &dyn IdeaGhClient, repo: &str` | `GhIssue` | `ActionExecutionFailed`, `GitCommandFailed`, `CommandTimeout` |
-| `mark_idea_pr` | `pr: u64, &CreativeIdea, &dyn IdeaGhClient, repo: &str` | `IdeaPrGate` | `ActionExecutionFailed`, `GitCommandFailed`, `CommandTimeout` |
+| `route_idea_to_issue` | `&CreativeIdea, &mut GitHubMutationGuard, &AutonomousGitHubAuthorization` | `GitHubMutationOutcome` | `GitHubMutationError` |
+| `mark_idea_pr` | `pr: u64, &CreativeIdea, &mut GitHubMutationGuard, &AutonomousGitHubAuthorization` | `IdeaPrGate` | `GitHubMutationError` |
 | `mark_completed` | `&mut CreativeIdea, metric_met: bool` | `()` | `InvalidIdeaTransition` |
 | `CreativeIdeasThread::tick` | `&mut ThreadContext` | `ThreadOutcome` | **never `Err`** — folds into `ThreadOutcome::failed` |
 | `CreativeIdeasThread::run_now` | `&mut ThreadContext` | `GenerationReport` | `ReviewUnavailable`, `PersistentStoreIo`, `InvalidIdeaTransition` (returned, not folded) |
@@ -697,9 +698,9 @@ With no wire protocol, three externally-observable contracts must remain stable:
 
 - **Trait/type API** — the Rust surface is
   `#![allow(dead_code)]` and carries no semver promise. `Reviewer`,
-  `FeedbackSynthesizer`, `IdeaSource`, and `IdeaGhClient` are the long-term
-  extension seams: extend via new impls or new trait methods with defaults,
-  never by changing an existing signature.
+  `FeedbackSynthesizer`, `IdeaSource`, and `GitHubMutationTransport` are the
+  long-term extension seams: extend via new impls or guarded operation variants,
+  never through a side-channel writer.
 - **Enum evolution** — adding an `IdeaStatus`/`ReviewVerdict` state is
   backward-compatible for writers, but per the fail-closed rule an older reader
   rejects an unknown state. Ship such a change **reader-first**.
@@ -729,7 +730,7 @@ part of the module surface (`cfg(test)` where applicable):
 | `FakeCreativeIdeaStore` | `CreativeIdeaStore` | persistence tests (plus a fake `CognitiveMemoryOps` round-trip) |
 | Fake reviewers + fake `FeedbackSynthesizer` | `Reviewer` / `FeedbackSynthesizer` | pipeline / synthesis tests |
 | `FakeGoalStore` | `GoalStore` | `route_idea_to_goal` |
-| `FakeIdeaGhClient` | `IdeaGhClient` | `route_idea_to_issue`, `mark_idea_pr` (asserts no `--admin`/`--no-verify`) |
+| Fake mutation store and transport | `GitHubMutationGuard` dependencies | issue/PR routing, restart replay, shared-budget enforcement, and no privilege-bypass arguments |
 | Injected `now_epoch: u64` | wall clock | deterministic timestamps (no `Clock` trait) |
 
 See the [design test plan](../design/creative-ideas-thread.md#test-plan-no-network-all-fakes)

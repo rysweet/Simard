@@ -166,9 +166,9 @@ it runs the authoritative OODA cycle inline, then ticks the `Mind`
 options — **neither implemented in this spike**:
 
 - **M1 read-only sensor:** register an `impl CognitiveThread` next to
-  `MaintenanceThread` / `EngineerLogAnalysisThread`. It only Observes → emits signals
-  → files deduped issues → renders a report. It fits the least-authority
-  `ThreadContext` because it takes **no** high-risk action.
+  `MaintenanceThread` / `EngineerLogAnalysisThread`. It only observes, emits
+  signals, persists bounded observations, and renders a report. Workstream gaps
+  may notify the operator but never file issues or seed the backlog.
 - **M2+ acting Overseer:** spawn a sibling supervised task alongside the loop, holding
   the guarded capability handles. This is the co-process proper.
 
@@ -203,10 +203,10 @@ is an orchestrator over shipped code, not a reimplementation.
 | `Intervention` | Capability trait | Existing Simard reuse (file:line) |
 |----------------|------------------|-----------------------------------|
 | `LaunchRecipe{brief}` | `RecipeLauncher` | `amplihack recipe run amplifier-bundle/recipes/smart-orchestrator.yaml -c task_description=…` (`src/bin/simard_engineer_loop_recipe.rs:51`, `src/bin/simard_self_improve_recipe.rs:50`); `recipe-runner-rs` + `AMPLIHACK_AGENT_BINARY` (`src/stewardship/recipe_merge_judge.rs:191`); concurrency via `agent_supervisor::spawn_subordinate` (`src/agent_supervisor/lifecycle/spawn.rs:27`); output parse `recipe_output::extract` (`src/recipe_output/extract.rs`). |
-| `VerifyAndMergePr{repo,pr}` | `PrOps::verify` + `PrOps::merge` | gates `evaluate_objective_gates` (`src/stewardship/merge_authority.rs:495`); merge `merge_pr_if_merge_ready` (`:564`); review `review_pipeline::{review_diff,should_commit}` (`src/review_pipeline.rs:128,147`). |
-| `ResolveConflict{repo,pr}` | `PrOps::resolve_conflict` | `git_guardrails::check_git_safety` (`src/git_guardrails.rs:41`) around the union-merge / `--no-verify` push. |
+| `VerifyAndMergePr{repo,pr}` | `PrOps::verify` | read-only gates use `evaluate_objective_gates`; merge mutation uses the shared durable GitHub guard. |
+| `ResolveConflict{repo,pr}` | `PrOps::resolve_conflict` | disabled until conflict-resolution push is integrated with the durable GitHub guard. |
 | `Deploy{commit}` | `Deployer` | `self_deploy::orchestrator::SelfDeployOrchestrator::run` (`src/self_deploy/orchestrator.rs:229`); `self_relaunch::{build_canary,verify_canary,all_gates_passed,default_gates,handover}` (`src/self_relaunch/*`); marker `env!("SIMARD_GIT_HASH")` via `self_deploy::health`. |
-| `FileIssue{run}` | `IssueFiler` | `stewardship::process_orchestrator_run` (`src/stewardship/mod.rs:51`); dedup `stewardship::{failure_signature,find_existing}` (`src/stewardship/dedup.rs`); backlog `goal_curation::enqueue_stewardship_issue`. |
+| `FileIssue{run}` | `IssueFiler` | Typed condition identity and provenance followed by `stewardship::MutationGuard`; durable reservation and the shared cycle budget are mandatory. No backlog item is created. |
 | `TransferGoal{goal}` | `MeetingHost` | `meeting_repl::run_meeting_repl` (`src/meeting_repl/repl.rs:211`); `meeting_facilitator` handoff (`MeetingHandoff`, `write_meeting_handoff`); `meetings::PersistedMeetingGoalUpdate`. |
 | `Report` | `StatusReader` | `status::provider::assemble` (`src/status/provider.rs:58`) rendered via `status::render::to_terminal` (`src/status/render.rs:28`) / `status::json::to_string_pretty` (`src/status/json.rs:12`); optional operator push via `ConversationChannel` (feature-gated — see [Design consolidation](#design-consolidation)). |
 | `RunAudit{scope}` | `Auditor` | `self_quality_audit::run_self_quality_audit` (`src/self_quality_audit.rs`); recipe `prompt_assets/simard/recipes/monthly-self-quality-audit.yaml`. |
@@ -336,8 +336,9 @@ Durable *findings* are **GitHub issues or code**, never committed snapshot docs
 | Self-reference | Advances the goal board | **Refuses its own artifacts**; dedups against OODA's in-flight work |
 
 The Overseer works **above** Simard's OODA. When it finds a *process* problem it
-either files a deduped issue, launches a fix workstream, or **transfers a goal** to
-Simard via a meeting — it does not reach into the OODA loop's state.
+may submit a stable-condition issue proposal through the shared guard, launch a
+fix workstream, or **transfer a goal** to Simard via a meeting - it does not
+reach into the OODA loop's state.
 
 ## Rust sketch
 
@@ -376,7 +377,7 @@ implementation follows — it replaces "trust the citations" with "citations ver
 | Report render | `status::render::to_terminal` (`src/status/render.rs:28`); `status::json::{to_string, to_string_pretty}` (`src/status/json.rs:7,12`) |
 | Merge gates | `stewardship::merge_authority::evaluate_objective_gates` (`src/stewardship/merge_authority.rs:495`) |
 | Merge | `stewardship::merge_authority::merge_pr_if_merge_ready` (`:564`) |
-| Issue filing / dedup | `stewardship::process_orchestrator_run` (`src/stewardship/mod.rs:51`); `failure_signature` / `find_existing` (`src/stewardship/dedup.rs`) |
+| Issue-write idempotency | `stewardship::MutationGuard`; the durable issue mutation identity and journal are authoritative across restart |
 | Recipe launch | `amplihack recipe run … smart-orchestrator` (`src/bin/simard_engineer_loop_recipe.rs:51`) |
 | Deploy / canary | `self_deploy::orchestrator::SelfDeployOrchestrator::run` + `self_relaunch` gates |
 | Goal transfer | `meeting_repl::run_meeting_repl` (`src/meeting_repl/repl.rs:211`) |
@@ -427,7 +428,7 @@ Each phase is independently shippable, additive, and gated behind an env flag
 
 | Milestone | Scope | Reuse | Test strategy | Exit criteria |
 |-----------|-------|-------|---------------|---------------|
-| **M1 — read-only observer** | Observe + Orient + `Report` + `FileIssue` only. Optional packaging as an `impl CognitiveThread` sensor. No launches, no merges, no deploy. | `status::assemble`; `stewardship::process_orchestrator_run` (deduped issues); `cost_tracking`. | Unit: `signals_from` thresholds; `orient` dedup vs in-flight; issue-filer idempotency with a fake `GhClient` (no network). | Runs behind flag; emits a report + files deduped issues; provably takes no write action beyond issue-filing. |
+| **M1 — read-only observer** | Observe + Orient + `Report`; routine workstream gaps surface observations and may notify, with zero issue or backlog mutation. | `status::assemble`; typed provenance eligibility; `cost_tracking`. | Unit: thresholds, recursive live/restart exclusion, notification dedup, and zero mutation calls. | Runs behind flag and emits an honest report without creating work from its own observations. |
 | **M2 — autonomous fix-launching + PR verify/merge** | `LaunchRecipe` (smart-orchestrator), poll → PR, `VerifyAndMergePr` for green/merge-ready PRs (routine autonomy). | `spawn_subordinate` / recipe runner; `merge_pr_if_merge_ready`; `evaluate_objective_gates`; `review_pipeline`; NEW pr-verify diff-scans (Bridge / `print!` / additive / PRD). | Unit: budget gate holds launches; per-cycle launch cap; pr-verify checklist pass/fail on fixture diffs; merge only when `ready`. Integration: fake recipe runner + fake `PrGhClient`. | Launches a fix for a seeded process problem and merges the resulting green PR through the gated authority, in a fixture. |
 | **M3 — guarded deploy + goal transfer** | `Deploy` (HIGH-RISK, opt-in) via canary gates + marker update; `ResolveConflict`; `TransferGoal` via meeting REPL. | `SelfDeployOrchestrator` + `self_relaunch` gates + marker; `git_guardrails`; `run_meeting_repl` + handoff. | Unit: deploy gate refuses no-op/rollback/red-canary/crash-loop; HIGH-RISK gated off by default; recursion guard refuses own PRs. Integration: fake deployer/canary; meeting handoff round-trip. | With opt-in, advances the deployed-commit marker only on a green canary; otherwise escalates. Never touches `~/.simard/worktrees`. |
 | **M4 — audits + self-tuning** | `RunAudit` loops (crusty-old-engineer-gated) on demand; recurring self-audit; threshold self-tuning of `SIMARD_OVERSEER_*` knobs. | `self_quality_audit::run_self_quality_audit`; `monthly-self-quality-audit.yaml`; telemetry history. | Unit: audit scope routing; tuning stays within clamped floors; no unbounded growth. | Runs a bounded audit loop and adjusts thresholds within floors, all observable in telemetry. |
@@ -438,11 +439,12 @@ Each phase is independently shippable, additive, and gated behind an env flag
   cognitive-thread discipline): thresholds, dedup, gating, sequencing, recursion.
 - **Injected capability fakes** for every trait (the sketch's tests already do this
   for all eight) so behavior is asserted with zero side effects.
-- **Idempotency** on `FileIssue`/`LaunchRecipe` (a second cycle finds the existing
-  issue/workstream and does not duplicate) — mirrors `stewardship` dedup tests.
-- **Failure isolation**: a failing capability degrades one intervention, never the
-  cycle (Observe failure aborts the cycle cleanly; board-read failure degrades to
-  "no dedup", never a crash).
+- **Idempotency** on `FileIssue` uses the persisted typed mutation identity;
+  restart replay and unfinished-reservation reconciliation make no duplicate
+  transport call.
+- **Failure visibility**: mutation-guard failures abort the cycle. Observation
+  failures remain isolated only where the capability contract explicitly
+  permits it; missing provenance never degrades to eligible input.
 
 ## Risks and sharp edges (crusty review)
 
@@ -487,9 +489,9 @@ built, these must be resolved — they are hard gates, not advice.
 6. **Single-source the budget.** `BudgetGate` hardcodes `500.0`; read
    `SIMARD_DAILY_BUDGET_USD` so it cannot drift from the OODA loop's ceiling.
 
-7. **Prefer M1. Earn the rest.** M1 (observe → report → file deduped issues)
-   delivers most of the value (visibility) at a fraction of the risk. M2–M4 should
-   be justified by M1's signals proving boring, not assumed.
+7. **Prefer M1. Earn the rest.** M1 (observe -> persist -> report/notify)
+   delivers visibility without manufacturing new work. M2-M4 should be
+   justified by M1's signals proving boring, not assumed.
 
 ### References
 - Knight Capital, SEC order (2013): https://www.sec.gov/litigation/admin/2013/34-70694.pdf
@@ -513,7 +515,9 @@ built, these must be resolved — they are hard gates, not advice.
 - [StatusSnapshot API](../reference/status-snapshot-api.md) and
   [Unified telemetry and status](../concepts/unified-telemetry-and-status.md) — the
   Observe input.
-- [Stewardship API](../reference/stewardship-api.md) — deduped issue filing.
+- [Stewardship API](../reference/stewardship-api.md) and
+  [mutation guard](../reference/stewardship-mutation-guard.md) - typed,
+  restart-safe GitHub mutation.
 - [Self-Deploy API](../reference/self-deploy-api.md) and
   [Cross-repo merge authority](../reference/cross-repo-merge-authority.md) — the
   guarded deploy and merge actions.

@@ -48,53 +48,47 @@ fn is_breaker_defer_ref(wip: &WipRef) -> bool {
 /// Files a tracking issue for a goal the breaker escalated. Injected so tests
 /// exercise the escalation path without shelling out to `gh`.
 pub(crate) trait NoProgressIssueFiler {
-    /// File (or attempt to file) a tracking issue. Failures must be logged, not
-    /// propagated: the goal is already Blocked with the sentinel, and a missing
-    /// issue must never abort the cycle.
-    fn file_issue(&self, title: &str, body: &str);
+    fn file_issue(
+        &self,
+        goal_id: &str,
+        provenance: crate::stewardship::ArtifactProvenance,
+        title: &str,
+        body: &str,
+    ) -> crate::error::SimardResult<()>;
 }
 
-/// Production filer: `gh issue create --label ooda-stuck`, mirroring the
-/// brain-failure safeguard in `ooda_actions::advance_goal::spawn`.
-pub(crate) struct GhIssueFiler;
+pub(crate) struct GhIssueFiler {
+    cycle_id: crate::stewardship::CycleId,
+}
+
+impl GhIssueFiler {
+    pub(crate) fn for_cycle(cycle_count: u32) -> Self {
+        Self {
+            cycle_id: crate::stewardship::CycleId::new(format!("ooda:{cycle_count}"))
+                .expect("numeric OODA cycle identity is valid"),
+        }
+    }
+}
 
 impl NoProgressIssueFiler for GhIssueFiler {
-    fn file_issue(&self, title: &str, body: &str) {
-        match std::process::Command::new("gh")
-            .args([
-                "issue",
-                "create",
-                "--title",
-                title,
-                "--body",
-                body,
-                "--label",
-                "ooda-stuck",
-            ])
-            .output()
-        {
-            Ok(out) if out.status.success() => {
-                tracing::warn!(
-                    target: "simard::ooda",
-                    title = %title,
-                    "no-progress breaker: tracking issue filed for stuck goal",
-                );
-            }
-            Ok(out) => {
-                tracing::error!(
-                    target: "simard::ooda",
-                    stderr = %String::from_utf8_lossy(&out.stderr),
-                    "no-progress breaker: gh issue create failed (goal still Blocked)",
-                );
-            }
-            Err(e) => {
-                tracing::error!(
-                    target: "simard::ooda",
-                    error = %e,
-                    "no-progress breaker: gh spawn failed (goal still Blocked)",
-                );
-            }
-        }
+    fn file_issue(
+        &self,
+        goal_id: &str,
+        provenance: crate::stewardship::ArtifactProvenance,
+        title: &str,
+        body: &str,
+    ) -> crate::error::SimardResult<()> {
+        crate::stewardship::mutation_guard::create_issue(
+            self.cycle_id.clone(),
+            crate::stewardship::IssueMutationIdentity::from_source("ooda-no-progress", goal_id),
+            provenance,
+            "rysweet/Simard",
+            title,
+            body,
+            vec!["ooda-stuck".to_string()],
+            Vec::new(),
+        )?;
+        Ok(())
     }
 }
 
@@ -125,6 +119,8 @@ pub(crate) struct NoProgressBreakerReport {
     /// breaker fails **closed** (no terminal action, counter preserved) rather
     /// than silently blocking or completing on an unknown cause (issue #16).
     pub investigation_errors: Vec<String>,
+    /// Fatal issue-mutation errors. The owning OODA cycle must propagate these.
+    pub mutation_errors: Vec<String>,
     /// Goals whose **bare** `[OODA-SAFEGUARD] … needs human review` block was
     /// re-investigated this cycle by the already-blocked re-investigation pass
     /// (issue #17) and upgraded away from bare — completed / dropped / healed /
@@ -349,7 +345,13 @@ pub(crate) fn apply_no_progress_breaker_with_threshold(
                 {
                     g.status = GoalProgress::Blocked(blocked_reason);
                 }
-                filer.file_issue(&issue_title, &issue_body);
+                let provenance = state
+                    .active_goals
+                    .provenance_for(crate::goal_curation::ArtifactKind::Goal, goal_id);
+                if let Err(error) = filer.file_issue(goal_id, provenance, &issue_title, &issue_body)
+                {
+                    report.mutation_errors.push(error.to_string());
+                }
                 report.escalated.push(goal_id.to_string());
                 tracing::warn!(
                     target: "simard::ooda",
@@ -657,7 +659,12 @@ fn apply_resolution_side_effects(
                     {
                         g.status = GoalProgress::Blocked(blocked_reason.clone());
                     }
-                    filer.file_issue(
+                    let provenance = state
+                        .active_goals
+                        .provenance_for(crate::goal_curation::ArtifactKind::Goal, goal_id);
+                    if let Err(error) = filer.file_issue(
+                        goal_id,
+                        provenance,
                         &format!(
                             "OODA no-progress breaker: precondition heal failed for '{goal_id}'"
                         ),
@@ -665,7 +672,9 @@ fn apply_resolution_side_effects(
                             "Healing the MISSING-PRECONDITION for goal `{goal_id}` failed: \
                              {err}\n\nThe goal has been Blocked with the WHY attached."
                         ),
-                    );
+                    ) {
+                        report.mutation_errors.push(error.to_string());
+                    }
                     tracker.reset_count(goal_id);
                     report.escalated.push(goal_id.to_string());
                     tracing::error!(
@@ -758,7 +767,12 @@ fn apply_resolution_side_effects(
             {
                 g.status = GoalProgress::Blocked(blocked_reason);
             }
-            filer.file_issue(&issue_title, &issue_body);
+            let provenance = state
+                .active_goals
+                .provenance_for(crate::goal_curation::ArtifactKind::Goal, goal_id);
+            if let Err(error) = filer.file_issue(goal_id, provenance, &issue_title, &issue_body) {
+                report.mutation_errors.push(error.to_string());
+            }
             tracker.reset_count(goal_id);
             report.escalated.push(goal_id.to_string());
             tracing::warn!(

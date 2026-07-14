@@ -1,3 +1,12 @@
+---
+title: OODA Brain Prompt Schema
+description: Prompt schema and typed handoff contract for the OODA engineer-lifecycle decision.
+last_updated: 2026-07-14
+review_schedule: as-needed
+owner: simard
+doc_type: reference
+---
+
 # Reference: `ooda_brain.md` Prompt Schema
 
 File: `prompt_assets/simard/ooda_brain.md`
@@ -140,10 +149,11 @@ BODY: Repro: spawn engineer, wait 30s, observe panic in tail.
 RATIONALE: log shows panic recurring across 3 spawns
 ```
 
-Side-effect: appends a record to `<state_root>/pending_issues.jsonl`, a new
-on-disk queue introduced by this feature. A follow-up OODA action will drain
-the queue and run `gh issue create --label ooda-stuck`; until that lands the
-file is a write-only audit trail.
+Side-effect: appends a typed observation to
+`<state_root>/pending_issues.jsonl`. Queue consumption validates provenance,
+uses an agentic recipe for semantic consolidation, and submits any authorized
+issue operation to `GitHubMutationGuard`. The queue never calls `gh issue`
+directly.
 
 ### `mark_goal_blocked`
 

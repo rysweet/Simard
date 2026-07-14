@@ -12,7 +12,9 @@
 //! brain.
 
 use crate::error::SimardResult;
-use crate::ooda_brain::parse_failure::{record_parse_failure, reset_consecutive_count};
+use crate::ooda_brain::parse_failure::{
+    record_parse_failure, record_parse_failure_in_cycle, reset_consecutive_count,
+};
 use crate::ooda_brain::{
     BrainJudgmentRecord, BrainPhase, DECIDE_PROMPT_NAME, DecideContext, DeterministicDecideBrain,
     OodaDecideBrain, push_brain_judgment,
@@ -37,6 +39,28 @@ pub fn decide_with_brain(
     priorities: &[Priority],
     config: &OodaConfig,
     brain: &dyn OodaDecideBrain,
+) -> SimardResult<Vec<PlannedAction>> {
+    decide_with_brain_impl(priorities, config, brain, None)
+}
+
+pub(crate) fn decide_with_brain_in_cycle(
+    priorities: &[Priority],
+    config: &OodaConfig,
+    brain: &dyn OodaDecideBrain,
+    cycle_id: &crate::stewardship::CycleId,
+    goals: &crate::goal_curation::GoalBoard,
+) -> SimardResult<Vec<PlannedAction>> {
+    decide_with_brain_impl(priorities, config, brain, Some((cycle_id, goals)))
+}
+
+fn decide_with_brain_impl(
+    priorities: &[Priority],
+    config: &OodaConfig,
+    brain: &dyn OodaDecideBrain,
+    mutation: Option<(
+        &crate::stewardship::CycleId,
+        &crate::goal_curation::GoalBoard,
+    )>,
 ) -> SimardResult<Vec<PlannedAction>> {
     let base_limit = config.max_concurrent_actions as usize;
     let limit = if let Some(ref scaler) = config.scaler {
@@ -86,14 +110,32 @@ pub fn decide_with_brain(
                 // Brain error — record the failure loudly and skip this
                 // priority. No fallback to a different brain.
                 let raw_response = extract_raw_response(&e);
-                let pf = record_parse_failure(
-                    BrainPhase::Decide,
-                    &priority.goal_id,
-                    &e,
-                    &raw_response,
-                    DECIDE_PROMPT_NAME,
-                    crate::ooda_brain::prompt_store::current_version(DECIDE_PROMPT_NAME),
-                );
+                let prompt_version =
+                    crate::ooda_brain::prompt_store::current_version(DECIDE_PROMPT_NAME);
+                let pf = if let Some((cycle_id, goals)) = mutation {
+                    record_parse_failure_in_cycle(
+                        BrainPhase::Decide,
+                        &priority.goal_id,
+                        &e,
+                        &raw_response,
+                        DECIDE_PROMPT_NAME,
+                        prompt_version,
+                        cycle_id,
+                        goals.provenance_for(
+                            crate::goal_curation::ArtifactKind::Goal,
+                            &priority.goal_id,
+                        ),
+                    )?
+                } else {
+                    record_parse_failure(
+                        BrainPhase::Decide,
+                        &priority.goal_id,
+                        &e,
+                        &raw_response,
+                        DECIDE_PROMPT_NAME,
+                        prompt_version,
+                    )
+                };
                 tracing::error!(
                     priority_goal_id = %priority.goal_id,
                     error = %e,

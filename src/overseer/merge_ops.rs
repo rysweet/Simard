@@ -171,6 +171,8 @@ pub struct MergePrOps {
     /// Anti-recursion identity. When set, the Overseer refuses to merge its OWN
     /// PRs (M3). Fails CLOSED when the guard is unconfigured.
     recursion: Option<RecursionGuard>,
+    mutation_guard: std::sync::Mutex<crate::stewardship::mutation_guard::MutationGuard>,
+    autonomous_merge_enabled: bool,
 }
 
 impl MergePrOps {
@@ -197,6 +199,26 @@ impl MergePrOps {
             poll,
             conflict: None,
             recursion: None,
+            mutation_guard: std::sync::Mutex::new({
+                #[cfg(test)]
+                {
+                    crate::stewardship::mutation_guard::MutationGuard::new(
+                        crate::stewardship::mutation_store::MutationStore::new(
+                            std::env::temp_dir()
+                                .join(format!(
+                                    "simard-overseer-merge-test-{}",
+                                    uuid::Uuid::new_v4()
+                                ))
+                                .join("mutations.json"),
+                        ),
+                    )
+                }
+                #[cfg(not(test))]
+                {
+                    crate::stewardship::mutation_guard::MutationGuard::from_default_store()
+                }
+            }),
+            autonomous_merge_enabled: true,
         }
     }
 
@@ -220,7 +242,7 @@ impl MergePrOps {
     /// gate is left **unwired** (fail-closed) until the operator provides an
     /// LLM reviewer — so the default autonomous path verifies as NOT ready.
     pub fn from_env() -> Self {
-        Self::new(
+        let mut ops = Self::new(
             Box::new(crate::stewardship::RealPrGhClient),
             Box::new(RealPrSource),
             None,
@@ -229,7 +251,11 @@ impl MergePrOps {
             Box::new(ThreadSleepClock),
             base_allowlist_from_env(),
             PollConfig::default(),
-        )
+        );
+        // Production remains fail-closed until approval is bound to and
+        // revalidated against the final head SHA at mutation time.
+        ops.autonomous_merge_enabled = false;
+        ops
     }
 
     /// Classify each check and poll while any is pending; escalate (Err) on the
@@ -328,6 +354,15 @@ impl PrOps for MergePrOps {
                 },
             },
         );
+        checks.push(CheckItem {
+            name: "trusted GitHub review approval".to_string(),
+            passed: snap.review_decision.eq_ignore_ascii_case("APPROVED"),
+            note: if snap.review_decision.eq_ignore_ascii_case("APPROVED") {
+                "approved".to_string()
+            } else {
+                "reviewDecision is not APPROVED".to_string()
+            },
+        });
 
         // #3–6 + #8 additive diff-scans.
         let diff = self.source.diff(repo, pr)?;
@@ -367,6 +402,13 @@ impl PrOps for MergePrOps {
     /// merges. On a successful merge it fires the dual-channel notification; the
     /// merge is not complete until that notification has dispatched.
     fn merge(&self, repo: &str, pr: u32) -> Result<(), OverseerError> {
+        if !self.autonomous_merge_enabled {
+            return Err(cap(
+                "merge",
+                "production autonomous merge is disabled until approval is head-SHA-bound"
+                    .to_string(),
+            ));
+        }
         // 0. Anti-recursion: never merge the Overseer's OWN PR (M3). Fails
         //    CLOSED when the guard is configured but the subject is its own.
         if let Some(guard) = &self.recursion {
@@ -399,17 +441,60 @@ impl PrOps for MergePrOps {
         self.poll_until_green(repo, pr)?;
 
         // 3. Merge through the shipped gated authority (squash, no --admin).
-        let outcome = merge_pr_if_merge_ready_with_judge(
-            pr,
+        let cycle_id = crate::stewardship::CycleId::scheduled("overseer")
+            .map_err(|e| cap("merge.guard", e.to_string()))?;
+        let identity = crate::stewardship::IssueMutationIdentity::from_source(
+            "overseer-pr-merge",
+            &format!("{repo}#{pr}\0{}", cycle_id.as_str()),
+        );
+        let request = crate::stewardship::GitHubMutationRequest::new(
             repo,
-            self.gh.as_ref(),
-            &self.base_allowlist,
-            self.judge.as_ref(),
+            identity,
+            crate::stewardship::ArtifactProvenance::system(
+                crate::stewardship::LineageId::new("overseer-merge")
+                    .map_err(|e| cap("merge.guard", e.to_string()))?,
+            ),
+            crate::stewardship::GitHubMutation::PullRequestMerge { number: pr },
         )
-        .map_err(|e| cap("merge", e.to_string()))?;
-
-        match outcome {
-            MergeOutcome::Merged { .. } => {
+        .map_err(|e| cap("merge.guard", e.to_string()))?;
+        let mut guard = self
+            .mutation_guard
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard
+            .begin_cycle(
+                cycle_id.clone(),
+                crate::stewardship::IssueMutationLimit::configured()
+                    .map_err(|e| cap("merge.guard", e.to_string()))?,
+            )
+            .map_err(|e| cap("merge.guard", e.to_string()))?;
+        let guarded = guard
+            .execute_github(
+                &cycle_id,
+                &request,
+                || match merge_pr_if_merge_ready_with_judge(
+                    pr,
+                    repo,
+                    self.gh.as_ref(),
+                    &self.base_allowlist,
+                    self.judge.as_ref(),
+                )? {
+                    MergeOutcome::Merged { .. } => Ok(
+                        crate::stewardship::GitHubMutationResult::PullRequestMerged { number: pr },
+                    ),
+                    MergeOutcome::Refused { reason, .. } => {
+                        Ok(crate::stewardship::GitHubMutationResult::Refused { reason })
+                    }
+                },
+            )
+            .map_err(|e| cap("merge", e.to_string()))?;
+        match guarded {
+            crate::stewardship::GitHubMutationOutcome::Completed {
+                result: crate::stewardship::GitHubMutationResult::PullRequestMerged { .. },
+            }
+            | crate::stewardship::GitHubMutationOutcome::AlreadyCompleted {
+                result: crate::stewardship::GitHubMutationResult::PullRequestMerged { .. },
+            } => {
                 // 4. MANDATORY: notify the operator on BOTH channels. The merge
                 //    is not "done" until this dispatches (queued counts — never
                 //    silently dropped).
@@ -425,7 +510,16 @@ impl PrOps for MergePrOps {
                 );
                 Ok(())
             }
-            MergeOutcome::Refused { reason, .. } => Err(cap("merge", reason)),
+            crate::stewardship::GitHubMutationOutcome::Completed {
+                result: crate::stewardship::GitHubMutationResult::Refused { reason },
+            }
+            | crate::stewardship::GitHubMutationOutcome::AlreadyCompleted {
+                result: crate::stewardship::GitHubMutationResult::Refused { reason },
+            } => Err(cap("merge", reason)),
+            _ => Err(cap(
+                "merge",
+                "durable mutation result does not match PR merge request".to_string(),
+            )),
         }
     }
 

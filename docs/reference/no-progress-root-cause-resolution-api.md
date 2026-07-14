@@ -345,9 +345,10 @@ pub(crate) fn apply_no_progress_breaker_investigated(
     reasoner: &dyn NoProgressWhyReasoner,
     healer: &dyn PreconditionHealer,
     dispatcher: &dyn NoProgressEngineerDispatcher,
-    filer: &dyn NoProgressIssueFiler,
+    mutation_guard: &mut GitHubMutationGuard,
+    authorization: &AutonomousGitHubAuthorization,
     threshold: u32,
-) -> NoProgressBreakerReport;
+) -> Result<NoProgressBreakerReport, GitHubMutationError>;
 ```
 
 The `SpawnEngineer` rung reuses the **same** `dispatch_spawn_engineer` the Act
@@ -389,8 +390,9 @@ Reuse (no parallel machinery is built):
   (`CloneRepoHealer`).
 - **Guided engineer** reuses `dispatch_spawn_engineer` — the **same** dispatch the
   OODA act phase uses (see [spawn agent for goal](./spawn-agent-for-goal.md)).
-- **Issue filing** reuses the injected `NoProgressIssueFiler` (`GhIssueFiler` in
-  production).
+- **Issue mutation** uses the shared `GitHubMutationGuard`. The recurring goal
+  and its full lineage must be eligible; `recurring_goal_reblock` never bypasses
+  provenance, restart reconciliation, or the cycle budget.
 
 ## One-shot guided-retry bound
 
@@ -418,7 +420,7 @@ guided retry per goal:
 | `repo_present` / `dependency_goal_state` `Err` (deterministic reasoner) | Downgrade to `GENUINELY-STUCK`; never self-heal/self-complete on unknown state. Logged. |
 | Clone (`Heal`) failure | `Escalate` with the `MISSING-PRECONDITION` WHY + a `clone-error` `Evidence`. |
 | `dispatch_spawn_engineer` rejected (`SpawnEngineer`) | Mark the guided retry spent; escalate with the WHY on the next stall. |
-| Issue filing failure | Goal is already `Blocked`+sentinel; log `error`, never abort the cycle (matches `GhIssueFiler`). |
+| Issue mutation failure | Return the fatal guard error and abort the owning cycle. The blocked state remains visible; no success-shaped continuation is allowed. |
 | Done-gate error on `MarkDone` check | Not `ALREADY-COMPLETE`; fall through the ladder (never complete on an error). |
 
 ## What is unchanged

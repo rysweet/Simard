@@ -201,8 +201,18 @@ impl GhClient for FakeGhClient {
             .cloned()
             .collect())
     }
+}
 
-    fn create_issue(&self, _repo: &str, title: &str, body: &str) -> SimardResult<GhIssue> {
+impl crate::stewardship::gh_client::IssueMutationTransport for FakeGhClient {
+    fn create_issue(
+        &self,
+        _repo: &str,
+        _identity: &crate::stewardship::IssueMutationIdentity,
+        title: &str,
+        body: &str,
+        _labels: &[String],
+        _assignees: &[String],
+    ) -> SimardResult<GhIssue> {
         let number = self.next_number.fetch_add(1, Ordering::SeqCst);
         let issue = GhIssue {
             number,

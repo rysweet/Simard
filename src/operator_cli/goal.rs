@@ -542,7 +542,7 @@ fn handle_add(
             board.active.push(crate::goal_curation::ActiveGoal {
                 parent_goal_id: None,
                 priority_explicit: false,
-                id,
+                id: id.clone(),
                 description: stored_description,
                 priority,
                 status: GoalProgress::NotStarted,
@@ -553,6 +553,13 @@ fn handle_add(
                 last_progress_update_at: None,
                 labels: vec![crate::goal_curation::labels::SOURCE_OPERATOR.to_string()],
             });
+            board.set_provenance(
+                crate::goal_curation::ArtifactKind::Goal,
+                &id,
+                crate::stewardship::ArtifactProvenance::operator(
+                    crate::stewardship::LineageId::new(format!("operator:{id}"))?,
+                ),
+            );
             Ok(())
         })?;
     }
@@ -605,12 +612,21 @@ fn handle_demote(goal_id: &str) -> Result<(), Box<dyn Error>> {
                 format!("goal '{goal_id}' not found on active board").into()
             })?;
         let goal = board.active.remove(position);
+        let provenance = board.provenance_for(crate::goal_curation::ArtifactKind::Goal, goal_id);
+        board.provenance.retain(|entry| {
+            !(entry.kind == crate::goal_curation::ArtifactKind::Goal && entry.id == goal_id)
+        });
         board.backlog.push(crate::goal_curation::BacklogItem {
             id: goal.id.clone(),
             description: goal.description,
             source: "operator:demote".to_string(),
             score: 0.5,
         });
+        board.set_provenance(
+            crate::goal_curation::ArtifactKind::BacklogItem,
+            goal_id,
+            provenance,
+        );
         Ok(())
     })?;
     eprintln!("[simard] goal demote: '{goal_id}' moved to backlog");

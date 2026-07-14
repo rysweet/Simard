@@ -253,11 +253,11 @@ Orient folds `StepFailureDiagnosed` into a `Problem` with
 | `DiskFull` | `ResourcePressure`, Critical | reuse existing disk-health remediation |
 | `OutOfMemory` | `ResourcePressure` | `LaunchRecipe` / `Escalate` |
 | `NetworkOrAuth` | `ProcessHealth` | `Escalate` (needs a human/credential) |
-| `Unknown` | `ProcessHealth`, Normal | `FileIssue` (deduped) so the pattern is investigated |
+| `Unknown` | `ProcessHealth`, Normal | stable-condition issue proposal through `GitHubMutationGuard` |
 
-The `dedup_key` mirrors `stewardship::failure_signature` semantics so one recurring
-cause does not spawn a duplicate workstream or duplicate issue. This reuses the
-existing Signal → Problem → Intervention machinery documented in the
+The agent-supplied stable condition identity survives issue-number, goal-slug,
+and process changes so one recurring cause does not spawn a duplicate
+workstream or issue. This reuses the existing Signal -> Problem -> Intervention machinery documented in the
 [Overseer goal-board health API](../reference/overseer-goal-board-health-api.md);
 no new orchestration is introduced.
 

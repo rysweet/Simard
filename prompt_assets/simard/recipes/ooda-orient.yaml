@@ -58,6 +58,12 @@ steps:
 
       ## CONTEXT
 
+      Typed admission has already excluded stewardship-originated and
+      legacy-unknown goals before this recipe runs. Do not reconstruct excluded
+      work from issue numbers, title prefixes, body markers, or narrative text.
+      This recipe ranks admitted goals only; it never authorizes or proposes a
+      GitHub mutation.
+
       A single goal that has at least one consecutive failure recorded:
 
       ```json

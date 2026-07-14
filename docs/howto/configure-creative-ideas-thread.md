@@ -205,7 +205,7 @@ flowchart TD
     E --> F[Four-reviewer pipeline<br/>crusty · philosophy · measurability]
     F --> G[Synthesis sets next_status<br/>via try_transition]
     G -->|AcceptedForImplementation,<br/>not flagged| H[route_idea_to_goal → Proposed goal]
-    G -->|NeedsHumanReview| I[route_idea_to_issue → issue<br/>label=creative-idea, assignee=rysweet]
+    G -->|NeedsHumanReview| I[typed proposal to GitHubMutationGuard<br/>label=creative-idea, assignee=rysweet]
     G -->|Rejected / Deferred / NeedsRevision| J[Persist status; park or re-enter]
 ```
 
@@ -235,7 +235,7 @@ Every new idea is reviewed in order; then a synthesis step sets its status.
 | Synthesis result | Route | Effect |
 |------------------|-------|--------|
 | `AcceptedForImplementation`, not flagged | `route_idea_to_goal` | A `Proposed` goal on the goal board, tagged with the originating idea `node_id`. The idea moves to `ImplementationStarted`. |
-| `NeedsHumanReview` | `route_idea_to_issue` | A GitHub issue labelled `creative-idea` and **assigned to `rysweet`**, body embeds the idea `node_id` + next steps. |
+| `NeedsHumanReview` | `route_idea_to_issue` | Eligible lineage is submitted through `GitHubMutationGuard`; the issue is labelled `creative-idea`, assigned to `rysweet`, and carries typed provenance. |
 | `Rejected` / `Deferred` / `NeedsRevision` | *(none)* | Status persisted; parked or re-entered on a later pass. |
 
 ## The human-review gate on creative-idea PRs
@@ -405,13 +405,17 @@ let goal = route_idea_to_goal(&idea, &goals, now_epoch).expect("routes to goal")
 assert_eq!(goal.status, GoalStatus::Proposed);
 assert!(goal.evidence_contains(&idea.node_id));   // traceable back to the idea
 
-// PR gate: draft + blocking label + owner review, and NO privilege bypass.
-let gh = FakeIdeaGhClient::default();
-let gate = mark_idea_pr(42, &idea, &gh, "rysweet/Simard").expect("gate applied");
+// PR gate: every write is reserved through a fake guarded transport.
+let gate = mark_idea_pr(
+    42,
+    &idea,
+    &mut mutation_guard,
+    &autonomous_authorization,
+).expect("gate applied");
 assert!(gate.draft);
 assert_eq!(gate.blocking_label, "creative-idea-needs-human-review");
 assert_eq!(gate.review_requested_from, vec!["rysweet".to_string()]);
-assert!(gh.recorded_args().iter().all(|a| a != "--admin" && a != "--no-verify"));
+assert!(transport.recorded_args().iter().all(|a| a != "--admin" && a != "--no-verify"));
 ```
 
 The design's [test plan](../design/creative-ideas-thread.md#test-plan-no-network-all-fakes)

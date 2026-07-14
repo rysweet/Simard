@@ -13,11 +13,11 @@
 //!   emits ONE consolidated [`Signal::WorkstreamGap`], which Orient classifies to
 //!   a [`ProblemKind::WorkstreamCoverage`] problem;
 //! - the act path notifies the operator on BOTH channels (email + Signal) with a
-//!   provenance-labelled summary AND files a deduped issue per gap — through the
-//!   SAME plumbing `goal_health` / M1 use, with NO new bypass — returning one
+//!   provenance-labelled summary and creates zero GitHub issues or backlog items,
+//!   returning one
 //!   [`ActOutcome::WorkstreamGapsFlagged`] that feeds DEDICATED tick counters
 //!   (never the generic `issues_filed` / `escalations`);
-//! - a recurring gap is deduped to AT MOST ONE notification + issue per signature
+//! - a recurring gap is deduped to AT MOST ONE notification per signature
 //!   (WhisperGate layer), so a fast cadence or a restart never floods the operator;
 //! - the act FAILS CLOSED without a DISTINCT steward identity (anti-recursion);
 //! - the `SIMARD_OVERSEER_GAP_SCAN` kill-switch holds the whole action, and
@@ -66,6 +66,9 @@ use crate::overseer::{ActOutcome, Capabilities, Overseer, decide, orient};
 /// A representative "uncovered high-priority goal" gap.
 fn sample_goal_gap() -> GapItem {
     GapItem {
+        provenance: crate::stewardship::ArtifactProvenance::system(
+            crate::stewardship::LineageId::new("goal:g-hot").unwrap(),
+        ),
         category: GapCategory::GoalUncovered,
         ref_id: "g-hot".to_string(),
         title: "Ship the p1 launch blocker".to_string(),
@@ -77,6 +80,9 @@ fn sample_goal_gap() -> GapItem {
 /// A representative "unaddressed live anomaly" gap.
 fn sample_anomaly_gap() -> GapItem {
     GapItem {
+        provenance: crate::stewardship::ArtifactProvenance::system(
+            crate::stewardship::LineageId::new("anomaly:distill_parse_fail_rate_high").unwrap(),
+        ),
         category: GapCategory::AnomalyUnaddressed,
         ref_id: "distill parse-fail rate high".to_string(),
         title: "distill parse-fail rate high".to_string(),
@@ -346,6 +352,15 @@ fn detects_uncovered_p1_goal_and_unaddressed_anomaly() {
         // a p3 goal ⇒ below the p1/p2 bar, not a gap.
         ActiveGoal::new("g-low", "p3 nice to have", 3),
     ];
+    for id in ["g-hot", "g-owned", "g-low"] {
+        board.set_provenance(
+            crate::goal_curation::ArtifactKind::Goal,
+            id,
+            crate::stewardship::ArtifactProvenance::system(
+                crate::stewardship::LineageId::new(format!("test:{id}")).unwrap(),
+            ),
+        );
+    }
     let anomalies = vec!["distill parse-fail rate 45% over window".to_string()];
 
     let gaps = detect_workstream_gaps(&board, &[], &anomalies, &[]);
@@ -431,6 +446,9 @@ fn delegates_blocked_goals_to_goal_health_and_never_reflags_them() {
 #[test]
 fn flags_high_signal_uncovered_issue_ignores_low_signal_and_covered() {
     let high = SurveyedIssue {
+        provenance: crate::stewardship::ArtifactProvenance::external(
+            crate::stewardship::LineageId::new("issue:rysweet/Simard#2630").unwrap(),
+        ),
         repo: "rysweet/Simard".to_string(),
         number: 2630,
         title: "P1 daemon crash on startup".to_string(),
@@ -438,6 +456,9 @@ fn flags_high_signal_uncovered_issue_ignores_low_signal_and_covered() {
     };
     // Not a high-signal label ⇒ not a gap.
     let low = SurveyedIssue {
+        provenance: crate::stewardship::ArtifactProvenance::external(
+            crate::stewardship::LineageId::new("issue:rysweet/Simard#9").unwrap(),
+        ),
         repo: "rysweet/Simard".to_string(),
         number: 9,
         title: "typo in docs".to_string(),
@@ -445,6 +466,9 @@ fn flags_high_signal_uncovered_issue_ignores_low_signal_and_covered() {
     };
     // High-signal but already covered by an in-flight workstream ⇒ not a gap.
     let covered = SurveyedIssue {
+        provenance: crate::stewardship::ArtifactProvenance::external(
+            crate::stewardship::LineageId::new("issue:rysweet/Simard#100").unwrap(),
+        ),
         repo: "rysweet/Simard".to_string(),
         number: 100,
         title: "workflow:default run failing".to_string(),
@@ -490,6 +514,9 @@ fn hostile_issue_title_yields_sanitized_signature_and_bounded_fields() {
     let mut nasty = String::from("`rm -rf /`; $(curl evil) \n\r\t <script>alert(1)</script> \"|&;");
     nasty.push_str(&"A".repeat(10_000));
     let issue = SurveyedIssue {
+        provenance: crate::stewardship::ArtifactProvenance::external(
+            crate::stewardship::LineageId::new("issue:rysweet/Simard#7").unwrap(),
+        ),
         repo: "rysweet/Simard".to_string(),
         number: 7,
         title: nasty,
@@ -576,7 +603,7 @@ fn workstream_gaps_flagged_outcome_carries_batch_counts() {
 }
 
 #[test]
-fn flags_gaps_notifies_both_channels_files_once_then_dedupes_on_repeat() {
+fn flags_gaps_notifies_both_channels_without_filing_then_dedupes_on_repeat() {
     let gaps = vec![sample_goal_gap(), sample_anomaly_gap()];
     let filed = Arc::new(Mutex::new(Vec::new()));
     let (notifier, email_log, signal_log) = dual_recording_notifier();
@@ -587,7 +614,7 @@ fn flags_gaps_notifies_both_channels_files_once_then_dedupes_on_repeat() {
         .with_operator_notifier(Box::new(notifier));
 
     // First tick: both gaps are genuine ⇒ flagged, one consolidated notification
-    // on BOTH channels, and one deduped issue per gap.
+    // on BOTH channels, and zero issue mutations.
     let first = overseer_tick(&mut ov);
     assert_eq!(
         first.workstream_gaps_detected, 2,
@@ -598,7 +625,7 @@ fn flags_gaps_notifies_both_channels_files_once_then_dedupes_on_repeat() {
     // returns one outcome — it cannot bump both IssueFiled and Escalated).
     assert_eq!(
         first.issues_filed, 0,
-        "gap issues ride the dedicated gap counter, not issues_filed"
+        "gap observations ride the dedicated gap counter, not issues_filed"
     );
     assert_eq!(
         first.escalations, 0,
@@ -618,11 +645,10 @@ fn flags_gaps_notifies_both_channels_files_once_then_dedupes_on_repeat() {
         1,
         "the Signal channel got one consolidated gap notification"
     );
-    // One deduped issue filed per flagged gap.
     assert_eq!(
         filed.lock().unwrap().len(),
-        2,
-        "one deduped issue filed per flagged gap"
+        0,
+        "routine workstream-gap observation must never file GitHub issues"
     );
 
     // The consolidated notification names the specifics.
@@ -638,7 +664,7 @@ fn flags_gaps_notifies_both_channels_files_once_then_dedupes_on_repeat() {
 
     // Second tick on the SAME picture: both signatures are still within the
     // dedup window ⇒ both suppressed (gate hit). No second notification, no
-    // second issue — one deduped item per recurring signature, not per tick.
+    // issue — one notification per recurring signature, not per tick.
     let second = overseer_tick(&mut ov);
     assert_eq!(
         second.workstream_gaps_detected, 0,
@@ -660,24 +686,13 @@ fn flags_gaps_notifies_both_channels_files_once_then_dedupes_on_repeat() {
     );
     assert_eq!(
         filed.lock().unwrap().len(),
-        2,
-        "no second issue for a recurring gap"
+        0,
+        "no issue is filed on either observation"
     );
 }
 
 #[test]
-fn flagged_gap_brief_source_module_routes_to_default_repo() {
-    use crate::stewardship::{TargetRepo, route_failure};
-
-    // Regression for issue #2934: `act_flag_workstream_gaps` files each gap with
-    // the bare source_module "overseer", which matches NO stewardship routing
-    // keyword. Before the default-repo fallback, the real `StewardshipIssueFiler`
-    // rejected this with `StewardshipRoutingAmbiguous`, so `flag_workstream_gaps`
-    // failed every tick ("overseer intervention failed ...
-    // intervention=flag_workstream_gaps error=... cannot route source-module
-    // 'overseer'"). This test pins that the brief the gap path actually produces
-    // routes to a real repo — the configured default (rysweet/Simard) — so the
-    // issue gets filed instead of erroring.
+fn flagged_gap_never_constructs_an_issue_brief() {
     let gaps = vec![sample_goal_gap()];
     let filed = Arc::new(Mutex::new(Vec::new()));
     let (notifier, _email_log, _signal_log) = dual_recording_notifier();
@@ -695,19 +710,10 @@ fn flagged_gap_brief_source_module_routes_to_default_repo() {
     assert_eq!(report.errors, 0, "the gap intervention must not error");
     assert!(!report.panicked);
 
-    let briefs = filed.lock().unwrap();
-    assert_eq!(briefs.len(), 1, "one deduped issue filed for the gap");
-    let src = &briefs[0].source_module;
-
-    // The exact value the gap path emits must resolve — never ambiguous.
-    let target = route_failure(src).unwrap_or_else(|e| {
-        panic!("gap brief source_module {src:?} must route to a real repo, got {e:?}")
-    });
     assert!(
-        matches!(target, TargetRepo::Simard),
-        "an overseer gap brief routes to the default repo (rysweet/Simard): {src:?}"
+        filed.lock().unwrap().is_empty(),
+        "routine gaps stay observation-only"
     );
-    assert_eq!(target.slug(), "rysweet/Simard");
 }
 
 #[test]
@@ -903,7 +909,7 @@ fn flag_workstream_gaps_is_routine_and_admitted_by_default_gate() {
     assert_eq!(
         classify(&iv),
         RiskClass::Routine,
-        "flagging gaps (notify + deduped file) is a routine action"
+        "flagging gaps (observation + notify only) is a routine action"
     );
     assert!(
         AutonomyGate::default().admit(&iv).is_ok(),

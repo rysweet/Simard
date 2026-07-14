@@ -60,6 +60,12 @@ steps:
 
       ## CONTEXT
 
+      Typed admission has already excluded stewardship-originated and
+      legacy-unknown goals before this recipe runs. Do not reconstruct excluded
+      work from issue numbers, title prefixes, body markers, or narrative text.
+      This recipe chooses an OODA action kind only; it never supplies GitHub
+      authorization, provenance, mutation identity, cycle identity, or budget.
+
       A single priority entry produced by the Orient phase:
 
       ```json

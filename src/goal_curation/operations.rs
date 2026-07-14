@@ -10,8 +10,8 @@ use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 
 use super::types::{
-    ActiveGoal, BacklogItem, CARRYOVER_CONCEPT, GoalBoard, GoalCarryoverRecord, GoalProgress,
-    MAX_ACTIVE_GOALS,
+    ActiveGoal, ArtifactKind, BacklogItem, CARRYOVER_CONCEPT, GoalBoard, GoalCarryoverRecord,
+    GoalProgress, MAX_ACTIVE_GOALS,
 };
 
 /// Process-local critical section for the merge-on-write pipeline in
@@ -372,7 +372,9 @@ pub fn load_goal_board(memory: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoar
     // The helper returns `None` on memory error, on zero results, or on a
     // payload parse failure — load_goal_board folds all three into the
     // legacy "empty board" fallback so callers see a stable contract.
-    Ok(read_latest_snapshot(memory).unwrap_or_default())
+    let mut board = read_latest_snapshot(memory).unwrap_or_default();
+    board.classify_known_legacy_provenance();
+    Ok(board)
 }
 
 /// Read the most recent `goal-board:snapshot` fact from cognitive memory,
@@ -515,7 +517,27 @@ pub(super) fn merge_boards(persisted: GoalBoard, in_flight: GoalBoard) -> GoalBo
         "merge_boards: completed"
     );
 
-    GoalBoard { active, backlog }
+    let mut provenance = persisted.provenance;
+    for entry in in_flight.provenance {
+        if let Some(existing) = provenance
+            .iter_mut()
+            .find(|existing| existing.kind == entry.kind && existing.id == entry.id)
+        {
+            *existing = entry;
+        } else {
+            provenance.push(entry);
+        }
+    }
+    let mut merged = GoalBoard {
+        active,
+        backlog,
+        provenance_version: persisted
+            .provenance_version
+            .max(in_flight.provenance_version),
+        provenance,
+    };
+    merged.prune_provenance();
+    merged
 }
 
 /// Save the current board state to cognitive memory as the single source of
@@ -706,6 +728,7 @@ pub fn save_goal_board_with_removals(
     if merged.active.len() > MAX_ACTIVE_GOALS {
         merged.active.truncate(MAX_ACTIVE_GOALS);
     }
+    merged.prune_provenance();
 
     debug!(
         merge = "goal-board",
@@ -795,7 +818,10 @@ pub fn add_active_goal(board: &mut GoalBoard, goal: ActiveGoal) -> SimardResult<
             reason: format!("goal '{}' is already active", goal.id),
         });
     }
+    let id = goal.id.clone();
     board.active.push(goal);
+    let provenance = super::types::structural_system_provenance(ArtifactKind::Goal, &id)?;
+    board.set_provenance(ArtifactKind::Goal, id, provenance);
     Ok(())
 }
 
@@ -808,39 +834,15 @@ pub fn add_backlog_item(board: &mut GoalBoard, item: BacklogItem) -> SimardResul
             reason: format!("backlog item '{}' already exists", item.id),
         });
     }
+    let id = item.id.clone();
     board.backlog.push(item);
+    let provenance = super::types::structural_system_provenance(ArtifactKind::BacklogItem, &id)?;
+    board.set_provenance(ArtifactKind::BacklogItem, id, provenance);
     Ok(())
 }
 
 /// Default backlog score for stewardship-filed issues (issue #1167).
 pub const DEFAULT_STEWARD_SCORE: f64 = 0.6;
-
-/// Enqueue a stewardship-filed (or matched) GitHub issue onto the backlog
-/// (issue #1167).
-///
-/// Idempotent: if a backlog item with the same stewardship id already exists
-/// (same repo + issue number), this is a no-op and returns `Ok(())`.
-pub fn enqueue_stewardship_issue(
-    board: &mut GoalBoard,
-    repo: &str,
-    issue_number: u64,
-    url: &str,
-    signature: &str,
-) -> SimardResult<()> {
-    let id = format!("stewardship-{}-{}", repo.replace('/', "_"), issue_number);
-    if board.backlog.iter().any(|b| b.id == id) {
-        return Ok(());
-    }
-    let item = BacklogItem {
-        id,
-        description: format!(
-            "Investigate stewardship-filed failure (signature {signature}) — {url}"
-        ),
-        source: format!("stewardship:{repo}#{issue_number}"),
-        score: DEFAULT_STEWARD_SCORE,
-    };
-    add_backlog_item(board, item)
-}
 
 /// Promote a backlog item to an active goal. The item is removed from the
 /// backlog and inserted as a `NotStarted` active goal with the given priority.
@@ -865,6 +867,12 @@ pub fn promote_to_active(
             field: "backlog_id".to_string(),
             reason: format!("backlog item '{backlog_id}' not found"),
         })?;
+    let provenance = board.provenance_for(ArtifactKind::BacklogItem, backlog_id);
+    if !provenance.is_recursive_input_eligible() {
+        return Err(SimardError::StewardshipProvenanceBlocked {
+            identity: backlog_id.to_string(),
+        });
+    }
     let item = board.backlog.remove(position);
     let promoted_source = crate::goal_curation::labels::source_for_backlog(&item.source);
     board.active.push(ActiveGoal {
@@ -881,6 +889,10 @@ pub fn promote_to_active(
         last_progress_update_at: None,
         labels: vec![promoted_source.to_string()],
     });
+    board
+        .provenance
+        .retain(|entry| !(entry.kind == ArtifactKind::BacklogItem && entry.id == backlog_id));
+    board.set_provenance(ArtifactKind::Goal, backlog_id, provenance);
     Ok(())
 }
 
@@ -1342,7 +1354,7 @@ pub fn seed_default_board(board: &mut GoalBoard) -> usize {
         board.active.push(ActiveGoal {
             parent_goal_id: None,
             priority_explicit: false,
-            id,
+            id: id.clone(),
             description: description.to_string(),
             priority,
             status: GoalProgress::NotStarted,
@@ -1353,6 +1365,14 @@ pub fn seed_default_board(board: &mut GoalBoard) -> usize {
             last_progress_update_at: None,
             labels: vec![crate::goal_curation::labels::SOURCE_SEED.to_string()],
         });
+        board.set_provenance(
+            ArtifactKind::Goal,
+            &id,
+            crate::stewardship::ArtifactProvenance::system(
+                crate::stewardship::LineageId::new(format!("seed:{id}"))
+                    .expect("goal slugs form valid lineage identifiers"),
+            ),
+        );
     }
 
     DEFAULT_SEED_GOALS.len()
@@ -1412,7 +1432,7 @@ pub fn seed_board_from_seed_goals(
         board.active.push(ActiveGoal {
             parent_goal_id: None,
             priority_explicit: false,
-            id,
+            id: id.clone(),
             description: goal.description.clone(),
             priority: goal.priority,
             status: GoalProgress::NotStarted,
@@ -1423,6 +1443,14 @@ pub fn seed_board_from_seed_goals(
             last_progress_update_at: None,
             labels: vec![crate::goal_curation::labels::SOURCE_SEED.to_string()],
         });
+        board.set_provenance(
+            ArtifactKind::Goal,
+            &id,
+            crate::stewardship::ArtifactProvenance::system(
+                crate::stewardship::LineageId::new(format!("seed:{id}"))
+                    .expect("goal slugs form valid lineage identifiers"),
+            ),
+        );
     }
 
     goals.len()

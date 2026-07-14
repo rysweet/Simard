@@ -591,8 +591,12 @@ fn ignore_files_remove_clears_from_both() {
 // ═══════════════════════════ execute.rs ═══════════════════════════
 
 use super::execute::{RemediationOutcome, execute};
-use super::gh::FakeSupplyChainGh;
-use crate::stewardship::{GhIssue, MergeOutcome, failure_signature};
+use super::gh::{FakeSupplyChainGh, remote_matches_repo};
+use crate::stewardship::mutation_guard::MutationGuard;
+use crate::stewardship::mutation_store::MutationStore;
+use crate::stewardship::{
+    CycleId, GhIssue, IssueMutationIdentity, IssueMutationLimit, MergeOutcome,
+};
 
 fn fixed_advisory() -> Advisory {
     Advisory {
@@ -618,6 +622,21 @@ fn nofix_advisory() -> Advisory {
     }
 }
 
+fn execute_for_test(
+    decision: Decision,
+    advisory: &Advisory,
+    files: &IgnoreFiles,
+    gh: &FakeSupplyChainGh,
+) -> crate::error::SimardResult<RemediationOutcome> {
+    let temp = tempfile::tempdir().unwrap();
+    let cycle_id = CycleId::new(format!("supply-chain-test:{}", advisory.id)).unwrap();
+    let mut guard = MutationGuard::new(MutationStore::new(temp.path().join("mutations.json")));
+    guard
+        .begin_cycle(cycle_id.clone(), IssueMutationLimit::new(4).unwrap())
+        .unwrap();
+    execute(decision, advisory, files, gh, &mut guard, &cycle_id)
+}
+
 #[test]
 fn execute_justified_ignore_files_issue_before_writing_ignore() {
     let dir = tempfile::tempdir().unwrap();
@@ -632,7 +651,7 @@ fn execute_justified_ignore_files_issue_before_writing_ignore() {
         reason: "no fixed upstream release; unreachable in Simard's usage".to_string(),
     };
 
-    let outcome = execute(decision, &adv, &files, &gh).unwrap();
+    let outcome = execute_for_test(decision, &adv, &files, &gh).unwrap();
 
     match outcome {
         RemediationOutcome::FiledJustifiedIgnore {
@@ -660,8 +679,10 @@ fn execute_justified_ignore_files_issue_before_writing_ignore() {
         .iter()
         .position(|l| l.starts_with("create_issue"))
         .unwrap();
-    let search_idx = log.iter().position(|l| l.starts_with("search")).unwrap();
-    assert!(search_idx < create_idx, "search then create: {log:?}");
+    assert_eq!(
+        create_idx, 0,
+        "durable journal is authoritative; no remote marker lookup precedes create: {log:?}"
+    );
     assert!(
         log.iter()
             .any(|l| l.starts_with("open_pr:chore/advisory-rustsec-2099-0009")),
@@ -705,7 +726,7 @@ fn execute_bump_opens_pr_removes_stale_ignore_and_self_merges_with_token() {
         to: "0.9.20".to_string(),
     };
 
-    let outcome = execute(decision, &adv, &files, &gh).unwrap();
+    let outcome = execute_for_test(decision, &adv, &files, &gh).unwrap();
     match outcome {
         RemediationOutcome::OpenedBumpPr { merged, .. } => {
             assert!(merged, "should self-merge green")
@@ -750,7 +771,7 @@ fn execute_bump_without_token_labels_needs_ci_and_never_self_merges() {
         to: "0.9.20".to_string(),
     };
 
-    let outcome = execute(decision, &adv, &files, &gh).unwrap();
+    let outcome = execute_for_test(decision, &adv, &files, &gh).unwrap();
     match outcome {
         RemediationOutcome::OpenedBumpPr { merged, .. } => {
             assert!(!merged, "must NOT self-merge without a CI-triggering token")
@@ -780,7 +801,7 @@ fn execute_escalate_files_issue_only_no_pr_no_ignore() {
         reason: "fix exists but not resolvable against Cargo.lock".to_string(),
     };
 
-    let outcome = execute(decision, &adv, &files, &gh).unwrap();
+    let outcome = execute_for_test(decision, &adv, &files, &gh).unwrap();
     assert!(matches!(outcome, RemediationOutcome::Escalated { .. }));
     let log = gh.log.borrow();
     assert!(log.iter().any(|l| l.starts_with("create_issue")));
@@ -797,12 +818,17 @@ fn execute_escalate_files_issue_only_no_pr_no_ignore() {
 }
 
 #[test]
-fn execute_is_idempotent_when_tracking_issue_exists() {
+fn execute_does_not_trust_unjournaled_tracking_issue_marker() {
     let dir = tempfile::tempdir().unwrap();
     write_min_repo(dir.path());
     let files = IgnoreFiles::at_root(dir.path());
     let adv = nofix_advisory();
-    let signature = failure_signature(&adv.id, &adv.crate_name);
+    let signature = IssueMutationIdentity::from_source(
+        "supply-chain-advisory",
+        &format!("{}\0{}", adv.id, adv.crate_name),
+    )
+    .as_str()
+    .to_string();
     let gh = FakeSupplyChainGh {
         existing_issues: vec![GhIssue {
             number: 7,
@@ -818,14 +844,17 @@ fn execute_is_idempotent_when_tracking_issue_exists() {
         reason: "no fix".to_string(),
     };
 
-    let outcome = execute(decision, &adv, &files, &gh).unwrap();
-    assert!(matches!(outcome, RemediationOutcome::Skipped { .. }));
+    let outcome = execute_for_test(decision, &adv, &files, &gh).unwrap();
+    assert!(matches!(
+        outcome,
+        RemediationOutcome::FiledJustifiedIgnore { .. }
+    ));
     let log = gh.log.borrow();
     assert!(
-        !log.iter().any(|l| l.starts_with("create_issue")),
-        "must not file a duplicate issue: {log:?}"
+        log.iter().any(|l| l.starts_with("create_issue")),
+        "remote marker is not durable authorization state: {log:?}"
     );
-    assert!(!files.is_ignored("RUSTSEC-2099-0009").unwrap());
+    assert!(files.is_ignored("RUSTSEC-2099-0009").unwrap());
 }
 
 #[test]
@@ -835,6 +864,22 @@ fn execute_no_action_is_skipped() {
     let files = IgnoreFiles::at_root(dir.path());
     let gh = FakeSupplyChainGh::default();
     let adv = nofix_advisory();
-    let outcome = execute(Decision::NoAction, &adv, &files, &gh).unwrap();
+    let outcome = execute_for_test(Decision::NoAction, &adv, &files, &gh).unwrap();
     assert!(matches!(outcome, RemediationOutcome::Skipped { .. }));
+}
+
+#[test]
+fn push_remote_must_match_guarded_repository() {
+    assert!(remote_matches_repo(
+        "git@github.com:rysweet/Simard.git",
+        "rysweet/Simard"
+    ));
+    assert!(remote_matches_repo(
+        "https://github.com/rysweet/Simard",
+        "rysweet/Simard"
+    ));
+    assert!(!remote_matches_repo(
+        "git@github.com:attacker/Simard.git",
+        "rysweet/Simard"
+    ));
 }

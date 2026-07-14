@@ -15,7 +15,13 @@ name: advisory-scan
 on:
   schedule:
     - cron: "0 6 * * *" # daily 06:00 UTC
-  workflow_dispatch: {} # manual trigger for testing / on-demand sweeps
+  workflow_dispatch:
+    inputs:
+      initialize_journal_only:
+        description: "After operator reconciliation, initialize state without scanning or mutating GitHub"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write # push deny.toml / Cargo.lock remediation branches
@@ -34,6 +40,16 @@ jobs:
     steps:
       - name: Check out default branch
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Restore durable stewardship journal
+        id: stewardship-state
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/simard-state/state
+          key: stewardship-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            stewardship-state-${{ github.run_id }}-
+            stewardship-state-
 
       - name: Prepare Rust runner (free disk, swap, mold, rust)
         uses: ./.github/actions/rust-runner-prep
@@ -59,6 +75,9 @@ jobs:
           tool: cargo-deny@0.19.9
 
       - name: Run supply-chain steward (scan DB HEAD, remediate)
+        id: steward
+        if: ${{ !inputs.initialize_journal_only }}
+        continue-on-error: true
         env:
           # Bot token so remediation PRs actually trigger the required CI. A PR
           # opened with the default GITHUB_TOKEN does NOT trigger workflows, so
@@ -72,4 +91,25 @@ jobs:
           # filing still works without self-merge.
           GH_TOKEN: ${{ secrets.STEWARD_GH_TOKEN || github.token }}
           STEWARD_REPO: ${{ github.repository }}
+          SIMARD_STATE_ROOT: ${{ runner.temp }}/simard-state
+          SIMARD_SCHEDULED_CYCLE_ID: github-run-${{ github.run_id }}
+          SIMARD_STEWARDSHIP_GITHUB_MUTATION_LIMIT: "4"
+          SIMARD_REQUIRE_EXISTING_MUTATION_JOURNAL: "1"
         run: cargo run --locked --bin supply-chain-steward -- scan
+
+      - name: Initialize reconciled mutation journal only
+        if: ${{ inputs.initialize_journal_only }}
+        env:
+          SIMARD_STATE_ROOT: ${{ runner.temp }}/simard-state
+        run: cargo run --locked --bin supply-chain-steward -- init-journal
+
+      - name: Persist stewardship journal
+        if: always()
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/simard-state/state
+          key: stewardship-state-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Propagate steward failure
+        if: steps.steward.outcome == 'failure'
+        run: exit 1

@@ -132,7 +132,7 @@ or `GET /api/overseer`) as described in
 | `OutOfMemory` | OOM-killed | resource remediation / `Escalate` |
 | `DiskFull` | ENOSPC | reuse the [disk-health check](./configure-disk-health-check.md) |
 | `NetworkOrAuth` | connection/TLS/401/403 | `Escalate` (needs a human/credential) |
-| `Unknown` | unrecognised signature | deduped `FileIssue` for investigation |
+| `Unknown` | unrecognised signature | stable-condition issue proposal through `GitHubMutationGuard` |
 
 See the full [classification matrix](../reference/terminal-failure-diagnosis-api.md#classification-matrix).
 

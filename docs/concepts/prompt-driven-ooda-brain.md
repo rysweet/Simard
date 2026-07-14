@@ -1,3 +1,12 @@
+---
+title: Prompt-Driven OODA Brain
+description: How Simard delegates engineer-lifecycle decisions to the OODA recipe while Rust enforces typed safety contracts.
+last_updated: 2026-07-14
+review_schedule: as-needed
+owner: simard
+doc_type: concept
+---
+
 # Prompt-Driven OODA Brain
 
 Simard's OODA daemon delegates the **engineer-lifecycle decision** — what to do
@@ -58,10 +67,10 @@ The brain is constructed **once per cycle** and dropped at cycle end. It is not
 a global, not an `Arc<Mutex<…>>`, and is not threaded through `OodaConfig`.
 This keeps its lifetime obviously scoped and avoids cross-cycle adapter state.
 
-`pending_issues.jsonl` is a write-only sink for now: this PR appends to it but
-does not consume it. A follow-up change will add an OODA action that drains the
-queue and runs `gh issue create --label ooda-stuck`. Until then, the file is
-useful as an audit trail and can be processed manually.
+`pending_issues.jsonl` is an observation queue. Its typed provenance is
+validated when loaded. Eligible records may be semantically consolidated by
+the OODA recipe and submitted to `GitHubMutationGuard`; the queue never invokes
+`gh issue` directly, and stewardship or legacy-unknown ancestry is rejected.
 
 ## Backward Compatibility
 

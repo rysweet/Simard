@@ -16,72 +16,71 @@
 //!
 //! Reuse map (see `docs/design/overseer.md` §capability table):
 //! `stewardship::process_orchestrator_run` (`src/stewardship/mod.rs:51`),
-//! dedup via `stewardship::failure_signature` (`src/stewardship/dedup.rs`),
-//! backlog enqueue via `goal_curation::enqueue_stewardship_issue`.
+//! dedup via the producer-supplied typed condition identity.
 
 use std::sync::{Arc, Mutex};
 
-use crate::goal_curation::GoalBoard;
 use crate::overseer::capabilities::{
     IssueFiler, IssueOutcome, OrchestratorRunBrief, OverseerError,
 };
 use crate::overseer::intervention::Intervention;
 use crate::overseer::signal::{Problem, ProblemKind, Signal};
+use crate::stewardship::gh_client::StewardshipGh;
+use crate::stewardship::mutation_guard::MutationGuard;
+#[cfg(test)]
+use crate::stewardship::mutation_store::MutationStore;
 use crate::stewardship::{
-    GhClient, OrchestratorRunSummary, StewardshipOutcome, failure_signature,
-    process_orchestrator_run,
+    ArtifactProvenance, CycleId, IssueMutationIdentity, LineageId, OrchestratorRunSummary,
+    StewardshipDisposition, StewardshipOutcome, process_orchestrator_run,
 };
 
 /// A real [`IssueFiler`] backed by Simard's stewardship loop. Wraps
-/// `stewardship::process_orchestrator_run`, which searches the routed repo for
-/// an OPEN issue carrying the same `failure_signature` and files a new one only
-/// when none exists — so repeated Observe cycles over the same failure are
-/// idempotent (`FiledNew` once, `MatchedExisting` thereafter).
+/// `stewardship::process_orchestrator_run`, whose durable mutation journal is
+/// authoritative. Repeated observations with the same condition identity are
+/// idempotent (`FiledNew` once, `MatchedExisting` thereafter) without trusting
+/// forgeable remote issue text.
 ///
 /// The `gh` handle is the ONLY network surface (a `RealGhClient` in the daemon,
-/// a fake in tests). The goal board is held behind a `Mutex` so `file(&self, …)`
-/// can enqueue the resulting issue without requiring `&mut self`.
+/// a fake in tests). The mutation guard is held behind a `Mutex` so
+/// `file(&self, …)` can persist journal state without requiring `&mut self`.
 pub struct StewardshipIssueFiler {
-    gh: Arc<dyn GhClient + Send + Sync>,
-    board: Mutex<GoalBoard>,
+    gh: Arc<dyn StewardshipGh + Send + Sync>,
+    guard: Mutex<MutationGuard>,
 }
 
 impl StewardshipIssueFiler {
-    /// Construct with a fresh, empty goal board.
-    pub fn new(gh: Arc<dyn GhClient + Send + Sync>) -> Self {
+    /// Construct with the production mutation journal.
+    pub(crate) fn new(gh: Arc<dyn StewardshipGh + Send + Sync>) -> Self {
         Self {
             gh,
-            board: Mutex::new(GoalBoard::new()),
+            guard: Mutex::new(MutationGuard::from_default_store()),
         }
     }
 
-    /// Construct over an existing board (e.g. the loaded persistent board).
-    pub fn with_board(gh: Arc<dyn GhClient + Send + Sync>, board: GoalBoard) -> Self {
+    #[cfg(test)]
+    pub(crate) fn new_for_test(gh: Arc<dyn StewardshipGh + Send + Sync>) -> Self {
+        let path = std::env::temp_dir()
+            .join(format!("simard-stewardship-test-{}", uuid::Uuid::new_v4()))
+            .join("mutations.json");
         Self {
             gh,
-            board: Mutex::new(board),
+            guard: Mutex::new(MutationGuard::new(MutationStore::new(path))),
         }
-    }
-
-    /// Snapshot the current backlog length (used by tests / reporting).
-    pub fn backlog_len(&self) -> usize {
-        self.board
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .backlog
-            .len()
     }
 }
 
 impl IssueFiler for StewardshipIssueFiler {
     fn file(&self, run: &OrchestratorRunBrief) -> Result<IssueOutcome, OverseerError> {
-        let summary = brief_to_summary(run);
-        let mut board = self
-            .board
+        let summary = brief_to_summary(run).map_err(|e| OverseerError::Capability {
+            what: "file_issue",
+            detail: e.to_string(),
+        })?;
+        let mut guard = self
+            .guard
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let outcome =
-            process_orchestrator_run(&summary, self.gh.as_ref(), &mut board).map_err(|e| {
+            process_orchestrator_run(&summary, self.gh.as_ref(), &mut guard).map_err(|e| {
                 OverseerError::Capability {
                     what: "file_issue",
                     detail: e.to_string(),
@@ -101,16 +100,22 @@ impl IssueFiler for StewardshipIssueFiler {
 /// STABLE one from the failure signature so re-observing the same failure keeps
 /// the same run identity and dedups to the same issue (the signature itself
 /// depends only on `failure_kind` + `error_text`).
-pub fn brief_to_summary(run: &OrchestratorRunBrief) -> OrchestratorRunSummary {
-    let signature = failure_signature(&run.failure_kind, &run.error_text);
-    OrchestratorRunSummary {
-        run_id: format!("overseer-{signature}"),
+pub fn brief_to_summary(
+    run: &OrchestratorRunBrief,
+) -> crate::error::SimardResult<OrchestratorRunSummary> {
+    let condition_id = run.condition_id.clone();
+    Ok(OrchestratorRunSummary {
+        run_id: format!("overseer-{}", condition_id.as_str()),
         recipe_name: run.recipe_name.clone(),
         failed_step: run.failed_step.clone(),
         source_module: run.source_module.clone(),
         failure_kind: run.failure_kind.clone(),
         error_text: run.error_text.clone(),
-    }
+        condition_id: condition_id.clone(),
+        cycle_id: CycleId::scheduled("overseer")?,
+        provenance: run.provenance.clone(),
+        disposition: StewardshipDisposition::AuthorizedIssue,
+    })
 }
 
 /// The M1 restriction of `decide`: every `Problem` maps to a **write-free**
@@ -152,7 +157,7 @@ pub fn decide_read_only(problem: &Problem) -> Intervention {
 /// Build the deduplicated stewardship brief for a filed problem. The brief is
 /// consumed by [`StewardshipIssueFiler`] → `stewardship::process_orchestrator_run`,
 /// which routes on `source_module` and dedups on
-/// `failure_signature(failure_kind, error_text)`.
+/// the producer-supplied typed `failure_kind`.
 fn problem_to_run_brief(problem: &Problem) -> OrchestratorRunBrief {
     OrchestratorRunBrief {
         recipe_name: "overseer-observer".to_string(),
@@ -160,6 +165,10 @@ fn problem_to_run_brief(problem: &Problem) -> OrchestratorRunBrief {
         source_module: routable_source_module(problem),
         failure_kind: problem.dedup_key.clone(),
         error_text: stable_error_text(problem),
+        condition_id: IssueMutationIdentity::from_source("overseer-problem", &problem.dedup_key),
+        provenance: ArtifactProvenance::system(
+            LineageId::new("overseer-problem").expect("static lineage id is valid"),
+        ),
     }
 }
 
@@ -195,8 +204,8 @@ fn kind_step_label(kind: ProblemKind) -> &'static str {
     }
 }
 
-/// STABLE error text (no fluctuating metric values) so `failure_signature` folds
-/// every recurrence of the same problem into ONE deduplicated issue. Live metric
+/// STABLE error text (no fluctuating metric values) keeps issue bodies useful
+/// while the typed failure kind owns condition identity. Live metric
 /// values live in the periodic Report / `simard status` telemetry, not the issue
 /// body. Keyed on the (already stable) `dedup_key` plus the evidence signal
 /// kinds — both invariant across observation cycles for a given problem.
@@ -266,7 +275,8 @@ mod tests {
     use crate::error::{SimardError, SimardResult};
     use crate::overseer::decide;
     use crate::overseer::signal::Priority;
-    use crate::stewardship::GhIssue;
+    use crate::stewardship::gh_client::IssueMutationTransport;
+    use crate::stewardship::{GhClient, GhIssue, IssueMutationIdentity};
 
     /// Stateful, **no-network** fake: `create_issue` registers the issue so a
     /// later `search_issues` for the same signature returns it — exactly how the
@@ -308,7 +318,18 @@ mod tests {
                 .cloned()
                 .collect())
         }
-        fn create_issue(&self, repo: &str, title: &str, body: &str) -> SimardResult<GhIssue> {
+    }
+
+    impl IssueMutationTransport for StatefulFakeGh {
+        fn create_issue(
+            &self,
+            repo: &str,
+            _identity: &IssueMutationIdentity,
+            title: &str,
+            body: &str,
+            _labels: &[String],
+            _assignees: &[String],
+        ) -> SimardResult<GhIssue> {
             *self.create_calls.lock().unwrap() += 1;
             let number = {
                 let mut n = self.next_number.lock().unwrap();
@@ -336,8 +357,20 @@ mod tests {
                 reason: "boom".to_string(),
             })
         }
-        fn create_issue(&self, _repo: &str, _title: &str, _body: &str) -> SimardResult<GhIssue> {
-            unreachable!("create must not be called after a search failure")
+    }
+    impl IssueMutationTransport for FailingGh {
+        fn create_issue(
+            &self,
+            _repo: &str,
+            _identity: &IssueMutationIdentity,
+            _title: &str,
+            _body: &str,
+            _labels: &[String],
+            _assignees: &[String],
+        ) -> SimardResult<GhIssue> {
+            Err(SimardError::StewardshipGhCommandFailed {
+                reason: "boom".to_string(),
+            })
         }
     }
 
@@ -348,6 +381,8 @@ mod tests {
             source_module: "simard::engineer_loop".to_string(),
             failure_kind: "PanicInStep".to_string(),
             error_text: "panic at /home/user/src/foo.rs:42:7\nbacktrace deadbeef".to_string(),
+            condition_id: IssueMutationIdentity::new("condition:test-observer").unwrap(),
+            provenance: ArtifactProvenance::system(LineageId::new("test-observer").unwrap()),
         }
     }
 
@@ -360,7 +395,7 @@ mod tests {
     #[test]
     fn issue_filer_is_idempotent_across_cycles_no_network() {
         let gh = Arc::new(StatefulFakeGh::new());
-        let filer = StewardshipIssueFiler::new(gh.clone());
+        let filer = StewardshipIssueFiler::new_for_test(gh.clone());
         let brief = sample_brief();
 
         let first = filer.file(&brief).expect("first file");
@@ -382,20 +417,19 @@ mod tests {
             "same issue URL both cycles"
         );
         assert_eq!(gh.create_calls(), 1, "no duplicate issue created");
-        assert_eq!(gh.search_calls(), 2, "each cycle searches exactly once");
         assert_eq!(
-            filer.backlog_len(),
-            1,
-            "second cycle must not duplicate the backlog row"
+            gh.search_calls(),
+            0,
+            "remote issue text is not authoritative idempotency state"
         );
     }
 
     #[test]
     fn issue_filer_surfaces_capability_failure_without_panic() {
-        let filer = StewardshipIssueFiler::new(Arc::new(FailingGh));
+        let filer = StewardshipIssueFiler::new_for_test(Arc::new(FailingGh));
         let err = filer
             .file(&sample_brief())
-            .expect_err("search failure surfaces");
+            .expect_err("create failure surfaces");
         assert!(
             matches!(
                 err,
@@ -409,11 +443,13 @@ mod tests {
     }
 
     #[test]
-    fn brief_to_summary_synthesises_stable_run_id_from_signature() {
+    fn brief_to_summary_synthesises_stable_run_id_from_condition() {
         let brief = sample_brief();
-        let summary = brief_to_summary(&brief);
-        let sig = failure_signature(&brief.failure_kind, &brief.error_text);
-        assert_eq!(summary.run_id, format!("overseer-{sig}"));
+        let summary = brief_to_summary(&brief).unwrap();
+        assert_eq!(
+            summary.run_id,
+            format!("overseer-{}", summary.condition_id.as_str())
+        );
         assert_eq!(summary.recipe_name, brief.recipe_name);
         assert_eq!(summary.failed_step, brief.failed_step);
         assert_eq!(summary.source_module, brief.source_module);
@@ -422,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn dedup_signature_ignores_recipe_and_step_differences() {
+    fn typed_condition_ignores_recipe_and_step_differences() {
         // Two briefs describing the SAME underlying failure (same kind + text)
         // but different recipe/step must share a signature → same issue.
         let a = sample_brief();
@@ -430,12 +466,12 @@ mod tests {
         b.recipe_name = "default-workflow".to_string();
         b.failed_step = "orient".to_string();
         assert_eq!(
-            failure_signature(&a.failure_kind, &a.error_text),
-            failure_signature(&b.failure_kind, &b.error_text)
+            brief_to_summary(&a).unwrap().condition_id,
+            brief_to_summary(&b).unwrap().condition_id
         );
 
         let gh = Arc::new(StatefulFakeGh::new());
-        let filer = StewardshipIssueFiler::new(gh.clone());
+        let filer = StewardshipIssueFiler::new_for_test(gh.clone());
         assert!(matches!(
             filer.file(&a).unwrap(),
             IssueOutcome::FiledNew { .. }
@@ -604,7 +640,7 @@ mod tests {
         // Two observation cycles of the SAME recurring process problem must file
         // exactly one issue (stable error_text → stable failure signature).
         let gh = Arc::new(StatefulFakeGh::new());
-        let filer = StewardshipIssueFiler::new(gh.clone());
+        let filer = StewardshipIssueFiler::new_for_test(gh.clone());
         let mut p = problem(
             ProblemKind::ProcessHealth,
             vec![Signal::DistillFailureRate { pct: 62.0 }],

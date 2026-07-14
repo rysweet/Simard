@@ -13,7 +13,12 @@ Closes the visibility gap that Issue [#1890](https://github.com/rysweet/Simard/i
 
 This page is the normative definition of how `decide_with_brain` and `orient_with_brain` in `simard::ooda_loop` surface a brain-invocation failure (the dominant case is a JSON-parse failure; other adapter `Err` variants are covered identically — see [Scope of the record](#scope-of-the-record)). Before this contract, a brain failure produced a single `WARN` line of the form `no JSON object found in LLM response (got N bytes)` and was then silently substituted by `DeterministicFallbackDecideBrain` / `DeterministicFallbackOrientBrain`. The cycle still ran, the cycle report still claimed a decision, and the operator had no way to tell a healthy cycle from a degraded one.
 
-> **TL;DR** — Decide and orient brain failures fire four visibility channels in a fixed sequence: (1) a single `ERROR`-level structured `tracing` event, (2) a `brain_parse_failure` metric increment, (3) a new `parse_failure` block on the corresponding `BrainJudgmentRecord` (which lands in `cycle_reports/cycle_*.json`), and (4) a throttled `gh issue create` escalation at ≥3 consecutive failures per `(phase, goal_id)`. The cycle does **not** abort — it continues with a deterministic substitution whose record now carries a `parse_failure` block, so the cycle report makes the degraded state machine-readable.
+> **TL;DR** - Decide and orient brain failures emit structured tracing,
+> metrics, a durable `parse_failure` record, and, at the recurrence threshold,
+> a typed issue proposal. Any autonomous issue mutation uses
+> `GitHubMutationGuard`. A mutation-guard failure aborts the owning cycle; a
+> successful visibility-only path may continue with the recorded deterministic
+> substitution.
 
 ## Scope of the record
 
@@ -97,8 +102,8 @@ pub struct ParseFailureRecord {
     pub prompt_version: String,
     /// How many *consecutive* failures (per `(phase, goal_id)`) have
     /// occurred up to and including this one. Resets to 0 on the next
-    /// successful parse for the same key. The `gh issue create`
-    /// escalation fires when this reaches `ISSUE_ESCALATION_THRESHOLD`
+    /// successful parse for the same key. A typed guarded issue proposal
+    /// is considered when this reaches `ISSUE_ESCALATION_THRESHOLD`
     /// (currently 3).
     pub consecutive_count: u32,
     /// Reserved for future retry-with-feedback. Always `false` in this
@@ -181,9 +186,17 @@ jq '.brain_judgments[]
 
 ## The four visibility channels
 
-Every call to `record_parse_failure(phase, goal_id, &err, &raw, prompt_name)` fires the four channels in a **fixed sequence**: tracing → metric → counter-increment → in-memory record returned for embedding into `BrainJudgmentRecord` → conditional `gh issue create`. The sequence is not atomic (channel 4 spawns a subprocess; channel 3 only lands on disk when `persist_cycle_report` runs at end-of-cycle), but an observer that sees channel N is guaranteed to have a record of channels `1..N−1` as well: the helper runs synchronously and only returns once channels 1, 2, and 4 (the externally observable ones) have been invoked.
+Every call to `record_parse_failure(phase, goal_id, &err, &raw, prompt_name)`
+fires four channels in a fixed sequence: tracing, metric, counter increment,
+the in-memory `BrainJudgmentRecord`, and a conditional typed issue proposal.
+When that proposal is authorized, the external issue mutation is performed
+only through `GitHubMutationGuard`; reservation and terminal outcome use the
+separate atomic mutation journal.
 
-**Sequencing relative to the fallback brain.** The four channels fire *before* the deterministic fallback brain is invoked, so even if the fallback itself errors (the `?` propagation on `fallback.judge_decision(&ctx)?` in `decide.rs`) the parse failure has already been recorded on channels 1, 2, and 4. Only channel 3 (the on-disk `BrainJudgmentRecord`) is lost in that pathological case — the cycle never gets to call `push_brain_judgment` — but the tracing event, the metric increment, and the auto-filed issue all survive. This sequencing is asserted by a regression test that injects a failing fallback brain and verifies channels 1, 2, and 4 still fire.
+**Sequencing relative to the fallback brain.** Visibility records are emitted
+before deterministic fallback. A mutation-guard error is fatal and is returned
+to the cycle owner; it is never reduced to a warning so fallback can make the
+cycle appear successful.
 
 ### 1. Structured `tracing::error!`
 
@@ -222,26 +235,23 @@ The existing `record_metric(name: &str, value: f64, context: &str)` API (in `sim
 
 The record produced by `record_parse_failure` is wrapped into the existing `push_brain_judgment(BrainJudgmentRecord { …, parse_failure: Some(record), … })` call. `persist_cycle_report` in `operator_commands_ooda::persistence` serializes it via `serde_json::to_value` with no manual schema work — the field is on the struct, so it lands in the JSON.
 
-### 4. Throttled `gh issue create`
+### 4. Guarded issue proposal
 
-When `consecutive_count >= ISSUE_ESCALATION_THRESHOLD` (currently `3`), the helper spawns:
+When `consecutive_count >= ISSUE_ESCALATION_THRESHOLD` (currently `3`), the
+helper builds a typed proposal from eligible sources. The trusted cycle owner
+submits the validated request:
 
 ```rust
-std::process::Command::new("gh")
-    .args([
-        "issue", "create",
-        "--repo", ESCALATION_REPO_SLUG,     // compile-time &'static str
-        "--title", &title,                  // pre-formatted, no shell
-        "--body-file", body_path,           // NamedTempFile, never --body
-        "--label", "ooda-brain-parse-failure",
-        "--label", "auto-filed",
-    ])
-    .status()
+mutation_guard.execute(request, &autonomous_authorization)?
 ```
 
-The title pattern is `OODA decide brain parse failure: goal=<id> (N consecutive)`; the body is a `tempfile::NamedTempFile`-backed markdown file containing the full `ParseFailureRecord` serialized as a fenced JSON block plus a short hand-off paragraph. **No shell interpolation, ever** — see [Security](#security).
+The title pattern is `OODA decide brain parse failure: goal=<id> (N
+consecutive)`. The body is constructed from bounded typed fields and contains
+the provenance metadata block. Raw model output is not copied into a public
+issue without redaction.
 
-`ESCALATION_REPO_SLUG` is a compile-time `&'static str` constant (`"rysweet/Simard"` in this repo) defined alongside `ISSUE_ESCALATION_THRESHOLD`. This matches the existing `--repo` pattern used by `stewardship/merge_authority.rs` and `worktree_gc/runner.rs` — the slug is passed positionally to `Command::args`, never interpolated into a shell string. Forks rebuilding this binary must edit the constant; this is intentional, so escalations cannot be silently redirected by an env var or runtime flag.
+`ESCALATION_REPO_SLUG` remains a trusted compile-time repository identifier.
+Authorization is bound to the same repository, cycle, and operation.
 
 ## Operator-visible decision tree
 
@@ -259,7 +269,7 @@ The title pattern is `OODA decide brain parse failure: goal=<id> (N consecutive)
                                      ├─► BrainJudgmentRecord.parse_failure = Some(_)  (ch.3)
                                      ├─► counter[ (phase, goal_id) ] += 1
                                      │       │
-                                     │       └─► if ≥3:  gh issue create  (ch.4)
+                                     │       └─► if >=3: typed proposal -> GitHubMutationGuard
                                      │
                                      ▼
                           DeterministicFallback*Brain
@@ -275,15 +285,19 @@ On the **next** successful parse for the same `(phase, goal_id)`, the counter is
 
 ## Configuration
 
-None. No new env var, CLI flag, or `~/.simard/config` key is introduced. The visibility channels are non-opt-out by design — silencing them was the bug that #1890 closes. Three compile-time constants live in `parse_failure.rs` for reviewers:
+Parse-failure visibility remains non-opt-out. Issue mutation additionally uses
+the shared stewardship mutation configuration:
 
 | Constant | Value | Meaning |
 |---|---|---|
 | `RAW_RESPONSE_TRUNCATE_BYTES` | `8192` | Cap fed to `truncate_to_char_boundary`. Matches the existing helper's default for `~/.simard/logs` protection. |
 | `ISSUE_ESCALATION_THRESHOLD` | `3` | Mirror of `spawn_engineer`/`#1711` throttle (see A6). |
-| `ESCALATION_REPO_SLUG` | `"rysweet/Simard"` | `--repo` target for `gh issue create`. Forks must edit at compile time. |
+| `ESCALATION_REPO_SLUG` | `"rysweet/Simard"` | Trusted repository bound into authorization. |
+| `SIMARD_STEWARDSHIP_GITHUB_MUTATION_LIMIT` | `1` | Shared finite reservation limit for every daemon-initiated GitHub write in the durable cycle. |
 
-Operators who want to disable the `gh issue create` channel (e.g., on an air-gapped daemon) should ensure the `gh` binary is not on `PATH`; the spawn fails fast, the failure is itself logged at `WARN`, and the other three channels continue unaffected. There is intentionally no "silence the issue filer" boolean — see [#1245](https://github.com/rysweet/Simard/issues/1245).
+Missing GitHub transport is not a kill switch. If an authorized mutation is
+attempted while transport is unavailable, the reservation and failure are
+persisted and the cycle fails visibly.
 
 ## Cycle-report shape
 
@@ -318,21 +332,28 @@ Healthy cycles serialize **byte-for-byte identically** to the pre-PR shape: the 
 
 ## Security
 
-* **`gh` invocation discipline.** All `gh issue create` calls use `Command::args([...])` with positional arguments. Bodies are passed via `--body-file <NamedTempFile>` (RAII-cleaned), not `--body` with `format!()`. The codebase contains an explicit grep-based test (`gh_issue_invocation_uses_arg_array_not_shell`) that fails CI if any caller composes a `gh` invocation from an interpolated string.
-* **Tempfile mode.** `tempfile::NamedTempFile::new()` creates the body file with mode `0600` on Unix (the crate's documented default; the open uses `O_CREAT | O_EXCL` and chmod-on-create). A regression test (`gh_body_tempfile_is_0600`) opens the file via `metadata().permissions().mode()` and asserts the low 9 bits are `0o600`, so a future tempfile-crate change or platform port can't silently relax this.
+* **Single mutation boundary.** No parse-failure code invokes `gh issue`
+  directly. The guard owns argv construction, durable reservation, transport,
+  and completion.
+* **Journal safety.** State uses owner-only permissions, no-follow path checks,
+  atomic replacement, and parent-directory flush.
 * **Display, not Debug.** `error_message` is `err.to_string()`. Future `SimardError` variants that grow sensitive fields cannot leak into the record via `{:?}`.
 * **Truncation as sanitization.** `raw_response_truncated` is `truncate_to_char_boundary(&mut s, 8192)`. No regex secret-scrubbing — see [Known limits](#known-limits).
 * **No new auth surface.** The `gh` channel reuses the operator's pre-existing `GH_TOKEN` / `gh auth` configuration. No new credential file, no new env var.
-* **Process-local counter.** The `(phase, goal_id) → u32` map lives behind `Mutex<HashMap<…>>` (in a `OnceLock`) to prevent a race when decide and orient fail for the same goal in the same cycle (SR7). Cross-restart counter loss is documented and accepted — the worst case is one extra `gh issue` per daemon restart loop, also documented in the PR body.
+* **Restart idempotency.** Even if the recurrence counter is reconstructed, the
+  stable typed mutation identity and journal prevent another mutation for the
+  same request.
 * **JSON-injection resistance.** `ParseFailureRecord` is built as a typed struct and serialized via `serde_json` — no manual string concatenation into JSON. The `parse_failure_record_serializes_safely_with_quotes_and_braces` regression test feeds a `raw_response_truncated` containing `"}` and asserts the resulting JSON round-trips.
 
 ## Known limits
 
 * **No secret scrubbing of LLM output.** Per A9 in the requirements, `raw_response_truncated` contains whatever the model returned, truncated only. The model is reading our prompt; secret exposure in its *response* is low-probability in practice. If a leak class emerges, it will be addressed separately — there is no module-level toggle to add scrubbing.
 * **No retry-with-feedback in this release.** The `retry_attempted` field is reserved and always `false`. A future PR can wire a single-attempt retry through the brain trait without changing this record's JSON shape.
-* **Counter is process-local.** Daemon restart resets all `(phase, goal_id)` counters to zero. A pathological restart loop could file one issue per (3 × restart). Operators who see this should investigate the restart loop, not the threshold.
+* **Counter reconstruction is not authority.** A restart may rebuild recurrence
+  state, but cannot reset the persisted mutation identity or reservation count.
 * **Counter map is unbounded.** The `(BrainPhase, String) → u32` map is keyed by `goal_id` and pruned only by successful-parse reset, not by absolute time or size. For daemons with unbounded goal cardinality the map grows monotonically (bounded only by distinct `goal_id` count per process lifetime). In practice goal cardinality is small (top-5 active + backlog) and daemon process lifetimes are bounded by `safe-update`, so no eviction logic is gated. If a future deployment shape changes this, an LRU cap is the obvious next step and does not change the JSON shape.
-* **`gh` is best-effort.** If `gh` is missing, unauthenticated, or rate-limited, the spawn failure is logged at `WARN` and the other three channels still fire. The cycle does not block on the network.
+* **GitHub mutation fails loudly.** Missing authentication, rate limits, and
+  transport errors are durable fatal guard outcomes for the owning cycle.
 * **Tracing-flood self-limiting.** A pathological per-cycle failure produces one `ERROR` line per cycle (one per phase). At default cycle cadence this is bounded by the cycle pacing, not by an in-helper rate limit; operators who need a louder cap can subscriber-side filter `target=simard::ooda_brain` to a lower level. The `gh` channel's per-`(phase, goal_id)` throttle (A6) is the protection against issue-tracker flooding; the tracing channel intentionally remains uncapped so the on-disk evidence is complete.
 * **Validation-failure case not covered.** The orient call site collapses `Ok(j) if j.validate(...).is_err()` into the same `_ =>` deterministic-substitution arm. This PR fires the record for `Err(_)` only, not for `Ok-but-invalid`. The latter is a structurally separate failure mode tracked in a follow-up issue; when addressed it should reuse `ParseFailureRecord` with an `error_message` prefix of `"orient validation failed: …"` to keep operator tooling unchanged.
 * **Deterministic-fallback brains are unchanged.** This PR does **not** remove `DeterministicFallbackDecideBrain` / `DeterministicFallbackOrientBrain`. They are still the legitimate substitute for the no-LLM bootstrap path (operator deliberately ran the daemon without an LLM brain configured). Removing them is the scope of [#1748](https://github.com/rysweet/Simard/issues/1748), explicitly out of scope here.

@@ -105,7 +105,7 @@ The design must satisfy three constraints that shaped every decision below:
 | 1 | Model `CreativeIdea` as a typed struct that **round-trips to/from** a `CognitiveProspective` node. Store `status`, `context`, and typed `links` as a JSON payload in `action_on_trigger`; `description` = the idea text; `status` mirrored into the prospective `status: String`. A thin `CreativeIdeaStore` seam wraps `store_prospective` / `list_all_prospective`. | Zero schema change to prospective memory; fully round-trippable; marks a native links field as future work. |
 | 2 | Reuse **`ThreadKind::BackgroundThought`** for the generator thread; do not add an enum variant. | The variant is already reserved for "idle associative background thought"; avoids touching the enum and its exhaustive matches. |
 | 3 | New top-level **`src/creative_ideas/`** owns the reviewer-pipeline trait, the four adapters, synthesis, routing, dedup/portfolio, and the config flag. The prospective type lives in `src/cognitive_memory/creative_idea.rs`; the generator thread in `src/cognitive_threads/threads/creative_ideas.rs`. | Respects "prospective type in `cognitive_memory`, thread in `cognitive_threads`" while keeping pipeline/routing cohesive and independently testable. |
-| 4 | Do **not** mutate the live `gh` tooling. Define an `IdeaGhClient` **extension seam** (labeled+assigned issue creation; PR draft/label/owner-review-request), faked in tests and backed in production by `RealIdeaGhClient` (a `gh` subprocess impl using pure argv builders). Reuse the existing `GhClient` (`src/stewardship/gh_client.rs`) pattern; never `--admin` / `--no-verify`. | The existing `GhClient` has only `search_issues` / `create_issue`; the gate needs labels/assignees/draft/review. A separate seam adds these without touching the daemon's `gh` tooling and keeps every side effect independently testable with a fake. |
+| 4 | Every daemon GitHub write uses `GitHubMutationGuard`, including issue creation and PR draft/label/review operations. Never `--admin` / `--no-verify`. | One write boundary prevents creative-idea routing or PR handling from bypassing provenance, restart idempotency, or the shared cycle budget. |
 
 ## Reuse map (what this design builds on — no duplication)
 
@@ -114,7 +114,7 @@ The design must satisfy three constraints that shaped every decision below:
 | Prospective memory | `CognitiveProspective` (`src/memory_cognitive.rs`); `CognitiveMemoryOps::store_prospective` / `list_all_prospective` / `check_triggers` / `resolve_prospective` (`src/cognitive_memory/mod.rs`) | `CreativeIdea` + `CreativeIdeaStore` seam that (de)serializes to a prospective node |
 | Thread scheduling | `CognitiveThread` trait, `ThreadKind::BackgroundThought`, `SchedulePolicy`, `Priority`, `ThreadContext`, `ThreadOutcome` (`src/cognitive_threads/thread.rs`); the `Mind` scheduler (#2531) | `CreativeIdeasThread` implementing `CognitiveThread` (gated `enabled()`) |
 | Goals | `GoalStore` trait, `GoalRecord`, `GoalStatus`, `GoalUpdate`, `goal_slug` (`src/goals/`) | `route_idea_to_goal(...)` producing a `Proposed` goal |
-| GitHub issues | `GhClient` trait + `RealGhClient` (`src/stewardship/gh_client.rs`); `StewardshipIssueFiler` (`src/overseer/observer.rs`) | `IdeaGhClient` extension seam for labeled+assigned issues and PR gate |
+| GitHub issues and PRs | `GitHubMutationGuard` and typed provenance | Pure creative-idea request adapters; the guard owns all write transport |
 | Reviewers | Existing agent/skill invocation (amplihack bin via `SIMARD_AMPLIHACK_BIN`; `AgentRole` in `src/agent_roles.rs`) | `Reviewer` trait + 4 adapters (skill/agent/synthesis) |
 | Cross-pollination | Overseer observations (`src/overseer/`); the daily Journal (OODA observe/cycle) | Read-only inputs into the generator's observation window |
 | Self-metrics | `recall_precision_at_k` (`RECALL_PRECISION_METRIC`, `src/cognitive_memory/metrics.rs`), distill fact-yield, reasoner-reliability | Measurability reviewer ties idea success metrics to these |
@@ -413,13 +413,16 @@ a bespoke clock trait — so routing is deterministic in tests.
 ### 2. Accepted but flagged → a GitHub Issue tagging the owner
 
 ```rust
-pub fn route_idea_to_issue(idea: &CreativeIdea, gh: &dyn IdeaGhClient, repo: &str)
-    -> SimardResult<GhIssue>;
+pub fn route_idea_to_issue(
+    idea: &CreativeIdea,
+    guard: &mut GitHubMutationGuard,
+    authorization: &AutonomousGitHubAuthorization,
+) -> Result<GitHubMutationOutcome, GitHubMutationError>;
 ```
 
-Creates an issue with a **specific label** (`creative-idea`) and **assigns the repo
-owner (`rysweet`)**. Applies only to ideas in `NeedsHumanReview`. The issue body embeds
-`idea.node_id` (traceability) and the synthesized next steps.
+Applies only to eligible ideas in `NeedsHumanReview`. It creates a typed request
+with label `creative-idea`, owner assignment, the idea node ID, next steps, and
+complete provenance. The guard derives identity and owns transport.
 
 ### 3. Idea-PR human-review gate
 
@@ -434,13 +437,17 @@ pub struct IdeaPrGate {
     pub originating_idea: String,    // idea.node_id (link back)
 }
 
-pub fn mark_idea_pr(pr_number: u64, idea: &CreativeIdea, gh: &dyn IdeaGhClient, repo: &str)
-    -> SimardResult<IdeaPrGate>;
+pub fn mark_idea_pr(
+    pr_number: u64,
+    idea: &CreativeIdea,
+    guard: &mut GitHubMutationGuard,
+    authorization: &AutonomousGitHubAuthorization,
+) -> Result<IdeaPrGate, GitHubMutationError>;
 ```
 
-Enforcement model (all standard GitHub mechanisms, no privilege bypass). `repo`
-(`owner/name`) is threaded through so the call reaches the correct repository — every
-`IdeaGhClient` PR method requires it:
+Enforcement uses standard GitHub mechanisms with no privilege bypass. Each
+typed request carries the validated repository and stable idea condition
+identity:
 
 - **Draft** — a draft PR cannot be merged by anyone until marked ready.
 - **Blocking label** — `creative-idea-needs-human-review`; branch-protection /
@@ -453,23 +460,18 @@ Enforcement model (all standard GitHub mechanisms, no privilege bypass). `repo`
 The idea only reaches `ImplementationCompleted` when (a) the PR merges through the
 normal gate **and** (b) the idea's `success_metric` is marked met — both required.
 
-### `IdeaGhClient` extension seam
+### Pure GitHub request adapter
 
 ```rust
-pub trait IdeaGhClient {
-    fn create_labeled_issue(&self, repo: &str, title: &str, body: &str,
-        labels: &[&str], assignees: &[&str]) -> SimardResult<GhIssue>;
-    fn set_pr_draft(&self, repo: &str, pr: u64, draft: bool) -> SimardResult<()>;
-    fn add_pr_label(&self, repo: &str, pr: u64, label: &str) -> SimardResult<()>;
-    fn request_pr_review(&self, repo: &str, pr: u64, reviewer: &str) -> SimardResult<()>;
-}
+pub fn build_idea_pr_mutations(
+    idea: &CreativeIdea,
+    pull_request: PullRequestNumber,
+) -> Result<Vec<GitHubMutationRequest>, IdeaRoutingError>;
 ```
 
-- **Production:** `RealIdeaGhClient` shells out via pure argv builders
-  (`gh issue create --label … --assignee …`, `gh pr ready --undo`, `gh pr edit
-  --add-label`, `gh pr edit --add-reviewer`), reusing the `RealGhClient`
-  subprocess pattern from `src/stewardship/gh_client.rs`. **Tests:**
-  `FakeIdeaGhClient` records calls for assertions.
+- **Production:** the request adapter is pure; `GitHubMutationGuard` owns all
+  issue and PR transport. **Tests:** mutation-guard fakes assert reservation,
+  shared-budget enforcement, and replay behavior.
 - **Never** emits `--admin` or `--no-verify`; a unit test asserts the constructed
   argument vectors contain neither flag.
 
@@ -505,10 +507,10 @@ All fallible operations return the crate-wide `SimardResult<T>`
 | `Reviewer::review` | `&ReviewContext` | `Review` | `ReviewUnavailable` |
 | `FeedbackSynthesizer::synthesize` | `&ReviewContext, &[Review]` | `SynthesisOutcome` | `ReviewBlocked`, `InvalidIdeaTransition` (illegal `next_status`) |
 | `route_idea_to_goal` | `&CreativeIdea, &dyn GoalStore, now_epoch: u64` | `GoalRecord` | `InvalidGoalRecord`, `InvalidIdeaTransition` |
-| `route_idea_to_issue` | `&CreativeIdea, &dyn IdeaGhClient, repo: &str` | `GhIssue` | `ActionExecutionFailed`, `GitCommandFailed`, `CommandTimeout` |
-| `mark_idea_pr` | `pr: u64, &CreativeIdea, &dyn IdeaGhClient, repo: &str` | `IdeaPrGate` | `ActionExecutionFailed`, `GitCommandFailed`, `CommandTimeout` |
-| `IdeaGhClient::*` | (see seam above) | per method | `ActionExecutionFailed`, `GitCommandFailed`, `CommandTimeout` |
-| `CreativeIdeasThread::tick` | `&mut ThreadContext` | `ThreadOutcome` | **never `Err`** — folds internal errors into `ThreadOutcome::failed` |
+| `route_idea_to_issue` | `&CreativeIdea, &mut GitHubMutationGuard, &AutonomousGitHubAuthorization` | `GitHubMutationOutcome` | `GitHubMutationError` |
+| `mark_idea_pr` | `pr: u64, &CreativeIdea, &mut GitHubMutationGuard, &AutonomousGitHubAuthorization` | `IdeaPrGate` | `GitHubMutationError` |
+| `build_idea_pr_mutations` | `&CreativeIdea, PullRequestNumber` | `Vec<GitHubMutationRequest>` | `IdeaRoutingError` |
+| `CreativeIdeasThread::tick` | `&mut ThreadContext` | `ThreadOutcome` | ordinary item errors become `failed`; guard errors abort the owning cycle |
 
 The request/response *schemas* are the structs already defined above
 (`CreativeIdea`, `GenerationInputs`, `RawIdea`, `ReviewContext`, `Review`,
@@ -545,9 +547,8 @@ Everything else reuses existing variants — **no bespoke error machinery**:
 - **Budget / rate limit** — the `tick` budget guard returns the existing
   `BudgetExceeded { period, spent, limit }` (or short-circuits to a skipped
   outcome when merely over cadence).
-- **GitHub / routing** — the future real `IdeaGhClient` maps non-zero `gh`
-  exits to `GitCommandFailed`/`ActionExecutionFailed` and hangs to
-  `CommandTimeout`; fakes return `Ok`.
+- **GitHub / routing** - request construction is pure. The shared guard maps
+  transport and reconciliation failures to fatal `GitHubMutationError` values.
 - **Reviewer adapters** — an unreachable skill/agent returns
   `ReviewUnavailable { reason }`; a fatal synthesis block surfaces as
   `ReviewBlocked { summary }`.
@@ -556,10 +557,9 @@ Everything else reuses existing variants — **no bespoke error machinery**:
   understands, yields `InvalidCreativeIdeaRecord` — **never** a silent default.
   A newer on-disk row is a hard, visible error on an older binary, never
   misinterpreted.
-- **Total `tick`** — `CreativeIdeasThread::tick` is infallible by contract:
-  every internal `Err` is caught, `tracing::warn!`-logged with the stable
-  `creative_ideas` thread id, and returned as `ThreadOutcome::failed(reason, elapsed)`.
-  A single idea's failure never aborts the batch or the daemon.
+- **Visible `tick` failure** - ordinary per-idea generation/review errors become
+  `ThreadOutcome::failed`. Mutation-guard errors are not downgraded; they
+  terminate the owning durable cycle with its audit record intact.
 
 ### Versioning strategy
 
@@ -574,9 +574,9 @@ remain stable are three; each has an explicit version discipline:
 
 - **Trait/type API** — the Rust surface carries `#![allow(dead_code)]`
   and **no** semver promise yet. The `Reviewer`, `FeedbackSynthesizer`,
-  `IdeaSource`, and `IdeaGhClient` traits are the intended long-term extension
-  seams, so future capability is added via **new adapter impls** or **new
-  trait methods with defaults**, never by changing an existing method signature.
+  `IdeaSource`, and `GitHubMutationTransport` traits are the intended long-term
+  extension seams, so future capability is added via new adapter impls or new
+  guarded operation variants, never by creating a side-channel writer.
 - **Enum evolution** — adding an `IdeaStatus`/`ReviewVerdict` state is
   backward-compatible for *writers*, but per the fail-closed rule an older
   *reader* rejects an unknown state rather than guessing. Such a change
@@ -690,7 +690,7 @@ src/creative_ideas/
   mod.rs        # CreativeIdeasConfig::from_env (gating)
   reviewers.rs  # Reviewer trait, Review, 4 adapters (skill/agent/measurability), fakes
   synthesis.rs  # FeedbackSynthesizer, default policy, SynthesisOutcome
-  routing.rs    # route_idea_to_goal / route_idea_to_issue / mark_idea_pr, IdeaGhClient + fake
+  routing.rs    # route_idea_to_goal plus pure guarded issue/PR request adapters
   dedup.rs      # near-duplicate + portfolio + budget helpers
   tests.rs      # unit tests (all fakes, no network)
 
@@ -707,9 +707,10 @@ agent-backed `AgenticIdeaSource`, the four real reviewer/synthesis adapters
 (`crusty-old-engineer` skill / `philosophy-guardian` agent / `measurability` agent /
 deterministic fail-closed synthesis) driven through the shared session `AgentInvoker`
 seam (idle-liveness, no wall-clock turn cap), the review-and-route `AgenticIdeaPipeline`
-(accepted → goal, human-review → labeled+owner-tagged issue), the real `IdeaGhClient`
-`gh` subprocess impl, the merge-driver block-until-human-review guard, dedup/portfolio/
-budget helpers, the dashboard + TUI surfacing, and the hermetic tests below.
+(accepted -> goal, human-review -> guarded labeled+owner-tagged issue), the
+shared GitHub mutation guard, the merge-driver block-until-human-review guard,
+dedup/portfolio/budget helpers, the dashboard + TUI surfacing, and the hermetic
+tests below.
 
 **Owned upstream (guideline G2):** the creative-idea memory type — the
 `CreativeIdeaStatus` lifecycle state machine and the typed `MemoryLink`/`MemoryLinkKind`
@@ -733,8 +734,9 @@ portfolio/novelty scoring).
    step sets a status that is a legal transition from `New`.
 4. **Routing — goal** — an `AcceptedForImplementation` (non-flagged) idea produces a
    `Proposed` goal in a fake `GoalStore`, tagged with the originating `node_id`.
-5. **Routing — issue** — a `NeedsHumanReview` idea produces an issue via a fake
-   `IdeaGhClient` with label `creative-idea` and assignee `rysweet`.
+5. **Routing - issue** - a `NeedsHumanReview` idea produces one guarded create
+   request with label `creative-idea`, assignee `rysweet`, typed provenance, and
+   a stable condition identity.
 6. **Routing — PR gate** — `mark_idea_pr` marks the PR **draft**, adds label
    `creative-idea-needs-human-review`, and requests review from `rysweet`; a test
    asserts the constructed gh args contain **no** `--admin` / `--no-verify`.
@@ -749,10 +751,10 @@ portfolio/novelty scoring).
 10. **Tick is total** — a `tick` whose idea source/reviewer returns `Err` yields
    `ThreadOutcome::failed` (not a panic, not `Err`), leaving the daemon unaffected.
 11. **Wired tick — end to end** — with the thread enabled and injected fakes
-    (`FakeIdeaSource`, stub reviewers, `DefaultSynthesizer`, in-memory `GoalStore`,
-    `FakeIdeaGhClient`), one `tick` persists ideas into prospective memory, runs the
-    four-reviewer pipeline, and produces routing outcomes — an accepted idea lands a
-    goal in the store, a human-review idea lands an issue in the fake `gh` client.
+    (`FakeIdeaSource`, stub reviewers, `DefaultSynthesizer`, in-memory
+    `GoalStore`, fake mutation store and transport), one `tick` persists ideas,
+    runs the four-reviewer pipeline, and produces routing outcomes without
+    bypassing the shared budget.
 12. **Daemon registration — enabled** — `register_creative_ideas_if_enabled` registers
     the `creative_ideas` thread with the `Mind` when the config is enabled (asserted via
     `mind.health()` / `mind.len()`) and returns `true`.
@@ -775,8 +777,9 @@ subsystem is registered with the `Mind` scheduler and default-ON, opt-out.
   `crusty-old-engineer` skill / `philosophy-guardian` agent / measurability agent /
   synthesis through the shared session `AgentInvoker`; reviews persist on the idea.
   *(delivered)*
-- **M4 — routing side-effects:** idea→goal and idea→issue (labeled + owner-tagged)
-  via the real `IdeaGhClient` `gh` impl (never `--admin`/`--no-verify`).
+- **M4 - routing side-effects:** idea-to-goal and guarded idea-to-issue
+  (labeled + owner-tagged) through the shared mutation transport (never
+  `--admin`/`--no-verify`).
   *(delivered)*
 - **M5 — PR gate + outcome loop:** the draft + blocking-label + owner-review gate
   on creative-idea PRs, enforced by the merge driver's skip guard; measured

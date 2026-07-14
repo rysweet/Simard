@@ -447,6 +447,7 @@ fn operator_complete_tombstones_and_blocks_reseed() {
     let recalled = GoalBoard {
         active: vec![active_goal("ladybug-hardening", GoalProgress::NotStarted)],
         backlog: Vec::new(),
+        ..GoalBoard::default()
     };
     let tombstones = crate::ooda_loop::load_tombstones(&root);
     let filtered = crate::goal_board_store::filter_tombstoned(recalled, &tombstones);

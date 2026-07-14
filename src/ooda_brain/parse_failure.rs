@@ -170,6 +170,53 @@ pub(crate) fn record_parse_failure(
     prompt_name: &'static str,
     prompt_version: String,
 ) -> ParseFailureRecord {
+    record_parse_failure_impl(
+        phase,
+        goal_id,
+        err,
+        raw_response,
+        prompt_name,
+        prompt_version,
+        None,
+    )
+    .expect("recording without an autonomous mutation cycle cannot mutate GitHub")
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_parse_failure_in_cycle(
+    phase: BrainPhase,
+    goal_id: &str,
+    err: &crate::error::SimardError,
+    raw_response: &str,
+    prompt_name: &'static str,
+    prompt_version: String,
+    cycle_id: &crate::stewardship::CycleId,
+    provenance: crate::stewardship::ArtifactProvenance,
+) -> crate::error::SimardResult<ParseFailureRecord> {
+    record_parse_failure_impl(
+        phase,
+        goal_id,
+        err,
+        raw_response,
+        prompt_name,
+        prompt_version,
+        Some((cycle_id, provenance)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_parse_failure_impl(
+    phase: BrainPhase,
+    goal_id: &str,
+    err: &crate::error::SimardError,
+    raw_response: &str,
+    prompt_name: &'static str,
+    prompt_version: String,
+    mutation: Option<(
+        &crate::stewardship::CycleId,
+        crate::stewardship::ArtifactProvenance,
+    )>,
+) -> crate::error::SimardResult<ParseFailureRecord> {
     let consecutive_count = bump_consecutive_count(phase, goal_id);
 
     let mut raw_truncated = raw_response.to_string();
@@ -228,11 +275,13 @@ pub(crate) fn record_parse_failure(
     }
 
     // Channel 4: throttled gh-issue escalation at >= threshold.
-    if consecutive_count >= ISSUE_ESCALATION_THRESHOLD {
-        maybe_escalate_to_gh_issue(&record);
+    if consecutive_count >= ISSUE_ESCALATION_THRESHOLD
+        && let Some((cycle_id, provenance)) = mutation
+    {
+        maybe_escalate_to_gh_issue(&record, cycle_id, provenance)?;
     }
 
-    record
+    Ok(record)
 }
 
 /// File a tracking issue when a `(phase, goal_id)` pair has crossed
@@ -244,9 +293,13 @@ pub(crate) fn record_parse_failure(
 /// also disable in production by exporting
 /// `SIMARD_BRAIN_PARSE_FAILURE_NO_ESCALATE=1` (e.g. during incident
 /// response when the issue tracker would be flooded).
-fn maybe_escalate_to_gh_issue(record: &ParseFailureRecord) {
+fn maybe_escalate_to_gh_issue(
+    record: &ParseFailureRecord,
+    cycle_id: &crate::stewardship::CycleId,
+    provenance: crate::stewardship::ArtifactProvenance,
+) -> crate::error::SimardResult<()> {
     if cfg!(test) {
-        return;
+        return Ok(());
     }
     if std::env::var("SIMARD_BRAIN_PARSE_FAILURE_NO_ESCALATE").is_ok() {
         tracing::warn!(
@@ -256,7 +309,7 @@ fn maybe_escalate_to_gh_issue(record: &ParseFailureRecord) {
             consecutive_count = record.consecutive_count,
             "gh-issue escalation suppressed by SIMARD_BRAIN_PARSE_FAILURE_NO_ESCALATE",
         );
-        return;
+        return Ok(());
     }
 
     let title = format!(
@@ -287,75 +340,20 @@ fn maybe_escalate_to_gh_issue(record: &ParseFailureRecord) {
         record.timestamp,
     );
 
-    // Use --body-file with a NamedTempFile so large/escape-laden bodies
-    // can't fail the spawn (same pattern as merge_authority.rs / spawn.rs).
-    let body_file = match tempfile::NamedTempFile::new() {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::error!(
-                target: "simard::ooda_brain",
-                phase = %record.phase,
-                goal_id = %record.goal_id,
-                error = %e,
-                "deterministic safeguard: NamedTempFile for gh issue body FAILED (parse-failure record still emitted)",
-            );
-            return;
-        }
-    };
-    if let Err(e) = std::fs::write(body_file.path(), &body) {
-        tracing::error!(
-            target: "simard::ooda_brain",
-            phase = %record.phase,
-            goal_id = %record.goal_id,
-            error = %e,
-            "deterministic safeguard: writing gh issue body to tempfile FAILED",
-        );
-        return;
-    }
-
-    match std::process::Command::new("gh")
-        .args([
-            "issue",
-            "create",
-            "--repo",
-            ESCALATION_REPO_SLUG,
-            "--title",
-            &title,
-            "--body-file",
-            &body_file.path().to_string_lossy(),
-            "--label",
-            "ooda-brain-parse-failure",
-        ])
-        .output()
-    {
-        Ok(out) if out.status.success() => {
-            tracing::info!(
-                target: "simard::ooda_brain",
-                phase = %record.phase,
-                goal_id = %record.goal_id,
-                consecutive_count = record.consecutive_count,
-                "deterministic safeguard: gh issue filed for brain parse-failure",
-            );
-        }
-        Ok(out) => {
-            tracing::error!(
-                target: "simard::ooda_brain",
-                phase = %record.phase,
-                goal_id = %record.goal_id,
-                stderr = %String::from_utf8_lossy(&out.stderr),
-                "deterministic safeguard: gh issue create FAILED (parse-failure record still emitted)",
-            );
-        }
-        Err(io_err) => {
-            tracing::error!(
-                target: "simard::ooda_brain",
-                phase = %record.phase,
-                goal_id = %record.goal_id,
-                error = %io_err,
-                "deterministic safeguard: gh process spawn FAILED (parse-failure record still emitted)",
-            );
-        }
-    }
+    crate::stewardship::mutation_guard::create_issue(
+        cycle_id.clone(),
+        crate::stewardship::IssueMutationIdentity::from_source(
+            &format!("ooda-{}-parse-failure", record.phase),
+            &record.goal_id,
+        ),
+        provenance,
+        ESCALATION_REPO_SLUG,
+        &title,
+        &body,
+        vec!["ooda-brain-parse-failure".to_string()],
+        Vec::new(),
+    )?;
+    Ok(())
 }
 
 fn phase_to_string(phase: BrainPhase) -> String {

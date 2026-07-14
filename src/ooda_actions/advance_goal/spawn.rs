@@ -282,11 +282,16 @@ pub fn dispatch_spawn_engineer(
         let decision = match brain.decide_engineer_lifecycle(&ctx) {
             Ok(d) => d,
             Err(e) => {
-                let prior_failures = lock_state(state)
-                    .goal_failure_counts
-                    .get(goal_id)
-                    .copied()
-                    .unwrap_or(0);
+                let (prior_failures, cycle_count, provenance) = {
+                    let guard = lock_state(state);
+                    (
+                        guard.goal_failure_counts.get(goal_id).copied().unwrap_or(0),
+                        guard.cycle_count,
+                        guard
+                            .active_goals
+                            .provenance_for(crate::goal_curation::ArtifactKind::Goal, goal_id),
+                    )
+                };
                 tracing::error!(
                     target: "simard::ooda_brain",
                     goal = %goal_id,
@@ -301,6 +306,7 @@ pub fn dispatch_spawn_engineer(
 
                 // Deterministic safeguard: with this failure the count
                 // becomes prior_failures + 1. Trigger at >= 3.
+                let mut tracking_issue_error = None;
                 if prior_failures >= 2 {
                     let new_count = prior_failures + 1;
                     let title = format!(
@@ -338,41 +344,34 @@ pub fn dispatch_spawn_engineer(
                             ));
                         }
                     }
-                    // File tracking issue. Failure to file is logged but
-                    // does NOT swallow the original brain failure.
-                    match std::process::Command::new("gh")
-                        .args([
-                            "issue",
-                            "create",
-                            "--title",
-                            &title,
-                            "--body",
-                            &body,
-                            "--label",
-                            "ooda-stuck",
-                        ])
-                        .output()
-                    {
-                        Ok(out) if out.status.success() => {
+                    let cycle_id = crate::stewardship::CycleId::new(format!("ooda:{cycle_count}"))
+                        .expect("numeric OODA cycle identity is valid");
+                    match crate::stewardship::mutation_guard::create_issue(
+                        cycle_id,
+                        crate::stewardship::IssueMutationIdentity::from_source(
+                            "ooda-brain-failure",
+                            goal_id,
+                        ),
+                        provenance,
+                        "rysweet/Simard",
+                        &title,
+                        &body,
+                        vec!["ooda-stuck".to_string()],
+                        Vec::new(),
+                    ) {
+                        Ok(_) => {
                             eprintln!(
                                 "[simard] DETERMINISTIC SAFEGUARD: goal '{}' marked Blocked + tracking issue filed",
                                 goal_id
                             );
                         }
-                        Ok(out) => {
+                        Err(error) => {
+                            tracking_issue_error = Some(error.to_string());
                             tracing::error!(
                                 target: "simard::ooda_brain",
                                 goal = %goal_id,
-                                stderr = %String::from_utf8_lossy(&out.stderr),
-                                "deterministic safeguard: gh issue create FAILED (goal still marked Blocked)",
-                            );
-                        }
-                        Err(io_err) => {
-                            tracing::error!(
-                                target: "simard::ooda_brain",
-                                goal = %goal_id,
-                                error = %io_err,
-                                "deterministic safeguard: gh process spawn FAILED (goal still marked Blocked)",
+                                error = %error,
+                                "deterministic safeguard: guarded issue mutation FAILED (cycle will fail)",
                             );
                         }
                     }
@@ -381,9 +380,19 @@ pub fn dispatch_spawn_engineer(
                 return make_outcome(
                     action,
                     false,
-                    format!(
-                        "brain failure: {} (prior consecutive failures: {})",
-                        e, prior_failures
+                    tracking_issue_error.map_or_else(
+                        || {
+                            format!(
+                                "brain failure: {} (prior consecutive failures: {})",
+                                e, prior_failures
+                            )
+                        },
+                        |issue_error| {
+                            format!(
+                                "brain failure: {} (prior consecutive failures: {}); guarded tracking-issue mutation failed: {}",
+                                e, prior_failures, issue_error
+                            )
+                        },
                     ),
                 );
             }
@@ -842,6 +851,7 @@ fn apply_lifecycle_decision(
     live_worktree: &std::path::Path,
     decision: EngineerLifecycleDecision,
 ) -> ActionOutcome {
+    let mut mutation_error = None;
     let success = matches!(
         decision,
         EngineerLifecycleDecision::ContinueSkipping { .. }
@@ -876,24 +886,30 @@ fn apply_lifecycle_decision(
     }
 
     if let EngineerLifecycleDecision::OpenTrackingIssue { title, body, .. } = &decision {
-        let result = std::process::Command::new("gh")
-            .args([
-                "issue",
-                "create",
-                "--title",
-                title,
-                "--body",
-                body,
-                "--label",
-                "ooda-stuck",
-            ])
-            .status();
-        if let Err(e) = result {
+        let provenance = state
+            .active_goals
+            .provenance_for(crate::goal_curation::ArtifactKind::Goal, goal_id);
+        let cycle_id = crate::stewardship::CycleId::new(format!("ooda:{}", state.cycle_count))
+            .expect("numeric OODA cycle identity is valid");
+        if let Err(error) = crate::stewardship::mutation_guard::create_issue(
+            cycle_id,
+            crate::stewardship::IssueMutationIdentity::from_source(
+                "ooda-lifecycle-tracking",
+                goal_id,
+            ),
+            provenance,
+            "rysweet/Simard",
+            title,
+            body,
+            vec!["ooda-stuck".to_string()],
+            Vec::new(),
+        ) {
+            mutation_error = Some(error.to_string());
             tracing::warn!(
                 target: "simard::ooda_brain",
                 goal = %goal_id,
-                error = %e,
-                "open_tracking_issue: gh issue create failed",
+                error = %error,
+                "open_tracking_issue: guarded issue mutation failed (cycle will fail)",
             );
         }
     }
@@ -953,7 +969,14 @@ fn apply_lifecycle_decision(
     }
 
     let detail = apply_decision_to_state(&decision, state, goal_id);
-    make_outcome(action, success, detail)
+    match mutation_error {
+        Some(error) => make_outcome(
+            action,
+            false,
+            format!("{detail}; guarded tracking-issue mutation failed: {error}"),
+        ),
+        None => make_outcome(action, success, detail),
+    }
 }
 
 /// Read the sentinel pid file written by the engineer-worktree allocator.

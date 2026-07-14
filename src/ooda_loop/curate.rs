@@ -57,7 +57,21 @@ pub fn promote_from_backlog(board: &mut GoalBoard) {
     });
 
     while board.active_slots_remaining() > 0 && !board.backlog.is_empty() {
-        let item_id = board.backlog[0].id.clone();
+        let Some(item_id) = board
+            .backlog
+            .iter()
+            .find(|item| {
+                board
+                    .provenance_for(crate::goal_curation::ArtifactKind::BacklogItem, &item.id)
+                    .is_recursive_input_eligible()
+            })
+            .map(|item| item.id.clone())
+        else {
+            tracing::warn!(
+                "OODA curate: no backlog item has eligible typed provenance; promotion stopped"
+            );
+            break;
+        };
         match crate::goal_curation::promote_to_active(board, &item_id, 3, None) {
             Ok(()) => {
                 eprintln!("[simard] OODA curate: promoted backlog item '{item_id}' to active");
@@ -176,13 +190,13 @@ pub fn check_meeting_handoffs(
                 continue;
             }
 
-            if board.active.len() < crate::goal_curation::MAX_ACTIVE_GOALS {
+            let kind = if board.active.len() < crate::goal_curation::MAX_ACTIVE_GOALS {
                 let priority = (i as u32).saturating_add(1).min(5);
                 board.active.push(ActiveGoal {
                     parent_goal_id: None,
                     priority_explicit: false,
                     repo: None,
-                    id: goal_id,
+                    id: goal_id.clone(),
                     description,
                     priority,
                     status: GoalProgress::NotStarted,
@@ -192,10 +206,11 @@ pub fn check_meeting_handoffs(
                     last_progress_update_at: None,
                     labels: vec![crate::goal_curation::labels::SOURCE_MEETING.to_string()],
                 });
+                crate::goal_curation::ArtifactKind::Goal
             } else {
                 let score = 1.0 - (i as f64 * 0.1).min(0.9);
                 board.backlog.push(BacklogItem {
-                    id: goal_id,
+                    id: goal_id.clone(),
                     description,
                     source: format!(
                         "meeting:{}{}{}",
@@ -207,7 +222,18 @@ pub fn check_meeting_handoffs(
                     ),
                     score,
                 });
-            }
+                crate::goal_curation::ArtifactKind::BacklogItem
+            };
+            board.set_provenance(
+                kind,
+                &goal_id,
+                crate::stewardship::ArtifactProvenance::external(
+                    crate::stewardship::LineageId::new(
+                        crate::stewardship::IssueMutationIdentity::from_source("meeting", &goal_id)
+                            .as_str(),
+                    )?,
+                ),
+            );
             created += 1;
         }
 
@@ -225,7 +251,7 @@ pub fn check_meeting_handoffs(
             }
             let score = (item.priority as f64 * 0.2).min(1.0);
             board.backlog.push(BacklogItem {
-                id: item_id,
+                id: item_id.clone(),
                 description: format!("[action] {} (owner: {})", item.description, item.owner),
                 source: format!(
                     "meeting:{}{}{}",
@@ -237,6 +263,19 @@ pub fn check_meeting_handoffs(
                 ),
                 score,
             });
+            board.set_provenance(
+                crate::goal_curation::ArtifactKind::BacklogItem,
+                &item_id,
+                crate::stewardship::ArtifactProvenance::external(
+                    crate::stewardship::LineageId::new(
+                        crate::stewardship::IssueMutationIdentity::from_source(
+                            "meeting-action",
+                            &item_id,
+                        )
+                        .as_str(),
+                    )?,
+                ),
+            );
             created += 1;
         }
 
@@ -713,6 +752,15 @@ mod tests {
             source: "test".to_string(),
             score: 0.5,
         });
+        for id in ["item-1", "item-2"] {
+            board.set_provenance(
+                crate::goal_curation::ArtifactKind::BacklogItem,
+                id,
+                crate::stewardship::ArtifactProvenance::system(
+                    crate::stewardship::LineageId::new(format!("test:{id}")).unwrap(),
+                ),
+            );
+        }
         promote_from_backlog(&mut board);
         assert!(board.active.len() <= crate::goal_curation::MAX_ACTIVE_GOALS);
         assert!(!board.active.is_empty());

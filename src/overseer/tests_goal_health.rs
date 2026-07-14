@@ -265,6 +265,15 @@ fn blocked_goals_projection_surfaces_perpetual_and_needs_review_goals() {
     let mut healthy = ActiveGoal::new("healthy", "Make progress", 4);
     healthy.status = GoalProgress::InProgress { percent: 40 };
     board.active = vec![research, feature, opsblock, healthy];
+    for id in ["research", "feature-x", "ops", "healthy"] {
+        board.set_provenance(
+            crate::goal_curation::ArtifactKind::Goal,
+            id,
+            crate::stewardship::ArtifactProvenance::system(
+                crate::stewardship::LineageId::new(format!("test:{id}")).unwrap(),
+            ),
+        );
+    }
 
     let blocked = blocked_goals_from_board(&board);
     assert_eq!(

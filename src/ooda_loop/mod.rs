@@ -74,8 +74,10 @@ pub use curate::{
     check_meeting_handoffs, drain_overseer_whispers, load_tombstones, promote_from_backlog,
     reap_old_handoffs, tombstone_goals,
 };
+pub(crate) use decide::decide_with_brain_in_cycle;
 pub use decide::{decide, decide_with_brain};
 pub use observe::{gather_environment, observe};
+pub(crate) use orient::orient_with_brain_in_cycle;
 pub use orient::{orient, orient_with_brain};
 pub use phase_weights::weights_for_phase;
 pub use priority_kind::{SyntheticPriorityKind, is_synthetic_id};

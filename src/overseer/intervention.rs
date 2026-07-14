@@ -72,8 +72,8 @@ pub enum Intervention {
     /// work with no active workstream (uncovered high-priority goals, high-signal
     /// issues with no PR, live anomalies with no fix in flight). Acts through the
     /// SAME plumbing goal-health / M1 use: notify the operator on BOTH channels
-    /// (email + Signal) with the specifics AND file one deduped issue per gap.
-    /// Deduped per gap signature so a recurring gap notifies/files at most once.
+    /// (email + Signal) with the specifics. Routine gaps never file issues.
+    /// Deduped per gap signature so a recurring gap notifies at most once.
     /// Capability: `notify::OperatorNotifier` + `IssueFiler::file`.
     FlagWorkstreamGaps { gaps: Vec<GapItem> },
 }

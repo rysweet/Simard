@@ -94,7 +94,7 @@ pub enum Signal {
 
 /// Which backlog source a [`GapItem`] came from — so the renderer can label the
 /// gap's provenance from structured data rather than parsing the summary (G3).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GapCategory {
     /// A high-priority goal on Simard's board with no active engineer / PR.
     GoalUncovered,
@@ -121,8 +121,10 @@ impl GapCategory {
 /// bounded at the detector (`sensor::MAX_GAP_FIELD_LEN`) and the `signature` is a
 /// restricted slug built from trusted identifiers only (never hostile free text),
 /// so a gap can never inflate a notification, an issue body, or a log line.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GapItem {
+    /// Structural provenance inherited from the source artifact.
+    pub provenance: crate::stewardship::ArtifactProvenance,
     /// The backlog source this gap came from.
     pub category: GapCategory,
     /// The specific, human-readable reference (goal id, `repo#number`, or the
@@ -134,7 +136,7 @@ pub struct GapItem {
     pub why_it_matters: String,
     /// Stable per-gap dedup signature (`goal:<id>` / `issue:<repo>#<n>` /
     /// `anomaly:<slug>`). Identical inputs yield identical signatures so a
-    /// recurring gap is deduped to at most one notification + issue per signature.
+    /// recurring gap is deduped to at most one notification per signature.
     pub signature: String,
 }
 
@@ -472,9 +474,21 @@ pub fn signals_from(state: &ObservedState) -> Vec<Signal> {
     // Backlog-coverage gaps: ONE consolidated signal carrying every genuine gap
     // the Observe pass surfaced (never one-per-gap, so Act notifies once with the
     // full list). A clean picture emits no signal — no gap, no noise.
-    if !state.workstream_gaps.is_empty() {
+    let eligible_gaps: Vec<GapItem> = state
+        .workstream_gaps
+        .iter()
+        .filter(|gap| gap.provenance.is_recursive_input_eligible())
+        .cloned()
+        .collect();
+    if eligible_gaps.len() != state.workstream_gaps.len() {
+        tracing::warn!(
+            rejected = state.workstream_gaps.len() - eligible_gaps.len(),
+            "overseer rejected workstream gaps with ineligible provenance"
+        );
+    }
+    if !eligible_gaps.is_empty() {
         out.push(Signal::WorkstreamGap {
-            gaps: state.workstream_gaps.clone(),
+            gaps: eligible_gaps,
         });
     }
 

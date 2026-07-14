@@ -180,7 +180,7 @@ fn lock(_state_root: &Path) -> Option<()> {
 /// damaged file must never crash the daemon; it starts from an empty board.
 fn read_unlocked(state_root: &Path) -> PersistentGoalState {
     let path = store_path(state_root);
-    match std::fs::read_to_string(&path) {
+    let mut state = match std::fs::read_to_string(&path) {
         Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|e| {
             tracing::warn!(
                 path = %path.display(),
@@ -190,7 +190,9 @@ fn read_unlocked(state_root: &Path) -> PersistentGoalState {
             PersistentGoalState::default()
         }),
         Err(_) => PersistentGoalState::default(),
-    }
+    };
+    state.board.classify_known_legacy_provenance();
+    state
 }
 
 /// Atomically write `state` to the store file (temp file + `rename`), creating
@@ -354,9 +356,32 @@ pub fn reconcile(
         active.truncate(MAX_ACTIVE_GOALS);
     }
 
+    let active_ids: HashSet<&str> = active.iter().map(|goal| goal.id.as_str()).collect();
+    let backlog_values: Vec<_> = backlog.into_values().collect();
+    let backlog_ids: HashSet<&str> = backlog_values.iter().map(|item| item.id.as_str()).collect();
+    let mut provenance = persisted.provenance.clone();
+    for entry in &in_flight.provenance {
+        if let Some(existing) = provenance
+            .iter_mut()
+            .find(|existing| existing.kind == entry.kind && existing.id == entry.id)
+        {
+            *existing = entry.clone();
+        } else {
+            provenance.push(entry.clone());
+        }
+    }
+    provenance.retain(|entry| match entry.kind {
+        crate::goal_curation::ArtifactKind::Goal => active_ids.contains(entry.id.as_str()),
+        crate::goal_curation::ArtifactKind::BacklogItem => backlog_ids.contains(entry.id.as_str()),
+    });
+
     GoalBoard {
         active,
-        backlog: backlog.into_values().collect(),
+        backlog: backlog_values,
+        provenance_version: persisted
+            .provenance_version
+            .max(in_flight.provenance_version),
+        provenance,
     }
 }
 

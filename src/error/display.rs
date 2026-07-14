@@ -302,6 +302,42 @@ impl Display for SimardError {
                     "stewardship: orchestrator run summary missing required field '{field}'"
                 )
             }
+            Self::StewardshipInvalidMutation { field, reason } => {
+                write!(
+                    f,
+                    "stewardship: invalid GitHub mutation field '{field}': {reason}"
+                )
+            }
+            Self::StewardshipProvenanceBlocked { identity } => {
+                write!(
+                    f,
+                    "stewardship: provenance blocks recursive GitHub mutation '{identity}'"
+                )
+            }
+            Self::StewardshipMutationBudgetExceeded { cycle_id, limit } => {
+                write!(
+                    f,
+                    "stewardship: GitHub mutation limit {limit} exceeded for cycle '{cycle_id}'"
+                )
+            }
+            Self::StewardshipMutationCycleFailed { cycle_id, reason } => {
+                write!(
+                    f,
+                    "stewardship: GitHub mutation cycle '{cycle_id}' already failed: {reason}"
+                )
+            }
+            Self::StewardshipUnfinishedReservation { identity } => {
+                write!(
+                    f,
+                    "stewardship: unfinished reservation for GitHub mutation '{identity}' requires reconciliation"
+                )
+            }
+            Self::StewardshipMutationIdentityConflict { identity } => {
+                write!(
+                    f,
+                    "stewardship: mutation identity '{identity}' was reused for a different request"
+                )
+            }
             Self::CiHealthGhCommandFailed { reason } => {
                 write!(f, "ci-health: gh command failed: {reason}")
             }

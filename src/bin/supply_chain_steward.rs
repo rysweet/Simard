@@ -14,6 +14,8 @@
 //!                 its own green-CI PRs.
 //!   decide-only   Parse `cargo audit --json` from stdin and print the decision
 //!                 for each advisory as JSON. No side effects — for inspection.
+//!   init-journal  Initialize durable mutation state only. Performs no scan or
+//!                 GitHub mutation; operator reconciliation must happen first.
 //! ```
 //!
 //! Logs go to **stderr** via `tracing`; the only **stdout** output is the
@@ -25,6 +27,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use simard::error::{SimardError, SimardResult};
+use simard::stewardship::mutation_guard::MutationGuard;
+use simard::stewardship::{CycleId, IssueMutationLimit};
 use simard::supply_chain_steward::{
     Advisory, Decision, IgnoreFiles, PatchStatus, RealSupplyChainGh, RemediationContext, decide,
     execute, parse_audit_json,
@@ -38,10 +42,11 @@ fn main() -> ExitCode {
     let result = match subcommand.as_deref() {
         Some("scan") => scan(),
         Some("decide-only") => decide_only(),
+        Some("init-journal") => init_journal(),
         other => {
             error!(
                 subcommand = ?other,
-                "usage: supply-chain-steward <scan|decide-only>"
+                "usage: supply-chain-steward <scan|decide-only|init-journal>"
             );
             return ExitCode::from(2);
         }
@@ -54,6 +59,13 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+fn init_journal() -> SimardResult<()> {
+    simard::stewardship::mutation_store::MutationStore::new(
+        simard::stewardship::mutation_store::MutationStore::default_path(),
+    )
+    .initialize_empty()
 }
 
 fn init_tracing() {
@@ -74,6 +86,9 @@ fn scan() -> SimardResult<()> {
     let advisories = parse_audit_json(&json)?;
     let files = IgnoreFiles::at_root(&root);
     let gh = RealSupplyChainGh::from_env();
+    let cycle_id = CycleId::scheduled("supply-chain-scan")?;
+    let mut mutation_guard = MutationGuard::from_default_store();
+    mutation_guard.begin_cycle(cycle_id.clone(), IssueMutationLimit::configured()?)?;
 
     if advisories.is_empty() {
         info!("no lockfile-affecting vulnerabilities against advisory-DB HEAD");
@@ -95,12 +110,8 @@ fn scan() -> SimardResult<()> {
         let ctx = build_context(adv, &git_pkgs, &files);
         let decision = decide(adv, &ctx);
         info!(advisory = %adv.id, crate_name = %adv.crate_name, decision = ?decision, "remediation decision");
-        match execute(decision, adv, &files, &gh) {
-            Ok(outcome) => info!(advisory = %adv.id, outcome = ?outcome, "remediation outcome"),
-            // A single advisory's remediation failure must not abort the whole
-            // sweep — surface it and continue with the rest.
-            Err(e) => error!(advisory = %adv.id, error = %e, "remediation failed"),
-        }
+        let outcome = execute(decision, adv, &files, &gh, &mut mutation_guard, &cycle_id)?;
+        info!(advisory = %adv.id, outcome = ?outcome, "remediation outcome");
     }
     Ok(())
 }

@@ -322,6 +322,34 @@ pub(crate) async fn seed_goals_at(state_root: &std::path::Path) -> Json<Value> {
         source: "dashboard-seed".to_string(),
         score: 0.6,
     });
+    for id in board
+        .active
+        .iter()
+        .map(|goal| goal.id.clone())
+        .collect::<Vec<_>>()
+    {
+        board.set_provenance(
+            crate::goal_curation::ArtifactKind::Goal,
+            &id,
+            crate::stewardship::ArtifactProvenance::system(
+                crate::stewardship::LineageId::new(format!("dashboard-seed:{id}")).unwrap(),
+            ),
+        );
+    }
+    for id in board
+        .backlog
+        .iter()
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>()
+    {
+        board.set_provenance(
+            crate::goal_curation::ArtifactKind::BacklogItem,
+            &id,
+            crate::stewardship::ArtifactProvenance::system(
+                crate::stewardship::LineageId::new(format!("dashboard-seed:{id}")).unwrap(),
+            ),
+        );
+    }
 
     match dashboard_save_goal_board(state_root, &board) {
         Ok(()) => {
@@ -365,6 +393,13 @@ pub(crate) async fn add_goal_at(
             source: "dashboard".to_string(),
             score,
         });
+        board.set_provenance(
+            crate::goal_curation::ArtifactKind::BacklogItem,
+            &id,
+            crate::stewardship::ArtifactProvenance::operator(
+                crate::stewardship::LineageId::new(format!("dashboard:{id}")).unwrap(),
+            ),
+        );
     } else {
         if board.active.len() >= MAX_ACTIVE_GOALS {
             return Json(json!({"error": format!(
@@ -416,6 +451,13 @@ pub(crate) async fn add_goal_at(
             last_progress_update_at: None,
             labels: vec![crate::goal_curation::labels::SOURCE_OPERATOR.to_string()],
         });
+        board.set_provenance(
+            crate::goal_curation::ArtifactKind::Goal,
+            &id,
+            crate::stewardship::ArtifactProvenance::operator(
+                crate::stewardship::LineageId::new(format!("dashboard:{id}")).unwrap(),
+            ),
+        );
     }
 
     match dashboard_save_goal_board(state_root, &board) {
@@ -538,13 +580,17 @@ pub(crate) async fn promote_backlog_item_at(
         Some(i) => board.backlog.remove(i),
         None => return Json(json!({"error": "backlog item not found"})),
     };
+    let provenance = board.provenance_for(crate::goal_curation::ArtifactKind::BacklogItem, &id);
+    board.provenance.retain(|entry| {
+        !(entry.kind == crate::goal_curation::ArtifactKind::BacklogItem && entry.id == id)
+    });
     let promoted_source = crate::goal_curation::labels::source_for_backlog(&item.source);
 
     board.active.push(ActiveGoal {
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
-        id: item.id,
+        id: item.id.clone(),
         description: item.description,
         priority: 3,
         status: GoalProgress::NotStarted,
@@ -554,6 +600,11 @@ pub(crate) async fn promote_backlog_item_at(
         last_progress_update_at: None,
         labels: vec![promoted_source.to_string()],
     });
+    board.set_provenance(
+        crate::goal_curation::ArtifactKind::Goal,
+        &item.id,
+        provenance,
+    );
 
     match dashboard_save_goal_board(state_root, &board) {
         Ok(()) => Json(json!({"status": "ok"})),
@@ -578,13 +629,22 @@ pub(crate) async fn demote_goal_at(
         Some(i) => board.active.remove(i),
         None => return Json(json!({"error": "active goal not found"})),
     };
+    let provenance = board.provenance_for(crate::goal_curation::ArtifactKind::Goal, &id);
+    board.provenance.retain(|entry| {
+        !(entry.kind == crate::goal_curation::ArtifactKind::Goal && entry.id == id)
+    });
 
     board.backlog.push(BacklogItem {
-        id: goal.id,
+        id: goal.id.clone(),
         description: goal.description,
         source: "demoted".to_string(),
         score: 0.0,
     });
+    board.set_provenance(
+        crate::goal_curation::ArtifactKind::BacklogItem,
+        &goal.id,
+        provenance,
+    );
 
     match dashboard_save_goal_board(state_root, &board) {
         Ok(()) => Json(json!({"status": "ok"})),

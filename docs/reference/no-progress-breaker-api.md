@@ -179,22 +179,22 @@ pub(crate) fn apply_no_progress_breaker(
     state: &mut OodaState,
     outcomes: &[ActionOutcome],
     evidence: &dyn EvidenceSource,
-    filer: &dyn NoProgressIssueFiler,
-) -> NoProgressBreakerReport;
+    mutation_guard: &mut GitHubMutationGuard,
+    authorization: &AutonomousGitHubAuthorization,
+) -> Result<NoProgressBreakerReport, GitHubMutationError>;
 ```
 
 There is **no** `tracker` parameter: the counter state lives on
 `OodaState::no_progress_tracker` (see above). The driver detaches it internally
 with `std::mem::take(&mut state.no_progress_tracker)` for the duration of the
 pass and restores it before returning. `evidence` is the injected
-`EvidenceSource` the done-gate consults; `filer` is the injected
-`NoProgressIssueFiler` that files the tracking issue on escalation.
+`EvidenceSource` the done-gate consults. Eligible escalation proposals use the
+shared mutation guard; guard failures abort the owning cycle.
 
 Tests call the threshold-parameterised form,
-`apply_no_progress_breaker_with_threshold(state, outcomes, evidence, filer, threshold)`,
-and inject fakes (a canned `EvidenceSource` and a recording
-`NoProgressIssueFiler`) so the breaker runs hermetically with no network and no
-live `gh`.
+`apply_no_progress_breaker_with_threshold(...)`, and inject a canned
+`EvidenceSource` plus fake mutation store/transport so the breaker runs
+hermetically with no network and no live `gh`.
 
 ## `NoProgressBreakerReport`
 

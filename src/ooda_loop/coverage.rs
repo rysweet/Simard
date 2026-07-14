@@ -78,6 +78,12 @@ pub fn ensure_goal_coverage(
         .active_goals
         .active
         .iter()
+        .filter(|g| {
+            state
+                .active_goals
+                .provenance_for(crate::goal_curation::ArtifactKind::Goal, &g.id)
+                .is_recursive_input_eligible()
+        })
         .filter(|g| is_incomplete(&g.status))
         .collect();
     let incomplete = incomplete_goals.len();
@@ -189,10 +195,25 @@ mod tests {
     }
 
     fn state_with(goals: Vec<ActiveGoal>) -> OodaState {
-        let board = GoalBoard {
+        let mut board = GoalBoard {
             active: goals,
             backlog: vec![],
+            ..GoalBoard::default()
         };
+        for id in board
+            .active
+            .iter()
+            .map(|goal| goal.id.clone())
+            .collect::<Vec<_>>()
+        {
+            board.set_provenance(
+                crate::goal_curation::ArtifactKind::Goal,
+                &id,
+                crate::stewardship::ArtifactProvenance::system(
+                    crate::stewardship::LineageId::new(format!("test:{id}")).unwrap(),
+                ),
+            );
+        }
         OodaState::new(board)
     }
 

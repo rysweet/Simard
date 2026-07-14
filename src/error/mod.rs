@@ -265,6 +265,27 @@ pub enum SimardError {
     StewardshipInvalidRunSummary {
         field: &'static str,
     },
+    StewardshipInvalidMutation {
+        field: &'static str,
+        reason: String,
+    },
+    StewardshipProvenanceBlocked {
+        identity: String,
+    },
+    StewardshipMutationBudgetExceeded {
+        cycle_id: String,
+        limit: u32,
+    },
+    StewardshipMutationCycleFailed {
+        cycle_id: String,
+        reason: String,
+    },
+    StewardshipUnfinishedReservation {
+        identity: String,
+    },
+    StewardshipMutationIdentityConflict {
+        identity: String,
+    },
     /// CI-health sweep: a `gh` subprocess invocation failed (non-zero exit,
     /// missing binary, malformed JSON) or a report could not be serialized.
     CiHealthGhCommandFailed {

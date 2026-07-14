@@ -27,11 +27,15 @@ use crate::creative_ideas::reviewers::{
     Reviewer, SessionAgentInvoker, run_review_pipeline,
 };
 use crate::creative_ideas::routing::{
-    IdeaGhClient, RealIdeaGhClient, route_idea_to_goal, route_idea_to_issue,
+    IdeaGhClient, RealIdeaGhClient, route_idea_to_goal, route_idea_to_issue_guarded,
 };
 use crate::creative_ideas::synthesis::DefaultSynthesizer;
 use crate::error::SimardResult;
 use crate::goals::{GoalStore, InProcessGoalStore};
+use crate::stewardship::mutation_guard::MutationGuard;
+#[cfg(test)]
+use crate::stewardship::mutation_store::MutationStore;
+use crate::stewardship::{CycleId, IssueMutationLimit};
 
 /// Env var overriding the `owner/name` repo slug the routing seam targets.
 pub const REPO_ENV: &str = "SIMARD_REPO";
@@ -113,12 +117,13 @@ pub struct AgenticIdeaPipeline {
     gh: Box<dyn IdeaGhClient + Send>,
     goals: Box<dyn GoalStoreFactory>,
     repo: String,
+    guard: std::sync::Mutex<MutationGuard>,
 }
 
 impl AgenticIdeaPipeline {
     /// Build with explicit seams (test seam).
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         invoker: Box<dyn AgentInvoker + Send>,
         gh: Box<dyn IdeaGhClient + Send>,
         goals: Box<dyn GoalStoreFactory>,
@@ -129,6 +134,23 @@ impl AgenticIdeaPipeline {
             gh,
             goals,
             repo,
+            guard: std::sync::Mutex::new({
+                #[cfg(test)]
+                {
+                    MutationGuard::new(MutationStore::new(
+                        std::env::temp_dir()
+                            .join(format!(
+                                "simard-creative-ideas-test-{}",
+                                uuid::Uuid::new_v4()
+                            ))
+                            .join("mutations.json"),
+                    ))
+                }
+                #[cfg(not(test))]
+                {
+                    MutationGuard::from_default_store()
+                }
+            }),
         }
     }
 
@@ -175,7 +197,19 @@ impl IdeaPipeline for AgenticIdeaPipeline {
                 RouteOutcome::Goal
             }
             IdeaStatus::NeedsHumanReview => {
-                route_idea_to_issue(idea, self.gh.as_ref(), &self.repo)?;
+                let cycle_id = CycleId::scheduled("creative-ideas")?;
+                let mut guard = self
+                    .guard
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                guard.begin_cycle(cycle_id.clone(), IssueMutationLimit::configured()?)?;
+                route_idea_to_issue_guarded(
+                    idea,
+                    self.gh.as_ref(),
+                    &mut guard,
+                    &cycle_id,
+                    &self.repo,
+                )?;
                 RouteOutcome::Issue
             }
             _ => RouteOutcome::Parked,

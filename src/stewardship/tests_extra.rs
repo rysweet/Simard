@@ -18,9 +18,12 @@ use std::sync::Mutex;
 
 use crate::error::SimardError;
 use crate::goal_curation::GoalBoard;
-use crate::stewardship::dedup::failure_signature;
+use crate::stewardship::gh_client::IssueMutationTransport;
+use crate::stewardship::mutation_guard::MutationGuard;
+use crate::stewardship::mutation_store::MutationStore;
 use crate::stewardship::{
-    GhClient, GhIssue, OrchestratorRunSummary, StewardshipOutcome, process_orchestrator_run,
+    ArtifactProvenance, CycleId, GhClient, GhIssue, IssueMutationIdentity, LineageId,
+    OrchestratorRunSummary, StewardshipOutcome, process_orchestrator_run,
 };
 
 // ─────────────────────────── FakeGhClient ───────────────────────────
@@ -80,7 +83,18 @@ impl GhClient for FakeGhClient {
             None => Ok(vec![]),
         }
     }
-    fn create_issue(&self, repo: &str, title: &str, body: &str) -> Result<GhIssue, SimardError> {
+}
+
+impl IssueMutationTransport for FakeGhClient {
+    fn create_issue(
+        &self,
+        repo: &str,
+        _identity: &IssueMutationIdentity,
+        title: &str,
+        body: &str,
+        _labels: &[String],
+        _assignees: &[String],
+    ) -> Result<GhIssue, SimardError> {
         self.create_calls.lock().unwrap().push((
             repo.to_string(),
             title.to_string(),
@@ -109,6 +123,10 @@ fn sample_run() -> OrchestratorRunSummary {
         source_module: "simard::engineer_loop".to_string(),
         failure_kind: "PanicInStep".to_string(),
         error_text: "panic at /home/user/src/foo.rs:42:7\nbacktrace deadbeef".to_string(),
+        condition_id: IssueMutationIdentity::new("condition:panic-in-step").unwrap(),
+        cycle_id: CycleId::new("run-abc123").unwrap(),
+        provenance: ArtifactProvenance::system(LineageId::new("orchestrator-run").unwrap()),
+        disposition: crate::stewardship::StewardshipDisposition::AuthorizedIssue,
     }
 }
 
@@ -120,17 +138,31 @@ fn amplihack_run() -> OrchestratorRunSummary {
         source_module: "amplihack::recipe-runner".to_string(),
         failure_kind: "NonZeroExit".to_string(),
         error_text: "exit 1: decomposition produced 0 workstreams".to_string(),
+        condition_id: IssueMutationIdentity::new("condition:zero-workstreams").unwrap(),
+        cycle_id: CycleId::new("run-xyz789").unwrap(),
+        provenance: ArtifactProvenance::system(LineageId::new("orchestrator-run").unwrap()),
+        disposition: crate::stewardship::StewardshipDisposition::AuthorizedIssue,
     }
+}
+
+fn process_run(
+    run: &OrchestratorRunSummary,
+    gh: &FakeGhClient,
+    _board: &mut GoalBoard,
+) -> crate::error::SimardResult<StewardshipOutcome> {
+    let temp = tempfile::tempdir().unwrap();
+    let mut guard = MutationGuard::new(MutationStore::new(temp.path().join("mutations.json")));
+    process_orchestrator_run(run, gh, &mut guard)
 }
 
 // ─────────────────────────── Routing tests ───────────────────────────
 
 #[test]
-fn process_run_matches_existing_when_signature_present() {
+fn process_run_does_not_trust_unjournaled_remote_signature() {
     let gh = FakeGhClient::new();
     let mut board = GoalBoard::new();
     let run = sample_run();
-    let sig = failure_signature(&run.failure_kind, &run.error_text);
+    let sig = run.condition_id.as_str().to_string();
 
     gh.seed_search(
         "rysweet/Simard",
@@ -143,33 +175,25 @@ fn process_run_matches_existing_when_signature_present() {
         }]),
     );
 
-    let outcome = process_orchestrator_run(&run, &gh, &mut board).unwrap();
-    match outcome {
-        StewardshipOutcome::MatchedExisting {
-            issue_number, repo, ..
-        } => {
-            assert_eq!(issue_number, 11);
-            assert_eq!(repo, "rysweet/Simard");
+    let outcome = process_run(&run, &gh, &mut board).unwrap();
+    assert!(matches!(
+        outcome,
+        StewardshipOutcome::FiledNew {
+            issue_number: 999,
+            ..
         }
-        other => panic!("expected MatchedExisting, got {other:?}"),
-    }
-
-    assert_eq!(gh.search_call_count(), 1);
-    assert_eq!(
-        gh.create_call_count(),
-        0,
-        "must NOT create when match exists"
-    );
-    assert_eq!(board.backlog.len(), 1);
-    assert_eq!(board.backlog[0].id, "stewardship-rysweet_Simard-11");
+    ));
+    assert_eq!(gh.search_call_count(), 0);
+    assert_eq!(gh.create_call_count(), 1);
+    assert!(board.backlog.is_empty());
 }
 
 #[test]
 fn process_run_idempotent_on_second_invocation() {
     let gh = FakeGhClient::new();
-    let mut board = GoalBoard::new();
+    let board = GoalBoard::new();
     let run = sample_run();
-    let sig = failure_signature(&run.failure_kind, &run.error_text);
+    let sig = run.condition_id.as_str().to_string();
 
     // First call: empty search → file new (#42).
     gh.seed_search("rysweet/Simard", &sig, Ok(vec![]));
@@ -182,7 +206,9 @@ fn process_run_idempotent_on_second_invocation() {
             body: format!("stewardship-signature: {sig}"),
         }),
     );
-    let first = process_orchestrator_run(&run, &gh, &mut board).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let mut guard = MutationGuard::new(MutationStore::new(temp.path().join("mutations.json")));
+    let first = process_orchestrator_run(&run, &gh, &mut guard).unwrap();
     assert!(matches!(
         first,
         StewardshipOutcome::FiledNew {
@@ -202,7 +228,7 @@ fn process_run_idempotent_on_second_invocation() {
             body: format!("stewardship-signature: {sig}"),
         }]),
     );
-    let second = process_orchestrator_run(&run, &gh, &mut board).unwrap();
+    let second = process_orchestrator_run(&run, &gh, &mut guard).unwrap();
     assert!(matches!(
         second,
         StewardshipOutcome::MatchedExisting {
@@ -210,11 +236,7 @@ fn process_run_idempotent_on_second_invocation() {
             ..
         }
     ));
-    assert_eq!(
-        board.backlog.len(),
-        1,
-        "second call must not duplicate backlog row"
-    );
+    assert!(board.backlog.is_empty());
 }
 
 #[test]
@@ -222,7 +244,7 @@ fn process_run_routes_amplihack_failures_to_amplihack_repo() {
     let gh = FakeGhClient::new();
     let mut board = GoalBoard::new();
     let run = amplihack_run();
-    let sig = failure_signature(&run.failure_kind, &run.error_text);
+    let sig = run.condition_id.as_str().to_string();
 
     gh.seed_search("rysweet/amplihack", &sig, Ok(vec![]));
     gh.seed_create(
@@ -235,7 +257,7 @@ fn process_run_routes_amplihack_failures_to_amplihack_repo() {
         }),
     );
 
-    let outcome = process_orchestrator_run(&run, &gh, &mut board).unwrap();
+    let outcome = process_run(&run, &gh, &mut board).unwrap();
     if let StewardshipOutcome::FiledNew { repo, .. } = outcome {
         assert_eq!(repo, "rysweet/amplihack");
     } else {
@@ -246,11 +268,11 @@ fn process_run_routes_amplihack_failures_to_amplihack_repo() {
 // ─────────────────────────── Failure propagation ───────────────────────────
 
 #[test]
-fn process_run_propagates_gh_search_failure() {
+fn process_run_does_not_consult_untrusted_remote_search() {
     let gh = FakeGhClient::new();
     let mut board = GoalBoard::new();
     let run = sample_run();
-    let sig = failure_signature(&run.failure_kind, &run.error_text);
+    let sig = run.condition_id.as_str().to_string();
 
     gh.seed_search(
         "rysweet/Simard",
@@ -260,17 +282,10 @@ fn process_run_propagates_gh_search_failure() {
         }),
     );
 
-    let err = process_orchestrator_run(&run, &gh, &mut board).unwrap_err();
-    assert!(matches!(
-        err,
-        SimardError::StewardshipGhCommandFailed { .. }
-    ));
-    assert_eq!(
-        gh.create_call_count(),
-        0,
-        "must not create when search fails"
-    );
-    assert!(board.backlog.is_empty());
+    let outcome = process_run(&run, &gh, &mut board).unwrap();
+    assert!(matches!(outcome, StewardshipOutcome::FiledNew { .. }));
+    assert_eq!(gh.search_call_count(), 0);
+    assert_eq!(gh.create_call_count(), 1);
 }
 
 #[test]
@@ -278,7 +293,7 @@ fn process_run_propagates_gh_create_failure() {
     let gh = FakeGhClient::new();
     let mut board = GoalBoard::new();
     let run = sample_run();
-    let sig = failure_signature(&run.failure_kind, &run.error_text);
+    let sig = run.condition_id.as_str().to_string();
 
     gh.seed_search("rysweet/Simard", &sig, Ok(vec![]));
     gh.seed_create(
@@ -288,7 +303,7 @@ fn process_run_propagates_gh_create_failure() {
         }),
     );
 
-    let err = process_orchestrator_run(&run, &gh, &mut board).unwrap_err();
+    let err = process_run(&run, &gh, &mut board).unwrap_err();
     assert!(matches!(
         err,
         SimardError::StewardshipGhCommandFailed { .. }
@@ -297,93 +312,19 @@ fn process_run_propagates_gh_create_failure() {
 }
 
 #[test]
-fn process_run_routes_overseer_to_default_and_dedups() {
-    // Regression for the `flag_workstream_gaps` failure: the Overseer files gap
-    // issues with the bare source_module "overseer" (no keyword match). Before
-    // the routing fallback this returned `StewardshipRoutingAmbiguous` and the
-    // whole intervention failed every tick ("intervention failed ...
-    // flag_workstream_gaps"). Now the router must route the unmatched source to
-    // the DEFAULT repo (rysweet/Simard), file exactly ONE issue, and dedup on a
-    // rerun with the same gap signature (no duplicate issues).
+fn process_run_rejects_routine_workstream_gap_before_github_or_backlog() {
     let gh = FakeGhClient::new();
     let mut board = GoalBoard::new();
     let mut run = sample_run();
     run.source_module = "overseer".to_string();
-    let sig = failure_signature(&run.failure_kind, &run.error_text);
+    run.failure_kind = "workstream_gap:goal".to_string();
+    run.disposition = crate::stewardship::StewardshipDisposition::ObservationOnly;
 
-    // First tick: no existing issue in the default repo → file exactly one.
-    gh.seed_search("rysweet/Simard", &sig, Ok(vec![]));
-    gh.seed_create(
-        "rysweet/Simard",
-        Ok(GhIssue {
-            number: 314,
-            url: "https://github.com/rysweet/Simard/issues/314".into(),
-            title: "[stewardship] workstream gap".into(),
-            body: format!("stewardship-signature: {sig}"),
-        }),
-    );
-
-    let first = process_orchestrator_run(&run, &gh, &mut board).unwrap();
-    match first {
-        StewardshipOutcome::FiledNew {
-            repo, issue_number, ..
-        } => {
-            assert_eq!(
-                repo, "rysweet/Simard",
-                "an unmatched source_module routes to the default repo"
-            );
-            assert_eq!(issue_number, 314);
-        }
-        other => panic!("expected FiledNew in rysweet/Simard, got {other:?}"),
-    }
-    // The router must have searched the DEFAULT repo (not amplihack) and created
-    // exactly one tracking issue.
-    assert_eq!(
-        gh.search_call_count(),
-        1,
-        "must search the default repo before filing"
-    );
-    assert_eq!(
-        gh.create_call_count(),
-        1,
-        "exactly one gap issue filed on the first tick"
-    );
-    assert_eq!(board.backlog.len(), 1);
-
-    // Second tick, SAME gap signature: search now returns the existing issue →
-    // MatchedExisting and NO second create (idempotent per signature — one
-    // rolling tracking issue per distinct gap, never a duplicate each tick).
-    gh.seed_search(
-        "rysweet/Simard",
-        &sig,
-        Ok(vec![GhIssue {
-            number: 314,
-            url: "https://github.com/rysweet/Simard/issues/314".into(),
-            title: "[stewardship] workstream gap".into(),
-            body: format!("stewardship-signature: {sig}"),
-        }]),
-    );
-    let second = process_orchestrator_run(&run, &gh, &mut board).unwrap();
-    assert!(
-        matches!(
-            second,
-            StewardshipOutcome::MatchedExisting {
-                issue_number: 314,
-                ..
-            }
-        ),
-        "rerun with the same gap signature must dedup to the existing issue: {second:?}"
-    );
-    assert_eq!(
-        gh.create_call_count(),
-        1,
-        "idempotent per gap signature — no duplicate issue on rerun"
-    );
-    assert_eq!(
-        board.backlog.len(),
-        1,
-        "no duplicate backlog row across ticks for the same gap"
-    );
+    let error = process_run(&run, &gh, &mut board).unwrap_err();
+    assert!(error.to_string().contains("observation-only"), "{error}");
+    assert_eq!(gh.search_call_count(), 0);
+    assert_eq!(gh.create_call_count(), 0);
+    assert!(board.backlog.is_empty());
 }
 
 // ─────────────────────────── Input validation ───────────────────────────
@@ -394,7 +335,7 @@ fn process_run_rejects_empty_run_id() {
     let mut board = GoalBoard::new();
     let mut run = sample_run();
     run.run_id = String::new();
-    let err = process_orchestrator_run(&run, &gh, &mut board).unwrap_err();
+    let err = process_run(&run, &gh, &mut board).unwrap_err();
     assert!(matches!(
         err,
         SimardError::StewardshipInvalidRunSummary { field } if field == "run_id"
@@ -408,7 +349,7 @@ fn process_run_rejects_empty_source_module() {
     let mut board = GoalBoard::new();
     let mut run = sample_run();
     run.source_module = String::new();
-    let err = process_orchestrator_run(&run, &gh, &mut board).unwrap_err();
+    let err = process_run(&run, &gh, &mut board).unwrap_err();
     assert!(matches!(
         err,
         SimardError::StewardshipInvalidRunSummary { field } if field == "source_module"
@@ -421,7 +362,7 @@ fn process_run_rejects_empty_failure_kind() {
     let mut board = GoalBoard::new();
     let mut run = sample_run();
     run.failure_kind = String::new();
-    let err = process_orchestrator_run(&run, &gh, &mut board).unwrap_err();
+    let err = process_run(&run, &gh, &mut board).unwrap_err();
     assert!(matches!(
         err,
         SimardError::StewardshipInvalidRunSummary { field } if field == "failure_kind"
@@ -434,7 +375,7 @@ fn process_run_rejects_empty_error_text() {
     let mut board = GoalBoard::new();
     let mut run = sample_run();
     run.error_text = String::new();
-    let err = process_orchestrator_run(&run, &gh, &mut board).unwrap_err();
+    let err = process_run(&run, &gh, &mut board).unwrap_err();
     assert!(matches!(
         err,
         SimardError::StewardshipInvalidRunSummary { field } if field == "error_text"

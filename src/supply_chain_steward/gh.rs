@@ -38,6 +38,10 @@ pub struct OpenedPr {
 /// Abstract GitHub / cargo / git operations the remediation execution layer
 /// drives. Kept minimal and mockable.
 pub trait SupplyChainGh {
+    fn repo(&self) -> &str;
+    fn validate_repo_target(&self) -> SimardResult<()> {
+        Ok(())
+    }
     /// Search **open** issues whose body embeds the dedup signature.
     fn search_issues(&self, signature: &str) -> SimardResult<Vec<GhIssue>>;
     /// File a tracking issue and return its handle (with URL + number).
@@ -53,8 +57,12 @@ pub trait SupplyChainGh {
     /// call; subsequent calls discard any prior advisory's un-pushed local
     /// state. Idempotent.
     fn reset_to_scan_base(&self) -> SimardResult<()>;
-    /// Commit the working-tree changes on a branch, push, and open a PR.
-    fn open_remediation_pr(&self, spec: &PrSpec) -> SimardResult<OpenedPr>;
+    /// Prepare the local branch and commit. This does not contact GitHub.
+    fn prepare_remediation_pr(&self, spec: &PrSpec) -> SimardResult<()>;
+    /// Push the prepared branch to GitHub.
+    fn push_remediation_branch(&self, branch: &str) -> SimardResult<()>;
+    /// Create the GitHub PR for an already-pushed branch.
+    fn create_remediation_pr(&self, spec: &PrSpec) -> SimardResult<OpenedPr>;
     /// Green-CI-only self-merge of the steward's **own** PR. Refuses unless
     /// every required check passes (via the merge-authority rail).
     fn self_merge_if_green(&self, pr_number: u32) -> SimardResult<MergeOutcome>;
@@ -160,7 +168,33 @@ fn push_labels(args: &mut Vec<String>, labels: &[String]) {
     }
 }
 
+pub(crate) fn remote_matches_repo(remote: &str, repo: &str) -> bool {
+    let normalized = remote.trim().trim_end_matches('/').trim_end_matches(".git");
+    normalized == format!("https://github.com/{repo}")
+        || normalized == format!("git@github.com:{repo}")
+        || normalized == format!("ssh://git@github.com/{repo}")
+}
+
 impl SupplyChainGh for RealSupplyChainGh {
+    fn repo(&self) -> &str {
+        &self.repo
+    }
+
+    fn validate_repo_target(&self) -> SimardResult<()> {
+        let remote = Self::run("git", &["remote", "get-url", "origin"], "verify-origin")?;
+        let remote = String::from_utf8_lossy(&remote.stdout);
+        if remote_matches_repo(&remote, &self.repo) {
+            Ok(())
+        } else {
+            Err(SimardError::SupplyChainRemediationFailed {
+                reason: format!(
+                    "refusing GitHub mutation because origin does not match guarded repo {}",
+                    self.repo
+                ),
+            })
+        }
+    }
+
     fn search_issues(&self, signature: &str) -> SimardResult<Vec<GhIssue>> {
         let search = format!("{signature} in:body");
         let output = Self::run(
@@ -241,7 +275,7 @@ impl SupplyChainGh for RealSupplyChainGh {
         Ok(())
     }
 
-    fn open_remediation_pr(&self, spec: &PrSpec) -> SimardResult<OpenedPr> {
+    fn prepare_remediation_pr(&self, spec: &PrSpec) -> SimardResult<()> {
         Self::run("git", &["checkout", "-B", &spec.branch], "open_pr:branch")?;
         Self::run("git", &["add", "-A"], "open_pr:add")?;
         Self::run(
@@ -257,12 +291,20 @@ impl SupplyChainGh for RealSupplyChainGh {
             ],
             "open_pr:commit",
         )?;
+        Ok(())
+    }
+
+    fn push_remediation_branch(&self, branch: &str) -> SimardResult<()> {
+        self.validate_repo_target()?;
         Self::run(
             "git",
-            &["push", "-u", "origin", &spec.branch, "--force"],
+            &["push", "-u", "origin", branch, "--force-with-lease"],
             "open_pr:push",
         )?;
+        Ok(())
+    }
 
+    fn create_remediation_pr(&self, spec: &PrSpec) -> SimardResult<OpenedPr> {
         let mut args = vec![
             "pr".to_string(),
             "create".to_string(),
@@ -285,8 +327,12 @@ impl SupplyChainGh for RealSupplyChainGh {
     }
 
     fn self_merge_if_green(&self, pr_number: u32) -> SimardResult<MergeOutcome> {
-        let client = crate::stewardship::RealPrGhClient;
-        crate::stewardship::merge_pr_if_merge_ready(pr_number, &self.repo, &client)
+        Ok(MergeOutcome::Refused {
+            pr_number,
+            reason:
+                "production supply-chain self-merge is disabled until approval is head-SHA-bound"
+                    .to_string(),
+        })
     }
 
     fn has_ci_trigger_token(&self) -> bool {
@@ -345,6 +391,10 @@ impl FakeSupplyChainGh {
 
 #[cfg(test)]
 impl SupplyChainGh for FakeSupplyChainGh {
+    fn repo(&self) -> &str {
+        "rysweet/Simard"
+    }
+
     fn search_issues(&self, signature: &str) -> SimardResult<Vec<GhIssue>> {
         self.log.borrow_mut().push(format!("search:{signature}"));
         Ok(self.existing_issues.clone())
@@ -381,7 +431,19 @@ impl SupplyChainGh for FakeSupplyChainGh {
         Ok(())
     }
 
-    fn open_remediation_pr(&self, spec: &PrSpec) -> SimardResult<OpenedPr> {
+    fn prepare_remediation_pr(&self, spec: &PrSpec) -> SimardResult<()> {
+        self.log
+            .borrow_mut()
+            .push(format!("prepare_pr:{}", spec.branch));
+        Ok(())
+    }
+
+    fn push_remediation_branch(&self, branch: &str) -> SimardResult<()> {
+        self.log.borrow_mut().push(format!("push_branch:{branch}"));
+        Ok(())
+    }
+
+    fn create_remediation_pr(&self, spec: &PrSpec) -> SimardResult<OpenedPr> {
         self.log.borrow_mut().push(format!(
             "open_pr:{}:[{}]",
             spec.branch,

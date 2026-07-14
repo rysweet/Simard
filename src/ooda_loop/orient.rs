@@ -4,7 +4,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::error::SimardResult;
 use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
-use crate::ooda_brain::parse_failure::{record_parse_failure, reset_consecutive_count};
+use crate::ooda_brain::parse_failure::{
+    record_parse_failure, record_parse_failure_in_cycle, reset_consecutive_count,
+};
 use crate::ooda_brain::{
     BrainJudgmentRecord, BrainPhase, DeterministicOrientBrain, ORIENT_PROMPT_NAME, OodaOrientBrain,
     OrientContext, push_brain_judgment,
@@ -47,6 +49,26 @@ pub fn orient_with_brain(
     goals: &GoalBoard,
     failure_counts: &HashMap<String, u32>,
     brain: &dyn OodaOrientBrain,
+) -> SimardResult<Vec<Priority>> {
+    orient_with_brain_impl(observation, goals, failure_counts, brain, None)
+}
+
+pub(crate) fn orient_with_brain_in_cycle(
+    observation: &Observation,
+    goals: &GoalBoard,
+    failure_counts: &HashMap<String, u32>,
+    brain: &dyn OodaOrientBrain,
+    cycle_id: &crate::stewardship::CycleId,
+) -> SimardResult<Vec<Priority>> {
+    orient_with_brain_impl(observation, goals, failure_counts, brain, Some(cycle_id))
+}
+
+fn orient_with_brain_impl(
+    observation: &Observation,
+    goals: &GoalBoard,
+    failure_counts: &HashMap<String, u32>,
+    brain: &dyn OodaOrientBrain,
+    cycle_id: Option<&crate::stewardship::CycleId>,
 ) -> SimardResult<Vec<Priority>> {
     let env = &observation.environment;
     let has_dirty_tree = !env.git_status.is_empty();
@@ -136,14 +158,32 @@ pub fn orient_with_brain(
                     Err(e) => {
                         // Parse failure — record loudly, use base urgency.
                         let raw_response = extract_raw_response(&e);
-                        let pf = record_parse_failure(
-                            BrainPhase::Orient,
-                            &g.id,
-                            &e,
-                            &raw_response,
-                            ORIENT_PROMPT_NAME,
-                            crate::ooda_brain::prompt_store::current_version(ORIENT_PROMPT_NAME),
-                        );
+                        let prompt_version =
+                            crate::ooda_brain::prompt_store::current_version(ORIENT_PROMPT_NAME);
+                        let pf = if let Some(cycle_id) = cycle_id {
+                            record_parse_failure_in_cycle(
+                                BrainPhase::Orient,
+                                &g.id,
+                                &e,
+                                &raw_response,
+                                ORIENT_PROMPT_NAME,
+                                prompt_version,
+                                cycle_id,
+                                goals.provenance_for(
+                                    crate::goal_curation::ArtifactKind::Goal,
+                                    &g.id,
+                                ),
+                            )?
+                        } else {
+                            record_parse_failure(
+                                BrainPhase::Orient,
+                                &g.id,
+                                &e,
+                                &raw_response,
+                                ORIENT_PROMPT_NAME,
+                                prompt_version,
+                            )
+                        };
                         tracing::error!(
                             goal_id = %g.id,
                             error = %e,
@@ -161,13 +201,13 @@ pub fn orient_with_brain(
                 };
             }
 
-            Priority {
+            Ok(Priority {
                 goal_id: g.id.clone(),
                 urgency,
                 reason,
-            }
+            })
         })
-        .collect();
+        .collect::<SimardResult<Vec<Priority>>>()?;
 
     filter_hallucinated_priorities(&mut priorities, &goals.active);
 

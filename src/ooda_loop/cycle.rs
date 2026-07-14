@@ -12,8 +12,8 @@ use crate::self_improve::{ImprovementCycle, ImprovementPhase};
 
 use super::types::*;
 use super::{
-    act, check_meeting_handoffs, decide, decide_with_brain, observe, orient, orient_with_brain,
-    promote_from_backlog, review_outcomes,
+    act, check_meeting_handoffs, decide, decide_with_brain_in_cycle, observe, orient,
+    orient_with_brain_in_cycle, promote_from_backlog, review_outcomes,
 };
 
 /// Run one complete OODA cycle: Observe -> Orient -> Decide -> Act -> Curate.
@@ -77,6 +77,8 @@ fn run_ooda_cycle_inner(
     config: &OodaConfig,
 ) -> SimardResult<CycleReport> {
     crate::ooda_brain::clear_brain_judgments();
+    let issue_mutation_cycle =
+        crate::stewardship::CycleId::new(format!("ooda:{}", state.cycle_count))?;
 
     // Budget enforcement: refuse to run if daily or weekly spend is exceeded.
     if let Ok(daily) = crate::cost_tracking::daily_summary()
@@ -250,18 +252,18 @@ fn run_ooda_cycle_inner(
     // Build an objective summary from active goals so memory retrieval is
     // targeted. Includes each goal's slug-phrase so prospective `check_triggers`
     // can fire the goal's trigger (#2300) — see `build_objective_probe`.
-    let objective_summary: String = build_objective_probe(&state.active_goals.active);
+    let recursive_input_board = state.active_goals.recursive_input_view();
+    let objective_summary: String = build_objective_probe(&recursive_input_board.active);
     // PR-A (issue #2281): build the live `active_slugs` set from
     // `active` + `backlog` so `preparation_memory_operations_with_active_slugs`
     // can drop stale `goal-store:record` facts whose slug is no longer
     // on the board. Using the live board (not snapshot facts) prevents
     // a stale snapshot from resurrecting a deleted slug into recall.
-    let active_slugs: std::collections::HashSet<&str> = state
-        .active_goals
+    let active_slugs: std::collections::HashSet<&str> = recursive_input_board
         .active
         .iter()
         .map(|g| g.id.as_str())
-        .chain(state.active_goals.backlog.iter().map(|b| b.id.as_str()))
+        .chain(recursive_input_board.backlog.iter().map(|b| b.id.as_str()))
         .collect();
     // Issue #2308 follow-up: mirror the live board's active goals into
     // prospective memory BEFORE preparation so `check_triggers` can fire them
@@ -272,7 +274,7 @@ fn run_ooda_cycle_inner(
     // prospect for every still-active goal each cycle). Failures are logged but
     // non-fatal — a reconcile hiccup must not abort the cycle.
     if let Err(e) =
-        crate::goals::reconcile_board_prospectives(&state.active_goals, &*memories.memory)
+        crate::goals::reconcile_board_prospectives(&recursive_input_board, &*memories.memory)
     {
         eprintln!("[simard] OODA cycle: board-sourced prospective reconcile failed: {e}");
     }
@@ -300,15 +302,16 @@ fn run_ooda_cycle_inner(
     state.current_phase = OodaPhase::Orient;
     eprintln!("[simard] OODA cycle: entering Orient phase");
     let priorities = match memories.orient_brain.as_ref() {
-        Some(brain) => orient_with_brain(
+        Some(brain) => orient_with_brain_in_cycle(
             &observation,
-            &state.active_goals,
+            &recursive_input_board,
             &state.goal_failure_counts,
             brain.as_ref(),
+            &issue_mutation_cycle,
         )?,
         None => orient(
             &observation,
-            &state.active_goals,
+            &recursive_input_board,
             &state.goal_failure_counts,
         )?,
     };
@@ -321,7 +324,13 @@ fn run_ooda_cycle_inner(
     state.current_phase = OodaPhase::Decide;
     eprintln!("[simard] OODA cycle: entering Decide phase");
     let mut planned_actions = match memories.decide_brain.as_ref() {
-        Some(brain) => decide_with_brain(&priorities, config, brain.as_ref())?,
+        Some(brain) => decide_with_brain_in_cycle(
+            &priorities,
+            config,
+            brain.as_ref(),
+            &issue_mutation_cycle,
+            &recursive_input_board,
+        )?,
         None => decide(&priorities, config)?,
     };
     eprintln!(
@@ -354,6 +363,14 @@ fn run_ooda_cycle_inner(
     // Bound concurrent engineer starts to the same AIMD cap coverage used to
     // allocate them, so dispatch concurrency stays resource-aware.
     let outcomes = act(&planned_actions, memories, state, coverage_cap)?;
+    if let Some(reason) = crate::stewardship::mutation_guard::MutationGuard::from_default_store()
+        .cycle_failure(&issue_mutation_cycle)?
+    {
+        return Err(SimardError::StewardshipMutationCycleFailed {
+            cycle_id: issue_mutation_cycle.as_str().to_string(),
+            reason,
+        });
+    }
     let act_elapsed = act_start.elapsed();
     eprintln!(
         "[simard] OODA cycle: Act complete ({} outcomes, {:.1}s)",
@@ -580,6 +597,7 @@ fn run_ooda_cycle_inner(
     // corruption guard treats them as a legitimate departure (not a "vanished"
     // goal) and the persist step force-removes them from the snapshot.
     let breaker_dropped: Vec<String> = if let Some(source) = &memories.completion_evidence {
+        let issue_filer = crate::ooda_loop::no_progress::GhIssueFiler::for_cycle(state.cycle_count);
         if crate::ooda_loop::no_progress::no_progress_investigation_enabled() {
             // Root-cause investigation (issue #16): before authoring any block,
             // the breaker classifies WHY a stalled goal made no shippable
@@ -603,9 +621,15 @@ fn run_ooda_cycle_inner(
                 &reasoner,
                 &healer,
                 &transition_dispatcher,
-                &crate::ooda_loop::no_progress::GhIssueFiler,
+                &issue_filer,
                 crate::ooda_loop::no_progress::INVESTIGATED_BREAKER_THRESHOLD,
             );
+            if let Some(reason) = report.mutation_errors.first() {
+                return Err(SimardError::StewardshipMutationCycleFailed {
+                    cycle_id: issue_mutation_cycle.as_str().to_string(),
+                    reason: reason.clone(),
+                });
+            }
             if report.fired() || !report.auto_cleared.is_empty() {
                 tracing::info!(
                     target: "simard::ooda",
@@ -631,9 +655,15 @@ fn run_ooda_cycle_inner(
                     &reasoner,
                     &healer,
                     &reinvestigate_dispatcher,
-                    &crate::ooda_loop::no_progress::GhIssueFiler,
+                    &issue_filer,
                     crate::ooda_loop::no_progress::INVESTIGATED_BREAKER_THRESHOLD,
                 );
+            if let Some(reason) = reinvestigate_report.mutation_errors.first() {
+                return Err(SimardError::StewardshipMutationCycleFailed {
+                    cycle_id: issue_mutation_cycle.as_str().to_string(),
+                    reason: reason.clone(),
+                });
+            }
             if reinvestigate_report.fired() || !reinvestigate_report.reinvestigated.is_empty() {
                 tracing::info!(
                     target: "simard::ooda",
@@ -678,6 +708,15 @@ fn run_ooda_cycle_inner(
                         "no-progress breaker: dispatched guided engineer via shared spawn",
                     );
                 }
+                if let Some(reason) =
+                    crate::stewardship::mutation_guard::MutationGuard::from_default_store()
+                        .cycle_failure(&issue_mutation_cycle)?
+                {
+                    return Err(SimardError::StewardshipMutationCycleFailed {
+                        cycle_id: issue_mutation_cycle.as_str().to_string(),
+                        reason,
+                    });
+                }
             }
             dropped
         } else {
@@ -686,8 +725,14 @@ fn run_ooda_cycle_inner(
                 state,
                 &outcomes,
                 source.as_ref(),
-                &crate::ooda_loop::no_progress::GhIssueFiler,
+                &issue_filer,
             );
+            if let Some(reason) = report.mutation_errors.first() {
+                return Err(SimardError::StewardshipMutationCycleFailed {
+                    cycle_id: issue_mutation_cycle.as_str().to_string(),
+                    reason: reason.clone(),
+                });
+            }
             if report.fired() {
                 tracing::info!(
                     target: "simard::ooda",

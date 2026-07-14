@@ -228,12 +228,15 @@ pub struct PriorOccurrence {
 ### `root_cause_signature`
 
 ```rust
-/// Stable signature for dedup / escalation of a root cause. Combines the
-/// problem's `dedup_key` with the primary cause `label` so a filed issue dedups
-/// on the ROOT CAUSE (across symptom recurrences), mirroring
-/// `crate::stewardship::failure_signature` semantics.
+/// Stable local correlation key for recalling root-cause observations.
+/// This is evidence supplied to the semantic recipe; it is not a GitHub
+/// mutation identity.
 pub fn root_cause_signature(problem: &Problem, primary: &CauseCandidate) -> String;
 ```
+
+When escalation is eligible, the recipe returns the authoritative
+`StableConditionId`. Rust does not promote `root_cause_signature`, issue
+numbers, or generated goal slugs into mutation identity.
 
 ### `RECURRENCE_ESCALATION_THRESHOLD`
 
@@ -345,9 +348,11 @@ no-mutation contract.
 ### `decide_blocked_goal` routing
 
 See the [routing table in the concept doc](../concepts/overseer-root-cause-why.md#blocked-perpetual-goal-routing-the-operators-exact-ask).
-In short: `recurrence < N` → one-off `UnblockGoal` (`RootCause`); `recurrence ≥ N`
-→ `FileIssue` on the deduped `root_cause_signature` (`RootCause`, escalates the
-cause); genuine `needs_review` → `EscalateBlockedGoal` (`RootCause`); plain
+In short: `recurrence < N` -> one-off `UnblockGoal` (`RootCause`);
+`recurrence >= N` -> a typed `recurring_goal_reblock` proposal for eligible
+non-stewardship lineage, executed only through `GitHubMutationGuard`
+(`RootCause`, escalates the cause); genuine `needs_review` ->
+`EscalateBlockedGoal` (`RootCause`); plain
 operator/dependency block → `Report` (`Acknowledged`, cause = deliberate block,
 addressed — **not** a symptom, so it never fires the "unaddressed" alarm).
 
@@ -473,8 +478,8 @@ the compile-time `RECURRENCE_ESCALATION_THRESHOLD` constant (default 3).
 Hermetic — existing fakes plus `LibraryCognitiveMemory::in_memory()`; no network,
 no `~/.simard`. Cover: (1) a structured `why` on **every** problem; (2) a
 symptom-only action labelled `SymptomMitigation` with the root cause recorded
-unaddressed, and a recurring perpetual re-block routed to a deduped root-cause
-`FileIssue`; (2b) a deliberate operator/dependency block labelled `Acknowledged`
+unaddressed, and an eligible recurring perpetual re-block routed through the
+durable mutation guard; (2b) a deliberate operator/dependency block labelled `Acknowledged`
 (not `SymptomMitigation`), leaving `symptom_mitigations` unincremented and the
 feed alarm silent; (3) the WHY rendered in `OverseerActivityRecord.problem_entries`
 and the symptom-mitigation summary in `humanize_tick`; (4) first-time false-park

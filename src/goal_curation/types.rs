@@ -5,6 +5,9 @@ use std::fmt::{self, Display, Formatter};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::error::SimardResult;
+use crate::stewardship::{ArtifactOrigin, ArtifactProvenance, IssueMutationIdentity, LineageId};
+
 /// Maximum number of concurrently active goals.
 ///
 /// Raised from 7 to 20 (operator directive, issue #6) so umbrella
@@ -332,11 +335,29 @@ pub struct BacklogItem {
     pub score: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactKind {
+    BacklogItem,
+    Goal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardArtifactProvenance {
+    pub kind: ArtifactKind,
+    pub id: String,
+    pub provenance: ArtifactProvenance,
+}
+
 /// The goal board: active goals + scored backlog.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GoalBoard {
     pub active: Vec<ActiveGoal>,
     pub backlog: Vec<BacklogItem>,
+    #[serde(default, skip_serializing_if = "u16_is_zero")]
+    pub provenance_version: u16,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provenance: Vec<BoardArtifactProvenance>,
 }
 
 impl GoalBoard {
@@ -345,9 +366,201 @@ impl GoalBoard {
         Self {
             active: Vec::new(),
             backlog: Vec::new(),
+            provenance_version: ArtifactProvenance::CURRENT_VERSION,
+            provenance: Vec::new(),
         }
     }
 
+    pub fn set_provenance(
+        &mut self,
+        kind: ArtifactKind,
+        id: impl Into<String>,
+        provenance: ArtifactProvenance,
+    ) {
+        let id = id.into();
+        if let Some(existing) = self
+            .provenance
+            .iter_mut()
+            .find(|entry| entry.kind == kind && entry.id == id)
+        {
+            existing.provenance = provenance;
+            return;
+        }
+        self.provenance.push(BoardArtifactProvenance {
+            kind,
+            id,
+            provenance,
+        });
+    }
+
+    pub fn provenance_for(&self, kind: ArtifactKind, id: &str) -> ArtifactProvenance {
+        if let Some(entry) = self
+            .provenance
+            .iter()
+            .find(|entry| entry.kind == kind && entry.id == id)
+        {
+            return entry.provenance.clone();
+        }
+        // Every artifact needs an explicit entry. A board schema version proves
+        // only that the field exists; it cannot classify a missing artifact.
+        ArtifactProvenance::default()
+    }
+
+    /// Clone only artifacts eligible to re-enter autonomous discovery or OODA.
+    pub fn recursive_input_view(&self) -> Self {
+        let active: Vec<ActiveGoal> = self
+            .active
+            .iter()
+            .filter(|goal| {
+                self.provenance_for(ArtifactKind::Goal, &goal.id)
+                    .is_recursive_input_eligible()
+            })
+            .cloned()
+            .collect();
+        let backlog: Vec<BacklogItem> = self
+            .backlog
+            .iter()
+            .filter(|item| {
+                self.provenance_for(ArtifactKind::BacklogItem, &item.id)
+                    .is_recursive_input_eligible()
+            })
+            .cloned()
+            .collect();
+        let active_ids: std::collections::BTreeSet<&str> =
+            active.iter().map(|goal| goal.id.as_str()).collect();
+        let backlog_ids: std::collections::BTreeSet<&str> =
+            backlog.iter().map(|item| item.id.as_str()).collect();
+        let provenance = self
+            .provenance
+            .iter()
+            .filter(|entry| match entry.kind {
+                ArtifactKind::Goal => active_ids.contains(entry.id.as_str()),
+                ArtifactKind::BacklogItem => backlog_ids.contains(entry.id.as_str()),
+            })
+            .cloned()
+            .collect();
+        Self {
+            active,
+            backlog,
+            provenance_version: self.provenance_version,
+            provenance,
+        }
+    }
+
+    pub(crate) fn prune_provenance(&mut self) {
+        let active_ids: std::collections::BTreeSet<&str> =
+            self.active.iter().map(|goal| goal.id.as_str()).collect();
+        let backlog_ids: std::collections::BTreeSet<&str> =
+            self.backlog.iter().map(|item| item.id.as_str()).collect();
+        self.provenance.retain(|entry| match entry.kind {
+            ArtifactKind::Goal => active_ids.contains(entry.id.as_str()),
+            ArtifactKind::BacklogItem => backlog_ids.contains(entry.id.as_str()),
+        });
+    }
+
+    pub(crate) fn classify_known_legacy_provenance(&mut self) {
+        if self.provenance_version == ArtifactProvenance::CURRENT_VERSION {
+            return;
+        }
+        let mut classified = Vec::new();
+        for goal in &self.active {
+            let origin = if goal
+                .labels
+                .iter()
+                .any(|label| label == crate::goal_curation::labels::SOURCE_OPERATOR)
+            {
+                Some(ArtifactOrigin::Operator)
+            } else if goal.labels.iter().any(|label| {
+                matches!(
+                    label.as_str(),
+                    crate::goal_curation::labels::SOURCE_SEED
+                        | crate::goal_curation::labels::SOURCE_CREATIVE_IDEAS
+                )
+            }) {
+                Some(ArtifactOrigin::System)
+            } else if goal
+                .labels
+                .iter()
+                .any(|label| label == crate::goal_curation::labels::SOURCE_MEETING)
+            {
+                Some(ArtifactOrigin::External)
+            } else {
+                None
+            };
+            if let Some(origin) = origin {
+                classified.push((ArtifactKind::Goal, goal.id.clone(), origin));
+            }
+        }
+        for item in &self.backlog {
+            let origin = if item.source == "dashboard" || item.source.starts_with("operator:") {
+                Some(ArtifactOrigin::Operator)
+            } else if item.source == "dashboard-seed" {
+                Some(ArtifactOrigin::System)
+            } else if item.source.starts_with("meeting:") {
+                Some(ArtifactOrigin::External)
+            } else if item.source.starts_with("overseer:")
+                || item.source.starts_with("stewardship:")
+            {
+                Some(ArtifactOrigin::Stewardship)
+            } else {
+                None
+            };
+            if let Some(origin) = origin {
+                classified.push((ArtifactKind::BacklogItem, item.id.clone(), origin));
+            }
+        }
+        for (kind, id, origin) in classified {
+            let lineage = LineageId::new(
+                IssueMutationIdentity::from_source("legacy-goal-board", &id)
+                    .as_str()
+                    .to_string(),
+            )
+            .expect("hashed legacy artifact identity is valid");
+            self.set_provenance(
+                kind,
+                id,
+                match origin {
+                    ArtifactOrigin::Operator => ArtifactProvenance::operator(lineage),
+                    ArtifactOrigin::System => ArtifactProvenance::system(lineage),
+                    ArtifactOrigin::External => ArtifactProvenance::external(lineage),
+                    ArtifactOrigin::Stewardship => ArtifactProvenance::stewardship(lineage),
+                    ArtifactOrigin::LegacyUnknown => unreachable!(),
+                },
+            );
+        }
+        self.provenance_version = ArtifactProvenance::CURRENT_VERSION;
+    }
+}
+
+pub(crate) fn structural_system_provenance(
+    kind: ArtifactKind,
+    id: &str,
+) -> SimardResult<ArtifactProvenance> {
+    let structural_id = format!(
+        "{}:{}",
+        match kind {
+            ArtifactKind::BacklogItem => "backlog",
+            ArtifactKind::Goal => "goal",
+        },
+        id
+    );
+    LineageId::new(
+        structural_id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/' | '#') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .take(200)
+            .collect::<String>(),
+    )
+    .map(ArtifactProvenance::system)
+}
+
+impl GoalBoard {
     /// How many active goal slots remain.
     pub fn active_slots_remaining(&self) -> usize {
         MAX_ACTIVE_GOALS.saturating_sub(self.active.len())
@@ -368,6 +581,10 @@ impl GoalBoard {
         };
         format!("active=[{active_text}]; backlog={backlog_text}")
     }
+}
+
+fn u16_is_zero(value: &u16) -> bool {
+    *value == 0
 }
 
 impl Default for GoalBoard {
@@ -816,6 +1033,7 @@ mod tests {
         let board = GoalBoard {
             active: vec![sample_goal(), sample_goal()],
             backlog: vec![],
+            ..GoalBoard::default()
         };
         assert_eq!(board.active_slots_remaining(), MAX_ACTIVE_GOALS - 2);
     }
@@ -841,6 +1059,7 @@ mod tests {
         let board = GoalBoard {
             active: goals,
             backlog: vec![],
+            ..GoalBoard::default()
         };
         assert_eq!(board.active_slots_remaining(), 0);
     }
@@ -866,6 +1085,7 @@ mod tests {
         let board = GoalBoard {
             active: goals,
             backlog: vec![],
+            ..GoalBoard::default()
         };
         assert_eq!(board.active_slots_remaining(), 0);
     }
@@ -880,6 +1100,7 @@ mod tests {
                 source: "auto".to_string(),
                 score: 0.5,
             }],
+            ..GoalBoard::default()
         };
         let json = serde_json::to_string(&board).unwrap();
         let b2: GoalBoard = serde_json::from_str(&json).unwrap();
@@ -912,6 +1133,7 @@ mod tests {
                     score: 0.2,
                 },
             ],
+            ..GoalBoard::default()
         };
         let s = board.durable_summary();
         assert!(s.contains("Ship MVP"));

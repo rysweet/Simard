@@ -605,11 +605,10 @@ pub fn enqueue_stewardship_issue(
 ) -> SimardResult<()>
 ```
 
-Idempotent. Derives a stable backlog ID using the format
-`stewardship-<org>_<repo>-<number>` (forward slashes in the repository name
-are replaced with underscores, e.g. `org/repo` → `stewardship-org_repo-42`),
-then calls `add_backlog_item`. If a backlog item with that ID already exists
-the call is a no-op. Default score: `DEFAULT_STEWARD_SCORE` (0.6).
+Compatibility-only boundary. The constructed item carries typed
+`Stewardship` provenance and is rejected by autonomous backlog insertion with
+`IneligibleProvenance`. Routine workstream gaps never call this function.
+Stewardship-created issues are not promoted or rediscovered as goals.
 
 ### `promote_to_active`
 
@@ -690,8 +689,8 @@ their seeding from this constant.
 pub const DEFAULT_STEWARD_SCORE: f64 = 0.6
 ```
 
-Default backlog score assigned to stewardship-filed issues by
-`enqueue_stewardship_issue`.
+Legacy score retained for serialization compatibility. It does not make a
+stewardship-originated item eligible for backlog insertion or promotion.
 
 ---
 
@@ -782,4 +781,3 @@ at `src/operator_commands_meeting/improvement_curation.rs:123`.
 There is no silent disk fallback for writes — when cognitive memory is
 unavailable, `save_goal_board` fails and the in-memory mutation is lost.
 For reads, the resilience contract (log + empty board) is documented above.
-

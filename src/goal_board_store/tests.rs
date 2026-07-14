@@ -24,6 +24,7 @@ fn board(goals: Vec<ActiveGoal>) -> GoalBoard {
     GoalBoard {
         active: goals,
         backlog: Vec::new(),
+        ..GoalBoard::default()
     }
 }
 

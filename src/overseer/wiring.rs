@@ -564,7 +564,7 @@ fn describe_action(iv: &Intervention, outcome: &ActOutcome) -> String {
         } => {
             if *flagged > 0 {
                 format!(
-                    "flagged {flagged} uncovered workstream(s) — notified operator + filed deduped issue(s) ({suppressed} suppressed)"
+                    "flagged {flagged} uncovered workstream(s) — notified operator ({suppressed} suppressed)"
                 )
             } else {
                 format!("workstream gaps suppressed — {suppressed} within the dedup window")
@@ -689,7 +689,7 @@ impl GoalCurator for BoardGoalCurator {
             return Ok(());
         }
         let item = BacklogItem {
-            id,
+            id: id.clone(),
             description: format!("{} — {}", goal.title, goal.rationale),
             // Stamp the Overseer's DISTINCT source tag so anti-recursion never
             // re-opens a goal the Overseer itself filed.
@@ -700,6 +700,18 @@ impl GoalCurator for BoardGoalCurator {
             what: "goal_board.enqueue",
             detail: e.to_string(),
         })?;
+        board.set_provenance(
+            crate::goal_curation::ArtifactKind::BacklogItem,
+            &id,
+            crate::stewardship::ArtifactProvenance::stewardship(
+                crate::stewardship::LineageId::new(format!("overseer:{id}")).map_err(|e| {
+                    OverseerError::Capability {
+                        what: "goal_board.provenance",
+                        detail: e.to_string(),
+                    }
+                })?,
+            ),
+        );
         save_goal_board(&board, self.mem.as_ref()).map_err(|e| OverseerError::Capability {
             what: "goal_board.save",
             detail: e.to_string(),
@@ -832,14 +844,45 @@ fn survey_high_signal_open_issues(repo: &str) -> Vec<SurveyedIssue> {
         title: String,
         labels: Vec<RawLabel>,
     }
+    let stewardship_numbers = crate::stewardship::mutation_store::MutationStore::new(
+        crate::stewardship::mutation_store::MutationStore::default_path(),
+    )
+    .stewardship_issue_numbers(repo);
+    if let Err(error) = &stewardship_numbers {
+        tracing::warn!(
+            target: "overseer::gap_scan", repo, error = %error,
+            "gap-scan: mutation journal unavailable; issue provenance remains unknown"
+        );
+    }
     match serde_json::from_slice::<Vec<RawIssue>>(&output.stdout) {
         Ok(raws) => raws
             .into_iter()
-            .map(|r| SurveyedIssue {
-                repo: repo.to_string(),
-                number: r.number,
-                title: r.title,
-                labels: r.labels.into_iter().map(|l| l.name).collect(),
+            .map(|r| {
+                let provenance = stewardship_numbers.as_ref().ok().map_or_else(
+                    crate::stewardship::ArtifactProvenance::default,
+                    |numbers| {
+                        let lineage = crate::stewardship::LineageId::new(
+                            crate::stewardship::IssueMutationIdentity::from_source(
+                                "surveyed-issue",
+                                &format!("{repo}#{}", r.number),
+                            )
+                            .as_str(),
+                        )
+                        .expect("hashed surveyed issue identity is valid");
+                        if numbers.contains(&r.number) {
+                            crate::stewardship::ArtifactProvenance::stewardship(lineage)
+                        } else {
+                            crate::stewardship::ArtifactProvenance::external(lineage)
+                        }
+                    },
+                );
+                SurveyedIssue {
+                    provenance,
+                    repo: repo.to_string(),
+                    number: r.number,
+                    title: r.title,
+                    labels: r.labels.into_iter().map(|l| l.name).collect(),
+                }
             })
             .collect(),
         Err(e) => {
@@ -1614,6 +1657,13 @@ mod tests {
                     source_module: "overseer".to_string(),
                     failure_kind: "compile".to_string(),
                     error_text: "boom".to_string(),
+                    condition_id: crate::stewardship::IssueMutationIdentity::new(
+                        "condition:test-wiring",
+                    )
+                    .unwrap(),
+                    provenance: crate::stewardship::ArtifactProvenance::system(
+                        crate::stewardship::LineageId::new("test-wiring").unwrap(),
+                    ),
                 },
             },
             &ActOutcome::IssueFiled(IssueOutcome::FiledNew {

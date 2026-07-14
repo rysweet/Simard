@@ -26,7 +26,8 @@ use crate::error::{SimardError, SimardResult};
 use super::edges::{write_edge, write_node};
 use super::prioritize::{PrioritizationSignals, prioritize};
 use super::types::{
-    ActiveGoal, BacklogItem, GoalBoard, GoalEdge, GoalEdgeType, GoalNode, MAX_ACTIVE_GOALS,
+    ActiveGoal, ArtifactKind, BacklogItem, GoalBoard, GoalEdge, GoalEdgeType, GoalNode,
+    MAX_ACTIVE_GOALS,
 };
 
 /// Lower bound on a real decomposition: a single sub-goal is not a
@@ -227,7 +228,8 @@ pub fn decompose_goal(
         }
     }
 
-    // 6) Mutate the board.
+    // 6) Mutate the board while preserving the parent's structural lineage.
+    let parent_provenance = board.provenance_for(ArtifactKind::Goal, goal_id);
     match placement {
         ChildPlacement::Board => {
             // Children replace the parent on the active board; the parent is
@@ -242,6 +244,11 @@ pub fn decompose_goal(
                 // over real backlog work; it is a tracking anchor, not a task.
                 score: 0.0,
             });
+            board.set_provenance(
+                ArtifactKind::BacklogItem,
+                &parent.id,
+                parent_provenance.clone(),
+            );
             // Issue #2695 follow-up: a decomposition's children would otherwise
             // ALL inherit the single flat `parent.priority` — the exact "flat
             // siblings ⇒ no prioritization" case the operator complains about.
@@ -266,7 +273,9 @@ pub fn decompose_goal(
                 .collect();
             let signals = sibling_dependency_signals(&child_ids, &proposals);
             for child in prioritize(&children, &signals, chrono::Utc::now()) {
+                let child_id = child.id.clone();
                 board.active.push(child);
+                board.set_provenance(ArtifactKind::Goal, child_id, parent_provenance.clone());
             }
         }
         ChildPlacement::Backlog => {
@@ -280,6 +289,11 @@ pub fn decompose_goal(
                     source: format!("decompose:{goal_id}"),
                     score: f64::from(parent.priority),
                 });
+                board.set_provenance(
+                    ArtifactKind::BacklogItem,
+                    child_id,
+                    parent_provenance.clone(),
+                );
             }
         }
     }

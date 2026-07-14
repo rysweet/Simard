@@ -114,70 +114,6 @@ fn seed_default_board_skips_non_empty() {
     assert_eq!(board.active.len(), 1);
 }
 
-// ── enqueue_stewardship_issue (issue #1167) ─────────────────────────
-
-#[test]
-fn enqueue_stewardship_issue_adds_backlog_row() {
-    let mut board = GoalBoard::new();
-    super::enqueue_stewardship_issue(
-        &mut board,
-        "rysweet/Simard",
-        42,
-        "https://github.com/rysweet/Simard/issues/42",
-        "abcdef0123456789",
-    )
-    .unwrap();
-    assert_eq!(board.backlog.len(), 1);
-    let item = &board.backlog[0];
-    assert_eq!(item.id, "stewardship-rysweet_Simard-42");
-    assert_eq!(item.source, "stewardship:rysweet/Simard#42");
-    assert!(item.description.contains("abcdef0123456789"));
-    assert!(
-        item.description
-            .contains("https://github.com/rysweet/Simard/issues/42")
-    );
-    assert!(item.score > 0.0 && item.score <= 1.0);
-}
-
-#[test]
-fn enqueue_stewardship_issue_is_idempotent_on_same_issue() {
-    let mut board = GoalBoard::new();
-    super::enqueue_stewardship_issue(
-        &mut board,
-        "rysweet/Simard",
-        42,
-        "https://github.com/rysweet/Simard/issues/42",
-        "sig",
-    )
-    .unwrap();
-    // Second call with same (repo, issue#) → no-op (returns Ok, backlog unchanged).
-    super::enqueue_stewardship_issue(
-        &mut board,
-        "rysweet/Simard",
-        42,
-        "https://github.com/rysweet/Simard/issues/42",
-        "sig",
-    )
-    .unwrap();
-    assert_eq!(board.backlog.len(), 1, "must not duplicate stewardship row");
-}
-
-#[test]
-fn enqueue_stewardship_issue_amplihack_repo() {
-    let mut board = GoalBoard::new();
-    super::enqueue_stewardship_issue(
-        &mut board,
-        "rysweet/amplihack",
-        7,
-        "https://github.com/rysweet/amplihack/issues/7",
-        "deadbeef",
-    )
-    .unwrap();
-    let item = &board.backlog[0];
-    assert_eq!(item.id, "stewardship-rysweet_amplihack-7");
-    assert_eq!(item.source, "stewardship:rysweet/amplihack#7");
-}
-
 // ── load_goal_board / save_goal_board: memory-only contract (issue #1590) ──
 
 /// Serialize access to SIMARD_STATE_ROOT across parallel test threads.
@@ -913,6 +849,7 @@ fn merge_boards_disjoint_active_ids_unions_both() {
             "Alpha",
         )],
         backlog: vec![],
+        ..GoalBoard::default()
     };
     let in_flight = GoalBoard {
         active: vec![goal_with(
@@ -922,6 +859,7 @@ fn merge_boards_disjoint_active_ids_unions_both() {
             "Beta",
         )],
         backlog: vec![],
+        ..GoalBoard::default()
     };
     let merged = merge_boards(persisted, in_flight);
     assert_eq!(merged.active.len(), 2);
@@ -942,6 +880,7 @@ fn merge_boards_active_collision_in_flight_wins_all_fields() {
             "Persisted desc",
         )],
         backlog: vec![],
+        ..GoalBoard::default()
     };
     let mut in_flight_goal = goal_with(
         "shared-id-xxxx",
@@ -954,6 +893,7 @@ fn merge_boards_active_collision_in_flight_wins_all_fields() {
     let in_flight = GoalBoard {
         active: vec![in_flight_goal],
         backlog: vec![],
+        ..GoalBoard::default()
     };
     let merged = merge_boards(persisted, in_flight);
     assert_eq!(merged.active.len(), 1);
@@ -981,6 +921,7 @@ fn merge_boards_backlog_unions_by_id_with_in_flight_precedence() {
             backlog_with("b-only-persisted", "Only persisted", "p", 0.1),
             backlog_with("b-shared", "Old persisted desc", "p", 0.2),
         ],
+        ..GoalBoard::default()
     };
     let in_flight = GoalBoard {
         active: vec![],
@@ -988,6 +929,7 @@ fn merge_boards_backlog_unions_by_id_with_in_flight_precedence() {
             backlog_with("b-only-flight", "Only flight", "f", 0.5),
             backlog_with("b-shared", "Newer flight desc", "f", 0.9),
         ],
+        ..GoalBoard::default()
     };
     let merged = merge_boards(persisted, in_flight);
     assert_eq!(
@@ -1033,10 +975,12 @@ fn merge_boards_active_overflow_truncates_to_max_keeping_lowest_priority() {
     let persisted = GoalBoard {
         active: persisted_goals,
         backlog: vec![],
+        ..GoalBoard::default()
     };
     let in_flight = GoalBoard {
         active: in_flight_goals,
         backlog: vec![],
+        ..GoalBoard::default()
     };
     let merged = merge_boards(persisted, in_flight);
     assert_eq!(merged.active.len(), MAX_ACTIVE_GOALS);
@@ -1072,6 +1016,7 @@ fn merge_boards_overflow_tiebreak_prefers_in_flight() {
             })
             .collect(),
         backlog: vec![],
+        ..GoalBoard::default()
     };
     let in_flight = GoalBoard {
         active: vec![goal_with(
@@ -1081,6 +1026,7 @@ fn merge_boards_overflow_tiebreak_prefers_in_flight() {
             "f",
         )],
         backlog: vec![],
+        ..GoalBoard::default()
     };
     let merged = merge_boards(persisted, in_flight);
     assert_eq!(merged.active.len(), MAX_ACTIVE_GOALS);
@@ -1105,6 +1051,7 @@ fn merge_boards_self_merge_is_identity() {
             goal_with("self-bbbbb", 2, GoalProgress::NotStarted, "b"),
         ],
         backlog: vec![backlog_with("self-bk", "x", "s", 0.5)],
+        ..GoalBoard::default()
     };
     let merged = merge_boards(board.clone(), board.clone());
     assert_eq!(merged.active.len(), board.active.len());
@@ -1131,6 +1078,7 @@ fn merge_boards_empty_persisted_returns_in_flight_unchanged() {
     let in_flight = GoalBoard {
         active: vec![goal_with("only-flight", 1, GoalProgress::NotStarted, "f")],
         backlog: vec![backlog_with("bk-flight", "x", "s", 0.1)],
+        ..GoalBoard::default()
     };
     let merged = merge_boards(GoalBoard::new(), in_flight.clone());
     assert_eq!(merged.active.len(), 1);
@@ -1150,6 +1098,7 @@ fn merge_boards_empty_in_flight_returns_persisted_unchanged() {
             "p",
         )],
         backlog: vec![backlog_with("bk-persisted", "x", "s", 0.1)],
+        ..GoalBoard::default()
     };
     let merged = merge_boards(persisted.clone(), GoalBoard::new());
     assert_eq!(merged.active.len(), 1);
@@ -1171,6 +1120,7 @@ fn merge_boards_cross_set_collision_uses_in_flight_classification() {
             "from persisted active",
         )],
         backlog: vec![],
+        ..GoalBoard::default()
     };
     let in_flight = GoalBoard {
         active: vec![],
@@ -1180,6 +1130,7 @@ fn merge_boards_cross_set_collision_uses_in_flight_classification() {
             "f",
             0.7,
         )],
+        ..GoalBoard::default()
     };
     let merged = merge_boards(persisted, in_flight);
     assert!(
@@ -1206,10 +1157,12 @@ fn merge_boards_is_deterministic_across_runs() {
             goal_with("aaa-goal-id", 2, GoalProgress::NotStarted, "a"),
         ],
         backlog: vec![],
+        ..GoalBoard::default()
     };
     let in_flight = GoalBoard {
         active: vec![goal_with("mmm-goal-id", 2, GoalProgress::NotStarted, "m")],
         backlog: vec![],
+        ..GoalBoard::default()
     };
     let merged_1 = merge_boards(persisted.clone(), in_flight.clone());
     let merged_2 = merge_boards(persisted.clone(), in_flight.clone());
@@ -1247,6 +1200,7 @@ fn read_latest_snapshot_picks_max_node_id_when_multiple_present() {
             "first",
         )],
         backlog: vec![],
+        ..GoalBoard::default()
     };
     let second = GoalBoard {
         active: vec![
@@ -1254,6 +1208,7 @@ fn read_latest_snapshot_picks_max_node_id_when_multiple_present() {
             goal_with("second-saved-goal", 2, GoalProgress::NotStarted, "second"),
         ],
         backlog: vec![],
+        ..GoalBoard::default()
     };
     // Pre-fix save_goal_board appends two facts; post-fix it appends two
     // (merge of empty + first, then merge of first + second). Either way
@@ -1304,6 +1259,7 @@ fn save_goal_board_sequential_two_disjoint_writers_preserves_both() {
             "Alpha goal",
         )],
         backlog: vec![],
+        ..GoalBoard::default()
     };
     let writer_b_board = GoalBoard {
         active: vec![goal_with(
@@ -1313,6 +1269,7 @@ fn save_goal_board_sequential_two_disjoint_writers_preserves_both() {
             "Beta goal",
         )],
         backlog: vec![],
+        ..GoalBoard::default()
     };
 
     with_state_root(&root, || {
@@ -1348,6 +1305,7 @@ fn save_goal_board_collision_persists_in_flight_fields() {
             "First desc",
         )],
         backlog: vec![],
+        ..GoalBoard::default()
     };
     let mut updated_goal = goal_with(
         "collision-goal-idid",
@@ -1359,6 +1317,7 @@ fn save_goal_board_collision_persists_in_flight_fields() {
     let second = GoalBoard {
         active: vec![updated_goal],
         backlog: vec![],
+        ..GoalBoard::default()
     };
 
     with_state_root(&root, || {
@@ -1396,6 +1355,7 @@ fn save_goal_board_read_failure_falls_back_to_persisting_in_flight() {
             "Fallback goal",
         )],
         backlog: vec![],
+        ..GoalBoard::default()
     };
 
     with_state_root(&root, || {
@@ -1436,6 +1396,7 @@ fn save_goal_board_capacity_bound_holds_after_multiple_merges() {
                     "x",
                 )],
                 backlog: vec![],
+                ..GoalBoard::default()
             };
             super::save_goal_board(&board, &memory).unwrap();
         }
@@ -1523,6 +1484,7 @@ fn save_goal_board_concurrent_two_writers_preserves_both_goals() {
                     "Alpha",
                 )],
                 backlog: vec![],
+                ..GoalBoard::default()
             };
             super::save_goal_board(&board, memory_a.as_ref()).unwrap();
         });
@@ -1540,6 +1502,7 @@ fn save_goal_board_concurrent_two_writers_preserves_both_goals() {
                     "Beta",
                 )],
                 backlog: vec![],
+                ..GoalBoard::default()
             };
             super::save_goal_board(&board, memory_b.as_ref()).unwrap();
         });
@@ -1618,6 +1581,7 @@ fn save_goal_board_concurrent_backlog_writers_preserve_both_items() {
             let board = GoalBoard {
                 active: vec![seed_a],
                 backlog: vec![backlog_with(&alpha_bk_id_t, "alpha-bk", "a", 0.3)],
+                ..GoalBoard::default()
             };
             super::save_goal_board(&board, memory_a.as_ref()).unwrap();
         });
@@ -1631,6 +1595,7 @@ fn save_goal_board_concurrent_backlog_writers_preserve_both_items() {
             let board = GoalBoard {
                 active: vec![seed_b],
                 backlog: vec![backlog_with(&beta_bk_id_t, "beta-bk", "b", 0.4)],
+                ..GoalBoard::default()
             };
             super::save_goal_board(&board, memory_b.as_ref()).unwrap();
         });

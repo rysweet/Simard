@@ -217,9 +217,10 @@ pub(crate) fn reinvestigate_bare_blocked_goals(
     reasoner: &dyn NoProgressWhyReasoner,
     healer: &dyn PreconditionHealer,
     dispatcher: &dyn NoProgressEngineerDispatcher,
-    filer: &dyn NoProgressIssueFiler,
+    mutation_guard: &mut GitHubMutationGuard,
+    authorization: &AutonomousGitHubAuthorization,
     threshold: u32,
-) -> NoProgressBreakerReport;
+) -> Result<NoProgressBreakerReport, GitHubMutationError>;
 ```
 
 **Per-goal algorithm** (the goal is definitionally past threshold; its counter was
@@ -240,7 +241,8 @@ reset to 0 when it blocked, so `consecutive = threshold`):
    3. **Dedupe belt:** `if tracker.reinvestigated(goal_id, why.class) { continue; }`.
    4. `let resolution = resolution_for_why(threshold, why, tracker.guided_retry_used(goal_id));`
    5. `apply_resolution(state, &mut tracker, &mut report, goal_id, threshold,
-      resolution, healer, dispatcher, filer, ResolutionSite::Reinvestigation);`
+      resolution, healer, dispatcher, mutation_guard, authorization,
+      ResolutionSite::Reinvestigation)?;`
    6. On a terminal (non-`Continue`) outcome: `tracker.mark_reinvestigated(goal_id, why.class);`.
 4. `tracker.retain_goals(&live); state.no_progress_tracker = tracker;` return `report`.
 
@@ -273,9 +275,10 @@ fn apply_resolution(
     resolution: NoProgressResolution,
     healer: &dyn PreconditionHealer,
     dispatcher: &dyn NoProgressEngineerDispatcher,
-    filer: &dyn NoProgressIssueFiler,
+    mutation_guard: &mut GitHubMutationGuard,
+    authorization: &AutonomousGitHubAuthorization,
     site: ResolutionSite,
-);
+) -> Result<(), GitHubMutationError>;
 ```
 
 ## Resolution ladder
@@ -289,10 +292,10 @@ fn apply_resolution(
 | `MarkDone` | status → `Completed` | *(same)* | ✅ Completed |
 | `Drop` | remove from board | *(same)* | ✅ removed |
 | `Heal(Ok)` | reset counter, **leave status** | reset counter **+ status → `NotStarted`** (un-block) | ✅ NotStarted |
-| `Heal(Err)` | `Blocked(why-bearing)` + file issue | *(same)* | ✅ Blocked-with-why |
+| `Heal(Err)` | `Blocked(why-bearing)` + guarded issue proposal | *(same)* | ✅ Blocked-with-why |
 | `Defer` | status → `Paused` + defer `WipRef` | *(same)* | ✅ Paused |
 | `SpawnEngineer` | queue spawn, mark guided-retry, reset counter, **leave status** | + status → `NotStarted` (un-block) | ✅ NotStarted |
-| `Escalate` | `Blocked(why-bearing)` + file issue | *(same)* | ✅ Blocked-with-why |
+| `Escalate` | `Blocked(why-bearing)` + guarded issue proposal | *(same)* | ✅ Blocked-with-why |
 
 **Why `Reinvestigation` un-blocks on `Heal(Ok)` / `SpawnEngineer`:** an already-blocked
 goal is not brain-selectable. If a precondition was healed or a fixer was spawned,
@@ -349,12 +352,14 @@ let dispatcher = QueueingEngineerDispatcher::new();
 
 // 1. On-transition path (outcome-driven) — runs the auto-clear scan internally first.
 let report   = apply_no_progress_breaker_investigated(
-    state, &outcomes, source_ref, &reasoner, &healer, &dispatcher, &GhIssueFiler, threshold);
+    state, &outcomes, source_ref, &reasoner, &healer, &dispatcher,
+    &mut mutation_guard, &authorization, threshold)?;
 
 // 2. Re-investigation pass (population-driven) — runs AFTER, so transition goals are
 //    already WHY-bearing and the two populations are disjoint this cycle.
 let reinvest = reinvestigate_bare_blocked_goals(
-    state, source_ref, &reasoner, &healer, &dispatcher, &GhIssueFiler, threshold);
+    state, source_ref, &reasoner, &healer, &dispatcher,
+    &mut mutation_guard, &authorization, threshold)?;
 
 let requests = dispatcher.into_requests();          // drains BOTH passes' spawns
 // … existing dispatch_spawn_engineer drain loop, unchanged …

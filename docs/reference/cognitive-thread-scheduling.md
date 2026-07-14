@@ -1,3 +1,12 @@
+---
+title: Cognitive-Thread Scheduling
+description: Scheduler, thread, safety, and guarded mutation contracts for Simard cognitive threads.
+last_updated: 2026-07-14
+review_schedule: as-needed
+owner: simard
+doc_type: reference
+---
+
 # Cognitive-Thread Scheduling (`src/cognitive_threads/`)
 
 **Status:** Design (issue #2419). Design covers the full "mind of many
@@ -416,26 +425,19 @@ only (bounded window + bounded record count → bounded cost).
 brain parse-failure spikes, restart churn, distill failure-rate, repeated CI
 failure modes.
 
-**Durable output (operator rule — artifacts are GitHub issues or durable code,
-never repo snapshot docs):** produces a **deduplicated GitHub issue** via the
-**existing deterministic** stewardship path (the same code-level dedup
-`stewardship::process_orchestrator_run` uses — *not* the heavier agentic-recipe
-path `brain_introspection` delegates to):
-- `stewardship::dedup::{normalize, failure_signature, find_existing}` to build a
-  stable signature and detect an existing **open** issue carrying it,
-- `stewardship::gh_client::{GhClient, GhIssue, RealGhClient}` to search + create.
+**Durable output:** eligible findings first pass through the typed agentic
+classification/consolidation recipe. Any proposed issue create, edit, close, or
+reopen then uses `GitHubMutationGuard`. The thread cannot call raw GitHub
+mutation transport. Stewardship-originated and `LegacyUnknown` inputs are
+excluded before recipe invocation and again when recipe output is accepted.
 
-The `GhClient` trait exposes exactly `search_issues(repo, signature)` and
-`create_issue(repo, title, body)` — **there is no update/comment op**. Dedup is
-therefore *create-suppression*: embed `stewardship-signature:<sig>` in the body,
-`search_issues` → `find_existing`; create **only** when no open issue with the
-signature exists, otherwise it is a no-op (structured telemetry only). When
-issue filing is unavailable (no `gh`/offline/tests), it degrades to **structured
-telemetry only** — never a committed file. The `Box<dyn GhClient + Send>` seam lets
-tests inject a fake client (fixture-driven, no network).
+The persisted mutation identity, not GitHub search, provides idempotency.
+Offline or ambiguous reconciliation fails the owning cycle visibly; it does not
+silently degrade to a success-shaped telemetry-only result.
 
-**Bounding:** hard caps on records scanned, findings emitted, and at most one
-issue create/update per run.
+**Bounding:** hard caps apply to records scanned and findings emitted. Every
+reserved daemon GitHub mutation consumes the shared stewardship cycle
+budget before transport.
 
 ## 10. Ambiguity resolution (decisive)
 
@@ -480,14 +482,14 @@ paths safe by construction and reuse the crate's existing hardening.**
 
 | ID | Requirement | Control / reuse anchor | Verified state |
 | --- | --- | --- | --- |
-| **SR-1** | **No shell interpretation.** Every subprocess call MUST use a `Command::args([...])` argv array — never `sh -c`, never string interpolation of tainted data into a command line. | argv-only exec. | `RealGhClient` already does this (`gh_client.rs`); new code must add no shell layer. Grep-guard `sh -c`. |
+| **SR-1** | **No shell interpretation.** Every subprocess call MUST use a `Command::args([...])` argv array — never `sh -c`, never string interpolation of tainted data into a command line. | argv-only exec. | The crate-private guarded transport uses argv arrays; architecture tests reject a side-channel writer. Grep-guard `sh -c`. |
 | **SR-2** | **Redact secrets before any excerpt leaves the process.** Every log excerpt placed in an issue title/body **or** a telemetry field MUST pass through the crate's secret scrubber first. `dedup::normalize` strips ANSI **for the signature only** and is *not* sufficient for display content. | `sanitization::sanitize_terminal_text` (strips terminal control **and** redacts `token=`/`Authorization:`/`_secret`/`_token`/… lines → `[REDACTED]`). | `src/sanitization.rs:60`. Prevents exfiltrating engineer-log secrets into a GitHub issue (broader audience than a local log). |
 | **SR-3** | **Neutralize markdown / mention / dedup-poison injection.** Untrusted excerpts MUST be fenced in a code block and MUST NOT emit GitHub `@mentions`, `#refs`/auto-links (notification & cross-link spam), nor smuggle a `stewardship-signature:` line that poisons dedup. The trusted signature marker lives in a controlled, delimited location; matching relies on the **server-side** `--search "stewardship-signature:<sig> in:body"` query, not a client-side scan of arbitrary bodies. | Fence + escape leading `@`/`#`; controlled marker placement. | `gh_client::search_issues` already searches server-side (`gh_client.rs`). |
 | **SR-4** | **Argument-injection hardening for `gh`.** Tainted title/body MUST NOT be interpretable as `gh` options. Values are passed as dedicated argv elements (consumed as option-arguments), and large/at-risk bodies SHOULD use `--body-file -` (stdin) as defense-in-depth. | argv positioning; optional stdin body. | Low residual risk; review-gated. |
 | **SR-5** | **Destructive-op path safety (MaintenanceThread).** Before any `remove_dir_all`/`remove_file`, the target MUST be (a) matched against an **allow-list of canonicalized absolute roots** (not filename-prefix only); (b) rejected if it **is a symlink** or falls outside the allowed root after `fs::canonicalize` (defeats `..`/symlink traversal and the TOCTOU where a symlink is swapped in before delete); (c) checked against the deny-list (`worktrees/main`, `~/.simard/repo`, live store, engineer worktrees). | Canonical allow/deny gate **in the thread**, wrapping the reused helpers. | ⚠ `cmd_cleanup::disk` gates by **filename prefix** with **no** `symlink_metadata`/`canonicalize`/`is_symlink` guard (verified: zero occurrences in `disk.rs`). The thread MUST add this gate itself and MUST refuse to `remove_dir_all` a path whose `symlink_metadata` is a symlink. |
 | **SR-6** | **Never delete the live store.** The candidate path MUST be asserted `!=` the active cognitive-store path (and its shadow/WAL) reachable via `ThreadContext.memory`. | Runtime equality assert (belt-and-suspenders with the SR-5 deny-list). | New check in the thread. |
 | **SR-7** | **Conservative default posture.** Global `dry_run` honored (`SIMARD_MAINTENANCE_DRY_RUN`); retention **floors** (always keep ≥ N newest) enforced *before* any prune; destructive maintenance ships **dry-run-first / opt-in** until validated in production. Availability > reclaimed bytes. | `ThreadContext.dry_run` + env retention floors. | Design §8. |
-| **SR-8** | **Resource-exhaustion / DoS bounds.** (a) `Mind` caps non-critical fan-out per tick and keeps OODA `Critical`/exempt so no thread flood starves the control loop; (b) `catch_unwind` + **capped** exponential backoff stops a hot-failing thread pinning a core; (c) interval env vars are clamped to a **minimum floor** (reject/normalize `0`/negative) so a hostile/misconfigured env can't make a thread due every tick; (d) `EngineerLogAnalysis` enforces record/window/finding caps **before** reading and ≤ 1 `create_issue` per run. | §5 budget + backoff; interval clamp; scan caps. | Budget/backoff in §5; add interval-floor clamp + pre-read caps. |
+| **SR-8** | **Resource-exhaustion / DoS bounds.** (a) `Mind` caps non-critical fan-out per tick and keeps OODA `Critical`/exempt so no thread flood starves the control loop; (b) `catch_unwind` + **capped** exponential backoff stops a hot-failing thread pinning a core; (c) interval env vars are clamped to a **minimum floor** (reject/normalize `0`/negative) so a hostile/misconfigured env can't make a thread due every tick; (d) `EngineerLogAnalysis` enforces record/window/finding caps before reading and submits at most one guarded proposal per run. | Scheduler bounds plus the shared durable GitHub-mutation budget. | Budget/backoff, interval-floor clamp, pre-read caps, and guard tests. |
 | **SR-9** | **Least authority.** Threads receive only borrowed, scoped resources via `ThreadContext` and MUST NOT reach globals. The two new threads MUST have **no** code path to `self_deploy`/`self_relaunch`/redeploy. `GhClient` is injected as `Box<dyn GhClient + Send>` (fake in tests → no network, no credentials). | `ThreadContext` seam (§4); trait-object `GhClient`. | ✅ Verified: none of `cmd_cleanup`, `memory_backup`, `stewardship`, `disk_pressure` reference `self_deploy`/`self_relaunch`/`redeploy`. |
 | **SR-10** | **Credential confidentiality.** New code MUST NOT read, log, embed in an issue body, or emit to telemetry any token/`GH_TOKEN`. Error strings may include `gh` stderr (gh prints no tokens) but MUST NOT be augmented with env dumps. | No secret in fields/bodies/errors. | `gh` auth stays ambient in the CLI. |
 | **SR-11** | **Telemetry integrity (no metric-cardinality injection).** Metric/span **names** use the fixed `simard.thread.<id>` scheme where `<id>` is a per-thread compile-time constant — never derived from untrusted input. Untrusted content appears only as **length-bounded structured field values**, never as a format-string arg (no log forging) and never as a name. | Constant ids; bounded structured fields. | Design §7. |
@@ -531,11 +533,10 @@ paths safe by construction and reuse the crate's existing hardening.**
 - `MaintenanceThread` — fixture `~/.simard` tree: prunes only allow-listed
   stale artifacts, **never** protected paths, honours `dry_run`, respects
   retention floors.
-- `EngineerLogAnalysisThread` — fixture logs/telemetry: detects seeded
-  recurring failure, files exactly one dedup'd issue via a **fake** `GhClient`,
-  is idempotent on re-run (second run's `search_issues` returns the existing
-  open issue → `find_existing` hits → **no second `create_issue`**), degrades to
-  telemetry when the client is absent.
+- `EngineerLogAnalysisThread` - fixture logs/telemetry: detects a seeded
+  recurring failure, supplies one stable condition identity to a fake guarded
+  transport, and replays the durable identity after restart without a second
+  external write.
 - **Security (Step 5d) fixtures:**
   - *Secret/injection scrub (SR-2/3)* — a seeded log line containing
     `token=SECRET`, `@here`, `#1`, and a spoofed `stewardship-signature: deadbeef`
@@ -798,12 +799,13 @@ pub struct EngineerLogAnalysisConfig {
     pub dry_run: bool,        // suppress issue creation; telemetry only
 }
 impl Default for EngineerLogAnalysisConfig { /* safe bounded defaults */ }
-pub struct EngineerLogAnalysisThread { /* cfg, gh: Box<dyn GhClient + Send>, health (private) */ }
+pub struct EngineerLogAnalysisThread { /* cfg, health (private); guard comes from cycle context */ }
 impl EngineerLogAnalysisThread {
-    pub fn from_env() -> Self;   // uses stewardship::gh_client::RealGhClient
-    pub fn with_client(          // test seam: inject a fake GhClient
+    pub fn from_env() -> Self;
+    pub fn with_mutation_dependencies( // test seam: fake durable store + transport
         cfg: EngineerLogAnalysisConfig,
-        gh: Box<dyn crate::stewardship::gh_client::GhClient + Send>,
+        store: FakeMutationStore,
+        transport: FakeGitHubMutationTransport,
     ) -> Self;
 }
 // policy() = Interval(cfg.interval_secs); priority() = Low.
@@ -832,21 +834,24 @@ The thread builds one `CleanupReport`, runs the allow-listed steps into it, then
 reports its accumulated totals as **structured telemetry** (§7). `dry_run`
 short-circuits every deleting call.
 
-**`EngineerLogAnalysisThread::tick` calls (deterministic dedup path):**
+**`EngineerLogAnalysisThread::tick` calls (agent-owned semantic path):**
 
 ```rust
-stewardship::dedup::failure_signature(failure_kind: &str, error_text: &str) -> String;
 stewardship::dedup::normalize(msg: &str) -> String;
-stewardship::dedup::find_existing<'a>(&'a [GhIssue], signature: &str) -> Option<&'a GhIssue>;
-// GhClient trait — search + create ONLY (no update/comment):
-GhClient::search_issues(&self, repo: &str, signature: &str) -> SimardResult<Vec<GhIssue>>;
-GhClient::create_issue(&self, repo: &str, title: &str, body: &str) -> SimardResult<GhIssue>;
+classification_recipe::classify_and_consolidate(
+    sources: &[EligibleArtifact],
+) -> Result<TypedDecisionWithStableConditionId, RecipeContractError>;
+GitHubMutationGuard::execute(
+    request: GitHubMutationRequest,
+    authorization: &GitHubMutationAuthorization,
+) -> Result<GitHubMutationOutcome, GitHubMutationError>;
 ```
 
-Contract: embed `stewardship-signature:<sig>` in the issue body (this is exactly
-what `RealGhClient::search_issues` greps for); `search_issues` → `find_existing`;
-call `create_issue` **iff** `find_existing` returned `None` and `!dry_run`.
-`GhIssue { number: u64, url: String, title: String, body: String }`.
+Contract: the thread supplies eligible typed sources. The recipe supplies
+semantic classification and the stable condition identity. The trusted runtime
+supplies authorization. The guard validates the condition identity, derives the
+mutation identity, reserves budget, reconciles restart state, and performs at
+most one transport call.
 
 ### A.9 Daemon integration seam — `src/operator_commands_ooda/daemon/mod.rs`
 

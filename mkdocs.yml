@@ -139,6 +139,7 @@ nav:
     - Goal-Fact Dedup in Preparation: concepts/goal-fact-dedup-in-preparation.md
     - Compound-Objective Search in Preparation: concepts/preparation-compound-objective-search.md
     - Goal Stewardship Mode: concepts/stewardship-mode.md
+    - Stewardship GitHub Mutation Safety: stewardship-safety.md
     - The Simard Whisperer: concepts/simard-whisperer.md
     - Automated Disk-Health Management: concepts/automated-disk-health.md
     - Agentic Disk Reclamation: concepts/agentic-disk-reclamation.md
@@ -153,6 +154,7 @@ nav:
     - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md
     - Read Simard's Daily Journal: tutorials/read-simards-daily-journal.md
     - Deploy Crocutus (Read-Only Observer): tutorials/deploy-crocutus-read-only-observer.md
+    - Stewardship Restart and Mutation Bound: tutorials/stewardship-restart-and-mutation-bound.md
   - How-To Guides:
     - Fix a No-`bridge` Naming Guard Failure: howto/fix-a-no-bridge-naming-guard-failure.md
     - Run the LOCAL COIN Gym Harness: howto/run-the-coin-gym-harness.md
@@ -217,6 +219,7 @@ nav:
     - Inspect Improvement Curation State: howto/inspect-improvement-curation-state.md
     - Inspect the Procedural-Learning Loop: howto/inspect-the-procedural-learning-loop.md
     - File Stewardship Issues from Orchestrator Runs: howto/file-stewardship-issues-from-orchestrator-runs.md
+    - File and Consolidate Stewardship Issues Safely: howto/stewardship-filing-and-consolidation.md
     - Configure the Simard Whisperer: howto/configure-the-simard-whisperer.md
     - Configure the Monthly Self-Quality-Audit: howto/configure-self-quality-audit.md
     - Configure the Disk-Health Check: howto/configure-disk-health-check.md
@@ -334,6 +337,7 @@ nav:
     - Goal Coverage Allocation: reference/goal-coverage-allocation.md
     - spawn_agent_for_goal API: reference/spawn-agent-for-goal.md
     - Stewardship API: reference/stewardship-api.md
+    - Stewardship GitHub Mutation Guard API: reference/stewardship-mutation-guard.md
     - CI-Health Sweep: reference/ci-health-sweep.md
     - Simard Whisperer API: reference/simard-whisperer-api.md
     - Maximum Safe Parallelism: reference/maximum-safe-parallelism.md
@@ -423,6 +427,7 @@ nav:
     - Engineer-Admission Kill Switch: operations/engineer-admission-kill-switch.md
     - Resource-Admission Kill Switch: operations/resource-admission-kill-switch.md
     - Creative-Ideas Semantic-Dedup Kill Switch: operations/creative-ideas-semantic-dedup-kill-switch.md
+    - Stewardship Issue Cleanup: operations/stewardship-issue-cleanup.md
     - Safe Self-Update: safe-self-update.md
     - Pre-Commit Setup: operations/pre-commit-setup.md
   - Operator Dashboard:

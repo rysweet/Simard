@@ -250,6 +250,8 @@ pub struct OrchestratorRunBrief {
     pub source_module: String,
     pub failure_kind: String,
     pub error_text: String,
+    pub condition_id: crate::stewardship::IssueMutationIdentity,
+    pub provenance: crate::stewardship::ArtifactProvenance,
 }
 
 /// Outcome of filing a deduplicated issue.
@@ -357,9 +359,7 @@ pub trait MeetingHost {
 ///
 /// **Reuse:** `crate::stewardship::process_orchestrator_run`
 /// (`src/stewardship/mod.rs:51`) with `OrchestratorRunSummary`; dedup via
-/// `crate::stewardship::{failure_signature, find_existing}`
-/// (`src/stewardship/dedup.rs`); backlog enqueue via
-/// `crate::goal_curation::enqueue_stewardship_issue`.
+/// Durable idempotency is enforced by the stewardship mutation journal.
 pub trait IssueFiler {
     fn file(&self, run: &OrchestratorRunBrief) -> Result<IssueOutcome, OverseerError>;
 }

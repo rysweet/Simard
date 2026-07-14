@@ -191,11 +191,11 @@ pub struct Overseer {
     /// [`WhisperGate`] primitive (900 s window) keyed by observation signature.
     write_back_gate: WhisperGate,
     /// Whether the recurring backlog-coverage gap-scan is enabled (config
-    /// opt-out). When off, the gap-scan action is held (never notifies/files)
+    /// opt-out). When off, the gap-scan action is held (never notifies)
     /// even though gaps were observed.
     gap_scan_enabled: bool,
     /// Dedup gate for the gap-scan, keyed on each gap's signature, so a recurring
-    /// gap is notified + filed at most once per window (never every tick). Kept
+    /// gap is notified at most once per window (never every tick). Kept
     /// distinct from `blocked_goal_gate` so goal-health and gap-scan dedup never
     /// interfere.
     gap_gate: WhisperGate,
@@ -263,7 +263,7 @@ pub enum ActOutcome {
     /// The recurring backlog-coverage gap-scan flagged (and/or suppressed)
     /// backlog gaps this act. `flagged` gaps got the consolidated operator
     /// notification + one deduped issue each; `suppressed` gaps were within the
-    /// per-gap dedup window (a recurring gap, not re-notified/re-filed). Feeds the
+    /// per-gap dedup window (a recurring gap, not re-notified). Feeds the
     /// DEDICATED tick counters — never the generic `issues_filed`/`escalations`.
     WorkstreamGapsFlagged {
         flagged: usize,
@@ -298,7 +298,7 @@ impl Overseer {
             memory_recall_enabled: false,
             write_back_gate: WhisperGate::new(900, 5),
             gap_scan_enabled: false,
-            // 15-minute dedup window so a recurring gap notifies/files once per
+            // 15-minute dedup window so a recurring gap notifies once per
             // window; a generous per-hour cap covers a maxed-out tick's distinct
             // gaps (bounded by `sensor::MAX_GAPS_PER_TICK`) without flooding.
             gap_gate: WhisperGate::new(900, 200),
@@ -336,7 +336,7 @@ impl Overseer {
 
     /// Enable/disable the recurring backlog-coverage gap-scan. Off by default;
     /// the daemon sets this from [`config::gap_scan_enabled`] (and its every-N
-    /// cadence). When off, observed gaps are held (never notified/filed).
+    /// cadence). When off, observed gaps are held (never notified).
     pub fn with_gap_scan_enabled(mut self, enabled: bool) -> Self {
         self.gap_scan_enabled = enabled;
         self
@@ -878,14 +878,9 @@ impl Overseer {
         ActOutcome::GoalHealthSuppressed { reason }
     }
 
-    /// FLAG the backlog-coverage gaps the recurring gap-scan found: notify the
-    /// operator on BOTH channels (email + Signal) with ONE consolidated,
-    /// provenance-labelled summary AND file one DEDUPED issue per fresh gap via
-    /// the SAME M1 stewardship path goal-health uses. Fails CLOSED without a
-    /// DISTINCT steward identity (anti-recursion). Deduped per gap signature so a
-    /// recurring gap notifies/files at most once per window; the dedup slot is
-    /// consumed only after a successful file, so a failure retries rather than
-    /// silently losing the gap.
+    /// FLAG the backlog-coverage gaps the recurring gap-scan found by notifying
+    /// the operator on both channels. Routine gap observation never creates a
+    /// GitHub issue or stewardship backlog item.
     fn act_flag_workstream_gaps(&mut self, gaps: &[GapItem]) -> Result<ActOutcome, OverseerError> {
         if !self.recursion.is_configured() {
             return Err(OverseerError::Recursion {
@@ -903,6 +898,15 @@ impl Overseer {
         let mut fresh: Vec<GapItem> = Vec::new();
         let mut suppressed = 0usize;
         for g in gaps {
+            if !g.provenance.is_recursive_input_eligible() {
+                suppressed += 1;
+                tracing::warn!(
+                    target: "overseer::gap_scan",
+                    gap = %g.signature,
+                    "overseer rejected a workstream gap with ineligible provenance"
+                );
+                continue;
+            }
             let sig = format!("workstream-gap:{}", g.signature);
             match self.gap_gate.peek(&sig, now) {
                 WhisperDecision::Deliver => fresh.push(g.clone()),
@@ -933,17 +937,14 @@ impl Overseer {
         })?;
         let notification = OperatorNotification::workstream_gap(fresh.len(), &fresh);
         let report = notifier.notify(&notification);
+        if !report.any_sent() {
+            return Err(OverseerError::Capability {
+                what: "notify.operator",
+                detail: "workstream-gap notification was not delivered to any channel".to_string(),
+            });
+        }
 
-        // One DEDUPED issue per fresh gap via the M1 stewardship path.
         for g in &fresh {
-            let run = OrchestratorRunBrief {
-                recipe_name: "smart-orchestrator".to_string(),
-                failed_step: "workstream-gap-scan".to_string(),
-                source_module: "overseer".to_string(),
-                failure_kind: format!("workstream_gap:{}", g.category.label()),
-                error_text: format!("{} — {}", g.ref_id, g.why_it_matters),
-            };
-            self.caps.issues.file(&run)?;
             let sig = format!("workstream-gap:{}", g.signature);
             self.gap_gate.commit(&sig, now);
         }
@@ -954,7 +955,7 @@ impl Overseer {
             suppressed,
             dispatched = report.dispatched(),
             all_sent = report.all_sent(),
-            "overseer flagged uncovered backlog work: notified the operator + filed deduped issue(s)"
+            "overseer recorded uncovered backlog work and notified the operator"
         );
         Ok(ActOutcome::WorkstreamGapsFlagged {
             flagged: fresh.len(),
@@ -1435,6 +1436,14 @@ pub fn decide(problem: &Problem) -> Intervention {
                             source_module: repo.clone(),
                             failure_kind: "ci_failure_cluster".to_string(),
                             error_text: format!("{failing} failing checks in {repo}"),
+                            condition_id: crate::stewardship::IssueMutationIdentity::from_source(
+                                "overseer-ci-failure",
+                                repo,
+                            ),
+                            provenance: crate::stewardship::ArtifactProvenance::system(
+                                crate::stewardship::LineageId::new("overseer-ci")
+                                    .expect("static lineage id is valid"),
+                            ),
                         },
                     };
                 }
@@ -1650,6 +1659,14 @@ fn decide_blocked_goal(
                     "goal `{goal_id}` is repeatedly re-parked despite symptom-level unblocks; \
                      the systemic root cause is `{cause_label}`. The Overseer escalates the root \
                      cause instead of re-patching the symptom every cycle."
+                ),
+                condition_id: crate::stewardship::IssueMutationIdentity::from_source(
+                    "overseer-recurring-reblock",
+                    &format!("{goal_id}\0{cause_label}"),
+                ),
+                provenance: crate::stewardship::ArtifactProvenance::system(
+                    crate::stewardship::LineageId::new("overseer-recurring-reblock")
+                        .expect("static lineage id is valid"),
                 ),
             },
         };

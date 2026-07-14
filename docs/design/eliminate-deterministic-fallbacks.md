@@ -1,3 +1,12 @@
+---
+title: Eliminate Deterministic Fallbacks
+description: Target architecture for agent-owned reasoning with typed, fail-loud deterministic safety rails.
+last_updated: 2026-07-14
+review_schedule: as-needed
+owner: simard
+doc_type: design
+---
+
 # Design: Eliminate Deterministic Fallbacks
 
 **Status:** Design consolidation (Step 5e) — grounded against source at commit on
@@ -81,11 +90,11 @@ sequence `Base → SchemaRepair → Escalate` (rung enum at recipe_brain.rs:207)
 - Merge-judge: `stewardship/recipe_merge_judge.rs:145`.
 
 ### 2.3 Parse-failure visibility — `parse_failure.rs`
-`src/ooda_brain/parse_failure.rs`. Every brain parse-failure fires four channels
-(parse_failure.rs:9–21): structured `tracing::error!`, a
-`record_metric("brain_parse_failure", …)` line, an on-disk `ParseFailureRecord`
-embedded in `cycle_*.json`, and a throttled `gh issue create` at
-`ISSUE_ESCALATION_THRESHOLD = 3` consecutive failures per `(phase, goal_id)`.
+`src/ooda_brain/parse_failure.rs`. Every brain parse-failure fires structured
+`tracing::error!`, a `record_metric("brain_parse_failure", ...)` line, and an
+on-disk `ParseFailureRecord` embedded in `cycle_*.json`. At
+`ISSUE_ESCALATION_THRESHOLD = 3`, eligible evidence may produce a typed issue
+proposal; all autonomous mutation uses the durable stewardship mutation guard.
 
 ### 2.4 Confidence primitive — `confidence.rs`
 `src/ooda_brain/confidence.rs`. Provides verbalized-confidence wrappers

@@ -33,6 +33,14 @@ impl GitRunner for RealGitRunner {
                     .to_string(),
             });
         }
+        if args.first() == Some(&"push") {
+            return Err(OverseerError::Capability {
+                what: "git",
+                detail:
+                    "raw conflict-resolution push is disabled; a durable mutation guard is required"
+                        .to_string(),
+            });
+        }
         crate::git_guardrails::check_git_safety(repo_dir, args).map_err(|e| {
             OverseerError::Capability {
                 what: "git_guardrails",
@@ -84,14 +92,12 @@ impl GitConflictResolver {
 
 impl ConflictResolver for GitConflictResolver {
     fn resolve(&self, _repo: &str, _pr: u32) -> Result<(), OverseerError> {
-        let base = format!("origin/{}", self.base_ref);
-        // Conservative, hook-respecting sequence — no --no-verify anywhere.
-        self.git.run(&self.repo_dir, &["fetch", "origin"])?;
-        self.git
-            .run(&self.repo_dir, &["merge", "--no-edit", &base])?;
-        // Push runs pre-commit/pre-push hooks (hard-gate #8).
-        self.git.run(&self.repo_dir, &["push"])?;
-        Ok(())
+        let _ = (&self.git, &self.repo_dir, &self.base_ref);
+        Err(OverseerError::Capability {
+            what: "resolve_conflict",
+            detail: "autonomous conflict resolution is disabled until its push uses the durable mutation guard"
+                .to_string(),
+        })
     }
 }
 
@@ -115,28 +121,17 @@ mod tests {
     }
 
     #[test]
-    fn resolver_pushes_through_hooks_never_no_verify() {
+    fn resolver_refuses_before_any_local_mutation() {
         let git = std::sync::Arc::new(RecordingGit::default());
         let resolver = GitConflictResolver::new(
             Box::new(GitRef(git.clone())),
             PathBuf::from("/repo"),
             "main",
         );
-        resolver.resolve("rysweet/Simard", 7).expect("resolve");
+        resolver.resolve("rysweet/Simard", 7).unwrap_err();
 
         let calls = git.calls.lock().unwrap();
-        // No git invocation ever carries --no-verify.
-        assert!(
-            calls.iter().all(|c| !c.iter().any(|a| a == "--no-verify")),
-            "conflict resolution must never use --no-verify: {calls:?}"
-        );
-        // The sequence ends with a plain push (hooks run).
-        assert_eq!(calls.last().unwrap(), &vec!["push".to_string()]);
-        assert!(
-            calls
-                .iter()
-                .any(|c| c.first().map(String::as_str) == Some("merge"))
-        );
+        assert!(calls.is_empty(), "refusal must precede fetch/merge/push");
     }
 
     struct GitRef(std::sync::Arc<RecordingGit>);

@@ -17,8 +17,14 @@ use std::time::Instant;
 use serde_json::json;
 
 use crate::sanitization::sanitize_terminal_text;
-use crate::stewardship::dedup;
-use crate::stewardship::gh_client::{GhClient, RealGhClient};
+use crate::stewardship::gh_client::{RealGhClient, StewardshipGh};
+use crate::stewardship::mutation_guard::MutationGuard;
+#[cfg(test)]
+use crate::stewardship::mutation_store::MutationStore;
+use crate::stewardship::{
+    ArtifactProvenance, CycleId, IssueMutationIdentity, IssueMutationLimit, IssueMutationOutcome,
+    IssueMutationRequest, LineageId,
+};
 
 use super::super::thread::{
     CognitiveThread, Priority, SchedulePolicy, ThreadContext, ThreadHealth, ThreadKind,
@@ -65,7 +71,8 @@ impl Default for EngineerLogAnalysisConfig {
 /// The engineer-log-analysis cognitive thread (exemplar 2).
 pub struct EngineerLogAnalysisThread {
     cfg: EngineerLogAnalysisConfig,
-    gh: Box<dyn GhClient + Send>,
+    gh: Box<dyn StewardshipGh + Send>,
+    guard: MutationGuard,
     last_run_epoch: Option<u64>,
     next_run_epoch: Option<u64>,
     last_success: Option<bool>,
@@ -88,10 +95,29 @@ impl EngineerLogAnalysisThread {
     /// Build from an explicit config with an injected [`GhClient`] (test seam —
     /// a fake client keeps tests offline and credential-free). The client must
     /// be `Send` so the thread satisfies [`CognitiveThread`]'s `Send` bound.
-    pub fn with_client(cfg: EngineerLogAnalysisConfig, gh: Box<dyn GhClient + Send>) -> Self {
+    pub(crate) fn with_client(
+        cfg: EngineerLogAnalysisConfig,
+        gh: Box<dyn StewardshipGh + Send>,
+    ) -> Self {
         Self {
             cfg,
             gh,
+            guard: {
+                #[cfg(test)]
+                {
+                    let path = std::env::temp_dir()
+                        .join(format!(
+                            "simard-engineer-analysis-test-{}",
+                            uuid::Uuid::new_v4()
+                        ))
+                        .join("mutations.json");
+                    MutationGuard::new(MutationStore::new(path))
+                }
+                #[cfg(not(test))]
+                {
+                    MutationGuard::from_default_store()
+                }
+            },
             last_run_epoch: None,
             next_run_epoch: None,
             last_success: None,
@@ -134,6 +160,30 @@ impl CognitiveThread for EngineerLogAnalysisThread {
         let mut created = 0usize;
         let mut deduped = 0usize;
         let mut errors: Vec<String> = Vec::new();
+        let cycle_id = match CycleId::scheduled("engineer-log-analysis") {
+            Ok(cycle_id) => cycle_id,
+            Err(error) => {
+                return ThreadOutcome::failed(
+                    format!("engineer-log-analysis cycle identity failed: {error}"),
+                    start.elapsed(),
+                );
+            }
+        };
+        let mutation_limit = match IssueMutationLimit::configured() {
+            Ok(limit) => limit,
+            Err(error) => {
+                return ThreadOutcome::failed(
+                    format!("engineer-log-analysis mutation configuration failed: {error}"),
+                    start.elapsed(),
+                );
+            }
+        };
+        if let Err(error) = self.guard.begin_cycle(cycle_id.clone(), mutation_limit) {
+            return ThreadOutcome::failed(
+                format!("engineer-log-analysis mutation cycle failed: {error}"),
+                start.elapsed(),
+            );
+        }
 
         for (sig, finding) in findings.iter() {
             // Only recurring signatures are durable findings (bounds noise).
@@ -144,20 +194,6 @@ impl CognitiveThread for EngineerLogAnalysisThread {
                 break;
             }
             emitted += 1;
-
-            // Dedup against already-filed issues (idempotency).
-            match self.gh.search_issues(&self.cfg.repo, sig) {
-                Ok(existing) => {
-                    if dedup::find_existing(&existing, sig).is_some() {
-                        deduped += 1;
-                        continue;
-                    }
-                }
-                Err(e) => {
-                    errors.push(format!("search failed: {e}"));
-                    continue;
-                }
-            }
 
             if dry_run {
                 // Durable telemetry instead of an issue — never a repo doc.
@@ -175,8 +211,25 @@ impl CognitiveThread for EngineerLogAnalysisThread {
             // so `sanitize_terminal_text` (inside build_issue_body) redacts them
             // even when they are not at the start of the raw log line (SR-2).
             let body = build_issue_body(sig, &linewise(&finding.excerpt));
-            match self.gh.create_issue(&self.cfg.repo, &title, &body) {
-                Ok(issue) => {
+            let request = match IssueMutationRequest::create(
+                &self.cfg.repo,
+                IssueMutationIdentity::new(format!("engineer-log-analysis:{sig}"))
+                    .expect("hex failure signature is a valid mutation identity"),
+                ArtifactProvenance::system(
+                    LineageId::new("engineer-log-analysis")
+                        .expect("static lineage identity is valid"),
+                ),
+                &title,
+                &body,
+            ) {
+                Ok(request) => request,
+                Err(error) => {
+                    errors.push(error.to_string());
+                    break;
+                }
+            };
+            match self.guard.execute(&cycle_id, &request, self.gh.as_ref()) {
+                Ok(IssueMutationOutcome::Completed { issue }) => {
                     created += 1;
                     tracing::info!(
                         metric = "simard.thread.engineer_log_analysis.issue_filed",
@@ -185,7 +238,13 @@ impl CognitiveThread for EngineerLogAnalysisThread {
                         "engineer-log-analysis filed deduplicated issue"
                     );
                 }
-                Err(e) => errors.push(format!("create failed: {e}")),
+                Ok(IssueMutationOutcome::AlreadyCompleted { .. }) => {
+                    deduped += 1;
+                }
+                Err(e) => {
+                    errors.push(format!("create failed: {e}"));
+                    break;
+                }
             }
         }
 
@@ -367,10 +426,21 @@ fn collect_findings(
             }
             let action_kind = o
                 .get("action_kind")
+                .or_else(|| o.pointer("/action/kind"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("action");
+            let goal_id = o
+                .get("goal_id")
+                .or_else(|| o.pointer("/action/goal_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("no-goal");
             let failure_kind = format!("engineer_failure:{action_kind}");
-            let sig = dedup::failure_signature(&failure_kind, detail);
+            let sig = IssueMutationIdentity::from_source(
+                "engineer-log-condition",
+                &format!("{failure_kind}\0{goal_id}"),
+            )
+            .as_str()
+            .to_string();
             let entry = findings.entry(sig).or_insert_with(|| Finding {
                 count: 0,
                 failure_kind: failure_kind.clone(),

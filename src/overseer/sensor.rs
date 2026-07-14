@@ -167,6 +167,17 @@ pub fn observed_from_snapshot(snap: &StatusSnapshot) -> ObservedState {
 pub fn in_flight_from_board(board: &GoalBoard) -> Vec<InFlightItem> {
     let mut items = Vec::with_capacity(board.active.len() + board.backlog.len());
     for g in &board.active {
+        if !board
+            .provenance_for(crate::goal_curation::ArtifactKind::Goal, &g.id)
+            .is_recursive_input_eligible()
+        {
+            tracing::warn!(
+                target: "overseer::provenance",
+                goal_id = %g.id,
+                "in-flight projection rejected a goal with ineligible provenance"
+            );
+            continue;
+        }
         let mut refs: Vec<String> = g
             .wip_refs
             .iter()
@@ -180,6 +191,17 @@ pub fn in_flight_from_board(board: &GoalBoard) -> Vec<InFlightItem> {
         });
     }
     for b in &board.backlog {
+        if !board
+            .provenance_for(crate::goal_curation::ArtifactKind::BacklogItem, &b.id)
+            .is_recursive_input_eligible()
+        {
+            tracing::warn!(
+                target: "overseer::provenance",
+                backlog_id = %b.id,
+                "in-flight projection rejected a backlog item with ineligible provenance"
+            );
+            continue;
+        }
         items.push(InFlightItem {
             id: b.id.clone(),
             source: b.source.clone(),
@@ -202,7 +224,16 @@ pub fn in_flight_from_board(board: &GoalBoard) -> Vec<InFlightItem> {
 ///
 /// [`GoalProgress::Blocked`]: crate::goal_curation::GoalProgress::Blocked
 pub fn blocked_goals_from_board(board: &GoalBoard) -> Vec<BlockedGoal> {
-    board.active.iter().filter_map(blocked_goal_of).collect()
+    board
+        .active
+        .iter()
+        .filter(|goal| {
+            board
+                .provenance_for(crate::goal_curation::ArtifactKind::Goal, &goal.id)
+                .is_recursive_input_eligible()
+        })
+        .filter_map(blocked_goal_of)
+        .collect()
 }
 
 /// Project one active goal onto a [`BlockedGoal`] when it is `Blocked`.
@@ -266,6 +297,8 @@ pub struct SurveyedIssue {
     pub title: String,
     /// The issue's labels.
     pub labels: Vec<String>,
+    /// Typed source provenance supplied by the survey adapter.
+    pub provenance: crate::stewardship::ArtifactProvenance,
 }
 
 /// Detect GENUINE backlog-coverage gaps across the WHOLE work picture: the goal
@@ -296,6 +329,15 @@ pub fn detect_workstream_gaps(
 
     // 1. Goal board — uncovered high-priority goals.
     for g in &board.active {
+        let provenance = board.provenance_for(crate::goal_curation::ArtifactKind::Goal, &g.id);
+        if !provenance.is_recursive_input_eligible() {
+            tracing::warn!(
+                target: "overseer::gap_scan",
+                goal_id = %g.id,
+                "gap-scan rejected a goal with ineligible provenance"
+            );
+            continue;
+        }
         // Blocked goals flow through goal_health; never re-flag them here.
         if matches!(g.status, GoalProgress::Blocked(_)) {
             continue;
@@ -308,6 +350,7 @@ pub fn detect_workstream_gaps(
             continue;
         }
         gaps.push(GapItem {
+            provenance,
             category: GapCategory::GoalUncovered,
             ref_id: truncate_field(&g.id),
             title: truncate_field(&g.description),
@@ -321,6 +364,15 @@ pub fn detect_workstream_gaps(
 
     // 2. High-signal open issues with no open PR / active workstream.
     for issue in issues {
+        if !issue.provenance.is_recursive_input_eligible() {
+            tracing::warn!(
+                target: "overseer::gap_scan",
+                repo = %issue.repo,
+                issue = issue.number,
+                "gap-scan rejected an issue with ineligible provenance"
+            );
+            continue;
+        }
         let matched: Vec<&str> = HIGH_SIGNAL_LABELS
             .iter()
             .copied()
@@ -337,6 +389,7 @@ pub fn detect_workstream_gaps(
             continue;
         }
         gaps.push(GapItem {
+            provenance: issue.provenance.clone(),
             category: GapCategory::IssueUncovered,
             ref_id: truncate_field(&ref_id),
             title: truncate_field(&issue.title),
@@ -359,6 +412,10 @@ pub fn detect_workstream_gaps(
             continue;
         }
         gaps.push(GapItem {
+            provenance: crate::stewardship::ArtifactProvenance::system(
+                crate::stewardship::LineageId::new(&signature)
+                    .expect("restricted anomaly signature is a valid lineage id"),
+            ),
             category: GapCategory::AnomalyUnaddressed,
             ref_id: truncate_field(a),
             title: truncate_field(a),
@@ -832,11 +889,16 @@ mod tests {
                 .cloned()
                 .collect())
         }
+    }
+    impl crate::stewardship::gh_client::IssueMutationTransport for StatefulFakeGh {
         fn create_issue(
             &self,
             repo: &str,
+            _identity: &crate::stewardship::IssueMutationIdentity,
             title: &str,
             body: &str,
+            _labels: &[String],
+            _assignees: &[String],
         ) -> crate::error::SimardResult<crate::stewardship::GhIssue> {
             *self.create_calls.lock().unwrap() += 1;
             let number = {
@@ -863,7 +925,7 @@ mod tests {
     ) -> OverseerSensorThread {
         OverseerSensorThread::new(
             Box::new(FakeSnapshots(snap)),
-            Box::new(StewardshipIssueFiler::new(gh)),
+            Box::new(StewardshipIssueFiler::new_for_test(gh)),
             config::DEFAULT_OVERSEER_INTERVAL_SECS,
             enabled,
         )

@@ -24,10 +24,16 @@
 //! remediates several advisories.
 
 use crate::error::{SimardError, SimardResult};
-use crate::stewardship::{MergeOutcome, failure_signature, find_existing};
+use crate::stewardship::gh_client::IssueMutationTransport;
+use crate::stewardship::mutation_guard::MutationGuard;
+use crate::stewardship::{
+    ArtifactProvenance, CycleId, GhIssue, GitHubMutation, GitHubMutationOutcome,
+    GitHubMutationRequest, GitHubMutationResult, IssueMutationIdentity, IssueMutationOutcome,
+    IssueMutationRequest, LineageId, MergeOutcome,
+};
 
 use super::config::IgnoreFiles;
-use super::gh::{PrSpec, SupplyChainGh};
+use super::gh::{OpenedPr, PrSpec, SupplyChainGh};
 use super::types::{Advisory, Decision};
 
 /// The concrete result of remediating one advisory.
@@ -66,18 +72,11 @@ pub fn execute(
     advisory: &Advisory,
     files: &IgnoreFiles,
     gh: &dyn SupplyChainGh,
+    guard: &mut MutationGuard,
+    cycle_id: &CycleId,
 ) -> SimardResult<RemediationOutcome> {
+    gh.validate_repo_target()?;
     let signature = signature_for(advisory);
-
-    // Idempotency: a daily cron must not re-file issues or re-open PRs. If a
-    // tracking issue already carries this advisory's signature, skip.
-    let existing = gh.search_issues(&signature)?;
-    if let Some(issue) = find_existing(&existing, &signature) {
-        return Ok(RemediationOutcome::Skipped {
-            advisory_id: advisory.id.clone(),
-            reason: format!("tracking issue already open: {}", issue.url),
-        });
-    }
 
     match decision {
         Decision::NoAction => Ok(RemediationOutcome::Skipped {
@@ -89,7 +88,17 @@ pub fn execute(
             crate_name,
             from,
             to,
-        } => execute_bump(advisory, &signature, &crate_name, &from, &to, files, gh),
+        } => execute_bump(
+            advisory,
+            &signature,
+            &crate_name,
+            &from,
+            &to,
+            files,
+            gh,
+            guard,
+            cycle_id,
+        ),
 
         Decision::JustifiedIgnore {
             advisory_id,
@@ -103,6 +112,8 @@ pub fn execute(
             &reason,
             files,
             gh,
+            guard,
+            cycle_id,
         ),
 
         Decision::Escalate {
@@ -115,7 +126,16 @@ pub fn execute(
                 advisory,
                 &format!("Escalation — a fix exists but cannot be auto-applied here: {reason}"),
             );
-            let issue = gh.create_issue(&title, &body, &labels(false))?;
+            let issue = guarded_issue_create(
+                gh,
+                guard,
+                cycle_id,
+                advisory,
+                "escalate",
+                &title,
+                &body,
+                &labels(false),
+            )?;
             Ok(RemediationOutcome::Escalated {
                 advisory_id,
                 issue_url: issue.url,
@@ -133,6 +153,8 @@ fn execute_bump(
     to: &str,
     files: &IgnoreFiles,
     gh: &dyn SupplyChainGh,
+    guard: &mut MutationGuard,
+    cycle_id: &CycleId,
 ) -> SimardResult<RemediationOutcome> {
     let title = format!(
         "[supply-chain] {}: bump {crate_name} {from} → {to}",
@@ -145,7 +167,16 @@ fn execute_bump(
             "A patched version is available; opening a minimal bump PR (`cargo update -p {crate_name} --precise {to}`)."
         ),
     );
-    let issue = gh.create_issue(&title, &body, &labels(false))?;
+    let issue = guarded_issue_create(
+        gh,
+        guard,
+        cycle_id,
+        advisory,
+        "bump",
+        &title,
+        &body,
+        &labels(false),
+    )?;
 
     // Start every remediation from the pristine scan base so this PR's commit
     // contains only this advisory's change (no cross-contamination when a single
@@ -165,13 +196,13 @@ fn execute_bump(
         body: pr_body,
         labels: labels(!can_trigger),
     };
-    let pr = gh.open_remediation_pr(&spec)?;
+    let pr = guarded_open_pr(gh, guard, cycle_id, advisory, &spec)?;
 
     // Self-merge only when the PR's CI can (and did) run green. A PR whose CI
     // cannot run is never self-merged.
     let merged = if pr.ci_will_run {
         matches!(
-            gh.self_merge_if_green(pr.number)?,
+            guarded_self_merge(gh, guard, cycle_id, advisory, pr.number)?,
             MergeOutcome::Merged { .. }
         )
     } else {
@@ -194,6 +225,8 @@ fn execute_justified_ignore(
     reason: &str,
     files: &IgnoreFiles,
     gh: &dyn SupplyChainGh,
+    guard: &mut MutationGuard,
+    cycle_id: &CycleId,
 ) -> SimardResult<RemediationOutcome> {
     // 1. File the tracking issue FIRST.
     let title = format!(
@@ -204,7 +237,16 @@ fn execute_justified_ignore(
         advisory,
         "No fixed upstream release exists; adding a justified, tracked ignore to deny.toml and .cargo/audit.toml.",
     );
-    let issue = gh.create_issue(&title, &body, &labels(false))?;
+    let issue = guarded_issue_create(
+        gh,
+        guard,
+        cycle_id,
+        advisory,
+        "justified-ignore",
+        &title,
+        &body,
+        &labels(false),
+    )?;
 
     // 2. Hard rail: never write an ignore without a tracker URL.
     if issue.url.trim().is_empty() {
@@ -230,7 +272,7 @@ fn execute_justified_ignore(
         body: ignore_pr_body(advisory, &issue.url, can_trigger),
         labels: labels(!can_trigger),
     };
-    let pr = gh.open_remediation_pr(&spec)?;
+    let pr = guarded_open_pr(gh, guard, cycle_id, advisory, &spec)?;
 
     Ok(RemediationOutcome::FiledJustifiedIgnore {
         advisory_id: advisory_id.to_string(),
@@ -240,9 +282,175 @@ fn execute_justified_ignore(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn guarded_issue_create(
+    gh: &dyn SupplyChainGh,
+    guard: &mut MutationGuard,
+    cycle_id: &CycleId,
+    advisory: &Advisory,
+    action: &str,
+    title: &str,
+    body: &str,
+    labels: &[String],
+) -> SimardResult<GhIssue> {
+    let request = IssueMutationRequest::create_with_labels(
+        gh.repo(),
+        IssueMutationIdentity::new(format!(
+            "supply-chain:{}:{action}",
+            advisory.id.to_ascii_lowercase()
+        ))?,
+        ArtifactProvenance::system(LineageId::new("supply-chain-steward")?),
+        title,
+        body,
+        labels.to_vec(),
+    )?;
+    let transport = SupplyChainIssueTransport(gh);
+    match guard.execute(cycle_id, &request, &transport)? {
+        IssueMutationOutcome::Completed { issue }
+        | IssueMutationOutcome::AlreadyCompleted { issue } => Ok(issue),
+    }
+}
+
+struct SupplyChainIssueTransport<'a>(&'a dyn SupplyChainGh);
+
+impl IssueMutationTransport for SupplyChainIssueTransport<'_> {
+    fn create_issue(
+        &self,
+        _repo: &str,
+        identity: &IssueMutationIdentity,
+        title: &str,
+        body: &str,
+        labels: &[String],
+        _assignees: &[String],
+    ) -> SimardResult<GhIssue> {
+        let body = format!(
+            "{body}\n\nsimard-mutation-id: {}\nsimard-provenance: stewardship\n",
+            identity.as_str()
+        );
+        self.0.create_issue(title, &body, labels)
+    }
+}
+
+fn guarded_open_pr(
+    gh: &dyn SupplyChainGh,
+    guard: &mut MutationGuard,
+    cycle_id: &CycleId,
+    advisory: &Advisory,
+    spec: &PrSpec,
+) -> SimardResult<OpenedPr> {
+    let provenance = ArtifactProvenance::system(LineageId::new("supply-chain-steward")?);
+    let push_request = GitHubMutationRequest::new(
+        gh.repo(),
+        IssueMutationIdentity::new(format!(
+            "supply-chain:{}:push",
+            advisory.id.to_ascii_lowercase()
+        ))?,
+        provenance.clone(),
+        GitHubMutation::GitPush {
+            branch: spec.branch.clone(),
+        },
+    )?;
+    guard.execute_github(cycle_id, &push_request, || {
+        gh.prepare_remediation_pr(spec)?;
+        gh.push_remediation_branch(&spec.branch)?;
+        Ok(GitHubMutationResult::Pushed {
+            branch: spec.branch.clone(),
+        })
+    })?;
+
+    let create_request = GitHubMutationRequest::new(
+        gh.repo(),
+        IssueMutationIdentity::new(format!(
+            "supply-chain:{}:pr-create",
+            advisory.id.to_ascii_lowercase()
+        ))?,
+        provenance,
+        GitHubMutation::PullRequestCreate {
+            branch: spec.branch.clone(),
+            title: spec.title.clone(),
+        },
+    )?;
+    let outcome = guard.execute_github(cycle_id, &create_request, || {
+        let pr = gh.create_remediation_pr(spec)?;
+        Ok(GitHubMutationResult::PullRequestCreated {
+            number: pr.number,
+            url: pr.url,
+        })
+    })?;
+    let result = match outcome {
+        GitHubMutationOutcome::Completed { result }
+        | GitHubMutationOutcome::AlreadyCompleted { result } => result,
+    };
+    match result {
+        GitHubMutationResult::PullRequestCreated { number, url } => Ok(OpenedPr {
+            number,
+            url,
+            ci_will_run: gh.has_ci_trigger_token(),
+        }),
+        _ => Err(SimardError::StewardshipMutationIdentityConflict {
+            identity: create_request.identity.as_str().to_string(),
+        }),
+    }
+}
+
+fn guarded_self_merge(
+    gh: &dyn SupplyChainGh,
+    guard: &mut MutationGuard,
+    cycle_id: &CycleId,
+    advisory: &Advisory,
+    pr_number: u32,
+) -> SimardResult<MergeOutcome> {
+    let request = GitHubMutationRequest::new(
+        gh.repo(),
+        IssueMutationIdentity::from_source(
+            "supply-chain-pr-merge",
+            &format!(
+                "{}\0{}",
+                advisory.id.to_ascii_lowercase(),
+                cycle_id.as_str()
+            ),
+        ),
+        ArtifactProvenance::system(LineageId::new("supply-chain-steward")?),
+        GitHubMutation::PullRequestMerge { number: pr_number },
+    )?;
+    let outcome = guard.execute_github(cycle_id, &request, || {
+        match gh.self_merge_if_green(pr_number)? {
+            MergeOutcome::Merged { .. } => {
+                Ok(GitHubMutationResult::PullRequestMerged { number: pr_number })
+            }
+            MergeOutcome::Refused { reason, .. } => Ok(GitHubMutationResult::Refused { reason }),
+        }
+    })?;
+    match outcome {
+        GitHubMutationOutcome::Completed {
+            result: GitHubMutationResult::PullRequestMerged { number },
+        }
+        | GitHubMutationOutcome::AlreadyCompleted {
+            result: GitHubMutationResult::PullRequestMerged { number },
+        } => Ok(MergeOutcome::Merged {
+            pr_number: number,
+            repo: gh.repo().to_string(),
+        }),
+        GitHubMutationOutcome::Completed {
+            result: GitHubMutationResult::Refused { reason },
+        }
+        | GitHubMutationOutcome::AlreadyCompleted {
+            result: GitHubMutationResult::Refused { reason },
+        } => Ok(MergeOutcome::Refused { pr_number, reason }),
+        _ => Err(SimardError::StewardshipMutationIdentityConflict {
+            identity: request.identity.as_str().to_string(),
+        }),
+    }
+}
+
 /// Deterministic dedup signature for an advisory (ID + affected crate).
 fn signature_for(advisory: &Advisory) -> String {
-    failure_signature(&advisory.id, &advisory.crate_name)
+    IssueMutationIdentity::from_source(
+        "supply-chain-advisory",
+        &format!("{}\0{}", advisory.id, advisory.crate_name),
+    )
+    .as_str()
+    .to_string()
 }
 
 /// Deterministic remediation branch name, so a re-run updates the same branch.

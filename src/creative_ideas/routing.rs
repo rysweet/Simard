@@ -13,14 +13,20 @@
 #![allow(dead_code)]
 
 use crate::cognitive_memory::creative_idea::{CreativeIdea, IdeaStatus};
-use crate::creative_ideas::{
-    CREATIVE_IDEA_ISSUE_LABEL, CREATIVE_IDEA_OWNER, CREATIVE_IDEA_PR_LABEL,
-};
+#[cfg(test)]
+use crate::creative_ideas::CREATIVE_IDEA_PR_LABEL;
+use crate::creative_ideas::{CREATIVE_IDEA_ISSUE_LABEL, CREATIVE_IDEA_OWNER};
 use crate::error::{SimardError, SimardResult};
 use crate::goals::{GoalRecord, GoalStatus, GoalStore, goal_slug};
 use crate::improvements::EvidenceRef;
 use crate::session::{SessionId, SessionPhase};
 use crate::stewardship::gh_client::GhIssue;
+use crate::stewardship::gh_client::IssueMutationTransport;
+use crate::stewardship::mutation_guard::MutationGuard;
+use crate::stewardship::{
+    ArtifactProvenance, CycleId, IssueMutationIdentity, IssueMutationOutcome, IssueMutationRequest,
+    LineageId,
+};
 
 /// Owner identity recorded on goals minted from creative ideas.
 const CREATIVE_IDEA_GOAL_OWNER_IDENTITY: &str = "simard";
@@ -33,7 +39,7 @@ const CREATIVE_IDEA_GOAL_PRIORITY: u8 = 3;
 /// `search_issues`/`create_issue`; this seam adds labeled+assigned issue
 /// creation and the PR draft/label/review-request operations without mutating
 /// the daemon's `gh` tooling. FUTURE (M4): a real subprocess impl.
-pub trait IdeaGhClient {
+pub(crate) trait IdeaGhClient {
     /// Create an issue with labels and assignees.
     fn create_labeled_issue(
         &self,
@@ -109,7 +115,8 @@ pub fn route_idea_to_goal(
 /// Applies to ideas in `NeedsHumanReview`. Creates an issue labeled
 /// [`CREATIVE_IDEA_ISSUE_LABEL`] and assigned to [`CREATIVE_IDEA_OWNER`]; the
 /// body embeds `idea.node_id` for traceability.
-pub fn route_idea_to_issue(
+#[cfg(test)]
+pub(crate) fn route_idea_to_issue(
     idea: &CreativeIdea,
     gh: &dyn IdeaGhClient,
     repo: &str,
@@ -129,6 +136,58 @@ pub fn route_idea_to_issue(
     )
 }
 
+pub(crate) fn route_idea_to_issue_guarded(
+    idea: &CreativeIdea,
+    gh: &dyn IdeaGhClient,
+    guard: &mut MutationGuard,
+    cycle_id: &CycleId,
+    repo: &str,
+) -> SimardResult<GhIssue> {
+    let title = format!("[creative-idea] {}", idea.idea);
+    let body = format!(
+        "originating-idea: {node}\n\n{rationale}\n\nRouted for human review by the Creative Ideas thread (#2419).",
+        node = idea.node_id,
+        rationale = creative_idea_rationale(idea),
+    );
+    let request = IssueMutationRequest::create_with_metadata(
+        repo,
+        IssueMutationIdentity::from_source("creative-idea", &idea.node_id),
+        ArtifactProvenance::system(LineageId::new("creative-ideas-thread")?),
+        title,
+        body,
+        vec![CREATIVE_IDEA_ISSUE_LABEL.to_string()],
+        vec![CREATIVE_IDEA_OWNER.to_string()],
+    )?;
+    let transport = IdeaIssueTransport(gh);
+    match guard.execute(cycle_id, &request, &transport)? {
+        IssueMutationOutcome::Completed { issue }
+        | IssueMutationOutcome::AlreadyCompleted { issue } => Ok(issue),
+    }
+}
+
+struct IdeaIssueTransport<'a>(&'a dyn IdeaGhClient);
+
+impl IssueMutationTransport for IdeaIssueTransport<'_> {
+    fn create_issue(
+        &self,
+        repo: &str,
+        identity: &IssueMutationIdentity,
+        title: &str,
+        body: &str,
+        labels: &[String],
+        assignees: &[String],
+    ) -> SimardResult<GhIssue> {
+        let body = format!(
+            "{body}\n\nsimard-mutation-id: {}\nsimard-provenance: stewardship\n",
+            identity.as_str()
+        );
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let assignees: Vec<&str> = assignees.iter().map(String::as_str).collect();
+        self.0
+            .create_labeled_issue(repo, title, &body, &labels, &assignees)
+    }
+}
+
 /// Apply the human-review gate to a PR arising from a creative-idea goal.
 ///
 /// Enforced by three standard GitHub mechanisms — **never** `--admin`/
@@ -136,7 +195,8 @@ pub fn route_idea_to_issue(
 /// label [`CREATIVE_IDEA_PR_LABEL`], (3) **request** the owner's review
 /// ([`CREATIVE_IDEA_OWNER`]). `repo` (`owner/name`) is required because each
 /// `IdeaGhClient` PR method is repo-scoped.
-pub fn mark_idea_pr(
+#[cfg(test)]
+pub(crate) fn mark_idea_pr(
     pr_number: u64,
     idea: &CreativeIdea,
     gh: &dyn IdeaGhClient,
@@ -268,7 +328,7 @@ pub fn gh_pr_add_reviewer_argv(repo: &str, pr: u64, reviewer: &str) -> Vec<Strin
 /// a unit test over the argv builders); the human-review gate is enforced only
 /// by standard GitHub mechanisms (draft + label + requested review).
 #[derive(Default)]
-pub struct RealIdeaGhClient;
+pub(crate) struct RealIdeaGhClient;
 
 impl RealIdeaGhClient {
     /// Construct the production client.

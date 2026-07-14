@@ -48,10 +48,17 @@ struct RecordingFiler {
 }
 
 impl NoProgressIssueFiler for RecordingFiler {
-    fn file_issue(&self, title: &str, body: &str) {
+    fn file_issue(
+        &self,
+        _goal_id: &str,
+        _provenance: crate::stewardship::ArtifactProvenance,
+        title: &str,
+        body: &str,
+    ) -> crate::error::SimardResult<()> {
         self.calls
             .borrow_mut()
             .push((title.to_string(), body.to_string()));
+        Ok(())
     }
 }
 

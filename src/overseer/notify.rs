@@ -272,6 +272,12 @@ impl NotifyReport {
         !self.per_channel.is_empty() && self.per_channel.iter().all(|(_, d)| d.is_sent())
     }
 
+    pub fn any_sent(&self) -> bool {
+        self.per_channel
+            .iter()
+            .any(|(_, delivery)| delivery.is_sent())
+    }
+
     /// The notification always "fires": every configured channel is attempted
     /// and every outcome recorded. This is the mandatory guarantee — a merge is
     /// never considered complete without a `NotifyReport` in hand.

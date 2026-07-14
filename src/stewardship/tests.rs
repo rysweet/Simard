@@ -18,10 +18,13 @@ use std::sync::Mutex;
 use crate::error::SimardError;
 use crate::goal_curation::GoalBoard;
 use crate::stewardship::dedup::{failure_signature, find_existing, normalize};
+use crate::stewardship::gh_client::IssueMutationTransport;
+use crate::stewardship::mutation_guard::MutationGuard;
+use crate::stewardship::mutation_store::MutationStore;
 use crate::stewardship::routing::route_failure;
 use crate::stewardship::{
-    GhClient, GhIssue, OrchestratorRunSummary, StewardshipOutcome, TargetRepo,
-    process_orchestrator_run,
+    ArtifactProvenance, CycleId, GhClient, GhIssue, IssueMutationIdentity, LineageId,
+    OrchestratorRunSummary, StewardshipOutcome, TargetRepo, process_orchestrator_run,
 };
 
 // ─────────────────────────── FakeGhClient ───────────────────────────
@@ -81,7 +84,18 @@ impl GhClient for FakeGhClient {
             None => Ok(vec![]),
         }
     }
-    fn create_issue(&self, repo: &str, title: &str, body: &str) -> Result<GhIssue, SimardError> {
+}
+
+impl IssueMutationTransport for FakeGhClient {
+    fn create_issue(
+        &self,
+        repo: &str,
+        _identity: &IssueMutationIdentity,
+        title: &str,
+        body: &str,
+        _labels: &[String],
+        _assignees: &[String],
+    ) -> Result<GhIssue, SimardError> {
         self.create_calls.lock().unwrap().push((
             repo.to_string(),
             title.to_string(),
@@ -110,7 +124,21 @@ fn sample_run() -> OrchestratorRunSummary {
         source_module: "simard::engineer_loop".to_string(),
         failure_kind: "PanicInStep".to_string(),
         error_text: "panic at /home/user/src/foo.rs:42:7\nbacktrace deadbeef".to_string(),
+        condition_id: IssueMutationIdentity::new("condition:panic-in-step").unwrap(),
+        cycle_id: CycleId::new("run-abc123").unwrap(),
+        provenance: ArtifactProvenance::system(LineageId::new("orchestrator-run").unwrap()),
+        disposition: crate::stewardship::StewardshipDisposition::AuthorizedIssue,
     }
+}
+
+fn process_run(
+    run: &OrchestratorRunSummary,
+    gh: &FakeGhClient,
+    _board: &mut GoalBoard,
+) -> crate::error::SimardResult<StewardshipOutcome> {
+    let temp = tempfile::tempdir().unwrap();
+    let mut guard = MutationGuard::new(MutationStore::new(temp.path().join("mutations.json")));
+    process_orchestrator_run(run, gh, &mut guard)
 }
 
 // ─────────────────────────── Routing tests ───────────────────────────
@@ -264,7 +292,7 @@ fn process_run_files_new_when_no_match() {
     let gh = FakeGhClient::new();
     let mut board = GoalBoard::new();
     let run = sample_run();
-    let sig = failure_signature(&run.failure_kind, &run.error_text);
+    let sig = run.condition_id.as_str().to_string();
 
     gh.seed_search("rysweet/Simard", &sig, Ok(vec![]));
     gh.seed_create(
@@ -277,7 +305,7 @@ fn process_run_files_new_when_no_match() {
         }),
     );
 
-    let outcome = process_orchestrator_run(&run, &gh, &mut board).unwrap();
+    let outcome = process_run(&run, &gh, &mut board).unwrap();
     match outcome {
         StewardshipOutcome::FiledNew {
             repo,
@@ -293,15 +321,10 @@ fn process_run_files_new_when_no_match() {
         other => panic!("expected FiledNew, got {other:?}"),
     }
 
-    assert_eq!(gh.search_call_count(), 1);
+    assert_eq!(gh.search_call_count(), 0);
     assert_eq!(gh.create_call_count(), 1);
-    assert_eq!(
-        board.backlog.len(),
-        1,
-        "backlog should hold 1 stewardship item"
+    assert!(
+        board.backlog.is_empty(),
+        "stewardship issues must never enter GoalBoard"
     );
-    let item = &board.backlog[0];
-    assert_eq!(item.id, "stewardship-rysweet_Simard-42");
-    assert_eq!(item.source, "stewardship:rysweet/Simard#42");
-    assert!(item.description.contains("42") || item.description.contains(&sig));
 }

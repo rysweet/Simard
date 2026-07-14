@@ -92,8 +92,9 @@ distinct and demand different remedies:
 Blindly unblocking treats (a), (b) and (c) identically and forever. The
 root-cause principle forces the Overseer to name the WHY, fix the actual cause
 when it can, and — when the same signature keeps recurring and the Overseer
-cannot fix it in-loop — **escalate the root cause** (a deduped issue describing
-the cause, not the symptom) instead of re-unblocking on a loop.
+cannot fix it in-loop - **escalate the root cause** through the durable issue
+mutation guard (an issue describing the cause, not the symptom) instead of
+re-unblocking on a loop.
 
 ## What "determining WHY" means
 
@@ -160,7 +161,7 @@ Decide classifies every planned action with a
 
 | Situation | `class` | `root_cause_addressed` | `unaddressed_note` |
 |---|---|---|---|
-| Action fixes the primary cause (e.g. a first-time false-park → `UnblockGoal`; a systemic cause → `FileIssue`/`EscalateBlockedGoal`) | `RootCause` | `true` | `None` |
+| Action fixes the primary cause (for example, a first-time false-park uses `UnblockGoal`; an eligible systemic cause uses a guarded issue proposal or `EscalateBlockedGoal`) | `RootCause` | `true` | `None` |
 | No fix is needed because the "cause" is a **deliberate** operator or dependency block, correctly respected by a no-op `Report` | `Acknowledged` | `true` | `None` |
 | Action only mitigates the symptom and leaves the primary cause live (e.g. a *repeated* `UnblockGoal` on a recurring re-block, a `Report` on genuinely-degraded process-health) | `SymptomMitigation` | `false` | `Some("<primary cause label>")` |
 
@@ -185,7 +186,7 @@ re-unblocking every cycle:
 | Condition | Action | Remediation |
 |---|---|---|
 | perpetual & no-progress marker & **recurrence < N** | `UnblockGoal { …, why }` — one-off false-park correction | `RootCause` |
-| perpetual & no-progress marker & **recurrence ≥ N** (keeps getting re-parked) | `FileIssue` describing the **root cause**, deduped on the root-cause signature | `RootCause` (escalates the cause) |
+| perpetual & no-progress marker & **recurrence >= N** (keeps getting re-parked) | typed `recurring_goal_reblock` proposal through `GitHubMutationGuard`, only for eligible lineage | `RootCause` (escalates the cause) |
 | genuine `needs_review` block | `EscalateBlockedGoal { …, why }` (operator, both channels) | `RootCause` |
 | plain operator/dependency block | `Report` | `Acknowledged` (respectful no-op; the deliberate block is the recorded, addressed cause — **not** flagged as a symptom) |
 
@@ -213,9 +214,10 @@ The WHY is surfaced everywhere the Overseer's activity is visible:
 - **Operator notifications** — `OperatorNotification::goal_blocked_with_why`
   includes the WHY line in the message body, so an escalation reaches a human
   *with* the diagnosed cause, not just the symptom.
-- **Deduped issues** — when a root cause is a recurring systemic defect the
-  Overseer cannot fix in-loop, it files a GitHub issue describing the **root
-  cause** (deduped on the root-cause signature), not the symptom.
+- **Guarded issues** - when a root cause is a recurring systemic defect the
+  Overseer cannot fix in-loop, eligible evidence may produce an issue describing
+  the **root cause**, keyed by the agent's stable condition identity rather than
+  a volatile issue number or goal slug.
 
 ## Always-on, mandatory — no opt-out
 

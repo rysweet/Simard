@@ -497,12 +497,14 @@ write, so a partial write is caught in CI. See
 ### Idempotency and deduplication
 
 The daily cron must be idempotent. The steward reuses
-[`stewardship::dedup`](./stewardship-api.md#deduplication):
+the shared [stewardship mutation guard](./stewardship-mutation-guard.md):
 
-- The **signature** is keyed on the advisory ID (+ affected crate), embedded in
-  each filed issue body as `stewardship-signature: <hex>`.
-- Before filing, `find_existing` searches open issues for that signature; a match
-  yields `Skipped` (no duplicate issue, no duplicate PR).
+- The stable mutation identity is derived from the advisory ID, affected crate,
+  repository, operation, and immutable payload digest.
+- Completed identities replay from the local journal. GitHub search is
+  reconciliation evidence only, never the authoritative idempotency store.
+- Every issue create, edit, close, or reopen reserves the shared cycle budget
+  before transport and propagates guard failures to the cycle owner.
 - Remediation PR branches use a deterministic name
   (`chore/advisory-<id-lowercased>`), so a second run updates the existing branch
   rather than opening a second PR.
@@ -580,7 +582,7 @@ pub enum SimardError {
 
 Each variant has a `Display` arm in `src/error/display.rs` and an associated unit
 test alongside the existing error-variant tests, matching the
-[stewardship error-variant pattern](./stewardship-api.md#error-variants).
+[stewardship mutation error pattern](./stewardship-mutation-guard.md#outcomes-and-errors).
 
 ## Dependabot
 
