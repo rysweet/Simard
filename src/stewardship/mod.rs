@@ -58,11 +58,10 @@ pub fn process_orchestrator_run(
 
     let existing = gh.search_issues(&repo, &signature)?;
     if let Some(issue) = find_existing(&existing, &signature) {
-        let issue = issue.clone();
         return Ok(StewardshipOutcome::MatchedExisting {
             repo,
             issue_number: issue.number,
-            url: issue.url,
+            url: issue.url.clone(),
             signature,
         });
     }
