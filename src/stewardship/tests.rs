@@ -301,7 +301,10 @@ fn process_run_sanitizes_every_outbound_issue_field_but_deduplicates_raw_input()
     let credential = "github_pat_EXAMPLE_FAKE_CREDENTIAL_do_not_use_00";
     let bearer_token = "EXAMPLE.bearer-token.do-not-use-000000";
     let authorization_header = "Authorization";
-    let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJleGFtcGxlIn0.signatureDoNotUse000";
+    let jwt = format!(
+        "{}.{}.{}",
+        "eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiJleGFtcGxlIn0", "signatureDoNotUse000"
+    );
     let password = "example-password-do-not-use";
     let key_secret = "example-api-key-do-not-use";
     let cloud_secret = "example-cloud-secret-do-not-use";
@@ -328,7 +331,7 @@ fn process_run_sanitizes_every_outbound_issue_field_but_deduplicates_raw_input()
          cloud access id {cloud_access_key}\n\
          google api key {google_api_key}\n\
          request jwt {jwt}\n\
-         {pem_begin}\n{pem_body}\n{pem_end}\n\
+         PRIVATE_KEY={pem_begin}\n{pem_body}\n{pem_end}\n\
          retry exhausted after 3 attempts"
     );
     let raw_signature = failure_signature(&run.failure_kind, &run.error_text);
@@ -362,7 +365,7 @@ fn process_run_sanitizes_every_outbound_issue_field_but_deduplicates_raw_input()
         github_token,
         credential,
         bearer_token,
-        jwt,
+        jwt.as_str(),
         password,
         key_secret,
         cloud_secret,

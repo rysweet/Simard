@@ -86,7 +86,11 @@ pub fn process_orchestrator_run(
         });
     }
 
-    let raw_body = format!(
+    let run_id = sanitize_issue_text(&run.run_id);
+    let failed_step = sanitize_issue_text(&run.failed_step);
+    let source_module = sanitize_issue_text(&run.source_module);
+    let error_text = sanitize_issue_text(&run.error_text);
+    let body = format!(
         "filed-by: simard-stewardship\n\
          stewardship-signature: {sig}\n\
          originating-run: {rid}\n\
@@ -96,12 +100,11 @@ pub fn process_orchestrator_run(
          ## Error\n\
          {err}\n",
         sig = signature,
-        rid = run.run_id,
-        step = run.failed_step,
-        src = run.source_module,
-        err = run.error_text,
+        rid = run_id,
+        step = failed_step,
+        src = source_module,
+        err = error_text,
     );
-    let body = sanitize_issue_text(&raw_body);
     let new = gh.create_issue(&repo, ISSUE_TITLE, &body)?;
     Ok(StewardshipOutcome::FiledNew {
         repo,
@@ -112,11 +115,11 @@ pub fn process_orchestrator_run(
 }
 
 fn sanitize_issue_text(input: &str) -> String {
-    let assignments = redact_sensitive_assignments(input);
+    let scrubbed = crate::journal::scrub_secrets(input);
+    let assignments = redact_sensitive_assignments(&scrubbed);
     let bearer_tokens = redact_bearer_tokens(&assignments);
     let jwt_tokens = redact_jwts(&bearer_tokens);
-    let cloud_keys = redact_cloud_access_keys(&jwt_tokens);
-    crate::journal::scrub_secrets(&cloud_keys)
+    redact_cloud_access_keys(&jwt_tokens)
 }
 
 fn redact_sensitive_assignments(input: &str) -> String {
@@ -160,7 +163,9 @@ fn redact_sensitive_assignments(input: &str) -> String {
             continue;
         }
 
-        let value_end = if *key == "authorization" {
+        let value_end = if input[value_start..].starts_with(REDACTED_SECRET) {
+            value_start + REDACTED_SECRET.len()
+        } else if *key == "authorization" {
             input[value_start..]
                 .find('\n')
                 .map_or(input.len(), |offset| value_start + offset)
