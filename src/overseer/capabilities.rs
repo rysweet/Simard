@@ -358,8 +358,8 @@ pub trait MeetingHost {
 /// **Reuse:** `crate::stewardship::process_orchestrator_run`
 /// (`src/stewardship/mod.rs:51`) with `OrchestratorRunSummary`; dedup via
 /// `crate::stewardship::{failure_signature, find_existing}`
-/// (`src/stewardship/dedup.rs`); backlog enqueue via
-/// `crate::goal_curation::enqueue_stewardship_issue`.
+/// (`src/stewardship/dedup.rs`). Filing never writes the resulting issue back
+/// into the goal board.
 pub trait IssueFiler {
     fn file(&self, run: &OrchestratorRunBrief) -> Result<IssueOutcome, OverseerError>;
 }

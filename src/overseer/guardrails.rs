@@ -54,7 +54,7 @@ pub fn classify(iv: &Intervention) -> RiskClass {
             RiskClass::Routine
         }
         // Flagging backlog-coverage gaps is routine stewardship: it notifies the
-        // operator and files a deduped issue (no LLM budget, no self-mutation).
+        // operator without creating recursive tracking work.
         // Its identity/dedup gates (fail-closed [`RecursionGuard`] + the per-gap
         // dedup gate) apply in the act path.
         Intervention::FlagWorkstreamGaps { .. } => RiskClass::Routine,

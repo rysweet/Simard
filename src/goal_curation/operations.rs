@@ -812,35 +812,8 @@ pub fn add_backlog_item(board: &mut GoalBoard, item: BacklogItem) -> SimardResul
     Ok(())
 }
 
-/// Default backlog score for stewardship-filed issues (issue #1167).
+/// Default backlog score for Overseer-created work.
 pub const DEFAULT_STEWARD_SCORE: f64 = 0.6;
-
-/// Enqueue a stewardship-filed (or matched) GitHub issue onto the backlog
-/// (issue #1167).
-///
-/// Idempotent: if a backlog item with the same stewardship id already exists
-/// (same repo + issue number), this is a no-op and returns `Ok(())`.
-pub fn enqueue_stewardship_issue(
-    board: &mut GoalBoard,
-    repo: &str,
-    issue_number: u64,
-    url: &str,
-    signature: &str,
-) -> SimardResult<()> {
-    let id = format!("stewardship-{}-{}", repo.replace('/', "_"), issue_number);
-    if board.backlog.iter().any(|b| b.id == id) {
-        return Ok(());
-    }
-    let item = BacklogItem {
-        id,
-        description: format!(
-            "Investigate stewardship-filed failure (signature {signature}) — {url}"
-        ),
-        source: format!("stewardship:{repo}#{issue_number}"),
-        score: DEFAULT_STEWARD_SCORE,
-    };
-    add_backlog_item(board, item)
-}
 
 /// Promote a backlog item to an active goal. The item is removed from the
 /// backlog and inserted as a `NotStarted` active goal with the given priority.

@@ -45,7 +45,6 @@ pub fn route_failure(source_module: &str) -> SimardResult<TargetRepo> {
         return Ok(TargetRepo::Simard);
     }
     tracing::warn!(
-        source_module = %source_module,
         default = DEFAULT_TARGET_REPO.slug(),
         "stewardship routing: no keyword match, routing to default repo"
     );

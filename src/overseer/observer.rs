@@ -15,13 +15,12 @@
 //!   machine-checkable predicate proving M1's exit criterion.
 //!
 //! Reuse map (see `docs/design/overseer.md` §capability table):
-//! `stewardship::process_orchestrator_run` (`src/stewardship/mod.rs:51`),
-//! dedup via `stewardship::failure_signature` (`src/stewardship/dedup.rs`),
-//! backlog enqueue via `goal_curation::enqueue_stewardship_issue`.
+//! `stewardship::process_orchestrator_run` (`src/stewardship/mod.rs:51`) and
+//! dedup via `stewardship::failure_signature` (`src/stewardship/dedup.rs`).
+//! Filed issues are not fed back into the goal board.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use crate::goal_curation::GoalBoard;
 use crate::overseer::capabilities::{
     IssueFiler, IssueOutcome, OrchestratorRunBrief, OverseerError,
 };
@@ -38,55 +37,28 @@ use crate::stewardship::{
 /// when none exists — so repeated Observe cycles over the same failure are
 /// idempotent (`FiledNew` once, `MatchedExisting` thereafter).
 ///
-/// The `gh` handle is the ONLY network surface (a `RealGhClient` in the daemon,
-/// a fake in tests). The goal board is held behind a `Mutex` so `file(&self, …)`
-/// can enqueue the resulting issue without requiring `&mut self`.
+/// The `gh` handle is the only network surface (a `RealGhClient` in the daemon,
+/// a fake in tests).
 pub struct StewardshipIssueFiler {
     gh: Arc<dyn GhClient + Send + Sync>,
-    board: Mutex<GoalBoard>,
 }
 
 impl StewardshipIssueFiler {
-    /// Construct with a fresh, empty goal board.
+    /// Construct an issue filer over the supplied GitHub client.
     pub fn new(gh: Arc<dyn GhClient + Send + Sync>) -> Self {
-        Self {
-            gh,
-            board: Mutex::new(GoalBoard::new()),
-        }
-    }
-
-    /// Construct over an existing board (e.g. the loaded persistent board).
-    pub fn with_board(gh: Arc<dyn GhClient + Send + Sync>, board: GoalBoard) -> Self {
-        Self {
-            gh,
-            board: Mutex::new(board),
-        }
-    }
-
-    /// Snapshot the current backlog length (used by tests / reporting).
-    pub fn backlog_len(&self) -> usize {
-        self.board
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .backlog
-            .len()
+        Self { gh }
     }
 }
 
 impl IssueFiler for StewardshipIssueFiler {
     fn file(&self, run: &OrchestratorRunBrief) -> Result<IssueOutcome, OverseerError> {
         let summary = brief_to_summary(run);
-        let mut board = self
-            .board
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let outcome =
-            process_orchestrator_run(&summary, self.gh.as_ref(), &mut board).map_err(|e| {
-                OverseerError::Capability {
-                    what: "file_issue",
-                    detail: e.to_string(),
-                }
-            })?;
+        let outcome = process_orchestrator_run(&summary, self.gh.as_ref()).map_err(|e| {
+            OverseerError::Capability {
+                what: "file_issue",
+                detail: e.to_string(),
+            }
+        })?;
         Ok(match outcome {
             StewardshipOutcome::FiledNew { url, .. } => IssueOutcome::FiledNew { url },
             StewardshipOutcome::MatchedExisting { url, .. } => {
@@ -262,6 +234,8 @@ pub fn is_m1_permitted(iv: &Intervention) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
     use crate::error::{SimardError, SimardResult};
     use crate::overseer::decide;
@@ -383,11 +357,6 @@ mod tests {
         );
         assert_eq!(gh.create_calls(), 1, "no duplicate issue created");
         assert_eq!(gh.search_calls(), 2, "each cycle searches exactly once");
-        assert_eq!(
-            filer.backlog_len(),
-            1,
-            "second cycle must not duplicate the backlog row"
-        );
     }
 
     #[test]

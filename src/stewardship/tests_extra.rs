@@ -1,8 +1,6 @@
 //! TDD tests for the stewardship loop (issue #1167).
 //!
-//! These tests are written **before** the implementation. They define the
-//! contract for `src/stewardship/` and the `enqueue_stewardship_issue`
-//! helper in `src/goal_curation/operations.rs`.
+//! These tests define the contract for `src/stewardship/`.
 //!
 //! Test plan (mirrors design spec §7):
 //! - Routing matrix: amplihack / simard / ambiguous / overlap-precedence
@@ -17,7 +15,6 @@ use std::cell::RefCell;
 use std::sync::Mutex;
 
 use crate::error::SimardError;
-use crate::goal_curation::GoalBoard;
 use crate::stewardship::dedup::failure_signature;
 use crate::stewardship::{
     GhClient, GhIssue, OrchestratorRunSummary, StewardshipOutcome, process_orchestrator_run,
@@ -128,7 +125,6 @@ fn amplihack_run() -> OrchestratorRunSummary {
 #[test]
 fn process_run_matches_existing_when_signature_present() {
     let gh = FakeGhClient::new();
-    let mut board = GoalBoard::new();
     let run = sample_run();
     let sig = failure_signature(&run.failure_kind, &run.error_text);
 
@@ -143,7 +139,7 @@ fn process_run_matches_existing_when_signature_present() {
         }]),
     );
 
-    let outcome = process_orchestrator_run(&run, &gh, &mut board).unwrap();
+    let outcome = process_orchestrator_run(&run, &gh).unwrap();
     match outcome {
         StewardshipOutcome::MatchedExisting {
             issue_number, repo, ..
@@ -160,14 +156,11 @@ fn process_run_matches_existing_when_signature_present() {
         0,
         "must NOT create when match exists"
     );
-    assert_eq!(board.backlog.len(), 1);
-    assert_eq!(board.backlog[0].id, "stewardship-rysweet_Simard-11");
 }
 
 #[test]
 fn process_run_idempotent_on_second_invocation() {
     let gh = FakeGhClient::new();
-    let mut board = GoalBoard::new();
     let run = sample_run();
     let sig = failure_signature(&run.failure_kind, &run.error_text);
 
@@ -182,7 +175,7 @@ fn process_run_idempotent_on_second_invocation() {
             body: format!("stewardship-signature: {sig}"),
         }),
     );
-    let first = process_orchestrator_run(&run, &gh, &mut board).unwrap();
+    let first = process_orchestrator_run(&run, &gh).unwrap();
     assert!(matches!(
         first,
         StewardshipOutcome::FiledNew {
@@ -191,7 +184,7 @@ fn process_run_idempotent_on_second_invocation() {
         }
     ));
 
-    // Second call: search now returns the issue → MatchedExisting; no new backlog row.
+    // Second call: search now returns the issue → MatchedExisting.
     gh.seed_search(
         "rysweet/Simard",
         &sig,
@@ -202,7 +195,7 @@ fn process_run_idempotent_on_second_invocation() {
             body: format!("stewardship-signature: {sig}"),
         }]),
     );
-    let second = process_orchestrator_run(&run, &gh, &mut board).unwrap();
+    let second = process_orchestrator_run(&run, &gh).unwrap();
     assert!(matches!(
         second,
         StewardshipOutcome::MatchedExisting {
@@ -210,17 +203,11 @@ fn process_run_idempotent_on_second_invocation() {
             ..
         }
     ));
-    assert_eq!(
-        board.backlog.len(),
-        1,
-        "second call must not duplicate backlog row"
-    );
 }
 
 #[test]
 fn process_run_routes_amplihack_failures_to_amplihack_repo() {
     let gh = FakeGhClient::new();
-    let mut board = GoalBoard::new();
     let run = amplihack_run();
     let sig = failure_signature(&run.failure_kind, &run.error_text);
 
@@ -235,7 +222,7 @@ fn process_run_routes_amplihack_failures_to_amplihack_repo() {
         }),
     );
 
-    let outcome = process_orchestrator_run(&run, &gh, &mut board).unwrap();
+    let outcome = process_orchestrator_run(&run, &gh).unwrap();
     if let StewardshipOutcome::FiledNew { repo, .. } = outcome {
         assert_eq!(repo, "rysweet/amplihack");
     } else {
@@ -248,7 +235,6 @@ fn process_run_routes_amplihack_failures_to_amplihack_repo() {
 #[test]
 fn process_run_propagates_gh_search_failure() {
     let gh = FakeGhClient::new();
-    let mut board = GoalBoard::new();
     let run = sample_run();
     let sig = failure_signature(&run.failure_kind, &run.error_text);
 
@@ -260,7 +246,7 @@ fn process_run_propagates_gh_search_failure() {
         }),
     );
 
-    let err = process_orchestrator_run(&run, &gh, &mut board).unwrap_err();
+    let err = process_orchestrator_run(&run, &gh).unwrap_err();
     assert!(matches!(
         err,
         SimardError::StewardshipGhCommandFailed { .. }
@@ -270,13 +256,11 @@ fn process_run_propagates_gh_search_failure() {
         0,
         "must not create when search fails"
     );
-    assert!(board.backlog.is_empty());
 }
 
 #[test]
 fn process_run_propagates_gh_create_failure() {
     let gh = FakeGhClient::new();
-    let mut board = GoalBoard::new();
     let run = sample_run();
     let sig = failure_signature(&run.failure_kind, &run.error_text);
 
@@ -288,12 +272,11 @@ fn process_run_propagates_gh_create_failure() {
         }),
     );
 
-    let err = process_orchestrator_run(&run, &gh, &mut board).unwrap_err();
+    let err = process_orchestrator_run(&run, &gh).unwrap_err();
     assert!(matches!(
         err,
         SimardError::StewardshipGhCommandFailed { .. }
     ));
-    assert!(board.backlog.is_empty(), "no backlog row when create fails");
 }
 
 #[test]
@@ -306,7 +289,6 @@ fn process_run_routes_overseer_to_default_and_dedups() {
     // the DEFAULT repo (rysweet/Simard), file exactly ONE issue, and dedup on a
     // rerun with the same gap signature (no duplicate issues).
     let gh = FakeGhClient::new();
-    let mut board = GoalBoard::new();
     let mut run = sample_run();
     run.source_module = "overseer".to_string();
     let sig = failure_signature(&run.failure_kind, &run.error_text);
@@ -323,7 +305,7 @@ fn process_run_routes_overseer_to_default_and_dedups() {
         }),
     );
 
-    let first = process_orchestrator_run(&run, &gh, &mut board).unwrap();
+    let first = process_orchestrator_run(&run, &gh).unwrap();
     match first {
         StewardshipOutcome::FiledNew {
             repo, issue_number, ..
@@ -348,7 +330,6 @@ fn process_run_routes_overseer_to_default_and_dedups() {
         1,
         "exactly one gap issue filed on the first tick"
     );
-    assert_eq!(board.backlog.len(), 1);
 
     // Second tick, SAME gap signature: search now returns the existing issue →
     // MatchedExisting and NO second create (idempotent per signature — one
@@ -363,7 +344,7 @@ fn process_run_routes_overseer_to_default_and_dedups() {
             body: format!("stewardship-signature: {sig}"),
         }]),
     );
-    let second = process_orchestrator_run(&run, &gh, &mut board).unwrap();
+    let second = process_orchestrator_run(&run, &gh).unwrap();
     assert!(
         matches!(
             second,
@@ -379,11 +360,6 @@ fn process_run_routes_overseer_to_default_and_dedups() {
         1,
         "idempotent per gap signature — no duplicate issue on rerun"
     );
-    assert_eq!(
-        board.backlog.len(),
-        1,
-        "no duplicate backlog row across ticks for the same gap"
-    );
 }
 
 // ─────────────────────────── Input validation ───────────────────────────
@@ -391,10 +367,9 @@ fn process_run_routes_overseer_to_default_and_dedups() {
 #[test]
 fn process_run_rejects_empty_run_id() {
     let gh = FakeGhClient::new();
-    let mut board = GoalBoard::new();
     let mut run = sample_run();
     run.run_id = String::new();
-    let err = process_orchestrator_run(&run, &gh, &mut board).unwrap_err();
+    let err = process_orchestrator_run(&run, &gh).unwrap_err();
     assert!(matches!(
         err,
         SimardError::StewardshipInvalidRunSummary { field } if field == "run_id"
@@ -405,10 +380,9 @@ fn process_run_rejects_empty_run_id() {
 #[test]
 fn process_run_rejects_empty_source_module() {
     let gh = FakeGhClient::new();
-    let mut board = GoalBoard::new();
     let mut run = sample_run();
     run.source_module = String::new();
-    let err = process_orchestrator_run(&run, &gh, &mut board).unwrap_err();
+    let err = process_orchestrator_run(&run, &gh).unwrap_err();
     assert!(matches!(
         err,
         SimardError::StewardshipInvalidRunSummary { field } if field == "source_module"
@@ -418,10 +392,9 @@ fn process_run_rejects_empty_source_module() {
 #[test]
 fn process_run_rejects_empty_failure_kind() {
     let gh = FakeGhClient::new();
-    let mut board = GoalBoard::new();
     let mut run = sample_run();
     run.failure_kind = String::new();
-    let err = process_orchestrator_run(&run, &gh, &mut board).unwrap_err();
+    let err = process_orchestrator_run(&run, &gh).unwrap_err();
     assert!(matches!(
         err,
         SimardError::StewardshipInvalidRunSummary { field } if field == "failure_kind"
@@ -431,10 +404,9 @@ fn process_run_rejects_empty_failure_kind() {
 #[test]
 fn process_run_rejects_empty_error_text() {
     let gh = FakeGhClient::new();
-    let mut board = GoalBoard::new();
     let mut run = sample_run();
     run.error_text = String::new();
-    let err = process_orchestrator_run(&run, &gh, &mut board).unwrap_err();
+    let err = process_orchestrator_run(&run, &gh).unwrap_err();
     assert!(matches!(
         err,
         SimardError::StewardshipInvalidRunSummary { field } if field == "error_text"
