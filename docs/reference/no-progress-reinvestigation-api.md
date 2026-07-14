@@ -217,10 +217,9 @@ pub(crate) fn reinvestigate_bare_blocked_goals(
     reasoner: &dyn NoProgressWhyReasoner,
     healer: &dyn PreconditionHealer,
     dispatcher: &dyn NoProgressEngineerDispatcher,
-    mutation_guard: &mut GitHubMutationGuard,
-    authorization: &AutonomousGitHubAuthorization,
+    filer: &dyn NoProgressIssueFiler,
     threshold: u32,
-) -> Result<NoProgressBreakerReport, GitHubMutationError>;
+) -> NoProgressBreakerReport;
 ```
 
 **Per-goal algorithm** (the goal is definitionally past threshold; its counter was
@@ -240,51 +239,40 @@ reset to 0 when it blocked, so `consecutive = threshold`):
       goal is now non-bare and excluded from this population next cycle.
    3. **Dedupe belt:** `if tracker.reinvestigated(goal_id, why.class) { continue; }`.
    4. `let resolution = resolution_for_why(threshold, why, tracker.guided_retry_used(goal_id));`
-   5. `apply_resolution(state, &mut tracker, &mut report, goal_id, threshold,
-      resolution, healer, dispatcher, mutation_guard, authorization,
-      ResolutionSite::Reinvestigation)?;`
+   5. `apply_resolution_side_effects(state, goal_id, threshold, resolution,
+      healer, dispatcher, filer, &mut tracker, &mut report, true);`
    6. On a terminal (non-`Continue`) outcome: `tracker.mark_reinvestigated(goal_id, why.class);`.
 4. `tracker.retain_goals(&live); state.no_progress_tracker = tracker;` return `report`.
 
-## Shared resolution: `apply_resolution` and `ResolutionSite`
+## Shared resolution: `apply_resolution_side_effects`
 
 The transition-path match body is extracted verbatim into one helper used by
 **both** passes, so the ladder cannot drift. `apply_no_progress_breaker_investigated`
-(the on-transition driver) calls it with `site = OnTransition`; the re-investigation
-pass calls it with `site = Reinvestigation`.
+(the on-transition driver) passes `unblock_nonterminal = false`; the
+re-investigation pass passes `true`.
 
 ```rust
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ResolutionSite {
-    /// The goal crossed the threshold this cycle (outcome-driven path).
-    OnTransition,
-    /// The goal was already parked bare and is being re-investigated (#17).
-    Reinvestigation,
-}
-
 /// Apply one `NoProgressResolution`'s side effects through the injected seams.
-/// `site` changes EXACTLY two arms (Heal(Ok) and SpawnEngineer un-block on
-/// Reinvestigation); every other arm is byte-identical, preserving the
-/// on-transition behavior (R1).
-fn apply_resolution(
+/// `unblock_nonterminal` is true for reinvestigation and false for the
+/// on-transition path.
+fn apply_resolution_side_effects(
     state: &mut OodaState,
-    tracker: &mut NoProgressTracker,
-    report: &mut NoProgressBreakerReport,
     goal_id: &str,
     consecutive: u32,
     resolution: NoProgressResolution,
     healer: &dyn PreconditionHealer,
     dispatcher: &dyn NoProgressEngineerDispatcher,
-    mutation_guard: &mut GitHubMutationGuard,
-    authorization: &AutonomousGitHubAuthorization,
-    site: ResolutionSite,
-) -> Result<(), GitHubMutationError>;
+    filer: &dyn NoProgressIssueFiler,
+    tracker: &mut NoProgressTracker,
+    report: &mut NoProgressBreakerReport,
+    unblock_nonterminal: bool,
+);
 ```
 
 ## Resolution ladder
 
 `resolution_for_why(consecutive, why, guided_retry_used)` maps a class to a
-`NoProgressResolution`; `apply_resolution` executes it. Every arm yields a
+`NoProgressResolution`; `apply_resolution_side_effects` executes it. Every arm yields a
 **non-bare** post-state.
 
 | Resolution | `OnTransition` (unchanged) | `Reinvestigation` (new) | Post-state |

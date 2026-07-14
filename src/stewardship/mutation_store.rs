@@ -9,8 +9,8 @@ use crate::error::{SimardError, SimardResult};
 use crate::persistence::persist_json;
 use crate::stewardship::GhIssue;
 use crate::stewardship::types::{
-    ArtifactProvenance, CycleId, GitHubMutationRequest, GitHubMutationResult,
-    IssueMutationIdentity, IssueMutationLimit, IssueMutationRequest, LineageId,
+    ArtifactProvenance, CycleId, IssueMutationIdentity, IssueMutationLimit, IssueMutationRequest,
+    LineageId,
 };
 
 const STORE_NAME: &str = "stewardship-issue-mutations";
@@ -65,30 +65,12 @@ struct MutationRecord {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-enum GitHubMutationStatus {
-    Reserved,
-    Ambiguous { reason: String },
-    Completed { result: GitHubMutationResult },
-    Rejected { reason: String },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct GitHubMutationRecord {
-    cycle_id: CycleId,
-    request: GitHubMutationRequest,
-    status: GitHubMutationStatus,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
 struct MutationJournal {
     version: u16,
     #[serde(default)]
     cycles: BTreeMap<String, CycleRecord>,
     #[serde(default)]
     mutations: BTreeMap<String, MutationRecord>,
-    #[serde(default)]
-    github_mutations: BTreeMap<String, GitHubMutationRecord>,
 }
 
 impl Default for MutationJournal {
@@ -97,7 +79,6 @@ impl Default for MutationJournal {
             version: 1,
             cycles: BTreeMap::new(),
             mutations: BTreeMap::new(),
-            github_mutations: BTreeMap::new(),
         }
     }
 }
@@ -105,12 +86,6 @@ impl Default for MutationJournal {
 pub(crate) enum ReservationDecision {
     Reserved,
     Completed(GhIssue),
-    Unfinished,
-}
-
-pub(crate) enum GitHubReservationDecision {
-    Reserved,
-    Completed(GitHubMutationResult),
     Unfinished,
 }
 
@@ -153,22 +128,14 @@ impl MutationStore {
                     .to_string(),
             });
         }
+        if let Some(existing) =
+            self.inspect(|journal| Ok(journal.cycles.get(id.as_str()).cloned()))?
+        {
+            return validate_cycle_start(&existing, limit);
+        }
         self.update(|journal| {
             if let Some(existing) = journal.cycles.get(id.as_str()) {
-                if existing.limit != limit {
-                    return Err(SimardError::StewardshipInvalidMutation {
-                        field: "mutation_limit",
-                        reason: "cannot change the limit of an existing cycle".to_string(),
-                    });
-                }
-                if let Some(reason) = &existing.failed_reason {
-                    return Err(SimardError::StewardshipMutationCycleFailed {
-                        cycle_id: existing.id.as_str().to_string(),
-                        reason: reason.clone(),
-                    });
-                }
-
-                return Ok(());
+                return validate_cycle_start(existing, limit);
             }
             journal.cycles.insert(
                 id.as_str().to_string(),
@@ -184,7 +151,7 @@ impl MutationStore {
     }
 
     pub fn cycle_failure(&self, id: &CycleId) -> SimardResult<Option<String>> {
-        self.update(|journal| {
+        self.inspect(|journal| {
             Ok(journal
                 .cycles
                 .get(id.as_str())
@@ -193,7 +160,7 @@ impl MutationStore {
     }
 
     pub fn stewardship_issue_numbers(&self, repo: &str) -> SimardResult<BTreeSet<u64>> {
-        self.update(|journal| {
+        self.inspect(|journal| {
             Ok(journal
                 .mutations
                 .values()
@@ -204,6 +171,17 @@ impl MutationStore {
                 })
                 .collect())
         })
+    }
+
+    fn inspect<T>(
+        &self,
+        operation: impl FnOnce(&MutationJournal) -> SimardResult<T>,
+    ) -> SimardResult<T> {
+        StoreLock::validate_store_file(&self.path)?;
+        let _lock = StoreLock::acquire(&self.path)?;
+        let journal = load_journal(&self.path)?;
+        validate_journal_version(&journal, &self.path)?;
+        operation(&journal)
     }
 
     pub(crate) fn reserve(
@@ -247,47 +225,6 @@ impl MutationStore {
         })
     }
 
-    pub(crate) fn reserve_github(
-        &self,
-        cycle_id: &CycleId,
-        request: &GitHubMutationRequest,
-    ) -> SimardResult<GitHubReservationDecision> {
-        self.update(|journal| {
-            ensure_cycle_healthy(journal, cycle_id)?;
-            let key = request.identity.as_str().to_string();
-            if let Some(existing) = journal.github_mutations.get(&key) {
-                if existing.request != *request {
-                    return Err(SimardError::StewardshipMutationIdentityConflict { identity: key });
-                }
-                return Ok(match &existing.status {
-                    GitHubMutationStatus::Completed { result } => {
-                        GitHubReservationDecision::Completed(result.clone())
-                    }
-                    GitHubMutationStatus::Reserved | GitHubMutationStatus::Ambiguous { .. } => {
-                        GitHubReservationDecision::Unfinished
-                    }
-                    GitHubMutationStatus::Rejected { reason } => {
-                        return Err(SimardError::StewardshipInvalidMutation {
-                            field: "request",
-                            reason: reason.clone(),
-                        });
-                    }
-                });
-            }
-
-            reserve_cycle_budget(journal, cycle_id)?;
-            journal.github_mutations.insert(
-                key,
-                GitHubMutationRecord {
-                    cycle_id: cycle_id.clone(),
-                    request: request.clone(),
-                    status: GitHubMutationStatus::Reserved,
-                },
-            );
-            Ok(GitHubReservationDecision::Reserved)
-        })
-    }
-
     pub(crate) fn complete(
         &self,
         identity: &IssueMutationIdentity,
@@ -309,24 +246,6 @@ impl MutationStore {
         })
     }
 
-    pub(crate) fn complete_github(
-        &self,
-        identity: &IssueMutationIdentity,
-        result: GitHubMutationResult,
-    ) -> SimardResult<()> {
-        self.update(|journal| {
-            let record = journal
-                .github_mutations
-                .get_mut(identity.as_str())
-                .ok_or_else(|| SimardError::StewardshipInvalidMutation {
-                    field: "mutation_identity",
-                    reason: "completion has no durable reservation".to_string(),
-                })?;
-            record.status = GitHubMutationStatus::Completed { result };
-            Ok(())
-        })
-    }
-
     pub(crate) fn mark_ambiguous(
         &self,
         cycle_id: &CycleId,
@@ -342,34 +261,6 @@ impl MutationStore {
                     reason: "ambiguous outcome has no durable reservation".to_string(),
                 })?;
             record.status = MutationStatus::Ambiguous {
-                reason: reason.clone(),
-            };
-            let cycle = journal.cycles.get_mut(cycle_id.as_str()).ok_or_else(|| {
-                SimardError::StewardshipInvalidMutation {
-                    field: "cycle_id",
-                    reason: "ambiguous outcome has no durable cycle".to_string(),
-                }
-            })?;
-            cycle.failed_reason = Some(reason);
-            Ok(())
-        })
-    }
-
-    pub(crate) fn mark_github_ambiguous(
-        &self,
-        cycle_id: &CycleId,
-        identity: &IssueMutationIdentity,
-        reason: String,
-    ) -> SimardResult<()> {
-        self.update(|journal| {
-            let record = journal
-                .github_mutations
-                .get_mut(identity.as_str())
-                .ok_or_else(|| SimardError::StewardshipInvalidMutation {
-                    field: "mutation_identity",
-                    reason: "ambiguous outcome has no durable reservation".to_string(),
-                })?;
-            record.status = GitHubMutationStatus::Ambiguous {
                 reason: reason.clone(),
             };
             let cycle = journal.cycles.get_mut(cycle_id.as_str()).ok_or_else(|| {
@@ -422,32 +313,6 @@ impl MutationStore {
         })
     }
 
-    pub(crate) fn record_github_rejection(
-        &self,
-        cycle_id: &CycleId,
-        request: &GitHubMutationRequest,
-        reason: String,
-    ) -> SimardResult<()> {
-        self.update(|journal| {
-            let key = request.identity.as_str().to_string();
-            if let Some(existing) = journal.github_mutations.get(&key) {
-                if existing.request != *request {
-                    return Err(SimardError::StewardshipMutationIdentityConflict { identity: key });
-                }
-                return Ok(());
-            }
-            journal.github_mutations.insert(
-                key,
-                GitHubMutationRecord {
-                    cycle_id: cycle_id.clone(),
-                    request: request.clone(),
-                    status: GitHubMutationStatus::Rejected { reason },
-                },
-            );
-            Ok(())
-        })
-    }
-
     fn update<T>(
         &self,
         operation: impl FnOnce(&mut MutationJournal) -> SimardResult<T>,
@@ -455,18 +320,39 @@ impl MutationStore {
         StoreLock::validate_store_file(&self.path)?;
         let _lock = StoreLock::acquire(&self.path)?;
         let mut journal = load_journal(&self.path)?;
-        if journal.version != 1 {
-            return Err(SimardError::PersistentStoreIo {
-                store: STORE_NAME.to_string(),
-                action: "validate-schema".to_string(),
-                path: self.path.clone(),
-                reason: format!("unsupported journal version {}", journal.version),
-            });
-        }
+        validate_journal_version(&journal, &self.path)?;
         let result = operation(&mut journal);
         persist_json(STORE_NAME, &self.path, &journal)?;
         result
     }
+}
+
+fn validate_cycle_start(existing: &CycleRecord, limit: IssueMutationLimit) -> SimardResult<()> {
+    if existing.limit != limit {
+        return Err(SimardError::StewardshipInvalidMutation {
+            field: "mutation_limit",
+            reason: "cannot change the limit of an existing cycle".to_string(),
+        });
+    }
+    if let Some(reason) = &existing.failed_reason {
+        return Err(SimardError::StewardshipMutationCycleFailed {
+            cycle_id: existing.id.as_str().to_string(),
+            reason: reason.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_journal_version(journal: &MutationJournal, path: &Path) -> SimardResult<()> {
+    if journal.version != 1 {
+        return Err(SimardError::PersistentStoreIo {
+            store: STORE_NAME.to_string(),
+            action: "validate-schema".to_string(),
+            path: path.to_path_buf(),
+            reason: format!("unsupported journal version {}", journal.version),
+        });
+    }
+    Ok(())
 }
 
 fn reserve_cycle_budget(journal: &mut MutationJournal, cycle_id: &CycleId) -> SimardResult<()> {
@@ -484,7 +370,7 @@ fn reserve_cycle_budget(journal: &mut MutationJournal, cycle_id: &CycleId) -> Si
     }
     if cycle.reservations >= cycle.limit.get() {
         cycle.failed_reason = Some(format!(
-            "GitHub mutation limit {} exceeded",
+            "issue mutation limit {} exceeded",
             cycle.limit.get()
         ));
         return Err(SimardError::StewardshipMutationBudgetExceeded {

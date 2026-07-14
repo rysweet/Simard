@@ -427,7 +427,7 @@ failure modes.
 
 **Durable output:** eligible findings first pass through the typed agentic
 classification/consolidation recipe. Any proposed issue create, edit, close, or
-reopen then uses `GitHubMutationGuard`. The thread cannot call raw GitHub
+reopen then uses `MutationGuard`. The thread cannot call raw GitHub
 mutation transport. Stewardship-originated and `LegacyUnknown` inputs are
 excluded before recipe invocation and again when recipe output is accepted.
 
@@ -799,13 +799,12 @@ pub struct EngineerLogAnalysisConfig {
     pub dry_run: bool,        // suppress issue creation; telemetry only
 }
 impl Default for EngineerLogAnalysisConfig { /* safe bounded defaults */ }
-pub struct EngineerLogAnalysisThread { /* cfg, health (private); guard comes from cycle context */ }
+pub struct EngineerLogAnalysisThread { /* cfg, gh client, mutation guard, health */ }
 impl EngineerLogAnalysisThread {
     pub fn from_env() -> Self;
-    pub fn with_mutation_dependencies( // test seam: fake durable store + transport
+    pub(crate) fn with_client( // test seam: fake issue transport
         cfg: EngineerLogAnalysisConfig,
-        store: FakeMutationStore,
-        transport: FakeGitHubMutationTransport,
+        gh: Box<dyn StewardshipGh + Send>,
     ) -> Self;
 }
 // policy() = Interval(cfg.interval_secs); priority() = Low.
@@ -841,10 +840,11 @@ stewardship::dedup::normalize(msg: &str) -> String;
 classification_recipe::classify_and_consolidate(
     sources: &[EligibleArtifact],
 ) -> Result<TypedDecisionWithStableConditionId, RecipeContractError>;
-GitHubMutationGuard::execute(
-    request: GitHubMutationRequest,
-    authorization: &GitHubMutationAuthorization,
-) -> Result<GitHubMutationOutcome, GitHubMutationError>;
+MutationGuard::execute(
+    cycle_id: &CycleId,
+    request: &IssueMutationRequest,
+    transport: &dyn IssueMutationTransport,
+) -> SimardResult<IssueMutationOutcome>;
 ```
 
 Contract: the thread supplies eligible typed sources. The recipe supplies

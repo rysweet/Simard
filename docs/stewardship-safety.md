@@ -1,26 +1,24 @@
 ---
-title: Stewardship GitHub mutation safety
-description: Typed recursive exclusion, durable restart idempotency, and the autonomous GitHub-mutation bound.
+title: Stewardship issue mutation safety
+description: Typed recursive exclusion, durable restart idempotency, and the autonomous issue-mutation bound.
 last_updated: 2026-07-14
 review_schedule: as-needed
 owner: simard
 doc_type: concept
 ---
 
-# Stewardship GitHub mutation safety
+# Stewardship issue mutation safety
 
-Autonomous GitHub writes are transactions. Issue creates, edits, closes, and
-reopens use the issue transport; pushes, pull-request creates, merges, draft
-changes, labels, review requests, and comments use typed non-issue requests.
-Both consume the same durable per-cycle budget. Explicitly invoked operator
-actions are outside the daemon boundary.
+Autonomous GitHub issue creates, edits, closes, and reopens are transactions.
+They consume one durable per-cycle issue-mutation budget. Pull-request
+operations and explicitly invoked operator actions are outside this boundary.
 
 The safety contract is:
 
 1. Routine workstream-gap observation creates no GitHub issue or stewardship
    backlog item. Existing operator notifications and counters remain.
 2. Typed `Stewardship` and `LegacyUnknown` provenance is rejected from goal,
-   backlog, gap, and GitHub-mutation inputs.
+   backlog, gap, and issue-mutation inputs.
 3. Agentic recipes own semantic consolidation and stable condition naming.
    Rust validates identifiers, provenance, persistence, and limits; it does not
    infer semantic equivalence from prose.
@@ -53,12 +51,12 @@ The Overseer still detects bounded `GapItem` values, emits one consolidated
 operator channels. `act_flag_workstream_gaps` never calls `IssueFiler` and never
 enqueues a backlog item.
 
-## Durable GitHub boundary
+## Durable issue boundary
 
 `stewardship::mutation_guard::MutationGuard` accepts typed
-`IssueMutationRequest` and `GitHubMutationRequest` values. The low-level issue
-transport remains crate-private. Supply-chain push, PR creation, and merge, plus
-Overseer merge, use `execute_github` on the same guard and journal.
+`IssueMutationRequest` values. The low-level issue transport remains
+crate-private, so autonomous issue mutations use guarded adapters rather than
+calling GitHub directly.
 
 The store is:
 
@@ -82,17 +80,17 @@ The guard:
 6. atomically records completion or an ambiguous failure.
 
 An unresolved reservation never retries and remote markers never prove
-completion. Issue and non-issue writes replay only a persisted completion
-result. Unfinished reservations require visible operator reconciliation. The
-journal remains authoritative.
+completion. Issue writes replay only a persisted completion result. Unfinished
+reservations require visible operator reconciliation. The journal remains
+authoritative.
 
 ## Cycle bound
 
-`SIMARD_STEWARDSHIP_GITHUB_MUTATION_LIMIT` defaults to `1` and accepts only
+`SIMARD_STEWARDSHIP_ISSUE_MUTATION_LIMIT` defaults to `1` and accepts only
 integers from `1` through `100`. There is no unlimited value. A reservation
 counts before transport and remains consumed after failure or restart.
-The former `SIMARD_STEWARDSHIP_ISSUE_MUTATION_LIMIT` name remains a compatibility
-fallback when the GitHub-wide variable is unset.
+The broader `SIMARD_STEWARDSHIP_GITHUB_MUTATION_LIMIT` name remains a
+compatibility fallback when the issue-specific variable is unset.
 
 Starting the same typed `CycleId` reuses its persisted count. Starting another
 scheduled cycle creates another durable budget record; it does not erase prior

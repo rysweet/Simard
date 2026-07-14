@@ -22,7 +22,7 @@ The mode separates three concerns:
    group eligible evidence into versioned typed proposals.
 3. **Safety enforcement.** Rust validates provenance, identifiers, stable
    agent-supplied condition identity, durable restart state, and the per-cycle
-   autonomous GitHub-mutation limit.
+   autonomous issue-mutation limit.
 
 Rust never decides semantic equivalence by parsing prose. Recipes provide
 stable condition identities but never grant authority or choose mutation
@@ -42,18 +42,17 @@ typed `Stewardship` provenance. These artifacts are excluded from:
 Legacy records without typed provenance are `LegacyUnknown` and fail closed;
 they are not assumed to be safe external input.
 
-## GitHub mutation
+## Issue mutation
 
-Autonomous GitHub issue, push, pull-request, label, review-request, and comment
-writes pass through the durable mutation guard. Explicit operator actions are
-outside the daemon-cycle boundary.
+Autonomous GitHub issue create, edit, close, and reopen operations pass through
+the durable mutation guard. Pull-request operations and explicit operator
+actions are outside the daemon-cycle boundary.
 Reservations consume budget before GitHub is called. The guard replays
 completed identities, fails closed on unfinished reservations after restart,
 and fails the whole cycle before mutation `limit + 1`.
 
-The default is one GitHub mutation per durable cycle. Restart resumes the same
-cycle identity and consumed budget. Explicit operator actions outside the
-daemon cycle use a separate invocation-bound path.
+The default is one issue mutation per durable cycle. Restart resumes the same
+cycle identity and consumed budget.
 
 ## Workstream gaps
 

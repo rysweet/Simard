@@ -317,7 +317,7 @@ impl Display for SimardError {
             Self::StewardshipMutationBudgetExceeded { cycle_id, limit } => {
                 write!(
                     f,
-                    "stewardship: GitHub mutation limit {limit} exceeded for cycle '{cycle_id}'"
+                    "stewardship: issue mutation limit {limit} exceeded for cycle '{cycle_id}'"
                 )
             }
             Self::StewardshipMutationCycleFailed { cycle_id, reason } => {

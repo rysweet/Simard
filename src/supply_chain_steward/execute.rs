@@ -27,8 +27,7 @@ use crate::error::{SimardError, SimardResult};
 use crate::stewardship::gh_client::IssueMutationTransport;
 use crate::stewardship::mutation_guard::MutationGuard;
 use crate::stewardship::{
-    ArtifactProvenance, CycleId, GhIssue, GitHubMutation, GitHubMutationOutcome,
-    GitHubMutationRequest, GitHubMutationResult, IssueMutationIdentity, IssueMutationOutcome,
+    ArtifactProvenance, CycleId, GhIssue, IssueMutationIdentity, IssueMutationOutcome,
     IssueMutationRequest, LineageId, MergeOutcome,
 };
 
@@ -196,13 +195,13 @@ fn execute_bump(
         body: pr_body,
         labels: labels(!can_trigger),
     };
-    let pr = guarded_open_pr(gh, guard, cycle_id, advisory, &spec)?;
+    let pr = open_remediation_pr(gh, &spec)?;
 
     // Self-merge only when the PR's CI can (and did) run green. A PR whose CI
     // cannot run is never self-merged.
     let merged = if pr.ci_will_run {
         matches!(
-            guarded_self_merge(gh, guard, cycle_id, advisory, pr.number)?,
+            gh.self_merge_if_green(pr.number)?,
             MergeOutcome::Merged { .. }
         )
     } else {
@@ -272,7 +271,7 @@ fn execute_justified_ignore(
         body: ignore_pr_body(advisory, &issue.url, can_trigger),
         labels: labels(!can_trigger),
     };
-    let pr = guarded_open_pr(gh, guard, cycle_id, advisory, &spec)?;
+    let pr = open_remediation_pr(gh, &spec)?;
 
     Ok(RemediationOutcome::FiledJustifiedIgnore {
         advisory_id: advisory_id.to_string(),
@@ -331,116 +330,10 @@ impl IssueMutationTransport for SupplyChainIssueTransport<'_> {
     }
 }
 
-fn guarded_open_pr(
-    gh: &dyn SupplyChainGh,
-    guard: &mut MutationGuard,
-    cycle_id: &CycleId,
-    advisory: &Advisory,
-    spec: &PrSpec,
-) -> SimardResult<OpenedPr> {
-    let provenance = ArtifactProvenance::system(LineageId::new("supply-chain-steward")?);
-    let push_request = GitHubMutationRequest::new(
-        gh.repo(),
-        IssueMutationIdentity::new(format!(
-            "supply-chain:{}:push",
-            advisory.id.to_ascii_lowercase()
-        ))?,
-        provenance.clone(),
-        GitHubMutation::GitPush {
-            branch: spec.branch.clone(),
-        },
-    )?;
-    guard.execute_github(cycle_id, &push_request, || {
-        gh.prepare_remediation_pr(spec)?;
-        gh.push_remediation_branch(&spec.branch)?;
-        Ok(GitHubMutationResult::Pushed {
-            branch: spec.branch.clone(),
-        })
-    })?;
-
-    let create_request = GitHubMutationRequest::new(
-        gh.repo(),
-        IssueMutationIdentity::new(format!(
-            "supply-chain:{}:pr-create",
-            advisory.id.to_ascii_lowercase()
-        ))?,
-        provenance,
-        GitHubMutation::PullRequestCreate {
-            branch: spec.branch.clone(),
-            title: spec.title.clone(),
-        },
-    )?;
-    let outcome = guard.execute_github(cycle_id, &create_request, || {
-        let pr = gh.create_remediation_pr(spec)?;
-        Ok(GitHubMutationResult::PullRequestCreated {
-            number: pr.number,
-            url: pr.url,
-        })
-    })?;
-    let result = match outcome {
-        GitHubMutationOutcome::Completed { result }
-        | GitHubMutationOutcome::AlreadyCompleted { result } => result,
-    };
-    match result {
-        GitHubMutationResult::PullRequestCreated { number, url } => Ok(OpenedPr {
-            number,
-            url,
-            ci_will_run: gh.has_ci_trigger_token(),
-        }),
-        _ => Err(SimardError::StewardshipMutationIdentityConflict {
-            identity: create_request.identity.as_str().to_string(),
-        }),
-    }
-}
-
-fn guarded_self_merge(
-    gh: &dyn SupplyChainGh,
-    guard: &mut MutationGuard,
-    cycle_id: &CycleId,
-    advisory: &Advisory,
-    pr_number: u32,
-) -> SimardResult<MergeOutcome> {
-    let request = GitHubMutationRequest::new(
-        gh.repo(),
-        IssueMutationIdentity::from_source(
-            "supply-chain-pr-merge",
-            &format!(
-                "{}\0{}",
-                advisory.id.to_ascii_lowercase(),
-                cycle_id.as_str()
-            ),
-        ),
-        ArtifactProvenance::system(LineageId::new("supply-chain-steward")?),
-        GitHubMutation::PullRequestMerge { number: pr_number },
-    )?;
-    let outcome = guard.execute_github(cycle_id, &request, || {
-        match gh.self_merge_if_green(pr_number)? {
-            MergeOutcome::Merged { .. } => {
-                Ok(GitHubMutationResult::PullRequestMerged { number: pr_number })
-            }
-            MergeOutcome::Refused { reason, .. } => Ok(GitHubMutationResult::Refused { reason }),
-        }
-    })?;
-    match outcome {
-        GitHubMutationOutcome::Completed {
-            result: GitHubMutationResult::PullRequestMerged { number },
-        }
-        | GitHubMutationOutcome::AlreadyCompleted {
-            result: GitHubMutationResult::PullRequestMerged { number },
-        } => Ok(MergeOutcome::Merged {
-            pr_number: number,
-            repo: gh.repo().to_string(),
-        }),
-        GitHubMutationOutcome::Completed {
-            result: GitHubMutationResult::Refused { reason },
-        }
-        | GitHubMutationOutcome::AlreadyCompleted {
-            result: GitHubMutationResult::Refused { reason },
-        } => Ok(MergeOutcome::Refused { pr_number, reason }),
-        _ => Err(SimardError::StewardshipMutationIdentityConflict {
-            identity: request.identity.as_str().to_string(),
-        }),
-    }
+fn open_remediation_pr(gh: &dyn SupplyChainGh, spec: &PrSpec) -> SimardResult<OpenedPr> {
+    gh.prepare_remediation_pr(spec)?;
+    gh.push_remediation_branch(&spec.branch)?;
+    gh.create_remediation_pr(spec)
 }
 
 /// Deterministic dedup signature for an advisory (ID + affected crate).

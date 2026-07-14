@@ -13,7 +13,6 @@ const MAX_LABELS: usize = 20;
 const MAX_LABEL_LEN: usize = 100;
 const MAX_ASSIGNEES: usize = 10;
 const MAX_ASSIGNEE_LEN: usize = 100;
-const MAX_BRANCH_LEN: usize = 255;
 
 macro_rules! typed_id {
     ($name:ident, $field:literal) => {
@@ -59,7 +58,11 @@ impl IssueMutationIdentity {
     pub fn from_source(namespace: &str, source: &str) -> Self {
         use sha2::{Digest, Sha256};
 
-        let digest = Sha256::digest([namespace.as_bytes(), b"\0", source.as_bytes()].concat());
+        let mut hasher = Sha256::new();
+        hasher.update(namespace.as_bytes());
+        hasher.update([0]);
+        hasher.update(source.as_bytes());
+        let digest = hasher.finalize();
         Self(format!("{namespace}:{digest:x}"))
     }
 }
@@ -160,8 +163,8 @@ pub struct IssueMutationLimit(u32);
 impl IssueMutationLimit {
     pub const DEFAULT: Self = Self(1);
     pub const MAX: u32 = 100;
-    pub const ENV: &'static str = "SIMARD_STEWARDSHIP_GITHUB_MUTATION_LIMIT";
-    pub const LEGACY_ENV: &'static str = "SIMARD_STEWARDSHIP_ISSUE_MUTATION_LIMIT";
+    pub const ENV: &'static str = "SIMARD_STEWARDSHIP_ISSUE_MUTATION_LIMIT";
+    pub const LEGACY_ENV: &'static str = "SIMARD_STEWARDSHIP_GITHUB_MUTATION_LIMIT";
 
     pub fn new(value: u32) -> SimardResult<Self> {
         if value == 0 || value > Self::MAX {
@@ -209,8 +212,6 @@ impl IssueMutationLimit {
         Self::new(value)
     }
 }
-
-pub type GitHubMutationLimit = IssueMutationLimit;
 
 /// Autonomous issue mutation kinds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -397,125 +398,6 @@ impl IssueMutationRequest {
 pub enum IssueMutationOutcome {
     Completed { issue: GhIssue },
     AlreadyCompleted { issue: GhIssue },
-}
-
-/// Non-issue GitHub writes that share the issue mutation cycle budget.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum GitHubMutation {
-    GitPush { branch: String },
-    PullRequestCreate { branch: String, title: String },
-    PullRequestMerge { number: u32 },
-    PullRequestDraft { number: u32, draft: bool },
-    AddLabel { number: u64, label: String },
-    RequestReview { number: u32, reviewer: String },
-    Comment { number: u64 },
-}
-
-/// Fully typed authorization input for a non-issue GitHub write.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GitHubMutationRequest {
-    pub repo: String,
-    pub identity: IssueMutationIdentity,
-    pub provenance: ArtifactProvenance,
-    pub mutation: GitHubMutation,
-}
-
-impl GitHubMutationRequest {
-    pub fn new(
-        repo: impl Into<String>,
-        identity: IssueMutationIdentity,
-        provenance: ArtifactProvenance,
-        mutation: GitHubMutation,
-    ) -> SimardResult<Self> {
-        let request = Self {
-            repo: repo.into(),
-            identity,
-            provenance,
-            mutation,
-        };
-        request.validate()?;
-        Ok(request)
-    }
-
-    pub fn validate(&self) -> SimardResult<()> {
-        validate_repo(&self.repo)?;
-        match &self.mutation {
-            GitHubMutation::GitPush { branch }
-            | GitHubMutation::PullRequestCreate { branch, .. }
-                if branch.trim().is_empty() || branch.len() > MAX_BRANCH_LEN =>
-            {
-                return Err(SimardError::StewardshipInvalidMutation {
-                    field: "branch",
-                    reason: format!("must be 1..={MAX_BRANCH_LEN} bytes"),
-                });
-            }
-            GitHubMutation::PullRequestMerge { number }
-            | GitHubMutation::PullRequestDraft { number, .. }
-            | GitHubMutation::RequestReview { number, .. }
-                if *number == 0 =>
-            {
-                return Err(SimardError::StewardshipInvalidMutation {
-                    field: "pull_request_number",
-                    reason: "must be positive".to_string(),
-                });
-            }
-            GitHubMutation::AddLabel { number, .. } | GitHubMutation::Comment { number }
-                if *number == 0 =>
-            {
-                return Err(SimardError::StewardshipInvalidMutation {
-                    field: "subject_number",
-                    reason: "must be positive".to_string(),
-                });
-            }
-            _ => {}
-        }
-        match &self.mutation {
-            GitHubMutation::PullRequestCreate { title, .. }
-                if title.trim().is_empty() || title.len() > MAX_ISSUE_TITLE_LEN =>
-            {
-                Err(SimardError::StewardshipInvalidMutation {
-                    field: "title",
-                    reason: format!("must be 1..={MAX_ISSUE_TITLE_LEN} bytes"),
-                })
-            }
-            GitHubMutation::AddLabel { label, .. }
-                if label.trim().is_empty() || label.len() > MAX_LABEL_LEN =>
-            {
-                Err(SimardError::StewardshipInvalidMutation {
-                    field: "label",
-                    reason: format!("must be 1..={MAX_LABEL_LEN} bytes"),
-                })
-            }
-            GitHubMutation::RequestReview { reviewer, .. }
-                if reviewer.trim().is_empty() || reviewer.len() > MAX_ASSIGNEE_LEN =>
-            {
-                Err(SimardError::StewardshipInvalidMutation {
-                    field: "reviewer",
-                    reason: format!("must be 1..={MAX_ASSIGNEE_LEN} bytes"),
-                })
-            }
-            _ => Ok(()),
-        }
-    }
-}
-
-/// Durable result needed to replay a completed non-issue mutation without
-/// contacting GitHub again.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum GitHubMutationResult {
-    Pushed { branch: String },
-    PullRequestCreated { number: u32, url: String },
-    PullRequestMerged { number: u32 },
-    Refused { reason: String },
-    Applied,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum GitHubMutationOutcome {
-    Completed { result: GitHubMutationResult },
-    AlreadyCompleted { result: GitHubMutationResult },
 }
 
 fn validate_repo(repo: &str) -> SimardResult<()> {

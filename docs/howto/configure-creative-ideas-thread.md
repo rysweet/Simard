@@ -205,7 +205,7 @@ flowchart TD
     E --> F[Four-reviewer pipeline<br/>crusty · philosophy · measurability]
     F --> G[Synthesis sets next_status<br/>via try_transition]
     G -->|AcceptedForImplementation,<br/>not flagged| H[route_idea_to_goal → Proposed goal]
-    G -->|NeedsHumanReview| I[typed proposal to GitHubMutationGuard<br/>label=creative-idea, assignee=rysweet]
+    G -->|NeedsHumanReview| I[typed proposal to MutationGuard<br/>label=creative-idea, assignee=rysweet]
     G -->|Rejected / Deferred / NeedsRevision| J[Persist status; park or re-enter]
 ```
 
@@ -235,7 +235,7 @@ Every new idea is reviewed in order; then a synthesis step sets its status.
 | Synthesis result | Route | Effect |
 |------------------|-------|--------|
 | `AcceptedForImplementation`, not flagged | `route_idea_to_goal` | A `Proposed` goal on the goal board, tagged with the originating idea `node_id`. The idea moves to `ImplementationStarted`. |
-| `NeedsHumanReview` | `route_idea_to_issue` | Eligible lineage is submitted through `GitHubMutationGuard`; the issue is labelled `creative-idea`, assigned to `rysweet`, and carries typed provenance. |
+| `NeedsHumanReview` | `route_idea_to_issue` | Eligible lineage is submitted through `MutationGuard`; the issue is labelled `creative-idea`, assigned to `rysweet`, and carries typed provenance. |
 | `Rejected` / `Deferred` / `NeedsRevision` | *(none)* | Status persisted; parked or re-entered on a later pass. |
 
 ## The human-review gate on creative-idea PRs

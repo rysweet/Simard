@@ -253,7 +253,7 @@ Orient folds `StepFailureDiagnosed` into a `Problem` with
 | `DiskFull` | `ResourcePressure`, Critical | reuse existing disk-health remediation |
 | `OutOfMemory` | `ResourcePressure` | `LaunchRecipe` / `Escalate` |
 | `NetworkOrAuth` | `ProcessHealth` | `Escalate` (needs a human/credential) |
-| `Unknown` | `ProcessHealth`, Normal | stable-condition issue proposal through `GitHubMutationGuard` |
+| `Unknown` | `ProcessHealth`, Normal | stable-condition issue proposal through `MutationGuard` |
 
 The agent-supplied stable condition identity survives issue-number, goal-slug,
 and process changes so one recurring cause does not spawn a duplicate

@@ -345,10 +345,9 @@ pub(crate) fn apply_no_progress_breaker_investigated(
     reasoner: &dyn NoProgressWhyReasoner,
     healer: &dyn PreconditionHealer,
     dispatcher: &dyn NoProgressEngineerDispatcher,
-    mutation_guard: &mut GitHubMutationGuard,
-    authorization: &AutonomousGitHubAuthorization,
+    filer: &dyn NoProgressIssueFiler,
     threshold: u32,
-) -> Result<NoProgressBreakerReport, GitHubMutationError>;
+) -> NoProgressBreakerReport;
 ```
 
 The `SpawnEngineer` rung reuses the **same** `dispatch_spawn_engineer` the Act
@@ -390,9 +389,10 @@ Reuse (no parallel machinery is built):
   (`CloneRepoHealer`).
 - **Guided engineer** reuses `dispatch_spawn_engineer` — the **same** dispatch the
   OODA act phase uses (see [spawn agent for goal](./spawn-agent-for-goal.md)).
-- **Issue mutation** uses the shared `GitHubMutationGuard`. The recurring goal
-  and its full lineage must be eligible; `recurring_goal_reblock` never bypasses
-  provenance, restart reconciliation, or the cycle budget.
+- **Issue mutation** uses the production `NoProgressIssueFiler`, which delegates
+  to the shared `MutationGuard`. The recurring goal and its full lineage must be
+  eligible; `recurring_goal_reblock` never bypasses provenance, restart
+  reconciliation, or the cycle budget.
 
 ## One-shot guided-retry bound
 

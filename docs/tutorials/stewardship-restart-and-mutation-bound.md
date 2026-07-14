@@ -1,5 +1,5 @@
 ---
-title: Stewardship restart and GitHub mutation bound
+title: Stewardship restart and issue mutation bound
 description: Understand completed replay, unfinished fail-closed behavior, and bound exhaustion.
 last_updated: 2026-07-14
 review_schedule: as-needed
@@ -7,7 +7,7 @@ owner: simard
 doc_type: tutorial
 ---
 
-# Stewardship restart and GitHub mutation bound
+# Stewardship restart and issue mutation bound
 
 The regression tests use an isolated journal and fake transport; they do not
 touch GitHub.
@@ -35,11 +35,11 @@ authorize daemon work.
 
 ## Bound exhaustion
 
-With limit `1`, request A reserves and mutates. Request B may be another issue
-write or a push/PR/label/comment write; it causes
+With limit `1`, issue request A reserves and mutates. Issue request B causes
 `StewardshipMutationBudgetExceeded` before transport. The cycle's failed state
-and consumed count are durable. Reconstructing the guard and trying request C
-produces the same failure and leaves the external mutation count at one.
+and consumed count are durable. Reconstructing the guard and trying issue
+request C produces the same failure and leaves the external mutation count at
+one.
 
 Reservations count even when transport fails. Duplicate completed replay does
 not reserve again.
@@ -71,4 +71,4 @@ cargo test --lib overseer::tests_gap_scan
 ```
 
 Production stores the journal under the trusted Simard state root and defaults
-to one autonomous GitHub mutation per cycle.
+to one autonomous GitHub issue mutation per cycle.

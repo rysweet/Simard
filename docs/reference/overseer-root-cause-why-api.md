@@ -350,7 +350,7 @@ no-mutation contract.
 See the [routing table in the concept doc](../concepts/overseer-root-cause-why.md#blocked-perpetual-goal-routing-the-operators-exact-ask).
 In short: `recurrence < N` -> one-off `UnblockGoal` (`RootCause`);
 `recurrence >= N` -> a typed `recurring_goal_reblock` proposal for eligible
-non-stewardship lineage, executed only through `GitHubMutationGuard`
+non-stewardship lineage, executed only through `MutationGuard`
 (`RootCause`, escalates the cause); genuine `needs_review` ->
 `EscalateBlockedGoal` (`RootCause`); plain
 operator/dependency block → `Report` (`Acknowledged`, cause = deliberate block,

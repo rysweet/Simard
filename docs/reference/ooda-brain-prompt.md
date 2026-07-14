@@ -152,7 +152,7 @@ RATIONALE: log shows panic recurring across 3 spawns
 Side-effect: appends a typed observation to
 `<state_root>/pending_issues.jsonl`. Queue consumption validates provenance,
 uses an agentic recipe for semantic consolidation, and submits any authorized
-issue operation to `GitHubMutationGuard`. The queue never calls `gh issue`
+issue operation to `MutationGuard`. The queue never calls `gh issue`
 directly.
 
 ### `mark_goal_blocked`

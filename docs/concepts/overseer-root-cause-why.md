@@ -186,7 +186,7 @@ re-unblocking every cycle:
 | Condition | Action | Remediation |
 |---|---|---|
 | perpetual & no-progress marker & **recurrence < N** | `UnblockGoal { …, why }` — one-off false-park correction | `RootCause` |
-| perpetual & no-progress marker & **recurrence >= N** (keeps getting re-parked) | typed `recurring_goal_reblock` proposal through `GitHubMutationGuard`, only for eligible lineage | `RootCause` (escalates the cause) |
+| perpetual & no-progress marker & **recurrence >= N** (keeps getting re-parked) | typed `recurring_goal_reblock` proposal through `MutationGuard`, only for eligible lineage | `RootCause` (escalates the cause) |
 | genuine `needs_review` block | `EscalateBlockedGoal { …, why }` (operator, both channels) | `RootCause` |
 | plain operator/dependency block | `Report` | `Acknowledged` (respectful no-op; the deliberate block is the recorded, addressed cause — **not** flagged as a symptom) |
 

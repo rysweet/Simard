@@ -43,10 +43,9 @@ pub use merge_judge::{
 pub use recipe_merge_judge::RecipeMergeJudge;
 pub use routing::route_failure;
 pub use types::{
-    ArtifactOrigin, ArtifactProvenance, CycleId, GitHubMutation, GitHubMutationLimit,
-    GitHubMutationOutcome, GitHubMutationRequest, GitHubMutationResult, IssueMutationIdentity,
-    IssueMutationLimit, IssueMutationOutcome, IssueMutationRequest, LineageId,
-    OrchestratorRunSummary, StewardshipDisposition, StewardshipOutcome, TargetRepo,
+    ArtifactOrigin, ArtifactProvenance, CycleId, IssueMutationIdentity, IssueMutationLimit,
+    IssueMutationOutcome, IssueMutationRequest, LineageId, OrchestratorRunSummary,
+    StewardshipDisposition, StewardshipOutcome, TargetRepo,
 };
 
 use crate::error::SimardResult;

@@ -16,7 +16,7 @@ This page is the normative definition of how `decide_with_brain` and `orient_wit
 > **TL;DR** - Decide and orient brain failures emit structured tracing,
 > metrics, a durable `parse_failure` record, and, at the recurrence threshold,
 > a typed issue proposal. Any autonomous issue mutation uses
-> `GitHubMutationGuard`. A mutation-guard failure aborts the owning cycle; a
+> `MutationGuard`. A mutation-guard failure aborts the owning cycle; a
 > successful visibility-only path may continue with the recorded deterministic
 > substitution.
 
@@ -190,7 +190,7 @@ Every call to `record_parse_failure(phase, goal_id, &err, &raw, prompt_name)`
 fires four channels in a fixed sequence: tracing, metric, counter increment,
 the in-memory `BrainJudgmentRecord`, and a conditional typed issue proposal.
 When that proposal is authorized, the external issue mutation is performed
-only through `GitHubMutationGuard`; reservation and terminal outcome use the
+only through `MutationGuard`; reservation and terminal outcome use the
 separate atomic mutation journal.
 
 **Sequencing relative to the fallback brain.** Visibility records are emitted
@@ -269,7 +269,7 @@ Authorization is bound to the same repository, cycle, and operation.
                                      ├─► BrainJudgmentRecord.parse_failure = Some(_)  (ch.3)
                                      ├─► counter[ (phase, goal_id) ] += 1
                                      │       │
-                                     │       └─► if >=3: typed proposal -> GitHubMutationGuard
+                                     │       └─► if >=3: typed proposal -> IssueMutationGuard
                                      │
                                      ▼
                           DeterministicFallback*Brain
@@ -293,7 +293,7 @@ the shared stewardship mutation configuration:
 | `RAW_RESPONSE_TRUNCATE_BYTES` | `8192` | Cap fed to `truncate_to_char_boundary`. Matches the existing helper's default for `~/.simard/logs` protection. |
 | `ISSUE_ESCALATION_THRESHOLD` | `3` | Mirror of `spawn_engineer`/`#1711` throttle (see A6). |
 | `ESCALATION_REPO_SLUG` | `"rysweet/Simard"` | Trusted repository bound into authorization. |
-| `SIMARD_STEWARDSHIP_GITHUB_MUTATION_LIMIT` | `1` | Shared finite reservation limit for every daemon-initiated GitHub write in the durable cycle. |
+| `SIMARD_STEWARDSHIP_ISSUE_MUTATION_LIMIT` | `1` | Finite reservation limit for autonomous issue writes in the durable cycle. |
 
 Missing GitHub transport is not a kill switch. If an authorized mutation is
 attempted while transport is unavailable, the reservation and failure are

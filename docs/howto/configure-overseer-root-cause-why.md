@@ -240,7 +240,7 @@ The suite asserts the operator-visible guarantees:
    **not** a blind re-`UnblockGoal`; a symptom-only action is
    `Remediation { class: SymptomMitigation, root_cause_addressed: false,
    unaddressed_note: Some(_) }`, and an eligible recurring perpetual re-block
-   routes through `GitHubMutationGuard`. A **deliberate** operator/dependency block is
+   routes through `MutationGuard`. A **deliberate** operator/dependency block is
    instead `Remediation { class: Acknowledged, root_cause_addressed: true,
    unaddressed_note: None }` and leaves `symptom_mitigations` unincremented — no
    false alarm.

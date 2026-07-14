@@ -8,8 +8,7 @@ use crate::stewardship::gh_client::{GhIssue, IssueMutationTransport};
 use crate::stewardship::mutation_guard::MutationGuard;
 use crate::stewardship::mutation_store::MutationStore;
 use crate::stewardship::types::{
-    ArtifactProvenance, CycleId, GitHubMutation, GitHubMutationOutcome, GitHubMutationRequest,
-    GitHubMutationResult, IssueMutation, IssueMutationIdentity, IssueMutationLimit,
+    ArtifactProvenance, CycleId, IssueMutation, IssueMutationIdentity, IssueMutationLimit,
     IssueMutationOutcome, IssueMutationRequest, LineageId,
 };
 
@@ -66,18 +65,6 @@ fn request(identity: &str) -> IssueMutationRequest {
     .unwrap()
 }
 
-fn push_request(identity: &str) -> GitHubMutationRequest {
-    GitHubMutationRequest::new(
-        "rysweet/Simard",
-        IssueMutationIdentity::new(identity).unwrap(),
-        operator_provenance("operator-request"),
-        GitHubMutation::GitPush {
-            branch: "fix/safety".to_string(),
-        },
-    )
-    .unwrap()
-}
-
 fn store(temp: &TempDir) -> MutationStore {
     MutationStore::new(temp.path().join("issue-mutations.json"))
 }
@@ -89,6 +76,34 @@ fn journal_initialization_is_explicit_and_mutation_free() {
     mutation_store.initialize_empty().unwrap();
     assert!(temp.path().join("issue-mutations.json").is_file());
     assert!(mutation_store.initialize_empty().is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn repeated_cycle_start_and_queries_do_not_rewrite_the_journal() {
+    use std::os::unix::fs::MetadataExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let mutation_store = store(&temp);
+    let cycle = CycleId::new("cycle-read-only").unwrap();
+    let limit = IssueMutationLimit::new(1).unwrap();
+    mutation_store.begin_cycle(cycle.clone(), limit).unwrap();
+    let path = temp.path().join("issue-mutations.json");
+    let inode = std::fs::metadata(&path).unwrap().ino();
+
+    mutation_store.begin_cycle(cycle.clone(), limit).unwrap();
+    assert_eq!(mutation_store.cycle_failure(&cycle).unwrap(), None);
+    assert!(
+        mutation_store
+            .stewardship_issue_numbers("rysweet/Simard")
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        std::fs::metadata(path).unwrap().ino(),
+        inode,
+        "read-only journal access must not trigger atomic file replacement"
+    );
 }
 
 #[test]
@@ -262,119 +277,6 @@ fn mutation_limit_fails_cycle_before_limit_plus_one_external_call() {
         transport.create_count(),
         1,
         "restart preserves the consumed cycle budget"
-    );
-}
-
-#[test]
-fn issue_and_push_share_one_durable_cycle_budget() {
-    let temp = tempfile::tempdir().unwrap();
-    let transport = FakeTransport::default();
-    let cycle = CycleId::new("cycle-shared-budget").unwrap();
-    let mut guard = MutationGuard::new(store(&temp));
-    guard
-        .begin_cycle(cycle.clone(), IssueMutationLimit::new(1).unwrap())
-        .unwrap();
-    guard
-        .execute(&cycle, &request("condition:issue-first"), &transport)
-        .unwrap();
-
-    let push_calls = Mutex::new(0usize);
-    let error = guard
-        .execute_github(&cycle, &push_request("condition:push-second"), || {
-            *push_calls.lock().unwrap() += 1;
-            Ok(GitHubMutationResult::Pushed {
-                branch: "fix/safety".to_string(),
-            })
-        })
-        .unwrap_err();
-    assert!(error.to_string().contains("mutation limit"), "{error}");
-    assert_eq!(*push_calls.lock().unwrap(), 0);
-
-    drop(guard);
-    let mut restarted = MutationGuard::new(store(&temp));
-    let restart_error = restarted
-        .execute_github(
-            &cycle,
-            &push_request("condition:push-after-restart"),
-            || {
-                *push_calls.lock().unwrap() += 1;
-                Ok(GitHubMutationResult::Pushed {
-                    branch: "fix/safety".to_string(),
-                })
-            },
-        )
-        .unwrap_err();
-    assert!(restart_error.to_string().contains("mutation limit"));
-    assert_eq!(
-        *push_calls.lock().unwrap(),
-        0,
-        "restart must not reset the shared GitHub mutation budget"
-    );
-}
-
-#[test]
-fn completed_push_is_replayed_from_durable_result_without_external_retry() {
-    let temp = tempfile::tempdir().unwrap();
-    let cycle = CycleId::new("cycle-push-restart").unwrap();
-    let mutation = push_request("condition:push-once");
-    let calls = Mutex::new(0usize);
-    let mut guard = MutationGuard::new(store(&temp));
-    guard
-        .begin_cycle(cycle.clone(), IssueMutationLimit::new(1).unwrap())
-        .unwrap();
-    guard
-        .execute_github(&cycle, &mutation, || {
-            *calls.lock().unwrap() += 1;
-            Ok(GitHubMutationResult::Pushed {
-                branch: "fix/safety".to_string(),
-            })
-        })
-        .unwrap();
-    drop(guard);
-
-    let mut restarted = MutationGuard::new(store(&temp));
-    let outcome = restarted
-        .execute_github(&cycle, &mutation, || {
-            *calls.lock().unwrap() += 1;
-            unreachable!("completed mutation must not contact GitHub again")
-        })
-        .unwrap();
-    assert!(matches!(
-        outcome,
-        GitHubMutationOutcome::AlreadyCompleted {
-            result: GitHubMutationResult::Pushed { .. }
-        }
-    ));
-    assert_eq!(*calls.lock().unwrap(), 1);
-}
-
-#[test]
-fn unfinished_push_fails_closed_after_restart() {
-    let temp = tempfile::tempdir().unwrap();
-    let cycle = CycleId::new("cycle-push-ambiguous").unwrap();
-    let mutation = push_request("condition:push-ambiguous");
-    let mutation_store = store(&temp);
-    mutation_store
-        .begin_cycle(cycle.clone(), IssueMutationLimit::new(1).unwrap())
-        .unwrap();
-    mutation_store.reserve_github(&cycle, &mutation).unwrap();
-    drop(mutation_store);
-
-    let calls = Mutex::new(0usize);
-    let mut restarted = MutationGuard::new(store(&temp));
-    let error = restarted
-        .execute_github(&cycle, &mutation, || {
-            *calls.lock().unwrap() += 1;
-            Ok(GitHubMutationResult::Pushed {
-                branch: "fix/safety".to_string(),
-            })
-        })
-        .unwrap_err();
-    assert!(error.to_string().contains("unfinished reservation"));
-    assert_eq!(
-        *calls.lock().unwrap(),
-        0,
-        "ambiguous push must require operator reconciliation"
     );
 }
 

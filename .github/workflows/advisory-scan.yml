@@ -93,7 +93,7 @@ jobs:
           STEWARD_REPO: ${{ github.repository }}
           SIMARD_STATE_ROOT: ${{ runner.temp }}/simard-state
           SIMARD_SCHEDULED_CYCLE_ID: github-run-${{ github.run_id }}
-          SIMARD_STEWARDSHIP_GITHUB_MUTATION_LIMIT: "4"
+          SIMARD_STEWARDSHIP_ISSUE_MUTATION_LIMIT: "4"
           SIMARD_REQUIRE_EXISTING_MUTATION_JOURNAL: "1"
         run: cargo run --locked --bin supply-chain-steward -- scan
 

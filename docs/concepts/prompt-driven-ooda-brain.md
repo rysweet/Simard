@@ -69,7 +69,7 @@ This keeps its lifetime obviously scoped and avoids cross-cycle adapter state.
 
 `pending_issues.jsonl` is an observation queue. Its typed provenance is
 validated when loaded. Eligible records may be semantically consolidated by
-the OODA recipe and submitted to `GitHubMutationGuard`; the queue never invokes
+the OODA recipe and submitted to `MutationGuard`; the queue never invokes
 `gh issue` directly, and stewardship or legacy-unknown ancestry is rejected.
 
 ## Backward Compatibility

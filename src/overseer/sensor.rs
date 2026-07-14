@@ -324,7 +324,7 @@ pub fn detect_workstream_gaps(
     anomalies: &[String],
     coverage: &[String],
 ) -> Vec<GapItem> {
-    let is_covered = |sig: &str| coverage.iter().any(|c| c == sig);
+    let coverage: std::collections::HashSet<&str> = coverage.iter().map(String::as_str).collect();
     let mut gaps: Vec<GapItem> = Vec::new();
 
     // 1. Goal board — uncovered high-priority goals.
@@ -346,7 +346,7 @@ pub fn detect_workstream_gaps(
             continue;
         }
         let signature = format!("goal:{}", g.id);
-        if is_covered(&signature) {
+        if coverage.contains(signature.as_str()) {
             continue;
         }
         gaps.push(GapItem {
@@ -360,6 +360,9 @@ pub fn detect_workstream_gaps(
             )),
             signature,
         });
+        if gaps.len() == MAX_GAPS_PER_TICK {
+            return gaps;
+        }
     }
 
     // 2. High-signal open issues with no open PR / active workstream.
@@ -385,7 +388,7 @@ pub fn detect_workstream_gaps(
         // id) — never the untrusted title (V3).
         let ref_id = format!("{}#{}", repo_slug(&issue.repo), issue.number);
         let signature = format!("issue:{ref_id}");
-        if is_covered(&signature) {
+        if coverage.contains(signature.as_str()) {
             continue;
         }
         gaps.push(GapItem {
@@ -399,6 +402,9 @@ pub fn detect_workstream_gaps(
             )),
             signature,
         });
+        if gaps.len() == MAX_GAPS_PER_TICK {
+            return gaps;
+        }
     }
 
     // 3. Live anomalies with no fix in flight.
@@ -408,7 +414,7 @@ pub fn detect_workstream_gaps(
             continue;
         }
         let signature = format!("anomaly:{slug}");
-        if is_covered(&signature) {
+        if coverage.contains(signature.as_str()) {
             continue;
         }
         gaps.push(GapItem {
@@ -422,9 +428,11 @@ pub fn detect_workstream_gaps(
             why_it_matters: "live anomaly with no fix in flight".to_string(),
             signature,
         });
+        if gaps.len() == MAX_GAPS_PER_TICK {
+            return gaps;
+        }
     }
 
-    gaps.truncate(MAX_GAPS_PER_TICK);
     gaps
 }
 
