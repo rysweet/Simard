@@ -60,10 +60,7 @@ pub fn validate_prompt_source(source: &Path) -> InstallResult<()> {
             source.display()
         ));
     }
-    for required in ["simard/ooda_orient.md", "simard/recipes/ooda-orient.yaml"]
-        .into_iter()
-        .chain(super::REQUIRED_TYPED_OODA_ASSETS)
-    {
+    for required in ["simard/ooda_orient.md", "simard/recipes/ooda-orient.yaml"] {
         let path = source.join(required);
         if !path.is_file() {
             return err(format!(
@@ -131,29 +128,12 @@ pub fn replace_live_prompt_assets(staged: &Path, layout: &InstallLayout) -> Inst
         )));
     }
 
-    let parent = layout
-        .prompt_assets_dir
-        .parent()
-        .ok_or_else(|| InstallError::new("prompt_assets destination has no parent"))?;
-    fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| {
-            InstallError::new(format!(
-                "failed to sync prompt_assets parent {}: {error}",
-                parent.display()
-            ))
-        })
+    Ok(())
 }
 
 fn has_required_assets(root: &Path) -> bool {
     root.join("simard/ooda_orient.md").is_file()
         && root.join("simard/recipes/ooda-orient.yaml").is_file()
-        && root
-            .join("simard/recipes/goal-session-actor.yaml")
-            .is_file()
-        && root
-            .join("simard/policies/goal-session-capabilities.toml")
-            .is_file()
 }
 
 fn copy_dir_recursive(source: &Path, destination: &Path, root: &Path) -> InstallResult<()> {
@@ -188,14 +168,6 @@ fn copy_dir_recursive(source: &Path, destination: &Path, root: &Path) -> Install
             let child_destination = destination.join(child_name);
             copy_dir_recursive(&child_source, &child_destination, root)?;
         }
-        fs::File::open(destination)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| {
-                InstallError::new(format!(
-                    "failed to sync staged prompt_assets directory {}: {error}",
-                    destination.display()
-                ))
-            })?;
         return Ok(());
     }
 
@@ -208,14 +180,6 @@ fn copy_dir_recursive(source: &Path, destination: &Path, root: &Path) -> Install
                 destination.display()
             ))
         })?;
-        fs::File::open(destination)
-            .and_then(|file| file.sync_all())
-            .map_err(|error| {
-                InstallError::new(format!(
-                    "failed to sync staged prompt asset {}: {error}",
-                    destination.display()
-                ))
-            })?;
         return Ok(());
     }
 

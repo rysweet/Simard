@@ -57,7 +57,6 @@ fn make_engineer_config(name: &str) -> SubordinateConfig {
         role: AgentRole::Engineer,
         worktree_path: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
         current_depth: 0,
-        requested_permissions: None,
     }
 }
 

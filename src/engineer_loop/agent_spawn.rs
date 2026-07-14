@@ -17,7 +17,6 @@
 //! Override binary path with `SIMARD_AMPLIHACK_BIN` (used by tests and
 //! environments where `amplihack` is not on PATH).
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -211,15 +210,6 @@ deployed copy.\n";
 /// scaffolding, not a stable API.
 #[doc(hidden)]
 pub fn engineer_argv(kind: AgentKind, prompt: &str, max_turns: u32) -> Vec<String> {
-    engineer_argv_with_permissions(kind, prompt, max_turns, None)
-}
-
-fn engineer_argv_with_permissions(
-    kind: AgentKind,
-    prompt: &str,
-    max_turns: u32,
-    permissions: Option<&BTreeSet<String>>,
-) -> Vec<String> {
     match kind {
         AgentKind::RustyClawd => vec![
             kind.subcommand().to_string(),
@@ -232,58 +222,26 @@ fn engineer_argv_with_permissions(
             "-p".to_string(),
             prompt.to_string(),
         ],
-        AgentKind::Copilot => {
-            let mut argv = vec![
-                kind.subcommand().to_string(),
-                "--subprocess-safe".to_string(),
-            ];
-            let Some(permissions) = permissions else {
-                argv.extend([
-                    "--disallow-temp-dir".to_string(),
-                    "--no-remote".to_string(),
-                    "--no-remote-export".to_string(),
-                    "--disable-builtin-mcps".to_string(),
-                ]);
-                return argv;
-            };
-            argv.extend([
-                "--disallow-temp-dir".to_string(),
-                "--no-remote".to_string(),
-                "--no-remote-export".to_string(),
-                "--secret-env-vars=GH_TOKEN,GITHUB_TOKEN,AZURE_CLIENT_SECRET,OPENAI_API_KEY,ANTHROPIC_API_KEY,AWS_SECRET_ACCESS_KEY".to_string(),
-            ]);
-            if permissions.contains("repo_read") {
-                argv.extend([
-                    "--allow-tool=read".to_string(),
-                    "--allow-tool=search".to_string(),
-                ]);
-            }
-            if permissions.contains("repo_write") {
-                argv.push("--allow-tool=write".to_string());
-            }
-            if permissions.contains("process_exec")
-                && let Ok(config) = std::env::var("SIMARD_PROCESS_EXEC_MCP_CONFIG")
-            {
-                argv.push(format!("--additional-mcp-config={config}"));
-                argv.push("--allow-tool=simard-process-broker(process_exec)".to_string());
-            }
-            if permissions.contains("github_issue_write") || permissions.contains("github_pr_write")
-            {
-                argv.push("--allow-tool=github-mcp-server".to_string());
-                if permissions.contains("github_issue_write") {
-                    argv.push("--add-github-mcp-tool=create_issue".to_string());
-                }
-                if permissions.contains("github_pr_write") {
-                    argv.extend([
-                        "--add-github-mcp-tool=create_pull_request".to_string(),
-                        "--add-github-mcp-tool=update_pull_request".to_string(),
-                    ]);
-                }
-            } else {
-                argv.push("--disable-builtin-mcps".to_string());
-            }
-            argv
-        }
+        AgentKind::Copilot => vec![
+            kind.subcommand().to_string(),
+            // Issue #2640: prompt-less argv. The prompt rides on STDIN (see
+            // `run_engineer_subprocess`), so it never contributes to ARG_MAX.
+            // `--subprocess-safe` skips interactive staging so the headless
+            // subprocess reads its stdin prompt non-interactively — the same
+            // proven `amplihack copilot --subprocess-safe …` stdin invocation
+            // the OODA launch and meeting turns use.
+            "--subprocess-safe".to_string(),
+            // Issue #1717: without --allow-all-tools the Copilot CLI's tool
+            // allow-list defaults to interactive prompting, and a headless
+            // engineer subprocess (no TTY) can only *read*: every file write,
+            // `git commit`, `gh pr create`, `amplihack recipe run`, etc. fail
+            // with "Permission denied". Both permission flags are required, and
+            // --allow-all-tools MUST precede --allow-all-paths (the pinned
+            // #1717 order). `COPILOT_ALLOW_ALL=1` in the child env is the
+            // belt-and-suspenders fallback if the flag is ever renamed.
+            "--allow-all-tools".to_string(),
+            "--allow-all-paths".to_string(),
+        ],
     }
 }
 
@@ -321,51 +279,7 @@ pub fn run_engineer_subprocess(
     kind: AgentKind,
 ) -> SimardResult<String> {
     let bin = amplihack_binary();
-    let scoped_permissions = std::env::var("SIMARD_ENGINEER_PERMISSIONS")
-        .ok()
-        .map(|raw| {
-            raw.split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToString::to_string)
-                .collect::<BTreeSet<_>>()
-        });
-    if let Some(permissions) = &scoped_permissions {
-        if kind != AgentKind::Copilot {
-            return Err(SimardError::ActionExecutionFailed {
-                action: format!("{bin} {}", kind.subcommand()),
-                reason: "typed engineer permissions require the canonical Copilot base type"
-                    .to_string(),
-            });
-        }
-        if permissions.is_empty()
-            || permissions.iter().any(|permission| {
-                !crate::typed_ooda::COPILOT_ENGINEER_PERMISSIONS.contains(&permission.as_str())
-            })
-        {
-            return Err(SimardError::ActionExecutionFailed {
-                action: format!("{bin} {}", kind.subcommand()),
-                reason: "typed engineer permissions contain an empty or unknown capability"
-                    .to_string(),
-            });
-        }
-    }
-    if scoped_permissions
-        .as_ref()
-        .is_some_and(|permissions| permissions.contains("process_exec"))
-        && std::env::var_os("SIMARD_PROCESS_EXEC_MCP_CONFIG").is_none()
-    {
-        return Err(SimardError::ActionExecutionFailed {
-            action: format!("{bin} {}", kind.subcommand()),
-            reason: "process_exec requires the scoped Simard MCP broker configuration".to_string(),
-        });
-    }
-    let argv = engineer_argv_with_permissions(
-        kind,
-        prompt,
-        DEFAULT_MAX_TURNS,
-        scoped_permissions.as_ref(),
-    );
+    let argv = engineer_argv(kind, prompt, DEFAULT_MAX_TURNS);
     let action_label = format!("{bin} {}", kind.subcommand());
 
     let mut cmd = Command::new(&bin);
@@ -385,7 +299,11 @@ pub fn run_engineer_subprocess(
     //     production-wired, so its path is left byte-identical.
     let prompt_feed = match kind {
         AgentKind::Copilot => {
-            cmd.env_remove("COPILOT_ALLOW_ALL");
+            // Belt-and-suspenders permission grant for the Copilot CLI
+            // subprocess (issue #1717): if a future upstream release renames or
+            // removes `--allow-all-tools`, `COPILOT_ALLOW_ALL` keeps the
+            // engineer from regressing to a permission-denied table.
+            cmd.env("COPILOT_ALLOW_ALL", "1");
             let applied = crate::spawn_payload::attach_prompt_std(&mut cmd, prompt.as_bytes())
                 .map_err(|e| SimardError::ActionExecutionFailed {
                     action: action_label.clone(),
@@ -818,9 +736,13 @@ mod tests {
             "copilot argv must include --subprocess-safe for stdin prompt \
              delivery (issue #2640): {argv:?}"
         );
-        assert!(!argv.iter().any(|a| a == "--allow-all-tools"));
-        assert!(!argv.iter().any(|a| a == "--allow-all-paths"));
-        assert!(!argv.iter().any(|a| a == "--allow-tool=shell"));
+        // Issue #1717: both permission flags present so non-interactive
+        // writes/git/gh/amplihack tools are auto-approved.
+        assert!(
+            argv.iter().any(|a| a == "--allow-all-tools"),
+            "copilot argv must include --allow-all-tools (issue #1717): {argv:?}"
+        );
+        assert!(argv.iter().any(|a| a == "--allow-all-paths"));
         // THE FIX: neither `-p` nor the prompt body may appear in argv.
         assert!(
             !argv.iter().any(|a| a == "-p"),
@@ -841,35 +763,38 @@ mod tests {
         assert!(!argv.iter().any(|a| a == "--max-turns"));
     }
 
+    /// Pin the exact prompt-less Copilot argv and the #1717 permission-flag
+    /// order.
+    ///
+    /// The prompt is delivered on stdin (issue #2640), so there is no `-p` for
+    /// the permission flags to precede; the canonical order is now:
+    ///   `copilot --subprocess-safe --allow-all-tools --allow-all-paths`
+    /// with `--allow-all-tools` still before `--allow-all-paths` (#1717).
     #[test]
-    fn engineer_argv_copilot_defaults_to_least_privilege() {
+    fn engineer_argv_copilot_grants_tool_permissions_for_non_interactive() {
         let argv = engineer_argv(AgentKind::Copilot, "any prompt", 1);
 
-        assert_eq!(argv[0], "copilot");
-        assert_eq!(argv[1], "--subprocess-safe", "exact slot 1: {argv:?}");
-        assert!(argv.iter().any(|value| value == "--disable-builtin-mcps"));
-        assert!(!argv.iter().any(|value| value == "--allow-all-tools"));
-        assert!(!argv.iter().any(|value| value == "--allow-all-paths"));
-    }
+        let tools_pos = argv.iter().position(|a| a == "--allow-all-tools").expect(
+            "--allow-all-tools must be present in Copilot argv (issue #1717: \
+                 non-interactive writes were failing closed without it)",
+        );
+        let paths_pos = argv
+            .iter()
+            .position(|a| a == "--allow-all-paths")
+            .expect("--allow-all-paths must be present in Copilot argv");
 
-    #[test]
-    fn typed_engineer_permissions_remove_global_tool_path_and_github_access() {
-        let permissions = BTreeSet::from(["repo_read".to_string(), "repo_write".to_string()]);
-        let argv = engineer_argv_with_permissions(
-            AgentKind::Copilot,
-            "opaque task",
-            1,
-            Some(&permissions),
+        assert!(
+            tools_pos < paths_pos,
+            "--allow-all-tools must precede --allow-all-paths: {argv:?}"
         );
 
-        assert!(!argv.iter().any(|value| value == "--allow-all-tools"));
-        assert!(!argv.iter().any(|value| value == "--allow-all-paths"));
-        assert!(argv.iter().any(|value| value == "--allow-tool=read"));
-        assert!(argv.iter().any(|value| value == "--allow-tool=write"));
-        assert!(!argv.iter().any(|value| value == "--allow-tool=shell"));
-        assert!(argv.iter().any(|value| value == "--disable-builtin-mcps"));
-        assert!(argv.iter().any(|value| value == "--disallow-temp-dir"));
-        assert!(!argv.iter().any(|value| value == "opaque task"));
+        // Exact prompt-less slots: subcommand, stdin-enabling flag, then the
+        // ordered permission flags. No `-p`, no prompt.
+        assert_eq!(argv[0], "copilot");
+        assert_eq!(argv[1], "--subprocess-safe", "exact slot 1: {argv:?}");
+        assert_eq!(argv[2], "--allow-all-tools", "exact slot 2: {argv:?}");
+        assert_eq!(argv[3], "--allow-all-paths", "exact slot 3: {argv:?}");
+        assert_eq!(argv.len(), 4, "copilot argv must be prompt-less: {argv:?}");
     }
 
     #[test]

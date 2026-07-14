@@ -8,7 +8,7 @@ description: >
   caused the live exit-126 / E2BIG "Argument list too long" defect, the preserved
   flags, the temp-file lifetime, and the argv-free invariant its tests enforce
   (#2640).
-last_updated: 2026-07-14
+last_updated: 2026-07-06
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -26,12 +26,6 @@ related:
 ---
 
 # Argv-free Copilot/OODA invocation reference
-
-!!! warning "Not a typed-engineer launch contract"
-    This page documents payload transport for legacy and non-engineer Copilot
-    launch sites. A typed OODA engineer must not inherit the `--allow-all-tools`
-    examples below. Its permission set selects the scoped adapters described in
-    [Engineer Copilot permissions](./engineer-copilot-permissions.md).
 
 > **Status: implemented.** The meeting and builder sites live in
 > [`src/base_type_copilot/mod.rs`](https://github.com/rysweet/Simard/blob/main/src/base_type_copilot/mod.rs);

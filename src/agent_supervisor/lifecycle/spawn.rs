@@ -48,27 +48,6 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
         // Limit concurrent cargo parallelism per agent to prevent OOM (issues #373, #2199).
         .env("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs())
         .current_dir(&config.worktree_path);
-    if let Some(permissions) = &config.requested_permissions {
-        cmd.env(
-            "SIMARD_ENGINEER_PERMISSIONS",
-            permissions.iter().cloned().collect::<Vec<_>>().join(","),
-        );
-        for secret in [
-            "AZURE_CLIENT_SECRET",
-            "OPENAI_API_KEY",
-            "ANTHROPIC_API_KEY",
-            "AWS_SECRET_ACCESS_KEY",
-        ] {
-            cmd.env_remove(secret);
-        }
-        if !permissions.contains("github_issue_write") && !permissions.contains("github_pr_write") {
-            cmd.env_remove("GH_TOKEN")
-                .env_remove("GITHUB_TOKEN")
-                .env_remove("SSH_AUTH_SOCK")
-                .env_remove("GIT_ASKPASS")
-                .env_remove("SSH_ASKPASS");
-        }
-    }
     // Issue #1197: per-engineer git worktrees would otherwise force a
     // cold cargo rebuild (incl. lbug, ~40min) every spawn. Share one
     // target dir across all engineer worktrees, but respect any operator

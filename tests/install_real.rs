@@ -8,30 +8,15 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use assert_cmd::Command;
 use tempfile::TempDir;
 
 fn simard() -> Command {
-    static HEALTH_CHECK: OnceLock<(TempDir, PathBuf)> = OnceLock::new();
-    let health_check = &HEALTH_CHECK
-        .get_or_init(|| {
-            let root = TempDir::new().expect("health tempdir");
-            let path = root.path().join("healthy");
-            fs::write(&path, "#!/bin/sh\nprintf '%s' '{\"healthy\":true}'\n")
-                .expect("health checker");
-            #[cfg(unix)]
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
-                .expect("health executable");
-            (root, path)
-        })
-        .1;
     let mut command = Command::cargo_bin("simard").expect("simard binary must be buildable");
     command
-        .timeout(Duration::from_secs(120))
-        .env("SIMARD_INSTALL_HEALTH_CHECK", health_check)
+        .timeout(Duration::from_secs(30))
         .env_remove("SIMARD_HOME")
         .env_remove("SIMARD_INSTALL_PROMPT_ASSETS_ROOT")
         .env_remove("SIMARD_PROMPT_ASSET_ROOT")
@@ -120,33 +105,6 @@ fn assert_backup_contains(root: &Path, expected: &[u8]) {
         matched,
         "expected one backup under {root:?} to contain the prior binary bytes; files: {files:?}"
     );
-}
-
-fn find_backup_manifest(root: &Path) -> PathBuf {
-    collect_files(root)
-        .into_iter()
-        .find(|path| path.file_name().is_some_and(|name| name == "manifest.json"))
-        .unwrap_or_else(|| panic!("verified backup manifest missing under {root:?}"))
-}
-
-#[cfg(unix)]
-fn fake_health_check(root: &Path, name: &str, body: &str) -> PathBuf {
-    let path = root.join(name);
-    fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("health checker");
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("health executable");
-    path
-}
-
-fn find_sqlite_snapshot(root: &Path, expected_value: &str) -> Option<PathBuf> {
-    collect_files(root).into_iter().find(|path| {
-        rusqlite::Connection::open(path)
-            .and_then(|connection| {
-                connection.query_row("SELECT value FROM snapshot_probe", [], |row| {
-                    row.get::<_, String>(0)
-                })
-            })
-            .is_ok_and(|value| value == expected_value)
-    })
 }
 
 #[test]
@@ -394,7 +352,6 @@ fn install_can_source_prompt_assets_from_distribution_env_root() {
     let (systemctl, _systemctl_log) = fake_systemctl(temp.path());
 
     fs::create_dir_all(source_root.join("simard/recipes")).expect("asset dirs");
-    fs::create_dir_all(source_root.join("simard/policies")).expect("policy dir");
     fs::write(
         source_root.join("simard/ooda_orient.md"),
         "packaged orient prompt",
@@ -405,16 +362,6 @@ fn install_can_source_prompt_assets_from_distribution_env_root() {
         "packaged recipe",
     )
     .expect("recipe asset");
-    fs::write(
-        source_root.join("simard/recipes/goal-session-actor.yaml"),
-        "packaged goal-session actor recipe",
-    )
-    .expect("typed actor recipe");
-    fs::write(
-        source_root.join("simard/policies/goal-session-capabilities.toml"),
-        "packaged goal-session policy",
-    )
-    .expect("typed actor policy");
 
     simard()
         .args(["install", "--simard-home"])
@@ -472,250 +419,6 @@ fn install_preserves_prior_binary_and_prints_memory_backup_guidance_before_resta
             "installer should print rollback and memory backup guidance containing {expected:?}; output:\n{output}"
         );
     }
-}
-
-#[cfg(unix)]
-#[test]
-fn rollback_manifest_restores_binary_assets_units_and_state() {
-    let temp = TempDir::new().expect("tempdir");
-    let simard_home = temp.path().join("simard-home");
-    let unit_dir = temp.path().join("systemd-user");
-    let (systemctl, _systemctl_log) = fake_systemctl(temp.path());
-
-    fs::create_dir_all(simard_home.join("bin")).expect("bin");
-    fs::create_dir_all(simard_home.join("prompt_assets/simard/recipes")).expect("assets");
-    fs::create_dir_all(simard_home.join("state/typed-ooda")).expect("state");
-    fs::create_dir_all(&unit_dir).expect("units");
-    fs::write(simard_home.join("bin/simard"), b"prior-binary").expect("binary");
-    fs::set_permissions(
-        simard_home.join("bin/simard"),
-        fs::Permissions::from_mode(0o755),
-    )
-    .expect("executable");
-    fs::write(
-        simard_home.join("prompt_assets/simard/recipes/prior.yaml"),
-        b"prior-recipe",
-    )
-    .expect("recipe");
-    let typed_ooda =
-        rusqlite::Connection::open(simard_home.join("state/typed-ooda/outcomes.sqlite3"))
-            .expect("state");
-    typed_ooda
-        .execute_batch(
-            "CREATE TABLE rollback_probe(value TEXT NOT NULL);
-             INSERT INTO rollback_probe VALUES ('prior-state');",
-        )
-        .expect("state row");
-    drop(typed_ooda);
-    fs::write(unit_dir.join("simard-ooda.service"), b"prior-ooda-unit").expect("unit");
-    fs::write(unit_dir.join("simard-signal.service"), b"prior-signal-unit").expect("unit");
-
-    simard()
-        .args(["install", "--simard-home"])
-        .arg(&simard_home)
-        .arg("--systemd-user-dir")
-        .arg(&unit_dir)
-        .arg("--systemctl")
-        .arg(&systemctl)
-        .assert()
-        .success();
-
-    let manifest = find_backup_manifest(&simard_home.join(".install-backups"));
-    let typed_ooda =
-        rusqlite::Connection::open(simard_home.join("state/typed-ooda/outcomes.sqlite3"))
-            .expect("mutate");
-    typed_ooda
-        .execute("UPDATE rollback_probe SET value='mutated-state'", [])
-        .expect("mutate row");
-    drop(typed_ooda);
-
-    simard()
-        .args(["install", "--simard-home"])
-        .arg(&simard_home)
-        .arg("--systemd-user-dir")
-        .arg(&unit_dir)
-        .arg("--systemctl")
-        .arg(&systemctl)
-        .arg("--rollback")
-        .arg(&manifest)
-        .assert()
-        .success();
-
-    assert_eq!(
-        fs::read(simard_home.join("bin/simard")).unwrap(),
-        b"prior-binary"
-    );
-    assert_eq!(
-        fs::read(simard_home.join("prompt_assets/simard/recipes/prior.yaml")).unwrap(),
-        b"prior-recipe"
-    );
-    let typed_ooda =
-        rusqlite::Connection::open(simard_home.join("state/typed-ooda/outcomes.sqlite3"))
-            .expect("state");
-    assert_eq!(
-        typed_ooda
-            .query_row("SELECT value FROM rollback_probe", [], |row| {
-                row.get::<_, String>(0)
-            })
-            .expect("restored state row"),
-        "prior-state"
-    );
-    assert_eq!(
-        fs::read(unit_dir.join("simard-ooda.service")).unwrap(),
-        b"prior-ooda-unit"
-    );
-    assert_eq!(
-        fs::read(unit_dir.join("simard-signal.service")).unwrap(),
-        b"prior-signal-unit"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn typed_ooda_backup_uses_online_sqlite_snapshot_with_live_wal_data() {
-    let temp = TempDir::new().expect("tempdir");
-    let simard_home = temp.path().join("simard-home");
-    let unit_dir = temp.path().join("systemd-user");
-    let (systemctl, _systemctl_log) = fake_systemctl(temp.path());
-    let health = fake_health_check(temp.path(), "healthy", "printf '%s' '{\"healthy\":true}'");
-    fs::create_dir_all(simard_home.join("state/typed-ooda")).expect("state");
-    let connection =
-        rusqlite::Connection::open(simard_home.join("state/typed-ooda/outcomes.sqlite3"))
-            .expect("sqlite");
-    connection
-        .execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA wal_autocheckpoint=0;
-             CREATE TABLE snapshot_probe(value TEXT NOT NULL);
-             INSERT INTO snapshot_probe VALUES ('committed-in-wal');",
-        )
-        .expect("write WAL row");
-
-    simard()
-        .args(["install", "--simard-home"])
-        .arg(&simard_home)
-        .arg("--systemd-user-dir")
-        .arg(&unit_dir)
-        .arg("--systemctl")
-        .arg(&systemctl)
-        .arg("--health-check")
-        .arg(&health)
-        .assert()
-        .success();
-
-    let snapshot = find_sqlite_snapshot(&simard_home.join(".install-backups"), "committed-in-wal")
-        .expect("backup must contain a queryable online SQLite snapshot");
-    let check = rusqlite::Connection::open(snapshot).expect("open snapshot");
-    assert_eq!(
-        check
-            .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
-            .expect("integrity check"),
-        "ok"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn cognitive_backup_uses_ladybug_export_and_restores_a_fresh_store() {
-    let temp = TempDir::new().expect("tempdir");
-    let simard_home = temp.path().join("simard-home");
-    let state = simard_home.join("state");
-    let cognitive = state.join("cognitive");
-    let unit_dir = temp.path().join("systemd-user");
-    let (systemctl, _systemctl_log) = fake_systemctl(temp.path());
-    let health = fake_health_check(temp.path(), "healthy", "printf '%s' '{\"healthy\":true}'");
-    fs::create_dir_all(&state).expect("state");
-    {
-        let database =
-            lbug::Database::new(&cognitive, lbug::SystemConfig::default()).expect("ladybug");
-        let connection = lbug::Connection::new(&database).expect("connection");
-        connection
-            .query("CREATE NODE TABLE SnapshotProbe(value STRING, PRIMARY KEY(value));")
-            .expect("table");
-        connection
-            .query("CREATE (:SnapshotProbe {value: 'prior-cognitive'});")
-            .expect("node");
-    }
-
-    simard()
-        .args(["install", "--simard-home"])
-        .arg(&simard_home)
-        .arg("--systemd-user-dir")
-        .arg(&unit_dir)
-        .arg("--systemctl")
-        .arg(&systemctl)
-        .arg("--health-check")
-        .arg(&health)
-        .assert()
-        .success();
-    let manifest = find_backup_manifest(&simard_home.join(".install-backups"));
-
-    if cognitive.is_dir() {
-        fs::remove_dir_all(&cognitive).expect("remove live cognitive store");
-    } else {
-        fs::remove_file(&cognitive).expect("remove live cognitive store");
-    }
-    simard()
-        .args(["install", "--simard-home"])
-        .arg(&simard_home)
-        .arg("--systemd-user-dir")
-        .arg(&unit_dir)
-        .arg("--systemctl")
-        .arg(&systemctl)
-        .arg("--health-check")
-        .arg(&health)
-        .arg("--rollback")
-        .arg(&manifest)
-        .assert()
-        .success();
-
-    let database = lbug::Database::new(&cognitive, lbug::SystemConfig::default())
-        .expect("restored LadybugDB opens");
-    let connection = lbug::Connection::new(&database).expect("restored connection");
-    let result = connection
-        .query("MATCH (n:SnapshotProbe) RETURN n.value;")
-        .expect("query restored data")
-        .to_string();
-    assert!(result.contains("prior-cognitive"), "{result}");
-}
-
-#[cfg(unix)]
-#[test]
-fn first_install_health_failure_rolls_back_absent_service_baseline() {
-    let temp = TempDir::new().expect("tempdir");
-    let simard_home = temp.path().join("simard-home");
-    let unit_dir = temp.path().join("systemd-user");
-    let (systemctl, systemctl_log) = fake_systemctl(temp.path());
-    let health = fake_health_check(
-        temp.path(),
-        "unhealthy",
-        "printf '%s' '{\"healthy\":false}'",
-    );
-
-    simard()
-        .args(["install", "--simard-home"])
-        .arg(&simard_home)
-        .arg("--systemd-user-dir")
-        .arg(&unit_dir)
-        .arg("--systemctl")
-        .arg(&systemctl)
-        .arg("--health-check")
-        .arg(&health)
-        .assert()
-        .failure();
-
-    assert!(!simard_home.join("bin/simard").exists());
-    assert!(!simard_home.join("prompt_assets").exists());
-    assert!(!unit_dir.join("simard-ooda.service").exists());
-    assert!(!unit_dir.join("simard-signal.service").exists());
-    let log = read(&systemctl_log);
-    assert_eq!(
-        log.lines()
-            .filter(|line| line.contains(" restart "))
-            .count(),
-        2,
-        "rollback must not restart services that did not exist before install:\n{log}"
-    );
 }
 
 #[cfg(unix)]

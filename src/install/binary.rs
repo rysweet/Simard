@@ -26,15 +26,7 @@ pub fn stage_binary(source: &Path, staged: &Path) -> InstallResult<()> {
             staged.display()
         ))
     })?;
-    set_executable(staged)?;
-    fs::File::open(staged)
-        .and_then(|file| file.sync_all())
-        .map_err(|error| {
-            InstallError::new(format!(
-                "failed to sync staged Simard binary {}: {error}",
-                staged.display()
-            ))
-        })
+    set_executable(staged)
 }
 
 pub fn preserve_prior_binary(layout: &InstallLayout) -> InstallResult<Option<PathBuf>> {
@@ -129,22 +121,7 @@ pub fn replace_live_binary(staged: &Path, live: &Path) -> InstallResult<()> {
             staged.display(),
             live.display()
         ))
-    })?;
-    sync_parent(live)
-}
-
-fn sync_parent(path: &Path) -> InstallResult<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| InstallError::new("installed binary has no parent directory"))?;
-    fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| {
-            InstallError::new(format!(
-                "failed to sync installed binary directory {}: {error}",
-                parent.display()
-            ))
-        })
+    })
 }
 
 fn files_have_same_bytes(left: &Path, right: &Path) -> InstallResult<bool> {

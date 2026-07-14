@@ -10,7 +10,7 @@ description: >
   classify_spawn_failure errno surfacing into overseer::failure_sink, the
   grep-shaped anti-regression guard (tests/e2big_argv_guard.rs), and the hermetic
   per-path >256 KiB test matrix (#2640).
-last_updated: 2026-07-14
+last_updated: 2026-07-06
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -32,12 +32,6 @@ related:
 ---
 
 # Large-payload spawn API reference
-
-!!! warning "Transport does not grant authority"
-    The broad Copilot flags in generic examples are not valid for typed OODA
-    engineers. Their permission environment selects the scoped adapters in
-    [Engineer Copilot permissions](./engineer-copilot-permissions.md); safe stdin
-    transport does not grant additional authority.
 
 > **Status: implemented.** This page is the wire-level contract for the
 > `spawn_payload` facade, which ships at `src/spawn_payload/mod.rs` (registered

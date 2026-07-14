@@ -6,7 +6,7 @@ description: >
   payload, so it routes through the `simard::spawn_payload` facade, can never
   overflow ARG_MAX (E2BIG), passes the tests/e2big_argv_guard.rs anti-regression
   guard, and surfaces any spawn failure instead of swallowing it (#2640).
-last_updated: 2026-07-14
+last_updated: 2026-07-06
 review_schedule: as-needed
 owner: simard
 doc_type: how-to
@@ -21,12 +21,6 @@ related:
 ---
 
 # How to add a safe agent/recipe spawn site
-
-!!! warning "Typed engineer processes use a different boundary"
-    Do not apply the broad Copilot flags in this guide to typed OODA engineers.
-    Their launch carries `SIMARD_ENGINEER_PERMISSIONS`, which selects scoped
-    Copilot tool adapters instead. See
-    [Engineer Copilot permissions](../reference/engineer-copilot-permissions.md).
 
 > **The `simard::spawn_payload` facade ships** (`src/spawn_payload/mod.rs`). Use
 > `attach_prompt_std` / `attach_prompt_tokio` for copilot prompts (stdin),

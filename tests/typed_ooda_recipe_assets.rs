@@ -119,18 +119,15 @@ fn migrated_recipe_assets_do_not_describe_prose_as_machine_authority() {
 }
 
 #[test]
-fn installer_stages_the_recipe_policy_and_backup_manifest() {
-    let build = read_required("build.rs");
+fn installer_recursively_stages_the_recipe_and_policy_assets() {
     let installer = read_required("src/install/mod.rs");
-
-    for asset in ["goal-session-actor.yaml", "goal-session-capabilities.toml"] {
-        assert!(
-            build.contains(asset) || installer.contains(asset),
-            "installer asset inventory must include {asset}"
-        );
-    }
+    let assets = read_required("src/install/assets.rs");
     assert!(
-        installer.contains("backup") && installer.contains("rollback"),
-        "typed OODA deployment must retain installer backup and rollback support"
+        installer.contains("stage_prompt_assets"),
+        "installer must stage prompt assets"
+    );
+    assert!(
+        assets.contains("copy_dir_recursive(source, staged, source)"),
+        "all recipe and policy assets must be copied recursively"
     );
 }

@@ -26,7 +26,6 @@ scripts/dashboard_audit/out/
 # Playwright self-understanding audit captures (issues #1170 / #1630 / #1992).
 tests/e2e-dashboard/.audit-output/
 .simard/bin/simard.bak.*
-.simard/goal-task.bin
 .local/
 
 # mkdocs build output

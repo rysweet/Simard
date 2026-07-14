@@ -1,6 +1,5 @@
 //! Types for subordinate agent management.
 
-use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
 use std::path::PathBuf;
 
@@ -23,9 +22,6 @@ pub struct SubordinateConfig {
     pub worktree_path: PathBuf,
     /// Current recursion depth (0 = top-level supervisor).
     pub current_depth: u32,
-    /// Explicit capability scope for typed OODA engineers. `None` preserves the
-    /// legacy operator-spawn behavior.
-    pub requested_permissions: Option<BTreeSet<String>>,
 }
 
 impl SubordinateConfig {
@@ -41,16 +37,6 @@ impl SubordinateConfig {
             return Err(SimardError::InvalidIdentityComposition {
                 identity: self.agent_name.clone(),
                 reason: "subordinate goal cannot be empty".to_string(),
-            });
-        }
-        if self
-            .requested_permissions
-            .as_ref()
-            .is_some_and(BTreeSet::is_empty)
-        {
-            return Err(SimardError::InvalidIdentityComposition {
-                identity: self.agent_name.clone(),
-                reason: "typed subordinate permissions cannot be empty".to_string(),
             });
         }
         // Depth limits are informational only — external agent tools (Copilot,
@@ -176,7 +162,6 @@ mod tests {
             role: AgentRole::Engineer,
             worktree_path: PathBuf::from("/fake/worktree"),
             current_depth: depth,
-            requested_permissions: None,
         }
     }
 

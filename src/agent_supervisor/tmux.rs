@@ -176,12 +176,6 @@ where
         ),
         ("CARGO_BUILD_JOBS".to_string(), cargo_jobs),
     ];
-    if let Some(permissions) = &config.requested_permissions {
-        tmux_env.push((
-            "SIMARD_ENGINEER_PERMISSIONS".to_string(),
-            permissions.iter().cloned().collect::<Vec<_>>().join(","),
-        ));
-    }
 
     let cargo_target = parent_pairs
         .iter()

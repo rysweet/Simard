@@ -1,201 +1,309 @@
 ---
 title: How OODA spawns engineer agents
-description: Operator guide for the typed goal-session actor that starts engineers without parsing agent prose.
-last_updated: 2026-07-14
+description: Intended operation for the recipe-backed OODA goal-session path that turns prompt-owned decisions into engineer subprocesses, no-action outcomes, and progress updates.
+last_updated: 2026-07-13
 review_schedule: as-needed
 owner: simard
 doc_type: howto
-status: implemented
 related:
   - ./run-ooda-daemon.md
-  - ../architecture/typed-ooda-loop.md
-  - ../reference/ooda-capability-api.md
-  - ../tutorials/complete-a-typed-ooda-cycle.md
+  - ../concepts/steerable-ooda-daemon.md
+  - ../reference/simard-cli.md
+  - ../reference/ooda-coverage-parallelism-ceiling.md
+  - ../../prompt_assets/simard/goal_session_objective.md
 ---
 
-# How OODA spawns engineer agents
+# [PLANNED - Implementation Pending] How OODA spawns engineer agents
 
-!!! info "Status"
-    Production goal-session Act uses scoped typed tools and durable outcomes.
-    Legacy marker parsing is test-only and has no production call edge.
+Use this guide to understand or verify the intended strict-contract behavior for
+how an OODA cycle turns one active goal into either an engineer subprocess, a
+no-action outcome, or a progress update.
 
-The goal-session recipe composes semantic reasoning and gives its final actor a
-scoped `record_action` tool. To start an engineer, the actor calls
-`record_action` with the `SpawnEngineer` variant. Rust validates and admits the
-typed request, commits the terminal, claim, and durable effect job, and then
-launches the engineer through the outbox dispatcher.
+The goal-session brain owns the judgment. Rust owns the rails:
 
-No Rust component reads recipe or agent prose to decide whether to spawn.
+- build the prompt input from known daemon state;
+- invoke the recipe-backed brain through structured subprocess arguments;
+- validate the response contract;
+- spawn the engineer or record no action;
+- surface invalid output as a visible failure.
+
+For the design rationale, see
+[prompt-owned OODA semantics and thin Rust rails](../concepts/steerable-ooda-daemon.md).
 
 ## Prerequisites
 
-- Simard installed through `simard install`;
-- a provider configured in `$SIMARD_HOME/config.toml`;
-- the goal-session recipe and capability policy installed under
-  `$SIMARD_HOME/prompt_assets`;
-- an enabled engineer base type;
-- user-level `simard-ooda.service` for live operation.
+- Simard installed through the canonical installer path:
 
-The capability policy grants `record_action.spawn_engineer` to the authenticated
-goal-session actor for governed repositories. It does not grant direct merge or
-deployment.
+  ```bash
+  npx github:rysweet/Simard install
+  ```
 
-There is no typed-to-parser fallback after a typed cycle starts.
+  or, for a local release candidate:
 
-## Add an actionable goal
+  ```bash
+  cargo build --release
+  ./target/release/simard install
+  ```
 
-```text
-simard goal add 1 \
-  "Implement issue #4052 and finish when the typed OODA path is verified" \
-  --repo rysweet/Simard
+- A configured LLM provider in `$SIMARD_HOME/config.toml` or through
+  `SIMARD_LLM_PROVIDER`.
+- Recipe assets installed under `$SIMARD_HOME/prompt_assets` by `simard install`.
+- An engineer agent available through `SIMARD_ENGINEER_AGENT`. The default is
+  `copilot`; `rustyclawd` is also accepted.
+
+## 1. Confirm the recipe-backed brain is active
+
+Check the installed daemon logs:
+
+```bash
+SIMARD_HOME="${SIMARD_HOME:-$HOME/.simard}"
+journalctl --user -u simard-ooda.service -n 100 --no-pager
+grep "RecipeBrain" "$SIMARD_HOME/ooda.log"
 ```
 
-The goal text remains semantic input. Rust does not extract the issue number or
-infer an action from it.
-
-## Run a bounded cycle
-
-Stop the service to avoid concurrent cycles, then run one foreground cycle:
+The log should name recipe-backed brain phases:
 
 ```text
-systemctl --user stop simard-ooda.service
+[simard] OODA daemon: brain = RecipeBrain (recipe-runner-rs backed, engineer-lifecycle)
+[simard] OODA daemon: decide_brain = RecipeBrain (recipe-runner-rs backed, decide)
+[simard] OODA daemon: orient_brain = RecipeBrain (recipe-runner-rs backed, orient)
+```
+
+If the log contains `DEGRADED`, fix provider, recipe-runner, or prompt-asset
+configuration before judging OODA behavior. A degraded fallback is visible by
+design and is not the healthy architecture.
+
+## 2. Configure the engineer runner
+
+Set the engineer agent in the user systemd environment when the daemon runs as a
+service:
+
+```bash
+systemctl --user import-environment SIMARD_ENGINEER_AGENT
+systemctl --user restart simard-ooda.service
+```
+
+Examples:
+
+```bash
+export SIMARD_ENGINEER_AGENT=copilot
+systemctl --user import-environment SIMARD_ENGINEER_AGENT
+systemctl --user restart simard-ooda.service
+```
+
+```bash
+export SIMARD_ENGINEER_AGENT=rustyclawd
+systemctl --user import-environment SIMARD_ENGINEER_AGENT
+systemctl --user restart simard-ooda.service
+```
+
+For per-cycle parallelism, prefer `SIMARD_OODA_MAX_CONCURRENT`:
+
+```bash
+export SIMARD_OODA_MAX_CONCURRENT=12
+systemctl --user import-environment SIMARD_OODA_MAX_CONCURRENT
+systemctl --user restart simard-ooda.service
+```
+
+`SIMARD_MAX_CONCURRENT_ACTIONS` remains a legacy fallback only when
+`SIMARD_OODA_MAX_CONCURRENT` is unset. Raising the ceiling only permits more
+independent goal coverage; resource admission and overlap gates still bound
+actual spawns.
+
+## 3. Add a bounded goal
+
+Create a goal with a concrete done condition:
+
+```bash
+simard goal add 2 "update OODA documentation to describe prompt-owned semantics and thin Rust rails"
+```
+
+For work in another governed repository, pass the repo slug:
+
+```bash
+simard goal add 2 "fix amplihack-rs issue #808; done when the fix is merged" --repo amplihack-rs
+```
+
+The OODA daemon reads the goal board on its next cycle. For a foreground smoke
+test, run one bounded cycle:
+
+```bash
+SIMARD_HOME="${SIMARD_HOME:-$HOME/.simard}"
 "$SIMARD_HOME/bin/simard" ooda run --cycles=1 "$SIMARD_HOME"
 ```
 
-The recipe performs:
+## 4. Understand the goal-session response contract
 
-1. Observe gathers typed state and semantic context.
-2. Orient receives Observe output unchanged.
-3. Decide receives Orient output unchanged.
-4. The goal-session actor receives Decide output unchanged.
-5. The actor invokes exactly one terminal capability.
-6. The runner verifies one durable terminal before reporting success.
+The goal-session prompt at
+`prompt_assets/simard/goal_session_objective.md` must instruct the brain to emit
+one explicit response shape before this planned contract is considered
+implemented.
 
-For an engineer action, `record_action` carries a typed repository, base type,
-permissions, claim, and byte-preserved task. The handler:
-
-1. binds the authenticated actor and session;
-2. loads the server-bound cycle and goal and rejects any target mismatch;
-3. validates a safe, non-empty request ID in the terminal ledger;
-4. validates the closed base-type enum;
-5. authorizes the requested permission subset against policy and the exact
-   bound repository;
-6. applies concurrency, disk, and active-claim admission;
-7. commits the terminal, engineer claim, and outbox job
-   atomically;
-8. leases and launches the effect from the outbox;
-9. records completion or retry using the effect ID, lease owner, and lease
-   generation while the lease remains current.
-
-The engineer receives scoped Copilot adapters. `process_exec` uses the
-transactionally capped Simard process broker; the unrestricted shell adapter is
-not exposed. Typed launches do not add `--allow-all-tools`,
-`--allow-all-paths`, or `COPILOT_ALLOW_ALL`.
-
-## Verify the durable result
-
-List recent terminals:
+### Spawn an engineer
 
 ```text
-simard ooda outcomes list --state-root "$SIMARD_STATE_ROOT" --limit 10 |
-  jq '.outcomes[] |
-    {
-      request_id,
-      cycle_id,
-      goal_id,
-      kind,
-      action: .payload.action.kind,
-      admission: .payload.admission
-    }'
+ACTION: SPAWN_ENGINEER
+TASK:
+Check out PR #4042, fix confirmed quality-audit findings only, update the PR
+body with merge-readiness evidence, wait for green checks, then merge through
+`simard merge-pr`.
+PROGRESS: 70
 ```
 
-A successful spawn has:
+What happens:
 
-```json
-{
-  "kind": "action",
-  "payload": {
-    "action": {
-      "kind": "spawn_engineer"
-    },
-    "admission": {
-      "policy_revision": "goal-session-policy-v1"
-    }
-  },
-  "effect": {
-    "state": "succeeded"
-  }
-}
-```
+1. Rust validates that `ACTION: SPAWN_ENGINEER` is the only action marker.
+2. Rust requires `TASK:` and reads the prose after it as the engineer objective.
+3. Rust applies `PROGRESS: 70` to the goal if present and valid.
+4. Rust starts the configured engineer agent with the task prose.
 
-Confirm the linked engineer:
+The engineer objective is intentionally prose. The brain can cite PR numbers,
+issue numbers, files, commands, or acceptance criteria without forcing Rust to
+understand the semantics.
+
+### Take no action
 
 ```text
-simard engineer list --json |
-  jq '.engineers[] | {session_id, goal_id, claim_key, state}'
+NO ACTION
+REASON: engineer simard-4042-finalizer is already repairing the PR branch.
+PROGRESS: 80
 ```
 
-Recipe stdout and logs can explain the reasoning, but they are not evidence that
-an engineer was started. The ledger record and linked engineer record are.
+What happens:
 
-## Interpret other terminals
+1. Rust validates that `NO ACTION` is on its own line and no spawn marker is
+   present.
+2. Rust requires `REASON:` and records that reason as the cycle outcome.
+3. Rust applies `PROGRESS: 80` if present and valid.
+4. No engineer subprocess is spawned.
 
-The actor may instead invoke:
+Use no-action when another engineer is already working, a real external blocker
+exists, or the cycle only needs to record a progress assessment.
 
-| Tool | Meaning |
+## 5. Recognize invalid output
+
+Invalid goal-session output fails the cycle visibly. It is not converted into a
+spawn, a no-op, or a fake progress update.
+
+| Output | Why it fails |
 | --- | --- |
-| `record_no_action` | No machine action is useful in this cycle. |
-| `record_blocked` | The goal cannot proceed until a typed blocker changes. |
-| `record_completed` | The semantic done condition is met and required typed evidence passed. |
+| Empty or whitespace-only response | There is no action contract to execute. |
+| Prose with no `ACTION: SPAWN_ENGINEER` or `NO ACTION` marker | Rust would have to guess intent. |
+| Both `ACTION: SPAWN_ENGINEER` and `NO ACTION` | Conflicting actions. |
+| `ACTION: SPAWN_ENGINEER` without `TASK:` | There is no engineer objective. |
+| `NO ACTION` without `REASON:` | There is no auditable no-action reason. |
+| `PROGRESS: 125` | Progress must be `0..=100`. |
+| Two different `PROGRESS:` values | Ambiguous state mutation. |
+| Unknown action marker | The prompt and rails are out of sync. |
 
-These are explicit actor decisions, not substitutes for a failed spawn.
+When this happens, inspect the daemon log:
 
-## Enable live operation after cutover
+```bash
+SIMARD_HOME="${SIMARD_HOME:-$HOME/.simard}"
+journalctl --user -u simard-ooda.service -n 100 --no-pager
+tail -n 100 "$SIMARD_HOME/ooda.log"
+```
+
+Fix the prompt or recipe contract. Do not add Rust keyword parsing to guess what
+the brain "probably meant". Until the strict parser lands, the existing
+compatibility path may accept non-empty free-form prose; that is not the target
+behavior described by this guide.
+
+## 6. Drive a PR to merge and deployment
+
+When an OODA-spawned engineer opens or updates a Simard PR, the goal-session
+brain should keep the next cycle focused on landing that PR instead of opening a
+duplicate. A merge task should instruct the engineer to:
 
 ```text
-systemctl --user start simard-ooda.service
-systemctl --user status simard-ooda.service --no-pager
+ACTION: SPAWN_ENGINEER
+TASK:
+Drive PR #4042 to merge-readiness. Confirm checks are green, resolve blocking
+review comments, update the PR body with evidence, merge through
+`simard merge-pr 4042`, then run the standard installer deployment path from
+the merged main branch and verify the installed binary is healthy.
+PROGRESS: 90
 ```
+
+The merge must use Simard's gated merge authority:
+
+```bash
+simard merge-pr 4042
+```
+
+After a Simard PR is merged, deploy the installed binary and assets through the
+standard installer rail:
+
+```bash
+git checkout main
+git pull --ff-only
+cargo build --release
+./target/release/simard install
+systemctl --user status simard-ooda.service --no-pager
+"$HOME/.simard/bin/simard" status --json
+```
+
+The install step copies the new binary and prompt assets to `SIMARD_HOME`,
+reloads user systemd, and restarts the OODA and Signal units. Do not leave the
+daemon running an old worktree binary after a merge.
+
+## Configuration reference
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `SIMARD_HOME` | `$HOME/.simard` | Install root, state root, service working directory, prompt-asset location. |
+| `SIMARD_LLM_PROVIDER` | config file value | Selects the provider used by prompt-driven brains. |
+| `SIMARD_ENGINEER_AGENT` | `copilot` | Selects the subordinate engineer agent; valid values are `copilot` and `rustyclawd`. |
+| `SIMARD_OODA_MAX_CONCURRENT` | `24` | Preferred OODA per-cycle goal coverage ceiling, range `1..=64`. |
+| `SIMARD_MAX_CONCURRENT_ACTIONS` | `24` | Legacy fallback only when `SIMARD_OODA_MAX_CONCURRENT` is unset. |
 
 ## Troubleshooting
 
-### The cycle reports `missing_terminal`
+### No engineer spawned
 
-The actor returned without invoking a terminal capability. The cycle failed.
-Fix the recipe or actor prompt. Do not add an output parser or convert the result
-to no-action.
+Check whether the brain emitted `NO ACTION`, whether an engineer is already in
+flight for the goal, and whether the response failed validation:
 
-### The tool reports `permission_denied`
+```bash
+SIMARD_HOME="${SIMARD_HOME:-$HOME/.simard}"
+tail -n 100 "$SIMARD_HOME/ooda.log"
+simard goal list
+```
 
-Inspect the installed capability policy and authenticated session identity.
-Grant only the missing repository/capability scope, then start a new cycle with
-a new stable request ID.
+If the outcome is no-action with a real reason, no subprocess should exist. If
+the outcome is an invalid contract, fix the prompt or recipe output.
 
-### The effect reports an unsupported base type
+### Engineer agent selection looks wrong
 
-Use `copilot`. The wire enum also accepts `rusty_clawd`, but the live typed
-effect executor currently supports only Copilot.
+Confirm the environment visible to the user systemd manager:
 
-### Admission rejects a spawn
+```bash
+systemctl --user show-environment | grep '^SIMARD_ENGINEER_AGENT='
+```
 
-Admission rejection fails the action attempt and does not create a terminal.
-Inspect the cycle error for disk, concurrency, or active-claim rejection. It
-does not silently become no-action.
+Then re-import and restart:
 
-### The recipe or tool fails
+```bash
+export SIMARD_ENGINEER_AGENT=copilot
+systemctl --user import-environment SIMARD_ENGINEER_AGENT
+systemctl --user restart simard-ooda.service
+```
 
-Inspect the daemon error and, if a terminal committed, fetch it with `simard
-ooda outcomes get`. There is no `ooda executions list` command.
+### OODA behavior changed after editing prompts
 
-### The action was replayed
+Reinstall after changing packaged prompt or recipe assets:
 
-An identical terminal request ID and fingerprint return the existing outcome.
-Different terminal arguments with the same ID fail with an idempotency conflict.
-Generate a new request ID only for a genuinely new action attempt.
+```bash
+cargo build --release
+./target/release/simard install
+```
+
+The live service reads installed assets under `SIMARD_HOME`, not arbitrary files
+from a worktree.
 
 ## See also
 
-- [Typed-capability OODA architecture](../architecture/typed-ooda-loop.md)
-- [OODA capability API](../reference/ooda-capability-api.md)
-- [Tutorial: complete a typed OODA cycle](../tutorials/complete-a-typed-ooda-cycle.md)
-- [Deploy and roll back typed OODA](../operations/deploy-and-roll-back-typed-ooda.md)
+- [Concept: prompt-owned OODA semantics and thin Rust rails](../concepts/steerable-ooda-daemon.md)
+- [How to run the OODA daemon](./run-ooda-daemon.md)
+- [Simard CLI reference](../reference/simard-cli.md)
+- [OODA coverage parallelism ceiling](../reference/ooda-coverage-parallelism-ceiling.md)

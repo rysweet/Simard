@@ -303,101 +303,14 @@ impl EffectExecutor for LiveGoalSessionEffects<'_, '_> {
         }
         match &job.action {
             Action::SpawnEngineer(spawn) => self.spawn_engineer(&job.goal_id, spawn),
-            Action::RequestMerge(merge) => self.request_merge(job, merge),
-            Action::RequestDeploy(deploy) => self.request_deploy(job, deploy),
-            Action::FileIssue(issue) => self.file_issue(job, issue),
+            _ => Err(EffectExecutionError::permanent(
+                "goal-session policy permits only spawn-engineer effects",
+            )),
         }
     }
 }
 
 impl LiveGoalSessionEffects<'_, '_> {
-    fn file_issue(
-        &self,
-        job: &EffectJob,
-        issue: &crate::typed_ooda::FileIssueAction,
-    ) -> Result<EffectResult, EffectExecutionError> {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-
-        let title = std::str::from_utf8(issue.title.as_bytes()).map_err(|error| {
-            EffectExecutionError::permanent(format!("issue title is not valid UTF-8: {error}"))
-        })?;
-        let body = std::str::from_utf8(issue.body.as_bytes()).map_err(|error| {
-            EffectExecutionError::permanent(format!("issue body is not valid UTF-8: {error}"))
-        })?;
-        self.require_goal_repository(&job.goal_id, &issue.repository)?;
-        let marker = format!("<!-- simard-idempotency:{} -->", job.request_id);
-        if let Some(number) = find_existing_issue(&issue.repository, &marker)? {
-            return Ok(EffectResult::Succeeded {
-                evidence: vec![EvidenceRef::Issue {
-                    repository: issue.repository.clone(),
-                    number,
-                }],
-            });
-        }
-        let body = if body.is_empty() {
-            marker
-        } else {
-            format!("{body}\n\n{marker}")
-        };
-        let request = serde_json::to_vec(&serde_json::json!({
-            "title": title,
-            "body": body,
-            "labels": issue.labels,
-        }))
-        .map_err(|error| {
-            EffectExecutionError::permanent(format!("issue request encoding failed: {error}"))
-        })?;
-        let endpoint = format!(
-            "repos/{}/{}/issues",
-            issue.repository.owner, issue.repository.name
-        );
-        let mut child = Command::new("gh")
-            .args(["api", "--method", "POST", &endpoint, "--input", "-"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| {
-                EffectExecutionError::permanent(format!(
-                    "gh issue request failed to start: {error}"
-                ))
-            })?;
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| EffectExecutionError::permanent("gh issue stdin was unavailable"))?
-            .write_all(&request)
-            .map_err(|error| {
-                EffectExecutionError::permanent(format!("gh issue request write failed: {error}"))
-            })?;
-        let output = child.wait_with_output().map_err(|error| {
-            EffectExecutionError::permanent(format!("gh issue request wait failed: {error}"))
-        })?;
-        if !output.status.success() {
-            return Err(EffectExecutionError::permanent(format!(
-                "gh issue request exited with {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-        #[derive(serde::Deserialize)]
-        struct CreatedIssue {
-            number: u64,
-        }
-        let created: CreatedIssue = serde_json::from_slice(&output.stdout).map_err(|error| {
-            EffectExecutionError::permanent(format!(
-                "GitHub issue response was invalid application data: {error}"
-            ))
-        })?;
-        Ok(EffectResult::Succeeded {
-            evidence: vec![EvidenceRef::Issue {
-                repository: issue.repository.clone(),
-                number: created.number,
-            }],
-        })
-    }
-
     fn spawn_engineer(
         &self,
         goal_id: &str,
@@ -495,7 +408,6 @@ impl LiveGoalSessionEffects<'_, '_> {
             role: AgentRole::Engineer,
             worktree_path: worktree.path().to_path_buf(),
             current_depth,
-            requested_permissions: Some(spawn.requested_permissions.clone()),
         };
         let handle = match spawn_subordinate(&config) {
             Ok(handle) => handle,
@@ -533,152 +445,6 @@ impl LiveGoalSessionEffects<'_, '_> {
         })
     }
 
-    fn request_merge(
-        &self,
-        job: &EffectJob,
-        merge: &crate::typed_ooda::RequestMergeAction,
-    ) -> Result<EffectResult, EffectExecutionError> {
-        require_privileged_approval(job)?;
-        self.require_goal_repository(&job.goal_id, &merge.pull_request.repository)?;
-        if merge.strategy != "squash" {
-            return Err(EffectExecutionError::permanent(
-                "the privileged merge executor supports only squash",
-            ));
-        }
-        let repository = format!(
-            "{}/{}",
-            merge.pull_request.repository.owner, merge.pull_request.repository.name
-        );
-        let number = merge.pull_request.number.to_string();
-        let head = std::process::Command::new("gh")
-            .args([
-                "pr",
-                "view",
-                &number,
-                "--repo",
-                &repository,
-                "--json",
-                "headRefOid,state,mergeCommit",
-            ])
-            .output()
-            .map_err(|error| {
-                EffectExecutionError::retryable(format!("merge head lookup failed: {error}"))
-            })?;
-        if !head.status.success() {
-            return Err(EffectExecutionError::retryable(format!(
-                "merge head lookup exited with {}: {}",
-                head.status,
-                String::from_utf8_lossy(&head.stderr)
-            )));
-        }
-        #[derive(serde::Deserialize)]
-        struct MergeState {
-            #[serde(rename = "headRefOid")]
-            head_ref_oid: String,
-            state: String,
-            #[serde(rename = "mergeCommit")]
-            merge_commit: Option<MergeCommit>,
-        }
-        #[derive(serde::Deserialize)]
-        struct MergeCommit {
-            oid: String,
-        }
-        let state: MergeState = serde_json::from_slice(&head.stdout).map_err(|error| {
-            EffectExecutionError::retryable(format!(
-                "merge head lookup returned invalid data: {error}"
-            ))
-        })?;
-        if state.head_ref_oid != merge.expected_head_sha {
-            return Err(EffectExecutionError::permanent(format!(
-                "pull request head changed: approved {}, actual {}",
-                merge.expected_head_sha, state.head_ref_oid
-            )));
-        }
-        if state.state == "MERGED" {
-            let evidence = state
-                .merge_commit
-                .map(|commit| EvidenceRef::Commit {
-                    repository: merge.pull_request.repository.clone(),
-                    sha: commit.oid,
-                })
-                .into_iter()
-                .collect();
-            return Ok(EffectResult::Succeeded { evidence });
-        }
-        let client = crate::stewardship::RealPrGhClient::new();
-        match crate::stewardship::merge_pr_if_merge_ready(
-            u32::try_from(merge.pull_request.number).map_err(|_| {
-                EffectExecutionError::permanent("pull request number exceeds supported range")
-            })?,
-            &repository,
-            &client,
-        )
-        .map_err(|error| {
-            EffectExecutionError::retryable(format!("privileged merge executor failed: {error}"))
-        })? {
-            crate::stewardship::MergeOutcome::Merged { .. } => {
-                Ok(EffectResult::Succeeded { evidence: vec![] })
-            }
-            crate::stewardship::MergeOutcome::Refused { reason, .. } => {
-                Err(EffectExecutionError::permanent(format!(
-                    "privileged merge gates refused: {reason}"
-                )))
-            }
-        }
-    }
-
-    fn request_deploy(
-        &self,
-        job: &EffectJob,
-        deploy: &crate::typed_ooda::RequestDeployAction,
-    ) -> Result<EffectResult, EffectExecutionError> {
-        require_privileged_approval(job)?;
-        if deploy.environment.name != "production" {
-            return Err(EffectExecutionError::permanent(
-                "privileged deploy executor only accepts the production environment",
-            ));
-        }
-        if env!("SIMARD_GIT_HASH") == deploy.artifact.source_commit {
-            let running = std::env::current_exe().map_err(|error| {
-                EffectExecutionError::permanent(format!(
-                    "running deploy artifact could not be resolved: {error}"
-                ))
-            })?;
-            let bytes = std::fs::read(&running).map_err(|error| {
-                EffectExecutionError::permanent(format!(
-                    "running deploy artifact could not be hashed: {error}"
-                ))
-            })?;
-            use sha2::Digest;
-            let actual = format!("sha256:{:x}", sha2::Sha256::digest(bytes));
-            if actual == deploy.artifact.digest {
-                return Ok(EffectResult::Succeeded { evidence: vec![] });
-            }
-            return Err(EffectExecutionError::permanent(format!(
-                "running commit matches but artifact digest differs: approved {}, running {}",
-                deploy.artifact.digest, actual
-            )));
-        }
-        let install_path = std::env::current_exe().map_err(|error| {
-            EffectExecutionError::permanent(format!(
-                "deploy executor binary resolution failed: {error}"
-            ))
-        })?;
-        crate::self_deploy::SelfDeployOrchestrator::with_source(
-            crate::safe_update::UpdateConfig::default(),
-            Box::new(crate::self_deploy::SystemdOrExecRestarter::new()),
-            deploy.artifact.source_commit.clone(),
-            install_path,
-            Box::new(crate::self_deploy::GitSourcePreparer::new()),
-        )
-        .with_expected_artifact_digest(deploy.artifact.digest.clone())
-        .run()
-        .map_err(|error| {
-            EffectExecutionError::retryable(format!("privileged deploy executor failed: {error}"))
-        })?;
-        Ok(EffectResult::Succeeded { evidence: vec![] })
-    }
-
     fn require_goal_repository(
         &self,
         goal_id: &str,
@@ -704,74 +470,6 @@ impl LiveGoalSessionEffects<'_, '_> {
         }
         Ok(())
     }
-}
-
-fn require_privileged_approval(job: &EffectJob) -> Result<(), EffectExecutionError> {
-    let approval = job.approval.as_ref().ok_or_else(|| {
-        EffectExecutionError::permanent("privileged effect has no server-issued approval")
-    })?;
-    let hash = crate::typed_ooda::action_payload_hash(&job.action).map_err(|error| {
-        EffectExecutionError::permanent(format!("privileged payload hashing failed: {error}"))
-    })?;
-    if approval.effect_id != job.effect_id
-        || approval.outcome_id != job.outcome_id
-        || approval.action_kind != job.action.kind()
-        || approval.canonical_payload_hash != hash
-        || approval.repository != job.repository
-    {
-        return Err(EffectExecutionError::permanent(
-            "privileged approval binding does not match the dispatched effect",
-        ));
-    }
-    let authority = crate::typed_ooda::ApprovalAuthority::from_environment().map_err(|error| {
-        EffectExecutionError::retryable(format!(
-            "privileged approval verifier is unavailable: {error}"
-        ))
-    })?;
-    if !authority.verifies(approval).map_err(|error| {
-        EffectExecutionError::permanent(format!("privileged approval verification failed: {error}"))
-    })? {
-        return Err(EffectExecutionError::permanent(
-            "privileged approval signature or principal is invalid",
-        ));
-    }
-    Ok(())
-}
-
-fn find_existing_issue(
-    repository: &RepositoryRef,
-    marker: &str,
-) -> Result<Option<u64>, EffectExecutionError> {
-    let repo = format!("{}/{}", repository.owner, repository.name);
-    let search = format!("{marker} in:body");
-    let output = std::process::Command::new("gh")
-        .args([
-            "issue", "list", "--repo", &repo, "--state", "all", "--search", &search, "--json",
-            "number", "--limit", "1",
-        ])
-        .output()
-        .map_err(|error| {
-            EffectExecutionError::retryable(format!(
-                "GitHub issue idempotency lookup failed to start: {error}"
-            ))
-        })?;
-    if !output.status.success() {
-        return Err(EffectExecutionError::retryable(format!(
-            "GitHub issue idempotency lookup exited with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-    #[derive(serde::Deserialize)]
-    struct ExistingIssue {
-        number: u64,
-    }
-    let issues: Vec<ExistingIssue> = serde_json::from_slice(&output.stdout).map_err(|error| {
-        EffectExecutionError::retryable(format!(
-            "GitHub issue idempotency lookup returned invalid data: {error}"
-        ))
-    })?;
-    Ok(issues.first().map(|issue| issue.number))
 }
 
 fn typed_ooda_state_root() -> PathBuf {

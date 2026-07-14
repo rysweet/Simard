@@ -420,7 +420,6 @@ fn dispatch_spawn_command(
         role: AgentRole::Engineer,
         worktree_path: PathBuf::from(&worktree_path),
         current_depth: depth,
-        requested_permissions: None,
     };
 
     let handle = spawn_subordinate(&config)?;

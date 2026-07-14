@@ -1,173 +1,361 @@
 ---
 title: Simard installer reference
-description: Canonical binary, asset, user-systemd, verified-backup, and rollback contract for simard install.
-last_updated: 2026-07-14
+description: Contract for the canonical `simard install` deployment path, including SIMARD_HOME layout, prompt assets, user systemd units, atomic replacement, rollback artifacts, update integration, and dry-run/test controls.
+last_updated: 2026-07-09
 review_schedule: as-needed
 owner: simard
 doc_type: reference
 related:
-  - ../operations/deploy-and-roll-back-typed-ooda.md
   - ../howto/run-ooda-daemon.md
-  - ./ooda-capability-api.md
+  - ./simard-cli.md
+  - ./npx-npm-install.md
+  - ../howto/set-up-the-signal-channel.md
 ---
 
 # Simard installer reference
 
-`simard install` deploys the currently executing binary, the complete prompt
-asset tree, and two user-level systemd units. Before replacing live files it
-creates a digest-verified backup manifest for the surfaces it owns or may need
-to restore.
+`simard install` is the canonical deployment rail for a running Simard host. It
+installs the currently executing Simard binary, installs matching prompt assets,
+writes user-level systemd units for the OODA and Signal services, and activates
+those services through `systemctl --user`.
+
+The operator rule is: do not deploy Simard by copying a binary over
+`~/.simard/bin/simard`, swapping files from a worktree, or relying on an ad-hoc
+`cargo build` path as the live service path. Build or download whatever binary
+you intend to deploy, then run that binary's installer:
+
+```bash
+./target/release/simard install
+```
+
+For release installs through npm:
+
+```bash
+npx github:rysweet/Simard install
+```
 
 ## Command
 
 ```text
-simard install \
-  [--simard-home PATH] \
-  [--systemd-user-dir PATH] \
-  [--systemctl PATH] \
-  [--dry-run]
-
-simard install \
-  --rollback MANIFEST \
-  [--simard-home PATH] \
-  [--systemd-user-dir PATH] \
-  [--systemctl PATH]
+simard install [--simard-home PATH] [--dry-run] [--systemd-user-dir PATH] [--systemctl PATH]
 ```
 
 | Option | Purpose |
 | --- | --- |
-| `--simard-home PATH` | Absolute install root. Overrides `SIMARD_HOME`. |
-| `--systemd-user-dir PATH` | User unit directory. Defaults to `$XDG_CONFIG_HOME/systemd/user` or `$HOME/.config/systemd/user`. |
-| `--systemctl PATH` | `systemctl` executable override. |
-| `--health-check PATH` | Override the JSON health checker; it must exit zero and return `{"healthy":true}`. |
-| `--dry-run` | Validate inputs and print the install and activation plan without mutation. |
-| `--rollback MANIFEST` | Restore one verified backup. Cannot be combined with `--dry-run`. |
-
-There is no `--health-timeout` option. The default checker is the installed
-binary's `self-health --json` command.
+| `--simard-home PATH` | Install root. Overrides `SIMARD_HOME`. Must be an absolute, non-empty path. |
+| `--dry-run` | Validate inputs and print the install plan without replacing live files or invoking `systemctl`. |
+| `--systemd-user-dir PATH` | User unit directory override. Intended for tests and isolated hosts. Defaults to `$XDG_CONFIG_HOME/systemd/user` or `$HOME/.config/systemd/user`. |
+| `--systemctl PATH` | `systemctl` executable override. Intended for hermetic tests with a fake command. Defaults to `systemctl`. |
 
 ## Environment
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SIMARD_HOME` | `$HOME/.simard` | Install root. |
-| `XDG_CONFIG_HOME` | `$HOME/.config` | Default user-systemd base. |
-| `SIMARD_INSTALL_PROMPT_ASSETS_ROOT` | Auto-discovered | Preferred source for the prompt asset tree. |
-| `SIMARD_PROMPT_ASSET_ROOT` | Auto-discovered | Compatibility source. |
-| `SIMARD_PROMPT_ASSETS_DIR` | Auto-discovered | Compatibility source pointing to the root or `simard` directory. |
+| `SIMARD_HOME` | `$HOME/.simard` | Install root when `--simard-home` is not supplied. |
+| `XDG_CONFIG_HOME` | `$HOME/.config` | Base directory for the default user systemd unit directory. |
+| `SIMARD_INSTALL_PROMPT_ASSETS_ROOT` | Auto-discovered | Preferred prompt asset source root for packaged installs. Must contain `simard/ooda_orient.md` and `simard/recipes/ooda-orient.yaml`. |
+| `SIMARD_PROMPT_ASSET_ROOT` | Auto-discovered | Compatibility prompt asset source root with the same expected directory shape as `SIMARD_INSTALL_PROMPT_ASSETS_ROOT`. |
+| `SIMARD_PROMPT_ASSETS_DIR` | Auto-discovered | Compatibility prompt asset source. May point either at a root containing `simard/` or directly at the `simard/` asset directory; direct `simard/` values are normalized to their parent root. |
 
-The source must contain the typed goal-session recipe and policy:
+Precedence for the install root is:
+
+1. `--simard-home PATH`
+2. `SIMARD_HOME`
+3. `$HOME/.simard`
+
+Precedence for prompt asset source discovery is:
+
+1. `SIMARD_INSTALL_PROMPT_ASSETS_ROOT`
+2. `SIMARD_PROMPT_ASSET_ROOT`
+3. `SIMARD_PROMPT_ASSETS_DIR`
+4. `prompt_assets` under the current working directory
+5. `prompt_assets` under the compiled Cargo manifest directory
+
+The selected prompt asset source must contain both required files:
 
 ```text
-simard/recipes/goal-session-actor.yaml
-simard/policies/goal-session-capabilities.toml
+<source-root>/
+`- simard/
+   |- ooda_orient.md
+   `- recipes/
+      `- ooda-orient.yaml
 ```
 
-## Installed and protected surfaces
+If no candidate has that shape, `simard install` exits non-zero before staging or service activation and reports the checked environment variables and fallback roots.
+
+All installer paths are validated before any live mutation. Empty paths, relative paths, control characters, newlines, carriage returns, and unsafe systemd percent escapes are rejected. Rejection is fail-closed: the installer exits non-zero and does not activate services.
+
+## Installed layout
+
+For the default home, the installer owns this layout:
 
 ```text
-$SIMARD_HOME/
-|- bin/simard
+~/.simard/
+|- bin/
+|  `- simard
 |- prompt_assets/
+|- cognitive/
 |- config.toml
-|- state/
 |- .install.lock
 |- .install-staging/
 `- .install-backups/
-
-$XDG_CONFIG_HOME/systemd/user/
-|- simard-ooda.service
-`- simard-signal.service
 ```
 
-The installer writes the binary, prompt assets, and unit files. It does not
-rewrite `config.toml` or `state/`, but includes both in the pre-install backup
-and explicit rollback inventory.
+| Path | Owner | Notes |
+| --- | --- | --- |
+| `$SIMARD_HOME/bin/simard` | Installer | Live Simard binary used by the systemd units. Replaced only by atomic rename. |
+| `$SIMARD_HOME/prompt_assets/` | Installer | Prompt assets that match the installed binary. Installed as a staged tree, then swapped into place through the directory strategy below. |
+| `$SIMARD_HOME/.install.lock` | Installer | Per-`SIMARD_HOME` install lock. A second installer for the same home fails instead of racing live replacements. |
+| `$SIMARD_HOME/.install-staging/` | Installer | Private staging area for the current install attempt. |
+| `$SIMARD_HOME/.install-backups/` | Installer/operator | Previous binary backups and operator-created memory snapshots. |
+| `$SIMARD_HOME/cognitive/` | Runtime | Cognitive memory store. The installer does not delete or rewrite it. |
+| `$SIMARD_HOME/config.toml` | Operator/runtime | Runtime configuration. The installer does not rewrite operator config. |
 
-The canonical typed-OODA fixture/read API stores its ledger at
-`<state-root>/typed-ooda/outcomes.sqlite3`. That database is protected by the
-installer only when the selected state root is `$SIMARD_HOME/state`.
+The installer creates staging and backup directories with owner-only
+permissions on Unix hosts.
 
-## Backup manifest
+## User systemd units
 
-Before live replacement, a non-dry-run install writes:
+`simard install` writes two user-level systemd units:
 
-```text
-$SIMARD_HOME/.install-backups/install-<transaction>/manifest.json
-```
+| Unit | Command | Working directory |
+| --- | --- | --- |
+| `simard-ooda.service` | `$SIMARD_HOME/bin/simard ooda run` | `$SIMARD_HOME` |
+| `simard-signal.service` | `$SIMARD_HOME/bin/simard signal run` | `$SIMARD_HOME` |
 
-The version-1 manifest contains:
+The units never reference a source checkout, worktree, `target/`, or
+`worktrees/main`. `WorkingDirectory` is always the resolved `SIMARD_HOME`, so
+service behavior is independent of the directory where the installer was
+launched.
 
-- `transaction_id`;
-- `simard_home`;
-- one entry for `binary`, `prompt_assets`, `ooda_unit`, `signal_unit`,
-  `config`, canonical typed-OODA SQLite, and cognitive LadybugDB;
-- each destination and backup path;
-- whether the destination existed;
-- a SHA-256 digest for each existing file or directory tree.
-
-Rollback accepts only a manifest inside the selected
-`$SIMARD_HOME/.install-backups` tree, with the exact expected surface inventory
-and matching install root. Every backup digest is verified before restoration.
-
-Services are quiesced after their exact baseline is captured. Typed OODA uses
-SQLite's online backup API plus `integrity_check`. Cognitive memory uses a
-LadybugDB checkpoint snapshot and verifies it by opening and querying a fresh
-staged store.
-
-## Install sequence
-
-1. Resolve and validate install and unit paths.
-2. Resolve the executing binary and prompt asset source.
-3. Validate required assets and render unit files.
-4. For a dry run, print the plan and stop.
-5. Resolve `systemctl` and acquire the per-home install lock.
-6. Stage the binary and prompt assets.
-7. Snapshot and verify every rollback surface and service baseline.
-8. Replace the binary, prompt assets, and unit files.
-9. Run `systemctl --user daemon-reload`, enable both units, and restart both.
-10. Run the mandatory health check.
-11. On any activation or health error, stage and atomically restore the backup.
-    services.
-
-The binary and prompt asset candidates are staged before replacement. Unit
-files are written through temporary files and renamed into place.
-
-## Rollback behavior
-
-Explicit rollback:
-
-1. verifies the manifest location, version, install root, inventory, and backup
-   digests;
-2. removes each current destination;
-3. copies each previously existing backup into place;
-4. verifies the restored digest;
-5. leaves destinations that were absent before the install absent;
-6. reloads, enables, and restarts both services.
-
-Rollback is not an atomic multi-surface transaction. It restores surfaces in
-sequence and does not preserve the prior enabled/active service state. If a
-copy or later activation step fails, the command returns an error but does not
-automatically compensate earlier restored surfaces.
-
-## Dry run
+After successful staging and file replacement, activation runs:
 
 ```bash
-simard install \
-  --simard-home "$HOME/.simard" \
-  --systemd-user-dir "$HOME/.config/systemd/user" \
-  --dry-run
+systemctl --user daemon-reload
+systemctl --user enable simard-ooda.service
+systemctl --user enable simard-signal.service
+systemctl --user restart simard-ooda.service
+systemctl --user restart simard-signal.service
 ```
 
-Dry run validates paths and assets and prints planned file and systemd
-operations. It does not acquire the install lock, stage files, create a backup,
-replace files, or invoke `systemctl`.
+If any activation command fails, `simard install` exits non-zero and reports
+the failed command. It must not hide `systemctl` errors.
+
+### Service environment
+
+User systemd services do not reliably inherit the shell environment used to run
+the installer. Provider selection and credentials must come from durable Simard
+configuration or from user-manager environment imported intentionally, not from
+implicit shell state.
+
+Recommended provider settings belong in `$SIMARD_HOME/config.toml`. If a
+provider still requires an environment variable such as `ANTHROPIC_API_KEY`,
+import it into the user systemd manager before activation:
+
+```bash
+systemctl --user import-environment ANTHROPIC_API_KEY SIMARD_LLM_PROVIDER
+systemctl --user restart simard-ooda.service simard-signal.service
+```
+
+Generated unit files must not embed secrets.
+
+## Install flow
+
+The installer is ordered so a failed preflight or staging step cannot leave
+services pointed at a half-written binary or partial prompt tree.
+
+1. Resolve and validate `SIMARD_HOME` and the user systemd unit directory.
+2. Resolve the current executable: the binary running `simard install` is the binary being deployed.
+3. Render both systemd unit files in memory and validate their paths.
+4. Resolve the `systemctl` executable when activation is enabled.
+5. Acquire the per-`SIMARD_HOME` install lock for the live transaction.
+6. Stage the new binary and prompt assets under `.install-staging/`.
+7. Preserve the previous live binary under `.install-backups/` when one exists and differs from the new binary.
+8. Atomically rename the staged binary into `$SIMARD_HOME/bin/simard`.
+9. Replace `$SIMARD_HOME/prompt_assets/` with the staged asset tree using the prompt-assets swap strategy below.
+10. Atomically rename staged unit files into the user systemd directory.
+11. Print rollback guidance, including memory backup guidance, before any service restart.
+12. Reload, enable, and restart the user services unless `--dry-run` was supplied.
+
+The live binary must never be overwritten by copying into the final path. The
+only live-binary replacement operation is a rename from a fully staged file.
+
+### Prompt-assets swap strategy
+
+Directory replacement uses an explicit transaction rather than a recursive copy
+over the live tree:
+
+1. Stage the complete asset tree under `.install-staging/<transaction>/prompt_assets`.
+2. Rename the live `$SIMARD_HOME/prompt_assets` to a backup path under
+   `.install-backups/` when it exists.
+3. Rename the staged tree into `$SIMARD_HOME/prompt_assets`.
+4. Leave the previous tree available for operator rollback until cleanup.
+
+Recursive copy-over-live is not acceptable.
+
+## `simard update` integration
+
+`simard update` remains a separate self-update command today. The planned
+installer integration is for `simard update` to download and verify the release
+asset, then hand that verified binary and its prompt assets to the same installer
+transaction described here. That keeps release upgrades on the same staging,
+backup, systemd activation, and rollback rail as source-built installs.
+
+Until that integration lands, docs that describe `simard update` as replacing
+the current binary are describing the legacy self-update rail, not this host
+installer.
+
+## Idempotency
+
+The command is safe to rerun:
+
+```bash
+simard install
+simard install
+```
+
+Repeated runs converge on the same layout and unit contents. If the live
+binary already matches the current executable, the installer leaves it in place
+instead of creating unnecessary backup churn. If unit files or prompt assets
+differ, they are replaced through the same staging and rename flow.
+
+Service activation remains intentional on rerun: `daemon-reload`, `enable`, and
+`restart` are issued after a successful non-dry-run install so the running
+services use the installed binary and assets.
+
+## Rollback artifacts and memory backup guidance
+
+`simard install` preserves the previous live binary before swapping in a new
+one:
+
+```text
+$SIMARD_HOME/.install-backups/simard.<transaction-id>.bak
+```
+
+The backup is first written to a sibling temporary file and then renamed into
+that final path, so operators never see a partially written final backup.
+
+The installer does not rewrite cognitive memory, but operators should snapshot
+memory before a service swap when they need a rollback point for state as well
+as code. The installer will print this guidance before restarting services:
+
+```bash
+SIMARD_HOME="${SIMARD_HOME:-$HOME/.simard}"
+mkdir -p "$SIMARD_HOME/.install-backups"
+tar --ignore-failed-read -C "$SIMARD_HOME" \
+  -czf "$SIMARD_HOME/.install-backups/memory-before-install-$(date -u +%Y%m%dT%H%M%SZ).tar.gz" \
+  cognitive goals memory config.toml
+```
+
+Manual binary rollback uses rename operations, not copy-over-live:
+
+```bash
+SIMARD_HOME="${SIMARD_HOME:-$HOME/.simard}"
+BACKUP="$(ls -t "$SIMARD_HOME"/.install-backups/simard.*.bak | head -n 1)"
+
+systemctl --user stop simard-ooda.service simard-signal.service
+mv "$SIMARD_HOME/bin/simard" "$SIMARD_HOME/.install-backups/simard.failed.$(date -u +%Y%m%dT%H%M%SZ)"
+mv "$BACKUP" "$SIMARD_HOME/bin/simard"
+chmod 755 "$SIMARD_HOME/bin/simard"
+systemctl --user daemon-reload
+systemctl --user restart simard-ooda.service simard-signal.service
+```
+
+Full automated rollback is not part of `simard install`; the installer provides
+the preserved binary and the operator-visible state backup guidance needed to
+roll back deliberately.
+
+## Dry-run and hermetic tests
+
+Use `--dry-run` to validate the install plan without mutating live files or
+invoking `systemctl`:
+
+```bash
+simard install --dry-run --simard-home "$HOME/.simard"
+```
+
+Integration tests and CI should use temporary homes, temporary unit directories,
+and a fake `systemctl` executable:
+
+```bash
+tmp="$(mktemp -d)"
+mkdir -p "$tmp/bin" "$tmp/systemd/user"
+
+cat > "$tmp/bin/systemctl" <<'SH'
+#!/usr/bin/env sh
+printf '%s\n' "$*" >> "$SIMARD_FAKE_SYSTEMCTL_LOG"
+exit 0
+SH
+chmod 755 "$tmp/bin/systemctl"
+
+SIMARD_FAKE_SYSTEMCTL_LOG="$tmp/systemctl.log" \
+simard install \
+  --simard-home "$tmp/home" \
+  --systemd-user-dir "$tmp/systemd/user" \
+  --systemctl "$tmp/bin/systemctl"
+```
+
+The resulting temp tree should contain:
+
+```text
+$tmp/home/bin/simard
+$tmp/home/prompt_assets/
+$tmp/systemd/user/simard-ooda.service
+$tmp/systemd/user/simard-signal.service
+$tmp/systemctl.log
+```
+
+The generated unit files should use `$tmp/home` as `WorkingDirectory` and must not contain the repository checkout path.
 
 ## Failure contract
 
-The installer returns nonzero for invalid paths, missing assets, lock
-contention, staging or backup failure, manifest verification failure, file
-replacement/restoration failure, or a failed `systemctl` command.
+`simard install` must fail closed. It exits non-zero and skips service
+activation when any required step fails, including:
 
-Install, activation, transport, malformed-response, timeout, and unhealthy
-failures trigger automatic rollback. A rollback failure is reported separately.
+- invalid `SIMARD_HOME` or override paths
+- missing or non-executable `systemctl` when activation is enabled
+- failure to read the current executable
+- failure to acquire the per-`SIMARD_HOME` install lock
+- failure to stage the binary, prompt assets, or units
+- failure to preserve the previous binary
+- failure to atomically rename a staged live file into place
+- any non-zero `systemctl --user` command
+
+Dry-run mode never invokes `systemctl`, even if `--systemctl` points at a real
+executable. Executable existence checks are deferred when activation is
+disabled.
+
+## Troubleshooting
+
+### Confirm what is installed
+
+```bash
+SIMARD_HOME="${SIMARD_HOME:-$HOME/.simard}"
+"$SIMARD_HOME/bin/simard" status
+ls "$SIMARD_HOME/prompt_assets"
+```
+
+### Inspect service state
+
+```bash
+systemctl --user status simard-ooda.service
+systemctl --user status simard-signal.service
+journalctl --user -u simard-ooda.service -n 100 --no-pager
+journalctl --user -u simard-signal.service -n 100 --no-pager
+```
+
+### Verify unit paths
+
+```bash
+systemctl --user cat simard-ooda.service
+systemctl --user cat simard-signal.service
+```
+
+Both units should show:
+
+```text
+WorkingDirectory=/home/you/.simard
+ExecStart=/home/you/.simard/bin/simard ...
+```
+
+If a unit references a source checkout, a worktree, `target/`, or `worktrees/main`, rerun `simard install` from the binary you intend to deploy.
