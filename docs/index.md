@@ -1,7 +1,7 @@
 ---
 title: Simard documentation
-description: Start here for the shipped `simard` operator CLI, planned typed-capability OODA design, the repo-grounded engineer loop, runtime contracts, and benchmark flow.
-last_updated: 2026-07-09
+description: Start here for the shipped `simard` operator CLI, typed-capability OODA execution, verified-backup installation, the repo-grounded engineer loop, runtime contracts, and benchmark flow.
+last_updated: 2026-07-14
 review_schedule: as-needed
 owner: simard
 ---
@@ -24,14 +24,10 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 
 ## Start here
 
-!!! warning "Typed OODA documentation is planned"
-    The typed-capability pages specify the feature to build. Current releases
-    still use the parser-route documentation until a verified route cutover.
-
-- [Planned typed-capability OODA architecture](./architecture/typed-ooda-loop.md) - Target semantic/typed boundary, durable effects, migration, and route rollback.
-- [Planned OODA capability API](./reference/ooda-capability-api.md) - Target terminal tools, schemas, authorization, idempotency, records, and configuration.
-- [Planned tutorial: Complete a typed OODA cycle](./tutorials/complete-a-typed-ooda-cycle.md) - Deterministic acceptance fixture for one action and one no-action cycle.
-- [Planned typed OODA migration runbook](./operations/deploy-and-roll-back-typed-ooda.md) - Shadow, cutover, and route-level rollback requirements.
+- [Typed-capability OODA architecture](./architecture/typed-ooda-loop.md) - Semantic/typed boundary, actor-session authority, durable terminals, effect outbox, and the explicit remaining migration boundary.
+- [OODA capability API](./reference/ooda-capability-api.md) - Terminal schemas, authorization, replay, effect leases, current limitations, errors, and policy configuration.
+- [Tutorial: Complete a typed OODA cycle](./tutorials/complete-a-typed-ooda-cycle.md) - Deterministic action, no-action, replay, and conflict examples.
+- [Deploy and roll back typed OODA](./operations/deploy-and-roll-back-typed-ooda.md) - Verified filesystem backup, explicit health verification, and deliberate rollback.
 - [Tutorial: Run your first local session](./tutorials/run-your-first-local-session.md) - Exercise the local runtime through the primary CLI.
 - [Simard installer reference](./reference/simard-installer.md) - Shipped deployment contract for the binary, prompt assets, user systemd units, rollback artifacts, and dry-run controls.
 - [How to move from terminal recipes into engineer runs](./howto/move-from-terminal-recipes-into-engineer-runs.md) - Start with a discoverable terminal recipe, then continue into the repo-grounded engineer loop through the same explicit state root.
@@ -68,7 +64,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 
 - [How to run the OODA daemon](./howto/run-ooda-daemon.md) - Planned installer-managed OODA and Signal service deployment through `simard install`.
 - [How to verify recalled memory is reaching decisions](./howto/verify-recall-reaches-decisions.md) - The operator playbook for #2942: read the Memory-tab **"Recall reaching decisions"** panel (attach-rate + avg facts/procedures/bytes injected per decision), watch the per-turn `simard::enrichment` `INFO`/degrade-`WARN` lines, and run `simard gym enrichment-ablation` (recall-on vs recall-off) for a reproducible yes/no on "recalled memory influences decisions". See the [concept](./concepts/enrichment-observability.md) and the [API reference](./reference/enrichment-observability-api.md).
-- [Planned: How OODA spawns engineer agents](./howto/spawn-engineers-from-ooda-daemon.md) - Target operation of the typed goal-session action path.
+- [How OODA spawns engineer agents](./howto/spawn-engineers-from-ooda-daemon.md) - Typed Copilot actions, scoped permissions, durable effects, and current process-authority limits.
 - [Concept: Self-diagnose on step error — ask WHY, not just log](./concepts/self-diagnose-on-step-error.md) — the coherent narrative for the live exit-126 / E2BIG "Argument list too long" incident: why the OODA copilot launch sites stopped inlining the prompt into `argv` (piping it on stdin instead), and why a caught decision-cycle / engineer / terminal-shell step failure now produces a structured `FailureDiagnosis` and a corrective Signal the loop acts on, instead of a silent log line — the operator principle "ask WHY it occurred, not just fix/log it" made mechanical (#2640). See the [argv-free invocation reference](./reference/argv-free-copilot-invocation.md), the [terminal failure diagnosis API](./reference/terminal-failure-diagnosis-api.md), and the [diagnose-and-recover runbook](./howto/diagnose-and-recover-ooda-step-failures.md).
 - [Concept: The journal E2BIG recipe-spawn incident — file the context, don't argv it](./concepts/journal-recipe-spawn-e2big.md) — why Simard's daily journal produced raw-error-dump reports every hour even AFTER the copilot argv-free fix (#2640): the journal spawns `recipe-runner-rs`, which accepts context only as `-c KEY=VALUE` on `argv`, and passed a full day of episodic context as `-c day_context=<...>` — overflowing `ARG_MAX` (E2BIG / `os error 7`) as a pre-exec `io::Error` (no exit status), then `warn!`-swallowing it into a jargon-filled deterministic raw dump. The fix routes the payload through a private temp file (`day_context_path`), classifies any residual spawn failure with `classify_spawn_failure` (errno-keyed) into the existing failure sink, and keeps the last-resort fallback loud and readable — no silent fallback (#2692). See the [recipe context-file transport reference](./reference/recipe-context-file-transport.md) and the [diagnose journal E2BIG runbook](./howto/diagnose-journal-e2big-spawn-failures.md).
 - [Recipe context-file transport reference](./reference/recipe-context-file-transport.md) — the file-channel transport that keeps large `recipe-runner-rs` payloads out of `argv`: the `ContextFile` helper, the `-c <key>_path=<abs>` grammar, the journal draft/review migration, the whole-repo spawn-site audit with per-site dispositions (Tier A file-channel / Tier B bounded-guard / Tier C safe), the pre-exec `classify_spawn_failure` errno classifier, the no-silent-fallback wiring into `overseer::failure_sink`, the recipe-asset `{{*_path}}` reads, and the hermetic argv-free tests (#2692).

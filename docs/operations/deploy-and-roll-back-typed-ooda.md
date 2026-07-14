@@ -1,7 +1,7 @@
 ---
 title: Deploy and roll back typed OODA
-description: Verified installer deployment and rollback for the typed-capability OODA route.
-last_updated: 2026-07-13
+description: Operator procedure for installer deployment, verification, and explicit rollback of typed OODA.
+last_updated: 2026-07-14
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -14,71 +14,113 @@ related:
 
 # Deploy and roll back typed OODA
 
-`simard install` stages the candidate binary and complete prompt asset tree,
-then creates and verifies a transaction backup before replacing any live
-surface. The backup covers:
+Use `simard install` to deploy a candidate binary and matching prompt assets.
+The installer creates a verified backup manifest before replacing live files.
 
-- the Simard binary;
-- prompts, recipes, and capability policies;
-- OODA and Signal service units;
-- `config.toml`;
-- the compatible state tree, including typed outcomes and effect jobs.
+The current backup is a recursive filesystem copy, not an online database
+snapshot. Stop the services first when the state tree may be restored later.
 
-The installer refuses replacement when backup creation or digest verification
-fails.
+## Before deployment
+
+```bash
+test -x ./target/release/simard
+test -f prompt_assets/simard/recipes/goal-session-actor.yaml
+test -f prompt_assets/simard/policies/goal-session-capabilities.toml
+
+systemctl --user stop simard-ooda.service simard-signal.service
+```
+
+Stopping services prevents concurrent writes while the installer copies
+`$SIMARD_HOME/state`. If your typed ledger uses another state root, back it up
+separately with a store-appropriate consistent snapshot.
+
+## Preview
+
+```bash
+./target/release/simard install \
+  --simard-home "$HOME/.simard" \
+  --systemd-user-dir "$HOME/.config/systemd/user" \
+  --dry-run
+```
+
+Dry run validates paths and required assets. It does not create a backup or
+invoke `systemctl`.
 
 ## Deploy
 
-```text
-simard install \
-  --simard-home "$SIMARD_HOME" \
+```bash
+./target/release/simard install \
+  --simard-home "$HOME/.simard" \
   --systemd-user-dir "$HOME/.config/systemd/user"
 ```
 
-The command prints the verified manifest path before restarting services. Keep
-that path; it is the rollback authority for this deployment.
-
-Confirm that the actor assets were installed:
+Capture the printed path:
 
 ```text
-test -f "$SIMARD_HOME/prompt_assets/simard/recipes/goal-session-actor.yaml"
-test -f "$SIMARD_HOME/prompt_assets/simard/policies/goal-session-capabilities.toml"
+$HOME/.simard/.install-backups/install-<transaction>/manifest.json
 ```
 
-Run the bounded fixture cycles from the
-[typed OODA tutorial](../tutorials/complete-a-typed-ooda-cycle.md) against an
-isolated state root before authorizing production expansion.
+The manifest covers the binary, prompt assets, both units, `config.toml`, and
+`state/`. It does not separately snapshot a typed-OODA database or cognitive
+store outside that state tree.
+
+## Verify
+
+The installer restarts both units but does not run an application health check.
+Verify them explicitly:
+
+```bash
+systemctl --user is-active --quiet simard-ooda.service
+systemctl --user is-active --quiet simard-signal.service
+
+test -f "$HOME/.simard/prompt_assets/simard/recipes/goal-session-actor.yaml"
+test -f "$HOME/.simard/prompt_assets/simard/policies/goal-session-capabilities.toml"
+
+"$HOME/.simard/bin/simard" ooda outcomes list \
+  --state-root "$HOME/.simard/state" \
+  --limit 1
+```
+
+The outcome command proves that the installed binary can open the selected
+typed ledger. It does not prove that a provider-backed cycle can complete.
 
 ## Roll back
 
-Stop admission of new work and allow running effects to finish. Then use the
-candidate binary (not an unverified copied binary) to restore the manifest:
+Choose the manifest printed by the deployment:
 
-```text
-simard install \
-  --simard-home "$SIMARD_HOME" \
-  --systemd-user-dir "$HOME/.config/systemd/user" \
-  --rollback "$SIMARD_HOME/.install-backups/install-<transaction>/manifest.json"
+```bash
+manifest="$HOME/.simard/.install-backups/install-<transaction>/manifest.json"
+jq '{version, transaction_id, simard_home, entries}' "$manifest"
 ```
 
-Rollback first verifies every backup digest and validates that the manifest's
-surface inventory and install root match the requested installation. It then
-restores all surfaces and restarts the user services. Missing pre-deployment
-surfaces are removed rather than synthesized.
+Stop services so state is not modified during restoration:
 
-Typed terminal and effect records are durable state. Rollback never reconstructs
-or changes them from recipe output or logs.
+```bash
+systemctl --user stop simard-ooda.service simard-signal.service
+```
 
-## Failure behavior
+Restore:
 
-| Failure | Required behavior |
+```bash
+"$HOME/.simard/bin/simard" install \
+  --simard-home "$HOME/.simard" \
+  --systemd-user-dir "$HOME/.config/systemd/user" \
+  --rollback "$manifest"
+```
+
+The command verifies all backup digests before deleting or restoring a live
+surface. It then reloads, enables, and restarts both services.
+
+## Failure handling
+
+| Failure | Operator action |
 | --- | --- |
-| Backup copy or digest verification fails | Installation stops before replacement. |
-| Manifest is outside `.install-backups` | Rollback is rejected. |
-| Manifest targets another install root | Rollback is rejected. |
-| A backup digest changed | Rollback is rejected before restoration. |
-| Service activation fails | The installer returns failure; use the verified manifest after correcting systemd access. |
+| Backup or manifest verification fails | Installation stops before replacement; correct the path or storage failure. |
+| File replacement or activation fails | Preserve the printed manifest, correct the failure, then run explicit rollback. |
+| Rollback copy fails | Stop; preserve backup and live artifacts. Restoration is sequential and may be partial. |
+| Service restart fails after rollback | Inspect `systemctl --user status` and restart after correcting the unit/runtime issue. |
 
-There is no production switch from typed execution to a prose-parser route.
-Deployment rollback restores one previously verified release as a coherent
-unit.
+The installer does not automatically roll back a failed deployment, does not
+reverse-compensate a partial rollback, and does not restore prior service
+enablement or active state. Do not claim a deployment or rollback succeeded
+until the explicit verification commands pass.

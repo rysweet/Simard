@@ -1,7 +1,7 @@
 ---
 title: Complete a typed OODA cycle
 description: Acceptance tutorial for deterministic action and no-action cycles with durable typed outcomes.
-last_updated: 2026-07-13
+last_updated: 2026-07-14
 review_schedule: as-needed
 owner: simard
 doc_type: tutorial
@@ -31,9 +31,9 @@ logs.
 ## Prerequisites
 
 - a candidate Simard build containing the typed route;
-- an isolated temporary `SIMARD_HOME`;
+- an isolated temporary state root;
 - the deterministic `typed-ooda-fixture` actor enabled only in test mode;
-- a fake engineer launcher that records requests without contacting a provider;
+- the fixture effect executor, which succeeds without contacting a provider;
 - `jq`;
 - `SIMARD_TYPED_OODA_FIXTURE=1`.
 
@@ -41,7 +41,7 @@ The fixture must be rejected outside test mode.
 
 ## 1. Create isolated state
 
-The final implementation must provide a test harness equivalent to:
+Create an isolated test state root:
 
 ```text
 SIMARD_STATE_ROOT="$(mktemp -d)"
@@ -73,7 +73,7 @@ simard ooda outcomes get --state-root "$SIMARD_STATE_ROOT" --request-id fixture-
   '
 ```
 
-Verify exactly one terminal and one launch request:
+Verify exactly one terminal:
 
 ```text
 simard ooda outcomes list --state-root "$SIMARD_STATE_ROOT" --limit 100 |
@@ -93,7 +93,7 @@ shell variable or UTF-8 conversion.
 
 The same test submits a field one byte above
 `max_semantic_payload_bytes`. The handler must return `payload_too_large` and
-must not create a terminal, correction, effect, or truncated blob.
+must not create a terminal, effect, or truncated blob.
 
 ## 5. Run the deterministic no-action fixture
 
@@ -126,7 +126,45 @@ simard ooda outcomes list --state-root "$SIMARD_STATE_ROOT" --limit 100 |
 
 The completed acceptance run proves deterministic action selection, no-action
 selection, terminal cardinality, action-only admission, durable effect
-execution, and byte fidelity. It does not prove production cutover readiness;
-the migration gates in
-[Typed-capability OODA architecture](../architecture/typed-ooda-loop.md#migration-and-route-rollback)
-must also pass.
+execution, and byte fidelity. It does not prove provider-backed production
+execution or the workflows listed outside the migration slice in
+[Typed-capability OODA architecture](../architecture/typed-ooda-loop.md#workflow-inventory-and-migration-status).
+
+## 7. Replay one terminal
+
+Run the action fixture again with the same request ID and unchanged scenario:
+
+```text
+simard ooda fixture run \
+  --state-root "$SIMARD_STATE_ROOT" \
+  --scenario spawn-engineer \
+  --request-id fixture-action-1
+```
+
+The command returns the original terminal and already-succeeded effect. Confirm
+that no second terminal exists and the effect was attempted once:
+
+```text
+simard ooda outcomes get --state-root "$SIMARD_STATE_ROOT" \
+  --request-id fixture-action-1 |
+  jq -e '
+    .outcome.request_id == "fixture-action-1"
+    and .effect.attempt == 1
+  '
+```
+
+Reuse the ID for a different mutation type:
+
+```text
+simard ooda fixture run \
+  --state-root "$SIMARD_STATE_ROOT" \
+  --scenario no-action \
+  --request-id fixture-action-1
+```
+
+This fails with an idempotency conflict and leaves the original terminal
+unchanged.
+
+The fixture CLI does not expose actor-binding overrides or a concurrent replay
+mode. Actor-token mismatch and concurrent persistence behavior belong in the
+Rust contract tests, not in this operator tutorial.

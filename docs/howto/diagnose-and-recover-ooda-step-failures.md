@@ -6,7 +6,7 @@ description: >
   signature, confirm the argv-free invocation is in effect, read the structured
   FailureDiagnosis and the corrective Signal the loop now raises, and tune the
   self-diagnose configuration.
-last_updated: 2026-07-06
+last_updated: 2026-07-14
 review_schedule: as-needed
 owner: simard
 doc_type: how-to
@@ -20,6 +20,11 @@ related:
 ---
 
 # How-to: Diagnose and recover OODA step failures
+
+!!! warning "Legacy launch diagnostics"
+    The `--allow-all-tools` examples on this page diagnose legacy decision and
+    terminal launch sites. Typed engineer process execution never uses that
+    grant; inspect its propagated permission set and scoped Copilot argv instead.
 
 > **Audience:** operators on call when an OODA goal fails a decision-cycle,
 > engineer, or terminal-shell step and makes no progress.

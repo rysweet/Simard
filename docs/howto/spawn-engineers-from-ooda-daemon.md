@@ -1,7 +1,7 @@
 ---
 title: How OODA spawns engineer agents
 description: Operator guide for the typed goal-session actor that starts engineers without parsing agent prose.
-last_updated: 2026-07-13
+last_updated: 2026-07-14
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -75,13 +75,20 @@ For an engineer action, `record_action` carries a typed repository, base type,
 permissions, claim, and byte-preserved task. The handler:
 
 1. binds the authenticated actor and session;
-2. validates the request and goal state;
-3. authorizes repository and permissions;
-4. applies concurrency, exact-claim, overlap, resource, and risk admission;
-5. enforces idempotency;
-6. commits the terminal, engineer claim, and outbox job atomically;
-7. leases and launches the effect from the outbox;
-8. records the typed effect result, recovering the same job after a crash.
+2. loads the server-bound cycle and goal and rejects any target mismatch;
+3. validates a safe, non-empty request ID in the terminal ledger;
+4. validates the closed base-type enum;
+5. authorizes the requested permission subset against policy and the exact
+   bound repository;
+6. applies concurrency, disk, and active-claim admission;
+7. commits the terminal, engineer claim, and outbox job
+   atomically;
+8. leases and launches the effect from the outbox;
+9. records completion or retry by effect ID while the job is running.
+
+The engineer receives scoped Copilot adapters. `process_exec` enables the shell
+adapter; it is not a transactionally capped process broker. Typed launches do
+not add `--allow-all-tools`, `--allow-all-paths`, or `COPILOT_ALLOW_ALL`.
 
 ## Verify the durable result
 
@@ -96,8 +103,7 @@ simard ooda outcomes list --state-root "$SIMARD_STATE_ROOT" --limit 10 |
       goal_id,
       kind,
       action: .payload.action.kind,
-      admission: .payload.admission,
-      effect
+      admission: .payload.admission
     }'
 ```
 
@@ -111,11 +117,7 @@ A successful spawn has:
       "kind": "spawn_engineer"
     },
     "admission": {
-      "authorization": "allowed",
-      "concurrency": "admitted",
-      "resources": "admitted",
-      "overlap": "admitted",
-      "risk": "admitted"
+      "policy_revision": "goal-session-policy-v1"
     }
   },
   "effect": {
@@ -167,36 +169,27 @@ Inspect the installed capability policy and authenticated session identity.
 Grant only the missing repository/capability scope, then start a new cycle with
 a new stable request ID.
 
+### The effect reports an unsupported base type
+
+Use `copilot`. The wire enum also accepts `rusty_clawd`, but the live typed
+effect executor currently supports only Copilot.
+
 ### Admission rejects a spawn
 
-Read the typed admission result:
-
-```text
-simard ooda outcomes list --goal-id "$GOAL_ID" --json |
-  jq '.admission_decisions[-1]'
-```
-
-Admission rejection fails the action attempt. It does not silently become
-no-action. A later semantic actor may record blocked or no-action after
-considering the typed rejection as explicit context.
+Admission rejection fails the action attempt and does not create a terminal.
+Inspect the cycle error for disk, concurrency, or active-claim rejection. It
+does not silently become no-action.
 
 ### The recipe or tool fails
 
-Inspect the typed execution record:
-
-```text
-simard ooda executions list --limit 10 --json |
-  jq '.executions[] | select(.status == "failed")'
-```
-
-The error code, failed step, and request identity are authoritative. Do not
-branch on stderr text.
+Inspect the daemon error and, if a terminal committed, fetch it with `simard
+ooda outcomes get`. There is no `ooda executions list` command.
 
 ### The action was replayed
 
-An identical request ID and arguments return the existing outcome. Different
-arguments with the same request ID fail with `idempotency_conflict`. Generate a
-new request ID only for a genuinely new action attempt.
+An identical terminal request ID and fingerprint return the existing outcome.
+Different terminal arguments with the same ID fail with an idempotency conflict.
+Generate a new request ID only for a genuinely new action attempt.
 
 ## See also
 

@@ -1,7 +1,7 @@
 ---
 title: Typed-capability OODA architecture
-description: Architecture of Simard's parser-free OODA workflows, capability boundary, durable outcomes, workflow ownership, and migration boundary.
-last_updated: 2026-07-13
+description: Implemented parser-free goal-session boundary, durable outcomes, workflow ownership, and remaining migration boundary.
+last_updated: 2026-07-14
 review_schedule: as-needed
 owner: simard
 doc_type: explanation
@@ -15,378 +15,207 @@ related:
 
 # Typed-capability OODA architecture
 
-!!! info "Implementation boundary"
-    The live goal-session Act path, typed capability handler, outcome ledger,
-    effect outbox, scoped actor runtime, fixture cycles, and installer rollback
-    are implemented. The inventory below also records later migration work for
-    OODA brains and coupled workflows that do not enter goal-session Act.
-
-The migrated OODA path composes semantic agents with deterministic recipes.
-Agent output remains opaque to Rust. When a cycle needs a machine action, the
-final actor invokes a typed capability. Rust validates the typed request and
-commits an immutable outcome plus a durable effect job.
+The migrated goal-session path makes durable typed tool calls authoritative.
+Rust does not parse the final actor's prose, markers, URLs, or JSON-looking text
+to decide what happened.
 
 ```text
-Observe recipe
-    │ opaque semantic output
-    ▼
-Orient recipe
-    │ opaque semantic output
-    ▼
-Decide recipe
-    │ opaque semantic output
-    ▼
-Goal-session actor
-    │ exactly one terminal typed capability
-    ▼
-Capability handler
-    ├── authenticates actor and session
-    ├── authorizes the capability
-    ├── validates typed arguments
-    ├── applies admission and safety rails
-    ├── enforces idempotency
-    └── commits outcome, claim, and effect job
-            ├── Append-only outcome ledger
-            └── Durable effect outbox
+existing Observe / Orient / Decide path
+        |
+        | opaque task, reason, and serialized context files
+        v
+goal-session recipe -> authenticated actor runtime
+        |
+        | exactly one terminal typed tool attempt
+        v
+capability handler
+        |- validates actor, repository, arguments, policy, and admission
+        |- commits terminal + claim + effect in SQLite
+        `- dispatches the durable effect
 ```
 
-Rust does not inspect agent prose, JSON, markers, formatting, first words,
-keywords, URLs, or error text to choose behavior. Typed tool-protocol decoding
-and parsing deterministic application data are allowed.
+## Ownership boundary
 
-## Architectural boundary
+Recipes and agents own semantic judgment:
 
-Recipes and prompts own semantic policy:
-
-- what the observations mean;
-- which goal matters now;
+- what observations mean;
 - whether work is useful, blocked, complete, or unnecessary;
-- how to describe a task, reason, issue, or evidence;
-- whether a situation merits an engineer, issue, merge request, or deploy
-  request;
-- how Observe, Orient, Decide, Act, Curate, Overseer, and cognitive-thread
-  reasoning are composed.
+- which typed action to request;
+- task, reason, summary, and rationale wording.
 
-Rust owns deterministic safety rails:
+Rust owns deterministic rails:
 
-- actor and session authentication;
-- capability authorization and least privilege;
-- typed argument and state-transition validation;
-- resource, overlap, concurrency, and risk admission;
-- idempotency and exactly-once terminal recording;
-- transactional persistence;
-- process lifecycle and explicit error propagation;
-- privileged merge and deployment execution after separately authorized
-  requests.
+- actor-session authentication;
+- capability and repository authorization;
+- typed argument validation;
+- byte-size limits;
+- engineer concurrency, disk, and claim admission;
+- terminal idempotency and one-terminal-per-cycle;
+- SQLite persistence;
+- effect dispatch and explicit failure propagation;
+- separate approval for merge and deploy effects.
 
-Neither side substitutes for the other. Rust does not infer intent from text,
-and recipes cannot bypass Rust's safety rails.
+Rust may decode typed tool JSON and deterministic application state. It may not
+interpret agent prose to select behavior.
 
-## Workflow inventory
+## Workflow inventory and migration status
 
-| Workflow | Semantic steps | Final machine boundary | Durable truth |
-| --- | --- | --- | --- |
-| Observe | Summarize goal, runtime, repository, memory, meeting, engineer, and external state. | Typed readers expose deterministic state; no mutating terminal. | Source stores and observation provenance. |
-| Orient | Interpret observations, urgency, dependencies, conflicts, and recalled memory. | None; output passes opaquely to Decide. | Recipe execution record, not business outcome. |
-| Decide | Select the next semantic direction and supply it to Act. | None; output passes opaquely to the goal-session actor. | No business outcome until Act commits a terminal. |
-| Act / goal session | Choose action, no-action, blocked, or completed. | Exactly one call: `record_action`, `record_no_action`, `record_blocked`, or `record_completed`. | `TerminalOutcome`. |
-| Curate | Judge goal ordering, backlog promotion, decomposition, and stale-goal treatment. | Typed goal-store capabilities. | Goal-store mutations and linked outcome/evidence records. |
-| Engineer admission | Judge likely overlap and usefulness. | Deterministic authorization, exact-path conflict, resource, count, and risk rails. | `AdmissionDecision` linked to the action outcome. |
-| Engineer lifecycle | Judge whether to wait, reclaim, redirect, block, or request follow-up. | Scoped lifecycle capabilities; never a lifecycle prose parser. | Lifecycle records and terminal goal outcomes. |
-| Progress and evidence | A separate progress step judges semantic progress and selects evidence outside the terminal Act invocation. | `record_progress` validates percentage, evidence references, identity, and state. | Immutable `ProgressRecord`; it does not satisfy the Act terminal. |
-| Completion | Judge whether the goal's semantic done condition is satisfied. | `record_completed` validates required typed evidence and completion gates. | `TerminalOutcome(kind=completed)`. |
-| No progress | Explain why work stalled and choose retry, defer, block, or no-action. | The actor invokes a matching typed capability; deterministic retry/admission limits still apply. | Blocked/no-action terminal plus evidence. |
-| Overseer | Diagnose system and goal-board conditions and choose a corrective request. | Scoped issue, engineer, progress, blocked, merge-request, and deploy-request capabilities. | Typed corrective-action and outcome records. |
-| Cognitive threads | Produce research, memory, creative-idea, journal, and health semantics. | Typed memory, goal, issue, and evidence capabilities appropriate to each thread. | Domain records in the owning store. |
-| Meeting-to-goal | Interpret meeting decisions and proposed work. | Typed goal creation/update capability. | Goal records with meeting provenance. |
-| Merge execution | Judge merge readiness in the privileged merge workflow. | Existing gated merge executor, reached from a typed `RequestMerge`. | Merge request and executor result records. |
-| Deployment execution | Judge deployment readiness in the privileged deploy workflow. | Installer/deploy executor, reached from a typed `RequestDeploy`. | Deploy request, backup manifest, and deploy result. |
+| Workflow | Current boundary | Status in this slice |
+| --- | --- | --- |
+| Observe / Orient / Decide | Existing OODA implementation prepares state and semantic context. | Inputs are forwarded into the typed goal session; these workflows are not fully reimplemented as typed capability recipes. |
+| Act / goal session | Actor calls `record_action`, `record_no_action`, `record_blocked`, or `record_completed`. | Migrated |
+| Engineer spawn | Typed action, claim, permission set, outbox effect, and subordinate launch. | Migrated for Copilot |
+| Issue creation | Typed action and outbox effect using deterministic GitHub application data. | Migrated |
+| Merge / deploy request | Typed action plus separately signed approval. | Migrated request boundary; downstream executors remain separate |
+| Progress | `record_progress` capability exists outside the default terminal actor policy. | Implemented API; not part of the terminal actor |
+| Curate, Overseer, cognitive threads, meetings | Existing domain workflows and stores. | Outside this migration slice |
+| Legacy engineer/operator launch | Existing broad Copilot permission contract when no typed permission set is present. | Outside typed OODA |
+
+This table is the migration boundary. “Outside this slice” does not mean
+parser-free unless that workflow has its own documented typed boundary.
 
 ## Branch ownership matrix
 
-Every branch belongs to exactly one side of the boundary.
-
 | Branch | Owner | Enforcement |
 | --- | --- | --- |
-| Which goal to work on | Recipe/prompt | Semantic ranking and reasoning. |
-| Whether observations imply urgency | Recipe/prompt | Opaque Orient output. |
-| Whether another engineer's work is semantically overlapping | Recipe/prompt | Engineer-admission recipe. |
-| Whether exact target paths or exclusive claims conflict | Rust | Deterministic conflict rail. |
-| Whether host resources permit a spawn | Rust | Fail-closed resource admission. |
-| Whether work should spawn an engineer | Recipe/prompt | `record_action(SpawnEngineer)`. |
-| Whether work should file an issue | Recipe/prompt | `record_action(FileIssue)`. |
-| Whether work is unnecessary now | Recipe/prompt | `record_no_action`. |
-| Whether a goal is blocked and why | Recipe/prompt | `record_blocked`. |
-| Whether a goal meets its semantic done condition | Recipe/prompt | `record_completed`. |
-| Whether required evidence is present and well-typed | Rust | Typed schema and state-transition validation. |
-| Whether an identity may use a capability | Rust | Session-bound authorization. |
-| Whether an action is too risky for goal-session authority | Rust | Capability policy and admission. |
-| Whether a merge/deploy request may execute | Privileged workflow plus Rust rails | Separate authorization and existing gates. |
-| Whether a duplicate request is a replay | Rust | Canonical argument hash and unique request ID. |
-| Whether a cycle already has a terminal | Rust | Unique `(session_id, cycle_id)` constraint. |
-| Whether recipe completion counts as cycle success | Rust | Success requires one committed terminal; an action cycle also satisfies its effect completion policy. |
-| How a task, reason, summary, or rationale is worded | Recipe/prompt | Opaque bytes; no normalization. |
-| How process, tool, authorization, or persistence failure is handled | Rust | Explicit error; no fallback outcome. |
-| Whether a failed step should be diagnosed or retried | Recipe policy within deterministic retry limits | A new attempt receives explicit failure context; the failed attempt remains failed. |
+| Whether to request an engineer, issue, merge, deploy, no-action, blocked, or completed | Actor | One typed terminal tool |
+| Whether the actor may call that tool | Rust | Session grants and policy |
+| Whether a repository target is allowed | Rust | Exact actor binding plus repository policy |
+| Whether engineer permissions are allowed | Rust | Non-empty subset of policy ceiling |
+| Whether disk, concurrency, or claim admission allows spawn | Rust | Deterministic checks before commit |
+| Whether completion has typed evidence | Rust | Completion validation |
+| Whether task/reason wording implies an action | Actor only | Rust does not inspect the wording |
+| Whether a request is an identical terminal replay | Rust | Stored request fingerprint |
+| Whether a cycle already has a terminal | Rust | Unique `(session_id, cycle_id)` |
+| Whether an action effect succeeded | Effect executor | Durable effect state |
+| Whether merge/deploy may execute | Approval authority plus executor | Signed approval and downstream checks |
 
-## Goal-session execution
+## Goal-session route
 
-The production dispatcher resolves the installed `goal-session-actor.yaml` and
-its sibling capability policy as one route. It writes each semantic value to a
-separate owner-private file, registers a short-lived actor-session lease in the
-ledger, and runs the YAML through `recipe-runner-rs`. The recipe invokes the
-current Simard binary's authenticated actor bridge; no production call site
-invokes the actor directly. The final actor receives:
+`TypedGoalSessionRoute::production` resolves the installed recipe and policy
+from `$HOME/.simard/prompt_assets/simard`, falling back to the repository asset
+tree. Both assets must exist and validate.
 
-- authenticated actor and session context;
-- `goal_id` and `cycle_id`;
-- raw task, reason, and prior semantic outputs;
-- typed observations and evidence references where deterministic data exists;
-- only the capabilities allowed by the session policy.
+The route:
 
-The actor must invoke exactly one terminal capability:
+1. registers a 30-minute actor-session lease bound to one actor, session, cycle,
+   goal, repository, grant set, and observe-only state;
+2. writes task, reason, Observe, Orient, Decide, token, and admission values to
+   separate private context files;
+3. runs `recipe-runner-rs` with file paths rather than large semantic values in
+   argv;
+4. invokes `simard ooda actor-run` through the recipe;
+5. requires one durable terminal for the session and cycle before returning.
 
-```text
-record_action
-record_no_action
-record_blocked
-record_completed
-```
+The actor runtime exposes one read-only semantic-context tool and four terminal
+tools. A tool error is remembered by the executor and fails the cycle. Zero
+terminal attempts, more than one terminal attempt, or a failed recipe process
+also fail.
 
-The actor makes no other mutating tool call. Progress is recorded by a separate
-recipe step with its own identity and request ID. This keeps the
-Act boundary auditable: one actor invocation produces exactly one terminal tool
-call.
+## Raw semantic handoff
 
-Recipe process exit `0` is necessary but not sufficient. The runner verifies
-that the ledger contains one terminal for `(session_id, cycle_id)`. Zero
-terminals, multiple terminal attempts, a tool error, or a non-zero recipe exit
-fails the cycle. For an action terminal, the runner also waits according to the
-effect policy. A permanent failed effect fails the cycle; a recoverable pending
-effect remains queued under its original identity and is reported as incomplete,
-not successful.
+Semantic context is carried as bytes:
 
-## Raw semantic handoffs
+1. private files avoid argv-size and shell-normalization problems;
+2. `OpaqueBytes` uses canonical padded base64 at the typed tool boundary;
+3. decoded bytes are checked only for size unless a specific downstream effect
+   requires UTF-8 application data;
+4. admitted bytes are persisted unchanged.
 
-Semantic payloads are byte-preserved within explicit admission limits:
+The file-issue executor requires UTF-8 title and body because GitHub receives
+text. Other opaque semantic fields remain bytes in the ledger.
 
-1. The runner writes potentially large inputs to owner-only context files rather
-   than `argv` or environment variables. File transport removes OS argument-size
-   coupling; it does not make payload admission unbounded.
-2. A recipe step receives the file path and reads the bytes without trimming or
-   normalization.
-3. Step output is passed directly to the next step through the runner's opaque
-   output channel.
-4. Typed capability arguments carry opaque byte fields as canonical padded
-   base64.
-5. The handler decodes once, rejects any field above its configured byte limit,
-   and otherwise persists the exact bytes.
+## Durable terminal and replay
 
-Round-trip tests cover empty content, newlines, NUL bytes, non-ASCII UTF-8,
-invalid UTF-8, ANSI bytes, marker-like text, JSON-looking text, URLs, and payloads
-larger than 256 KiB but within the configured limit. Oversize content fails with
-`payload_too_large`; it is never truncated. No admitted content changes are
-permitted.
+The terminal ledger stores immutable serialized outcomes. Recipe stdout,
+stderr, and final model text are diagnostic only.
 
-## Typed outcome ledger
+The terminal table has unique constraints on request ID, outcome ID, and
+`(session_id, cycle_id)`. An identical request replay returns the stored
+terminal; conflicting reuse returns `IdempotencyConflict`.
 
-The append-only ledger is authoritative. Recipe stdout, stderr, logs, exit text,
-and model output are diagnostic only.
+Progress records use a separate table and separate request-ID namespace. The
+current implementation does not have a global mutation registry or
+cross-mutation request-ID conflict detection.
 
-```rust
-struct TerminalOutcome {
-    outcome_id: OutcomeId,
-    request_id: RequestId,
-    session_id: SessionId,
-    actor_identity: IdentityRef,
-    repository: RepositoryRef,
-    goal_id: GoalId,
-    cycle_id: CycleId,
-    kind: OutcomeKind,
-    payload: TypedOutcomePayload,
-    raw_semantic: Vec<u8>,
-    evidence: Vec<EvidenceRef>,
-    recorded_at: Timestamp,
-}
-```
+## Action effects
 
-`TypedOutcomePayload::Action` contains the admitted action and its
-`AdmissionDecision`. No-action, blocked, and completed payloads have no
-admission field because no machine action was admitted.
+An action terminal and its effect job commit together. Production effects are:
 
-The store enforces:
+- allocate a worktree and spawn a scoped Copilot subordinate;
+- create an issue with a stable hidden idempotency marker;
+- request merge after signed approval and downstream checks;
+- request deployment after signed approval and downstream checks.
 
-- unique `request_id`;
-- unique `(session_id, cycle_id)` terminal outcome;
-- immutable committed outcomes;
-- one transaction for idempotency registration and outcome insertion;
-- identical replay returns the existing record;
-- conflicting reuse of a request ID fails;
-- corrections append a separate `OutcomeCorrection` linked by `outcome_id`;
-- terminal success is returned only after the transaction commits.
+Jobs move through `pending`, `running`, `blocked`, `succeeded`, or `failed`.
+A lease records owner and expiry and increments `attempt` when claimed.
 
-An `OutcomeCorrection` has its own `correction_id`, `request_id`,
-`target_outcome_id`, reason, evidence, actor identity, and timestamp. It can mark
-the interpretation of a terminal as invalid or superseded, but it cannot insert
-another terminal for the same `(session_id, cycle_id)`. A corrected decision is
-made in a new cycle. This preserves terminal cardinality and immutable history.
+Current recovery resets expired running jobs to pending. Completion updates by
+effect ID and running state; there is no lease-generation or completing-owner
+fence. This is durable at-least-once recovery, not an exactly-once guarantee for
+arbitrary external effects.
 
-See the [capability API reference](../reference/ooda-capability-api.md) for the
-complete schemas.
+## Engineer authority
 
-## Action execution
+The typed action's permission set is propagated through
+`SIMARD_ENGINEER_PERMISSIONS`. The Copilot launcher maps it to scoped read,
+search, write, shell, and GitHub MCP adapters and removes broad allow-all flags.
 
-`record_action` accepts a closed union:
-
-- `SpawnEngineer`;
-- `FileIssue`;
-- `RequestMerge`;
-- `RequestDeploy`.
-
-The handler first validates and admits the request. For `SpawnEngineer`, one
-transaction creates the terminal, engineer claim, and durable outbox job. The
-outbox dispatcher launches the engineer after commit and records effect state:
-`pending`, `running`, `succeeded`, `failed`, or `cancelled`.
-
-Outbox jobs are claimed with a lease. After a crash, an expired `running` lease
-returns to `pending`; the dispatcher resumes the same idempotent effect using the
-original outcome and request identity. It never asks the actor for a replacement
-terminal. A permanent launch failure records a typed failed effect and leaves
-the action terminal intact; the cycle execution fails even though its semantic
-decision is durably recorded.
-
-`RequestMerge` and `RequestDeploy` create requests only. Goal-session actors do
-not receive direct merge or deployment authority. The outbox records them as
-`blocked` until an approval authority issues an approval bound to the principal,
-goal, session, cycle, action kind, canonical payload hash, exact repository, and
-policy revision. Approved merges run the existing merge-readiness authority and
-recheck the PR head SHA. Approved deploys build the exact source commit, verify
-the approved artifact digest before mutation, take the normal protective backup,
-and use the existing health/rollback sequence.
-
-The production outbox worker recovers expired leases before dispatch, drains
-older pending work at cycle startup, and then handles the current action. A
-retryable failure returns the same job to `pending`; permanent failure and
-authorization blocking are durable. External effects reconcile by stable
-request identity before retry: issue bodies carry a hidden idempotency marker,
-engineer spawns check the live claim sentinel, merge dispatch checks whether the
-PR is already merged, and deploy dispatch verifies the running commit and binary
-digest.
+`process_exec` currently enables Copilot's shell adapter. It is not a
+transactional per-command broker and has no per-cycle process mutation cap.
+See [Engineer Copilot permissions](../reference/engineer-copilot-permissions.md).
 
 ## Failure model
 
-Failures remain failures.
+| Failure | Result |
+| --- | --- |
+| Actor or recipe exits without a terminal | `MissingTerminal` |
+| Actor attempts more than one terminal | `MultipleTerminalAttempts` |
+| Tool validation or authorization fails | `ToolFailed`; no synthetic no-action |
+| Persistence fails | Failure; no success response |
+| Action effect is blocked or permanently fails | `DownstreamFailed`; terminal remains durable |
+| Retryable effect fails | Job returns to pending; cycle reports incomplete |
+| Recipe process exits nonzero | `RecipeFailed` |
 
-| Failure | Cycle result | Durable effect |
-| --- | --- | --- |
-| Recipe step exits non-zero | Failed | Recipe execution failure; no synthetic terminal. |
-| Actor returns without terminal | Failed | Missing-terminal failure. |
-| Second terminal attempt | Failed | Conflict; first committed terminal remains authoritative. |
-| Tool protocol or schema error | Failed | Rejected request record, when safe to persist. |
-| Authentication or authorization denied | Failed | Denial audit record. |
-| Admission rejected | Failed or explicitly blocked only when the actor calls `record_blocked` in a new valid attempt | Admission decision; never automatic no-action. |
-| Persistence failure | Failed | No success response and no partial outcome. |
-| Crash after terminal commit, before effect | Pending recovery | Outbox dispatcher resumes the same idempotent effect; no second terminal is allowed. |
-| Downstream engineer/issue effect fails | Failed | Typed failed effect linked to the terminal; retry follows the outbox policy. |
-| Merge/deploy request rejected | Request remains rejected | Typed executor result; goal is not marked complete. |
-| Opaque transport round trip fails | Failed | Transport integrity error. |
-
-There is no parser repair retry, marker compatibility mode, deterministic
-semantic fallback, or fallback from typed execution to a legacy parser.
+There is no typed-to-parser fallback in the migrated goal-session path.
 
 ## Parser-removal boundary
 
-The typed goal-session route cannot call prose interpreters. The following
-behaviors are absent from the route:
+The production goal-session actor returns business results only through typed
+tools. It does not use:
 
-| Removed behavior | Replacement |
-| --- | --- |
-| Decide keyword/first-word scans | Decide output passes opaquely to the actor. |
-| Orient number scraping from prose | Orient remains semantic; deterministic metrics arrive as typed inputs. |
-| Engineer-lifecycle marker or JSON parsing | Lifecycle actor invokes typed capabilities. |
-| Goal-session `ACTION`, `TASK`, `REASON`, or `PROGRESS` markers | Terminal tools receive typed arguments and opaque bytes. |
-| Progress/completion verdict parsing | `record_progress` and `record_completed`. |
-| No-progress classification tokens | Semantic actor chooses a terminal capability. |
-| PR/issue URL extraction from logs | Typed `EvidenceRef::PullRequest` and `EvidenceRef::Issue`. |
-| Error-text classification that changes behavior | Typed process/tool errors and exit status. |
-| Parse-repair prompts and compatibility retries | Explicit failed recipe attempt. |
-| Deterministic `AdvanceGoal` or skip fallback | Missing terminal or actor failure. |
+- `ACTION`, `TASK`, `REASON`, or `PROGRESS` markers;
+- first-word or keyword scans;
+- URL extraction to create evidence;
+- response-schema repair retries;
+- recipe stdout as an outcome.
 
-After cutover, legacy prose parsers may exist only in workflows that are not reachable from
-the typed goal-session process tree. Route-construction tests walk every
-registered recipe, capability, subprocess, and callback edge from goal-session
-execution and fail if a quarantined parser module is reachable.
+Legacy parsers may still exist in workflows outside the inventory row marked
+“Migrated.” Their presence is not evidence that the typed goal-session actor
+depends on them.
 
-## Migration and rollback
+## Deployment boundary
 
-The goal-session route is a production compile-time cutover, not a per-cycle
-parser switch. Production `AdvanceGoal` dispatch cannot call the quarantined
-legacy response parser; that module is compiled only for legacy unit fixtures.
-Typed failures therefore have no compatibility fallback.
+`simard install` backs up the binary, prompt assets, units, config, and selected
+state tree before replacement. The current backup is a verified recursive copy,
+not an online SQLite/LadybugDB snapshot, and rollback is sequential rather than
+atomic. Stop services before deployment when state consistency matters.
 
-Deployment rollback uses the verified installer manifest. It restores the
-previous binary, prompt/recipe/policy tree, service units, configuration, and
-compatible state together. Typed records remain part of the restored state.
-See the deployment runbook for the exact command.
+See [Deploy and roll back typed OODA](../operations/deploy-and-roll-back-typed-ooda.md).
 
-The typed cutover scope includes the complete goal-session action path and every
-synchronous dependency it can reach:
+## Verified invariants
 
-- Observe, Orient, Decide, and goal-session actor recipe composition;
-- terminal capability registration and dispatch;
-- engineer spawn, admission, claim, and launch result;
-- progress/evidence, no-action, blocked, and completed recording;
-- issue creation requests;
-- merge and deploy request creation;
-- goal state updates and outcome persistence;
-- Overseer and cognitive-thread calls that enter a goal session.
+1. A successful actor step has exactly one durable terminal.
+2. Terminal authority comes from an authenticated session.
+3. Admitted semantic bytes are size-checked and preserved.
+4. Recipe prose and logs are not business truth.
+5. Action, claim, and effect insertion share one transaction.
+6. Merge and deploy effects require separate signed approval.
+7. Typed goal-session failures do not fall back to prose parsing.
+8. Typed Copilot spawns carry an explicit permission set.
 
-Privileged merge and deployment executors remain separate downstream workflows.
-They accept typed requests and cannot be invoked directly by a goal-session
-actor. Any remaining parser in those executors is outside the migrated process
-tree and is tracked separately; it cannot affect goal-session routing or create
-a goal-session terminal.
-
-## Safety invariants
-
-1. Every successful Act cycle has exactly one durable terminal outcome and
-   exactly one terminal tool invocation.
-2. No terminal exists without authenticated actor and session identity.
-3. Failures and blockers cannot be represented as progress.
-4. Admitted raw semantic bytes are never truncated, normalized, repaired, or
-   interpreted by Rust; oversize payloads fail before commit.
-5. Terminal success is returned only after durable commit.
-6. Merge and deployment remain outside goal-session execution authority.
-7. Typed-path failures never fall back to prose parsing.
-8. Every mutation has a stable request ID and canonical replay semantics.
-9. Recipe logs and prose never become business truth.
-10. A route cannot be enabled unless parser-unreachability tests pass.
-11. Every admitted external effect has a durable outbox state and crash-safe,
-    idempotent recovery.
-
-## Validation contract
-
-The release gate covers:
-
-- successful engineer, issue, merge-request, and deploy-request actions;
-- no-action, blocked, and completed terminals;
-- exact raw-byte round trips;
-- invalid typed arguments and unknown action variants;
-- denied identities and capabilities;
-- duplicate and conflicting request IDs;
-- overlap, resource, concurrency, and risk admission rejection;
-- transaction and persistence failure;
-- missing and duplicate terminal attempts;
-- recipe, tool, and downstream execution failure propagation;
-- crash recovery before and after commit;
-- graph proof that the goal-session route cannot reach quarantined parsers;
-- one authorized completed cycle with an intended machine action;
-- one authorized no-action or blocked cycle;
-- durable evidence for both end-to-end cycles.
-
-## See also
-
-- [OODA capability API](../reference/ooda-capability-api.md)
-- [How OODA spawns engineer agents](../howto/spawn-engineers-from-ooda-daemon.md)
-- [Tutorial: complete a typed OODA cycle](../tutorials/complete-a-typed-ooda-cycle.md)
-- [Deploy and roll back typed OODA](../operations/deploy-and-roll-back-typed-ooda.md)
+Stronger properties such as global mutation request IDs, lease-generation
+fencing, indeterminate-effect reconciliation, transactionally capped process
+execution, application-consistent installer snapshots, and atomic
+reverse-compensating rollback are not implemented by this branch and must not
+be presented as current guarantees.
