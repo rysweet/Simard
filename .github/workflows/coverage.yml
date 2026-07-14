@@ -34,6 +34,7 @@ jobs:
       - name: Install Rust nightly toolchain
         uses: dtolnay/rust-toolchain@5b842231ba77f5c045dba54ac5560fed2db780e2 # nightly
         with:
+          toolchain: nightly-2026-07-01
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov
@@ -77,7 +78,7 @@ jobs:
       - name: Run coverage
         run: |
           mkdir -p target/ci-logs
-          cargo +nightly llvm-cov --workspace --lib --bins \
+          cargo +nightly-2026-07-01 llvm-cov --workspace --lib --bins \
             --ignore-filename-regex 'tests?/' \
             --json \
             --summary-only \

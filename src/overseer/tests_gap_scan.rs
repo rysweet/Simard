@@ -13,11 +13,11 @@
 //!   emits ONE consolidated [`Signal::WorkstreamGap`], which Orient classifies to
 //!   a [`ProblemKind::WorkstreamCoverage`] problem;
 //! - the act path notifies the operator on BOTH channels (email + Signal) with a
-//!   provenance-labelled summary AND files a deduped issue per gap — through the
-//!   SAME plumbing `goal_health` / M1 use, with NO new bypass — returning one
+//!   provenance-labelled summary and never files routine observation issues,
+//!   returning one
 //!   [`ActOutcome::WorkstreamGapsFlagged`] that feeds DEDICATED tick counters
 //!   (never the generic `issues_filed` / `escalations`);
-//! - a recurring gap is deduped to AT MOST ONE notification + issue per signature
+//! - a recurring gap is deduped to AT MOST ONE notification per signature
 //!   (WhisperGate layer), so a fast cadence or a restart never floods the operator;
 //! - the act FAILS CLOSED without a DISTINCT steward identity (anti-recursion);
 //! - the `SIMARD_OVERSEER_GAP_SCAN` kill-switch holds the whole action, and
@@ -576,7 +576,7 @@ fn workstream_gaps_flagged_outcome_carries_batch_counts() {
 }
 
 #[test]
-fn flags_gaps_notifies_both_channels_files_once_then_dedupes_on_repeat() {
+fn flags_gaps_notifies_both_channels_without_filing_then_dedupes_on_repeat() {
     let gaps = vec![sample_goal_gap(), sample_anomaly_gap()];
     let filed = Arc::new(Mutex::new(Vec::new()));
     let (notifier, email_log, signal_log) = dual_recording_notifier();
@@ -586,8 +586,8 @@ fn flags_gaps_notifies_both_channels_files_once_then_dedupes_on_repeat() {
         .with_gap_scan_enabled(true)
         .with_operator_notifier(Box::new(notifier));
 
-    // First tick: both gaps are genuine ⇒ flagged, one consolidated notification
-    // on BOTH channels, and one deduped issue per gap.
+    // First tick: both gaps are genuine ⇒ flagged and one consolidated
+    // notification on both channels.
     let first = overseer_tick(&mut ov);
     assert_eq!(
         first.workstream_gaps_detected, 2,
@@ -618,11 +618,9 @@ fn flags_gaps_notifies_both_channels_files_once_then_dedupes_on_repeat() {
         1,
         "the Signal channel got one consolidated gap notification"
     );
-    // One deduped issue filed per flagged gap.
-    assert_eq!(
-        filed.lock().unwrap().len(),
-        2,
-        "one deduped issue filed per flagged gap"
+    assert!(
+        filed.lock().unwrap().is_empty(),
+        "routine gap observations never file issues"
     );
 
     // The consolidated notification names the specifics.
@@ -638,7 +636,7 @@ fn flags_gaps_notifies_both_channels_files_once_then_dedupes_on_repeat() {
 
     // Second tick on the SAME picture: both signatures are still within the
     // dedup window ⇒ both suppressed (gate hit). No second notification, no
-    // second issue — one deduped item per recurring signature, not per tick.
+    // second issue.
     let second = overseer_tick(&mut ov);
     assert_eq!(
         second.workstream_gaps_detected, 0,
@@ -658,26 +656,11 @@ fn flags_gaps_notifies_both_channels_files_once_then_dedupes_on_repeat() {
         1,
         "no second Signal notification for a recurring gap"
     );
-    assert_eq!(
-        filed.lock().unwrap().len(),
-        2,
-        "no second issue for a recurring gap"
-    );
+    assert!(filed.lock().unwrap().is_empty());
 }
 
 #[test]
-fn flagged_gap_brief_source_module_routes_to_default_repo() {
-    use crate::stewardship::{TargetRepo, route_failure};
-
-    // Regression for issue #2934: `act_flag_workstream_gaps` files each gap with
-    // the bare source_module "overseer", which matches NO stewardship routing
-    // keyword. Before the default-repo fallback, the real `StewardshipIssueFiler`
-    // rejected this with `StewardshipRoutingAmbiguous`, so `flag_workstream_gaps`
-    // failed every tick ("overseer intervention failed ...
-    // intervention=flag_workstream_gaps error=... cannot route source-module
-    // 'overseer'"). This test pins that the brief the gap path actually produces
-    // routes to a real repo — the configured default (rysweet/Simard) — so the
-    // issue gets filed instead of erroring.
+fn flagged_gap_never_constructs_an_issue_brief() {
     let gaps = vec![sample_goal_gap()];
     let filed = Arc::new(Mutex::new(Vec::new()));
     let (notifier, _email_log, _signal_log) = dual_recording_notifier();
@@ -695,19 +678,10 @@ fn flagged_gap_brief_source_module_routes_to_default_repo() {
     assert_eq!(report.errors, 0, "the gap intervention must not error");
     assert!(!report.panicked);
 
-    let briefs = filed.lock().unwrap();
-    assert_eq!(briefs.len(), 1, "one deduped issue filed for the gap");
-    let src = &briefs[0].source_module;
-
-    // The exact value the gap path emits must resolve — never ambiguous.
-    let target = route_failure(src).unwrap_or_else(|e| {
-        panic!("gap brief source_module {src:?} must route to a real repo, got {e:?}")
-    });
     assert!(
-        matches!(target, TargetRepo::Simard),
-        "an overseer gap brief routes to the default repo (rysweet/Simard): {src:?}"
+        filed.lock().unwrap().is_empty(),
+        "routine gaps stay observation-only"
     );
-    assert_eq!(target.slug(), "rysweet/Simard");
 }
 
 #[test]

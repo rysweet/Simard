@@ -79,7 +79,7 @@ use simard::stewardship::FakeGhClient;
 ```rust
 use simard::stewardship::{process_orchestrator_run, StewardshipOutcome};
 
-match process_orchestrator_run(&run, &gh, &mut board)? {
+match process_orchestrator_run(&run, &gh)? {
     StewardshipOutcome::FiledNew { repo, issue_number, url, signature } => {
         tracing::info!(%repo, issue_number, %url, %signature,
             "stewardship filed new issue");
@@ -91,9 +91,9 @@ match process_orchestrator_run(&run, &gh, &mut board)? {
 }
 ```
 
-`board` is mutated in both cases — the issue handle is enqueued via
-`enqueue_stewardship_issue` with a deterministic id, so re-invoking the loop
-with the same `OrchestratorRunSummary` is idempotent.
+The API has no goal-board parameter. Re-invoking the loop with the same
+`OrchestratorRunSummary` remains idempotent through the open-issue signature
+search.
 
 ## 4. Handle errors loudly
 
@@ -109,11 +109,10 @@ use simard::error::{SimardError, SimardResult};
 use simard::stewardship::process_orchestrator_run;
 
 fn handle_failed_run(
-    run:   &OrchestratorRunSummary,
-    gh:    &dyn GhClient,
-    board: &mut GoalBoard,
+    run: &OrchestratorRunSummary,
+    gh:  &dyn GhClient,
 ) -> SimardResult<()> {
-    if let Err(err) = process_orchestrator_run(run, gh, board) {
+    if let Err(err) = process_orchestrator_run(run, gh) {
         match err {
             SimardError::StewardshipGhCommandFailed { reason } => {
                 // gh is broken / unauthenticated / rate-limited; surface as a

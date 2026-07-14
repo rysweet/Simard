@@ -440,9 +440,8 @@ fn first_time_false_park_self_heals_as_root_cause() {
 }
 
 /// RECURRING re-block (recurrence ≥ N) must NOT blindly re-`UnblockGoal` every
-/// cycle (the operator's rejected antipattern). It escalates the ROOT CAUSE —
-/// a deduped `FileIssue` describing the systemic defect (why it keeps getting
-/// re-parked) — instead of patching the symptom again.
+/// cycle. It escalates the root cause to the operator without creating another
+/// GitHub issue.
 #[test]
 fn recurring_reblock_escalates_root_cause_not_blind_unblock() {
     let iv = decide(&perpetual_blocked_problem(Some(
@@ -453,46 +452,25 @@ fn recurring_reblock_escalates_root_cause_not_blind_unblock() {
         "a repeatedly re-parked perpetual goal must not be blindly re-unblocked: {iv:?}"
     );
     assert!(
-        matches!(iv, Intervention::FileIssue { .. }),
-        "the recurring root cause is escalated via a deduped FileIssue: {iv:?}"
+        matches!(iv, Intervention::EscalateBlockedGoal { .. }),
+        "the recurring root cause is escalated to the operator: {iv:?}"
     );
 }
 
-/// The recurring-reblock `FileIssue` is ROUTABLE and STABLY DEDUPED (regression
-/// for the two blocking review findings): its `source_module` routes to a real
-/// repo (so the issue actually files, not `StewardshipRoutingAmbiguous`), and
-/// its `stewardship::failure_signature` is IDENTICAL across successive
-/// recurrences — so the same systemic defect is filed ONCE and deduped, never a
-/// fresh issue every cycle as the recurrence count climbs.
+/// Recurring reblocks remain operator escalations as the recurrence count
+/// climbs; they never become issue-filing actions.
 #[test]
-fn recurring_reblock_issue_routes_and_dedups_stably() {
-    use crate::stewardship::{failure_signature, route_failure};
-
-    fn brief(recurrence: u32) -> OrchestratorRunBrief {
-        match decide(&perpetual_blocked_problem(Some(recurrence))) {
-            Intervention::FileIssue { run } => run,
-            other => panic!("expected FileIssue at recurrence {recurrence}, got {other:?}"),
-        }
+fn recurring_reblock_never_files_an_issue() {
+    for recurrence in [
+        RECURRENCE_ESCALATION_THRESHOLD,
+        RECURRENCE_ESCALATION_THRESHOLD + 5,
+    ] {
+        let intervention = decide(&perpetual_blocked_problem(Some(recurrence)));
+        assert!(
+            matches!(intervention, Intervention::EscalateBlockedGoal { .. }),
+            "recurrence {recurrence} must notify, not file: {intervention:?}"
+        );
     }
-
-    let at_threshold = brief(RECURRENCE_ESCALATION_THRESHOLD);
-    let later = brief(RECURRENCE_ESCALATION_THRESHOLD + 5);
-
-    // Routable: never `StewardshipRoutingAmbiguous`.
-    assert!(
-        route_failure(&at_threshold.source_module).is_ok(),
-        "the escalation issue must route to a real repo: {:?}",
-        at_threshold.source_module
-    );
-
-    // Deduped: the signature is stable across recurrence counts (the count is
-    // NOT embedded in the dedup fields).
-    let sig_a = failure_signature(&at_threshold.failure_kind, &at_threshold.error_text);
-    let sig_b = failure_signature(&later.failure_kind, &later.error_text);
-    assert_eq!(
-        sig_a, sig_b,
-        "recurring re-park issues must dedup to ONE signature across recurrences: {at_threshold:?} vs {later:?}"
-    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════

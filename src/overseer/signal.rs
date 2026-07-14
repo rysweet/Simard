@@ -134,7 +134,7 @@ pub struct GapItem {
     pub why_it_matters: String,
     /// Stable per-gap dedup signature (`goal:<id>` / `issue:<repo>#<n>` /
     /// `anomaly:<slug>`). Identical inputs yield identical signatures so a
-    /// recurring gap is deduped to at most one notification + issue per signature.
+    /// recurring gap is deduped to at most one notification per signature.
     pub signature: String,
 }
 
@@ -169,7 +169,7 @@ pub enum ProblemKind {
     DriftCorrection,
     /// Important backlog work is uncovered — a high-priority goal, high-signal
     /// issue, or live anomaly with no active workstream. The recurring gap-scan's
-    /// problem family; driven by the deduped notify + file-issue act path.
+    /// problem family; driven by the deduped notification act path.
     WorkstreamCoverage,
     /// A diagnosed decision-cycle / engineer / terminal-shell step failure
     /// (issue #2640, PART 2). Routed to a CORRECTIVE workstream that diagnoses

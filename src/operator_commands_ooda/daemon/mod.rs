@@ -834,8 +834,8 @@ pub fn run_ooda_daemon(
         // NOTE: the Overseer M1 read-only observer sensor that previously
         // registered here (default-OFF, `SIMARD_OVERSEER_ENABLED` truthy) is
         // SUPERSEDED by the acting Overseer periodic task driven below in the
-        // main loop (default-ON). Both observe and file DEDUPLICATED issues;
-        // running both would double-file and split the enable-gate, so the
+        // main loop (default-ON). Running both would duplicate observations and
+        // split the enable-gate, so the
         // acting co-process owns Observe→Orient→Decide→Act now. See
         // `crate::overseer::wiring`.
         daemon_log(
