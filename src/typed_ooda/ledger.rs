@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -132,6 +132,69 @@ pub struct CapabilityHandler {
     policy: CapabilityPolicy,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct ActorBinding {
+    cycle_id: String,
+    goal_id: String,
+    actor_identity: String,
+    repository_json: Vec<u8>,
+    grants_json: Vec<u8>,
+    engineer_permissions_json: Vec<u8>,
+    working_directory_json: Option<Vec<u8>>,
+    observe_only: bool,
+}
+
+struct StoredActorSession {
+    binding: ActorBinding,
+    token_hash: String,
+    expires_at: i64,
+}
+
+impl ActorBinding {
+    fn new(
+        actor: &AuthenticatedToolContext,
+        cycle_id: &str,
+        goal_id: &str,
+        repository: &RepositoryRef,
+    ) -> CapabilityResult<Self> {
+        Ok(Self {
+            cycle_id: cycle_id.to_string(),
+            goal_id: goal_id.to_string(),
+            actor_identity: actor.actor_identity.clone(),
+            repository_json: serde_json::to_vec(repository).map_err(serialization)?,
+            grants_json: serde_json::to_vec(actor.grants()).map_err(serialization)?,
+            engineer_permissions_json: serde_json::to_vec(actor.engineer_permissions())
+                .map_err(serialization)?,
+            working_directory_json: actor
+                .bound_working_directory()
+                .map(serde_json::to_vec)
+                .transpose()
+                .map_err(serialization)?,
+            observe_only: actor.is_observe_only(),
+        })
+    }
+
+    fn into_context(self, session_id: &str) -> CapabilityResult<AuthenticatedToolContext> {
+        let repository: RepositoryRef =
+            serde_json::from_slice(&self.repository_json).map_err(serialization)?;
+        let grants: BTreeSet<CapabilityGrant> =
+            serde_json::from_slice(&self.grants_json).map_err(serialization)?;
+        let engineer_permissions: BTreeSet<String> =
+            serde_json::from_slice(&self.engineer_permissions_json).map_err(serialization)?;
+        let mut actor = AuthenticatedToolContext::new(self.actor_identity, session_id, grants)
+            .scoped_to_repository(repository)
+            .bound_to_cycle_goal(self.cycle_id, self.goal_id)
+            .with_engineer_permissions(engineer_permissions)
+            .with_observe_only(self.observe_only);
+        if let Some(json) = self.working_directory_json {
+            let working_directory: PathBuf =
+                serde_json::from_slice(&json).map_err(serialization)?;
+            actor = actor.scoped_to_working_directory(working_directory);
+        }
+        Ok(actor)
+    }
+}
+
 impl std::fmt::Debug for CapabilityHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CapabilityHandler")
@@ -142,187 +205,11 @@ impl std::fmt::Debug for CapabilityHandler {
 
 impl CapabilityHandler {
     pub fn open(path: impl AsRef<Path>, policy: CapabilityPolicy) -> CapabilityResult<Self> {
-        let connection = Connection::open(path.as_ref()).map_err(persistence)?;
+        let mut connection = Connection::open(path.as_ref()).map_err(persistence)?;
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(persistence)?;
-        connection
-            .execute_batch(
-                "
-                PRAGMA foreign_keys = ON;
-                PRAGMA journal_mode = WAL;
-                CREATE TABLE IF NOT EXISTS terminal_outcomes (
-                    request_id TEXT PRIMARY KEY,
-                    request_hash TEXT NOT NULL,
-                    session_id TEXT NOT NULL,
-                    cycle_id TEXT NOT NULL,
-                    outcome_id TEXT NOT NULL UNIQUE,
-                    outcome_json BLOB NOT NULL,
-                    UNIQUE(session_id, cycle_id)
-                );
-                CREATE TABLE IF NOT EXISTS progress_records (
-                    request_id TEXT PRIMARY KEY,
-                    request_hash TEXT NOT NULL,
-                    session_id TEXT NOT NULL,
-                    cycle_id TEXT NOT NULL,
-                    progress_json BLOB NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS mutation_requests (
-                    request_id TEXT PRIMARY KEY,
-                    mutation_type TEXT NOT NULL,
-                    request_hash TEXT NOT NULL,
-                    result_json BLOB NOT NULL,
-                    request_format_version INTEGER NOT NULL DEFAULT 2,
-                    result_format_version INTEGER NOT NULL DEFAULT 1
-                );
-                CREATE TABLE IF NOT EXISTS effect_jobs (
-                    effect_id TEXT PRIMARY KEY,
-                    outcome_id TEXT NOT NULL UNIQUE,
-                    request_id TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    state TEXT NOT NULL,
-                    action_json BLOB NOT NULL,
-                    attempt INTEGER NOT NULL DEFAULT 0,
-                    lease_generation INTEGER NOT NULL DEFAULT 0,
-                    lease_owner TEXT,
-                    lease_expires_at INTEGER,
-                    error TEXT,
-                    result_json BLOB,
-                    FOREIGN KEY(outcome_id) REFERENCES terminal_outcomes(outcome_id)
-                );
-                CREATE TABLE IF NOT EXISTS engineer_claims (
-                    claim_key TEXT PRIMARY KEY,
-                    outcome_id TEXT NOT NULL UNIQUE,
-                    request_id TEXT NOT NULL,
-                    FOREIGN KEY(outcome_id) REFERENCES terminal_outcomes(outcome_id)
-                );
-                CREATE TABLE IF NOT EXISTS actor_sessions (
-                    session_id TEXT PRIMARY KEY,
-                    cycle_id TEXT NOT NULL,
-                    goal_id TEXT NOT NULL,
-                    actor_identity TEXT NOT NULL,
-                    repository_json BLOB NOT NULL,
-                    grants_json BLOB NOT NULL,
-                    engineer_permissions_json BLOB NOT NULL DEFAULT X'5b5d',
-                    working_directory_json BLOB,
-                    observe_only INTEGER NOT NULL,
-                    token_hash TEXT NOT NULL,
-                    expires_at INTEGER NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS process_executions (
-                    execution_id TEXT PRIMARY KEY,
-                    request_id TEXT NOT NULL UNIQUE,
-                    request_hash TEXT NOT NULL,
-                    session_id TEXT NOT NULL,
-                    cycle_id TEXT NOT NULL,
-                    goal_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    request_json BLOB NOT NULL,
-                    result_json BLOB NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS process_executions_cycle_idx
-                    ON process_executions(session_id, cycle_id);
-                CREATE TABLE IF NOT EXISTS mutation_scope_counters (
-                    session_id TEXT NOT NULL,
-                    cycle_id TEXT NOT NULL,
-                    goal_id TEXT NOT NULL,
-                    mutation_type TEXT NOT NULL,
-                    spent INTEGER NOT NULL,
-                    PRIMARY KEY(session_id, cycle_id, goal_id, mutation_type)
-                );
-                CREATE TABLE IF NOT EXISTS authorization_decisions (
-                    decision_id TEXT PRIMARY KEY,
-                    effect_id TEXT NOT NULL,
-                    decision TEXT NOT NULL,
-                    decision_json BLOB NOT NULL,
-                    recorded_at INTEGER NOT NULL,
-                    FOREIGN KEY(effect_id) REFERENCES effect_jobs(effect_id)
-                );
-                CREATE INDEX IF NOT EXISTS progress_records_cycle_idx
-                    ON progress_records(session_id, cycle_id);
-                CREATE INDEX IF NOT EXISTS effect_jobs_state_lease_idx
-                    ON effect_jobs(state, lease_expires_at);
-                CREATE INDEX IF NOT EXISTS authorization_decisions_effect_idx
-                    ON authorization_decisions(effect_id, recorded_at);
-                ",
-            )
-            .map_err(persistence)?;
-        ensure_effect_result_column(&connection)?;
-        ensure_column(
-            &connection,
-            "effect_jobs",
-            "lease_generation",
-            "ALTER TABLE effect_jobs ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0",
-        )?;
-        ensure_column(
-            &connection,
-            "actor_sessions",
-            "engineer_permissions_json",
-            "ALTER TABLE actor_sessions ADD COLUMN engineer_permissions_json BLOB NOT NULL DEFAULT X'5b5d'",
-        )?;
-        ensure_column(
-            &connection,
-            "actor_sessions",
-            "working_directory_json",
-            "ALTER TABLE actor_sessions ADD COLUMN working_directory_json BLOB",
-        )?;
-        ensure_column(
-            &connection,
-            "mutation_requests",
-            "request_format_version",
-            "ALTER TABLE mutation_requests ADD COLUMN request_format_version INTEGER NOT NULL DEFAULT 1",
-        )?;
-        ensure_column(
-            &connection,
-            "mutation_requests",
-            "result_format_version",
-            "ALTER TABLE mutation_requests ADD COLUMN result_format_version INTEGER NOT NULL DEFAULT 1",
-        )?;
-        connection
-            .execute_batch(
-                "
-                INSERT OR IGNORE INTO mutation_requests(
-                    request_id, mutation_type, request_hash, result_json,
-                    request_format_version, result_format_version
-                )
-                    SELECT request_id, 'terminal', request_hash, outcome_json, 1, 1
-                    FROM terminal_outcomes;
-                INSERT OR IGNORE INTO mutation_requests(
-                    request_id, mutation_type, request_hash, result_json,
-                    request_format_version, result_format_version
-                )
-                    SELECT request_id, 'progress', request_hash, progress_json, 1, 1
-                    FROM progress_records;
-                ",
-            )
-            .map_err(persistence)?;
-        connection
-            .execute(
-                "DELETE FROM actor_sessions WHERE expires_at < ?1",
-                [now_millis()],
-            )
-            .map_err(persistence)?;
-        connection
-            .execute_batch(
-                "
-                DELETE FROM actor_sessions
-                WHERE session_id IN (
-                    SELECT session_id FROM actor_sessions
-                    GROUP BY session_id HAVING COUNT(*) > 1
-                );
-                CREATE UNIQUE INDEX IF NOT EXISTS actor_sessions_session_idx
-                    ON actor_sessions(session_id);
-                INSERT INTO mutation_scope_counters(
-                    session_id, cycle_id, goal_id, mutation_type, spent
-                )
-                SELECT session_id, cycle_id, goal_id, 'process_exec', COUNT(*)
-                FROM process_executions
-                GROUP BY session_id, cycle_id, goal_id
-                ON CONFLICT(session_id, cycle_id, goal_id, mutation_type)
-                DO UPDATE SET spent=MAX(spent, excluded.spent);
-                ",
-            )
-            .map_err(persistence)?;
+        super::schema::initialize(&mut connection, now_millis()).map_err(persistence)?;
         Ok(Self {
             connection: Mutex::new(connection),
             policy,
@@ -378,15 +265,7 @@ impl CapabilityHandler {
             &self.policy.revision,
             &("actor_session_v1", cycle_id, goal_id, ttl_millis),
         )?;
-        let repository_json = serde_json::to_vec(repository).map_err(serialization)?;
-        let grants_json = serde_json::to_vec(actor.grants()).map_err(serialization)?;
-        let engineer_permissions_json =
-            serde_json::to_vec(actor.engineer_permissions()).map_err(serialization)?;
-        let working_directory_json = actor
-            .bound_working_directory()
-            .map(serde_json::to_vec)
-            .transpose()
-            .map_err(serialization)?;
+        let binding = ActorBinding::new(actor, cycle_id, goal_id, repository)?;
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -402,58 +281,11 @@ impl CapabilityHandler {
                 [now_millis()],
             )
             .map_err(persistence)?;
-        type ExistingActorBinding = (
-            String,
-            String,
-            String,
-            Vec<u8>,
-            Vec<u8>,
-            Vec<u8>,
-            Option<Vec<u8>>,
-            bool,
-        );
-        let existing_binding: Option<ExistingActorBinding> = transaction
-            .query_row(
-                "SELECT cycle_id, goal_id, actor_identity, repository_json, grants_json,
-                        engineer_permissions_json, working_directory_json, observe_only
-                 FROM actor_sessions WHERE session_id=?1",
-                [&actor.session_id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                        row.get(7)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(persistence)?;
-        if existing_binding.as_ref().is_some_and(
-            |(
-                cycle,
-                goal,
-                actor_identity,
-                stored_repository,
-                stored_grants,
-                stored_engineer_permissions,
-                stored_working_directory,
-                observe_only,
-            )| {
-                cycle != cycle_id
-                    || goal != goal_id
-                    || actor_identity != &actor.actor_identity
-                    || stored_repository != &repository_json
-                    || stored_grants != &grants_json
-                    || stored_engineer_permissions != &engineer_permissions_json
-                    || stored_working_directory != &working_directory_json
-                    || *observe_only != actor.is_observe_only()
-            },
-        ) {
+        let existing_binding = load_actor_binding(&transaction, &actor.session_id)?;
+        if existing_binding
+            .as_ref()
+            .is_some_and(|existing| existing != &binding)
+        {
             return Err(CapabilityError::new(
                 CapabilityErrorCode::AuthorizationScopeViolation,
                 "actor session is already bound to a different identity or authorization scope",
@@ -482,14 +314,14 @@ impl CapabilityHandler {
                     expires_at=excluded.expires_at",
                 params![
                     actor.session_id,
-                    cycle_id,
-                    goal_id,
-                    actor.actor_identity,
-                    repository_json,
-                    grants_json,
-                    engineer_permissions_json,
-                    working_directory_json,
-                    actor.is_observe_only(),
+                    binding.cycle_id,
+                    binding.goal_id,
+                    binding.actor_identity,
+                    binding.repository_json,
+                    binding.grants_json,
+                    binding.engineer_permissions_json,
+                    binding.working_directory_json,
+                    binding.observe_only,
                     token_hash,
                     expires_at_unix_millis
                 ],
@@ -521,87 +353,23 @@ impl CapabilityHandler {
         validate_identifier("cycle id", cycle_id)?;
         validate_identifier("goal id", goal_id)?;
         let connection = self.lock()?;
-        type SessionRow = (
-            String,
-            String,
-            String,
-            Vec<u8>,
-            Vec<u8>,
-            Vec<u8>,
-            Option<Vec<u8>>,
-            bool,
-            String,
-            i64,
-        );
-        let row: Option<SessionRow> = connection
-            .query_row(
-                "SELECT cycle_id, goal_id, actor_identity, repository_json, grants_json,
-                        engineer_permissions_json, working_directory_json, observe_only,
-                        token_hash, expires_at
-                 FROM actor_sessions WHERE session_id=?1",
-                [session_id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                        row.get(7)?,
-                        row.get(8)?,
-                        row.get(9)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(persistence)?;
-        let Some((
-            stored_cycle,
-            stored_goal,
-            actor_identity,
-            repository_json,
-            grants_json,
-            engineer_permissions_json,
-            working_directory_json,
-            observe_only,
-            token_hash,
-            expires_at,
-        )) = row
-        else {
+        let Some(stored) = load_actor_session(&connection, session_id)? else {
             return Err(CapabilityError::new(
                 CapabilityErrorCode::Unauthenticated,
                 "actor session lease was not found",
             ));
         };
-        if stored_cycle != cycle_id
-            || stored_goal != goal_id
-            || expires_at < now_millis()
-            || token_hash != sha256_hex(token.as_bytes())
+        if stored.binding.cycle_id != cycle_id
+            || stored.binding.goal_id != goal_id
+            || stored.expires_at < now_millis()
+            || stored.token_hash != sha256_hex(token.as_bytes())
         {
             return Err(CapabilityError::new(
                 CapabilityErrorCode::Unauthenticated,
                 "actor session lease is expired or does not match the invocation",
             ));
         }
-        let repository: RepositoryRef =
-            serde_json::from_slice(&repository_json).map_err(serialization)?;
-        let grants: BTreeSet<CapabilityGrant> =
-            serde_json::from_slice(&grants_json).map_err(serialization)?;
-        let engineer_permissions: BTreeSet<String> =
-            serde_json::from_slice(&engineer_permissions_json).map_err(serialization)?;
-        let mut actor = AuthenticatedToolContext::new(actor_identity, session_id, grants)
-            .scoped_to_repository(repository)
-            .bound_to_cycle_goal(cycle_id, goal_id)
-            .with_engineer_permissions(engineer_permissions)
-            .with_observe_only(observe_only);
-        if let Some(json) = working_directory_json {
-            let working_directory: std::path::PathBuf =
-                serde_json::from_slice(&json).map_err(serialization)?;
-            actor = actor.scoped_to_working_directory(working_directory);
-        }
-        Ok(actor)
+        stored.binding.into_context(session_id)
     }
 
     pub fn issue_privileged_approval(
@@ -785,13 +553,14 @@ impl CapabilityHandler {
             },
         });
         let outcome = self.new_outcome(actor, &identity, payload, raw_semantic, evidence);
-        insert_terminal(&transaction, &outcome, &fingerprint)?;
-        record_request(
+        let outcome_json = serde_json::to_vec(&outcome).map_err(serialization)?;
+        insert_terminal(&transaction, &outcome, &fingerprint, &outcome_json)?;
+        record_request_json(
             &transaction,
             &outcome.request_id,
             "terminal",
             &fingerprint,
-            &outcome,
+            &outcome_json,
         )?;
         let TypedOutcomePayload::Action(action_payload) = &outcome.payload else {
             unreachable!("record_action always creates an action payload");
@@ -947,15 +716,21 @@ impl CapabilityHandler {
         transaction
             .execute(
                 "INSERT INTO progress_records(request_id, request_hash, session_id, cycle_id, progress_json) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![record.request_id, fingerprint, record.session_id, record.cycle_id, json],
+                params![
+                    record.request_id,
+                    fingerprint,
+                    record.session_id,
+                    record.cycle_id,
+                    &json
+                ],
             )
             .map_err(persistence)?;
-        record_request(
+        record_request_json(
             &transaction,
             &record.request_id,
             "progress",
             &fingerprint,
-            &record,
+            &json,
         )?;
         transaction.commit().map_err(persistence)?;
         Ok(record)
@@ -1002,6 +777,44 @@ impl CapabilityHandler {
         actor: &AuthenticatedToolContext,
         request: &ProcessExecRequest,
     ) -> CapabilityResult<(ProcessExecutionRecord, bool)> {
+        self.validate_process_execution(actor, request)?;
+        let fingerprint = fingerprint(actor, &self.policy.revision, &("process_exec_v1", request))?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(persistence)?;
+        if let Some(existing) = replay_request(
+            &transaction,
+            &request.identity.request_id,
+            "process_exec",
+            &fingerprint,
+        )? {
+            return Ok((existing, false));
+        }
+        reserve_process_slot(
+            &transaction,
+            &request.identity,
+            self.policy.process_exec_mutations_per_cycle,
+        )?;
+        let record = new_process_execution(request);
+        let result_json = serde_json::to_vec(&record).map_err(serialization)?;
+        insert_process_execution(&transaction, request, &record, &fingerprint, &result_json)?;
+        record_request_json(
+            &transaction,
+            &record.request_id,
+            "process_exec",
+            &fingerprint,
+            &result_json,
+        )?;
+        transaction.commit().map_err(persistence)?;
+        Ok((record, true))
+    }
+
+    fn validate_process_execution(
+        &self,
+        actor: &AuthenticatedToolContext,
+        request: &ProcessExecRequest,
+    ) -> CapabilityResult<()> {
         self.authorize(actor, &request.identity, CapabilityGrant::ProcessExec)?;
         if actor.is_observe_only()
             || !actor.engineer_permissions().contains("process_exec")
@@ -1040,86 +853,7 @@ impl CapabilityHandler {
                 "process arguments exceed the typed execution boundary",
             ));
         }
-
-        let fingerprint = fingerprint(actor, &self.policy.revision, &("process_exec_v1", request))?;
-        let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(persistence)?;
-        if let Some(existing) = replay_request(
-            &transaction,
-            &request.identity.request_id,
-            "process_exec",
-            &fingerprint,
-        )? {
-            return Ok((existing, false));
-        }
-        let reserved = transaction
-            .query_row(
-                "INSERT INTO mutation_scope_counters(
-                    session_id, cycle_id, goal_id, mutation_type, spent
-                 ) VALUES (?1, ?2, ?3, 'process_exec', 1)
-                 ON CONFLICT(session_id, cycle_id, goal_id, mutation_type)
-                 DO UPDATE SET spent=spent+1
-                 WHERE spent < ?4
-                 RETURNING spent",
-                params![
-                    request.identity.session_id,
-                    request.identity.cycle_id,
-                    request.identity.goal_id,
-                    self.policy.process_exec_mutations_per_cycle
-                ],
-                |row| row.get::<_, usize>(0),
-            )
-            .optional()
-            .map_err(persistence)?;
-        if reserved.is_none() || self.policy.process_exec_mutations_per_cycle == 0 {
-            return Err(CapabilityError::new(
-                CapabilityErrorCode::MutationCapExhausted,
-                "process_exec mutation cap is exhausted for this cycle",
-            ));
-        }
-        let record = ProcessExecutionRecord {
-            execution_id: Uuid::now_v7().to_string(),
-            request_id: request.identity.request_id.clone(),
-            session_id: request.identity.session_id.clone(),
-            cycle_id: request.identity.cycle_id.clone(),
-            goal_id: request.identity.goal_id.clone(),
-            status: ProcessExecutionStatus::Reserved,
-            exit_code: None,
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        };
-        let request_json = serde_json::to_vec(request).map_err(serialization)?;
-        let result_json = serde_json::to_vec(&record).map_err(serialization)?;
-        transaction
-            .execute(
-                "INSERT INTO process_executions(
-                    execution_id, request_id, request_hash, session_id, cycle_id,
-                    goal_id, status, request_json, result_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    record.execution_id,
-                    record.request_id,
-                    fingerprint,
-                    record.session_id,
-                    record.cycle_id,
-                    record.goal_id,
-                    record.status.as_str(),
-                    request_json,
-                    result_json
-                ],
-            )
-            .map_err(persistence)?;
-        record_request(
-            &transaction,
-            &record.request_id,
-            "process_exec",
-            &fingerprint,
-            &record,
-        )?;
-        transaction.commit().map_err(persistence)?;
-        Ok((record, true))
+        Ok(())
     }
 
     fn update_process_execution(
@@ -1139,7 +873,7 @@ impl CapabilityHandler {
                 params![
                     record.execution_id,
                     record.status.as_str(),
-                    result_json,
+                    &result_json,
                     expected.as_str()
                 ],
             )
@@ -1153,10 +887,7 @@ impl CapabilityHandler {
         transaction
             .execute(
                 "UPDATE mutation_requests SET result_json=?2 WHERE request_id=?1",
-                params![
-                    record.request_id,
-                    serde_json::to_vec(record).map_err(serialization)?
-                ],
+                params![record.request_id, result_json],
             )
             .map_err(persistence)?;
         transaction.commit().map_err(persistence)
@@ -1741,13 +1472,14 @@ impl CapabilityHandler {
         }
         ensure_cycle_open(&transaction, identity)?;
         let outcome = self.new_outcome(actor, identity, payload, raw_semantic, evidence);
-        insert_terminal(&transaction, &outcome, &fingerprint)?;
-        record_request(
+        let outcome_json = serde_json::to_vec(&outcome).map_err(serialization)?;
+        insert_terminal(&transaction, &outcome, &fingerprint, &outcome_json)?;
+        record_request_json(
             &transaction,
             &outcome.request_id,
             "terminal",
             &fingerprint,
-            &outcome,
+            &outcome_json,
         )?;
         transaction.commit().map_err(persistence)?;
         Ok(outcome)
@@ -2085,12 +1817,141 @@ impl CapabilityHandler {
     }
 }
 
+fn load_actor_binding(
+    connection: &Connection,
+    session_id: &str,
+) -> CapabilityResult<Option<ActorBinding>> {
+    connection
+        .query_row(
+            "SELECT cycle_id, goal_id, actor_identity, repository_json, grants_json,
+                    engineer_permissions_json, working_directory_json, observe_only
+             FROM actor_sessions WHERE session_id=?1",
+            [session_id],
+            actor_binding_from_row,
+        )
+        .optional()
+        .map_err(persistence)
+}
+
+fn load_actor_session(
+    connection: &Connection,
+    session_id: &str,
+) -> CapabilityResult<Option<StoredActorSession>> {
+    connection
+        .query_row(
+            "SELECT cycle_id, goal_id, actor_identity, repository_json, grants_json,
+                    engineer_permissions_json, working_directory_json, observe_only,
+                    token_hash, expires_at
+             FROM actor_sessions WHERE session_id=?1",
+            [session_id],
+            |row| {
+                Ok(StoredActorSession {
+                    binding: actor_binding_from_row(row)?,
+                    token_hash: row.get(8)?,
+                    expires_at: row.get(9)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(persistence)
+}
+
+fn actor_binding_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActorBinding> {
+    Ok(ActorBinding {
+        cycle_id: row.get(0)?,
+        goal_id: row.get(1)?,
+        actor_identity: row.get(2)?,
+        repository_json: row.get(3)?,
+        grants_json: row.get(4)?,
+        engineer_permissions_json: row.get(5)?,
+        working_directory_json: row.get(6)?,
+        observe_only: row.get(7)?,
+    })
+}
+
+fn reserve_process_slot(
+    transaction: &Transaction<'_>,
+    identity: &TerminalRequestIdentity,
+    limit: usize,
+) -> CapabilityResult<()> {
+    let reserved = transaction
+        .query_row(
+            "INSERT INTO mutation_scope_counters(
+                session_id, cycle_id, goal_id, mutation_type, spent
+             ) VALUES (?1, ?2, ?3, 'process_exec', 1)
+             ON CONFLICT(session_id, cycle_id, goal_id, mutation_type)
+             DO UPDATE SET spent=spent+1
+             WHERE spent < ?4
+             RETURNING spent",
+            params![
+                identity.session_id,
+                identity.cycle_id,
+                identity.goal_id,
+                limit
+            ],
+            |row| row.get::<_, usize>(0),
+        )
+        .optional()
+        .map_err(persistence)?;
+    if reserved.is_none() || limit == 0 {
+        return Err(CapabilityError::new(
+            CapabilityErrorCode::MutationCapExhausted,
+            "process_exec mutation cap is exhausted for this cycle",
+        ));
+    }
+    Ok(())
+}
+
+fn new_process_execution(request: &ProcessExecRequest) -> ProcessExecutionRecord {
+    ProcessExecutionRecord {
+        execution_id: Uuid::now_v7().to_string(),
+        request_id: request.identity.request_id.clone(),
+        session_id: request.identity.session_id.clone(),
+        cycle_id: request.identity.cycle_id.clone(),
+        goal_id: request.identity.goal_id.clone(),
+        status: ProcessExecutionStatus::Reserved,
+        exit_code: None,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    }
+}
+
+fn insert_process_execution(
+    transaction: &Transaction<'_>,
+    request: &ProcessExecRequest,
+    record: &ProcessExecutionRecord,
+    fingerprint: &str,
+    result_json: &[u8],
+) -> CapabilityResult<()> {
+    let request_json = serde_json::to_vec(request).map_err(serialization)?;
+    transaction
+        .execute(
+            "INSERT INTO process_executions(
+                execution_id, request_id, request_hash, session_id, cycle_id,
+                goal_id, status, request_json, result_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                record.execution_id,
+                record.request_id,
+                fingerprint,
+                record.session_id,
+                record.cycle_id,
+                record.goal_id,
+                record.status.as_str(),
+                request_json,
+                result_json
+            ],
+        )
+        .map_err(persistence)?;
+    Ok(())
+}
+
 fn insert_terminal(
     transaction: &Transaction<'_>,
     outcome: &TerminalOutcome,
     fingerprint: &str,
+    json: &[u8],
 ) -> CapabilityResult<()> {
-    let json = serde_json::to_vec(outcome).map_err(serialization)?;
     transaction
         .execute(
             "INSERT INTO terminal_outcomes(request_id, request_hash, session_id, cycle_id, outcome_id, outcome_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -2104,45 +1965,6 @@ fn insert_terminal(
             ],
         )
         .map_err(persistence)?;
-    Ok(())
-}
-
-fn ensure_effect_result_column(connection: &Connection) -> CapabilityResult<()> {
-    let exists: bool = connection
-        .query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM pragma_table_info('effect_jobs') WHERE name='result_json'
-            )",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(persistence)?;
-    if !exists {
-        connection
-            .execute("ALTER TABLE effect_jobs ADD COLUMN result_json BLOB", [])
-            .map_err(persistence)?;
-    }
-    Ok(())
-}
-
-fn ensure_column(
-    connection: &Connection,
-    table: &str,
-    column: &str,
-    migration: &str,
-) -> CapabilityResult<()> {
-    let exists: bool = connection
-        .query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM pragma_table_info(?1) WHERE name=?2
-            )",
-            params![table, column],
-            |row| row.get(0),
-        )
-        .map_err(persistence)?;
-    if !exists {
-        connection.execute(migration, []).map_err(persistence)?;
-    }
     Ok(())
 }
 
@@ -2193,6 +2015,16 @@ fn record_request<T: Serialize>(
     result: &T,
 ) -> CapabilityResult<()> {
     let json = serde_json::to_vec(result).map_err(serialization)?;
+    record_request_json(transaction, request_id, mutation_type, fingerprint, &json)
+}
+
+fn record_request_json(
+    transaction: &Transaction<'_>,
+    request_id: &str,
+    mutation_type: &str,
+    fingerprint: &str,
+    json: &[u8],
+) -> CapabilityResult<()> {
     transaction
         .execute(
             "INSERT INTO mutation_requests(

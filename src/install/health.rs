@@ -1,6 +1,6 @@
 use std::fmt::{self, Display, Formatter};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -74,24 +74,33 @@ pub(crate) fn run_with_args(
                 format!("health check failed to start: {error}"),
             )
         })?;
+    wait_for_exit(&mut child, timeout)?;
+    let output = child.wait_with_output().map_err(|error| {
+        HealthCheckError::new(
+            HealthCheckErrorKind::Transport,
+            format!("health check output transport failed: {error}"),
+        )
+    })?;
+    validate_output(output)
+}
+
+fn wait_for_exit(child: &mut Child, timeout: Duration) -> Result<(), HealthCheckError> {
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(_)) => return Ok(()),
             Ok(None) if Instant::now() < deadline => {
                 thread::sleep(Duration::from_millis(5));
             }
             Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                terminate(child);
                 return Err(HealthCheckError::new(
                     HealthCheckErrorKind::Timeout,
                     "health check timed out",
                 ));
             }
             Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                terminate(child);
                 return Err(HealthCheckError::new(
                     HealthCheckErrorKind::Transport,
                     format!("health check status transport failed: {error}"),
@@ -99,12 +108,14 @@ pub(crate) fn run_with_args(
             }
         }
     }
-    let output = child.wait_with_output().map_err(|error| {
-        HealthCheckError::new(
-            HealthCheckErrorKind::Transport,
-            format!("health check output transport failed: {error}"),
-        )
-    })?;
+}
+
+fn terminate(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn validate_output(output: Output) -> Result<HealthResponse, HealthCheckError> {
     if !output.status.success() {
         return Err(HealthCheckError::new(
             HealthCheckErrorKind::NonzeroExit,

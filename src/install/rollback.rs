@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -50,32 +50,65 @@ pub fn create_verified_backup(
 ) -> InstallResult<VerifiedBackup> {
     let services = super::systemd::capture_baseline(layout, systemctl)?;
     super::systemd::quiesce_for_snapshot(systemctl, &services)?;
-    let result: InstallResult<VerifiedBackup> = (|| {
-        fs::create_dir_all(&layout.backup_root).map_err(|error| {
-            InstallError::new(format!(
-                "failed to create backup root {}: {error}",
-                layout.backup_root.display()
-            ))
-        })?;
-        let root = layout
-            .backup_root
-            .join(format!("install-{}", layout.transaction_id));
-        if root.exists() {
-            return err(format!(
-                "verified backup transaction already exists: {}",
-                root.display()
-            ));
-        }
-        fs::create_dir(&root).map_err(|error| {
-            InstallError::new(format!(
-                "failed to create verified backup directory {}: {error}",
-                root.display()
-            ))
-        })?;
+    let result = create_backup_manifest(layout, &services);
+    if let Err(snapshot_error) = result {
+        return match super::systemd::restore_baseline(systemctl, &services) {
+            Ok(()) => Err(snapshot_error),
+            Err(service_error) => err(format!(
+                "snapshot failed: {snapshot_error}; service baseline restoration failed: {service_error}"
+            )),
+        };
+    }
+    result
+}
 
-        let surfaces = backup_surfaces(layout);
-        let mut entries = Vec::with_capacity(surfaces.len());
-        for (name, destination, kind) in surfaces {
+fn create_backup_manifest(
+    layout: &InstallLayout,
+    services: &[super::systemd::ServiceBaseline],
+) -> InstallResult<VerifiedBackup> {
+    let root = create_backup_directory(layout)?;
+    let manifest = BackupManifest {
+        version: MANIFEST_VERSION,
+        transaction_id: layout.transaction_id.clone(),
+        simard_home: layout.simard_home.clone(),
+        entries: snapshot_surfaces(layout, &root)?,
+        services: services.to_vec(),
+    };
+    let manifest_path = root.join("manifest.json");
+    write_manifest(&manifest_path, &manifest)?;
+    verify_manifest(layout, &manifest_path)?;
+    Ok(VerifiedBackup { manifest_path })
+}
+
+fn create_backup_directory(layout: &InstallLayout) -> InstallResult<PathBuf> {
+    fs::create_dir_all(&layout.backup_root).map_err(|error| {
+        InstallError::new(format!(
+            "failed to create backup root {}: {error}",
+            layout.backup_root.display()
+        ))
+    })?;
+    let root = layout
+        .backup_root
+        .join(format!("install-{}", layout.transaction_id));
+    if root.exists() {
+        return err(format!(
+            "verified backup transaction already exists: {}",
+            root.display()
+        ));
+    }
+    fs::create_dir(&root).map_err(|error| {
+        InstallError::new(format!(
+            "failed to create verified backup directory {}: {error}",
+            root.display()
+        ))
+    })?;
+    Ok(root)
+}
+
+fn snapshot_surfaces(layout: &InstallLayout, root: &Path) -> InstallResult<Vec<BackupEntry>> {
+    backup_surfaces(layout)
+        .into_iter()
+        .map(|(name, destination, kind)| {
             let backup = root.join(&name);
             let existed = destination.exists();
             let digest = if existed {
@@ -91,36 +124,16 @@ pub fn create_verified_backup(
             } else {
                 None
             };
-            entries.push(BackupEntry {
+            Ok(BackupEntry {
                 name,
                 destination,
                 backup,
                 existed,
                 digest,
                 kind,
-            });
-        }
-        let manifest = BackupManifest {
-            version: MANIFEST_VERSION,
-            transaction_id: layout.transaction_id.clone(),
-            simard_home: layout.simard_home.clone(),
-            entries,
-            services: services.clone(),
-        };
-        let manifest_path = root.join("manifest.json");
-        write_manifest(&manifest_path, &manifest)?;
-        verify_manifest(layout, &manifest_path)?;
-        Ok(VerifiedBackup { manifest_path })
-    })();
-    if let Err(snapshot_error) = result {
-        return match super::systemd::restore_baseline(systemctl, &services) {
-            Ok(()) => Err(snapshot_error),
-            Err(service_error) => err(format!(
-                "snapshot failed: {snapshot_error}; service baseline restoration failed: {service_error}"
-            )),
-        };
-    }
-    result
+            })
+        })
+        .collect()
 }
 
 pub fn restore_verified_backup(
@@ -369,71 +382,16 @@ fn publish_restore_entries_inner(
 ) -> InstallResult<()> {
     let mut swapped: Vec<(&BackupEntry, PathBuf)> = Vec::new();
     for (index, (entry, stage)) in manifest.entries.iter().zip(staged).enumerate() {
+        let compensation =
+            match publish_restore_entry(manifest, index, entry, stage.as_deref(), fail_at) {
+                Ok(compensation) => compensation,
+                Err(error) => return fail_with_compensation(&swapped, error.to_string()),
+            };
+        swapped.push((entry, compensation));
         let parent = entry
             .destination
             .parent()
             .expect("validated during staging");
-        let compensation = parent.join(format!(
-            ".simard-compensation-{}-{}",
-            manifest.transaction_id, entry.name
-        ));
-        if compensation.exists() {
-            return fail_with_compensation(
-                &swapped,
-                format!(
-                    "unfinished rollback compensation requires recovery before retry: {}",
-                    compensation.display()
-                ),
-            );
-        }
-        if entry.destination.exists() {
-            if let Err(error) = fs::rename(&entry.destination, &compensation) {
-                return fail_with_compensation(
-                    &swapped,
-                    format!(
-                        "failed to stage rollback compensation for {}: {error}",
-                        entry.destination.display()
-                    ),
-                );
-            }
-            if let Err(error) = sync_directory(parent) {
-                let restore_current = fs::rename(&compensation, &entry.destination)
-                    .map_err(|restore| {
-                        InstallError::new(format!(
-                            "failed to restore {} after durability failure: {restore}",
-                            entry.destination.display()
-                        ))
-                    })
-                    .and_then(|()| sync_directory(parent));
-                return fail_with_current_and_prior_compensation(
-                    &swapped,
-                    error.to_string(),
-                    restore_current,
-                );
-            }
-        }
-        if fail_at == Some(index) {
-            let restore_current = restore_current_surface(entry, &compensation);
-            return fail_with_current_and_prior_compensation(
-                &swapped,
-                "injected atomic rollback publication failure".to_string(),
-                restore_current,
-            );
-        }
-        if let Some(stage) = stage
-            && let Err(error) = fs::rename(stage, &entry.destination)
-        {
-            let restore_current = restore_current_surface(entry, &compensation);
-            return fail_with_current_and_prior_compensation(
-                &swapped,
-                format!(
-                    "failed atomic rollback replacement for {}: {error}",
-                    entry.destination.display()
-                ),
-                restore_current,
-            );
-        }
-        swapped.push((entry, compensation));
         if let Err(error) = sync_directory(parent) {
             return fail_with_compensation(&swapped, error.to_string());
         }
@@ -448,6 +406,66 @@ fn publish_restore_entries_inner(
         )?;
     }
     Ok(())
+}
+
+fn publish_restore_entry(
+    manifest: &BackupManifest,
+    index: usize,
+    entry: &BackupEntry,
+    stage: Option<&Path>,
+    fail_at: Option<usize>,
+) -> InstallResult<PathBuf> {
+    let parent = entry
+        .destination
+        .parent()
+        .expect("validated during staging");
+    let compensation = parent.join(format!(
+        ".simard-compensation-{}-{}",
+        manifest.transaction_id, entry.name
+    ));
+    if compensation.exists() {
+        return err(format!(
+            "unfinished rollback compensation requires recovery before retry: {}",
+            compensation.display()
+        ));
+    }
+    if entry.destination.exists() {
+        fs::rename(&entry.destination, &compensation).map_err(|error| {
+            InstallError::new(format!(
+                "failed to stage rollback compensation for {}: {error}",
+                entry.destination.display()
+            ))
+        })?;
+        if let Err(error) = sync_directory(parent) {
+            let current = fs::rename(&compensation, &entry.destination)
+                .map_err(|restore| {
+                    InstallError::new(format!(
+                        "failed to restore {} after durability failure: {restore}",
+                        entry.destination.display()
+                    ))
+                })
+                .and_then(|()| sync_directory(parent));
+            return Err(current_compensation_error(error.to_string(), current));
+        }
+    }
+    if fail_at == Some(index) {
+        return Err(current_compensation_error(
+            "injected atomic rollback publication failure".to_string(),
+            restore_current_surface(entry, &compensation),
+        ));
+    }
+    if let Some(stage) = stage
+        && let Err(error) = fs::rename(stage, &entry.destination)
+    {
+        return Err(current_compensation_error(
+            format!(
+                "failed atomic rollback replacement for {}: {error}",
+                entry.destination.display()
+            ),
+            restore_current_surface(entry, &compensation),
+        ));
+    }
+    Ok(compensation)
 }
 
 fn compensate_restore(swapped: &[(&BackupEntry, PathBuf)]) -> InstallResult<()> {
@@ -509,24 +527,12 @@ fn fail_with_compensation(
     }
 }
 
-fn fail_with_current_and_prior_compensation(
-    swapped: &[(&BackupEntry, PathBuf)],
-    failure: String,
-    current: InstallResult<()>,
-) -> InstallResult<()> {
-    let prior = compensate_restore(swapped);
-    match (current, prior) {
-        (Ok(()), Ok(())) => err(failure),
-        (current, prior) => {
-            let mut details = vec![failure];
-            if let Err(error) = current {
-                details.push(format!("current-surface compensation failed: {error}"));
-            }
-            if let Err(error) = prior {
-                details.push(format!("prior-surface compensation failed: {error}"));
-            }
-            err(details.join("; "))
-        }
+fn current_compensation_error(failure: String, current: InstallResult<()>) -> InstallError {
+    match current {
+        Ok(()) => InstallError::new(failure),
+        Err(error) => InstallError::new(format!(
+            "{failure}; current-surface compensation failed: {error}"
+        )),
     }
 }
 
@@ -805,9 +811,19 @@ fn digest_into(root: &Path, path: &Path, hasher: &mut Sha256) -> InstallResult<(
     hasher.update(relative.as_os_str().as_encoded_bytes());
     if metadata.is_file() {
         hasher.update([0]);
-        hasher.update(fs::read(path).map_err(|error| {
+        let mut file = fs::File::open(path).map_err(|error| {
             InstallError::new(format!("failed to hash file {}: {error}", path.display()))
-        })?);
+        })?;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer).map_err(|error| {
+                InstallError::new(format!("failed to hash file {}: {error}", path.display()))
+            })?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
         return Ok(());
     }
     if metadata.is_dir() {

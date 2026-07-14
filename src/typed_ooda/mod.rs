@@ -10,6 +10,7 @@ mod actor;
 mod executor;
 mod ledger;
 mod route;
+mod schema;
 mod types;
 
 pub use actor::*;
