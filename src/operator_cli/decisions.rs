@@ -223,11 +223,6 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_fn_exists() {
-        let _fn_ref: fn() -> Result<(), Box<dyn std::error::Error>> = dispatch_act_on_decisions;
-    }
-
-    #[test]
     fn handoff_serde_round_trip() {
         let h = sample_handoff(false);
         let json = serde_json::to_string(&h).unwrap();

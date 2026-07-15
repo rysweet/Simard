@@ -270,3 +270,177 @@ fn bounded_diagnostic_file(path: &Path) -> String {
     }
     diagnostic
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(dir: &Path, name: &str, contents: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, contents).expect("write test asset");
+        path
+    }
+
+    /// Build a route whose on-disk assets are byte-identical to the trusted
+    /// compiled-in copies, exercising the accept path without touching the
+    /// process environment or the real install tree.
+    fn trusted_route(dir: &Path) -> TypedGoalSessionRoute {
+        TypedGoalSessionRoute {
+            recipe_path: write(dir, "recipe.yaml", TRUSTED_RECIPE),
+            policy_path: write(dir, "policy.toml", TRUSTED_POLICY),
+        }
+    }
+
+    #[test]
+    fn accessors_return_configured_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let route = trusted_route(dir.path());
+        assert_eq!(route.recipe_path(), dir.path().join("recipe.yaml"));
+        assert_eq!(route.policy_path(), dir.path().join("policy.toml"));
+    }
+
+    #[test]
+    fn validate_assets_accepts_byte_identical_trusted_assets() {
+        let dir = tempfile::tempdir().unwrap();
+        trusted_route(dir.path())
+            .validate_assets()
+            .expect("trusted assets must validate");
+    }
+
+    #[test]
+    fn validate_assets_rejects_recipe_that_diverges_from_trusted_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let route = TypedGoalSessionRoute {
+            recipe_path: write(
+                dir.path(),
+                "recipe.yaml",
+                &format!("{TRUSTED_RECIPE}\n# smuggled instruction\n"),
+            ),
+            policy_path: write(dir.path(), "policy.toml", TRUSTED_POLICY),
+        };
+        let error = route
+            .validate_assets()
+            .expect_err("tampered recipe rejected");
+        assert_eq!(error.code(), CycleErrorCode::RecipeFailed);
+        assert!(
+            error
+                .to_string()
+                .contains("recipe does not match the trusted compiled asset"),
+            "unexpected message: {error}"
+        );
+    }
+
+    #[test]
+    fn validate_assets_rejects_policy_that_diverges_from_trusted_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let route = TypedGoalSessionRoute {
+            recipe_path: write(dir.path(), "recipe.yaml", TRUSTED_RECIPE),
+            policy_path: write(
+                dir.path(),
+                "policy.toml",
+                &format!("{TRUSTED_POLICY}\n# widened grant\n"),
+            ),
+        };
+        let error = route
+            .validate_assets()
+            .expect_err("tampered policy rejected");
+        assert_eq!(error.code(), CycleErrorCode::RecipeFailed);
+        assert!(
+            error
+                .to_string()
+                .contains("policy does not match the trusted compiled asset"),
+            "unexpected message: {error}"
+        );
+    }
+
+    #[test]
+    fn validate_assets_reports_unreadable_recipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let route = TypedGoalSessionRoute {
+            recipe_path: dir.path().join("absent-recipe.yaml"),
+            policy_path: dir.path().join("absent-policy.toml"),
+        };
+        let error = route
+            .validate_assets()
+            .expect_err("missing recipe rejected");
+        assert_eq!(error.code(), CycleErrorCode::RecipeFailed);
+        assert!(
+            error.to_string().contains("could not be read"),
+            "unexpected message: {error}"
+        );
+    }
+
+    #[test]
+    fn load_policy_parses_the_trusted_policy_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = trusted_route(dir.path())
+            .load_policy()
+            .expect("trusted policy parses");
+        assert!(
+            !policy.revision.is_empty(),
+            "parsed policy must carry a revision id"
+        );
+    }
+
+    #[test]
+    fn load_policy_surfaces_malformed_toml_as_tool_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let route = TypedGoalSessionRoute {
+            recipe_path: write(dir.path(), "recipe.yaml", TRUSTED_RECIPE),
+            policy_path: write(dir.path(), "policy.toml", "this is = = not valid toml"),
+        };
+        let error = route.load_policy().expect_err("malformed policy rejected");
+        assert_eq!(error.code(), CycleErrorCode::ToolFailed);
+    }
+
+    #[test]
+    fn bounded_diagnostic_file_returns_full_short_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), "diag", "recipe blew up here");
+        assert_eq!(bounded_diagnostic_file(&path), "recipe blew up here");
+    }
+
+    #[test]
+    fn bounded_diagnostic_file_truncates_and_marks_oversized_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = "x".repeat(5000);
+        let path = write(dir.path(), "diag", &payload);
+        let diagnostic = bounded_diagnostic_file(&path);
+        assert!(
+            diagnostic.starts_with(&"x".repeat(4096)),
+            "the first 4096 bytes must be preserved verbatim"
+        );
+        assert!(
+            diagnostic.ends_with("[diagnostic truncated after 4096 bytes]"),
+            "oversized output must carry the truncation marker: {diagnostic}"
+        );
+        assert!(
+            !diagnostic.contains(&"x".repeat(4097)),
+            "no more than 4096 payload bytes may survive truncation"
+        );
+    }
+
+    #[test]
+    fn bounded_diagnostic_file_reports_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            bounded_diagnostic_file(&dir.path().join("no-such-diagnostic")),
+            "diagnostic output unavailable"
+        );
+    }
+
+    #[test]
+    fn context_error_maps_io_failures_to_recipe_failed() {
+        let error = context_error(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "transport closed",
+        ));
+        assert_eq!(error.code(), CycleErrorCode::RecipeFailed);
+        assert!(
+            error
+                .to_string()
+                .contains("private context transport failed"),
+            "unexpected message: {error}"
+        );
+    }
+}

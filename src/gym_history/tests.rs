@@ -30,7 +30,10 @@ fn score_record_construction() {
 
 #[test]
 fn open_creates_schema() {
-    let _h = mem_history();
+    let history = mem_history();
+    // A freshly opened store must expose a queryable schema: a lookup against
+    // an empty table returns None instead of erroring on a missing relation.
+    assert!(history.latest("progressive", "never-recorded").is_none());
 }
 
 #[test]
