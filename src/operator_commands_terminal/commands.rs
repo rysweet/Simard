@@ -185,8 +185,14 @@ mod tests {
 
     #[test]
     fn terminal_recipe_list_returns_result() {
+        // The probe enumerates terminal recipe descriptors from prompt_assets
+        // and prints them; with the bundled recipes present it must succeed
+        // rather than merely "return a result".
         let result = run_terminal_recipe_list_probe();
-        let _ = result;
+        assert!(
+            result.is_ok(),
+            "terminal recipe list probe should succeed: {result:?}"
+        );
     }
 
     #[test]

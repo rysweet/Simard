@@ -97,19 +97,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn load_meeting_system_prompt_does_not_panic() {
-        let _prompt = load_meeting_system_prompt();
-    }
-
-    #[test]
-    fn load_meeting_system_prompt_returns_string() {
+    fn load_meeting_system_prompt_returns_meeting_prompt_content() {
+        // `prompt_root()` resolves under CARGO_MANIFEST_DIR, so the real
+        // prompt_assets/simard/meeting_system.md is read during tests. Verify
+        // we actually loaded a meaningful prompt rather than an empty string
+        // silently produced by `unwrap_or_default()` on a read error.
         let prompt = load_meeting_system_prompt();
-        let _ = prompt.len();
-    }
-
-    #[test]
-    fn open_meeting_agent_session_returns_none_without_api_key() {
-        let _result = open_meeting_agent_session();
+        assert!(
+            !prompt.trim().is_empty(),
+            "meeting system prompt must be non-empty"
+        );
+        assert!(
+            prompt.to_lowercase().contains("meeting"),
+            "meeting system prompt should describe meeting mode, got start: {:.80}",
+            prompt
+        );
     }
 
     /// Calling `open_meeting_agent_session()` in a headless CI
@@ -139,11 +141,5 @@ mod tests {
         );
 
         let _ = handle.join();
-    }
-
-    #[test]
-    fn run_meeting_repl_command_errors_cleanly_without_agent() {
-        let prompt = load_meeting_system_prompt();
-        let _ = prompt.len();
     }
 }
