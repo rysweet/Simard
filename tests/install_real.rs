@@ -324,6 +324,14 @@ fn install_writes_binary_prompt_assets_and_systemd_units_atomically_with_safe_pa
             !contents.contains("worktrees/main") && !contents.contains("/target/"),
             "unit file {unit:?} must not reference a source checkout or build directory:\n{contents}"
         );
+        assert!(
+            contents.contains("Restart=always"),
+            "unit file {unit:?} must use Restart=always so the daemon self-recovers from a graceful exit-0 shutdown (e.g. a stray SIGTERM):\n{contents}"
+        );
+        assert!(
+            !contents.contains("Restart=on-failure"),
+            "unit file {unit:?} must not use Restart=on-failure, which does not restart a clean exit:\n{contents}"
+        );
     }
 
     assert_systemctl_logged(&systemctl_log, &["--user", "daemon-reload"]);
