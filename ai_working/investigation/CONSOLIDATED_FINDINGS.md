@@ -2114,3 +2114,131 @@ plus its required regression test and explicit out-of-scope carve-outs (§20.5);
 **signal-vs-defect verdict** with a fresh **32/0** memory-recall re-run at HEAD `1de21e71` (§20.6). D0–D3
 remain live and unremediated; the L0→L1→L2→L3 whole-loop remediation order (§16.3) stands; **no production
 `.rs` changed; no remediation landed.**
+
+## §21 — Fourteenth-wave net-new findings (HEAD `f455c06d`, zero non-test source drift) — three parallel dives: an independent end-to-end signature-assembly re-trace landing on a *recall-side* count-exclusion fix seam (primary), the refreshed two-loops citation table + the "escalation ≥3 rung is itself non-closing" sharpening + the INV-GAP-KEY trap (secondary), and the decoupling-constrained landing order + a per-rung regression-safety matrix (tertiary)
+
+**Three parallel deep dives**, folded here — primary at HEAD `ad5e1060`
+([`primary_signature_assembly_pipeline_trace_HEAD_ad5e1060.md`](./primary_signature_assembly_pipeline_trace_HEAD_ad5e1060.md)),
+secondary at HEAD `f455c06d`
+([`secondary_two_loops_and_drift_HEAD_f455c06d.md`](./secondary_two_loops_and_drift_HEAD_f455c06d.md)),
+and tertiary/architect at HEAD `f455c06d`
+([`tertiary_architecture_LANDING_SAFE_REMEDIATION_HEAD_f455c06d.md`](./tertiary_architecture_LANDING_SAFE_REMEDIATION_HEAD_f455c06d.md)).
+Drift re-check: `git diff --stat 1de21e71..HEAD -- src/` (the §20 pin → this HEAD) touches **only**
+`src/overseer/tests_root_cause.rs` (the two lane-decoupling pins added at `f9cefec1`, already folded at §17/§20.4);
+`git diff --stat ad5e1060 f455c06d -- src/overseer/ src/ooda_loop/` is **empty** (`f455c06d` is a docs-only
+verification re-run of `ad5e1060`). **All non-test production source is byte-identical to the §20 grounding**, so
+every load-bearing line number below re-verifies exact (each dive independently re-opened its citations).
+**Empirical re-grounding this wave (re-run during consolidation):** `cargo test --lib overseer::tests_root_cause`
+→ **21 passed, 0 failed** at HEAD `f455c06d`, including both decoupling pins
+`loud_lane_a_recurring_signature_does_not_feed_lane_b_recurrence` and `lane_b_escalates_without_any_lane_a_signal`;
+the dives additionally report `no_progress` **77**, `tests_whisper` **28**, `tests_memory_recall` **32** green at
+the same HEAD. **No verdict reversal across fourteen waves; D1/D2/D3 remain live and unmerged; no remediation
+landed.** This wave is a **re-grounding + remediation-sharpening** pass: the *self-referential* verdict, the
+*two-non-closing-loops* structure, the *dead-zone*, and the *benign `engineer_spawn`* reading all re-confirm at a
+new HEAD, and the three dives contribute four net refinements — (a) a **recall-side** count-exclusion fix seam that
+is defence-in-depth with §20.5's write-boundary filter (§21.1), (b) the sharpening that even the **≥3
+`EscalateBlockedGoal` rung is itself non-closing** so crossing the escalation floor still removes no block (§21.2),
+(c) the **INV-GAP-KEY** ledger-key trap for the gap closing rung (§21.3), and (d) the **decoupling-constrained
+landing order** with a per-rung regression-safety matrix naming exact tests to keep-green vs deliberately-update
+(§21.4).
+
+- **21.1 — NET-NEW fix-seam refinement: the *recall-side* count-exclusion cut (primary §3, §7), defence-in-depth
+  with §20.5's write-boundary filter.** §20.5 specified the loop-breaker as a filter inside
+  `write_back_observation` (`mod.rs:546`) that drops `overseer-obs:`-prefixed problems **before** computing the
+  next signature (the *write* seam). This wave's independent primary re-trace lands on the **complementary read
+  seam**: exclude self-authored episodes from the recurrence **count** in `signals_from`
+  (`signal.rs:455-470`) — skip any recalled episode whose recovered `failure_signature` carries the
+  `overseer-obs:` prefix (or thread `source_label` through `RecalledEpisode` and skip `OVERSEER_SOURCE_LABEL`).
+  Re-confirmed root facts making this the *highest-leverage* recall-side cut: (i) recall has **no source filter** —
+  `recall_episodes_ranked` (`cognitive_memory/mod.rs:542-550`) is a pure keyword search that never excludes
+  `OVERSEER_SOURCE_LABEL`, and `recall_episodic` (`wiring.rs:1013`) passes no provenance (**D1** re-confirmed);
+  (ii) `sanitize_recalled` (`capabilities.rs:468-482`) only replaces control chars + caps length — it does **not**
+  strip the `overseer-obs:` prefix, so a recalled composite re-enters as a `dedup_key` and nests (**nesting**
+  re-confirmed). **Architectural framing (net-new):** the two seams are **defence-in-depth on the same self-feed
+  edge** — the read-side cut (§21.1) stops the Overseer *counting* its own bookkeeping as an incident (kills the
+  spurious `RecurringSignature` emission at source); the write-side cut (§20.5) stops a recall-derived meta-problem
+  *re-entering* the next signature (kills nesting at the write boundary). If both land, redundant guards at two
+  seams; if only one, the loop is still cut. Primary's ordered candidate set: **[1]** count-exclusion at
+  `signal.rs:455-470` (smallest, highest leverage) → **[2]** refuse a self-signature as a problem key in the
+  `RecurringSignature` arm (`mod.rs:1353-1363`) → **[3]** strip a leading `overseer-obs:` in `observation_signature`
+  (`mod.rs:1068`, caps growth). **Do NOT** touch the threshold or de-ratchet the escalation counter — the `2×` is
+  honest (the documented `store_fact_with_caller_key` collapse-to-1 trap still applies).
+
+- **21.2 — NET-NEW sharpening: the ≥3 `EscalateBlockedGoal` rung is *itself* non-closing (secondary §2).** Prior
+  waves established the `2 ≤ rec < 3` dead-zone falls to `Report` (rung 4). This wave adds the load-bearing
+  observation that the ladder's **top** rung does not close either: `decide_blocked_goal`
+  (`mod.rs:1603-1631`) rung 1 escalates only at `recurrence >= 3` to `EscalateBlockedGoal`, which is a
+  **notification** (`mod.rs:814-834`), *not* a block-removing action; the **only** closing rung is rung 2
+  `UnblockGoal`, which fires *solely* for a `perpetual && is_no_progress_marker` false-park. Consequence: for the
+  non-perpetual, non-review blocked goals that dominate the signature (kgpacks #12/#17/#18/#23/#25,
+  simard-identity personas, coverage-to-70, coin harness), **every** ladder outcome — `Report` at 1–2× *and*
+  `EscalateBlockedGoal` at ≥3× — leaves the block in place. So closing Loop A requires **adding a block-removing
+  action** in the `2 ≤ rec` band (D2's closing rung), not merely lowering the escalation floor; a "fix" that only
+  makes goals escalate sooner still resolves nothing. Confirms Loop A is unclosed at *both* ends of its ladder.
+
+- **21.3 — NET-NEW remediation trap: INV-GAP-KEY — the gap closing-edge ledger must key on `GapItem.signature`,
+  not the bare `workstream-gap` dedup_key (secondary §7, tertiary §4[3b]).** The `WorkstreamGap` arm mints a
+  single **bare constant** key `"workstream-gap"` (`mod.rs:1371`) with per-gap identity erased; `dedup()` in
+  `observation_signature` (`mod.rs:1071`) collapses only *adjacent* equal keys, which is why distinct gaps surface
+  as the `workstream-gap|workstream-gap` tail. When D3 adds a `LaunchRecipe`/`FileIssue` closing edge to
+  `WorkstreamCoverage` (`mod.rs:1534-1543`), keying its cross-window idempotency ledger on that bare dedup_key
+  would **fold all distinct gaps into one launch/issue** (an issue-storm-in-reverse: under-filing). The closing
+  edge must therefore key on the per-gap `GapItem.signature` (the identity `act_flag_workstream_gaps` already
+  peeks against `gap_gate`, `mod.rs:900-908`), and must fire only for **proven-recurring** gaps so **first-sight**
+  gaps stay on the existing notify path. This is the gap-arm analogue of D2's Lane-B honesty requirement:
+  *close on stable identity, not on the aggregate family key.*
+
+- **21.4 — NET-NEW: the decoupling-constrained landing order + a per-rung regression-safety matrix (tertiary
+  §3–§5).** The two lanes being decoupled at `decide` (Lane A only raises priority in `orient`; Lane B alone drives
+  `decide` via `why.recurrence`, `mod.rs:972-997`) is already established (§15.1/§17/§20.4) and re-pinned green
+  this wave. The tertiary's net contribution is to make that fact a **hard constraint on the fix**: because Lane A
+  is **inert for closure**, (i) any remediation that "makes the 2× stop" by touching Lane A's `×N` is **cosmetic**;
+  (ii) the closing rung *and* the idempotency fix must **both** target **Lane B**; and (iii) the loop-breaker must
+  **NOT** bridge Lane A → Lane B — bridging would break the two now-regression-pin tests *and* re-introduce the
+  self-feed the loop-breaker exists to sever. The re-justified strict dependency chain:
+  **[1] write-back self-observation guard** (loop-breaker; `mod.rs:546`, drop `overseer-obs:`-prefixed problems) →
+  **[2] Lane-B count-in-content + WHY-gate** (ATOMIC latch; `record_occurrence`/`StoredOccurrence`/`recall_occurrences`
+  at `mod.rs:1004-1043`,`:1180-1185`,`:972-997` — a signature-keyed upsert whose payload carries
+  `occurrence_count`/`first_seen`/`last_seen`, escalation reading the field, **not** `recall.len()`; ship count +
+  gate together or nothing changes) → **[3] closing rungs** (3a `decide_blocked_goal` dead-zone rung, `mod.rs:1603-1631`;
+  3b `WorkstreamCoverage` launch/file edge with the INV-GAP-KEY cross-window ledger, §21.3). Order is a **true
+  dependency chain**: [1] freezes the signature *set* so [2]'s idempotent upsert has a fixed target (an upsert
+  cannot collapse a moving nested key); [2] makes the count mean "distinct windows" not "write cadence" before
+  [3] consumes it. **Per-rung regression matrix (exact tests):**
+  - **[1]** keep GREEN `tests_memory_recall` (32) + `tests_whisper` (28); add an A→A isolation test proving a
+    slice of only `overseer-obs:*`/`RecurringSignature` problems yields `Ok(None)` (the §20.4 test gap).
+  - **[2]** deliberately UPDATE any test pinning `StoredOccurrence`'s 4-field shape (it gains the count fields);
+    keep GREEN the two decoupling pins and `recurring_reblock_never_files_an_issue`; add an idempotency test
+    (N write-backs → `occurrence_count == N` via one logical record, recurrence tracks distinct windows).
+  - **[3a]** keep GREEN `tests_no_progress`/`_investigation`/`_reinvestigation` (the perpetual self-heal branch
+    must still win its band) + `loud_lane_a_…`; add a pin for the previously-`Report` band's new outcome.
+  - **[3b]** deliberately UPDATE the notify-only pins `flags_gaps_notifies_both_channels_without_filing_then_dedupes_on_repeat`
+    (`tests_gap_scan.rs:579`) and `flagged_gap_never_constructs_an_issue_brief` (`:663`), scoped to *cross-window
+    recurrence* only; keep GREEN the opt-out/identity-safety invariants `delegates_blocked_goals_to_goal_health_and_never_reflags_them`
+    (`:413`), `disabled_gap_scan_holds_the_whole_action` (`:688`), `gap_scan_fails_closed_without_a_distinct_identity`
+    (`:719`); add a cross-window ledger test keyed on `GapItem.signature`.
+
+- **21.5 — `resource:engineer_spawn` re-affirmed benign at HEAD (secondary §5).** Re-verified an ordinary leaf
+  `dedup_key` minted by `Signal::EngineerSpawnRate` (`mod.rs:1267-1272`, `Priority::Normal`, sig-mapped
+  `engineer_spawn` at `capabilities.rs:562`), routing to a **notify-only global** `Escalate` (`mod.rs:1444-1446`)
+  that fires only at/above **8 live** engineers (`tests_m1.rs:133-149`, green). It is **membership drift** into the
+  same composite (its `{live}` count lands only in the summary, never the key), so it does **not** reset recurrence
+  counting; the grep shows **no causal edge** coupling `EngineerSpawnRate` to `WorkstreamGap` (independent
+  signal→token→escalate chain). The gap↔spawn overlap is a legitimate resource-allocation tension at *different
+  seams* (per-goal coverage vs global admission cap) — **not** a defect, and **not** to be coupled by any resourcing
+  rung (verification-phase guard: confirm no spawn-based remediation accidentally edges back into `WorkstreamGap`).
+
+**§21 delta:** verdict unchanged across all fourteen waves — the `×2` is an **honest** re-observation of a
+non-advancing board (self-referential write-back recall, `mod.rs:1360-1362` verbatim = the task string); the
+**defect is the response**: two observe-and-flag loops (blocked-goal ladder + notify-only `WorkstreamCoverage`)
+that never close, an unguarded self-feed edge with no effective idempotency boundary, and a `2↔3` recurrence
+dead-zone. This wave re-grounds every load-bearing citation at HEAD `f455c06d` (zero non-test source drift; fresh
+**21/0** `tests_root_cause` re-run incl. both decoupling pins) and sharpens the remediation on four axes:
+**(a)** a **recall-side count-exclusion** fix seam (`signal.rs:455-470`) that is **defence-in-depth** with §20.5's
+write-boundary filter (§21.1); **(b)** the finding that even the **≥3 `EscalateBlockedGoal` rung is itself
+non-closing** — closing Loop A needs a block-removing action, not a lower floor (§21.2); **(c)** the **INV-GAP-KEY**
+trap — the gap closing-edge ledger must key on `GapItem.signature`, never the bare `workstream-gap` (§21.3); and
+**(d)** the **decoupling-constrained landing order** `[1] loop-breaker → [2] Lane-B count-in-content (atomic) →
+[3] closing rungs`, with a per-rung keep-green/deliberately-update regression matrix (§21.4). D1/D2/D3 remain live
+and unremediated; the L0→L1→L2→L3 whole-loop remediation order (§16.3) stands; **no production `.rs` changed; no
+remediation landed.**
