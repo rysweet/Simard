@@ -6,7 +6,47 @@
 This extends [`verification_results.md`](./verification_results.md) (H1-focused) to a
 complete per-hypothesis matrix, each with the concrete test run and its outcome.
 
-**Re-executed on HEAD `05c08919`** (`cargo test -p simard --lib`, 2026-07-15):
+**Re-executed on HEAD `ad5e1060`** (`cargo test -p simard --lib`, 2026-07-15):
+- Source is **byte-identical** to the previous run: `git diff --name-only 05c08919..HEAD`
+  returns solely `ai_working/investigation/verification_results_ALL_HYPOTHESES.md`
+  (docs-only), and `git diff --stat 05c08919..HEAD -- src/` is empty. The working tree adds
+  only three investigation deep-dive docs (`primary_emission_pipeline_trace_HEAD_05c08919.md`,
+  `secondary_two_loops_and_drift_HEAD_ad5e1060.md`, `tertiary_architecture_LANDING_HEAD_ad5e1060.md`)
+  — **no production `.rs` changed**, so every source citation below still holds and **no fix is merged**.
+- Full overseer suite (`overseer::`): **361 passed, 0 failed** (7960 filtered).
+- All named discriminating probes re-run green at this HEAD (`--exact`):
+  - H0/H1 dedup+persist + H0 whisper-gate + H1 recurring-signature family + H5 lane-decoupling
+    (one batch of 8, 8313 filtered): `write_back_is_deduplicated_within_window`,
+    `write_back_persists_again_for_a_distinct_signature`,
+    `whisper_gate_suppresses_an_identical_whisper_within_the_window`,
+    `whisper_gate_caps_whispers_per_rolling_hour`,
+    `recurring_signature_emitted_when_two_episodes_share_signature`,
+    `recurring_signature_not_emitted_for_single_occurrence`,
+    `orient_raises_recurring_signature_to_high_priority`,
+    `overseer::tests_root_cause::loud_lane_a_recurring_signature_does_not_feed_lane_b_recurrence` — **8 passed**.
+  - H3/H7 gap+route-by-shape (one batch of 8, 8313 filtered):
+    `decide_routes_workstream_coverage_to_flag_gaps`, `flagged_gap_never_constructs_an_issue_brief`,
+    `flags_gaps_notifies_both_channels_without_filing_then_dedupes_on_repeat`,
+    `workstream_gap_maps_to_a_workstream_coverage_problem_at_high_priority`,
+    `delegates_blocked_goals_to_goal_health_and_never_reflags_them`,
+    `decide_routes_a_blocked_goal_by_shape`,
+    `perpetual_no_progress_goal_is_unblocked_once_and_not_escalated`,
+    `needs_review_goal_escalates_to_operator_on_both_channels` — **8 passed**.
+  - H2 reinvestigation ladder (`goal_curation::tests_no_progress_reinvestigation` +
+    `ooda_loop::tests_no_progress_reinvestigation`): **21 passed** (8300 filtered), including the
+    smoking gun `a_perpetual_goal_is_never_reinvestigated_even_if_bare_blocked` (re-run `--exact`, passed).
+- Source invariants re-confirmed at this HEAD (unchanged from `05c08919`):
+  H5 `RECURRING_SIGNATURE_THRESHOLD = 2` (`signal.rs:362`) vs
+  `RECURRENCE_ESCALATION_THRESHOLD = 3` (`root_cause.rs:33`);
+  H4 `write_back_observation(&cycle.problems)` writes ALL problems (`wiring.rs:301`);
+  H6 `record_occurrence` (`mod.rs:1004`) uses non-deduping `mem.store_fact` (`mod.rs:1034`) and
+  `WhisperGate.last_delivered` is an in-process `HashMap` (`guardrails.rs:294`);
+  H0 `keys.dedup()` collapses adjacent-equal only (`mod.rs:1071`); H2 `is_bare_no_progress_block`
+  gate present (`ooda_loop/no_progress.rs:832`), INV-WHY still violable (perpetual-goal smoking-gun
+  still passes); H3 notify-only arm `act_flag_workstream_gaps` (`mod.rs:884`) + `FlagWorkstreamGaps`
+  routing (`mod.rs:671,1543`). **Verdict matrix below unchanged; all tests green.**
+
+**Previously re-executed on HEAD `05c08919`** (`cargo test -p simard --lib`, 2026-07-15):
 - Full overseer suite (`overseer::`): **361 passed, 0 failed** (7960 filtered).
 - All named discriminating probes re-run green at this HEAD:
   - H0/H1 dedup+persist: `write_back_is_deduplicated_within_window`,
