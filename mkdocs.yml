@@ -149,6 +149,7 @@ nav:
     - The Simard Journal: concepts/simard-journal.md
     - Journal Report Tone Contract: concepts/journal-report-tone-contract.md
     - Eliminating "bridge" Terminology: concepts/bridge-terminology-elimination.md
+    - Engineer-Claim Liveness Lease: concepts/engineer-claim-liveness-lease.md
   - Tutorials:
     - Complete a Typed OODA Cycle: tutorials/complete-a-typed-ooda-cycle.md
     - First Local Session: tutorials/run-your-first-local-session.md
@@ -253,6 +254,7 @@ nav:
     - CLI Reference: reference/simard-cli.md
     - Simard Installer: reference/simard-installer.md
     - OODA Capability API: reference/ooda-capability-api.md
+    - Engineer-Claim Release & Reclaim API: reference/engineer-claim-release-api.md
     - Typed OODA Goal-Session Deterministic Rails: reference/typed-ooda-goal-session-rails.md
     - Telemetry Metrics: reference/telemetry-metrics.md
     - Recall-Precision Hybrid Measurement: reference/recall-precision-hybrid-api.md

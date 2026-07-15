@@ -127,9 +127,26 @@ impl ApprovalAuthority {
     }
 }
 
+/// Authoritative liveness signal for an engineer claim.
+///
+/// The `engineer_claims` admission gate uses this to decide, on a `claim_key`
+/// collision, whether the existing claim belongs to a genuinely-live engineer
+/// (reject the duplicate spawn) or a dead/orphaned one (reclaim it). The trait
+/// is injected so the ledger stays free of a dependency on the engineer
+/// worktree / `ooda_actions` layers that own the real sentinel + PID scan.
+///
+/// Implementations MUST be fail-closed: return `true` for anything that is not
+/// *provable death*. See the production provider in
+/// `src/ooda_actions/advance_goal/typed_goal_session.rs`.
+pub trait EngineerLiveness: Send + Sync {
+    /// True iff `claim_key`'s engineer is actually alive right now.
+    fn is_claim_live(&self, claim_key: &str) -> bool;
+}
+
 pub struct CapabilityHandler {
     connection: Mutex<Connection>,
     policy: CapabilityPolicy,
+    engineer_liveness: Option<Box<dyn EngineerLiveness>>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -213,7 +230,43 @@ impl CapabilityHandler {
         Ok(Self {
             connection: Mutex::new(connection),
             policy,
+            engineer_liveness: None,
         })
+    }
+
+    /// Inject the authoritative engineer-liveness provider used by the
+    /// `engineer_claims` reclaim gate. Without a provider the gate is
+    /// fail-closed: an existing claim is treated as live and a duplicate spawn
+    /// is rejected, preserving the single-active-claim invariant.
+    pub fn with_engineer_liveness(mut self, liveness: Box<dyn EngineerLiveness>) -> Self {
+        self.engineer_liveness = Some(liveness);
+        self
+    }
+
+    /// Release (delete) the engineer claim for `claim_key`.
+    ///
+    /// Idempotent: deleting a claim that does not exist is success (0 rows
+    /// affected -> `Ok(())`). Runs in its own immediate transaction so a
+    /// concurrent reclaim/insert cannot interleave a partial state.
+    /// Fail-visible: a real SQL error is returned as `Err`, never swallowed.
+    ///
+    /// This is the deterministic release-on-termination call every engineer
+    /// exit path flows through. See
+    /// [`crate::typed_ooda::EngineerLiveness`] and the reference doc
+    /// `docs/reference/engineer-claim-release-api.md`.
+    pub fn release_engineer_claim(&self, claim_key: &str) -> CapabilityResult<()> {
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(persistence)?;
+        transaction
+            .execute(
+                "DELETE FROM engineer_claims WHERE claim_key = ?1",
+                params![claim_key],
+            )
+            .map_err(persistence)?;
+        transaction.commit().map_err(persistence)?;
+        Ok(())
     }
 
     pub fn register_actor_session(
@@ -566,21 +619,12 @@ impl CapabilityHandler {
             unreachable!("record_action always creates an action payload");
         };
         if let Action::SpawnEngineer(spawn) = &action_payload.action {
-            transaction
-                .execute(
-                    "INSERT INTO engineer_claims(claim_key, outcome_id, request_id) VALUES (?1, ?2, ?3)",
-                    params![spawn.claim_key, outcome.outcome_id, outcome.request_id],
-                )
-                .map_err(|error| {
-                    if is_constraint(&error) {
-                        CapabilityError::new(
-                            CapabilityErrorCode::AdmissionRejected,
-                            format!("engineer claim is already active: {}", spawn.claim_key),
-                        )
-                    } else {
-                        persistence(error)
-                    }
-                })?;
+            self.insert_engineer_claim(
+                &transaction,
+                &spawn.claim_key,
+                &outcome.outcome_id,
+                &outcome.request_id,
+            )?;
         }
         insert_effect(&transaction, &outcome, &action_payload.action)?;
         transaction.commit().map_err(persistence)?;
@@ -1811,6 +1855,70 @@ impl CapabilityHandler {
             .lock()
             .map_err(|_| persistence_message("outcome ledger lock is poisoned"))
     }
+
+    /// True iff the existing claim for `claim_key` corresponds to a live
+    /// engineer. Fail-closed: with no liveness provider we cannot prove death,
+    /// so the claim is treated as live and a duplicate spawn stays rejected.
+    fn claim_is_live(&self, claim_key: &str) -> bool {
+        match &self.engineer_liveness {
+            Some(provider) => provider.is_claim_live(claim_key),
+            None => true,
+        }
+    }
+
+    /// Insert the `engineer_claims` row for a `SpawnEngineer` action, applying
+    /// the liveness-verified reclaim gate on a `claim_key` collision.
+    ///
+    /// On a `PRIMARY KEY` violation the existing claim is inspected: a **live**
+    /// claim keeps the `AdmissionRejected` rejection (single-active-claim
+    /// invariant), while a **dead/orphaned** claim is reclaimed by deleting the
+    /// stale row and retrying the insert **once, inside the same transaction**
+    /// (no zero-claim window, no TOCTOU gap). The retried insert carries the new
+    /// spawn's fresh `outcome_id`, so it never collides on `outcome_id UNIQUE`.
+    fn insert_engineer_claim(
+        &self,
+        transaction: &Transaction<'_>,
+        claim_key: &str,
+        outcome_id: &str,
+        request_id: &str,
+    ) -> CapabilityResult<()> {
+        let rejected = || {
+            CapabilityError::new(
+                CapabilityErrorCode::AdmissionRejected,
+                format!("engineer claim is already active: {claim_key}"),
+            )
+        };
+        let insert = |tx: &Transaction<'_>| {
+            tx.execute(
+                "INSERT INTO engineer_claims(claim_key, outcome_id, request_id) VALUES (?1, ?2, ?3)",
+                params![claim_key, outcome_id, request_id],
+            )
+        };
+        match insert(transaction) {
+            Ok(_) => Ok(()),
+            Err(error) if is_constraint(&error) => {
+                if self.claim_is_live(claim_key) {
+                    return Err(rejected());
+                }
+                // Stale/orphaned claim: reclaim it and retry once.
+                transaction
+                    .execute(
+                        "DELETE FROM engineer_claims WHERE claim_key = ?1",
+                        params![claim_key],
+                    )
+                    .map_err(persistence)?;
+                insert(transaction).map_err(|retry_error| {
+                    if is_constraint(&retry_error) {
+                        rejected()
+                    } else {
+                        persistence(retry_error)
+                    }
+                })?;
+                Ok(())
+            }
+            Err(error) => Err(persistence(error)),
+        }
+    }
 }
 
 fn load_actor_binding(
@@ -2604,5 +2712,282 @@ mod approval_tests {
             action_payload_hash(&approved.action).expect("payload hash")
         );
         assert!(!approval.signature.is_empty());
+    }
+}
+
+/// TDD regression suite for the engineer-claim liveness lease (issue #4094).
+///
+/// The append-only `engineer_claims` table had a `claim_key` PRIMARY KEY and
+/// **no release path**: once a goal spawned its first engineer, every future
+/// spawn for that goal was permanently rejected as "engineer claim is already
+/// active", even after the engineer had terminated (success, failure, blocked,
+/// crash, or zombie-reap). The row was never deleted, so a single spawn locked
+/// a goal out for the lifetime of the store.
+///
+/// These tests pin the fix and MUST fail until Step 8 lands the implementation.
+/// They are written against the intended API surface, which does not yet exist
+/// (so this module is compile-red today — that is the TDD "red" contract):
+///
+///   * [`CapabilityHandler::release_engineer_claim`] — idempotent, fail-visible
+///     `DELETE FROM engineer_claims WHERE claim_key = ?1`. This is the exact,
+///     deterministic call the engineer-termination chokepoint
+///     (`cleanup_engineer_worktree_for_goal`) makes on every one of its
+///     terminal paths. Because the call is unconditional and idempotent,
+///     covering the single chokepoint covers all termination paths.
+///   * [`EngineerLiveness`] — trait injected into the handler
+///     (`with_engineer_liveness`) whose `is_claim_live(claim_key)` reuses the
+///     real sentinel + `is_pid_alive_public` liveness signal. Production wraps
+///     `find_live_engineer_for_goal`; tests supply a deterministic double so no
+///     real processes are spawned.
+///   * The reclaim gate inside [`CapabilityHandler::record_action`]: on a
+///     `claim_key` PK violation, a claim proven *not live* is reclaimed
+///     (deleted + the new spawn admitted); a claim that *is* live still yields
+///     `AdmissionRejected`.
+///
+/// Behaviours covered:
+///   T1  release-on-termination frees a goal for re-spawn (core #4094 regression)
+///   T2  a dead/orphaned claim is reclaimed, not blocking a new spawn
+///   T3  a live engineer still blocks a duplicate concurrent spawn
+///   T4  releasing a non-existent claim is a no-op success (idempotent)
+///   T5  releasing the same claim twice is safe (all termination paths idempotent)
+///   ST-1 release deletes ONLY the targeted claim_key
+///   ST-2 a handler with no liveness provider is fail-closed (never blind-reclaims)
+#[cfg(test)]
+mod engineer_claim_lease_tests {
+    use super::*;
+
+    const REPO_OWNER: &str = "rysweet";
+    const REPO_NAME: &str = "Simard";
+    const POLICY_REVISION: &str = "policy-v1";
+
+    /// Deterministic [`EngineerLiveness`] double reporting a fixed verdict for
+    /// every claim key. `live == true` models a running engineer whose sentinel
+    /// PID is alive; `live == false` models a dead/orphaned claim (dead sentinel
+    /// PID) that must be reclaimable.
+    struct FixedLiveness {
+        live: bool,
+    }
+
+    impl EngineerLiveness for FixedLiveness {
+        fn is_claim_live(&self, _claim_key: &str) -> bool {
+            self.live
+        }
+    }
+
+    fn claim_key_for(goal_id: &str) -> String {
+        format!("{REPO_OWNER}/{REPO_NAME}:{goal_id}")
+    }
+
+    fn open_handler(dir: &std::path::Path) -> CapabilityHandler {
+        CapabilityHandler::open(
+            dir.join("outcomes.sqlite3"),
+            CapabilityPolicy::new(POLICY_REVISION),
+        )
+        .expect("open capability handler")
+    }
+
+    fn open_handler_with_liveness(dir: &std::path::Path, live: bool) -> CapabilityHandler {
+        open_handler(dir).with_engineer_liveness(Box::new(FixedLiveness { live }))
+    }
+
+    fn spawn_actor(session_id: &str, cycle_id: &str, goal_id: &str) -> AuthenticatedToolContext {
+        AuthenticatedToolContext::new(
+            "goal-session-actor",
+            session_id,
+            [CapabilityGrant::RecordAction(ActionKind::SpawnEngineer)],
+        )
+        .scoped_to_repository(RepositoryRef::new(REPO_OWNER, REPO_NAME))
+        .bound_to_cycle_goal(cycle_id, goal_id)
+        .with_engineer_permissions(["repo_read"])
+    }
+
+    fn spawn_request(
+        request_id: &str,
+        session_id: &str,
+        cycle_id: &str,
+        goal_id: &str,
+    ) -> RecordActionRequest {
+        RecordActionRequest {
+            identity: TerminalRequestIdentity::new(request_id, session_id, cycle_id, goal_id),
+            action: Action::SpawnEngineer(SpawnEngineerAction {
+                task: OpaqueBytes::from(b"advance the goal".to_vec()),
+                repository: RepositoryRef::new(REPO_OWNER, REPO_NAME),
+                base_type: BaseType::Copilot,
+                requested_permissions: ["repo_read".to_string()].into_iter().collect(),
+                // claim_key is `owner/repo:goal_id` — intentionally STABLE across
+                // spawns of the same goal. That stability is exactly what the
+                // leaked PK weaponized into a permanent lock.
+                claim_key: claim_key_for(goal_id),
+            }),
+            raw_semantic: OpaqueBytes::from(b"spawn engineer".to_vec()),
+            evidence: Vec::new(),
+        }
+    }
+
+    fn admission() -> AdmissionSnapshot {
+        AdmissionSnapshot {
+            concurrent_engineers: 0,
+            disk_used_percent: 1,
+            active_claims: BTreeSet::new(),
+            policy_revision: POLICY_REVISION.to_string(),
+        }
+    }
+
+    /// Record a `SpawnEngineer` terminal outcome for `goal_id`. Every attempt
+    /// uses a unique (session, cycle, request) triple because
+    /// `terminal_outcomes` enforces `UNIQUE(session_id, cycle_id)` and a
+    /// `request_id` PRIMARY KEY, so a genuine re-spawn always lands on a fresh
+    /// cycle — while the `claim_key` stays constant for the goal.
+    fn spawn_engineer(
+        handler: &CapabilityHandler,
+        attempt: &str,
+        goal_id: &str,
+    ) -> CapabilityResult<TerminalOutcome> {
+        let session_id = format!("session-{goal_id}-{attempt}");
+        let cycle_id = format!("cycle-{goal_id}-{attempt}");
+        let request_id = format!("request-{goal_id}-{attempt}");
+        let actor = spawn_actor(&session_id, &cycle_id, goal_id);
+        handler.record_action(
+            &actor,
+            spawn_request(&request_id, &session_id, &cycle_id, goal_id),
+            &admission(),
+        )
+    }
+
+    /// T1 — CORE REGRESSION for issue #4094.
+    ///
+    /// Spawn an engineer, observe the (correct) single-active rejection while it
+    /// holds the claim, then RELEASE the claim on termination and confirm the
+    /// same goal can be spawned again. Before the fix this final spawn hit the
+    /// append-only PK and was rejected forever.
+    #[test]
+    fn spawning_again_after_release_succeeds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handler = open_handler(dir.path());
+        let goal = "goal-alpha";
+
+        // First engineer spawns and takes the claim.
+        spawn_engineer(&handler, "0", goal).expect("first spawn admitted");
+
+        // While that engineer is (treated as) live, a duplicate is rejected.
+        let blocked = spawn_engineer(&handler, "1", goal)
+            .expect_err("duplicate spawn must be rejected while the claim is held");
+        assert_eq!(blocked.code(), CapabilityErrorCode::AdmissionRejected);
+
+        // The engineer terminates: its lifecycle releases the claim. This is the
+        // exact deterministic call `cleanup_engineer_worktree_for_goal` makes.
+        handler
+            .release_engineer_claim(&claim_key_for(goal))
+            .expect("release must succeed");
+
+        // A fresh engineer for the SAME goal is now admitted — leak fixed.
+        spawn_engineer(&handler, "2", goal)
+            .expect("spawn after release must be admitted (claim was released)");
+    }
+
+    /// T2 — stale-claim reclaim: a dead engineer must not block a new spawn.
+    ///
+    /// The claim row still exists (no release ran — crash/zombie), but liveness
+    /// reports the engineer as dead, so the next spawn reclaims the orphaned row
+    /// instead of rejecting. This models the 31 orphaned claims from the live
+    /// incident that permanently locked out every active goal.
+    #[test]
+    fn dead_claim_does_not_block_new_spawn() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handler = open_handler_with_liveness(dir.path(), false);
+        let goal = "goal-orphaned";
+
+        spawn_engineer(&handler, "0", goal).expect("first spawn admitted");
+        spawn_engineer(&handler, "1", goal)
+            .expect("dead claim must be reclaimed, not block a new spawn");
+    }
+
+    /// T3 — single-active-claim preserved: a live engineer still blocks a
+    /// duplicate concurrent spawn, so we never run duplicate work on a goal.
+    #[test]
+    fn live_claim_still_blocks_duplicate_spawn() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handler = open_handler_with_liveness(dir.path(), true);
+        let goal = "goal-busy";
+
+        spawn_engineer(&handler, "0", goal).expect("first spawn admitted");
+        let blocked = spawn_engineer(&handler, "1", goal)
+            .expect_err("live engineer must still block a duplicate spawn");
+        assert_eq!(blocked.code(), CapabilityErrorCode::AdmissionRejected);
+    }
+
+    /// T4 — release is idempotent when the claim does not exist (0 rows == Ok).
+    #[test]
+    fn release_is_idempotent_when_no_claim_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handler = open_handler(dir.path());
+        handler
+            .release_engineer_claim(&claim_key_for("never-spawned"))
+            .expect("releasing a non-existent claim is a no-op success");
+    }
+
+    /// T5 — releasing the same claim twice is safe. Termination paths may race
+    /// or re-run (e.g. reap after a clean exit already released it); a second
+    /// release must not error, and the goal remains spawnable.
+    #[test]
+    fn releasing_the_same_claim_twice_is_ok() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handler = open_handler(dir.path());
+        let goal = "goal-double-release";
+        spawn_engineer(&handler, "0", goal).expect("first spawn admitted");
+
+        let key = claim_key_for(goal);
+        handler
+            .release_engineer_claim(&key)
+            .expect("first release ok");
+        handler
+            .release_engineer_claim(&key)
+            .expect("second release is still a no-op success");
+
+        spawn_engineer(&handler, "1", goal).expect("spawn after double release admitted");
+    }
+
+    /// ST-1 — release deletes ONLY the targeted `claim_key` (no key confusion).
+    ///
+    /// Two goals hold live claims; releasing goal A must not disturb goal B.
+    #[test]
+    fn release_only_deletes_the_targeted_claim() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handler = open_handler_with_liveness(dir.path(), true);
+        let goal_a = "goal-a";
+        let goal_b = "goal-b";
+
+        spawn_engineer(&handler, "0", goal_a).expect("spawn A admitted");
+        spawn_engineer(&handler, "0", goal_b).expect("spawn B admitted");
+
+        handler
+            .release_engineer_claim(&claim_key_for(goal_a))
+            .expect("release A ok");
+
+        // A was released → re-spawn admitted.
+        spawn_engineer(&handler, "1", goal_a).expect("A re-spawn admitted after release");
+        // B was untouched and is still live → duplicate rejected.
+        let blocked = spawn_engineer(&handler, "1", goal_b)
+            .expect_err("B claim must be untouched by A's release");
+        assert_eq!(blocked.code(), CapabilityErrorCode::AdmissionRejected);
+    }
+
+    /// ST-2 — a handler with no liveness provider is FAIL-CLOSED.
+    ///
+    /// Without a liveness signal the handler must NOT silently reclaim a claim
+    /// it cannot prove is dead; it treats an existing claim as live and keeps
+    /// rejecting duplicates. This preserves the single-active guarantee and
+    /// guards against a default that blind-reclaims and reintroduces duplicate
+    /// engineers.
+    #[test]
+    fn default_handler_without_liveness_is_fail_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handler = open_handler(dir.path());
+        let goal = "goal-failclosed";
+
+        spawn_engineer(&handler, "0", goal).expect("first spawn admitted");
+        let blocked = spawn_engineer(&handler, "1", goal)
+            .expect_err("without a liveness signal the claim must be treated as live");
+        assert_eq!(blocked.code(), CapabilityErrorCode::AdmissionRejected);
     }
 }

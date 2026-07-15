@@ -246,6 +246,56 @@ fn cleanup_engineer_worktree_for_goal(state: &mut OodaState, goal_id: &str) {
         // worktree drops here; if cleanup() already ran the swap guard
         // ensures Drop is a no-op.
     }
+    // Release-on-termination (issue #4094): deterministically free the
+    // typed-OODA engineer claim so the goal can spawn again. This chokepoint is
+    // reached by every engineer exit path (success, failure, blocked, crash,
+    // zombie-reap), co-located with the worktree-sentinel drop above. The
+    // release is idempotent and fail-visible.
+    release_engineer_claim_for_goal(state, goal_id);
+}
+
+/// Delete the `engineer_claims` lease row for `goal_id` on engineer
+/// termination. Reconstructs the deterministic `claim_key`
+/// (`{owner}/{repo}:{goal_id}`) from the goal's stored repo slug and issues the
+/// idempotent [`CapabilityHandler::release_engineer_claim`]. Fail-visible: a
+/// failure to open the ledger or delete the row is logged at error and never
+/// silently swallowed (the stale-claim reclaim gate is the safety net).
+fn release_engineer_claim_for_goal(state: &OodaState, goal_id: &str) {
+    let repo_slug = state
+        .active_goals
+        .active
+        .iter()
+        .find(|g| g.id == goal_id)
+        .and_then(|g| g.repo.as_deref());
+    let repository = crate::typed_ooda::RepositoryRef::from_goal_slug(repo_slug);
+    let claim_key = format!("{}/{}:{}", repository.owner, repository.name, goal_id);
+
+    let ledger_path = crate::typed_ooda::ledger_path(
+        &crate::ooda_actions::advance_goal::spawn::typed_ooda_state_root(),
+    );
+    let policy = crate::typed_ooda::CapabilityPolicy::new("engineer-claim-release");
+    let handler = match crate::typed_ooda::CapabilityHandler::open(&ledger_path, policy) {
+        Ok(handler) => handler,
+        Err(error) => {
+            tracing::error!(
+                target: "simard::engineer_claim",
+                goal = %goal_id,
+                claim_key = %claim_key,
+                error = %error,
+                "failed to open ledger to release engineer claim on termination",
+            );
+            return;
+        }
+    };
+    if let Err(error) = handler.release_engineer_claim(&claim_key) {
+        tracing::error!(
+            target: "simard::engineer_claim",
+            goal = %goal_id,
+            claim_key = %claim_key,
+            error = %error,
+            "failed to release engineer claim on termination",
+        );
+    }
 }
 
 /// Validate that a subordinate's claimed completion produced real artifacts.
