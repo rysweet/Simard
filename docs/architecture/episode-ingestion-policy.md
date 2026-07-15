@@ -89,12 +89,16 @@ for why behaviour is asserted there rather than by reading episodes back).
 The classifier evaluates four rules top-to-bottom and returns on the
 first match:
 
-1. **Failure override (highest priority).** If the content contains any
-   of `error`, `failed`, `failure`, `panic`, `exception` (case-insensitive),
-   the episode is **stored** at `importance = 0.9` — even if it also looks
-   like noise. A failed "session complete" is still a failure worth
-   keeping. The kind is `RecipeFailure` when the content/source mentions a
-   recipe, `ActionFailure` otherwise.
+1. **Failure override (highest priority).** If the content carries a
+   **whole-word** failure signal — a word from the `error` / `fail` /
+   `failure` / `panic` / `exception` family, matched at word boundaries and
+   including inflections (`errors`, `failed`, `panicked`, `exceptions`, …) and
+   compound PascalCase type names (`ParseError`, `NullPointerException`), but
+   **not** coincidental look-alikes that merely embed a stem (`exceptional`,
+   `hispanic`, `terror`, `mirror`) — the episode is **stored** at
+   `importance = 0.9` — even if it also looks like noise. A failed "session
+   complete" is still a failure worth keeping. The kind is `RecipeFailure`
+   when the content/source mentions a recipe, `ActionFailure` otherwise.
 2. **Known-noise markers → Drop.** A small allowlist of substrings —
    `started with objective`, `completed and persisted`, `flushing working
    memory`, `continue_skipping`, `no decision keyword` — is dropped.
