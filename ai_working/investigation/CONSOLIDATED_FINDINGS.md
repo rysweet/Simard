@@ -1610,3 +1610,132 @@ gap file-rung is documented-but-unwired) and the F5 **correction** (the WHY ladd
 point); and **(d)** re-pins the empirical baseline at 361/0 with all invariants intact. No new defects;
 D0–D3 remain live and unremediated; remediation order L0→L1→L2→L3 (§16.3) stands, with L0's fail-loud
 now doubly-motivated by the shared Gate-1 wiring.
+
+---
+
+## §18 — Eleventh-wave net-new findings (HEAD `f1db90f4`, zero source drift) — the two-and-only-two re-persistence conditions, the type-grounded WhisperGate real-vs-bug ruling, the membership-drift precision defect, and the gap↔spawn non-coupling verdict
+
+Five parallel deep dives at HEAD `f1db90f4`, folded here. Two PRIMARY dives adjudicate the
+signature-assembly + idempotency gate from complementary angles
+([`primary_emitters_and_idempotency_gate_HEAD_f1db90f4.md`](./primary_emitters_and_idempotency_gate_HEAD_f1db90f4.md),
+[`primary_signature_assembly_and_2x_verdict_HEAD_f1db90f4.md`](./primary_signature_assembly_and_2x_verdict_HEAD_f1db90f4.md));
+one VERIFICATION dive re-executes a practical test for every hypothesis on the latest tree
+([`verification_results_HEAD_f1db90f4.md`](./verification_results_HEAD_f1db90f4.md)); and two TERTIARY
+(architect) dives settle the `workstream-gap`↔`resource:engineer_spawn` coupling question and
+characterise signature idempotency under membership drift
+([`tertiary_gap_spawn_coupling_HEAD_f1db90f4.md`](./tertiary_gap_spawn_coupling_HEAD_f1db90f4.md),
+[`tertiary_lane_isolation_and_membership_drift_HEAD_f1db90f4.md`](./tertiary_lane_isolation_and_membership_drift_HEAD_f1db90f4.md)).
+`f1db90f4` is a docs-only commit over `f9cefec1` (`git diff --stat f9cefec1 HEAD -- src/` → **empty**);
+all prior source citations hold verbatim. **No verdict reversal.** This cohort *pins the exact
+re-persistence conditions, grounds the real-vs-bug ruling in the gate's own type, adds one net-new
+precision defect (membership-drift signature forking), and closes out the gap↔spawn coupling question.*
+
+- **18.1 — The two — and only two — conditions that re-persist an identical signature (NEW precise
+  enumeration).** The first PRIMARY dive nails down exactly when a second identical `overseer-obs:…`
+  episode appears, reducing the space to two mutually-exclusive, both-honest causes:
+  1. **`> 900 s` window expiry (same process).** The near-static problem set is re-observed on a tick
+     ≥ 900 s after the last store; `now - last ≥ window` ⇒ `peek` falls through to `Deliver` ⇒ a second
+     store with the identical key (`guardrails.rs:313-317`). Honest cross-window re-observation.
+  2. **Daemon restart.** `WhisperGate.last_delivered` is a process-local in-memory `HashMap` with **no
+     persistence** (`guardrails.rs:294`); `Overseer::new` reconstructs a fresh `WhisperGate::new(900,5)`
+     (`mod.rs:299`), wiping all dedup state, so the next tick observing the same set sees an empty map ⇒
+     `Deliver` ⇒ re-store even if `< 900 s` of wall-clock elapsed across the restart boundary.
+  Both yield exactly-2× (and N× over N windows/restarts). **From the signature alone the two causes are
+  indistinguishable** — no restart/window timestamps are stamped on the episode. This is the sharpest
+  statement yet of §16/§17's "honest re-observation": the idempotency guarantee is *intentionally scoped
+  to one process's 900 s window*, and these are the two — and only two — ways past it.
+
+- **18.2 — Type-grounded real-vs-bug ruling: the `2×` is real signal, not a WhisperGate bug (NEW
+  adjudication angle).** The second PRIMARY dive adjudicates the same `2×` **from the gate's own type**
+  rather than from the observe-loop: `last_delivered: HashMap<String,i64>` (`guardrails.rs:294`) yields
+  three structural properties directly from the type — **process-local** (reset empty on every
+  `WhisperGate::new`), **windowed-not-permanent** (`now - last < window` lapses by design), and
+  **commit-after-success only** (`mod.rs:548-557`, a failed write never suppresses a later one). The
+  gate's contract, per its own doc-comment (`mod.rs:520-523`), is *"record a persistent condition at
+  most once per window"* — a **per-tick anti-flood, NOT a global once-only ledger**. A real-vs-bug
+  decision matrix enumerates every producer of the second episode (restart / `>900 s` lapse / distinct
+  process / storage replay) and finds **every** path that yields `2×` is a genuine second observation of
+  a still-true condition; the only path the gate must stop — *within-window per-tick* duplication — it
+  stops correctly. **Verdict: no gate defect behind the `2×`.** This independently reproduces §17.1's
+  signal-vs-recording-defect ruling from the WhisperGate/`last_delivered` angle, with no contradiction.
+
+- **18.3 — NET-NEW precision defect: `observation_signature` is a membership-sensitive set-hash, and
+  `resource:engineer_spawn` drift forks Lane-A recurrence identity.** The membership-drift TERTIARY dive
+  characterises signature idempotency *precisely* — a genuinely new refinement:
+  - `observation_signature` (`mod.rs:1068-1074`) is **idempotent under ordering** (`sort_unstable`) and
+    **under duplication** (`dedup`), but **NOT idempotent under membership drift**: it set-hashes the
+    *entire tick's problem set*, so adding/removing any one incidental member changes the string identity.
+  - `resource:engineer_spawn` (`dedup_key="resource:engineer_spawn"`, fired at `ENGINEER_SPAWN_THRESHOLD=8`,
+    `signal.rs:351`) is benign transient telemetry uncorrelated with the blocked cluster; as spawn load
+    crosses 8 it toggles in/out of the set, forking the composite hash `S` ↔ `S'`. Two consequences on the
+    self-fed **Lane-A** loop: **(a) write-back dedup defeated** — `S` and `S'` are distinct `write_back_gate`
+    keys, so the 900 s window suppresses neither and **both persist** as near-duplicate episodes; **(b)
+    Lane-A bucket fragmentation / undercount** — `signals_from` counts by exact `failure_signature`, so
+    `S`- and `S'`-episodes land in different buckets and each must independently reach `≥2`, *splitting*
+    one static cluster's recurrence and holding the visible count at a low `×2`. This membership-drift
+    heterogeneity (variants with/without `resource:engineer_spawn` and `workstream-gap`, single-member up to
+    the full ~14-goal cluster) is **exactly the fingerprint of the observed signature blob** and explains
+    why the count sits at `×2` despite a persistently-blocked world.
+  - **Quarantine holds:** Lane-B keys recurrence on the *per-problem* `dedup_key`
+    (`recall_occurrences(&problem.dedup_key)`, filter `o.signature == dedup_key`, `mod.rs:456,972-997`), so
+    it is **structurally immune** to composite membership drift — `resource:engineer_spawn` toggling can
+    never reset, inflate, or deflate a blocked goal's Lane-B `recurrence`. **Adjudication: a benign-but-
+    latent Lane-A *precision* defect, not a correctness defect in escalation.** It exposes the root design
+    smell that Lane-A recurrence identity is simultaneously **over-aggregated** (many goals share one hash;
+    the coverage `dedup_key` is the constant `"workstream-gap"` — cannot tell 2 gaps from 20) **and
+    identity-fragile** (incidental co-members fork it) — the two faces of keying recurrence on the *whole
+    tick-set* instead of the *condition*. Closing hardening (diagnosis only): key advisory recurrence on
+    each *individual* `dedup_key` recalled ≥2 (matching Lane-B's granularity, curing both faces), **or**
+    exclude volatile `resource:*` telemetry from `observation_signature`. Do **not** merge lanes, silence
+    the `×2`, or add spawn controls.
+
+- **18.4 — `workstream-gap` ↔ `resource:engineer_spawn` are INDEPENDENT aggregation artifacts, not a
+  causal chain (NEW explicit coupling verdict).** The gap↔spawn TERTIARY dive settles the coupling
+  question that the interleaved blob (`…workstream-gap|…|resource:engineer_spawn|workstream-gap…`) invites.
+  The two share **no** producer input, `ProblemKind`, `dedup_key`, root cause, intervention, or dedup gate
+  (full trace table): spawn is `live_engineers >= 8` → `EngineerSpawnRate` → `ResourcePressure`/Normal →
+  `engineer-spawn-storm` → `Escalate` (notify-only); gap is `!workstream_gaps.is_empty()` →
+  `WorkstreamGap` → `WorkstreamCoverage`/High → `important-work-with-no-active-workstream` →
+  `FlagWorkstreamGaps` (notify-only). **No path** lets the engineer count feed gap detection or vice-versa;
+  the interleaving is a **flattened recall concatenation of distinct persisted `dedup_key`s across ticks**,
+  not a mechanized loop. `goal:blocked:…issue-17-ws2…-7f5afcca` is a **third, deliberately isolated lane**
+  (`GoalBlocked`→`GoalHygiene`), and blocked goals are explicitly excluded from the gap scan
+  (`detect_workstream_gaps` `continue`s on `GoalProgress::Blocked(_)`, `sensor.rs:300-302`, pinned by
+  `delegates_blocked_goals_to_goal_health_and_never_reflags_them` `tests_gap_scan.rs:413`); the `-7f5afcca`
+  suffix is a stable content-hash of one persisted record recalled, not genuine re-duplication. The **only**
+  real coupling is *semantic, at the operator level*: the `engineer-spawn-storm` cause text itself reads
+  *"a fan-out storm OR stuck workstreams"*, so ≥8 live engineers **and** blocked/uncovered high-value goals
+  is a plausible operational story surfaced as **two separate escalations by design**, not a code loop.
+  **Remediation: NONE trivial-and-safe** — coupling the lanes or suppressing recall would invent a fix for
+  non-broken behavior and risk regressing the pinned isolation guarantees; an advisory correlation note in
+  the escalation text is a product change, out of scope.
+
+- **18.5 — Full per-hypothesis re-verification re-pinned at HEAD `f1db90f4` (empirical baseline).** The
+  verification dive re-executed a practical test for **every** hypothesis H0–H8 on the current tree: the
+  **full overseer suite = 361 passed, 0 failed** (7960 filtered), plus **22 targeted discriminating tests
+  green** (4 H0 whisper/write-back probes + 3 H1 recall + 2 H2 reinvestigation + 4 H3 gap-scan + 2 H5 lane
+  + 3 H6 root-cause + 4 H7 gap/goal-health). Both PRIMARY dives independently reran the gate/recall suites
+  (`overseer::tests_whisper::whisper_gate` → **2 passed**; `overseer::tests_memory_recall` → **32 passed,
+  0 failed**, incl. `write_back_is_deduplicated_within_window`,
+  `whisper_gate_suppresses_an_identical_whisper_within_the_window` @0/300/899 Suppress → **Deliver@901**,
+  and `recurring_signature_emitted_when_two_episodes_share_signature`). All six source invariants unchanged
+  from `f9cefec1` (`RECURRING_SIGNATURE_THRESHOLD=2` `signal.rs:362`; `RECURRENCE_ESCALATION_THRESHOLD=3`
+  `root_cause.rs:33`; non-deduping `store_fact` `mod.rs:1034`; `WhisperGate::new(900,5)` `mod.rs:299`;
+  blocked-goal gate `WhisperGate::new(900,20)` `mod.rs:292`; gap gate `WhisperGate::new(900,200)`
+  `mod.rs:304`). Verdict matrix reproduced unchanged: **H0 REJECTED** (dedup/storage/replay artifact
+  excluded), **H1 CONFIRMED** (real cross-window re-observation), **H2–H8 SUPPORTED**.
+
+**§18 delta:** verdict still unchanged. This cohort **(a)** enumerates the *two-and-only-two*
+re-persistence conditions (`>900 s` window expiry vs. daemon restart) and pins them as indistinguishable
+from the signature alone; **(b)** grounds the real-vs-bug ruling in the WhisperGate's own type
+(`process-local` + `windowed` + `commit-after-success`), reproducing §17.1 from the gate angle;
+**(c)** adds the **net-new membership-drift precision defect** — `observation_signature` is a set-hash
+that `resource:engineer_spawn` drift forks, defeating write-back dedup and fragmenting/undercounting the
+Lane-A `×2`, while Lane-B stays per-`dedup_key`-immune; **(d)** issues the explicit **gap↔spawn
+non-coupling** verdict (independent aggregation artifacts, no trivial fix warranted); and **(e)** re-pins
+the empirical baseline at **361/0** with all invariants intact and no production `.rs` changed. Both
+PRIMARY suggested hardenings converge with prior waves and add one new observability idea — **stamp
+episode metadata with a window/epoch or restart-id** so a future reader can attribute a `2×` to window
+vs. restart (removing the §18.1 "indistinguishable" gap) — and **filter self-provenance on recall** (skip
+episodes whose `failure_signature` starts with `overseer-obs:`) so the Overseer never counts its own
+write-back. D0–D3 remain live and unremediated; remediation order L0→L1→L2→L3 (§16.3) stands.
