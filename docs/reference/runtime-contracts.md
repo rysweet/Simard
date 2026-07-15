@@ -153,6 +153,8 @@ The bounded engineer loop is intentionally narrow:
 - it surfaces active goals and up to the three most recent carried meeting records from the same state root
 - it may surface a separate terminal continuity summary when the same state root already contains a valid terminal-scoped handoff
 
+During the inspect phase the loop records an architecture gap trace. Because the shipped `simard_operator_probe` binary is a thin wrapper that delegates to `dispatch_operator_probe`, the gap trace follows that delegation into the authoritative routing table at `src/operator_commands/dispatch.rs` rather than string-scanning the wrapper alone. When the dispatcher wires the `engineer-loop-run` subcommand, the trace reports that the operator probe exposes the repo-grounded engineer-loop-run surface; it falls back to describing a terminal-only or unwired surface only when the dispatcher genuinely lacks the engineer loop.
+
 The bounded engineer loop supports two honest action shapes:
 
 - a read-only repo-native scan such as `cargo-metadata-scan` or `git-tracked-file-scan`
