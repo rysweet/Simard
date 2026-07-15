@@ -253,6 +253,7 @@ nav:
     - CLI Reference: reference/simard-cli.md
     - Simard Installer: reference/simard-installer.md
     - OODA Capability API: reference/ooda-capability-api.md
+    - Typed OODA Goal-Session Deterministic Rails: reference/typed-ooda-goal-session-rails.md
     - Telemetry Metrics: reference/telemetry-metrics.md
     - Recall-Precision Hybrid Measurement: reference/recall-precision-hybrid-api.md
     - Enrichment Observability API: reference/enrichment-observability-api.md

@@ -268,16 +268,13 @@ fn admission_snapshot(
 }
 
 fn goal_repository(goal: &crate::goal_curation::ActiveGoal) -> Result<RepositoryRef, String> {
-    let slug = goal.repo.as_deref().unwrap_or("rysweet/Simard");
-    let slug = if slug == "Simard" {
-        "rysweet/Simard"
-    } else {
-        slug
-    };
-    match slug.split_once('/') {
-        Some((owner, name)) => Ok(RepositoryRef::new(owner, name)),
-        None => Ok(RepositoryRef::new("rysweet", slug)),
-    }
+    // Delegate to the single source of truth for goal-repo normalization
+    // (`RepositoryRef::from_goal_slug`, unit-tested in `typed_ooda::types`).
+    // It binds a BARE goal repo name (e.g. "agent-kgpacks-rs-audit", "skwaq")
+    // to the canonical `rysweet/<name>` so it compares equal to the actor's
+    // always owner-qualified request, while preserving an explicitly qualified
+    // owner verbatim (a genuinely different owner still correctly mismatches).
+    Ok(RepositoryRef::from_goal_slug(goal.repo.as_deref()))
 }
 
 fn disk_used_percent(path: &Path) -> Option<u8> {
@@ -337,18 +334,12 @@ impl LiveGoalSessionEffects<'_, '_> {
                 "goal already has an assigned engineer",
             ));
         }
-        let expected_repo = goal_repo.as_deref().unwrap_or("rysweet/Simard");
-        let expected_repo = if expected_repo == "Simard" {
-            "rysweet/Simard"
-        } else {
-            expected_repo
-        };
+        // The spawn repository is already admitted against the normalized goal
+        // repository by `require_goal_repository` above (which routes through
+        // the single `goal_repository` -> `RepositoryRef::from_goal_slug`
+        // normalizer, correctly binding bare goal slugs to `rysweet/<name>`).
+        // No second inline check is needed here.
         let requested_repo = format!("{}/{}", spawn.repository.owner, spawn.repository.name);
-        if requested_repo != expected_repo {
-            return Err(EffectExecutionError::permanent(format!(
-                "typed spawn repository {requested_repo:?} does not match goal repository {expected_repo:?}"
-            )));
-        }
 
         let current_depth = std::env::var("SIMARD_SUBORDINATE_DEPTH")
             .ok()
