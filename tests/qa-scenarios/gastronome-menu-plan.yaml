@@ -1,0 +1,43 @@
+name: gastronome-menu-plan
+app_type: cli
+description: >
+  Verify the Gastronome kitchen app turns an event/menu brief into a costed,
+  scheduled menu plan end-to-end: sample-brief emits a valid brief, and plan
+  costs, scales, and schedules it within budget.
+steps:
+  # 1. sample-brief emits a valid brief containing the sample event.
+  - action: run
+    command: "cargo run --quiet --bin gastronome-kitchen -- sample-brief"
+    timeout: 180s
+  - action: expect_stdout
+    contains: "Summer Garden Luncheon"
+  - action: expect_stdout
+    contains: "guest_count"
+  - action: expect_exit_code
+    code: 0
+
+  # 2. End-to-end: brief -> costed, scheduled plan (human-readable summary).
+  - action: run
+    command: "cargo run --quiet --bin gastronome-kitchen -- sample-brief | cargo run --quiet --bin gastronome-kitchen -- plan --brief - --format text"
+    timeout: 240s
+  - action: expect_stdout
+    contains: "Menu plan — Summer Garden Luncheon (24 guests)"
+  - action: expect_stdout
+    contains: "EVENT TOTAL"
+  - action: expect_stdout
+    contains: "Budget: within"
+  - action: expect_stdout
+    contains: "Nutrition per guest"
+  - action: expect_stdout
+    contains: "Prep schedule"
+  - action: expect_exit_code
+    code: 0
+
+  # 3. Error path: an invalid brief exits non-zero with a JSON error envelope.
+  - action: run
+    command: "printf '{ not json' | cargo run --quiet --bin gastronome-kitchen -- plan --brief - --format json 2>&1"
+    timeout: 180s
+  - action: expect_stdout
+    contains: "invalid brief JSON"
+  - action: expect_exit_code
+    code: 2

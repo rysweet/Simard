@@ -56,6 +56,12 @@ path = "src/bin/simard_tui/main.rs"
 name = "supply-chain-steward"
 path = "src/bin/supply_chain_steward.rs"
 
+# Gastronome identity: deterministic kitchen app that turns an event/menu brief
+# into a costed, scheduled menu plan. See src/gastronome/ and docs/gastronome.md.
+[[bin]]
+name = "gastronome-kitchen"
+path = "src/bin/gastronome_kitchen.rs"
+
 [dependencies]
 # De-fork phase 2b (issue #2307): the amplihack-memory-lib `CognitiveMemory`
 # (persistent, lbug-backed `GraphStore`) is now the SOLE cognitive-memory

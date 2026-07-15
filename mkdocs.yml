@@ -64,6 +64,7 @@ nav:
   - Memory architecture: memory.md
   - Dashboard: dashboard.md
   - Distributed operations: distributed-operations.md
+  - Gastronome Identity: gastronome.md
   - Architecture:
     - Overview: architecture/overview.md
     - Simard System Architecture: architecture/system-architecture.md

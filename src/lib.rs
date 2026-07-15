@@ -73,6 +73,7 @@ pub mod evidence;
 pub mod fact_reliability;
 #[cfg(test)]
 mod fact_reliability_tests;
+pub mod gastronome;
 pub mod git_guardrails;
 pub mod goal_board_store;
 pub mod goal_curation;
