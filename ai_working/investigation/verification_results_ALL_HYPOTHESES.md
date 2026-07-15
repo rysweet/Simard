@@ -6,7 +6,24 @@
 This extends [`verification_results.md`](./verification_results.md) (H1-focused) to a
 complete per-hypothesis matrix, each with the concrete test run and its outcome.
 
-**Re-reproduced on HEAD `440e024c`** (`cargo test -p simard --lib`):
+**Re-executed on HEAD `cb8cd1dc`** (`cargo test -p simard --lib`, 2026-07-15):
+- Full overseer suite (`overseer::`): **361 passed, 0 failed** (7960 filtered).
+- 17 named discriminating tests (`--exact`, all H0–H8 probes incl. the two
+  `ooda_loop::tests_no_progress_reinvestigation` H2 tests): **all green** (8368 filtered).
+- Source invariants re-confirmed at this HEAD (line numbers drifted as the suite grew;
+  the invariants themselves hold): H5 `RECURRING_SIGNATURE_THRESHOLD = 2` (`signal.rs:362`)
+  vs `RECURRENCE_ESCALATION_THRESHOLD = 3` (`root_cause.rs:33`); H6 `record_occurrence`
+  uses non-deduping `mem.store_fact` (`mod.rs:1203`) and `WhisperGate.last_delivered` is an
+  in-process `HashMap` (`guardrails.rs:294`); write-back gate `WhisperGate::new(900,5)`
+  (`mod.rs:299`); H4 `write_back_observation(&cycle.problems)` writes ALL problems
+  (`wiring.rs:301`); H0 `keys.dedup()` collapses adjacent-equal only (`mod.rs:1262`);
+  H2 bare-block predicate `is_bare_no_progress_block` + renderer `no_progress_blocked_reason`
+  present (`no_progress_breaker.rs:108/123`) — INV-WHY still violable. Note: H2 has since been
+  refined in source — `is_evidenceless_no_progress_block` + `needs_reinvestigation` now also
+  cover the `evidence=[(none)]` variant (the live-daemon defect verified 2026-07-15),
+  strengthening H2 rather than falsifying it. **Verdict matrix below unchanged; all tests green.**
+
+**Previously re-reproduced on HEAD `440e024c`** (`cargo test -p simard --lib`):
 - Full overseer suite (`overseer::`): **359 passed, 0 failed** (7960 filtered).
 - 16 named discriminating tests (`--exact`, two batches of 6 + 10): **all green**.
 - Source invariants re-confirmed: H5 thresholds `RECURRING_SIGNATURE_THRESHOLD = 2`
