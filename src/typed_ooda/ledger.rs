@@ -580,10 +580,7 @@ impl CapabilityHandler {
             return Ok(existing);
         }
         if let Action::SpawnEngineer(spawn) = &request.action {
-            let expected_claim = format!(
-                "{}/{}:{}",
-                spawn.repository.owner, spawn.repository.name, request.identity.goal_id
-            );
+            let expected_claim = spawn.repository.claim_key(&request.identity.goal_id);
             if spawn.claim_key != expected_claim {
                 return Err(CapabilityError::new(
                     CapabilityErrorCode::InvalidArgument,
