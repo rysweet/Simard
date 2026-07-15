@@ -165,7 +165,7 @@ Environment=SIMARD_IDENTITY_PATH=%h/crocutus/identity
 Environment=SIMARD_PROMPT_ROOT=%h/crocutus
 ExecStartPre=%h/.crocutus/bin/simard debug instance --check-collision
 ExecStart=%h/.crocutus/bin/simard ooda run
-Restart=on-failure
+Restart=always
 
 [Install]
 WantedBy=default.target
