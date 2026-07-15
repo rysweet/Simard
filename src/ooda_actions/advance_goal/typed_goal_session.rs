@@ -24,7 +24,7 @@ pub(crate) fn run(
 ) -> ActionOutcome {
     let cycle_number = lock_state(state).cycle_count;
     let cycle_id = format!("cycle-{cycle_number}-{}", goal.id);
-    let session_id = format!("ooda-process-{}-{cycle_id}-{}", std::process::id(), goal.id);
+    let session_id = format!("ooda-{}", uuid::Uuid::now_v7());
     let (observe_output, orient_output) = {
         let guard = lock_state(state);
         let observe = match serde_json::to_vec(&guard.last_observation) {
@@ -274,10 +274,10 @@ fn goal_repository(goal: &crate::goal_curation::ActiveGoal) -> Result<Repository
     } else {
         slug
     };
-    let (owner, name) = slug
-        .split_once('/')
-        .ok_or_else(|| format!("goal repository {slug:?} must be an owner/name slug"))?;
-    Ok(RepositoryRef::new(owner, name))
+    match slug.split_once('/') {
+        Some((owner, name)) => Ok(RepositoryRef::new(owner, name)),
+        None => Ok(RepositoryRef::new("rysweet", slug)),
+    }
 }
 
 fn disk_used_percent(path: &Path) -> Option<u8> {
