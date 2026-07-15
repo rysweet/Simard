@@ -6,7 +6,24 @@
 This extends [`verification_results.md`](./verification_results.md) (H1-focused) to a
 complete per-hypothesis matrix, each with the concrete test run and its outcome.
 
-**Re-executed on HEAD `cb8cd1dc`** (`cargo test -p simard --lib`, 2026-07-15):
+**Re-executed on HEAD `bbddd23a`** (`cargo test -p simard --lib`, 2026-07-15):
+- Full overseer suite (`overseer::`): **361 passed, 0 failed** (7960 filtered).
+- 17 named discriminating tests (all H0–H8 probes, incl. the two
+  `ooda_loop::tests_no_progress_reinvestigation` H2 tests): **all green** —
+  4 H0/H1 dedup+whisper-gate probes (8317 filtered) + 13 H1–H8 route/shape probes
+  (8308 filtered).
+- Source invariants re-confirmed at this HEAD: H5 `RECURRING_SIGNATURE_THRESHOLD = 2`
+  (`signal.rs:362`) vs `RECURRENCE_ESCALATION_THRESHOLD = 3` (`root_cause.rs:33`);
+  H2 bare-block predicate `is_bare_no_progress_block` (`goal_curation/no_progress_breaker.rs:108`)
+  + bare renderer `no_progress_blocked_reason` (`:123`) split from `_with_why` (`:141`) —
+  INV-WHY still violable; H3 notify-only arm `act_flag_workstream_gaps` (`mod.rs:884`) +
+  `FlagWorkstreamGaps` routing (`mod.rs:1543`); H4 `write_back_observation(&cycle.problems)`
+  writes ALL problems (`wiring.rs:301`); H6 `record_occurrence` uses non-deduping
+  `mem.store_fact` (`mod.rs:1034`) and `WhisperGate.last_delivered` is an in-process
+  `HashMap` (`guardrails.rs:294`); write-back gate `WhisperGate::new(900,5)` (`mod.rs:299`).
+  **Verdict matrix below unchanged; all tests green.**
+
+**Previously re-executed on HEAD `cb8cd1dc`** (`cargo test -p simard --lib`, 2026-07-15):
 - Full overseer suite (`overseer::`): **361 passed, 0 failed** (7960 filtered).
 - 17 named discriminating tests (`--exact`, all H0–H8 probes incl. the two
   `ooda_loop::tests_no_progress_reinvestigation` H2 tests): **all green** (8368 filtered).

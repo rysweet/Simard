@@ -34,7 +34,32 @@ default-**on** at its second gate so only the shared `completion_evidence` wirin
 and a full **361/0 per-hypothesis re-verification**) are folded into **§17**. This tenth wave is the
 first that is **not docs-only**: it added a single **test** (`src/overseer/tests_root_cause.rs`, commit
 `f9cefec1`) proving Lane-A `RecurringSignature` does **not** feed Lane-B recurrence — i.e. the 2↔3
-dead-zone (D2) is now green-by-test. **No production `.rs` changed; no remediation landed.**
+dead-zone (D2) is now green-by-test. **No production `.rs` changed; no remediation landed.** A
+**twelfth-wave** set of **three parallel deep dives** at HEAD `bbddd23a`
+(only `tests_root_cause.rs` differs from the `5a85317b` pin — all non-test source byte-identical) is
+folded into **§19**. The **architect/tertiary** dive
+([`tertiary_architecture_TWO_LOOPS_AND_DEADZONE_HEAD_bbddd23a.md`](./tertiary_architecture_TWO_LOOPS_AND_DEADZONE_HEAD_bbddd23a.md))
+hardens the D2 dead-zone diagnosis from "ACT rarely records occurrences" to a
+**total structural latch** — `ActOutcome::Reported ∉ outcome_records_occurrence` (`wiring.rs:612-627`),
+so a sub-threshold blocked goal accrues **exactly zero** Lane-B occurrences by construction and can
+**never** reach the escalation threshold of 3; names the three non-closing loops (L1/L2/L3) and the
+missing **"recurrence-2 closing rung"**; and reconfirms `resource:engineer_spawn` as benign drift while
+flagging that `Escalated` **is** in the occurrence set (`wiring.rs:619`) — an inconsistency vs. L1's
+`Reported`. The **primary** dive
+([`primary_signature_assembly_emitter_and_2x_deepdive.md`](./primary_signature_assembly_emitter_and_2x_deepdive.md))
+pins the complete end-to-end **emitter map** (assembly `mod.rs:1068-1073`; human "N×" string
+`mod.rs:1359-1362`; marker embed `wiring.rs:1084` / parse `wiring.rs:976-986`,`:1025`; 2× count
+`signal.rs:455-470`, threshold `signal.rs:362`) and the **four in-memory `WhisperGate` configs**
+(`mod.rs:286-304`) — establishing that the write-back dedup window is **ephemeral with no persisted gate
+state**, so a daemon restart re-opens the 900 s window and re-persists the same `[sig:…]` episode, the
+precise mechanism that makes `occurrences == 2`. The **secondary** dive
+([`secondary_nesting_vs_duplication_token_class_HEAD_bbddd23a.md`](./secondary_nesting_vs_duplication_token_class_HEAD_bbddd23a.md))
+adds the **decisive structural proof** that the literal `…|workstream-gap|workstream-gap|…` /
+nested `overseer-obs:…|overseer-obs:…` doubling is a **positive fingerprint of D1 self-observation
+nesting and is impossible from true per-token duplication** (because `orient` merges same-`dedup_key`
+signals and `keys.dedup()` collapses adjacent equals ⇒ each family key appears **at most once per
+snapshot**), and classifies every token load-bearing vs. benign drift. **No production `.rs` changed;
+no remediation landed.**
 
 This consolidates all parallel deep dives:
 [`investigation_report.md`](./investigation_report.md) (primary/secondary root cause),
@@ -1739,3 +1764,160 @@ episode metadata with a window/epoch or restart-id** so a future reader can attr
 vs. restart (removing the §18.1 "indistinguishable" gap) — and **filter self-provenance on recall** (skip
 episodes whose `failure_signature` starts with `overseer-obs:`) so the Overseer never counts its own
 write-back. D0–D3 remain live and unremediated; remediation order L0→L1→L2→L3 (§16.3) stands.
+
+---
+
+## §19 — Twelfth-wave net-new findings (HEAD `bbddd23a`, zero non-test source drift) — three parallel dives: the D2 dead-zone is a *total* structural latch (tertiary), the complete emitter map + four `WhisperGate` configs (primary), and the decisive "doubling is D1 nesting, impossible from duplication" proof (secondary)
+
+**Three parallel deep dives** at HEAD `bbddd23a`, folded here — architect/tertiary
+([`tertiary_architecture_TWO_LOOPS_AND_DEADZONE_HEAD_bbddd23a.md`](./tertiary_architecture_TWO_LOOPS_AND_DEADZONE_HEAD_bbddd23a.md)),
+primary ([`primary_signature_assembly_emitter_and_2x_deepdive.md`](./primary_signature_assembly_emitter_and_2x_deepdive.md)),
+and secondary ([`secondary_nesting_vs_duplication_token_class_HEAD_bbddd23a.md`](./secondary_nesting_vs_duplication_token_class_HEAD_bbddd23a.md)).
+Drift re-check: since the `5a85317b` tertiary pin only `src/overseer/tests_root_cause.rs` (+99 test
+lines) changed — **all non-test source is byte-identical**, so every load-bearing line number below is
+exact at HEAD (independently re-read per dive; every citation verifies). **No verdict reversal; no
+production `.rs` changed; no remediation landed.** This wave *upgrades* the D2 diagnosis from
+probabilistic to total (§19.1), maps all three non-closing loops in one table (§19.2), adds the
+two-closing-seams boundary insight (§19.3), names the missing middle remediation tier (§19.4),
+reconfirms `engineer_spawn` benign while flagging the Lane-B counter inconsistency (§19.5), pins the
+complete signature-assembly **emitter map** and the **four in-memory gate configs** (§19.6), and proves
+the observed token-doubling is a **positive fingerprint of D1 nesting** — impossible from true
+duplication — with a full load-bearing-vs-benign **token taxonomy** (§19.7–§19.8).
+
+- **19.1 — NET-NEW hardening: the D2 dead-zone latch is a HARD exclusion, not a probabilistic slowdown.**
+  Prior waves framed D2 as "ACT is gated shut, so `record_occurrence` rarely runs." This dive grounds the
+  stronger, exact claim at the `Decide × outcome` intersection: a plain blocked goal (not
+  perpetual+no-progress, not needs_review, recurrence < 3) falls to `Intervention::Report`
+  (`mod.rs:1630`) → `ActOutcome::Reported` (`mod.rs:658`), and **`Reported ∉ outcome_records_occurrence`**
+  (`wiring.rs:612-627` — the set is exactly `Launched | Merged | Deployed | IssueFiled | Escalated |
+  Whispered | GoalUnblocked | GoalEscalated | ConflictResolved | GoalTransferred | Audited`;
+  **verified this wave**). The Act loop only calls `record_occurrence` when
+  `outcome_records_occurrence(&outcome)` is true (`wiring.rs:276-280`), so a sub-threshold blocked goal
+  records **exactly zero** Lane-B occurrences → `recall_occurrences(dedup_key)` stays empty →
+  `recurrence` stays **pinned at 0** (`root_cause.rs:79-82`) → `decide_blocked_goal`'s `>= 3` escalation
+  rung (`mod.rs:1613`) is **unreachable by construction**, forever. The circular dependency is the latch:
+  the counter that unlocks escalation can only advance through an outcome (`Escalated`/`GoalEscalated`/
+  `GoalUnblocked`) **itself already gated behind having accrued that counter**. **The dead zone is total,
+  not probabilistic** — Lane B is not "slow to reach 3," it is pinned at 0 for precisely the blocked-goal
+  class the escalation rung was designed to catch.
+
+- **19.2 — The three non-closing observe-and-flag loops (unified L1/L2/L3 map).** The composite persists
+  because three Decide arms terminate without a closing edge:
+
+  | # | Loop | Decide arm | Act outcome | Closing edge? |
+  |---|---|---|---|---|
+  | **L1** | Blocked-goal WHY gate | `decide_blocked_goal` → `Report` (sub-threshold, `mod.rs:1630`) | `Reported` | **None** — re-emits `goal:blocked:<id>` every cycle; Lane B pinned at 0 (§19.1) |
+  | **L2** | Workstream-gap launch gap | `WorkstreamCoverage` → `FlagWorkstreamGaps` (`mod.rs:1534-1543`) | `WorkstreamGapsFlagged` (notify-only, `mod.rs:884-948`) | **None** — no `launch.rs` edge, no issue filed |
+  | **L3** | Engineer-spawn pressure | `ResourcePressure` → `Escalate` (`mod.rs:1444-1446`) | `Escalated` (bare no-op, `mod.rs:663`) | **None**, but **benign** — transient resource state self-resolves |
+
+  This is the concise structural restatement of root causes A (§1) and B (§2): L1 and L2 are the two
+  genuine non-closing loops; L3 is technically a third but structurally benign (nothing to "close").
+
+- **19.3 — Two "closing seams," neither reached by L1/L2 (component-boundary insight).** Only two seams
+  can actually close a problem: the `RecipeLauncher` (`launch.rs` — `smart_orchestrator_args` +
+  `SmartOrchestratorLauncher`) and the `IssueFiler`. Only `LaunchRecipe`-routed problems
+  (`ProcessHealth`/`CrossCutting`/`StepFailure`, `mod.rs:1429-1435`, `1565-1579`) cross a closing seam
+  **and** feed Lane B (`Launched ∈ outcome_records_occurrence`). `WorkstreamCoverage` is the **only**
+  High-priority coverage problem with **no edge into either seam**; L1 (sub-threshold) dead-ends at
+  `Reported`. Auditing which Decide arms reach these two seams exposes every non-closing loop in one pass.
+
+- **19.4 — The named missing tier: the "recurrence-2 closing rung."** The two decoupled recurrence lanes
+  create a middle gap with no remediation rung: at **count 1** nothing fires (correct — noise); at
+  **count 2** Lane A raises a **High-priority** `RecurringSignature` (`signal.rs:463`, admitted
+  `mod.rs:1353-1363`) but the priority bump is **inert** — Decide routes `GoalHygiene`/`WorkstreamCoverage`
+  purely by `ProblemKind`, never reading `problem.priority` (`mod.rs:1447`, `1534`), so L1 still `Report`s
+  and L2 still notify-only flags; at **count 3** Lane B escalation *would* be eligible but is unreachable
+  for L1 (§19.1/§1.2). So a problem sits "recognized as recurring, still uncovered" indefinitely — this is
+  the count-2 signal the user observed ("seen 2×"). **Missing architectural element (named, not built):** a
+  middle tier that, on Lane-A recognition (count ≥ 2), converts a non-closing flag into a closing action —
+  e.g. a `WorkstreamCoverage → LaunchRecipe`/`FileIssue` edge, and/or a Lane-A-driven bump that lets a
+  blocked goal escalate without waiting on the starved Lane-B counter (equivalently: add `Reported` to
+  `outcome_records_occurrence` so Lane B can accrue). This is the **"recurrence-2 closing rung."**
+
+- **19.5 — `resource:engineer_spawn` reconfirmed benign, plus a NET-NEW counter-inconsistency flag.**
+  `EngineerSpawnRate { live }` → `ResourcePressure`/Normal → fixed key `"resource:engineer_spawn"`
+  (`mod.rs:1267-1272`) → `Escalate` → `Escalated` no-op. Its appearance/disappearance across the corpus is
+  **membership drift** of the per-cycle problem set (enters only on ticks where live engineers crossed the
+  threshold), **not a new defect** — consistent with §11/§15/§18. **New honest asymmetry flagged (not a
+  bug in scope):** `Escalated` **is** in `outcome_records_occurrence` (`wiring.rs:619`), so
+  `resource:engineer_spawn` *does* accrue Lane-B occurrences — the exact opposite of the L1 `Reported`
+  starvation (§19.1). The two paths treat the recurrence counter **inconsistently**: the benign transient
+  telemetry accrues occurrences it will never need, while the genuinely-stuck blocked goal accrues none it
+  desperately needs.
+
+- **19.6 — NET-NEW: the complete emitter map + the four in-memory `WhisperGate` configs (primary dive).**
+  The primary deep dive pins the full end-to-end signature-assembly emitter chain to exact loci at HEAD,
+  several of which prior waves cited only piecemeal:
+
+  | Step | Locus @ HEAD | Emits |
+  |---|---|---|
+  | Signature assembly (`overseer-obs:` emitter) | `mod.rs:1068-1073` | `format!("overseer-obs:{}", sorted_deduped_keys.join("\|"))` |
+  | Constituent `goal:blocked:<id>` | `mod.rs:1336` | `Signal::GoalBlocked` dedup_key |
+  | Constituent `workstream-gap` | `mod.rs:1371` | `Signal::WorkstreamGap` fixed literal |
+  | Constituent `resource:engineer_spawn` | `capabilities.rs:562` (recall keyword) / `mod.rs:1270` (key) | `Signal::EngineerSpawnRate` |
+  | Human `recurring signature seen N×…` string | `mod.rs:1359-1362` | `sanitize_recalled(format!("recurring signature seen {occurrences}× in cognitive memory ({signature})"))` — **verbatim** the investigation-question string |
+  | Marker embed on write | `wiring.rs:1084` | `format!("{} [sig:{}]", episode.content, episode.signature)` |
+  | Marker parse on recall | `wiring.rs:976-986` (+ call `:1025`) | `parse_failure_signature("[sig:…]")` → `failure_signature` |
+  | 2× recurrence count | `signal.rs:455-470`, threshold `signal.rs:362` (`= 2`) | `Signal::RecurringSignature{signature,occurrences}` |
+
+  **NET-NEW precision — the four gates (`mod.rs:286-304`):** `whisper_gate` (900 s / 5-per-hr),
+  `blocked_goal_gate` (900 s / 20), **`write_back_gate` (900 s / 5)**, and **`gap_gate` (900 s / 200)** are
+  all `WhisperGate` instances (`guardrails.rs:291-343`) whose `last_delivered`/`deliveries` maps are
+  initialized **empty** by `WhisperGate::new` (`guardrails.rs:301`) with **no load/save anywhere**. This
+  makes the exact re-persistence mechanism explicit: the write-back dedup window is **ephemeral**, so a
+  daemon **restart** resets the 900 s window and the same `overseer-obs:…` write-back is stored **again**
+  into the *persistent* memory graph — two restarts within a recall horizon ⇒ two identical `[sig:…]`
+  episodes ⇒ `occurrences == 2` (`signal.rs:463`). This is the concrete **second** path to `×2` alongside
+  two ordinary 900 s windows (the residual-uncertainty item tertiary §7 leaves un-adjudicated from static
+  source — both paths yield *real* re-observation, so the verdict is unchanged either way). Minimal-fix
+  pointers (verdict unchanged, not landed): store-side idempotency on the `signature` metadata in
+  `record_observation` (`wiring.rs:1076-1091`) kills the count inflation; the D1 write-boundary filter
+  (§19.7) stops the nesting; optionally persist `write_back_gate.last_delivered` across restarts.
+
+- **19.7 — NET-NEW decisive proof: the literal doubling is D1 nesting, *impossible* from true duplication
+  (secondary dive).** The secondary deep dive supplies the structural argument that settles the
+  nesting-vs-duplication question the investigation string raises. Two invariants hold at HEAD:
+  (a) `orient` merges any two same-`dedup_key` signals into a single `Problem` (`mod.rs:1200-1221`, merge
+  at `:1211`), and (b) `observation_signature`'s `keys.dedup()` collapses adjacent equal keys
+  (`mod.rs:1071`). Together they guarantee **each family key can appear at most once per snapshot**.
+  Therefore a literal `workstream-gap|workstream-gap` (or repeated `overseer-obs:`) inside one composite
+  is **impossible from true per-token duplication** — it can *only* arise from **nested recalled
+  `overseer-obs:…` fragments**, each a distinct string (it embeds its own `workstream-gap`) that survives
+  `dedup()`. The observed doubling is thus a **positive fingerprint of the D1 self-observation feedback**,
+  not a counting bug and not per-token duplication. Corollary: the `×2` is an **honest** Lane-A occurrence
+  tally — audit the closing action, not the counter (consistent with §15/§16/§17).
+
+- **19.8 — Token taxonomy: load-bearing vs. benign membership drift, and the Lane-A-only precision defect
+  (secondary dive).** Re-grounded at HEAD, every constituent token classifies cleanly:
+
+  | Token | dedup_key @ HEAD | Volatile field | Class |
+  |---|---|---|---|
+  | `goal:blocked:<goal_id>` | `format!("goal:blocked:{goal_id}")` (`mod.rs:1336`) | `consecutive_no_action`/`needs_review` (summary/priority only) | **Load-bearing** — the persistent membership set that *is* the problem |
+  | `overseer-obs:…` (nested) | `sanitize_recalled(signature)` (`mod.rs:1359`) | `occurrences` (summary only) | **Load-bearing / signature-inflating** — the D1 artifact that manufactures the doubling |
+  | `workstream-gap` | fixed literal (`mod.rs:1371`) | `gaps.len()` (summary only) | **Benign membership drift** |
+  | `resource:engineer_spawn` | fixed literal (`mod.rs:1270`) | `{live}` (summary only) | **Benign membership drift / telemetry** |
+
+  **Precision nuance (Lane-A only, *not* a correctness defect):** because `observation_signature` is a
+  **set-hash over the whole tick's membership**, `workstream-gap`/`engineer_spawn` are benign as *tokens*
+  yet, as *co-members*, they **fork the composite Lane-A identity** under drift. That fork is confined to
+  the self-fed **advisory Lane-A**; **Lane-B escalation keys on the per-problem `dedup_key`** and is
+  immune. So membership drift is a benign-but-latent **precision** defect in Lane-A, never a correctness
+  defect in escalation. **D1 fix seam (named, not built):** filter recall-derived
+  (`overseer-obs:` / `RecurringSignature`) dedup_keys out of the set fed to `observation_signature` at
+  `mod.rs:546` — a symptom-seam fix, orthogonal to the counter (agrees with the §13 minimal-contained
+  D1 fix).
+
+**§19 delta:** verdict unchanged across all twelve waves. This wave **(a)** upgrades the D2 dead-zone
+from a probabilistic "ACT rarely records" to a **total structural latch** grounded at the newly-verified
+`wiring.rs:612-627` (`Reported ∉ outcome_records_occurrence` ⇒ Lane B pinned at 0, escalation unreachable
+by construction); **(b)** unifies root causes A/B/benign into the **L1/L2/L3 non-closing-loop table**;
+**(c)** adds the **two-closing-seams** boundary insight (neither reached by L1/L2); **(d)** names the
+missing **"recurrence-2 closing rung"** and pins *why* the count-2 recognition is inert (Decide routes by
+`ProblemKind`, ignores the priority bump); and **(e)** reconfirms `engineer_spawn` benign while flagging
+the net-new **Lane-B counter inconsistency** (`Escalated` accrues, `Reported` does not); **(f)** pins the
+complete **emitter map** and the **four in-memory `WhisperGate` configs** (`mod.rs:286-304`, empty on
+init, no persistence), making the **restart-driven re-persistence** path to `×2` explicit (primary); and
+**(g)** proves the observed token-doubling is a **positive fingerprint of D1 nesting, impossible from
+true duplication** (`orient` merge + `keys.dedup()` ⇒ each key at most once per snapshot), with a full
+load-bearing-vs-benign **token taxonomy** and the Lane-A-only precision-defect nuance (secondary). D0–D3
+remain live and unremediated; remediation order L0→L1→L2→L3 (§16.3) stands; no production `.rs` changed.
