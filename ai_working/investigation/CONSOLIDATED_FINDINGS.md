@@ -2,10 +2,12 @@
 
 **Investigation:** the overseer signature seen 2× in cognitive memory:
 `overseer-obs:goal:blocked:…|…|workstream-gap|workstream-gap`
-**Branch / HEAD:** `investigation/recurring-blocked-goals-workstream-gaps` @ `85b9398a`
-**Date:** 2026-07-15  **Status:** Complete — re-validated against current source (HEAD `85b9398a`;
-the two commits after `dea65df8` are **docs-only** — `git diff --name-only dea65df8..HEAD` touches
-only `ai_working/`, zero `.rs` changes, so every source citation still holds and no fix is merged).
+**Branch / HEAD:** `investigation/recurring-blocked-goals-workstream-gaps` @ `388e6c29`
+**Date:** 2026-07-15  **Status:** Complete — re-validated against current source through five waves
+(latest HEAD `388e6c29`; **every** investigation commit is **docs-only** — `git diff --name-only
+6e3113bc..HEAD -- '*.rs'` is empty, all changes confined to `ai_working/`, so every source citation
+still holds and no fix is merged). Fifth-wave net-new findings (incl. the `resource:engineer_spawn`
+membership drift) are folded into §11.
 
 This consolidates all parallel deep dives:
 [`investigation_report.md`](./investigation_report.md) (primary/secondary root cause),
@@ -49,6 +51,19 @@ marks), and two knowledge-archaeology re-checks
 [`specialist_revalidation_HEAD_85b9398a.md`](./specialist_revalidation_HEAD_85b9398a.md)
 (every load-bearing line re-verified exact; the one wrong *remedy* — §6.2b — confirmed already
 corrected to a count-in-content upsert). Net-new items from this wave are folded into §10.
+
+A **fifth re-validation wave at HEAD `388e6c29`** re-grounded every load-bearing citation to
+live `src/` once more (`git diff --name-only 6e3113bc..HEAD -- '*.rs'` is **empty** — all five
+investigation commits are docs-only, zero `.rs` changes) and analysed the one genuinely new
+element, the `resource:engineer_spawn` token in the later snapshot:
+[`secondary_token_provenance_membership_delta_HEAD_388e6c29.md`](./secondary_token_provenance_membership_delta_HEAD_388e6c29.md)
+(per-token provenance + the two-snapshot membership-delta table),
+[`specialist_revalidation_drift_HEAD_388e6c29.md`](./specialist_revalidation_drift_HEAD_388e6c29.md)
+(drift assessment: prior findings re-validated, `engineer_spawn` is **benign membership drift,
+not code drift**), and
+[`tertiary_fix_landing_and_regression_safety_HEAD_388e6c29.md`](./tertiary_fix_landing_and_regression_safety_HEAD_388e6c29.md)
+(minimal-fix landing location + a per-test no-regression argument). Net-new items from this
+wave are folded into §11.
 
 Every claim below is re-grounded to a current line in `src/overseer/` (re-verified at
 HEAD `85b9398a`; all prior root-cause citations still hold — the one superseded item is
@@ -614,3 +629,66 @@ No remediation has been merged — §6's three-defect fix (D1 stop self-observat
 D2 count-in-content occurrence record shipped atomically with guaranteed WHY-reasoner wiring,
 D3 recurrence-aware gap-closing rung at threshold 2) is all **remaining scoped work**
 (`specialist_revalidation_HEAD_85b9398a.md §0`).
+
+---
+
+## 11. Fifth re-validation wave (HEAD `388e6c29`) — net-new, folded
+
+This wave re-grounded every load-bearing citation to live `src/` once more and reached the
+same verdict with **zero source drift**: `git diff --name-only 6e3113bc..HEAD -- '*.rs'` is
+**empty**, so all five investigation commits (`6e3113bc`, `dea65df8`, `85b9398a`, plus the two
+consolidations to `388e6c29`) are **documentation-only** and every `src/overseer/*` +
+`src/stewardship/dedup.rs` line citation in §0–§10 remains valid. Baseline idempotency tests
+re-run green (`overseer::observer`, `tests_gap_scan`, `tests_root_cause`, `tests_memory_recall`;
+incl. `dedup_signature_ignores_recipe_and_step_differences`, `write_back_is_deduplicated_within_window`,
+`issue_filer_is_idempotent_across_cycles_no_network`). Four items are net-new and folded here:
+
+- **11.1 — `resource:engineer_spawn` is benign membership drift, not code drift.** The later of
+  the two snapshots carries a NEW `resource:engineer_spawn` token (absent from the `6e3113bc`
+  and `85b9398a` docs). It is **not new code** — the `"resource:engineer_spawn"` literal key has
+  existed since `add1708a` (#2419/#2533); its appearance means an `EngineerSpawnRate{live}` signal
+  crossed threshold **at observe time**. Structurally it is identical to `goal:blocked` and
+  `workstream-gap`: the volatile `{live}` count lands only in the summary
+  (`mod.rs:1267-1272` → `observation_content`), the `dedup_key` is a fixed literal, so **no
+  volatile component leaks into the signature**. The prior "deterministic membership fingerprint"
+  verdict absorbs it cleanly (`specialist_revalidation_drift_HEAD_388e6c29.md §3c`;
+  `secondary_token_provenance_membership_delta_HEAD_388e6c29.md §1`).
+
+- **11.2 — The two occurrences are overlapping-but-DIFFERENT snapshots (membership-delta table).**
+  A per-token diff of the two snapshots shows: the 8 kgpacks/core `goal:blocked` goals **PERSIST**
+  (unremediated across both passes); the five `simard-identity-*` goals **DROP** (unblocked between
+  passes); `resource:engineer_spawn` + an extra nested `workstream-gap` **APPEAR**. Because
+  membership A ≠ B, `observation_signature(A) ≠ observation_signature(B)` **by design** → both were
+  legitimately stored, and the recall counter later saw the recurring *family* prefix ≥2× and
+  emitted `RecurringSignature`. This confirms the `2×` is a faithful re-observation **loop, not an
+  artifact** — and sharpens §10.4 from "static set" to "*near*-static set"
+  (`secondary_token_provenance_membership_delta_HEAD_388e6c29.md §4`).
+
+- **11.3 — One under-throughput problem in three views.** The three persistent token families —
+  `goal:blocked:*` (GoalHygiene), `workstream-gap` (WorkstreamCoverage), and now
+  `resource:engineer_spawn` (ResourcePressure) — are causally **one under-resourcing/under-throughput
+  problem**: the system *is* spawning engineers (`engineer_spawn` up) yet goals stay blocked and gaps
+  stay uncovered. All three are observe-and-flag problems with no closing action, sitting in the same
+  **"2× dead zone"** — deduped by the 15-min `write_back_gate` (`mod.rs:548`) yet below
+  `RECURRENCE_ESCALATION_THRESHOLD = 3` (`root_cause.rs:33`) — flagged forever, escalated never
+  (`secondary_token_provenance_membership_delta_HEAD_388e6c29.md §5`).
+
+- **11.4 — Fix landing + per-test no-regression argument (tertiary deliverable).** The recurring
+  `overseer-obs:…` signature is produced **only** in `overseer/mod.rs`; `stewardship/dedup.rs` is a
+  confirmed **red herring** (it governs the already-idempotent issue-filing lane —
+  `failure_signature`/`find_existing` — which never carries the composite). Landing map, re-affirmed
+  at HEAD: **D2 core** count-in-content upsert at `record_occurrence` (`mod.rs:1034`) + read at
+  `recall_occurrences` (`mod.rs:972-997`), **coupled** with closing the WHY double-gate in
+  `ooda_loop/cycle.rs` (the pair is a latch — must ship atomically); **D1** one-line write-back
+  filter (`mod.rs:534-563`, drop recall-derived `RecurringSignature` problems before
+  `observation_signature`); **D3** recurrence-aware gap-closing rung (`mod.rs:901-934` + `launch.rs`).
+  **Never `dedup.rs`.** Every named idempotency test is on a separate seam the fix does not touch, so
+  each stays green; the fix set moves the system **toward** stronger idempotency (upsert replaces
+  append; content-count replaces node-multiplicity; self-observation stops re-entering the graph)
+  and weakens no existing dedup guarantee
+  (`tertiary_fix_landing_and_regression_safety_HEAD_388e6c29.md §1,§4,§5`).
+
+**Fix status (unchanged, re-confirmed at HEAD `388e6c29`):** all investigation commits remain
+**documentation-only**; defects **D1/D2/D3 stay live in source**. No remediation merged — §6's
+three-defect fix is all remaining scoped work. **INVESTIGATION-ONLY** — this wave specifies and
+re-validates; it does not implement.
