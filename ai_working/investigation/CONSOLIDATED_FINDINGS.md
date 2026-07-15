@@ -2,12 +2,14 @@
 
 **Investigation:** the overseer signature seen 2× in cognitive memory:
 `overseer-obs:goal:blocked:…|…|workstream-gap|workstream-gap`
-**Branch / HEAD:** `investigation/recurring-blocked-goals-workstream-gaps` @ `388e6c29`
-**Date:** 2026-07-15  **Status:** Complete — re-validated against current source through five waves
-(latest HEAD `388e6c29`; **every** investigation commit is **docs-only** — `git diff --name-only
+**Branch / HEAD:** `investigation/recurring-blocked-goals-workstream-gaps` @ `0289572e`
+**Date:** 2026-07-15  **Status:** Complete — re-validated against current source through six waves
+(latest HEAD `0289572e`; **every** investigation commit is **docs-only** — `git diff --name-only
 6e3113bc..HEAD -- '*.rs'` is empty, all changes confined to `ai_working/`, so every source citation
 still holds and no fix is merged). Fifth-wave net-new findings (incl. the `resource:engineer_spawn`
-membership drift) are folded into §11.
+membership drift) are folded into §11; sixth-wave net-new findings (the end-to-end pipeline trace and
+the **D2→D1→D3 dependency-safe landing order**, plus a reconciliation of the two waves' D-numbering)
+are folded into §12.
 
 This consolidates all parallel deep dives:
 [`investigation_report.md`](./investigation_report.md) (primary/secondary root cause),
@@ -64,6 +66,28 @@ not code drift**), and
 [`tertiary_fix_landing_and_regression_safety_HEAD_388e6c29.md`](./tertiary_fix_landing_and_regression_safety_HEAD_388e6c29.md)
 (minimal-fix landing location + a per-test no-regression argument). Net-new items from this
 wave are folded into §11.
+
+A **sixth re-validation wave at HEAD `0289572e`** (this consolidation) re-ground every prior verdict
+to current source once more — `git diff --name-only 85b9398a..HEAD` touches **only** `ai_working/`,
+`6e3113bc..HEAD -- '*.rs'` is **empty**, baseline tests green (13 passed) — across four parallel
+deep dives:
+[`specialist_regrounding_HEAD_0289572e.md`](./specialist_regrounding_HEAD_0289572e.md)
+(knowledge-archaeology re-grounding: every load-bearing citation re-verified exact at HEAD,
+`resource:engineer_spawn` re-confirmed benign membership drift),
+[`tertiary_architecture_pipeline_and_landing_order_HEAD_0289572e.md`](./tertiary_architecture_pipeline_and_landing_order_HEAD_0289572e.md)
+(the full OODA-tick pipeline trace showing the self-observation feedback runaway concretely, and a
+**D2→D1→D3 dependency-safe landing order**),
+[`primary_signature_provenance_REVALIDATION_HEAD_0289572e.md`](./primary_signature_provenance_REVALIDATION_HEAD_0289572e.md)
+(the honest-2×-cross-window verdict + an **empirical fix-landing grep** proving D1/D2/D3 all unmerged,
+and the Lane-A/Lane-B remediation-placement rule), and
+[`secondary_token_classification_and_root_cause_HEAD_0289572e.md`](./secondary_token_classification_and_root_cause_HEAD_0289572e.md)
+(the **per-goal stall-class map** — 3 of 4 blocks non-genuine, one common unwired-WHY-rung root cause
+— plus the gap↔blocked oscillation and per-gap-identity-loss findings), corroborated by a second
+architect drift-check
+[`tertiary_architecture_DRIFT_AND_LANDING_HEAD_0289572e.md`](./tertiary_architecture_DRIFT_AND_LANDING_HEAD_0289572e.md)
+(independent per-citation drift table + struct-level absence proofs). Net-new items — including a
+reconciliation of the two waves' divergent D1/D2/D3 labels and one stale citation flagged — are
+folded into §12.
 
 Every claim below is re-grounded to a current line in `src/overseer/` (re-verified at
 HEAD `85b9398a`; all prior root-cause citations still hold — the one superseded item is
@@ -641,7 +665,9 @@ consolidations to `388e6c29`) are **documentation-only** and every `src/overseer
 `src/stewardship/dedup.rs` line citation in §0–§10 remains valid. Baseline idempotency tests
 re-run green (`overseer::observer`, `tests_gap_scan`, `tests_root_cause`, `tests_memory_recall`;
 incl. `dedup_signature_ignores_recipe_and_step_differences`, `write_back_is_deduplicated_within_window`,
-`issue_filer_is_idempotent_across_cycles_no_network`). Four items are net-new and folded here:
+`issue_filer_is_idempotent_across_cycles_no_network`). Six items are net-new and folded here (11.5
+and 11.6 fold two fifth-wave deep dives — [`primary_signature_provenance_EMPIRICAL_HEAD_388e6c29.md`](./primary_signature_provenance_EMPIRICAL_HEAD_388e6c29.md)
+and [`secondary_writeback_feedback_and_deadzone_HEAD_388e6c29.md`](./secondary_writeback_feedback_and_deadzone_HEAD_388e6c29.md)):
 
 - **11.1 — `resource:engineer_spawn` is benign membership drift, not code drift.** The later of
   the two snapshots carries a NEW `resource:engineer_spawn` token (absent from the `6e3113bc`
@@ -688,7 +714,199 @@ incl. `dedup_signature_ignores_recipe_and_step_differences`, `write_back_is_dedu
   and weakens no existing dedup guarantee
   (`tertiary_fix_landing_and_regression_safety_HEAD_388e6c29.md §1,§4,§5`).
 
+- **11.5 — Empirical (test-executed) proof the `2×` is real-and-vacuous, not an artifact (primary).**
+  Beyond citation, the fifth-wave primary **ran the two gating suites** — `overseer::tests_memory_recall`
+  (**32 passed**) and `stewardship::tests` (**23 passed**), 55 tests total — turning the verdict from
+  code-read to test-anchored. Load-bearing cases: `write_back_is_deduplicated_within_window` (two
+  identical-signature ticks in one 900 s window ⇒ exactly **1** episode — rules out double-write);
+  `write_back_persists_again_for_a_distinct_signature` (`tests_memory_recall.rs:820`; distinct obs ⇒
+  **2** episodes — the count is honest); `recurring_signature_emitted_when_two_episodes_share_signature`
+  (`:471`, the `≥2` floor) bracketed by `recurring_signature_not_emitted_for_single_occurrence`. The
+  stewardship suite proves the `failure_signature = sha256(kind‖msg)` hash lane is a **separate,
+  isolated subsystem that never touches the `overseer-obs:` composite** — closing the "ruled-out
+  artifact" column with executable evidence. Every artifact hypothesis (double-write, replay,
+  off-by-one, `dedup()` collapse, hash collision, `stewardship` mis-key, `notify.rs` duplication) is
+  now test- or structure-anchored (`primary_signature_provenance_EMPIRICAL_HEAD_388e6c29.md §A,§B,§ruled-out`).
+
+- **11.6 — Second-order harm + non-durable gate sharpen the D1/D2 case (secondary).** Two net-new
+  refinements: (a) **The self-observation meta-problem is *cost-bearing*.** The recall-derived
+  `RecurringSignature` problem is `ProblemKind::ProcessHealth` → `Intervention::LaunchRecipe`
+  (`mod.rs:1429`), and `is_cost_bearing` (`mod.rs:1057-1062`) classes `LaunchRecipe`/`RunAudit` as
+  budget-spending — so the loop can spend LLM budget launching a recipe **about the overseer's own
+  observation blob** instead of remediating real blocked goals. It stands alone (its `overseer-obs:*`
+  key merges with no in-cycle problem, `mod.rs:1211`), so it is the *only* constituent with a
+  `LaunchRecipe` edge — the one convergent action aimed at the wrong target. (b) **The write-back
+  dedup gate is in-memory only.** `write_back_gate = WhisperGate::new(900, 5)` (`mod.rs:299`) is a
+  `HashMap`+`Vec` with **no persistence** (`guardrails.rs:291-297`), so a daemon restart resets it and
+  the same `observation_signature` is re-recorded → recall climbs to 2. Hence the missing lever is
+  **storage-layer idempotency (signature-keyed upsert / bounded retention), not the counter** — and
+  the D1 fix must land at the **WRITE boundary** (exclude `overseer-obs:`-prefixed / `RecurringSignature`
+  problems before `observation_signature`), because read-side `sanitize_recalled` scopes "untrusted"
+  to injection/length, not to the system's own recycled signatures. A regression test (feed a recalled
+  `overseer-obs:`-prefixed episode, assert it does NOT re-enter the next signature) does not yet exist
+  (`secondary_writeback_feedback_and_deadzone_HEAD_388e6c29.md §1,§2,§5,§6`).
+
 **Fix status (unchanged, re-confirmed at HEAD `388e6c29`):** all investigation commits remain
 **documentation-only**; defects **D1/D2/D3 stay live in source**. No remediation merged — §6's
 three-defect fix is all remaining scoped work. **INVESTIGATION-ONLY** — this wave specifies and
 re-validates; it does not implement.
+
+---
+
+## 12. Sixth re-validation wave (HEAD `0289572e`) — net-new, folded
+
+This wave (the current consolidation) re-ground every prior verdict against live `src/` a sixth
+time across four parallel deep dives (specialist re-grounding, two architect pipeline/landing
+deliverables, a primary re-validation, and a secondary token-classification pass). Drift is docs-only
+once more:
+`git diff --name-only 85b9398a..HEAD` touches **only** `ai_working/investigation/*.md`;
+`git diff --name-only 6e3113bc..HEAD -- '*.rs'` is **empty**. Baseline re-run green: `cargo test -p
+simard --lib -- overseer::observer:: dedup_signature brief_to_summary write_back_is_deduplicated`
+→ **13 passed; 0 failed** (incl. `write_back_is_deduplicated_within_window`,
+`dedup_signature_ignores_recipe_and_step_differences`,
+`issue_filer_is_idempotent_across_cycles_no_network`,
+`same_process_problem_dedups_to_one_issue_across_cycles`,
+`brief_to_summary_synthesises_stable_run_id_from_signature`). Every load-bearing citation was
+independently re-verified exact at HEAD (`mod.rs:1068-1073` signature builder; `mod.rs:1353-1363`
+`RecurringSignature`→`ProcessHealth`/`High`/`sanitize_recalled` — whose summary string is literally
+`"recurring signature seen {occurrences}× in cognitive memory ({signature})"`, i.e. the exact text
+of the investigation question; `mod.rs:1211,1217-1218` same-key merge raising priority via `.min`;
+`mod.rs:1615-1633` `decide_blocked_goal` fall-through to `Intervention::Report`; `signal.rs:362`
+`RECURRING_SIGNATURE_THRESHOLD = 2`; `root_cause.rs:33` `RECURRENCE_ESCALATION_THRESHOLD = 3`;
+`wiring.rs:301` write-back passes **all** `cycle.problems`; `mod.rs:1267-1272` `EngineerSpawnRate`
+→ fixed literal `resource:engineer_spawn`). The net-new items folded here (12.1–12.10):
+
+- **12.1 — End-to-end OODA-tick pipeline trace makes the feedback runaway concrete.** The tertiary
+  deep dive traces one `run_cycle()` tick token-by-token: (A) OBSERVE snapshot → (B) pre-recall keys
+  (`RecallKeys::from_signals`) → (C) RECALL recovers prior `overseer-obs:…` from the `[sig:…]` marker
+  → (D) `signals_from` counts recalled episodes by `failure_signature`, emitting
+  `Signal::RecurringSignature` at ≥2 (`signal.rs:463`) → (E) ORIENT sets the recurring problem's
+  `dedup_key = sanitize_recalled(signature)` — i.e. the `overseer-obs:…` string **itself** →
+  (G) WRITE-BACK folds that key into the **next** `observation_signature`. Shown concretely, tick
+  *n*'s whole keyset re-enters tick *n+1* as one giant nested key, reproducing the observed
+  `overseer-obs:overseer-obs:…` shape. This is the sharpest single-tick proof yet that the nesting is
+  a genuine self-observation control-flow loop, not display noise
+  (`tertiary_architecture_pipeline_and_landing_order_HEAD_0289572e.md §2`).
+
+- **12.2 — Dependency-safe landing order `D2→D1→D3`, with a hard ordering constraint.** The tertiary
+  argues a *true* dependency chain (not preference): land the **loop-breaker first** — exclude
+  recall-derived meta-problems (evidence solely `Signal::RecurringSignature`, or
+  `dedup_key.starts_with("overseer-obs:")`) from write-back, co-landing a classify/decide meta-guard
+  so an `overseer-obs:*` `RecurringSignature` never becomes an actionable `ProcessHealth`/`LaunchRecipe`.
+  **Rationale — the load-bearing new insight:** making the store idempotent *before* breaking the loop
+  is useless, because **each nesting level is a *different* signature, so a signature-keyed upsert
+  cannot collapse a moving target.** Only after the signature set is stabilized (meta-free) does
+  "one node per signature" describe a fixed target and does the recall `occurrences` count reflect
+  distinct observation *windows* rather than write cadence; only then can a first-recurrence rung
+  escalate on a *meaningful* count over a *meta-free* signature. Hence the strict chain: stabilize
+  (loop-breaker) → make counting meaningful (idempotent upsert) → act on the count (recurrence rung)
+  (`tertiary_architecture_pipeline_and_landing_order_HEAD_0289572e.md §4`).
+
+- **12.3 — RECONCILIATION: the two waves relabel D1/D2/D3; the underlying three defects are
+  identical.** The §3c/§6 numbering (waves 1–5) and the sixth-wave tertiary use **conflicting** D
+  labels for the **same** three seams. Readers must map them explicitly:
+
+  | Underlying defect (one per seam) | §3c/§6 label | §12 (wave-6) label | §6 landing slot |
+  |---|---|---|---|
+  | Self-observation write-back re-enters recall-derived `overseer-obs:` tokens (`wiring.rs:301`, filter before `observation_signature`) | **D1** (§6.5) | **D2** (loop-breaker) | write-back filter |
+  | Recurrence counter is a non-idempotent ratchet / cadence artifact → signature-keyed count-in-content upsert (`mod.rs:1034`, read `mod.rs:972-997`) | **D2** (§6.2b + WHY-gate latch) | **D1** (idempotent upsert) | count-in-content + WHY-gate latch |
+  | Recurrence dead-zone + notify-only gap routing → first-recurrence closing rung (`mod.rs:1615-1633`, `901-934`) | **D3** (§6.1) | **D3** (recurrence rung) | gap-closing rung |
+
+  The three fixes and their seams are **unchanged**; only the labels differ. To avoid future
+  confusion, treat §6's descriptive names (not the bare D-numbers) as canonical; the sixth-wave
+  D-numbers are local to `tertiary_architecture_pipeline_and_landing_order_HEAD_0289572e.md`.
+
+- **12.4 — Landing-order tension surfaced (loop-breaker-first vs. counter-latch-first).** §6.6's
+  order (wave-1–5 labels) was **D2 counter+WHY-gate (atomic latch) → D3 rung → D1 write-back filter**;
+  the sixth-wave order (its own labels) is **D2 loop-breaker → D1 upsert → D3 rung**, which in §6's
+  canonical names is **write-back filter → counter-upsert → rung**. These **disagree on whether the
+  write-back filter or the counter latch lands first.** The sixth-wave argument is the stronger one
+  and should be adopted: the write-back filter (loop-breaker) **must precede** the idempotent counter,
+  because an upsert keyed on a signature that keeps growing new nesting levels collapses nothing —
+  the target moves every tick until the loop is cut. This **refines §6.6**: keep §6.2b's
+  count-in-content + WHY-gate as an atomic latch, but land the §6.5 write-back filter (loop-breaker)
+  **before** that latch, then the §6.1 gap/recurrence rung last. No source citation changes; this is
+  a sequencing correction to the fix *plan*, not to the root-cause analysis.
+
+- **12.5 — One stale citation flagged (does not affect any verdict).** The sixth-wave tertiary cites
+  `tests_signature_verification.rs:164` as "a test pins the [2 vs 3] ordering." **That file does not
+  exist** at HEAD `0289572e` (`ls src/overseer/tests_signature_verification.rs` → not found; no test
+  file references `RECURRING_SIGNATURE_THRESHOLD` besides `signal.rs` itself). The two thresholds are
+  nonetheless **real and verified** as constants (`signal.rs:362 = 2`, `root_cause.rs:33 = 3`), so the
+  **dead-zone verdict stands**; only the "a test pins it" sub-claim is unsupported. Per the
+  no-doc-to-doc-trust discipline (see `RECONCILIATION_LEDGER.md`), this citation should be dropped or
+  repointed to the live constants rather than the nonexistent test.
+
+- **12.6 — Empirical fix-landing proof: D1/D2/D3 are ALL unmerged at HEAD (primary).** Beyond the
+  `*.rs`-diff-empty argument, a direct grep confirms **no fix has quietly landed**: `grep -rn
+  "count_in_content\|upsert_fact\|occurrence_count" src/overseer/` is **empty** (D2 idempotent
+  count-in-content upsert absent — `store_fact` at `mod.rs:1034` remains append-only); the only
+  `overseer-obs:` sites are the construction (`mod.rs:1072`) and a comment (`mod.rs:440`) — **no
+  write-boundary exclusion** (D1/loop-breaker absent); and there is no `quarantine` nor any
+  `workstream-gap`→`LaunchRecipe` edge (D3 gap-closing absent, still notify-only). This upgrades the
+  fix-status claim from "docs-only diff" to "**verified absent by symbol search**"
+  (`primary_signature_provenance_REVALIDATION_HEAD_0289572e.md §6`). A second architect drift-check
+  independently corroborates this at the **struct level**: `StoredOccurrence` (`mod.rs:1180-1185`)
+  has exactly four fields — `signature`, `cause_label`, `action`, `outcome` — **no `count` /
+  `first_seen` / `last_seen`**, so the D2 count-in-content field literally does not exist yet; and
+  `grep 'starts_with("overseer-obs'` in `mod.rs` returns **0 matches** (loop-breaker guard absent).
+  That deep dive also re-derives the full per-citation drift table (all ✅ exact, docs-only) and
+  endorses §12.2/§12.4's loop-breaker→idempotent-counter→closing-rung order and the count-in-content
+  (not bare caller-key) remedy (`tertiary_architecture_DRIFT_AND_LANDING_HEAD_0289572e.md §2,§4`).
+
+- **12.7 — Remediation must land on the EPISODE lane (Lane A), not the occurrence lane (Lane B).**
+  The primary sharpens §3c's two-lane model into an actionable placement rule: **Lane A** =
+  episode-count recall (`signal.rs:455-470`, gate `RECURRING_SIGNATURE_THRESHOLD = 2`) drives the
+  **visible `2×`** and priority promotion; **Lane B** = root-cause occurrence facts
+  (`record_occurrence`→append-only `store_fact`, `mod.rs:1004-1043`; gate
+  `RECURRENCE_ESCALATION_THRESHOLD = 3` at `mod.rs:1613`) drives escalation. Because the `2×` is only
+  ever provable on Lane A, the first-recurrence closing rung (§6.1/§12.2-D3) **must read the episode
+  lane**, not the occurrence lane — escalating on Lane B alone can never fire at 2×. The
+  15-min `write_back_gate` is re-confirmed as a `WhisperGate` **900 s** window (`mod.rs:191-192,286`),
+  so `occurrences == 2` ⇒ two Observe passes ≥15 min apart over an unchanged state
+  (`primary_signature_provenance_REVALIDATION_HEAD_0289572e.md §3,§4,§6`).
+
+- **12.8 — Per-goal stall-class map: 3 of 4 blocked clusters are NOT genuine, one common root cause
+  (secondary).** The secondary classifies each aggregate member goal and finds the recurring
+  population is **one unwired classification rung, not many goal bugs**:
+
+  | Cluster | Stall class | Genuine block? |
+  |---|---|---|
+  | kgpacks-rs parity + issues #12/#17/#18/#23/#25 | false-park `AlreadyComplete`/`MissingPrecondition` (work already closed/merged, misread as stuck) | **NO** |
+  | audit Simard coverage → 70% | uncheckable done-gate `UnclearCriteria` (idles, re-parks) | **NO** |
+  | simard-identity personas (atelier/bursar/cartographer/concierge/gastronome) | starvation `GoalUncovered` (p1/p2, no assignee/workstream) | **NO** (resourcing) |
+  | coin benchmark harness | genuine `MissingPrecondition`/`UpstreamDependency` | **YES** (1 of 4) |
+
+  All three non-genuine classes funnel through the same **bare no-progress park with no `WHY` token**:
+  the corrective vocabulary exists (`NoProgressClass` + `resolution_for_why`) but the WHY reasoner in
+  `ooda_loop/cycle.rs` is **double-gated (completion-evidence gate + feature-flag gate) and fails
+  open to bare-park**, with no invariant tying a `Blocked` reason to a `NoProgressClass`. So the
+  blocks are **causally linked (one common root cause)**, merely co-aggregated — with the coin-harness
+  the lone independently-genuine dependency block mixed in
+  (`secondary_token_classification_and_root_cause_HEAD_0289572e.md §4`).
+
+- **12.9 — `workstream-gap` and `goal:blocked` are one entity oscillating between two views
+  (secondary).** Re-verified at `sensor.rs:300-302`: `detect_workstream_gaps` **explicitly skips
+  `GoalProgress::Blocked` goals** ("Blocked goals flow through goal_health; never re-flag them here"),
+  so a single under-resourced entity is `workstream-gap` while active-uncovered and `goal:blocked`
+  while parked — never both at once, but both across windows. Corollary trap: the bare family key
+  `"workstream-gap"` (`mod.rs:1371`) **destroys per-gap identity** at the write boundary (every persona
+  gap is indistinguishable), whereas the per-gap gate already uses a distinct key
+  `workstream-gap:{signature}` (`mod.rs:901`) — so any gap-closing rung (D3) must key on
+  `GapItem.signature`, echoing the `INV-GAP-KEY` trap in §10/§3-ledger
+  (`secondary_token_classification_and_root_cause_HEAD_0289572e.md §5,§6,§7`).
+
+- **12.10 — Open verification questions carried forward (secondary).** Four checks would harden the
+  membership-drift and root-cause claims but require a live daemon / goal board (out of scope for this
+  static investigation): (1) confirm the `simard-identity-*` goals genuinely transitioned to unblocked
+  between snapshots (DROP A→B) rather than merely dropping out of recall ranking; (2) confirm
+  `resource:engineer_spawn` fired from real elevated live-spawn telemetry at snapshot B (convergence
+  class) vs. a one-off spike; (3) confirm `completion_evidence` (WHY Gate A) is actually `None` in the
+  live daemon (determines whether the WHY ladder ever ran for the kgpacks cluster); (4) confirm the
+  escalation decision latches at `recurrence ≥ 3` and never un-latches
+  (`secondary_token_classification_and_root_cause_HEAD_0289572e.md §Questions`).
+
+**Fix status (unchanged, re-confirmed at HEAD `0289572e`):** all six investigation commits remain
+**documentation-only**; defects **D1/D2/D3 (either labeling) stay live in source**. No remediation
+merged — §6's three-defect fix, landed in the §12.4-refined order, is all remaining scoped work.
+**INVESTIGATION-ONLY** — this wave specifies, re-validates, and reconciles; it does not implement.
