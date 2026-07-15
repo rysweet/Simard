@@ -1220,7 +1220,13 @@ mod tests {
         let mut by_repo = HashMap::new();
         by_repo.insert(
             repo.to_string(),
-            Ok(vec![open_pr(301, canonical, "MERGEABLE", "main", "SUCCESS")]),
+            Ok(vec![open_pr(
+                301,
+                canonical,
+                "MERGEABLE",
+                "main",
+                "SUCCESS",
+            )]),
         );
         let gh = ListingGh::new(by_repo);
         let (ops, _seen) = survey_ops(gh, Some(configured));
