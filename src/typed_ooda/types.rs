@@ -116,6 +116,18 @@ impl RepositoryRef {
             },
         }
     }
+
+    /// Deterministic engineer-claim key for `goal_id`: `{owner}/{name}:{goal_id}`.
+    ///
+    /// **Single source of truth** for the `engineer_claims` key. The
+    /// spawn-admission path (which inserts the claim) and the
+    /// release/reclaim-on-termination paths MUST produce the identical string,
+    /// so both go through here. A silent divergence in this formula is exactly
+    /// the bug class that leaked claims and permanently locked out goals
+    /// (issue #4094).
+    pub fn claim_key(&self, goal_id: &str) -> String {
+        format!("{}/{}:{}", self.owner, self.name, goal_id)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

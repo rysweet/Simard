@@ -268,7 +268,7 @@ fn release_engineer_claim_for_goal(state: &OodaState, goal_id: &str) {
         .find(|g| g.id == goal_id)
         .and_then(|g| g.repo.as_deref());
     let repository = crate::typed_ooda::RepositoryRef::from_goal_slug(repo_slug);
-    let claim_key = format!("{}/{}:{}", repository.owner, repository.name, goal_id);
+    let claim_key = repository.claim_key(goal_id);
 
     let ledger_path = crate::typed_ooda::ledger_path(
         &crate::ooda_actions::advance_goal::spawn::typed_ooda_state_root(),
