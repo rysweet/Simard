@@ -72,8 +72,8 @@ mod discovery;
 mod precommit;
 use claim::{claim_is_live, format_engineer_claim, read_engineer_claim_full};
 pub use claim::{is_pid_alive_public, read_pid_starttime_public};
-pub use discovery::{LiveEngineerWorktree, live_claimed_engineers};
 pub(crate) use discovery::goal_id_from_worktree_dir;
+pub use discovery::{LiveEngineerWorktree, live_claimed_engineers};
 
 /// Maximum length of a `goal_id` accepted by [`EngineerWorktree::allocate`].
 ///
@@ -487,8 +487,8 @@ impl Drop for EngineerWorktree {
     }
 }
 mod cleanup;
-use cleanup::{cleanup_inner, create_worktrees_root, unique_suffix};
 pub(crate) use cleanup::assert_under_root;
+use cleanup::{cleanup_inner, create_worktrees_root, unique_suffix};
 mod sweep;
 pub use sweep::{
     RemovalReason, sweep_orphaned_worktrees, sweep_orphaned_worktrees_inner, validate_goal_id,

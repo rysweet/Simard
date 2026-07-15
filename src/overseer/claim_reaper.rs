@@ -664,7 +664,10 @@ mod tests {
 
         let summary = reap_stale_claims(&ledger, &probe, &cleanup, false, STALE_SECS);
 
-        assert!(summary.reclaimed.is_empty(), "disabled reaper must be a no-op");
+        assert!(
+            summary.reclaimed.is_empty(),
+            "disabled reaper must be a no-op"
+        );
         assert!(ledger.released.borrow().is_empty());
         assert_eq!(ledger.list_engineer_claims(), vec![key.to_string()]);
         assert!(cleanup.cleaned().is_empty());
@@ -742,7 +745,10 @@ mod tests {
 
         // The good claim is still reclaimed despite the bad claim erroring.
         assert!(summary.reclaimed.contains(&good.to_string()));
-        assert!(summary.errors >= 1, "the failing release must be counted, not swallowed");
+        assert!(
+            summary.errors >= 1,
+            "the failing release must be counted, not swallowed"
+        );
         assert_eq!(
             ledger.list_engineer_claims(),
             vec![bad.to_string()],
@@ -811,7 +817,10 @@ mod tests {
             ClaimLiveness::Dead {
                 reason: DeadReason::HeartbeatStale,
                 age_secs: Some(age),
-            } => assert!(age < 300, "fresh worktree idle age should be tiny, got {age}s"),
+            } => assert!(
+                age < 300,
+                "fresh worktree idle age should be tiny, got {age}s"
+            ),
             other => panic!("expected HeartbeatStale with a small age, got {other:?}"),
         }
     }
@@ -826,7 +835,9 @@ mod tests {
         // enumeration fails ⇒ fail-closed Live (not NoWorktree).
         let state_root = tempfile::tempdir().expect("tempdir");
         let probe = WorktreeClaimLivenessProbe::new(
-            state_root.path().join("does-not-exist-so-root-is-unreadable"),
+            state_root
+                .path()
+                .join("does-not-exist-so-root-is-unreadable"),
         );
 
         let verdict = probe.assess("rysweet/Simard:any-goal");

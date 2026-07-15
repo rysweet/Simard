@@ -3031,7 +3031,9 @@ mod engineer_claim_lease_tests {
         spawn_engineer(&handler, "0", "g1").expect("spawn g1 admitted");
         spawn_engineer(&handler, "0", "g2").expect("spawn g2 admitted");
 
-        let mut listed = handler.list_engineer_claims().expect("list with two claims");
+        let mut listed = handler
+            .list_engineer_claims()
+            .expect("list with two claims");
         listed.sort();
         assert_eq!(
             listed,

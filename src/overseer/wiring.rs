@@ -1238,9 +1238,11 @@ fn build_claim_reaper_seams(
     };
     Some((
         Box::new(handler),
-        Box::new(crate::overseer::claim_reaper::WorktreeClaimLivenessProbe::new(
-            state_root.to_path_buf(),
-        )),
+        Box::new(
+            crate::overseer::claim_reaper::WorktreeClaimLivenessProbe::new(
+                state_root.to_path_buf(),
+            ),
+        ),
         Box::new(crate::overseer::claim_reaper::WorktreeDirCleanup::new(
             state_root.to_path_buf(),
         )),
