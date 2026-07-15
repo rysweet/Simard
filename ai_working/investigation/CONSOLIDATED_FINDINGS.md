@@ -2,16 +2,19 @@
 
 **Investigation:** the overseer signature seen 2× in cognitive memory:
 `overseer-obs:goal:blocked:…|…|workstream-gap|workstream-gap`
-**Branch / HEAD:** `investigation/recurring-blocked-goals-workstream-gaps` @ `5a85317b`
-**Date:** 2026-07-15  **Status:** Complete — re-validated against current source through seven waves
-(latest HEAD `5a85317b`; **every** investigation commit is **docs-only** — `git diff --name-only
-6e3113bc..HEAD -- '*.rs'` is empty, all changes confined to `ai_working/`, so every source citation
-still holds and no fix is merged). Fifth-wave net-new findings (incl. the `resource:engineer_spawn`
-membership drift) are folded into §11; sixth-wave net-new findings (the end-to-end pipeline trace and
-the **D2→D1→D3 dependency-safe landing order**, plus a reconciliation of the two waves' D-numbering)
-are folded into §12; seventh-wave net-new findings (the falsifiable **H0–H8 hypothesis set**, the
-executed **per-hypothesis verification matrix**, and the **minimal contained signature-path fix** with
-a zero-drift re-grounding) are folded into §13.
+**Branch / HEAD:** `investigation/recurring-blocked-goals-workstream-gaps` @ `b9f99879`
+**Date:** 2026-07-15  **Status:** Complete — re-validated against current source through eight waves
+(latest HEAD `b9f99879`; **every** investigation commit is **docs-only** — `git diff --name-only
+6e3113bc..HEAD -- '*.rs'` is empty and the working tree is also source-clean, all changes confined to
+`ai_working/`, so every source citation still holds and no fix is merged). Fifth-wave net-new findings
+(incl. the `resource:engineer_spawn` membership drift) are folded into §11; sixth-wave net-new findings
+(the end-to-end pipeline trace and the **D2→D1→D3 dependency-safe landing order**, plus a reconciliation
+of the two waves' D-numbering) are folded into §12; seventh-wave net-new findings (the falsifiable
+**H0–H8 hypothesis set**, the executed **per-hypothesis verification matrix**, and the **minimal
+contained signature-path fix** with a zero-drift re-grounding) are folded into §13; eighth-wave net-new
+findings (the exact open-loop seam, the per-token emitter map, the config-conditional WHY-gating hole,
+the **no-new-plumbing D1 fix** with the refined **D2→D3→D1→gauges** landing order, and the merge-base
+`dcf909c5` zero-drift re-grounding across committed *and* working-tree state) are folded into §14.
 
 This consolidates all parallel deep dives:
 [`investigation_report.md`](./investigation_report.md) (primary/secondary root cause),
@@ -109,8 +112,26 @@ write-back filter — plus a zero-line-drift re-grounding of every prior citatio
 items from this wave — the falsifiable hypothesis framing, the complete per-hypothesis verdict matrix,
 and the minimal contained D1 fix with its exactness proof — are folded into §13.
 
+An **eighth re-validation wave at HEAD `b9f99879`** re-grounded the whole pipeline once more via three
+parallel deep dives — every load-bearing citation independently re-read against live `src/` (no
+doc-to-doc trust), and drift re-checked: `git diff 6b2bf5e1..b9f99879 -- src/overseer src/stewardship`
+and `… -- src/ooda_loop` are **both empty** (every commit since the last code change `6b2bf5e1` is
+`docs(investigation)` — zero source drift, so all citations are byte-identical):
+[`primary_signature_provenance_HEAD_b9f99879.md`](./primary_signature_provenance_HEAD_b9f99879.md)
+(full Observe→Orient→Act→Store→Recall provenance trace + the **2× write-back-gate verdict** — the 900 s
+`WhisperGate` is a same-window de-dup, **not** a loop breaker; loop **open at HEAD** — pinpointing the
+precise open seam at `recall_episodic` with **no source-label self-exclusion**, `wiring.rs:1013-1031`),
+[`secondary_idempotency_and_gap_spawn_cycle_HEAD_b9f99879.md`](./secondary_idempotency_and_gap_spawn_cycle_HEAD_b9f99879.md)
+(the **two-orthogonal-dedup-namespaces** table, the membership-fingerprint idempotency proof, and the
+headline correction that **`workstream-gap → resource:engineer_spawn` is NOT a causal orchestration
+cycle** — no code edge; co-occurrence = under-resourced state; split defect/steady-state verdict), and
+[`tertiary_architecture_REGROUND_HEAD_b9f99879.md`](./tertiary_architecture_REGROUND_HEAD_b9f99879.md)
+(the zero-drift per-citation ledger, the consolidated **Observe→Orient→Act pipeline diagram**, and the
+architectural root cause of D1: provenance is **stamped on write** but **erased on read**). Net-new
+items from this wave are folded into §14.
+
 Every claim below is re-grounded to a current line in `src/overseer/` (re-verified at
-HEAD `5a85317b`; all prior root-cause citations still hold exact — the one superseded item is
+HEAD `b9f99879`; all prior root-cause citations still hold exact — the one superseded item is
 a *remedy*, §6.2b, not an analysis).
 
 ---
@@ -1047,7 +1068,158 @@ bounded) and the counters **lack idempotency** (H6, compounding not causal). H7/
 into **one under-throughput condition in three views**. Every defect is design-level; **none is a
 dedup/storage bug.**
 
-**Fix status (unchanged, re-confirmed at HEAD `5a85317b`):** all seven investigation commits remain
+**Fix status (unchanged, re-confirmed at HEAD `b9f99879`):** all eight investigation commits remain
 **documentation-only**; defects **D1/D2/D3 stay live in source**. No remediation merged — §6's
-three-defect fix, landed in the §12.4-refined **D2→D1→D3 dependency-safe order**, is all remaining
-scoped work. **INVESTIGATION-ONLY** — this wave formalizes and verifies; it does not implement.
+three-defect fix, landed in the §12.4/§13.6-refined **D2→D3→D1 dependency-safe order**, is all
+remaining scoped work. **INVESTIGATION-ONLY** — this wave formalizes and verifies; it does not
+implement.
+
+---
+
+## 14. Eighth-wave net-new (HEAD `b9f99879`) — provenance re-trace, open-loop seam, and the "spawn cycle" correction
+
+The eighth wave changed **no verdict**; it re-grounded the entire pipeline at a fresh HEAD with **zero
+code drift** and sharpened three things: the *exact* open-loop seam, the correct classification of the
+`workstream-gap ↔ engineer_spawn` co-occurrence, and the architectural naming of the D1 cause.
+
+- **14.1 — Zero code drift, independently re-verified (all three deep dives).** The last pipeline code
+  change is `6b2bf5e1` (2026-07-14, `fix(stewardship): stop recursive issue flood safely (#4063)`);
+  `src/ooda_loop` last changed at `ad8a2b81` (2026-07-08). `git diff 6b2bf5e1..b9f99879 -- src/overseer
+  src/stewardship` and `… -- src/ooda_loop` are **both empty** — every commit in between is
+  `docs(investigation)`. Consequence: every line citation across all prior waves is **byte-identical**
+  at HEAD; the D1 fix (`dedup_key.starts_with("overseer-obs:")` write-back filter) is still **not
+  present** at `mod.rs:534-563`; the §6.2b remedy trap remains correctly superseded. The per-citation
+  re-read table (tertiary §1) marks every load-bearing claim ✅ exact.
+
+- **14.2 — The precise open-loop seam: provenance stamped on write, erased on read (D1 root cause,
+  architect naming).** `record_observation` correctly stamps `source_label = "overseer"`
+  (`wiring.rs:1084-1088`), but `recall_episodic` (`wiring.rs:1013-1031`) recovers
+  `failure_signature = parse_failure_signature(&e.content)` from **every** episode and **never reads
+  `e.source_label`** — the self-vs-external distinction *exists in storage but is discarded on read*
+  (`wiring.rs:1024-1029`). That single seam is where the loop closes: the Overseer's own
+  `overseer-obs:…` write-back re-enters recall as a `failure_signature`, two such episodes fire
+  `RecurringSignature{occurrences:2}` (`signal.rs:455-470`, threshold 2 at `signal.rs:362`), Orient
+  admits it as a **standalone** `overseer-obs:…` problem that never merges (`mod.rs:1353-1363`,
+  `1211`), and the next `observation_signature` nests it one level deeper. The cheapest correct fix is
+  a ~4-line drop of own-source episodes **at recall** *or* of `overseer-obs:*` keys **at write-back**;
+  both are orthogonal to D2/D3.
+
+- **14.3 — Write-back-gate verdict: correct as designed, NOT a loop breaker; loop OPEN at HEAD
+  (primary).** `WhisperGate::new(900, 5)` (`mod.rs:298-299`) suppresses **same-window** duplicates
+  only. Two legitimate write-back passes ≥15 min apart produce two episodes with the identical
+  composite; recall counts 2 and fires at `occurrences >= 2`. The gate cannot — and was never meant to
+  — prevent this. Worse, **while the signature is nesting it is a *new* string every cycle**, so even
+  in-window the gate always `Deliver`s until the composite saturates `RECALLED_TEXT_MAX_LEN = 8192`
+  (`capabilities.rs:455`); after saturation the truncated prefix stabilizes and cross-window
+  re-delivery sustains the `×2`. Either regime keeps the loop alive. This resolves the earlier
+  window-vs-restart residual: a daemon restart is *sufficient* but **not necessary** for exactly 2×.
+
+- **14.4 — `workstream-gap → resource:engineer_spawn` is NOT a causal orchestration cycle (secondary
+  headline correction; confirmed by tertiary §4).** There is **no code edge** between the two.
+  `workstream-gap` (`detect_workstream_gaps`, `sensor.rs:288`) drives only
+  `act_flag_workstream_gaps` (`mod.rs:884`) → **operator notification only** (email/Signal), keyed
+  `workstream-gap:{g.signature}`; it launches no workstream, files no issue, **spawns no engineer**.
+  `resource:engineer_spawn` is a **passive** telemetry read of `live_engineers >=
+  ENGINEER_SPAWN_THRESHOLD (8)` (`signal.rs:351,393-396`). Real engineer spawning lives in a
+  **different subsystem** — OODA `dispatch_spawn_engineer` (`cycle.rs:665`) / `no_progress.rs`
+  `SpawnEngineer` (`:712-713`), **bounded to one guided retry** (`mark_guided_retry`,
+  `no_progress.rs:716`). The two tokens co-occur only because both conditions were true in the same
+  window (engineers maxed **and** coverage incomplete) — a real **under-resourced STATE**, not a loop.
+
+- **14.5 — Split defect/steady-state verdict along the co-occurrence (secondary S4).** The
+  `resource:engineer_spawn` side is **benign steady-state** — passive telemetry, count in summary only,
+  real spawn path bounded — no unfulfilled-spawn defect at the overseer boundary. The `workstream-gap`
+  side is a **real defect**, but the *observe-and-flag-without-closing* defect (D3, the missing
+  convergence rung), **not** an orchestration cycle. `WorkstreamCoverage` remains the only High-priority
+  Decide arm with no `launch.rs` close edge (`mod.rs:1534-1543`). Both share the same root: one
+  resourcing/convergence problem surfaced through multiple lenses (confirms H7/H8, §7).
+
+- **14.6 — Two dedup namespaces, orthogonal, re-confirmed (secondary S1 / tertiary §2).** The
+  investigation signature is composed **entirely** from Overseer Problem `dedup_key`s (the single
+  `overseer-obs:` composite namespace, minted by `observation_signature`, `mod.rs:1068-1073`). It
+  **never** touches the stewardship `sha256(kind + norm(text))[..8]` `failure_signature` namespace
+  (`stewardship/dedup.rs:63`), which is GitHub-**issue** dedup only. The two systems are correctly
+  orthogonal; `stewardship/routing.rs` is ruled out as the token origin. Each family key is idempotent
+  (Orient merges same-key problems, `keys.dedup()` collapses adjacent equals), so the signature is a
+  **deterministic membership fingerprint of the open-problem SET**, not an inflating join — a *fixed*
+  stuck set yields a *stable* signature; the `×2` is cross-window re-observation, not per-goal
+  inflation.
+
+- **14.7 — Landing order re-affirmed and residual verification questions logged.** The dependency-safe
+  order stands: **D2 (atomic gate+counter) → D3 (per-`GapItem.signature` closing rung, honouring the
+  INV-GAP-KEY trap) → D1 (recall/write-back self-exclusion filter)**. D1 alone stops the *nesting
+  shape* but not the `×2` (the static set is D2+D3). Two questions are handed to the verification
+  phase: **(Q1)** confirm the `ResourcePressure → Escalate` path for the Normal-priority
+  `engineer_spawn` problem (`mod.rs:1444`) is priority/dedup gated so an elevated-but-normal spawn rate
+  cannot escalate spuriously; **(Q2)** confirm the OODA guided-retry bound (`no_progress.rs:716`)
+  cannot be re-armed every cycle under sustained gaps (no unbounded-spawn path). Prior waves say both
+  are benign; these are targeted closes, not open risks.
+
+- **14.8 — Definitive per-token emitter map + the "2×" is a recall count, not a gate count (primary
+  emitter dive).** Every token in the composite is minted in exactly one place. The `overseer-obs:`
+  prefix and `|`-join come from `observation_signature` — `format!("overseer-obs:{}", keys.join("|"))`
+  over **sorted+deduped** `Problem.dedup_key`s (`mod.rs:1068-1073`). Each member key is minted in the
+  `classify_signal` signal→problem map (`mod.rs:1237-1373`): `goal:blocked:{goal_id}` (`:1336`),
+  `workstream-gap` literal (`:1371`), `resource:engineer_spawn` literal (`:1270`), and the
+  recall-driven `sanitize_recalled(signature)` self-key (`:1359`). `observer.rs` only *labels* variants
+  for telemetry (`:216`) and `notify.rs` is a *sink* for operator subjects (`:98,204`) — **neither
+  emits** the composite. Crucially, the **"2×" is `Signal::RecurringSignature.occurrences`**
+  (`signal.rs:455-470`), a tally of recalled episodes sharing one `failure_signature` — **not** a
+  `WhisperGate` counter. It reaches 2 because the write-back gate is an in-process, process-local
+  `HashMap<String,i64>` with a 900 s window (`guardrails.rs:291-333`, gate built `WhisperGate::new(900,5)`
+  at `mod.rs:299`): an identical observation is re-persisted whenever the daemon **restarted**, the
+  condition is re-observed **>900 s later**, or a **different instance** wrote it. This pins §14.3's
+  mechanism to the exact gate storage line.
+
+- **14.9 — The blocked-WHY ladder is well-formed; its closure hole is *conditional*, and elevated
+  `engineer_spawn` is a read-back of the ladder's own spawns (secondary two-loops dive).** The
+  remediation ladder (`resolution_for_why`, `no_progress_breaker.rs:384-417`) correctly routes most WHY
+  classes to non-blocking outcomes; only `UnclearCriteria/GenuinelyStuck` terminate at
+  **Escalate→Blocked** awaiting a human (`:402-410`) — the arm with **no auto-clearing convergence rung**
+  (unlike `UpstreamDependency`'s self-clearing `Defer`), which is the static set feeding the `2×`. The
+  ladder is **double-gated** (`cycle.rs:582-583`): Gate A `completion_evidence.is_some()` + Gate B
+  `no_progress_investigation_enabled()`. In the **default daemon Gate A is satisfied** (wired to
+  `GhCliEvidenceSource`, `daemon/mod.rs:455-471`), so the classifier runs — the closure hole is
+  **latent, active only** when `SIMARD_COMPLETION_EVIDENCE=off` or a non-daemon path leaves
+  `completion_evidence=None` (`client_factory.rs:109`, `daemon/mod.rs:1982`), which skips the whole block
+  incl. `reinvestigate_bare_blocked_goals` (`cycle.rs:700-702`). This *refines* the D2 defect: the bare-
+  block dead zone is real, but the WHY-gating hole is config-conditional, not unconditional. It also
+  fixes the causal direction of the `engineer_spawn` token: the ladder's own `dispatch_spawn_engineer`
+  (`cycle.rs:648-681`) **raises `live_engineers`**, so an elevated `EngineerSpawnRate` signal
+  (`signal.rs:393-396`) is a **read-back of the very stall the ladder is retrying** — a benign symptom of
+  Loop (a), consistent with §14.4's "not a spawn loop."
+
+- **14.10 — The D1 fix needs *no new plumbing*: the provenance it must consult is already in scope at
+  the drop site (tertiary minimal-fix dive — sharpens the estimate).** `recall_episodes_ranked` returns
+  `Vec<CognitiveEpisode>` (`cognitive_memory/mod.rs:542`); `CognitiveEpisode` carries a **public
+  `source_label: String`** (`memory_cognitive.rs:47-53`) populated end-to-end (`library_adapter.rs:559`)
+  and set to `"overseer"` on the Overseer's own write-backs (`wiring.rs:952,1088`). At the open seam
+  `recall_episodic` (`wiring.rs:1024-1029`) the loop **binds `e` but maps only `e.content`+`e.node_id`,
+  discarding `e.source_label`**. So closing D1 requires **no schema change, no new field, no new query** —
+  only a single-predicate `skip if e.source_label == OVERSEER_SOURCE_LABEL`, tightening the prior
+  "~4 lines" estimate. Landing order is confirmed and extended to **D2 (atomic gate+counter) → D3
+  (per-`GapItem.signature` closing rung, honouring INV-GAP-KEY) → D1 (recall-side self-source filter) →
+  Step 4 convergence gauges** (telemetry that `goal:blocked:*`/`workstream-gap` counts trend to zero — the
+  acceptance test, not a code defect). D1 alone stops the nesting **shape** but not the `2×`
+  **recurrence** (the set stays static until D2+D3 converge), so it is correctly ordered last despite
+  being the "true self-loop."
+
+- **14.11 — Drift baseline reset to the merge-base, and the *working tree* is also zero-drift (specialist
+  re-grounding dive).** The correct "last consolidated code" baseline is `dcf909c5` — the last real code
+  commit and `git merge-base HEAD main`; `6e3113bc..HEAD` is seven `docs(investigation)` commits. Beyond
+  the committed check, the **working tree** is clean of source: `git diff HEAD -- '*.rs'` is **0 lines**
+  (some `src/overseer/*.rs` carry fresh mtimes from checkout/build, but content is byte-identical — mtime
+  is not drift), and all staged/untracked changes are **exclusively `ai_working/investigation/*.md`**.
+  Whole-branch delta `dcf909c5..HEAD` = **34 files, +6476, 100% docs**. The overseer/stewardship pipeline
+  is byte-identical to `6b2bf5e1` (PR #4063), so the D1 self-exclusion filter is provably **unimplemented**
+  — committed *and* uncommitted. Confidence: **high** (reproducible git evidence + line-anchored re-read).
+
+**Bottom line (eight-wave consolidated verdict):** unchanged and now re-grounded at HEAD `b9f99879`
+with **zero code drift**. The `×2` is a **faithful cross-window recurrence count of a genuinely
+re-observed near-static problem set** (H1 confirmed; H0 rejected). It persists because two
+observe-and-flag loops never close (D2 bare-blocked WHY double-gate; D3 notify-only `WorkstreamCoverage`),
+parks in the **dead zone between thresholds 2 and 3** (D2), and the Overseer **re-observes its own
+bookkeeping** through a single open seam — provenance stamped on write but erased on read at
+`recall_episodic` (D1, `wiring.rs:1024-1029`). The `workstream-gap ↔ engineer_spawn` pairing is a
+**co-occurring under-resourced state, not a spawn loop**. Every defect is design-level; **none is a
+dedup/storage bug**; **no remediation is merged** — all eight investigation commits are docs-only.
