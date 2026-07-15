@@ -2,8 +2,10 @@
 
 **Investigation:** the overseer signature seen 2× in cognitive memory:
 `overseer-obs:goal:blocked:…|…|workstream-gap|workstream-gap`
-**Branch / HEAD:** `investigation/recurring-blocked-goals-workstream-gaps` @ `dea65df8`
-**Date:** 2026-07-15  **Status:** Complete — re-validated against current source (HEAD `dea65df8`).
+**Branch / HEAD:** `investigation/recurring-blocked-goals-workstream-gaps` @ `85b9398a`
+**Date:** 2026-07-15  **Status:** Complete — re-validated against current source (HEAD `85b9398a`;
+the two commits after `dea65df8` are **docs-only** — `git diff --name-only dea65df8..HEAD` touches
+only `ai_working/`, zero `.rs` changes, so every source citation still holds and no fix is merged).
 
 This consolidates all parallel deep dives:
 [`investigation_report.md`](./investigation_report.md) (primary/secondary root cause),
@@ -30,8 +32,26 @@ seam), and
 [`RECONCILIATION_LEDGER.md`](./RECONCILIATION_LEDGER.md) (independent knowledge-archaeology
 pass: every load-bearing citation re-verified, one fix-recommendation contradiction
 surfaced and resolved).
+
+A **fourth re-validation wave at HEAD `85b9398a`** independently re-derived and extended the
+above (all citations re-verified against live `src/`, no doc-to-doc trust):
+[`SYNTHESIS.md`](./SYNTHESIS.md) (the five-output executive synthesis + JSON),
+[`primary_signature_provenance_and_idempotency.md`](./primary_signature_provenance_and_idempotency.md)
+and [`primary_signature_provenance_dedup_verdict.md`](./primary_signature_provenance_dedup_verdict.md)
+(per-token provenance + the honest-count/vacuous-event verdict),
+[`secondary_common_root_cause_HEAD_85b9398a.md`](./secondary_common_root_cause_HEAD_85b9398a.md)
+(one-lever/four-symptom common root cause),
+[`tertiary_pipeline_and_store_boundary.md`](./tertiary_pipeline_and_store_boundary.md) and
+[`tertiary_pipeline_idempotency_RERUN_85b9398a.md`](./tertiary_pipeline_idempotency_RERUN_85b9398a.md)
+(the **cognitive-memory vs stewardship-store boundary** + end-to-end pipeline with idempotency
+marks), and two knowledge-archaeology re-checks
+[`specialist_crosscheck_HEAD_85b9398a.md`](./specialist_crosscheck_HEAD_85b9398a.md) /
+[`specialist_revalidation_HEAD_85b9398a.md`](./specialist_revalidation_HEAD_85b9398a.md)
+(every load-bearing line re-verified exact; the one wrong *remedy* — §6.2b — confirmed already
+corrected to a count-in-content upsert). Net-new items from this wave are folded into §10.
+
 Every claim below is re-grounded to a current line in `src/overseer/` (re-verified at
-HEAD `dea65df8`; all prior root-cause citations still hold — the one superseded item is
+HEAD `85b9398a`; all prior root-cause citations still hold — the one superseded item is
 a *remedy*, §6.2b, not an analysis).
 
 ---
@@ -545,3 +565,52 @@ defects (D1/D2/D3) and one is a coupled pair:
    WHY-reasoner wiring (INV-WHY, §6.3) as the D2 latch; a recurrence-aware closing rung
    with gap threshold 2 (§6.1, D3); stopping the self-observation write-back that nests
    `overseer-obs:` tokens (§6.5, D1); and convergence observability (§6.4).
+
+---
+
+## 10. Fourth re-validation wave (HEAD `85b9398a`) — net-new, folded
+
+This wave re-derived the analysis from source (no doc-to-doc trust) and confirmed **every**
+load-bearing citation §0–§9 re-verifies *exactly* at HEAD `85b9398a`. No conclusion changed.
+Four items are genuinely net-new and are folded in here:
+
+- **10.1 — The investigation question is Simard-emitted (self-authored).** The literal string
+  `"recurring signature seen {occurrences}× in cognitive memory ({signature})"` is produced by
+  the `Signal::RecurringSignature` arm of `signal_to_problem` (`mod.rs:1353-1362`). So the prompt
+  we are answering is the overseer quoting **its own** write-back bookkeeping back to us — direct
+  confirmation of the D1 self-observation loop, now traced end-to-end
+  (`specialist_crosscheck_HEAD_85b9398a.md §2`).
+
+- **10.2 — The `×2` counts recalled EPISODES, not occurrence facts (lane-A nailed).** The count
+  comes from `signal.rs:455-469` tallying `snapshot.episodes[*].failure_signature`
+  (`capabilities.rs:614`) — the overseer's own append-only `overseer-obs:` episodes — **not** the
+  Lane-B root-cause occurrence facts. This pins the visible `×2` unambiguously to Lane A and
+  explains the self-referential re-count at threshold 2
+  (`specialist_revalidation_HEAD_85b9398a.md §1`, `primary_signature_provenance_dedup_verdict.md`).
+
+- **10.3 — Store-boundary answer: cognitive memory ≠ stewardship store.** The `overseer-obs:…`
+  signature lives **only** in cognitive memory and is **never** written to the stewardship
+  (GitHub-issue) store. They are two physically distinct stores with different keys, idempotency
+  contracts, and purposes: cognitive memory (`CognitiveClientMemoryStore`, dual-write Python
+  client + `FileBackedMemoryStore`) is **append-only / not idempotent across windows**, keyed on
+  `overseer-obs:{join}` (episodes) and `{dedup_key}::{label}` (facts); the stewardship store
+  (GitHub Issues via `GhClient`) is **idempotent** (search-before-file → `FiledNew` once,
+  `MatchedExisting` after), keyed on `failure_signature = sha256(kind‖norm(err))[..8]`
+  (`stewardship/dedup.rs:63-75`). The two only share the word "signature" and the
+  search-before-write idiom — the `×2` is a cross-window recurrence tally **in cognitive memory**,
+  not a duplicated issue (`tertiary_pipeline_and_store_boundary.md §0`).
+
+- **10.4 — Verdict re-affirmed with the honest-count / vacuous-event distinction.** Two things
+  are simultaneously true: (a) **the count is honest** — two distinct episode nodes exist, the
+  within-window gate provably suppresses same-window dupes, so it is not double-read / replay /
+  collision / `dedup()` bug; and (b) **the event it certifies is vacuous** — the composite is an
+  aggregate join of every open problem's `dedup_key`, so its recurrence means only "the same
+  static problem set (partly the overseer's own bookkeeping) was observed twice." Audit the
+  **missing closing action**, not the counter (`primary_signature_provenance_dedup_verdict.md`).
+
+**Fix status (unchanged, re-confirmed):** all three investigation commits (`6e3113bc`,
+`dea65df8`, `85b9398a`) are **documentation-only**; defects **D1/D2/D3 remain live in source**.
+No remediation has been merged — §6's three-defect fix (D1 stop self-observation write-back,
+D2 count-in-content occurrence record shipped atomically with guaranteed WHY-reasoner wiring,
+D3 recurrence-aware gap-closing rung at threshold 2) is all **remaining scoped work**
+(`specialist_revalidation_HEAD_85b9398a.md §0`).
