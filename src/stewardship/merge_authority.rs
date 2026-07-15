@@ -95,6 +95,11 @@ pub struct OpenPrSummary {
     pub mergeable: String,
     pub checks: Vec<CheckRollupEntry>,
     pub url: String,
+    /// `author.login` from `gh pr list --json ...,author`. Used by the
+    /// autonomous-self-merge sensor (#4097) to tell Simard's OWN PRs from a
+    /// human's — an empty author (missing object) can never equal a configured
+    /// automerge author, so it fails closed. Not read by the dashboard panel.
+    pub author: String,
 }
 
 impl OpenPrSummary {
@@ -130,6 +135,29 @@ pub trait PrGhClient {
     /// dashboard handler relies on [`RealPrGhClient`]'s override.
     fn list_open_prs(&self, _repo: &str, _limit: u32) -> SimardResult<Vec<OpenPrSummary>> {
         Ok(Vec::new())
+    }
+
+    /// Author-scoped variant of [`list_open_prs`](Self::list_open_prs) for the
+    /// autonomous-self-merge sensor (#4097). Lists open PRs authored by
+    /// `author` only, pushing the author filter SERVER-SIDE so:
+    /// - a busy repo with more than `limit` open PRs can never crowd Simard's
+    ///   own eligible PRs out of the fetch window (they'd be silently skipped),
+    ///   and
+    /// - the transferred + parsed JSON shrinks to just Simard's PRs instead of
+    ///   every author's `statusCheckRollup`.
+    ///
+    /// The default impl delegates to [`list_open_prs`](Self::list_open_prs)
+    /// (the caller still applies its own exact-author match as defense-in-
+    /// depth), so existing fakes that only script the unscoped listing keep
+    /// working unchanged. [`RealPrGhClient`] overrides it to add
+    /// `gh pr list --author <author>`.
+    fn list_prs_by_author(
+        &self,
+        repo: &str,
+        _author: &str,
+        limit: u32,
+    ) -> SimardResult<Vec<OpenPrSummary>> {
+        self.list_open_prs(repo, limit)
     }
 }
 
@@ -306,7 +334,36 @@ impl PrGhClient for RealPrGhClient {
                     "--state",
                     "open",
                     "--json",
-                    "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url",
+                    "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url,author",
+                    "--limit",
+                    &limit_s,
+                ],
+            )?;
+            parse_pr_list_json(&stdout)
+        })
+    }
+
+    fn list_prs_by_author(
+        &self,
+        repo: &str,
+        author: &str,
+        limit: u32,
+    ) -> SimardResult<Vec<OpenPrSummary>> {
+        retry_transient_gh("gh pr list", || {
+            let limit_s = limit.to_string();
+            let stdout = run_gh_checked(
+                &format!("gh pr list --repo {repo} --state open --author {author}"),
+                &[
+                    "pr",
+                    "list",
+                    "--repo",
+                    repo,
+                    "--state",
+                    "open",
+                    "--author",
+                    author,
+                    "--json",
+                    "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url,author",
                     "--limit",
                     &limit_s,
                 ],
@@ -417,6 +474,13 @@ pub fn parse_pr_list_json(stdout: &[u8]) -> SimardResult<Vec<OpenPrSummary>> {
         status_check_rollup: Vec<RawCheck>,
         #[serde(default)]
         url: String,
+        #[serde(default)]
+        author: Option<RawAuthor>,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawAuthor {
+        #[serde(default)]
+        login: String,
     }
     #[derive(serde::Deserialize)]
     struct RawCheck {
@@ -464,6 +528,7 @@ pub fn parse_pr_list_json(stdout: &[u8]) -> SimardResult<Vec<OpenPrSummary>> {
                 mergeable: r.mergeable,
                 checks,
                 url: r.url,
+                author: r.author.map(|a| a.login).unwrap_or_default(),
             }
         })
         .collect())
@@ -1478,6 +1543,57 @@ mod tests {
     fn parse_pr_list_json_accepts_empty_array() {
         let prs = parse_pr_list_json(b"[]").unwrap();
         assert!(prs.is_empty());
+    }
+
+    /// Issue #4097: the autonomous-self-merge sensor must be able to tell
+    /// Simard's OWN PRs from a human's, so `parse_pr_list_json` has to capture
+    /// the `author.login` from the `gh pr list --json ...,author` shape.
+    #[test]
+    fn parse_pr_list_json_captures_author_login() {
+        let stdout = br#"[
+            {
+                "number": 4097,
+                "title": "feat: activate autonomous self-merge",
+                "headRefName": "feat/self-merge",
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "url": "https://github.com/rysweet/Simard/pull/4097",
+                "author": { "login": "simard-engineer" },
+                "statusCheckRollup": [
+                    { "name": "ci", "conclusion": "SUCCESS", "status": "COMPLETED" }
+                ]
+            }
+        ]"#;
+        let prs = parse_pr_list_json(stdout).unwrap();
+        assert_eq!(prs.len(), 1);
+        assert_eq!(
+            prs[0].author, "simard-engineer",
+            "author.login must be projected onto OpenPrSummary.author"
+        );
+    }
+
+    /// A `gh pr list` row missing the `author` object (e.g. a ghost/deleted
+    /// account) must default to an empty author, never panic — an empty author
+    /// can never equal a configured automerge author, so it fails closed.
+    #[test]
+    fn parse_pr_list_json_missing_author_defaults_empty() {
+        let stdout = br#"[
+            {
+                "number": 10,
+                "title": "orphan",
+                "headRefName": "x",
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "url": "https://github.com/rysweet/Simard/pull/10",
+                "statusCheckRollup": []
+            }
+        ]"#;
+        let prs = parse_pr_list_json(stdout).unwrap();
+        assert_eq!(prs.len(), 1);
+        assert!(
+            prs[0].author.is_empty(),
+            "a missing author object must default to empty (fail-closed), not panic"
+        );
     }
 
     // ─── Transient gh retry / resilience (Step 8b) ─────────────────────────

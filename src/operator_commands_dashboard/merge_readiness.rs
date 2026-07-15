@@ -242,6 +242,7 @@ mod tests {
                 },
             ],
             url: format!("https://github.com/rysweet/Simard/pull/{number}"),
+            author: "simard-engineer".into(),
         }
     }
 
@@ -257,6 +258,7 @@ mod tests {
                 state: "FAILURE".into(),
             }],
             url: format!("https://github.com/rysweet/Simard/pull/{number}"),
+            author: "simard-engineer".into(),
         }
     }
 
@@ -272,6 +274,7 @@ mod tests {
                 state: "IN_PROGRESS".into(),
             }],
             url: format!("https://github.com/rysweet/Simard/pull/{number}"),
+            author: "simard-engineer".into(),
         }
     }
 
@@ -287,6 +290,7 @@ mod tests {
                 state: "SUCCESS".into(),
             }],
             url: format!("https://github.com/rysweet/Simard/pull/{number}"),
+            author: "simard-engineer".into(),
         }
     }
 

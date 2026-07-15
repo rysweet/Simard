@@ -306,6 +306,78 @@ pub fn overseer_author_login() -> String {
     overseer_author_login_from(|k| std::env::var(k).ok())
 }
 
+// ─── autonomous-self-merge sensor gates (issue #4097) ──────────────────────
+//
+// Two operator hard-gates activate the `ready_prs` sensor rail. BOTH default
+// to OFF and fail CLOSED so deploying the code does NOT immediately merge
+// across every governed repo:
+// - `SIMARD_AUTOMERGE_REPOS`: the explicit repo allowlist (comma-separated
+//   `owner/name`). Default EMPTY => no repo eligible => autonomous merge OFF.
+//   Enable ONE canary repo first.
+// - `SIMARD_AUTOMERGE_AUTHOR`: the OODA/engineer `gh` login Simard authors her
+//   PRs under. The sensor lists ONLY PRs whose `author.login` EXACTLY matches,
+//   so it never acts on a human's PR. Default None => the sensor cannot tell
+//   its own PRs from a human's => it yields NO candidates (fail-closed). This
+//   is DISTINCT from [`OVERSEER_AUTHOR_LOGIN_ENV`] (the overseer-bot recursion
+//   identity): they are different logins by design, so the downstream
+//   recursion guard never collides with a valid self-merge candidate.
+
+/// Explicit repo allowlist gating the autonomous self-merge sensor. See the
+/// module note above. Comma-separated `owner/name`; default EMPTY = OFF.
+pub const SIMARD_AUTOMERGE_REPOS_ENV: &str = "SIMARD_AUTOMERGE_REPOS";
+
+/// The OODA/engineer `gh` login Simard authors her PRs under. See the module
+/// note above. Default None = fail-closed (no candidates).
+pub const SIMARD_AUTOMERGE_AUTHOR_ENV: &str = "SIMARD_AUTOMERGE_AUTHOR";
+
+/// Resolve the autonomous-self-merge repo allowlist from an env resolver.
+/// Comma-separated `owner/name`; entries are trimmed and empties dropped.
+/// Unset/empty/comma-noise => EMPTY vec (autonomous merge OFF, fail-closed).
+pub fn automerge_repos_from(lookup: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    lookup(SIMARD_AUTOMERGE_REPOS_ENV)
+        .as_deref()
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Production entry point: read the real process environment.
+pub fn automerge_repos() -> Vec<String> {
+    automerge_repos_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the OODA/engineer author login the sensor filters candidates to.
+/// Unset/empty/whitespace-only => None (fail-closed: the sensor yields no
+/// candidates, so it can never merge a human's PR by mistake).
+pub fn automerge_author_from(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    lookup(SIMARD_AUTOMERGE_AUTHOR_ENV)
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Production entry point: the OODA/engineer author login the self-merge sensor
+/// filters candidates to (#4097). Read ONLY from the explicit
+/// `SIMARD_AUTOMERGE_AUTHOR` env var; unset/empty/whitespace-only => `None` =>
+/// the sensor yields no candidates (fail-closed), exactly as the module note
+/// and the pure [`automerge_author_from`] resolver promise.
+///
+/// There is deliberately NO ambient `gh api user` fallback. An autonomous
+/// self-merge must never adopt whatever identity the daemon's `gh` token
+/// happens to resolve to: if that token were authenticated as a human operator
+/// (a personal `gh auth login`, a PAT in CI), the sensor would treat that
+/// human's own open PRs as self-merge candidates — and the recursion guard only
+/// refuses the distinct `simard-overseer[bot]` login, so it would not catch
+/// them. Both self-merge gates (this author and `SIMARD_AUTOMERGE_REPOS`)
+/// therefore require explicit operator opt-in.
+pub fn automerge_author() -> Option<String> {
+    automerge_author_from(|k| std::env::var(k).ok())
+}
+
 /// Resolve the daily budget from an env resolver, falling back to
 /// [`DEFAULT_DAILY_BUDGET_USD`] when the value is unset, empty, unparseable, or
 /// non-positive. This is the single source of truth the [`BudgetGate`] reads.
@@ -445,6 +517,72 @@ mod tests {
         assert_eq!(
             overseer_author_login_from(env(&[(OVERSEER_AUTHOR_LOGIN_ENV, " simard-bot ")])),
             "simard-bot"
+        );
+    }
+
+    // ─── autonomous-self-merge allowlist (issue #4097) ─────────────────────
+    //
+    // The `ready_prs` sensor is gated behind an explicit repo allowlist so
+    // deploying the code does NOT immediately merge across every governed
+    // repo. Default = EMPTY = OFF; unknown/unset must fail CLOSED.
+
+    #[test]
+    fn automerge_repos_empty_by_default_is_off() {
+        // Unset => empty allowlist => autonomous self-merge OFF.
+        assert!(
+            automerge_repos_from(env(&[])).is_empty(),
+            "unset SIMARD_AUTOMERGE_REPOS must resolve to an EMPTY allowlist (OFF)"
+        );
+        // Empty / whitespace-only / comma-noise all collapse to empty.
+        for off in ["", "   ", ",", " , , "] {
+            assert!(
+                automerge_repos_from(env(&[(SIMARD_AUTOMERGE_REPOS_ENV, off)])).is_empty(),
+                "{off:?} must resolve to an EMPTY allowlist (fail-closed / OFF)"
+            );
+        }
+    }
+
+    #[test]
+    fn automerge_repos_parses_trimmed_comma_separated_slugs() {
+        assert_eq!(
+            automerge_repos_from(env(&[(
+                SIMARD_AUTOMERGE_REPOS_ENV,
+                " rysweet/Simard , rysweet/other "
+            )])),
+            vec!["rysweet/Simard".to_string(), "rysweet/other".to_string()],
+            "comma-separated owner/name slugs are trimmed; empty entries dropped"
+        );
+    }
+
+    #[test]
+    fn automerge_repos_single_canary_repo() {
+        // The documented canary path: enable ONE repo first.
+        assert_eq!(
+            automerge_repos_from(env(&[(SIMARD_AUTOMERGE_REPOS_ENV, "rysweet/Simard")])),
+            vec!["rysweet/Simard".to_string()]
+        );
+    }
+
+    #[test]
+    fn automerge_author_none_by_default() {
+        // No configured author => the sensor cannot tell its OWN PRs from a
+        // human's => it must fail closed (None => empty candidate list).
+        assert!(
+            automerge_author_from(env(&[])).is_none(),
+            "unset SIMARD_AUTOMERGE_AUTHOR must resolve to None (fail-closed)"
+        );
+        assert!(
+            automerge_author_from(env(&[(SIMARD_AUTOMERGE_AUTHOR_ENV, "   ")])).is_none(),
+            "whitespace-only author must resolve to None (fail-closed)"
+        );
+    }
+
+    #[test]
+    fn automerge_author_reads_trimmed_explicit_value() {
+        assert_eq!(
+            automerge_author_from(env(&[(SIMARD_AUTOMERGE_AUTHOR_ENV, " simard-engineer ")])),
+            Some("simard-engineer".to_string()),
+            "the OODA/engineer gh identity is read and trimmed"
         );
     }
 

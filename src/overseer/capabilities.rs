@@ -327,6 +327,22 @@ pub trait PrOps {
     fn verify(&self, repo: &str, pr: u32) -> Result<VerifyReport, OverseerError>;
     fn merge(&self, repo: &str, pr: u32) -> Result<(), OverseerError>;
     fn resolve_conflict(&self, repo: &str, pr: u32) -> Result<(), OverseerError>;
+
+    /// Survey the given `owner/name` repos for Simard's OWN green + MERGEABLE
+    /// PRs and return them as a candidate list (issue #4097). This is the THIN
+    /// DETERMINISTIC sensor rail that populates
+    /// [`ObservedState::ready_prs`](crate::overseer::capabilities::ObservedState),
+    /// re-activating the dormant `PrReadyToMerge`/`VerifyAndMergePr` machinery.
+    ///
+    /// It is a candidate LIST only — a cheap author-filter + the already-fetched
+    /// `mergeable`/`statusCheckRollup` objective pre-filter. It NEVER merges and
+    /// NEVER runs the MergeJudge: the authoritative six-criteria gate stays
+    /// downstream in `merge_authority` and remains the single source of merge
+    /// truth. The default is EMPTY (default-off, fail-closed) so an
+    /// implementation that has not opted in performs no autonomous merge.
+    fn survey_ready_prs(&self, _repos: &[String]) -> Vec<PrRef> {
+        Vec::new()
+    }
 }
 
 /// Build, verify, and hand over a new binary — the Overseer's guarded (HIGH-RISK)

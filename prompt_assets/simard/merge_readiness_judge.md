@@ -8,7 +8,9 @@ whether the PR satisfies the **merge-ready skill** at
 ## Ground truth
 
 The skill defines the criteria. The skill is the source of truth, not this prompt. The
-skill currently lists six evidence sections that must be present in a merge-ready PR body:
+skill currently lists six evidence sections that must be present in a merge-ready PR body,
+plus a seventh **crusty-review evidence** criterion that autonomous self-merge (#4097)
+makes mandatory:
 
 1. **QA-team evidence** — scenarios + validate + run results
 2. **Documentation** — surfaces touched + doc updates (or internal-only justification)
@@ -16,6 +18,16 @@ skill currently lists six evidence sections that must be present in a merge-read
 4. **CI** — link to the green run for every required check
 5. **Scope** — diff summary with confirmation of no unrelated edits
 6. **Verdict** — explicit "ready to merge" / "draft" / "blocked" call with rationale
+7. **Crusty-review evidence** — documented evidence that the crusty-old-engineer review
+   loop ran to satisfaction: the review concerns raised and how each was resolved (or an
+   explicit, reasoned "no concerns" with the reviewer's sign-off). A PR that merges itself
+   autonomously MUST show the crusty gate was honored — a heading with no concerns, no
+   resolutions, and no sign-off is **not** substantive and fails this criterion.
+
+This seventh criterion is a **hard** merge-ready requirement (it moves the `verdict`, not
+just an advisory flag): if crusty-review evidence is missing or thin, the verdict is
+`not_ready` with a `high`-severity blocker on **Crusty-review**. This exists so Simard's
+autonomous self-merge can never bypass the crusty review gate.
 
 The exact section names may evolve; treat the skill template at
 `~/.copilot/skills/merge-ready/pr-description-template.md` as authoritative when in
