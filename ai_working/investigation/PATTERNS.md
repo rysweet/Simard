@@ -47,3 +47,39 @@ Under-resourced important work oscillates between a *coverage* signature
 (uncovered, while active) and a *blocked* signature (parked, while idle). When
 the same entities appear in both recurring families, treat them as one
 resourcing/convergence problem, not two independent bugs.
+
+## Anti-pattern: "Self-observation feedback"
+
+**Shape:** a monitoring loop writes its own recall-derived observations back
+into the store it reads from, then re-observes them next cycle — nesting its
+own bookkeeping inside future signatures. Seen here as the recall-derived
+`RecurringSignature` problem being written back by
+`write_back_observation(&cycle.problems)`, so a prior `overseer-obs:…` string
+nests inside the next window's signature (the repeated `overseer-obs:` runs in
+the investigated signature).
+
+**Fix:** never write back recall-derived *meta*-problems; treat recalled
+signatures as untrusted at the **write** boundary, not just the read boundary
+(exclude them from write-back, or tag+filter them so they can't re-enter).
+
+## Anti-pattern: "Missing storage-layer idempotency"
+
+**Shape:** a write-back is gated only by an in-memory, per-process window
+(`WhisperGate`) with no cross-window/cross-restart upsert. A long-lived
+unresolved problem therefore legitimately appends new same-signature nodes
+every window/restart, ratcheting the count and accumulating unbounded episodes.
+The `×2` recurrence is a *faithful* count — the defect is the absence of an
+idempotent write, not a broken dedup.
+
+**Fix:** signature-keyed idempotent upsert at the storage layer (as issue #2298
+did for procedures) or bounded retention — so persistence, not just
+notification, converges.
+
+## Meta-pattern: "The recurrence count is honest; audit the closing action, not the counter"
+
+When a monitoring signal recurs at a low, stable count, first confirm the count
+is a faithful re-observation (deterministic, sorted/deduped signature; provable
+within-window dedup) before suspecting a storage/dedup bug. A *correct* count
+that never trends to zero points at a **missing convergence rung** (no closing
+action + threshold/escalation dead zone), not a counting defect. Fix the loop
+that fails to resolve the condition, not the mechanism that reports it.

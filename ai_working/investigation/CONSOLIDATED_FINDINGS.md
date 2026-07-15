@@ -2,8 +2,8 @@
 
 **Investigation:** the overseer signature seen 2× in cognitive memory:
 `overseer-obs:goal:blocked:…|…|workstream-gap|workstream-gap`
-**Branch / HEAD:** `investigation/recurring-blocked-goals-workstream-gaps` @ `6e3113bc`
-**Date:** 2026-07-15  **Status:** Complete — verified against current source.
+**Branch / HEAD:** `investigation/recurring-blocked-goals-workstream-gaps` @ `dea65df8`
+**Date:** 2026-07-15  **Status:** Complete — re-validated against current source (HEAD `dea65df8`).
 
 This consolidates all parallel deep dives:
 [`investigation_report.md`](./investigation_report.md) (primary/secondary root cause),
@@ -15,9 +15,24 @@ architecture),
 (cognitive-memory dedup path: real-loop-vs-artifact verdict + self-referential
 write-back feedback),
 [`DISCOVERIES.md`](./DISCOVERIES.md), [`PATTERNS.md`](./PATTERNS.md),
-plus a fresh **verification pass** that traced the exact composite-signature
-construction the question references. Every claim below is re-grounded to a
-current line in `src/overseer/` (re-verified at HEAD `6e3113bc`).
+plus a **verification pass** ([`verification_results.md`](./verification_results.md))
+that traced the exact composite-signature construction the question references, and
+**two re-validation passes at current HEAD `dea65df8`**:
+[`secondary_dedup_recurrence_VALIDATION_HEAD.md`](./secondary_dedup_recurrence_VALIDATION_HEAD.md)
+(the **two-counter-lane** framing + a critical caveat that the naïve one-line counter
+fix is a trap) and
+[`tertiary_architecture_VALIDATION_HEAD.md`](./tertiary_architecture_VALIDATION_HEAD.md)
+(the **three-defect D1/D2/D3** geometry, the count-in-content fix, and dependency-correct
+landing order),
+[`tertiary_gap_routing_and_remediation_rung.md`](./tertiary_gap_routing_and_remediation_rung.md)
+(the **dual-path gap quarantine** + `INV-GAP-KEY` + the already-built stewardship routing
+seam), and
+[`RECONCILIATION_LEDGER.md`](./RECONCILIATION_LEDGER.md) (independent knowledge-archaeology
+pass: every load-bearing citation re-verified, one fix-recommendation contradiction
+surfaced and resolved).
+Every claim below is re-grounded to a current line in `src/overseer/` (re-verified at
+HEAD `dea65df8`; all prior root-cause citations still hold — the one superseded item is
+a *remedy*, §6.2b, not an analysis).
 
 ---
 
@@ -207,13 +222,18 @@ effective (non-suppressed) act per window and never pruned. Consequences:
    proves ≥2 distinct windows) **and** a counter whose *magnitude* is partly a
    write artifact.
 
-**Fix:** switch `record_occurrence` to
-`store_fact_with_caller_key(root_cause_signature(problem, primary), …)` — the
-`root_cause_signature` helper (`root_cause.rs:53`) already exists — so recurrence
-becomes a deduped/superseding incident signal instead of an accumulating
-write-count. (Note: escalation is idempotent at the **action** level — a repeat
-within the 15-min `blocked_goal_gate` window returns `GoalHealthSuppressed`,
-`mod.rs:810-878` — so the ratchet is a *decision*-level defect only.)
+**Fix (corrected — see §3c caveat):** the naïve
+`store_fact_with_caller_key(root_cause_signature(problem, primary), …)` — first
+proposed here and in §6.2b — is a **trap**: `DedupMode::CallerKey` keeps exactly
+one live fact per key, so `recall_occurrences().len()` would stick at **1** and
+escalation (`recurrence >= 3`) becomes **dead code**
+(`secondary_dedup_recurrence_VALIDATION_HEAD.md §4`). The correct fix carries the
+count **in the fact content**: a caller-key upsert whose `content` holds an
+incremented `occurrence_count` + `first_seen`/`last_seen`, with escalation reading
+that field instead of `recall.len()` (full design in §6.2b, corrected). (Note:
+escalation is idempotent at the **action** level — a repeat within the 15-min
+`blocked_goal_gate` window returns `GoalHealthSuppressed`, `mod.rs:810-878` — so
+the ratchet is a *decision*-level defect only.)
 
 ### 3b. Verified — observation *episodes* also lack storage-layer idempotency
 Distinct from §3a (root-cause occurrence *facts*), the **observation episodes**
@@ -232,6 +252,41 @@ recall `LIMIT`/consolidation. **Verdict (secondary deep dive):** the `×2` is a
 *faithful* recurrence count of a genuinely re-observed static problem set — **not**
 a dedup/storage/replay bug — but the storage layer offers no cross-restart
 protection and no episode-level idempotency.
+
+### 3c. Re-validated framing — TWO counter lanes, THREE defects, ONE latch
+The two re-validation passes at HEAD `dea65df8` sharpen §3a/§3b into the load-bearing
+geometry. The `×2` and the escalation counter live on **two decoupled storage lanes**,
+and the whole symptom is **three independent defects** that merely co-occur in one string:
+
+- **Lane A — observation episodes** (drives the visible `×2`): written by
+  `record_observation` → `store_episode` (unconditional), keyed on the composite
+  `overseer-obs:…` signature, incremented **once per 900 s window**, counted by
+  `RecurringSignature.occurrences` (threshold **2**, `signal.rs:463`). *This is the
+  number in the question.*
+- **Lane B — root-cause occurrences** (drives escalation): written by
+  `record_occurrence` → `store_fact` (unconditional, `mod.rs:1034`), keyed on
+  `occurrence_concept(dedup_key)`, incremented **once per ACT that touches the cause**,
+  counted by `RootCause.recurrence = recall.len()` (threshold **3**, `mod.rs:1613`).
+
+**The lanes are decoupled** — the operator-visible `×2` (Lane A) says *nothing* about
+whether Lane B reached 3. So the "dead zone at 2" is really a **cross-lane visibility
+gap**, and Lane B has two opposite failure modes depending only on whether the blocked
+goal's ACT path is reached: if the WHY double-gate keeps it **shut**, Lane B never
+increments → never escalates (today's exact symptom); if it is **open**, Lane B ratchets
+monotonically → **over-escalates and latches forever**.
+
+Mapped to three seams (`tertiary_architecture_VALIDATION_HEAD.md §1`):
+
+| Defect | Seam | Symptom in the signature |
+|---|---|---|
+| **D1** emission hygiene | `write_back` re-emits recall-derived `RecurringSignature` | the nested `overseer-obs:…\|overseer-obs:…` runs |
+| **D2** escalation counter + gate | Lane B append-only ratchet **behind** the WHY double-gate | blocked goals never escalate *or* over-escalate |
+| **D3** closing edge | `WorkstreamCoverage` has no `launch.rs` edge; `gap_gate` has no cross-window ledger | the `workstream-gap\|workstream-gap` tail, forever |
+
+**The latch:** D2's counter and D2's accrual gate (the WHY double-gate) form a coupled
+pair — fixing *either alone changes nothing observable*. The count-in-content counter
+(§6.2b) and closing the WHY double-gate (§6.3) **must ship together**; D1 (§6.5) and D3
+(§6.1) are independently shippable. Dependency-correct landing order in §6.6.
 
 ---
 
@@ -280,29 +335,63 @@ compounding defect.
 
 ## 6. Systemic fix — make persistent signals converge
 
-### 6.1 Close the workstream-gap loop (highest impact)
-Give `WorkstreamCoverage` a **recurrence-aware three-rung ladder** (rewrite the
-Decide arm at `mod.rs:1534-1543`): **1× → Notify** (unchanged); **≥2× → Remediate**
-= `LaunchRecipe` via the existing `launch.rs` seam, honoring the launch cap +
-board dedup key; **≥3× or launch-unsafe → Escalate once** with history. Record
-each fresh gap signature as a `PriorOccurrence` at the `commit` site
-(`mod.rs:931-934`) so gaps gain the cross-window memory they currently lack.
-Classify the new remediation at the same `RiskClass` `LaunchRecipe` carries
-(`guardrails.rs:60`) so the autonomy/budget gate governs it.
+### 6.1 Close the workstream-gap loop (highest impact, D3)
+`WorkstreamCoverage` is the **only** High-priority `ProblemKind` quarantined from
+**both** closing seams the codebase already owns — a **dual-path** hole
+(`tertiary_gap_routing_and_remediation_rung.md §1`): the read-only observer routes it
+to `Intervention::Report` (`observer.rs:120`, never files) and the acting overseer to
+notify-only `FlagWorkstreamGaps` (`mod.rs:1543`, never launches). Every *other* High
+finding converges through `FileIssue` (M1) or `LaunchRecipe`/`VerifyAndMergePr` (M2).
+The recurrence's routing origin is therefore a **Decide-table routing hole**, not a
+detection bug — and both arms must be fixed (M1's `Report` fall-through will silently
+swallow gaps the moment gap survey is added to the observer).
+
+Give `WorkstreamCoverage` a **recurrence-aware three-rung ladder** (rewrite the Decide
+arm at `mod.rs:1534-1543`): **1× → Notify** (unchanged); **≥2× → Remediate** =
+`LaunchRecipe` via the existing `launch.rs` seam (or file via the already-built,
+currently-dangling `stewardship::route_failure` seam, `routing.rs:39-52`, which
+explicitly anticipates overseer gap briefs), honoring the launch cap + board dedup key;
+**≥3× or launch-unsafe → Escalate once** with history. Classify the new remediation at
+the same `RiskClass` `LaunchRecipe` carries (`guardrails.rs:60`) so the autonomy/budget
+gate governs it.
+
+> **INV-GAP-KEY** (`tertiary_gap_routing_and_remediation_rung.md §2`): the recurrence
+> ledger, launch dedup key, and any per-gap issue MUST key on **`GapItem.signature`**
+> (`goal:<id>`/`issue:<repo>#<n>`/`anomaly:<slug>`, `signal.rs:135-138`) — **never** the
+> bare `problem.dedup_key == "workstream-gap"` (`mod.rs:1371`), which is a fixed constant
+> that erases per-gap identity. The consolidated `WorkstreamGap` signal must be **fanned
+> back out** to per-gap identities at the remediation seam (the inverse of the emission
+> consolidation at `signal.rs:475-478`). Record each fresh gap as a `PriorOccurrence`
+> keyed on `GapItem.signature` at the `commit` site (`mod.rs:931-934`) so gaps gain the
+> cross-window memory they currently lack. **Trap:** naively wiring the observer's
+> `FileIssue` arm folds *every* distinct gap into ONE issue (stewardship dedups on
+> `failure_kind = dedup_key`, `observer.rs:133`) — under-reporting, not remediation.
 
 ### 6.2 Unify recurrence tracking; gap threshold = 2
 Track gap signatures in cognitive memory like root-cause occurrences and apply
 one "seen N× → remediate/escalate" policy. Use **2** for gaps (a coverage gap has
 no benign transient explanation) vs **3** for blocked-goal causes.
 
-### 6.2b De-ratchet the recurrence counter (idempotency defect)
-Make `record_occurrence` dedup/supersede instead of accumulate: replace the plain
-`store_fact` (`mod.rs:1034`) with
-`store_fact_with_caller_key(root_cause_signature(problem, primary), …)` (helper at
-`root_cause.rs:53`). This makes `recurrence` a genuine incident streak, stops the
-lifetime write-count inflation, and lets an already-escalated goal fall back to
-self-heal once its cause clears — closing the "escalation latches on forever"
-failure mode (§3a).
+### 6.2b De-ratchet the recurrence counter — count-in-content (idempotency defect)
+**Do NOT** replace `store_fact` (`mod.rs:1034`) with a bare
+`store_fact_with_caller_key(root_cause_signature(problem, primary), …)`. The
+re-validation pass proved this is a **trap**
+(`secondary_dedup_recurrence_VALIDATION_HEAD.md §4`): `DedupMode::CallerKey`
+supersedes to **exactly one live fact per key**, and because
+`root_cause_signature` is stable for a repeating cause, `recall_occurrences().len()`
+would collapse to **1** permanently — making the `recurrence >= 3` escalation rung
+(`mod.rs:1613`) **dead code**. The two goals (*stop the ratchet* **and** *still cross
+3*) reconcile only by carrying the count **in the fact content**:
+- **Write** (`record_occurrence`): caller-key upsert keyed on
+  `root_cause_signature(entry.key, primary)`; on hit, deserialize,
+  `occurrence_count += 1`, refresh `last_seen`, re-store (supersede). One live fact
+  per cause, count inside. Add a `last_seen`/`distinct_windows` guard mirroring the
+  900 s gate so a flapping daemon can't inflate the count within one window.
+- **Read** (`RootCause.recurrence`): read `occurrence_count` from the single live
+  fact instead of `recall.len()`.
+This removes the lifetime write-count inflation *and* lets an already-escalated goal
+fall back to self-heal once its cause clears — closing the "escalation latches on
+forever" failure mode (§3a) without making escalation unreachable.
 
 ### 6.3 Guarantee the WHY reasoner (INV-WHY)
 Make Gate A/B failures **loud, not open**: a daemon with
@@ -335,6 +424,22 @@ idempotent upsert as procedures (#2298) — or a bounded retention/consolidation
 so a long-unresolved problem set does not accumulate unbounded same-signature
 episode nodes across windows/restarts.
 
+### 6.6 Dependency-correct landing order (the latch, §3c)
+The fixes are **not** independent choices from a menu — they map 1:1 to the three
+defects (D1/D2/D3) and one is a coupled pair:
+
+1. **§6.2b counter + §6.3 WHY-gate, shipped together (D2 latch).** Fixing either
+   alone changes nothing observable: counter-only leaves the gate shut (count stays 0,
+   `×2` persists) or open (over-escalates); gate-only revives the append-only ratchet.
+   *Highest priority, must be atomic* — it unblocks every `goal:blocked:*` row.
+2. **§6.1 closing rung (D3).** Independently shippable; converges the `workstream-gap`
+   family (simard-identity personas + the `workstream-gap|workstream-gap` tail).
+3. **§6.5 write-back filter (D1).** Independently shippable one-liner; removes the
+   nested `overseer-obs:` shape.
+4. **§6.4 convergence gauges.** Proves the fix holds and guards regression; also cover
+   the Lane-A cross-restart episode-inflation residual (dedup episodes on
+   `(signature, window)` if restart-flapping is confirmed as a `×2` source).
+
 ---
 
 ## 7. Reusable anti-patterns (for the pattern library)
@@ -362,6 +467,14 @@ episode nodes across windows/restarts.
    long-lived unresolved problem accumulates unbounded same-signature nodes. *Fix:*
    signature-keyed idempotent upsert (as #2298 did for procedures) or bounded
    retention.
+7. **The count is honest — audit the closing action, not the counter** — when a
+   signal recurs at a low, stable count, first prove the count is a faithful
+   re-observation (deterministic, sorted/deduped signature; provable within-window
+   dedup) before suspecting a storage/dedup bug. A *correct* count that never trends
+   to zero points at a **missing convergence rung**, not a counting defect. Corollary:
+   a "de-ratchet" fix that collapses a counter to one live node can silently make an
+   escalation threshold unreachable (§6.2b trap) — carry counts *in content*, not in
+   node multiplicity.
 
 ---
 
@@ -399,6 +512,13 @@ episode nodes across windows/restarts.
 | Launcher/`RecipeBrief` seam exists, bounded by launch cap | `overseer/launch.rs` |
 | `tally_outcome`/counters seam for observability | `overseer/wiring.rs`; `overseer/activity.rs:66-68` |
 | Guardrails risk classification seam | `overseer/guardrails.rs:60` |
+| Two decoupled counter lanes (A=episodes/`×2`, B=occurrences/escalation) | `secondary_dedup_recurrence_VALIDATION_HEAD.md §2`; `wiring.rs:1076-1088`, `mod.rs:1004-1043` |
+| Naïve `store_fact_with_caller_key(root_cause_signature)` collapses recall to 1 → escalation dead code (the trap) | `secondary_dedup_recurrence_VALIDATION_HEAD.md §4`; `library_adapter.rs:885-889` |
+| Three-defect geometry D1/D2/D3; counter+WHY-gate form a latch (must ship together) | `tertiary_architecture_VALIDATION_HEAD.md §1,§3` |
+| All prior citations re-verified at HEAD `dea65df8`; no fix merged | `tertiary_architecture_VALIDATION_HEAD.md §0`; `secondary_dedup_recurrence_VALIDATION_HEAD.md §1`; `RECONCILIATION_LEDGER.md §0` |
+| `WorkstreamCoverage` quarantined from BOTH closing seams (M1 observer→Report, M2 acting→Notify) | `observer.rs:105,120`; `mod.rs:1543`; `tertiary_gap_routing_and_remediation_rung.md §1` |
+| Per-gap identity is `GapItem.signature`; problem dedup_key is the constant `"workstream-gap"` (INV-GAP-KEY) | `signal.rs:135-138`; `mod.rs:1371,901`; `tertiary_gap_routing_and_remediation_rung.md §2` |
+| Stewardship routing seam built + dangling, anticipates overseer gap briefs | `stewardship/routing.rs:11-15,39-52`; `tertiary_gap_routing_and_remediation_rung.md §3` |
 
 ---
 
@@ -416,9 +536,12 @@ episode nodes across windows/restarts.
    self-observation feedback (recall-derived problems written back); 2× sits in a
    recurrence dead zone (below the escalation bar of 3, no gap remediation rung at
    all), with two independent non-idempotency defects (§3a occurrence-fact ratchet,
-   §3b episode storage) inflating counts / accumulating nodes.
+   §3b episode storage) inflating counts / accumulating nodes. §3c re-frames these as
+   **two decoupled counter lanes** (A drives the visible `×2`, B drives escalation).
 4. **Prioritized per-goal unblocking actions** — ✅ §5.
-5. **Systemic fix to stop the signature recurring** — ✅ §6: recurrence-aware
-   remediation rung, unified recurrence tracking (gap threshold 2), guaranteed
-   WHY-reasoner wiring (INV-WHY), convergence observability, and stopping the
-   self-observation feedback that nests `overseer-obs:` tokens (§6.5).
+5. **Systemic fix to stop the signature recurring** — ✅ §6: three-defect fix
+   (§3c/§6.6) — a **count-in-content** occurrence record (§6.2b, *not* the naïve
+   caller-key collapse, which is a proven trap) shipped **together with** guaranteed
+   WHY-reasoner wiring (INV-WHY, §6.3) as the D2 latch; a recurrence-aware closing rung
+   with gap threshold 2 (§6.1, D3); stopping the self-observation write-back that nests
+   `overseer-obs:` tokens (§6.5, D1); and convergence observability (§6.4).
