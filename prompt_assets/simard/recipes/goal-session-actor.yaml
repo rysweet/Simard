@@ -77,3 +77,31 @@ steps:
 
       The capability call is the outcome. Your prose is diagnostic only. If the
       capability fails, stop; do not invoke another terminal.
+
+  - id: "goal-session-terminal-verifier"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      Verify that the prior semantic actor recorded a durable terminal by running:
+
+      "{{simard_binary}}" ooda terminal status \
+        --ledger-path "{{ledger_path}}" \
+        --policy-path "{{policy_path}}" \
+        --session-id "{{session_id}}" \
+        --cycle-id "{{cycle_id}}"
+
+      If it prints "present", stop successfully. If it prints "missing", read
+      the task, reason, Observe, Orient, and Decide context files below and make
+      the semantic decision yourself:
+
+      task context path = {{task_path}}
+      reason context path = {{reason_path}}
+      observe context path = {{observe_output_path}}
+      orient context path = {{orient_output_path}}
+      decide context path = {{decide_output_path}}
+
+      Then read the trusted workflow asset at {{recipe_path}} and invoke exactly
+      one of the four `simard ooda terminal` commands shown in its first actor
+      step, using the same scoped arguments and context paths. Do not emit or
+      parse a marker, JSON verdict, or prose contract. The durable terminal is
+      the only business outcome.

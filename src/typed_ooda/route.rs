@@ -143,6 +143,7 @@ impl TypedGoalSessionRoute {
             .stderr(diagnostic_file);
         for value in [
             format!("simard_binary={}", binary.display()),
+            format!("recipe_path={}", self.recipe_path.display()),
             format!("ledger_path={}", ledger_path.display()),
             format!("policy_path={}", self.policy_path.display()),
             format!("session_id={}", invocation.session_id),

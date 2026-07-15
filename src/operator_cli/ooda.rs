@@ -82,9 +82,18 @@ fn dispatch_terminal(
     let policy_path = Path::new(required_named(&parsed, "policy-path")?);
     let session_id = required_named(&parsed, "session-id")?;
     let cycle_id = required_named(&parsed, "cycle-id")?;
-    let goal_id = required_named(&parsed, "goal-id")?;
     let policy = crate::typed_ooda::CapabilityPolicy::from_toml_file(policy_path)?;
     let handler = crate::typed_ooda::CapabilityHandler::open(ledger_path, policy)?;
+    if terminal == "status" {
+        let status = if handler.terminal_for_cycle(session_id, cycle_id)?.is_some() {
+            "present"
+        } else {
+            "missing"
+        };
+        println!("{status}");
+        return Ok(());
+    }
+    let goal_id = required_named(&parsed, "goal-id")?;
     let token = std::fs::read_to_string(required_named(&parsed, "auth-token-path")?)?;
     let actor = handler.authenticate_actor_session(token.trim(), session_id, cycle_id, goal_id)?;
     let admission: crate::typed_ooda::AdmissionSnapshot =

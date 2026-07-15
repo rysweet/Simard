@@ -124,6 +124,17 @@ fn scoped_terminal_cli_records_no_action_without_a_rust_hosted_actor() {
 
     Command::cargo_bin("simard")
         .expect("simard binary")
+        .args(["ooda", "terminal", "status", "--ledger-path"])
+        .arg(&ledger)
+        .args(["--policy-path"])
+        .arg(&policy_path)
+        .args(["--session-id", session_id, "--cycle-id", cycle_id])
+        .assert()
+        .success()
+        .stdout("missing\n");
+
+    Command::cargo_bin("simard")
+        .expect("simard binary")
         .args(["ooda", "terminal", "no-action", "--ledger-path"])
         .arg(&ledger)
         .args(["--policy-path"])
@@ -146,6 +157,17 @@ fn scoped_terminal_cli_records_no_action_without_a_rust_hosted_actor() {
         .arg(&raw_path)
         .assert()
         .success();
+
+    Command::cargo_bin("simard")
+        .expect("simard binary")
+        .args(["ooda", "terminal", "status", "--ledger-path"])
+        .arg(&ledger)
+        .args(["--policy-path"])
+        .arg(&policy_path)
+        .args(["--session-id", session_id, "--cycle-id", cycle_id])
+        .assert()
+        .success()
+        .stdout("present\n");
 
     let outcome = handler
         .terminal_for_cycle(session_id, cycle_id)
