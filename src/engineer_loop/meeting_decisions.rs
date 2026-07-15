@@ -151,6 +151,7 @@ pub(crate) fn is_meeting_decision_record(value: &str) -> bool {
 pub(crate) fn architecture_gap_summary(repo_root: &Path) -> SimardResult<String> {
     let architecture_path = repo_root.join("Specs/ProductArchitecture.md");
     let probe_path = repo_root.join("src/bin/simard_operator_probe.rs");
+    let dispatcher_path = repo_root.join("src/operator_commands/dispatch.rs");
     let runtime_contracts_path = repo_root.join("docs/reference/runtime-contracts.md");
 
     let architecture_exists = architecture_path.is_file();
@@ -164,6 +165,13 @@ pub(crate) fn architecture_gap_summary(repo_root: &Path) -> SimardResult<String>
             "operator probe already exposes engineer-loop-run".to_string()
         } else if source.contains("\"terminal-run\"") {
             "operator probe exposes terminal-run but not a repo-grounded engineer-loop-run"
+                .to_string()
+        } else if source.contains("dispatch_operator_probe")
+            && dispatcher_exposes_engineer_loop_run(&dispatcher_path)?
+        {
+            // The probe binary was slimmed to a delegator; the repo-grounded
+            // engineer-loop-run surface now lives in the dispatcher it forwards to.
+            "operator probe delegates to a dispatcher that exposes the repo-grounded engineer-loop-run surface"
                 .to_string()
         } else {
             "operator probe exists but does not yet expose a terminal engineer loop".to_string()
@@ -186,4 +194,20 @@ pub(crate) fn architecture_gap_summary(repo_root: &Path) -> SimardResult<String>
             "Repository is missing Specs/ProductArchitecture.md, so the gap trace falls back to current operator/runtime surfaces only; {operator_surface}; {review_trace}."
         ),
     })
+}
+
+/// Returns true when the operator-probe dispatcher source exposes the
+/// repo-grounded `engineer-loop-run` surface. Used to follow the probe binary's
+/// delegation to `dispatch_operator_probe` after the probe was slimmed to a thin
+/// forwarder. A missing dispatcher file is treated as "not exposed" rather than
+/// an error so the gap summary degrades to an honest negative.
+fn dispatcher_exposes_engineer_loop_run(dispatcher_path: &Path) -> SimardResult<bool> {
+    if !dispatcher_path.is_file() {
+        return Ok(false);
+    }
+    let source = fs::read_to_string(dispatcher_path).map_err(|error| SimardError::ArtifactIo {
+        path: dispatcher_path.to_path_buf(),
+        reason: error.to_string(),
+    })?;
+    Ok(source.contains("\"engineer-loop-run\""))
 }

@@ -1,7 +1,7 @@
 ---
 title: "Improvement context: denser execution evidence for the engineer loop"
-description: Captured improvement-curation context — preserves the active "Capture denser execution evidence" goal and the architecture observation that the legacy `simard_operator_probe` surface does not yet expose a terminal engineer loop, so a future improvement-curation cycle can act on it without re-deriving the framing.
-last_updated: 2026-05-19
+description: Captured improvement-curation context — preserves the active "Capture denser execution evidence" goal and the architecture observation that the legacy `simard_operator_probe` surface historically did not expose a terminal engineer loop. That surface gap is now resolved: the probe delegates to a dispatcher that exposes the repo-grounded `engineer-loop-run` probe, and the engineer-loop gap-detection summary recognizes it (see the Resolution update below). The framing is preserved so a future improvement-curation cycle keeps the audit trail.
+last_updated: 2026-07-15
 review_schedule: as-needed
 owner: simard
 doc_type: concept
@@ -27,6 +27,19 @@ of Simard already applies to state, prompts, and runtime contracts.
 > (see [How to inspect improvement-curation state](../howto/inspect-improvement-curation-state.md))
 > is where this priority is meant to be promoted to a tracked active goal
 > with full denser execution evidence.
+
+> **Resolution update:** the specific surface gap in *Captured architecture
+> observation* point 2 ("operator probe exists but does not yet expose a
+> terminal engineer loop") is now resolved. The `simard_operator_probe`
+> binary was slimmed to a thin delegator that forwards to
+> `dispatch_operator_probe`, and that dispatcher
+> (`src/operator_commands/dispatch.rs`) exposes the repo-grounded
+> `engineer-loop-run` probe surface. The engineer-loop gap-detection helper
+> (`architecture_gap_summary`) now follows that delegation and reports
+> "operator probe delegates to a dispatcher that exposes the repo-grounded
+> engineer-loop-run surface" instead of a stale false negative. The verbatim
+> observation below is retained for the audit trail; the denser-execution-
+> evidence *goal* it framed remains open.
 
 ## Why this is preserved as a doc
 

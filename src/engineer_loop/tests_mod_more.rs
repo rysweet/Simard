@@ -109,6 +109,74 @@ fn architecture_gap_summary_with_probe_engineer_loop_run() {
 }
 
 #[test]
+fn architecture_gap_summary_with_probe_delegating_to_dispatcher() {
+    // After the probe binary was refactored to delegate to
+    // `dispatch_operator_probe`, the `"engineer-loop-run"` surface lives in the
+    // dispatcher, not the probe file. The gap summary must follow the delegation
+    // and report the repo-grounded engineer-loop-run surface instead of a false
+    // "does not yet expose" negative.
+    let dir = tempfile::tempdir().unwrap();
+    let bin_dir = dir.path().join("src/bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    std::fs::write(
+        bin_dir.join("simard_operator_probe.rs"),
+        "fn main() { simard::dispatch_operator_probe(std::env::args().skip(1)) }",
+    )
+    .unwrap();
+    let dispatch_dir = dir.path().join("src/operator_commands");
+    std::fs::create_dir_all(&dispatch_dir).unwrap();
+    std::fs::write(
+        dispatch_dir.join("dispatch.rs"),
+        r#"fn dispatch() { match cmd { "engineer-loop-run" => run(), _ => {} } }"#,
+    )
+    .unwrap();
+    let result = super::architecture_gap_summary(dir.path()).unwrap();
+    assert!(
+        result.contains(
+            "operator probe delegates to a dispatcher that exposes the repo-grounded engineer-loop-run surface"
+        ),
+        "expected delegation surface, got: {result}"
+    );
+}
+
+#[test]
+fn architecture_gap_summary_delegation_without_dispatcher_surface_is_gap() {
+    // Probe delegates but the dispatcher does not (yet) expose the surface:
+    // must fall back to the honest "does not yet expose" gap, never a false pass.
+    let dir = tempfile::tempdir().unwrap();
+    let bin_dir = dir.path().join("src/bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    std::fs::write(
+        bin_dir.join("simard_operator_probe.rs"),
+        "fn main() { simard::dispatch_operator_probe(std::env::args().skip(1)) }",
+    )
+    .unwrap();
+    let dispatch_dir = dir.path().join("src/operator_commands");
+    std::fs::create_dir_all(&dispatch_dir).unwrap();
+    std::fs::write(dispatch_dir.join("dispatch.rs"), "fn dispatch() {}").unwrap();
+    let result = super::architecture_gap_summary(dir.path()).unwrap();
+    assert!(
+        result.contains("does not yet expose"),
+        "expected honest gap, got: {result}"
+    );
+}
+
+#[test]
+fn architecture_gap_summary_matches_real_repo_surface() {
+    // Regression guard against the real repository layout: the probe delegates to
+    // the dispatcher, which does expose engineer-loop-run. The summary must report
+    // the delegation surface rather than a stale false negative.
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let result = super::architecture_gap_summary(repo_root).unwrap();
+    assert!(
+        result.contains(
+            "operator probe delegates to a dispatcher that exposes the repo-grounded engineer-loop-run surface"
+        ),
+        "real-repo gap summary regressed: {result}"
+    );
+}
+
+#[test]
 fn architecture_gap_summary_with_probe_terminal_run() {
     let dir = tempfile::tempdir().unwrap();
     let bin_dir = dir.path().join("src/bin");
