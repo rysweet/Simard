@@ -2,9 +2,9 @@
 
 **Investigation:** the overseer signature seen 2× in cognitive memory:
 `overseer-obs:goal:blocked:…|…|workstream-gap|workstream-gap`
-**Branch / HEAD:** `investigation/recurring-blocked-goals-workstream-gaps` @ `b9f99879`
-**Date:** 2026-07-15  **Status:** Complete — re-validated against current source through eight waves
-(latest HEAD `b9f99879`; **every** investigation commit is **docs-only** — `git diff --name-only
+**Branch / HEAD:** `investigation/recurring-blocked-goals-workstream-gaps` @ `440e024c`
+**Date:** 2026-07-15  **Status:** Complete — re-validated against current source through nine waves
+(latest HEAD `440e024c`; **every** investigation commit is **docs-only** — `git diff --name-only
 6e3113bc..HEAD -- '*.rs'` is empty and the working tree is also source-clean, all changes confined to
 `ai_working/`, so every source citation still holds and no fix is merged). Fifth-wave net-new findings
 (incl. the `resource:engineer_spawn` membership drift) are folded into §11; sixth-wave net-new findings
@@ -14,7 +14,12 @@ of the two waves' D-numbering) are folded into §12; seventh-wave net-new findin
 contained signature-path fix** with a zero-drift re-grounding) are folded into §13; eighth-wave net-new
 findings (the exact open-loop seam, the per-token emitter map, the config-conditional WHY-gating hole,
 the **no-new-plumbing D1 fix** with the refined **D2→D3→D1→gauges** landing order, and the merge-base
-`dcf909c5` zero-drift re-grounding across committed *and* working-tree state) are folded into §14.
+`dcf909c5` zero-drift re-grounding across committed *and* working-tree state) are folded into §14;
+ninth-wave net-new findings (the two **decoupled recurrence lanes**, the **structural
+unreachability** of the raise-priority rung for the composite self-observation, the two concrete
+**over-aggregation harms** — churn-brittle detection and composite non-actionability — and the
+`workstream-gap ↔ engineer_spawn` **no-causal-edge** reconfirmation, all re-verified against live
+`src/` at HEAD `440e024c` with zero drift) are folded into §15.
 
 This consolidates all parallel deep dives:
 [`investigation_report.md`](./investigation_report.md) (primary/secondary root cause),
@@ -1214,12 +1219,138 @@ code drift** and sharpened three things: the *exact* open-loop seam, the correct
   is byte-identical to `6b2bf5e1` (PR #4063), so the D1 self-exclusion filter is provably **unimplemented**
   — committed *and* uncommitted. Confidence: **high** (reproducible git evidence + line-anchored re-read).
 
-**Bottom line (eight-wave consolidated verdict):** unchanged and now re-grounded at HEAD `b9f99879`
-with **zero code drift**. The `×2` is a **faithful cross-window recurrence count of a genuinely
+**Bottom line (nine-wave consolidated verdict):** unchanged and now re-grounded at HEAD `440e024c`
+with **zero code drift** (`git diff dcf909c5..HEAD -- '*.rs'` empty; `git diff HEAD -- '*.rs'` = 0
+lines). The `×2` is a **faithful cross-window recurrence count of a genuinely
 re-observed near-static problem set** (H1 confirmed; H0 rejected). It persists because two
 observe-and-flag loops never close (D2 bare-blocked WHY double-gate; D3 notify-only `WorkstreamCoverage`),
 parks in the **dead zone between thresholds 2 and 3** (D2), and the Overseer **re-observes its own
 bookkeeping** through a single open seam — provenance stamped on write but erased on read at
 `recall_episodic` (D1, `wiring.rs:1024-1029`). The `workstream-gap ↔ engineer_spawn` pairing is a
 **co-occurring under-resourced state, not a spawn loop**. Every defect is design-level; **none is a
-dedup/storage bug**; **no remediation is merged** — all eight investigation commits are docs-only.
+dedup/storage bug**; **no remediation is merged** — all nine investigation commits are docs-only.
+
+---
+
+## §15 — Ninth-wave net-new findings (HEAD `440e024c`, zero drift)
+
+This wave consolidates three new parallel deep dives, each re-grounded line-by-line against live
+`src/` (no doc-to-doc trust):
+[`primary_signature_recurrence_VERDICT_HEAD_b9f99879.md`](./primary_signature_recurrence_VERDICT_HEAD_b9f99879.md)
+(signature computation/recurrence + `goal:blocked` lifecycle, with oracle suites re-run),
+[`secondary_deadzone_and_overaggregation_HEAD_440e024c.md`](./secondary_deadzone_and_overaggregation_HEAD_440e024c.md)
+(the `2×→3×` dead-zone geometry + over-aggregation harms), and
+[`secondary_gap_and_spawn_HEAD_440e024c.md`](./secondary_gap_and_spawn_HEAD_440e024c.md)
+(`workstream-gap` vs `resource:engineer_spawn` detection sources). All three **confirm-not-contradict**
+the eight-wave verdict; the net-new content sharpens the D2 dead-zone and the over-aggregation
+mechanism.
+
+- **15.1 — The two thresholds are two decoupled lanes, named precisely (sharpens D2).** The visible
+  `2×` and the escalation bar of `3` live on **different counters that never meet**:
+  - **Lane A — episodic recall:** `RECURRING_SIGNATURE_THRESHOLD = 2` (`signal.rs:362`), fired at
+    `signal.rs:462-468`, counts **write-back episodes** whose `failure_signature` string is
+    byte-identical. This is the `Signal::RecurringSignature.occurrences` the question string reports.
+  - **Lane B — semantic root cause:** `RECURRENCE_ESCALATION_THRESHOLD = 3` (`root_cause.rs:33`),
+    gated at `mod.rs:1613` inside `decide_blocked_goal`, counts recalled `PriorOccurrence`s sharing a
+    `cause_label`.
+  The `2×` is **Lane A**; the escalation gate reads **Lane B**; **they never share a counter.** This is
+  the *cross-lane visibility gap* — not a single mis-set threshold, and it is why bumping either
+  constant in isolation cannot close the loop.
+
+- **15.2 — NET-NEW: for the composite self-observation the raise-priority rung is *structurally
+  unreachable* (deepens the dead-zone verdict).** The intended "raise priority before escalate"
+  mechanism is Orient's same-key merge (`mod.rs:1210-1219`, **verified this wave**):
+  `problems.iter_mut().find(|p| p.dedup_key == key)` then, for a `RecurringSignature` co-signal,
+  `existing.priority = existing.priority.min(priority)`. But the `RecurringSignature` problem's key is
+  `sanitize_recalled(signature)` (`mod.rs:1359`, **verified**) — the **whole-cycle composite**
+  `overseer-obs:…` — which is **not equal to any per-goal `goal:blocked:{goal_id}` key**
+  (`mod.rs:1336`). So the merge predicate `p.dedup_key == key` can **never** match, and the `2×`
+  **never raises the priority of any individual blocked goal it is composed of.** The meta-problem
+  instead stands alone → `ProblemKind::ProcessHealth` (`mod.rs:1356`) → `LaunchRecipe`, i.e. the one
+  cost-bearing convergent edge in the whole flow is aimed at the **meaningless composite blob**, not at
+  any real goal. The dead zone is therefore **worse than "no rung between raise and escalate"**: for the
+  composite the raise rung is unreachable **by construction** — *priority never raised AND never
+  escalated* — so the `2×` exerts **zero** remediation pressure on the actual goals.
+
+- **15.3 — Over-aggregation is *expected* co-occurrence aggregation (no identity loss) but carries two
+  real harms (corroborates D1).** `observation_signature` (`mod.rs:1068-1073`) folds the **entire
+  cycle's** problem set into one composite; recall counts **episodes by exact composite string**
+  (`signal.rs:456-460` builds a `BTreeMap<&str,u32>` keyed on the whole `failure_signature`). Per-goal
+  identity is **not** lost (each goal ID survives as its own `|`-token), so this is **not** a
+  token-duplication bug — but the whole-cycle granularity produces two harms:
+  - **Harm A — detection brittleness / false negatives under churn.** The recall key is a logical
+    **AND** of the *entire* membership set. `RecurringSignature` fires only when **two cycles share a
+    byte-identical composite** — the whole blocked/gap set unchanged. Any churn (one goal resolves, one
+    new goal blocks, a gap opens/closes) mutates the composite → recall resets to 1 → **no**
+    `RecurringSignature`, **even for a goal re-blocking every single cycle**. Recurrence is tracked at
+    whole-cycle granularity when it should be **per-`dedup_key`**; a chronically-stuck goal in a
+    churning environment can evade Lane-A detection indefinitely.
+  - **Harm B — composite non-actionability.** When the composite *does* recur to `LaunchRecipe`, the
+    `task_description` is the whole blob ("fix goal A AND B AND … AND a coverage gap AND an
+    engineer-spawn note") — a *diagnostic aggregate*, not a well-formed recipe brief. The sole
+    convergent edge is pointed at something no engineer can execute against.
+  Both harms trace to the **same** whole-cycle `observation_signature`, the very mechanism behind D1's
+  nesting loop — **same root mechanism, three symptoms** (nesting, brittle detection, non-actionable
+  remediation unit).
+
+- **15.4 — `workstream-gap` and `resource:engineer_spawn` are two *independent* detection sources with
+  no causal code edge; their pairing is an under-resourced *state* (reconfirms H7/H8).**
+  - `workstream-gap` (`detect_workstream_gaps`, `sensor.rs:288-372`) emits a `GapItem` per **uncovered**
+    high-priority backlog item (`goal:{id}` / `issue:{repo}#{n}` / `anomaly:{slug}`), **explicitly
+    skipping Blocked goals** (`sensor.rs:300-302`, delegated to `goal_health`) — which is exactly the
+    active⇄idle oscillation (§14/H7) that puts the *same* entities in both families. Its Decide arm
+    `act_flag_workstream_gaps` (`mod.rs:884-946`) is **operator-notify-only** (email + Signal, deduped
+    per-gap by `WhisperGate::new(900,200)`) — the **only** High-family Decide arm with **no `launch.rs`
+    edge**; a persistently uncovered item re-notifies every window forever. **Root cause = a missing
+    convergence rung, not a counting bug** (D3).
+  - `resource:engineer_spawn` is **benign passive telemetry**: `Signal::EngineerSpawnRate{live}` when
+    `state.live_engineers >= 8` (`signal.rs:351,393-396`) → `ResourcePressure`, `Priority::Normal`
+    (`mod.rs:1267-1272`) → `Escalate{reason}` (`mod.rs:1444-1446`); its `{live}` count lives only in
+    the summary. Actual spawning lives in the OODA loop (`no_progress.rs` `SpawnEngineer`, bounded to
+    one guided retry) — **no unfulfilled-spawn defect at the overseer boundary.**
+  - **No code path** connects the two. They co-occur only because both predicates held in one window:
+    engineers saturated (≥8) **AND** backlog coverage incomplete. This **unifies the whole signature**:
+    `goal:blocked` (idle stuck goals) + `workstream-gap` (active uncovered goals) +
+    `resource:engineer_spawn` (no spare executors) are **three symptoms of one resourcing/convergence
+    deficit**, not three independent bugs.
+
+- **15.5 — Refined remediation guidance and re-affirmed coupling trap (investigation-only, nothing
+  landed).** (a) **Key recurrence per `dedup_key`, not per composite** so a single re-blocking goal
+  trips `2×` regardless of cycle-mate churn (fixes Harm A; larger change — one write-back episode per
+  problem, or per-key markers). (b) **Add a 2× remediation rung gated on the WHY class, not the raw
+  count** — the final `Report` arm is *correct* for a deliberate operator/upstream block
+  (`mod.rs:1597-1598`), so a bare count bump would over-escalate benign blocks; route down a resolution
+  action only for WHY classes carrying **no** benign explanation, reserving human `EscalateBlockedGoal`
+  for `UnclearCriteria`/`GenuinelyStuck`. This rung and the WHY-ungating (D2, config-conditional per
+  §14.9) are a **coupled pair**. (c) **Do not point `LaunchRecipe` at the composite** — target a single
+  decomposed member or route to per-goal resolution (Harm B). (d) **Coupling trap re-affirmed**
+  (`RECONCILIATION_LEDGER`): any Lane-B threshold or accrual change must ship **atomically** with its
+  counter or `recurrence >= 3` (`mod.rs:1613`) becomes dead code / latches.
+
+- **15.6 — Zero source drift re-confirmed at HEAD `440e024c`; oracle suites green.** `git diff
+  dcf909c5..HEAD -- '*.rs'` is empty and `git diff HEAD -- '*.rs'` = **0 lines** (committed *and*
+  working-tree source byte-identical). The two new load-bearing citations were **independently
+  re-verified this wave** against live source: the Orient merge predicate + `RecurringSignature`
+  priority-raise (`mod.rs:1210-1219`) and the composite `sanitize_recalled(signature)` key
+  (`mod.rs:1359`) — confirming §15.2's structural-unreachability by construction. Primary re-ran the
+  behavioral oracles at HEAD: `overseer::tests_memory_recall` **32 passed**, `overseer::tests_gap_scan`
+  **21 passed**, no-progress/goal-health **77 passed** (incl.
+  `perpetual_no_progress_goal_is_unblocked_once_and_not_escalated` — parks, does not converge). D1/D2/D3
+  remain **unimplemented**, committed and uncommitted.
+
+- **15.7 — Open questions carried to the verification phase.** (Q1) Add a unit test asserting the Orient
+  merge at `mod.rs:1211` **never** matches an `overseer-obs:` composite key against a `goal:blocked:`
+  key (static reading says never; §15.2). (Q2) Confirm whether the composite `RecurringSignature`'s
+  `LaunchRecipe` is actually **admitted by `gate()`** under default autonomy/budget — determines whether
+  Harm B is **live vs latent** (still open from prior waves). (Q3) Add a regression test: two cycles with
+  a **one-goal-different** blocked set must **NOT** emit `RecurringSignature` (demonstrates Harm A), and
+  a per-`dedup_key`-keyed variant **SHOULD** (demonstrates the fix direction). (Q4) Confirm the `Report`
+  default arm is reached only for genuinely-benign blocks once a WHY class is wired, so the proposed 2×
+  rung would not swallow deliberate operator blocks.
+
+**Ninth-wave delta:** no verdict change. The wave **deepens D2** (the raise-priority rung is
+structurally unreachable for the composite, so the `2×` is not merely under-escalated but exerts *zero*
+pressure on real goals) and **decomposes the over-aggregation** into two concrete harms (churn-brittle
+detection, non-actionable remediation unit) — both tracing to the same whole-cycle `observation_signature`
+that drives D1. `workstream-gap ↔ engineer_spawn` is re-confirmed as a **co-occurring under-resourced
+state with no causal edge**. Zero code drift; investigation-only; nothing landed.

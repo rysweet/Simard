@@ -6,6 +6,17 @@
 This extends [`verification_results.md`](./verification_results.md) (H1-focused) to a
 complete per-hypothesis matrix, each with the concrete test run and its outcome.
 
+**Re-reproduced on HEAD `440e024c`** (`cargo test -p simard --lib`):
+- Full overseer suite (`overseer::`): **359 passed, 0 failed** (7960 filtered).
+- 16 named discriminating tests (`--exact`, two batches of 6 + 10): **all green**.
+- Source invariants re-confirmed: H5 thresholds `RECURRING_SIGNATURE_THRESHOLD = 2`
+  (`signal.rs:362`) vs `RECURRENCE_ESCALATION_THRESHOLD = 3` (`root_cause.rs:33`);
+  H6 `record_occurrence` uses non-deduping `mem.store_fact` (`mod.rs:1034`);
+  H2 bare-block renderer `no_progress_blocked_reason` split from `_with_why`
+  (`no_progress_breaker.rs:123/141`); write-back gate `WhisperGate::new(900,5)`
+  (`mod.rs:299`). The absolute overseer count drifts by a few across waves
+  (360 → 359); the invariant — **0 failures, all discriminating tests green** — holds.
+
 **Environment:** `cargo test -p simard --lib` (package `simard` owns `src/overseer`).
 Runs re-executed and reproduced on HEAD `5a85317b`:
 - Full overseer suite (`cargo test --lib overseer::`): **360 passed, 0 failed** (7960 filtered).
