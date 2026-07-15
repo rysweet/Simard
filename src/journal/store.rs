@@ -10,6 +10,12 @@
 //! * `content` = the JSON-serialised [`JournalEntry`].
 //! * tag `"journal"` — so the store can enumerate journal facts.
 //!
+//! The read path stays **defensive** about that supersede contract: if the
+//! backend ever surfaces more than one `journal:YYYY-MM-DD` fact for a day
+//! (observed live), every reader collapses them to the single
+//! newest-generated entry (see [`dedupe_by_date_keep_newest`] and
+//! [`get_entry_by_date`]), so no read surface ever shows a day twice.
+//!
 //! [`JournalStore::query`] is the single retrieval path (by date range + free
 //! text) that backs both the dashboard and the TUI, so the two never diverge.
 
@@ -84,18 +90,35 @@ pub fn save_entry(mem: &dyn CognitiveMemoryOps, entry: &JournalEntry) -> SimardR
 
 /// Fetch the entry for an exact day against a borrowed backend. See
 /// [`JournalStore::get_by_date`].
+///
+/// The store's caller-key contract *should* keep exactly one live
+/// `journal:YYYY-MM-DD` fact per day, but this reader stays defensive: if the
+/// backend surfaces more than one fact for the day (observed live — see the
+/// duplicate-date guard in [`entries_in_range`]), the **newest-generated** one
+/// wins, so a single-entry read agrees with the deduped date list and render
+/// instead of returning an arbitrary (first-enumerated) duplicate. A matching
+/// `journal:` fact whose content will not parse is still surfaced fail-loud as
+/// [`SimardError::InvalidJournalRecord`](crate::error::SimardError) — that is
+/// real corruption, not an absent entry.
 pub fn get_entry_by_date(
     mem: &dyn CognitiveMemoryOps,
     date: NaiveDate,
 ) -> SimardResult<Option<JournalEntry>> {
     let key = journal_caller_key(date);
     let facts = mem.search_facts(&key, 64, 0.0)?;
+    let mut newest: Option<JournalEntry> = None;
     for fact in facts {
         if fact.concept == key {
-            return Ok(Some(parse_entry(&fact.concept, &fact.content)?));
+            let entry = parse_entry(&fact.concept, &fact.content)?;
+            if newest
+                .as_ref()
+                .is_none_or(|best| entry.generated_at > best.generated_at)
+            {
+                newest = Some(entry);
+            }
         }
     }
-    Ok(None)
+    Ok(newest)
 }
 
 /// Enumerate stored entries whose concept-encoded date falls within `range`
@@ -111,7 +134,7 @@ fn entries_in_range(
     range: Option<(NaiveDate, NaiveDate)>,
 ) -> SimardResult<Vec<JournalEntry>> {
     let facts = mem.search_facts(JOURNAL_SEARCH_TOKEN, ENUMERATION_LIMIT, 0.0)?;
-    let mut entries: Vec<JournalEntry> = facts
+    let entries: Vec<JournalEntry> = facts
         .iter()
         .filter_map(|f| {
             let date = date_from_concept(&f.concept)?;
@@ -123,9 +146,39 @@ fn entries_in_range(
             serde_json::from_str::<JournalEntry>(&f.content).ok()
         })
         .collect();
+    // Collapse any same-day duplicates (newest-generated wins) and return
+    // newest day first.
+    Ok(dedupe_by_date_keep_newest(entries))
+}
+
+/// Collapse entries sharing a calendar day down to the single **newest-generated**
+/// one, returned newest day first.
+///
+/// The journal's caller-key contract is supposed to keep exactly one live
+/// `journal:YYYY-MM-DD` fact per day (rolling regenerations *supersede* rather
+/// than accumulate), so in the common case this is a no-op. It exists because
+/// the read path must stay defensive: the live store was observed holding two
+/// facts for the same day, which made the dashboard date picker and journal
+/// search list that day **twice** with conflicting PR counts while the
+/// single-entry endpoint returned only one. Keeping the newest `generated_at`
+/// per day honours the documented "latest supersedes" roll-forward semantics
+/// and keeps every read surface (dates list, search, render, single entry) in
+/// agreement regardless of how a duplicate arose.
+fn dedupe_by_date_keep_newest(entries: Vec<JournalEntry>) -> Vec<JournalEntry> {
+    let mut newest_per_day: std::collections::HashMap<NaiveDate, JournalEntry> =
+        std::collections::HashMap::with_capacity(entries.len());
+    for entry in entries {
+        match newest_per_day.get(&entry.date) {
+            Some(existing) if existing.generated_at >= entry.generated_at => {}
+            _ => {
+                newest_per_day.insert(entry.date, entry);
+            }
+        }
+    }
+    let mut deduped: Vec<JournalEntry> = newest_per_day.into_values().collect();
     // Newest day first.
-    entries.sort_by_key(|e| std::cmp::Reverse(e.date));
-    Ok(entries)
+    deduped.sort_by_key(|e| std::cmp::Reverse(e.date));
+    deduped
 }
 
 /// Every stored entry, newest day first, against a borrowed backend. See
