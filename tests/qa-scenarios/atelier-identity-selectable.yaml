@@ -1,0 +1,74 @@
+name: atelier-identity-selectable
+app_type: cli
+description: |
+  Verify the Atelier industrial & furniture design identity is a first-class,
+  SELECTABLE Simard identity with its identity card, capabilities, goal-session
+  recipes, and prompt assets in place.
+
+  Atelier (`simard-atelier`) is a pluggable identity that carries a product
+  brief to an exported, fabrication-ready model and a render. This scenario
+  proves the in-repo, deterministic half of that guarantee: the identity is
+  loadable/selectable via the builtin loader, carries the engineer operating
+  mode and the terminal-shell base type it needs to drive Blender/FreeCAD/
+  OpenSCAD headlessly, exposes a unique `atelier-system` prompt asset, and ships
+  its two goal-session recipes plus its prompt-asset identity card.
+
+  Behaviour is proven by the hermetic unit tests in `src/identity/` (loader +
+  coverage) plus on-disk asset checks. The `bash -lc` wrapper exits zero only
+  when every test reports a positive pass count AND every shipped asset exists,
+  so a renamed/removed test or a deleted asset fails the scenario rather than
+  passing it vacuously.
+
+metadata:
+  tags:
+    - cli
+    - identity
+    - atelier
+
+agents:
+  - name: cli-agent
+    type: cli
+    command: bash
+
+steps:
+  # 1. The Atelier identity is selectable via the builtin loader, in engineer
+  #    mode, with the terminal-shell base type and a unique atelier-system
+  #    prompt asset (src/identity/loader.rs + coverage_tests.rs).
+  - action: run
+    params:
+      command: "bash -lc 'set -euo pipefail; OUT=$(cargo test --lib -- identity::loader::tests::builtin_loader_loads_atelier_identity identity::coverage_tests::builtin_loader_all_single_identities_have_capabilities identity::coverage_tests::builtin_loader_each_identity_has_unique_prompt_asset 2>&1); echo \"$OUT\"; echo \"$OUT\" | grep -q \"3 passed\"'"
+    timeout: 300000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # 2. The identity card, capabilities prompt, and both goal-session recipes are
+  #    shipped on disk (identity is nothing without its assets).
+  - action: run
+    params:
+      command: "bash -lc 'set -euo pipefail; for f in prompt_assets/simard/atelier_system.md prompt_assets/simard/recipes/atelier-parametric-modeling.yaml prompt_assets/simard/recipes/atelier-fabrication-export.yaml docs/tutorials/deploy-atelier-industrial-design.md; do test -s \"$f\" || { echo \"MISSING $f\"; exit 1; }; done; echo ALL_ASSETS_PRESENT'"
+    timeout: 60000
+  - action: wait_for_output
+    params:
+      value: "ALL_ASSETS_PRESENT"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # 3. The identity card declares the fabrication pipeline it must drive:
+  #    the three headless tools and the fabrication-ready export deliverables.
+  - action: run
+    params:
+      command: "bash -lc 'set -euo pipefail; A=prompt_assets/simard/atelier_system.md; for kw in OpenSCAD FreeCAD Blender STEP STL \"cut list\" BOM render parametric; do grep -qi \"$kw\" \"$A\" || { echo \"MISSING KEYWORD $kw\"; exit 1; }; done; echo IDENTITY_CARD_COMPLETE'"
+    timeout: 60000
+  - action: wait_for_output
+    params:
+      value: "IDENTITY_CARD_COMPLETE"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

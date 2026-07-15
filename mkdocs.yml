@@ -155,6 +155,7 @@ nav:
     - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md
     - Read Simard's Daily Journal: tutorials/read-simards-daily-journal.md
     - Deploy Crocutus (Read-Only Observer): tutorials/deploy-crocutus-read-only-observer.md
+    - Deploy Atelier (Industrial & Furniture Design): tutorials/deploy-atelier-industrial-design.md
   - How-To Guides:
     - Fix a No-`bridge` Naming Guard Failure: howto/fix-a-no-bridge-naming-guard-failure.md
     - Run the LOCAL COIN Gym Harness: howto/run-the-coin-gym-harness.md
