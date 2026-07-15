@@ -240,7 +240,7 @@ Environment=SIMARD_BACKUP_INTERVAL_SECS=86400
 KillSignal=SIGTERM
 TimeoutStopSec=30
 ExecStart=/usr/local/bin/simard ooda daemon
-Restart=on-failure
+Restart=always
 ```
 
 > The live store is `~/.simard/cognitive`; the daemon's `WorkingDirectory` is
