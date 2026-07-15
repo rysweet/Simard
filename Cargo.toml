@@ -1,6 +1,6 @@
 [package]
 name = "simard"
-version = "0.31.1"
+version = "0.32.1"
 edition = "2024"
 default-run = "simard"
 
@@ -156,7 +156,7 @@ amplihack-agent-eval = { git = "https://github.com/rysweet/amplihack-rs.git", re
 # The fork fixes the from-source duplicate-symbol link and the libstdc++
 # std::format ABI SIGSEGV; see amplihack-memory docs/lbug_libstdcxx_abi.md.
 lbug = { git = "https://github.com/rysweet/ladybug-rust", rev = "5a2c107881879f4d1bb594b14967948870e65cdc" }
-rusqlite = { version = "=0.31.0", features = ["bundled"] }
+rusqlite = { version = "=0.31.0", features = ["backup", "bundled"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.149"
 # Issue #2250: the launch-time update check compares semver versions with the

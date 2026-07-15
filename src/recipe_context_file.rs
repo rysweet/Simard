@@ -52,6 +52,11 @@ impl ContextFile {
     /// The payload is written verbatim (no truncation), so an oversized value
     /// that would have overflowed `argv` lands safely on disk instead.
     pub fn write(base_type: &str, key: &str, value: &str) -> io::Result<Self> {
+        Self::write_bytes(base_type, key, value.as_bytes())
+    }
+
+    /// Write opaque bytes without requiring UTF-8 or normalizing the payload.
+    pub fn write_bytes(base_type: &str, key: &str, value: &[u8]) -> io::Result<Self> {
         let dir = tempfile::Builder::new()
             .prefix(&format!("simard-{base_type}-ctx-"))
             .tempdir()?;

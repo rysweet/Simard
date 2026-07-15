@@ -1,6 +1,6 @@
 ---
 title: Text-parsing wire formats
-description: Normative reference for every text-based wire format Simard's Rust code parses from LLM and recipe output. Replaces the former JSON-based contracts.
+description: Current reference for text-based wire formats; OODA formats become legacy only after verified typed-route cutover.
 last_updated: 2026-06-29
 review_schedule: as-needed
 owner: simard
@@ -18,9 +18,15 @@ related:
 
 Crate: `simard`
 
-This page is the normative definition of every text-based wire format that
-Simard's Rust code parses from LLM or recipe output. There are three
-protocol families, each used at specific decision sites.
+This page is the normative definition of current text-based wire formats parsed
+from LLM or recipe output.
+
+!!! note "Migration condition"
+    Current releases use the OODA formats on this page. Their OODA consumers
+    become legacy only after a release implements and selects the typed route
+    and verifies those parsers are unreachable. They remain authoritative while
+    the route is `legacy` or `shadow`. Non-OODA parsers remain governed by this
+    page after OODA cutover.
 
 For the design rationale, see
 [Concept: text-based brain protocol](../concepts/text-based-brain-protocol.md).
@@ -148,10 +154,10 @@ denominator per phase.
 
 ## Protocol 1: First-word match (OODA brains)
 
-Used by: `ooda_brain::recipe_brain` (all three phases)
+Used by: `ooda_brain::recipe_brain` (all three current parser-route phases)
 
 > **Changed in [#2144](https://github.com/rysweet/Simard/issues/2144):**
-> All three OODA brain parsers now use the same first-word extraction pattern.
+> The planned typed route will not register these parsers after cutover.
 > The `DECISION:` marker protocol, JSON extraction, and keyword-scanning
 > fallback chains have been removed.
 

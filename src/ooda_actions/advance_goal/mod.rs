@@ -3,6 +3,7 @@
 use crate::goal_curation::GoalProgress;
 use crate::ooda_loop::{ActionOutcome, OodaClients, OodaState, PlannedAction};
 
+#[cfg(test)]
 use super::goal_session::GoalAction;
 use super::make_outcome;
 
@@ -28,7 +29,11 @@ mod overlap;
 // so `spawn::dispatch_spawn_engineer` can invoke the gate.
 pub(crate) mod resource_admission;
 mod subordinate;
-use spawn::{dispatch_spawn_engineer, is_brain_failure_marker};
+#[cfg(not(test))]
+pub(crate) mod typed_goal_session;
+#[cfg(test)]
+use spawn::dispatch_spawn_engineer;
+use spawn::is_brain_failure_marker;
 // Dispatch-dedup helper introduced by PR #1228; intentionally re-exported so
 // the daemon can scan engineer-worktrees for live sentinels before spawning.
 // Clippy flags it as unused at the lib level — suppress to preserve the API.
@@ -149,68 +154,77 @@ pub(super) fn dispatch_advance_goal(
         _ => {}
     }
 
-    // Clone the brain Arc up-front so we don't fight the borrow checker
-    // when we mutably borrow `memories.session` below (issue #1266).
-    let brain = std::sync::Arc::clone(&memories.brain);
-
-    // Same pattern for the progress-evidence checker (issue #1967): clone
-    // the Arc up-front so it lives across the inner mutable session
-    // borrow without colliding with the memories field-borrow check.
-    let checker = std::sync::Arc::clone(&memories.progress_evidence);
-
-    // Split-borrow disjoint fields of `memories` so we can hold `&mut
-    // session` and `&dyn memory` simultaneously. `&mut *memories` flattens
-    // the deref so Rust tracks the per-field borrows.
-    let OodaClients {
-        ref mut session,
-        ref memory,
-        ref repo_root,
-        ..
-    } = *memories;
-
-    // If a base-type session is available, use run_turn for real agent work.
-    if let Some(sess) = session {
-        let result = super::goal_session::advance_goal_with_session(
-            action,
-            memory.as_ref(),
-            checker.as_ref(),
-            sess.as_mut(),
-            state,
-            &goal,
-        );
-
-        // For spawn_engineer the dispatcher must perform the actual fork
-        // (it owns the state mutation needed to set goal.assigned_to).
-        // `dispatch_spawn_engineer` takes the state behind a `Mutex` for its
-        // short critical sections; wrap the single-threaded `&mut state` here.
-        // (Concurrent dispatch in `ooda_actions::concurrent` shares one
-        // `Mutex` across threads instead.)
-        if let Some(GoalAction::SpawnEngineer {
-            task,
-            files: _,
-            issue: _,
-        }) = result.action
-        {
-            let state_mx = std::sync::Mutex::new(&mut *state);
-            return dispatch_spawn_engineer(
-                action,
-                &state_mx,
-                &goal_id,
-                &task,
-                brain.as_ref(),
-                repo_root,
-            );
-        }
-
-        return result.outcome;
+    #[cfg(not(test))]
+    {
+        let state_mx = std::sync::Mutex::new(&mut *state);
+        typed_goal_session::run(action, &state_mx, &goal, &memories.repo_root)
     }
 
-    // No session = cannot advance. Fail visibly per PHILOSOPHY.md.
-    make_outcome(
-        action,
-        false,
-        format!(
-            "goal '{goal_id}' cannot advance: no LLM session available. Check SIMARD_LLM_PROVIDER and auth config."
-        ),
-    )
+    #[cfg(test)]
+    {
+        // Clone the brain Arc up-front so we don't fight the borrow checker
+        // when we mutably borrow `memories.session` below (issue #1266).
+        let brain = std::sync::Arc::clone(&memories.brain);
+
+        // Same pattern for the progress-evidence checker (issue #1967): clone
+        // the Arc up-front so it lives across the inner mutable session
+        // borrow without colliding with the memories field-borrow check.
+        let checker = std::sync::Arc::clone(&memories.progress_evidence);
+
+        // Split-borrow disjoint fields of `memories` so we can hold `&mut
+        // session` and `&dyn memory` simultaneously. `&mut *memories` flattens
+        // the deref so Rust tracks the per-field borrows.
+        let OodaClients {
+            ref mut session,
+            ref memory,
+            ref repo_root,
+            ..
+        } = *memories;
+
+        // If a base-type session is available, use run_turn for real agent work.
+        if let Some(sess) = session {
+            let result = super::goal_session::advance_goal_with_session(
+                action,
+                memory.as_ref(),
+                checker.as_ref(),
+                sess.as_mut(),
+                state,
+                &goal,
+            );
+
+            // For spawn_engineer the dispatcher must perform the actual fork
+            // (it owns the state mutation needed to set goal.assigned_to).
+            // `dispatch_spawn_engineer` takes the state behind a `Mutex` for its
+            // short critical sections; wrap the single-threaded `&mut state` here.
+            // (Concurrent dispatch in `ooda_actions::concurrent` shares one
+            // `Mutex` across threads instead.)
+            if let Some(GoalAction::SpawnEngineer {
+                task,
+                files: _,
+                issue: _,
+            }) = result.action
+            {
+                let state_mx = std::sync::Mutex::new(&mut *state);
+                return dispatch_spawn_engineer(
+                    action,
+                    &state_mx,
+                    &goal_id,
+                    &task,
+                    brain.as_ref(),
+                    repo_root,
+                );
+            }
+
+            return result.outcome;
+        }
+
+        // No session = cannot advance. Fail visibly per PHILOSOPHY.md.
+        make_outcome(
+            action,
+            false,
+            format!(
+                "goal '{goal_id}' cannot advance: no LLM session available. Check SIMARD_LLM_PROVIDER and auth config."
+            ),
+        )
+    }
 }
