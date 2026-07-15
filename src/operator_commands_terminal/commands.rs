@@ -185,8 +185,10 @@ mod tests {
 
     #[test]
     fn terminal_recipe_list_returns_result() {
-        let result = run_terminal_recipe_list_probe();
-        let _ = result;
+        // The probe enumerates the compiled-in terminal recipe descriptors and
+        // must succeed without a live runtime: the descriptor set is embedded,
+        // so listing is a pure, deterministic operation.
+        run_terminal_recipe_list_probe().expect("listing embedded terminal recipes must succeed");
     }
 
     #[test]

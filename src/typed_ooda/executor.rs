@@ -653,3 +653,55 @@ fn effect_mutation_request_id(job: &EffectJob, operation: &str) -> String {
 pub struct GoalSessionExecution {
     pub outcome: TerminalOutcome,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cycle_error_exposes_code_and_message() {
+        let error = CycleError::new(CycleErrorCode::MissingTerminal, "no durable terminal");
+        assert_eq!(error.code(), CycleErrorCode::MissingTerminal);
+        assert_eq!(error.to_string(), "no durable terminal");
+    }
+
+    #[test]
+    fn recipe_process_error_nonzero_exit_names_the_status() {
+        let error = RecipeProcessError::nonzero_exit(17);
+        assert_eq!(error.to_string(), "recipe process exited with status 17");
+    }
+
+    #[test]
+    fn recipe_process_error_failed_preserves_message() {
+        let error = RecipeProcessError::failed("spawn refused");
+        assert_eq!(error.to_string(), "spawn refused");
+    }
+
+    #[test]
+    fn recipe_process_error_carries_capability_error_message() {
+        let capability =
+            CapabilityError::new(CapabilityErrorCode::PermissionDenied, "grant missing");
+        let error: RecipeProcessError = capability.into();
+        assert_eq!(error.to_string(), "grant missing");
+    }
+
+    #[test]
+    fn effect_execution_error_permanent_is_not_retryable() {
+        let error = EffectExecutionError::permanent("disk is gone");
+        assert!(
+            error.permanent,
+            "permanent errors must set the permanent flag"
+        );
+        assert_eq!(error.to_string(), "disk is gone");
+    }
+
+    #[test]
+    fn effect_execution_error_retryable_is_not_permanent() {
+        let error = EffectExecutionError::retryable("transient network blip");
+        assert!(
+            !error.permanent,
+            "retryable errors must leave the permanent flag clear"
+        );
+        assert_eq!(error.to_string(), "transient network blip");
+    }
+}

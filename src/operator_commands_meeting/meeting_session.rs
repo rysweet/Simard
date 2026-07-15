@@ -101,17 +101,6 @@ mod tests {
         let _prompt = load_meeting_system_prompt();
     }
 
-    #[test]
-    fn load_meeting_system_prompt_returns_string() {
-        let prompt = load_meeting_system_prompt();
-        let _ = prompt.len();
-    }
-
-    #[test]
-    fn open_meeting_agent_session_returns_none_without_api_key() {
-        let _result = open_meeting_agent_session();
-    }
-
     /// Calling `open_meeting_agent_session()` in a headless CI
     /// environment must NEVER block indefinitely — it either succeeds or
     /// returns None promptly.
