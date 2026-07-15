@@ -72,7 +72,7 @@ pub fn live_claimed_engineers(state_root: &Path) -> Vec<LiveEngineerWorktree> {
 /// Only strips the two-field suffix when it actually matches (a run of digits
 /// then a 6-char hex tag); otherwise the whole directory name is returned so an
 /// unexpected name still yields a stable, non-empty dedup key.
-fn goal_id_from_worktree_dir(name: &str) -> String {
+pub(crate) fn goal_id_from_worktree_dir(name: &str) -> String {
     let mut it = name.rsplitn(3, '-');
     let last = it.next(); // hex6
     let mid = it.next(); // epoch secs

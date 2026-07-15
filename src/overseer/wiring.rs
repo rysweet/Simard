@@ -44,8 +44,8 @@ use crate::overseer::capabilities::{
     RecalledProcedure, RecalledProspective, RecordOutcome,
 };
 use crate::overseer::config::{
-    gap_scan_enabled, goal_health_enabled, memory_recall_enabled, overseer_author_login,
-    overseer_interval_secs, whisper_enabled,
+    claim_reap_enabled, claim_reap_stale_secs, gap_scan_enabled, goal_health_enabled,
+    memory_recall_enabled, overseer_author_login, overseer_interval_secs, whisper_enabled,
 };
 use crate::overseer::deploy::GuardedDeployer;
 use crate::overseer::guardrails::RecursionGuard;
@@ -1156,10 +1156,10 @@ pub fn build_overseer(
     repo_root: std::path::PathBuf,
     state_root: std::path::PathBuf,
 ) -> Overseer {
-    Overseer::new(assemble_capabilities(
+    let overseer = Overseer::new(assemble_capabilities(
         Arc::clone(&mem),
         repo_root,
-        state_root,
+        state_root.clone(),
     ))
     .with_verify_merge_autonomy(true)
     .with_high_risk_autonomy(true)
@@ -1196,7 +1196,57 @@ pub fn build_overseer(
     // prior occurrences of a problem's root cause and records new ones — turning
     // a one-off false-park into a detected recurring root cause it escalates
     // instead of re-patching.
-    .with_memory(mem)
+    .with_memory(mem);
+
+    // Periodic stale-engineer-claim reaper (issue #4099): sweep + reclaim the
+    // `engineer_claims` leak independent of per-goal polling. Wire the shared
+    // ledger chokepoint, the worktree liveness probe, and the orphan cleanup —
+    // all rooted at the SAME `state_root` the engineers spawn under. Opening the
+    // ledger is fail-visible: if it fails the reaper is simply not wired this
+    // tick (the sweep is skipped), never a panic that would abort the tick.
+    match build_claim_reaper_seams(&state_root) {
+        Some((ledger, probe, cleanup)) => overseer.with_claim_reaper(
+            ledger,
+            probe,
+            cleanup,
+            claim_reap_enabled(),
+            claim_reap_stale_secs(),
+        ),
+        None => overseer,
+    }
+}
+
+/// Open the reaper's ledger + build its worktree-rooted probe and cleanup seams.
+/// Returns `None` (fail-visible log) if the ledger cannot be opened so the tick
+/// runs without the reaper rather than panicking.
+fn build_claim_reaper_seams(
+    state_root: &std::path::Path,
+) -> Option<crate::overseer::claim_reaper::ClaimReaperSeamSet> {
+    let ledger_path = crate::typed_ooda::ledger_path(state_root);
+    let policy = crate::typed_ooda::CapabilityPolicy::new("engineer-claim-reaper");
+    let handler = match crate::typed_ooda::CapabilityHandler::open(&ledger_path, policy) {
+        Ok(handler) => handler,
+        Err(error) => {
+            tracing::error!(
+                target: "simard::claim_reaper",
+                error = %error,
+                ledger_path = %ledger_path.display(),
+                "[simard] claim-reaper NOT wired this tick: failed to open ledger",
+            );
+            return None;
+        }
+    };
+    Some((
+        Box::new(handler),
+        Box::new(
+            crate::overseer::claim_reaper::WorktreeClaimLivenessProbe::new(
+                state_root.to_path_buf(),
+            ),
+        ),
+        Box::new(crate::overseer::claim_reaper::WorktreeDirCleanup::new(
+            state_root.to_path_buf(),
+        )),
+    ))
 }
 
 /// Resolve the acting Overseer's tick cadence (seconds), clamped to the config
