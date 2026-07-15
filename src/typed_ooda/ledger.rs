@@ -2421,7 +2421,7 @@ mod approval_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let handler = CapabilityHandler::open(
             dir.path().join("outcomes.sqlite3"),
-            CapabilityPolicy::goal_session_default("policy-v1"),
+            CapabilityPolicy::new("policy-v1"),
         )
         .expect("handler");
         let actor = AuthenticatedToolContext::new(
