@@ -290,13 +290,11 @@ pub fn automerge_repos() -> Vec<String> {
 /// Unset/empty/whitespace-only => None (fail-closed: the sensor yields no
 /// candidates, so it can never merge a human's PR by mistake).
 pub fn automerge_author_from(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
-    match lookup(SIMARD_AUTOMERGE_AUTHOR_ENV)
+    lookup(SIMARD_AUTOMERGE_AUTHOR_ENV)
         .as_deref()
         .map(str::trim)
-    {
-        Some(s) if !s.is_empty() => Some(s.to_string()),
-        _ => None,
-    }
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// Production entry point: the OODA/engineer author login the self-merge sensor
