@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -748,20 +748,16 @@ impl CapabilityHandler {
         record.status = ProcessExecutionStatus::Running;
         self.update_process_execution(&record, ProcessExecutionStatus::Reserved)?;
 
-        let output = Command::new(&request.program)
-            .args(&request.args)
-            .current_dir(&request.working_directory)
-            .output();
-        match output {
-            Ok(output) => {
-                record.status = if output.status.success() {
+        match capture_process_output(&request) {
+            Ok(captured) => {
+                record.status = if captured.success {
                     ProcessExecutionStatus::Completed
                 } else {
                     ProcessExecutionStatus::Failed
                 };
-                record.exit_code = output.status.code();
-                record.stdout = output.stdout;
-                record.stderr = output.stderr;
+                record.exit_code = captured.exit_code;
+                record.stdout = captured.stdout;
+                record.stderr = captured.stderr;
             }
             Err(error) => {
                 record.status = ProcessExecutionStatus::Failed;
@@ -1900,6 +1896,95 @@ fn reserve_process_slot(
         ));
     }
     Ok(())
+}
+
+/// Per-stream cap on captured subprocess output. Bounds ledger row size and
+/// peak memory without imposing any wall-clock timeout on the child.
+const PROCESS_OUTPUT_LIMIT: usize = 1024 * 1024;
+
+struct CapturedProcessOutput {
+    success: bool,
+    exit_code: Option<i32>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// Run a process capturing at most [`PROCESS_OUTPUT_LIMIT`] bytes per stream.
+///
+/// stdout and stderr are drained concurrently on separate threads so a child
+/// that fills one pipe cannot deadlock against a serial reader. There is no
+/// timeout: the child runs to completion, matching the project rule against
+/// wall-clock kills of working steps.
+fn capture_process_output(request: &ProcessExecRequest) -> io::Result<CapturedProcessOutput> {
+    let mut child = Command::new(&request.program)
+        .args(&request.args)
+        .current_dir(&request.working_directory)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_reader = spawn_capped_reader(stdout);
+    let stderr_reader = spawn_capped_reader(stderr);
+
+    let status = child.wait()?;
+    let (stdout, stdout_truncated) = join_capped_reader(stdout_reader);
+    let (stderr, stderr_truncated) = join_capped_reader(stderr_reader);
+
+    Ok(CapturedProcessOutput {
+        success: status.success(),
+        exit_code: status.code(),
+        stdout: mark_truncation(stdout, stdout_truncated),
+        stderr: mark_truncation(stderr, stderr_truncated),
+    })
+}
+
+fn spawn_capped_reader<R>(reader: Option<R>) -> std::thread::JoinHandle<(Vec<u8>, bool)>
+where
+    R: Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let mut truncated = false;
+        if let Some(mut reader) = reader {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match reader.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        // Fully drain the pipe so the child never blocks on a
+                        // full buffer, but only retain up to the cap in memory.
+                        if buffer.len() < PROCESS_OUTPUT_LIMIT {
+                            let remaining = PROCESS_OUTPUT_LIMIT - buffer.len();
+                            let keep = remaining.min(read);
+                            buffer.extend_from_slice(&chunk[..keep]);
+                            if keep < read {
+                                truncated = true;
+                            }
+                        } else {
+                            truncated = true;
+                        }
+                    }
+                    Err(ref error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+        }
+        (buffer, truncated)
+    })
+}
+
+fn join_capped_reader(handle: std::thread::JoinHandle<(Vec<u8>, bool)>) -> (Vec<u8>, bool) {
+    handle.join().unwrap_or_else(|_| (Vec::new(), false))
+}
+
+fn mark_truncation(mut buffer: Vec<u8>, truncated: bool) -> Vec<u8> {
+    if truncated {
+        buffer.extend_from_slice(b"\n[process output truncated at 1048576 bytes]");
+    }
+    buffer
 }
 
 fn new_process_execution(request: &ProcessExecRequest) -> ProcessExecutionRecord {

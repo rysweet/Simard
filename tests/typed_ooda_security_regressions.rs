@@ -715,6 +715,35 @@ fn process_exec_replays_and_concurrency_cannot_bypass_or_double_spend_cap() {
 }
 
 #[test]
+fn process_exec_output_is_bounded_to_protect_the_ledger_and_memory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("ledger.sqlite3");
+    drop(handler(&path));
+    let process_actor = actor(
+        "cycle-process-big",
+        "goal-process",
+        [CapabilityGrant::ProcessExec],
+    )
+    .scoped_to_working_directory(dir.path());
+    // Emit two megabytes to stdout — well past the one-megabyte per-stream cap.
+    let request = ProcessExecRequest {
+        identity: identity("request-process-big", "cycle-process-big", "goal-process"),
+        program: PathBuf::from("/bin/sh"),
+        args: vec!["-c".to_string(), "head -c 2097152 /dev/zero".to_string()],
+        working_directory: dir.path().to_path_buf(),
+    };
+
+    let record = handler(&path)
+        .execute_process(&process_actor, request)
+        .expect("bounded process");
+    assert_eq!(record.status, ProcessExecutionStatus::Completed);
+    let limit = 1024 * 1024;
+    let marker = b"\n[process output truncated at 1048576 bytes]";
+    assert_eq!(record.stdout.len(), limit + marker.len());
+    assert!(record.stdout.ends_with(marker));
+}
+
+#[test]
 fn process_exec_failed_calls_spend_the_cap_and_unknown_wire_shapes_are_rejected() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("ledger.sqlite3");
