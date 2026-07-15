@@ -136,6 +136,29 @@ pub trait PrGhClient {
     fn list_open_prs(&self, _repo: &str, _limit: u32) -> SimardResult<Vec<OpenPrSummary>> {
         Ok(Vec::new())
     }
+
+    /// Author-scoped variant of [`list_open_prs`](Self::list_open_prs) for the
+    /// autonomous-self-merge sensor (#4097). Lists open PRs authored by
+    /// `author` only, pushing the author filter SERVER-SIDE so:
+    /// - a busy repo with more than `limit` open PRs can never crowd Simard's
+    ///   own eligible PRs out of the fetch window (they'd be silently skipped),
+    ///   and
+    /// - the transferred + parsed JSON shrinks to just Simard's PRs instead of
+    ///   every author's `statusCheckRollup`.
+    ///
+    /// The default impl delegates to [`list_open_prs`](Self::list_open_prs)
+    /// (the caller still applies its own exact-author match as defense-in-
+    /// depth), so existing fakes that only script the unscoped listing keep
+    /// working unchanged. [`RealPrGhClient`] overrides it to add
+    /// `gh pr list --author <author>`.
+    fn list_prs_by_author(
+        &self,
+        repo: &str,
+        _author: &str,
+        limit: u32,
+    ) -> SimardResult<Vec<OpenPrSummary>> {
+        self.list_open_prs(repo, limit)
+    }
 }
 
 /// Max retry attempts for *transient* `gh` read failures (network blips,
@@ -310,6 +333,35 @@ impl PrGhClient for RealPrGhClient {
                     repo,
                     "--state",
                     "open",
+                    "--json",
+                    "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url,author",
+                    "--limit",
+                    &limit_s,
+                ],
+            )?;
+            parse_pr_list_json(&stdout)
+        })
+    }
+
+    fn list_prs_by_author(
+        &self,
+        repo: &str,
+        author: &str,
+        limit: u32,
+    ) -> SimardResult<Vec<OpenPrSummary>> {
+        retry_transient_gh("gh pr list", || {
+            let limit_s = limit.to_string();
+            let stdout = run_gh_checked(
+                &format!("gh pr list --repo {repo} --state open --author {author}"),
+                &[
+                    "pr",
+                    "list",
+                    "--repo",
+                    repo,
+                    "--state",
+                    "open",
+                    "--author",
+                    author,
                     "--json",
                     "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url,author",
                     "--limit",

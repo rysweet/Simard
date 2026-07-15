@@ -462,9 +462,13 @@ impl PrOps for MergePrOps {
     }
 
     /// The thin deterministic self-merge sensor rail (#4097). For each
-    /// allowlisted `owner/name` repo it lists open PRs (ONE `gh pr list` per
-    /// repo, reusing [`PrGhClient::list_open_prs`]) and keeps only those that
-    /// are (a) authored by the configured automerge author (EXACT match) and
+    /// allowlisted `owner/name` repo it lists Simard's OWN open PRs (ONE
+    /// author-scoped `gh pr list` per repo, reusing
+    /// [`PrGhClient::list_prs_by_author`] so the author filter runs SERVER-SIDE
+    /// — a busy repo can never crowd Simard's PRs out of the fetch window, and
+    /// only her PRs are transferred + parsed) and keeps only those that
+    /// are (a) authored by the configured automerge author (re-verified with an
+    /// EXACT in-process match as defense-in-depth) and
     /// (b) pass the cheap objective pre-filter
     /// ([`evaluate_objective_gates`]: base allow-list + `mergeable == MERGEABLE`
     /// + all checks green) computed from the already-fetched listing fields.
@@ -492,8 +496,10 @@ impl PrOps for MergePrOps {
         let mut candidates = Vec::new();
         for repo in repos {
             // A generous per-repo cap: the survey is O(open PRs), and the
-            // downstream gate re-verifies each candidate authoritatively.
-            let summaries = match self.gh.list_open_prs(repo, 100) {
+            // downstream gate re-verifies each candidate authoritatively. The
+            // author filter is pushed SERVER-SIDE so a repo with >100 open PRs
+            // can never crowd Simard's own eligible PRs out of this window.
+            let summaries = match self.gh.list_prs_by_author(repo, author, 100) {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!(
@@ -1009,6 +1015,7 @@ mod tests {
         by_repo:
             HashMap<String, Result<Vec<crate::stewardship::merge_authority::OpenPrSummary>, ()>>,
         listed: Mutex<Vec<String>>,
+        authors: Mutex<Vec<String>>,
         merges: Mutex<usize>,
     }
     impl ListingGh {
@@ -1021,11 +1028,15 @@ mod tests {
             Arc::new(Self {
                 by_repo,
                 listed: Mutex::new(Vec::new()),
+                authors: Mutex::new(Vec::new()),
                 merges: Mutex::new(0),
             })
         }
         fn listed(&self) -> Vec<String> {
             self.listed.lock().unwrap().clone()
+        }
+        fn authors(&self) -> Vec<String> {
+            self.authors.lock().unwrap().clone()
         }
         fn merges(&self) -> usize {
             *self.merges.lock().unwrap()
@@ -1055,6 +1066,19 @@ mod tests {
                 }),
                 None => Ok(Vec::new()),
             }
+        }
+        fn list_prs_by_author(
+            &self,
+            repo: &str,
+            author: &str,
+            limit: u32,
+        ) -> crate::error::SimardResult<Vec<crate::stewardship::merge_authority::OpenPrSummary>>
+        {
+            // Record the author the survey pushes down (the server-side filter),
+            // then reuse the scripted unscoped listing so existing per-repo
+            // scenarios stay valid.
+            self.authors.lock().unwrap().push(author.to_string());
+            self.list_open_prs(repo, limit)
         }
     }
 
@@ -1147,6 +1171,32 @@ mod tests {
         assert!(
             seen.lock().unwrap().is_empty(),
             "the sensor is silent — no operator notification on a survey"
+        );
+    }
+
+    #[test]
+    fn survey_pushes_the_configured_author_filter_server_side() {
+        // Guards the resource/robustness fix: the survey must scope the listing
+        // to Simard's OWN author server-side, so a busy repo with more open PRs
+        // than the fetch limit can never crowd her eligible PRs out of the
+        // window (and only her PRs are transferred + parsed).
+        let author = "simard-engineer";
+        let repo = "rysweet/Simard";
+        let mut by_repo = HashMap::new();
+        by_repo.insert(
+            repo.to_string(),
+            Ok(vec![open_pr(401, author, "MERGEABLE", "main", "SUCCESS")]),
+        );
+        let gh = ListingGh::new(by_repo);
+        let (ops, _seen) = survey_ops(gh.clone(), Some(author));
+
+        let _ = ops.survey_ready_prs(&[repo.to_string()]);
+
+        assert_eq!(
+            gh.authors(),
+            vec![author.to_string()],
+            "the survey must forward the configured automerge author to the \
+             server-side `gh pr list --author` filter"
         );
     }
 
