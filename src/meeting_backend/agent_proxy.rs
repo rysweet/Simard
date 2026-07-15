@@ -748,11 +748,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_agent_command_returns_valid_command() {
-        let _result = resolve_agent_command();
-    }
-
-    #[test]
     fn strip_copilot_noise_removes_usage_stats() {
         let input = "Here is the answer.\nTotal usage est: 1234 tokens\nAPI time spent: 2.3s";
         let result = strip_copilot_noise(input);

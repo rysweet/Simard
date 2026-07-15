@@ -223,8 +223,28 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_fn_exists() {
-        let _fn_ref: fn() -> Result<(), Box<dyn std::error::Error>> = dispatch_act_on_decisions;
+    #[serial_test::serial(cognitive_memory)]
+    fn dispatch_act_on_decisions_with_no_handoff_is_a_graceful_noop() {
+        // Point handoff resolution at an empty temp dir so `dispatch` takes the
+        // "no handoff found" early-return branch. This exercises real behavior
+        // (graceful Ok(()) when there is nothing to act on) instead of merely
+        // asserting the function's type signature — and it NEVER invokes the
+        // real `gh`, so it cannot pollute the issue tracker.
+        let tmp = tempdir().unwrap();
+        let saved = std::env::var_os("SIMARD_HANDOFF_DIR");
+        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", tmp.path()) };
+
+        let result = dispatch_act_on_decisions();
+
+        match saved {
+            Some(v) => unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", v) },
+            None => unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") },
+        }
+
+        assert!(
+            result.is_ok(),
+            "an empty handoff dir must yield a graceful Ok(()) no-op, got {result:?}"
+        );
     }
 
     #[test]
