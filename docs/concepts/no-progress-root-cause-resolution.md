@@ -8,6 +8,7 @@ doc_type: concept
 status: implemented
 related:
   - ./perpetual-goal-no-progress-exemption.md
+  - ./no-progress-terminal-investigation.md
   - ./steerable-ooda-daemon.md
   - ./closed-loop-outcome-verification.md
   - ./overseer-root-cause-why.md
