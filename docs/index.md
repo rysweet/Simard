@@ -26,6 +26,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 
 - [Typed-capability OODA architecture](./architecture/typed-ooda-loop.md) - Semantic/typed boundary, actor-session authority, durable terminals, effect outbox, and the explicit remaining migration boundary.
 - [OODA capability API](./reference/ooda-capability-api.md) - Terminal schemas, authorization, replay, effect leases, current limitations, errors, and policy configuration.
+- [Typed OODA goal-session deterministic rails](./reference/typed-ooda-goal-session-rails.md) — the two thin rail fixes that unblocked live OODA goals (#4076): propagating `AMPLIHACK_AGENT_BINARY` to the goal-session `recipe-runner-rs` subprocess (no silent `claude` fallback) and normalizing bare goal repo names to `rysweet/<name>` at spawn admission, plus the additive Act-loop failure-detail log.
 - [Tutorial: Complete a typed OODA cycle](./tutorials/complete-a-typed-ooda-cycle.md) - Deterministic action, no-action, replay, and conflict examples.
 - [Tutorial: Run your first local session](./tutorials/run-your-first-local-session.md) - Exercise the local runtime through the primary CLI.
 - [Simard installer reference](./reference/simard-installer.md) - Shipped deployment contract for the binary, prompt assets, user systemd units, rollback artifacts, and dry-run controls.

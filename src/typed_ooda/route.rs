@@ -123,6 +123,22 @@ impl TypedGoalSessionRoute {
         })?;
 
         let runner = resolve_recipe_runner()?;
+        // Resolve the agent binary from the canonical provider config BEFORE
+        // creating the diagnostic file or spawning. recipe-runner-rs otherwise
+        // falls back to a hardcoded "claude", which is unauthenticated on the
+        // Copilot host and silently fails every OODA goal. No silent fallback:
+        // if the provider config is unavailable, surface a visible RecipeFailed
+        // rather than spawning with the wrong (unauthenticated) default.
+        // Resolving here (before the temp file) also avoids leaking an orphaned
+        // diagnostic file on the error path.
+        let agent_binary =
+            crate::session_builder::LlmProvider::resolve_agent_binary().ok_or_else(|| {
+                CycleError::new(
+                    CycleErrorCode::RecipeFailed,
+                    "goal-session agent binary could not be resolved from provider config; \
+                     refusing to spawn recipe-runner-rs with an unauthenticated default",
+                )
+            })?;
         let diagnostic_path = std::env::temp_dir().join(format!(
             "simard-goal-session-{}.stderr",
             uuid::Uuid::now_v7()
@@ -133,15 +149,7 @@ impl TypedGoalSessionRoute {
                 format!("goal-session diagnostic file could not be created: {error}"),
             )
         })?;
-        let mut command = Command::new(runner);
-        command
-            .arg(&self.recipe_path)
-            .arg("--no-auto-stage")
-            .arg("-C")
-            .arg(repo_root)
-            .stdout(Stdio::null())
-            .stderr(diagnostic_file);
-        for value in [
+        let context = vec![
             format!("simard_binary={}", binary.display()),
             format!("recipe_path={}", self.recipe_path.display()),
             format!("ledger_path={}", ledger_path.display()),
@@ -156,9 +164,15 @@ impl TypedGoalSessionRoute {
             decide.arg_value(),
             token.arg_value(),
             admission.arg_value(),
-        ] {
-            command.arg("-c").arg(value);
-        }
+        ];
+        let mut command = build_goal_session_command(
+            &runner,
+            &self.recipe_path,
+            repo_root,
+            &context,
+            agent_binary,
+        );
+        command.stdout(Stdio::null()).stderr(diagnostic_file);
         let status = command.status().map_err(|error| {
             CycleError::new(
                 CycleErrorCode::RecipeFailed,
@@ -229,6 +243,34 @@ fn context_error(error: std::io::Error) -> CycleError {
     )
 }
 
+/// Build the `recipe-runner-rs` `Command` for the typed goal-session actor.
+///
+/// Thin construction seam: assembles the runner argv (recipe path,
+/// `--no-auto-stage`, `-C <repo>`, then each context value as `-c <value>`)
+/// and — critically — exports `AMPLIHACK_AGENT_BINARY` so the nested agent
+/// uses the resolved provider binary instead of recipe-runner-rs's hardcoded
+/// `"claude"` default. Stdio is applied by the caller. No behavior beyond
+/// carrying the env; kept minimal so the env invariant is unit-testable.
+fn build_goal_session_command(
+    runner: &Path,
+    recipe_path: &Path,
+    repo_root: &Path,
+    context: &[String],
+    agent_binary: &str,
+) -> Command {
+    let mut command = Command::new(runner);
+    command
+        .arg(recipe_path)
+        .arg("--no-auto-stage")
+        .arg("-C")
+        .arg(repo_root)
+        .env("AMPLIHACK_AGENT_BINARY", agent_binary);
+    for value in context {
+        command.arg("-c").arg(value);
+    }
+    command
+}
+
 fn resolve_recipe_runner() -> Result<PathBuf, CycleError> {
     if let Some(configured) = std::env::var_os("SIMARD_RECIPE_RUNNER_BIN") {
         let path = PathBuf::from(configured);
@@ -269,4 +311,112 @@ fn bounded_diagnostic_file(path: &Path) -> String {
         diagnostic.push_str("\n[diagnostic truncated after 4096 bytes]");
     }
     diagnostic
+}
+
+#[cfg(test)]
+mod agent_binary_rail_tests {
+    //! BUG 1 regression (the multi-day outage cause): the goal-session
+    //! `recipe-runner-rs` subprocess must carry `AMPLIHACK_AGENT_BINARY` set to
+    //! the resolved provider binary. Without it, `recipe-runner-rs` falls back
+    //! to the hardcoded `"claude"`, which is unauthenticated on the Copilot
+    //! host — the agent step exits 1, no durable terminal is recorded, and every
+    //! OODA goal logs "consecutive failures" with an empty `terminal_outcomes`.
+    //!
+    //! Every other `recipe-runner-rs` spawn site in the repo already sets this
+    //! (journal, stewardship, disk_health, disk_reclaim). These tests pin the
+    //! same invariant for the typed goal-session route by inspecting the built
+    //! `Command`'s env — mirroring the `command.get_envs()` style — via the
+    //! `build_goal_session_command` construction seam the fix extracts.
+    use super::*;
+    use std::ffi::{OsStr, OsString};
+    use std::path::Path;
+
+    #[test]
+    fn goal_session_command_exports_amplihack_agent_binary() {
+        let context = vec![
+            "session_id=cycle-session".to_string(),
+            "goal_id=goal-1".to_string(),
+        ];
+        let command = build_goal_session_command(
+            Path::new("/home/agent/.cargo/bin/recipe-runner-rs"),
+            Path::new("/etc/simard/recipes/goal-session-actor.yaml"),
+            Path::new("/srv/simard/repo"),
+            &context,
+            "copilot",
+        );
+        let carries_binary = command.get_envs().any(|(key, value)| {
+            key == OsStr::new("AMPLIHACK_AGENT_BINARY") && value == Some(OsStr::new("copilot"))
+        });
+        assert!(
+            carries_binary,
+            "goal-session recipe Command must export AMPLIHACK_AGENT_BINARY=<resolved provider>",
+        );
+    }
+
+    #[test]
+    fn goal_session_command_binary_is_the_resolved_value_not_hardcoded() {
+        // The env value is whatever the caller resolved from the canonical
+        // provider resolver — never a hardcoded default. A different provider
+        // binary must flow through verbatim.
+        let command = build_goal_session_command(
+            Path::new("/runner"),
+            Path::new("/recipe.yaml"),
+            Path::new("/repo"),
+            &[],
+            "rustyclawd",
+        );
+        let value = command
+            .get_envs()
+            .find(|(key, _)| *key == OsStr::new("AMPLIHACK_AGENT_BINARY"))
+            .and_then(|(_, value)| value)
+            .map(OsStr::to_owned);
+        assert_eq!(value, Some(OsString::from("rustyclawd")));
+    }
+
+    #[test]
+    fn goal_session_command_preserves_runner_argv() {
+        // Adding the env must not disturb the existing recipe-runner argv:
+        // recipe path first, then --no-auto-stage, -C <repo>, and each
+        // context value passed as `-c <value>`.
+        let context = vec!["session_id=abc".to_string(), "goal_id=xyz".to_string()];
+        let command = build_goal_session_command(
+            Path::new("/runner"),
+            Path::new("/recipe.yaml"),
+            Path::new("/repo"),
+            &context,
+            "copilot",
+        );
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args.first().map(String::as_str),
+            Some("/recipe.yaml"),
+            "the recipe path must remain the first positional argument",
+        );
+        assert!(
+            args.iter().any(|arg| arg == "--no-auto-stage"),
+            "the --no-auto-stage flag must be preserved",
+        );
+        let dash_c = args
+            .iter()
+            .position(|arg| arg == "-C")
+            .expect("the -C working-directory flag must be present");
+        assert_eq!(
+            args.get(dash_c + 1).map(String::as_str),
+            Some("/repo"),
+            "-C must be followed by the repo root",
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-c" && pair[1] == "session_id=abc"),
+            "each context value must be carried as `-c <value>`",
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-c" && pair[1] == "goal_id=xyz"),
+            "each context value must be carried as `-c <value>`",
+        );
+    }
 }

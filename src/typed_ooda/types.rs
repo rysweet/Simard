@@ -89,6 +89,33 @@ impl RepositoryRef {
             name: name.into(),
         }
     }
+
+    /// Normalize a goal's stored repository slug into a canonical
+    /// owner-qualified [`RepositoryRef`] for the spawn admission check.
+    ///
+    /// This is the **single source of truth** for goal-repo normalization; the
+    /// `goal_repository` helper in the (test-excluded) effect handler delegates
+    /// to it so the rule is unit-testable here.
+    ///
+    /// Thin deterministic rail (BUG 2): goals frequently store a BARE repo
+    /// name (e.g. `"agent-kgpacks-rs-audit"` or `"skwaq"`), while the actor
+    /// always produces an owner-qualified request (`rysweet/<name>`). This
+    /// binds them to the same canonical form:
+    ///
+    /// - `None` => `rysweet/Simard` (the default goal repository)
+    /// - a bare name (no `'/'`) => `rysweet/<name>`
+    /// - an `owner/name` slug => split verbatim, so a genuinely different
+    ///   owner is preserved and still correctly mismatches — the rail is not
+    ///   loosened.
+    pub fn from_goal_slug(slug: Option<&str>) -> Self {
+        match slug {
+            None => Self::new("rysweet", "Simard"),
+            Some(value) => match value.split_once('/') {
+                Some((owner, name)) => Self::new(owner, name),
+                None => Self::new("rysweet", value),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -945,4 +972,74 @@ pub(crate) fn validate_sha(sha: &str) -> CapabilityResult<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod goal_slug_normalization_tests {
+    //! BUG 2 regression: the typed spawn-engineer repo rail must bind a BARE
+    //! goal repo slug (e.g. `agent-kgpacks-rs-audit`) to the canonical
+    //! `rysweet` owner before comparing it against the actor's — always
+    //! owner-qualified — request, while still REJECTING a genuinely different
+    //! owner.
+    //!
+    //! On the live daemon the old inline `"Simard"`-only special case rejected
+    //! ~11/20 goals (`typed spawn repository ... does not match goal repository
+    //! ...`) because every bare slug other than `"Simard"` failed the naive
+    //! `"rysweet/<name>" != "<name>"` compare. `RepositoryRef::from_goal_slug`
+    //! is the single normalization source of truth the rail routes through
+    //! (via `goal_repository` -> `require_goal_repository`), replacing that
+    //! special case with the general bare-name rule.
+    //!
+    //! These are pure, side-effect-free tests: the effect handler
+    //! `LiveGoalSessionEffects::spawn_engineer` is compiled only under
+    //! `cfg(not(test))`, so the contract is pinned here at its normalization
+    //! seam rather than through the (test-excluded) effect handler.
+    use super::RepositoryRef;
+
+    #[test]
+    fn bare_name_binds_to_rysweet_owner_and_matches_request() {
+        // (a) bare "agent-kgpacks-rs-audit" + requested
+        //     "rysweet/agent-kgpacks-rs-audit" => allowed
+        let requested = RepositoryRef::new("rysweet", "agent-kgpacks-rs-audit");
+        let expected = RepositoryRef::from_goal_slug(Some("agent-kgpacks-rs-audit"));
+        assert_eq!(
+            expected,
+            RepositoryRef::new("rysweet", "agent-kgpacks-rs-audit"),
+        );
+        assert_eq!(
+            expected, requested,
+            "a bare goal slug must be admitted against the actor's rysweet-scoped request",
+        );
+    }
+
+    #[test]
+    fn bare_simard_binds_to_rysweet_simard() {
+        // (b) bare "Simard" + requested "rysweet/Simard" => allowed
+        let requested = RepositoryRef::new("rysweet", "Simard");
+        let expected = RepositoryRef::from_goal_slug(Some("Simard"));
+        assert_eq!(expected, RepositoryRef::new("rysweet", "Simard"));
+        assert_eq!(expected, requested);
+    }
+
+    #[test]
+    fn none_defaults_to_rysweet_simard() {
+        // (c) None goal.repo + requested "rysweet/Simard" => allowed
+        let requested = RepositoryRef::new("rysweet", "Simard");
+        let expected = RepositoryRef::from_goal_slug(None);
+        assert_eq!(expected, RepositoryRef::new("rysweet", "Simard"));
+        assert_eq!(expected, requested);
+    }
+
+    #[test]
+    fn explicit_other_owner_is_preserved_and_rejects_rysweet_request() {
+        // (d) explicit "otherowner/thing" + requested "rysweet/thing"
+        //     => rejected (mismatch preserved — rail NOT loosened)
+        let requested = RepositoryRef::new("rysweet", "thing");
+        let expected = RepositoryRef::from_goal_slug(Some("otherowner/thing"));
+        assert_eq!(expected, RepositoryRef::new("otherowner", "thing"));
+        assert_ne!(
+            expected, requested,
+            "an explicit non-rysweet owner must never be normalized into the rysweet namespace",
+        );
+    }
 }

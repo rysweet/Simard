@@ -389,6 +389,10 @@ fn run_ooda_cycle_inner(
                     "[simard] OODA cycle: goal '{goal_id}' consecutive failures = {} (cooldown will demote urgency)",
                     *entry
                 );
+                eprintln!(
+                    "[simard] OODA cycle: goal '{goal_id}' failure detail: {}",
+                    truncate_detail(&outcome.detail, 240)
+                );
             }
 
             if let Some(goal) = state
