@@ -699,7 +699,18 @@ impl CapabilityPolicy {
 
     pub fn goal_session_default(revision: impl Into<String>) -> Self {
         let mut policy = Self::new(revision);
-        policy.grants.remove(&CapabilityGrant::RecordProgress);
+        policy.grants = [
+            CapabilityGrant::RecordAction(ActionKind::SpawnEngineer),
+            CapabilityGrant::RecordNoAction,
+            CapabilityGrant::RecordBlocked,
+            CapabilityGrant::RecordCompleted,
+        ]
+        .into_iter()
+        .collect();
+        policy.allowed_engineer_permissions = ["repo_read".to_string(), "repo_write".to_string()]
+            .into_iter()
+            .collect();
+        policy.allowed_deployment_environments.clear();
         policy
     }
 

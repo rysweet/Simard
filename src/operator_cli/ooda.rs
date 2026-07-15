@@ -268,7 +268,7 @@ fn dispatch_fixture(
             concurrent_engineers: 0,
             disk_used_percent: 0,
             active_claims: BTreeSet::new(),
-            policy_revision: "fixture-admission-v1".to_string(),
+            policy_revision: "goal-session-policy-v1".to_string(),
         },
         Box::new(FixtureEffects),
     );

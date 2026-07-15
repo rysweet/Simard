@@ -1781,10 +1781,10 @@ impl CapabilityHandler {
     }
 
     fn admit(&self, action: &Action, snapshot: &AdmissionSnapshot) -> CapabilityResult<()> {
-        if snapshot.policy_revision.is_empty() {
+        if snapshot.policy_revision != self.policy.revision {
             return Err(CapabilityError::new(
                 CapabilityErrorCode::AdmissionRejected,
-                "admission policy revision is missing",
+                "admission policy revision does not match the active capability policy",
             ));
         }
         if snapshot.disk_used_percent > self.policy.max_disk_used_percent {

@@ -67,7 +67,7 @@ fn executor() -> (tempfile::TempDir, GoalSessionExecutor) {
         concurrent_engineers: 0,
         disk_used_percent: 5,
         active_claims: BTreeSet::new(),
-        policy_revision: "admission-v1".to_string(),
+        policy_revision: "goal-session-policy-v1".to_string(),
     };
     (
         dir,
@@ -309,7 +309,7 @@ fn permanent_downstream_failure_fails_the_cycle_but_keeps_the_action_terminal() 
             concurrent_engineers: 0,
             disk_used_percent: 5,
             active_claims: BTreeSet::new(),
-            policy_revision: "admission-v1".to_string(),
+            policy_revision: "goal-session-policy-v1".to_string(),
         },
         Box::new(PermanentlyFailingEffects),
     );
@@ -353,7 +353,7 @@ fn permanent_downstream_failure_fails_the_cycle_but_keeps_the_action_terminal() 
 }
 
 #[test]
-fn privileged_effect_without_server_approval_is_blocked_not_reported_successful() {
+fn ungranted_merge_request_becomes_blocked_without_an_effect() {
     let dir = tempfile::tempdir().expect("tempdir");
     let handler = CapabilityHandler::open(
         dir.path().join("outcomes.sqlite3"),
@@ -380,7 +380,7 @@ fn privileged_effect_without_server_approval_is_blocked_not_reported_successful(
         Box::new(SucceedingEffects),
     );
     let invocation = invocation("cycle-unapproved-merge");
-    let error = executor
+    let execution = executor
         .execute(&invocation, |received, tools| {
             tools.record_action(
                 "request-unapproved-merge",
@@ -397,20 +397,16 @@ fn privileged_effect_without_server_approval_is_blocked_not_reported_successful(
             )?;
             Ok(())
         })
-        .expect_err("unapproved merge cannot execute");
-    assert_eq!(error.code(), CycleErrorCode::DownstreamFailed);
-    let outcome = executor
-        .handler()
-        .terminal_for_cycle("session-workflow", "cycle-unapproved-merge")
-        .expect("terminal query")
-        .expect("action remains durable");
-    let effect = executor
-        .handler()
-        .effect_for_outcome(&outcome.outcome_id)
-        .expect("effect query")
-        .expect("durable effect");
-    assert_eq!(effect.state.as_str(), "blocked");
-    assert!(effect.approval.is_none());
+        .expect("policy denial is a durable blocked terminal");
+    assert_eq!(execution.outcome.kind, TerminalKind::Blocked);
+    assert!(
+        executor
+            .handler()
+            .effect_for_outcome(&execution.outcome.outcome_id)
+            .expect("effect query")
+            .is_none(),
+        "blocked policy decisions never create effect work"
+    );
 }
 
 #[test]

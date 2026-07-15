@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -13,6 +14,10 @@ const RECIPE_FILENAME: &str = "goal-session-actor.yaml";
 const POLICY_FILENAME: &str = "goal-session-capabilities.toml";
 const ADAPTER_TAG: &str = "typed-ooda";
 const ACTOR_SESSION_LEASE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const TRUSTED_RECIPE: &str =
+    include_str!("../../prompt_assets/simard/recipes/goal-session-actor.yaml");
+const TRUSTED_POLICY: &str =
+    include_str!("../../prompt_assets/simard/policies/goal-session-capabilities.toml");
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TypedGoalSessionRoute {
@@ -117,14 +122,25 @@ impl TypedGoalSessionRoute {
             )
         })?;
 
-        let mut command = Command::new("recipe-runner-rs");
+        let runner = resolve_recipe_runner()?;
+        let diagnostic_path = std::env::temp_dir().join(format!(
+            "simard-goal-session-{}.stderr",
+            uuid::Uuid::now_v7()
+        ));
+        let diagnostic_file = std::fs::File::create(&diagnostic_path).map_err(|error| {
+            CycleError::new(
+                CycleErrorCode::RecipeFailed,
+                format!("goal-session diagnostic file could not be created: {error}"),
+            )
+        })?;
+        let mut command = Command::new(runner);
         command
             .arg(&self.recipe_path)
             .arg("--no-auto-stage")
             .arg("-C")
             .arg(repo_root)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stdout(Stdio::null())
+            .stderr(diagnostic_file);
         for value in [
             format!("simard_binary={}", binary.display()),
             format!("ledger_path={}", ledger_path.display()),
@@ -142,22 +158,21 @@ impl TypedGoalSessionRoute {
         ] {
             command.arg("-c").arg(value);
         }
-        let output = command.output().map_err(|error| {
+        let status = command.status().map_err(|error| {
             CycleError::new(
                 CycleErrorCode::RecipeFailed,
                 format!("goal-session recipe runner failed to start: {error}"),
             )
         })?;
-        if !output.status.success() {
+        if !status.success() {
+            let diagnostic = bounded_diagnostic_file(&diagnostic_path);
+            let _ = std::fs::remove_file(&diagnostic_path);
             return Err(CycleError::new(
                 CycleErrorCode::RecipeFailed,
-                format!(
-                    "goal-session recipe exited with {}: {}",
-                    output.status,
-                    bounded_diagnostic(&output.stderr)
-                ),
+                format!("goal-session recipe exited with {status}: {diagnostic}"),
             ));
         }
+        let _ = std::fs::remove_file(&diagnostic_path);
 
         let outcome = handler
             .terminal_for_cycle(&invocation.session_id, &invocation.cycle_id)
@@ -181,14 +196,25 @@ impl TypedGoalSessionRoute {
                 ),
             )
         })?;
-        if !recipe.contains("type: \"agent\"")
-            || !recipe.contains("ooda terminal")
-            || recipe.contains("type: \"bash\"")
-            || recipe.contains("ooda actor-run")
-        {
+        if recipe != TRUSTED_RECIPE {
             return Err(CycleError::new(
                 CycleErrorCode::RecipeFailed,
-                "goal-session recipe must be an agent step that invokes the authenticated typed terminal capability",
+                "goal-session recipe does not match the trusted compiled asset",
+            ));
+        }
+        let policy = std::fs::read_to_string(&self.policy_path).map_err(|error| {
+            CycleError::new(
+                CycleErrorCode::RecipeFailed,
+                format!(
+                    "goal-session policy {} could not be read: {error}",
+                    self.policy_path.display()
+                ),
+            )
+        })?;
+        if policy != TRUSTED_POLICY {
+            return Err(CycleError::new(
+                CycleErrorCode::RecipeFailed,
+                "goal-session policy does not match the trusted compiled asset",
             ));
         }
         self.load_policy().map(|_| ())
@@ -202,7 +228,44 @@ fn context_error(error: std::io::Error) -> CycleError {
     )
 }
 
-fn bounded_diagnostic(bytes: &[u8]) -> String {
-    let end = bytes.len().min(1000);
-    String::from_utf8_lossy(&bytes[..end]).into_owned()
+fn resolve_recipe_runner() -> Result<PathBuf, CycleError> {
+    if let Some(configured) = std::env::var_os("SIMARD_RECIPE_RUNNER_BIN") {
+        let path = PathBuf::from(configured);
+        if path.is_absolute() && path.is_file() {
+            return Ok(path);
+        }
+        return Err(CycleError::new(
+            CycleErrorCode::RecipeFailed,
+            "SIMARD_RECIPE_RUNNER_BIN must name an existing absolute file",
+        ));
+    }
+    let path = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/"))
+        .join(".cargo/bin/recipe-runner-rs");
+    if path.is_file() {
+        return Ok(path);
+    }
+    Err(CycleError::new(
+        CycleErrorCode::RecipeFailed,
+        "recipe-runner-rs was not found at ~/.cargo/bin; configure SIMARD_RECIPE_RUNNER_BIN",
+    ))
+}
+
+fn bounded_diagnostic_file(path: &Path) -> String {
+    const LIMIT: u64 = 4096;
+    let mut bytes = Vec::new();
+    let Ok(file) = std::fs::File::open(path) else {
+        return "diagnostic output unavailable".to_string();
+    };
+    let mut reader = file.take(LIMIT + 1);
+    if reader.read_to_end(&mut bytes).is_err() {
+        return "diagnostic output unreadable".to_string();
+    }
+    let truncated = bytes.len() as u64 > LIMIT;
+    bytes.truncate(LIMIT as usize);
+    let mut diagnostic = String::from_utf8_lossy(&bytes).into_owned();
+    if truncated {
+        diagnostic.push_str("\n[diagnostic truncated after 4096 bytes]");
+    }
+    diagnostic
 }

@@ -70,7 +70,7 @@ fn admitted() -> AdmissionSnapshot {
         concurrent_engineers: 0,
         disk_used_percent: 10,
         active_claims: BTreeSet::new(),
-        policy_revision: "admission-v1".to_string(),
+        policy_revision: "policy-v1".to_string(),
     }
 }
 
