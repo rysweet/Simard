@@ -2,14 +2,16 @@
 
 **Investigation:** the overseer signature seen 2× in cognitive memory:
 `overseer-obs:goal:blocked:…|…|workstream-gap|workstream-gap`
-**Branch / HEAD:** `investigation/recurring-blocked-goals-workstream-gaps` @ `0289572e`
-**Date:** 2026-07-15  **Status:** Complete — re-validated against current source through six waves
-(latest HEAD `0289572e`; **every** investigation commit is **docs-only** — `git diff --name-only
+**Branch / HEAD:** `investigation/recurring-blocked-goals-workstream-gaps` @ `5a85317b`
+**Date:** 2026-07-15  **Status:** Complete — re-validated against current source through seven waves
+(latest HEAD `5a85317b`; **every** investigation commit is **docs-only** — `git diff --name-only
 6e3113bc..HEAD -- '*.rs'` is empty, all changes confined to `ai_working/`, so every source citation
 still holds and no fix is merged). Fifth-wave net-new findings (incl. the `resource:engineer_spawn`
 membership drift) are folded into §11; sixth-wave net-new findings (the end-to-end pipeline trace and
 the **D2→D1→D3 dependency-safe landing order**, plus a reconciliation of the two waves' D-numbering)
-are folded into §12.
+are folded into §12; seventh-wave net-new findings (the falsifiable **H0–H8 hypothesis set**, the
+executed **per-hypothesis verification matrix**, and the **minimal contained signature-path fix** with
+a zero-drift re-grounding) are folded into §13.
 
 This consolidates all parallel deep dives:
 [`investigation_report.md`](./investigation_report.md) (primary/secondary root cause),
@@ -89,8 +91,26 @@ architect drift-check
 reconciliation of the two waves' divergent D1/D2/D3 labels and one stale citation flagged — are
 folded into §12.
 
+A **seventh re-validation wave at HEAD `5a85317b`** re-cast the six-wave verdicts as an explicit,
+falsifiable **hypothesis set** and executed a **per-hypothesis verification pass** — every citation
+re-grounded to live `src/` once more (`git diff --name-only 6e3113bc..HEAD -- '*.rs'` still **empty**,
+docs-only):
+[`HYPOTHESES.md`](./HYPOTHESES.md) (the H0–H8 map: null-hypothesis H0 **rejected**, H1 the honest-`2×`
+cause, H2/H3/H4 the three root defects, H5 the dead zone, H6 the compounding non-idempotency, H7/H8
+the one-problem-in-N-views unifiers — each stated as a confirm/falsify test) and
+[`verification_results_ALL_HYPOTHESES.md`](./verification_results_ALL_HYPOTHESES.md) (a practical test
+executed for **every** H0–H8: full overseer suite **360 passed / 0 failed**, plus **17 targeted
+discriminating tests** and an end-to-end no-bridge probe, all green), synthesized in
+[`FINAL_SYNTHESIS.md`](./FINAL_SYNTHESIS.md) (the five-output executive synthesis + JSON at current
+HEAD), and complemented by a fourth architect deep dive
+[`tertiary_architecture_REGROUND_HEAD_5a85317b.md`](./tertiary_architecture_REGROUND_HEAD_5a85317b.md)
+(the **minimal contained signature-path fix** — a ~4-line `dedup_key.starts_with("overseer-obs:")`
+write-back filter — plus a zero-line-drift re-grounding of every prior citation at HEAD). Net-new
+items from this wave — the falsifiable hypothesis framing, the complete per-hypothesis verdict matrix,
+and the minimal contained D1 fix with its exactness proof — are folded into §13.
+
 Every claim below is re-grounded to a current line in `src/overseer/` (re-verified at
-HEAD `85b9398a`; all prior root-cause citations still hold — the one superseded item is
+HEAD `5a85317b`; all prior root-cause citations still hold exact — the one superseded item is
 a *remedy*, §6.2b, not an analysis).
 
 ---
@@ -910,3 +930,124 @@ of the investigation question; `mod.rs:1211,1217-1218` same-key merge raising pr
 **documentation-only**; defects **D1/D2/D3 (either labeling) stay live in source**. No remediation
 merged — §6's three-defect fix, landed in the §12.4-refined order, is all remaining scoped work.
 **INVESTIGATION-ONLY** — this wave specifies, re-validates, and reconciles; it does not implement.
+
+---
+
+## 13. Seventh re-validation wave (HEAD `5a85317b`) — hypothesis formalization + full per-hypothesis verification, folded
+
+This wave re-cast the accumulated six-wave verdicts as an explicit **falsifiable hypothesis set**
+([`HYPOTHESES.md`](./HYPOTHESES.md)) and then executed a **practical verification test for every
+hypothesis** ([`verification_results_ALL_HYPOTHESES.md`](./verification_results_ALL_HYPOTHESES.md)),
+synthesized in [`FINAL_SYNTHESIS.md`](./FINAL_SYNTHESIS.md). All source citations were re-grounded to
+live `src/` at HEAD `5a85317b`; `git diff --name-only 6e3113bc..HEAD -- '*.rs'` is **empty**
+(docs-only), so every prior line citation still holds. Independently re-confirmed this wave:
+`observation_signature` (`mod.rs:1068-1072`), the `"workstream-gap"` constant key (`mod.rs:1371`),
+`RECURRING_SIGNATURE_THRESHOLD = 2` (`signal.rs:362`), `RECURRENCE_ESCALATION_THRESHOLD = 3`
+(`root_cause.rs:33` — the escalation constant now cited at its definition, superseding the earlier
+`mod.rs:1613` use-site citation), and the bare-block pair `is_bare_no_progress_block`
+(`no_progress_breaker.rs:108`) / `no_progress_blocked_reason` (`:123`).
+
+- **13.1 — The six-wave analysis is now a confirm/falsify hypothesis map (H0–H8).** Each prior finding
+  is restated so a single source/test probe can confirm or falsify it, and the falsification tests
+  become the **acceptance criteria for any eventual fix**:
+
+  | ID | Hypothesis | Role | Defect | Verdict |
+  |----|-----------|------|--------|---------|
+  | H0 | Dedup / storage / replay / collision artifact | Null | — | **REJECTED (high)** |
+  | H1 | Real re-observation loop of a near-static set | Cause of `2×` | — | **CONFIRMED (high)** |
+  | H2 | WHY reasoner double-gated → bare parks | Root cause A | D2 (latch) | **SUPPORTED (high)** |
+  | H3 | `WorkstreamCoverage` has no closing edge | Root cause B | D3 | **SUPPORTED (high)** |
+  | H4 | Self-observation write-back feedback | Nesting cause | D1 | **SUPPORTED (bounded)** |
+  | H5 | 2×↔3× dead zone, two decoupled lanes | Why "exactly 2×" | D2 | **SUPPORTED (high)** |
+  | H6 | Non-idempotent counters (compounding) | Amplifier | D2 | **SUPPORTED (non-causal)** |
+  | H7 | blocked ↔ gap = one problem, two views | Unifier | — | **SUPPORTED (high)** |
+  | H8 | Three token families = one under-throughput | Generalization | — | **SUPPORTED (med-high)** |
+
+  This map **reconciles cleanly with §0–§12** — no verdict reversed. H1 restates §0's honest-`2×`
+  verdict; H0's rejection restates §0/§3's not-a-dedup-bug proof; H2↔§1/§1a (double-gated WHY),
+  H3↔§2/§6.1 (notify-only gap arm / D3), H4↔§0a/§6.5 (self-observation, D1), H5↔§3/§3c (dead zone,
+  two lanes), H6↔§3a/§3b/§6.2b (non-idempotent ratchet, count-in-content remedy, non-causal),
+  H7↔§4/§12.9 (oscillation), H8↔§11 (`resource:engineer_spawn` benign membership drift). The one
+  refinement carried in: H1 is sharpened from "static set" to **"near-static set"** to match §11.2's
+  overlapping-but-different two-snapshot membership delta.
+
+- **13.2 — Null hypothesis empirically rejected; the `2×` is an honest count.** H0 (the `2×` is a
+  counting/dedup/replay/collision artifact) was actively falsified, not merely assumed away:
+  `write_back_is_deduplicated_within_window` proves intra-window suppression (not a double-read);
+  `write_back_persists_again_for_a_distinct_signature` proves distinct observations legitimately
+  persist (the count is honest); `keys.dedup()` collapses only *adjacent-equal* keys within one
+  signature (`mod.rs:1071`), so `workstream-gap|workstream-gap` are distinct concatenated
+  problems/episodes, not a dedup failure; and the store-boundary trace confirms the composite lives
+  **only** under the cognitive `overseer-obs:` key, never in the stewardship store (keyed on
+  `sha256(kind‖norm(err))[..8]`) — no cross-store duplication.
+
+- **13.3 — Every hypothesis has an executed practical test; suite is green at current HEAD.** The
+  verification pass reproduced at HEAD `5a85317b`: the full overseer suite (`cargo test --lib
+  overseer::`) **360 passed / 0 failed**; **17 targeted `--exact` discriminating tests** (7 + 10, two
+  batches) all passed; and an **end-to-end no-bridge probe** — a `RecurringSignature{occurrences:2}`
+  fed through `signals_from → orient → analyze → decide` yields a `ProcessHealth` `LaunchRecipe` with
+  root-cause `recurrence == 0`, **never** `EscalateBlockedGoal` — executed and passed. This last probe
+  is the empirical proof of the §3c/§12.7 **two-lane decoupling**: Lane A's visible `×2` (episodes)
+  cannot advance Lane B's `≥3` escalation rung (occurrence facts) because no code path converts one
+  into the other. (The absolute suite count drifts by a few tests across waves as the suite grows —
+  earlier `verification_results.md` recorded 359; the invariant is **0 failures** and all 17
+  discriminating tests green, which reproduces here.)
+
+- **13.4 — Smoking-gun test for INV-WHY (H2).** `a_perpetual_goal_is_never_reinvestigated_even_if_bare_blocked`
+  demonstrates that a bare-block reason (no `NoProgressClass` / WHY token) can persist **indefinitely**
+  — the goal re-parks every window and stays in the `goal:blocked:*` population. Combined with the
+  reachability of `no_progress_blocked_reason(consecutive)` (renders `{PREFIX}{count}{SUFFIX}` with no
+  WHY, `no_progress_breaker.rs:123-125`) and `is_bare_no_progress_block` returning `true` for it
+  (`:108-113`), this proves **INV-WHY is violable in source today** — the acceptance-criterion
+  falsification test for H2 holds, confirming the primary common root cause behind the `goal:blocked`
+  tokens.
+
+- **13.5 — Discriminating predictions locked as the fix acceptance criteria (unchanged from §6.4).**
+  The four falsification tests that must flip once §6 remediation lands are re-confirmed verbatim as
+  the regression contract: (1) close the WHY double-gate + count-in-content counter atomically ⇒
+  `goal:blocked:*` tokens converge (falsifies H2 "stuck forever"); (2) add a recurrence-aware
+  gap-closing rung at threshold 2 ⇒ the `workstream-gap|workstream-gap` tail converges (falsifies H3
+  "flag-forever"); (3) filter recall-derived `RecurringSignature` from write-back ⇒ nested
+  `overseer-obs:` tokens vanish (falsifies H4); (4) the persistent-unremediated gauge (§6.4: count of
+  signatures with recurrence ≥2 and no launch/escalation, plus INV-WHY violations) must reach and stay
+  0 — the leading indicator that a signature re-entered the dead zone.
+
+- **13.6 — Minimal contained D1 signature-path fix, with exactness proof (tertiary architect).** The
+  seventh-wave architect specified the *cheapest, orthogonal* fix for the self-referential
+  `overseer-obs:…|overseer-obs:…` nesting: a ~4-line filter inside `write_back_observation`
+  (`mod.rs:534-563`) that drops any problem whose `dedup_key.starts_with("overseer-obs:")` before
+  signature/content assembly (empty-survivor set ⇒ clean tick, write nothing). Two net-new proofs make
+  it exact and safe: **(a) single-producer** — the `overseer-obs:` prefix has exactly **one** literal
+  emitter in the tree, `observation_signature` (`mod.rs:1072`), re-confirmed by
+  `grep '"overseer-obs:' src/overseer/*.rs` returning only that line; the prefix reaches a
+  `dedup_key` only via the RecurringSignature recall arm (`mod.rs:1359`), and `sanitize_recalled`
+  (`capabilities.rs:468`) preserves the position-0 prefix (only blanks control chars / end-truncates),
+  so the filter is robust even against deeply nested composites. **(b) prefix-filter beats an
+  evidence-based filter** — a RecurringSignature whose recalled signature is a *domain* key (e.g.
+  `goal:blocked:X`) keeps that domain `dedup_key` and **merges** into the genuine fresh blocked-goal
+  problem in `orient` (`mod.rs:1211-1219`), boosting its priority; filtering on "evidence contains
+  `RecurringSignature`" would wrongly drop that real, recall-*boosted* observation, whereas the
+  `starts_with("overseer-obs:")` filter excludes **only** the truly self-referential standalone echoes.
+  Scope is deliberately **write-back only**: the RecurringSignature problem stays in `cycle.problems`
+  so Decide/Act still fire its `LaunchRecipe` (`mod.rs:1429`); the fix removes the nested *shape* but
+  does **not** by itself converge the static problem set (that is D2+D3). This confirms and sharpens
+  §6.5 and the recommended **D2 (atomic gate+counter) → D3 (closing rung) → D1 (this filter)** landing
+  order (§12.4/§6.6), and re-grounds every prior citation at HEAD `5a85317b` with **zero line drift**
+  (`git diff --stat dea65df8..HEAD -- src/` empty). Two residuals are explicitly logged: the
+  window-vs-restart origin of the `×2` is undecidable from static source, and whether the overseer
+  should *act* on (not just avoid re-recording) its own recalled echo — the `LaunchRecipe` from a
+  recall-derived ProcessHealth problem — is a broader emission-hygiene question left to the D-set owner.
+
+**Bottom line (seven-wave consolidated verdict):** the `×2` is a **faithful cross-window recurrence
+count of a genuinely re-observed near-static problem set** (H1 confirmed; H0 empirically rejected).
+It never changes because two observe-and-flag loops never close — blocked goals can bare-park with no
+WHY (H2/D2), coverage gaps notify with no launch edge (H3/D3) — and the count parks in the **dead zone
+between thresholds 2 and 3** (H5), while the overseer **re-observes its own bookkeeping** (H4/D1,
+bounded) and the counters **lack idempotency** (H6, compounding not causal). H7/H8 unify the symptoms
+into **one under-throughput condition in three views**. Every defect is design-level; **none is a
+dedup/storage bug.**
+
+**Fix status (unchanged, re-confirmed at HEAD `5a85317b`):** all seven investigation commits remain
+**documentation-only**; defects **D1/D2/D3 stay live in source**. No remediation merged — §6's
+three-defect fix, landed in the §12.4-refined **D2→D1→D3 dependency-safe order**, is all remaining
+scoped work. **INVESTIGATION-ONLY** — this wave formalizes and verifies; it does not implement.
