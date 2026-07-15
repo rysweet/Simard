@@ -6,7 +6,47 @@
 This extends [`verification_results.md`](./verification_results.md) (H1-focused) to a
 complete per-hypothesis matrix, each with the concrete test run and its outcome.
 
-**Re-executed on HEAD `bbddd23a`** (`cargo test -p simard --lib`, 2026-07-15):
+**Re-executed on HEAD `05c08919`** (`cargo test -p simard --lib`, 2026-07-15):
+- Full overseer suite (`overseer::`): **361 passed, 0 failed** (7960 filtered).
+- All named discriminating probes re-run green at this HEAD:
+  - H0/H1 dedup+persist: `write_back_is_deduplicated_within_window`,
+    `write_back_persists_again_for_a_distinct_signature` (2 passed).
+  - H0 whisper-gate: `whisper_gate_suppresses_an_identical_whisper_within_the_window`,
+    `whisper_gate_caps_whispers_per_rolling_hour` (`overseer::tests_whisper`, 2 passed).
+  - H1 recurring-signature family (`overseer::tests_memory_recall`): 8 passed incl.
+    `recurring_signature_emitted_when_two_episodes_share_signature`,
+    `recurring_signature_not_emitted_for_single_occurrence`,
+    `orient_raises_recurring_signature_to_high_priority`.
+  - H2 reinvestigation ladder: **21 passed** across `goal_curation::tests_no_progress_reinvestigation`
+    (10) + `ooda_loop::tests_no_progress_reinvestigation` (11), including the smoking gun
+    `a_perpetual_goal_is_never_reinvestigated_even_if_bare_blocked` and
+    `a_reinvestigated_goal_is_not_processed_again_next_cycle`.
+  - H3/H7 gap+delegation (`overseer::tests_gap_scan`): `decide_routes_workstream_coverage_to_flag_gaps`,
+    `flagged_gap_never_constructs_an_issue_brief`,
+    `flags_gaps_notifies_both_channels_without_filing_then_dedupes_on_repeat`,
+    `workstream_gap_maps_to_a_workstream_coverage_problem_at_high_priority`,
+    `delegates_blocked_goals_to_goal_health_and_never_reflags_them` — all green.
+  - H5 lane-decoupling: `overseer::tests_root_cause::loud_lane_a_recurring_signature_does_not_feed_lane_b_recurrence` (passed).
+  - H7 route-by-shape (`overseer::tests_goal_health`): `decide_routes_a_blocked_goal_by_shape`,
+    `perpetual_no_progress_goal_is_unblocked_once_and_not_escalated`,
+    `needs_review_goal_escalates_to_operator_on_both_channels` — all green.
+- Source invariants re-confirmed at this HEAD (some paths/lines drifted; invariants hold):
+  H5 `RECURRING_SIGNATURE_THRESHOLD = 2` (`signal.rs:362`) vs
+  `RECURRENCE_ESCALATION_THRESHOLD = 3` (`root_cause.rs:33`, applied at `mod.rs:1613`);
+  H2 bare-block predicate `is_bare_no_progress_block` (`goal_curation/no_progress_breaker.rs:108`)
+  + bare renderer `no_progress_blocked_reason` (`:123`) split from `_with_why` (`:141`) —
+  **file relocated from `overseer/goal_curation/` to top-level `src/goal_curation/`**, INV-WHY
+  still violable (perpetual-goal smoking-gun test still passes); H3 notify-only arm
+  `act_flag_workstream_gaps` (`mod.rs:884`) + `FlagWorkstreamGaps` routing (`mod.rs:1543`);
+  H4 `write_back_observation(&cycle.problems)` writes ALL problems (`wiring.rs:301`);
+  H6 `record_occurrence` (`mod.rs:1004`) uses non-deduping `mem.store_fact` (`mod.rs:1034`) and
+  `WhisperGate.last_delivered` is an in-process `HashMap` (`guardrails.rs:294`).
+  **Verdict matrix below unchanged; all tests green.** Note: the H2 reinvestigation ladder has
+  grown (21 tests) — the self-heal path now covers done/precondition/upstream/retry-spent variants,
+  which *strengthens* remediation coverage but does **not** falsify H2: a perpetual bare block still
+  persists without a WHY token, so INV-WHY remains violable.
+
+**Previously re-executed on HEAD `bbddd23a`** (`cargo test -p simard --lib`, 2026-07-15):
 - Full overseer suite (`overseer::`): **361 passed, 0 failed** (7960 filtered).
 - 17 named discriminating tests (all H0–H8 probes, incl. the two
   `ooda_loop::tests_no_progress_reinvestigation` H2 tests): **all green** —
