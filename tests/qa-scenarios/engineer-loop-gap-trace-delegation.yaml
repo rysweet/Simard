@@ -1,0 +1,50 @@
+name: engineer-loop-gap-trace-delegation
+app_type: cli
+description: |
+  Validates that the engineer-loop inspect-phase architecture gap trace follows
+  the operator-probe binary's delegation into dispatch_operator_probe instead of
+  string-scanning the thin wrapper alone. On the real repository the shipped
+  probe delegates to a dispatcher that wires the engineer-loop-run subcommand,
+  so the gap trace must report the repo-grounded engineer-loop-run surface as
+  exposed and must never claim it "does not yet expose" a terminal engineer loop.
+agents:
+  - name: cargo-test-runner
+    type: cli
+    command: cargo
+
+steps:
+  # Synthetic-input detection: delegating probe + dispatcher exposing the mode.
+  - action: run
+    command: "cargo test --lib engineer_loop::tests_mod_more::architecture_gap_summary_delegating_probe_follows_dispatcher_engineer_loop"
+    timeout: 120s
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
+
+  # Terminal-only dispatcher still reported honestly (no false engineer-loop claim).
+  - action: run
+    command: "cargo test --lib engineer_loop::tests_mod_more::architecture_gap_summary_delegating_probe_follows_dispatcher_terminal_only"
+    timeout: 120s
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
+
+  # Delegating probe with no dispatcher file fails closed to "not wired".
+  - action: run
+    command: "cargo test --lib engineer_loop::tests_mod_more::architecture_gap_summary_delegating_probe_without_dispatch_file_reports_unwired"
+    timeout: 120s
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
+
+  # Real-repo regression guard: shipped surfaces report engineer-loop-run exposed.
+  - action: run
+    command: "cargo test --lib engineer_loop::tests_mod_more::architecture_gap_summary_on_real_repo_reports_engineer_loop_exposed"
+    timeout: 120s
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"

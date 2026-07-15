@@ -165,6 +165,13 @@ pub(crate) fn architecture_gap_summary(repo_root: &Path) -> SimardResult<String>
         } else if source.contains("\"terminal-run\"") {
             "operator probe exposes terminal-run but not a repo-grounded engineer-loop-run"
                 .to_string()
+        } else if source.contains("dispatch_operator_probe") {
+            // The shipped probe binary is a thin wrapper that delegates to
+            // `dispatch_operator_probe`; the real engineer-loop-run surface lives
+            // behind that dispatcher. Follow the delegation so the gap trace
+            // reflects the surface operators actually reach rather than the
+            // wrapper file.
+            dispatched_engineer_surface_summary(repo_root)?
         } else {
             "operator probe exists but does not yet expose a terminal engineer loop".to_string()
         }
@@ -186,4 +193,38 @@ pub(crate) fn architecture_gap_summary(repo_root: &Path) -> SimardResult<String>
             "Repository is missing Specs/ProductArchitecture.md, so the gap trace falls back to current operator/runtime surfaces only; {operator_surface}; {review_trace}."
         ),
     })
+}
+
+/// Resolve the operator surface message by following the probe binary's
+/// delegation into `dispatch_operator_probe`.
+///
+/// The shipped `src/bin/simard_operator_probe.rs` is intentionally a thin
+/// wrapper, so string-scanning it alone under-reports the exposed surface. The
+/// authoritative routing table lives in `src/operator_commands/dispatch.rs`;
+/// inspect it so the gap trace reflects the surface operators actually reach.
+fn dispatched_engineer_surface_summary(repo_root: &Path) -> SimardResult<String> {
+    let dispatch_path = repo_root.join("src/operator_commands/dispatch.rs");
+    if dispatch_path.is_file() {
+        let source =
+            fs::read_to_string(&dispatch_path).map_err(|error| SimardError::ArtifactIo {
+                path: dispatch_path.clone(),
+                reason: error.to_string(),
+            })?;
+        if source.contains("\"engineer-loop-run\"") {
+            return Ok(
+                "operator probe delegates to a dispatcher that exposes the repo-grounded engineer-loop-run surface"
+                    .to_string(),
+            );
+        }
+        if source.contains("\"terminal-run\"") {
+            return Ok(
+                "operator probe delegates to a dispatcher that exposes terminal-run but not a repo-grounded engineer-loop-run"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(
+        "operator probe delegates to a dispatcher but the engineer-loop-run surface is not wired"
+            .to_string(),
+    )
 }
