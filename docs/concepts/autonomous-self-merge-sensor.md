@@ -115,10 +115,12 @@ fails closed and visible at every step.
   candidates ⇒ no autonomous merge.** Deploying this code does **not** merge
   anything until an operator canary-enables a specific repo. See
   [Enable autonomous self-merge (canary)](../howto/enable-autonomous-self-merge-canary.md).
-- **Own PRs only.** Exact author-login equality against Simard's OODA/engineer
-  identity. This identity is **distinct** from the `simard-overseer[bot]`
-  identity that the `RecursionGuard` refuses, so the two never collide and
-  valid candidates survive the guard. An unresolvable author ⇒ empty list.
+- **Own PRs only.** Whole-login, case-insensitive equality against Simard's
+  configured OODA/engineer identity (`SIMARD_AUTOMERGE_AUTHOR`, required — no
+  ambient `gh` fallback). This identity is **distinct** from the
+  `simard-overseer[bot]` identity that the `RecursionGuard` refuses, so the two
+  never collide and valid candidates survive the guard. An unset or unmatched
+  author ⇒ empty list.
 - **Authoritative gate unchanged.** The authoritative gate in `merge_authority`
   stays fail-closed (`Unclear`/error ⇒ `NotReady` ⇒ refuse) and still **never**
   uses `--admin` or `--no-verify`. Branch protections are never bypassed.

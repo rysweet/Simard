@@ -467,8 +467,8 @@ impl PrOps for MergePrOps {
     /// [`PrGhClient::list_prs_by_author`] so the author filter runs SERVER-SIDE
     /// — a busy repo can never crowd Simard's PRs out of the fetch window, and
     /// only her PRs are transferred + parsed) and keeps only those that
-    /// are (a) authored by the configured automerge author (re-verified with an
-    /// EXACT in-process match as defense-in-depth) and
+    /// are (a) authored by the configured automerge author (re-verified with a
+    /// case-insensitive whole-login in-process match as defense-in-depth) and
     /// (b) pass the cheap objective pre-filter
     /// ([`evaluate_objective_gates`]: base allow-list + `mergeable == MERGEABLE`
     /// + all checks green) computed from the already-fetched listing fields.
@@ -513,10 +513,16 @@ impl PrOps for MergePrOps {
                 }
             };
             for pr in summaries {
-                // EXACT author match: a substring/prefix would let a look-alike
-                // or human PR through. An empty author (missing object) can
-                // never match, so it fails closed.
-                if pr.author != author {
+                // Case-INSENSITIVE whole-login match: GitHub logins are unique
+                // case-insensitively and `gh pr list --author` already matches
+                // that way server-side, so a byte-exact compare here would
+                // silently drop every returned row when the operator configured
+                // `SIMARD_AUTOMERGE_AUTHOR` with different casing than the
+                // canonical `author.login` — a "canary does nothing" trap. This
+                // stays a WHOLE-login equality (a substring/prefix would let a
+                // look-alike or human PR through). An empty author (missing
+                // object) can never match, so it still fails closed.
+                if !pr.author.eq_ignore_ascii_case(author) {
                     continue;
                 }
                 // Cheap objective pre-filter from the ALREADY-FETCHED listing
@@ -1197,6 +1203,33 @@ mod tests {
             vec![author.to_string()],
             "the survey must forward the configured automerge author to the \
              server-side `gh pr list --author` filter"
+        );
+    }
+
+    #[test]
+    fn survey_matches_author_case_insensitively() {
+        // Guards the case-sensitivity fix: `gh pr list --author` matches logins
+        // case-insensitively server-side, so if an operator configures
+        // `SIMARD_AUTOMERGE_AUTHOR` with different casing than the canonical
+        // `author.login`, the in-process defense-in-depth match must NOT drop
+        // the row (a silent "canary does nothing" trap). A whole-login,
+        // case-insensitive equality keeps the own-PR candidate.
+        let configured = "Simard-Engineer";
+        let canonical = "simard-engineer";
+        let repo = "rysweet/Simard";
+        let mut by_repo = HashMap::new();
+        by_repo.insert(
+            repo.to_string(),
+            Ok(vec![open_pr(301, canonical, "MERGEABLE", "main", "SUCCESS")]),
+        );
+        let gh = ListingGh::new(by_repo);
+        let (ops, _seen) = survey_ops(gh, Some(configured));
+
+        assert_eq!(
+            ops.survey_ready_prs(&[repo.to_string()]),
+            vec![pr_ref(repo, 301)],
+            "a differently-cased configured author must still match the PR's \
+             canonical login (GitHub logins are unique case-insensitively)"
         );
     }
 

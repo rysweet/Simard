@@ -36,8 +36,11 @@ its [API reference](../reference/ready-prs-sensor-api.md).
 ## Prerequisites
 
 - The daemon binary includes the `ready_prs` sensor (this feature).
-- **`gh`** authenticated as Simard's OODA/engineer identity
-  (`gh auth status`) — this is the login whose PRs she may merge.
+- **`gh`** authenticated so the daemon can list and merge PRs (`gh auth status`).
+- You know the login Simard authors her PRs under (`gh api user --jq .login` on
+  the daemon's identity, or the engineer login she commits as) — you set this
+  explicitly as `SIMARD_AUTOMERGE_AUTHOR`. There is **no** implicit fallback to
+  the ambient `gh` identity: leaving it unset keeps the sensor fail-closed.
 - You know the canary repo in `owner/name` form (start with `rysweet/Simard`).
 - `NODE_OPTIONS=--max-old-space-size=32768` exported for any Node-backed tooling
   (saved operator preference; change in `~/.amplihack/config`).
@@ -47,7 +50,7 @@ its [API reference](../reference/ready-prs-sensor-api.md).
 | Variable | Effect |
 |---|---|
 | `SIMARD_AUTOMERGE_REPOS` | Comma-separated `owner/name` allowlist of repos eligible for autonomous self-merge. **Unset/empty ⇒ OFF.** |
-| `SIMARD_AUTOMERGE_AUTHOR` | *(optional)* Override the own-PR author login. Unset ⇒ resolved from `gh api user`. |
+| `SIMARD_AUTOMERGE_AUTHOR` | **Required.** The `gh` login whose own PRs Simard may merge. **Unset/empty ⇒ OFF** (fail-closed — there is no ambient `gh api user` fallback). |
 
 Setting the allowlist only lets the sensor **list candidates**. Every candidate
 still passes the authoritative merge gate in
@@ -71,25 +74,27 @@ You want at least one of Simard's own PRs to be green + `MERGEABLE` so the canar
 has something to act on. If none are ready, the canary is still safe — it will
 simply merge nothing.
 
-### 2. Enable exactly one repo
+### 2. Enable exactly one repo and set the author
 
-Add the variable to the daemon's systemd unit (user service) — a single-repo
-allowlist:
+Add **both** gate variables to the daemon's systemd unit (user service) — a
+single-repo allowlist plus the explicit own-PR author. Leaving either unset
+keeps the sensor OFF (fail-closed):
 
 ```ini
 # ~/.config/systemd/user/simard-ooda.service  (drop-in or [Service] block)
 Environment=SIMARD_AUTOMERGE_REPOS=rysweet/Simard
+Environment=SIMARD_AUTOMERGE_AUTHOR=<the login from step 1>
 ```
 
-Then reload and restart so the daemon reads the new value at boot:
+Then reload and restart so the daemon reads the new values at boot:
 
 ```bash
 systemctl --user daemon-reload
 systemctl --user restart simard-ooda.service
 ```
 
-> The allowlist is read from the daemon's **process environment**, which is
-> fixed for the life of the process. Changing it mid-run has no effect —
+> Both gates are read from the daemon's **process environment**, which is
+> fixed for the life of the process. Changing them mid-run has no effect —
 > restart to apply.
 
 ### 3. Verify the wire is live
@@ -157,7 +162,8 @@ disable.
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| Survey never lists a known-green own PR | author login mismatch | Compare `gh api user --jq .login` with the PR's `author.login`; set `SIMARD_AUTOMERGE_AUTHOR` explicitly if the daemon runs as a different identity. |
+| Survey never lists a known-green own PR | `SIMARD_AUTOMERGE_AUTHOR` unset or mismatched | Confirm the var is set (unset ⇒ fail-closed OFF). Casing is tolerated (the match is case-insensitive), but confirm it is the same whole login as the PR's `author.login`. |
+| No candidates although author and repo are set | author login typo (wrong whole login) | Compare the configured `SIMARD_AUTOMERGE_AUTHOR` with the PR's `author.login`; the match is a whole-login, case-insensitive equality — a different login (not just different casing) yields nothing. |
 | Candidate listed but never merged | authoritative gate refused it | Read the refusal reason in the log — usually a missing or thin merge-ready evidence section (QA-team, Quality-audit, CI link). Fix the PR body; the sensor was correct to list it. |
 | No `survey_ready_prs` line at all | allowlist unset or typo | Confirm `SIMARD_AUTOMERGE_REPOS` is exactly `owner/name`; unknown values contribute nothing. Restart after any change. |
 | A repo in the allowlist is skipped every cycle | `gh pr list` errored for that repo | Look for the `warn!` line naming the repo (auth/permissions); other repos are unaffected. |

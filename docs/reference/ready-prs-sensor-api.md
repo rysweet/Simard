@@ -115,19 +115,26 @@ repo is not surveyed and contributes zero candidates.
 /// `SIMARD_AUTOMERGE_AUTHOR`. Pure env projection: `None` when unset.
 pub fn automerge_author_from(lookup: impl Fn(&str) -> Option<String>) -> Option<String>;
 
-/// Production entry. When SIMARD_AUTOMERGE_AUTHOR is unset, falls back to the
-/// authenticated gh identity (`gh api user` → `.login`), resolved once and
-/// cached. The `gh` side effect lives here (and/or in the survey impl), never
-/// in the pure `_from` resolver.
+/// Production entry. Reads ONLY the explicit `SIMARD_AUTOMERGE_AUTHOR` env var;
+/// unset/empty => `None` => the sensor yields no candidates (fail-closed),
+/// identical to the pure `_from` resolver it delegates to. There is
+/// deliberately NO ambient `gh api user` fallback — see the design note.
 pub fn automerge_author() -> Option<String>;
 ```
 
-> **Design note.** The `gh api user` fallback cannot live inside
-> `automerge_author_from`, whose only input is a pure environment lookup
-> closure. Keep the identity fallback in the production entry (or the survey
-> impl) so the `_from` function stays deterministic and unit-testable.
+> **Design note.** There is deliberately no ambient `gh api user` fallback when
+> `SIMARD_AUTOMERGE_AUTHOR` is unset. An autonomous self-merge must never adopt
+> whatever identity the daemon's `gh` token happens to resolve to: if that token
+> were authenticated as a human operator (a personal `gh auth login`, a PAT in
+> CI), the sensor would treat that human's own open PRs as self-merge
+> candidates, and the recursion guard — which only refuses the distinct
+> `simard-overseer[bot]` login — would not catch them. Both gates (author and
+> repo allowlist) therefore require explicit operator opt-in, and
+> `automerge_author` fails closed on unset exactly like the pure `_from`
+> resolver. Keeping the resolver pure also keeps it deterministic and
+> unit-testable.
 
-This is the **OODA/engineer** identity — the daemon's authenticated `gh` user —
+This is the **OODA/engineer** identity — the login Simard authors her PRs under —
 and is **distinct** from `SIMARD_OVERSEER_AUTHOR_LOGIN`
 (`simard-overseer[bot]`), which the `RecursionGuard` refuses. Keeping the two
 identities separate is what lets Simard's own engineering PRs survive the guard

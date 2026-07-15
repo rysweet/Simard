@@ -298,38 +298,21 @@ pub fn automerge_author_from(lookup: impl Fn(&str) -> Option<String>) -> Option<
 }
 
 /// Production entry point: the OODA/engineer author login the self-merge sensor
-/// filters candidates to (#4097). The explicit `SIMARD_AUTOMERGE_AUTHOR` env
-/// override always wins; when it is unset the identity falls back to the
-/// authenticated `gh` login (`gh api user` → `.login`), resolved once and
-/// cached. Any failure to resolve => `None` => the sensor yields no candidates
-/// (fail-closed). The `gh` side effect lives HERE, never in the pure
-/// [`automerge_author_from`] resolver.
+/// filters candidates to (#4097). Read ONLY from the explicit
+/// `SIMARD_AUTOMERGE_AUTHOR` env var; unset/empty/whitespace-only => `None` =>
+/// the sensor yields no candidates (fail-closed), exactly as the module note
+/// and the pure [`automerge_author_from`] resolver promise.
+///
+/// There is deliberately NO ambient `gh api user` fallback. An autonomous
+/// self-merge must never adopt whatever identity the daemon's `gh` token
+/// happens to resolve to: if that token were authenticated as a human operator
+/// (a personal `gh auth login`, a PAT in CI), the sensor would treat that
+/// human's own open PRs as self-merge candidates — and the recursion guard only
+/// refuses the distinct `simard-overseer[bot]` login, so it would not catch
+/// them. Both self-merge gates (this author and `SIMARD_AUTOMERGE_REPOS`)
+/// therefore require explicit operator opt-in.
 pub fn automerge_author() -> Option<String> {
-    // Explicit override wins and is re-read from the live environment.
-    if let Some(explicit) = automerge_author_from(|k| std::env::var(k).ok()) {
-        return Some(explicit);
-    }
-    // Otherwise fall back to the authenticated gh identity, resolved once.
-    static CACHED_GH_LOGIN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    CACHED_GH_LOGIN
-        .get_or_init(resolve_authenticated_gh_login)
-        .clone()
-}
-
-/// Resolve the authenticated `gh` login via `gh api user --jq .login`. Returns
-/// `None` on ANY failure (gh missing, unauthenticated, empty output) so the
-/// self-merge sensor fails CLOSED — an unresolved identity yields no candidates
-/// and can never merge a human's PR by mistake.
-fn resolve_authenticated_gh_login() -> Option<String> {
-    let output = std::process::Command::new("gh")
-        .args(["api", "user", "--jq", ".login"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let login = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if login.is_empty() { None } else { Some(login) }
+    automerge_author_from(|k| std::env::var(k).ok())
 }
 
 /// Resolve the daily budget from an env resolver, falling back to
