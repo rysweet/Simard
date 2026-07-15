@@ -1898,6 +1898,17 @@ impl CapabilityHandler {
             Ok(_) => Ok(()),
             Err(error) if is_constraint(&error) => {
                 if self.claim_is_live(claim_key) {
+                    // Admission rejected because the existing claim is (proven or
+                    // fail-closed assumed) live. Emit a WARN so a claim that is
+                    // repeatedly blocked as "live" — e.g. a forged/stuck liveness
+                    // sentinel silently self-DoS'ing new spawns — is observable.
+                    tracing::warn!(
+                        target: "simard::ooda_brain",
+                        claim_key = %claim_key,
+                        request_id = %request_id,
+                        outcome_id = %outcome_id,
+                        "engineer claim admission rejected: existing claim is live",
+                    );
                     return Err(rejected());
                 }
                 // Stale/orphaned claim: reclaim it and retry once.
