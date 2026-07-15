@@ -2,7 +2,7 @@ use assert_cmd::Command;
 use serde_json::Value;
 use simard::typed_ooda::{
     AdmissionSnapshot, AuthenticatedToolContext, CapabilityGrant, CapabilityHandler,
-    CapabilityPolicy, RepositoryRef, TerminalKind,
+    CapabilityPolicy, EvidenceRef, RepositoryRef, TerminalKind,
 };
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -178,4 +178,126 @@ fn scoped_terminal_cli_records_no_action_without_a_rust_hosted_actor() {
         outcome.raw_semantic.as_bytes(),
         b"free-form semantic agent context"
     );
+}
+
+#[test]
+fn completed_terminal_cli_requires_typed_evidence_and_records_a_completion() {
+    let state = tempfile::tempdir().expect("state");
+    let ledger = state.path().join("outcomes.sqlite3");
+    let policy_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("prompt_assets/simard/policies/goal-session-capabilities.toml");
+    let policy = CapabilityPolicy::from_toml_file(&policy_path).expect("policy");
+    let handler = CapabilityHandler::open(&ledger, policy).expect("ledger");
+    let session_id = "cli-complete-session";
+    let cycle_id = "cli-complete-cycle";
+    let goal_id = "cli-complete-goal";
+    let actor = AuthenticatedToolContext::new(
+        "goal-session-actor",
+        session_id,
+        [CapabilityGrant::RecordCompleted],
+    )
+    .scoped_to_repository(RepositoryRef::new("rysweet", "Simard"))
+    .bound_to_cycle_goal(cycle_id, goal_id)
+    .with_engineer_permissions(["repo_read", "repo_write"]);
+    let lease = handler
+        .register_actor_session(
+            &actor,
+            "register-cli-complete-session",
+            cycle_id,
+            goal_id,
+            Duration::from_secs(60),
+        )
+        .expect("actor lease");
+    let token_path = state.path().join("token");
+    std::fs::write(&token_path, lease.token).expect("token");
+    let admission_path = state.path().join("admission.json");
+    std::fs::write(
+        &admission_path,
+        serde_json::to_vec(&AdmissionSnapshot {
+            concurrent_engineers: 0,
+            disk_used_percent: 0,
+            active_claims: BTreeSet::new(),
+            policy_revision: "goal-session-policy-v1".to_string(),
+        })
+        .expect("admission JSON"),
+    )
+    .expect("admission");
+    let summary_path = state.path().join("summary");
+    let raw_path = state.path().join("raw");
+    std::fs::write(&summary_path, b"goal shipped and verified").expect("summary");
+    std::fs::write(&raw_path, b"free-form semantic completion context").expect("raw");
+
+    // A completion without typed evidence must be rejected by the capability.
+    let empty_evidence = state.path().join("empty-evidence.json");
+    std::fs::write(&empty_evidence, b"[]").expect("empty evidence");
+    Command::cargo_bin("simard")
+        .expect("simard binary")
+        .args(["ooda", "terminal", "completed", "--ledger-path"])
+        .arg(&ledger)
+        .args(["--policy-path"])
+        .arg(&policy_path)
+        .args([
+            "--session-id",
+            session_id,
+            "--cycle-id",
+            cycle_id,
+            "--goal-id",
+            goal_id,
+            "--auth-token-path",
+        ])
+        .arg(&token_path)
+        .args(["--admission-path"])
+        .arg(&admission_path)
+        .args(["--request-id", "cli-complete-empty", "--summary-path"])
+        .arg(&summary_path)
+        .args(["--criterion-id", "goal-session-complete", "--evidence-path"])
+        .arg(&empty_evidence)
+        .args(["--raw-semantic-path"])
+        .arg(&raw_path)
+        .assert()
+        .failure();
+
+    // A completion with typed evidence succeeds and records a Completed terminal.
+    let evidence_path = state.path().join("evidence.json");
+    std::fs::write(
+        &evidence_path,
+        serde_json::to_vec(&vec![EvidenceRef::Commit {
+            repository: RepositoryRef::new("rysweet", "Simard"),
+            sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
+        }])
+        .expect("evidence JSON"),
+    )
+    .expect("evidence");
+    Command::cargo_bin("simard")
+        .expect("simard binary")
+        .args(["ooda", "terminal", "completed", "--ledger-path"])
+        .arg(&ledger)
+        .args(["--policy-path"])
+        .arg(&policy_path)
+        .args([
+            "--session-id",
+            session_id,
+            "--cycle-id",
+            cycle_id,
+            "--goal-id",
+            goal_id,
+            "--auth-token-path",
+        ])
+        .arg(&token_path)
+        .args(["--admission-path"])
+        .arg(&admission_path)
+        .args(["--request-id", "cli-complete-ok", "--summary-path"])
+        .arg(&summary_path)
+        .args(["--criterion-id", "goal-session-complete", "--evidence-path"])
+        .arg(&evidence_path)
+        .args(["--raw-semantic-path"])
+        .arg(&raw_path)
+        .assert()
+        .success();
+
+    let outcome = handler
+        .terminal_for_cycle(session_id, cycle_id)
+        .expect("terminal query")
+        .expect("durable terminal");
+    assert_eq!(outcome.kind, TerminalKind::Completed);
 }

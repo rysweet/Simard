@@ -151,19 +151,22 @@ fn dispatch_terminal(
                 evidence: Vec::new(),
             },
         )?,
-        "completed" => handler.record_completed(
-            &actor,
-            crate::typed_ooda::RecordCompletedRequest {
-                identity,
-                summary: read_opaque(&parsed, "summary-path")?,
-                completion: crate::typed_ooda::CompletionRef {
-                    criterion_id: required_named(&parsed, "criterion-id")?.to_string(),
-                    verification_evidence: Vec::new(),
+        "completed" => {
+            let verification_evidence = read_typed_evidence(&parsed, "evidence-path")?;
+            handler.record_completed(
+                &actor,
+                crate::typed_ooda::RecordCompletedRequest {
+                    identity,
+                    summary: read_opaque(&parsed, "summary-path")?,
+                    completion: crate::typed_ooda::CompletionRef {
+                        criterion_id: required_named(&parsed, "criterion-id")?.to_string(),
+                        verification_evidence: verification_evidence.clone(),
+                    },
+                    raw_semantic,
+                    evidence: verification_evidence,
                 },
-                raw_semantic,
-                evidence: Vec::new(),
-            },
-        )?,
+            )?
+        }
         other => return Err(format!("unsupported command 'ooda terminal {other}'").into()),
     };
     println!("{}", outcome.outcome_id);
@@ -177,6 +180,21 @@ fn read_opaque(
     Ok(crate::typed_ooda::OpaqueBytes::from(std::fs::read(
         required_named(values, key)?,
     )?))
+}
+
+/// Read a typed evidence list from a JSON file the actor wrote via its file
+/// tool. Evidence is a machine-owned tool-protocol argument (a `Vec` of typed
+/// `EvidenceRef`), not agent prose, so deserializing it here does not violate
+/// the zero-parser invariant. A completion must carry at least one entry.
+fn read_typed_evidence(
+    values: &std::collections::BTreeMap<String, String>,
+    key: &str,
+) -> Result<Vec<crate::typed_ooda::EvidenceRef>, Box<dyn std::error::Error>> {
+    let path = required_named(values, key)?;
+    let bytes = std::fs::read(path)?;
+    let evidence: Vec<crate::typed_ooda::EvidenceRef> = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("--{key} must be a JSON array of typed evidence: {error}"))?;
+    Ok(evidence)
 }
 
 fn dispatch_approvals(
