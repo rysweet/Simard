@@ -44,6 +44,7 @@ mod tests {
         assert_eq!(OperatingMode::Improvement.to_string(), "improvement");
         assert_eq!(OperatingMode::Gym.to_string(), "gym");
         assert_eq!(OperatingMode::Orchestrator.to_string(), "orchestrator");
+        assert_eq!(OperatingMode::Atelier.to_string(), "atelier");
     }
 
     #[test]

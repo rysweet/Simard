@@ -23,6 +23,10 @@ pub enum OperatingMode {
     Gym,
     /// Workflow orchestration — recipe routing and workstream dispatch.
     Orchestrator,
+    /// Industrial & furniture design studio — parametric modeling and
+    /// fabrication: drives CAD tools (Blender bpy / FreeCAD / OpenSCAD) to take
+    /// a product brief to an exported model, render, and fabrication package.
+    Atelier,
 }
 
 impl Display for OperatingMode {
@@ -34,6 +38,7 @@ impl Display for OperatingMode {
             Self::Improvement => "improvement",
             Self::Gym => "gym",
             Self::Orchestrator => "orchestrator",
+            Self::Atelier => "atelier",
         };
         f.write_str(label)
     }
@@ -50,6 +55,7 @@ impl FromStr for OperatingMode {
             "improvement" => Ok(Self::Improvement),
             "gym" => Ok(Self::Gym),
             "orchestrator" => Ok(Self::Orchestrator),
+            "atelier" => Ok(Self::Atelier),
             other => Err(format!("unknown operating mode: '{other}'")),
         }
     }
@@ -96,6 +102,7 @@ mod tests {
         assert_eq!(OperatingMode::Improvement.to_string(), "improvement");
         assert_eq!(OperatingMode::Gym.to_string(), "gym");
         assert_eq!(OperatingMode::Orchestrator.to_string(), "orchestrator");
+        assert_eq!(OperatingMode::Atelier.to_string(), "atelier");
     }
 
     #[test]
@@ -140,6 +147,7 @@ mod tests {
             OperatingMode::Improvement,
             OperatingMode::Gym,
             OperatingMode::Orchestrator,
+            OperatingMode::Atelier,
         ];
         for mode in modes {
             let json = serde_json::to_string(&mode).unwrap();
@@ -176,6 +184,10 @@ mod tests {
         assert_eq!(
             "orchestrator".parse::<OperatingMode>().unwrap(),
             OperatingMode::Orchestrator
+        );
+        assert_eq!(
+            "atelier".parse::<OperatingMode>().unwrap(),
+            OperatingMode::Atelier
         );
     }
 

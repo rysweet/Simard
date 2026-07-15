@@ -616,6 +616,38 @@ path = "engineer_system.md"
         assert!(!manifest.prompt_assets.is_empty());
     }
 
+    const ATELIER_TOML: &str = r#"
+[package]
+name = "simard-atelier"
+version = "0.1.0"
+
+[[identities]]
+name = "simard-atelier"
+default_mode = "atelier"
+supported_base_types = ["local-harness", "terminal-shell"]
+required_capabilities = ["prompt-assets", "session-lifecycle", "memory", "evidence", "reflection"]
+
+[[identities.prompt_assets]]
+id = "atelier-system"
+path = "atelier_system.md"
+"#;
+
+    #[test]
+    fn file_loader_loads_pluggable_atelier_card() {
+        let prompt_root = TempDir::new().unwrap();
+        let identity_dir = prompt_root.path().join("atelier");
+        fs::create_dir_all(&identity_dir).unwrap();
+        write_identity_toml(&identity_dir, ATELIER_TOML);
+        fs::write(identity_dir.join("atelier_system.md"), "# Atelier").unwrap();
+
+        let loader = FileIdentityLoader::new(&identity_dir, prompt_root.path());
+        let manifest = loader.load(&test_request("simard-atelier")).unwrap();
+        assert_eq!(manifest.name, "simard-atelier");
+        assert_eq!(manifest.default_mode, OperatingMode::Atelier);
+        assert_eq!(manifest.prompt_assets[0].id.as_str(), "atelier-system");
+        assert!(manifest.supports_base_type(&BaseTypeId::new("terminal-shell")));
+    }
+
     // ── Fallback behavior ───────────────────────────────────────────
 
     #[test]

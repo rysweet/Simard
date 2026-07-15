@@ -1,0 +1,45 @@
+# Atelier — pluggable Simard identity card (industrial & furniture design).
+#
+# This is the file-based ("pluggable") form of the identity, loadable by
+# `FileIdentityLoader`. The identity is ALSO registered as a builtin
+# (`simard-atelier`) in `src/identity/loader.rs`, which is the primary
+# selectable path; this card documents the portable identity-card + capabilities
+# format and can be dropped into an identity directory to load the same identity
+# from disk.
+#
+# `prompt_assets[].path` is resolved relative to the identity directory; point it
+# at the Atelier system prompt (canonically shipped at
+# `prompt_assets/simard/atelier_system.md`).
+
+[package]
+name = "simard-atelier"
+version = "0.1.0"
+description = "Industrial & furniture design studio: parametric modeling + fabrication (Blender/FreeCAD/OpenSCAD)."
+
+[[identities]]
+name = "simard-atelier"
+default_mode = "atelier"
+
+# Runs on the same base types as the engineer identity. A shell-capable base
+# type (terminal-shell) is required to drive the CAD tools.
+supported_base_types = [
+  "local-harness",
+  "terminal-shell",
+  "rusty-clawd",
+  "copilot-sdk",
+  "claude-agent-sdk",
+  "ms-agent-framework",
+]
+
+# Capabilities the runtime must satisfy to instantiate this identity.
+required_capabilities = [
+  "prompt-assets",
+  "session-lifecycle",
+  "memory",
+  "evidence",
+  "reflection",
+]
+
+[[identities.prompt_assets]]
+id = "atelier-system"
+path = "atelier_system.md"

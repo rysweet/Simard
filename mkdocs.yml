@@ -70,6 +70,7 @@ nav:
     - Typed-Capability OODA Loop: architecture/typed-ooda-loop.md
     - RPC Transport Pattern: architecture/rpc-pattern.md
     - Agent Composition: architecture/agent-composition.md
+    - Atelier Identity — Industrial & Furniture Design: architecture/atelier-identity.md
     - Engineer-Loop Agent Orchestration: architecture/engineer-agent-orchestration.md
     - Cognitive Memory: architecture/cognitive-memory.md
     - Cognitive Memory — Library Adapter: architecture/cognitive-memory-library-adapter.md

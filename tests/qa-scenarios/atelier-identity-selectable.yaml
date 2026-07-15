@@ -1,0 +1,51 @@
+name: atelier-identity-selectable
+app_type: cli
+description: >
+  Verify the pluggable Atelier identity (industrial & furniture design) is
+  selectable through the builtin loader and ships its system prompt + the two
+  goal-session recipes (parametric modeling + fabrication export) that take a
+  product brief to an exported model, render, and fabrication package.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+steps:
+  # Drive the outside-in Atelier integration test. The CLI runner rejects any
+  # non-zero exit, so this already enforces that every Atelier assertion (the
+  # identity is selectable in `atelier` mode, supports a shell base type for CAD
+  # tooling, and ships its prompt + both goal-session recipes) holds.
+  - action: run
+    params:
+      # First build can compile the crate + test target; keep the timeout wide.
+      command: "cargo test --test atelier_identity -- --nocapture"
+    timeout: 600000
+  # The identity is selectable in the dedicated `atelier` operating mode.
+  - action: wait_for_output
+    params:
+      value: "atelier_is_selectable_with_atelier_mode ... ok"
+    timeout: 15000
+  # It advertises a shell-capable base type so it can drive Blender/FreeCAD/OpenSCAD.
+  - action: wait_for_output
+    params:
+      value: "atelier_supports_a_shell_base_type_for_cad_tools ... ok"
+    timeout: 15000
+  # It ships its system prompt AND both goal-session recipes.
+  - action: wait_for_output
+    params:
+      value: "atelier_ships_prompt_and_goal_session_recipes ... ok"
+    timeout: 15000
+  # The prompt covers the full brief -> exported model + render pipeline.
+  - action: wait_for_output
+    params:
+      value: "atelier_prompt_covers_the_end_to_end_pipeline ... ok"
+    timeout: 15000
+  # All Atelier assertions passed.
+  - action: wait_for_output
+    params:
+      value: "test result: ok."
+    timeout: 15000
+  # Re-confirm the test binary exited cleanly (exit code 0).
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
