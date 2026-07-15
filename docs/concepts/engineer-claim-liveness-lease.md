@@ -15,6 +15,7 @@ doc_type: explanation
 status: implemented
 related:
   - ../reference/engineer-claim-release-api.md
+  - ./stale-engineer-claim-reaper.md
   - ../architecture/engineer-agent-orchestration.md
   - ../reference/ooda-engineer-lifecycle-recipe.md
   - ../reference/ooda-capability-api.md
@@ -159,6 +160,13 @@ shipped design needs no such column: release-on-termination plus
 liveness-verified reclaim fully cover correctness, so `schema.rs` is unchanged
 and existing stores need **no migration**. Any rows leaked before the fix
 self-heal — they are reclaimed the next time their goal attempts a spawn.
+
+> **Within-incarnation leaks are handled separately.** The collision-reclaim
+> above only fires when a goal is spawned *again*. A claim whose goal is never
+> re-spawned within a single daemon incarnation (completed, removed, or test
+> junk) is instead cleared by the independent periodic
+> [stale-engineer-claim reaper](./stale-engineer-claim-reaper.md) on the
+> Overseer tick.
 
 ## Invariants at a glance
 

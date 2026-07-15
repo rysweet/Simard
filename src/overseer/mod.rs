@@ -48,6 +48,7 @@
 pub mod activity;
 pub mod audit;
 pub mod capabilities;
+pub mod claim_reaper;
 pub mod config;
 pub mod conflict;
 pub mod deploy;
@@ -221,6 +222,28 @@ pub struct Overseer {
     /// no longer `Running` frees its slot), so the guard is "at most one IN
     /// FLIGHT", never a permanent one-shot.
     inflight_investigations: HashMap<String, WorkstreamHandle>,
+    /// Whether the periodic stale-engineer-claim reaper (issue #4099) is enabled
+    /// (config opt-out via `SIMARD_CLAIM_REAP_ENABLED`). ON by default in the
+    /// daemon; OFF in the bare constructor. When off, the sweep is a no-op.
+    claim_reap_enabled: bool,
+    /// Idle-staleness threshold (seconds) the reaper applies to a worktree's
+    /// newest-file age. Generous (default 1800s) so a long-but-alive engineer is
+    /// never reaped (no wall-clock kill).
+    claim_reap_stale_secs: u64,
+    /// The reaper's three injected seams: the ledger it sweeps + reclaims through
+    /// (the shared release chokepoint), the liveness probe, and the orphan
+    /// worktree cleanup. `None` until wired by `build_overseer`; when absent the
+    /// tick simply skips the sweep.
+    claim_reaper: Option<ClaimReaperSeams>,
+}
+
+/// The reaper's injected dependencies, bundled so the `Overseer` carries one
+/// optional field. Wired in `build_overseer`; faked in tests via the pure
+/// [`claim_reaper::reap_stale_claims`] entry point.
+struct ClaimReaperSeams {
+    ledger: Box<dyn claim_reaper::ClaimLedger>,
+    probe: Box<dyn claim_reaper::ClaimLivenessProbe>,
+    cleanup: Box<dyn claim_reaper::OrphanWorktreeCleanup>,
 }
 
 /// The result of one meta-OODA turn. Side-effect free: it reports what was
@@ -318,6 +341,9 @@ impl Overseer {
             gap_gate: WhisperGate::new(900, 200),
             memory: None,
             inflight_investigations: HashMap::new(),
+            claim_reap_enabled: false,
+            claim_reap_stale_secs: config::DEFAULT_CLAIM_REAP_STALE_SECS,
+            claim_reaper: None,
         }
     }
 
@@ -394,6 +420,32 @@ impl Overseer {
         self
     }
 
+    /// Wire the periodic stale-engineer-claim reaper (issue #4099): the ledger it
+    /// sweeps + reclaims through (the shared release chokepoint), the liveness
+    /// probe (worktree presence + newest-file mtime), the orphan-worktree
+    /// cleanup, and the resolved config (enabled + staleness threshold). Absent
+    /// by default; `build_overseer` wires the production seams. When wired,
+    /// [`Overseer::run_cycle`] sweeps every `engineer_claims` row each tick and
+    /// reclaims those whose engineer is provably dead — INDEPENDENT of per-goal
+    /// polling — closing the within-incarnation claim leak.
+    pub fn with_claim_reaper(
+        mut self,
+        ledger: Box<dyn claim_reaper::ClaimLedger>,
+        probe: Box<dyn claim_reaper::ClaimLivenessProbe>,
+        cleanup: Box<dyn claim_reaper::OrphanWorktreeCleanup>,
+        enabled: bool,
+        stale_secs: u64,
+    ) -> Self {
+        self.claim_reap_enabled = enabled;
+        self.claim_reap_stale_secs = stale_secs;
+        self.claim_reaper = Some(ClaimReaperSeams {
+            ledger,
+            probe,
+            cleanup,
+        });
+        self
+    }
+
     /// Run one meta-OODA turn. Observe → Orient → Decide → plan+gate. Does NOT
     /// execute side effects; returns the plan for M2+ Act to run.
     pub fn run_cycle(&mut self) -> Result<CycleReport, OverseerError> {
@@ -404,6 +456,15 @@ impl Overseer {
         // skip a duplicate launch than to double-launch on a transient error) —
         // exactly the "two PIDs on one signature" defect this guard closes.
         self.reconcile_inflight_investigations();
+
+        // Periodic stale-engineer-claim reaper (issue #4099): a synchronous,
+        // thread-less sweep alongside the reconcile above. Reclaims every
+        // `engineer_claims` row whose engineer is provably dead (no worktree, or
+        // an idle worktree stale beyond the threshold), INDEPENDENT of whether
+        // that goal is being advanced — the gap PR #4095's per-collision /
+        // per-goal reclaim paths never close. Fail-closed, fail-visible; a
+        // per-claim error is contained so it can never abort the tick.
+        self.reap_stale_engineer_claims();
 
         // Observe.
         let mut observed = self.caps.status.snapshot()?;
@@ -606,7 +667,33 @@ impl Overseer {
         }
     }
 
-    /// Apply autonomy, budget, and conflict gates to one intervention, producing
+    /// Run one claim-reaper sweep if the reaper is wired (issue #4099). Delegates
+    /// to the pure [`claim_reaper::reap_stale_claims`] over the injected seams so
+    /// all policy + containment lives in one tested place. A no-op when the
+    /// reaper is absent (bare constructor / tests) or disabled by config.
+    fn reap_stale_engineer_claims(&mut self) {
+        let Some(reaper) = self.claim_reaper.as_ref() else {
+            return;
+        };
+        let summary = claim_reaper::reap_stale_claims(
+            reaper.ledger.as_ref(),
+            reaper.probe.as_ref(),
+            reaper.cleanup.as_ref(),
+            self.claim_reap_enabled,
+            self.claim_reap_stale_secs,
+        );
+        if !summary.reclaimed.is_empty() || summary.errors > 0 {
+            tracing::info!(
+                target: "simard::claim_reaper",
+                reclaimed = summary.reclaimed.len(),
+                skipped = summary.skipped,
+                errors = summary.errors,
+                "[simard] claim-reaper sweep complete",
+            );
+        }
+    }
+
+
     /// a `PlannedIntervention` (admitted or held-with-reason). The attached
     /// `remediation` is a from-intervention default; `run_cycle` overrides it with
     /// the WHY-aware classification once the problem's root cause is known.

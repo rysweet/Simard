@@ -61,12 +61,28 @@ pub const SIMARD_OVERSEER_GAP_SCAN_ENV: &str = "SIMARD_OVERSEER_GAP_SCAN";
 /// disables the scan by stealth nor divides by zero.
 pub const SIMARD_OVERSEER_GAP_SCAN_EVERY_N_ENV: &str = "SIMARD_OVERSEER_GAP_SCAN_EVERY_N";
 
+/// Opt-out switch for the periodic stale-engineer-claim reaper (issue #4099).
+/// The reaper is ENABLED by default; only an explicit falsey value here disables
+/// it. Distinct from the acting-Overseer gate: the reaper is a safety mechanism
+/// that closes the `engineer_claims` leak, so it defaults ON even in a
+/// conservative deployment.
+pub const SIMARD_CLAIM_REAP_ENABLED_ENV: &str = "SIMARD_CLAIM_REAP_ENABLED";
+
+/// Idle-staleness threshold (seconds) beyond which a claim's worktree is judged
+/// stale and reclaimed. Newest-file mtime idle age, NOT a run-duration cap.
+/// Unset/empty/unparseable ⇒ [`DEFAULT_CLAIM_REAP_STALE_SECS`] (fail-safe).
+pub const SIMARD_CLAIM_REAP_STALE_SECS_ENV: &str = "SIMARD_CLAIM_REAP_STALE_SECS";
+
+/// Default reaper staleness threshold: 30 minutes. Generous on purpose so a
+/// long-but-alive engineer (slow compile/test) that keeps writing is never
+/// reaped (fail-closed, no wall-clock kill).
+pub const DEFAULT_CLAIM_REAP_STALE_SECS: u64 = 1800;
+
 /// GitHub login the acting Overseer authors its own workstreams under. Sourced
 /// here so the daemon and the merge/recursion path agree on ONE stable, DISTINCT
 /// identity (never the human operator's login). Defaults to
 /// [`DEFAULT_OVERSEER_AUTHOR_LOGIN`] when unset.
 pub const OVERSEER_AUTHOR_LOGIN_ENV: &str = "SIMARD_OVERSEER_AUTHOR_LOGIN";
-
 /// The Overseer's well-known bot login, distinct from the engineer/OODA
 /// identity. Used by the anti-recursion guard so the Overseer never
 /// verifies/merges/deploys its OWN PRs and never re-opens its own goals.
@@ -227,6 +243,53 @@ pub fn gap_scan_every_n_from(lookup: impl Fn(&str) -> Option<String>) -> u64 {
 /// Production entry point: read the real process environment.
 pub fn gap_scan_every_n() -> u64 {
     gap_scan_every_n_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve whether the stale-engineer-claim reaper (issue #4099) is enabled.
+///
+/// Enabled by default (the reaper closes the `engineer_claims` leak); DISABLED
+/// only when [`SIMARD_CLAIM_REAP_ENABLED_ENV`] holds an explicit falsey value
+/// (`0`/`false`/`no`/`off`). Unset/empty/garbage ⇒ enabled.
+pub fn claim_reap_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    // Opt-out: enabled unless an explicit falsey value is set. Unset/empty/garbage
+    // all leave the reaper ON so the leak-closing safety mechanism is never lost by
+    // stealth.
+    !matches!(
+        lookup(SIMARD_CLAIM_REAP_ENABLED_ENV).as_deref().map(str::trim),
+        Some(v) if is_falsey(v)
+    )
+}
+
+/// Production entry point: read the real process environment.
+pub fn claim_reap_enabled() -> bool {
+    claim_reap_enabled_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the reaper's idle-staleness threshold in seconds.
+///
+/// Unset/empty/unparseable ⇒ [`DEFAULT_CLAIM_REAP_STALE_SECS`] (fail-safe: a bad
+/// value never collapses the threshold to a mass-reclaim `0`). An explicit
+/// numeric value is honored.
+pub fn claim_reap_stale_secs_from(lookup: impl Fn(&str) -> Option<String>) -> u64 {
+    // Fail-safe: unset/empty/unparseable AND an explicit `0` (which would collapse
+    // the window to a mass-reclaim) fall back to the generous default. Only a
+    // positive integer is honored.
+    match lookup(SIMARD_CLAIM_REAP_STALE_SECS_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => s
+            .parse::<u64>()
+            .ok()
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_CLAIM_REAP_STALE_SECS),
+        _ => DEFAULT_CLAIM_REAP_STALE_SECS,
+    }
+}
+
+/// Production entry point: read the real process environment.
+pub fn claim_reap_stale_secs() -> u64 {
+    claim_reap_stale_secs_from(|k| std::env::var(k).ok())
 }
 
 /// Resolve the Overseer's DISTINCT author login. Falls back to
@@ -448,5 +511,65 @@ mod tests {
             resolve_interval_secs(env(&[(OVERSEER_INTERVAL_ENV, "1")])),
             MIN_OVERSEER_INTERVAL_SECS
         );
+    }
+
+    // ----- Claim reaper config (issue #4099) — T5 --------------------------
+
+    #[test]
+    fn claim_reap_enabled_by_default_when_unset() {
+        assert!(
+            claim_reap_enabled_from(env(&[])),
+            "the reaper is ENABLED by default (closes the engineer_claims leak)"
+        );
+    }
+
+    #[test]
+    fn claim_reap_disabled_by_explicit_falsey() {
+        for falsey in ["0", "false", "no", "off", "OFF", " false "] {
+            assert!(
+                !claim_reap_enabled_from(env(&[(SIMARD_CLAIM_REAP_ENABLED_ENV, falsey)])),
+                "{falsey:?} must disable the reaper"
+            );
+        }
+    }
+
+    #[test]
+    fn claim_reap_stays_enabled_for_truthy_or_garbage() {
+        for on in ["1", "true", "yes", "on", "garbage", ""] {
+            assert!(
+                claim_reap_enabled_from(env(&[(SIMARD_CLAIM_REAP_ENABLED_ENV, on)])),
+                "{on:?} must leave the reaper enabled (only explicit falsey disables)"
+            );
+        }
+    }
+
+    #[test]
+    fn claim_reap_stale_secs_defaults_when_unset() {
+        assert_eq!(
+            claim_reap_stale_secs_from(env(&[])),
+            DEFAULT_CLAIM_REAP_STALE_SECS
+        );
+        assert_eq!(DEFAULT_CLAIM_REAP_STALE_SECS, 1800);
+    }
+
+    #[test]
+    fn claim_reap_stale_secs_honors_explicit_value() {
+        assert_eq!(
+            claim_reap_stale_secs_from(env(&[(SIMARD_CLAIM_REAP_STALE_SECS_ENV, "3600")])),
+            3600
+        );
+    }
+
+    #[test]
+    fn claim_reap_stale_secs_falls_back_on_bad_values() {
+        // Garbage / empty never collapse the threshold to a mass-reclaim value;
+        // they fall back to the safe default.
+        for bad in ["abc", "", "-5", "1.5", "   "] {
+            assert_eq!(
+                claim_reap_stale_secs_from(env(&[(SIMARD_CLAIM_REAP_STALE_SECS_ENV, bad)])),
+                DEFAULT_CLAIM_REAP_STALE_SECS,
+                "{bad:?} must fall back to the default threshold"
+            );
+        }
     }
 }

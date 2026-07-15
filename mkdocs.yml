@@ -150,6 +150,7 @@ nav:
     - Journal Report Tone Contract: concepts/journal-report-tone-contract.md
     - Eliminating "bridge" Terminology: concepts/bridge-terminology-elimination.md
     - Engineer-Claim Liveness Lease: concepts/engineer-claim-liveness-lease.md
+    - Stale-Engineer-Claim Reaper: concepts/stale-engineer-claim-reaper.md
   - Tutorials:
     - Complete a Typed OODA Cycle: tutorials/complete-a-typed-ooda-cycle.md
     - First Local Session: tutorials/run-your-first-local-session.md
@@ -164,6 +165,7 @@ nav:
     - Bootstrap and Reflection: howto/configure-bootstrap-and-inspect-reflection.md
     - Attach to a Running Engineer: howto/attach-to-a-running-engineer.md
     - Inspect and Clean Engineer Worktrees: howto/inspect-and-clean-engineer-worktrees.md
+    - Diagnose and Clear Leaked Engineer Claims: howto/diagnose-leaked-engineer-claims.md
     - Grant Engineer Write Permissions: howto/grant-engineer-write-permissions.md
     - Edit the Engineer System Prompt: howto/edit-the-engineer-system-prompt.md
     - Run the OODA Daemon: howto/run-ooda-daemon.md
@@ -255,6 +257,7 @@ nav:
     - Simard Installer: reference/simard-installer.md
     - OODA Capability API: reference/ooda-capability-api.md
     - Engineer-Claim Release & Reclaim API: reference/engineer-claim-release-api.md
+    - Stale-Engineer-Claim Reaper API: reference/claim-reaper-api.md
     - Typed OODA Goal-Session Deterministic Rails: reference/typed-ooda-goal-session-rails.md
     - Telemetry Metrics: reference/telemetry-metrics.md
     - Recall-Precision Hybrid Measurement: reference/recall-precision-hybrid-api.md
@@ -430,6 +433,7 @@ nav:
     - Progress-Evidence Kill Switch: operations/progress-evidence-kill-switch.md
     - Outcome-Verification Kill Switch: operations/outcome-verification-kill-switch.md
     - Engineer-Admission Kill Switch: operations/engineer-admission-kill-switch.md
+    - Claim-Reaper Kill Switch & Tuning: operations/claim-reaper-kill-switch.md
     - Resource-Admission Kill Switch: operations/resource-admission-kill-switch.md
     - Creative-Ideas Semantic-Dedup Kill Switch: operations/creative-ideas-semantic-dedup-kill-switch.md
     - Safe Self-Update: safe-self-update.md

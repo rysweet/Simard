@@ -269,6 +269,24 @@ impl CapabilityHandler {
         Ok(())
     }
 
+    /// List every `claim_key` currently held in `engineer_claims`.
+    ///
+    /// Read-only full scan of the tiny (cap-24) admission table. The periodic
+    /// claim reaper (issue #4099) sweeps this to find claims whose engineer is
+    /// provably dead, INDEPENDENT of whether that goal is being polled — the gap
+    /// PR #4095's per-collision / per-goal reclaim paths do not close. Repo
+    /// agnostic: keys span every repo the daemon serves.
+    pub fn list_engineer_claims(&self) -> CapabilityResult<Vec<String>> {
+        let connection = self.lock()?;
+        let mut statement = connection
+            .prepare("SELECT claim_key FROM engineer_claims")
+            .map_err(persistence)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(persistence)?;
+        rows.map(|row| row.map_err(persistence)).collect()
+    }
+
     pub fn register_actor_session(
         &self,
         actor: &AuthenticatedToolContext,
@@ -2989,5 +3007,47 @@ mod engineer_claim_lease_tests {
         let blocked = spawn_engineer(&handler, "1", goal)
             .expect_err("without a liveness signal the claim must be treated as live");
         assert_eq!(blocked.code(), CapabilityErrorCode::AdmissionRejected);
+    }
+
+    /// RP-1 (issue #4099) — `list_engineer_claims` reflects the real ledger and
+    /// `release_engineer_claim` (the shared chokepoint the reaper reuses) removes
+    /// the row. Proves the reaper never needs hand-rolled SQL: list to find the
+    /// leak, release to reclaim it, list again to confirm it is gone.
+    #[test]
+    fn list_engineer_claims_reflects_ledger_and_release_removes_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handler = open_handler_with_liveness(dir.path(), true);
+
+        // Empty ledger to start.
+        assert!(
+            handler
+                .list_engineer_claims()
+                .expect("list on empty ledger")
+                .is_empty(),
+            "a fresh ledger holds no engineer claims"
+        );
+
+        // Two goals across (conceptually) different repos hold claims.
+        spawn_engineer(&handler, "0", "g1").expect("spawn g1 admitted");
+        spawn_engineer(&handler, "0", "g2").expect("spawn g2 admitted");
+
+        let mut listed = handler.list_engineer_claims().expect("list with two claims");
+        listed.sort();
+        assert_eq!(
+            listed,
+            vec![claim_key_for("g1"), claim_key_for("g2")],
+            "list_engineer_claims must return every held claim_key"
+        );
+
+        // Reclaim g1 through the shared release path (what the reaper calls).
+        handler
+            .release_engineer_claim(&claim_key_for("g1"))
+            .expect("release g1");
+
+        assert_eq!(
+            handler.list_engineer_claims().expect("list after release"),
+            vec![claim_key_for("g2")],
+            "released claim must be gone; the untouched claim remains"
+        );
     }
 }
