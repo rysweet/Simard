@@ -46,7 +46,7 @@ use crate::error::{SimardError, SimardResult};
 use crate::goal_curation::completion_gate::{DependencyState, EvidenceSource};
 use crate::goal_curation::no_progress_breaker::{
     NO_PROGRESS_BLOCKED_PREFIX, NO_PROGRESS_BREAKER_THRESHOLD, is_bare_no_progress_block,
-    is_no_progress_marker, no_progress_blocked_reason,
+    is_no_progress_marker, no_progress_blocked_reason, no_progress_blocked_reason_with_why,
 };
 use crate::goal_curation::no_progress_why::{
     Evidence, NoProgressClass, NoProgressWhy, NoProgressWhyReasoner,
@@ -234,6 +234,31 @@ fn pr_ref(num: &str) -> WipRef {
 fn bare_blocked_goal(id: &str) -> ActiveGoal {
     let mut g = ActiveGoal::new(id, "advance kgpacks-rs to full parity", 1);
     g.status = GoalProgress::Blocked(no_progress_blocked_reason(NO_PROGRESS_BREAKER_THRESHOLD));
+    g
+}
+
+/// A goal parked in the LIVE production-defect state (verified 2026-07-15): a
+/// WHY-bearing safeguard block whose evidence rendered `(none)` because the goal
+/// never produced a tracked issue/PR — e.g. the six `simard-identity-*` goals.
+/// Shape: `🔒 [OODA-SAFEGUARD] … why=GENUINELY-STUCK evidence=[(none)]`.
+///
+/// This is NOT "bare" per `is_bare_no_progress_block` (it carries the class
+/// token), which is precisely why the pass used to SKIP it and the ~12–13 goals
+/// stayed stranded. The re-investigation population must include it.
+fn evidenceless_blocked_goal(id: &str) -> ActiveGoal {
+    let mut g = ActiveGoal::new(id, "keep the simard identity coherent", 1);
+    let none_why = NoProgressWhy::new(NoProgressClass::GenuinelyStuck, vec![]);
+    let reason = no_progress_blocked_reason_with_why(NO_PROGRESS_BREAKER_THRESHOLD, &none_why);
+    assert!(
+        reason.contains("(none)"),
+        "fixture must reproduce the evidence=[(none)] defect: {reason}"
+    );
+    assert!(
+        !is_bare_no_progress_block(&reason),
+        "the (none) block carries the class token, so the legacy 'bare' predicate \
+         does NOT match it — this is why it was stranded: {reason}"
+    );
+    g.status = GoalProgress::Blocked(reason);
     g
 }
 
@@ -1006,4 +1031,88 @@ fn every_bare_goal_in_the_population_is_upgraded_in_a_single_pass() {
         report.fired(),
         "a cycle that re-investigated the whole bare population counts as a firing"
     );
+}
+
+// === (i) the live defect: an evidence=[(none)] block is re-investigated ======
+
+#[test]
+fn an_evidenceless_none_block_is_reinvestigated_and_never_left_as_none() {
+    // THE stranded population (verified on the live daemon 2026-07-15): 12–13
+    // goals parked with `[OODA-SAFEGUARD] … why=GENUINELY-STUCK evidence=[(none)]`.
+    // Because that block carries the class token it is NOT "bare" per
+    // `is_bare_no_progress_block`, so the #17 pass skipped it and the goals were
+    // stranded forever with a generic, evidence-free stamp. This change makes an
+    // evidence-less `(none)` block a first-class member of the re-investigation
+    // population: it MUST be re-investigated and driven away from `(none)` — here
+    // the independent investigation supplies real evidence, upgrading the block
+    // to a concrete WHY (never `(none)`).
+    let id = "simard-identity-coherence";
+    let mut goal = evidenceless_blocked_goal(id);
+    // The goal DOES have a live artifact the investigation can cite — the point
+    // is the ORIGINAL stamp lost it to `(none)`; re-investigation recovers it.
+    goal.wip_refs = vec![pr_ref("7")];
+    let mut state = state_with(goal);
+    // Force the terminal (escalate) rung so we observe the authored block: the
+    // guided fixer retry is already spent.
+    state.no_progress_tracker.mark_guided_retry(id);
+
+    let evidence = FakeEvidence::stuck();
+    // The independent investigation now DOES find evidence (the issue-17 standard:
+    // a concrete, evidence-backed WHY).
+    let reasoner = FakeReasoner::classifying(
+        NoProgressClass::GenuinelyStuck,
+        vec![Evidence::new("pr", "#7", "OPEN")],
+    );
+    let (healer, dispatcher, filer) = (
+        RecordingHealer::ok(),
+        RecordingDispatcher::ok(),
+        RecordingFiler::default(),
+    );
+
+    let report = drive(
+        &mut state,
+        &evidence,
+        &reasoner,
+        &healer,
+        &dispatcher,
+        &filer,
+    );
+
+    // The evidence-less goal is NO LONGER skipped — it is re-investigated.
+    assert!(
+        report.reinvestigated.contains(&id.to_string()),
+        "an evidence=[(none)] block must be re-investigated, not stranded: {report:?}"
+    );
+
+    // And it is driven away from `(none)` — the authored block carries the
+    // recovered evidence and never renders `(none)`. A non-terminal upgrade
+    // (fixer/heal/defer/complete) is equally valid so long as no `(none)` block
+    // survives — asserted by `assert_no_none` below.
+    if let GoalProgress::Blocked(reason) = status_of(&state, id) {
+        assert!(
+            !reason.contains("(none)"),
+            "a re-investigated goal must NEVER remain an evidence=[(none)] block: {reason}"
+        );
+        assert!(
+            is_no_progress_marker(reason) && reason.starts_with(NO_PROGRESS_BLOCKED_PREFIX),
+            "the rewritten block must keep the [OODA-SAFEGUARD] marker: {reason}"
+        );
+        assert!(
+            reason.contains("#7"),
+            "the block must attach the recovered evidence link: {reason}"
+        );
+    }
+    assert_no_none(&state, id);
+}
+
+/// Assert a goal is not parked with an evidence=[(none)] block anywhere.
+fn assert_no_none(state: &OodaState, id: &str) {
+    if let Some(g) = state.active_goals.active.iter().find(|g| g.id == id)
+        && let GoalProgress::Blocked(reason) = &g.status
+    {
+        assert!(
+            !reason.contains("(none)"),
+            "goal {id} must NEVER be parked with an evidence=[(none)] block: {reason}"
+        );
+    }
 }

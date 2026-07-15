@@ -21,9 +21,9 @@ use crate::goal_curation::completion_gate::{
     CompletionEvidenceGate, CompletionVerdict, DependencyState, EvidenceSource,
 };
 use crate::goal_curation::no_progress_breaker::{
-    NO_PROGRESS_BREAKER_THRESHOLD, NoProgressResolution, NoProgressTracker,
-    is_bare_no_progress_block, no_progress_blocked_reason_with_why, obsolescence_reason,
-    resolution_for_why, verify_stuck_goal,
+    NO_PROGRESS_BREAKER_THRESHOLD, NoProgressResolution, NoProgressTracker, needs_reinvestigation,
+    no_progress_blocked_reason_with_why, obsolescence_reason, resolution_for_why,
+    verify_stuck_goal,
 };
 use crate::goal_curation::no_progress_why::{
     Evidence, NoProgressClass, NoProgressWhy, NoProgressWhyReasoner,
@@ -365,7 +365,8 @@ pub(crate) fn apply_no_progress_breaker_with_threshold(
             // panic on the legacy path.
             NoProgressResolution::Heal { .. }
             | NoProgressResolution::Defer { .. }
-            | NoProgressResolution::SpawnEngineer { .. } => {
+            | NoProgressResolution::SpawnEngineer { .. }
+            | NoProgressResolution::SurfaceInvestigationFailure { .. } => {
                 tracing::warn!(
                     target: "simard::ooda",
                     goal = %goal_id,
@@ -767,6 +768,36 @@ fn apply_resolution_side_effects(
                 "no-progress breaker: stuck after guided retry — BLOCKED WITH why + issue filed",
             );
         }
+        NoProgressResolution::SurfaceInvestigationFailure { reason } => {
+            // The independent investigation reached the terminal rung with NO
+            // evidence. A goal must NEVER be parked with `evidence=[(none)]`, so
+            // this is a SURFACED failure — not a bare block. Take no terminal
+            // action: record it in `investigation_errors` (fail visible) and
+            // leave the goal retriable so the next investigation can recover real
+            // evidence (fail closed). The guided-retry flag is preserved, so a
+            // future terminal rung goes straight here again rather than spawning a
+            // second engineer. On the re-investigation path the goal starts in a
+            // bare / `(none)` Blocked state, so un-block it to `NotStarted` so the
+            // brain can re-select it and a later cycle can re-investigate.
+            if unblock_nonterminal
+                && let Some(g) = state
+                    .active_goals
+                    .active
+                    .iter_mut()
+                    .find(|g| g.id == goal_id)
+            {
+                g.status = GoalProgress::NotStarted;
+            }
+            tracker.reset_count(goal_id);
+            report.investigation_errors.push(goal_id.to_string());
+            tracing::error!(
+                target: "simard::ooda",
+                goal = %goal_id,
+                reason = %reason,
+                "no-progress breaker: evidence-less terminal outcome SURFACED as an \
+                 investigation failure (never parked with evidence=[(none)]) — retriable",
+            );
+        }
     }
 }
 
@@ -829,9 +860,7 @@ pub(crate) fn reinvestigate_bare_blocked_goals(
         .iter()
         .filter(|g| !g.is_perpetual())
         .filter_map(|g| match &g.status {
-            GoalProgress::Blocked(reason) if is_bare_no_progress_block(reason) => {
-                Some(g.id.clone())
-            }
+            GoalProgress::Blocked(reason) if needs_reinvestigation(reason) => Some(g.id.clone()),
             _ => None,
         })
         .collect();
@@ -866,8 +895,31 @@ pub(crate) fn reinvestigate_bare_blocked_goals(
         // this (goal, class) — possibly before a restart that re-parked the goal
         // bare. Do NOT repeat the side effect (e.g. spawn a second fixer), but
         // never leave the goal bare: rewrite it to the WHY-bearing block so the
-        // rail excludes it next cycle.
+        // rail excludes it next cycle — UNLESS the re-investigation produced no
+        // evidence, in which case rewriting would re-author the very
+        // `evidence=[(none)]` block this change forbids. For that case, surface an
+        // investigation failure and un-block the goal so it stays retriable.
         if tracker.reinvestigated(&goal_id, class) {
+            if why.evidence.is_empty() {
+                if let Some(g) = state
+                    .active_goals
+                    .active
+                    .iter_mut()
+                    .find(|g| g.id == goal_id)
+                {
+                    g.status = GoalProgress::NotStarted;
+                }
+                report.investigation_errors.push(goal_id.clone());
+                tracing::error!(
+                    target: "simard::ooda",
+                    goal = %goal_id,
+                    why = %class.token(),
+                    "no-progress re-investigation: (goal, class) already resolved but the \
+                     re-investigation produced NO evidence — refusing to re-author an \
+                     evidence=[(none)] block; surfaced as an investigation failure, un-blocked",
+                );
+                continue;
+            }
             let blocked_reason = no_progress_blocked_reason_with_why(threshold, &why);
             if let Some(g) = state
                 .active_goals
@@ -890,6 +942,12 @@ pub(crate) fn reinvestigate_bare_blocked_goals(
         let guided_retry_used = tracker.guided_retry_used(&goal_id);
         let resolution = resolution_for_why(threshold, why, guided_retry_used);
 
+        // An evidence-less terminal outcome takes NO terminal action (it is
+        // surfaced + retried), so it must NOT be recorded in the (goal, class)
+        // dedupe set — otherwise a later cycle that DOES recover evidence would be
+        // wrongly deduped instead of spawning a fixer / escalating with the WHY.
+        let took_terminal_action = resolution.is_terminal();
+
         // Re-investigation path: the goal starts BARE-blocked, so a non-terminal
         // `Heal` / `SpawnEngineer` rung must UN-BLOCK it to NotStarted.
         apply_resolution_side_effects(
@@ -907,8 +965,11 @@ pub(crate) fn reinvestigate_bare_blocked_goals(
 
         // A terminal action was taken for this (goal, class); record it so a
         // re-park after a restart cannot trigger a second one. Only recorded on a
-        // successful classification (never on a fail-closed error above).
-        tracker.mark_reinvestigated(&goal_id, class);
+        // successful classification (never on a fail-closed error above) that took
+        // a real terminal action (never a surfaced evidence-less failure).
+        if took_terminal_action {
+            tracker.mark_reinvestigated(&goal_id, class);
+        }
     }
 
     // Prune counters/flags for goals no longer on the active board.

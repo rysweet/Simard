@@ -130,7 +130,10 @@ use crate::goal_curation::no_progress_breaker::{
     NO_PROGRESS_BREAKER_THRESHOLD, is_no_progress_marker,
 };
 use crate::overseer::notify::{OperatorNotification, OperatorNotifier};
-use capabilities::{DeployReport, GoalBrief, InFlightItem, IssueOutcome, WorkstreamHandle};
+use capabilities::{
+    DeployReport, GoalBrief, InFlightItem, IssueOutcome, WorkstreamHandle, WorkstreamStatus,
+};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -207,6 +210,17 @@ pub struct Overseer {
     /// memory-recall capability (`caps.memory`): this is the occurrence-signature
     /// recall/store seam that drives recurrence-based root-cause escalation.
     memory: Option<Arc<dyn CognitiveMemoryOps>>,
+    /// In-flight recipe-investigation dedup set (live defect 2026-07-15): keyed by
+    /// each launched investigation's [`recipe_dedup_key`], holding the workstream
+    /// handle so the set can self-reconcile. A goal / recurring-signature that
+    /// already has a recipe-runner investigation RUNNING is never launched a
+    /// second time — the concrete defect was two recipe-runner PIDs (1074394 and
+    /// 1095553) investigating the identical `overseer-obs:goal:blocked:…`
+    /// signature at once. Populated in [`Overseer::act`] on a successful launch
+    /// and reconciled at the top of [`Overseer::run_cycle`] (a workstream that is
+    /// no longer `Running` frees its slot), so the guard is "at most one IN
+    /// FLIGHT", never a permanent one-shot.
+    inflight_investigations: HashMap<String, WorkstreamHandle>,
 }
 
 /// The result of one meta-OODA turn. Side-effect free: it reports what was
@@ -303,6 +317,7 @@ impl Overseer {
             // gaps (bounded by `sensor::MAX_GAPS_PER_TICK`) without flooding.
             gap_gate: WhisperGate::new(900, 200),
             memory: None,
+            inflight_investigations: HashMap::new(),
         }
     }
 
@@ -382,6 +397,14 @@ impl Overseer {
     /// Run one meta-OODA turn. Observe → Orient → Decide → plan+gate. Does NOT
     /// execute side effects; returns the plan for M2+ Act to run.
     pub fn run_cycle(&mut self) -> Result<CycleReport, OverseerError> {
+        // Reconcile the in-flight investigation dedup set FIRST: poll each
+        // launched recipe-runner investigation and free the slot of any that is
+        // no longer `Running`, so a genuinely-new recurrence can be investigated
+        // later. A poll error leaves the entry in place (fail closed: better to
+        // skip a duplicate launch than to double-launch on a transient error) —
+        // exactly the "two PIDs on one signature" defect this guard closes.
+        self.reconcile_inflight_investigations();
+
         // Observe.
         let mut observed = self.caps.status.snapshot()?;
         // Enrich with goal-board health AND the in-flight dedup set from a
@@ -562,6 +585,27 @@ impl Overseer {
         }
     }
 
+    /// Free the dedup slot of every in-flight investigation whose recipe-runner
+    /// is no longer `Running`, so a genuinely-new recurrence of the same
+    /// signature can be investigated on a later cycle. A poll error leaves the
+    /// entry in place (fail closed — never double-launch on a transient error).
+    fn reconcile_inflight_investigations(&mut self) {
+        if self.inflight_investigations.is_empty() {
+            return;
+        }
+        let done: Vec<String> = self
+            .inflight_investigations
+            .iter()
+            .filter_map(|(key, handle)| match self.caps.recipes.poll(handle) {
+                Ok(WorkstreamStatus::Running) | Err(_) => None,
+                Ok(_) => Some(key.clone()),
+            })
+            .collect();
+        for key in done {
+            self.inflight_investigations.remove(&key);
+        }
+    }
+
     /// Apply autonomy, budget, and conflict gates to one intervention, producing
     /// a `PlannedIntervention` (admitted or held-with-reason). The attached
     /// `remediation` is a from-intervention default; `run_cycle` overrides it with
@@ -597,6 +641,27 @@ impl Overseer {
             return held_plan(iv, "held: gap-scan disabled (SIMARD_OVERSEER_GAP_SCAN)");
         }
 
+        // In-flight investigation dedup (live defect 2026-07-15): never launch a
+        // SECOND recipe-runner investigation for a signature that already has one
+        // running. The observed failure was two recipe-runner processes (PIDs
+        // 1074394 and 1095553) investigating the identical
+        // `overseer-obs:goal:blocked:…` signature at once, because a recurring
+        // signature re-observed each cycle re-launched a fresh recipe while the
+        // prior one was still in flight (`sequence_group` is `None` for these, so
+        // the conflict sequencer never dedups them). Checked BEFORE the cost gate
+        // so a held duplicate never consumes a per-cycle launch slot; keyed per
+        // signature so a DIFFERENT investigation is unaffected.
+        if let Intervention::LaunchRecipe { brief } = iv
+            && self
+                .inflight_investigations
+                .contains_key(&recipe_dedup_key(brief))
+        {
+            return held_plan(
+                iv,
+                "held: an investigation for this signature is already in flight",
+            );
+        }
+
         // Autonomy: HIGH-RISK requires opt-in, else it is escalated (held).
         if let Err(e) = self.autonomy.admit(iv) {
             return held_plan(iv, e.to_string());
@@ -630,7 +695,13 @@ impl Overseer {
     pub fn act(&mut self, iv: &Intervention) -> Result<ActOutcome, OverseerError> {
         match iv {
             Intervention::LaunchRecipe { brief } => {
-                Ok(ActOutcome::Launched(self.caps.recipes.launch(brief)?))
+                let handle = self.caps.recipes.launch(brief)?;
+                // Register the launch in the in-flight dedup set so a re-observed
+                // recurring signature is HELD in `gate` until this investigation
+                // completes (reconciled at the top of `run_cycle`).
+                self.inflight_investigations
+                    .insert(recipe_dedup_key(brief), handle.clone());
+                Ok(ActOutcome::Launched(handle))
             }
             Intervention::VerifyAndMergePr { repo, pr } => {
                 let report = self.caps.prs.verify(repo, *pr)?;
@@ -1059,6 +1130,28 @@ fn is_cost_bearing(iv: &Intervention) -> bool {
         iv,
         Intervention::LaunchRecipe { .. } | Intervention::RunAudit { .. }
     )
+}
+
+/// Stable dedup key for one recipe-runner investigation launch (live defect
+/// 2026-07-15). Two launches for the SAME goal / recurring signature must map to
+/// the same key so the in-flight guard holds the duplicate; two DIFFERENT
+/// investigations must map to distinct keys so neither is starved.
+///
+/// A recurring-signature launch embeds its `overseer-obs:…` signature token in
+/// the task description; keying on that token (when present) makes the guard
+/// robust to incidental prose drift around it. Absent the token, the trimmed
+/// task description is the key — deterministic for a given problem summary, which
+/// is itself derived deterministically from the signal.
+fn recipe_dedup_key(brief: &RecipeBrief) -> String {
+    let desc = brief.task_description.trim();
+    if let Some(start) = desc.find("overseer-obs:") {
+        let tail = &desc[start..];
+        let end = tail
+            .find(|c: char| c == ')' || c.is_whitespace())
+            .unwrap_or(tail.len());
+        return tail[..end].to_string();
+    }
+    desc.to_string()
 }
 
 /// Stable, deterministic signature for the Overseer's own observation write-back
@@ -1826,6 +1919,76 @@ mod tests {
             &mut 0,
         );
         assert!(!held.admitted);
+    }
+
+    #[test]
+    fn duplicate_investigation_for_an_in_flight_signature_is_held() {
+        // Live-daemon defect (2026-07-15): the overseer had TWO recipe-runner
+        // processes (PIDs 1074394 and 1095553) investigating the SAME recurring
+        // signature simultaneously, because a recurring `overseer-obs:goal:blocked`
+        // signature re-observed each cycle launched a FRESH `smart-orchestrator`
+        // recipe while the prior one was still running. `sequence_group` is `None`
+        // for these ProcessHealth/RecurringSignature launches, so the conflict
+        // sequencer never dedups them. A launch-site guard must ensure a given
+        // goal / recurring-signature has at most ONE investigation in flight.
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]));
+        let brief = RecipeBrief {
+            task_description: "recurring signature seen 2× in cognitive memory \
+                               (overseer-obs:goal:blocked:simard-identity-coherence)"
+                .to_string(),
+            target_repo: "rysweet/Simard".to_string(),
+            sequence_group: None,
+        };
+        let iv = Intervention::LaunchRecipe {
+            brief: brief.clone(),
+        };
+
+        // Cycle 1: the first investigation for this signature is admitted and the
+        // recipe-runner is launched (still Running, per FakeRecipes::poll).
+        let first = ov.gate(&iv, &ObservedState::default(), &mut 0);
+        assert!(
+            first.admitted,
+            "the first investigation for a signature must be admitted"
+        );
+        let launched = ov.act(&first.intervention).expect("launch");
+        assert!(
+            matches!(launched, ActOutcome::Launched(_)),
+            "the admitted investigation must actually launch a workstream"
+        );
+
+        // Cycle 2: the SAME recurring signature is re-observed while the first
+        // investigation is still in flight. It MUST be held — never a second
+        // concurrent recipe-runner for the same signature.
+        let second = ov.gate(&iv, &ObservedState::default(), &mut 0);
+        assert!(
+            !second.admitted,
+            "a duplicate investigation for an in-flight signature must be HELD, \
+             got admitted plan: {second:?}"
+        );
+        assert!(
+            second.note.to_ascii_lowercase().contains("flight")
+                || second.note.to_ascii_lowercase().contains("in-flight")
+                || second.note.to_ascii_lowercase().contains("already"),
+            "the hold reason must explain the in-flight dedup: {:?}",
+            second.note
+        );
+
+        // A DIFFERENT signature is unaffected — the guard dedups per signature,
+        // never a blanket launch freeze.
+        let other = Intervention::LaunchRecipe {
+            brief: RecipeBrief {
+                task_description: "recurring signature seen 2× in cognitive memory \
+                                   (overseer-obs:goal:blocked:some-other-goal)"
+                    .to_string(),
+                target_repo: "rysweet/Simard".to_string(),
+                sequence_group: None,
+            },
+        };
+        let other_plan = ov.gate(&other, &ObservedState::default(), &mut 0);
+        assert!(
+            other_plan.admitted,
+            "an investigation for a DIFFERENT signature must still be admitted"
+        );
     }
 
     #[test]

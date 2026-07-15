@@ -112,6 +112,37 @@ pub fn is_bare_no_progress_block(reason: &str) -> bool {
             .any(|class| reason.contains(class.token()))
 }
 
+/// The evidence-less `(none)` variant of a safeguard block — the exact
+/// live-daemon defect (verified 2026-07-15): a WHY-bearing block whose evidence
+/// rendered `(none)` because the goal never produced a tracked issue/PR (the six
+/// `simard-identity-*` goals, the coverage/coin/parity goals). Shape:
+/// `🔒 [OODA-SAFEGUARD] … why=GENUINELY-STUCK evidence=[(none)]`.
+///
+/// Crucially this is NOT [`is_bare_no_progress_block`] — it carries a class
+/// token, so the legacy "bare" predicate skips it, which is precisely why ~12–13
+/// goals stayed stranded with a generic, evidence-free stamp. The
+/// re-investigation pass must treat it as a first-class member of its population
+/// so the goal is driven away from `(none)` (to a concrete WHY, a fixer, or a
+/// surfaced investigation failure) rather than parked forever.
+///
+/// Keys on the marker plus the literal `evidence=[(none)]` segment authored by
+/// [`no_progress_blocked_reason_with_why`] via [`NoProgressWhy::render_evidence`]
+/// — so once re-investigation attaches real evidence (or unblocks the goal) the
+/// reason no longer matches and the pass never re-processes it (idempotent).
+pub fn is_evidenceless_no_progress_block(reason: &str) -> bool {
+    is_no_progress_marker(reason) && reason.contains("evidence=[(none)]")
+}
+
+/// True when `reason` is a safeguard block the re-investigation pass must
+/// re-examine (issue #16/#17): either a legacy **bare** block
+/// ([`is_bare_no_progress_block`]) or an evidence-less `(none)` block
+/// ([`is_evidenceless_no_progress_block`]). Both denote a goal parked WITHOUT a
+/// concrete, evidence-backed WHY — the population that must never be left
+/// stranded.
+pub fn needs_reinvestigation(reason: &str) -> bool {
+    is_bare_no_progress_block(reason) || is_evidenceless_no_progress_block(reason)
+}
+
 /// Render the sentinel [`GoalProgress::Blocked`] reason for a goal escalated
 /// after `consecutive` no-action cycles.
 ///
@@ -205,13 +236,32 @@ pub enum NoProgressResolution {
         issue_title: String,
         issue_body: String,
     },
+    /// `UNCLEAR-CRITERIA` / `GENUINELY-STUCK`, terminal rung reached but the
+    /// independent investigation produced **no evidence** (issue #16). The old
+    /// code stamped a bare `evidence=[(none)]` block here — the exact live-daemon
+    /// defect (2026-07-15): the six `simard-identity-*` goals and the
+    /// coverage/coin/parity goals never produced a tracked issue/PR, so their
+    /// evidence rendered `(none)`. A goal must NEVER be parked with
+    /// `evidence=[(none)]`: an evidence-less terminal outcome is itself a
+    /// **surfaced investigation failure**, not a silent generic block. The caller
+    /// records the goal in
+    /// [`investigation_errors`](crate::ooda_loop::no_progress::NoProgressBreakerReport::investigation_errors),
+    /// takes **no** terminal action, and leaves the goal retriable (fail
+    /// visible + fail closed) so the next investigation can recover real evidence.
+    SurfaceInvestigationFailure { reason: String },
 }
 
 impl NoProgressResolution {
-    /// `true` for every resolution except [`NoProgressResolution::Continue`] —
-    /// i.e. the breaker fired and the goal is leaving the no-action loop.
+    /// `true` for every resolution that removes the goal from the no-action loop
+    /// with a definitive action. [`Continue`](Self::Continue) (below threshold)
+    /// and [`SurfaceInvestigationFailure`](Self::SurfaceInvestigationFailure) (an
+    /// evidence-less terminal outcome that is surfaced and retried, taking NO
+    /// terminal action) are the two non-terminal resolutions.
     pub fn is_terminal(&self) -> bool {
-        !matches!(self, Self::Continue)
+        !matches!(
+            self,
+            Self::Continue | Self::SurfaceInvestigationFailure { .. }
+        )
     }
 }
 
@@ -401,6 +451,23 @@ pub fn resolution_for_why(
         }
         NoProgressClass::UnclearCriteria | NoProgressClass::GenuinelyStuck => {
             if guided_retry_used {
+                // Terminal rung: the guided (independent) investigation is spent
+                // and the goal is still stuck. NEVER author a bare
+                // `evidence=[(none)]` block — the exact live-daemon defect. If the
+                // investigation produced concrete evidence, escalate WITH it;
+                // otherwise surface the evidence-less outcome as an investigation
+                // failure (fail visible + retriable), taking no bare terminal
+                // action.
+                if why.evidence.is_empty() {
+                    return NoProgressResolution::SurfaceInvestigationFailure {
+                        reason: format!(
+                            "independent investigation of a stalled goal classified {} but \
+                             produced no supporting evidence at the terminal rung — refusing to \
+                             park it with an empty-evidence block; surfaced for retry",
+                            why.class.token(),
+                        ),
+                    };
+                }
                 let blocked_reason = no_progress_blocked_reason_with_why(consecutive, &why);
                 let (issue_title, issue_body) = why_escalation_issue(consecutive, &why);
                 NoProgressResolution::Escalate {

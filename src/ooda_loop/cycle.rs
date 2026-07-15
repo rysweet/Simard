@@ -610,7 +610,10 @@ fn run_ooda_cycle_inner(
                 &crate::ooda_loop::no_progress::GhIssueFiler,
                 crate::ooda_loop::no_progress::INVESTIGATED_BREAKER_THRESHOLD,
             );
-            if report.fired() || !report.auto_cleared.is_empty() {
+            if report.fired()
+                || !report.auto_cleared.is_empty()
+                || !report.investigation_errors.is_empty()
+            {
                 tracing::info!(
                     target: "simard::ooda",
                     summary = %report.log_line(),
@@ -638,7 +641,10 @@ fn run_ooda_cycle_inner(
                     &crate::ooda_loop::no_progress::GhIssueFiler,
                     crate::ooda_loop::no_progress::INVESTIGATED_BREAKER_THRESHOLD,
                 );
-            if reinvestigate_report.fired() || !reinvestigate_report.reinvestigated.is_empty() {
+            if reinvestigate_report.fired()
+                || !reinvestigate_report.reinvestigated.is_empty()
+                || !reinvestigate_report.investigation_errors.is_empty()
+            {
                 tracing::info!(
                     target: "simard::ooda",
                     summary = %reinvestigate_report.log_line(),

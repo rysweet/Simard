@@ -305,6 +305,44 @@ fn stuck_escalates_with_why_only_after_the_guided_retry_is_exhausted() {
     }
 }
 
+#[test]
+fn terminal_stuck_with_no_evidence_surfaces_a_failure_never_a_none_block() {
+    // THE live-daemon defect (2026-07-15): a goal that never produced a tracked
+    // issue/PR (the six `simard-identity-*`, the coverage/coin/parity goals) has
+    // empty evidence, so the terminal rung used to author
+    //   `🔒 [OODA-SAFEGUARD] … why=GENUINELY-STUCK evidence=[(none)]`.
+    // The pure policy must NEVER emit an Escalate here — an evidence-less terminal
+    // outcome is a SURFACED investigation failure (fail visible + retriable), not
+    // a bare generic block.
+    for class in [
+        NoProgressClass::GenuinelyStuck,
+        NoProgressClass::UnclearCriteria,
+    ] {
+        let why = NoProgressWhy::new(class, vec![]);
+        match resolution_for_why(
+            NO_PROGRESS_BREAKER_THRESHOLD,
+            why,
+            /* guided_retry_used */ true,
+        ) {
+            NoProgressResolution::SurfaceInvestigationFailure { reason } => {
+                assert!(
+                    reason.contains(class.token()),
+                    "the surfaced failure should name the classified WHY: {reason:?}"
+                );
+                assert!(
+                    !reason.contains("(none)"),
+                    "even the surfaced-failure reason must not read as an \
+                     evidence=[(none)] block: {reason:?}"
+                );
+            }
+            other => panic!(
+                "an evidence-less terminal outcome for {class:?} must surface a failure, \
+                 never Escalate/park with (none), got {other:?}"
+            ),
+        }
+    }
+}
+
 // --- the reasoner seam (agentic investigation is injected) ------------------
 
 /// A hermetic fake reasoner: returns a canned finding (or a canned error) so the

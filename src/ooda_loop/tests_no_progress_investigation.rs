@@ -725,3 +725,120 @@ fn perpetual_goal_is_exempt_and_never_investigated_or_blocked() {
         "a perpetual goal must never file an issue or spawn an engineer"
     );
 }
+
+// === (f) the terminal dead-end: NEVER park a goal with evidence=[(none)] =====
+
+#[test]
+fn genuinely_stuck_with_no_evidence_surfaces_investigation_error_never_parks_none() {
+    // THE production defect (verified on the live daemon 2026-07-15): 12–13 goals
+    // — the six `simard-identity-*`, the coverage/coin/parity goals — never
+    // produced a tracked issue/PR, so their `wip_refs` are empty and the
+    // deterministic reasoner's `stuck_evidence(goal)` is `[]`. Past the guided
+    // retry the terminal ELSE case then authored
+    //   `[OODA-SAFEGUARD] … why=GENUINELY-STUCK evidence=[(none)]`
+    // — a generic, evidence-free stamp. That dead-end is exactly what this change
+    // replaces: an independent root-cause investigation must produce either an
+    // evidence-backed WHY (see `..._blocks_with_concrete_why`) OR, when it
+    // genuinely cannot produce ANY evidence, a SURFACED failure
+    // (`investigation_errors`) — never a silent `evidence=[(none)]` block.
+    //
+    // Here the injected investigation returns GENUINELY-STUCK with EMPTY
+    // evidence (the "investigation produced nothing" outcome). The breaker must:
+    //   * NOT set `Blocked` with an `evidence=[(none)]` reason,
+    //   * NOT count the goal as `escalated`,
+    //   * surface the goal in `investigation_errors` (fail-visible),
+    //   * leave the goal un-blocked and retriable (fail closed).
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let id = "simard-identity-coherence";
+    // A goal with NO tracked issue/PR — the exact shape whose `stuck_evidence`
+    // is empty on the live daemon.
+    let goal = stuck_goal(id);
+    assert!(
+        goal.wip_refs.is_empty(),
+        "fixture must model a goal with no tracked artifacts (empty evidence)"
+    );
+    let mut state = state_with(goal);
+
+    let evidence = FakeEvidence::stuck();
+    // The independent investigation classifies GENUINELY-STUCK but can attach NO
+    // evidence — the case that used to leak `evidence=[(none)]`.
+    let reasoner = FakeReasoner::classifying(NoProgressClass::GenuinelyStuck, vec![]);
+    let healer = RecordingHealer::ok();
+    let dispatcher = RecordingDispatcher::ok();
+    let filer = RecordingFiler::default();
+
+    // First stall spends the one guided-engineer retry (the independent agentic
+    // investigation dispatch); the goal is NOT blocked yet.
+    for _ in 1..=threshold {
+        drive(
+            &mut state,
+            id,
+            &evidence,
+            &reasoner,
+            &healer,
+            &dispatcher,
+            &filer,
+            threshold,
+        );
+    }
+    assert_eq!(
+        dispatcher.calls.borrow().len(),
+        1,
+        "the first stall must dispatch exactly one guided investigation"
+    );
+    assert!(
+        matches!(
+            state.active_goals.active[0].status,
+            GoalProgress::NotStarted
+        ),
+        "after the guided retry the goal is still active, not blocked"
+    );
+
+    // Second stall: the guided retry is spent and the investigation STILL yields
+    // no evidence. The old code escalated here with `evidence=[(none)]`; the new
+    // terminal path must instead SURFACE the failure and take no bare action.
+    let mut last = super::no_progress::NoProgressBreakerReport::default();
+    for _ in 1..=threshold {
+        last = drive(
+            &mut state,
+            id,
+            &evidence,
+            &reasoner,
+            &healer,
+            &dispatcher,
+            &filer,
+            threshold,
+        );
+    }
+
+    assert!(
+        last.investigation_errors.contains(&id.to_string()),
+        "an evidence-less terminal outcome must be SURFACED as an investigation \
+         error, not stamped as a bare block: {last:?}"
+    );
+    assert!(
+        !last.escalated.contains(&id.to_string()),
+        "a goal must NEVER be escalated/blocked with empty evidence: {last:?}"
+    );
+    assert!(
+        dispatcher.calls.borrow().len() == 1,
+        "the guided retry stays bounded to one — no second engineer spawn"
+    );
+    assert!(
+        filer.calls.borrow().is_empty(),
+        "no tracking issue may be filed for an evidence-free terminal outcome"
+    );
+
+    // The headline invariant: the goal is never parked with `evidence=[(none)]`.
+    match &state.active_goals.active[0].status {
+        GoalProgress::Blocked(reason) => {
+            assert!(
+                !reason.contains("(none)"),
+                "a goal must NEVER be parked with an evidence=[(none)] block: {reason}"
+            );
+        }
+        // NotStarted (fail-closed, retriable) is the expected end state.
+        GoalProgress::NotStarted => {}
+        other => panic!("expected a fail-closed retriable state, got {other:?}"),
+    }
+}
