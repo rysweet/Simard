@@ -41,10 +41,15 @@ steps:
       value: "0"
     timeout: 5000
 
-  # The shared per-fact reliability scorer both write-boundary seams use.
+  # The shared per-fact reliability scorer both write-boundary seams use,
+  # including the concept-identity dedup guard: a prior of a DIFFERENT category
+  # (surfaced by the concept-token `search_facts` scan) must never dedup-block a
+  # genuinely distinct new fact. The `fact_reliability` filter covers both the
+  # `fact_reliability_tests` integration cases and the inline
+  # `fact_reliability::concept_identity_tests` unit cases.
   - action: run
     params:
-      command: "cargo test --locked --lib fact_reliability_tests"
+      command: "cargo test --locked --lib fact_reliability"
     timeout: 600000
   - action: wait_for_output
     params:
