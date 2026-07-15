@@ -59,7 +59,23 @@ nested `overseer-obs:…|overseer-obs:…` doubling is a **positive fingerprint 
 nesting and is impossible from true per-token duplication** (because `orient` merges same-`dedup_key`
 signals and `keys.dedup()` collapses adjacent equals ⇒ each family key appears **at most once per
 snapshot**), and classifies every token load-bearing vs. benign drift. **No production `.rs` changed;
-no remediation landed.**
+no remediation landed.** A **thirteenth-wave** set of **three parallel deep dives** at HEAD `1de21e71`
+(only `src/overseer/tests_root_cause.rs` differs from the twelfth-wave pin — all non-test source
+byte-identical; memory-recall suite re-run green **32/0** this wave) is folded into **§20**: the
+**primary** dive traces the self-ingestion loop **link-by-link end-to-end** (the 8-edge
+`write-back → recall → count → classify → orient → re-wrap → gate → Recur` cycle) and shows the recall
+path has **no self-authorship exclusion**; the **secondary** dive proves the `orient` merge branch is
+**dead for the composite** (so a `RecurringSignature` **always** becomes a *standalone* `ProcessHealth`
+meta-problem that re-enters `write_back_observation(&cycle.problems)` with **no write-boundary filter**),
+re-affirming the `×2` as an honest signal and the over-aggregated composite + unguarded write-boundary as
+the defect; and the **tertiary/architect** dive inventories **all five dedup/idempotency gates** (only
+G1 sits on the self-feed edge and is defeated by signature mutation; G2 is dead for the composite ⇒ the
+loop has **no effective idempotency boundary**), confirms **Lane-A ⟂ Lane-A is UNTESTED** (test gap on
+the exact defect edge), and specifies the **minimal landing-order-safe fix** — a single-function
+write-boundary self-provenance filter in `write_back_observation` (`mod.rs:534-563`) that drops
+`overseer-obs:`-keyed recall-derived problems before `observation_signature`, restoring G1's dedup power
+with **no cross-file plumbing** and order-independent defence-in-depth with the recall-side
+`source_label` filter. **No production `.rs` changed; no remediation landed.**
 
 This consolidates all parallel deep dives:
 [`investigation_report.md`](./investigation_report.md) (primary/secondary root cause),
@@ -1921,3 +1937,180 @@ init, no persistence), making the **restart-driven re-persistence** path to `×2
 true duplication** (`orient` merge + `keys.dedup()` ⇒ each key at most once per snapshot), with a full
 load-bearing-vs-benign **token taxonomy** and the Lane-A-only precision-defect nuance (secondary). D0–D3
 remain live and unremediated; remediation order L0→L1→L2→L3 (§16.3) stands; no production `.rs` changed.
+
+## §20 — Thirteenth-wave net-new findings (HEAD `1de21e71`, zero non-test source drift) — three parallel dives: the end-to-end self-ingestion loop traced link-by-link (primary), the "orient-merge-is-dead ⇒ standalone self-feeding meta-problem" mechanism + signal-vs-defect verdict (secondary), and the complete gate inventory + the minimal landing-order-safe write-boundary fix with the A→A test gap (tertiary)
+
+**Three parallel deep dives** at HEAD `1de21e71`, folded here — primary
+([`primary_self_ingestion_loop_pipeline_trace_HEAD_1de21e71.md`](./primary_self_ingestion_loop_pipeline_trace_HEAD_1de21e71.md)),
+secondary ([`secondary_composite_overaggregation_and_selffeed_HEAD_1de21e71.md`](./secondary_composite_overaggregation_and_selffeed_HEAD_1de21e71.md)),
+and tertiary/architect ([`tertiary_two_loop_architecture_and_landing_order_safe_fix_HEAD_1de21e71.md`](./tertiary_two_loop_architecture_and_landing_order_safe_fix_HEAD_1de21e71.md)).
+Drift re-check: since the twelfth-wave (`bbddd23a`) pin only `src/overseer/tests_root_cause.rs` changed —
+**all non-test source is byte-identical**, so every load-bearing line number below is exact at HEAD
+(independently re-read per dive; every citation verifies). **Empirical re-grounding this wave:**
+`cargo test --lib overseer::tests_memory_recall` → **32 passed, 0 failed** at HEAD `1de21e71` (re-run and
+confirmed during consolidation), including `write_back_is_deduplicated_within_window` and
+`write_back_persists_again_for_a_distinct_signature`. **No verdict reversal; no production `.rs` changed;
+no remediation landed.** This wave converts the accumulated diagnosis into (a) a single continuous
+**link-by-link loop trace** with an explicit `Recur` edge (§20.1), (b) the sharpened **standalone-meta-problem
+self-feed** mechanism naming the exact unguarded call site (§20.2), (c) a unified **five-gate idempotency
+inventory** proving the self-feed edge has *no* effective boundary (§20.3), (d) the **A→A test gap** on the
+precise defect edge (§20.4), and (e) the concrete **minimal, landing-order-safe write-boundary fix** with a
+buildable diff, out-of-scope carve-outs, and the required regression test (§20.5) — plus a re-affirmed
+**signal-vs-defect verdict** with fresh green empirics (§20.6).
+
+- **20.1 — NET-NEW consolidation: the self-ingestion loop, traced link-by-link end-to-end (primary dive).**
+  Prior waves cited the loop's edges piecemeal (§14 pipeline trace, §19.6 emitter map, §19.7 nesting proof).
+  This dive assembles them into **one continuous eight-edge cycle**, each edge a direct HEAD citation:
+  1. **Seed / write-back embeds a recoverable self-marker** — `record_observation` stores
+     `content = "{content} [sig:{signature}]"` with fixed `source_label = OVERSEER_SOURCE_LABEL`
+     (`wiring.rs:1076-1091`, label `:952`).
+  2. **Recall lifts the Overseer's own marker — NO provenance filter** — `recall_episodic`
+     (`wiring.rs:1013-1031`) maps *every* recalled episode to `RecalledEpisode { failure_signature:
+     parse_failure_signature(&e.content), … }`; `parse_failure_signature` (`wiring.rs:976-986`) extracts the
+     `[sig:…]` payload regardless of author, and **does not exclude `source_label == "overseer"`**.
+  3. **Count fires at 2 → the reported "seen 2×"** — `signals_from` (`signal.rs:455-470`) buckets by
+     `failure_signature`; any bucket `>= RECURRING_SIGNATURE_THRESHOLD` (`= 2`, `signal.rs:362`) emits
+     `Signal::RecurringSignature { signature: "overseer-obs:…", occurrences }`. The threshold value **is** the
+     reported `2×`.
+  4. **Classify keeps the self-prefix in the dedup_key** — `classify_signal` (`mod.rs:1353-1363`) sets
+     `dedup_key = sanitize_recalled(signature)`; `sanitize_recalled` (`capabilities.rs:468-482`) strips only
+     control chars and caps length — it **does not strip/reject the `overseer-obs:` self-prefix**.
+  5. **Orient folds it in as a first-class problem** — `orient` (`mod.rs:1200-1235`) pushes it as a
+     `Problem` whose `dedup_key` is the `overseer-obs:…` string, sitting alongside the tick's *fresh* bare keys
+     (`goal:blocked:…`, `workstream-gap`, `resource:engineer_spawn`).
+  6. **`observation_signature` RE-WRAPS → the nested prefix** — `mod.rs:1068-1073`,
+     `format!("overseer-obs:{}", keys.join("|"))` over the sorted, deduped keys; because one key is already
+     `overseer-obs:goal:blocked:…`, the emitted signature nests: an outer `overseer-obs:` wrapping a mix of
+     `overseer-obs:goal:blocked:…` fragments and fresh bare keys — **the exact structure of the reported blob**.
+  7. **The write-back gate does NOT break the loop** — `write_back_gate` (`WhisperGate::new(900,5)`,
+     `mod.rs:299`; internals `guardrails.rs:291-343`; used `mod.rs:546-556`) suppresses only the
+     **byte-identical** signature within its 900 s window, but **every generation mutates** the signature
+     (the nested prefix grows and the aggregated fresh-key set churns), so each generation is a *new* gate key
+     → `Deliver` → persisted → recallable again.
+  8. **Recur** — the freshly persisted, deeper-nested episode is recalled next pass (edge 2), re-counted,
+     re-raised; the recurrence counter inflates and the signature accretes prefixes without bound.
+  **Single-sentence root cause (primary):** the episodic recall path has **no self-authorship exclusion**, and
+  neither `sanitize_recalled` nor `observation_signature` treats an already-`overseer-obs:`-prefixed key
+  specially — so the Overseer recalls, re-classifies, and re-wraps its own write-backs into an ever-nesting
+  recurring signature. (Confidence: **High** — every edge is a HEAD citation; the nested-prefix structure is
+  reproducible *only* by edges 2→4→6, and `2× == RECURRING_SIGNATURE_THRESHOLD` exactly.)
+
+- **20.2 — NET-NEW mechanism sharpening: the `orient` merge branch is DEAD for the composite ⇒ the
+  `RecurringSignature` ALWAYS becomes a *standalone* self-feeding meta-problem (secondary dive F3).** §19.7
+  established that nesting is a fingerprint of D1; this dive names the exact *vehicle* and the exact *unguarded
+  call site*. Two facts, both re-grounded at HEAD:
+  1. **The only episodic `[sig:…]` writer is the Overseer's own `record_observation`** (`wiring.rs:1076-1091`);
+     `record_occurrence` (Lane B) writes via `store_fact`, **not** episodic — so **no per-problem episodic
+     writer exists**. Therefore the `orient` "merge into a same-`dedup_key` in-cycle problem" branch
+     (`mod.rs:1211-1221`) is **effectively dead for this pipeline**: the composite key
+     `overseer-obs:g1|g2|…` never equals a single problem's `goal:blocked:g1`. The `RecurringSignature`
+     **always spawns a STANDALONE `ProcessHealth` meta-problem** whose `dedup_key = sanitize_recalled(composite)`.
+  2. **That standalone meta-problem re-enters the next write-back with NO write-boundary filter.**
+     `wiring.rs:301` calls `write_back_observation(&cycle.problems)` over **all** problems — including the
+     recall-derived meta-problem — so next cycle `observation_signature` folds the prior composite back in →
+     `overseer-obs:overseer-obs:g1|…`. This is the precise, cited origin of the nested tokens in the
+     investigation string. Net: **Lane-A is isolated from Lane-B (tested) but NOT isolated from itself
+     (untested, §20.4).** The base composite parks at a stable `2×` while a growing nested tail accumulates
+     episodes and consumes memory (bounded only by the 8192-byte cap in `sanitize_recalled`,
+     `capabilities.rs:455,472`).
+
+- **20.3 — NET-NEW unified inventory: all five dedup/idempotency gates, and why the self-feed edge has NONE
+  effective (tertiary dive B).** Every gate on (or near) the loop, located and adjudicated at HEAD:
+
+  | # | Gate | Location | Keyed on | Durability | Stops | Why it fails on the self-loop |
+  |---|------|----------|----------|------------|-------|-------------------------------|
+  | **G1** | `write_back_gate` (`WhisperGate::new(900,5)`) | `mod.rs:299`; internals `guardrails.rs:291-333`; used `mod.rs:546-556` | full `observation_signature` string | **in-memory only** (resets on restart, `guardrails.rs:294-295`) | re-persisting a **byte-identical** signature within 900 s | signature **mutates every generation** ⇒ each gen is a new key ⇒ `Deliver` every time |
+  | **G2** | `orient` in-cycle merge | `mod.rs:1211-1221` | `dedup_key` equality | per-tick | duplicate problems in one tick | **dead for composite**: `overseer-obs:g1\|g2` never equals a bare `goal:blocked:g1` |
+  | **G3** | `orient` in-flight dedup | `mod.rs:1207-1209` | key vs engineers' refs | per-tick | fighting an engineer already on it | irrelevant — no engineer owns a meta-key |
+  | **G4** | Lane-B `recall_occurrences` exact-match | `mod.rs:983` | per-problem `dedup_key` | store-durable (semantic facts) | cross-problem key bleed | works correctly; keeps Lane-B immune to churn |
+  | **G5** | `blocked_goal_gate` / `gap_gate` / `whisper_gate` | `mod.rs:286,292,304` | respective signatures | in-memory | flooding those act-paths | not on the write-back path; out of scope |
+
+  **Key architectural finding:** the *only* idempotency gate on the self-feed edge is **G1**, and G1 is
+  structurally defeated by signature mutation; **G2 (which could collapse a recalled signature into an existing
+  problem) is dead for the composite**. So **the loop has no effective idempotency boundary** — the exact
+  structural reason the 15-minute window never suppresses the recurrence.
+
+- **20.4 — NET-NEW test gap on the exact defect edge: Lane-A ⟂ Lane-A is UNTESTED (tertiary C, secondary
+  "test gaps").** Isolation is asymmetrically covered:
+  - **A↔B isolated — TESTED, PASS:** `tests_root_cause.rs:490`
+    (`loud_lane_a_recurring_signature_does_not_feed_lane_b_recurrence`) and its converse `:536`. Different
+    stores (`store_episode` `wiring.rs:1088` vs `store_fact` `mod.rs:1034`), different counters (floor 2 vs 3).
+  - **A→A NOT isolated — UNTESTED (the leak):** the two isolation tests cover only A↔B; the write-back tests
+    (`tests_memory_recall.rs:797,820`) feed **per-problem** signatures (`process:distill_fail`,
+    `goal:blocked:research`), never a composite `overseer-obs:g1|g2|…` back through recall. The
+    standalone-meta-problem outcome (§20.2) and its re-nesting are therefore **unasserted**. This is a test gap
+    on precisely the defect edge, and it must ship with the fix (§20.5).
+
+- **20.5 — NET-NEW remediation spec: the minimal, landing-order-safe write-boundary fix (tertiary dive E).**
+  The architect specifies a fix constrained to be **single-function, no cross-file plumbing, idempotent/additive,
+  and counter-untouching** — so it cannot half-land and is order-independent with the recall-side fix. In
+  `write_back_observation` (`mod.rs:534-563`), drop recall-derived meta-problems **before** computing the
+  signature:
+
+  ```rust
+  // mod.rs, inside write_back_observation, replacing the `let signature = …` line:
+  let own: Vec<Problem> = problems
+      .iter()
+      .filter(|p| !p.dedup_key.starts_with("overseer-obs:")) // never fold our own recall back in
+      .cloned()
+      .collect();
+  if own.is_empty() {
+      return Ok(None); // nothing but our own echoes this tick — write nothing
+  }
+  let signature = observation_signature(&own);
+  // … build observation_content from `own` too (mod.rs:551); gate/peek/commit unchanged …
+  ```
+
+  **Why it is the correct cut:** (i) it **kills the nesting at the source** — the composite can never again
+  contain an `overseer-obs:` key, so `observation_signature` stops growing and the signature becomes **stable**
+  across ticks for a stable board, which **restores G1's dedup power** (the 900 s window now actually suppresses
+  the repeat) — one fix repairs both "duplicate persistence" (via re-enabled G1) and "over-aggregation
+  self-feed"; (ii) it **keeps the honest signal** — Lane-A still fires `RecurringSignature` for *genuine*
+  recurring board states, it just stops recording its **own** meta-problem as new evidence; (iii) it is
+  **order-independent / defence-in-depth** with the primary's recall-side fix (exclude
+  `source_label == OVERSEER_SOURCE_LABEL` in `recall_episodic`) — if both land, redundant guards at two seams;
+  if only one, the loop is still cut; (iv) **no plumbing** — it reads `dedup_key`, already present on `Problem`,
+  vs. the recall-side fix which needs `source_label` returned through `recall_episodes_ranked`.
+  **Required regression test (ship with the fix):** an **A→A isolation test** (none exists, §20.4) — drive a
+  cycle that write-backs a composite, recalls it, fires `RecurringSignature`, and asserts the meta-problem's
+  `overseer-obs:` key is **excluded** from the next `observation_signature` (signature does not nest; G1
+  suppresses the within-window repeat). Mirror `tests_memory_recall.rs:820` but assert **no** distinct nested
+  signature is produced.
+  **Deliberately out of scope (flag, don't bundle):** (a) the **restart-reset duplicate** — G1's in-memory
+  state clears on daemon restart (`guardrails.rs:294-295`), so one identical write-back can re-persist per
+  restart even for a *stable* signature; bounded (≤1 per stable signature per restart), a distinct
+  lower-severity issue needing store-schema work — land separately; (b) **demote the composite
+  `ProcessHealth → LaunchRecipe` to advisory/telemetry** (`mod.rs:1429-1435`) — a *routing* policy change,
+  complementary but separate so the loop cut can land first and alone.
+
+- **20.6 — Signal-vs-defect verdict, re-affirmed with fresh green empirics (secondary dive F4, tertiary D).**
+  The `2×` is an **honest** re-observation: `observation_signature` is deterministic (sort+dedup), and because
+  each constituent `dedup_key` is `goal:blocked:{id}` (reason-independent, `mod.rs:1336`), an identical composite
+  means "the same *set* of things is still stuck" — a genuine *board-did-not-advance* signal, not a counting bug
+  (within-window dedup proven green: `write_back_is_deduplicated_within_window`; distinct-signature
+  re-persistence green: `write_back_persists_again_for_a_distinct_signature`; **32/0** this wave). **The DEFECT
+  is the response, on two counts:** (1) `WorkstreamCoverage → FlagWorkstreamGaps` notifies only
+  (`mod.rs:884-948`) — no closing rung (endorsed from §16/§19 L2); (2) `ProcessHealth` (composite Lane-A) *has*
+  a closing rung but the **wrong one** — it `LaunchRecipe`s (cost-bearing, gated by `max_launches_per_cycle=2`,
+  `mod.rs:283,607-611`) on a self-referential meta-string, and the meta-problem it acts on **re-amplifies its
+  own signature** (§20.2). **Do NOT touch the counter** (`signal.rs:455-470`) — the documented trap
+  (`PATTERNS.md`). The composite adds little that the churn-immune per-problem Lane-B (floor 3 →
+  `EscalateBlockedGoal`) does not cover more precisely, which is why the standing recommendation is to
+  **exclude recall-derived meta-problems at the write boundary (§20.5) and/or demote the composite to pure
+  telemetry**, not to adjust the honest count.
+
+**§20 delta:** verdict unchanged across all thirteen waves — the `×2` is an honest signal of a non-advancing
+board; the over-aggregated composite + the **unguarded write-boundary** (self-ingestion with no
+self-provenance filter) is the defect. This wave **(a)** assembles the scattered edges into one
+**link-by-link end-to-end loop trace** with the explicit `Recur` edge (primary, §20.1); **(b)** sharpens the
+mechanism to the **dead `orient` merge branch ⇒ standalone `ProcessHealth` meta-problem** that re-enters the
+**unfiltered** `write_back_observation(&cycle.problems)` at `wiring.rs:301` (secondary, §20.2); **(c)** proves
+via a **unified five-gate inventory** that the self-feed edge has **no effective idempotency boundary** (G1
+defeated by mutation, G2 dead for the composite; tertiary, §20.3); **(d)** identifies the **A→A isolation test
+gap** on the exact defect edge (§20.4); **(e)** specifies the **minimal, landing-order-safe write-boundary
+fix** — a single-function `overseer-obs:`-prefix filter in `write_back_observation` (`mod.rs:534-563`) that
+restores G1's dedup power with no plumbing and is defence-in-depth with the recall-side `source_label` filter,
+plus its required regression test and explicit out-of-scope carve-outs (§20.5); and **(f)** re-affirms the
+**signal-vs-defect verdict** with a fresh **32/0** memory-recall re-run at HEAD `1de21e71` (§20.6). D0–D3
+remain live and unremediated; the L0→L1→L2→L3 whole-loop remediation order (§16.3) stands; **no production
+`.rs` changed; no remediation landed.**
