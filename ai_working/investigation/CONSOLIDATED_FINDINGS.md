@@ -2,11 +2,12 @@
 
 **Investigation:** the overseer signature seen 2× in cognitive memory:
 `overseer-obs:goal:blocked:…|…|workstream-gap|workstream-gap`
-**Branch / HEAD:** `investigation/recurring-blocked-goals-workstream-gaps` @ `440e024c`
-**Date:** 2026-07-15  **Status:** Complete — re-validated against current source through nine waves
-(latest HEAD `440e024c`; **every** investigation commit is **docs-only** — `git diff --name-only
-6e3113bc..HEAD -- '*.rs'` is empty and the working tree is also source-clean, all changes confined to
-`ai_working/`, so every source citation still holds and no fix is merged). Fifth-wave net-new findings
+**Branch / HEAD:** `investigation/recurring-blocked-goals-workstream-gaps` @ `f9cefec1`
+**Date:** 2026-07-15  **Status:** Complete — re-validated against current source through **ten** waves
+(latest HEAD `f9cefec1`; through the ninth wave every investigation commit was **docs-only**, and the
+tenth wave added **only a test** — `git diff --name-only 6b2bf5e1..HEAD -- src/overseer src/stewardship`
+returns solely `src/overseer/tests_root_cause.rs`, the working tree is source-clean, and **no production
+`.rs` changed**, so every source citation still holds and **no fix is merged**). Fifth-wave net-new findings
 (incl. the `resource:engineer_spawn` membership drift) are folded into §11; sixth-wave net-new findings
 (the end-to-end pipeline trace and the **D2→D1→D3 dependency-safe landing order**, plus a reconciliation
 of the two waves' D-numbering) are folded into §12; seventh-wave net-new findings (the falsifiable
@@ -19,7 +20,21 @@ ninth-wave net-new findings (the two **decoupled recurrence lanes**, the **struc
 unreachability** of the raise-priority rung for the composite self-observation, the two concrete
 **over-aggregation harms** — churn-brittle detection and composite non-actionability — and the
 `workstream-gap ↔ engineer_spawn` **no-causal-edge** reconfirmation, all re-verified against live
-`src/` at HEAD `440e024c` with zero drift) are folded into §15.
+`src/` at HEAD `440e024c` with zero drift) are folded into §15. Tenth-wave net-new findings at
+HEAD `f9cefec1` (the load-bearing **D0 reconciliation-seam root cause** — the completion gate is a
+*conjunction* and its reconciler is doubly-conditional, so an issue-closed-without-linked-merged-PR
+anchor never leaves `Blocked`; the **revised L0→L1→L2→L3 whole-loop remediation order**; and an
+explicit **reconciliation of the two newest deep dives' `engineer_spawn` disagreement** — one calls
+it a benign "false lead," the other a real coupled-`8`s admission-cap; both are correct at different
+seams) are folded into **§16**. Three further tenth-wave parallel dives at the same HEAD `f9cefec1`
+(the explicit **intended-signal-vs-recording-defect adjudication** — the `×2` is signal, the only
+genuine recording concern is Lane-B durability, not the count; an empirical **21/21 lane-isolation
+re-run**; the **F2 doc/impl gap-rung mismatch** and the **F5 correction** that the WHY ladder is
+default-**on** at its second gate so only the shared `completion_evidence` wiring gates both it and D0;
+and a full **361/0 per-hypothesis re-verification**) are folded into **§17**. This tenth wave is the
+first that is **not docs-only**: it added a single **test** (`src/overseer/tests_root_cause.rs`, commit
+`f9cefec1`) proving Lane-A `RecurringSignature` does **not** feed Lane-B recurrence — i.e. the 2↔3
+dead-zone (D2) is now green-by-test. **No production `.rs` changed; no remediation landed.**
 
 This consolidates all parallel deep dives:
 [`investigation_report.md`](./investigation_report.md) (primary/secondary root cause),
@@ -1354,3 +1369,244 @@ pressure on real goals) and **decomposes the over-aggregation** into two concret
 detection, non-actionable remediation unit) — both tracing to the same whole-cycle `observation_signature`
 that drives D1. `workstream-gap ↔ engineer_spawn` is re-confirmed as a **co-occurring under-resourced
 state with no causal edge**. Zero code drift; investigation-only; nothing landed.
+
+---
+
+## §16 — Tenth-wave net-new findings (HEAD `f9cefec1`) — the D0 reconciliation-seam root cause, revised whole-loop remediation order, and the `engineer_spawn` reconciliation
+
+Sources folded this wave:
+[`primary_signature_recurrence_VERDICT_HEAD_b9f99879.md`](./primary_signature_recurrence_VERDICT_HEAD_b9f99879.md)
+(independent line-by-line re-read + oracle re-run; D1/D2/D3 re-affirmed),
+[`tertiary_orchestration_synthesis_and_remediation_HEAD_f9cefec1.md`](./tertiary_orchestration_synthesis_and_remediation_HEAD_f9cefec1.md)
+(**the new D0 upstream root cause** + whole-loop L0–L3 ordering), and
+[`secondary_starvation_coupling_HEAD.md`](./secondary_starvation_coupling_HEAD.md)
+(the executor/capacity-layer **coupled-`8`s** refinement of the `engineer_spawn` framing).
+All load-bearing citations re-verified against live `src/` at HEAD `f9cefec1`.
+
+**No verdict reversal.** The `×2` remains a *faithful, honest cross-window re-observation of a
+near-static blocked/gap set* (H1 CONFIRMED, H0 REJECTED). This wave does two things the prior nine
+did not: it names the **upstream reason the anchor is `Blocked` at all** (D0 — previously only
+classified as "a real near-static set" without saying *why* it stays static), and it **resolves the
+one genuine cross-deep-dive disagreement** about `resource:engineer_spawn`.
+
+- **16.1 — D0 (NEW, load-bearing): the reconciliation seam cannot clear an
+  issue-closed-without-linked-merged-PR goal out of `Blocked`.** Prior waves located three defects
+  *inside* the Overseer (D1 write-back self-nesting, D2 escalation dead-zone, D3 coverage
+  notify-only). All three explain why the signature **persists, is mis-counted, and never
+  converges** — none explains why the dominant anchor `goal:blocked:fix-agent-kgpacks-rs-issue-17-…`
+  is on the board as `Blocked` **in the first place while its GitHub issue is closed**. The cause is
+  upstream, at the only seam that moves a goal out of `Blocked` on completion evidence:
+  - **The completion gate is a *conjunction*, not a disjunction.** `CompletionEvidenceGate::evaluate`
+    (`goal_curation/completion_gate.rs:394`, missing-evidence variants `PrNotMerged` / `IssueOpen` /
+    `NotDeployed` at `:43-47`) marks a goal `Complete` **iff** `pr_merged ∧ issue_closed
+    [∧ deployed]`. A **closed issue alone** yields `missing = [PrNotMerged]` → `Blocked`, *not*
+    `Complete`. If issue #17 was closed out-of-band (manually / duplicate / wontfix, or by a PR the
+    evidence source cannot tie to the goal's `wip_refs`), the goal is pinned to `Blocked` **forever**.
+  - **The reconciler is doubly conditional and silent when off.** `sweep_done_goals` runs only inside
+    `if let Some(evidence) = &memories.completion_evidence` (`operator_commands_ooda/daemon/mod.rs:1322-1323`),
+    and `completion_evidence` is itself `None` unless `completion_evidence_enabled()` (`:455-457`). On
+    any deployment where the feature flag is off or the source is absent, the **only** board-draining
+    reconciler is a **silent no-op** and *every* blocked goal is permanent — with **no fail-loud**.
+  - **Fail-closed on a flaky source compounds it.** Any error from the evidence source returns
+    `Blocked{CouldNotVerify}`, so a rate-limited / unauthenticated `gh` re-blocks the goal every cycle
+    — a live, near-static blocked set is exactly what the `×2` recall needs.
+  - **Verdict:** **D0 is the root of the anchor; D1/D2/D3 are why the anchor's signature recurs, is
+    mis-counted, and never converges. Complementary, not competing.** This is the missing upstream
+    link the nine prior waves under-weighted.
+
+- **16.2 — Reconciliation of the `resource:engineer_spawn` disagreement between this wave's two
+  deep dives (the one genuine cross-report tension).** The tenth-wave **tertiary** calls
+  `engineer_spawn` a **benign "false lead"** with **no spawn semaphore** gating goal work (grep of
+  `agent_supervisor`/`engineer_loop`/`signal.rs` finds only the `ENGINEER_SPAWN_THRESHOLD = 8`
+  *observe* threshold); the tenth-wave **secondary** calls it a **real resource-starvation coupling**.
+  Both are correct at different seams — they do **not** contradict, they resolve as follows:
+  - **Agreed by both (and by §15.4):** there is **no data-flow *code* edge** from `engineer_spawn`
+    (or from a `workstream-gap`) into any spawn/launch path. The composite pairing is a *state*
+    co-occurrence, not a producer→consumer edge.
+  - **Secondary's refinement is a *state* coupling on a shared constant, not a code edge.** The
+    telemetry threshold `ENGINEER_SPAWN_THRESHOLD = 8` (`signal.rs:351,394`) is **the same number** as
+    the hard admission cap `max_concurrent_engineers = 8` (`typed_ooda/types.rs:680`), enforced by the
+    capability ledger `admit()` which rejects `SpawnEngineer` on
+    `concurrent_engineers >= max_concurrent_engineers` with `"engineer concurrency limit reached"`
+    (`typed_ooda/ledger.rs:1793-1796`). So at exactly 8 live claims the *same* condition that **mints**
+    `resource:engineer_spawn` also **rejects** the only spawn attempt an idle goal makes (the
+    no-progress `SpawnEngineer` guided retry). The cap is a **saturation ceiling** (PID-liveness
+    counted, self-clears when engineers exit) — **not a deadlock** — but engineer subprocesses have
+    **no wall-clock timeout by design**, so a few wedged agents can extend the saturation window.
+  - **Tertiary's point stands for *active* gap goals:** `detect_workstream_gaps` never attempts a
+    spawn, so for uncovered-but-active goals the cap is irrelevant — the block is the **missing
+    convergence rung** (D3), not the cap. The cap only bites *idle* goals whose no-progress breaker
+    tries (and is rejected).
+  - **Resolved framing (supersedes §15.4's "benign passive telemetry" for precision):**
+    `resource:engineer_spawn` is **not a driver of the signature and remains lowest-priority for
+    remediation** (do **not** build spawn-capacity controls to chase this stall, and do **not** treat
+    it as an escalation trigger on its own — tertiary is right that it is a *passenger* in the
+    composite). **But** it is **not pure noise either**: it is an honest **early-warning that the
+    concurrency admission cap is being hit**, which is a genuine *secondary* contributor to
+    `goal:blocked` persistence **under saturation** (secondary is right that the cap is real and
+    cap-rejects idle-goal spawns). Net: **peripheral to the fix, not fictitious.**
+
+- **16.3 — Revised whole-loop remediation order (L0→L1→L2→L3), superseding the prior D2→D3→D1
+  landing order now that D0 is known.** Prior waves ordered fixes by *dependency safety within the
+  Overseer* (D2 counter → D3 rung → D1 hygiene). With D0 identified as the upstream anchor cause, the
+  **leverage-ranked** order is:
+  - **L0 (fixes D0; highest leverage).** Reconcile issue-closed goals out of `Blocked`: either treat
+    `issue_closed && !self_affecting` as `Complete` at `completion_gate.rs:394-438` (issue closure is
+    the definition of done for a "fix issue N" goal), **or** add a `sweep_stale_blocked` pass that
+    tombstones a goal blocked > N cycles whose issue is closed. **And fail loud** when
+    `completion_evidence` is `None`/disabled (`daemon/mod.rs:1322`) instead of silently skipping
+    reconciliation. **L0 alone likely collapses the observed `×2` to nothing for the kgpacks anchors.**
+  - **L1 (fixes D3).** Give `WorkstreamCoverage` a real closing edge (`LaunchRecipe`/`FileIssue`) in
+    Decide (`mod.rs:1534-1543`), gated behind a **cross-window recurrence ledger** and keyed on a
+    **per-gap identity** replacing the opaque constant `"workstream-gap"` dedup_key (`mod.rs:1371`;
+    `INV-GAP-KEY`) so the ledger can tell *which* gap recurs.
+  - **L2 (fixes D2).** Close the 2↔3 escalation dead-zone with a recurrence-aware rung *between*
+    Lane-A (`RecurringSignature` @ 2) and Lane-B (escalation @ 3) — the two lanes share no counter
+    (**now proven by the new `tests_root_cause.rs` test at `f9cefec1`**). Route the rung down a
+    resolution action **only for WHY classes carrying no benign explanation** (per §15.5), so a bare
+    count bump does not over-escalate deliberate operator blocks. Ship any Lane-B accrual change
+    **atomically with its counter** or `recurrence >= 3` (`mod.rs:1613`) latches / becomes dead code
+    (the re-affirmed coupling trap, `RECONCILIATION_LEDGER`).
+  - **L3 (fixes D1; hygiene, lowest urgency).** Exclude recall-derived `RecurringSignature`
+    (`ProblemKind::ProcessHealth`) problems from the write-back set (`mod.rs:534-563`) so the
+    `overseer-obs:…|overseer-obs:…` self-nesting stops. Cosmetic-plus-bounded; does **not** by itself
+    stop the loop (D0/D3 do).
+  - **Executor-side (from secondary, orthogonal to L0–L3, lower priority):** decouple
+    `ENGINEER_SPAWN_THRESHOLD` from the hard cap or make `engineer_spawn` escalate **only when it
+    co-occurs with unmet `workstream-gap`s**; consider prioritized admission/preemption for p1/p2
+    gap-goals under saturation; bound engineer slot-hold time via progress-signal liveness (respecting
+    the PR#1988/#1989 no-SIGKILL constraint).
+
+- **16.4 — Source-drift & empirical state at HEAD `f9cefec1`.** Unlike waves 1–9 (docs-only), this
+  wave added **one test file**: `src/overseer/tests_root_cause.rs` (commit `f9cefec1`,
+  `git diff 440e024c..f9cefec1 -- '*.rs'` = that file only; working tree source-clean). **No
+  production `.rs` changed** and `git diff 6b2bf5e1..HEAD -- src/overseer src/stewardship` shows only
+  that test — so every prior source citation still holds and **no remediation has landed** (D0/D1/D2/D3
+  all live). The added test **confirms empirically** that Lane-A `RecurringSignature` does not feed
+  Lane-B recurrence — i.e. D2's 2↔3 dead-zone is a *verified* property, not an inference. Oracle
+  suites remain green as re-run by primary: `overseer::tests_memory_recall` **32 passed**,
+  `overseer::tests_gap_scan` **21 passed**, no-progress/goal-health **77 passed** (incl.
+  `perpetual_no_progress_goal_is_unblocked_once_and_not_escalated` — parks, does not converge).
+
+- **16.5 — Open questions carried forward (from the tenth-wave secondary; verification-phase).**
+  (Q1) Confirm `count_live_engineer_claims` (`ooda_brain/context.rs`) and the ledger snapshot's
+  `concurrent_engineers` are computed from the **same** claim source, so the emit-threshold and the
+  reject-threshold genuinely fire on the same count of 8 (E1 hinges on this). (Q2) Confirm no
+  production config raises `max_concurrent_engineers` above `ENGINEER_SPAWN_THRESHOLD`, which would
+  decouple the two `8`s. (Q3) Confirm a cap-rejected no-progress `SpawnEngineer` retry is **retryable
+  next window**, not counted as an exhausted retry that pushes the goal to permanent bare-block.
+  (Q4) Confirm `memories.completion_evidence` is actually `Some`/enabled in the running daemon build
+  — if it is `None`/disabled, **D0 is not just the anchor's cause but a total reconciliation outage**,
+  and L0's fail-loud is the single most urgent change.
+
+**Tenth-wave delta:** verdict unchanged (honest `×2`, real re-observation). The wave **adds the
+upstream root cause D0** (issue-closed-without-merged-PR pins the anchor `Blocked`; reconciler is a
+silent, doubly-conditional no-op when disabled), **re-orders remediation to L0→L1→L2→L3** by leverage,
+and **reconciles the `engineer_spawn` framing** to "peripheral early-warning of a real admission cap,
+not a driver and not fictitious." First non-docs-only wave — a single test locks in the D2 dead-zone
+property. Nothing else landed; D0–D3 remain live.
+
+---
+
+## §17 — Tenth-wave (continued): the signal-vs-recording-defect adjudication, convergence-rung refinements, and full per-hypothesis re-verification at HEAD `f9cefec1`
+
+Three additional parallel deep dives from the same tenth wave (all HEAD `f9cefec1`), folded here:
+[`tertiary_lane_isolation_signal_vs_defect_VERDICT_HEAD_f9cefec1.md`](./tertiary_lane_isolation_signal_vs_defect_VERDICT_HEAD_f9cefec1.md)
+(the explicit **"intended signal vs recording defect"** adjudication + lane-isolation re-run),
+[`secondary_reemission_and_convergence_HEAD_f9cefec1.md`](./secondary_reemission_and_convergence_HEAD_f9cefec1.md)
+(convergence-rung asymmetry + **two net-new refinements**: a doc/impl mismatch on the gap rung and a
+**correction to the "double-gated WHY ladder" claim**), and
+[`verification_results_HEAD_f9cefec1.md`](./verification_results_HEAD_f9cefec1.md)
+(re-execution of a practical test for **every** hypothesis H0–H8 on the latest tree). All citations
+re-verified against live `src/` at HEAD `f9cefec1`. **No verdict reversal**; this cohort *sharpens the
+adjudication, corrects one imprecise prior claim, and re-pins the empirical baseline.*
+
+- **17.1 — The `×2` is *intended signal*, not a *recording defect* (NEW explicit adjudication).** Prior
+  waves classified the `×2` as an "honest re-observation" but never squarely answered the user's implicit
+  question — *is this a bug in how recurrence is recorded?* The tenth-wave tertiary adjudicates it
+  directly and answers **no**:
+  - The full observe→signature→count loop is deterministic and honest end-to-end: OBSERVE is a **pure
+    projection** of `GoalProgress::Blocked` (`sensor.rs:204-221`, no fabrication); the composite
+    `observation_signature` is a stable **set hash** (`sort→dedup→"overseer-obs:{join('|')}"`,
+    `mod.rs:1068-1073`); Lane-A `occurrences` is a faithful count of recalled episodes carrying the same
+    `failure_signature`, and recall reads **live facts only** (`include_superseded:false`,
+    `library_adapter.rs:763,773,830`) so there is **no storage amplification / replay**. A truthful
+    sensor reporting a genuinely-static blocked world **is signal by definition** — silencing the count
+    would itself be the defect.
+  - **Where a recording concern genuinely exists (and its boundary):** only in **Lane-B durability**, not
+    in the `×2` the user saw. `record_occurrence` writes via non-idempotent `store_fact` (`mod.rs:1034`),
+    an append-only ratchet; the correct hardening is a **caller-key upsert carrying an `occurrence_count`
+    in the fact content** (escalation reading that field), **not** the naïve
+    `store_fact_with_caller_key` swap floated in §6.2b — which would collapse recall to **1 forever** and
+    make the `≥3` escalation rung **dead code** (re-confirms the `RECONCILIATION_LEDGER` trap). This
+    cohort **re-affirms** that trap rather than re-deriving it.
+  - **The 2↔3 dead-zone is a *design consequence of correct lane isolation*, not a bug in it.** Because
+    Lane-A (`RecurringSignature @ 2`) and Lane-B (`recurrence @ 3`) are isolated by construction, a
+    signature stably re-observed at Lane-A `×2` **raises priority in `orient` but never reaches Lane-B's
+    `≥3`** unless Lane-B independently accumulates ≥3 cause-matched `PriorOccurrence`s. The remedy is a
+    rung that *acts on Lane-A `×2`* (L1/L2), **not** merging the lanes or touching the counter.
+  - **Verdict (this cohort):** do **not** touch the counter or the lane isolation — both are correct and
+    now guarded. This *sharpens* §16.1–§16.3: the honest-`×2` framing now carries an explicit
+    signal-vs-defect ruling and a precise recording-concern boundary (Lane-B durability only).
+
+- **17.2 — Lane isolation empirically re-run and reconfirmed (not just inferred).** The tenth-wave
+  tertiary re-executed `cargo test --lib overseer::tests_root_cause` → **21 passed, 0 failed** at HEAD,
+  including both directional guards: `loud_lane_a_recurring_signature_does_not_feed_lane_b_recurrence`
+  (`tests_root_cause.rs:490-529` — a deliberately loud Lane-A `occurrences: 10` yields
+  `problem.why.recurrence == 0` and the goal **self-heals** via `UnblockGoal`) and the converse
+  `lane_b_escalates_without_any_lane_a_signal` (`:535-573`). `git show --stat f9cefec1` confirms this is a
+  **net-new verification test (+99 lines in `tests_root_cause.rs`), not a behavior change** — the
+  isolation was always true; `f9cefec1` pins it against regression. This is the empirical anchor under
+  §16.4's "D2 dead-zone is now a *verified* property."
+
+- **17.3 — Convergence-rung asymmetry re-grounded, plus two net-new refinements (F2, F5).** The
+  tenth-wave secondary re-confirms the core defect — Simard has exactly **one** durable convergence
+  mechanism (`stewardship::process_orchestrator_run` → `route_failure` → search-or-file a **deduplicated**
+  GitHub issue, `stewardship/mod.rs:70-115`, `routing.rs:39`), reached **only** for orchestrator run
+  failures; `workstream-gap` (→ `FlagWorkstreamGaps`, notify-only) and `resource:engineer_spawn`
+  (→ `Escalate`/`Report`, notify-only) are **routed away** from it and therefore re-emit every dedup
+  window forever. Two refinements are net-new to the consolidated record:
+  - **F2 (NEW, doc/impl mismatch):** `observer.rs:117-119` asserts gaps are *"acted on … (notify +
+    **deduped file**)"* and `routing.rs:11-15` provisions a default-repo fallback for the *"Overseer's
+    **workstream-gap briefs**"* — **but neither is wired.** No code constructs an
+    `OrchestratorRunSummary`/`Brief` from a `GapItem`; `act_flag_workstream_gaps` only notifies. The
+    comments describe a **file rung that does not exist** — concrete evidence the convergence rung was
+    *intended and dropped*, not deliberately omitted. This upgrades D3 from "missing by omission" to
+    "missing against a documented-but-unwired intent," strengthening the case for L1.
+  - **F5 (CORRECTION to a prior claim):** earlier waves called the WHY resolution ladder *"double-gated
+    off"* (`cycle.rs:582-702`). **Precision correction, verified at HEAD:** Gate 2
+    (`no_progress_investigation_enabled()`, `cycle.rs:583`) is **default-TRUE**
+    (`no_progress.rs:203-207`, `unwrap_or(true)`; only `SIMARD_NO_PROGRESS_INVESTIGATE=off` disables it).
+    The **operative** gate is Gate 1 — `if let Some(source) = &memories.completion_evidence`
+    (`cycle.rs:582`), tied to `SIMARD_PROGRESS_EVIDENCE`. So the ladder is **not** "off by two default-off
+    flags"; when Gate 1's evidence source is wired, the ladder runs and resolves via `resolution_for_why`
+    (`no_progress_breaker.rs:384-414`), proven by the 77 investigation/reinvestigation tests. **This
+    reframes the production risk as a *mis-provisioned evidence source*, not a hard-off reasoner** — and
+    it is the *same* `completion_evidence` wiring that gates D0's reconciler (§16.1), so **Gate-1 wiring
+    is a single shared leverage point for both the WHY ladder and D0 reconciliation** (raising the
+    priority of §16.5-Q4 / the L0 fail-loud).
+
+- **17.4 — Full per-hypothesis re-verification on the latest tree (empirical baseline re-pinned).** The
+  tenth-wave verification dive re-executed a practical test for **every** hypothesis H0–H8 at HEAD
+  `f9cefec1`: the **full overseer suite = 361 passed, 0 failed**, plus **22 targeted discriminating
+  tests green** (2 whisper-gate + 15 named + 5 Lane-A/B decoupling). All seven source invariants the
+  hypotheses depend on are **unchanged** at HEAD (`RECURRING_SIGNATURE_THRESHOLD=2` `signal.rs:362`;
+  `RECURRENCE_ESCALATION_THRESHOLD=3` `root_cause.rs:33`; non-deduping `store_fact` `mod.rs:1034`;
+  bare-block renderer split `no_progress_breaker.rs:123/141`; `WhisperGate::new(900,5)` `mod.rs:299`;
+  completion done-gate conjunction `completion_gate.rs:394-438`). Verdict matrix reproduced unchanged:
+  **H0 REJECTED** (dedup/storage/replay artifact excluded), **H1 CONFIRMED** (real cross-window
+  re-observation), **H2–H8 SUPPORTED** (bare-park no-WHY, coverage notify-only, bounded write-back
+  feedback, 2↔3 dead-zone, non-idempotent-but-non-causal counters, blocked↔gap one-problem-two-views,
+  three-families-one-under-throughput). The absolute overseer count drifts a few tests across waves
+  (359→360→**361**) as the suite grows; the invariant — **0 failures, every discriminating test green** —
+  holds. This is the empirical floor under §16's source-drift claim: no production `.rs` changed, every
+  citation still resolves, no remediation landed.
+
+**§17 delta:** verdict still unchanged. This cohort **(a)** issues the explicit *signal-vs-recording-
+defect* ruling — the `×2` is intended signal; the only genuine recording concern is Lane-B durability,
+not the count; **(b)** re-runs and reconfirms lane isolation empirically (21/21); **(c)** adds F2 (the
+gap file-rung is documented-but-unwired) and the F5 **correction** (the WHY ladder is default-on at Gate
+2; only Gate-1 evidence wiring gates it — the same wiring that gates D0, making it a shared leverage
+point); and **(d)** re-pins the empirical baseline at 361/0 with all invariants intact. No new defects;
+D0–D3 remain live and unremediated; remediation order L0→L1→L2→L3 (§16.3) stands, with L0's fail-loud
+now doubly-motivated by the shared Gate-1 wiring.
