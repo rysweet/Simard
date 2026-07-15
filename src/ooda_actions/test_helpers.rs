@@ -134,6 +134,42 @@ pub(crate) fn mock_knowledge() -> KnowledgeClient {
     )))
 }
 
+/// Like [`test_memories`], but wires a cognitive-memory client that records the
+/// params of every `memory.store_episode` RPC into the returned sink. Lets
+/// tests assert *what* a persistence path actually wrote (content, source
+/// label, metadata) instead of merely that it did not panic.
+pub(crate) fn capturing_memories() -> (
+    OodaClients,
+    std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+) {
+    use std::sync::{Arc, Mutex};
+
+    let episodes: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&episodes);
+    let memory: Box<dyn CognitiveMemoryOps> = Box::new(CognitiveMemoryClient::new(Box::new(
+        InMemoryRpcTransport::new("capture-mem", move |method, params| match method {
+            "memory.store_episode" => {
+                sink.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(params.clone());
+                Ok(json!({"id": "epi_capture"}))
+            }
+            "memory.get_statistics" => Ok(json!({
+                "sensory_count": 0, "working_count": 0, "episodic_count": 0,
+                "semantic_count": 0, "procedural_count": 0, "prospective_count": 0
+            })),
+            _ => Err(RpcErrorPayload {
+                code: -32601,
+                message: format!("unknown: {method}"),
+            }),
+        }),
+    )));
+
+    let mut clients = test_memories();
+    clients.memory = memory;
+    (clients, episodes)
+}
+
 pub(crate) fn test_memories() -> OodaClients {
     OodaClients {
         memory: mock_memory(),
