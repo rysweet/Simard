@@ -745,6 +745,27 @@ fn engineer_worktree_state_root() -> std::path::PathBuf {
         })
 }
 
+/// Resolve the typed-OODA ledger state root.
+///
+/// Single source of truth for the directory that contains the typed-OODA
+/// SQLite ledger. Both the spawn-admission path (`typed_goal_session::run`,
+/// which opens the ledger for `record_action`) and the engineer-termination
+/// release path (`subordinate::cleanup_engineer_worktree_for_goal`) resolve the
+/// ledger through this helper, so a released claim always targets the exact
+/// ledger the admission gate inserted it into. Lives in `spawn` (compiled in
+/// both test and non-test builds) because `typed_goal_session` is
+/// `#[cfg(not(test))]`.
+pub(crate) fn typed_ooda_state_root() -> std::path::PathBuf {
+    std::env::var_os("SIMARD_STATE_ROOT")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("SIMARD_HOME").map(std::path::PathBuf::from))
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".simard")
+        })
+}
+
 /// Scan `<state_root>/engineer-worktrees/` for any directory whose name
 /// starts with `<goal_id>-` and whose `.simard-engineer-claim` sentinel
 /// names a live PID. Returns the first such path, or None if no live

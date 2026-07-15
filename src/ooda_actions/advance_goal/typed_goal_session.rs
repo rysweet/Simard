@@ -13,7 +13,7 @@ use crate::typed_ooda::{
 };
 
 use super::repo_resolver;
-use super::spawn::{find_live_engineer_for_goal, lock_state};
+use super::spawn::{find_live_engineer_for_goal, lock_state, typed_ooda_state_root};
 use crate::ooda_actions::make_outcome;
 
 pub(crate) fn run(
@@ -102,7 +102,9 @@ pub(crate) fn run(
         );
     }
     let handler = match CapabilityHandler::open(&ledger_path, policy) {
-        Ok(handler) => handler,
+        Ok(handler) => handler.with_engineer_liveness(Box::new(WorktreeEngineerLiveness {
+            state_root: typed_ooda_state_root(),
+        })),
         Err(error) => {
             return make_outcome(
                 action,
@@ -463,15 +465,42 @@ impl LiveGoalSessionEffects<'_, '_> {
     }
 }
 
-fn typed_ooda_state_root() -> PathBuf {
-    std::env::var_os("SIMARD_STATE_ROOT")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("SIMARD_HOME").map(PathBuf::from))
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".simard")
-        })
+/// Production [`EngineerLiveness`] provider backing the `engineer_claims`
+/// reclaim gate. It answers "is this claim's engineer alive?" using the same
+/// filesystem sentinel + PID-liveness signal the rest of the daemon trusts
+/// (`find_live_engineer_for_goal` -> `.simard-engineer-claim` scan +
+/// `is_pid_alive_public` with the process-start-time guard).
+///
+/// **Fail-closed contract.** Reclaim requires *proof of death*. `is_claim_live`
+/// returns `true` for anything short of a successful scan that finds no
+/// matching, alive, start-time-verified sentinel:
+///   - a malformed `claim_key` (no `:` separator) -> live;
+///   - a scan/IO error reading the worktrees directory -> live;
+///
+/// so an ambiguous signal never reclaims a claim out from under a running
+/// engineer. Only a *successful* scan that finds no live engineer is death.
+struct WorktreeEngineerLiveness {
+    state_root: PathBuf,
+}
+
+impl crate::typed_ooda::EngineerLiveness for WorktreeEngineerLiveness {
+    fn is_claim_live(&self, claim_key: &str) -> bool {
+        // claim_key = "{owner}/{repo}:{goal_id}"; the underlying liveness scan
+        // is keyed on goal_id alone (unique within a single daemon state_root).
+        let Some((_, goal_id)) = claim_key.split_once(':') else {
+            return true;
+        };
+        let worktrees_root = self
+            .state_root
+            .join(crate::engineer_worktree::WORKTREES_SUBDIR);
+        // A read_dir error is NOT proof of death (fail-closed). `find_live_...`
+        // maps such an error to `None`, indistinguishable from "no engineer",
+        // so we probe the directory first and treat any scan error as live.
+        if std::fs::read_dir(&worktrees_root).is_err() {
+            return true;
+        }
+        find_live_engineer_for_goal(&self.state_root, goal_id).is_some()
+    }
 }
 
 fn job_safe_suffix() -> u128 {
