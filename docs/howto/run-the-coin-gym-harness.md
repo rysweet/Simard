@@ -49,6 +49,7 @@ coin-gym run <model> [--strategy baseline|team] [--profile <name>] [--targets <p
 coin-gym score   <run-id> [--profile <name>]
 coin-gym compare <run-id> [--profile <name>]
 coin-gym improve <run-id> [--profile <name>] [--holdout fresh]
+coin-gym leaderboard [--profile <name>]
 coin-gym contract [--dataset <repo>] [--revision <tag>] [--split a,b] [--project x,y] [--source rebuild|image]
 coin-gym profiles
 ```
@@ -107,6 +108,55 @@ for the same model. A gap beyond 10 percentage points is flagged as a **material
 deviation** — a signal of a harness/config bug rather than a capability result.
 Offline scaffold runs are labelled *illustrative only* (a mock oracle cannot
 reproduce leaderboard numbers).
+
+### `leaderboard` — the LOCAL leaderboard + baseline-vs-team verdict
+
+```bash
+coin-gym leaderboard
+coin-gym leaderboard --profile opus
+```
+
+Where `compare` diffs **one** run against COIN's *published* board, `leaderboard`
+materialises the **LOCAL** board the objective is graded on. It ranks **every**
+persisted run (across profiles, or one profile with `--profile`) by reach then
+precision, then prints the single-model **baseline vs.** multi-agent **team**
+head-to-head that decides the done-gate:
+
+```text
+LOCAL-ONLY leaderboard (never posted externally)
+scope:   all profiles under target/coin-gym
+note:    includes OFFLINE SCAFFOLD runs (mock oracle) — an A/B here is illustrative, …
+ #  strategy    reach  precision  R/W/A/T/N/E               model            run-id
+ 1  team    60.0%     100.0%  R:3/W:0/A:2/T:0/N:0/E:0   Claude Opus 4.6   …-team-…  (offline)
+ 2  baseline    60.0%      60.0%  R:3/W:2/A:0/T:0/N:0/E:0   Claude Opus 4.6   …-baseline-…  (offline)
+baseline vs team (best run of each strategy per model):
+  [TEAM] Claude Opus 4.6 — team BEATS baseline (Δreach +0.0 pts, Δprecision +40.0 pts)
+         baseline reach 60.0% precision 60.0%   team reach 60.0% precision 100.0%
+verdict: MULTIAGENT BEATS BASELINE
+         MULTIAGENT BEATS SINGLE-MODEL BASELINE — team wins 1/1 comparable A/B(s), no regressions
+```
+
+Rules that keep the verdict honest:
+
+- **Ranking** is reach % (desc), then precision % (desc), then earliest start
+  (a stable, reproducible tie-break), then run-id.
+- **"Team beats baseline"** is defined the way COIN rewards — **strictly more
+  reached, or equal reach with strictly higher precision** — so the team's
+  abstention gate (which lifts precision without over-claiming) counts as a win.
+- **Best-of-each-strategy.** For every model with both a baseline and a team run,
+  the *best* run of each strategy is compared, so adding weak runs never dilutes
+  the A/B.
+- **Cross-snapshot pairs are excluded.** A team/baseline pair drawn from
+  *different* snapshots is flagged `[SKIP]` and left out of the aggregate verdict —
+  an A/B is only meaningful on the same pinned target set.
+- **Aggregate verdict** reports `MULTIAGENT BEATS BASELINE` only when at least one
+  comparable (same-snapshot) A/B has the team winning **and none** is a regression
+  (baseline beating team).
+
+> **LOCAL-ONLY.** Nothing here is posted externally; the ranking is computed from
+> the gym's own persisted runs. **Offline scaffold** runs are flagged so a
+> mock-oracle A/B is never mistaken for a real `coin evaluate` capability result
+> (that needs the Phase-3 VM, #2823).
 
 ### `improve` — offline failure analysis + overfitting gate
 
