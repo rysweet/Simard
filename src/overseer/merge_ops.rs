@@ -384,17 +384,41 @@ impl PrOps for MergePrOps {
     /// merges. On a successful merge it fires the dual-channel notification; the
     /// merge is not complete until that notification has dispatched.
     fn merge(&self, repo: &str, pr: u32) -> Result<(), OverseerError> {
-        // 0. Anti-recursion: never merge the Overseer's OWN PR (M3). Fails
-        //    CLOSED when the guard is configured but the subject is its own.
-        if let Some(guard) = &self.recursion {
+        // 0. Anti-recursion + author re-assert. Both fail CLOSED; the PR author
+        //    is fetched once and shared by both gates.
+        //    (a) Never merge the Overseer's OWN PR (M3).
+        //    (b) When an autonomous-merge identity is configured, independently
+        //        re-verify at THIS authoritative step that the PR is really
+        //        authored by that identity. The survey filter is the sole
+        //        production feeder of `ready_prs` today, so this is pure
+        //        defense-in-depth: it keeps the author gate robust against any
+        //        FUTURE path that could enqueue a `PrRef` from another source
+        //        (per the Step 17c security review's hardening note). The match
+        //        is case-INSENSITIVE, consistent with the survey filter; an
+        //        empty/mismatched author can never match and is refused.
+        if self.recursion.is_some() || self.automerge_author.is_some() {
             let author = self.source.author(repo, pr)?;
-            guard
-                .admit(&Subject::Pr {
-                    repo: repo.to_string(),
-                    pr,
-                    author,
-                })
-                .map_err(|e| cap("merge.recursion", e.to_string()))?;
+            if let Some(guard) = &self.recursion {
+                guard
+                    .admit(&Subject::Pr {
+                        repo: repo.to_string(),
+                        pr,
+                        author: author.clone(),
+                    })
+                    .map_err(|e| cap("merge.recursion", e.to_string()))?;
+            }
+            if let Some(expected) = self.automerge_author.as_deref()
+                && !author.eq_ignore_ascii_case(expected)
+            {
+                return Err(cap(
+                    "merge.author",
+                    format!(
+                        "refusing to merge {repo}#{pr}: author {author:?} does not \
+                         match the configured autonomous-merge identity \
+                         (fail-closed)"
+                    ),
+                ));
+            }
         }
 
         // 1. Full checklist must pass.
@@ -998,6 +1022,97 @@ mod tests {
             email.lock().unwrap().is_empty(),
             "no notify on a refused own PR"
         );
+    }
+
+    #[test]
+    fn merge_refuses_when_author_mismatches_configured_automerge_identity() {
+        // Defense-in-depth (Step 17c hardening): even on a fully GREEN,
+        // mergeable, reviewed PR, the authoritative merge step must refuse a PR
+        // whose author is NOT the configured autonomous-merge identity — proving
+        // the author gate no longer rests solely on the upstream survey filter.
+        struct HumanAuthorSource;
+        impl PrSource for HumanAuthorSource {
+            fn diff(&self, _r: &str, _p: u32) -> Result<String, OverseerError> {
+                Ok(CLEAN_DIFF.to_string())
+            }
+            fn title(&self, _r: &str, _p: u32) -> Result<String, OverseerError> {
+                Ok("t".to_string())
+            }
+            fn author(&self, _r: &str, _p: u32) -> Result<String, OverseerError> {
+                Ok("human-dev".to_string())
+            }
+        }
+        let gh = ScriptedGh::new(vec![green()]);
+        let email = Arc::new(Mutex::new(vec![]));
+        let notifier = DualChannelNotifier::new(vec![Box::new(CapturingChannel {
+            name: "email".to_string(),
+            seen: email.clone(),
+        })]);
+        let ops = MergePrOps::new(
+            Box::new(gh.clone()),
+            Box::new(HumanAuthorSource),
+            Some(Box::new(FakeReviewer(vec![]))),
+            Box::new(ReadyJudge),
+            notifier,
+            Box::new(Arc::new(CountingClock::default())),
+            vec!["main".to_string()],
+            PollConfig::default(),
+        )
+        .with_automerge_author("simard-engineer".to_string());
+        assert!(
+            ops.merge("rysweet/Simard", 7).is_err(),
+            "a non-automerge-author PR must be refused at the merge step (fail-closed)"
+        );
+        assert_eq!(gh.merges(), 0, "no merge of a foreign-author PR");
+        assert!(
+            email.lock().unwrap().is_empty(),
+            "no notify on a refused foreign-author PR"
+        );
+    }
+
+    #[test]
+    fn merge_allows_configured_automerge_author_case_insensitively() {
+        // The merge-step author re-assert uses the SAME case-insensitive whole-
+        // login comparison as the survey filter, so a casing difference between
+        // `SIMARD_AUTOMERGE_AUTHOR` and the canonical `author.login` still merges
+        // (no "canary does nothing" trap) rather than silently refusing.
+        struct MatchingAuthorSource;
+        impl PrSource for MatchingAuthorSource {
+            fn diff(&self, _r: &str, _p: u32) -> Result<String, OverseerError> {
+                Ok(CLEAN_DIFF.to_string())
+            }
+            fn title(&self, _r: &str, _p: u32) -> Result<String, OverseerError> {
+                Ok("t".to_string())
+            }
+            fn author(&self, _r: &str, _p: u32) -> Result<String, OverseerError> {
+                Ok("Simard-Engineer".to_string())
+            }
+        }
+        let gh = ScriptedGh::new(vec![green()]);
+        let email = Arc::new(Mutex::new(vec![]));
+        let notifier = DualChannelNotifier::new(vec![Box::new(CapturingChannel {
+            name: "email".to_string(),
+            seen: email.clone(),
+        })]);
+        let ops = MergePrOps::new(
+            Box::new(gh.clone()),
+            Box::new(MatchingAuthorSource),
+            Some(Box::new(FakeReviewer(vec![]))),
+            Box::new(ReadyJudge),
+            notifier,
+            Box::new(Arc::new(CountingClock::default())),
+            vec!["main".to_string()],
+            PollConfig::default(),
+        )
+        .with_automerge_author("simard-engineer".to_string());
+        ops.merge("rysweet/Simard", 7)
+            .expect("matching automerge author (case-insensitive) should merge");
+        assert_eq!(
+            gh.merges(),
+            1,
+            "exactly one squash-merge for the matched author"
+        );
+        assert_eq!(email.lock().unwrap().len(), 1, "operator notified on merge");
     }
 
     // ── survey_ready_prs: the dead-wire sensor rail (issue #4097) ────────────
