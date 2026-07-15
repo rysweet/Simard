@@ -201,6 +201,24 @@ fn architecture_gap_summary_delegating_probe_without_dispatch_file_reports_unwir
 }
 
 #[test]
+fn architecture_gap_summary_on_real_repo_reports_engineer_loop_exposed() {
+    // Regression guard: the shipped operator-probe binary delegates to
+    // `dispatch_operator_probe`, which wires `engineer-loop-run`. The gap trace
+    // must follow that delegation and report the surface as exposed rather than
+    // falsely claiming it "does not yet expose" a terminal engineer loop.
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let result = super::architecture_gap_summary(repo_root).unwrap();
+    assert!(
+        result.contains("engineer-loop-run surface"),
+        "expected exposed engineer-loop-run surface, got: {result}"
+    );
+    assert!(
+        !result.contains("does not yet expose"),
+        "gap trace must not claim the engineer loop is unexposed, got: {result}"
+    );
+}
+
+#[test]
 fn architecture_gap_summary_with_runtime_contracts_docs() {
     let dir = tempfile::tempdir().unwrap();
     let docs_dir = dir.path().join("docs/reference");
