@@ -469,6 +469,43 @@ async fn memory_metrics_goal_count_reflects_live_union_and_relabels_source() {
     drop(mem);
 }
 
+/// Regression for #4075. The Memory tab's "Memory records" tile
+/// (`GET /api/memory` → `memory_records.count`) must reflect the number of
+/// records in the on-disk checksummed envelope, not its two top-level keys.
+/// A live store with 1244 records previously reported `2` because
+/// `count_json_records` counted the `{crc32, records}` object's keys.
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn memory_metrics_record_count_reads_checksummed_envelope() {
+    let state = HermeticState::new();
+    let root = state.state_root().to_path_buf();
+
+    // Write the canonical checksummed envelope the FileBackedMemoryStore
+    // persists: a two-key object whose real record count lives in `records`.
+    let envelope = serde_json::json!({
+        "crc32": 3861665043u32,
+        "records": [
+            {"id": "a"}, {"id": "b"}, {"id": "c"},
+            {"id": "d"}, {"id": "e"},
+        ],
+    });
+    std::fs::write(
+        root.join("memory_records.json"),
+        serde_json::to_vec(&envelope).unwrap(),
+    )
+    .expect("write memory_records.json envelope");
+
+    let result = memory_metrics().await;
+    let mr = &result.0["memory_records"];
+
+    assert_eq!(
+        mr["count"].as_u64(),
+        Some(5),
+        "memory_records.count must equal the `records` array length (5), never the \
+         object's two top-level keys (#4075); got {mr}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Outside-in end-to-end (Step 13): drive the REAL dashboard router over raw
 // HTTP/1.1 on an ephemeral loopback port, exactly as the browser Goals tab
