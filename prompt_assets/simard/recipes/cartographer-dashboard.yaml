@@ -1,0 +1,141 @@
+# cartographer-dashboard.yaml — Cartographer identity, END-TO-END orchestration.
+#
+# The full Simard Cartographer pipeline in one agent run: dataset + question ->
+# served interactive dashboard + written narrative. This is the recipe that
+# satisfies the identity's definition of done. It runs the same four phases the
+# per-phase recipes (cartographer-explore / -visualize / -deliver / -narrative)
+# run individually, but as one continuous session so intermediate artifacts stay
+# in the agent's working context. Canonical persona:
+# prompt_assets/simard/cartographer_system.md.
+#
+# Context vars (passed via -c):
+#   dataset_path     — ABSOLUTE path to the dataset (read/served; NOT inlined).
+#   question         — the question to answer end-to-end.
+#   workdir          — ABSOLUTE path to the working directory for app source,
+#                      dependencies, and intermediate artifacts.
+#   port             — TCP port the dashboard must serve on.
+#   result_output    — ABSOLUTE path to the clean result FILE the agent writes
+#                      the final end-to-end manifest JSON to.
+#
+# Output (clean result channel): a JSON object written to `result_output`:
+#   {
+#     "question": "…",
+#     "served_url": "http://127.0.0.1:<port>",
+#     "serve_verified": true,
+#     "run_command": "…",
+#     "narrative_markdown": "<the full written narrative as Markdown>",
+#     "headline_finding": "…",
+#     "done": true
+#   }
+# `done` is `true` ONLY when all four phases completed AND the dashboard was
+# verified served. Otherwise `done` is `false` with `serve_verified` reflecting
+# reality — FAIL HONEST, never claim a dashboard that is not up.
+
+name: "cartographer-dashboard"
+description: "Cartographer — end-to-end: dataset+question to a served interactive dashboard with a written narrative"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "cartographer", "data-storytelling", "dashboard", "end-to-end"]
+
+context:
+  dataset_path: ""
+  question: ""
+  workdir: ""
+  port: ""
+  result_output: ""
+
+steps:
+  - id: "cartograph"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      You are **Simard in Cartographer mode**. Take a dataset and a question
+      ALL THE WAY to a **served interactive dashboard** plus a **written
+      narrative**, in one continuous session. Run all four phases in order and
+      do not stop early.
+
+      Work the discipline throughout: **inspect -> act -> verify -> persist**.
+      Never claim a step done you did not actually do; never fabricate a number
+      the data does not support; never claim a dashboard you did not serve.
+
+      ## Inputs
+
+      Dataset (ABSOLUTE path — read/serve it, it is NOT inlined):
+
+      ```
+      {{dataset_path}}
+      ```
+
+      Question to answer end-to-end:
+
+      ```
+      {{question}}
+      ```
+
+      Working directory for app source, dependencies, and artifacts:
+
+      ```
+      {{workdir}}
+      ```
+
+      Serve the dashboard on this port:
+
+      ```
+      {{port}}
+      ```
+
+      ## The four phases (run all, in order)
+
+      1. **Explore** — Profile the dataset (rows, columns, dtypes, nulls,
+         ranges, outliers). Restate the question in answerable terms and name
+         what the data cannot answer. Compute the real signals (trends,
+         comparisons, correlations, segments, anomalies) with actual code.
+         Record evidence-backed findings; state uncertainty. If the data cannot
+         answer the question, say so honestly and carry that forward.
+      2. **Visualize** — For each finding pick the right chart and precise
+         encodings (x/y/color/size), aggregation, filters, and interaction.
+         Design the layout and the single headline view that answers the
+         question at a glance. Follow visualization best practice (position for
+         quantities, honest baselines/scales, deliberate color, direct labels).
+      3. **Deliver** — Build and **actually serve** an interactive dashboard
+         using the tool that fits — **Streamlit**, **Plotly/Dash**,
+         **Observable**, or **D3**. Bind port `{{port}}`, start the server, and
+         **verify it responds** (e.g. start the app, then
+         `curl -sSf http://127.0.0.1:{{port}}`). Pin dependencies and persist a
+         one-command run instruction in `{{workdir}}`.
+      4. **Narrate** — Write a plain, honest Markdown narrative that leads with
+         the answer, walks through the findings tied to specific dashboard
+         panels, uses only real numbers from the analysis, and states caveats.
+
+      ## Definition of done (all must hold)
+
+      - The dataset was profiled and the question analysed with real code.
+      - A visualization design was produced and implemented.
+      - The interactive dashboard is SERVED and verified reachable at
+        `http://127.0.0.1:{{port}}`, with source + run command persisted.
+      - The narrative answers the question, tied to the dashboard's panels, with
+        numbers that match the analysis and caveats stated.
+
+      Set `done` to `true` ONLY if every item above holds. If the dashboard
+      never came up, set `serve_verified` and `done` to `false` and explain.
+
+      ## Where to put the result (clean result channel)
+
+      Write ONLY the final manifest JSON to the result file at this ABSOLUTE
+      path, using your file-writing tool:
+
+      ```
+      {{result_output}}
+      ```
+
+      The file must contain the JSON and NOTHING ELSE — no preamble, no code
+      fence, no tool-call narration. Stdout is IGNORED. Shape:
+
+      {"question": "…", "served_url": "http://127.0.0.1:{{port}}",
+       "serve_verified": true, "run_command": "…",
+       "narrative_markdown": "<full Markdown narrative>",
+       "headline_finding": "…", "done": true}
+
+      If you cannot write the file, stop and report the failure — do not emit
+      the manifest to stdout instead.
+    output: "cartographer_dashboard_result"

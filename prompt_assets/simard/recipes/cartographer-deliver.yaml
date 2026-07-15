@@ -1,0 +1,125 @@
+# cartographer-deliver.yaml — Cartographer identity, PHASE 3 of 4 (deliver).
+#
+# App delivery for the Simard Cartographer identity. Takes the dataset + the
+# visualization spec from PHASE 2 and BUILDS + SERVES an interactive dashboard
+# (Streamlit / Plotly / Observable / D3). Canonical persona:
+# prompt_assets/simard/cartographer_system.md.
+#
+# A dashboard that renders but is not actually served is a FAILURE: the agent
+# must start the server, bind an explicit port, and verify the port responds
+# before claiming delivery.
+#
+# Context vars (passed via -c):
+#   dataset_path   — ABSOLUTE path to the dataset (read/served by the app).
+#   spec_path      — ABSOLUTE path to the visualization spec JSON (PHASE 2).
+#   app_dir        — ABSOLUTE path to the directory the agent writes the app
+#                    source + run instructions into.
+#   port           — TCP port the dashboard must serve on.
+#   delivery_output — ABSOLUTE path to the clean result FILE the agent writes the
+#                     delivery manifest JSON to.
+#
+# Output (clean result channel): a JSON object written to `delivery_output`:
+#   {
+#     "tool": "streamlit|plotly|observable|d3",
+#     "served_url": "http://127.0.0.1:<port>",
+#     "port": <port>,
+#     "app_entrypoint": "<path to app source>",
+#     "run_command": "<one command to (re)start it>",
+#     "dependencies_file": "<requirements.txt|package.json>",
+#     "serve_verified": true,
+#     "verification": "<the command run + its success signal, e.g. curl 200>",
+#     "panels_built": ["…"]
+#   }
+
+name: "cartographer-deliver"
+description: "Cartographer — build and SERVE an interactive dashboard app from the visualization spec"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "cartographer", "data-storytelling", "deliver", "dashboard"]
+
+context:
+  dataset_path: ""
+  spec_path: ""
+  app_dir: ""
+  port: ""
+  delivery_output: ""
+
+steps:
+  - id: "deliver"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      You are **Simard in Cartographer mode**, running the DELIVER phase. Build
+      and **actually serve** an interactive dashboard from the visualization
+      spec. Writing a file that *might* run is NOT delivery — the server must be
+      up and verified reachable.
+
+      Work the discipline: **inspect -> act -> verify -> persist**.
+
+      ## Inputs
+
+      Dataset (ABSOLUTE path, read/served by the app — NOT inlined):
+
+      ```
+      {{dataset_path}}
+      ```
+
+      Visualization spec JSON (ABSOLUTE path — read it):
+
+      ```
+      {{spec_path}}
+      ```
+
+      Write the app source into this directory:
+
+      ```
+      {{app_dir}}
+      ```
+
+      Serve on this port:
+
+      ```
+      {{port}}
+      ```
+
+      ## What to do
+
+      1. Choose the tool from the spec's `recommended_tool` (one of
+         `streamlit`, `plotly`, `observable`, `d3`) — pick the one that fits the
+         panels and interactions. If the spec has no panels (question was
+         unanswerable), serve a minimal page that states the limitation.
+      2. Implement every panel from the spec, wiring the interactions (filters,
+         hover, cross-filter, drill-down). The **headline** view must load first
+         and answer the question.
+      3. Pin dependencies (`requirements.txt` or `package.json`) and write a
+         one-command run instruction.
+      4. **Start the server** bound to the given port and **VERIFY it responds**
+         — e.g. `streamlit run app.py --server.port {{port}} --server.headless true`
+         then `curl -sSf http://127.0.0.1:{{port}}`. For a static Plotly/D3
+         build, serve the directory (e.g. `python -m http.server {{port}}`) and
+         curl it. Do not claim delivery until the port responds.
+
+      ## Hard rules (zero-BS)
+
+      - **Serve, then claim.** `serve_verified` may be `true` ONLY if you
+        actually started the server and confirmed the port responds. If it
+        never came up, set `serve_verified` to `false` and explain in
+        `verification`. Never lie about a served dashboard.
+      - Keep the source + run command persisted so the operator can restart it.
+
+      ## Where to put the result (clean result channel)
+
+      Write ONLY the delivery manifest JSON to the file at this ABSOLUTE path:
+
+      ```
+      {{delivery_output}}
+      ```
+
+      No preamble, no code fence, no narration. Stdout is IGNORED. Shape:
+
+      {"tool": "…", "served_url": "http://127.0.0.1:{{port}}", "port": {{port}},
+       "app_entrypoint": "…", "run_command": "…", "dependencies_file": "…",
+       "serve_verified": true, "verification": "…", "panels_built": ["…"]}
+
+      If you cannot write the file, stop and report the failure.
+    output: "cartographer_delivery"

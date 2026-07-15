@@ -1,0 +1,168 @@
+name: "Cartographer Identity — Data Storytelling & Dashboards"
+description: >
+  Outside-in gate for the Simard Cartographer identity (data storytelling &
+  dashboards). The identity turns a dataset+question into a served interactive
+  dashboard with a written narrative via four recipes (explore, visualize,
+  deliver, narrate) plus an end-to-end orchestrator, using
+  Observable/Plotly/Streamlit/D3. These steps drive the deterministic
+  asset-pin gates in `tests/cartographer_identity_assets.rs` (which assert the
+  builtin loader advertises `simard-cartographer`, the system prompt states the
+  inspect->act->verify->persist / zero-fabrication / serve-then-claim contract,
+  and every recipe exposes its context vars, clean output channel, and
+  guardrails) and the builtin-loader unit coverage in the `identity` module.
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "test-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Builtin loader advertises the simard-cartographer identity + prompt asset"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test cartographer_identity_assets
+        builtin_loader_advertises_cartographer_identity
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test builtin_loader_advertises_cartographer_identity ... ok"
+
+  - name: "Cartographer supports engineer-grade backends and capabilities (it serves apps)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test cartographer_identity_assets
+        cartographer_identity_supports_engineer_grade_backends_and_capabilities
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test cartographer_identity_supports_engineer_grade_backends_and_capabilities ... ok"
+
+  - name: "System prompt states the four-phase, zero-fabrication, serve-then-claim contract"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test cartographer_identity_assets
+        cartographer_system_prompt_states_the_end_to_end_contract
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test cartographer_system_prompt_states_the_end_to_end_contract ... ok"
+
+  - name: "Every recipe is a default-agent step with a clean result channel"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test cartographer_identity_assets
+        every_cartographer_recipe_is_a_default_agent_step_with_clean_output
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test every_cartographer_recipe_is_a_default_agent_step_with_clean_output ... ok"
+
+  - name: "Deliver recipe requires a verified, actually-served dashboard"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test cartographer_identity_assets
+        deliver_recipe_requires_a_verified_served_dashboard
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test deliver_recipe_requires_a_verified_served_dashboard ... ok"
+
+  - name: "End-to-end dashboard recipe runs all four phases and gates 'done' on a served URL"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test cartographer_identity_assets
+        dashboard_recipe_runs_all_four_phases_end_to_end
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test dashboard_recipe_runs_all_four_phases_end_to_end ... ok"
+
+  - name: "Full cartographer asset-pin suite is green"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test cartographer_identity_assets
+        -- --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test result: ok."
+
+  - name: "Builtin-loader unit coverage loads the cartographer identity"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib
+        identity::loader::tests::builtin_loader_loads_cartographer_identity
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test identity::loader::tests::builtin_loader_loads_cartographer_identity ... ok"
+
+assertions: []
+
+cleanup:
+  - name: "Test agent cleanup"
+    agent: "test-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "identity"
+    - "cartographer"
+    - "data-storytelling"
+    - "dashboards"
+    - "outside-in"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

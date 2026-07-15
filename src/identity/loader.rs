@@ -158,6 +158,32 @@ impl IdentityLoader for BuiltinIdentityLoader {
                 MemoryPolicy::default(),
                 request.contract.clone(),
             ),
+            "simard-cartographer" => IdentityManifest::new(
+                "simard-cartographer",
+                request.package_version.clone(),
+                vec![PromptAssetRef::new(
+                    "cartographer-system",
+                    "simard/cartographer_system.md",
+                )],
+                vec![
+                    BaseTypeId::new("local-harness"),
+                    BaseTypeId::new("terminal-shell"),
+                    BaseTypeId::new("rusty-clawd"),
+                    BaseTypeId::new("copilot-sdk"),
+                    BaseTypeId::new("claude-agent-sdk"),
+                    BaseTypeId::new("ms-agent-framework"),
+                ],
+                capability_set([
+                    BaseTypeCapability::PromptAssets,
+                    BaseTypeCapability::SessionLifecycle,
+                    BaseTypeCapability::Memory,
+                    BaseTypeCapability::Evidence,
+                    BaseTypeCapability::Reflection,
+                ]),
+                OperatingMode::Engineer,
+                MemoryPolicy::default(),
+                request.contract.clone(),
+            ),
             "simard-composite-engineer" => IdentityManifest::compose(
                 "simard-composite-engineer",
                 request.package_version.clone(),
@@ -309,6 +335,26 @@ mod tests {
     }
 
     #[test]
+    fn builtin_loader_loads_cartographer_identity() {
+        let loader = BuiltinIdentityLoader;
+        let manifest = loader
+            .load(&IdentityLoadRequest::new(
+                "simard-cartographer",
+                "0.1.0",
+                test_contract(),
+            ))
+            .unwrap();
+        assert_eq!(manifest.name, "simard-cartographer");
+        assert_eq!(manifest.default_mode, OperatingMode::Engineer);
+        assert_eq!(manifest.prompt_assets.len(), 1);
+        assert_eq!(manifest.prompt_assets[0].id.as_str(), "cartographer-system");
+        assert_eq!(
+            manifest.prompt_assets[0].relative_path,
+            std::path::Path::new("simard/cartographer_system.md")
+        );
+    }
+
+    #[test]
     fn builtin_loader_loads_composite_engineer_identity() {
         let loader = BuiltinIdentityLoader;
         let manifest = loader
@@ -335,6 +381,7 @@ mod tests {
             "simard-gym",
             "simard-goal-curator",
             "simard-improvement-curator",
+            "simard-cartographer",
         ];
         for name in names {
             let manifest = loader

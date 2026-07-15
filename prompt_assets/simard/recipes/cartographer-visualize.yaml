@@ -1,0 +1,102 @@
+# cartographer-visualize.yaml — Cartographer identity, PHASE 2 of 4 (visualize).
+#
+# Visualization design for the Simard Cartographer identity. Takes the findings
+# from PHASE 1 (explore) and produces a concrete VISUALIZATION SPEC the delivery
+# phase can build directly. Canonical persona:
+# prompt_assets/simard/cartographer_system.md.
+#
+# Context vars (passed via -c):
+#   findings_path  — ABSOLUTE path to the findings JSON produced by
+#                    cartographer-explore. Read, never inlined.
+#   question       — the operator's question (for framing the headline view).
+#   spec_output    — ABSOLUTE path to the clean result FILE the agent writes the
+#                    visualization spec JSON to.
+#
+# Output (clean result channel): a JSON object written to `spec_output`:
+#   {
+#     "headline": { "title": "…", "chart": "…", "encodings": {…}, "why": "answers the question at a glance" },
+#     "panels": [ {"id","title","chart","encodings":{"x","y","color","size"},"aggregation","filters","interaction","finding_ref"} ],
+#     "layout": "<how panels are arranged>",
+#     "recommended_tool": "streamlit|plotly|observable|d3",
+#     "tool_rationale": "…"
+#   }
+
+name: "cartographer-visualize"
+description: "Cartographer — turn findings into a concrete visualization spec (chart types, encodings, interactions)"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "cartographer", "data-storytelling", "visualize"]
+
+context:
+  findings_path: ""
+  question: ""
+  spec_output: ""
+
+steps:
+  - id: "visualize"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      You are **Simard in Cartographer mode**, running the VISUALIZE phase. Turn
+      the findings into a concrete visualization spec the delivery phase can
+      build directly. Design, do not yet implement.
+
+      ## Inputs
+
+      The findings JSON (from the explore phase) is at this ABSOLUTE path — read
+      it, it is NOT inlined:
+
+      ```
+      {{findings_path}}
+      ```
+
+      The operator's question (frame the headline view around it):
+
+      ```
+      {{question}}
+      ```
+
+      ## What to do
+
+      1. For each material finding, choose the RIGHT chart: line for trend, bar
+         for comparison, scatter for relationship, small multiples for segments,
+         map for geography.
+      2. Specify each panel precisely: chart type, x/y/color/size encodings,
+         aggregation, filters, and the interaction (hover, brush, cross-filter,
+         drill-down). Link each panel back to the finding it shows
+         (`finding_ref`).
+      3. Design the dashboard **layout** and the single **headline** view that
+         answers the question at a glance.
+      4. Recommend the delivery tool — one of `streamlit`, `plotly`,
+         `observable`, `d3` — and justify the choice (match the tool to the data
+         and interaction needs).
+
+      ## Visualization best practice (follow it)
+
+      - Position/length encode quantities best; avoid misleading dual axes.
+      - Never truncate a bar-chart baseline. Do not distort scales.
+      - Use color deliberately (categorical vs. sequential); label directly.
+      - Maximize data-ink; cut chartjunk. Every panel must earn its place.
+
+      ## Where to put the result (clean result channel)
+
+      Write ONLY the visualization spec JSON to the file at this ABSOLUTE path:
+
+      ```
+      {{spec_output}}
+      ```
+
+      The file must contain the JSON and NOTHING ELSE — no preamble, no code
+      fence, no tool-call narration. Stdout is IGNORED. Shape:
+
+      {"headline": {"title": "…", "chart": "…", "encodings": {…}, "why": "…"},
+       "panels": [{"id": "…", "title": "…", "chart": "…",
+                   "encodings": {"x": "…", "y": "…", "color": "…", "size": "…"},
+                   "aggregation": "…", "filters": "…", "interaction": "…", "finding_ref": "…"}],
+       "layout": "…", "recommended_tool": "streamlit|plotly|observable|d3", "tool_rationale": "…"}
+
+      If the findings are empty (the explore phase could not answer the
+      question), write a spec with an empty `panels` array and a `headline`
+      that states the limitation. Do NOT invent panels for signals that do not
+      exist. If you cannot write the file, stop and report the failure.
+    output: "cartographer_viz_spec"

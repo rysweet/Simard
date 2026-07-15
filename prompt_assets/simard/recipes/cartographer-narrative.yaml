@@ -1,0 +1,96 @@
+# cartographer-narrative.yaml — Cartographer identity, PHASE 4 of 4 (narrative).
+#
+# Written narrative for the Simard Cartographer identity. Takes the findings
+# (PHASE 1) and the delivery manifest (PHASE 3) and writes the STORY the data
+# tells, tied to the dashboard's panels. Canonical persona:
+# prompt_assets/simard/cartographer_system.md.
+#
+# Context vars (passed via -c):
+#   findings_path   — ABSOLUTE path to the findings JSON (PHASE 1). Read, not inlined.
+#   delivery_path   — ABSOLUTE path to the delivery manifest JSON (PHASE 3).
+#   question        — the operator's question the narrative must answer.
+#   narrative_output — ABSOLUTE path to the clean result FILE the agent writes
+#                      the finished Markdown narrative to.
+#
+# Output: Markdown narrative text written to `narrative_output` (NOT JSON). The
+# Rust caller reads the narrative from this file; recipe-runner stdout is inert.
+
+name: "cartographer-narrative"
+description: "Cartographer — write the data-story narrative that answers the question, tied to the dashboard panels"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "cartographer", "data-storytelling", "narrative"]
+
+context:
+  findings_path: ""
+  delivery_path: ""
+  question: ""
+  narrative_output: ""
+
+steps:
+  - id: "narrate"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      You are **Simard in Cartographer mode**, running the NARRATIVE phase.
+      Write the story the data tells, in plain, honest prose, tied to the
+      dashboard the delivery phase served.
+
+      ## Inputs
+
+      Findings JSON (ABSOLUTE path — read it, NOT inlined):
+
+      ```
+      {{findings_path}}
+      ```
+
+      Delivery manifest JSON (ABSOLUTE path — read it; it names the served URL
+      and the panels that were built):
+
+      ```
+      {{delivery_path}}
+      ```
+
+      The question the narrative must answer:
+
+      ```
+      {{question}}
+      ```
+
+      ## Required structure (Markdown)
+
+      1. `## Answer` — ONE short paragraph that answers the question directly
+         (or the honest "the data cannot fully answer this, but here is what it
+         shows"). Lead with the answer.
+      2. `## What the data shows` — walk the reader through the key findings in
+         a logical order. Each finding ties to a specific dashboard panel by its
+         title (e.g. "see the *Trend by segment* panel"). Quantify with the real
+         numbers from the findings JSON.
+      3. `## Caveats and limits` — data-quality limits, uncertainty, and what a
+         follow-up analysis would need.
+      4. `## The dashboard` — one line pointing to the served URL from the
+         delivery manifest and how to (re)open it.
+
+      ## Hard rules (zero-BS)
+
+      - Use ONLY numbers present in the findings JSON. NEVER invent figures or
+        fabricate precision. If a number is not in the findings, do not cite it.
+      - If `serve_verified` in the delivery manifest is `false`, say plainly in
+        `## The dashboard` that the dashboard was not successfully served.
+      - Keep it readable: short paragraphs, no jargon dumps.
+
+      ## Where to put the narrative (clean result channel)
+
+      Write ONLY the finished Markdown narrative to the result file at this
+      ABSOLUTE path, using your file-writing tool:
+
+      ```
+      {{narrative_output}}
+      ```
+
+      The file must contain the narrative and NOTHING ELSE — no preamble, no
+      status lines, no tool-call narration, no surrounding code fence. Your
+      terminal output (stdout) is IGNORED; only this file's contents become the
+      narrative. If you cannot write the file, stop and report the failure — do
+      not emit the narrative to stdout instead.
+    output: "cartographer_narrative"
