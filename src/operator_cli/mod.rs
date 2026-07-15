@@ -6,6 +6,7 @@ mod dashboard;
 mod decisions;
 mod disk_reclaim;
 mod engineer;
+mod gastronome;
 mod goal;
 mod gym;
 mod meeting;
@@ -100,6 +101,16 @@ Product modes:
   improvement-curation run <base-type> <topology> <objective> [state-root]
   improvement-curation read <base-type> <topology> <state-root>
   creative-ideas consolidate [--apply]  — cluster + merge semantically-duplicate ideas (#2925)
+  gastronome plan <brief-file> [--json]
+                         — culinary / menu & event design: turn an event/menu
+                           brief (JSON or TOML) into a costed, scheduled menu
+                           plan (nutrition + cost + scaling + prep schedule)
+  gastronome demo [--json]
+                         — plan a built-in example brief end-to-end
+  gastronome recipes|menus [--json]
+                         — list the built-in recipe library / menus
+  gastronome scale <recipe-id> <servings> [--json]
+                         — scale one library recipe to a serving count
   gym list
   gym run <scenario-id>
   gym compare <scenario-id>
@@ -242,6 +253,7 @@ where
         "goal-curation" => curation::dispatch_goal_curation_command(args),
         "improvement-curation" => curation::dispatch_improvement_curation_command(args),
         "creative-ideas" => creative_ideas::dispatch_creative_ideas_command(args),
+        "gastronome" => gastronome::dispatch_gastronome_command(args),
         "review" => review::dispatch_review_command(args),
         "gym" => gym::dispatch_gym_command(args),
         "ooda" => ooda::dispatch_ooda_command(args),
@@ -363,7 +375,7 @@ where
 }
 
 pub fn operator_cli_usage() -> &'static str {
-    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|ooda|memory|status|spawn|merge-pr|worktree-gc|disk-reclaim|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap|signal> ..."
+    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|gastronome|ooda|memory|status|spawn|merge-pr|worktree-gc|disk-reclaim|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap|signal> ..."
 }
 
 pub fn operator_cli_help() -> &'static str {

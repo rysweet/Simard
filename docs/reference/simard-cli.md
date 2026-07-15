@@ -1275,6 +1275,43 @@ healthy binary's `self-test` is genuinely and deterministically green. The
 the catalogue (`gym list`) and are runnable individually with
 `gym run <scenario-id>` as benchmarks for capable reasoning backends.
 
+## Gastronome (culinary / menu & event design)
+
+The `simard gastronome` command tree is the "kitchen app" for the
+`simard-gastronome` identity. It takes an event/menu brief to a **costed,
+scheduled menu plan** using a pure, deterministic in-tree engine (no network,
+no clock), so results are reproducible. See the
+[Gastronome concept](../concepts/gastronome-identity.md) and the
+[how-to guide](../howto/plan-a-costed-menu.md).
+
+### `simard gastronome plan <brief-file> [--json]`
+
+Reads an event/menu brief (JSON **or** TOML) and emits a costed, scheduled menu
+plan: the menu scaled to the guest count, total and per-guest cost, per-guest
+nutrition, and a prep schedule that finishes at service time. Dietary
+restrictions are enforced **fail-closed** — a menu that cannot satisfy a
+required restriction is rejected rather than served. `--json` emits a
+machine-readable `MenuPlan` document (nothing else is written to stdout, so it
+stays pipe-safe).
+
+A brief has the fields: `event_name`, `guest_count`, `menu_id`,
+`dietary_restrictions` (optional array), `budget_per_guest` (optional), and
+`service_time_min` (minutes-from-midnight; `1080` = 18:00).
+
+### `simard gastronome demo [--json]`
+
+Plans a built-in example brief end-to-end — the fastest way to smoke-check the
+pipeline.
+
+### `simard gastronome recipes|menus [--json]`
+
+Lists the built-in recipe library / menus.
+
+### `simard gastronome scale <recipe-id> <servings> [--json]`
+
+Scales one library recipe to a target serving count, with resolved, costed
+ingredient lines.
+
 ## Benchmark gym configuration
 
 The benchmark metric reporting surface does not require feature flags or environment variables.

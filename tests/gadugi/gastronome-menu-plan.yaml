@@ -1,0 +1,59 @@
+name: "Gastronome takes an event/menu brief to a costed, scheduled plan (end-to-end)"
+description: "Outside-in proof that the Gastronome culinary / menu & event-design identity satisfies its Done criterion: the `simard gastronome` kitchen app turns an event/menu brief into a COSTED, SCHEDULED menu plan — menu chosen, recipes scaled to the guest count, nutrition + cost rolled up (with budget warnings), and a prep schedule that finishes at service time — with dietary restrictions enforced fail-closed. The engine is pure and deterministic (no network, no clock), so this runs hermetically. It exercises both the in-tree unit + integration tests (name-pinned so a rename cannot silently no-op the scenario) and the real CLI surfaces: demo, plan-from-file (JSON), a vegan + gluten-free plan, and the fail-closed dietary guard."
+version: "1.0.0"
+
+config:
+  timeout: 600000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 600000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Brief -> costed, scheduled menu plan (gastronome end-to-end)"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/gastronome-menu-plan.sh"
+    timeout: 600000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "gastronome"
+    - "identity"
+    - "menu-design"
+    - "nutrition"
+    - "cost"
+    - "scheduling"
+    - "end-to-end"
+    - "coverage"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"
