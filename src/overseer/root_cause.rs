@@ -32,6 +32,18 @@ use crate::overseer::signal::{
 /// against the operator's rejected "unblock it every cycle" antipattern.
 pub const RECURRENCE_ESCALATION_THRESHOLD: u32 = 3;
 
+/// The intermediate "seen 2×" remediation rung (issue #4108). A recurring signal
+/// that has been recalled this many times sits in the dead zone ABOVE the
+/// recurring-signature noise floor
+/// ([`crate::overseer::signal::RECURRING_SIGNATURE_THRESHOLD`] = 2) yet BELOW the
+/// root-cause escalation bar ([`RECURRENCE_ESCALATION_THRESHOLD`] = 3): too
+/// persistent to keep merely re-notifying, not yet an operator escalation. At
+/// this rung a [`crate::overseer::signal::ProblemKind::WorkstreamCoverage`]
+/// problem converges from notify-only to a BOUNDED auto-launch of a single
+/// top-ranked gap. Deliberately a NEW constant so neither existing threshold
+/// (both gate the memory-recall / root-cause test suites) has to move.
+pub const WORKSTREAM_COVERAGE_LAUNCH_THRESHOLD: u32 = 2;
+
 /// A prior occurrence of a problem's root cause, recalled from cognitive memory.
 /// The Overseer records one of these each time it acts on a cause (via
 /// amplihack-memory-lib); recall of them raises [`RootCause::recurrence`] so a
@@ -324,12 +336,21 @@ fn resource_pressure_candidates(
                 ];
             }
             Signal::EngineerSpawnRate { live } => {
+                // Issue #4108: `resource:engineer_spawn` recurs in cognitive
+                // memory, but an elevated live-engineer count is USUALLY benign
+                // membership drift (workstreams in flight at expected capacity),
+                // not a spawn failure. The WHY names BOTH readings so the operator
+                // can tell expected drift from a real fan-out storm / stuck or
+                // runaway workstreams, and keeps the live count as grounding.
                 return vec![cand(
                     "engineer-spawn-storm",
                     Likelihood::High,
                     [
                         format!("live_engineers={live}"),
-                        "elevated engineer spawn — a fan-out storm or stuck workstreams"
+                        "elevated live-engineer count — most often BENIGN membership \
+                         drift (workstreams in flight, a fan-out at expected capacity), \
+                         but a count that persists across cycles can indicate a spawn \
+                         FAILURE (a storm or stuck/runaway workstreams)"
                             .to_string(),
                     ],
                 )];
@@ -531,7 +552,10 @@ fn rationale_for(problem: &Problem, primary: &CauseCandidate, recurrence: u32) -
                 .to_string()
         }
         "engineer-spawn-storm" => {
-            "engineer spawn is elevated — a fan-out storm or stuck workstreams".to_string()
+            "engineer spawn is elevated — usually benign membership drift (workstreams in \
+             flight at expected capacity), but a persistent count can mean a spawn failure \
+             (a fan-out storm or stuck/runaway workstreams)"
+                .to_string()
         }
         "unbounded-memory-growth" => {
             "cognitive-memory is growing beyond expectation — consolidation/forgetting is lagging"

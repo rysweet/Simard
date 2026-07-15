@@ -44,10 +44,12 @@ use crate::overseer::notify::{
     ChannelDelivery, DualChannelNotifier, NotifyChannel, OperatorNotification,
 };
 use crate::overseer::root_cause::{
-    PriorOccurrence, RECURRENCE_ESCALATION_THRESHOLD, analyze, root_cause_signature,
+    PriorOccurrence, RECURRENCE_ESCALATION_THRESHOLD, WORKSTREAM_COVERAGE_LAUNCH_THRESHOLD,
+    analyze, root_cause_signature,
 };
 use crate::overseer::signal::{
-    CauseSource, Confidence, Likelihood, Priority, Problem, ProblemKind, RootCause, Signal,
+    CauseSource, Confidence, Likelihood, Priority, Problem, ProblemKind,
+    RECURRING_SIGNATURE_THRESHOLD, RootCause, Signal,
 };
 use crate::overseer::wiring::{OverseerTickReport, overseer_identity, overseer_tick};
 use crate::overseer::{ActOutcome, Capabilities, Overseer, decide, orient};
@@ -903,4 +905,117 @@ fn remediation_class_and_addressed_flag_are_consistent() {
         let _: &PlannedIntervention = planned;
         check(&planned.remediation);
     }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Section H — issue #4108: engineer_spawn WHY classification + the 2× rung
+// ════════════════════════════════════════════════════════════════════════════
+//
+// TDD (RED) contract for the recurring-signature convergence work. Two seams:
+//   1. `resource:engineer_spawn` recurs in cognitive memory as a persistent
+//      blocked signal, yet an elevated live-engineer count is usually BENIGN
+//      membership drift (workstreams in flight), not a spawn FAILURE. The WHY
+//      must classify which it is so the Overseer stops treating expected drift
+//      as an unresolved problem — an acknowledged/benign cause, not a symptom.
+//   2. The `WORKSTREAM_COVERAGE_LAUNCH_THRESHOLD` middle rung is documented and
+//      placed WITHOUT mutating either existing threshold constant.
+
+/// A `ResourcePressure` problem whose sole evidence is an elevated live-engineer
+/// spawn count — the `resource:engineer_spawn` signal that recurs in memory.
+fn engineer_spawn_problem(live: u32) -> Problem {
+    Problem {
+        kind: ProblemKind::ResourcePressure,
+        priority: Priority::Normal,
+        dedup_key: "resource:engineer_spawn".to_string(),
+        summary: format!("elevated engineer spawn: {live} live"),
+        evidence: vec![Signal::EngineerSpawnRate { live }],
+        why: None,
+    }
+}
+
+#[test]
+fn analyze_classifies_engineer_spawn_and_never_falls_back_to_unknown() {
+    // The analyzer must produce a SPECIFIC engineer-spawn cause — never the
+    // low-confidence "unknown" fallback — so a recurring spawn signal is
+    // explained, not silently re-parked.
+    let rc = analyze(&engineer_spawn_problem(12), &ObservedState::default(), &[]);
+    let primary = rc
+        .primary()
+        .expect("a spawn problem yields a primary cause");
+    assert!(
+        primary.label.contains("spawn"),
+        "the primary cause explicitly names engineer spawn: {:?}",
+        primary.label
+    );
+    assert_ne!(
+        primary.label, "unknown-cause",
+        "an engineer-spawn signal must be classified, not left unknown"
+    );
+}
+
+#[test]
+fn analyze_engineer_spawn_why_distinguishes_benign_drift_from_spawn_failure() {
+    // The WHY must characterise engineer_spawn — the operator needs to know
+    // whether the elevated count is benign membership drift (workstreams in
+    // flight / a fan-out at capacity) or an actual spawn FAILURE (stuck / failing
+    // workstreams). The rendered one-liner and evidence must carry that
+    // distinction rather than an ambiguous "spawn is high".
+    let rc = analyze(&engineer_spawn_problem(12), &ObservedState::default(), &[]);
+    let rendered = rc.to_string().to_lowercase();
+    let evidence_blob = rc
+        .primary()
+        .expect("primary")
+        .evidence
+        .join(" ")
+        .to_lowercase();
+    let haystack = format!("{rendered} {evidence_blob}");
+
+    let names_benign = [
+        "drift",
+        "membership",
+        "capacity",
+        "fan-out",
+        "in flight",
+        "expected",
+    ]
+    .iter()
+    .any(|k| haystack.contains(k));
+    let names_failure = ["stuck", "storm", "fail", "runaway"]
+        .iter()
+        .any(|k| haystack.contains(k));
+    assert!(
+        names_benign && names_failure,
+        "the engineer_spawn WHY must distinguish benign drift from a spawn failure: {haystack:?}"
+    );
+    // The live count is preserved as evidence so the classification is grounded.
+    assert!(
+        evidence_blob.contains("12"),
+        "the WHY keeps the live-engineer count as grounding evidence: {evidence_blob:?}"
+    );
+}
+
+#[test]
+#[allow(clippy::assertions_on_constants)]
+fn workstream_coverage_launch_threshold_documents_the_middle_rung_without_moving_constants() {
+    // The 2× remediation rung must be a NEW, explicitly-named constant keyed on
+    // recurrence == 2, sitting strictly between the recurring-signal noise floor
+    // and the escalation bar — and it must NOT change either existing constant
+    // (both gate the memory-recall / root-cause tests).
+    assert_eq!(
+        RECURRING_SIGNATURE_THRESHOLD, 2,
+        "the recurring-signature floor stays at 2"
+    );
+    assert_eq!(
+        RECURRENCE_ESCALATION_THRESHOLD, 3,
+        "the escalation bar stays at 3 (no re-tuning)"
+    );
+    assert_eq!(
+        WORKSTREAM_COVERAGE_LAUNCH_THRESHOLD, 2,
+        "the intermediate launch rung fires at the 'seen 2×' dead-zone value"
+    );
+    assert!(
+        RECURRING_SIGNATURE_THRESHOLD <= WORKSTREAM_COVERAGE_LAUNCH_THRESHOLD
+            && WORKSTREAM_COVERAGE_LAUNCH_THRESHOLD < RECURRENCE_ESCALATION_THRESHOLD,
+        "the middle rung sits within [noise floor, escalation bar)"
+    );
 }
