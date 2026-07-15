@@ -124,7 +124,10 @@ pub use wiring::{
 };
 
 pub use activity::ProblemEntry;
-pub use root_cause::{PriorOccurrence, RECURRENCE_ESCALATION_THRESHOLD, root_cause_signature};
+pub use root_cause::{
+    PriorOccurrence, RECURRENCE_ESCALATION_THRESHOLD, WORKSTREAM_COVERAGE_LAUNCH_THRESHOLD,
+    root_cause_signature,
+};
 
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::goal_curation::no_progress_breaker::{
@@ -1585,6 +1588,53 @@ fn classify_signal(s: &Signal) -> (ProblemKind, Priority, String, String) {
     }
 }
 
+/// Rank a backlog-coverage gap for the bounded auto-launch selector: lower is
+/// more important, mirroring [`GapCategory`] declaration order (an uncovered
+/// high-priority GOAL outranks a high-signal ISSUE, which outranks an
+/// unaddressed ANOMALY). Pure and total.
+fn gap_rank(gap: &GapItem) -> u8 {
+    match gap.category {
+        GapCategory::GoalUncovered => 0,
+        GapCategory::IssueUncovered => 1,
+        GapCategory::AnomalyUnaddressed => 2,
+    }
+}
+
+/// Pick the single most important uncovered gap to launch a bounded workstream
+/// for (issue #4108). This BOUNDS the "seen 2×" WorkstreamCoverage convergence to
+/// AT MOST ONE launch per cycle, so a persistent multi-gap board can never storm
+/// N launches in a tick. Deterministic: `min_by_key` keeps the first gap of the
+/// top-ranked category, a pure function of the input set. Returns `None` for an
+/// empty set (never a spurious launch).
+pub fn pick_top_gap(gaps: &[GapItem]) -> Option<&GapItem> {
+    gaps.iter().min_by_key(|g| gap_rank(g))
+}
+
+/// Convert a single uncovered gap into a bounded [`RecipeBrief`] for the
+/// coverage-convergence auto-launch (issue #4108). Targets the Simard board,
+/// names the specific uncovered work, and records the recurrence count so the
+/// launch explains WHY it fired now. Every field originates in the multi-writer
+/// cognitive-memory graph, so the whole brief is `sanitize_recalled`-cleaned at
+/// this egress boundary before it becomes a launched recipe's context var (no
+/// log / notification / shell injection can survive into the workstream).
+pub fn gap_to_brief(gap: &GapItem, recurrence: u32) -> RecipeBrief {
+    let task_description = sanitize_recalled(&format!(
+        "Cover the uncovered {} backlog gap {} — {}. Why it matters: {}. This gap has \
+         recurred {}× in cognitive memory with no active workstream; open a bounded \
+         workstream for it (assign an owner or file an explicit gap doc).",
+        gap.category.label(),
+        gap.ref_id,
+        gap.title,
+        gap.why_it_matters,
+        recurrence,
+    ));
+    RecipeBrief {
+        task_description,
+        target_repo: "rysweet/Simard".to_string(),
+        sequence_group: None,
+    }
+}
+
 /// Decide: choose one `Intervention` for a `Problem`. Illustrative routing; a
 /// production Overseer would use a prompt-driven reasoner with this deterministic
 /// mapping as its floor (mirroring `OodaDecideBrain`'s deterministic fallback).
@@ -1721,7 +1771,13 @@ pub fn decide(problem: &Problem) -> Intervention {
             urgency: WhisperUrgency::Normal,
         },
         // Backlog-coverage gaps carry the consolidated `WorkstreamGap` evidence
-        // forward verbatim so Act can notify about the specific gaps.
+        // forward. Below the "seen 2×" middle rung (no WHY, or recurrence <
+        // `WORKSTREAM_COVERAGE_LAUNCH_THRESHOLD`) the arm stays notify-only — the
+        // exact behaviour it has always had. AT/above the rung a persistent
+        // coverage gap converges from re-notifying to a BOUNDED auto-launch of the
+        // single top-ranked gap (issue #4108), so recurring uncovered work stops
+        // silently recurring. Never launches without a WHY (the hollow-launch
+        // fail-safe): an absent `why` reads as recurrence 0.
         ProblemKind::WorkstreamCoverage => {
             let gaps = problem
                 .evidence
@@ -1731,6 +1787,14 @@ pub fn decide(problem: &Problem) -> Intervention {
                     _ => None,
                 })
                 .unwrap_or_default();
+            let recurrence = problem.why.as_ref().map(|w| w.recurrence).unwrap_or(0);
+            if recurrence >= WORKSTREAM_COVERAGE_LAUNCH_THRESHOLD
+                && let Some(top) = pick_top_gap(&gaps)
+            {
+                return Intervention::LaunchRecipe {
+                    brief: gap_to_brief(top, recurrence),
+                };
+            }
             Intervention::FlagWorkstreamGaps { gaps }
         }
         // A diagnosed step failure drives a CORRECTIVE workstream (#2640, PART 2):

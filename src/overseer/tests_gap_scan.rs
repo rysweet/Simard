@@ -50,16 +50,22 @@ use crate::overseer::intervention::Intervention;
 use crate::overseer::notify::{
     ChannelDelivery, DualChannelNotifier, NotifyChannel, OperatorNotification,
 };
+use crate::overseer::root_cause::{
+    RECURRENCE_ESCALATION_THRESHOLD, WORKSTREAM_COVERAGE_LAUNCH_THRESHOLD,
+};
 use crate::overseer::sensor::{
     MAX_GAP_FIELD_LEN, MAX_GAPS_PER_TICK, SurveyedIssue, detect_workstream_gaps,
 };
 use crate::overseer::signal::{
-    GapCategory, GapItem, Priority, Problem, ProblemKind, Signal, signals_from,
+    CauseCandidate, CauseSource, Confidence, GapCategory, GapItem, Likelihood, Priority, Problem,
+    ProblemKind, RECURRING_SIGNATURE_THRESHOLD, RootCause, Signal, signals_from,
 };
 use crate::overseer::wiring::{
     OverseerTickReport, overseer_identity, overseer_tick, run_overseer_tick_isolated,
 };
-use crate::overseer::{ActOutcome, Capabilities, Overseer, decide, orient};
+use crate::overseer::{
+    ActOutcome, Capabilities, Overseer, decide, gap_to_brief, orient, pick_top_gap,
+};
 
 // ─────────────────────────── sample gap helpers ────────────────────────────
 
@@ -915,5 +921,304 @@ fn tick_render_shows_flagged_gap_clause_and_a_clean_scan_adds_none() {
     assert!(
         clean_line.contains("observing"),
         "a clean board is the honest 'observing' state: {clean_line}"
+    );
+}
+
+// ═══════════════ 8. recurrence-aware WorkstreamCoverage convergence ══════════
+//
+// TDD (RED) contract for issue #4108: a `WorkstreamCoverage` problem whose WHY
+// has recalled the SAME gap-coverage cause 2× (the "seen 2×" dead zone above the
+// `RECURRING_SIGNATURE_THRESHOLD` noise floor but below the
+// `RECURRENCE_ESCALATION_THRESHOLD` escalation bar) must stop merely re-notifying
+// and instead take the intermediate remediation rung: a BOUNDED auto-launch of a
+// single top-ranked gap. Below the middle rung (recurrence < 2, or no WHY at
+// all) the arm stays exactly notify-only — the identical behaviour it has today,
+// so no existing gap-scan contract regresses. References
+// `pick_top_gap` / `gap_to_brief` / `WORKSTREAM_COVERAGE_LAUNCH_THRESHOLD`, which
+// do not exist yet: the RED state is a failing compile until the feature lands.
+
+/// A representative "uncovered high-signal open issue" gap (the middle
+/// `GapCategory` provenance, distinct from goal/anomaly).
+fn sample_issue_gap() -> GapItem {
+    GapItem {
+        category: GapCategory::IssueUncovered,
+        ref_id: "rysweet/kgpacks-rs#17".to_string(),
+        title: "ws2 int8 pq embed".to_string(),
+        why_it_matters: "high-signal open issue with no open PR and no workstream".to_string(),
+        signature: "issue:rysweet/kgpacks-rs#17".to_string(),
+    }
+}
+
+/// A `WorkstreamCoverage` problem carrying `gaps`, whose WHY (as `orient` +
+/// memory recall would populate it) reports `recurrence` prior occurrences of the
+/// coverage cause. `recurrence == None` leaves `why` unset — the raw,
+/// pre-analysis / memory-unavailable shape that must fail SAFE (never launch).
+fn workstream_coverage_problem(recurrence: Option<u32>, gaps: Vec<GapItem>) -> Problem {
+    let why = recurrence.map(|n| RootCause {
+        candidates: vec![CauseCandidate {
+            label: "uncovered-backlog-work".to_string(),
+            likelihood: Likelihood::High,
+            evidence: vec!["persistent workstream gap with no active engineer".to_string()],
+        }],
+        primary_rationale: "backlog-coverage gap recurring without a workstream".to_string(),
+        confidence: Confidence::High,
+        source: if n > 0 {
+            CauseSource::MemoryRecall
+        } else {
+            CauseSource::Telemetry
+        },
+        recurrence: n,
+    });
+    Problem {
+        kind: ProblemKind::WorkstreamCoverage,
+        priority: Priority::High,
+        dedup_key: "workstream-gap".to_string(),
+        summary: format!("{} uncovered workstream(s)", gaps.len()),
+        evidence: vec![Signal::WorkstreamGap { gaps }],
+        why,
+    }
+}
+
+// ─────────── decide arm: fail-safe below the middle rung ───────────
+
+#[test]
+fn decide_workstream_coverage_without_why_stays_notify_only() {
+    // Absent WHY ⇒ recurrence treated as 0 ⇒ the arm must NEVER launch. This is
+    // the hollow-launch fail-safe: the Overseer never spawns work without a WHY.
+    let problem = workstream_coverage_problem(None, vec![sample_goal_gap(), sample_anomaly_gap()]);
+    match decide(&problem) {
+        Intervention::FlagWorkstreamGaps { gaps } => {
+            assert_eq!(
+                gaps.len(),
+                2,
+                "a why-less coverage problem still notifies the gaps"
+            );
+        }
+        other => panic!("no WHY must stay notify-only (fail-safe), got {other:?}"),
+    }
+}
+
+#[test]
+fn decide_workstream_coverage_below_launch_threshold_stays_notify_only() {
+    // recurrence 1 < WORKSTREAM_COVERAGE_LAUNCH_THRESHOLD (2): still just notify.
+    let recurrence = WORKSTREAM_COVERAGE_LAUNCH_THRESHOLD - 1;
+    let problem = workstream_coverage_problem(
+        Some(recurrence),
+        vec![sample_goal_gap(), sample_anomaly_gap()],
+    );
+    match decide(&problem) {
+        Intervention::FlagWorkstreamGaps { gaps } => {
+            assert_eq!(
+                gaps.len(),
+                2,
+                "below the middle rung the arm is byte-for-byte the old notify-only behaviour"
+            );
+        }
+        other => panic!(
+            "recurrence {recurrence} is below the launch rung; expected notify, got {other:?}"
+        ),
+    }
+}
+
+// ─────────── decide arm: bounded auto-launch AT the middle rung ───────────
+
+#[test]
+fn decide_workstream_coverage_at_launch_threshold_launches_recipe() {
+    // recurrence == 2 (the dead-zone value from issue #4108) crosses the middle
+    // rung: the arm converges from notify-only to a bounded LaunchRecipe.
+    let problem = workstream_coverage_problem(
+        Some(WORKSTREAM_COVERAGE_LAUNCH_THRESHOLD),
+        vec![sample_goal_gap()],
+    );
+    match decide(&problem) {
+        Intervention::LaunchRecipe { brief } => {
+            assert_eq!(
+                brief.target_repo, "rysweet/Simard",
+                "the coverage launch targets the Simard board"
+            );
+            assert!(
+                brief.task_description.contains("g-hot"),
+                "the launch brief names the specific uncovered gap: {:?}",
+                brief.task_description
+            );
+        }
+        other => panic!("recurrence at the middle rung must LaunchRecipe, got {other:?}"),
+    }
+}
+
+#[test]
+fn decide_workstream_coverage_launch_is_bounded_to_one_gap_per_cycle() {
+    // Three uncovered gaps but the arm must launch AT MOST ONE (the top-ranked
+    // gap) so a persistent multi-gap board can never storm N launches in a tick.
+    let problem = workstream_coverage_problem(
+        Some(WORKSTREAM_COVERAGE_LAUNCH_THRESHOLD),
+        vec![sample_anomaly_gap(), sample_issue_gap(), sample_goal_gap()],
+    );
+    match decide(&problem) {
+        Intervention::LaunchRecipe { brief } => {
+            let gaps = [sample_anomaly_gap(), sample_issue_gap(), sample_goal_gap()];
+            let top = pick_top_gap(&gaps).expect("a non-empty gap set has a top gap");
+            assert!(
+                brief.task_description.contains(&top.ref_id),
+                "the single launch is for the top-ranked gap {:?}, brief: {:?}",
+                top.ref_id,
+                brief.task_description
+            );
+            // One Intervention ⇒ structurally one launch per cycle; the brief must
+            // not fan out into every gap's reference.
+            assert!(
+                !brief
+                    .task_description
+                    .contains(&sample_anomaly_gap().ref_id)
+                    || top.ref_id == sample_anomaly_gap().ref_id,
+                "the bounded launch does not enumerate the non-top gaps"
+            );
+        }
+        other => {
+            panic!("a multi-gap middle-rung problem must launch exactly one recipe, got {other:?}")
+        }
+    }
+}
+
+#[test]
+fn decide_workstream_coverage_above_launch_threshold_still_launches() {
+    // recurrence 3 (== escalation bar) still launches from the coverage arm — the
+    // >= middle-rung branch is monotonic; escalation routing is orthogonal.
+    let problem = workstream_coverage_problem(
+        Some(RECURRENCE_ESCALATION_THRESHOLD),
+        vec![sample_goal_gap()],
+    );
+    assert!(
+        matches!(decide(&problem), Intervention::LaunchRecipe { .. }),
+        "recurrence at/above the escalation bar remains a launch, not a silent re-notify"
+    );
+}
+
+// ─────────── pure helper: pick_top_gap (bounding selector) ───────────
+
+#[test]
+fn pick_top_gap_returns_none_on_empty() {
+    let empty: Vec<GapItem> = vec![];
+    assert!(
+        pick_top_gap(&empty).is_none(),
+        "no gaps ⇒ nothing to launch (never a spurious launch)"
+    );
+}
+
+#[test]
+fn pick_top_gap_prefers_goal_over_issue_over_anomaly() {
+    // Ranking mirrors GapCategory declaration order: an uncovered high-priority
+    // GOAL outranks an uncovered ISSUE, which outranks an unaddressed ANOMALY —
+    // regardless of input ordering — so the one bounded launch targets the most
+    // important uncovered work.
+    let goal = sample_goal_gap();
+    let issue = sample_issue_gap();
+    let anomaly = sample_anomaly_gap();
+
+    assert_eq!(
+        pick_top_gap(&[anomaly.clone(), issue.clone(), goal.clone()])
+            .unwrap()
+            .signature,
+        goal.signature,
+        "goal outranks issue and anomaly"
+    );
+    assert_eq!(
+        pick_top_gap(&[anomaly.clone(), issue.clone()])
+            .unwrap()
+            .signature,
+        issue.signature,
+        "issue outranks anomaly"
+    );
+    assert_eq!(
+        pick_top_gap(std::slice::from_ref(&anomaly))
+            .unwrap()
+            .signature,
+        anomaly.signature,
+        "a lone anomaly is its own top gap"
+    );
+}
+
+#[test]
+fn pick_top_gap_is_deterministic() {
+    let gaps = vec![sample_anomaly_gap(), sample_issue_gap(), sample_goal_gap()];
+    let a = pick_top_gap(&gaps).unwrap().signature.clone();
+    let b = pick_top_gap(&gaps).unwrap().signature.clone();
+    assert_eq!(
+        a, b,
+        "selection must be a pure, deterministic function of the gap set"
+    );
+}
+
+// ─────────── pure helper: gap_to_brief (sanitising converter) ───────────
+
+#[test]
+fn gap_to_brief_targets_simard_and_carries_gap_specifics_and_recurrence() {
+    let brief = gap_to_brief(&sample_goal_gap(), WORKSTREAM_COVERAGE_LAUNCH_THRESHOLD);
+    assert_eq!(
+        brief.target_repo, "rysweet/Simard",
+        "coverage briefs run against the Simard board"
+    );
+    assert!(
+        brief.task_description.contains("g-hot"),
+        "the brief carries the uncovered gap's ref_id: {:?}",
+        brief.task_description
+    );
+    assert!(
+        brief
+            .task_description
+            .contains(&WORKSTREAM_COVERAGE_LAUNCH_THRESHOLD.to_string()),
+        "the brief records the recurrence count so the launch explains WHY now: {:?}",
+        brief.task_description
+    );
+}
+
+#[test]
+fn gap_to_brief_sanitizes_hostile_recalled_text() {
+    // Gap text can originate from the multi-writer cognitive-memory graph, so it
+    // is untrusted: the brief must pass every field through `sanitize_recalled`
+    // before it becomes an egress surface (a launched recipe's context var).
+    let hostile = GapItem {
+        category: GapCategory::IssueUncovered,
+        ref_id: "org/repo#1".to_string(),
+        title: "legit\r\nDROP TABLE goals;--\u{001b}[31m".to_string(),
+        why_it_matters: "tab\tand\u{0007}bell control bytes".to_string(),
+        signature: "issue:org/repo#1".to_string(),
+    };
+    let brief = gap_to_brief(&hostile, 2);
+    assert!(
+        !brief.task_description.contains('\n') && !brief.task_description.contains('\r'),
+        "no newline survives into the launch brief (log/notification injection): {:?}",
+        brief.task_description
+    );
+    assert!(
+        !brief.task_description.chars().any(|c| c.is_control()),
+        "no raw control byte survives into the launch brief: {:?}",
+        brief.task_description
+    );
+}
+
+// ─────────── middle-rung threshold placement ───────────
+
+#[test]
+#[allow(clippy::assertions_on_constants)]
+fn workstream_coverage_launch_threshold_is_the_middle_rung() {
+    // The new rung sits in the "seen 2×" dead zone: at/above the recurring-signal
+    // noise floor, and strictly BELOW the root-cause escalation bar — without
+    // changing either existing constant (both gate many other tests).
+    assert_eq!(
+        RECURRING_SIGNATURE_THRESHOLD, 2,
+        "the recurring-signature noise floor is unchanged"
+    );
+    assert_eq!(
+        RECURRENCE_ESCALATION_THRESHOLD, 3,
+        "the escalation bar is unchanged"
+    );
+    assert!(
+        WORKSTREAM_COVERAGE_LAUNCH_THRESHOLD >= RECURRING_SIGNATURE_THRESHOLD,
+        "the launch rung is at or above the noise floor (2×), never on first sighting"
+    );
+    assert!(
+        WORKSTREAM_COVERAGE_LAUNCH_THRESHOLD < RECURRENCE_ESCALATION_THRESHOLD,
+        "the launch rung sits strictly below the escalation bar (the intermediate rung)"
     );
 }
