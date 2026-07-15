@@ -1904,7 +1904,7 @@ impl CapabilityHandler {
                         claim_key = %claim_key,
                         request_id = %request_id,
                         outcome_id = %outcome_id,
-                        "engineer claim admission rejected: existing claim is live",
+                        "engineer claim admission rejected: existing claim treated as live (fail-closed when no liveness provider is configured)",
                     );
                     return Err(rejected());
                 }
@@ -2784,6 +2784,25 @@ mod engineer_claim_lease_tests {
 
     fn claim_key_for(goal_id: &str) -> String {
         RepositoryRef::new(REPO_OWNER, REPO_NAME).claim_key(goal_id)
+    }
+
+    /// F3 — independent wire-format pin for issue #4094.
+    ///
+    /// Both the production admission gate and `claim_key_for` delegate to
+    /// `RepositoryRef::claim_key`, so a formula edit would move every
+    /// derived-value assertion in lockstep and hide the regression. This test
+    /// pins the format against hard-coded literals (not the shared helper or
+    /// constants), so any change to the formula fails loudly here — exactly the
+    /// silent drift class that caused the #4094 lockout.
+    #[test]
+    fn claim_key_wire_format_is_pinned() {
+        assert_eq!(
+            RepositoryRef::new("rysweet", "Simard").claim_key("goal-x"),
+            "rysweet/Simard:goal-x",
+            "engineer claim_key wire format changed — confirm this is intentional \
+             and that claims persisted under the old format are migrated/reclaimed, \
+             otherwise live goals will be locked out (issue #4094)",
+        );
     }
 
     fn open_handler(dir: &std::path::Path) -> CapabilityHandler {
