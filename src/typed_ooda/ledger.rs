@@ -2775,7 +2775,7 @@ mod engineer_claim_lease_tests {
     }
 
     fn claim_key_for(goal_id: &str) -> String {
-        format!("{REPO_OWNER}/{REPO_NAME}:{goal_id}")
+        RepositoryRef::new(REPO_OWNER, REPO_NAME).claim_key(goal_id)
     }
 
     fn open_handler(dir: &std::path::Path) -> CapabilityHandler {

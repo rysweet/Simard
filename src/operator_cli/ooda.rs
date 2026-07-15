@@ -108,7 +108,7 @@ fn dispatch_terminal(
                 .bound_repository()
                 .cloned()
                 .ok_or("authenticated actor has no repository scope")?;
-            let claim_key = format!("{}/{}:{goal_id}", repository.owner, repository.name);
+            let claim_key = repository.claim_key(goal_id);
             handler.record_action(
                 &actor,
                 crate::typed_ooda::RecordActionRequest {
@@ -322,7 +322,8 @@ fn dispatch_fixture(
                             repository: crate::typed_ooda::RepositoryRef::new("rysweet", "Simard"),
                             base_type: crate::typed_ooda::BaseType::Copilot,
                             requested_permissions: BTreeSet::from(["repo_read".to_string()]),
-                            claim_key: "rysweet/Simard:fixture-goal".to_string(),
+                            claim_key: crate::typed_ooda::RepositoryRef::new("rysweet", "Simard")
+                                .claim_key("fixture-goal"),
                         },
                     ),
                     received.decide_output.clone(),
