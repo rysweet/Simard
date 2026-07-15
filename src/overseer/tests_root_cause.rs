@@ -473,6 +473,105 @@ fn recurring_reblock_never_files_an_issue() {
     }
 }
 
+/// DECOUPLING (net-new finding H1: two independent recurrence lanes).
+///
+/// Lane A = `Signal::RecurringSignature` (episodic recall; floor
+/// `RECURRING_SIGNATURE_THRESHOLD = 2`, keyed on `failure_signature`).
+/// Lane B = root-cause escalation (floor `RECURRENCE_ESCALATION_THRESHOLD = 3`,
+/// keyed on `PriorOccurrence.cause_label` and counted by `analyze`).
+///
+/// The two share NO counter: `decide` reads recurrence ONLY from
+/// `why.recurrence` (populated by `analyze` over the `&[PriorOccurrence]` recall
+/// slice), never from a `RecurringSignature` co-signal in the evidence (which
+/// `orient` uses solely to raise priority). Therefore a LOUD Lane-A signal
+/// (occurrences far above BOTH floors) with an EMPTY Lane-B recall must leave
+/// recurrence at 0 and let the false-park self-heal — Lane A cannot trip Lane B.
+#[test]
+fn loud_lane_a_recurring_signature_does_not_feed_lane_b_recurrence() {
+    let loud = crate::overseer::signal::RECURRING_SIGNATURE_THRESHOLD
+        + RECURRENCE_ESCALATION_THRESHOLD
+        + 5;
+    let mut problem = Problem {
+        kind: ProblemKind::GoalHygiene,
+        priority: Priority::High,
+        dedup_key: "goal:blocked:research".to_string(),
+        summary: "goal research blocked".to_string(),
+        evidence: vec![
+            Signal::GoalBlocked {
+                goal_id: "research".to_string(),
+                reason: no_progress_blocked_reason(4),
+                perpetual: true,
+                needs_review: true,
+                consecutive_no_action: 4,
+            },
+            // Lane A fires LOUD, well above its own floor and Lane B's floor.
+            Signal::RecurringSignature {
+                signature: "goal:blocked:research".to_string(),
+                occurrences: loud,
+            },
+        ],
+        why: None,
+    };
+    // Lane B recall is EMPTY — no prior root-cause occurrences recalled.
+    problem.why = Some(analyze(&problem, &ObservedState::default(), &[]));
+
+    assert_eq!(
+        problem.why.as_ref().unwrap().recurrence,
+        0,
+        "a loud Lane-A RecurringSignature (occurrences={loud}) must NOT bleed into \
+         Lane-B recurrence — the lanes share no counter"
+    );
+    let iv = decide(&problem);
+    assert!(
+        matches!(iv, Intervention::UnblockGoal { .. }),
+        "loud Lane A must not trip Lane-B's >=3 escalation gate; expected self-heal, got {iv:?}"
+    );
+}
+
+/// DECOUPLING converse: Lane B escalates on its OWN input (>= 3 matching
+/// `PriorOccurrence`) even when Lane A is entirely SILENT (no
+/// `RecurringSignature` evidence at all). Confirms Lane B does not depend on
+/// Lane A firing.
+#[test]
+fn lane_b_escalates_without_any_lane_a_signal() {
+    let mut problem = Problem {
+        kind: ProblemKind::GoalHygiene,
+        priority: Priority::High,
+        dedup_key: "goal:blocked:research".to_string(),
+        summary: "goal research blocked".to_string(),
+        // No RecurringSignature anywhere — Lane A is silent.
+        evidence: vec![Signal::GoalBlocked {
+            goal_id: "research".to_string(),
+            reason: no_progress_blocked_reason(4),
+            perpetual: true,
+            needs_review: true,
+            consecutive_no_action: 4,
+        }],
+        why: None,
+    };
+    // Lane B recall: exactly RECURRENCE_ESCALATION_THRESHOLD prior occurrences of
+    // the SAME primary cause the analyzer derives for a no-progress false park.
+    let recall: Vec<PriorOccurrence> = (0..RECURRENCE_ESCALATION_THRESHOLD)
+        .map(|_| PriorOccurrence {
+            cause_label: "parked-by-no-progress-safeguard".to_string(),
+            action: "unblock_goal".to_string(),
+            outcome: "re-blocked next cycle".to_string(),
+        })
+        .collect();
+    problem.why = Some(analyze(&problem, &ObservedState::default(), &recall));
+
+    assert_eq!(
+        problem.why.as_ref().unwrap().recurrence,
+        RECURRENCE_ESCALATION_THRESHOLD,
+        "Lane B counts its own PriorOccurrence recall independently of Lane A"
+    );
+    let iv = decide(&problem);
+    assert!(
+        matches!(iv, Intervention::EscalateBlockedGoal { .. }),
+        "Lane B must escalate on its own input with Lane A silent, got {iv:?}"
+    );
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // Section C — run_cycle / tick integration (fakes; memory optional)
 // ════════════════════════════════════════════════════════════════════════════
