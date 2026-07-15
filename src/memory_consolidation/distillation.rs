@@ -161,7 +161,15 @@ impl<'a> InProcessFactSink<'a> {
 impl DistillFactSink for InProcessFactSink<'_> {
     fn commit_fact(&mut self, fact: &DistilledFact) -> SimardResult<bool> {
         // Grounding is batch-membership for the in-process seam (O(1) set lookup).
-        let grounded = self.episode_ids.contains(fact.source_episode_id.as_str());
+        // Trim the cited id before the lookup so this seam grounds a
+        // whitespace-padded `source_episode_id` (a routine LLM surface variation)
+        // exactly as the production store-existence seam does — `any_episode_exists`
+        // / `episode_exists` both `.trim()` the cited id before matching. The batch
+        // node ids are canonical/un-padded, so trimming only the cited id (not the
+        // stored ids) is precisely symmetric with that seam and keeps both write
+        // boundaries' store/quarantine disposition identical (the shared-gate
+        // invariant in `fact_reliability`).
+        let grounded = self.episode_ids.contains(fact.source_episode_id.trim());
 
         // Score → threshold → dedup → persist through the single shared gate, so
         // this in-process seam and the IPC server's `StoreFactGated` handler
