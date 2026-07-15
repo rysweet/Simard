@@ -464,3 +464,142 @@ pub fn record_ablation_feed(outcome: &EnrichmentAblationOutcome) -> SimardResult
         reason: e.to_string(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    //! Hermetic, deterministic unit tests for the *pure* enrichment-observability
+    //! logic. These exercise the private helpers and the local [`Rollup`]
+    //! aggregate directly, so they never touch the process-global rollup, the
+    //! filesystem, the network, or a real cognitive-memory store — and therefore
+    //! contribute to the `--lib` coverage metric (the CI `cargo-llvm-cov` gate,
+    //! which excludes `tests/` integration binaries).
+    use super::*;
+
+    // ── sanitize_field: control-strip + UTF-8-boundary truncation ────────────
+
+    #[test]
+    fn sanitize_field_strips_control_characters() {
+        // Newlines, tabs, and carriage returns are control chars: a
+        // log-injection / WARN-forging attempt must not survive the choke point.
+        let out = sanitize_field("a\nb\tc\rd\u{7}e", 1000);
+        assert_eq!(out, "abcde", "every control character must be removed");
+    }
+
+    #[test]
+    fn sanitize_field_returns_short_value_unchanged() {
+        let out = sanitize_field("short", MAX_OBJECTIVE_BYTES);
+        assert_eq!(out, "short");
+    }
+
+    #[test]
+    fn sanitize_field_truncates_on_a_utf8_char_boundary() {
+        // Each 'é' is two UTF-8 bytes. With max_bytes=5 the naive cut lands in
+        // the middle of the third 'é' (byte 5 splits a char); the helper must
+        // step back to byte 4 and keep exactly two whole chars.
+        let input = "é".repeat(10); // 20 bytes
+        let out = sanitize_field(&input, 5);
+        assert!(out.len() <= 5, "result must not exceed the byte budget");
+        assert_eq!(out, "éé", "truncation must land on a char boundary");
+        assert!(
+            input.starts_with(&out),
+            "the retained slice must be a genuine prefix, not a re-encoding"
+        );
+    }
+
+    #[test]
+    fn sanitize_field_control_strip_runs_before_the_length_check() {
+        // 8 control bytes + "keep" (4 bytes). After stripping only "keep"
+        // remains, which is under the budget, so nothing is truncated.
+        let out = sanitize_field("\n\n\n\n\n\n\n\nkeep", 4);
+        assert_eq!(out, "keep");
+    }
+
+    // ── DegradeReason / AblationVerdict: bounded, stable string forms ─────────
+
+    #[test]
+    fn degrade_reason_as_str_is_low_cardinality_and_distinct() {
+        assert_eq!(DegradeReason::MemoryIpc.as_str(), "memory_ipc");
+        assert_eq!(DegradeReason::KnowledgeLaunch.as_str(), "knowledge_launch");
+        assert_ne!(
+            DegradeReason::MemoryIpc.as_str(),
+            DegradeReason::KnowledgeLaunch.as_str()
+        );
+    }
+
+    #[test]
+    fn ablation_verdict_as_str_is_stable() {
+        assert_eq!(AblationVerdict::Influences.as_str(), "influences");
+        assert_eq!(AblationVerdict::NoInfluence.as_str(), "no-influence");
+    }
+
+    // ── Rollup: local aggregate, no global state touched ─────────────────────
+
+    #[test]
+    fn empty_rollup_omits_the_section_so_the_dashboard_shows_untracked() {
+        // Nothing observed → None (not a false 0% attach-rate).
+        assert!(Rollup::default().to_section().is_none());
+    }
+
+    #[test]
+    fn rollup_records_decisions_and_computes_rate_and_averages() {
+        let mut r = Rollup::default();
+        r.record_decision(true, 3, 2, 100);
+        r.record_decision(false, 1, 0, 50);
+
+        let section = r.to_section().expect("populated rollup emits a section");
+
+        assert_eq!(section["decisions"], json!(2));
+        assert_eq!(section["attached"], json!(1));
+        assert_eq!(section["attach_rate"], json!(0.5));
+        // (3 + 1) / 2, (2 + 0) / 2, (100 + 50) / 2.
+        assert_eq!(section["avg_facts_injected"], json!(2.0));
+        assert_eq!(section["avg_procedures_injected"], json!(1.0));
+        assert_eq!(section["avg_preamble_bytes"], json!(75.0));
+
+        // `last` mirrors the MOST RECENT decision (the second, degraded one).
+        let last = &section["last"];
+        assert_eq!(last["attached"], json!(false));
+        assert_eq!(last["facts_injected"], json!(1));
+        assert_eq!(last["procedures_injected"], json!(0));
+        assert_eq!(last["preamble_bytes"], json!(50));
+        assert!(
+            last["at"].as_str().is_some_and(|s| !s.is_empty()),
+            "last.at must carry an RFC3339 timestamp"
+        );
+
+        // The window opened on the first decision and both bounds are present.
+        assert!(section["window_start"].as_str().is_some());
+        assert!(section["window_end"].as_str().is_some());
+    }
+
+    #[test]
+    fn rollup_full_attach_reports_rate_one() {
+        let mut r = Rollup::default();
+        r.record_decision(true, 5, 1, 200);
+        let section = r.to_section().unwrap();
+        assert_eq!(section["attach_rate"], json!(1.0));
+        assert_eq!(section["attached"], json!(1));
+    }
+
+    #[test]
+    fn rollup_counts_each_degrade_reason_independently() {
+        let mut r = Rollup::default();
+        r.record_degrade(DegradeReason::MemoryIpc);
+        r.record_degrade(DegradeReason::MemoryIpc);
+        r.record_degrade(DegradeReason::KnowledgeLaunch);
+
+        // A degrade-only window must still surface (so operators see the WARNs)
+        // even though no decision was observed.
+        let section = r.to_section().expect("degrade-only rollup emits a section");
+        assert_eq!(section["degraded"]["memory_ipc"], json!(2));
+        assert_eq!(section["degraded"]["knowledge_launch"], json!(1));
+
+        // With zero decisions the averages and rate are Null, never a fake 0.
+        assert_eq!(section["decisions"], json!(0));
+        assert!(section["attach_rate"].is_null());
+        assert!(section["avg_facts_injected"].is_null());
+        assert!(section["avg_procedures_injected"].is_null());
+        assert!(section["avg_preamble_bytes"].is_null());
+        assert!(section["last"].is_null(), "no decision → no `last`");
+    }
+}
