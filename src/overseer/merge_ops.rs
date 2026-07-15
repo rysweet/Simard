@@ -28,7 +28,7 @@ use crate::stewardship::{
     evaluate_objective_gates, merge_pr_if_merge_ready_with_judge,
 };
 
-use crate::overseer::capabilities::{CheckItem, OverseerError, PrOps, VerifyReport};
+use crate::overseer::capabilities::{CheckItem, OverseerError, PrOps, PrRef, VerifyReport};
 use crate::overseer::guardrails::{RecursionGuard, Subject};
 use crate::overseer::notify::{DualChannelNotifier, MergeNotification};
 use crate::overseer::pr_verify::run_diff_scans;
@@ -171,6 +171,10 @@ pub struct MergePrOps {
     /// Anti-recursion identity. When set, the Overseer refuses to merge its OWN
     /// PRs (M3). Fails CLOSED when the guard is unconfigured.
     recursion: Option<RecursionGuard>,
+    /// The OODA/engineer `gh` login Simard authors her PRs under (#4097). The
+    /// `survey_ready_prs` sensor lists ONLY PRs whose author EXACTLY matches, so
+    /// it never surveys a human's PR. `None` => fail-closed (no candidates).
+    automerge_author: Option<String>,
 }
 
 impl MergePrOps {
@@ -197,6 +201,7 @@ impl MergePrOps {
             poll,
             conflict: None,
             recursion: None,
+            automerge_author: None,
         }
     }
 
@@ -215,12 +220,20 @@ impl MergePrOps {
         self
     }
 
+    /// Wire the OODA/engineer author login the autonomous-self-merge sensor
+    /// (#4097) filters candidates to. Without it, `survey_ready_prs` cannot tell
+    /// Simard's OWN PRs from a human's and yields NO candidates (fail-closed).
+    pub fn with_automerge_author(mut self, author: String) -> Self {
+        self.automerge_author = Some(author);
+        self
+    }
+
     /// Production adapter: real `gh` client + diff source, the env merge-judge,
     /// env base-allowlist, the env-wired dual notifier, real sleep. The review
     /// gate is left **unwired** (fail-closed) until the operator provides an
     /// LLM reviewer — so the default autonomous path verifies as NOT ready.
     pub fn from_env() -> Self {
-        Self::new(
+        let mut ops = Self::new(
             Box::new(crate::stewardship::RealPrGhClient),
             Box::new(RealPrSource),
             None,
@@ -229,7 +242,11 @@ impl MergePrOps {
             Box::new(ThreadSleepClock),
             base_allowlist_from_env(),
             PollConfig::default(),
-        )
+        );
+        // Wire the OODA/engineer author so the self-merge sensor (#4097) can tell
+        // Simard's own PRs from a human's. `None` (default) => fail-closed.
+        ops.automerge_author = crate::overseer::config::automerge_author();
+        ops
     }
 
     /// Classify each check and poll while any is pending; escalate (Err) on the
@@ -442,6 +459,71 @@ impl PrOps for MergePrOps {
                         .to_string(),
             }),
         }
+    }
+
+    /// The thin deterministic self-merge sensor rail (#4097). For each
+    /// allowlisted `owner/name` repo it lists open PRs (ONE `gh pr list` per
+    /// repo, reusing [`PrGhClient::list_open_prs`]) and keeps only those that
+    /// are (a) authored by the configured automerge author (EXACT match) and
+    /// (b) pass the cheap objective pre-filter
+    /// ([`evaluate_objective_gates`]: base allow-list + `mergeable == MERGEABLE`
+    /// + all checks green) computed from the already-fetched listing fields.
+    ///
+    /// This is a candidate LIST only: it NEVER calls `view_pr`, NEVER runs the
+    /// MergeJudge, and NEVER merges. The authoritative six-criteria gate stays
+    /// downstream in `merge_authority` and remains the single source of merge
+    /// truth. Every failure mode is fail-closed AND fail-visible:
+    /// - no automerge author configured => empty (logged) — cannot distinguish own PRs;
+    /// - a `gh pr list` error for a repo => that repo is skipped (logged), others still surveyed;
+    /// - an empty allowlist => empty, and `gh` is never even called.
+    fn survey_ready_prs(&self, repos: &[String]) -> Vec<PrRef> {
+        let Some(author) = self.automerge_author.as_deref() else {
+            if !repos.is_empty() {
+                tracing::warn!(
+                    target: "overseer::merge",
+                    "autonomous-self-merge sensor: SIMARD_AUTOMERGE_AUTHOR unset — \
+                     cannot distinguish Simard's own PRs from a human's; yielding no \
+                     candidates (fail-closed)"
+                );
+            }
+            return Vec::new();
+        };
+
+        let mut candidates = Vec::new();
+        for repo in repos {
+            // A generous per-repo cap: the survey is O(open PRs), and the
+            // downstream gate re-verifies each candidate authoritatively.
+            let summaries = match self.gh.list_open_prs(repo, 100) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "overseer::merge",
+                        repo = %repo,
+                        error = %e,
+                        "autonomous-self-merge sensor: `gh pr list` failed — skipping this \
+                         repo (fail-visible); other repos still surveyed"
+                    );
+                    continue;
+                }
+            };
+            for pr in summaries {
+                // EXACT author match: a substring/prefix would let a look-alike
+                // or human PR through. An empty author (missing object) can
+                // never match, so it fails closed.
+                if pr.author != author {
+                    continue;
+                }
+                // Cheap objective pre-filter from the ALREADY-FETCHED listing
+                // fields — no extra `gh` read. The full MergeJudge runs later.
+                if evaluate_objective_gates(&pr.to_snapshot(), &self.base_allowlist).is_ok() {
+                    candidates.push(PrRef {
+                        repo: repo.clone(),
+                        pr: pr.number,
+                    });
+                }
+            }
+        }
+        candidates
     }
 }
 
@@ -903,6 +985,280 @@ mod tests {
         assert!(
             email.lock().unwrap().is_empty(),
             "no notify on a refused own PR"
+        );
+    }
+
+    // ── survey_ready_prs: the dead-wire sensor rail (issue #4097) ────────────
+    //
+    // These tests pin the THIN DETERMINISTIC candidate-listing rail that
+    // populates `ObservedState.ready_prs`. The rail only LISTS candidates
+    // (author-filter + the cheap objective pre-filter on already-fetched
+    // statusCheckRollup/mergeable); the authoritative six-criteria gate stays
+    // downstream in merge_authority and remains the single source of merge
+    // truth. The sensor must NEVER merge and must fail CLOSED + VISIBLE.
+
+    use std::collections::HashMap;
+
+    /// A `PrGhClient` whose `list_open_prs` is scripted per-repo (an `Ok` list
+    /// or a simulated `gh` failure). Records `squash_merge` calls so a test can
+    /// assert the SENSOR never merges. `view_pr` is deliberately `unreachable!`
+    /// — the survey rail must decide from the listing fields alone, never by
+    /// re-reading each PR (that is the downstream verify/merge path's job).
+    #[allow(clippy::type_complexity)]
+    struct ListingGh {
+        by_repo:
+            HashMap<String, Result<Vec<crate::stewardship::merge_authority::OpenPrSummary>, ()>>,
+        listed: Mutex<Vec<String>>,
+        merges: Mutex<usize>,
+    }
+    impl ListingGh {
+        fn new(
+            by_repo: HashMap<
+                String,
+                Result<Vec<crate::stewardship::merge_authority::OpenPrSummary>, ()>,
+            >,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                by_repo,
+                listed: Mutex::new(Vec::new()),
+                merges: Mutex::new(0),
+            })
+        }
+        fn listed(&self) -> Vec<String> {
+            self.listed.lock().unwrap().clone()
+        }
+        fn merges(&self) -> usize {
+            *self.merges.lock().unwrap()
+        }
+    }
+    impl PrGhClient for Arc<ListingGh> {
+        fn view_pr(&self, _repo: &str, _pr: u32) -> crate::error::SimardResult<PrSnapshot> {
+            unreachable!(
+                "the survey rail must not call view_pr — it lists from listing fields only"
+            );
+        }
+        fn squash_merge(&self, _repo: &str, _pr: u32) -> crate::error::SimardResult<()> {
+            *self.merges.lock().unwrap() += 1;
+            Ok(())
+        }
+        fn list_open_prs(
+            &self,
+            repo: &str,
+            _limit: u32,
+        ) -> crate::error::SimardResult<Vec<crate::stewardship::merge_authority::OpenPrSummary>>
+        {
+            self.listed.lock().unwrap().push(repo.to_string());
+            match self.by_repo.get(repo) {
+                Some(Ok(v)) => Ok(v.clone()),
+                Some(Err(())) => Err(crate::error::SimardError::MergeAuthorityGhCommandFailed {
+                    reason: "simulated gh pr list failure".to_string(),
+                }),
+                None => Ok(Vec::new()),
+            }
+        }
+    }
+
+    fn open_pr(
+        number: u32,
+        author: &str,
+        mergeable: &str,
+        base: &str,
+        check_state: &str,
+    ) -> crate::stewardship::merge_authority::OpenPrSummary {
+        crate::stewardship::merge_authority::OpenPrSummary {
+            number,
+            title: format!("candidate PR #{number}"),
+            head_ref_name: format!("feat/{number}"),
+            base_ref_name: base.to_string(),
+            mergeable: mergeable.to_string(),
+            checks: vec![check("ci", check_state)],
+            url: format!("https://github.com/rysweet/Simard/pull/{number}"),
+            author: author.to_string(),
+        }
+    }
+
+    fn pr_ref(repo: &str, pr: u32) -> crate::overseer::capabilities::PrRef {
+        crate::overseer::capabilities::PrRef {
+            repo: repo.to_string(),
+            pr,
+        }
+    }
+
+    /// Build a `MergePrOps` wired to the listing fake, base-allowlist `[main]`,
+    /// and an optional automerge author. Returns the captured notify buffer so
+    /// a test can assert the sensor stays SILENT.
+    fn survey_ops(
+        gh: Arc<ListingGh>,
+        author: Option<&str>,
+    ) -> (MergePrOps, Arc<Mutex<Vec<OperatorNotification>>>) {
+        let seen = Arc::new(Mutex::new(vec![]));
+        let notifier = DualChannelNotifier::new(vec![Box::new(CapturingChannel {
+            name: "email".to_string(),
+            seen: seen.clone(),
+        })]);
+        let mut ops = MergePrOps::new(
+            Box::new(gh),
+            Box::new(FakeSource {
+                diff: String::new(),
+            }),
+            None,
+            Box::new(ReadyJudge),
+            notifier,
+            Box::new(Arc::new(CountingClock::default())),
+            vec!["main".to_string()],
+            PollConfig::default(),
+        );
+        if let Some(a) = author {
+            ops = ops.with_automerge_author(a.to_string());
+        }
+        (ops, seen)
+    }
+
+    #[test]
+    fn survey_selects_only_green_mergeable_simard_authored_allowlisted_prs() {
+        let author = "simard-engineer";
+        let repo = "rysweet/Simard";
+        let mut by_repo = HashMap::new();
+        by_repo.insert(
+            repo.to_string(),
+            Ok(vec![
+                open_pr(101, author, "MERGEABLE", "main", "SUCCESS"), // ✓ the only candidate
+                open_pr(102, author, "CONFLICTING", "main", "SUCCESS"), // ✗ not MERGEABLE
+                open_pr(103, author, "MERGEABLE", "main", "FAILURE"), // ✗ red CI
+                open_pr(104, "human-dev", "MERGEABLE", "main", "SUCCESS"), // ✗ human-authored
+                open_pr(105, author, "MERGEABLE", "release/9", "SUCCESS"), // ✗ non-allowlisted base
+            ]),
+        );
+        let gh = ListingGh::new(by_repo);
+        let (ops, seen) = survey_ops(gh.clone(), Some(author));
+
+        let candidates = ops.survey_ready_prs(&[repo.to_string()]);
+
+        assert_eq!(
+            candidates,
+            vec![pr_ref(repo, 101)],
+            "only the green + MERGEABLE + Simard-authored + main-targeted PR survives"
+        );
+        assert_eq!(
+            gh.merges(),
+            0,
+            "the sensor LISTS candidates — it must never merge"
+        );
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "the sensor is silent — no operator notification on a survey"
+        );
+    }
+
+    #[test]
+    fn survey_is_empty_and_queries_nothing_when_allowlist_is_empty() {
+        let gh = ListingGh::new(HashMap::new());
+        let (ops, _seen) = survey_ops(gh.clone(), Some("simard-engineer"));
+
+        let candidates = ops.survey_ready_prs(&[]);
+
+        assert!(
+            candidates.is_empty(),
+            "empty allowlist => empty ready_prs (autonomous merge OFF by default)"
+        );
+        assert!(
+            gh.listed().is_empty(),
+            "no repo allowlisted => the sensor must not even call `gh pr list`"
+        );
+    }
+
+    #[test]
+    fn survey_is_empty_when_automerge_author_is_unresolved() {
+        let repo = "rysweet/Simard";
+        let mut by_repo = HashMap::new();
+        by_repo.insert(
+            repo.to_string(),
+            Ok(vec![open_pr(
+                201,
+                "simard-engineer",
+                "MERGEABLE",
+                "main",
+                "SUCCESS",
+            )]),
+        );
+        let gh = ListingGh::new(by_repo);
+        // No automerge author wired => cannot distinguish own PRs => fail closed.
+        let (ops, _seen) = survey_ops(gh, None);
+
+        assert!(
+            ops.survey_ready_prs(&[repo.to_string()]).is_empty(),
+            "an unresolved automerge author must fail closed to an empty candidate list"
+        );
+    }
+
+    #[test]
+    fn survey_skips_a_repo_on_gh_error_without_panicking() {
+        let author = "simard-engineer";
+        let mut by_repo = HashMap::new();
+        by_repo.insert("rysweet/broken".to_string(), Err(()));
+        by_repo.insert(
+            "rysweet/Simard".to_string(),
+            Ok(vec![open_pr(301, author, "MERGEABLE", "main", "SUCCESS")]),
+        );
+        let gh = ListingGh::new(by_repo);
+        let (ops, _seen) = survey_ops(gh, Some(author));
+
+        let candidates =
+            ops.survey_ready_prs(&["rysweet/broken".to_string(), "rysweet/Simard".to_string()]);
+
+        assert_eq!(
+            candidates,
+            vec![pr_ref("rysweet/Simard", 301)],
+            "a failing repo is skipped (fail-visible/closed); healthy repos still yield candidates"
+        );
+    }
+
+    #[test]
+    fn survey_excludes_human_authored_even_when_green_and_mergeable() {
+        let author = "simard-engineer";
+        let repo = "rysweet/Simard";
+        let mut by_repo = HashMap::new();
+        by_repo.insert(
+            repo.to_string(),
+            Ok(vec![
+                open_pr(401, "some-human", "MERGEABLE", "main", "SUCCESS"),
+                open_pr(
+                    402,
+                    "simard-engineer-impostor",
+                    "MERGEABLE",
+                    "main",
+                    "SUCCESS",
+                ),
+            ]),
+        );
+        let gh = ListingGh::new(by_repo);
+        let (ops, _seen) = survey_ops(gh, Some(author));
+
+        assert!(
+            ops.survey_ready_prs(&[repo.to_string()]).is_empty(),
+            "author match must be EXACT — no substring/prefix — so human & look-alike PRs are excluded"
+        );
+    }
+
+    #[test]
+    fn survey_default_trait_seam_is_empty() {
+        struct MinimalPrOps;
+        impl PrOps for MinimalPrOps {
+            fn verify(&self, _r: &str, _p: u32) -> Result<VerifyReport, OverseerError> {
+                unreachable!()
+            }
+            fn merge(&self, _r: &str, _p: u32) -> Result<(), OverseerError> {
+                unreachable!()
+            }
+            fn resolve_conflict(&self, _r: &str, _p: u32) -> Result<(), OverseerError> {
+                unreachable!()
+            }
+        }
+        assert!(
+            MinimalPrOps
+                .survey_ready_prs(&["rysweet/Simard".to_string()])
+                .is_empty(),
+            "the PrOps survey seam defaults to empty (default-off, fail-closed)"
         );
     }
 }

@@ -101,7 +101,10 @@ impl StatusReader for SnapshotStatusReader {
 /// Pure projection of a `StatusSnapshot` onto the Overseer's [`ObservedState`].
 /// Every field cites the exact snapshot path; a **degraded** section
 /// (`SectionEnvelope.data == None`) maps to `None`, never a panic. PR/CI reads
-/// (`ready_prs` / `ci_failures`) are an M2 capability, so they stay empty at M1.
+/// (`ready_prs` / `ci_failures`) are NOT sourced from the read-only status
+/// snapshot: `ready_prs` is enriched post-snapshot by the acting Overseer's
+/// Observe pass (`Overseer::run_cycle` — the autonomous-self-merge sensor rail,
+/// #4097), so this pure projection stays side-effect free and leaves them empty.
 pub fn observed_from_snapshot(snap: &StatusSnapshot) -> ObservedState {
     let telemetry = snap.telemetry.data.as_ref();
     let daemon = snap.daemon.data.as_ref();
@@ -125,6 +128,10 @@ pub fn observed_from_snapshot(snap: &StatusSnapshot) -> ObservedState {
         gym_skipped: gym.map(|g| g.skip_gym).unwrap_or(false)
             || telemetry.map(|t| t.gym_skipped).unwrap_or(false),
         anomalies: telemetry.map(|t| t.anomalies.clone()).unwrap_or_default(),
+        // Enriched post-snapshot by the acting Overseer's Observe pass (the
+        // autonomous-self-merge sensor rail, #4097 — `Overseer::run_cycle`),
+        // not from the read-only status snapshot; left empty here so this
+        // projection stays additive and side-effect free.
         ready_prs: Vec::new(),
         ci_failures: Vec::new(),
         // Goal-board health (blocked goals) is projected from the live board by

@@ -75,6 +75,7 @@ fn pr(number: u32, title: &str) -> OpenPrSummary {
         mergeable: "MERGEABLE".into(),
         checks: vec![check("SUCCESS")],
         url: format!("https://github.com/rysweet/Simard/pull/{number}"),
+        author: "simard-engineer".into(),
     }
 }
 

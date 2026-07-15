@@ -1283,6 +1283,10 @@ mod tests {
     struct RecordingPrs {
         ready: bool,
         merges: MergeLog,
+        /// Candidates the survey rail reports (#4097). In production `ready_prs`
+        /// is populated by `PrOps::survey_ready_prs`, not the status snapshot, so
+        /// tests seed the merge path HERE rather than via `FakeStatus`.
+        ready_prs: Vec<crate::overseer::capabilities::PrRef>,
     }
     impl RecordingPrs {
         fn new(ready: bool) -> (Self, MergeLog) {
@@ -1291,9 +1295,16 @@ mod tests {
                 Self {
                     ready,
                     merges: Arc::clone(&merges),
+                    ready_prs: Vec::new(),
                 },
                 merges,
             )
+        }
+
+        /// Seed the candidates the survey rail will report this tick.
+        fn with_ready_prs(mut self, ready_prs: Vec<crate::overseer::capabilities::PrRef>) -> Self {
+            self.ready_prs = ready_prs;
+            self
         }
     }
     impl PrOps for RecordingPrs {
@@ -1313,6 +1324,9 @@ mod tests {
         }
         fn resolve_conflict(&self, _repo: &str, _pr: u32) -> Result<(), OverseerError> {
             Ok(())
+        }
+        fn survey_ready_prs(&self, _repos: &[String]) -> Vec<crate::overseer::capabilities::PrRef> {
+            self.ready_prs.clone()
         }
     }
 
@@ -1406,16 +1420,17 @@ mod tests {
     fn tick_verifies_and_merges_a_green_ready_pr_and_records_the_merge() {
         // Seed a merge-ready PR signal → Decide maps to VerifyAndMergePr →
         // with verify-merge autonomy ON, the tick merges it (normal merge).
-        let observed = ObservedState {
-            ready_prs: vec![crate::overseer::capabilities::PrRef {
-                repo: "rysweet/Simard".to_string(),
-                pr: 42,
-            }],
-            ..ObservedState::default()
-        };
+        // `ready_prs` is sourced from the survey rail (#4097), not the snapshot.
         let (prs, merges) = RecordingPrs::new(true);
-        let mut overseer = Overseer::new(caps_with(Box::new(FakeStatus(observed)), Box::new(prs)))
-            .with_verify_merge_autonomy(true);
+        let prs = prs.with_ready_prs(vec![crate::overseer::capabilities::PrRef {
+            repo: "rysweet/Simard".to_string(),
+            pr: 42,
+        }]);
+        let mut overseer = Overseer::new(caps_with(
+            Box::new(FakeStatus(ObservedState::default())),
+            Box::new(prs),
+        ))
+        .with_verify_merge_autonomy(true);
         let report = overseer_tick(&mut overseer);
         assert_eq!(report.prs_merged, 1, "green ready PR must be merged");
         assert_eq!(
@@ -1426,16 +1441,16 @@ mod tests {
 
     #[test]
     fn tick_holds_the_merge_when_autonomy_is_not_opted_in() {
-        let observed = ObservedState {
-            ready_prs: vec![crate::overseer::capabilities::PrRef {
-                repo: "rysweet/Simard".to_string(),
-                pr: 7,
-            }],
-            ..ObservedState::default()
-        };
-        // Default autonomy (verify-merge OFF) → the merge is HELD (escalated).
         let (prs, merges) = RecordingPrs::new(true);
-        let mut overseer = Overseer::new(caps_with(Box::new(FakeStatus(observed)), Box::new(prs)));
+        let prs = prs.with_ready_prs(vec![crate::overseer::capabilities::PrRef {
+            repo: "rysweet/Simard".to_string(),
+            pr: 7,
+        }]);
+        // Default autonomy (verify-merge OFF) → the merge is HELD (escalated).
+        let mut overseer = Overseer::new(caps_with(
+            Box::new(FakeStatus(ObservedState::default())),
+            Box::new(prs),
+        ));
         let report = overseer_tick(&mut overseer);
         assert_eq!(report.prs_merged, 0);
         assert_eq!(report.held, 1, "verify-merge is opt-in; held by default");
@@ -1785,16 +1800,16 @@ mod tests {
 
     #[test]
     fn tick_records_action_details_for_a_merged_pr() {
-        let observed = ObservedState {
-            ready_prs: vec![crate::overseer::capabilities::PrRef {
-                repo: "rysweet/Simard".to_string(),
-                pr: 42,
-            }],
-            ..ObservedState::default()
-        };
         let (prs, _merges) = RecordingPrs::new(true);
-        let mut overseer = Overseer::new(caps_with(Box::new(FakeStatus(observed)), Box::new(prs)))
-            .with_verify_merge_autonomy(true);
+        let prs = prs.with_ready_prs(vec![crate::overseer::capabilities::PrRef {
+            repo: "rysweet/Simard".to_string(),
+            pr: 42,
+        }]);
+        let mut overseer = Overseer::new(caps_with(
+            Box::new(FakeStatus(ObservedState::default())),
+            Box::new(prs),
+        ))
+        .with_verify_merge_autonomy(true);
         let report = overseer_tick(&mut overseer);
 
         assert_eq!(report.prs_merged, 1);
@@ -1811,16 +1826,16 @@ mod tests {
 
     #[test]
     fn tick_records_why_a_held_intervention_took_no_action() {
-        let observed = ObservedState {
-            ready_prs: vec![crate::overseer::capabilities::PrRef {
-                repo: "rysweet/Simard".to_string(),
-                pr: 7,
-            }],
-            ..ObservedState::default()
-        };
         // Default autonomy → the merge is HELD; the log must SAY WHY, not go silent.
         let (prs, _merges) = RecordingPrs::new(true);
-        let mut overseer = Overseer::new(caps_with(Box::new(FakeStatus(observed)), Box::new(prs)));
+        let prs = prs.with_ready_prs(vec![crate::overseer::capabilities::PrRef {
+            repo: "rysweet/Simard".to_string(),
+            pr: 7,
+        }]);
+        let mut overseer = Overseer::new(caps_with(
+            Box::new(FakeStatus(ObservedState::default())),
+            Box::new(prs),
+        ));
         let report = overseer_tick(&mut overseer);
 
         assert_eq!(report.held, 1);

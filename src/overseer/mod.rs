@@ -427,6 +427,18 @@ impl Overseer {
             .workstream_gaps(&observed.anomalies)
             .unwrap_or_default();
 
+        // Enrich with the autonomous-self-merge candidate survey (#4097): the
+        // thin deterministic sensor rail that LISTS Simard's OWN green +
+        // MERGEABLE PRs in the explicit `SIMARD_AUTOMERGE_REPOS` allowlist. This
+        // is the dead-wire fix — populating `ready_prs` re-activates the already
+        // -built `PrReadyToMerge`/`VerifyAndMergePr` merge machinery. The
+        // allowlist is EMPTY by default => no candidates => autonomous merge
+        // stays OFF until an operator canary-enables one repo. The rail only
+        // LISTS candidates; the authoritative six-criteria gate stays downstream
+        // in `merge_authority`. A survey failure degrades to empty inside the
+        // ops layer (fail-visible), never aborts the cycle.
+        observed.ready_prs = self.caps.prs.survey_ready_prs(&config::automerge_repos());
+
         // Drain diagnosed step failures (#2640, PART 2) from the process-global
         // failure sink into this Observe pass, so a caught decision-cycle /
         // engineer / terminal-shell failure surfaces as a corrective
