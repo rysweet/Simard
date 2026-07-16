@@ -1141,10 +1141,33 @@ fn build_ecosystem_observer(
     Box<dyn crate::overseer::ecosystem_observe::EcosystemObserver>,
 )> {
     use crate::overseer::ecosystem_observe::{
-        RecipeEcosystemObserver, SpawnEcosystemRecipeRunner, load_ecosystem_roster,
+        ECOSYSTEM_ROSTER_FILENAME, RecipeEcosystemObserver, SpawnEcosystemRecipeRunner,
+        load_ecosystem_roster, resolve_ecosystem_roster_path,
     };
 
-    let roster_path = repo_root.join("prompt_assets/simard/ecosystem_repos.toml");
+    // Install-first resolution (issue #2419): the deployed daemon's `repo_root`
+    // is a stale source checkout that lacks the roster, while the roster is
+    // installed under `~/.simard`. Resolve it there first, then in-tree.
+    let roster_path = match resolve_ecosystem_roster_path(repo_root, None) {
+        Some(path) => path,
+        None => {
+            let installed_candidate = dirs::home_dir().map(|home| {
+                home.join(".simard")
+                    .join("prompt_assets/simard")
+                    .join(ECOSYSTEM_ROSTER_FILENAME)
+            });
+            let in_tree_candidate = repo_root
+                .join("prompt_assets/simard")
+                .join(ECOSYSTEM_ROSTER_FILENAME);
+            tracing::warn!(
+                target: "simard::ecosystem_observe",
+                installed_candidate = ?installed_candidate.as_ref().map(|p| p.display().to_string()),
+                in_tree_candidate = %in_tree_candidate.display(),
+                "[simard] ecosystem-observe NOT wired: failed to load stewarded roster (no roster at the installed or in-tree location)",
+            );
+            return None;
+        }
+    };
     let roster = match load_ecosystem_roster(&roster_path) {
         Ok(roster) => roster,
         Err(error) => {

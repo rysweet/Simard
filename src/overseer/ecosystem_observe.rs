@@ -269,6 +269,45 @@ fn resolve_observe_recipe_path(
     None
 }
 
+/// The stewarded roster this rail loads (resolved install-first, then in-tree).
+/// Hardcoded const — never derived from env/args/file contents (path-traversal
+/// prevention).
+pub(crate) const ECOSYSTEM_ROSTER_FILENAME: &str = "ecosystem_repos.toml";
+
+/// Resolve the `ecosystem_repos.toml` roster path. Checks, in order:
+///   1. `~/.simard/prompt_assets/simard/<name>` (installed / hot-reload path)
+///   2. `<repo_root>/prompt_assets/simard/<name>` (in-tree)
+///
+/// Mirrors [`resolve_observe_recipe_path`] EXACTLY (minus the `recipes/`
+/// subdir), fixing issue #2419: the deployed daemon's `repo_root` is a stale
+/// source checkout that lacks the roster, while the roster is installed under
+/// `~/.simard`. `home_override` keeps tests hermetic against the ambient
+/// `~/.simard`; production passes `None`.
+pub(crate) fn resolve_ecosystem_roster_path(
+    repo_root: &Path,
+    home_override: Option<&Path>,
+) -> Option<std::path::PathBuf> {
+    let home = home_override
+        .map(std::path::PathBuf::from)
+        .or_else(dirs::home_dir);
+    if let Some(home) = home {
+        let installed = home
+            .join(".simard")
+            .join("prompt_assets/simard")
+            .join(ECOSYSTEM_ROSTER_FILENAME);
+        if installed.is_file() {
+            return Some(installed);
+        }
+    }
+    let in_tree = repo_root
+        .join("prompt_assets/simard")
+        .join(ECOSYSTEM_ROSTER_FILENAME);
+    if in_tree.is_file() {
+        return Some(in_tree);
+    }
+    None
+}
+
 /// Production [`EcosystemRecipeRunner`]: spawns `recipe-runner-rs` on the
 /// `ecosystem-observe` recipe and returns its OPAQUE final-step output.
 ///
@@ -641,5 +680,115 @@ slug = "bad"
         assert!(!is_valid_slug("owner/name;rm -rf /")); // shell metachars
         assert!(!is_valid_slug("owner/name`whoami`"));
         assert!(!is_valid_slug("owner/name$(id)"));
+    }
+
+    // ── roster path resolution (install-first) ───────────────────────────
+    //
+    // These specify `resolve_ecosystem_roster_path`, the install-first
+    // resolver that fixes the #2419 bug where the deployed daemon
+    // (WorkingDirectory ~/.simard, a stale source `repo_root`) failed-closed
+    // on EVERY tick with "NOT wired: failed to load stewarded roster" because
+    // the roster was only ever sought under `repo_root`. The resolver mirrors
+    // `resolve_observe_recipe_path` EXACTLY: prefer
+    // `<home>/.simard/prompt_assets/simard/ecosystem_repos.toml`, else fall
+    // back to `<repo_root>/prompt_assets/simard/ecosystem_repos.toml`, else
+    // `None`. All tests are hermetic: they use `tempfile::tempdir` + an
+    // explicit `home_override` and NEVER touch the ambient `~/.simard`.
+
+    /// Write the roster under `<base>/prompt_assets/simard/ecosystem_repos.toml`
+    /// and return the file path. `base` is a home's `.simard` dir or a repo_root.
+    fn write_roster_under(base: &Path) -> std::path::PathBuf {
+        let dir = base.join("prompt_assets/simard");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(ECOSYSTEM_ROSTER_FILENAME);
+        std::fs::write(
+            &path,
+            "schema_version = 1\n[[repo]]\nslug = \"rysweet/Simard\"\n",
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn roster_path_filename_is_fixed_const() {
+        // Security invariant: the filename is a hardcoded const, never derived
+        // from env/args/file contents (path-traversal prevention).
+        assert_eq!(ECOSYSTEM_ROSTER_FILENAME, "ecosystem_repos.toml");
+    }
+
+    #[test]
+    fn roster_path_prefers_installed_home() {
+        // Given BOTH an installed roster (~/.simard/...) and an in-tree roster
+        // (repo_root/...), the resolver prefers the INSTALLED one (install-first),
+        // exactly like the recipe resolver.
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let installed = write_roster_under(&home.path().join(".simard"));
+        let _in_tree = write_roster_under(repo.path());
+
+        let resolved = resolve_ecosystem_roster_path(repo.path(), Some(home.path()))
+            .expect("resolver must find the installed roster");
+        assert_eq!(
+            resolved, installed,
+            "install-first: the ~/.simard roster wins over the in-tree copy"
+        );
+    }
+
+    #[test]
+    fn roster_path_falls_back_to_repo_root() {
+        // Given ONLY the in-tree roster (no installed copy under home_override),
+        // the resolver falls back to `repo_root/prompt_assets/simard/...`.
+        let home = tempfile::tempdir().unwrap(); // empty .simard — no roster
+        let repo = tempfile::tempdir().unwrap();
+        let in_tree = write_roster_under(repo.path());
+
+        let resolved = resolve_ecosystem_roster_path(repo.path(), Some(home.path()))
+            .expect("resolver must fall back to the in-tree roster");
+        assert_eq!(
+            resolved, in_tree,
+            "fallback: the repo_root roster is used when no install copy exists"
+        );
+    }
+
+    #[test]
+    fn roster_path_none_when_absent() {
+        // Given NEITHER an installed nor an in-tree roster, the resolver returns
+        // None (fail-open seam: the caller then emits the fail-visible warn and
+        // skips the pass without panicking).
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+
+        assert!(
+            resolve_ecosystem_roster_path(repo.path(), Some(home.path())).is_none(),
+            "no roster anywhere → None, never a panic"
+        );
+    }
+
+    #[test]
+    fn roster_path_wires_from_install_when_repo_root_lacks_roster() {
+        // REGRESSION for #2419: the deployed daemon's `repo_root` is a STALE
+        // source checkout WITHOUT the roster, while the roster is installed at
+        // ~/.simard/prompt_assets/simard/ecosystem_repos.toml. The resolver MUST
+        // wire from the installed location — the reported bug cannot come back.
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap(); // repo_root deliberately EMPTY
+        let installed = write_roster_under(&home.path().join(".simard"));
+
+        // Sanity: repo_root truly lacks the roster (mirrors the stale deploy dir).
+        assert!(
+            !repo
+                .path()
+                .join("prompt_assets/simard")
+                .join(ECOSYSTEM_ROSTER_FILENAME)
+                .exists(),
+            "precondition: repo_root has no roster (as on the stale deploy dir)"
+        );
+
+        let resolved = resolve_ecosystem_roster_path(repo.path(), Some(home.path()))
+            .expect("must wire from the installed roster even when repo_root lacks it");
+        assert_eq!(
+            resolved, installed,
+            "install-first resolution fixes the #2419 fail-closed-every-tick bug"
+        );
     }
 }
