@@ -353,3 +353,63 @@ pub fn dispatch_probe_with_context(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod doc_parity_tests {
+    //! Guards against operator-surface documentation drift.
+    //!
+    //! Every `simard_operator_probe` subcommand wired in
+    //! [`dispatch_operator_probe`] is a shipped compatibility surface, so the
+    //! runtime-contracts reference must document it. This test caught (and now
+    //! prevents regressing) the gap where `concierge-run` and
+    //! `handoff-roundtrip` were fully wired but absent from the doc.
+
+    const DISPATCH_SRC: &str = include_str!("dispatch.rs");
+    const RUNTIME_CONTRACTS_DOC: &str = include_str!("../../docs/reference/runtime-contracts.md");
+
+    /// Extract the command literals handled by the positional
+    /// `dispatch_operator_probe` match arms. Scoped to that function so the gym
+    /// dispatcher's `list`/`run`/`compare`/`run-suite` arms (a separate surface,
+    /// documented under the gym section) are not mistaken for probe commands.
+    fn operator_probe_commands() -> Vec<String> {
+        let start = DISPATCH_SRC
+            .find("pub fn dispatch_operator_probe")
+            .expect("dispatch_operator_probe present");
+        let end = DISPATCH_SRC[start..]
+            .find("pub fn dispatch_legacy_gym_cli")
+            .map(|offset| start + offset)
+            .expect("legacy gym dispatcher present");
+        let body = &DISPATCH_SRC[start..end];
+
+        let mut commands = Vec::new();
+        for line in body.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix('"')
+                && let Some(close) = rest.find('"')
+                && rest[close + 1..].trim_start().starts_with("=>")
+            {
+                commands.push(rest[..close].to_string());
+            }
+        }
+        commands.sort();
+        commands.dedup();
+        commands
+    }
+
+    #[test]
+    fn every_operator_probe_command_is_documented() {
+        let commands = operator_probe_commands();
+        assert!(
+            !commands.is_empty(),
+            "expected to parse at least one probe command from dispatch_operator_probe"
+        );
+        for command in commands {
+            let needle = format!("simard_operator_probe {command}");
+            assert!(
+                RUNTIME_CONTRACTS_DOC.contains(&needle),
+                "operator-probe command `{command}` is wired in dispatch.rs but is not documented \
+                 as `{needle}` in docs/reference/runtime-contracts.md"
+            );
+        }
+    }
+}
