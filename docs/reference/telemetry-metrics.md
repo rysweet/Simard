@@ -169,6 +169,13 @@ node/edge counts **from these snapshot gauges** — process-agnostic and requiri
 no LadybugDB open from the CLI. When the daemon has not yet flushed memory
 gauges the section renders `absent`, never a fabricated zero.
 
+> **Grounding coverage.** The raw `simard.memory.edges{type=DERIVES_FROM}` gauge
+> is complemented by a durable **`fact_provenance_coverage`** self-metric — the
+> grounded *fraction* (`facts_with_provenance / facts_total`) emitted per cycle
+> to the `metrics.jsonl` series so a graph-memory grounding regression is
+> comparable and regressable, not just a raw count. See
+> [Cognitive-memory provenance § Observability](./cognitive-memory-provenance.md#observability-grounding-coverage-self-metric).
+
 ### LLM usage — `simard.llm.*`
 
 Mirrored from `cost_tracking` (the ledger format is unchanged; these are
