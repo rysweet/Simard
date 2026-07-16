@@ -1,0 +1,55 @@
+name: "Bursar Identity End-to-End (investment portfolio research & management)"
+description: "Outside-in proof that the simard-bursar identity constructs a target allocation AND backtests / risk-reports / rebalances it end-to-end, research/advisory only (never executing orders). Drives the operator-probe `bursar-run` surface (construct -> backtest -> risk report -> rebalancing recommendation, self-verified) and confirms the `simard-bursar` identity bootstraps as a first-class identity."
+version: "1.0.0"
+
+config:
+  timeout: 360000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 360000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Bursar constructs an allocation and verifies a backtest/risk/rebalancing analysis end-to-end"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/bursar-identity.sh"
+    timeout: 360000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "bursar"
+    - "investment"
+    - "identity"
+    - "portfolio"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

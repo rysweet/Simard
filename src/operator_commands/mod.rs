@@ -1,3 +1,4 @@
+mod bursar;
 mod command_context;
 mod concierge;
 mod dispatch;
@@ -31,6 +32,7 @@ pub use crate::operator_commands_terminal::{
 };
 
 // Re-export pub items from sub-modules.
+pub use bursar::run_bursar_probe;
 pub use concierge::run_concierge_probe;
 pub use dispatch::{
     dispatch_legacy_gym_cli, dispatch_operator_probe, dispatch_probe_with_context, gym_usage,

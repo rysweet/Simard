@@ -1,0 +1,29 @@
+name: simard-bursar-end-to-end
+app_type: cli
+description: |
+  Proves the Bursar identity delivers on its "Done when" bar: take an objective +
+  constraints brief to a backtested, risk-reported allocation end-to-end, as
+  research/advisory only (never executing orders). Drives the operator-probe
+  `bursar-run` surface, which constructs the target allocation and runs the
+  backtest / risk report / rebalancing recommendation with self-verified
+  invariants.
+
+  Schema note: the pinned `@gadugi/agentic-test` CLI runner only gates on
+  `run`-step exit codes and reads command text from `params.command`, so the
+  assertion is encoded in the exit code of a `bash -lc` wrapper that exits zero
+  only when the run reports "Allocation verified: yes", advisory-only order
+  execution, and a completed session.
+metadata:
+  tags:
+    - cli
+    - bursar
+    - investment
+agents:
+  - name: cli-agent
+    type: cli
+    command: bash
+steps:
+  - action: run
+    params:
+      command: "bash -lc 'OUT=$(cargo run --quiet --bin simard_operator_probe -- bursar-run single-process \"Balanced growth portfolio for a 20 year horizon, \\$250,000\" 2>&1); echo \"$OUT\"; echo \"$OUT\" | grep -q \"Allocation verified: yes\" && echo \"$OUT\" | grep -q \"Order execution: none (advisory only)\" && echo \"$OUT\" | grep -Eq \"Sharpe ratio: -?[0-9]+\\.[0-9]+\" && echo \"$OUT\" | grep -q \"Session phase: complete\"'"
+    timeout: 360000

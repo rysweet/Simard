@@ -15,6 +15,11 @@ pub mod base_type_turn;
 pub mod base_types;
 pub mod bootstrap;
 pub mod build_lock;
+// Bursar identity: investment-portfolio research & management — deterministic
+// mandate/allocation design plus a runnable backtest / risk / rebalancing
+// engine. Research/advisory only: it never executes orders. Self-contained
+// domain brick; tests live in `#[cfg(test)]` siblings.
+pub mod bursar;
 pub mod cargo_jobs;
 pub mod ci_health;
 pub mod cmd_cleanup;
@@ -260,6 +265,14 @@ pub use bootstrap::{
     run_local_session,
 };
 pub use build_lock::{BuildLock, BuildLockGuard};
+// NOTE: `bursar::render_report` is intentionally NOT re-exported here to avoid a
+// name clash with `concierge::render_report`; reach it via `bursar::render_report`.
+pub use bursar::{
+    AllocationSlice, AssetClass, Backtest, BacktestSummary, BursarError, BursarOutcome,
+    InvestmentBrief, PortfolioEngine, PortfolioPlan, RebalanceAction, RebalanceOrder,
+    RebalancePlan, RiskMetrics, RiskTolerance, TargetAllocation, design_allocation, run_bursar,
+    validate_backtest,
+};
 pub use cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
 pub use concierge::{
     BrandIdentity, Channel, ChannelAvailability, ConciergeError, ConciergeOutcome, GuestExperience,
