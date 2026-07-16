@@ -842,3 +842,177 @@ fn genuinely_stuck_with_no_evidence_surfaces_investigation_error_never_parks_non
         other => panic!("expected a fail-closed retriable state, got {other:?}"),
     }
 }
+
+// === DeterministicNoProgressReasoner: the production classifier itself ========
+//
+// The suite above injects a `FakeReasoner`; these tests pin the *real* reasoner
+// (`crate::ooda_loop::no_progress::DeterministicNoProgressReasoner`), which is
+// what actually classifies a live stall. The defect they close (issue #16):
+// its terminal rung returned `GENUINELY-STUCK` even for a goal with **no**
+// checkable artifacts, yielding an incoherent `evidence=[(none)]` WHY that
+// violates the class contract and mis-routes an unclear-criteria goal.
+
+use super::no_progress::DeterministicNoProgressReasoner;
+
+/// An evidence source that is "stuck" on every certifying probe but errors on a
+/// chosen investigation probe, to drive the reasoner's probe-error downgrade.
+struct ErroringEvidence {
+    fail_repo_present: bool,
+    fail_dependency: bool,
+}
+
+impl EvidenceSource for ErroringEvidence {
+    fn any_pr_merged(&self, _goal: &ActiveGoal) -> SimardResult<bool> {
+        Ok(false)
+    }
+    fn issue_closed(&self, _goal: &ActiveGoal) -> SimardResult<bool> {
+        Ok(false)
+    }
+    fn is_deployed(&self, _goal: &ActiveGoal) -> SimardResult<bool> {
+        Ok(false)
+    }
+    fn repo_present(&self, _goal: &ActiveGoal) -> SimardResult<bool> {
+        if self.fail_repo_present {
+            Err(SimardError::VerificationFailed {
+                reason: "gh repo view timed out".to_string(),
+            })
+        } else {
+            Ok(true)
+        }
+    }
+    fn dependency_goal_state(&self, _goal: &ActiveGoal) -> SimardResult<DependencyState> {
+        if self.fail_dependency {
+            Err(SimardError::VerificationFailed {
+                reason: "goal-board read failed".to_string(),
+            })
+        } else {
+            Ok(DependencyState::None)
+        }
+    }
+}
+
+/// A broadly-scoped/exploratory goal with NO tracked PR/issue — nothing the
+/// done-gate can ever check. This is the exact shape of the identity-cartographer
+/// goal that stalled: its true root cause is UNCLEAR-CRITERIA, not a mysterious
+/// GENUINELY-STUCK, and it must never be classified with empty evidence.
+#[test]
+fn deterministic_reasoner_no_checkable_artifacts_is_unclear_criteria_with_evidence() {
+    let evidence = FakeEvidence::stuck();
+    let reasoner = DeterministicNoProgressReasoner::new(&evidence);
+    let goal = stuck_goal("identity-cartographer-data-storytelling");
+    assert!(
+        goal.wip_refs.is_empty(),
+        "fixture must have no checkable artifacts"
+    );
+
+    let why = reasoner.investigate(&goal).expect("reasoner returns Ok");
+
+    assert_eq!(
+        why.class,
+        NoProgressClass::UnclearCriteria,
+        "a stall with nothing the done-gate can check is UNCLEAR-CRITERIA, not GENUINELY-STUCK",
+    );
+    assert!(
+        !why.evidence.is_empty(),
+        "the WHY must carry evidence naming the absent criteria",
+    );
+    assert_ne!(
+        why.render_evidence(),
+        "(none)",
+        "the reasoner must NEVER emit evidence=[(none)] — the live-daemon defect (issue #16)",
+    );
+}
+
+/// A stall that still has open, checkable artifacts (an open PR/issue) IS
+/// genuinely stuck — a human can act on those live artifacts, which become the
+/// WHY's evidence.
+#[test]
+fn deterministic_reasoner_open_artifacts_is_genuinely_stuck_with_those_artifacts() {
+    let evidence = FakeEvidence::stuck();
+    let reasoner = DeterministicNoProgressReasoner::new(&evidence);
+    let mut goal = stuck_goal("stuck-with-open-pr");
+    goal.wip_refs = vec![pr_ref("42"), issue_ref("7", "tracking")];
+
+    let why = reasoner.investigate(&goal).expect("reasoner returns Ok");
+
+    assert_eq!(why.class, NoProgressClass::GenuinelyStuck);
+    assert!(
+        !why.evidence.is_empty(),
+        "open artifacts must be carried as evidence"
+    );
+    let rendered = why.render_evidence();
+    assert!(
+        rendered.contains("pr #42 (OPEN)") && rendered.contains("issue #7 (OPEN)"),
+        "the open artifacts must be the evidence: {rendered}",
+    );
+}
+
+/// When an investigation probe itself errors, the reasoner keeps GENUINELY-STUCK
+/// (a real, if transient, machine cause) but must still attach the failing probe
+/// as evidence — never an empty `evidence=[(none)]`.
+#[test]
+fn deterministic_reasoner_probe_error_is_stuck_with_probe_evidence_never_empty() {
+    for (fail_repo_present, fail_dependency, probe) in [
+        (true, false, "repo_present"),
+        (false, true, "dependency_goal_state"),
+    ] {
+        let evidence = ErroringEvidence {
+            fail_repo_present,
+            fail_dependency,
+        };
+        let reasoner = DeterministicNoProgressReasoner::new(&evidence);
+        // No artifacts, so the ONLY thing that keeps evidence non-empty is the
+        // probe-error record itself.
+        let goal = stuck_goal("probe-error-goal");
+
+        let why = reasoner
+            .investigate(&goal)
+            .expect("probe error downgrades, not Err");
+
+        assert_eq!(
+            why.class,
+            NoProgressClass::GenuinelyStuck,
+            "a probe error is a genuine machine cause, not unclear criteria",
+        );
+        let rendered = why.render_evidence();
+        assert_ne!(
+            rendered, "(none)",
+            "probe-error WHY must never be evidence-less"
+        );
+        assert!(
+            rendered.contains(probe) && rendered.contains("errored"),
+            "the failing probe must be recorded as evidence: {rendered}",
+        );
+    }
+}
+
+/// The headline invariant across every terminal-classification shape: the
+/// production reasoner must NEVER return a stall class (GENUINELY-STUCK /
+/// UNCLEAR-CRITERIA) with empty evidence.
+#[test]
+fn deterministic_reasoner_never_emits_an_empty_evidence_stall_class() {
+    let evidence = FakeEvidence::stuck();
+    let reasoner = DeterministicNoProgressReasoner::new(&evidence);
+
+    for wip in [
+        vec![],
+        vec![pr_ref("1")],
+        vec![issue_ref("2", "t")],
+        vec![pr_ref("3"), issue_ref("4", "t")],
+    ] {
+        let mut goal = stuck_goal("invariant-goal");
+        goal.wip_refs = wip;
+        let why = reasoner.investigate(&goal).expect("reasoner returns Ok");
+        if matches!(
+            why.class,
+            NoProgressClass::GenuinelyStuck | NoProgressClass::UnclearCriteria
+        ) {
+            assert!(
+                !why.evidence.is_empty(),
+                "stall class {} must carry evidence, got (none) for wip_refs {:?}",
+                why.class.token(),
+                goal.wip_refs,
+            );
+        }
+    }
+}

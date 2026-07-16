@@ -207,7 +207,18 @@ signals the daemon can gather without the brain:
 | done-gate verdict | [`verify_stuck_goal`](../reference/no-progress-breaker-api.md#noprogressresolution) over the [completion-evidence gate](../reference/completion-evidence-gate-api.md) | `ALREADY-COMPLETE` / `OBSOLETE` |
 | governed repo present? | `EvidenceSource::repo_present` | `MISSING-PRECONDITION` |
 | dependency goal / PR state | `EvidenceSource::dependency_goal_state` | `UPSTREAM-DEPENDENCY` |
-| none of the above | — | `UNCLEAR-CRITERIA` / `GENUINELY-STUCK` |
+| none of the above, **with** open checkable artifacts (PR/issue) | still-open `wip_refs` | `GENUINELY-STUCK` (evidence = those artifacts) |
+| none of the above, **no** checkable artifacts | — | `UNCLEAR-CRITERIA` (evidence = "no machine-checkable done-criteria") |
+
+The final split matters (issue #16): `GENUINELY-STUCK` is reserved for a stall
+that still has a **live artifact a human can act on**, which becomes its
+evidence. A goal with **nothing the done-gate can ever check** — no tracked
+PR/issue, e.g. a broadly-scoped exploratory goal — is instead `UNCLEAR-CRITERIA`:
+its done-criteria are not expressed as anything verifiable. Routing it there
+sends it down the rung whose guided-engineer task is exactly "clarify and make
+the done-criteria measurable". Either way the WHY carries **non-empty** evidence;
+the reasoner never emits `GENUINELY-STUCK evidence=[(none)]`, the exact
+live-daemon defect that class contract forbids.
 
 This mirrors the sibling **brain-failure** safeguard, which is likewise "a
 deterministic safeguard enforced by simard, NOT a brain decision — the brain is
@@ -232,9 +243,11 @@ than guessing:
 
 - A **reasoner error** downgrades to the deterministic WHY (never blocks or
   completes silently on the reasoner's behalf); it is logged at `error`.
-- An **evidence-source error** on `repo_present` / `dependency_goal_state` is
-  treated as `UNCLEAR` (the breaker never self-completes or self-heals on an
-  *unknown* state).
+- An **evidence-source error** on `repo_present` / `dependency_goal_state`
+  downgrades to `GENUINELY-STUCK` with the **failing probe recorded as evidence**
+  (e.g. `investigation repo_present (errored: …)`) — a real, if transient, machine
+  cause; the breaker never self-completes or self-heals on an *unknown* state, and
+  the WHY is never left evidence-less.
 - A **clone failure** on the MISSING-PRECONDITION rung escalates with the clone
   error attached as evidence.
 - An **auto-complete** only fires when the done-gate positively certifies the

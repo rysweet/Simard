@@ -1,0 +1,52 @@
+# Canonical agentic-test schema (name + agents[] + steps[] with params), matching
+# tests/qa-scenarios/dashboard-goal-persistence.yaml so the installed
+# `@gadugi/agentic-test` CLI accepts it (`name`, non-empty `agents`, `steps`).
+#
+# Regression coverage for issue #16: the production no-progress reasoner
+# (`DeterministicNoProgressReasoner`) must never classify a stall as
+# `GENUINELY-STUCK` with `evidence=[(none)]`. A goal with no machine-checkable
+# artifacts is now correctly classified `UNCLEAR-CRITERIA` (routing it to the
+# "clarify and make the done-criteria measurable" guided-engineer rung), while a
+# stall with open PR/issue artifacts stays `GENUINELY-STUCK` with those artifacts
+# as evidence. Either way the WHY carries non-empty evidence.
+#
+# The `cli` agent's command runner treats a non-zero exit code as a step failure,
+# so the `grep -q "4 passed"` (the four new deterministic-reasoner tests) makes
+# this a real pass/fail gate, not a cosmetic assertion.
+name: ooda-no-progress-why-unclear-criteria
+description: >-
+  The production no-progress reasoner never emits GENUINELY-STUCK
+  evidence=[(none)]; a stall with no checkable done-criteria is classified
+  UNCLEAR-CRITERIA, and open artifacts keep it GENUINELY-STUCK with evidence.
+version: "1.0"
+config:
+  timeout: 300000
+environment:
+  requires: []
+agents:
+  - name: cli-agent
+    type: cli
+    config: {}
+metadata:
+  tags:
+    - cli
+  priority: high
+steps:
+  - name: Run the deterministic no-progress reasoner classification regression tests
+    agent: cli-agent
+    action: run
+    params:
+      command: bash
+      args:
+        - -lc
+        - >-
+          set -euo pipefail;
+          OUT=$(cargo test --lib --
+          ooda_loop::tests_no_progress_investigation::deterministic_reasoner_no_checkable_artifacts_is_unclear_criteria_with_evidence
+          ooda_loop::tests_no_progress_investigation::deterministic_reasoner_open_artifacts_is_genuinely_stuck_with_those_artifacts
+          ooda_loop::tests_no_progress_investigation::deterministic_reasoner_probe_error_is_stuck_with_probe_evidence_never_empty
+          ooda_loop::tests_no_progress_investigation::deterministic_reasoner_never_emits_an_empty_evidence_stall_class
+          2>&1);
+          echo "$OUT";
+          echo "$OUT" | grep -q "4 passed"
+    timeout: 300000

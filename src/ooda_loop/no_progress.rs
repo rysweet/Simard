@@ -1048,6 +1048,66 @@ fn stuck_evidence(goal: &ActiveGoal) -> Vec<Evidence> {
         .collect()
 }
 
+/// Classify a stall for which no machine-resolvable cause was found — the last
+/// rung of [`DeterministicNoProgressReasoner::investigate`].
+///
+/// The done-gate could not certify the goal, its repo is present, and it is not
+/// gated on a tracked upstream — yet it keeps producing no shippable action. Two
+/// shapes reach here and they are **not** the same root cause:
+///
+/// * The goal still has **open, checkable artifacts** (a PR or issue a human can
+///   act on). That is a true [`GenuinelyStuck`](NoProgressClass::GenuinelyStuck):
+///   the WHY points a human straight at those live artifacts.
+/// * The goal has **nothing the done-gate can ever check** — no tracked PR/issue,
+///   so no artifact whose state could certify completion (e.g. a broadly-scoped
+///   exploratory goal). Its real root cause is
+///   [`UnclearCriteria`](NoProgressClass::UnclearCriteria): the done-criteria are
+///   not expressed as anything verifiable, so the gate can never certify it.
+///   Routing it there (not to `GenuinelyStuck`) sends it down the rung whose
+///   guided-engineer task is exactly "clarify and make the done-criteria
+///   measurable", which is the actual remedy.
+///
+/// Either way the returned WHY carries **non-empty** evidence, so it is never the
+/// incoherent `GENUINELY-STUCK evidence=[(none)]` — the contract every stall class
+/// owes its downstream escalation and the exact live-daemon defect (issue #16)
+/// that an empty-evidence classification reintroduces.
+fn stuck_or_unclear(goal: &ActiveGoal) -> NoProgressWhy {
+    let open_artifacts = stuck_evidence(goal);
+    if open_artifacts.is_empty() {
+        NoProgressWhy::new(
+            NoProgressClass::UnclearCriteria,
+            vec![Evidence::new(
+                "criteria",
+                goal.id.clone(),
+                "no machine-checkable done-criteria",
+            )],
+        )
+    } else {
+        NoProgressWhy::new(NoProgressClass::GenuinelyStuck, open_artifacts)
+    }
+}
+
+/// A `GENUINELY-STUCK` finding for a stall where an investigation probe itself
+/// errored (e.g. `repo_present` / `dependency_goal_state`). The error is a real,
+/// if transient, machine cause — so we keep [`GenuinelyStuck`] but record the
+/// failing probe as evidence, joined with any still-open artifacts, so the WHY is
+/// never `evidence=[(none)]`.
+///
+/// [`GenuinelyStuck`]: NoProgressClass::GenuinelyStuck
+fn stuck_from_probe_error(
+    goal: &ActiveGoal,
+    probe: &str,
+    error: &dyn std::fmt::Display,
+) -> NoProgressWhy {
+    let mut evidence = stuck_evidence(goal);
+    evidence.push(Evidence::new(
+        "investigation",
+        probe,
+        format!("errored: {error}"),
+    ));
+    NoProgressWhy::new(NoProgressClass::GenuinelyStuck, evidence)
+}
+
 impl NoProgressWhyReasoner for DeterministicNoProgressReasoner<'_> {
     fn investigate(&self, goal: &ActiveGoal) -> SimardResult<NoProgressWhy> {
         // 1. Done-gate positively certifies completion (the kgpacks-rs incident).
@@ -1082,10 +1142,7 @@ impl NoProgressWhyReasoner for DeterministicNoProgressReasoner<'_> {
                     error = %e,
                     "no-progress reasoner: repo_present errored — downgrading to GENUINELY-STUCK",
                 );
-                return Ok(NoProgressWhy::new(
-                    NoProgressClass::GenuinelyStuck,
-                    stuck_evidence(goal),
-                ));
+                return Ok(stuck_from_probe_error(goal, "repo_present", &e));
             }
         }
         // 4. Gated on a specific upstream that has not landed.
@@ -1105,17 +1162,13 @@ impl NoProgressWhyReasoner for DeterministicNoProgressReasoner<'_> {
                     "no-progress reasoner: dependency_goal_state errored — \
                      downgrading to GENUINELY-STUCK",
                 );
-                return Ok(NoProgressWhy::new(
-                    NoProgressClass::GenuinelyStuck,
-                    stuck_evidence(goal),
-                ));
+                return Ok(stuck_from_probe_error(goal, "dependency_goal_state", &e));
             }
         }
-        // 5. No machine-resolvable cause found.
-        Ok(NoProgressWhy::new(
-            NoProgressClass::GenuinelyStuck,
-            stuck_evidence(goal),
-        ))
+        // 5. No machine-resolvable cause found: GENUINELY-STUCK when there are
+        // still open artifacts to point a human at, else UNCLEAR-CRITERIA when the
+        // goal has nothing the done-gate can ever check. Never evidence=[(none)].
+        Ok(stuck_or_unclear(goal))
     }
 }
 
