@@ -226,16 +226,25 @@ pub fn commit_gated_fact(
     // Identity dedup: do not downgrade/duplicate an equal-or-stronger prior
     // version of the *same* fact (concept + content). `search_facts` is queried
     // with the new confidence as `min_confidence` so it returns only priors
-    // strong enough to block; the explicit `>=` is belt-and-suspenders against a
-    // backend that ignores the filter.
+    // strong enough to block; it matches on a query-token substring of a fact's
+    // concept OR content, so the returned set can include priors of a DIFFERENT
+    // concept whose content merely shares a token of this concept's label. The
+    // dedup identity is `concept` + trimmed `content` (a fact under another
+    // concept is a distinct identity), so the predicate requires BOTH the concept
+    // and the trimmed content to match before an equal-or-stronger prior blocks
+    // the write — otherwise a cross-concept content collision would silently drop
+    // grounded, distinct knowledge. The explicit `>=` is belt-and-suspenders
+    // against a backend that ignores the `min_confidence` filter.
+    let new_concept = concept.trim();
     let new_content = content.trim();
     let existing = memory
         .search_facts(concept, DEDUP_PRIOR_SCAN_LIMIT, confidence)
         .unwrap_or_default();
-    if existing
-        .iter()
-        .any(|f| f.content.trim() == new_content && f.confidence >= confidence)
-    {
+    if existing.iter().any(|f| {
+        f.concept.trim() == new_concept
+            && f.content.trim() == new_content
+            && f.confidence >= confidence
+    }) {
         return Ok(FactGateDecision::Quarantined { confidence });
     }
 

@@ -323,3 +323,92 @@ fn commit_gated_fact_stores_dedups_and_quarantines() {
         "an ungrounded empty fact scores below the threshold"
     );
 }
+
+/// Dedup identity is `concept` + trimmed `content`, so a fact under a DIFFERENT
+/// concept is a distinct identity and must be stored even when its content is
+/// byte-identical to an existing fact. The dedup prior scan queries
+/// `search_facts(concept, …)`, whose backend matches when any query token is a
+/// substring of a fact's concept **or content**. A prior of another concept
+/// whose content happens to contain a token of the new concept label therefore
+/// surfaces in that scan; without a concept-identity check the shared gate would
+/// quarantine the distinct fact and silently drop grounded, distinct knowledge
+/// (a distillation fact-yield loss). This pins that the cross-concept collision
+/// is stored, while a same-concept restatement is still deduped.
+#[test]
+fn commit_gated_fact_stores_distinct_concept_with_identical_content() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::{FactGateDecision, commit_gated_fact};
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode(
+            "episode payload for cross-concept dedup",
+            "engineer-cycle",
+            None,
+        )
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let episode_ids = [ep.clone()];
+
+    // The shared content mentions the OTHER concept's label ("lesson-learned"),
+    // so a later `search_facts("lesson-learned", …)` prior scan surfaces this
+    // bug-pattern fact by a content-substring match.
+    let content = "the lesson-learned root cause is unclear";
+
+    // (1) Store a grounded, known-concept `bug-pattern` fact. Nominal score 0.9.
+    let first = commit_gated_fact(
+        &mem,
+        "bug-pattern",
+        content,
+        true,
+        &source,
+        &[String::from("bug-pattern")],
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        first.stored(),
+        "first (bug-pattern) fact must store, got {first:?}"
+    );
+
+    // (2) A DISTINCT identity: same content, different concept `lesson-learned`.
+    // It must store — it is not a restatement of the bug-pattern fact.
+    let distinct = commit_gated_fact(
+        &mem,
+        "lesson-learned",
+        content,
+        true,
+        &source,
+        &[String::from("lesson-learned")],
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    let FactGateDecision::Stored { node_id, .. } = &distinct else {
+        panic!(
+            "a distinct-concept fact with identical content must be stored, not \
+             quarantined as a cross-concept false dedup; got {distinct:?}"
+        );
+    };
+    assert!(!node_id.is_empty());
+
+    // (3) A genuine same-identity restatement (same concept + content) is still
+    // deduped, proving the concept check tightens — never loosens — the gate.
+    let restated = commit_gated_fact(
+        &mem,
+        "lesson-learned",
+        content,
+        true,
+        &source,
+        &[String::from("lesson-learned")],
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        !restated.stored(),
+        "a same-concept, same-content restatement must still dedup, got {restated:?}"
+    );
+    assert!(
+        restated.confidence() >= RELIABILITY_THRESHOLD,
+        "the dedup quarantine cleared the threshold; only the equal prior blocks it"
+    );
+}
