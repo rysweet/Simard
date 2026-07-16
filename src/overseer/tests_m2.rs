@@ -217,7 +217,10 @@ fn seeded_problem_launches_fix_merges_green_pr_and_notifies_operator() {
     );
     let n = &email.lock().unwrap()[0];
     assert!(n.link.as_deref().unwrap().ends_with("/pull/2601"));
-    assert!(n.problem.contains("merge-ready"));
+    assert!(
+        n.problem.contains("passed every check and review"),
+        "the operator notification must be plain English, not gate jargon"
+    );
     assert!(n.autonomous);
 }
 

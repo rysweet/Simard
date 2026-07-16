@@ -4,9 +4,10 @@ description: >
   Operator runbook to turn on Simard's autonomous self-merge safely, one repo at
   a time, via the SIMARD_AUTOMERGE_REPOS allowlist. Ships OFF by default; this
   page shows how to canary-enable a single repo, verify Simard sees and merges
-  only her own green + MERGEABLE PRs through the authoritative gate, and how to
-  roll back instantly.
-last_updated: 2026-07-15
+  only her own engineers' green + MERGEABLE PRs (scoped by the simard-autonomous
+  label or an engineer-exclusive branch namespace) while the operator's OWN review
+  PRs are never touched, and how to roll back instantly.
+last_updated: 2026-07-16
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -53,10 +54,33 @@ its [API reference](../reference/ready-prs-sensor-api.md).
 | `SIMARD_AUTOMERGE_AUTHOR` | **Required.** The `gh` login whose own PRs Simard may merge. **Unset/empty ⇒ OFF** (fail-closed — there is no ambient `gh api user` fallback). |
 
 Setting the allowlist only lets the sensor **list candidates**. Every candidate
-still passes the authoritative merge gate in
+must also pass the **engineer-PR gate** (see below) *and* the authoritative merge
+gate in
 [`merge_authority`](../reference/cross-repo-merge-authority.md)
-(`MERGEABLE` + CI-green + merge-judge over the six merge-ready evidence sections) before any
-merge, and that gate never uses `--admin`/`--no-verify`.
+(`MERGEABLE` + CI-green + merge-judge over the six merge-ready evidence sections)
+before any merge, and that gate never uses `--admin`/`--no-verify`.
+
+### Your own review PRs are never touched
+
+Simard's engineers **and you** author PRs under the same `rysweet` login **and**
+under the same common branch prefixes (`feat/`, `fix/`, `chore/`), so neither the
+author nor a shared branch prefix can tell them apart. To keep your own review PRs
+— a `feat/…` or `fix/…` branch under your login with no `simard-autonomous` label
+— out of the autonomous loop, the sensor additionally requires a **durable
+engineer marker** on every candidate:
+
+| Marker | Applied by | Role |
+|---|---|---|
+| `simard-autonomous` **label** (`SIMARD_ENGINEER_PR_LABEL`) | Simard's engineer at `gh pr create` time | **Primary** marker — the only one that works on the shared branch prefixes (`feat/`, `fix/`, `chore/`) both you and the engineers use |
+| **Engineer-exclusive branch namespace** — `engineer/`, `chore/advisory-` | The engineer worktree and the supply-chain steward, deterministically in Rust | **Secondary** defense-in-depth marker — namespaces no operator review PR ever uses |
+
+A PR is a candidate **only if it carries the `simard-autonomous` label OR is on an
+engineer-exclusive branch namespace**. Your review PRs carry **neither** (a
+`feat/…` / `fix/…` branch is shared, not engineer-exclusive, and you don't apply
+the label), so they are **never** auto-merged — even when they are green,
+`MERGEABLE`, and authored under your login. You do not configure this; the label
+and namespaces are code constants. Nothing you can set in the systemd unit widens
+the scope to your own review branches.
 
 ## Procedure
 
@@ -121,9 +145,18 @@ no survey line at all when the candidate set is empty and no repo errored.)
 
 ### 4. Confirm the safety boundaries held
 
-- **Human PRs untouched.** Open a human-authored PR (or point at an existing
-  one) and confirm it never appears as a candidate — only Simard's own login
-  matches.
+- **Your own review PRs untouched.** Confirm an operator-authored review PR — one
+  on a shared-prefix branch (`feat/…`, `fix/…`) with no `simard-autonomous` label
+  — **never** appears as a candidate, even though it shares your login and may be
+  green. The engineer-PR gate excludes it. Grep the survey log for a `debug!`
+  exclusion note naming it.
+- **Only engineer PRs included.** A candidate that *is* listed carries either the
+  `simard-autonomous` label or an engineer-exclusive branch namespace
+  (`engineer/…`, `chore/advisory-…`). If a genuinely engineer-authored PR is *not*
+  listed, confirm the engineer applied the label (or that it is on an `engineer/`
+  branch).
+- **Other human PRs untouched.** A PR authored by a login other than
+  `SIMARD_AUTOMERGE_AUTHOR` never appears as a candidate.
 - **Red / conflicting excluded.** A PR with a failing check or `CONFLICTING`
   never becomes a candidate.
 - **Gate still authoritative.** A candidate whose body lacks the six substantive
@@ -165,5 +198,7 @@ disable.
 | Survey never lists a known-green own PR | `SIMARD_AUTOMERGE_AUTHOR` unset or mismatched | Confirm the var is set (unset ⇒ fail-closed OFF). Casing is tolerated (the match is case-insensitive), but confirm it is the same whole login as the PR's `author.login`. |
 | No candidates although author and repo are set | author login typo (wrong whole login) | Compare the configured `SIMARD_AUTOMERGE_AUTHOR` with the PR's `author.login`; the match is a whole-login, case-insensitive equality — a different login (not just different casing) yields nothing. |
 | Candidate listed but never merged | authoritative gate refused it | Read the refusal reason in the log — usually a missing or thin merge-ready evidence section (QA-team, Quality-audit, CI link). Fix the PR body; the sensor was correct to list it. |
+| A known engineer PR is never listed | missing engineer marker | Confirm the PR carries the `simard-autonomous` label OR is on an engineer-exclusive branch namespace (`engineer/…`, `chore/advisory-…`). A PR on a shared prefix (`feat/…`, `fix/…`, `chore/…`) with no label is excluded by design — the fix is to apply the `simard-autonomous` label. |
+| Your own review PR appears eligible | (should be impossible) | The engineer-PR gate excludes any PR lacking both the label and an engineer-exclusive branch namespace. If an operator PR is ever listed, treat it as a safety defect: roll back (below) and file a bug — it means the PR carries the `simard-autonomous` label, or is on an `engineer/`/`chore/advisory-` branch it should not be. |
 | No `survey_ready_prs` line at all | allowlist unset or typo | Confirm `SIMARD_AUTOMERGE_REPOS` is exactly `owner/name`; unknown values contribute nothing. Restart after any change. |
 | A repo in the allowlist is skipped every cycle | `gh pr list` errored for that repo | Look for the `warn!` line naming the repo (auth/permissions); other repos are unaffected. |

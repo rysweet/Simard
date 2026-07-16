@@ -243,6 +243,7 @@ mod tests {
             ],
             url: format!("https://github.com/rysweet/Simard/pull/{number}"),
             author: "simard-engineer".into(),
+            labels: Vec::new(),
         }
     }
 
@@ -259,6 +260,7 @@ mod tests {
             }],
             url: format!("https://github.com/rysweet/Simard/pull/{number}"),
             author: "simard-engineer".into(),
+            labels: Vec::new(),
         }
     }
 
@@ -275,6 +277,7 @@ mod tests {
             }],
             url: format!("https://github.com/rysweet/Simard/pull/{number}"),
             author: "simard-engineer".into(),
+            labels: Vec::new(),
         }
     }
 
@@ -291,6 +294,7 @@ mod tests {
             }],
             url: format!("https://github.com/rysweet/Simard/pull/{number}"),
             author: "simard-engineer".into(),
+            labels: Vec::new(),
         }
     }
 

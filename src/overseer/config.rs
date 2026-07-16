@@ -378,6 +378,51 @@ pub fn automerge_author() -> Option<String> {
     automerge_author_from(|k| std::env::var(k).ok())
 }
 
+/// The durable machine label Simard stamps on EVERY engineer / goal-advance PR
+/// at `gh pr create` time (see `prompt_assets/simard/engineer_system.md`). It is
+/// the PRIMARY self-identifying marker the autonomous-self-merge sensor (#4097)
+/// uses to tell Simard's OWN merge-ready PRs from the operator's own review PRs
+/// when BOTH are authored by the same `gh` login (e.g. `rysweet`). The author
+/// filter alone cannot separate them; this label can.
+///
+/// Matched EXACTLY (whole-string, case-sensitive) by [`is_engineer_pr_label`]:
+/// a substring or loose match would let a spoofed look-alike label
+/// (`not-simard-autonomous`, `simard-autonomous-ish`) through the gate.
+pub const SIMARD_ENGINEER_PR_LABEL: &str = "simard-autonomous";
+
+/// The Rust-deterministic, engineer-EXCLUSIVE head-branch namespaces. These are
+/// code-generated and NEVER hand-typed by a human operator, so a head branch
+/// under one of them is proof-of-Simard-origin. They are the SECONDARY
+/// (defense-in-depth) marker for the case where the best-effort label was not
+/// applied to an engineer PR.
+///
+/// - `engineer/`       — engineer worktree branches (`engineer_worktree/mod.rs`
+///   builds `engineer/<goal-id>-<suffix>`).
+/// - `chore/advisory-` — supply-chain remediation branches
+///   (`supply_chain_steward/execute.rs` builds `chore/advisory-<advisory-id>`).
+///
+/// Shared prefixes (`feat/`, `fix/`, bare `chore/`) are DELIBERATELY excluded:
+/// the operator uses them too, so they are non-discriminating — on a shared
+/// prefix the label is the only thing that qualifies a PR. Every entry is
+/// non-empty so an empty head can never `starts_with`-match (fail-closed).
+pub const ENGINEER_BRANCH_PREFIXES: &[&str] = &["engineer/", "chore/advisory-"];
+
+/// True iff `label` is EXACTLY the durable engineer-PR marker
+/// [`SIMARD_ENGINEER_PR_LABEL`]. Whole-string, case-sensitive.
+pub fn is_engineer_pr_label(label: &str) -> bool {
+    label == SIMARD_ENGINEER_PR_LABEL
+}
+
+/// True iff `head` rides a Rust-deterministic, engineer-only branch namespace
+/// (see [`ENGINEER_BRANCH_PREFIXES`]). Anchored with `starts_with` so a
+/// look-alike like `engineerish/…` never matches, and — because every prefix is
+/// non-empty — an empty head ref can never qualify (fail-closed).
+pub fn is_engineer_branch(head: &str) -> bool {
+    ENGINEER_BRANCH_PREFIXES
+        .iter()
+        .any(|prefix| head.starts_with(prefix))
+}
+
 /// Resolve the daily budget from an env resolver, falling back to
 /// [`DEFAULT_DAILY_BUDGET_USD`] when the value is unset, empty, unparseable, or
 /// non-positive. This is the single source of truth the [`BudgetGate`] reads.
@@ -709,5 +754,81 @@ mod tests {
                 "{bad:?} must fall back to the default threshold"
             );
         }
+    }
+
+    // ── engineer-PR identity gate (issue #4097, G3) ──────────────────────────
+    //
+    // The autonomous-self-merge sensor scopes candidates by author (G2). But
+    // Simard's engineer PRs AND the operator's own review PRs are BOTH authored
+    // by the same login (`rysweet`), so the author filter alone cannot tell them
+    // apart. G3 adds a NARROWING engineer-PR marker: a durable machine label
+    // (primary — works even on shared `feat/`/`fix/` branches) OR a
+    // Rust-deterministic engineer-only branch namespace (secondary,
+    // defense-in-depth). These tests pin the primitives G3 is built from.
+
+    /// The durable machine label Simard stamps on her own engineer PRs is an
+    /// EXACT, case-sensitive, whole-string constant. A substring/loosely-matched
+    /// value would let a spoofed look-alike label through the gate.
+    #[test]
+    fn engineer_pr_label_is_the_exact_expected_constant() {
+        assert_eq!(
+            SIMARD_ENGINEER_PR_LABEL, "simard-autonomous",
+            "the engineer-PR label must be the exact durable machine marker \
+             engineers stamp at `gh pr create` time"
+        );
+    }
+
+    /// Only the two Rust-deterministic, engineer-EXCLUSIVE branch namespaces are
+    /// recognised: `engineer/` (engineer_worktree/mod.rs) and `chore/advisory-`
+    /// (supply_chain_steward/execute.rs). Both are code-generated and never used
+    /// by a human operator, so a match here is proof-of-Simard-origin.
+    #[test]
+    fn is_engineer_branch_accepts_only_engineer_exclusive_namespaces() {
+        assert!(
+            is_engineer_branch("engineer/4097-abcd1234"),
+            "the deterministic engineer worktree branch prefix must be recognised"
+        );
+        assert!(
+            is_engineer_branch("chore/advisory-rustsec-2024-0001"),
+            "the deterministic supply-chain remediation branch prefix must be recognised"
+        );
+    }
+
+    /// The gate must EXCLUDE every branch a human operator could author. The
+    /// shared `feat/`/`fix/`/bare-`chore/` prefixes are used by operators AND
+    /// engineers alike, so they are NON-discriminating and must NOT qualify on
+    /// their own — the label is what distinguishes an engineer PR on a shared
+    /// prefix. `cogthreads/…` models the operator's own review PRs (#3142) that
+    /// must NEVER auto-merge.
+    #[test]
+    fn is_engineer_branch_rejects_operator_and_shared_branches() {
+        for head in [
+            "cogthreads/some-review",      // operator review PR (#3142) — never merge
+            "feat/operator-manual-change", // shared prefix, operator-authored
+            "feat/4097",                   // shared prefix — non-discriminating
+            "fix/typo",                    // shared prefix — non-discriminating
+            "chore/bump-deps",             // bare chore/ is NOT chore/advisory-
+            "main",                        // a base branch, not an engineer head
+            "engineerish/not-really",      // must anchor, not substring-match
+            "release/9",
+        ] {
+            assert!(
+                !is_engineer_branch(head),
+                "{head:?} is operator-reachable / non-discriminating and must NOT \
+                 qualify as an engineer branch"
+            );
+        }
+    }
+
+    /// Empty inputs must fail closed. An empty head ref (missing field) can never
+    /// be an engineer branch, and no allow-list entry may be an empty prefix
+    /// (which would `starts_with`-match EVERY branch and silently re-open the
+    /// gate).
+    #[test]
+    fn is_engineer_branch_fails_closed_on_empty_head() {
+        assert!(
+            !is_engineer_branch(""),
+            "an empty head ref must never qualify (fail-closed)"
+        );
     }
 }

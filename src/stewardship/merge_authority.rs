@@ -83,7 +83,7 @@ pub struct CheckRollupEntry {
 
 /// One open-PR summary used by the dashboard's Merge Readiness panel
 /// (#1880). Sourced from
-/// `gh pr list --json number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url`.
+/// `gh pr list --json number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url,author,labels`.
 /// Mirrors [`PrSnapshot`] without `body` or `review_decision` — the panel
 /// only renders the cheap deterministic gates per PR.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -100,6 +100,14 @@ pub struct OpenPrSummary {
     /// human's — an empty author (missing object) can never equal a configured
     /// automerge author, so it fails closed. Not read by the dashboard panel.
     pub author: String,
+    /// Label names from `gh pr list --json ...,labels`. The autonomous-self-merge
+    /// sensor (#4097) reads this to positively identify Simard's OWN engineer PRs
+    /// (they carry [`SIMARD_ENGINEER_PR_LABEL`]) and separate them from the
+    /// operator's own review PRs when both share the same author login. Nameless
+    /// labels are dropped at parse time. Not read by the dashboard panel.
+    ///
+    /// [`SIMARD_ENGINEER_PR_LABEL`]: crate::overseer::config::SIMARD_ENGINEER_PR_LABEL
+    pub labels: Vec<String>,
 }
 
 impl OpenPrSummary {
@@ -334,7 +342,7 @@ impl PrGhClient for RealPrGhClient {
                     "--state",
                     "open",
                     "--json",
-                    "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url,author",
+                    "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url,author,labels",
                     "--limit",
                     &limit_s,
                 ],
@@ -363,7 +371,7 @@ impl PrGhClient for RealPrGhClient {
                     "--author",
                     author,
                     "--json",
-                    "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url,author",
+                    "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url,author,labels",
                     "--limit",
                     &limit_s,
                 ],
@@ -476,11 +484,18 @@ pub fn parse_pr_list_json(stdout: &[u8]) -> SimardResult<Vec<OpenPrSummary>> {
         url: String,
         #[serde(default)]
         author: Option<RawAuthor>,
+        #[serde(default)]
+        labels: Vec<RawLabel>,
     }
     #[derive(serde::Deserialize)]
     struct RawAuthor {
         #[serde(default)]
         login: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawLabel {
+        #[serde(default)]
+        name: String,
     }
     #[derive(serde::Deserialize)]
     struct RawCheck {
@@ -529,6 +544,12 @@ pub fn parse_pr_list_json(stdout: &[u8]) -> SimardResult<Vec<OpenPrSummary>> {
                 checks,
                 url: r.url,
                 author: r.author.map(|a| a.login).unwrap_or_default(),
+                labels: r
+                    .labels
+                    .into_iter()
+                    .map(|l| l.name)
+                    .filter(|n| !n.is_empty())
+                    .collect(),
             }
         })
         .collect())
@@ -1593,6 +1614,108 @@ mod tests {
         assert!(
             prs[0].author.is_empty(),
             "a missing author object must default to empty (fail-closed), not panic"
+        );
+    }
+
+    /// Issue #4097 (G3): the autonomous-self-merge sensor's engineer-PR gate
+    /// needs the PR's labels to tell Simard's OWN engineer PRs from the
+    /// operator's own review PRs (both authored by the same login). So
+    /// `parse_pr_list_json` must project every `label.name` from the
+    /// `gh pr list --json ...,labels` shape onto `OpenPrSummary.labels`.
+    #[test]
+    fn parse_pr_list_json_captures_labels() {
+        let stdout = br#"[
+            {
+                "number": 4097,
+                "title": "feat: activate autonomous self-merge",
+                "headRefName": "feat/self-merge",
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "url": "https://github.com/rysweet/Simard/pull/4097",
+                "author": { "login": "rysweet" },
+                "labels": [
+                    { "name": "simard-autonomous" },
+                    { "name": "enhancement" }
+                ],
+                "statusCheckRollup": [
+                    { "name": "ci", "conclusion": "SUCCESS", "status": "COMPLETED" }
+                ]
+            }
+        ]"#;
+        let prs = parse_pr_list_json(stdout).unwrap();
+        assert_eq!(prs.len(), 1);
+        assert_eq!(
+            prs[0].labels,
+            vec!["simard-autonomous".to_string(), "enhancement".to_string()],
+            "every label.name must be projected onto OpenPrSummary.labels in order"
+        );
+    }
+
+    /// A `gh pr list` row with a missing or empty `labels` array must default to
+    /// an empty `Vec` — never panic. An engineer PR with no labels then relies on
+    /// its branch namespace (the G3 secondary marker); an operator PR with no
+    /// labels and a non-engineer branch fails the gate closed.
+    #[test]
+    fn parse_pr_list_json_missing_labels_defaults_empty() {
+        let stdout = br#"[
+            {
+                "number": 10,
+                "title": "no labels here",
+                "headRefName": "engineer/10-abcd",
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "url": "https://github.com/rysweet/Simard/pull/10",
+                "author": { "login": "rysweet" },
+                "statusCheckRollup": []
+            },
+            {
+                "number": 11,
+                "title": "explicitly empty labels",
+                "headRefName": "feat/11",
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "url": "https://github.com/rysweet/Simard/pull/11",
+                "author": { "login": "rysweet" },
+                "labels": [],
+                "statusCheckRollup": []
+            }
+        ]"#;
+        let prs = parse_pr_list_json(stdout).unwrap();
+        assert_eq!(prs.len(), 2);
+        assert!(
+            prs[0].labels.is_empty(),
+            "a missing labels array must default to an empty Vec (fail-closed), not panic"
+        );
+        assert!(
+            prs[1].labels.is_empty(),
+            "an explicitly empty labels array must round-trip to an empty Vec"
+        );
+    }
+
+    /// Defensive: a `label` object missing its `name` (or with an empty name)
+    /// must be dropped, mirroring how `parse_pr_view_json` filters empty label
+    /// names — a nameless label can never equal the exact engineer-PR marker.
+    #[test]
+    fn parse_pr_list_json_drops_nameless_labels() {
+        let stdout = br#"[
+            {
+                "number": 12,
+                "title": "malformed label",
+                "headRefName": "feat/12",
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "url": "https://github.com/rysweet/Simard/pull/12",
+                "author": { "login": "rysweet" },
+                "labels": [ { "name": "" }, {} , { "name": "simard-autonomous" } ],
+                "statusCheckRollup": []
+            }
+        ]"#;
+        let prs = parse_pr_list_json(stdout).unwrap();
+        assert_eq!(prs.len(), 1);
+        assert_eq!(
+            prs[0].labels,
+            vec!["simard-autonomous".to_string()],
+            "nameless/empty labels must be dropped, leaving only the real marker"
         );
     }
 

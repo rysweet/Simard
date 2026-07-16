@@ -3,10 +3,12 @@ title: ready_prs sensor API reference
 description: >
   The Observe-path sensor that populates ObservedState.ready_prs — the survey
   seam on PrOps, the SIMARD_AUTOMERGE_REPOS allowlist and SIMARD_AUTOMERGE_AUTHOR
-  identity resolvers, the OpenPrSummary.author field, the deterministic
-  author + objective-gate pre-filter pipeline, fail-to-empty semantics, and the
-  run_cycle enrichment call site.
-last_updated: 2026-07-15
+  identity resolvers, the SIMARD_ENGINEER_PR_LABEL + engineer branch-prefix
+  allow-list and is_engineer_branch() engineer-PR gate that keeps the operator's
+  own review PRs out, the OpenPrSummary.author + OpenPrSummary.labels fields, the
+  deterministic author → engineer-PR → objective-gate pre-filter pipeline,
+  fail-to-empty semantics, and the run_cycle enrichment call site.
+last_updated: 2026-07-16
 owner: simard
 doc_type: reference
 status: reference
@@ -45,12 +47,13 @@ pub struct PrRef {
 }
 ```
 
-### `OpenPrSummary.author`
+### `OpenPrSummary.author` and `OpenPrSummary.labels`
 
 The existing open-PR listing summary
 ([`src/stewardship/merge_authority.rs`](https://github.com/rysweet/Simard/blob/main/src/stewardship/merge_authority.rs))
-gains an `author` field so candidates can be author-filtered without a second
-`gh` round-trip:
+already carries an `author` field (used by the author filter); the engineer-PR
+gate adds a `labels` field so candidates can be scoped without a second `gh`
+round-trip:
 
 ```rust
 pub struct OpenPrSummary {
@@ -62,23 +65,38 @@ pub struct OpenPrSummary {
     pub checks: Vec<CheckRollupEntry>,
     pub url: String,
     /// PR author login, from `gh pr list --json ...,author` (`author.login`).
-    /// Added so the ready_prs sensor can keep Simard's own PRs and drop
-    /// human-authored ones.
+    /// Used by the author filter to keep Simard's own login and drop other human
+    /// logins. (Pre-existing field — the server-side `--author` push already
+    /// relies on it.)
     pub author: String,
+    /// PR label names, from `gh pr list --json ...,labels` (each `.name`).
+    /// Added so the ready_prs sensor's engineer-PR gate can require the durable
+    /// `simard-autonomous` marker. Missing/null/empty ⇒ `Vec::new()` (never
+    /// panics), which the gate treats as "no label" (fail-closed).
+    pub labels: Vec<String>,
 }
 ```
 
-The backing `gh` command grows one JSON field:
+Both `gh pr list` call sites in
+[`RealPrGhClient`](https://github.com/rysweet/Simard/blob/main/src/stewardship/merge_authority.rs)
+already request `author`; the engineer-PR gate adds one field — `labels` — to
+**both** of them: `list_open_prs` (the dashboard path) and `list_prs_by_author`
+(the survey path this sensor uses). Because both deserialize through the shared
+`parse_pr_list_json`, the field must be added to both `--json` strings or the
+survey path silently parses an empty `labels`. The survey path pushes the author
+filter server-side via `--author`:
 
 ```
-gh pr list --repo <owner/repo> --state open \
-  --json number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url,author \
+# list_prs_by_author — the survey path (author filtered server-side):
+gh pr list --repo <owner/repo> --state open --author <login> \
+  --json number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url,author,labels \
   --limit <limit>
 ```
 
-`parse_pr_list_json` reads `author.login` into `OpenPrSummary.author`. A missing
-or null `author` parses to an empty string, which the exact-equality filter
-rejects (fail-closed).
+`parse_pr_list_json` reads `author.login` into `OpenPrSummary.author` and each
+`labels[].name` into `OpenPrSummary.labels`. A missing or null `author` parses to
+an empty string (rejected by the case-insensitive whole-login filter); a
+missing/null/empty `labels` array parses to `Vec::new()` — both fail-closed.
 
 ## Configuration resolvers
 
@@ -141,6 +159,83 @@ identities separate is what lets Simard's own engineering PRs survive the guard
 while the overseer-bot's PRs stay refused. If the author cannot be resolved, the
 sensor returns an **empty** candidate list (fail-closed).
 
+### `SIMARD_ENGINEER_PR_LABEL` + engineer branch-namespace allow-list — the engineer-PR gate
+
+The author filter is **not sufficient** on its own: Simard's engineers *and* the
+operator both author PRs under the same login (`rysweet`). Setting
+`SIMARD_AUTOMERGE_AUTHOR=rysweet` would therefore make the operator's **own review
+PRs** eligible — which must **never** happen. Worse, engineers and the operator
+also share the **common branch prefixes** — `feat/`, `fix/`, and `chore/` are all
+used by both — so a branch prefix like `feat/` cannot discriminate between an
+engineer's merge-ready PR and the operator's own review PR either. The engineer-PR
+gate closes that gap with a durable, self-identifying **label** as the primary
+marker, backed by a narrow set of branch namespaces that only Simard's automation
+ever creates. These are **compile-time constants** in
+[`src/overseer/config.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/config.rs),
+not env vars — the scoping is a code-controlled safety property, not operator
+tunable:
+
+```rust
+/// The durable machine label Simard's engineers apply to every PR they open —
+/// the PRIMARY, general-purpose engineer marker. Because it is independent of
+/// branch naming, it is the only marker that can positively identify Simard's own
+/// work on a shared branch prefix (`feat/`, `fix/`, `chore/`). Matched by
+/// whole-string, case-sensitive equality (a substring/prefix match could admit a
+/// spoofed look-alike label).
+pub const SIMARD_ENGINEER_PR_LABEL: &str = "simard-autonomous";
+
+/// Head-branch namespaces that ONLY Simard's automation creates, assigned
+/// deterministically in Rust — the SECONDARY, defense-in-depth marker.
+/// Deliberately restricted to namespaces that are provably never operator-authored:
+///   - `engineer/`       — the engineer worktree
+///                          (`src/engineer_worktree/mod.rs`: `format!("engineer/{dir_name}")`)
+///   - `chore/advisory-` — the supply-chain steward
+///                          (`src/supply_chain_steward/execute.rs`: `format!("chore/advisory-{id}")`)
+/// It deliberately EXCLUDES every shared prefix — `feat/`, `fix/`, and bare
+/// `chore/` — because operators author review PRs under those too, so admitting
+/// them would re-open the exact gap this gate closes. Non-empty by construction;
+/// an empty prefix would match every branch.
+pub const ENGINEER_BRANCH_PREFIXES: &[&str] = &["engineer/", "chore/advisory-"];
+
+/// True iff `head_ref` starts with one of ENGINEER_BRANCH_PREFIXES. Empty
+/// prefixes are guarded against, and an empty `head_ref` matches nothing.
+pub fn is_engineer_branch(head_ref: &str) -> bool;
+```
+
+A PR passes the engineer-PR gate iff:
+
+```
+labels contains SIMARD_ENGINEER_PR_LABEL   (whole-string, case-sensitive)          ← primary
+  OR
+is_engineer_branch(head_ref_name) == true  (anchored starts_with, non-empty prefix) ← secondary
+```
+
+The gate is an **OR**, but the two arms are not co-equal:
+
+- The **`simard-autonomous` label is the primary marker.** It is the only marker
+  that works on the shared branch prefixes (`feat/`, `fix/`, `chore/`) that
+  engineers and the operator both use, so every engineer PR must carry it. The
+  engineer applies it at `gh pr create` time.
+- The **engineer branch namespace is a secondary, defense-in-depth marker.** It
+  covers only `engineer/` and `chore/advisory-` — namespaces Simard's automation
+  assigns deterministically in Rust and that no operator review PR ever uses. It
+  exists so an engineer PR is still caught if the label was forgotten, and because
+  those namespaces are engineer-exclusive it can **never** admit an operator PR.
+
+Either arm alone proves Simard-origin; **neither ⇒ excluded**, even if the author
+matches and CI is green. Critically, a shared-prefix branch (`feat/…`, `fix/…`,
+bare `chore/…`) that lacks the label is **excluded** — that is exactly the
+operator's own review PR case.
+
+> **Narrowing gate, not the trust boundary.** The engineer-PR gate runs *after*
+> and *within* the author filter — it can only ever *remove* PRs the author
+> filter already admitted, never add one. The author filter
+> (`SIMARD_AUTOMERGE_AUTHOR`) plus GitHub server-side branch protection remain
+> the external-attacker trust boundary; the engineer-PR gate is the intra-author
+> boundary that separates Simard's engineers from the operator. A label applied
+> by a triage-permission collaborator on a *foreign-authored* PR cannot make it a
+> candidate, because that PR fails the author filter first.
+
 ## The survey seam
 
 A single trait method on the `PrOps` capability
@@ -153,13 +248,17 @@ mapped to a merge.
 pub trait PrOps {
     // ... existing methods ...
 
-    /// Survey allowlisted repos for Simard-authored, green + MERGEABLE PRs.
-    /// Returns candidate references only — never merges. Any per-repo error
-    /// is logged (`tracing::warn!`) and that repo contributes nothing;
-    /// the method never returns an error and never panics.
+    /// Survey allowlisted repos for Simard-engineer-authored, green + MERGEABLE
+    /// PRs. Returns candidate references only — never merges. Candidates are
+    /// scoped by author login AND the engineer-PR gate (the `simard-autonomous`
+    /// label OR an engineer-exclusive branch namespace), so the operator's own
+    /// review PRs — which share the author login and the common branch prefixes —
+    /// are never included. Any per-repo error is logged (`tracing::warn!`) and
+    /// that repo contributes nothing; the method never returns an error and never
+    /// panics.
     ///
     /// Default impl returns an empty Vec so existing fakes need no stub.
-    fn survey_ready_prs(&self, _allowlist: &[String]) -> Vec<PrRef> {
+    fn survey_ready_prs(&self, _repos: &[String]) -> Vec<PrRef> {
         Vec::new()
     }
 }
@@ -172,11 +271,26 @@ The production implementation lives on `MergePrOps`
 
 For each `repo` in the allowlist, in order:
 
-1. **List** — `list_open_prs(repo, limit)`. On error: `warn!` and skip this repo.
-2. **Author filter** — keep PRs where `summary.author == automerge_author()`
-   (exact equality). No `contains` / prefix / regex — an empty or mismatched
-   author is dropped.
-3. **Objective pre-filter** — project each surviving `OpenPrSummary` to a
+1. **List (author pushed server-side)** — `list_prs_by_author(repo, author, 100)`.
+   The author is passed to `gh pr list --author <login>` so GitHub filters
+   server-side; a generous 100-PR cap then can't let a busy repo crowd Simard's
+   own eligible PRs out of the window. On error: `warn!` and skip this repo.
+2. **Author re-check (defense-in-depth)** — keep PRs where `summary.author`
+   equals `automerge_author()` by whole-login, case-insensitive equality
+   (`eq_ignore_ascii_case`). The server already filtered by `--author`, but
+   re-checking in-process guards against any `gh`/`--author` matching-semantics
+   drift. No `contains` / prefix / regex — an empty or mismatched author is
+   dropped.
+3. **Engineer-PR gate** — keep only PRs that carry the durable engineer marker:
+   the primary `summary.labels.iter().any(|l| l == SIMARD_ENGINEER_PR_LABEL)`
+   **OR** the secondary `is_engineer_branch(&summary.head_ref_name)` (the
+   engineer-exclusive namespaces `engineer/` and `chore/advisory-` only). A PR
+   matching **neither** is dropped (with a `debug!` exclusion note) even though its
+   author matched. This runs **after** the author filter (so it can only narrow,
+   never widen) and **before** the objective pre-filter. It is what keeps the
+   operator's own review PRs (shared author login, shared branch prefix such as
+   `feat/…`, no `simard-autonomous` label) out of the candidate set.
+4. **Objective pre-filter** — project each surviving `OpenPrSummary` to a
    `PrSnapshot` (via `to_snapshot()`) and run the existing
    `evaluate_objective_gates(&snap, &self.base_allowlist)`: base-branch
    allowlist, `mergeable == "MERGEABLE"`, and every `statusCheckRollup` entry in
@@ -185,7 +299,7 @@ For each `repo` in the allowlist, in order:
    `base_allowlist_from_env()`); reusing it is what guarantees the *additive
    strictness* invariant — a looser base list in the sensor could admit a
    candidate the gate rejects. The merge-judge is **not** run here.
-4. **Collect** the survivors as `PrRef { repo, pr: number }`.
+5. **Collect** the survivors as `PrRef { repo, pr: number }`.
 
 The result is the concatenation of survivors across all allowlisted repos. An
 empty allowlist means the loop body never runs and the result is empty.
@@ -238,18 +352,31 @@ Once `ready_prs` is non-empty, the existing chain runs untouched:
 | Allowlist unset/empty | `ready_prs = []` (OFF) |
 | Author unresolved | `ready_prs = []` |
 | `list_open_prs` errors for a repo | `warn!`, that repo skipped, others continue |
-| PR authored by a human | excluded |
+| PR authored by a different human login | excluded (author filter) |
 | PR authored by `simard-overseer[bot]` | excluded (wrong identity) + refused later by `RecursionGuard` |
+| PR author matches but branch is a shared prefix (`feat/…`, `fix/…`, bare `chore/…`) and has no `simard-autonomous` label | **excluded** (engineer-PR gate) — this is the operator-review-PR case |
+| PR author matches, has `simard-autonomous` label | passes engineer-PR gate (primary marker) |
+| PR author matches, branch is an engineer-exclusive namespace (`engineer/…`, `chore/advisory-…`) | passes engineer-PR gate (secondary marker; label not required) |
 | PR `mergeable != "MERGEABLE"` (e.g. `CONFLICTING`) | excluded |
 | Any check `FAILURE`/`PENDING`/`IN_PROGRESS`/… | excluded |
 | PR base branch not in allowlist | excluded |
-| Green + `MERGEABLE` + own-author + allowlisted repo | **included** as candidate |
+| Own-author + engineer marker (label OR engineer branch) + green + `MERGEABLE` + allowlisted repo | **included** as candidate |
 
 ## Invariants
 
 - The sensor **never merges**. It returns `Vec<PrRef>` and nothing else.
 - Fail-closed and fail-visible: every failure yields an empty list plus a log
   line, never a silent wrong merge.
+- The engineer-PR gate runs **after** the author filter and only **narrows** it:
+  it can never make a foreign-authored PR a candidate, and a PR carrying neither
+  the `simard-autonomous` label nor an engineer-exclusive branch namespace is
+  never a candidate — including any PR on a shared prefix (`feat/`, `fix/`,
+  `chore/`) without the label. This is what excludes the operator's own review PRs.
+- Marker matching is **exact**: the label is compared by whole-string,
+  case-sensitive equality; the branch by anchored `starts_with` on a curated,
+  engineer-**exclusive**, non-empty namespace list (`engineer/`, `chore/advisory-`).
+  No substring/regex matching, and no shared prefix (`feat/`, `fix/`, bare
+  `chore/`) is ever in the list.
 - The authoritative merge gate in `merge_authority` is unchanged and still
   never uses `--admin` or `--no-verify`.
 - The pre-filter is additive strictness only — it cannot admit a merge the

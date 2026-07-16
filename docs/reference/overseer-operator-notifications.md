@@ -126,6 +126,35 @@ Problem solved:
 (`plain_text()` already ends in a newline and the footer begins with `\n\n`, so the
 rendered notice carries two blank lines before the footer.)
 
+### Autonomous-merge notification wording (plain English)
+
+The merge notification built by `MergePrOps::notification`
+([`src/overseer/merge_ops.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/merge_ops.rs))
+is deliberately **jargon-free**. The operator gets a message that names, in plain
+English, **what was solved** and **which PR solved it** — not the internal gate
+names (no "objective gates", "pr-verify scans", "base allow-list", "MergeJudge").
+The `problem` field reads like a human status update:
+
+```text
+🔔 SIMARD▶OPERATOR: The Overseer autonomously merged a pull request in rysweet/Simard.
+
+Problem solved:
+  Merged: "Fix flaky retry backoff in the OODA scheduler"
+  It passed every check and review, so Simard merged it for you.
+  https://github.com/rysweet/Simard/pull/4231
+
+
+— Simard automated notice · do not reply
+```
+
+The notification always carries the PR title and the PR URL, so the operator can
+open the merged PR directly from their phone. The DualChannelNotifier still fires
+**both** Signal and email on every autonomous merge (Signal is the primary
+reliable path). The plain wording is a documentation/UX contract: the merge path
+must not surface internal gate jargon to the operator.
+
+---
+
 ### Where wrapping happens
 
 Only the Overseer **notification** path wraps its body. The wrap is applied in
