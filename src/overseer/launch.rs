@@ -25,9 +25,14 @@
 //! 47/28/12 min apart, wasting compute). [`AmplihackRecipeRunner::spawn`] is
 //! therefore **idempotent per signature**:
 //!
-//! 1. **Reap** — every tracked run is polled; entries whose child has exited (or
-//!    can no longer be polled) are evicted. This is what keeps suppression from
-//!    ever being permanent: once a run finishes, its signature is free again.
+//! 1. **Reap** — every tracked run is polled; an entry is evicted only when its
+//!    child has definitively **exited** (its temp log is unlinked at the same
+//!    time). A run that is still executing — or whose state is momentarily
+//!    indeterminate (a poll `Err`) — is **kept**, so a transient error can never
+//!    let a byte-identical recipe relaunch (fail-closed, matching the sibling
+//!    `inflight_investigations` reconcile in [`crate::overseer`]). A genuinely
+//!    completed run is still freed here, so suppression is never permanent for a
+//!    real completion.
 //! 2. **Suppress** — if a still-Running run exists for the same signature, no
 //!    second process is spawned; the existing run's handle is returned so the
 //!    deduped caller polls the SAME run. The suppression is **fail-visible**: a
@@ -42,10 +47,26 @@
 //! caller-facing [`WorkstreamHandle::id`] are a bounded hex `sig_token`
 //! (`hex(hash(signature))`) — URL-path-safe for the dashboard round-trip and
 //! leaking no brief text into logs.
+//!
+//! # Cross-tick durability (#4125)
+//!
+//! The reported defect is *cross-tick*: the Overseer daemon rebuilds the entire
+//! Overseer — and therefore a fresh launcher — on **every** meta-OODA tick
+//! (`crate::operator_commands_ooda::daemon` calls `crate::overseer::build_overseer`
+//! inside the tick thread; default cadence 900 s), and the three duplicate
+//! processes were 47/28/12 min apart == three *separate* ticks. A per-instance
+//! `runs` map would be empty at the start of every tick, so the rail above could
+//! only ever dedup *within* one tick and would still spawn a duplicate on the
+//! next. The in-flight registry is therefore **process-wide**:
+//! [`AmplihackRecipeRunner::from_env`] — the only production constructor, used by
+//! both the daemon tick ([`crate::overseer::build_overseer`]) and the dashboard
+//! feedback endpoint — shares one `runs` map for the whole process, so
+//! suppression survives the tick rebuild (and dedups across the two launch
+//! paths). That process-scoped durability is what actually closes #4125.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::overseer::capabilities::{
     OverseerError, RecipeBrief, RecipeLauncher, WorkstreamHandle, WorkstreamStatus,
@@ -209,7 +230,17 @@ impl ChildSpawner for RealChildSpawner {
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         ));
-        let log = std::fs::File::create(&log_path).map_err(|e| {
+        // Owner-only (0600) on unix: the captured recipe stdout/stderr can carry
+        // tokens/secrets, so the temp log must not be world-readable (security
+        // review, PR #4142). The log is unlinked when its run is reaped.
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let log = opts.open(&log_path).map_err(|e| {
             std::io::Error::new(e.kind(), format!("create log {}: {e}", log_path.display()))
         })?;
         let log_err = log.try_clone()?;
@@ -254,9 +285,11 @@ impl SmartOrchestratorLauncher {
         Self { runner }
     }
 
-    /// Production launcher: a real `amplihack recipe run` spawner.
+    /// Production launcher: a real `amplihack recipe run` spawner sharing the
+    /// process-wide in-flight registry so launch dedup survives the daemon's
+    /// per-tick Overseer rebuild (#4125 — see the module docs).
     pub fn from_env() -> Self {
-        Self::new(Box::new(AmplihackRecipeRunner::default()))
+        Self::new(Box::new(AmplihackRecipeRunner::from_env()))
     }
 }
 
@@ -277,6 +310,33 @@ struct RunEntry {
     log_path: std::path::PathBuf,
 }
 
+/// Cap on how much of a recipe's captured output [`probe`](RecipeRunner::probe)
+/// reads. The child writes this log, so an unbounded `read_to_string` is an OOM
+/// / resource-exhaustion vector (security review, PR #4142). The completion PR
+/// URL the probe scans for is printed at the END of a run, so bounding to the
+/// tail keeps the relevant region while capping memory.
+const MAX_PROBE_LOG_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Read at most the final [`MAX_PROBE_LOG_BYTES`] of `path`, lossily as UTF-8.
+/// Any I/O error (missing/unreadable log) yields an empty string, preserving the
+/// prior `unwrap_or_default()` "no PR" behaviour.
+fn read_log_tail(path: &std::path::Path) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(MAX_PROBE_LOG_BYTES);
+    if start > 0 && f.seek(SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut buf = Vec::new();
+    if f.take(MAX_PROBE_LOG_BYTES).read_to_end(&mut buf).is_err() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 /// Real runner: spawns `amplihack recipe run smart-orchestrator …`, capturing
 /// output to a temp log so [`probe`](RecipeRunner::probe) can read the resulting
 /// PR once the run finishes. `AMPLIHACK_AGENT_BINARY` is preserved from the
@@ -285,30 +345,69 @@ struct RunEntry {
 /// Launches are **idempotent per signature** (see the module docs): the `runs`
 /// map is keyed by a [`signature_token`], and [`spawn`](RecipeRunner::spawn)
 /// reaps finished runs then suppresses (with a visible warning) any duplicate
-/// launch for a still-Running signature.
+/// launch for a still-Running signature. In production the `runs` map is
+/// **process-wide** ([`AmplihackRecipeRunner::from_env`] → [`shared_runs`]) so
+/// suppression survives the daemon's per-tick Overseer rebuild (#4125).
 pub struct AmplihackRecipeRunner {
     spawner: Box<dyn ChildSpawner>,
-    runs: Mutex<HashMap<String, RunEntry>>,
+    runs: Arc<Mutex<HashMap<String, RunEntry>>>,
+}
+
+/// The process-wide in-flight run registry shared by every
+/// [`AmplihackRecipeRunner::from_env`] instance. The daemon rebuilds a fresh
+/// launcher every meta-OODA tick, so a per-instance map would reset each cycle
+/// and defeat cross-tick dedup; one process-scoped map (see the module docs,
+/// "Cross-tick durability") is what makes suppression survive the rebuild and
+/// actually close #4125.
+fn shared_runs() -> Arc<Mutex<HashMap<String, RunEntry>>> {
+    static RUNS: OnceLock<Arc<Mutex<HashMap<String, RunEntry>>>> = OnceLock::new();
+    RUNS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+        .clone()
 }
 
 impl Default for AmplihackRecipeRunner {
     fn default() -> Self {
         Self {
             spawner: Box::new(RealChildSpawner),
-            runs: Mutex::new(HashMap::new()),
+            runs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
 
 impl AmplihackRecipeRunner {
-    /// Test-only constructor injecting a fake [`ChildSpawner`] so the
-    /// idempotency rail can be exercised without launching a real `amplihack`.
+    /// Production runner: a real `amplihack` spawner sharing the **process-wide**
+    /// in-flight registry ([`shared_runs`]) so launch dedup survives the daemon's
+    /// per-tick Overseer rebuild (#4125). Every `from_env()` runner in the
+    /// process reaps and suppresses against the same map, so a duplicate launch
+    /// for an in-flight signature is caught even across ticks — and across the
+    /// daemon-tick and dashboard-feedback launch paths, which now share it.
+    pub fn from_env() -> Self {
+        Self {
+            spawner: Box::new(RealChildSpawner),
+            runs: shared_runs(),
+        }
+    }
+
+    /// Test-only constructor injecting a fake [`ChildSpawner`] with a private,
+    /// non-shared registry so the idempotency rail can be exercised without
+    /// launching a real `amplihack` and without touching the process-wide map.
     #[cfg(test)]
     fn with_spawner(spawner: Box<dyn ChildSpawner>) -> Self {
         Self {
             spawner,
-            runs: Mutex::new(HashMap::new()),
+            runs: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Test-only constructor that SHARES an explicit `runs` registry, simulating
+    /// the daemon rebuilding the Overseer across ticks while the process-wide
+    /// registry persists (proves cross-tick dedup — #4125).
+    #[cfg(test)]
+    fn with_spawner_sharing(
+        spawner: Box<dyn ChildSpawner>,
+        runs: Arc<Mutex<HashMap<String, RunEntry>>>,
+    ) -> Self {
+        Self { spawner, runs }
     }
 }
 
@@ -321,10 +420,22 @@ impl RecipeRunner for AmplihackRecipeRunner {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        // Reap: drop entries whose child has exited (or can no longer be polled)
-        // so a genuinely-new re-occurrence AFTER the prior run completes can
-        // relaunch. Suppression is never permanent.
-        runs.retain(|_, entry| matches!(entry.child.poll(), Ok(None)));
+        // Reap: evict an entry only when its child has DEFINITIVELY exited, and
+        // unlink its temp log at the same moment (no orphaned, owner-readable
+        // recipe output left in the temp dir). A still-running child — or one
+        // whose state is momentarily indeterminate (poll `Err`) — is KEPT so a
+        // duplicate launch stays suppressed. Fail-CLOSED: matches the sibling
+        // `inflight_investigations` reconcile and guarantees a transient poll
+        // error can never let a byte-identical recipe relaunch (#4125). A
+        // genuinely-completed run is still freed here, so suppression is never
+        // permanent for a real completion.
+        runs.retain(|_, entry| match entry.child.poll() {
+            Ok(Some(_)) => {
+                let _ = std::fs::remove_file(&entry.log_path);
+                false
+            }
+            _ => true,
+        });
 
         // Suppress: a still-Running run for this signature already exists — do
         // NOT spawn a second process; hand back the shared run (idempotent).
@@ -363,7 +474,7 @@ impl RecipeRunner for AmplihackRecipeRunner {
         match entry.child.poll() {
             Ok(None) => Ok(WorkstreamStatus::Running),
             Ok(Some(exit)) => {
-                let output = std::fs::read_to_string(&entry.log_path).unwrap_or_default();
+                let output = read_log_tail(&entry.log_path);
                 if let Some((repo, pr)) = extract_pr_ref(&output) {
                     Ok(WorkstreamStatus::ProducedPr { repo, pr })
                 } else if exit.success {
@@ -665,6 +776,75 @@ mod tests {
             spawner.spawns(),
             2,
             "distinct signatures must not dedup against each other"
+        );
+    }
+
+    #[test]
+    fn shared_registry_dedups_across_launcher_rebuilds() {
+        // #4125 core: the daemon rebuilds the whole Overseer — and a fresh
+        // runner — every tick. A process-wide registry must make suppression
+        // survive that rebuild, so two runners sharing one `runs` map (tick N and
+        // tick N+1) spawn the SAME in-flight signature only once. Before the fix
+        // the per-tick map was empty each cycle and a byte-identical duplicate
+        // was spawned on the next tick.
+        let spawner = FakeChildSpawner::new();
+        let runs = Arc::new(Mutex::new(HashMap::new()));
+        let tick1 =
+            AmplihackRecipeRunner::with_spawner_sharing(Box::new(spawner.clone()), runs.clone());
+        let tick2 =
+            AmplihackRecipeRunner::with_spawner_sharing(Box::new(spawner.clone()), runs.clone());
+        let brief = mk_brief("rysweet/Simard", "fix kgpacks-rs blocked goal");
+
+        let h1 = tick1.spawn(&brief).unwrap(); // tick N
+        let h2 = tick2.spawn(&brief).unwrap(); // tick N+1: fresh runner, shared map
+
+        assert_eq!(
+            spawner.spawns(),
+            1,
+            "an in-flight signature must not respawn on the next tick's fresh runner"
+        );
+        assert_eq!(h1.id, h2.id, "both ticks resolve to the same in-flight run");
+    }
+
+    /// A child whose `poll()` always errors, to exercise fail-closed reap.
+    struct ErrChild;
+    impl SpawnedChild for ErrChild {
+        fn poll(&mut self) -> std::io::Result<Option<ChildExit>> {
+            Err(std::io::Error::other("transient poll failure"))
+        }
+    }
+    struct ErrChildSpawner {
+        spawn_count: Arc<AtomicUsize>,
+    }
+    impl ChildSpawner for ErrChildSpawner {
+        fn spawn(&self, _brief: &RecipeBrief) -> std::io::Result<(Box<dyn SpawnedChild>, PathBuf)> {
+            self.spawn_count.fetch_add(1, Ordering::SeqCst);
+            Ok((
+                Box::new(ErrChild),
+                std::env::temp_dir().join("fake-err.log"),
+            ))
+        }
+    }
+
+    #[test]
+    fn reap_is_fail_closed_on_poll_error() {
+        let spawn_count = Arc::new(AtomicUsize::new(0));
+        let runner = AmplihackRecipeRunner::with_spawner(Box::new(ErrChildSpawner {
+            spawn_count: spawn_count.clone(),
+        }));
+        let brief = mk_brief("rysweet/Simard", "fix kgpacks-rs blocked goal");
+
+        let _h1 = runner.spawn(&brief).unwrap();
+        assert_eq!(spawn_count.load(Ordering::SeqCst), 1);
+
+        // Second launch: reap polls the prior child, which ERRORS. Fail-closed
+        // means the entry is KEPT and the duplicate is suppressed — never a
+        // second process on a transient poll error (#4125).
+        let _h2 = runner.spawn(&brief).unwrap();
+        assert_eq!(
+            spawn_count.load(Ordering::SeqCst),
+            1,
+            "a poll error must not evict the in-flight entry (fail-closed)"
         );
     }
 

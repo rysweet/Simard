@@ -8,9 +8,12 @@ description: >
   before spawning, `AmplihackRecipeRunner::spawn` reaps finished runs, then
   suppresses a duplicate launch when a still-running run already exists for the
   same normalized `target_repo` + `task_description` signature, returning a
-  shared handle instead. Covers the `recipe_signature` normalization contract,
-  the reap-then-dedup order, the fail-visible `overseer::recipe` warning, the
-  shared-handle probe semantics, and the injectable child-spawn seam.
+  shared handle instead. The in-flight registry is **process-wide**, so
+  suppression survives the daemon rebuilding the Overseer on every tick — the
+  cross-tick guarantee that actually closes #4125. Covers the `recipe_signature`
+  normalization contract, the fail-closed reap-then-dedup order, the fail-visible
+  `overseer::recipe` warning, the shared-handle probe semantics, and the
+  injectable child-spawn seam.
 last_updated: 2026-07-16
 review_schedule: as-needed
 owner: simard
@@ -60,6 +63,27 @@ second process — it returns a handle to the existing run.
 The guard lives at the **launcher level** (not only in the higher-level decision
 logic) because that is the reliable, last-line rail: no matter how many times the
 decision layer asks for a launch, at most one live process exists per signature.
+
+#### Why the rail must be process-wide (the cross-tick requirement)
+
+The reported defect is **cross-tick**: the daemon rebuilds the *entire* Overseer
+— and therefore a fresh `AmplihackRecipeRunner` — on **every** meta-OODA tick
+(`src/operator_commands_ooda/daemon/mod.rs` calls `crate::overseer::build_overseer`
+inside the tick thread; default cadence **900 s**). The three duplicate
+processes were **47 / 28 / 12 min apart == three separate ticks**.
+
+A per-instance `runs` map is therefore empty at the start of every tick, so a
+launcher-local rail could only ever dedup *within* one tick and would still spawn
+a byte-identical duplicate on the next. The in-flight registry is consequently
+**process-wide**: `AmplihackRecipeRunner::from_env` — the only production
+constructor, used by both the daemon tick and the dashboard feedback endpoint —
+shares **one** `runs` map (a `static OnceLock<Arc<Mutex<…>>>`) for the whole
+process. Suppression survives the tick rebuild, and the daemon-tick and
+dashboard launch paths now dedup against each other too. This process-scoped
+durability is what actually closes #4125; the per-signature logic alone did not.
+(The higher-level `inflight_investigations` set is still per-tick, so the
+decision layer may re-decide to launch — but the launcher rail suppresses the
+duplicate **process**, which is the observed harm.)
 
 ### The signature
 
@@ -130,10 +154,14 @@ deduped caller receive the same `WorkstreamHandle.id` and therefore `probe` the
 On every `spawn(brief)` call, under the `runs` mutex:
 
 1. **Reap finished runs.** `try_wait()` (via the `poll()` seam) each tracked run
-   and **evict** any entry whose child has exited (or is unpollable). This is why
-   suppression is **never permanent**: once a run completes, its entry is gone, so
-   a genuinely-new occurrence of the same signature *after* the prior run finished
-   will spawn fresh.
+   and **evict** an entry only when its child has **definitively exited**,
+   unlinking its temp log at the same moment. A still-running child — or one whose
+   state is momentarily **indeterminate** (a `poll` `Err`) — is **kept**. This is
+   **fail-closed**: it matches the sibling `inflight_investigations` reconcile and
+   guarantees a transient poll error can never let a byte-identical recipe
+   relaunch. Suppression is still never *permanent*: a genuinely-completed run is
+   freed here, so a new occurrence of the same signature *after* the prior run
+   finished will spawn fresh.
 2. **Dedup.** Compute `recipe_signature(brief)` and its `sig_token`. If a
    **still-running** entry exists for that token, **do not spawn**. Emit a visible
    warning (below) and return `WorkstreamHandle { id: sig_token }` pointing at the
@@ -174,7 +202,7 @@ tracing::warn!(
 | Exited **and** log contains a `…/pull/<n>` URL | `ProducedPr { repo, pr }` |
 | Exited cleanly, no PR in log | `Failed { reason: "recipe finished but produced no PR" }` |
 | Exited non-zero, no PR | `Failed { reason: "recipe exited with <status>" }` |
-| `poll()` errored | `OverseerError::Capability` |
+| `poll()` errored | entry **kept** (fail-closed); `probe` surfaces `OverseerError::Capability` |
 
 Because a deduped caller holds the **same** `sig_token` id, it probes the shared
 run and observes the same terminal status as the original caller. Reaping only
@@ -205,24 +233,34 @@ struct ChildExit {
 }
 ```
 
-- **Production**: `RealChildSpawner` holds the current log-file creation,
-  `Command` construction, `AMPLIHACK_AGENT_BINARY` inheritance, and
-  `record_spawn_failure` behavior **byte-identical** to before. `RealChild` wraps
-  `std::process::Child` and maps `try_wait()` into `ChildExit`.
+- **Production**: `RealChildSpawner` holds log-file creation, `Command`
+  construction, `AMPLIHACK_AGENT_BINARY` inheritance, and `record_spawn_failure`
+  behavior. The temp log is created **owner-only (0600)** on unix (it captures
+  recipe stdout/stderr, which can carry tokens) and is **unlinked when its run is
+  reaped**, so no orphaned secret-bearing logs accumulate in the temp dir.
+  `RealChild` wraps `std::process::Child` and maps `try_wait()` into `ChildExit`.
 - **Tests**: a `FakeChildSpawner` counts spawns and hands out `FakeChild`s whose
   exit is operator-controlled.
 
-`AmplihackRecipeRunner` now holds the spawner:
+`probe` reads at most the final `MAX_PROBE_LOG_BYTES` (4 MiB) **tail** of the
+child-written log rather than the whole file, bounding memory against an
+unbounded/adversarial log while still catching the completion PR URL (printed at
+the end of a run).
+
+`AmplihackRecipeRunner` now holds the spawner and a **shared** in-flight registry:
 
 ```rust
 pub struct AmplihackRecipeRunner {
-    spawner: Box<dyn ChildSpawner>,          // Default = RealChildSpawner
-    runs: Mutex<HashMap<String, RunEntry>>,  // keyed by sig_token
+    spawner: Box<dyn ChildSpawner>,               // Default/from_env = RealChildSpawner
+    runs: Arc<Mutex<HashMap<String, RunEntry>>>,  // keyed by sig_token
 }
 ```
 
-`AmplihackRecipeRunner::default()` uses the real spawner (production path is
-unchanged); a test-only constructor injects a fake.
+`AmplihackRecipeRunner::from_env()` (the production path, via
+`SmartOrchestratorLauncher::from_env`) shares the process-wide `runs` registry so
+dedup survives the daemon's per-tick Overseer rebuild (#4125). `default()` keeps a
+private map; test-only constructors inject a fake spawner (and, for the cross-tick
+test, an explicitly shared registry).
 
 ## Behavior contract (worked examples)
 
@@ -270,23 +308,47 @@ assert probe(WorkstreamHandle { id: h.id }) == probe(h)   // rebuilt handle prob
 // token — never the brief text
 ```
 
+**5. Cross-tick rebuild → still one process (the #4125 case).**
+
+```
+// tick N and tick N+1 build SEPARATE runners that share the process-wide registry
+tick1 = runner_sharing(registry)
+tick2 = runner_sharing(registry)
+h1 = tick1.launch(brief)     // spawns process #1
+h2 = tick2.launch(brief)     // fresh runner, same registry, run #1 still Running → suppressed
+assert spawn_count == 1
+assert h1.id == h2.id
+```
+
+**6. Fail-closed reap → a transient poll error never double-launches.**
+
+```
+h1 = launch(brief)           // spawns process #1
+<child #1's poll() now errors transiently>
+h2 = launch(brief)           // reap KEEPS the erroring entry → suppressed
+assert spawn_count == 1
+```
+
 ## What did NOT change
 
 - **The recipe invocation** (`smart_orchestrator_args`), its argv-safety bounding,
-  the temp-log capture, `AMPLIHACK_AGENT_BINARY` inheritance, and
-  `record_spawn_failure` on pre-exec failure — all preserved verbatim.
+  the temp-log **capture channel**, `AMPLIHACK_AGENT_BINARY` inheritance, and
+  `record_spawn_failure` on pre-exec failure — all preserved. (The temp log is now
+  created 0600 and unlinked on reap, and `probe` reads a bounded tail — hardening
+  only; the capture behavior itself is unchanged.)
 - **`probe` result semantics** and the `RecipeRunner` / `RecipeLauncher` traits.
 - **The higher-level decision logic.** The Overseer's `gate()` already holds a
   `LaunchRecipe` decision when an in-flight workstream is tracked
   (`inflight_investigations` + `recipe_dedup_key`); this fix adds the mandatory
   **launcher-level** rail beneath it. Both layers coexist: the decision layer
   avoids asking, and the launcher guarantees at-most-one-per-signature even if it
-  does. The two keys are **intentionally independent**: the decision layer's
-  `recipe_dedup_key` (`src/overseer/mod.rs`) keys on `task_description` and its
-  extracted `overseer-obs:` tag, while the launcher's `recipe_signature` folds
-  `target_repo` + the full normalized `task_description`. They need not agree —
-  each is a self-sufficient guard, and the launcher rail holds even when the
-  decision layer's key would not have matched.
+  does — and, being process-wide, does so **across ticks** where the per-tick
+  decision layer resets. The two keys are **intentionally independent**: the
+  decision layer's `recipe_dedup_key` (`src/overseer/mod.rs`) keys on
+  `task_description` and its extracted `overseer-obs:` tag, while the launcher's
+  `recipe_signature` folds `target_repo` + the full normalized `task_description`.
+  They need not agree — each is a self-sufficient guard, and the launcher rail
+  holds even when the decision layer's key would not have matched.
 
 ## Related
 
