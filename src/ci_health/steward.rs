@@ -29,6 +29,7 @@ use std::collections::BTreeMap;
 use crate::error::SimardResult;
 use crate::stewardship::{GhClient, StewardshipOutcome, failure_signature, find_existing};
 
+use super::diagnose::RunDiagnostics;
 use super::{ActionableFailure, FleetReport};
 
 /// Stable `failure_kind` component for every CI-health-originated signature, so
@@ -56,8 +57,10 @@ pub fn ci_failure_signature(failure: &ActionableFailure) -> String {
 }
 
 /// Issue body embedding the dedup front-matter (matching the stewardship
-/// contract) plus CI-health specifics for triage.
-fn issue_body(failure: &ActionableFailure, signature: &str) -> String {
+/// contract) plus CI-health specifics for triage. `root_cause` is the rendered
+/// Root-cause block (see [`diagnose_block`]); it is embedded verbatim so an
+/// unavailable diagnosis is *visible in the issue* rather than silently absent.
+fn issue_body(failure: &ActionableFailure, signature: &str, root_cause: &str) -> String {
     let run_url = failure.run_url.as_deref().unwrap_or("unknown");
     format!(
         "filed-by: simard-stewardship\n\
@@ -73,6 +76,8 @@ fn issue_body(failure: &ActionableFailure, signature: &str) -> String {
          The `{workflow}` workflow's latest run on `{repo}`@`{branch}` \
          concluded `{conclusion}`.\n\
          \n\
+         {root_cause}\
+         \n\
          Filed by Simard's CI-health steward. This issue tracks the broken \
          workflow until its default-branch CI is green again; re-sweeps with \
          `simard ci-health --file-issues` dedupe against the \
@@ -83,7 +88,34 @@ fn issue_body(failure: &ActionableFailure, signature: &str) -> String {
         branch = failure.default_branch,
         conclusion = failure.conclusion,
         run_url = run_url,
+        root_cause = root_cause,
     )
+}
+
+/// Build the Root-cause Markdown block for a failure, best-effort. Filing the
+/// tracking issue is the correctness-critical act, so a diagnosis that cannot
+/// be fetched must never abort it; instead the block records *why* it is
+/// unavailable (no silent degradation). Returns a block ending in a newline.
+fn diagnose_block(failure: &ActionableFailure, diag: &dyn RunDiagnostics) -> String {
+    // When the specific run URL was not captured, fall back to the repo's
+    // Actions page so the block always offers a real place to investigate.
+    let run_url = failure
+        .run_url
+        .clone()
+        .unwrap_or_else(|| format!("https://github.com/{}/actions", failure.repo));
+    let Some(run_id) = failure.run_id else {
+        return format!(
+            "## Root cause\n\nDiagnosis unavailable: the failing run's id was not captured \
+             this sweep. Investigate the workflow's runs: {run_url}\n"
+        );
+    };
+    match diag.diagnose(&failure.repo, run_id) {
+        Ok(diagnosis) => diagnosis.render(&run_url),
+        Err(e) => format!(
+            "## Root cause\n\nDiagnosis unavailable: could not read the failing run's jobs \
+             ({e}). Open the run to investigate: {run_url}\n"
+        ),
+    }
 }
 
 /// File a deduplicated tracking issue for each **distinct** actionable failure
@@ -91,17 +123,21 @@ fn issue_body(failure: &ActionableFailure, signature: &str) -> String {
 ///
 /// Distinct failures (by [`ci_failure_signature`]) are processed once each: for
 /// each, search the repo for an open issue already carrying that signature; if
-/// found → [`StewardshipOutcome::MatchedExisting`], else file a new issue →
-/// [`StewardshipOutcome::FiledNew`]. A `gh` error on the search propagates and
+/// found → [`StewardshipOutcome::MatchedExisting`], else diagnose the failing
+/// run's root cause (best-effort, via `diag`) and file a new issue embedding it
+/// → [`StewardshipOutcome::FiledNew`]. A `gh` error on the search propagates and
 /// **no** issue is filed for that signature — the same fail-loud rule as
-/// orchestrator stewardship (never file while a search is degraded).
+/// orchestrator stewardship (never file while a search is degraded). A
+/// diagnosis error, by contrast, never aborts filing: the issue is still filed,
+/// recording that the root cause was unavailable (see [`diagnose_block`]).
 ///
 /// Returns one outcome per distinct signature, in stable signature order. A
 /// green report (no actionable failures) yields an empty vector without
-/// touching `gh`.
+/// touching `gh` or `diag`.
 pub fn file_issues_for_report(
     report: &FleetReport,
     gh: &dyn GhClient,
+    diag: &dyn RunDiagnostics,
 ) -> SimardResult<Vec<StewardshipOutcome>> {
     // Collapse to one representative failure per distinct signature so two
     // workflows that hash identically (e.g. two workflow files sharing a
@@ -126,7 +162,8 @@ pub fn file_issues_for_report(
             continue;
         }
         let title = issue_title(failure);
-        let body = issue_body(failure, &signature);
+        let root_cause = diagnose_block(failure, diag);
+        let body = issue_body(failure, &signature, &root_cause);
         let new = gh.create_issue(&failure.repo, &title, &body)?;
         outcomes.push(StewardshipOutcome::FiledNew {
             repo: failure.repo.clone(),

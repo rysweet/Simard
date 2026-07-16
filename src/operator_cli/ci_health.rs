@@ -9,8 +9,8 @@
 //! See `docs/reference/ci-health-sweep.md`.
 
 use crate::ci_health::{
-    RealGhWorkflowClient, file_issues_for_report, render_human, report_to_json, sweep_fixture,
-    sweep_live_with_options,
+    RealGhRunDiagnostics, RealGhWorkflowClient, file_issues_for_report, render_human,
+    report_to_json, sweep_fixture, sweep_live_with_options,
 };
 use crate::stewardship::{RealGhClient, StewardshipOutcome};
 
@@ -26,8 +26,10 @@ Usage: simard ci-health [--json] [--no-cache] [--file-issues] [--from-json <path
   --file-issues        For each distinct actionable failure, file a deduplicated
                        tracking issue in the failing repo (dedupes against any
                        open issue already carrying the same
-                       stewardship-signature). Read-only by default; this flag
-                       opts in to the write. Rejected with --from-json.
+                       stewardship-signature). New issues embed a root-cause
+                       block naming the failing job(s)/step(s). Read-only by
+                       default; this flag opts in to the write. Rejected with
+                       --from-json.
   --from-json <path>   Classify an offline snapshot fixture instead of calling
                        `gh` (the fixture shape mirrors the live snapshot).
 
@@ -46,7 +48,11 @@ instead of being re-collected. Use --no-cache to force a full sweep.
 With --file-issues, each distinct actionable failure (one per broken
 repo+workflow) is converted into a deduplicated GitHub issue in the failing
 repo, reusing the stewardship-signature dedup contract so an already-tracked
-broken workflow is never re-filed.
+broken workflow is never re-filed. Each newly-filed issue embeds a root-cause
+block pinpointing which job(s) and step(s) of the failing run failed (read from
+`gh run view --json jobs`) so a fixer needn't hunt through the run to find the
+failure, and links the run for the failing logs; a diagnosis that cannot be
+fetched is recorded as unavailable rather than omitted.
 
 Exit code: 0 when the fleet is green; non-zero when any actionable failure
 exists.
@@ -153,7 +159,8 @@ fn file_actionable_issues(
         eprintln!("ci-health: fleet green; no actionable failures to file.");
         return Ok(());
     }
-    let outcomes = file_issues_for_report(report, &RealGhClient::new())?;
+    let outcomes =
+        file_issues_for_report(report, &RealGhClient::new(), &RealGhRunDiagnostics::new())?;
     eprintln!(
         "ci-health: filed/matched {} deduplicated tracking issue(s):",
         outcomes.len()
