@@ -50,6 +50,13 @@ mod tests_no_progress_investigation;
 #[cfg(test)]
 mod tests_no_progress_reinvestigation;
 
+// Issue #16 (follow-up, TDD): unit tests for the production
+// `DeterministicNoProgressReasoner` — a goal with no derivable done-signal is
+// UNCLEAR-CRITERIA (unmeasurable criteria), and no classification ever renders
+// `evidence=[(none)]`.
+#[cfg(test)]
+mod tests_no_progress_reasoner;
+
 // Issue #2329: Observe-vs-Decide phase weights yield different ranked-recall
 // ordering of the same fact set, exercised against the real lbug-backed
 // `LibraryCognitiveMemory` adapter.

@@ -19,6 +19,7 @@ use std::collections::HashSet;
 use crate::error::SimardResult;
 use crate::goal_curation::completion_gate::{
     CompletionEvidenceGate, CompletionVerdict, DependencyState, EvidenceSource,
+    has_derivable_signal,
 };
 use crate::goal_curation::no_progress_breaker::{
     NO_PROGRESS_BREAKER_THRESHOLD, NoProgressResolution, NoProgressTracker, needs_reinvestigation,
@@ -995,9 +996,21 @@ pub(crate) fn reinvestigate_bare_blocked_goals(
 /// own failure). Signals, in ladder order: the done-gate certifies
 /// `ALREADY-COMPLETE`; an obsolescence marker means `OBSOLETE`; an absent
 /// governed repo means `MISSING-PRECONDITION`; a pending upstream means
-/// `UPSTREAM-DEPENDENCY`; anything else is `GENUINELY-STUCK`. An evidence-source
-/// error on the auxiliary signals downgrades to `GENUINELY-STUCK` (fail closed —
-/// never self-heal / self-defer on an unknown state).
+/// `UPSTREAM-DEPENDENCY`; a goal with **no derivable completion signal** (no
+/// tracked PR/issue and not self-affecting — so the done-gate can *never*
+/// certify it) means `UNCLEAR-CRITERIA`; anything else is `GENUINELY-STUCK`. An
+/// evidence-source error on the auxiliary signals downgrades to
+/// `GENUINELY-STUCK` (fail closed — never self-heal / self-defer on an unknown
+/// state).
+///
+/// **Invariant (issue #16 follow-up):** every WHY this reasoner returns carries
+/// **non-empty** evidence. A goal whose done-criteria are unmeasurable is
+/// `UNCLEAR-CRITERIA` with the criteria named, and the `GENUINELY-STUCK`
+/// fall-through never renders empty (see [`stuck_evidence`]). This closes the
+/// live-daemon defect where a goal with no tracked artifact was parked
+/// `why=GENUINELY-STUCK evidence=[(none)]` — a generic, evidence-free stamp that
+/// stranded goals such as `advance-…-to-full-parity` whose real cause was an
+/// unmeasurable "full parity" done-criterion.
 pub(crate) struct DeterministicNoProgressReasoner<'a> {
     evidence: &'a dyn EvidenceSource,
 }
@@ -1028,9 +1041,30 @@ fn artifact_evidence(goal: &ActiveGoal) -> Vec<Evidence> {
         .collect()
 }
 
+/// Evidence for an `UNCLEAR-CRITERIA` goal: it has **no derivable completion
+/// signal** (no tracked PR, no tracked issue, not self-affecting), so the
+/// done-gate can never certify it and its done-criteria are, by construction,
+/// unmeasurable. Always non-empty — this is the concrete WHY handed to the
+/// guided engineer and, if the retry is spent, into the escalation block.
+fn unclear_criteria_evidence(goal: &ActiveGoal) -> Vec<Evidence> {
+    vec![Evidence::new(
+        "criteria",
+        goal.id.clone(),
+        "no measurable done-signal (no tracked PR/issue, not self-affecting)",
+    )]
+}
+
 /// Narrative evidence for a `GENUINELY-STUCK` goal: its still-open artifacts.
+///
+/// Guaranteed **non-empty**: a goal only reaches the `GENUINELY-STUCK`
+/// fall-through with a derivable completion signal, but that signal can be
+/// self-affecting-only (no PR/issue `wip_ref`), which would otherwise render an
+/// empty list and reproduce the `evidence=[(none)]` defect. When no open
+/// PR/issue ref is present, fall back to a goal-level entry so the WHY always
+/// carries concrete evidence.
 fn stuck_evidence(goal: &ActiveGoal) -> Vec<Evidence> {
-    goal.wip_refs
+    let refs: Vec<Evidence> = goal
+        .wip_refs
         .iter()
         .filter_map(|w| match w.kind.to_ascii_lowercase().as_str() {
             "pr" => Some(Evidence::new(
@@ -1045,7 +1079,16 @@ fn stuck_evidence(goal: &ActiveGoal) -> Vec<Evidence> {
             )),
             _ => None,
         })
-        .collect()
+        .collect();
+    if refs.is_empty() {
+        vec![Evidence::new(
+            "goal",
+            goal.id.clone(),
+            "no machine-resolvable cause; change not landed",
+        )]
+    } else {
+        refs
+    }
 }
 
 impl NoProgressWhyReasoner for DeterministicNoProgressReasoner<'_> {
@@ -1111,7 +1154,21 @@ impl NoProgressWhyReasoner for DeterministicNoProgressReasoner<'_> {
                 ));
             }
         }
-        // 5. No machine-resolvable cause found.
+        // 5. The done-criteria are not expressed as anything the done-gate can
+        //    ever check: the goal has no derivable completion signal (no tracked
+        //    PR, no tracked issue, not self-affecting). Completion can never be
+        //    certified, so this is UNCLEAR-CRITERIA, not GENUINELY-STUCK — the
+        //    goal needs *measurable* done-criteria. Routing to a guided engineer
+        //    with this WHY tells the engineer exactly that (see
+        //    `engineer_task_for_why`), and the evidence is never empty, so a
+        //    terminal escalation can never render `evidence=[(none)]`.
+        if !has_derivable_signal(goal) {
+            return Ok(NoProgressWhy::new(
+                NoProgressClass::UnclearCriteria,
+                unclear_criteria_evidence(goal),
+            ));
+        }
+        // 6. A derivable signal exists but no machine-resolvable cause was found.
         Ok(NoProgressWhy::new(
             NoProgressClass::GenuinelyStuck,
             stuck_evidence(goal),

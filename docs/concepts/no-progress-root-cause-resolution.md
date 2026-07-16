@@ -1,7 +1,7 @@
 ---
 title: The no-progress breaker explains WHY and self-resolves before escalating
 description: Why the OODA no-progress safeguard no longer parks a goal with a bare "needs human review"; how it classifies the ROOT CAUSE of a stall (already-complete, obsolete, missing-precondition, upstream-dependency, unclear-criteria, genuinely-stuck), self-resolves the machine-fixable causes (auto-complete on live artifacts, clone a missing repo, defer behind an upstream, spawn a guided engineer), and only escalates to a human as a last resort with the concrete WHY + evidence attached.
-last_updated: 2026-07-07
+last_updated: 2026-07-16
 review_schedule: as-needed
 owner: simard
 doc_type: concept
@@ -138,7 +138,12 @@ Only the **last** rung reaches a human, and when it does the block reason is
   same dispatch the OODA loop already uses) with the classified WHY embedded in
   the task ("prior attempts stalled: `<why>`; `<evidence>`") so the engineer
   starts from the diagnosis rather than a cold read. This is bounded to **exactly
-  one** guided retry per goal.
+  one** guided retry per goal. The two classes differ in *what* the engineer is
+  told: `UNCLEAR-CRITERIA` means the goal has **no derivable done-signal** — its
+  done-criteria are unmeasurable, so the guided task is to *make them
+  measurable*; `GENUINELY-STUCK` means a signal exists (e.g. an open PR, a
+  self-affecting deploy) but no cause resolved it. Either way the evidence is
+  always concrete — never `evidence=[(none)]`.
 
 ### The last rung: escalate WITH the WHY
 
@@ -207,7 +212,22 @@ signals the daemon can gather without the brain:
 | done-gate verdict | [`verify_stuck_goal`](../reference/no-progress-breaker-api.md#noprogressresolution) over the [completion-evidence gate](../reference/completion-evidence-gate-api.md) | `ALREADY-COMPLETE` / `OBSOLETE` |
 | governed repo present? | `EvidenceSource::repo_present` | `MISSING-PRECONDITION` |
 | dependency goal / PR state | `EvidenceSource::dependency_goal_state` | `UPSTREAM-DEPENDENCY` |
-| none of the above | — | `UNCLEAR-CRITERIA` / `GENUINELY-STUCK` |
+| **no derivable done-signal** (no tracked PR/issue, not self-affecting) | [`has_derivable_signal`](../reference/completion-evidence-gate-api.md) | `UNCLEAR-CRITERIA` |
+| a derivable signal exists but no machine-resolvable cause | — | `GENUINELY-STUCK` |
+
+The last two rows split what used to be a single undifferentiated fall-through.
+A goal with **no derivable completion signal** — no tracked PR, no tracked
+issue, and not self-affecting — is one the done-gate can *never* certify: its
+done-criteria are, by construction, **unmeasurable**. That is a
+`UNCLEAR-CRITERIA` stall (route the goal to a guided engineer whose task is
+literally *"clarify and make the done-criteria measurable"*), **not** a
+`GENUINELY-STUCK` "no cause found". This is the direct fix for goals such as
+`advance-…-to-full-parity` that stalled with `why=GENUINELY-STUCK
+evidence=[(none)]`: "full parity" is nothing the done-gate can check, so the
+classifier now names *that* as the WHY instead of stamping a generic,
+evidence-free block. As an invariant, **every** WHY the deterministic reasoner
+returns carries non-empty evidence, so `evidence=[(none)]` can never again
+originate from the classifier.
 
 This mirrors the sibling **brain-failure** safeguard, which is likewise "a
 deterministic safeguard enforced by simard, NOT a brain decision — the brain is
