@@ -951,6 +951,7 @@ mod steward_issue_filing {
     use std::sync::Mutex;
 
     use super::super::classify::{ActionableFailure, FleetReport};
+    use super::super::diagnose::{FailedJob, RunDiagnosis, RunDiagnostics};
     use super::super::steward::{ci_failure_signature, file_issues_for_report};
     use crate::error::SimardError;
     use crate::stewardship::{GhClient, GhIssue, StewardshipOutcome};
@@ -1032,6 +1033,57 @@ mod steward_issue_filing {
         }
     }
 
+    /// Fake [`RunDiagnostics`] for the steward filing tests. Records its calls
+    /// so tests can assert diagnosis is invoked exactly for newly-filed issues
+    /// (and never for matched-existing ones).
+    #[derive(Default)]
+    struct FakeDiagnostics {
+        /// When set, every `diagnose` call returns this error.
+        error: Option<String>,
+        /// Failing jobs returned on success (empty = "no failing job found").
+        jobs: Vec<FailedJob>,
+        calls: Mutex<Vec<(String, u64)>>,
+    }
+
+    impl FakeDiagnostics {
+        /// A canned single failing job+step, so a filed body has a concrete
+        /// root cause to assert on.
+        fn new() -> Self {
+            Self {
+                jobs: vec![FailedJob {
+                    name: "build".to_string(),
+                    conclusion: "failure".to_string(),
+                    failed_steps: vec!["compile".to_string()],
+                }],
+                ..Self::default()
+            }
+        }
+        fn failing(reason: &str) -> Self {
+            Self {
+                error: Some(reason.to_string()),
+                ..Self::default()
+            }
+        }
+        fn calls(&self) -> Vec<(String, u64)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl RunDiagnostics for FakeDiagnostics {
+        fn diagnose(&self, repo: &str, run_id: u64) -> Result<RunDiagnosis, SimardError> {
+            self.calls.lock().unwrap().push((repo.to_string(), run_id));
+            if let Some(reason) = &self.error {
+                return Err(SimardError::CiHealthGhCommandFailed {
+                    reason: reason.clone(),
+                });
+            }
+            Ok(RunDiagnosis {
+                run_id,
+                failed_jobs: self.jobs.clone(),
+            })
+        }
+    }
+
     fn af(repo: &str, workflow: &str, conclusion: &str, run_id: u64) -> ActionableFailure {
         ActionableFailure {
             repo: repo.to_string(),
@@ -1065,7 +1117,12 @@ mod steward_issue_filing {
         );
         let gh = FakeGhClient::new();
 
-        let outcomes = file_issues_for_report(&report(vec![f1.clone(), f2.clone()]), &gh).unwrap();
+        let outcomes = file_issues_for_report(
+            &report(vec![f1.clone(), f2.clone()]),
+            &gh,
+            &FakeDiagnostics::new(),
+        )
+        .unwrap();
 
         assert_eq!(outcomes.len(), 2);
         // Every distinct failure is searched (in its own repo, by its signature)
@@ -1098,7 +1155,8 @@ mod steward_issue_filing {
             }],
         );
 
-        let outcomes = file_issues_for_report(&report(vec![f]), &gh).unwrap();
+        let diag = FakeDiagnostics::new();
+        let outcomes = file_issues_for_report(&report(vec![f]), &gh, &diag).unwrap();
 
         assert_eq!(outcomes.len(), 1);
         match &outcomes[0] {
@@ -1116,6 +1174,9 @@ mod steward_issue_filing {
         }
         // A matched signature must never create a new issue.
         assert!(gh.create_calls().is_empty());
+        // …nor spend a diagnosis `gh` call: an already-tracked failure is a
+        // zero-network no-op beyond the dedup search.
+        assert!(diag.calls().is_empty());
     }
 
     #[test]
@@ -1127,7 +1188,8 @@ mod steward_issue_filing {
         assert_eq!(ci_failure_signature(&f1), ci_failure_signature(&f2));
         let gh = FakeGhClient::new();
 
-        let outcomes = file_issues_for_report(&report(vec![f1, f2]), &gh).unwrap();
+        let outcomes =
+            file_issues_for_report(&report(vec![f1, f2]), &gh, &FakeDiagnostics::new()).unwrap();
 
         assert_eq!(outcomes.len(), 1);
         assert_eq!(gh.create_calls().len(), 1);
@@ -1136,25 +1198,33 @@ mod steward_issue_filing {
     #[test]
     fn green_report_files_nothing_and_touches_no_gh() {
         let gh = FakeGhClient::new();
-        let outcomes = file_issues_for_report(&report(vec![]), &gh).unwrap();
+        let diag = FakeDiagnostics::new();
+        let outcomes = file_issues_for_report(&report(vec![]), &gh, &diag).unwrap();
         assert!(outcomes.is_empty());
         assert!(gh.search_calls().is_empty());
         assert!(gh.create_calls().is_empty());
+        assert!(diag.calls().is_empty());
     }
 
     #[test]
     fn a_degraded_search_propagates_and_never_files() {
         let gh = FakeGhClient::new();
         gh.fail_search("`gh issue list` exited 1");
-        let err =
-            file_issues_for_report(&report(vec![af("rysweet/azlin", "CI", "failure", 9)]), &gh)
-                .unwrap_err();
+        let diag = FakeDiagnostics::new();
+        let err = file_issues_for_report(
+            &report(vec![af("rysweet/azlin", "CI", "failure", 9)]),
+            &gh,
+            &diag,
+        )
+        .unwrap_err();
         assert!(matches!(
             err,
             SimardError::StewardshipGhCommandFailed { .. }
         ));
         // Fail-loud: no issue is filed while the search is degraded.
         assert!(gh.create_calls().is_empty());
+        // A degraded search short-circuits before diagnosis is even attempted.
+        assert!(diag.calls().is_empty());
     }
 
     #[test]
@@ -1163,7 +1233,7 @@ mod steward_issue_filing {
         let sig = ci_failure_signature(&f);
         let gh = FakeGhClient::new();
 
-        file_issues_for_report(&report(vec![f]), &gh).unwrap();
+        file_issues_for_report(&report(vec![f]), &gh, &FakeDiagnostics::new()).unwrap();
 
         let (repo, title, body) = gh.create_calls().into_iter().next().unwrap();
         assert_eq!(repo, "rysweet/amplihack-rs");
@@ -1181,6 +1251,61 @@ mod steward_issue_filing {
     }
 
     #[test]
+    fn a_new_issue_embeds_the_root_cause_diagnosis() {
+        let f = af("rysweet/amplihack-rs", "Code Atlas", "failure", 42);
+        let gh = FakeGhClient::new();
+        let diag = FakeDiagnostics::new();
+
+        file_issues_for_report(&report(vec![f]), &gh, &diag).unwrap();
+
+        // Diagnosis was fetched for exactly the failing run, in its repo.
+        assert_eq!(diag.calls(), vec![("rysweet/amplihack-rs".to_string(), 42)]);
+        let (_, _, body) = gh.create_calls().into_iter().next().unwrap();
+        assert!(body.contains("## Root cause"), "body was:\n{body}");
+        // The canned failing job+step are named so a fixer needn't re-fetch logs.
+        assert!(body.contains("job `build`"), "body was:\n{body}");
+        assert!(body.contains("step `compile`"), "body was:\n{body}");
+    }
+
+    #[test]
+    fn a_diagnosis_error_still_files_the_issue_marked_unavailable() {
+        // Filing the tracking issue is the correctness-critical act; a diagnosis
+        // that cannot be fetched must not abort it — the issue is filed anyway,
+        // recording that the root cause is unavailable (no silent degradation).
+        let f = af("rysweet/amplihack-rs", "Auto Release", "failure", 7);
+        let gh = FakeGhClient::new();
+        let diag = FakeDiagnostics::failing("`gh run view` exited 1");
+
+        let outcomes = file_issues_for_report(&report(vec![f]), &gh, &diag).unwrap();
+
+        assert!(matches!(
+            outcomes.as_slice(),
+            [StewardshipOutcome::FiledNew { .. }]
+        ));
+        let (_, _, body) = gh.create_calls().into_iter().next().unwrap();
+        assert!(body.contains("Diagnosis unavailable"), "body was:\n{body}");
+        assert!(body.contains("`gh run view` exited 1"), "body was:\n{body}");
+        // The run link is still offered for manual investigation.
+        assert!(body.contains("https://github.com/rysweet/amplihack-rs/actions/runs/7"));
+    }
+
+    #[test]
+    fn a_failure_without_a_run_id_records_diagnosis_unavailable() {
+        let mut f = af("rysweet/amplihack-rs", "Code Atlas", "failure", 1);
+        f.run_id = None;
+        f.run_url = None;
+        let gh = FakeGhClient::new();
+        let diag = FakeDiagnostics::new();
+
+        file_issues_for_report(&report(vec![f]), &gh, &diag).unwrap();
+
+        // With no run id there is nothing to diagnose; the fetch is skipped.
+        assert!(diag.calls().is_empty());
+        let (_, _, body) = gh.create_calls().into_iter().next().unwrap();
+        assert!(body.contains("Diagnosis unavailable"), "body was:\n{body}");
+    }
+
+    #[test]
     fn signature_is_stable_across_volatile_run_id_and_conclusion() {
         // Same broken repo+workflow, different run id and a failure/timed_out
         // flap, must hash identically so re-sweeps dedupe.
@@ -1193,5 +1318,139 @@ mod steward_issue_filing {
         // The same workflow in a different repo is a distinct failure.
         let d = af("rysweet/Simard", "CI", "failure", 1);
         assert_ne!(ci_failure_signature(&a), ci_failure_signature(&d));
+    }
+}
+
+mod diagnosis {
+    use super::super::diagnose::{FailedJob, RunDiagnosis, parse_run_diagnosis};
+
+    const RUN_URL: &str = "https://github.com/rysweet/amplihack-rs/actions/runs/42";
+
+    #[test]
+    fn parses_only_failing_jobs_and_their_failing_steps() {
+        // One failing job with a mix of step conclusions, plus a fully-green
+        // job that must be dropped entirely.
+        let json = br#"{
+          "jobs": [
+            {
+              "name": "build-atlas",
+              "conclusion": "failure",
+              "steps": [
+                {"name": "Set up job", "conclusion": "success"},
+                {"name": "Install Graphviz", "conclusion": "success"},
+                {"name": "Render DOT diagrams", "conclusion": "failure"},
+                {"name": "Upload atlas artifact", "conclusion": "skipped"}
+              ]
+            },
+            {
+              "name": "lint",
+              "conclusion": "success",
+              "steps": [{"name": "clippy", "conclusion": "success"}]
+            }
+          ]
+        }"#;
+        let d = parse_run_diagnosis(42, json).unwrap();
+        assert_eq!(
+            d,
+            RunDiagnosis {
+                run_id: 42,
+                failed_jobs: vec![FailedJob {
+                    name: "build-atlas".to_string(),
+                    conclusion: "failure".to_string(),
+                    failed_steps: vec!["Render DOT diagrams".to_string()],
+                }],
+            }
+        );
+        assert!(!d.is_empty());
+    }
+
+    #[test]
+    fn treats_timed_out_and_startup_failure_as_failing_but_not_cancelled() {
+        let json = br#"{
+          "jobs": [
+            {"name": "a", "conclusion": "timed_out", "steps": []},
+            {"name": "b", "conclusion": "startup_failure", "steps": []},
+            {"name": "c", "conclusion": "cancelled", "steps": []},
+            {"name": "d", "conclusion": "", "steps": []}
+          ]
+        }"#;
+        let d = parse_run_diagnosis(1, json).unwrap();
+        let names: Vec<_> = d.failed_jobs.iter().map(|j| j.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn empty_jobs_is_a_diagnosable_empty_result() {
+        let d = parse_run_diagnosis(9, br#"{"jobs": []}"#).unwrap();
+        assert!(d.is_empty());
+    }
+
+    #[test]
+    fn a_missing_jobs_key_is_an_error_not_a_false_empty() {
+        // `gh run view --json jobs` always includes `jobs`; a response without
+        // it is an unexpected shape and must surface as an error (→ diagnosis
+        // unavailable), never a confident "no failing job".
+        assert!(parse_run_diagnosis(1, br#"{"unexpected": "shape"}"#).is_err());
+    }
+
+    #[test]
+    fn malformed_json_is_an_error_not_a_silent_empty() {
+        assert!(parse_run_diagnosis(1, b"not json").is_err());
+    }
+
+    #[test]
+    fn render_names_each_failing_job_and_step_with_the_run_link() {
+        let d = RunDiagnosis {
+            run_id: 42,
+            failed_jobs: vec![
+                FailedJob {
+                    name: "build-atlas".to_string(),
+                    conclusion: "failure".to_string(),
+                    failed_steps: vec!["Render DOT diagrams".to_string()],
+                },
+                FailedJob {
+                    name: "Build aarch64".to_string(),
+                    conclusion: "failure".to_string(),
+                    failed_steps: vec!["Build (native)".to_string(), "Package".to_string()],
+                },
+            ],
+        };
+        let out = d.render(RUN_URL);
+        assert!(out.starts_with("## Root cause\n"));
+        assert!(out.contains(&format!("[run 42]({RUN_URL})")));
+        assert!(out.contains("- job `build-atlas` \u{2192} step `Render DOT diagrams`"));
+        assert!(out.contains("- job `Build aarch64` \u{2192} step `Build (native)`"));
+        assert!(out.contains("- job `Build aarch64` \u{2192} step `Package`"));
+    }
+
+    #[test]
+    fn render_of_a_failing_job_with_no_failing_step_reports_its_conclusion() {
+        // A stepless failing job (e.g. a timed-out job) is described by its own
+        // reported conclusion, not a guessed cause.
+        let d = RunDiagnosis {
+            run_id: 5,
+            failed_jobs: vec![FailedJob {
+                name: "deploy".to_string(),
+                conclusion: "timed_out".to_string(),
+                failed_steps: vec![],
+            }],
+        };
+        let out = d.render(RUN_URL);
+        assert!(out.contains("job `deploy` concluded `timed_out`"));
+        assert!(out.contains("no individual step reported failing"));
+        // No speculation about the cause.
+        assert!(!out.contains("setup/teardown"));
+    }
+
+    #[test]
+    fn render_of_an_empty_diagnosis_points_at_the_run() {
+        let d = RunDiagnosis {
+            run_id: 7,
+            failed_jobs: vec![],
+        };
+        let out = d.render(RUN_URL);
+        assert!(out.starts_with("## Root cause\n"));
+        assert!(out.contains("No failing job/step was identified"));
+        assert!(out.contains(&format!("[run 7]({RUN_URL})")));
     }
 }

@@ -103,6 +103,7 @@ src/ci_health/
 ├── classify.rs   WorkflowVerdict, IgnoreReason, build_report, repo_cacheable, update_cache_from_report, FleetReport (serializable DTOs)
 ├── cache.rs      GreenShaCache — persisted {repo -> last-known-green head SHA}
 ├── gh.rs         GhWorkflowClient trait (incl. head_sha), RealGhWorkflowClient, pure parse/join helpers, fixture loader
+├── diagnose.rs   RunDiagnostics trait + RealGhRunDiagnostics, parse_run_diagnosis, RunDiagnosis/FailedJob (root-cause of a failing run)
 ├── report.rs     render_human
 ├── steward.rs    actionable-failure -> deduplicated-issue steward (ci_failure_signature, file_issues_for_report)
 └── tests.rs      unit tests
@@ -244,6 +245,35 @@ the [Stewardship](./stewardship-api.md) dedup contract rather than forking it:
 - **Fail-loud.** A `gh` error on the search propagates and **no** issue is filed
   for that signature — the loop never assumes "no matches" on a degraded search,
   matching the orchestrator steward's contract.
+
+#### Root-cause diagnosis in the issue body
+
+Tracking *that* a workflow broke is not enough to act on it — the goal's third
+clause is *"diagnose root cause."* So every **newly-filed** issue embeds a
+`## Root cause` block pinpointing which of the failing run's job(s) and step(s)
+failed, read from `gh run view <run_id> --json jobs` by [`ci_health::diagnose`]
+(`src/ci_health/diagnose.rs`). This localizes the failure — a human or a
+downstream `ci-diagnostic` fixer sees *which job and step* failed without
+hunting through the run — and links the run for the failing logs, an on-ramp to
+*"launch a fix."*
+
+- **Structured, not log-scraped.** Diagnosis reads the jobs API, whose
+  `jobs[].conclusion` / `jobs[].steps[].conclusion` name the failing job and
+  step directly. The set of "failing" conclusions is exactly the sweep's
+  actionable set (`failure` / `timed_out` / `startup_failure`), so `cancelled` /
+  `skipped` / `success` steps are never mistaken for the root cause. A failing
+  job with no individually-failing step (e.g. a `timed_out` job) is rendered
+  with its own reported conclusion rather than a guessed cause.
+- **Best-effort, never blocks tracking.** Filing the tracking issue is the
+  correctness-critical act; a diagnosis that cannot be fetched (a `gh` error, a
+  malformed jobs response, or a failure whose run id was not captured) must not
+  abort it. The block then records *why* it is unavailable and links the run —
+  no silent degradation.
+- **Only for genuinely-new issues.** Diagnosis is fetched solely on the
+  file-new path (after the dedup search found no existing issue), so a re-swept,
+  already-tracked failure and a green fleet both cost **zero** extra `gh` calls.
+  A consequence is that an existing tracked issue is not retroactively
+  re-diagnosed; the block reflects the run that first tripped the sweep.
 
 `--file-issues` is **opt-in**: the default sweep is read-only. It requires a
 live sweep and is rejected when combined with `--from-json` (filing real issues

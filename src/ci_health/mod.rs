@@ -22,6 +22,7 @@
 
 pub mod cache;
 pub mod classify;
+pub mod diagnose;
 pub mod gh;
 pub mod report;
 pub mod steward;
@@ -34,6 +35,9 @@ pub use cache::GreenShaCache;
 pub use classify::{
     ActionableFailure, FleetReport, WorkflowVerdict, build_report, classify_workflow,
     repo_cacheable, update_cache_from_report,
+};
+pub use diagnose::{
+    FailedJob, RealGhRunDiagnostics, RunDiagnosis, RunDiagnostics, parse_run_diagnosis,
 };
 pub use gh::{
     GhWorkflowClient, RealGhWorkflowClient, build_repo_snapshot, collect_fleet,
