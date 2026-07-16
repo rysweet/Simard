@@ -429,6 +429,42 @@ fn delegates_blocked_goals_to_goal_health_and_never_reflags_them() {
 }
 
 #[test]
+fn exempts_standing_goals_from_the_gap_scan_even_when_uncovered() {
+    // A standing/perpetual goal is a permanent duty advanced by the OODA goal
+    // loop, not a one-shot uncovered gap. It has no terminal done-state and a
+    // merged PR gives it no coverage, so flagging it would re-notify forever
+    // (goal:steward-ci-github-actions-health-…e06d9e64 regression). It must be
+    // exempted exactly like a Blocked goal — even at p1/p2 with no assignee and
+    // no wip_ref.
+    let standing = ActiveGoal::new(
+        "g-standing",
+        "Steward CI/GitHub-Actions health across all governed repos. Standing goal.",
+        1,
+    );
+    assert!(
+        standing.is_perpetual(),
+        "the description marker must make this goal perpetual"
+    );
+    // A non-standing p1 sibling with the same coverage shape stays a gap — the
+    // exemption is scoped to the standing marker, not a blanket mute.
+    let one_shot = ActiveGoal::new("g-oneshot", "p1 one-shot with no workstream", 1);
+
+    let mut board = GoalBoard::new();
+    board.active = vec![standing, one_shot];
+
+    let gaps = detect_workstream_gaps(&board, &[], &[], &[]);
+    assert_eq!(
+        gaps.len(),
+        1,
+        "only the non-standing p1 goal is a gap; the standing goal is exempt: {gaps:?}"
+    );
+    assert_eq!(
+        gaps[0].signature, "goal:g-oneshot",
+        "the standing goal is never flagged; only the one-shot goal is: {gaps:?}"
+    );
+}
+
+#[test]
 fn flags_high_signal_uncovered_issue_ignores_low_signal_and_covered() {
     let high = SurveyedIssue {
         repo: "rysweet/Simard".to_string(),
