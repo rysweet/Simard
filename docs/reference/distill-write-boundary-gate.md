@@ -78,7 +78,15 @@ order:
    stored) so a low-reliability candidate can never corrupt past experience.
 5. **Identity dedup** — a weaker-or-equal new fact never clobbers a
    higher-confidence existing fact of the **same identity** (concept + content).
-   Distinct lessons that merely share a label still accumulate.
+   Distinct lessons that merely share a label still accumulate. A known concept
+   the agent re-emits in a variant surface form (`PR-Pattern`, `pr_pattern`,
+   `bug pattern`) is first folded to its canonical `KNOWN_CONCEPTS` label via
+   `fact_reliability::canonical_concept`, so the dedup key AND the stored concept
+   are one identity: a variant-labelled restatement dedups instead of storing a
+   redundant near-duplicate, and concept-consistent recall for the canonical
+   label surfaces every fact of that concept instead of missing the ones stored
+   under a variant form (the concept-axis analog of the content-whitespace and
+   episode-id normalizations). A genuinely off-spec concept is preserved verbatim.
 6. **Persist** — surviving facts are written with
    `store_fact_with_provenance` (computed confidence, **one `DERIVES_FROM` edge
    per supplied `source_episode_id`**, and a scalar `source_id` of
@@ -127,7 +135,7 @@ exactly what lets the stub and the IPC handler agree on every decision.
 | `fact_reliability::fact_passes_gate(concept, content, grounded) -> bool` | Thin predicate: `score >= RELIABILITY_THRESHOLD`. The shared store/quarantine decision. |
 | `fact_reliability::commit_gated_fact(memory, concept, content, grounded, source_id, tags, source_episode_ids) -> SimardResult<FactGateDecision>` | The shared gate orchestration both seams call: score → threshold → identity-dedup → `store_fact_with_provenance`. Grounding is resolved by the caller; the returned `FactGateDecision` is `Stored { confidence, node_id }` or `Quarantined { confidence }` (a `confidence >= RELIABILITY_THRESHOLD` quarantine is a dedup skip, below is a low-reliability block). |
 | `fact_reliability::RELIABILITY_THRESHOLD` (re-exported as `distillation::DISTILL_RELIABILITY_THRESHOLD`) | Minimum confidence to store rather than quarantine (`0.5`). |
-| `fact_reliability::canonical_concept(label) -> Option<&'static str>` | Canonicalises / validates a concept label. |
+| `fact_reliability::canonical_concept(label) -> Option<&'static str>` | Canonicalises / validates a concept label. Applied by `commit_gated_fact` before the dedup key and stored concept are derived, so a known label's surface variants (`PR-Pattern`, `pr_pattern`, `bug pattern`) fold onto one identity; an off-spec label (returns `None`) is stored verbatim. |
 | `fact_reliability::normalize_source_episode_id(raw: &str) -> &str` | Canonical grounding / provenance key for a cited episode id: trim surrounding whitespace (no-op for a well-formed id; interior whitespace preserved). Both seams normalize with this so a padded id grounds and threads provenance identically. |
 
 > **G2 / D3 note.** #2679 homes the gate at the IPC handler that fronts

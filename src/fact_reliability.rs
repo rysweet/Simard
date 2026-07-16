@@ -310,6 +310,23 @@ impl FactGateDecision {
 ///     distinguish it by `confidence >= RELIABILITY_THRESHOLD`).
 ///   - Survivors persist via `store_fact_with_provenance` with the gate-computed
 ///     confidence and the source-episode provenance edges.
+///
+/// **Concept canonicalization.** A known concept the LLM re-emits in a variant
+/// surface form ("PR-Pattern", "pr_pattern", "bug pattern") is folded to its
+/// canonical [`KNOWN_CONCEPTS`] label via [`canonical_concept`] BEFORE it is used
+/// as the dedup search key AND the stored concept, so:
+///   - the dedup step recognizes a variant-labelled restatement as the same fact
+///     of the same identity (the backend's concept keyword search treats
+///     `bug-pattern` and `bug pattern` as different queries, so without this a
+///     genuinely-new fact under a variant label escaped dedup), and
+///   - concept-consistent recall/search for the canonical label surfaces every
+///     fact of that concept, instead of missing the ones stored under a variant
+///     surface form.
+///
+/// This is the concept-axis analog of [`dedup_content_key`] (content whitespace)
+/// and [`normalize_source_episode_id`] (episode-id whitespace). A genuinely
+/// off-spec concept ([`canonical_concept`] returns `None`) is preserved verbatim,
+/// matching that conservative surface-form policy.
 pub fn commit_gated_fact(
     memory: &dyn crate::cognitive_memory::CognitiveMemoryOps,
     concept: &str,
@@ -319,6 +336,13 @@ pub fn commit_gated_fact(
     tags: &[String],
     source_episode_ids: &[String],
 ) -> crate::error::SimardResult<FactGateDecision> {
+    // Fold a known concept's surface variant onto its canonical label so the
+    // dedup key and the stored concept are one identity; keep an off-spec concept
+    // verbatim. Scoring canonicalizes internally too, so this only reconciles the
+    // dedup/store paths with the score path (no disposition change for a concept
+    // already in canonical form).
+    let concept = canonical_concept(concept).unwrap_or(concept);
+
     let confidence = score_fact_reliability(concept, content, grounded);
 
     // Threshold quarantine.
