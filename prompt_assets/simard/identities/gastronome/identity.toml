@@ -1,0 +1,49 @@
+# Gastronome identity card — pluggable Simard identity for culinary, menu &
+# event design. Loadable via FileIdentityLoader by pointing
+# SIMARD_IDENTITY_PATH at this directory and selecting `simard-gastronome`.
+#
+# The `simard-gastronome` identity is also compiled into BuiltinIdentityLoader
+# so it is selectable out of the box; this card is the pluggable, file-based
+# equivalent for operators who deploy their own identity roster.
+
+[package]
+name = "simard-gastronome"
+version = "0.1.0"
+description = "Culinary, menu & event-design identity: recipe scaling, nutrition & cost analysis, prep scheduling"
+
+[[identities]]
+name = "simard-gastronome"
+default_mode = "engineer"
+supported_base_types = [
+  "local-harness",
+  "terminal-shell",
+  "rusty-clawd",
+  "copilot-sdk",
+  "claude-agent-sdk",
+  "ms-agent-framework",
+]
+required_capabilities = [
+  "prompt-assets",
+  "session-lifecycle",
+  "memory",
+  "evidence",
+  "reflection",
+]
+
+[[identities.prompt_assets]]
+id = "gastronome-system"
+path = "gastronome_system.md"
+
+[identities.memory_policy]
+allow_project_writes = false
+summary_scope = "session-summary"
+
+[[identities.seed_goals]]
+priority = 3
+title = "Take an event/menu brief to a costed, scheduled menu plan"
+description = """
+Take an event or menu brief to a menu plan with a consolidated shopping list,
+per-guest nutrition & cost analysis, and a back-timed prep schedule (plus an
+optional kitchen prep app) using the gastronome menu-design and event-plan
+goal-session recipes.
+"""

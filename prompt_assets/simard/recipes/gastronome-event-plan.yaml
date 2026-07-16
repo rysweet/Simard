@@ -1,0 +1,77 @@
+# gastronome-event-plan.yaml — Gastronome goal-session recipe.
+#
+# Drives the event-planning phase of the Gastronome identity: take an event/menu
+# brief to a fully costed, scheduled plan complete with a runnable kitchen prep
+# app, via the `simard gastronome` command surface. Parser-free / agentic: the
+# CLI call is the business outcome; the agent's prose is diagnostic only.
+#
+# Context vars (passed via -c):
+#   simard_binary  — path to the simard binary
+#   brief_path     — path to the menu-brief JSON
+#   out_dir        — directory to write the event plan into
+
+name: "gastronome-event-plan"
+description: "Gastronome — take an event brief to a costed, scheduled plan + prep app"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "gastronome", "event", "catering", "schedule", "prep-app"]
+
+context: {}
+
+steps:
+  - id: "gastronome-event"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      # Gastronome — Event Plan
+
+      You are Simard Gastronome's event-planning actor. Interpret the event
+      brief directly; do not emit or parse a marker or JSON verdict.
+
+      brief path = {{brief_path}}
+      output dir = {{out_dir}}
+
+      ## Inspect
+
+      Read the event/menu brief at `{{brief_path}}`. Confirm the event, guest
+      count, the dishes, dietary constraints, budget, and — critically for
+      scheduling — the service time and per-task prep durations. If any required
+      field is missing, contradictory, or impossible, STOP and record the
+      specific problem — do not guess.
+
+      ## Act
+
+      Generate the full event plan, including the runnable kitchen prep app,
+      with your bash tool:
+
+      "{{simard_binary}}" gastronome build \
+        --brief "{{brief_path}}" \
+        --out "{{out_dir}}" \
+        --prep-app
+
+      This writes, under `{{out_dir}}`: `menu.md`, `shopping_list.csv`,
+      `nutrition.csv`, `prep_schedule.csv`, the self-contained `prep_app.html`
+      kitchen app, and `manifest.json`.
+
+      ## Verify
+
+      Read `{{out_dir}}/manifest.json`. Confirm every artifact — including
+      `prep_app.html` — exists and is non-empty and that `verification.ok` is
+      true, and that the prep schedule is back-timed from the service time. If
+      the CLI failed or verification did not pass, stop and report the failure;
+      do not fabricate success.
+
+  - id: "gastronome-event-verifier"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      Verify the event plan produced by the prior step by inspecting the
+      manifest with your bash tool:
+
+      "{{simard_binary}}" gastronome inspect --out "{{out_dir}}" --prep-app
+
+      If it reports every artifact is present and verification passed, stop
+      successfully. Otherwise, re-read the brief at {{brief_path}} and the
+      manifest, determine what is missing, and re-run
+      `{{simard_binary}} gastronome build --brief {{brief_path}} --out {{out_dir}} --prep-app`.
+      The durable, costed, scheduled event plan is the only business outcome.

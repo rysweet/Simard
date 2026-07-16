@@ -1,0 +1,43 @@
+name: gastronome-brief-to-menu-plan
+app_type: cli
+description: |
+  Outside-in coverage for the Gastronome culinary, menu &amp; event-design
+  identity: an event/menu brief must go end to end to a costed, scheduled menu
+  plan — a menu card, a consolidated shopping list, a nutrition breakdown, and a
+  back-timed prep schedule (plus an optional kitchen prep app) — and the shipped
+  identity/policy/recipe assets must load through the real Simard loaders.
+
+  Verified end to end:
+  - `src/gastronome/` unit tests: brief parsing/validation, recipe scaling,
+    shopping-list aggregation, cost &amp; nutrition roll-up, prep scheduling,
+    menu-card rendering, prep-app generation, and the build/verify/inspect
+    manifest orchestration.
+  - `tests/gastronome_assets_valid.rs`: the pluggable `simard-gastronome`
+    identity card loads via `FileIdentityLoader` in engineer mode, the
+    goal-session capability policy parses via `CapabilityPolicy::from_toml_file`
+    with the least-privilege shape, and both goal-session recipes drive the
+    `simard gastronome` CLI surface.
+  - `tests/gastronome_pipeline_e2e.rs`: `simard gastronome build` takes the
+    sample dinner brief to `menu.md`, `shopping_list.csv`, `nutrition.csv`,
+    `prep_schedule.csv`, a self-contained `prep_app.html`, and a `manifest.json`
+    whose `verification.ok` is true. Gastronome has no external tool dependency,
+    so this suite always runs (nothing to skip).
+
+  Schema note: the pinned `@gadugi/agentic-test` CLI runner gates only on
+  `run`-step exit codes and reads the command from `params.command`, so all
+  suites run under a single `bash -lc` wrapper that exits zero only when every
+  invoked `cargo test` reports success.
+metadata:
+  tags:
+    - cli
+    - gastronome
+    - identity
+agents:
+  - name: cli-agent
+    type: cli
+    command: bash
+steps:
+  - action: run
+    params:
+      command: "bash -lc 'set -euo pipefail; cargo test --lib gastronome 2>&1 | tee /tmp/gastronome-qa-unit.log | grep -q \"test result: ok\"; cargo test --test gastronome_assets_valid 2>&1 | tee /tmp/gastronome-qa-assets.log | grep -q \"test result: ok\"; cargo test --test gastronome_pipeline_e2e 2>&1 | tee /tmp/gastronome-qa-e2e.log | grep -q \"test result: ok\"'"
+    timeout: 600000

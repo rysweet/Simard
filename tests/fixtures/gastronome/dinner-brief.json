@@ -1,0 +1,50 @@
+{
+  "event": "Autumn tasting dinner",
+  "guests": 24,
+  "currency": "USD",
+  "service_time": "19:00",
+  "dietary": ["vegetarian-options"],
+  "dishes": [
+    {
+      "name": "Roasted squash soup",
+      "course": "starter",
+      "tags": ["vegetarian", "gluten-free"],
+      "ingredients": [
+        { "name": "Butternut squash", "qty_per_serving": 180, "unit": "g", "cost_per_unit": 0.004,
+          "nutrition": { "kcal": 0.45, "protein_g": 0.011, "carbs_g": 0.12, "fat_g": 0.001 } },
+        { "name": "Double cream", "qty_per_serving": 30, "unit": "ml", "cost_per_unit": 0.006,
+          "nutrition": { "kcal": 4.5, "protein_g": 0.02, "carbs_g": 0.03, "fat_g": 0.48 } }
+      ],
+      "prep": [
+        { "task": "Roast squash", "minutes": 45, "station": "oven" },
+        { "task": "Blend and season", "minutes": 15, "station": "prep" }
+      ]
+    },
+    {
+      "name": "Braised short rib",
+      "course": "main",
+      "ingredients": [
+        { "name": "Beef short rib", "qty_per_serving": 220, "unit": "g", "cost_per_unit": 0.022,
+          "nutrition": { "kcal": 2.5, "protein_g": 0.19, "carbs_g": 0.0, "fat_g": 0.18 } },
+        { "name": "Red wine", "qty_per_serving": 40, "unit": "ml", "cost_per_unit": 0.008 }
+      ],
+      "prep": [
+        { "task": "Sear ribs", "minutes": 25, "station": "stove" },
+        { "task": "Braise low", "minutes": 180, "station": "oven" }
+      ]
+    },
+    {
+      "name": "Poached pear",
+      "course": "dessert",
+      "tags": ["vegan"],
+      "ingredients": [
+        { "name": "Pear", "qty_per_serving": 1, "unit": "each", "cost_per_unit": 0.8,
+          "nutrition": { "kcal": 100, "protein_g": 0.6, "carbs_g": 27, "fat_g": 0.2 } }
+      ],
+      "prep": [
+        { "task": "Poach pears", "minutes": 30, "station": "stove" }
+      ]
+    }
+  ],
+  "budget": 400.0
+}

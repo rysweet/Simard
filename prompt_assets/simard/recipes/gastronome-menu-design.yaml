@@ -1,0 +1,75 @@
+# gastronome-menu-design.yaml — Gastronome goal-session recipe.
+#
+# Drives the menu-design phase of the Gastronome identity: take an event/menu
+# brief and produce a scaled menu, a consolidated shopping list, a nutrition
+# breakdown, and a menu card via the `simard gastronome` command surface.
+# Parser-free / agentic: the CLI call is the business outcome; the agent's prose
+# is diagnostic only.
+#
+# Context vars (passed via -c):
+#   simard_binary  — path to the simard binary
+#   brief_path     — path to the menu-brief JSON
+#   out_dir        — directory to write the menu plan into
+
+name: "gastronome-menu-design"
+description: "Gastronome — take an event/menu brief to a scaled, costed menu plan"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "gastronome", "menu", "culinary", "nutrition", "cost"]
+
+context: {}
+
+steps:
+  - id: "gastronome-menu"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      # Gastronome — Menu Design
+
+      You are Simard Gastronome's menu-design actor. Interpret the menu brief
+      directly; do not emit or parse a marker or JSON verdict.
+
+      brief path = {{brief_path}}
+      output dir = {{out_dir}}
+
+      ## Inspect
+
+      Read the menu brief at `{{brief_path}}`. Confirm the event, guest count,
+      the dishes and their per-serving recipes, dietary constraints, budget, and
+      the service time. If any required field is missing, contradictory, or
+      impossible, STOP and record the specific problem — do not guess.
+
+      ## Act
+
+      Generate the menu plan with your bash tool:
+
+      "{{simard_binary}}" gastronome build \
+        --brief "{{brief_path}}" \
+        --out "{{out_dir}}"
+
+      This writes, under `{{out_dir}}`: `menu.md` (menu card),
+      `shopping_list.csv`, `nutrition.csv`, `prep_schedule.csv`, and
+      `manifest.json`.
+
+      ## Verify
+
+      Read `{{out_dir}}/manifest.json`. Confirm the menu card, shopping list,
+      nutrition breakdown, and prep schedule exist and are non-empty and that
+      `verification.ok` is true. If the CLI failed or verification did not pass,
+      stop and report the failure; do not fabricate success.
+
+  - id: "gastronome-menu-verifier"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      Verify the menu plan produced by the prior step by inspecting the manifest
+      with your bash tool:
+
+      "{{simard_binary}}" gastronome inspect --out "{{out_dir}}"
+
+      If it reports the menu card, shopping list, nutrition breakdown, and prep
+      schedule are present and verification passed, stop successfully.
+      Otherwise, re-read the brief at {{brief_path}} and the manifest, determine
+      what is missing, and re-run
+      `{{simard_binary}} gastronome build --brief {{brief_path}} --out {{out_dir}}`.
+      The durable menu plan is the only business outcome.

@@ -340,6 +340,18 @@ Atelier drives OpenSCAD (with optional FreeCAD/Blender) to export an STL, a
 render, a cut list, and a BOM from a JSON product brief. See
 [Design furniture with Atelier](docs/howto/design-with-atelier.md).
 
+### Gastronome menu &amp; event design mode
+```bash
+# Gastronome identity: menu/event brief -> costed, scheduled menu plan
+simard gastronome build --brief brief.json --out ./plan --prep-app
+simard gastronome inspect --out ./plan     # re-verify an existing plan
+```
+Gastronome scales recipes to the guest count and rolls up a menu card, a
+shopping list, a nutrition breakdown, and a back-timed prep schedule from a JSON
+menu brief — with an optional self-contained kitchen prep app. It is
+self-contained (no external engine). See
+[Plan menus with Gastronome](docs/howto/plan-menus-with-gastronome.md).
+
 ### Self-management
 ```bash
 simard update                          # self-update to the latest release

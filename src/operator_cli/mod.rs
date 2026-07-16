@@ -7,6 +7,7 @@ mod dashboard;
 mod decisions;
 mod disk_reclaim;
 mod engineer;
+mod gastronome;
 mod goal;
 mod gym;
 mod meeting;
@@ -164,6 +165,15 @@ Design (Atelier identity):
   atelier inspect --out <dir> [--fabrication]
                          — re-read and re-verify an existing package manifest
 
+Menu & event design (Gastronome identity):
+  gastronome build --brief <brief.json> --out <dir> [--prep-app] [--strict]
+                         — take an event/menu brief to a costed, scheduled menu
+                           plan: menu card, shopping list, nutrition breakdown,
+                           and a back-timed prep schedule; --prep-app also emits
+                           a self-contained prep_app.html kitchen app
+  gastronome inspect --out <dir> [--prep-app]
+                         — re-read and re-verify an existing menu plan
+
 Compatibility binaries remain available: simard_operator_probe, simard-gym
 ";
 
@@ -247,6 +257,7 @@ where
     match command.as_str() {
         "engineer" => engineer::dispatch_engineer_command(args),
         "atelier" => atelier::dispatch_atelier_command(args),
+        "gastronome" => gastronome::dispatch_gastronome_command(args),
         "meeting" => meeting::dispatch_meeting_command(args),
         "goal" => goal::dispatch_goal_command(args),
         "goal-curation" => curation::dispatch_goal_curation_command(args),
@@ -373,7 +384,7 @@ where
 }
 
 pub fn operator_cli_usage() -> &'static str {
-    "usage: simard <engineer|atelier|meeting|goal-curation|improvement-curation|gym|ooda|memory|status|spawn|merge-pr|worktree-gc|disk-reclaim|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap|signal> ..."
+    "usage: simard <engineer|atelier|gastronome|meeting|goal-curation|improvement-curation|gym|ooda|memory|status|spawn|merge-pr|worktree-gc|disk-reclaim|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap|signal> ..."
 }
 
 pub fn operator_cli_help() -> &'static str {

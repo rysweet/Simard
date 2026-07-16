@@ -1,0 +1,122 @@
+//! Asset-level validation for the shipped Gastronome identity.
+//!
+//! These tests prove the Gastronome *capability-bearing* assets are not just
+//! present but actually parse and validate through the real Simard loaders:
+//!
+//! * the pluggable identity card loads via `FileIdentityLoader`;
+//! * the goal-session capability policy parses via
+//!   `CapabilityPolicy::from_toml_file` and holds the least-privilege shape;
+//! * the two goal-session recipes carry the parser-free command contract that
+//!   drives the `simard gastronome` surface.
+
+use std::path::{Path, PathBuf};
+
+use simard::identity::{
+    FileIdentityLoader, IdentityLoadRequest, IdentityLoader, ManifestContract, OperatingMode,
+};
+use simard::metadata::{Freshness, Provenance};
+use simard::typed_ooda::CapabilityPolicy;
+
+fn repo_path(relative: impl AsRef<Path>) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)
+}
+
+fn test_contract() -> ManifestContract {
+    ManifestContract::new(
+        "gastronome::assets::test",
+        "brief -> menu plan",
+        vec!["test:gastronome".to_string()],
+        Provenance::new("gastronome-assets-test", "tests/gastronome_assets_valid.rs"),
+        Freshness::now().unwrap(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn shipped_gastronome_identity_card_loads_and_is_engineer_mode() {
+    let prompt_root = repo_path("prompt_assets");
+    let identity_dir = prompt_root.join("simard/identities/gastronome");
+    assert!(
+        identity_dir.join("identity.toml").exists(),
+        "gastronome identity card should be shipped at {}",
+        identity_dir.display()
+    );
+
+    let loader = FileIdentityLoader::new(&identity_dir, &prompt_root);
+    let request = IdentityLoadRequest::new("simard-gastronome", "0.1.0", test_contract());
+    let manifest = loader
+        .load(&request)
+        .expect("shipped gastronome identity.toml should load");
+
+    assert_eq!(manifest.name, "simard-gastronome");
+    assert_eq!(manifest.default_mode, OperatingMode::Engineer);
+    assert!(
+        manifest
+            .prompt_assets
+            .iter()
+            .any(|a| a.id.as_str() == "gastronome-system"),
+        "gastronome identity should expose its system prompt asset"
+    );
+}
+
+#[test]
+fn shipped_gastronome_capability_policy_parses_and_is_least_privilege() {
+    let policy_path =
+        repo_path("prompt_assets/simard/policies/gastronome-goal-session-capabilities.toml");
+    let policy = CapabilityPolicy::from_toml_file(&policy_path)
+        .expect("gastronome goal-session capability policy should parse and validate");
+
+    // A successful parse already enforces actor == goal-session-actor,
+    // terminal_calls_per_cycle == 1, session binding, and >=1 repository.
+    assert!(
+        policy
+            .allowed_repositories
+            .iter()
+            .any(|r| r.owner == "rysweet" && r.name == "Simard"),
+        "policy should be scoped to the governed Simard repository"
+    );
+    assert!(
+        policy.max_concurrent_engineers >= 1,
+        "policy should permit at least one engineer"
+    );
+}
+
+#[test]
+fn shipped_gastronome_recipes_drive_the_cli_command_surface() {
+    for (relative, expected_command) in [
+        (
+            "prompt_assets/simard/recipes/gastronome-menu-design.yaml",
+            "gastronome build",
+        ),
+        (
+            "prompt_assets/simard/recipes/gastronome-event-plan.yaml",
+            "gastronome build",
+        ),
+    ] {
+        let recipe = std::fs::read_to_string(repo_path(relative))
+            .unwrap_or_else(|e| panic!("recipe {relative} should be readable: {e}"));
+
+        for required in ["name:", "description:", "steps:", "brief_path", "out_dir"] {
+            assert!(
+                recipe.contains(required),
+                "recipe {relative} must contain `{required}`"
+            );
+        }
+        assert!(
+            recipe.contains(expected_command),
+            "recipe {relative} must invoke the `{expected_command}` CLI surface"
+        );
+    }
+}
+
+#[test]
+fn shipped_gastronome_event_recipe_requests_the_prep_app() {
+    let recipe = std::fs::read_to_string(repo_path(
+        "prompt_assets/simard/recipes/gastronome-event-plan.yaml",
+    ))
+    .expect("event-plan recipe should be readable");
+    assert!(
+        recipe.contains("--prep-app"),
+        "the event-plan recipe should emit the optional kitchen prep app"
+    );
+}

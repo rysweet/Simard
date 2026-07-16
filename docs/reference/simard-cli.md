@@ -76,6 +76,9 @@ simard
 |- atelier
 |  |- build --brief <brief.json> --out <dir> [--fabrication] [--strict]
 |  `- inspect --out <dir> [--fabrication]
+|- gastronome
+|  |- build --brief <brief.json> --out <dir> [--prep-app] [--strict]
+|  `- inspect --out <dir> [--prep-app]
 |- update
 `- install [--simard-home PATH] [--dry-run] [--systemd-user-dir PATH] [--systemctl PATH]  # planned
 ```
@@ -546,6 +549,37 @@ Re-reads an existing package directory, re-runs verification against the
 persisted `manifest.json`, and prints the tool report and verification result
 without rebuilding. Also prints the available-tool report when `<dir>` does not
 yet contain a manifest.
+
+## Gastronome menu &amp; event design commands
+
+The **Gastronome** identity (`simard-gastronome`) turns a menu/event brief into
+a costed, scheduled menu plan. See
+[Plan menus with Gastronome](../howto/plan-menus-with-gastronome.md) for the full
+workflow.
+
+### `simard gastronome build --brief <brief.json> --out <dir> [--prep-app] [--strict]`
+
+Reads a menu brief (JSON: `event`, `guests`, `currency`, optional
+`service_time`, `budget`, and a list of `dishes` — each with a `course`, `tags`,
+per-serving `ingredients` carrying cost and nutrition, and `prep` steps),
+scales every recipe to the guest count, and rolls up the plan. Writes to
+`<dir>`: `menu.md`, `shopping_list.csv`, `nutrition.csv`, `prep_schedule.csv`,
+`manifest.json`, and — with `--prep-app` — a self-contained `prep_app.html`
+kitchen checklist. Gastronome is self-contained: there is no external engine to
+install.
+
+Verification always requires the core deliverables (a valid menu, a shopping
+list, a nutrition breakdown, and an internally consistent prep schedule). The
+budget check is advisory. `--strict` promotes the advisory check (within budget)
+to a hard failure.
+
+Exit codes: `0` verified; `1` verification failed (or a `--strict` advisory
+check failed); non-zero on an invalid brief.
+
+### `simard gastronome inspect --out <dir> [--prep-app]`
+
+Re-reads an existing plan directory, re-runs verification against the persisted
+`manifest.json`, and prints the verification result without rebuilding.
 
 ## Compatibility mapping
 

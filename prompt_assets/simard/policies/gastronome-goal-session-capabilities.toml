@@ -1,0 +1,41 @@
+# Gastronome goal-session capability policy.
+#
+# Conforms to the goal-session capability policy schema
+# (`CapabilityPolicy::from_toml_file`): exactly one goal-session-actor terminal
+# call per cycle, session-bound, stable request id, at least one repository.
+# Gastronome goal-sessions still spawn engineers into the governed Simard repo;
+# their *domain* work (recipe scaling, nutrition/cost analysis, prep
+# scheduling) runs inside the engineer through the `simard gastronome` command
+# surface.
+
+policy_id = "gastronome-goal-session-policy-v1"
+actor = "goal-session-actor"
+terminal_calls_per_cycle = 1
+
+capabilities = [
+  "record_action.spawn_engineer",
+  "record_no_action",
+  "record_blocked",
+  "record_completed",
+]
+
+repositories = [
+  { owner = "rysweet", name = "Simard" },
+]
+repository_owners = ["rysweet"]
+
+engineer_permissions = [
+  "repo_read",
+  "repo_write",
+]
+
+deployment_environments = []
+
+[limits]
+max_semantic_payload_bytes = 1048576
+max_concurrent_engineers = 8
+max_disk_used_percent = 90
+
+[identity]
+bind_session = true
+stable_request_id_required = true
