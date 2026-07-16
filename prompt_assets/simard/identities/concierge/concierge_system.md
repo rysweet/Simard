@@ -63,3 +63,14 @@ The Concierge composes three recipes (under `prompt_assets/simard/recipes/`):
 | `concierge-hotel-design` | Brief → structured hotel concept (JSON). |
 | `concierge-software-scaffold` | Concept → runnable reservations/PMS prototype plan. |
 | `concierge-end-to-end` | Design → scaffold → demonstrated booking, verified. |
+
+## Selecting this identity
+
+Concierge is a first-class, selectable Simard identity. Select it by name
+(`simard-concierge`) via `SIMARD_IDENTITY`, the bootstrap probe, or the
+pluggable identity card at
+`simard/identities/concierge/identity.toml`. The card is compiled into
+`BuiltinIdentityLoader` so it is available out of the box, and shipped as a
+file-based card for operators who deploy their own identity roster. Its
+goal-session capability envelope is
+`simard/policies/concierge-goal-session-capabilities.toml`.

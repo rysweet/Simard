@@ -19,7 +19,9 @@ out, the room serviced, and availability restored, with invariants verified.
 |---|---|
 | Identity | `simard-concierge` in `src/identity/loader.rs` (mode: `orchestrator`) |
 | Runnable domain module | `src/concierge/` (`design`, `pms`, orchestrator) |
-| System prompt | `prompt_assets/simard/concierge_system.md` |
+| System prompt | `prompt_assets/simard/identities/concierge/concierge_system.md` |
+| Pluggable identity card | `prompt_assets/simard/identities/concierge/identity.toml` |
+| Capability policy | `prompt_assets/simard/policies/concierge-goal-session-capabilities.toml` |
 | Design / scaffold prompts | `prompt_assets/simard/concierge_property_design.md`, `concierge_software_scaffold.md` |
 | Recipes | `prompt_assets/simard/recipes/concierge-{hotel-design,software-scaffold,end-to-end}.yaml` |
 | Operator probe | `simard_operator_probe concierge-run <topology> "<brief>"` |
@@ -83,5 +85,8 @@ A passing `concierge-run` ends with a `RES-…` sample reservation,
 
 - Unit: `src/concierge/{design,pms}.rs` and `src/concierge/mod.rs` (`#[cfg(test)]`).
 - Integration: `tests/concierge_end_to_end.rs`.
+- Asset validation: `tests/concierge_assets_valid.rs` (the pluggable identity
+  card loads and matches the builtin, the capability policy parses least-
+  privilege, and the recipes drive the `concierge-run` surface).
 - Outside-in scenarios: `tests/gadugi/concierge-identity.{sh,yaml}` and
   `tests/qa-scenarios/concierge-end-to-end.yaml`.
