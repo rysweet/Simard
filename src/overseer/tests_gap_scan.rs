@@ -576,7 +576,11 @@ fn workstream_gaps_flagged_outcome_carries_batch_counts() {
 }
 
 #[test]
-fn flags_gaps_notifies_both_channels_without_filing_then_dedupes_on_repeat() {
+fn covers_gaps_with_a_launch_without_filing_then_dedupes_on_repeat() {
+    // Issue #4128 (D3b): a coverage gap now gets a CLOSING EDGE — the Overseer
+    // launches ONE workstream that actually covers the consolidated gap set —
+    // instead of the old notify-only path that left the gap uncovered and
+    // re-surfaced it every window as the recurring `workstream-gap` signature.
     let gaps = vec![sample_goal_gap(), sample_anomaly_gap()];
     let filed = Arc::new(Mutex::new(Vec::new()));
     let (notifier, email_log, signal_log) = dual_recording_notifier();
@@ -586,75 +590,42 @@ fn flags_gaps_notifies_both_channels_without_filing_then_dedupes_on_repeat() {
         .with_gap_scan_enabled(true)
         .with_operator_notifier(Box::new(notifier));
 
-    // First tick: both gaps are genuine ⇒ flagged and one consolidated
-    // notification on both channels.
+    // First tick: the consolidated gap set decides to ONE covering launch.
     let first = overseer_tick(&mut ov);
     assert_eq!(
-        first.workstream_gaps_detected, 2,
-        "both genuine gaps are flagged this tick"
-    );
-    assert_eq!(first.workstream_gaps_suppressed, 0);
-    // Gap activity rides its DEDICATED counters, NOT the generic ones (one act
-    // returns one outcome — it cannot bump both IssueFiled and Escalated).
-    assert_eq!(
-        first.issues_filed, 0,
-        "gap issues ride the dedicated gap counter, not issues_filed"
-    );
-    assert_eq!(
-        first.escalations, 0,
-        "gaps do not ride the escalation counter"
+        first.recipes_launched, 1,
+        "the consolidated gap set is covered by exactly one launched workstream: {first:?}"
     );
     assert_eq!(first.errors, 0);
     assert!(!first.panicked);
 
-    // ONE consolidated notification per channel (not one per gap).
-    assert_eq!(
-        email_log.lock().unwrap().len(),
-        1,
-        "the email channel got one consolidated gap notification"
-    );
-    assert_eq!(
-        signal_log.lock().unwrap().len(),
-        1,
-        "the Signal channel got one consolidated gap notification"
+    // The closing edge is a LAUNCH, never a notify and never a file: the old
+    // notify-only path is gone (issue #4128 A2 — the missing closing edge WAS
+    // the defect), so no operator notification and no issue are produced.
+    assert!(
+        email_log.lock().unwrap().is_empty() && signal_log.lock().unwrap().is_empty(),
+        "the coverage closing edge covers the gap by launching, it does not notify"
     );
     assert!(
         filed.lock().unwrap().is_empty(),
-        "routine gap observations never file issues"
+        "a coverage launch never files an issue"
     );
 
-    // The consolidated notification names the specifics.
-    {
-        let seen = email_log.lock().unwrap();
-        let n = &seen[0];
-        assert_eq!(n.kind, "workstream-gap");
-        assert!(
-            n.plain_text().contains("g-hot"),
-            "the notification names the uncovered goal: {n:?}"
-        );
-    }
-
-    // Second tick on the SAME picture: both signatures are still within the
-    // dedup window ⇒ both suppressed (gate hit). No second notification, no
-    // second issue.
+    // Second tick on the SAME picture: the covering workstream is still in flight
+    // (poll ⇒ Running), so the in-flight dedup guard HOLDS a duplicate launch —
+    // the recurring gap is not re-covered while its coverage is already running.
     let second = overseer_tick(&mut ov);
     assert_eq!(
-        second.workstream_gaps_detected, 0,
-        "a recurring gap is not re-flagged within the dedup window"
+        second.recipes_launched, 0,
+        "a recurring gap is not re-launched while its coverage is in flight: {second:?}"
     );
-    assert_eq!(
-        second.workstream_gaps_suppressed, 2,
-        "both recurring gaps are counted as suppressed"
+    assert!(
+        second.held >= 1,
+        "the duplicate coverage launch is held by the in-flight guard: {second:?}"
     );
-    assert_eq!(
-        email_log.lock().unwrap().len(),
-        1,
-        "no second notification for a recurring gap"
-    );
-    assert_eq!(
-        signal_log.lock().unwrap().len(),
-        1,
-        "no second Signal notification for a recurring gap"
+    assert!(
+        email_log.lock().unwrap().is_empty() && signal_log.lock().unwrap().is_empty(),
+        "no notification on a recurring gap"
     );
     assert!(filed.lock().unwrap().is_empty());
 }
@@ -672,15 +643,17 @@ fn flagged_gap_never_constructs_an_issue_brief() {
 
     let report = overseer_tick(&mut ov);
     assert_eq!(
-        report.workstream_gaps_detected, 1,
-        "the genuine gap is flagged"
+        report.recipes_launched, 1,
+        "the genuine gap is covered by a launched workstream (issue #4128, D3b)"
     );
     assert_eq!(report.errors, 0, "the gap intervention must not error");
     assert!(!report.panicked);
 
+    // The coverage closing edge is a LaunchRecipe, never a FileIssue: a routine
+    // gap covers the work by launching, it never constructs an issue brief.
     assert!(
         filed.lock().unwrap().is_empty(),
-        "routine gaps stay observation-only"
+        "a coverage gap never files an issue"
     );
 }
 
@@ -850,26 +823,6 @@ fn gap_scan_every_n_defaults_to_one_and_clamps_to_floor() {
 // ═══════════════════ 6. decide / classify routing ═══════════════════════════
 
 #[test]
-fn decide_routes_workstream_coverage_to_flag_gaps() {
-    let problem = Problem {
-        kind: ProblemKind::WorkstreamCoverage,
-        priority: Priority::High,
-        dedup_key: "workstream-gap".to_string(),
-        summary: "2 uncovered workstreams".to_string(),
-        evidence: vec![Signal::WorkstreamGap {
-            gaps: vec![sample_goal_gap(), sample_anomaly_gap()],
-        }],
-        why: None,
-    };
-    match decide(&problem) {
-        Intervention::FlagWorkstreamGaps { gaps } => {
-            assert_eq!(gaps.len(), 2, "decide carries the specific gaps forward");
-        }
-        other => panic!("expected FlagWorkstreamGaps, got {other:?}"),
-    }
-}
-
-#[test]
 fn flag_workstream_gaps_is_routine_and_admitted_by_default_gate() {
     let iv = Intervention::FlagWorkstreamGaps {
         gaps: vec![sample_goal_gap()],
@@ -915,5 +868,72 @@ fn tick_render_shows_flagged_gap_clause_and_a_clean_scan_adds_none() {
     assert!(
         clean_line.contains("observing"),
         "a clean board is the honest 'observing' state: {clean_line}"
+    );
+}
+
+// ═══════════════════ 8. issue #4128: gap closing edge (RED, TDD Step 7) ══════
+//
+// A backlog-coverage gap that only NOTIFIES never gets covered, so it recurs
+// every window and surfaces as the recurring `workstream-gap` signature. Two
+// coupled fixes are pinned here:
+//   D3a — per-gap keying: the coverage problem is keyed `workstream-gap:<sig>`,
+//         not the bare `workstream-gap` constant, so distinct gaps no longer
+//         collapse onto one dedup key (which starves the in-flight / closing
+//         edge to a single gap).
+//   D3b — closing edge: a coverage problem DECIDES to a terminal edge that
+//         actually covers the gap (LaunchRecipe / FileIssue), routed through the
+//         gate — not the notify-only `FlagWorkstreamGaps`. This SUPERSEDES the
+//         old `decide_routes_workstream_coverage_to_flag_gaps` contract.
+// RED until the per-gap key + Decide-arm closing edge land.
+
+/// D3a: a single observed gap orients to a PER-GAP dedup key
+/// `workstream-gap:<signature>`, not the bare `workstream-gap` constant.
+#[test]
+fn single_gap_orients_to_a_per_gap_keyed_coverage_problem() {
+    let gap = sample_goal_gap();
+    let observed = ObservedState {
+        workstream_gaps: vec![gap.clone()],
+        ..ObservedState::default()
+    };
+
+    let problems = orient(&signals_from(&observed), &[]);
+    let problem = problems
+        .iter()
+        .find(|p| p.kind == ProblemKind::WorkstreamCoverage)
+        .expect("a WorkstreamGap classifies to a WorkstreamCoverage problem");
+
+    assert_eq!(
+        problem.dedup_key,
+        format!("workstream-gap:{}", gap.signature),
+        "the coverage problem is keyed per-gap so distinct gaps don't collapse: {}",
+        problem.dedup_key
+    );
+}
+
+/// D3b: a WorkstreamCoverage problem DECIDES to a terminal closing edge that
+/// covers the gap (a LaunchRecipe or a FileIssue), routed through the gate —
+/// never a notify-only action that leaves the gap uncovered and recurring.
+#[test]
+fn a_coverage_gap_decides_to_a_terminal_closing_edge() {
+    let gap = sample_goal_gap();
+    let problem = Problem {
+        kind: ProblemKind::WorkstreamCoverage,
+        priority: Priority::High,
+        dedup_key: format!("workstream-gap:{}", gap.signature),
+        summary: "1 uncovered workstream".to_string(),
+        evidence: vec![Signal::WorkstreamGap {
+            gaps: vec![gap.clone()],
+        }],
+        why: None,
+    };
+
+    let iv = decide(&problem);
+    assert!(
+        matches!(
+            iv,
+            Intervention::LaunchRecipe { .. } | Intervention::FileIssue { .. }
+        ),
+        "a coverage gap decides to a terminal closing edge (launch/file) so the gap \
+         gets covered and stops recurring — not a notify-only action: {iv:?}"
     );
 }

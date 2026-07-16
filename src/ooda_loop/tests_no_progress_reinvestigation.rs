@@ -1116,3 +1116,76 @@ fn assert_no_none(state: &OodaState, id: &str) {
         );
     }
 }
+
+// === issue #4128 (R1): an evidenceless (none) block that is ACTUALLY done =====
+
+/// Regression ANCHOR (green) for the #4128 incident: the reinvestigation pass
+/// shipped in issues #16/#17 already routes the stranded `evidence=[(none)]`
+/// population through the auto-complete rung, and #4128's overseer-side fixes
+/// (D1/D2b/D3) depend on that staying true — an incident goal that is actually
+/// done must LEAVE the blocked set, so the Overseer stops re-observing it as a
+/// recurring `overseer-obs:goal:blocked:…` signature.
+///
+/// The canonical incident goal: kgpacks-rs / simard-identity goals parked with
+/// `why=GENUINELY-STUCK evidence=[(none)]` whose referenced issue is now CLOSED
+/// and PR MERGED. Because the block carries the class token it is NOT "bare", so
+/// the safeguard used to keep re-parking it as "no progress" while the work was
+/// in fact DONE. Re-investigation of the `(none)` population reads the fresh
+/// CLOSED/MERGED evidence and transitions the goal OUT of Blocked to Completed —
+/// never re-parks it. This test pins that this remains the behavior #4128 relies
+/// on; it is intentionally already-green (the pass exists).
+#[test]
+fn an_evidenceless_none_block_that_is_actually_done_is_completed_not_reparked() {
+    let id = "fix-agent-kgpacks-rs-issue-17-ws2-int8-pq-embed";
+    let mut goal = evidenceless_blocked_goal(id);
+    goal.wip_refs = vec![issue_ref("17", "int8-PQ-embed"), pr_ref("41")];
+    let mut state = state_with(goal);
+
+    // Fresh evidence: the issue is CLOSED and the PR MERGED (the work is done).
+    let evidence = FakeEvidence {
+        pr_merged: true,
+        issue_closed: true,
+        deployed: true,
+        repo_present: true,
+        dependency: std::sync::RwLock::new(DependencyState::None),
+    };
+    let reasoner = FakeReasoner::classifying(
+        NoProgressClass::AlreadyComplete,
+        vec![
+            Evidence::new("issue", "#17", "CLOSED"),
+            Evidence::new("pr", "#41", "MERGED"),
+        ],
+    );
+    let (healer, dispatcher, filer) = (
+        RecordingHealer::ok(),
+        RecordingDispatcher::ok(),
+        RecordingFiler::default(),
+    );
+
+    let report = drive(
+        &mut state,
+        &evidence,
+        &reasoner,
+        &healer,
+        &dispatcher,
+        &filer,
+    );
+
+    assert!(
+        report.reinvestigated.contains(&id.to_string()),
+        "the evidence=[(none)] goal is re-investigated, not stranded: {report:?}"
+    );
+    assert!(
+        report.marked_done.contains(&id.to_string()),
+        "an actually-done (none) goal must be marked done, not re-parked: {report:?}"
+    );
+    assert!(
+        matches!(status_of(&state, id), GoalProgress::Completed),
+        "the goal transitions OUT of Blocked to Completed on fresh CLOSED/MERGED evidence"
+    );
+    assert!(
+        report.escalated.is_empty() && filer.calls.borrow().is_empty(),
+        "an actually-done goal must NEVER be escalated to a human: {report:?}"
+    );
+    assert_no_none(&state, id);
+}

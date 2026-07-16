@@ -639,6 +639,19 @@ impl Overseer {
         if problems.is_empty() {
             return Ok(None);
         }
+        // D1 (issue #4128): never record an observation OF our own observation.
+        // Recall-derived `overseer-obs:*` problems are the Overseer reading its
+        // own prior write-back back out of cognitive memory; folding them into a
+        // fresh write-back is the self-referential loop that self-amplifies the
+        // recurrence counter (the live "recurring signature seen 2×" incident).
+        // If a tick's ONLY problems are these self-observations, there is nothing
+        // first-order to record — record nothing and break the loop.
+        if !problems
+            .iter()
+            .any(|p| !is_recall_derived_self_observation(p))
+        {
+            return Ok(None);
+        }
         let signature = observation_signature(problems);
         let now = now_secs();
         match self.write_back_gate.peek(&signature, now) {
@@ -733,9 +746,19 @@ impl Overseer {
             );
         }
 
-        // Gap-scan opt-out: when disabled, hold the whole flag-gaps action (no
-        // notification, no issue) even though gaps were observed.
-        if matches!(iv, Intervention::FlagWorkstreamGaps { .. }) && !self.gap_scan_enabled {
+        // Gap-scan opt-out: when disabled, hold the coverage action even though
+        // gaps were observed. The closing edge is now a `LaunchRecipe` tagged with
+        // `WORKSTREAM_COVERAGE_GROUP` (issue #4128, D3b), so the opt-out matches
+        // that marker; the legacy notify-only `FlagWorkstreamGaps` is still held
+        // too (defence in depth for any direct construction).
+        if !self.gap_scan_enabled
+            && (matches!(iv, Intervention::FlagWorkstreamGaps { .. })
+                || matches!(
+                    iv,
+                    Intervention::LaunchRecipe { brief }
+                        if brief.sequence_group.as_deref() == Some(WORKSTREAM_COVERAGE_GROUP)
+                ))
+        {
             return held_plan(iv, "held: gap-scan disabled (SIMARD_OVERSEER_GAP_SCAN)");
         }
 
@@ -793,6 +816,23 @@ impl Overseer {
     pub fn act(&mut self, iv: &Intervention) -> Result<ActOutcome, OverseerError> {
         match iv {
             Intervention::LaunchRecipe { brief } => {
+                // Anti-recursion fail-closed for the backlog-coverage closing edge
+                // (issue #4128, D3b): a workstream launched to COVER an uncovered
+                // gap is the Overseer acting autonomously on Simard's own backlog,
+                // so it must NEVER fire without a DISTINCT steward identity — the
+                // same guard the legacy `act_flag_workstream_gaps` path enforced.
+                // Scoped to the coverage sequence group so ordinary investigation
+                // launches (process-health, cross-cutting) are unaffected.
+                if brief.sequence_group.as_deref() == Some(WORKSTREAM_COVERAGE_GROUP)
+                    && !self.recursion.is_configured()
+                {
+                    return Err(OverseerError::Recursion {
+                        subject: format!(
+                            "launch workstream-coverage recipe (unconfigured steward identity): {}",
+                            recipe_dedup_key(brief)
+                        ),
+                    });
+                }
                 let handle = self.caps.recipes.launch(brief)?;
                 // Register the launch in the in-flight dedup set so a re-observed
                 // recurring signature is HELD in `gate` until this investigation
@@ -1138,21 +1178,43 @@ impl Overseer {
     /// empty + a `tracing` log (never a silent failure, never a panic). The
     /// caller folds the result into the structured analysis so recall raises
     /// `recurrence` for a repeatedly-seen cause.
+    ///
+    /// Issue #4128 (D2b): occurrence memory now stores ONE count-in-content fact
+    /// per `(signature, cause_label)`. Each such fact is EXPANDED back into its
+    /// `count` `PriorOccurrence`s (bounded by [`OCCURRENCE_RECALL_LIMIT`]) so the
+    /// downstream recurrence tally — `analyze` counts matching occurrences — still
+    /// ratchets to the escalation threshold, without the unbounded row growth that
+    /// let the Overseer's own re-observation self-amplify.
     fn recall_occurrences(&self, dedup_key: &str) -> Vec<PriorOccurrence> {
         let Some(mem) = self.memory.as_ref() else {
             return Vec::new();
         };
         let concept = occurrence_concept(dedup_key);
         match mem.search_facts(&concept, OCCURRENCE_RECALL_LIMIT, 0.0) {
-            Ok(facts) => facts
-                .into_iter()
-                .filter_map(|f| {
-                    serde_json::from_str::<StoredOccurrence>(&f.content)
+            Ok(facts) => {
+                let mut out: Vec<PriorOccurrence> = Vec::new();
+                for f in facts {
+                    let Some(stored) = serde_json::from_str::<StoredOccurrence>(&f.content)
                         .ok()
                         .filter(|o| o.signature == dedup_key)
-                        .map(StoredOccurrence::into_prior)
-                })
-                .collect(),
+                    else {
+                        continue;
+                    };
+                    // Expand the count-in-content tally into that many recalled
+                    // occurrences, bounded overall so a large saturating count can
+                    // never blow up the recalled set.
+                    let remaining = (OCCURRENCE_RECALL_LIMIT as usize).saturating_sub(out.len());
+                    if remaining == 0 {
+                        break;
+                    }
+                    let repeats = (stored.count.max(1) as usize).min(remaining);
+                    let prior = stored.into_prior();
+                    for _ in 0..repeats {
+                        out.push(prior.clone());
+                    }
+                }
+                out
+            }
             Err(e) => {
                 tracing::debug!(
                     target: "overseer::root_cause",
@@ -1165,11 +1227,42 @@ impl Overseer {
         }
     }
 
+    /// Read the current recorded occurrence `count` for `(signature, cause_label)`
+    /// from cognitive memory (issue #4128, D2b), so a fresh occurrence upserts an
+    /// incremented count rather than appending a new row. Best-effort: no memory,
+    /// a recall error, or no prior fact ⇒ 0. Takes the MAX across any matching
+    /// facts so a legacy multi-row tail (pre-#4128 appends) still ratchets forward
+    /// instead of resetting.
+    fn recorded_occurrence_count(&self, signature: &str, cause_label: &str) -> u32 {
+        let Some(mem) = self.memory.as_ref() else {
+            return 0;
+        };
+        let concept = occurrence_concept(signature);
+        match mem.search_facts(&concept, OCCURRENCE_RECALL_LIMIT, 0.0) {
+            Ok(facts) => facts
+                .iter()
+                .filter_map(|f| serde_json::from_str::<StoredOccurrence>(&f.content).ok())
+                .filter(|o| o.signature == signature && o.cause_label == cause_label)
+                .map(|o| o.count.max(1))
+                .max()
+                .unwrap_or(0),
+            Err(_) => 0,
+        }
+    }
+
     /// Record this occurrence's root-cause signature + primary cause + action +
     /// outcome into cognitive memory (amplihack-memory-lib, G2) so a later cycle
     /// recalls it and raises `recurrence`. Best-effort: no memory wired ⇒ no-op;
     /// a store error is `tracing`-logged and swallowed (never fatal to the tick,
     /// never silent).
+    ///
+    /// Issue #4128 (D2b): this UPSERTS a SINGLE count-in-content fact per
+    /// `(signature, cause_label)` — it reads the prior count, stores an
+    /// incremented count under a stable caller-dedup key (superseding the old
+    /// live fact), and prunes the superseded tail — rather than appending a fresh
+    /// fact every cycle. Appending grew occurrence rows without bound, which is
+    /// exactly what let the Overseer's re-observation of its own signature
+    /// self-amplify into the "recurring signature seen 2×" incident.
     fn record_occurrence(&self, entry: &ProblemEntry, outcome: &ActOutcome) {
         let Some(mem) = self.memory.as_ref() else {
             return;
@@ -1177,11 +1270,17 @@ impl Overseer {
         let Some(primary) = entry.why.primary() else {
             return;
         };
+        // Increment the prior count (saturating) so the single stored fact is an
+        // honest, bounded running tally of this cause's occurrences.
+        let count = self
+            .recorded_occurrence_count(&entry.key, &primary.label)
+            .saturating_add(1);
         let record = StoredOccurrence {
             signature: entry.key.clone(),
             cause_label: primary.label.clone(),
             action: entry.action.clone(),
             outcome: describe_outcome(outcome),
+            count,
         };
         let content = match serde_json::to_string(&record) {
             Ok(c) => c,
@@ -1195,18 +1294,42 @@ impl Overseer {
             }
         };
         let concept = occurrence_concept(&entry.key);
+        let caller_key = StoredOccurrence::caller_key(&entry.key, &primary.label);
         let tags = vec![
             entry.key.clone(),
             primary.label.clone(),
             "overseer-root-cause".to_string(),
         ];
-        if let Err(e) = mem.store_fact(&concept, &content, 0.9, &tags, "overseer:root-cause") {
+        // CallerKey upsert: the incremented-count content supersedes the prior
+        // live fact so exactly one live occurrence fact survives per key.
+        if let Err(e) = mem.store_fact_with_caller_key(
+            &caller_key,
+            &concept,
+            &content,
+            0.9,
+            &tags,
+            "overseer:root-cause",
+        ) {
             tracing::debug!(
                 target: "overseer::root_cause",
                 signature = %entry.key,
                 cause = %primary.label,
                 error = %e,
                 "root-cause occurrence store failed (best-effort) — recurrence tracking degraded"
+            );
+            return;
+        }
+        // Reclaim the superseded revision archived by the upsert so occurrence
+        // recall reads exactly one live count-in-content fact (best-effort — a
+        // failed prune only leaves a reclaimable archived tail, never a wrong
+        // count, since recall takes the MAX count across matching facts).
+        if let Err(e) = mem.prune_superseded() {
+            tracing::debug!(
+                target: "overseer::root_cause",
+                signature = %entry.key,
+                cause = %primary.label,
+                error = %e,
+                "root-cause occurrence prune failed (best-effort) — superseded tail left for a later pass"
             );
         }
     }
@@ -1252,29 +1375,57 @@ fn recipe_dedup_key(brief: &RecipeBrief) -> String {
     desc.to_string()
 }
 
+/// The write-back prefix the Overseer stamps on its own observation episodes
+/// (issue #2628). A recalled episode carrying this prefix is the Overseer reading
+/// its OWN prior observation back out of cognitive memory — folding such a
+/// recall-derived problem into a fresh write-back is the self-referential loop
+/// that self-amplifies the recurrence counter (issue #4128, D1). The write
+/// boundary excludes any problem whose `dedup_key` already carries this prefix.
+const OVERSEER_OBS_PREFIX: &str = "overseer-obs:";
+
+/// True for a recall-derived problem that is the Overseer's OWN prior observation
+/// (its `dedup_key` already carries the [`OVERSEER_OBS_PREFIX`]). These are
+/// filtered at the write boundary (issue #4128, D1) so the Overseer never records
+/// an observation OF its own observation.
+fn is_recall_derived_self_observation(problem: &Problem) -> bool {
+    problem.dedup_key.starts_with(OVERSEER_OBS_PREFIX)
+}
+
 /// Stable, deterministic signature for the Overseer's own observation write-back
-/// (issue #2628): the sorted, deduped problem `dedup_key`s joined. Two identical
-/// observations produce the same signature (so the write-back gate de-dups them);
-/// two different observations produce distinct signatures (so both are recorded).
+/// (issue #2628): the sorted, deduped FIRST-ORDER problem `dedup_key`s joined.
+/// Two identical observations produce the same signature (so the write-back gate
+/// de-dups them); two different observations produce distinct signatures (so both
+/// are recorded).
+///
+/// Recall-derived `overseer-obs:*` problems are excluded (issue #4128, D1): the
+/// signature keys ONLY genuinely first-order observations, so the write-back can
+/// never nest an `overseer-obs:` prefix on itself and re-observe its own output.
 fn observation_signature(problems: &[Problem]) -> String {
-    let mut keys: Vec<&str> = problems.iter().map(|p| p.dedup_key.as_str()).collect();
+    let mut keys: Vec<&str> = problems
+        .iter()
+        .filter(|p| !is_recall_derived_self_observation(p))
+        .map(|p| p.dedup_key.as_str())
+        .collect();
     keys.sort_unstable();
     keys.dedup();
-    format!("overseer-obs:{}", keys.join("|"))
+    format!("{OVERSEER_OBS_PREFIX}{}", keys.join("|"))
 }
 
 /// The human-readable one-line body of the Overseer's observation write-back.
-/// Every problem summary is `sanitize_recalled`-cleaned (defence in depth: the
-/// summaries may themselves already carry recalled text) before it enters the
-/// episode content that is persisted into the multi-writer memory graph.
+/// Only FIRST-ORDER problems are described (recall-derived `overseer-obs:*`
+/// self-observations are excluded, issue #4128 D1). Every problem summary is
+/// `sanitize_recalled`-cleaned (defence in depth: the summaries may themselves
+/// already carry recalled text) before it enters the episode content that is
+/// persisted into the multi-writer memory graph.
 fn observation_content(problems: &[Problem]) -> String {
     let parts: Vec<String> = problems
         .iter()
+        .filter(|p| !is_recall_derived_self_observation(p))
         .map(|p| sanitize_recalled(&p.summary))
         .collect();
     sanitize_recalled(&format!(
         "overseer observed {} problem(s): {}",
-        problems.len(),
+        parts.len(),
         parts.join("; ")
     ))
 }
@@ -1367,15 +1518,40 @@ fn describe_outcome(outcome: &ActOutcome) -> String {
 
 /// The durable form of a [`PriorOccurrence`], stored in cognitive memory with the
 /// problem `signature` so recall can filter to this problem's occurrences.
+///
+/// Issue #4128 (D2b): occurrence memory is an UPSERT of ONE fact per
+/// `(signature, cause_label)` carrying a bounded `count`, rather than a fresh
+/// appended fact every cycle. The count-in-content is the honest recurrence
+/// tally; recall expands it back into that many `PriorOccurrence`s so the
+/// recurrence-driven root-cause escalation still ratchets, without the unbounded
+/// row growth that let the Overseer's own re-observation self-amplify.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredOccurrence {
     signature: String,
     cause_label: String,
     action: String,
     outcome: String,
+    /// How many times this `(signature, cause_label)` has been recorded. Defaults
+    /// to 1 for legacy facts written before the count field existed (each such
+    /// pre-#4128 fact represented exactly one occurrence).
+    #[serde(default = "one_u32")]
+    count: u32,
+}
+
+/// serde default for [`StoredOccurrence::count`]: a legacy (pre-#4128) occurrence
+/// fact carried no count and represented exactly one occurrence.
+fn one_u32() -> u32 {
+    1
 }
 
 impl StoredOccurrence {
+    /// The stable caller-dedup key for this occurrence's upsert (issue #4128,
+    /// D2b): one live fact per `(signature, cause_label)`. Keyed on both so
+    /// distinct causes of the SAME signature never collapse onto one row.
+    fn caller_key(signature: &str, cause_label: &str) -> String {
+        format!("overseer-occ:{signature}::{cause_label}")
+    }
+
     fn into_prior(self) -> PriorOccurrence {
         PriorOccurrence {
             cause_label: self.cause_label,
@@ -1383,6 +1559,27 @@ impl StoredOccurrence {
             outcome: self.outcome,
         }
     }
+}
+
+/// The conflict-sequencer / gate marker for the Overseer's backlog-coverage
+/// closing edge (issue #4128, D3b). A [`Intervention::LaunchRecipe`] carrying
+/// this `sequence_group` is the workstream launched to COVER an uncovered gap:
+/// the gate holds it when the gap-scan is disabled (preserving the opt-out that
+/// used to live on the notify-only `FlagWorkstreamGaps` path) and the sequencer
+/// serialises concurrent coverage launches.
+const WORKSTREAM_COVERAGE_GROUP: &str = "workstream-coverage";
+
+/// Per-gap dedup key for a backlog-coverage problem (issue #4128, D3a):
+/// `workstream-gap:<sorted, deduped gap signatures>`. Keying on the specific gap
+/// set (never the bare `workstream-gap` constant) stops distinct gap sets from
+/// collapsing onto one dedup key — which had starved the closing edge / in-flight
+/// guard to a single gap. Each gap `signature` is a restricted slug built from
+/// trusted identifiers only, so the key is always a safe, stable token.
+fn workstream_gap_key(gaps: &[GapItem]) -> String {
+    let mut sigs: Vec<&str> = gaps.iter().map(|g| g.signature.as_str()).collect();
+    sigs.sort_unstable();
+    sigs.dedup();
+    format!("workstream-gap:{}", sigs.join("|"))
 }
 
 /// Orient: fold `Signal`s into ranked, deduplicated `Problem`s. Dedups against
@@ -1553,13 +1750,17 @@ fn classify_signal(s: &Signal) -> (ProblemKind, Priority, String, String) {
             )),
         ),
         // The recurring gap-scan surfaces ONE consolidated signal per Observe
-        // pass, so it maps to a SINGLE high-priority coverage problem with a
-        // stable, evidence-independent dedup key. Uncovered p1/p2 goals, bug/P1
-        // issues, and live anomalies all rank High.
+        // pass carrying every uncovered gap. It maps to a SINGLE high-priority
+        // coverage problem whose dedup key is keyed PER-GAP (issue #4128, D3a):
+        // `workstream-gap:<sorted gap signatures>` rather than the bare
+        // `workstream-gap` constant. Keying on the specific gap set means a
+        // DIFFERENT set of gaps no longer collapses onto one dedup key (which had
+        // starved the closing edge / in-flight guard to a single gap). Uncovered
+        // p1/p2 goals, bug/P1 issues, and live anomalies all rank High.
         Signal::WorkstreamGap { gaps } => (
             ProblemKind::WorkstreamCoverage,
             Priority::High,
-            "workstream-gap".to_string(),
+            workstream_gap_key(gaps),
             format!("{} uncovered workstream(s)", gaps.len()),
         ),
         // A diagnosed step failure (#2640): a broken OODA step is HIGH priority.
@@ -1720,8 +1921,16 @@ pub fn decide(problem: &Problem) -> Intervention {
             note: compose_whisper_note(problem, &ObservedState::default()),
             urgency: WhisperUrgency::Normal,
         },
-        // Backlog-coverage gaps carry the consolidated `WorkstreamGap` evidence
-        // forward verbatim so Act can notify about the specific gaps.
+        // Backlog-coverage gaps get a CLOSING EDGE (issue #4128, D3b): launch a
+        // workstream that actually COVERS the uncovered work so the gap stops
+        // recurring — never the old notify-only `FlagWorkstreamGaps`, which left
+        // the gap uncovered and re-surfaced it every window as the recurring
+        // `workstream-gap` signature. The launch is tagged with the
+        // `WORKSTREAM_COVERAGE_GROUP` sequence group so the gate can hold it when
+        // the gap-scan is disabled (the opt-out that used to live on the notify
+        // path) and the sequencer serialises concurrent coverage launches; the
+        // per-gap signatures embedded in the brief make the in-flight guard dedup
+        // a re-observed identical gap set to a SINGLE in-flight coverage launch.
         ProblemKind::WorkstreamCoverage => {
             let gaps = problem
                 .evidence
@@ -1731,7 +1940,28 @@ pub fn decide(problem: &Problem) -> Intervention {
                     _ => None,
                 })
                 .unwrap_or_default();
-            Intervention::FlagWorkstreamGaps { gaps }
+            // Describe the gaps by category + restricted-slug signature only
+            // (both bounded/safe), never free-text titles, so the brief can never
+            // inflate a launched task description.
+            let details = gaps
+                .iter()
+                .map(|g| format!("{}: {}", g.category.label(), g.signature))
+                .collect::<Vec<_>>()
+                .join("; ");
+            Intervention::LaunchRecipe {
+                brief: RecipeBrief {
+                    task_description: format!(
+                        "Cover uncovered backlog workstream(s) surfaced by the Overseer \
+                         gap-scan so they stop recurring: launch or track a workstream that \
+                         closes each gap. {n} gap(s): {details}. ({key})",
+                        n = gaps.len(),
+                        details = details,
+                        key = workstream_gap_key(&gaps),
+                    ),
+                    target_repo: "rysweet/Simard".to_string(),
+                    sequence_group: Some(WORKSTREAM_COVERAGE_GROUP.to_string()),
+                },
+            }
         }
         // A diagnosed step failure drives a CORRECTIVE workstream (#2640, PART 2):
         // launch a recipe that diagnoses the WHY and applies the remedy, keyed to
