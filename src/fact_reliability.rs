@@ -201,6 +201,10 @@ impl FactGateDecision {
 ///   - Confidence is ALWAYS [`score_fact_reliability`]'s output, never a client
 ///     hint.
 ///   - Below [`RELIABILITY_THRESHOLD`] → [`FactGateDecision::Quarantined`].
+///   - Survivors are persisted under the **canonical** concept label (surface-form
+///     variants of the closed [`KNOWN_CONCEPTS`] set — case, `_`/space separators,
+///     wrapping punctuation — fold onto one concept node so graph memory does not
+///     fragment; a genuinely off-spec concept is stored verbatim).
 ///   - A weaker-or-equal restatement never clobbers an existing equal-or-stronger
 ///     fact of the same identity (`concept` + trimmed `content`); such a fact is
 ///     also quarantined (its score still cleared the threshold, so the caller can
@@ -222,6 +226,22 @@ pub fn commit_gated_fact(
     if confidence < RELIABILITY_THRESHOLD {
         return Ok(FactGateDecision::Quarantined { confidence });
     }
+
+    // Canonicalize the persisted concept label to its known-label form. An LLM
+    // routinely varies the *surface form* of a label it clearly intends
+    // (title/upper case, `_`/space separators, wrapping quotes/punctuation), and
+    // the distiller stores the concept verbatim — so `pr-pattern`, `PR_Pattern`
+    // and `Lesson Learned` would fragment into distinct concept nodes, diluting
+    // graph memory and splitting a single semantic concept's facts across
+    // variants (worse concept-grouped recall). Folding to the canonical label
+    // *before* dedup and persist consolidates every variant onto one concept node
+    // and keeps the dedup keyword query (`search_facts(concept, ..)`) aligned with
+    // what survivors are stored under. A genuinely off-spec concept has no
+    // canonical form and is stored verbatim, exactly as before — this only
+    // collapses surface variants of the closed [`KNOWN_CONCEPTS`] set, never
+    // renames a distinct concept. Scoring already canonicalized internally for the
+    // concept-validity nudge, so `confidence` is unaffected by this fold.
+    let concept = canonical_concept(concept).unwrap_or(concept);
 
     // Identity dedup: do not downgrade/duplicate an equal-or-stronger prior
     // version of the *same* fact (concept + content). `search_facts` is queried

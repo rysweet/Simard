@@ -323,3 +323,149 @@ fn commit_gated_fact_stores_dedups_and_quarantines() {
         "an ungrounded empty fact scores below the threshold"
     );
 }
+
+/// A fact whose concept is a *surface-form variant* of a known label (here
+/// `PR_Pattern`) is persisted under the **canonical** concept (`pr-pattern`), so
+/// variants collapse onto one graph-memory concept node instead of fragmenting.
+/// Disposition and confidence are unchanged — only the persisted label folds.
+#[test]
+fn commit_gated_fact_persists_canonical_concept_for_surface_variants() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::{FactGateDecision, commit_gated_fact};
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode("squash fixup commits before review", "engineer-cycle", None)
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let episode_ids = [ep.clone()];
+
+    let decision = commit_gated_fact(
+        &mem,
+        "PR_Pattern",
+        "squash fixup commits before requesting review",
+        true,
+        &source,
+        &[String::from("PR_Pattern")],
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        matches!(decision, FactGateDecision::Stored { .. }),
+        "a grounded, well-formed variant-labeled fact must store, got {decision:?}"
+    );
+
+    let facts = mem
+        .search_facts("squash", 10, 0.0)
+        .expect("search must not error");
+    let stored = facts
+        .iter()
+        .find(|f| f.content == "squash fixup commits before requesting review")
+        .expect("the stored fact must be retrievable");
+    assert_eq!(
+        stored.concept, "pr-pattern",
+        "the surface variant `PR_Pattern` must persist under the canonical `pr-pattern`"
+    );
+}
+
+/// A genuinely off-spec concept (no canonical form) is stored **verbatim** — the
+/// fold only collapses surface variants of the closed known set, it never renames
+/// a distinct concept.
+#[test]
+fn commit_gated_fact_stores_offspec_concept_verbatim() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::{FactGateDecision, commit_gated_fact};
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode(
+            "some unusual engineering observation",
+            "engineer-cycle",
+            None,
+        )
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+
+    let decision = commit_gated_fact(
+        &mem,
+        "design-insight",
+        "prefer explicit boundaries over shared mutable state",
+        true,
+        &source,
+        &[String::from("design-insight")],
+        std::slice::from_ref(&ep),
+    )
+    .expect("commit must not error");
+    assert!(matches!(decision, FactGateDecision::Stored { .. }));
+
+    let facts = mem
+        .search_facts("boundaries", 10, 0.0)
+        .expect("search must not error");
+    let stored = facts
+        .iter()
+        .find(|f| f.content == "prefer explicit boundaries over shared mutable state")
+        .expect("the stored fact must be retrievable");
+    assert_eq!(
+        stored.concept, "design-insight",
+        "an off-spec concept has no canonical form and must be stored verbatim"
+    );
+}
+
+/// A variant-labeled restatement of an already-stored fact dedups against the
+/// canonical prior: both the prior and the restatement fold to `pr-pattern`, so
+/// the identity dedup (concept-keyed candidate retrieval + content equality)
+/// recognizes the duplicate and does not fragment or downgrade the prior.
+#[test]
+fn commit_gated_fact_dedups_variant_label_against_canonical_prior() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::{FactGateDecision, commit_gated_fact};
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode("rebase then squash before review", "engineer-cycle", None)
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let episode_ids = [ep.clone()];
+    let content = "rebase and squash before requesting review";
+
+    // Canonical label first.
+    let first = commit_gated_fact(
+        &mem,
+        "pr-pattern",
+        content,
+        true,
+        &source,
+        &[String::from("pr-pattern")],
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(matches!(first, FactGateDecision::Stored { .. }));
+
+    // Same content under a surface-variant label → dedup quarantine, not a
+    // second concept node.
+    let second = commit_gated_fact(
+        &mem,
+        "PR Pattern",
+        content,
+        true,
+        &source,
+        &[String::from("PR Pattern")],
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        !second.stored(),
+        "a variant-labeled restatement of an existing canonical fact must dedup"
+    );
+
+    let matches = mem
+        .search_facts("rebase", 10, 0.0)
+        .expect("search must not error")
+        .into_iter()
+        .filter(|f| f.content == content)
+        .count();
+    assert_eq!(
+        matches, 1,
+        "exactly one node must exist for the fact — the variant did not fragment it"
+    );
+}
