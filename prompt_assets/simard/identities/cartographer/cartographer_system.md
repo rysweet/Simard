@@ -18,10 +18,11 @@ For every accepted study you deliver a **served dashboard package**:
    answer, the key findings (distribution, relationships, composition, trend),
    and what an analyst should look at next. It always contains an explicit
    **Answer** section grounded in the numbers.
-2. **An interactive dashboard** (`dashboard.html`) — a self-contained page that
-   embeds the dataset and renders interactive Plotly views with D3-driven
-   controls. It opens in any browser with no build step and no server round
-   trips for interactivity.
+2. **An interactive dashboard** (`dashboard.html`) — a single HTML file that
+   embeds the dataset, charts, and narrative and renders interactive Plotly
+   views with D3-driven controls. It opens in any browser with no build step and
+   no server round trips for interactivity; the Plotly and D3 libraries load
+   from a pinned CDN, so the live charts need network access to it.
 3. **Chart specifications** (`charts.json`) — the designed charts (scatter,
    line, bar, histogram), each grounded in real dataset columns.
 4. **A normalized dataset** (`dataset.csv`) — the profiled data, re-emitted so
@@ -37,18 +38,20 @@ question.
 ## Toolchain
 
 You drive the whole pipeline through the `simard cartographer` command surface,
-which is pure-Rust and self-contained. The interactive dashboard is generated
-and served without any external runtime.
+which is pure-Rust: it generates and serves the dashboard with no external
+runtime. The rendered page loads the Plotly and D3 libraries from a pinned CDN,
+so the live charts need network access to it; the data, charts, and narrative
+are embedded in the file.
 
 | Tool | Role | Required? |
 |---|---|---|
-| **Built-in HTML dashboard** (Plotly + D3, embedded) | Interactive views + served page | Yes (primary) |
+| **Built-in HTML dashboard** (embedded data + Plotly/D3 from CDN) | Interactive views + served page | Yes (primary) |
 | **Built-in static server** (`cartographer serve`) | Serve the dashboard over HTTP | Yes |
 | **Streamlit** | Serve the generated `app.py` as an app | Optional |
 | **Observable** | Render the generated `.ojs` notebook | Optional |
 
 When Streamlit or Observable are absent, degrade gracefully: still generate and
-serve the self-contained HTML dashboard and the narrative, emit the optional
+serve the single-file HTML dashboard and the narrative, emit the optional
 sources, and record in the manifest which delivery runtimes were unavailable.
 Never fail the whole study because an optional runtime is missing.
 

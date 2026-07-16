@@ -18,7 +18,7 @@ use super::dataset::Dataset;
 use super::viz::ChartSpec;
 
 const PLOTLY_CDN: &str = "https://cdn.plot.ly/plotly-2.35.2.min.js";
-const D3_CDN: &str = "https://cdn.jsdelivr.net/npm/d3@7";
+const D3_CDN: &str = "https://cdn.jsdelivr.net/npm/d3@7.9.0";
 
 /// HTML-escape text destined for element bodies / attributes.
 fn escape_html(s: &str) -> String {

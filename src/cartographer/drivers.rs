@@ -6,10 +6,10 @@
 //! *optional*: Cartographer always emits their source, and merely records
 //! whether a runtime is installed so the operator knows if they are runnable.
 //!
-//! These probes only ask `command -v` (a POSIX builtin that does not execute
-//! the target). Cartographer never spawns a Python interpreter itself.
+//! These probes only walk `PATH` directly and never spawn a shell or execute
+//! the target binary. Cartographer never spawns a Python interpreter itself.
 
-use std::process::Command;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -22,15 +22,27 @@ pub struct ToolReport {
     pub role: Option<String>,
 }
 
-/// Return true if `bin` resolves on `PATH`. Uses `command -v`, which does not
+/// Return true if `bin` resolves to an existing file on `PATH`.
+///
+/// This walks the `PATH` entries directly rather than shelling out, so it
+/// never spawns a process and carries no shell-injection surface. It does not
 /// execute the target binary.
 pub fn binary_available(bin: &str) -> bool {
-    Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {bin} >/dev/null 2>&1"))
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    // Reject anything that is not a bare command name; a path separator would
+    // mean the caller wanted a specific file, which these probes never do.
+    if bin.is_empty() || bin.contains('/') {
+        return false;
+    }
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        if dir.as_os_str().is_empty() {
+            return false;
+        }
+        let candidate = Path::new(&dir).join(bin);
+        candidate.is_file()
+    })
 }
 
 /// Probe a runtime's availability, tagging it with its delivery role.

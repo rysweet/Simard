@@ -3,13 +3,15 @@
 //! Turns a dataset + an analytical question into a **served interactive
 //! dashboard** with a **written narrative**, end to end: profile the data,
 //! surface quantitative findings, design charts, write the story, and render a
-//! self-contained `dashboard.html` (Plotly + D3) plus optional Streamlit /
-//! Observable delivery sources — all described by a verified `manifest.json`.
+//! single-file `dashboard.html` (embedded data + Plotly/D3) plus optional
+//! Streamlit / Observable delivery sources — all described by a verified
+//! `manifest.json`.
 //!
 //! This module is the domain engine behind the `simard-cartographer` identity
 //! and its goal-session recipes. The HTML dashboard is generated purely in Rust
-//! and served by a built-in static server, so the core path has no external
-//! dependencies; Streamlit and Observable are optional targets whose runtime
+//! and served by a built-in static server, so the generate-and-serve path has
+//! no external runtime dependency; the rendered page loads Plotly and D3 from a
+//! pinned CDN. Streamlit and Observable are optional targets whose runtime
 //! availability is recorded but never required.
 //!
 //! # Example

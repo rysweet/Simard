@@ -348,9 +348,9 @@ simard cartographer serve --out ./pkg --self-check   # prove the dashboard serve
 simard cartographer inspect --out ./pkg              # re-verify an existing package
 ```
 Cartographer profiles a dataset, surfaces findings, designs charts, writes the
-narrative, and renders a self-contained interactive dashboard (Plotly + D3)
-served by a built-in HTTP server — pure Rust, with optional Streamlit/Observable
-delivery. See
+narrative, and renders a single-file interactive dashboard (embedded data +
+Plotly/D3 from a pinned CDN) served by a built-in HTTP server — pure Rust, with
+optional Streamlit/Observable delivery. See
 [Tell data stories with Cartographer](docs/howto/tell-data-stories-with-cartographer.md).
 
 ### Self-management

@@ -23,20 +23,22 @@ shareable, interactive answer.
 Cartographer is repo-grounded and runs in engineer mode
 (`inspect → act → verify → persist`): it profiles the data, surfaces findings,
 designs charts grounded in real columns, writes the story, renders a
-self-contained dashboard, and serves it — writing a `manifest.json` recording
+single-file dashboard, and serves it — writing a `manifest.json` recording
 exactly what was built and verified.
 
 ## Prerequisites
 
 - Simard binary built (`cargo build --quiet --bin simard`).
-- **No external dependency for the happy path** — the dashboard is generated in
-  Rust (Plotly + D3, embedded) and served by a built-in static server.
+- **No external tool dependency for the happy path** — the dashboard is
+  generated in Rust (data, charts, and narrative embedded) and served by a
+  built-in static server. The rendered page loads the Plotly and D3 libraries
+  from a pinned CDN, so viewing the live charts needs network access to it.
 - Optional delivery targets (Cartographer degrades gracefully without them):
   - [Streamlit](https://streamlit.io/) to serve the generated `app.py`.
   - [Observable](https://observablehq.com/) to render the generated `.ojs`
     notebook.
 
-Their absence never fails a study; the self-contained HTML dashboard is always
+Their absence never fails a study; the single-file HTML dashboard is always
 produced and their availability is only recorded in the manifest.
 
 ## Select the Cartographer identity
@@ -157,4 +159,7 @@ delivery runtimes as best-effort:
   unavailable. The HTML dashboard still serves the story.
 
 Every probe result is recorded in `manifest.json`, so the package is always
-self-describing and the self-contained dashboard always works offline.
+self-describing and the dashboard renders from a single HTML file. The dataset,
+charts, narrative, and layout are embedded directly in `dashboard.html`; the
+Plotly and D3 libraries load from a pinned CDN, so rendering the live charts
+needs network access to that CDN.

@@ -563,7 +563,8 @@ for the full workflow.
 Reads a study brief (JSON: `title`, `question`, `dataset` (a `.csv`/`.json`
 path or inline `csv`), optional `app_target`, `hints`, `audience`), profiles the
 dataset, surfaces findings, designs charts, writes the narrative, and renders a
-self-contained interactive dashboard. Writes to `<dir>`: `dataset.csv`,
+single-file interactive dashboard (embedded data + Plotly/D3 from a pinned CDN).
+Writes to `<dir>`: `dataset.csv`,
 `charts.json`, `narrative.md`, `dashboard.html`, `manifest.json`, and — when the
 target is `streamlit` or `observable` — an `app.py` or `notebook.ojs` delivery
 source. `--target` overrides the brief's delivery target.
