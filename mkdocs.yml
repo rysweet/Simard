@@ -249,6 +249,7 @@ nav:
     - Configure Overseer Email Notifications: howto/configure-overseer-email-notifications.md
     - Review Overseer Workstream Gaps: howto/review-overseer-workstream-gaps.md
     - Configure Overseer Root-Cause Principle: howto/configure-overseer-root-cause-why.md
+    - Configure Overseer Recurrence Escalation: howto/configure-overseer-recurrence-escalation.md
     - Configure Cognitive-Thread Scheduling: howto/configure-cognitive-thread-scheduling.md
     - Add a New Cognitive Thread: howto/add-a-new-cognitive-thread.md
     - Configure the Creative Ideas Thread: howto/configure-creative-ideas-thread.md
@@ -273,6 +274,7 @@ nav:
     - Overseer Operator Notifications: reference/overseer-operator-notifications.md
     - Overseer Workstream Gap-Scan: reference/overseer-workstream-gap-scan.md
     - Overseer Root-Cause (WHY) API: reference/overseer-root-cause-why-api.md
+    - Overseer Recurrence Dead-Band Escalation API: reference/overseer-recurrence-dead-band-escalation-api.md
     - simard-engineer-step CLI: reference/simard-engineer-step.md
     - simard-tui Dashboard: reference/simard-tui.md
     - Dashboard Memory Tab: reference/dashboard-memory-tab.md

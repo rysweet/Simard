@@ -44,7 +44,8 @@ use crate::overseer::notify::{
     ChannelDelivery, DualChannelNotifier, NotifyChannel, OperatorNotification,
 };
 use crate::overseer::root_cause::{
-    PriorOccurrence, RECURRENCE_ESCALATION_THRESHOLD, analyze, root_cause_signature,
+    PERPETUAL_RECURRENCE_ESCALATION_THRESHOLD, PriorOccurrence, RECURRENCE_ESCALATION_THRESHOLD,
+    analyze, root_cause_signature,
 };
 use crate::overseer::signal::{
     CauseSource, Confidence, Likelihood, Priority, Problem, ProblemKind, RootCause, Signal,
@@ -474,8 +475,98 @@ fn recurring_reblock_never_files_an_issue() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Section C — run_cycle / tick integration (fakes; memory optional)
+// Section B′ — #4124 recurrence DEAD-BAND escalation (perpetual re-park loop)
 // ════════════════════════════════════════════════════════════════════════════
+//
+// TDD (RED) contract for issue #4124 ("recurring signature seen 2 in cognitive
+// memory"). A PERPETUAL, no-progress goal whose SAME goal-scoped root cause has
+// already recurred at the detection floor (`recurrence == 2`) must ESCALATE ONCE
+// instead of being blindly re-`UnblockGoal`-ed every cycle. This closes the
+// `[2, 3)` dead-band below the general `RECURRENCE_ESCALATION_THRESHOLD` (3).
+//
+// The binding spec is
+// docs/reference/overseer-recurrence-dead-band-escalation-api.md. The new
+// `PERPETUAL_RECURRENCE_ESCALATION_THRESHOLD` constant and the one new
+// `decide_blocked_goal` branch do NOT exist yet, so this module fails to compile
+// until the feature lands — that compile failure is the RED state.
+
+/// T1 (AC2 / F1 / F3) — the dead-band close. A perpetual, no-progress goal whose
+/// cause has recurred exactly at the detection floor
+/// (`recurrence == PERPETUAL_RECURRENCE_ESCALATION_THRESHOLD` = 2) must ESCALATE
+/// its root cause, NOT be re-unblocked. This is the loop-termination guarantee:
+/// the identical signature stops being re-emitted as a fresh un-escalated park.
+#[test]
+fn perpetual_repark_at_detection_floor_escalates_not_reunblocks() {
+    assert_eq!(
+        PERPETUAL_RECURRENCE_ESCALATION_THRESHOLD, 2,
+        "the dead-band floor equals the detection floor of 2 (#4124)"
+    );
+    // recurrence sits in the [2, 3) dead-band: below the general fast path (3)
+    // but at the perpetual re-park floor (2).
+    const _: () = assert!(
+        PERPETUAL_RECURRENCE_ESCALATION_THRESHOLD < RECURRENCE_ESCALATION_THRESHOLD,
+        "the dead-band floor must sit strictly below the general escalation floor"
+    );
+
+    let iv = decide(&perpetual_blocked_problem(Some(
+        PERPETUAL_RECURRENCE_ESCALATION_THRESHOLD,
+    )));
+    assert!(
+        !matches!(iv, Intervention::UnblockGoal { .. }),
+        "a perpetual re-park recurring at the detection floor must NOT be blindly \
+         re-unblocked (the rejected 'unblock every cycle' antipattern): {iv:?}"
+    );
+    match iv {
+        Intervention::EscalateBlockedGoal { goal_id, .. } => {
+            assert_eq!(goal_id, "research", "the escalation names the blocked goal");
+        }
+        other => panic!("recurrence==2 perpetual re-park must escalate its root cause: {other:?}"),
+    }
+}
+
+/// T2 (I2) — one below the dead-band floor still self-heals. `recurrence == 1`
+/// is a genuine false-park that has re-parked only once; the perpetual
+/// no-progress self-heal branch is UNCHANGED, so it is auto-unblocked (never a
+/// premature escalation).
+#[test]
+fn perpetual_repark_one_below_floor_still_self_heals() {
+    let iv = decide(&perpetual_blocked_problem(Some(
+        PERPETUAL_RECURRENCE_ESCALATION_THRESHOLD - 1,
+    )));
+    assert!(
+        matches!(iv, Intervention::UnblockGoal { .. }),
+        "recurrence below the dead-band floor is still a self-healed false park: {iv:?}"
+    );
+}
+
+/// T3 (I2) — the FIRST park (`recurrence == 0`) self-heals, exactly as before.
+/// Pins that closing the dead-band does not disturb the first-time false-park
+/// root-cause fix (#2609). Redundant-by-design with
+/// `first_time_false_park_self_heals_as_root_cause` to make the dead-band's
+/// lower boundary explicit.
+#[test]
+fn first_park_still_self_heals_under_dead_band_close() {
+    let iv = decide(&perpetual_blocked_problem(Some(0)));
+    assert!(
+        matches!(iv, Intervention::UnblockGoal { .. }),
+        "a first-time false park is still self-healed (root-cause fix): {iv:?}"
+    );
+}
+
+/// T4 (F1 upper bound) — the general recurrence fast path is unchanged: at
+/// `recurrence >= RECURRENCE_ESCALATION_THRESHOLD` (3) the goal escalates via the
+/// pre-existing branch, so escalation is always bounded no later than the 3rd
+/// observation regardless of the new dead-band branch.
+#[test]
+fn general_fast_path_still_escalates_at_upper_floor() {
+    let iv = decide(&perpetual_blocked_problem(Some(
+        RECURRENCE_ESCALATION_THRESHOLD,
+    )));
+    assert!(
+        matches!(iv, Intervention::EscalateBlockedGoal { .. }),
+        "recurrence at the general floor still escalates via the fast path: {iv:?}"
+    );
+}
 
 /// EVERY detected problem carries a populated WHY after a cycle — the mandatory
 /// principle. A blocked perpetual goal AND a high distill-fail-rate both surface
@@ -792,7 +883,108 @@ fn escalate_blocked_goal_notification_carries_the_why() {
     }
 }
 
-/// Occurrence memory ACCUMULATES across ticks: after the Overseer acts on a
+/// T5 (F3 / I4 / SR1 / SR6) — the newly-reachable escalation path CANNOT
+/// amplify notifications. Repeated escalation of the SAME `goal_id` (as a
+/// re-parking loop would produce every cycle) is collapsed by the existing
+/// per-goal `blocked_goal_gate` to a SINGLE operator notification per channel —
+/// no new delivery channel, no SMTP amplification.
+#[test]
+fn repeated_blocked_goal_escalation_is_deduped_to_one_notification() {
+    let (store, _log) = FakeGoalStore::new(vec![]);
+    let (notifier, email_log, signal_log) = dual_recording_notifier();
+    let mut ov = Overseer::new(caps_with(ObservedState::default(), Box::new(store)))
+        .with_identity(overseer_identity())
+        .with_goal_health_enabled(true)
+        .with_operator_notifier(Box::new(notifier));
+
+    let escalation = Intervention::EscalateBlockedGoal {
+        goal_id: "fix-agent-kgpacks-rs-issue-17-ws2-int8-pq-embed".to_string(),
+        reason: no_progress_blocked_reason(4),
+        why: "perpetual re-park recurring at the detection floor (2×)".to_string(),
+    };
+
+    // Two consecutive cycles escalate the identical goal (the re-park loop).
+    let first = ov.act(&escalation);
+    assert!(
+        matches!(first, Ok(ActOutcome::GoalEscalated { .. })),
+        "the first escalation dispatches: {first:?}"
+    );
+    let _second = ov.act(&escalation);
+
+    for (chan, log) in [("email", &email_log), ("signal", &signal_log)] {
+        let seen = log.lock().unwrap();
+        assert_eq!(
+            seen.len(),
+            1,
+            "the {chan} channel received EXACTLY ONE notification despite two \
+             escalations of the same goal (blocked_goal_gate dedup)"
+        );
+    }
+}
+
+/// T6 (AC4 / F2 / SR3) — the escalation report NAMES the missing dependency so
+/// the operator receives the concrete blocker, and it carries ONLY non-sensitive
+/// identifiers — no secret-shaped substrings (credentials, SMTP passwords, keys).
+#[test]
+fn blocked_goal_escalation_names_dependency_without_leaking_secrets() {
+    let (store, _log) = FakeGoalStore::new(vec![]);
+    let (notifier, email_log, signal_log) = dual_recording_notifier();
+    let mut ov = Overseer::new(caps_with(ObservedState::default(), Box::new(store)))
+        .with_identity(overseer_identity())
+        .with_goal_health_enabled(true)
+        .with_operator_notifier(Box::new(notifier));
+
+    // The WHY names the concrete, out-of-tree missing dependency (#4124 AC #4).
+    let dependency = "agent-kgpacks-rs issue-17 WS2 int8/PQ embed";
+    let why = format!(
+        "perpetual goal re-parked 2× on the SAME root cause — blocked on missing \
+         dependency: {dependency}. Escalated instead of re-unblocked (#4124)."
+    );
+    let out = ov.act(&Intervention::EscalateBlockedGoal {
+        goal_id: "fix-agent-kgpacks-rs-issue-17-ws2-int8-pq-embed".to_string(),
+        reason: no_progress_blocked_reason(4),
+        why: why.clone(),
+    });
+    assert!(
+        matches!(out, Ok(ActOutcome::GoalEscalated { .. })),
+        "the escalation is dispatched: {out:?}"
+    );
+
+    // Substrings that MUST NOT appear — an escalation body must never render
+    // credentials or transport secrets (SR3).
+    let secret_markers = [
+        "password",
+        "passwd",
+        "secret",
+        "smtp_pass",
+        "api_key",
+        "apikey",
+        "token=",
+        "authorization:",
+        "bearer ",
+        "-----begin",
+    ];
+
+    for (chan, log) in [("email", &email_log), ("signal", &signal_log)] {
+        let seen = log.lock().unwrap();
+        assert_eq!(seen.len(), 1, "the {chan} channel received the escalation");
+        let n = &seen[0];
+        assert!(
+            n.problem.contains(dependency),
+            "the {chan} escalation body NAMES the missing dependency: {:?}",
+            n.problem
+        );
+        let haystack = format!("{} {}", n.headline, n.problem).to_lowercase();
+        for marker in secret_markers {
+            assert!(
+                !haystack.contains(marker),
+                "the {chan} escalation must not leak a secret-shaped substring \
+                 {marker:?}: {haystack:?}"
+            );
+        }
+    }
+}
+
 /// blocked goal (storing the occurrence via amplihack-memory-lib), a subsequent
 /// cycle RECALLS it, so the WHY reports `recurrence ≥ 1`. This is the feedback
 /// loop that turns a one-off false-park into a detected recurring root cause.
