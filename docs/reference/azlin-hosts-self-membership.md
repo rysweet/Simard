@@ -19,6 +19,32 @@ a green `joined` badge next to it.
 > **Note:** The `is_local` flag is a UI hint only. It MUST NOT be used for
 > authorization decisions or trust boundaries.
 
+## Discovery Timeout & Caching
+
+VM discovery for the **Available VMs** list runs `azlin list --output json`,
+which queries Azure and routinely takes 10–20s. To keep the Hosts panel
+responsive, `GET /api/hosts` bounds and caches this call:
+
+- **Hard timeout:** the `azlin list` call is bounded (20s). If it exceeds the
+  bound it is abandoned rather than blocking the request indefinitely.
+- **Short cache:** a successful discovery is cached in-process for 60s, so
+  refreshes and concurrent clients are served instantly instead of
+  re-querying Azure every request.
+- **Stale fallback:** if a fresh discovery times out but a previous result is
+  cached, the last-known VM list is served (flagged stale) instead of
+  blanking the panel.
+
+**Additive response fields:**
+
+| Field                  | Type    | Description                                                             |
+| ---------------------- | ------- | ----------------------------------------------------------------------- |
+| `discovery_timed_out`  | boolean | True when the `azlin list` discovery exceeded its timeout this request. |
+| `discovery_stale`      | boolean | True when the returned `discovered` list is a stale cached copy served after a timeout. |
+
+Both fields are always present. When discovery times out, the dashboard
+renders a small amber notice above the VM list so the empty/stale state is
+never silently mistaken for "no VMs".
+
 ## API
 
 ### `GET /api/azlin/hosts`
