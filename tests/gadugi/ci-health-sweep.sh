@@ -9,8 +9,9 @@
 #   - active workflow, latest run failure        -> ACTIONABLE failure (red)
 #
 # Asserts that disabled/cancelled/in-progress signals never fail the fleet,
-# that a genuine active-CI failure does, and that the exit code follows the
-# verdict.
+# that a genuine active-CI failure does, that the exit code follows the
+# verdict, and that the opt-in `--file-issues` write is guarded off the offline
+# fixture path (a live-only sweep) and advertised in help.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -67,5 +68,25 @@ if [ "$FAIL_CODE" -eq 0 ]; then
   echo "FAIL: failing fixture returned zero exit code" >&2
   exit 1
 fi
+
+# ── 4. --file-issues is an opt-in live-only write, guarded off the fixture ───
+# Filing deduplicated tracking issues requires a live sweep; combining the
+# write flag with an offline fixture must be rejected (deterministic, no
+# network, never creates a real issue).
+set +e
+GUARD_OUT="$(cargo run --quiet --bin simard -- ci-health --file-issues --from-json "$FAILING_FIXTURE" 2>&1)"
+GUARD_CODE=$?
+set -e
+printf '%s\n' "$GUARD_OUT"
+if [ "$GUARD_CODE" -eq 0 ]; then
+  echo "FAIL: --file-issues --from-json was accepted (must be rejected)" >&2
+  exit 1
+fi
+printf '%s\n' "$GUARD_OUT" | grep -F -- "--file-issues" >/dev/null
+printf '%s\n' "$GUARD_OUT" | grep -F "cannot be combined with" >/dev/null
+
+# The opt-in write flag is advertised in help.
+HELP_OUT="$(cargo run --quiet --bin simard -- ci-health --help 2>/dev/null)"
+printf '%s\n' "$HELP_OUT" | grep -F -- "--file-issues" >/dev/null
 
 echo "ci-health-sweep: PASS"

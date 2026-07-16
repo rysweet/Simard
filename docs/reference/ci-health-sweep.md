@@ -74,6 +74,7 @@ src/ci_health/
 ├── cache.rs      GreenShaCache — persisted {repo -> last-known-green head SHA}
 ├── gh.rs         GhWorkflowClient trait (incl. head_sha), RealGhWorkflowClient, pure parse/join helpers, fixture loader
 ├── report.rs     render_human
+├── steward.rs    actionable-failure -> deduplicated-issue bridge (ci_failure_signature, file_issues_for_report)
 └── tests.rs      unit tests
 ```
 
@@ -134,12 +135,16 @@ complete behavior), never to a wrong verdict.
 ## `simard ci-health`
 
 ```
-simard ci-health [--json] [--no-cache] [--from-json <path>]
+simard ci-health [--json] [--no-cache] [--file-issues] [--from-json <path>]
 
   --json               Emit the FleetReport as JSON (default: human table).
   --no-cache           Force a full re-collection of every repo, ignoring the
                        last-known-green head-SHA cache (the cache is still
                        refreshed from this sweep). Alias: --refresh.
+  --file-issues        For each distinct actionable failure, file a
+                       deduplicated tracking issue in the failing repo
+                       (see below). Read-only by default; this flag opts in to
+                       the write. Rejected with --from-json.
   --from-json <path>   Classify an offline snapshot fixture instead of calling
                        `gh` (the fixture shape mirrors the live snapshot).
 ```
@@ -168,6 +173,43 @@ The human report leads with a greppable banner (`CI-HEALTH: GREEN` /
 `CI-HEALTH: FAILING`) and a per-repo breakdown; each actionable failure is
 hoisted to the top with a direct run URL. The `--json` report is the same data
 as a stable `FleetReport` object.
+
+### Filing deduplicated tracking issues (`--file-issues`)
+
+Detecting failures is only half of the standing CI-health stewardship goal; the
+other half is *"dedupe to one issue/PR per distinct failure."* The
+[`ci_health::steward`] bridge (`src/ci_health/steward.rs`) converts a
+[`FleetReport`]'s actionable failures into deduplicated GitHub issues, reusing
+the [Stewardship](./stewardship-api.md) dedup contract rather than forking it:
+
+- **Distinct-failure identity.** A distinct CI failure is one broken *workflow
+  on a repo*, keyed by `<repo> :: <workflow>`. The volatile run id/URL and the
+  specific failing conclusion (`failure` / `timed_out` / `startup_failure`) are
+  **excluded** from the signature, so the same broken workflow hashes
+  identically across sweeps and across a `failure`↔`timed_out` flap — yielding
+  exactly one issue per broken workflow. The signature is
+  `failure_signature("ci_workflow_failure", "<repo> :: <workflow>")`, the same
+  8-byte SHA-256 prefix the orchestrator-failure steward uses.
+- **Target repo is the failing repo itself.** Unlike orchestrator-failure
+  routing, a CI failure's repo is already known (it is a governed repo), so no
+  routing matrix is consulted — the issue is filed in the repo whose CI failed.
+- **Dedup, then file.** For each distinct signature the bridge searches the
+  target repo (`gh issue list -R <repo> --state open --search
+  "stewardship-signature:<sig> in:body"`). A match short-circuits to
+  `MatchedExisting` (no new issue); otherwise a new issue is filed with the
+  standard `filed-by: simard-stewardship` / `stewardship-signature: <sig>`
+  front-matter plus CI-health specifics (repo, workflow, default branch, latest
+  conclusion, run URL). Two failures that hash to the same signature in one
+  sweep collapse to a single issue.
+- **Fail-loud.** A `gh` error on the search propagates and **no** issue is filed
+  for that signature — the loop never assumes "no matches" on a degraded search,
+  matching the orchestrator steward's contract.
+
+`--file-issues` is **opt-in**: the default sweep is read-only. It requires a
+live sweep and is rejected when combined with `--from-json` (filing real issues
+from an offline fixture would be wrong). The exit code still follows the verdict
+(non-zero while any actionable failure exists); the filed/matched issues are
+printed after the report.
 
 ### Governed fleet
 

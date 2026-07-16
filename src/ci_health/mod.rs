@@ -24,6 +24,7 @@ pub mod cache;
 pub mod classify;
 pub mod gh;
 pub mod report;
+pub mod steward;
 pub mod types;
 
 #[cfg(test)]
@@ -39,6 +40,7 @@ pub use gh::{
     snapshot_from_fixture,
 };
 pub use report::render_human;
+pub use steward::{ci_failure_signature, file_issues_for_report};
 pub use types::{
     FleetSnapshot, RepoSnapshot, RunConclusion, WorkflowRun, WorkflowSnapshot, WorkflowState,
 };

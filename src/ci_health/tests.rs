@@ -940,3 +940,258 @@ fn cache_round_trips_through_disk_and_tolerates_missing_or_corrupt() {
     std::fs::write(&path, b"{ this is not json").unwrap();
     assert!(GreenShaCache::load(&path).is_empty());
 }
+
+// ─────────────────── CI-health → deduplicated-issue bridge ──────────────────
+//
+// These pin the `steward` bridge that converts an actionable-failure report
+// into deduplicated tracking issues (the "one issue per distinct failure" half
+// of the standing CI-health goal), reusing the stewardship dedup contract.
+mod steward_bridge {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use super::super::classify::{ActionableFailure, FleetReport};
+    use super::super::steward::{ci_failure_signature, file_issues_for_report};
+    use crate::error::SimardError;
+    use crate::stewardship::{GhClient, GhIssue, StewardshipOutcome};
+
+    #[derive(Default)]
+    struct FakeGhClient {
+        /// Pre-seeded `search_issues` responses, keyed by (repo, signature).
+        search: Mutex<HashMap<(String, String), Vec<GhIssue>>>,
+        /// When set, every `search_issues` call returns this error.
+        search_error: Mutex<Option<String>>,
+        search_calls: Mutex<Vec<(String, String)>>,
+        create_calls: Mutex<Vec<(String, String, String)>>,
+        /// Monotonic issue-number source for created issues.
+        next_number: Mutex<u64>,
+    }
+
+    impl FakeGhClient {
+        fn new() -> Self {
+            Self {
+                next_number: Mutex::new(100),
+                ..Self::default()
+            }
+        }
+        fn seed_existing(&self, repo: &str, sig: &str, issues: Vec<GhIssue>) {
+            self.search
+                .lock()
+                .unwrap()
+                .insert((repo.to_string(), sig.to_string()), issues);
+        }
+        fn fail_search(&self, reason: &str) {
+            *self.search_error.lock().unwrap() = Some(reason.to_string());
+        }
+        fn search_calls(&self) -> Vec<(String, String)> {
+            self.search_calls.lock().unwrap().clone()
+        }
+        fn create_calls(&self) -> Vec<(String, String, String)> {
+            self.create_calls.lock().unwrap().clone()
+        }
+    }
+
+    impl GhClient for FakeGhClient {
+        fn search_issues(&self, repo: &str, signature: &str) -> Result<Vec<GhIssue>, SimardError> {
+            self.search_calls
+                .lock()
+                .unwrap()
+                .push((repo.to_string(), signature.to_string()));
+            if let Some(reason) = self.search_error.lock().unwrap().clone() {
+                return Err(SimardError::StewardshipGhCommandFailed { reason });
+            }
+            Ok(self
+                .search
+                .lock()
+                .unwrap()
+                .get(&(repo.to_string(), signature.to_string()))
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        fn create_issue(
+            &self,
+            repo: &str,
+            title: &str,
+            body: &str,
+        ) -> Result<GhIssue, SimardError> {
+            self.create_calls.lock().unwrap().push((
+                repo.to_string(),
+                title.to_string(),
+                body.to_string(),
+            ));
+            let mut n = self.next_number.lock().unwrap();
+            let number = *n;
+            *n += 1;
+            Ok(GhIssue {
+                number,
+                url: format!("https://github.com/{repo}/issues/{number}"),
+                title: title.to_string(),
+                body: body.to_string(),
+            })
+        }
+    }
+
+    fn af(repo: &str, workflow: &str, conclusion: &str, run_id: u64) -> ActionableFailure {
+        ActionableFailure {
+            repo: repo.to_string(),
+            default_branch: "main".to_string(),
+            workflow: workflow.to_string(),
+            conclusion: conclusion.to_string(),
+            run_id: Some(run_id),
+            run_url: Some(format!("https://github.com/{repo}/actions/runs/{run_id}")),
+        }
+    }
+
+    fn report(failures: Vec<ActionableFailure>) -> FleetReport {
+        FleetReport {
+            green: failures.is_empty(),
+            repos_checked: 1,
+            repos_from_cache: 0,
+            workflows_checked: failures.len(),
+            actionable_failures: failures,
+            repos: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn files_a_new_deduped_issue_per_distinct_failure() {
+        let f1 = af("rysweet/amplihack-rs", "Code Atlas", "failure", 1);
+        let f2 = af(
+            "rysweet/amplihack-rs",
+            "Publish Snapshot Release",
+            "failure",
+            2,
+        );
+        let gh = FakeGhClient::new();
+
+        let outcomes = file_issues_for_report(&report(vec![f1.clone(), f2.clone()]), &gh).unwrap();
+
+        assert_eq!(outcomes.len(), 2);
+        // Every distinct failure is searched (in its own repo, by its signature)
+        // and then filed.
+        assert_eq!(gh.search_calls().len(), 2);
+        assert_eq!(gh.create_calls().len(), 2);
+        for outcome in &outcomes {
+            match outcome {
+                StewardshipOutcome::FiledNew { repo, .. } => {
+                    assert_eq!(repo, "rysweet/amplihack-rs")
+                }
+                other => panic!("expected FiledNew, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn dedupes_against_an_existing_open_issue_without_filing() {
+        let f = af("rysweet/azlin", "CI", "failure", 7);
+        let sig = ci_failure_signature(&f);
+        let gh = FakeGhClient::new();
+        gh.seed_existing(
+            "rysweet/azlin",
+            &sig,
+            vec![GhIssue {
+                number: 55,
+                url: "https://github.com/rysweet/azlin/issues/55".to_string(),
+                title: "[ci-health] CI failing on rysweet/azlin".to_string(),
+                body: format!("stewardship-signature: {sig}\n"),
+            }],
+        );
+
+        let outcomes = file_issues_for_report(&report(vec![f]), &gh).unwrap();
+
+        assert_eq!(outcomes.len(), 1);
+        match &outcomes[0] {
+            StewardshipOutcome::MatchedExisting {
+                repo,
+                issue_number,
+                signature,
+                ..
+            } => {
+                assert_eq!(repo, "rysweet/azlin");
+                assert_eq!(*issue_number, 55);
+                assert_eq!(signature, &sig);
+            }
+            other => panic!("expected MatchedExisting, got {other:?}"),
+        }
+        // A matched signature must never create a new issue.
+        assert!(gh.create_calls().is_empty());
+    }
+
+    #[test]
+    fn collapses_duplicate_signatures_into_one_issue_per_sweep() {
+        // Two workflow files sharing a name / a repeated failure hash to the
+        // same signature; only one issue may be filed in a single sweep.
+        let f1 = af("rysweet/amplihack-rs", "CI", "failure", 1);
+        let f2 = af("rysweet/amplihack-rs", "CI", "timed_out", 2);
+        assert_eq!(ci_failure_signature(&f1), ci_failure_signature(&f2));
+        let gh = FakeGhClient::new();
+
+        let outcomes = file_issues_for_report(&report(vec![f1, f2]), &gh).unwrap();
+
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(gh.create_calls().len(), 1);
+    }
+
+    #[test]
+    fn green_report_files_nothing_and_touches_no_gh() {
+        let gh = FakeGhClient::new();
+        let outcomes = file_issues_for_report(&report(vec![]), &gh).unwrap();
+        assert!(outcomes.is_empty());
+        assert!(gh.search_calls().is_empty());
+        assert!(gh.create_calls().is_empty());
+    }
+
+    #[test]
+    fn a_degraded_search_propagates_and_never_files() {
+        let gh = FakeGhClient::new();
+        gh.fail_search("`gh issue list` exited 1");
+        let err =
+            file_issues_for_report(&report(vec![af("rysweet/azlin", "CI", "failure", 9)]), &gh)
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            SimardError::StewardshipGhCommandFailed { .. }
+        ));
+        // Fail-loud: no issue is filed while the search is degraded.
+        assert!(gh.create_calls().is_empty());
+    }
+
+    #[test]
+    fn issue_carries_the_dedup_frontmatter_and_ci_specifics() {
+        let f = af("rysweet/amplihack-rs", "Code Atlas", "failure", 42);
+        let sig = ci_failure_signature(&f);
+        let gh = FakeGhClient::new();
+
+        file_issues_for_report(&report(vec![f]), &gh).unwrap();
+
+        let (repo, title, body) = gh.create_calls().into_iter().next().unwrap();
+        assert_eq!(repo, "rysweet/amplihack-rs");
+        assert_eq!(
+            title,
+            "[ci-health] Code Atlas failing on rysweet/amplihack-rs"
+        );
+        assert!(body.contains("filed-by: simard-stewardship"));
+        assert!(body.contains(&format!("stewardship-signature: {sig}")));
+        assert!(body.contains("ci-health-repo: rysweet/amplihack-rs"));
+        assert!(body.contains("ci-health-workflow: Code Atlas"));
+        assert!(body.contains("default-branch: main"));
+        assert!(body.contains("latest-conclusion: failure"));
+        assert!(body.contains("https://github.com/rysweet/amplihack-rs/actions/runs/42"));
+    }
+
+    #[test]
+    fn signature_is_stable_across_volatile_run_id_and_conclusion() {
+        // Same broken repo+workflow, different run id and a failure/timed_out
+        // flap, must hash identically so re-sweeps dedupe.
+        let a = af("rysweet/azlin", "CI", "failure", 1);
+        let b = af("rysweet/azlin", "CI", "timed_out", 999);
+        assert_eq!(ci_failure_signature(&a), ci_failure_signature(&b));
+        // A different workflow in the same repo is a distinct failure.
+        let c = af("rysweet/azlin", "Rust CI", "failure", 1);
+        assert_ne!(ci_failure_signature(&a), ci_failure_signature(&c));
+        // The same workflow in a different repo is a distinct failure.
+        let d = af("rysweet/Simard", "CI", "failure", 1);
+        assert_ne!(ci_failure_signature(&a), ci_failure_signature(&d));
+    }
+}
