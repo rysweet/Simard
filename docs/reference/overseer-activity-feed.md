@@ -144,8 +144,9 @@ with concrete values — see the
 | `deploys` | Guarded deploys performed through the canary / self-deploy gates. |
 | `escalations` | Interventions handed off to the operator. |
 | `held` | Interventions a gate held back (autonomy / budget / conflict). |
-| `errors` | Capability errors encountered while acting (isolated, never fatal). |
-| `panicked` | The tick itself panicked and was isolated. Recorded, not swallowed. |
+| `errors` | **Isolated** per-intervention capability errors encountered while acting — surfaced for visibility (activity feed / dashboard / totals) but **never fatal** and, since #4080, **decoupled from health**: an isolated `act()` error no longer pins the meta-thread in `"erroring"`. |
+| `panicked` | The tick itself panicked and was isolated. Recorded, not swallowed. Implies `cycle_failed` (the panic path sets both). |
+| `cycle_failed` | **Additive (#4080), `#[serde(default)]`.** `true` **only** when the tick's OODA cycle itself failed — either `run_cycle()` returned `Err` or the tick panicked. This is the fatal-failure signal that (together with `panicked`) drives the meta-thread's `"erroring"` health; a tick that completes its cycle reports `false` even if isolated `act()` errors occurred. Placed immediately after `panicked` (the two fatal-failure signals sit together). |
 | `duration_ms` | Wall-clock duration of the tick. |
 | `observed_details` | **Additive.** Bare (unprefixed) lines — one per evidence signal of each ranked problem, plus benign non-escalating signals — with concrete values (e.g. `"distill parse-failure rate 34% (threshold 20%)"`). `#[serde(default)]`, capped at 24 lines. |
 | `action_details` | **Additive.** Self-prefixed lines — one per action taken / held / suppressed — with ids and URLs (e.g. `"did: filed issue https://github.com/…/2631"`, `"held: verify-and-merge PR …"`). `#[serde(default)]`, capped at 24 lines. |
@@ -172,6 +173,39 @@ fields (first match wins):
 | `consecutive_errors > 0` | `"erroring"` |
 | `last_run.is_none()` | `"idle"` |
 | otherwise | `"ok"` |
+
+#### What sets the meta-thread's `consecutive_errors` (#4080)
+
+For the synthetic **`overseer`** meta-thread row (built by
+`OverseerThreadStatus::overseer_meta`, since the meta-loop is driven directly by
+the daemon rather than the `Mind` scheduler), `consecutive_errors` is derived
+from the tick's **`last_success`** boolean, which is:
+
+```text
+last_success = !report.panicked && !report.cycle_failed
+```
+
+That is, the meta-thread is `"erroring"` **only** when the tick's OODA cycle
+itself failed — `run_cycle()` returned `Err` (`cycle_failed`) or the tick
+panicked (`panicked`). **Isolated `report.errors` no longer contribute.** A tick
+that completes its cycle reports `"ok"` even if one or more per-intervention
+`act()` calls failed; those failures are still counted in `errors` and summed
+into `OverseerTotals.errors` for the feed, so no signal is lost — they are
+simply decoupled from health.
+
+Because health is **recomputed fresh from this boolean every tick** (it is not a
+latched flag), recovery is automatic: the first tick that completes its cycle
+after a transient `act()` error flips the meta-thread straight back from
+`"erroring"` to `"ok"` — no "clear on next healthy tick" state machine is
+involved. Genuine cycle failures and panics still surface as `"erroring"`, so
+the fix cannot mask a real fault.
+
+> **Why keep `panicked` in the boolean?** Because the panic path sets
+> `cycle_failed = true` as well, `!panicked && !cycle_failed` is logically
+> equivalent to `!cycle_failed` today. The `panicked` term is retained
+> **deliberately** as defence-in-depth: if a future panic-handling path ever
+> forgets to set `cycle_failed`, the explicit `panicked` guard still forces
+> `"erroring"`. Do **not** "simplify" it away.
 
 ### Bounded by construction
 
@@ -310,7 +344,7 @@ which the SPA shows as a soft banner while keeping the last good render.
           "report": {
             "problems": 2, "issues_filed": 1, "recipes_launched": 1,
             "prs_merged": 0, "deploys": 0, "escalations": 0,
-            "held": 1, "errors": 0, "panicked": false, "duration_ms": 843,
+            "held": 1, "errors": 0, "panicked": false, "cycle_failed": false, "duration_ms": 843,
             "observed_details": [
               "distill parse-failure rate 34% (threshold 20%)",
               "blocked goal g-42: waiting on upstream review — needs human review"
@@ -331,6 +365,28 @@ which the SPA shows as a soft banner while keeping the last good render.
 Consumers should treat the section as optional: check `availability` /
 `freshness` before reading `data`. `recent` is newest-first. Unknown fields are
 ignored and missing fields default, so the schema can grow additively.
+
+### Worked example — isolated `act()` error stays `"ok"` (#4080)
+
+A tick can hit an isolated per-intervention failure (for example a
+verify-and-merge that is momentarily blocked) yet still complete its OODA cycle.
+Such a tick records the failure in `errors` for visibility but reports
+`cycle_failed: false`, so the meta-thread stays `"ok"`:
+
+```jsonc
+{
+  "id": "overseer", "enabled": true,
+  "last_success": true, "consecutive_errors": 0, "health": "ok"
+  // ← from report { "errors": 1, "panicked": false, "cycle_failed": false }
+  //   last_success = !panicked && !cycle_failed = true
+}
+```
+
+By contrast, a tick whose `run_cycle()` returned `Err` (or that panicked)
+reports `cycle_failed: true`, giving `last_success = false`,
+`consecutive_errors = 1`, and `health = "erroring"`. Because the label is
+recomputed from `last_success` every tick, the **next** clean tick flips the row
+straight back to `"ok"` — no stuck-flag reset is needed.
 
 ### Honest-state response example (disabled)
 

@@ -1620,7 +1620,7 @@ pub fn run_ooda_daemon(
                                  held={} goals_unblocked={} goals_escalated={} \
                                  memory_recalls={} memory_writes={} memory_errors={} \
                                  workstream_gaps_detected={} workstream_gaps_suppressed={} \
-                                 errors={} panicked={} ({}ms)",
+                                 errors={} panicked={} cycle_failed={} ({}ms)",
                                 report.problems,
                                 report.issues_filed,
                                 report.recipes_launched,
@@ -1637,6 +1637,7 @@ pub fn run_ooda_daemon(
                                 report.workstream_gaps_suppressed,
                                 report.errors,
                                 report.panicked,
+                                report.cycle_failed,
                                 report.duration_ms,
                             ),
                         );
@@ -1653,7 +1654,7 @@ pub fn run_ooda_daemon(
                         feed_threads.push(
                             crate::overseer::activity::OverseerThreadStatus::overseer_meta(
                                 feed_cadence_secs,
-                                !report.panicked && report.errors == 0,
+                                !report.panicked && !report.cycle_failed,
                             ),
                         );
                         for h in &thread_healths {
