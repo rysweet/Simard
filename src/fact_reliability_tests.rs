@@ -42,7 +42,7 @@
 
 use crate::fact_reliability::{
     KNOWN_CONCEPTS, RELIABILITY_THRESHOLD, canonical_concept, fact_passes_gate,
-    score_fact_reliability,
+    normalize_source_episode_id, score_fact_reliability,
 };
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -273,6 +273,57 @@ fn canonical_concept_rejects_offspec() {
             "off-spec {raw:?} must be dropped"
         );
     }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// normalize_source_episode_id: the shared grounding/provenance id key both seams
+// use so a whitespace-padded cited id grounds and threads provenance identically
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Surrounding whitespace an LLM might append to a re-emitted id is trimmed, so
+/// the *exact* grounding match still succeeds and the fact is not silently
+/// quarantined as ungrounded (lost fact-yield).
+#[test]
+fn normalize_source_episode_id_trims_surrounding_whitespace() {
+    for raw in [
+        " epi_00001",
+        "epi_00001 ",
+        "  epi_00001  ",
+        "epi_00001\n",
+        "\tepi_00001\r\n",
+    ] {
+        assert_eq!(
+            normalize_source_episode_id(raw),
+            "epi_00001",
+            "surrounding whitespace must be trimmed for {raw:?}"
+        );
+    }
+}
+
+/// A well-formed id (episode node ids are UUID-v7 / ULID and never carry
+/// whitespace) is returned unchanged — the normalization is a no-op for every
+/// real id, so it cannot alter an already-grounding fact's disposition.
+#[test]
+fn normalize_source_episode_id_is_noop_for_clean_id() {
+    for raw in [
+        "epi_00001",
+        "0192f8c1-5a3e-7abc-9def-0123456789ab",
+        "ep-123",
+    ] {
+        assert_eq!(normalize_source_episode_id(raw), raw);
+    }
+}
+
+/// Interior whitespace is deliberately preserved: `"ep 123"` is a genuinely
+/// different / malformed id and must stay ungrounded rather than silently fold
+/// onto `"ep123"` — matching the conservative surface-form policy of
+/// `canonical_concept` / `dedup_content_key`. An all-whitespace id normalizes to
+/// the empty string (which no episode resolves, so it is correctly ungrounded).
+#[test]
+fn normalize_source_episode_id_preserves_interior_and_empties_blank() {
+    assert_eq!(normalize_source_episode_id("ep 123"), "ep 123");
+    assert_eq!(normalize_source_episode_id("   "), "");
+    assert_eq!(normalize_source_episode_id(""), "");
 }
 
 // ───────────────────────────────────────────────────────────────────────────

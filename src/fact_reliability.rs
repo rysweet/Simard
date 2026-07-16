@@ -227,6 +227,36 @@ pub fn dedup_content_key(content: &str) -> String {
     content.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Normalize a distiller-cited source-episode id to the canonical key both
+/// write-boundary seams ground and thread provenance against: trim surrounding
+/// whitespace.
+///
+/// A cognitive-memory episode `node_id` (UUID-v7 / ULID) never carries interior
+/// *or* surrounding whitespace, so trimming is a no-op for any well-formed id.
+/// It only rescues an id an LLM re-emitted with a stray leading/trailing newline
+/// or space — a surface variant of a genuine id. Without this, such an id fails
+/// the *exact* grounding match, and the two failure modes are exactly the ones
+/// the shared gate exists to prevent:
+///
+///   * the fact scores ungrounded (tops out at 0.4 < [`RELIABILITY_THRESHOLD`])
+///     and is quarantined — a genuinely grounded fact silently dropped, dragging
+///     distillation fact-yield down, and
+///   * even if grounded, a `store_fact_with_provenance` call handed the padded id
+///     draws a `DERIVES_FROM` edge to a node that does not resolve, so the edge
+///     dangles and the stored fact loses its provenance.
+///
+/// Both the IPC server's `StoreFactGated` handler and the in-process
+/// [`crate::memory_consolidation`] `DistillFactSink` call this so a cited id
+/// grounds and threads provenance identically no matter which boundary writes it
+/// — the seam-parity invariant the shared gate is built on. Interior whitespace
+/// is deliberately preserved (a genuinely different / malformed id like
+/// `"ep 123"` is left ungrounded rather than silently merged), matching the
+/// conservative surface-form policy of [`canonical_concept`] and
+/// [`dedup_content_key`].
+pub fn normalize_source_episode_id(raw: &str) -> &str {
+    raw.trim()
+}
+
 /// Disposition of one write-boundary gate decision (issue #2679), returned by
 /// [`commit_gated_fact`].
 #[derive(Debug, Clone, PartialEq)]
