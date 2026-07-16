@@ -439,6 +439,11 @@ pub fn distill_recent_episodes_with_runner(
 
     record_distill_success_metric(true, None, pulled, stored);
 
+    // Durable per-pass fact-yield (promoted facts per input episode) so the
+    // real distiller's yield is observable/trendable over time — emitted only on
+    // a completed pass, where `stored`/`quarantined` reflect real gate decisions.
+    record_fact_yield_metric(pulled, stored, quarantined);
+
     Ok(DistillReport {
         input_count: pulled,
         fact_count: stored,
@@ -486,6 +491,63 @@ fn record_reliability_gate_metric(candidate_facts: u32, quarantined: u32, promot
             target: "simard::distill",
             error = %e,
             "failed to record distill_reliability_gate metric (distillation unaffected)",
+        );
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// distill_fact_yield instrumentation (perpetual-cognition goal)
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Fact-yield of one distillation pass: promoted facts per input episode
+/// (`fact_count / input_count`). `0.0` when no episodes were pulled — a guard
+/// against a division-by-zero that the [`DISTILL_MIN_EPISODES`] skip already
+/// makes unreachable on the emitting path.
+///
+/// This is the deterministic *definition* of fact-yield the docs use
+/// ("facts-per-episode-batch"); it is emitted per pass as the durable
+/// [`record_fact_yield_metric`] series so the yield of the real (non-deterministic
+/// LLM) distiller is observable and trendable over time, the way
+/// `recall_precision_at_k` makes ranked-recall quality observable.
+fn fact_yield(fact_count: u32, input_count: u32) -> f64 {
+    if input_count == 0 {
+        0.0
+    } else {
+        f64::from(fact_count) / f64::from(input_count)
+    }
+}
+
+/// Build the JSON `context` payload for the `distill_fact_yield` metric. Carries
+/// the raw counts so a consumer can recompute the ratio or segment by pass size,
+/// and `quarantined` so a low yield can be attributed to gate blocks vs. a
+/// low-signal batch.
+fn build_fact_yield_context(input_count: u32, fact_count: u32, quarantined: u32) -> String {
+    serde_json::json!({
+        "input_count": input_count,
+        "fact_count": fact_count,
+        "quarantined": quarantined,
+        "fact_yield": fact_yield(fact_count, input_count),
+    })
+    .to_string()
+}
+
+/// Record one `distill_fact_yield` metric event per **completed** pass so
+/// distillation fact-yield (promoted facts per input episode) is a first-class,
+/// trendable self-metric rather than only inert context on `distill_success_rate`.
+/// A regression in the real distiller's yield is then visible as a falling mean.
+/// Best-effort; no-op under `cfg!(test)` so unit tests never append to the
+/// operator's real `metrics.jsonl`.
+fn record_fact_yield_metric(input_count: u32, fact_count: u32, quarantined: u32) {
+    if cfg!(test) {
+        return;
+    }
+    let value = fact_yield(fact_count, input_count);
+    let context = build_fact_yield_context(input_count, fact_count, quarantined);
+    if let Err(e) = crate::self_metrics::record_metric("distill_fact_yield", value, &context) {
+        tracing::warn!(
+            target: "simard::distill",
+            error = %e,
+            "failed to record distill_fact_yield metric (distillation unaffected)",
         );
     }
 }
@@ -864,6 +926,32 @@ mod unit_tests {
         let payload = build_reliability_gate_context(0, 0, 0);
         let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(v["block_rate"], 0.0);
+    }
+
+    #[test]
+    fn fact_yield_is_facts_per_episode() {
+        // 3 facts from a 25-episode batch → 0.12 facts/episode.
+        assert!((fact_yield(3, 25) - 0.12).abs() < 1e-9);
+        // A perfect one-fact-per-episode pass → 1.0.
+        assert_eq!(fact_yield(20, 20), 1.0);
+    }
+
+    #[test]
+    fn fact_yield_is_zero_when_no_input_episodes() {
+        // Guards the division; the DISTILL_MIN_EPISODES skip makes this
+        // unreachable on the emitting path, but the helper must be total.
+        assert_eq!(fact_yield(0, 0), 0.0);
+        assert_eq!(fact_yield(5, 0), 0.0);
+    }
+
+    #[test]
+    fn fact_yield_metric_context_shape() {
+        let payload = build_fact_yield_context(25, 3, 2);
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["input_count"], 25);
+        assert_eq!(v["fact_count"], 3);
+        assert_eq!(v["quarantined"], 2);
+        assert!((v["fact_yield"].as_f64().unwrap() - 0.12).abs() < 1e-9);
     }
 
     #[test]
