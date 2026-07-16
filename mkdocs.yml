@@ -97,6 +97,7 @@ nav:
     - Operational Autonomy Model: concepts/operational-autonomy-model.md
     - Adaptive Scaling: concepts/adaptive-scaling.md
     - Pluggable Identity: concepts/pluggable-identity.md
+    - "Gastronome Identity — culinary, menu & event design": concepts/gastronome-identity.md
     - Multi-Identity Host Isolation: concepts/multi-identity-host-isolation.md
     - Write-Authority Posture: concepts/write-authority-posture.md
     - Identity-Scoped Cognition (Seed Goals, Observe-Only Act): concepts/identity-scoped-cognition.md

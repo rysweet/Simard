@@ -158,6 +158,31 @@ impl IdentityLoader for BuiltinIdentityLoader {
                 MemoryPolicy::default(),
                 request.contract.clone(),
             ),
+            "simard-gastronome" => IdentityManifest::new(
+                "simard-gastronome",
+                request.package_version.clone(),
+                vec![PromptAssetRef::new(
+                    "gastronome-system",
+                    "simard/gastronome_system.md",
+                )],
+                vec![
+                    BaseTypeId::new("local-harness"),
+                    BaseTypeId::new("rusty-clawd"),
+                    BaseTypeId::new("copilot-sdk"),
+                    BaseTypeId::new("claude-agent-sdk"),
+                    BaseTypeId::new("ms-agent-framework"),
+                ],
+                capability_set([
+                    BaseTypeCapability::PromptAssets,
+                    BaseTypeCapability::SessionLifecycle,
+                    BaseTypeCapability::Memory,
+                    BaseTypeCapability::Evidence,
+                    BaseTypeCapability::Reflection,
+                ]),
+                OperatingMode::Orchestrator,
+                MemoryPolicy::default(),
+                request.contract.clone(),
+            ),
             "simard-composite-engineer" => IdentityManifest::compose(
                 "simard-composite-engineer",
                 request.package_version.clone(),
@@ -324,6 +349,22 @@ mod tests {
             !manifest.components.is_empty(),
             "composite should have components"
         );
+    }
+
+    #[test]
+    fn builtin_loader_loads_gastronome_identity() {
+        let loader = BuiltinIdentityLoader;
+        let manifest = loader
+            .load(&IdentityLoadRequest::new(
+                "simard-gastronome",
+                "0.1.0",
+                test_contract(),
+            ))
+            .unwrap();
+        assert_eq!(manifest.name, "simard-gastronome");
+        assert_eq!(manifest.default_mode, OperatingMode::Orchestrator);
+        assert_eq!(manifest.prompt_assets[0].id.as_str(), "gastronome-system");
+        assert!(manifest.supports_base_type(&BaseTypeId::new("local-harness")));
     }
 
     #[test]

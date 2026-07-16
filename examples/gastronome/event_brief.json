@@ -1,0 +1,11 @@
+{
+  "name": "Harvest Supper",
+  "guests": 24,
+  "serve_time": "19:30",
+  "dietary_constraints": ["vegetarian", "nut-free"],
+  "courses": [
+    { "course": "starter" },
+    { "course": "main" },
+    { "course": "dessert", "recipe_id": "lemon-posset" }
+  ]
+}

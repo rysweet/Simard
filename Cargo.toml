@@ -33,6 +33,10 @@ name = "simard-engineer-step"
 path = "src/bin/simard_engineer_step.rs"
 
 [[bin]]
+name = "simard-gastronome"
+path = "src/bin/simard_gastronome.rs"
+
+[[bin]]
 name = "simard-engineer-loop-recipe"
 path = "src/bin/simard_engineer_loop_recipe.rs"
 

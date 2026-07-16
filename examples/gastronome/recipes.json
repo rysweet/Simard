@@ -1,0 +1,127 @@
+{
+  "recipes": [
+    {
+      "id": "bruschetta",
+      "name": "Tomato Bruschetta",
+      "course": "starter",
+      "base_servings": 6,
+      "dietary_tags": ["vegetarian", "vegan", "dairy-free", "nut-free"],
+      "ingredients": [
+        {
+          "ingredient": {
+            "name": "sourdough",
+            "unit": "kg",
+            "cost_per_unit": 4.5,
+            "nutrition_per_unit": { "calories": 2600.0, "protein_g": 90.0, "carbs_g": 500.0, "fat_g": 20.0 }
+          },
+          "quantity": 0.06
+        },
+        {
+          "ingredient": {
+            "name": "tomatoes",
+            "unit": "kg",
+            "cost_per_unit": 3.0,
+            "nutrition_per_unit": { "calories": 180.0, "protein_g": 9.0, "carbs_g": 39.0, "fat_g": 2.0 }
+          },
+          "quantity": 0.1
+        },
+        {
+          "ingredient": {
+            "name": "olive oil",
+            "unit": "litre",
+            "cost_per_unit": 8.0,
+            "nutrition_per_unit": { "calories": 8840.0, "protein_g": 0.0, "carbs_g": 0.0, "fat_g": 1000.0 }
+          },
+          "quantity": 0.008
+        }
+      ],
+      "steps": [
+        { "description": "toast bread", "minutes": 8, "active": false },
+        { "description": "dice and dress tomatoes", "minutes": 12, "active": true },
+        { "description": "assemble", "minutes": 6, "active": true }
+      ]
+    },
+    {
+      "id": "mushroom-risotto",
+      "name": "Wild Mushroom Risotto",
+      "course": "main",
+      "base_servings": 4,
+      "dietary_tags": ["vegetarian", "gluten-free", "nut-free"],
+      "ingredients": [
+        {
+          "ingredient": {
+            "name": "arborio rice",
+            "unit": "kg",
+            "cost_per_unit": 3.2,
+            "nutrition_per_unit": { "calories": 3500.0, "protein_g": 70.0, "carbs_g": 790.0, "fat_g": 6.0 }
+          },
+          "quantity": 0.09
+        },
+        {
+          "ingredient": {
+            "name": "mushrooms",
+            "unit": "kg",
+            "cost_per_unit": 9.0,
+            "nutrition_per_unit": { "calories": 220.0, "protein_g": 31.0, "carbs_g": 33.0, "fat_g": 3.0 }
+          },
+          "quantity": 0.12
+        },
+        {
+          "ingredient": {
+            "name": "parmesan",
+            "unit": "kg",
+            "cost_per_unit": 22.0,
+            "nutrition_per_unit": { "calories": 4310.0, "protein_g": 380.0, "carbs_g": 41.0, "fat_g": 290.0 }
+          },
+          "quantity": 0.03
+        }
+      ],
+      "steps": [
+        { "description": "sweat aromatics", "minutes": 10, "active": true },
+        { "description": "toast rice and add stock gradually", "minutes": 22, "active": true },
+        { "description": "rest and finish with parmesan", "minutes": 5, "active": true }
+      ]
+    },
+    {
+      "id": "lemon-posset",
+      "name": "Lemon Posset",
+      "course": "dessert",
+      "base_servings": 6,
+      "dietary_tags": ["vegetarian", "gluten-free", "nut-free"],
+      "ingredients": [
+        {
+          "ingredient": {
+            "name": "double cream",
+            "unit": "litre",
+            "cost_per_unit": 3.5,
+            "nutrition_per_unit": { "calories": 4490.0, "protein_g": 21.0, "carbs_g": 29.0, "fat_g": 480.0 }
+          },
+          "quantity": 0.1
+        },
+        {
+          "ingredient": {
+            "name": "lemons",
+            "unit": "each",
+            "cost_per_unit": 0.35,
+            "nutrition_per_unit": { "calories": 17.0, "protein_g": 0.6, "carbs_g": 5.0, "fat_g": 0.2 }
+          },
+          "quantity": 0.5
+        },
+        {
+          "ingredient": {
+            "name": "caster sugar",
+            "unit": "kg",
+            "cost_per_unit": 1.4,
+            "nutrition_per_unit": { "calories": 4000.0, "protein_g": 0.0, "carbs_g": 1000.0, "fat_g": 0.0 }
+          },
+          "quantity": 0.04
+        }
+      ],
+      "steps": [
+        { "description": "simmer cream and sugar", "minutes": 10, "active": true },
+        { "description": "add lemon and portion", "minutes": 10, "active": true },
+        { "description": "chill to set", "minutes": 180, "active": false }
+      ]
+    }
+  ]
+}
