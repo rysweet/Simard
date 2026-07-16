@@ -2423,3 +2423,156 @@ REJECT-persist-`last_delivered` (four reasons) + no-threshold-move ruling, with 
 remedy traps (§22.7). It also surfaces one **open landing-order question** (D1-first vs D2-first) for the implementation
 phase. D1/D2/D3 remain live and unremediated; the L0→L1→L2→L3 whole-loop remediation order (§16.3) stands; **no
 production `.rs` changed; no remediation landed.**
+
+## §23 — Sixteenth-wave net-new findings (HEAD `9fd1ea0a`/`a68296c6`, zero non-test source drift) — two parallel dives: the **"unwired WHY reasoner" lever is STALE at HEAD** — the breaker *and* the issue-#17 bare-park reinvestigation sweep are both default-wired, so the real bare-park condition is the `completion_evidence` gate + env kill-switch, not a missing subsystem (secondary); the **signature-invariant recurrence** proof that `goal:blocked:<id>` omits the WHY token so a correctly-classified terminal block is indistinguishable from a bare park (secondary); the **emission/notification decoupling** — the `workstream-gap` token can recur in the composite with *zero* operator notifications when gap-scan is disabled, a strictly weaker "observe-into-signature-without-closing" precondition (secondary); and the architect **two-lane reconciliation + 14-claim exact-citation re-verification** ("no stale citations" at `a68296c6`) that comes down on **D2-first (order B)** for §22's open landing-order question, arguing no fix depends on another's *code* (tertiary)
+
+**Two parallel deep dives**, folded here — a patterns/secondary dive at HEAD `9fd1ea0a`
+([`secondary_blocked_park_and_gap_spawn_coupling_HEAD_9fd1ea0a.md`](./secondary_blocked_park_and_gap_spawn_coupling_HEAD_9fd1ea0a.md))
+and an architect/tertiary dive at HEAD `a68296c6`
+([`tertiary_architecture_TWO_LANE_RECONCILIATION_AND_LANDING_HEAD_a68296c6.md`](./tertiary_architecture_TWO_LANE_RECONCILIATION_AND_LANDING_HEAD_a68296c6.md)).
+Drift re-check: `git diff --name-only 7293de99..HEAD -- '*.rs'` (the §22 pin → this HEAD) is **empty** — the two
+intervening commits (`9fd1ea0a`, `a68296c6`) are `docs(investigation)/*.md`-only. The wider audit
+`git diff --name-only dea65df8..HEAD -- '*.rs'` = **`src/overseer/tests_root_cause.rs` only** (the net-additive
+`loud_lane_a_recurring_signature_does_not_feed_lane_b_recurrence` decoupling pin, already folded at §17/§20.4/§22.7).
+**All non-test production source is byte-identical to the §20/§21/§22 grounding**, so every load-bearing line number below
+re-verifies exact (both dives independently re-opened their citations; the architect published a 14-row re-verification
+table and I spot-re-confirmed `cycle.rs:582-583`, `no_progress.rs:203-207`, `sensor.rs:299-301`, `mod.rs:596-597,1603-1613`,
+`cycle.rs:628` at HEAD).
+**Empirical re-grounding this wave (re-run during consolidation at HEAD `a68296c6`):**
+`overseer::tests_root_cause` → **21/0** (incl. `loud_lane_a_…`), `overseer::tests_memory_recall` → **32/0**,
+`overseer::tests_gap_scan` → **21/0**, `overseer::tests_whisper` → **28/0**, `no_progress` → **77/0** = **179 passed,
+0 failed** — identical to the §22 re-grounding. **No verdict reversal across sixteen waves; D1/D2/D3 remain live and
+unmerged; no remediation landed.** This wave is a **framing-correction + reconciliation** pass: it *corrects a stale
+mechanism claim* carried from early artifacts, *sharpens* the observe-without-closing thesis on both lanes, and *takes a
+position* on the §22 open landing-order question. The five net refinements are §23.1–§23.5.
+
+- **23.1 — NET-NEW correction: the "unwired/degraded WHY reasoner" lever is STALE at HEAD — the breaker AND the issue-#17
+  bare-park reinvestigation sweep are BOTH default-wired; the real "no WHY classification" condition is the
+  `completion_evidence` gate + env kill-switch, a degraded *configuration*, not a missing subsystem (secondary A2).**
+  Prior artifacts (`blocked_transition_and_escalation_idempotency.md §3`; `DISCOVERIES.md #4`) named an *unwired/degraded
+  WHY reasoner* as the "single lever." At live HEAD this is **no longer accurate**: (i) `cycle.rs:583` gates on
+  `no_progress_investigation_enabled()` — **default ON** (`no_progress.rs:203-207`; `SIMARD_NO_PROGRESS_INVESTIGATE=off`
+  is an opt-out kill-switch, `unwrap_or(true)`); (ii) `cycle.rs:599-608` calls `apply_no_progress_breaker_investigated`
+  with a real production `DeterministicNoProgressReasoner::new(source_ref)` (`cycle.rs:593-594`), a `CloneRepoHealer`, and
+  a `QueueingEngineerDispatcher` — so a stall is classified and routed down `resolution_for_why`, not parked bare; (iii)
+  `cycle.rs:627-636` **additionally** calls **`reinvestigate_bare_blocked_goals`** (`cycle.rs:628`, verified) — the
+  issue-#17 sweep that scans the board for goals still in a *bare* `[OODA-SAFEGUARD] … needs human review` block and
+  re-runs the same reasoner + ladder, un-blocking on a non-terminal rung or authoring a WHY-bearing reason otherwise. So
+  bare parks are **actively upgraded to WHY-bearing every cycle**. The gate that actually *preserves* bare, unexplained
+  parks is narrower: the **whole breaker + reinvestigation block is gated on `memories.completion_evidence == Some`**
+  (`cycle.rs:582`, `if let Some(source) = &memories.completion_evidence`). Absent that memory pair (non-daemon callers, or
+  a daemon config without the completion-evidence source), **neither parking nor reinvestigation runs**, so a pre-existing
+  bare park persists untouched and no WHY is ever produced — and the env kill-switch path (`cycle.rs:684-698`) falls back
+  to `apply_no_progress_breaker`, whose ladder authors the *bare* `no_progress_blocked_reason` ("…consecutive no-action
+  cycles; needs human review", `no_progress_breaker.rs:75,123`). **Net correction:** the classification machinery exists
+  and is default-wired; bare parks are a **degraded-configuration artifact** (evidence source absent or kill-switch
+  engaged), not a missing subsystem. The root-cause *shape* (bare park → no self-resolution) is unchanged **where the gate
+  is off**; the *mechanism description* in the early artifacts is corrected. **Verification-phase question:** does the
+  production daemon actually supply `memories.completion_evidence`? If yes, sustained bare parks should self-heal and the
+  reviewer should audit the reasoner's *classification accuracy* (e.g. kgpacks recurring despite an `AlreadyComplete`
+  classification implies the done-gate/verify path is misfiring), not the breaker's existence; if no, that absence is the
+  concrete "no WHY" root cause.
+
+- **23.2 — NET-NEW pattern "signature-invariant recurrence": `goal:blocked:<id>` is dedup-keyed on `goal_id` ONLY and
+  carries NO WHY token, so a *correctly-classified terminal block* re-emits the identical signature as a bare park —
+  recurrence is NOT evidence of a missing classification (secondary A1/A3).** `Signal::GoalBlocked` orients to a `Problem`
+  with `dedup_key = format!("goal:blocked:{goal_id}")` (`mod.rs:1336`). The WHY class (`AlreadyComplete`,
+  `UnclearCriteria`, `GenuinelyStuck`, `UpstreamDependency`, …) lives only in the goal's block-reason *text* and in
+  `problem.why`; it is **never** part of the `dedup_key`, and the observation signature is built purely from sorted/deduped
+  dedup_keys (`observation_signature`, `mod.rs:1068-1073`). **Consequence:** the recurring `goal:blocked:<slug>` token is
+  *invariant* to whether the park is bare or WHY-bearing — a goal correctly classified `UnclearCriteria` (→ human),
+  `GenuinelyStuck` (→ human), or `UpstreamDependency` (→ defer until upstream lands) **legitimately stays blocked and
+  re-emits the identical signature every window**. So the focus premise "bare no-progress, no WHY classification"
+  **cannot be confirmed from the signature**; the recurrence looks the same either way. The persistent `goal:blocked`
+  recurrence is the expected fingerprint of *terminally-classified-but-unresolved* work. Even with the reasoner wired
+  (§23.1), the cluster recurs because the terminal WHY classes *intentionally* keep the goal blocked, and **no rung
+  converges the recurring observation signal** — `decide_blocked_goal` (`mod.rs:1603-1631`) only *escalates once per
+  window* (gated, at `recurrence >= RECURRENCE_ESCALATION_THRESHOLD` `mod.rs:1613`) or *reports*; it **never marks the
+  observation lane resolved**. Per-class ladder (secondary A3 table): kgpacks #12/17/18/23/25 + parity →
+  `AlreadyComplete`/`MissingPrecondition` (should clear — if they recur, classification or the done-gate is failing);
+  coverage-audit-to-70% → `UnclearCriteria` (uncheckable done-gate → **stays blocked, correctly**); coin-benchmark harness
+  → `MissingPrecondition`/`UpstreamDependency`-defer (**stays blocked** until upstream lands); simard-identity personas →
+  `GoalUncovered`(active)/`UnclearCriteria`(blocked) (**stays blocked**). **Same root shape as the gap loop (§23.3):
+  observe-without-closing on the observation lane.** New named anti-pattern for the library: *don't infer "unclassified"
+  from recurrence.*
+
+- **23.3 — NET-NEW nuance: signature emission is DECOUPLED from notification — the `workstream-gap` token can recur in
+  the composite with ZERO operator notifications when gap-scan is disabled, a strictly WEAKER precondition than
+  "notify-without-closing" (secondary B2).** `act_flag_workstream_gaps` (`mod.rs:884-946`) is **notify-only**: it peeks
+  `gap_gate` (`WhisperGate::new(900, 200)`) keyed `workstream-gap:{g.signature}` (`:901`), sends one consolidated operator
+  notification (email + Signal, `:929-930`), commits the gate (`:932-933`) — **no `launch`, no `file_issue`, no engineer
+  spawn** (the Decide arm `mod.rs:1534-1543` merely carries `WorkstreamGap` evidence into `Intervention::FlagWorkstreamGaps`,
+  vs. the sibling `StepFailure` arm `:1549-1580` which produces a real `Intervention::LaunchRecipe` — `WorkstreamCoverage`
+  is the sole High-family arm with no launch edge, reconfirming D3). **The net-new nuance:** the `workstream-gap` token
+  enters the composite at **Orient** — `signal_to_problem` mints `dedup_key = "workstream-gap"` (`mod.rs:1371`) and
+  `write_back_observation(&cycle.problems)` (`wiring.rs:301`) writes `observation_signature` over the oriented problems,
+  gated only by the `write_back_gate` — **independent of the Act phase**, which can be *held entirely* when
+  `!self.gap_scan_enabled` (`mod.rs:596-597`: `if matches!(iv, Intervention::FlagWorkstreamGaps { .. }) &&
+  !self.gap_scan_enabled { return held_plan(iv, "held: gap-scan disabled (SIMARD_OVERSEER_GAP_SCAN)") }`; default `false`
+  at `:300`). **Consequence:** the token can recur in the signature **even when zero notifications fire** (gap-scan
+  disabled) ⇒ the loop is "observe-into-signature *without any* closing action" — a strictly weaker precondition than the
+  prior "notify-without-closing" framing, and a **silent-degradation surface**: gaps recur in the operator-visible
+  signature with *zero* operator alerting. Worth a convergence gauge on `gap_scan_enabled` state. Any remediation must key
+  on `GapItem.signature` (per-gap), **not** the bare `"workstream-gap"` dedup_key (**INV-GAP-KEY trap**, `mod.rs:1371`),
+  else all gaps fold into one issue.
+
+- **23.4 — NET-NEW reconciliation: the architect re-verified all 14 load-bearing citations exact at `a68296c6` ("no stale
+  citations") and confirmed the `tests_root_cause.rs` `loud_lane_a_…` test codifies the two-lane decoupling as a
+  regression invariant (tertiary §0–§1).** Rather than trust the docs' own line numbers, the tertiary dive independently
+  re-opened every cited seam at HEAD and published a 14-row status table, all ✅ exact: `observation_signature`
+  (`mod.rs:1068-1073`), write-back over oriented problems (`wiring.rs:301`), recall-driven `RecurringSignature` →
+  `dedup_key = sanitize_recalled(signature)` (`mod.rs:1353-1359`), Lane-A floor `RECURRING_SIGNATURE_THRESHOLD = 2`
+  (`signal.rs:362,463`), Lane-B append-only `store_fact` ratchet (`mod.rs:1034`), Lane-B escalate at
+  `RECURRENCE_ESCALATION_THRESHOLD (3)` (`mod.rs:1613`; `root_cause.rs:33`), notify-only `WorkstreamCoverage`
+  (`mod.rs:1534-1543`) vs. launching `StepFailure` (`:1549-1580`), bare `"workstream-gap"` dedup_key (`mod.rs:1371`),
+  `goal:blocked:{goal_id}` carrying no WHY (`mod.rs:1336`), `resource:engineer_spawn` passive telemetry (`mod.rs:1270`),
+  the WHY double-gate (`cycle.rs:582-583`), and volatile per-process whisper gates (`guardrails.rs:292-333`). The wider
+  `dea65df8..HEAD` audit shows the *only* `.rs` change is the net-additive test
+  `loud_lane_a_recurring_signature_does_not_feed_lane_b_recurrence` (`tests_root_cause.rs:477+`), which **hardens this
+  wave's two-lane thesis as a regression invariant and contradicts nothing** — the two lanes (Lane A episode/visible-count
+  `RecurringSignature.occurrences`; Lane B root-cause/escalation `store_fact` ratchet) **share no counter**, so the `×2`
+  carries zero information about whether Lane B reached `3`. The committed root-cause analysis is **sound and live**.
+
+- **23.5 — NET-NEW position on §22's open landing-order question: the architect comes down on D2-FIRST (order B),
+  arguing no fix depends on another's *code* (only verification is cleaner in sequence); the atomicity table + rejected
+  levers are re-endorsed (tertiary §2–§5).** §22 surfaced an honest divergence between **(A) D1-first** (freeze the
+  signature *set* first so the signature-keyed upsert has a fixed target — an upsert cannot collapse a *moving* nested key)
+  and **(B) D2-first**. This wave's architect **endorses order (B): D2 → D3 → D1 → convergence gauges**, with the rationale
+  that D2 "drains the `goal:blocked:*` population at the source — the largest token cluster — and unlatches escalation,"
+  and crucially that **"no fix depends on another's *code*, but the *verification* of each is cleaner in this sequence"**
+  (D1 last keeps its cosmetic-looking-but-real diff reviewable once volume has dropped). **Honest reconciliation (not a
+  reversal):** this *narrows* the §22 question but does **not** fully rebut the §21.4/§22 dependency argument — it sidesteps
+  the "upsert cannot collapse a moving nested key" concern by asserting D1↔D2 is not a hard *code* dependency; the
+  implementation phase should still either land D1 before D2 **or** prove D2's upsert key is stable under nesting before
+  deferring D1. The rest of the architect ruling re-confirms §22 verbatim: **atomicity** — D2 (WHY-gate close +
+  count-in-content upsert) is **ATOMIC** (the accrual gate `cycle.rs:582` and the counter `mod.rs:1034/1613` form a
+  *latch*; the de-ratchet must be a count-in-content upsert, **NEVER** the literal `store_fact_with_caller_key` one-liner,
+  or `DedupMode::CallerKey` collapses `recall.len()` to 1 and makes `>=3` dead code); D1 (write-back emission filter), D3
+  (per-gap `≥2×→LaunchRecipe` keyed on `GapItem.signature`), and gauges are **INDEPENDENT**; **rejected levers re-endorsed**
+  — persisting `last_delivered` (masks an open backlog as convergence; duplicates Lane-B durability; loads a correctness
+  surface onto a primitive correct *because* volatile) and moving `2`/`3` (lanes decoupled; escalates honest transients);
+  and **`resource:engineer_spawn` is NOT a fourth defect** — benign passive telemetry (`mod.rs:1270`) with no causal edge
+  to `workstream-gap`, co-occurring only because both predicates held in one window (backlog uncovered AND engineers
+  saturated). The three tokens are **three symptoms of one under-resourced, non-converging state** — `goal:blocked` (idle
+  stuck) + `workstream-gap` (active uncovered) + `resource:engineer_spawn` (no spare executors) — not an orchestration
+  cycle; actual spawning lives in the OODA loop (`no_progress.rs` `SpawnEngineer` rung, bounded to one guided retry via
+  `mark_guided_retry`), with no unfulfilled-spawn defect at the overseer boundary.
+
+**§23 delta:** verdict unchanged across all sixteen waves — the `×2` is an **honest** re-observation of a static,
+under-resourced, non-advancing problem set (Lane A `RecurringSignature.occurrences`, `signal.rs:455-470`), **not** a
+dedup/replay artifact; the **defect is the response** — two observe-and-flag loops that never close (`goal:blocked`
+observation lane never resolved by `decide_blocked_goal`, `workstream-gap` notify-only with no launch edge), a self-feed
+whose mutating nested signature defeats the exact-string dedup gate (D1), and a cross-lane `2↔3` visibility gap (D2). This
+wave re-grounds every load-bearing citation at HEAD `9fd1ea0a`/`a68296c6` (zero non-test source drift; fresh **179/0**
+across five suites) and adds five refinements: **(1)** the *stale "unwired WHY reasoner"* correction — the breaker and the
+issue-#17 `reinvestigate_bare_blocked_goals` sweep are both default-wired, so bare parks are a `completion_evidence`-gate +
+kill-switch *configuration* artifact, not a missing subsystem (§23.1); **(2)** the *signature-invariant recurrence* pattern
+— `goal:blocked:<id>` omits the WHY token, so recurrence cannot be read as a missing classification (§23.2); **(3)** the
+*emission/notification decoupling* — the `workstream-gap` token can recur with **zero** operator notifications when
+gap-scan is disabled, a silent-degradation surface and a strictly weaker observe-without-closing precondition (§23.3);
+**(4)** the architect *14-claim exact-citation re-verification* ("no stale citations" at `a68296c6`) with the
+`loud_lane_a_…` two-lane-decoupling regression invariant (§23.4); and **(5)** the architect *D2-first (order B)* position
+on §22's open landing-order question — narrowing it by arguing no hard *code* dependency, while leaving the "prove-the-
+upsert-key-is-stable-under-nesting-or-land-D1-first" caveat open — plus the re-endorsed atomicity table, rejected levers,
+and `engineer_spawn`-is-not-a-fourth-defect ruling (§23.5). D1/D2/D3 remain live and unremediated; the L0→L1→L2→L3
+whole-loop remediation order (§16.3) stands; **no production `.rs` changed; no remediation landed.**
