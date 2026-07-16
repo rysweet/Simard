@@ -89,6 +89,77 @@ fn score_compare_improve_load_a_saved_run() {
 }
 
 #[test]
+fn leaderboard_command_ranks_baseline_and_team_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    // Empty gym: the command must still succeed (nothing to rank).
+    dispatch_with_home(home, args(&["leaderboard"])).unwrap();
+
+    // Populate a baseline and a team run for the same model on the same snapshot.
+    dispatch_with_home(
+        home,
+        args(&[
+            "run",
+            "claude-opus-4.6",
+            "--strategy",
+            "baseline",
+            "--profile",
+            "opus",
+        ]),
+    )
+    .unwrap();
+    dispatch_with_home(
+        home,
+        args(&[
+            "run",
+            "claude-opus-4.6",
+            "--strategy",
+            "team",
+            "--profile",
+            "opus-team",
+        ]),
+    )
+    .unwrap();
+
+    // Both the aggregate and the profile-scoped views must dispatch cleanly.
+    dispatch_with_home(home, args(&["leaderboard"])).unwrap();
+    dispatch_with_home(home, args(&["leaderboard", "--profile", "opus"])).unwrap();
+
+    // The usage string must advertise the new command.
+    assert!(coin_gym_usage().contains("leaderboard"));
+}
+
+#[test]
+fn leaderboard_verdict_shows_team_beating_baseline_on_the_sample() {
+    use super::local_leaderboard::build_local_leaderboard;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    // On the bundled sample the two strategies must share a snapshot so the A/B
+    // is comparable; the team's abstention gate lifts precision 60% → 100%.
+    dispatch_with_home(
+        home,
+        args(&["run", "claude-opus-4.6", "--strategy", "baseline"]),
+    )
+    .unwrap();
+    dispatch_with_home(
+        home,
+        args(&["run", "claude-opus-4.6", "--strategy", "team"]),
+    )
+    .unwrap();
+
+    let board = build_local_leaderboard(home, None).unwrap();
+    assert_eq!(board.head_to_head.len(), 1, "one baseline-vs-team pair");
+    let h = &board.head_to_head[0];
+    assert!(
+        !h.cross_snapshot,
+        "both runs use the bundled sample snapshot"
+    );
+    assert!(h.team_beats_baseline, "team lifts precision on equal reach");
+    assert!(board.multiagent_beats_baseline);
+}
+
+#[test]
 fn profiles_command_runs_on_empty_and_populated_home() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();

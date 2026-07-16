@@ -13,17 +13,22 @@
 //! executor that delegates to `coin evaluate` (real Docker wiring is Phase 3), a
 //! scorer, a leaderboard comparator, an offline failure-analyst plus
 //! overfitting-reviewer gate, profiles, and the
-//! `coin-gym run|score|compare|improve|profiles` CLI. The whole pipeline runs
+//! `coin-gym run|score|compare|improve|leaderboard|profiles` CLI. The whole
+//! pipeline runs
 //! offline against a mock oracle so it is exercised without a VM. Live grading
 //! (Phase 3 VM) remains a follow-up on issue #2823; the live self-improvement
 //! loop with verify/rollback (Phase 5, issue #2825) is implemented offline in
-//! [`improve_loop`] behind `coin-gym improve --holdout fresh`.
+//! [`improve_loop`] behind `coin-gym improve --holdout fresh`. The LOCAL
+//! leaderboard (`coin-gym leaderboard`) ranks the persisted runs and renders the
+//! single-model baseline vs. multi-agent team head-to-head that grades the
+//! done-gate — see [`local_leaderboard`].
 
 pub mod agent_runner;
 pub mod executor;
 pub mod improve;
 pub mod improve_loop;
 pub mod leaderboard;
+pub mod local_leaderboard;
 pub mod profiles;
 pub mod scorer;
 pub mod target_loader;
@@ -41,6 +46,8 @@ mod tests_improve;
 mod tests_improve_loop;
 #[cfg(test)]
 mod tests_leaderboard;
+#[cfg(test)]
+mod tests_local_leaderboard;
 #[cfg(test)]
 mod tests_profiles;
 #[cfg(test)]
@@ -61,6 +68,7 @@ use executor::{
 use improve::analyze_and_review;
 use improve_loop::{SelfImproveReport, run_self_improvement};
 use leaderboard::compare_to_leaderboard;
+use local_leaderboard::{HeadToHead, LocalLeaderboard, build_local_leaderboard};
 use profiles::{PersistedRun, default_home, ensure_profile, list_profiles, load_run, save_run};
 use scorer::{Score, score_run};
 use target_loader::DemoScenario;
@@ -76,6 +84,7 @@ pub fn coin_gym_usage() -> &'static str {
      \x20 score <run-id> [--profile <name>]\n\
      \x20 compare <run-id> [--profile <name>]\n\
      \x20 improve <run-id> [--profile <name>] [--holdout fresh]\n\
+     \x20 leaderboard [--profile <name>]\n\
      \x20 contract [--dataset <repo>] [--revision <tag>] [--split a,b] [--project x,y] [--source rebuild|image]\n\
      \x20 profiles\n\
      \n\
@@ -83,9 +92,10 @@ pub fn coin_gym_usage() -> &'static str {
      needs `coin evaluate` on a Docker host (Phase 3, issue #2823). `improve\n\
      --holdout fresh` runs the Phase-5 self-improvement loop (failure-analyst →\n\
      overfitting gate → verify on held-out fresh → keep/rollback + durable tactic\n\
-     memory) offline. `contract` prints the real coin evaluate/verify wiring\n\
-     without running anything (LOCAL-ONLY). See\n\
-     docs/howto/run-the-coin-gym-harness.md."
+     memory) offline. `leaderboard` ranks the LOCAL saved runs and prints the\n\
+     baseline-vs-team head-to-head (LOCAL-ONLY, never posted). `contract` prints\n\
+     the real coin evaluate/verify wiring without running anything (LOCAL-ONLY).\n\
+     See docs/howto/run-the-coin-gym-harness.md."
 }
 
 /// Dispatch the `coin-gym` CLI over an argument iterator (argv minus the
@@ -118,6 +128,7 @@ where
         "score" => cmd_score(home, rest),
         "compare" => cmd_compare(home, rest),
         "improve" => cmd_improve(home, rest),
+        "leaderboard" => cmd_leaderboard(home, rest),
         "contract" => cmd_contract(rest),
         "profiles" => cmd_profiles(home, rest),
         other => Err(CoinGymError::Usage(format!(
@@ -394,6 +405,93 @@ fn print_self_improve(profile: &str, report: &SelfImproveReport) {
         }
     }
     println!("note: {}", report.note);
+}
+
+// ── leaderboard ──────────────────────────────────────────────────────────────
+
+/// Render the **LOCAL** leaderboard: rank every persisted run and print the
+/// single-model baseline vs. multi-agent team head-to-head that decides the
+/// objective's done-gate. `--profile` narrows the ranking to one profile.
+fn cmd_leaderboard(home: &Path, rest: &[String]) -> CoinGymResult<()> {
+    let parsed = parse_args(rest, &["profile"])?;
+    let profile = sanitized_profile(&parsed);
+    let board = build_local_leaderboard(home, profile.as_deref())?;
+    print_local_leaderboard(home, profile.as_deref(), &board);
+    Ok(())
+}
+
+fn print_local_leaderboard(home: &Path, profile: Option<&str>, board: &LocalLeaderboard) {
+    println!("LOCAL-ONLY leaderboard (never posted externally)");
+    match profile {
+        Some(name) => println!("scope:   profile '{name}' under {}", home.display()),
+        None => println!("scope:   all profiles under {}", home.display()),
+    }
+    if board.rows.is_empty() {
+        println!("note:    {}", board.summary);
+        return;
+    }
+    if board.any_offline {
+        println!(
+            "note:    includes OFFLINE SCAFFOLD runs (mock oracle) — an A/B here is illustrative, \
+             not a real coin evaluate grade (Phase 3)"
+        );
+    }
+    println!(
+        "{:>2}  {:<8}  {:>7}  {:>9}  {:<24}  {:<18}  run-id",
+        "#", "strategy", "reach", "precision", "R/W/A/T/N/E", "model"
+    );
+    for r in &board.rows {
+        println!(
+            "{:>2}  {:<8}  {:>6.1}%  {:>8.1}%  {:<24}  {:<18}  {}{}",
+            r.rank,
+            r.strategy,
+            r.reach_pct,
+            r.precision_pct,
+            r.histogram,
+            r.model,
+            r.run_id,
+            if r.offline_scaffold {
+                "  (offline)"
+            } else {
+                ""
+            },
+        );
+    }
+
+    println!("baseline vs team (best run of each strategy per model):");
+    if board.head_to_head.is_empty() {
+        println!("  (no model has both a baseline and a team run yet)");
+    } else {
+        for h in &board.head_to_head {
+            print_head_to_head(h);
+        }
+    }
+    println!(
+        "verdict: {}",
+        if board.multiagent_beats_baseline {
+            "MULTIAGENT BEATS BASELINE"
+        } else {
+            "not yet"
+        }
+    );
+    println!("         {}", board.summary);
+}
+
+fn print_head_to_head(h: &HeadToHead) {
+    let tag = if h.cross_snapshot {
+        "SKIP"
+    } else if h.team_beats_baseline {
+        "TEAM"
+    } else if h.baseline_beats_team {
+        "BASE"
+    } else {
+        "TIE "
+    };
+    println!("  [{tag}] {} — {}", h.model, h.verdict);
+    println!(
+        "         baseline reach {:.1}% precision {:.1}%   team reach {:.1}% precision {:.1}%",
+        h.baseline.reach_pct, h.baseline.precision_pct, h.team.reach_pct, h.team.precision_pct
+    );
 }
 
 // ── contract ─────────────────────────────────────────────────────────────────

@@ -14,11 +14,14 @@
 #   4. The overfitting-reviewer gate ACCEPTs the analyst's general tactics, and
 #      `improve` flags the live verify/rollback loop as Phase 5.
 #   5. `profiles` lists isolated per-model run state.
-#   6. `contract` prints the real `coin evaluate`/`coin verify` wiring (snapshot
+#   6. `leaderboard` ranks the LOCAL saved runs and renders the baseline-vs-team
+#      head-to-head verdict (team beats baseline at equal reach via precision),
+#      LOCAL-ONLY and flagging offline scaffold runs.
+#   7. `contract` prints the real `coin evaluate`/`coin verify` wiring (snapshot
 #      argv, the /answer/ submission contract, and the LOCAL-ONLY guardrail)
 #      without running anything, and never leaks the fictional --target/--input
 #      flags (issue #3001).
-#   7. An unknown command exits non-zero with usage.
+#   8. An unknown command exits non-zero with usage.
 #
 # Hermetic: COIN_GYM_HOME is a throwaway temp dir; nothing touches the real
 # ~/.simard state or the network.
@@ -80,7 +83,25 @@ PROFILES="$(run_gym profiles)"
 printf '%s\n' "$PROFILES"
 printf '%s\n' "$PROFILES" | grep -F "opus" >/dev/null
 
-# --- 6. contract: the real coin evaluate/verify wiring (issue #3001) -----------
+# --- 6. leaderboard: LOCAL ranking + baseline-vs-team head-to-head verdict -----
+# Ranks every saved run (across profiles) and prints the single-model baseline
+# vs. multi-agent team verdict that grades the objective's done-gate. On the
+# bundled sample the team ties reach but wins on precision, so multiagent must
+# BEAT the baseline. LOCAL-ONLY, and offline scaffold runs are flagged.
+LEADERBOARD="$(run_gym leaderboard)"
+printf '%s\n' "$LEADERBOARD"
+printf '%s\n' "$LEADERBOARD" | grep -F "LOCAL-ONLY leaderboard" >/dev/null
+printf '%s\n' "$LEADERBOARD" | grep -F "OFFLINE SCAFFOLD" >/dev/null
+printf '%s\n' "$LEADERBOARD" | grep -F "team BEATS baseline" >/dev/null
+printf '%s\n' "$LEADERBOARD" | grep -F "MULTIAGENT BEATS SINGLE-MODEL BASELINE" >/dev/null
+# The team run must rank above the baseline (higher precision at equal reach).
+printf '%s\n' "$LEADERBOARD" | grep -E "^ *1 +team" >/dev/null
+# `--profile` narrows the ranking to a single profile.
+LB_ONE="$(run_gym leaderboard --profile opus)"
+printf '%s\n' "$LB_ONE"
+printf '%s\n' "$LB_ONE" | grep -F "profile 'opus'" >/dev/null
+
+# --- 7. contract: the real coin evaluate/verify wiring (issue #3001) -----------
 # `contract` prints exactly how the harness drives COIN's own oracle, without
 # running anything. Asserts the real snapshot-mode argv (no fictional
 # --target/--input), the verify step, the /answer/ submission contract, and the
@@ -107,7 +128,7 @@ fi
 grep -F "unknown --source" /tmp/coin-gym-src.out >/dev/null
 rm -f /tmp/coin-gym-src.out
 
-# --- 7. unknown command exits non-zero with usage -----------------------------
+# --- 8. unknown command exits non-zero with usage -----------------------------
 if run_gym frobnicate >/tmp/coin-gym-bogus.out 2>&1; then
   echo "ERROR: unknown command should have failed" >&2
   exit 1
