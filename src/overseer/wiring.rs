@@ -178,6 +178,21 @@ pub struct OverseerTickReport {
     /// Set when the tick itself panicked and was isolated by
     /// [`run_overseer_tick_isolated`].
     pub panicked: bool,
+    /// Additive (#4080). `true` **only** when the tick's OODA cycle itself
+    /// failed — either `run_cycle()` returned `Err` or the tick panicked (in
+    /// which case `panicked` is also set). This is the fatal-failure signal
+    /// that (together with `panicked`) drives the `overseer` meta-thread's
+    /// `"erroring"` health: the daemon derives
+    /// `last_success = !panicked && !cycle_failed`.
+    ///
+    /// It is deliberately **separate** from `errors`: an isolated
+    /// per-intervention `act()` failure increments `errors` (for feed/totals
+    /// visibility) but leaves `cycle_failed` **false**, so a transient
+    /// capability error no longer pins the meta-thread in `"erroring"`. Covered
+    /// by the struct-level `#[serde(default)]`, so legacy feed records written
+    /// before this field existed deserialize with `cycle_failed = false` and
+    /// the feed `SCHEMA_VERSION` does not change.
+    pub cycle_failed: bool,
     /// Wall-clock duration of the tick in milliseconds.
     pub duration_ms: u64,
     /// Human-readable lines describing WHAT was observed this tick — the ranked
@@ -316,6 +331,7 @@ pub fn overseer_tick_detailed(
         }
         Err(e) => {
             report.errors += 1;
+            report.cycle_failed = true;
             tracing::warn!(
                 target: "overseer::tick",
                 error = %e,
@@ -349,6 +365,8 @@ pub fn overseer_tick_detailed(
         workstream_gaps_detected = report.workstream_gaps_detected,
         workstream_gaps_suppressed = report.workstream_gaps_suppressed,
         errors = report.errors,
+        panicked = report.panicked,
+        cycle_failed = report.cycle_failed,
         duration_ms = report.duration_ms,
         "overseer tick complete"
     );
@@ -386,6 +404,7 @@ pub fn run_overseer_tick_isolated_detailed(
             (
                 OverseerTickReport {
                     panicked: true,
+                    cycle_failed: true,
                     errors: 1,
                     duration_ms: start.elapsed().as_millis() as u64,
                     ..OverseerTickReport::default()
@@ -1485,6 +1504,156 @@ mod tests {
         assert!(!report.panicked, "an error is not a panic");
         assert_eq!(report.errors, 1);
         assert_eq!(report.problems, 0);
+    }
+
+    // ── #4080: isolated `act` errors must not pin the meta-thread "erroring" ─
+    //
+    // Root cause: the daemon derived the overseer meta-thread's `last_success`
+    // from `!panicked && errors == 0`, so a single transient per-intervention
+    // `act` failure (which is documented as "isolated, never fatal") pinned the
+    // thread in "erroring" and a later healthy tick never cleared it. The fix
+    // adds an additive `cycle_failed: bool` that is set ONLY when the tick's
+    // OODA cycle itself fails (`run_cycle` Err or a panic), and health is then
+    // derived from `!panicked && !cycle_failed`. These tests pin that contract.
+
+    /// A `PrOps` whose `merge` fails with a *capability* error (not
+    /// `NotMergeReady`), so `act` returns `Err` → the tick records an isolated
+    /// `errors += 1` while `run_cycle` itself succeeded. This reproduces the
+    /// exact signal (#4080) that used to pin the meta-thread in "erroring".
+    struct FailingMergePrs {
+        ready_prs: Vec<crate::overseer::capabilities::PrRef>,
+    }
+    impl PrOps for FailingMergePrs {
+        fn verify(&self, _repo: &str, _pr: u32) -> Result<VerifyReport, OverseerError> {
+            Ok(VerifyReport {
+                ready: true,
+                checks: vec![CheckItem {
+                    name: "objective gates".to_string(),
+                    passed: true,
+                    note: "test".to_string(),
+                }],
+            })
+        }
+        fn merge(&self, _repo: &str, _pr: u32) -> Result<(), OverseerError> {
+            Err(OverseerError::Capability {
+                what: "merge",
+                detail: "transient GitHub 502 — retry next tick".to_string(),
+            })
+        }
+        fn resolve_conflict(&self, _repo: &str, _pr: u32) -> Result<(), OverseerError> {
+            Ok(())
+        }
+        fn survey_ready_prs(&self, _repos: &[String]) -> Vec<crate::overseer::capabilities::PrRef> {
+            self.ready_prs.clone()
+        }
+    }
+
+    #[test]
+    fn an_isolated_act_error_does_not_mark_the_cycle_failed() {
+        // A green, merge-ready PR is surveyed and verify-merge autonomy is ON, so
+        // the tick ADMITS a VerifyAndMergePr intervention. Its `merge` fails →
+        // the act error is isolated and counted in `errors`, but `run_cycle`
+        // succeeded, so the tick is NOT a cycle failure. This is the recovery
+        // (erroring→ok) path: `cycle_failed` MUST stay false so the daemon
+        // derives the meta-thread health as "ok".
+        let prs = FailingMergePrs {
+            ready_prs: vec![crate::overseer::capabilities::PrRef {
+                repo: "rysweet/Simard".to_string(),
+                pr: 42,
+            }],
+        };
+        let mut overseer = Overseer::new(caps_with(
+            Box::new(FakeStatus(ObservedState::default())),
+            Box::new(prs),
+        ))
+        .with_verify_merge_autonomy(true);
+        let report = overseer_tick(&mut overseer);
+        assert!(
+            report.errors >= 1,
+            "the failed merge must still be surfaced as an isolated error"
+        );
+        assert!(!report.panicked, "an isolated act error is not a panic");
+        assert!(
+            !report.cycle_failed,
+            "run_cycle succeeded — an isolated act error must NOT mark the tick \
+             cycle_failed (#4080 erroring→ok recovery)"
+        );
+    }
+
+    #[test]
+    fn a_run_cycle_error_marks_the_cycle_failed() {
+        // A genuine OODA-cycle failure (the Observe pass errors) IS a cycle
+        // failure and must surface: `cycle_failed` true, not a panic.
+        struct ErrStatus;
+        impl StatusReader for ErrStatus {
+            fn snapshot(&self) -> Result<ObservedState, OverseerError> {
+                Err(OverseerError::Capability {
+                    what: "status",
+                    detail: "degraded".to_string(),
+                })
+            }
+        }
+        let (prs, _merges) = RecordingPrs::new(true);
+        let mut overseer = Overseer::new(caps_with(Box::new(ErrStatus), Box::new(prs)));
+        let report = overseer_tick(&mut overseer);
+        assert!(!report.panicked, "a run_cycle error is not a panic");
+        assert!(
+            report.cycle_failed,
+            "run_cycle returned Err — the tick's cycle failed and must surface \
+             cycle_failed so health stays erroring (#4080)"
+        );
+    }
+
+    #[test]
+    fn a_panicking_tick_marks_the_cycle_failed() {
+        // A panic is the most severe cycle failure: both `panicked` and
+        // `cycle_failed` must be set so the meta-thread health is "erroring".
+        let (prs, _merges) = RecordingPrs::new(true);
+        let mut overseer = Overseer::new(caps_with(Box::new(PanicStatus), Box::new(prs)));
+        let report = run_overseer_tick_isolated(&mut overseer);
+        assert!(report.panicked, "the tick panicked and was isolated");
+        assert!(
+            report.cycle_failed,
+            "a panic is a cycle failure — cycle_failed must be set alongside \
+             panicked (#4080)"
+        );
+    }
+
+    #[test]
+    fn a_default_report_is_not_cycle_failed() {
+        // The healthy baseline: a freshly-defaulted report is neither panicked
+        // nor cycle_failed, so the derived health is "ok".
+        let report = OverseerTickReport::default();
+        assert!(!report.cycle_failed);
+        assert!(!report.panicked);
+    }
+
+    #[test]
+    fn cycle_failed_deserializes_to_false_from_a_legacy_feed_record() {
+        // Durable JSON written by an older build lacks `cycle_failed`. The
+        // struct-level `#[serde(default)]` must fill it with `false` so existing
+        // feed records keep deserializing without a SCHEMA_VERSION bump.
+        let legacy = r#"{
+            "problems": 3,
+            "errors": 1,
+            "panicked": false,
+            "duration_ms": 12
+        }"#;
+        let report: OverseerTickReport =
+            serde_json::from_str(legacy).expect("legacy record without cycle_failed must parse");
+        assert_eq!(report.problems, 3);
+        assert_eq!(report.errors, 1);
+        assert!(
+            !report.cycle_failed,
+            "a legacy record without the field must default cycle_failed to false"
+        );
+
+        // And a round-trip now carries the field explicitly.
+        let json = serde_json::to_string(&report).expect("serialize");
+        assert!(
+            json.contains("\"cycle_failed\":false"),
+            "the additive field must be emitted on write: {json}"
+        );
     }
 
     // ── identity ──────────────────────────────────────────────────────────

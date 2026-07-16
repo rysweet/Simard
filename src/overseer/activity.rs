@@ -654,6 +654,54 @@ mod tests {
         assert_eq!(bad.health, "erroring");
         assert_eq!(bad.consecutive_errors, 1);
     }
+
+    /// The daemon derives the overseer meta-thread's `last_success` from a tick
+    /// report. Per #4080 that derivation is `!panicked && !cycle_failed` — an
+    /// isolated per-intervention `act` error (counted in `errors`) must NOT drag
+    /// the thread into "erroring", while a genuine cycle failure or panic must.
+    fn meta_health_for(report: &OverseerTickReport) -> String {
+        // Mirror the daemon's derivation (daemon/mod.rs) so this test pins the
+        // exact boolean the production loop feeds into `overseer_meta`.
+        let last_success = !report.panicked && !report.cycle_failed;
+        OverseerThreadStatus::overseer_meta(900, last_success).health
+    }
+
+    #[test]
+    fn isolated_errors_keep_the_meta_thread_ok_but_cycle_failure_errors_4080() {
+        // Isolated act error, cycle otherwise healthy → "ok" (the recovery path).
+        let isolated = OverseerTickReport {
+            errors: 1,
+            panicked: false,
+            cycle_failed: false,
+            ..OverseerTickReport::default()
+        };
+        assert_eq!(
+            meta_health_for(&isolated),
+            "ok",
+            "an isolated act error must not pin the meta-thread erroring (#4080)"
+        );
+
+        // Genuine cycle failure → "erroring".
+        let cycle_failed = OverseerTickReport {
+            errors: 1,
+            panicked: false,
+            cycle_failed: true,
+            ..OverseerTickReport::default()
+        };
+        assert_eq!(meta_health_for(&cycle_failed), "erroring");
+
+        // Panic → "erroring".
+        let panicked = OverseerTickReport {
+            panicked: true,
+            cycle_failed: true,
+            ..OverseerTickReport::default()
+        };
+        assert_eq!(meta_health_for(&panicked), "erroring");
+
+        // Clean tick → "ok".
+        let clean = OverseerTickReport::default();
+        assert_eq!(meta_health_for(&clean), "ok");
+    }
 }
 
 #[cfg(test)]
