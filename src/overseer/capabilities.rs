@@ -31,6 +31,11 @@ pub enum OverseerError {
     Recursion { subject: String },
     /// An intervention was deferred to avoid colliding with in-flight work.
     Conflict { with: String },
+    /// The authoritative merge-readiness review did not approve the PR (the
+    /// agentic judge refused, or no LLM provider was available so it fails
+    /// closed). This is NOT an error — the Act handler maps it to an operator
+    /// escalation. Never merge blindly on this outcome.
+    NotMergeReady { pr: u32, reason: String },
 }
 
 impl fmt::Display for OverseerError {
@@ -51,6 +56,9 @@ impl fmt::Display for OverseerError {
             }
             Self::Recursion { subject } => write!(f, "anti-recursion: refused own {subject}"),
             Self::Conflict { with } => write!(f, "conflict-avoidance: deferred (overlaps {with})"),
+            Self::NotMergeReady { pr, reason } => {
+                write!(f, "PR #{pr} is not merge-ready yet: {reason}")
+            }
         }
     }
 }

@@ -8,7 +8,10 @@
 //!   `stewardship::merge_authority::evaluate_objective_gates`.
 //! - Merge itself: `merge_pr_if_merge_ready_with_judge` → `gh pr merge --squash`
 //!   (**no `--admin`, no `--no-verify`** — verified in the grounding ledger).
-//! - Review gate (#7): `review_pipeline::should_commit`.
+//! - Review authority: the ALREADY-WIRED agentic `MergeJudge`
+//!   (`prompt_assets/…/merge_readiness_judge.md`), the SINGLE source of
+//!   merge-readiness review truth, invoked at `merge()` step 3. `verify()` is a
+//!   review-FREE objective pre-filter (#4097).
 //! - New diff-scans (#3–6): [`pr_verify`](crate::overseer::pr_verify).
 //!
 //! Operator hard-gates encoded:
@@ -22,7 +25,6 @@
 //! [`poll_until_green`]: MergePrOps::poll_until_green
 //! [`NotifyReport`]: crate::overseer::notify::NotifyReport
 
-use crate::review_pipeline::{ReviewFinding, should_commit};
 use crate::stewardship::{
     MergeJudge, MergeOutcome, PrGhClient, base_allowlist_from_env, build_merge_judge,
     evaluate_objective_gates, merge_pr_if_merge_ready_with_judge,
@@ -46,14 +48,6 @@ pub trait PrSource {
     fn author(&self, _repo: &str, _pr: u32) -> Result<String, OverseerError> {
         Ok(String::new())
     }
-}
-
-/// The review gate (#7). Injected so tests exercise `should_commit` without an
-/// LLM. Production wires an LLM-backed reviewer; absent one, verify treats the
-/// review as **unavailable → not ready** (fail-closed), so the Overseer never
-/// merges unreviewed.
-pub trait DiffReviewer {
-    fn review(&self, diff: &str) -> Result<Vec<ReviewFinding>, OverseerError>;
 }
 
 /// Resolves a PR's merge conflicts. Deliberately its own seam so the real
@@ -160,7 +154,6 @@ fn run_gh(args: &[&str]) -> Result<String, OverseerError> {
 pub struct MergePrOps {
     gh: Box<dyn PrGhClient>,
     source: Box<dyn PrSource>,
-    reviewer: Option<Box<dyn DiffReviewer>>,
     judge: Box<dyn MergeJudge>,
     notifier: DualChannelNotifier,
     clock: Box<dyn PollClock>,
@@ -183,7 +176,6 @@ impl MergePrOps {
     pub fn new(
         gh: Box<dyn PrGhClient>,
         source: Box<dyn PrSource>,
-        reviewer: Option<Box<dyn DiffReviewer>>,
         judge: Box<dyn MergeJudge>,
         notifier: DualChannelNotifier,
         clock: Box<dyn PollClock>,
@@ -193,7 +185,6 @@ impl MergePrOps {
         Self {
             gh,
             source,
-            reviewer,
             judge,
             notifier,
             clock,
@@ -229,14 +220,16 @@ impl MergePrOps {
     }
 
     /// Production adapter: real `gh` client + diff source, the env merge-judge,
-    /// env base-allowlist, the env-wired dual notifier, real sleep. The review
-    /// gate is left **unwired** (fail-closed) until the operator provides an
-    /// LLM reviewer — so the default autonomous path verifies as NOT ready.
+    /// env base-allowlist, the env-wired dual notifier, real sleep. `verify()` is
+    /// a review-FREE objective pre-filter; the SINGLE review authority is the
+    /// agentic `MergeJudge` (`merge_readiness_judge.md`) invoked at `merge()`
+    /// step 3. When no LLM provider is configured, [`build_merge_judge`] returns
+    /// the fail-closed `RefusingMergeJudge`, so the default autonomous path
+    /// escalates rather than merging unreviewed.
     pub fn from_env() -> Self {
         let mut ops = Self::new(
             Box::new(crate::stewardship::RealPrGhClient),
             Box::new(RealPrSource),
-            None,
             build_merge_judge(),
             DualChannelNotifier::from_env(),
             Box::new(ThreadSleepClock),
@@ -326,8 +319,12 @@ impl MergePrOps {
 }
 
 impl PrOps for MergePrOps {
-    /// Run the full pr-verify checklist: objective gates (#1–2), the four
-    /// additive diff-scans (#3–6), and the review gate (#7). `ready` iff all pass.
+    /// Run the OBJECTIVE pre-filter: objective gates (#1–2) and the additive
+    /// deterministic diff-scans (#3–6/#8). `ready` iff all pass. This carries NO
+    /// review gate — the agentic `MergeJudge` (`merge_readiness_judge.md`) is the
+    /// SOLE review authority and runs downstream in [`merge`](Self::merge)
+    /// step 3. `ready == true` therefore means "eligible to proceed to the
+    /// authoritative merge", not "approved to merge".
     fn verify(&self, repo: &str, pr: u32) -> Result<VerifyReport, OverseerError> {
         let mut checks = Vec::new();
 
@@ -354,31 +351,6 @@ impl PrOps for MergePrOps {
         // #3–6 + #8 additive diff-scans.
         let diff = self.source.diff(repo, pr)?;
         checks.extend(run_diff_scans(&diff));
-
-        // #7 review gate (fail-closed when unwired).
-        checks.push(match &self.reviewer {
-            Some(r) => {
-                let findings = r.review(&diff)?;
-                if should_commit(&findings) {
-                    CheckItem {
-                        name: "review (no Bug/Security >= High)".to_string(),
-                        passed: true,
-                        note: format!("{} finding(s), none blocking", findings.len()),
-                    }
-                } else {
-                    CheckItem {
-                        name: "review (no Bug/Security >= High)".to_string(),
-                        passed: false,
-                        note: "a Bug/Security finding of High+ severity blocks merge".to_string(),
-                    }
-                }
-            }
-            None => CheckItem {
-                name: "review (no Bug/Security >= High)".to_string(),
-                passed: false,
-                note: "review unavailable (no reviewer wired) — fail-closed".to_string(),
-            },
-        });
 
         let ready = checks.iter().all(|c| c.passed);
         Ok(VerifyReport { ready, checks })
@@ -471,7 +443,16 @@ impl PrOps for MergePrOps {
                 );
                 Ok(())
             }
-            MergeOutcome::Refused { reason, .. } => Err(cap("merge", reason)),
+            MergeOutcome::Refused { pr_number, reason } => {
+                // The authoritative agentic review (or a fail-closed judge on a
+                // provider outage) did not approve this PR. Surface it as
+                // NotMergeReady so the Act handler ESCALATES to the operator — it
+                // is never merged blindly and never a hard error.
+                Err(OverseerError::NotMergeReady {
+                    pr: pr_number,
+                    reason,
+                })
+            }
         }
     }
 
@@ -677,13 +658,6 @@ mod tests {
         }
     }
 
-    struct FakeReviewer(Vec<ReviewFinding>);
-    impl DiffReviewer for FakeReviewer {
-        fn review(&self, _diff: &str) -> Result<Vec<ReviewFinding>, OverseerError> {
-            Ok(self.0.clone())
-        }
-    }
-
     struct ReadyJudge;
     impl MergeJudge for ReadyJudge {
         fn judge(
@@ -767,7 +741,6 @@ mod tests {
     fn adapter_with(
         gh: Arc<ScriptedGh>,
         diff: &str,
-        reviewer: Option<Box<dyn DiffReviewer>>,
         clock: Arc<CountingClock>,
         poll: PollConfig,
     ) -> (
@@ -792,7 +765,6 @@ mod tests {
             Box::new(FakeSource {
                 diff: diff.to_string(),
             }),
-            reviewer,
             Box::new(ReadyJudge),
             notifier,
             Box::new(clock),
@@ -810,7 +782,6 @@ mod tests {
         let (ops, _, _) = adapter_with(
             gh,
             CLEAN_DIFF,
-            Some(Box::new(FakeReviewer(vec![]))),
             Arc::new(CountingClock::default()),
             PollConfig::default(),
         );
@@ -830,7 +801,6 @@ mod tests {
         let (ops, _, _) = adapter_with(
             gh,
             dirty,
-            Some(Box::new(FakeReviewer(vec![]))),
             Arc::new(CountingClock::default()),
             PollConfig::default(),
         );
@@ -845,51 +815,10 @@ mod tests {
         let (ops, _, _) = adapter_with(
             gh,
             CLEAN_DIFF,
-            Some(Box::new(FakeReviewer(vec![]))),
             Arc::new(CountingClock::default()),
             PollConfig::default(),
         );
         assert!(!ops.verify("rysweet/Simard", 1).unwrap().ready);
-    }
-
-    #[test]
-    fn verify_review_gate_blocks_high_severity_finding() {
-        use crate::review_pipeline::{FindingCategory, ReviewFinding, Severity};
-        let finding = ReviewFinding {
-            category: FindingCategory::Security,
-            severity: Severity::High,
-            description: "hardcoded secret".to_string(),
-            file_path: "src/x.rs".to_string(),
-            line_range: None,
-        };
-        let gh = ScriptedGh::new(vec![green()]);
-        let (ops, _, _) = adapter_with(
-            gh,
-            CLEAN_DIFF,
-            Some(Box::new(FakeReviewer(vec![finding]))),
-            Arc::new(CountingClock::default()),
-            PollConfig::default(),
-        );
-        assert!(
-            !ops.verify("rysweet/Simard", 1).unwrap().ready,
-            "a High Security finding must block"
-        );
-    }
-
-    #[test]
-    fn verify_fail_closed_without_reviewer() {
-        let gh = ScriptedGh::new(vec![green()]);
-        let (ops, _, _) = adapter_with(
-            gh,
-            CLEAN_DIFF,
-            None,
-            Arc::new(CountingClock::default()),
-            PollConfig::default(),
-        );
-        assert!(
-            !ops.verify("rysweet/Simard", 1).unwrap().ready,
-            "no reviewer wired → review unavailable → not ready (fail-closed)"
-        );
     }
 
     // ── merge: green-only, no-admin, notify fires ────────────────────────────
@@ -900,7 +829,6 @@ mod tests {
         let (ops, email, signal) = adapter_with(
             gh.clone(),
             CLEAN_DIFF,
-            Some(Box::new(FakeReviewer(vec![]))),
             Arc::new(CountingClock::default()),
             PollConfig::default(),
         );
@@ -933,7 +861,6 @@ mod tests {
         let (ops, email, signal) = adapter_with(
             gh.clone(),
             CLEAN_DIFF,
-            Some(Box::new(FakeReviewer(vec![]))),
             Arc::new(CountingClock::default()),
             PollConfig::default(),
         );
@@ -967,7 +894,6 @@ mod tests {
         let (ops, email, _) = adapter_with(
             gh.clone(),
             CLEAN_DIFF,
-            Some(Box::new(FakeReviewer(vec![]))),
             clock.clone(),
             PollConfig {
                 max_attempts: 5,
@@ -992,7 +918,6 @@ mod tests {
         let (ops, _, _) = adapter_with(
             gh,
             CLEAN_DIFF,
-            None,
             Arc::new(CountingClock::default()),
             PollConfig::default(),
         );
@@ -1011,7 +936,6 @@ mod tests {
         let (ops2, _, _) = adapter_with(
             gh2,
             CLEAN_DIFF,
-            None,
             Arc::new(CountingClock::default()),
             PollConfig::default(),
         );
@@ -1045,7 +969,6 @@ mod tests {
         let ops = MergePrOps::new(
             Box::new(gh.clone()),
             Box::new(OwnAuthorSource),
-            Some(Box::new(FakeReviewer(vec![]))),
             Box::new(ReadyJudge),
             notifier,
             Box::new(Arc::new(CountingClock::default())),
@@ -1095,7 +1018,6 @@ mod tests {
         let ops = MergePrOps::new(
             Box::new(gh.clone()),
             Box::new(HumanAuthorSource),
-            Some(Box::new(FakeReviewer(vec![]))),
             Box::new(ReadyJudge),
             notifier,
             Box::new(Arc::new(CountingClock::default())),
@@ -1141,7 +1063,6 @@ mod tests {
         let ops = MergePrOps::new(
             Box::new(gh.clone()),
             Box::new(MatchingAuthorSource),
-            Some(Box::new(FakeReviewer(vec![]))),
             Box::new(ReadyJudge),
             notifier,
             Box::new(Arc::new(CountingClock::default())),
@@ -1318,7 +1239,6 @@ mod tests {
             Box::new(FakeSource {
                 diff: String::new(),
             }),
-            None,
             Box::new(ReadyJudge),
             notifier,
             Box::new(Arc::new(CountingClock::default())),

@@ -84,6 +84,8 @@ mod tests_memory_recall;
 #[cfg(test)]
 mod tests_root_cause;
 #[cfg(test)]
+mod tests_selfmerge_fix;
+#[cfg(test)]
 mod tests_whisper;
 
 pub use capabilities::{
@@ -843,11 +845,18 @@ impl Overseer {
             }
             Intervention::VerifyAndMergePr { repo, pr } => {
                 let report = self.caps.prs.verify(repo, *pr)?;
-                if report.ready {
-                    self.caps.prs.merge(repo, *pr)?;
-                    Ok(ActOutcome::Merged)
-                } else {
-                    Ok(ActOutcome::Escalated)
+                if !report.ready {
+                    return Ok(ActOutcome::Escalated);
+                }
+                // `verify()` is only the objective pre-filter. The authoritative
+                // agentic review runs inside `merge()` (step 3); when it refuses
+                // — or the LLM provider is unavailable and the judge fails closed
+                // — `merge()` returns `NotMergeReady`, which is an ESCALATION, not
+                // an error (never a blind merge).
+                match self.caps.prs.merge(repo, *pr) {
+                    Ok(()) => Ok(ActOutcome::Merged),
+                    Err(OverseerError::NotMergeReady { .. }) => Ok(ActOutcome::Escalated),
+                    Err(e) => Err(e),
                 }
             }
             Intervention::ResolveConflict { repo, pr } => {
@@ -2374,5 +2383,98 @@ mod tests {
             })
             .expect("act");
         assert_eq!(out, ActOutcome::Escalated);
+    }
+
+    // ── #4097: a NotMergeReady from the authoritative agentic merge step must
+    //    ESCALATE (be handed to the operator), never be tallied as an error and
+    //    never a blind merge. A genuine capability/safety error still propagates.
+
+    /// A `PrOps` whose `verify()` passes the objective pre-filter but whose
+    /// `merge()` returns a scripted result — so we can drive the Act handler's
+    /// mapping of the authoritative merge step's outcome.
+    struct ScriptedMergePrs {
+        ready: bool,
+        merge_result: fn(&str, u32) -> Result<(), OverseerError>,
+    }
+    impl PrOps for ScriptedMergePrs {
+        fn verify(&self, _repo: &str, _pr: u32) -> Result<VerifyReport, OverseerError> {
+            Ok(VerifyReport {
+                ready: self.ready,
+                checks: vec![],
+            })
+        }
+        fn merge(&self, repo: &str, pr: u32) -> Result<(), OverseerError> {
+            (self.merge_result)(repo, pr)
+        }
+        fn resolve_conflict(&self, _repo: &str, _pr: u32) -> Result<(), OverseerError> {
+            Ok(())
+        }
+    }
+
+    fn caps_with_prs(prs: Box<dyn PrOps>) -> Capabilities {
+        Capabilities {
+            status: Box::new(FakeStatus(ObservedState::default())),
+            recipes: Box::new(FakeRecipes),
+            prs,
+            deployer: Box::new(FakeDeployer),
+            meetings: Box::new(FakeMeetings),
+            issues: Box::new(FakeIssues),
+            goals: Box::new(FakeGoals(vec![])),
+            auditor: Box::new(FakeAuditor),
+            memory: Box::new(capabilities::InertMemoryRecall),
+        }
+    }
+
+    #[test]
+    fn act_escalates_when_merge_returns_not_merge_ready() {
+        // verify() is ready (objective pre-filter passed), but the authoritative
+        // agentic merge step refuses → NotMergeReady. The Act handler must map
+        // this to an ESCALATION, not propagate it as an error.
+        let prs = ScriptedMergePrs {
+            ready: true,
+            merge_result: |_repo, pr| {
+                Err(OverseerError::NotMergeReady {
+                    pr,
+                    reason: "the merge-readiness review did not approve yet".to_string(),
+                })
+            },
+        };
+        let mut ov = Overseer::new(caps_with_prs(Box::new(prs)));
+        let out = ov
+            .act(&Intervention::VerifyAndMergePr {
+                repo: "rysweet/Simard".to_string(),
+                pr: 4097,
+            })
+            .expect("a NotMergeReady must be handled as an escalation, not an Err");
+        assert_eq!(
+            out,
+            ActOutcome::Escalated,
+            "a not-ready-now merge refusal escalates to the operator"
+        );
+    }
+
+    #[test]
+    fn act_propagates_a_genuine_capability_error_from_merge() {
+        // A genuine infra/safety failure (e.g. the anti-recursion guard, a `gh`
+        // failure) must still propagate as an Err so the tick counts it under
+        // `errors` — never silently downgraded to an escalation.
+        let prs = ScriptedMergePrs {
+            ready: true,
+            merge_result: |_repo, _pr| {
+                Err(OverseerError::Capability {
+                    what: "merge.recursion",
+                    detail: "refused own PR".to_string(),
+                })
+            },
+        };
+        let mut ov = Overseer::new(caps_with_prs(Box::new(prs)));
+        let res = ov.act(&Intervention::VerifyAndMergePr {
+            repo: "rysweet/Simard".to_string(),
+            pr: 4097,
+        });
+        assert!(
+            matches!(res, Err(OverseerError::Capability { .. })),
+            "a genuine capability/safety error must propagate as an error, got {res:?}"
+        );
     }
 }
