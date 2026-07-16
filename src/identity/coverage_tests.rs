@@ -519,6 +519,7 @@ fn builtin_loader_all_single_identities_have_capabilities() {
         "simard-gym",
         "simard-goal-curator",
         "simard-improvement-curator",
+        "simard-atelier",
     ];
     for name in names {
         let manifest = loader
@@ -596,6 +597,7 @@ fn builtin_loader_each_identity_has_unique_prompt_asset() {
         "simard-gym",
         "simard-goal-curator",
         "simard-improvement-curator",
+        "simard-atelier",
     ];
     let mut seen_asset_ids = BTreeSet::new();
     for name in names {

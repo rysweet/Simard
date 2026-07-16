@@ -382,6 +382,7 @@ nav:
     - Meeting Handoff Schema: reference/meeting-handoff-schema.md
     - Handoff Lifecycle API: reference/handoff-lifecycle-api.md
     - Pluggable Identity API: reference/pluggable-identity-api.md
+    - Atelier Identity (Furniture Design): reference/atelier-identity.md
     - Agent Instance Isolation: reference/agent-instance-isolation.md
     - Write-Authority Posture API: reference/write-authority-posture-api.md
     - Identity-Scoped Cognition API: reference/identity-scoped-cognition-api.md

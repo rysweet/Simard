@@ -1,0 +1,13 @@
+{
+  "name": "Studio Writing Desk",
+  "product_type": "table",
+  "dimensions": {
+    "length_mm": 1400,
+    "width_mm": 700,
+    "height_mm": 740,
+    "thickness_mm": 25
+  },
+  "material": "25mm oak-veneer plywood",
+  "quantity": 1,
+  "leg_section_mm": 60
+}

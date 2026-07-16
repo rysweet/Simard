@@ -1,0 +1,54 @@
+name: "Simard Atelier identity — brief to model + render"
+description: "Outside-in coverage for the pluggable `simard-atelier` industrial & furniture design identity. Verifies both acceptance criteria: (1) the identity is selectable via the operator probe's repo-grounded engineer-loop-run surface and drives a session to completion, and (2) the `simard-atelier-build` tool takes a product brief JSON to an exported model (STL) + render (SVG) plus a grouped cut list, a scaled bill of materials, and a manifest — deterministically and with no external CAD dependency (hermetic --no-cad run)."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "simard-atelier is selectable and a brief becomes an exported model + render"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/atelier-identity-pipeline.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "atelier"
+    - "identity"
+    - "cad"
+    - "fabrication"
+    - "outside-in"
+  priority: "high"
+  author: "simard-engineer"
+  test_type: "outside-in"
