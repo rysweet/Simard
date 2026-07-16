@@ -323,3 +323,158 @@ fn commit_gated_fact_stores_dedups_and_quarantines() {
         "an ungrounded empty fact scores below the threshold"
     );
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// Concept-label canonicalization at the shared write boundary: a recognized
+// surface-form variant is stored under (and recalled by) its canonical label,
+// and two surface-variant restatements of the same fact dedup against each
+// other. An off-spec label is stored verbatim (nudge, not gate).
+// ───────────────────────────────────────────────────────────────────────────
+
+/// A fact whose concept is a surface-form variant of a known label
+/// ("PR-Pattern") is persisted under the canonical label ("pr-pattern") and is
+/// therefore recalled by the canonical label — recall no longer fragments across
+/// the LLM's surface-form variance.
+#[test]
+fn commit_gated_fact_stores_variant_concept_under_canonical_label() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::commit_gated_fact;
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode(
+            "episode payload for canonicalization test",
+            "engineer-cycle",
+            None,
+        )
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let episode_ids = [ep.clone()];
+
+    let stored = commit_gated_fact(
+        &mem,
+        "PR-Pattern",
+        "prefer small focused pull requests",
+        true,
+        &source,
+        &[],
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(stored.stored(), "a grounded well-formed fact stores");
+
+    // The persisted fact carries the canonical label, not the raw "PR-Pattern".
+    // Use the wildcard "return all" path so the assertion checks the stored
+    // label directly, independent of the library's keyword-relevance ranking.
+    let hits = mem.search_facts("*", 100, 0.0).expect("search_facts");
+    let found = hits
+        .iter()
+        .find(|f| f.content.trim() == "prefer small focused pull requests")
+        .expect("canonicalized fact present in store");
+    assert_eq!(
+        found.concept, "pr-pattern",
+        "a recognized surface-form variant must persist under its canonical label"
+    );
+}
+
+/// Two facts with identical content but different *surface forms* of the same
+/// concept converge onto one canonical label, so the second is a dedup
+/// quarantine instead of a duplicate stored under a divergent label.
+#[test]
+fn commit_gated_fact_dedups_across_surface_form_variants() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::{FactGateDecision, commit_gated_fact};
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode(
+            "episode payload for variant-dedup test",
+            "engineer-cycle",
+            None,
+        )
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let episode_ids = [ep.clone()];
+    let content = "empty outcome list panics cycle";
+
+    let first = commit_gated_fact(
+        &mem,
+        "bug-pattern",
+        content,
+        true,
+        &source,
+        &[],
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(first.stored(), "first insert stores");
+
+    // Same fact, but the LLM emitted a different surface form of the label.
+    let second = commit_gated_fact(
+        &mem,
+        "Bug_Pattern",
+        content,
+        true,
+        &source,
+        &[],
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        !second.stored(),
+        "a surface-form variant of an equal-or-stronger prior must dedup, not store a divergent copy"
+    );
+    assert!(
+        matches!(second, FactGateDecision::Quarantined { confidence } if confidence >= RELIABILITY_THRESHOLD),
+        "the dedup quarantine still cleared the reliability threshold"
+    );
+
+    // Exactly one fact of this concept exists in the store.
+    let hits = mem.search_facts("*", 100, 0.0).expect("search_facts");
+    let matching = hits
+        .iter()
+        .filter(|f| f.content.trim() == content && f.concept == "bug-pattern")
+        .count();
+    assert_eq!(
+        matching, 1,
+        "the two variants must converge onto a single stored fact"
+    );
+}
+
+/// A genuinely off-spec concept does not canonicalize and is stored verbatim —
+/// canonicalization is a nudge, not a gate, and never relabels or drops an
+/// unrecognized concept.
+#[test]
+fn commit_gated_fact_stores_offspec_concept_verbatim() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::commit_gated_fact;
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode("episode payload for off-spec test", "engineer-cycle", None)
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let episode_ids = [ep.clone()];
+
+    let stored = commit_gated_fact(
+        &mem,
+        "infra-observation",
+        "the deploy pipeline flaked on a cold cache",
+        true,
+        &source,
+        &[],
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(stored.stored(), "a grounded well-formed fact stores");
+
+    let hits = mem.search_facts("*", 100, 0.0).expect("search_facts");
+    let found = hits
+        .iter()
+        .find(|f| f.content.trim() == "the deploy pipeline flaked on a cold cache")
+        .expect("off-spec fact present in store");
+    assert_eq!(
+        found.concept, "infra-observation",
+        "an off-spec concept must be stored verbatim, never relabeled"
+    );
+}
