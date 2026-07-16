@@ -791,12 +791,18 @@ mod tests {
 
     #[test]
     fn verify_not_ready_on_dirty_diff() {
+        // A retained substantive gate still hard-blocks: adding a point-in-time
+        // report doc (G4) fails verify(). (The former style scans — added
+        // `Bridge` name / stray `println!` — are judge-advisory since #4163 and
+        // no longer block; see verify_ready_on_simard_diagnostic_prints.)
         let gh = ScriptedGh::new(vec![green()]);
         let dirty = "\
-+++ b/src/x.rs
-@@ -0,0 +1,2 @@
-+struct HttpBridge;
-+    println!(\"noise\");
+diff --git a/docs/investigation/run.md b/docs/investigation/run.md
+new file mode 100644
+--- /dev/null
++++ b/docs/investigation/run.md
+@@ -0,0 +1,1 @@
++# Investigation Report
 ";
         let (ops, _, _) = adapter_with(
             gh,
@@ -805,7 +811,70 @@ mod tests {
             PollConfig::default(),
         );
         let report = ops.verify("rysweet/Simard", 1).unwrap();
-        assert!(!report.ready, "Bridge + println diff must fail verify");
+        assert!(
+            !report.ready,
+            "an added point-in-time report doc must fail verify (retained G4 gate): {report:?}"
+        );
+    }
+
+    // ── issue #4163: style-scan relaxation at the verify() boundary ───────────
+    //
+    // TDD (Step 7). verify() runs the objective gates plus `run_diff_scans`. The
+    // two redundant STYLE scans currently make a CI-green, MERGEABLE engineer PR
+    // verify NOT ready purely for carrying the documented `[simard] eprintln!`
+    // operator-diagnostic convention. These tests pin the target boundary
+    // behaviour: diagnostic prints no longer block, while the retained
+    // substantive gates still do.
+
+    /// A CI-green, MERGEABLE PR whose only "style" content is added `[simard]`
+    /// diagnostic prints verifies READY. RED until the stray-print scan is
+    /// removed from `run_diff_scans` (Step 8).
+    #[test]
+    fn verify_ready_on_simard_diagnostic_prints() {
+        let gh = ScriptedGh::new(vec![green()]);
+        let diagnostics = "\
++++ b/src/overseer/daemon.rs
+@@ -0,0 +1,2 @@
++    eprintln!(\"[simard] overseer tick surveyed ready PRs\");
++    println!(\"[simard] merged a ready engineer PR\");
+";
+        let (ops, _, _) = adapter_with(
+            gh,
+            diagnostics,
+            Arc::new(CountingClock::default()),
+            PollConfig::default(),
+        );
+        let report = ops.verify("rysweet/Simard", 1).unwrap();
+        assert!(
+            report.ready,
+            "a green PR whose only style content is [simard] diagnostic prints \
+             must verify ready: {report:?}"
+        );
+    }
+
+    /// Guard: relaxing the style scans must NOT weaken the retained substantive
+    /// gates. A CI-green PR whose diff removes a `pub` API still fails verify()
+    /// (not-ready before AND after the change).
+    #[test]
+    fn verify_not_ready_on_removed_pub_api() {
+        let gh = ScriptedGh::new(vec![green()]);
+        let breaking = "\
++++ b/src/x.rs
+@@ -1,2 +1,1 @@
+-pub fn removed_api() {}
+ fn keep() {}
+";
+        let (ops, _, _) = adapter_with(
+            gh,
+            breaking,
+            Arc::new(CountingClock::default()),
+            PollConfig::default(),
+        );
+        let report = ops.verify("rysweet/Simard", 1).unwrap();
+        assert!(
+            !report.ready,
+            "a removed pub API must still fail verify (retained additive gate): {report:?}"
+        );
     }
 
     #[test]

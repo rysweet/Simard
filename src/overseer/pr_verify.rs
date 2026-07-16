@@ -1,19 +1,26 @@
-//! M2 **hard gate** — the pr-verify safety diff-scans (design doc §pr-verify
-//! checklist, items 3–6). These are the NEW, additive checks that did not exist
-//! before this milestone; **no merge capability ships before they do and are
-//! unit-tested** (crusty review risk #2 / operator hard-gate #5).
+//! M2 **hard gate** — the pr-verify safety diff-scans. These are the additive
+//! merge-safety checks that gate an autonomous merge in [`verify`]. After issue
+//! #4163 the two redundant STYLE scans (no-`Bridge` naming, no-stray-print) are
+//! no longer wired into [`run_diff_scans`]: `Bridge` naming is already enforced
+//! repo-wide by the CI integration test `tests/no_bridge_naming.rs`, and stray
+//! prints are governed by clippy/CI while the `[simard]` `eprintln!`/`println!`
+//! operator-diagnostic convention is expected. Both concerns are now
+//! **judge-advisory** (the crusty-old-engineer pass in
+//! `merge_readiness_judge.md`), not hard merge gates.
 //!
 //! Every scan is a **pure** function over a unified diff (`gh pr diff` output),
 //! so the whole merge-safety surface is testable on fixture diffs with zero
-//! network. The scans:
+//! network. The scans wired into [`run_diff_scans`] are the three that CI does
+//! NOT already enforce and that are true merge-safety concerns:
 //!
 //! | # | Check | This module |
 //! |---|-------|-------------|
-//! | 3 | No `Bridge` naming in **added** lines | [`scan_no_bridge_naming`] |
-//! | 4 | No stray `print!`/`println!`/`eprintln!`/`eprint!` in added `src/**` | [`scan_no_stray_prints`] |
 //! | 5 | Additive / non-breaking — no **removed** `pub` items | [`scan_additive_no_removed_pub`] |
 //! | 6 | PRD (`Specs/ProductArchitecture.md`) preserved — no removed lines | [`scan_prd_preserved`] |
 //! | 8 | No **added** point-in-time report doc (G4 durable-docs policy) | [`scan_no_point_in_time_report_docs`] |
+//!
+//! The pure [`scan_no_bridge_naming`] and [`scan_no_stray_prints`] helpers are
+//! retained (and unit-tested) but are no longer hard gates.
 //!
 //! Items 1–2 (CI-green / mergeable / base-allowlist) reuse
 //! `stewardship::merge_authority::evaluate_objective_gates`; item 7 reuses
@@ -144,9 +151,12 @@ fn parse_hunk_new_start(line: &str) -> Option<usize> {
 
 // ─────────────────────────── scan #3: no Bridge ────────────────────────────
 
-/// Check #3: no `Bridge` naming introduced in **added** lines. Scoped to added
-/// lines only, so pre-existing `terminal_engineer_bridge` / `OodaBridges` code
-/// (which predates the operator's no-`Bridge` preference) is untouched. Uses a
+/// Check #3 (advisory only since #4163): no `Bridge` naming introduced in
+/// **added** lines. Retained as a pure, unit-tested helper but NO LONGER wired
+/// into [`run_diff_scans`] — `Bridge` naming is enforced repo-wide by the CI
+/// integration test `tests/no_bridge_naming.rs`, so re-blocking it at the merge
+/// gate is redundant. Scoped to added lines only, so pre-existing code that
+/// predates the operator's no-`Bridge` preference is untouched. Uses a
 /// case-sensitive `Bridge` substring so CamelCase identifiers (`HttpBridge`,
 /// `FooBridge`) are caught while the lowercase word (`abridged`, `cambridge`)
 /// is not.
@@ -168,9 +178,14 @@ pub fn scan_no_bridge_naming(diff: &str) -> Vec<DiffFinding> {
 
 const PRINT_MACROS: &[&str] = &["println!", "print!", "eprintln!", "eprint!"];
 
-/// Check #4: no stray `print!`/`println!`/`eprintln!`/`eprint!` in added lines
-/// of files under `src/`. Test files, examples, and build scripts are out of
-/// scope (they legitimately print).
+/// Check #4 (advisory only since #4163): no stray
+/// `print!`/`println!`/`eprintln!`/`eprint!` in added lines of files under
+/// `src/`. Retained as a pure, unit-tested helper but NO LONGER wired into
+/// [`run_diff_scans`] — clippy/CI already govern genuinely-stray prints and the
+/// `[simard]` `eprintln!`/`println!` operator-diagnostic convention is expected,
+/// so hard-blocking a merge on it contradicted Simard's own convention. Test
+/// files, examples, and build scripts are out of scope (they legitimately
+/// print).
 pub fn scan_no_stray_prints(diff: &str) -> Vec<DiffFinding> {
     let mut out = Vec::new();
     for_each_diff_line(diff, |dl| {
@@ -398,15 +413,19 @@ pub fn scan_no_point_in_time_report_docs(diff: &str) -> Vec<DiffFinding> {
 
 // ─────────────────────────── checklist assembly ────────────────────────────
 
-/// Run all additive diff-scans and return one [`CheckItem`] per scan. A scan
-/// passes when it finds no violations; the note names the offenders.
+/// Run the additive merge-safety diff-scans and return one [`CheckItem`] per
+/// scan. A scan passes when it finds no violations; the note names the
+/// offenders.
+///
+/// After issue #4163 this wires ONLY the three substantive merge-safety gates
+/// that CI does not already enforce — additive (no removed `pub`), PRD
+/// preserved, and no point-in-time report doc (G4). The two former STYLE gates
+/// (no-`Bridge`-naming, no-stray-print) were removed: `Bridge` naming is
+/// enforced repo-wide by `tests/no_bridge_naming.rs`, and stray prints are
+/// governed by clippy/CI (the `[simard]` diagnostic-print convention is
+/// expected). Both are now judge-advisory, not hard merge gates.
 pub fn run_diff_scans(diff: &str) -> Vec<CheckItem> {
     vec![
-        finding_check(
-            "no-Bridge-naming (added lines)",
-            scan_no_bridge_naming(diff),
-        ),
-        finding_check("no-stray-print (added src/**)", scan_no_stray_prints(diff)),
         finding_check(
             "additive (no removed pub items)",
             scan_additive_no_removed_pub(diff),
@@ -592,15 +611,19 @@ diff --git a/src/foo.rs b/src/foo.rs
 +// orient-decide-act, no forbidden tokens
 ";
         let checks = run_diff_scans(diff);
-        assert_eq!(checks.len(), 5);
+        assert_eq!(checks.len(), 3);
         assert!(
             checks.iter().all(|c| c.passed),
-            "a clean additive diff passes all five scans: {checks:?}"
+            "a clean additive diff passes all three retained scans: {checks:?}"
         );
     }
 
     #[test]
     fn dirty_diff_fails_the_right_scans() {
+        // A removed pub item and a removed PRD line each still fail a RETAINED
+        // gate. The added CamelCase `Bridge` name and stray `println!` no longer
+        // hard-block (they are judge-advisory since #4163), so only the two
+        // substantive gates fail.
         let diff = format!(
             "\
 +++ b/src/foo.rs
@@ -619,7 +642,11 @@ diff --git a/src/foo.rs b/src/foo.rs
             .filter(|c| !c.passed)
             .map(|c| c.name.as_str())
             .collect();
-        assert_eq!(failed.len(), 4, "all four scans should fail: {checks:?}");
+        assert_eq!(
+            failed.len(),
+            2,
+            "only the two retained substantive gates should fail: {checks:?}"
+        );
     }
 
     #[test]
@@ -915,8 +942,8 @@ deleted file mode 100644
         );
     }
 
-    /// The G4 scan is registered as a fifth `run_diff_scans` check and fails on a
-    /// diff that adds a report doc.
+    /// The G4 scan is one of the three retained `run_diff_scans` checks and
+    /// fails on a diff that adds a report doc.
     #[test]
     fn g4_is_registered_as_a_diff_scan() {
         let diff = "\
@@ -928,7 +955,11 @@ new file mode 100644
 +# Investigation Report
 ";
         let checks = run_diff_scans(diff);
-        assert_eq!(checks.len(), 5, "the G4 scan is registered as a 5th check");
+        assert_eq!(
+            checks.len(),
+            3,
+            "the G4 scan is one of the 3 retained checks"
+        );
         let g4 = checks
             .iter()
             .find(|c| c.name.to_lowercase().contains("point-in-time"))
@@ -964,5 +995,127 @@ new file mode 100644
             "additive scan unchanged"
         );
         assert!(scan_prd_preserved(diff).is_empty(), "PRD scan unchanged");
+    }
+
+    // ── issue #4163: relax the over-strict STYLE diff-scans ───────────────────
+    //
+    // TDD (Step 7 — write tests first). The autonomous self-merge surveys ready
+    // engineer PRs but merges ZERO because two STYLE scans in `run_diff_scans`
+    // hard-block genuinely-ready PRs:
+    //
+    //   * `no-stray-print` — flags added `[simard] eprintln!`/`println!` in
+    //     `src/**`, which is the DOCUMENTED daemon operator-diagnostic
+    //     convention; clippy/CI already govern truly-stray prints. It alone
+    //     blocks real ready PRs.
+    //   * `no-Bridge-naming` — already enforced repo-wide by the CI integration
+    //     test `tests/no_bridge_naming.rs`, so re-blocking it here is redundant.
+    //
+    // The target contract: `run_diff_scans` keeps ONLY the three substantive
+    // merge-safety gates that CI does NOT already enforce — additive (no removed
+    // `pub`), PRD preserved, and no point-in-time report docs (G4). These tests
+    // fail RED against the current five-scan implementation and go GREEN once the
+    // two style scans are removed (Step 8). They deliberately avoid the naming
+    // token so they stay clean regardless of the linter's exclusion list.
+
+    /// After the relaxation `run_diff_scans` exposes EXACTLY the three
+    /// substantive merge-safety gates, and no print-style scan remains.
+    #[test]
+    fn run_diff_scans_keeps_only_the_three_substantive_gates() {
+        let clean = "\
++++ b/src/overseer/new_thing.rs
+@@ -0,0 +1,2 @@
++pub fn reasoner_step() {}
++pub struct Observation;
+";
+        let checks = run_diff_scans(clean);
+        assert_eq!(
+            checks.len(),
+            3,
+            "only the 3 substantive merge-safety gates remain after the relaxation: {checks:?}"
+        );
+        assert!(
+            checks.iter().all(|c| c.passed),
+            "a clean additive diff passes all three retained scans: {checks:?}"
+        );
+        let names: Vec<String> = checks.iter().map(|c| c.name.to_lowercase()).collect();
+        assert!(
+            names.iter().any(|n| n.contains("additive")),
+            "the additive (no removed pub) gate is retained: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n.contains("prd")),
+            "the PRD-preserved gate is retained: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n.contains("point-in-time")),
+            "the point-in-time-report-docs (G4) gate is retained: {names:?}"
+        );
+        assert!(
+            names.iter().all(|n| !n.contains("print")),
+            "the redundant stray-print style scan is no longer a hard gate: {names:?}"
+        );
+    }
+
+    /// The documented `[simard] eprintln!` operator-diagnostic convention is NOT
+    /// a hard merge gate: a diff adding diagnostic prints under `src/**.rs` passes
+    /// every retained scan (clippy/CI govern genuinely-stray prints).
+    #[test]
+    fn simard_diagnostic_prints_are_not_a_hard_gate() {
+        let diff = "\
++++ b/src/overseer/daemon.rs
+@@ -0,0 +1,3 @@
++    eprintln!(\"[simard] overseer tick: surveyed {n} ready PRs\");
++    println!(\"[simard] merged PR #{pr}\");
++    eprint!(\"[simard] escalation: {reason}\");
+";
+        let checks = run_diff_scans(diff);
+        assert!(
+            checks.iter().all(|c| c.passed),
+            "added [simard] diagnostic prints must pass every retained scan — this is \
+             the documented daemon operator-diagnostic convention; clippy/CI cover \
+             genuinely-stray prints: {checks:?}"
+        );
+    }
+
+    /// The relaxation removes ONLY the two redundant style scans; the three
+    /// substantive gates still hard-block. A removed `pub` item, a removed PRD
+    /// line, and an added point-in-time report doc each still fail `run_diff_scans`.
+    #[test]
+    fn retained_substantive_gates_still_block() {
+        let removed_pub = "\
++++ b/src/foo.rs
+@@ -1,2 +1,1 @@
+-pub fn removed_api() {}
+ fn keep() {}
+";
+        assert!(
+            run_diff_scans(removed_pub).iter().any(|c| !c.passed),
+            "a removed pub item must still fail a retained (additive) scan"
+        );
+
+        let removed_prd = format!(
+            "\
++++ b/{PRD_PATH}
+@@ -1,1 +1,1 @@
+-A load-bearing invariant.
+"
+        );
+        assert!(
+            run_diff_scans(&removed_prd).iter().any(|c| !c.passed),
+            "a removed PRD line must still fail the retained PRD-preserved scan"
+        );
+
+        let report_doc = "\
+diff --git a/docs/investigation/run.md b/docs/investigation/run.md
+new file mode 100644
+--- /dev/null
++++ b/docs/investigation/run.md
+@@ -0,0 +1,1 @@
++# Investigation Report
+";
+        assert!(
+            run_diff_scans(report_doc).iter().any(|c| !c.passed),
+            "an added point-in-time report doc must still fail the retained G4 scan"
+        );
     }
 }
