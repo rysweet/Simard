@@ -34,6 +34,12 @@ fn dispatch_operator_probe_goal_curation_missing_args() {
     assert!(err.to_string().contains("expected base type"));
 }
 
+#[test]
+fn dispatch_operator_probe_goal_curation_read_missing_args() {
+    let err = dispatch_operator_probe(args(&["goal-curation-read"])).unwrap_err();
+    assert!(err.to_string().contains("expected base type"));
+}
+
 // --- dispatch_legacy_gym_cli: more arg validation ---
 
 #[test]
@@ -174,6 +180,25 @@ fn dispatch_operator_probe_goal_curation_missing_topology() {
 }
 
 #[test]
+fn dispatch_operator_probe_goal_curation_read_missing_topology() {
+    let err = dispatch_operator_probe(args(&["goal-curation-read", "local-harness"])).unwrap_err();
+    assert!(err.to_string().contains("expected topology"));
+}
+
+#[test]
+fn dispatch_operator_probe_goal_curation_read_rejects_extra_args() {
+    let err = dispatch_operator_probe(args(&[
+        "goal-curation-read",
+        "local-harness",
+        "single-process",
+        "/tmp/state",
+        "unexpected",
+    ]))
+    .unwrap_err();
+    assert!(err.to_string().contains("unexpected trailing arguments"));
+}
+
+#[test]
 fn dispatch_operator_probe_goal_curation_missing_objective() {
     let err = dispatch_operator_probe(args(&[
         "goal-curation-run",
@@ -207,6 +232,28 @@ fn next_required_consumes_only_first_item() {
 fn reject_extra_args_single_trailing() {
     let err = reject_extra_args(args(&["only_one"]).into_iter()).unwrap_err();
     assert!(err.to_string().contains("only_one"));
+}
+
+// End-to-end wiring: the compatibility `goal-curation-read` probe subcommand
+// dispatches through `dispatch_operator_probe` into `run_goal_curation_read_probe`
+// with an explicit `[state-root]`, reaching a real (empty) durable goal register
+// read without error. This proves the compat surface parity with the canonical
+// `simard goal-curation read` command, not just its argument validation.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn dispatch_operator_probe_goal_curation_read_succeeds_with_explicit_state_root() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let result = dispatch_operator_probe(args(&[
+        "goal-curation-read",
+        "local-harness",
+        "single-process",
+        dir.path().to_str().unwrap(),
+    ]));
+    assert!(
+        result.is_ok(),
+        "goal-curation-read compat probe should succeed against an empty state root: {:?}",
+        result.err()
+    );
 }
 
 // Tests previously inlined in dispatch.rs (#1266 burndown)
