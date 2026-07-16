@@ -555,3 +555,189 @@ fn commit_gated_fact_dedups_whitespace_variant_restatement() {
         "distinct content must still be promoted"
     );
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// Concept canonicalization at the write boundary. A known concept the LLM
+// re-emits in a variant surface form ("PR-Pattern", "pr_pattern", "bug pattern")
+// is folded to its canonical KNOWN_CONCEPTS label BEFORE it is used as the dedup
+// key and the stored concept, so a variant-labelled restatement dedups (no
+// redundant fact) and concept-consistent recall for the canonical label surfaces
+// the fact instead of missing it. The concept-axis analog of the whitespace
+// content-dedup and episode-id fixes.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// A genuinely-new fact committed under a SEPARATOR-variant concept label
+/// ("bug pattern") is stored under the CANONICAL concept ("bug-pattern"), so a
+/// concept-consistent recall/search for the canonical label surfaces it. Before
+/// this fix the fact was stored under the raw variant label and the backend's
+/// concept keyword search (which treats "bug-pattern" and "bug pattern" as
+/// different queries) missed it — a genuinely-recalled fact silently invisible
+/// to concept-keyed recall, dragging recall quality down.
+#[test]
+fn commit_gated_fact_canonicalizes_stored_concept() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::{FactGateDecision, commit_gated_fact};
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode(
+            "episode payload for concept-canon test",
+            "engineer-cycle",
+            None,
+        )
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let tags = [String::from("bug-pattern")];
+    let episode_ids = [ep.clone()];
+
+    // Commit a grounded, well-formed fact under the SPACE-separated variant
+    // label "bug pattern" (what an LLM routinely emits for "bug-pattern").
+    let stored = commit_gated_fact(
+        &mem,
+        "bug pattern",
+        "off by one in retry loop drops last item",
+        true,
+        &source,
+        &tags,
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        matches!(stored, FactGateDecision::Stored { .. }),
+        "a grounded, well-formed fact must be stored, got {stored:?}"
+    );
+
+    // It must be stored under the CANONICAL "bug-pattern" concept, not the raw
+    // "bug pattern" variant.
+    let all = mem.search_facts("*", 50, 0.0).expect("search all");
+    assert_eq!(all.len(), 1, "exactly one fact was committed");
+    assert_eq!(
+        all[0].concept, "bug-pattern",
+        "the variant label must be folded to its canonical form on store, got {:?}",
+        all[0].concept
+    );
+
+    // And a concept-consistent recall for the canonical label surfaces it.
+    let by_canon = mem
+        .search_facts("bug-pattern", 50, 0.0)
+        .expect("recall by concept");
+    assert!(
+        by_canon.iter().any(|f| f.node_id == all[0].node_id),
+        "canonical-label recall must surface the fact stored under a variant label"
+    );
+}
+
+/// A grounded, known-concept fact that restates an already-stored fact under a
+/// VARIANT surface form of the same concept ("Bug_Pattern" for "bug-pattern") is
+/// recognized as the same identity and quarantined as a dedup — no redundant
+/// near-duplicate is promoted. Before this fix the variant label produced a
+/// different dedup search query, so the prior was not found and a second copy of
+/// the same lesson was stored, inflating semantic memory and diluting recall
+/// precision.
+#[test]
+fn commit_gated_fact_dedups_concept_surface_variant_restatement() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::commit_gated_fact;
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode(
+            "episode payload for concept-dedup test",
+            "engineer-cycle",
+            None,
+        )
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let tags = [String::from("lesson-learned")];
+    let episode_ids = [ep.clone()];
+
+    // (1) Store the canonical fact under the canonical "lesson-learned" label.
+    let stored = commit_gated_fact(
+        &mem,
+        "lesson-learned",
+        "always verify the goal before persisting",
+        true,
+        &source,
+        &tags,
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(stored.stored(), "canonical fact must be stored first");
+
+    // (2) Restate the SAME content under the underscore+case variant
+    // "Lesson_Learned" → dedup quarantine (same lesson, same identity), and its
+    // score still clears the threshold so it is distinguishable from a
+    // low-reliability block.
+    let variant = commit_gated_fact(
+        &mem,
+        "Lesson_Learned",
+        "always verify the goal before persisting",
+        true,
+        &source,
+        &tags,
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        !variant.stored(),
+        "a concept-surface-variant restatement must dedup, not create a redundant fact"
+    );
+    assert!(
+        variant.confidence() >= RELIABILITY_THRESHOLD,
+        "a dedup quarantine cleared the threshold; only the prior blocks it"
+    );
+
+    // Exactly one fact exists, under the canonical concept.
+    let all = mem.search_facts("*", 50, 0.0).expect("search all");
+    assert_eq!(
+        all.len(),
+        1,
+        "the variant restatement must not add a second fact"
+    );
+    assert_eq!(all[0].concept, "lesson-learned");
+}
+
+/// A genuinely off-spec concept ([`canonical_concept`] returns `None`) is
+/// preserved verbatim on store — canonicalization only folds the closed known
+/// label set, never rewrites an unrecognized concept.
+#[test]
+fn commit_gated_fact_preserves_offspec_concept_verbatim() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::{FactGateDecision, canonical_concept, commit_gated_fact};
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode("episode payload for offspec test", "engineer-cycle", None)
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let tags: [String; 0] = [];
+    let episode_ids = [ep.clone()];
+
+    let concept = "infra-observation";
+    assert!(
+        canonical_concept(concept).is_none(),
+        "test precondition: {concept:?} is genuinely off-spec"
+    );
+
+    let stored = commit_gated_fact(
+        &mem,
+        concept,
+        "the daemon reclaims disk under memory pressure",
+        true,
+        &source,
+        &tags,
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        matches!(stored, FactGateDecision::Stored { .. }),
+        "a grounded off-spec fact still clears the gate (concept validity is a nudge)"
+    );
+
+    let all = mem.search_facts("*", 50, 0.0).expect("search all");
+    assert_eq!(all.len(), 1);
+    assert_eq!(
+        all[0].concept, concept,
+        "an off-spec concept must be stored verbatim, not rewritten"
+    );
+}
