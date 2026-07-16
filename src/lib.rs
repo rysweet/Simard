@@ -5,6 +5,7 @@ pub mod agent_registry;
 pub mod agent_roles;
 pub mod agent_supervisor;
 pub mod amplihack_freshness_gate;
+pub mod atelier;
 pub mod base_type_claude_agent_sdk;
 pub mod base_type_copilot;
 pub mod base_type_harness;

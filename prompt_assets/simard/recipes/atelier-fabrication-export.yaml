@@ -1,0 +1,77 @@
+# atelier-fabrication-export.yaml — Atelier goal-session recipe.
+#
+# Drives the fabrication-export phase of the Atelier identity: from a built
+# parametric model, produce the fabrication package — CAD interchange solid
+# (STEP, when a solid-modeling kernel is available), cut list, and bill of
+# materials — and verify it against the model. Parser-free / agentic.
+#
+# Context vars (passed via -c):
+#   simard_binary  — path to the simard binary
+#   brief_path     — path to the product-brief JSON
+#   out_dir        — directory holding the fabrication package
+
+name: "atelier-fabrication-export"
+description: "Atelier — export a fabrication package (STEP/STL, cut list, BOM) from a model"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "atelier", "fabrication", "bom", "cutlist", "export"]
+
+context: {}
+
+steps:
+  - id: "atelier-fabricate"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      # Atelier — Fabrication Export
+
+      You are Simard Atelier's fabrication-export actor. Interpret the brief and
+      the built model directly; do not emit or parse a marker or JSON verdict.
+
+      brief path = {{brief_path}}
+      output dir = {{out_dir}}
+
+      ## Inspect
+
+      Ensure the parametric model already exists under `{{out_dir}}` (run the
+      atelier-parametric-modeling recipe first if it does not). Read the brief
+      at `{{brief_path}}` for stock sizes, hardware, finishes, and any budget
+      constraint that the BOM must respect.
+
+      ## Act
+
+      Produce (or refresh) the full fabrication package with your bash tool:
+
+      "{{simard_binary}}" atelier build \
+        --brief "{{brief_path}}" \
+        --out "{{out_dir}}" \
+        --fabrication
+
+      The `--fabrication` flag additionally emits `model.step` when a solid
+      kernel (FreeCAD) is available, and always emits `cutlist.csv` and
+      `bom.csv`. Every part in the cut list must fit the declared stock and
+      appear in the BOM.
+
+      ## Verify
+
+      Read `{{out_dir}}/manifest.json`. Confirm `cutlist.csv` and `bom.csv`
+      exist, that `verification.ok` is true, and that no part exceeds stock. If
+      a solid kernel was unavailable, `model.step` may be recorded as skipped —
+      that is acceptable; the STL, cut list, and BOM are the required fabrication
+      minimum. If verification failed, stop and report; do not fabricate success.
+
+  - id: "atelier-fabricate-verifier"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      Verify the fabrication package by inspecting the manifest with your bash
+      tool:
+
+      "{{simard_binary}}" atelier inspect --out "{{out_dir}}" --fabrication
+
+      If it reports the cut list and BOM are present, consistent with the model,
+      and verification passed, stop successfully. Otherwise re-read the brief at
+      {{brief_path}} and the manifest, determine what is missing or inconsistent,
+      and re-run
+      `{{simard_binary}} atelier build --brief {{brief_path}} --out {{out_dir}} --fabrication`.
+      The durable, verified fabrication package is the only business outcome.

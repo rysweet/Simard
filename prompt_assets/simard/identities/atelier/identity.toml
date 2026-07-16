@@ -1,0 +1,48 @@
+# Atelier identity card — pluggable Simard identity for industrial &
+# furniture design. Loadable via FileIdentityLoader by pointing
+# SIMARD_IDENTITY_PATH at this directory and selecting `simard-atelier`.
+#
+# The `simard-atelier` identity is also compiled into BuiltinIdentityLoader so
+# it is selectable out of the box; this card is the pluggable, file-based
+# equivalent for operators who deploy their own identity roster.
+
+[package]
+name = "simard-atelier"
+version = "0.1.0"
+description = "Industrial & furniture design identity: parametric modeling and fabrication exports"
+
+[[identities]]
+name = "simard-atelier"
+default_mode = "engineer"
+supported_base_types = [
+  "local-harness",
+  "terminal-shell",
+  "rusty-clawd",
+  "copilot-sdk",
+  "claude-agent-sdk",
+  "ms-agent-framework",
+]
+required_capabilities = [
+  "prompt-assets",
+  "session-lifecycle",
+  "memory",
+  "evidence",
+  "reflection",
+]
+
+[[identities.prompt_assets]]
+id = "atelier-system"
+path = "atelier_system.md"
+
+[identities.memory_policy]
+allow_project_writes = false
+summary_scope = "session-summary"
+
+[[identities.seed_goals]]
+priority = 3
+title = "Design a fabrication-ready product from a brief"
+description = """
+Take an industrial/furniture product brief to an exported 3D model + render
+plus a cut list and BOM using the atelier parametric-modeling and
+fabrication-export goal-session recipes.
+"""

@@ -61,6 +61,32 @@ impl IdentityLoader for BuiltinIdentityLoader {
                 MemoryPolicy::default(),
                 request.contract.clone(),
             ),
+            "simard-atelier" => IdentityManifest::new(
+                "simard-atelier",
+                request.package_version.clone(),
+                vec![PromptAssetRef::new(
+                    "atelier-system",
+                    "simard/identities/atelier/atelier_system.md",
+                )],
+                vec![
+                    BaseTypeId::new("local-harness"),
+                    BaseTypeId::new("terminal-shell"),
+                    BaseTypeId::new("rusty-clawd"),
+                    BaseTypeId::new("copilot-sdk"),
+                    BaseTypeId::new("claude-agent-sdk"),
+                    BaseTypeId::new("ms-agent-framework"),
+                ],
+                capability_set([
+                    BaseTypeCapability::PromptAssets,
+                    BaseTypeCapability::SessionLifecycle,
+                    BaseTypeCapability::Memory,
+                    BaseTypeCapability::Evidence,
+                    BaseTypeCapability::Reflection,
+                ]),
+                OperatingMode::Engineer,
+                MemoryPolicy::default(),
+                request.contract.clone(),
+            ),
             "simard-meeting" => IdentityManifest::new(
                 "simard-meeting",
                 request.package_version.clone(),
@@ -251,6 +277,22 @@ mod tests {
     }
 
     // --- BuiltinIdentityLoader: all identities ---
+
+    #[test]
+    fn builtin_loader_loads_atelier_identity() {
+        let loader = BuiltinIdentityLoader;
+        let manifest = loader
+            .load(&IdentityLoadRequest::new(
+                "simard-atelier",
+                "0.1.0",
+                test_contract(),
+            ))
+            .unwrap();
+        assert_eq!(manifest.name, "simard-atelier");
+        assert_eq!(manifest.default_mode, OperatingMode::Engineer);
+        assert_eq!(manifest.prompt_assets[0].id.as_str(), "atelier-system");
+        assert!(manifest.supports_base_type(&BaseTypeId::new("local-harness")));
+    }
 
     #[test]
     fn builtin_loader_loads_meeting_identity() {
