@@ -1,7 +1,7 @@
 ---
 title: Pluggable identity — TOML-driven agent personas
 description: Why and how Simard loads identity configuration from identity.toml files, allowing different repositories to define distinct agent personas, operating modes, prompt assets, and memory policies that override compiled-in defaults.
-last_updated: 2026-06-10
+last_updated: 2026-07-16
 owner: simard
 doc_type: concept
 related:
@@ -12,16 +12,19 @@ related:
   - ./multi-identity-host-isolation.md
   - ./write-authority-posture.md
   - ./identity-scoped-cognition.md
+  - ../../examples/identities/README.md
+  - ../../prompt_assets/simard/identity_authoring.md
 ---
 
 # Pluggable identity — TOML-driven agent personas
 
 ## The problem
 
-Simard ships with five built-in identities (`simard-engineer`,
+Simard ships with several built-in identities (`simard-engineer`,
 `simard-meeting`, `simard-gym`, `simard-goal-curator`,
-`simard-improvement-curator`) plus one composite (`simard-composite-engineer`).
-These are compiled into the binary via `BuiltinIdentityLoader`.
+`simard-improvement-curator`, `simard-concierge`, `simard-atelier`) plus one
+composite (`simard-composite-engineer`). These are compiled into the binary via
+`BuiltinIdentityLoader`.
 
 This works for Simard's own repository, but breaks down when Simard operates
 across multiple repositories with different needs:
@@ -146,6 +149,79 @@ registry-based loaders), `compose_with_precedence()` in
 `identity_precedence` resolves conflicts. The file-based loader
 produces an `IdentityManifest` — the same type that builtins produce —
 so precedence resolution is orthogonal to the loading mechanism.
+
+## The boundary: Simard's own identities vs. example identities
+
+Pluggable identity draws a hard line between two kinds of identity, and it
+matters where each one lives.
+
+### Simard's own operating identities → compiled in
+
+The identities Simard uses to operate *herself* —
+`simard-engineer`, `simard-meeting`, `simard-gym`, `simard-goal-curator`,
+`simard-improvement-curator`, `simard-concierge`, `simard-atelier`, and the
+composite — are **compiled into `BuiltinIdentityLoader`** in
+`src/identity/loader.rs`. They are part of the daemon's own behavior and
+legitimately live in `src/`. This does not change.
+
+> **Naming note:** `simard-atelier` and `simard-concierge` are Simard's *own*
+> operating identities and stay compiled in. Do not confuse them with
+> hypothetical `atelier`/`concierge`-style **example** packages — the boundary
+> is defined by where an identity lives (compiled `BuiltinIdentityLoader` arm
+> vs. data under `examples/identities/`), not by its theme.
+
+### Example non-engineering identities → data-only packages
+
+Identities that merely *demonstrate* what the framework can produce —
+cartographer, gastronome, bursar, and the like — are **not** part of Simard's
+daemon. They are authored as **data-only packages**
+under [`examples/identities/<name>/`](../../examples/identities/README.md):
+
+```
+examples/identities/<name>/
+├── identity.toml     # manifest (same schema FileIdentityLoader consumes)
+├── prompts/*.md      # system + phase prompts
+└── recipes/*.yaml    # agentic goal-session recipes (all domain tooling lives here)
+```
+
+They are loaded at runtime by the data-driven file loader, not compiled in:
+
+```rust
+use simard::identity::{load_example_identity, DEFAULT_EXAMPLE_IDENTITIES_DIR};
+
+let manifest = load_example_identity(
+    DEFAULT_EXAMPLE_IDENTITIES_DIR.as_ref(), // repo-root examples/identities (overridable)
+    "cartographer",
+    &request,
+)?;
+```
+
+`load_example_identity` is a thin rail: it validates `<name>` as a single path
+segment, resolves `<base>/<name>/identity.toml`, guards that the file exists
+(so a missing package cannot silently fall through to a built-in), and delegates
+to the existing `FileIdentityLoader`. A missing package or invalid TOML returns
+a fail-visible `IdentityTomlParseError` — never a panic, never a silent
+fallback. There is **no** `BuiltinIdentityLoader` arm for an example identity.
+
+### Why the split
+
+- **Keep the daemon pure.** Simard's `src/` stays pure Rust — no Python, no
+  `kuzu`, no domain modules. An example identity that needs Python, pandas,
+  Blender, or a web server drives that tooling from its **recipes**, in agent
+  sessions, never from `src/`.
+- **Zero-friction identities.** Adding, changing, or removing an example
+  identity is a data change under `examples/identities/`. It requires no edit to
+  `src/identity/loader.rs`, no new binary, and no `operator_cli` subcommand.
+- **A guardrail against tree bloat.** Historically, example identities crept
+  into `src/` as whole domain modules and hardcoded loader arms. The data-driven
+  home removes that incentive: the *only* `src/` code supporting example
+  identities is the thin `load_example_identity` rail.
+
+Engineers building an identity must follow
+[`prompt_assets/simard/identity_authoring.md`](../../prompt_assets/simard/identity_authoring.md),
+which spells out the prohibitions (no domain Rust, no `BuiltinIdentityLoader`
+arm, no `operator_cli` subcommand, no `src/bin/*`). The reference package is
+[`examples/identities/cartographer/`](../../examples/identities/cartographer/).
 
 ## What this is not
 
