@@ -286,6 +286,7 @@ knowledge — there is no parallel datastore.
 | Content | the JSON-serialized `JournalEntry` |
 | Tag | `journal` (`JOURNAL_TAG`) |
 | Write path | [`store_fact_with_caller_key`](./cognitive-memory-fact-recall.md) — "at most one live fact per key", so regenerating a day **supersedes** the prior entry (idempotent rolling update) |
+| Read-path dedup | Defensive: should the backend ever surface **more than one** `journal:YYYY-MM-DD` fact for a day, every read collapses them to the single **newest-generated** entry (by `generated_at`) — the same "latest supersedes" semantics as the write path |
 
 Two equivalent surfaces read/write the same records:
 
@@ -319,6 +320,16 @@ searchable, browse-by-date behaviour is **preserved unchanged** from #2618.
 Enumeration is lenient (a non-journal or unparseable candidate fact is skipped), but a
 `journal:`-keyed fact whose JSON is corrupt fails **loud** as
 `SimardError::InvalidJournalRecord` on an exact `get_by_date`.
+
+Duplicate-day facts are collapsed at **read** time, not merely on write. The
+caller-key write contract is supposed to keep exactly one live fact per day, but
+the live store was observed holding two `journal:2026-07-15` facts, which made
+the dashboard date picker and search list the same day **twice** with
+conflicting PR counts while `GET /api/journal/entry/{date}` returned only one.
+The reader now keeps the **newest `generated_at`** entry per day across
+`all_entries`, `dates`, `query`, and `get_by_date`, so all four surfaces agree
+and each day appears exactly once regardless of how a duplicate arose.
+
 
 ## Rendering — the shared renderer
 
@@ -394,8 +405,8 @@ daily thread.
 
 | Route | Response | Notes |
 | --- | --- | --- |
-| `GET /api/journal/dates` | `{ "dates": [ {date, quiet_day, pr_count}, … ] }` | Newest day first, for the date picker. |
-| `POST /api/journal/search` | `{ "results": [ {date, quiet_day, pr_count, snippet}, … ] }` | Body `{query?, from?, to?}` (dates `YYYY-MM-DD`); newest first. |
+| `GET /api/journal/dates` | `{ "dates": [ {date, quiet_day, pr_count}, … ] }` | Newest day first, each day exactly once (duplicate-day facts collapse to the newest generation), for the date picker. |
+| `POST /api/journal/search` | `{ "results": [ {date, quiet_day, pr_count, snippet}, … ] }` | Body `{query?, from?, to?}` (dates `YYYY-MM-DD`); newest first, one entry per day. |
 | `GET /api/journal/entry/{date}` | `JournalEntry` JSON, or `{status:"error", error}` | `{date}` strictly parsed `%Y-%m-%d`. |
 | `GET /api/journal/render/{date}` | `text/html` (server-rendered fragment) | Report headings + 3-column PR table, fully HTML-escaped — safe to inject into the panel. |
 
