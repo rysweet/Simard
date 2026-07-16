@@ -123,13 +123,18 @@ Pure, no IO — the fully unit-testable core. Classification is **content- and
 source-driven** (call sites do not have to pre-tag every event). Evaluates
 four rules in **strict priority order** and returns on the first match:
 
-1. **Failure override (highest).** If `content` contains any of `error`,
-   `failed`, `failure`, `panic`, `exception` (case-insensitive):
-   `Store(EpisodeMetadata { importance: 0.9, event_kind, is_operational:
-   false, goal_id, cycle })`, where `event_kind` is `RecipeFailure` when the
-   content/source mentions a recipe and `ActionFailure` otherwise. Overrides
-   every rule below — a noisy line that records a failure is
-   still kept.
+1. **Failure override (highest).** If `content` carries a **whole-word**
+   failure signal — a word from the `error` / `fail` / `failure` / `panic` /
+   `exception` family, matched at word boundaries and including inflections
+   (`errors`, `failed`, `failing`, `panicked`, `panicking`, `exceptions`, …)
+   and compound PascalCase type names (`ParseError`, `IoError`,
+   `NullPointerException`), but **not** coincidental look-alikes that merely
+   embed a stem as a substring (`exceptional`, `hispanic`, `terror`,
+   `mirror`) — the result is `Store(EpisodeMetadata { importance: 0.9,
+   event_kind, is_operational: false, goal_id, cycle })`, where `event_kind`
+   is `RecipeFailure` when the content/source mentions a recipe and
+   `ActionFailure` otherwise. Overrides every rule below — a noisy line that
+   records a failure is still kept.
 2. **Known-noise markers → `Drop`.** Case-insensitive substring match on
    any of:
    `started with objective`, `completed and persisted`,

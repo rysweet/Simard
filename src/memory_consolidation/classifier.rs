@@ -19,10 +19,14 @@
 //!
 //! ## Decision rules (strict priority — first match wins)
 //!
-//! 1. **Failure override.** Content carrying a failure/error signal (`error`,
-//!    `failed`, `failure`, `panic`, `exception`) is ALWAYS stored at full
-//!    importance, even if it also matches a drop marker (A7). Recipe-context
-//!    failures classify as [`EventKind::RecipeFailure`], everything else as
+//! 1. **Failure override.** Content carrying a failure/error signal — a
+//!    whole word from the `error` / `fail` / `failure` / `panic` / `exception`
+//!    family (matched at word boundaries, including inflections like `errors`,
+//!    `failed`, `panicked`, and compound PascalCase type names like `ParseError`
+//!    / `NullPointerException`, but NOT look-alikes like `exceptional` or
+//!    `hispanic`) — is ALWAYS stored at full importance, even if it also
+//!    matches a drop marker (A7). Recipe-context failures classify as
+//!    [`EventKind::RecipeFailure`], everything else as
 //!    [`EventKind::ActionFailure`].
 //! 2. **Known-noise markers → Drop.** `started with objective`,
 //!    `completed and persisted`, `flushing working memory`,
@@ -132,8 +136,29 @@ impl IntakeDecision {
 // Marker token sets
 // ───────────────────────────────────────────────────────────────────────────
 
-/// Case-insensitive failure/error signal tokens (A7 override).
-const FAILURE_TOKENS: &[&str] = &["error", "failed", "failure", "panic", "exception"];
+/// Case-insensitive failure/error signal STEMS (A7 override).
+///
+/// A word carries a failure signal iff — **at a word boundary** — it equals one
+/// of these stems or a stem plus a benign inflectional suffix (see
+/// [`INFLECTIONAL_SUFFIXES`]). Word-boundary matching replaces the earlier naive
+/// substring scan that mis-fired on derivational / coincidental look-alikes —
+/// "exceptional" (≠ "exception"), "hispanic" (≠ "panic"), "terror" / "mirror"
+/// (≠ "error") — which would spuriously store benign or POSITIVE episodes at
+/// full failure importance and pollute distillation with phantom failure facts.
+///
+/// `panick` sits alongside `panic` so the `c → ck` orthographic doubling in the
+/// inflected forms ("panicked", "panicking") still fires while "hispanic" — a
+/// distinct word that merely *contains* "panic" — never matches, because
+/// matching is whole-word: "hispanic" is not "panic"/"panick" plus a suffix.
+const FAILURE_STEMS: &[&str] = &["error", "fail", "failure", "panic", "panick", "exception"];
+
+/// Benign English inflectional suffixes accepted after a [`FAILURE_STEMS`] stem
+/// so genuine inflections keep firing: `""` (the bare stem), plurals ("errors",
+/// "exceptions"), past / participle ("failed", "panicked"), and gerund
+/// ("failing", "panicking"). *Derivational* suffixes — e.g. `-al` in
+/// "exceptional" or `-ism` in "terrorism" — are deliberately EXCLUDED: they
+/// change the word's meaning, so a word bearing one is NOT a failure signal.
+const INFLECTIONAL_SUFFIXES: &[&str] = &["", "s", "es", "d", "ed", "ing"];
 
 /// Case-insensitive operational-noise markers → drop.
 const NOISE_MARKERS: &[&str] = &[
@@ -148,9 +173,67 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|n| haystack.contains(n))
 }
 
+/// Compound error/exception TYPE-NAME suffixes (e.g. `ParseError`, `IoError`,
+/// `NullPointerException`). Idiomatic error types — especially in Rust, where
+/// they conventionally end in `Error` — routinely appear as a single
+/// delimiter-less compound token that the [`word_is_failure`] *prefix* rule
+/// cannot see. These are detected on **original-case** text: a token that ends
+/// with one of these PascalCase segments (optionally pluralised) is a genuine
+/// error/exception type name. The capitalised initial is what distinguishes a
+/// compound type name from an all-lowercase coincidental look-alike — `terror`
+/// ends in the letters `error` but not in the capitalised `Error`, so it is
+/// still excluded.
+const COMPOUND_FAILURE_SUFFIXES: &[&str] = &["Error", "Exception"];
+
+/// `true` when a single already-lowercased `word` is a [`FAILURE_STEMS`] stem
+/// followed by a benign [`INFLECTIONAL_SUFFIXES`] suffix. Whole-word by
+/// construction: the whole `word` must be `stem + suffix`, so a longer word that
+/// merely embeds a stem (e.g. "hispanic", "exceptional") does not match.
+fn word_is_failure(word: &str) -> bool {
+    FAILURE_STEMS.iter().any(|stem| {
+        word.strip_prefix(stem)
+            .is_some_and(|suffix| INFLECTIONAL_SUFFIXES.contains(&suffix))
+    })
+}
+
+/// `true` when an **original-case** `word` is a compound error/exception TYPE
+/// name — a token strictly longer than, and ending in, one of
+/// [`COMPOUND_FAILURE_SUFFIXES`] (optionally pluralised). The `len > suffix`
+/// guard keeps the bare word (`Error` / `Exception`) out of this path — that
+/// form is a delimited word already handled by the lowercase [`word_is_failure`]
+/// rule — so only genuine compounds (`ParseError`, `RuntimeException`) match
+/// here, while lowercase look-alikes (`terror`) never do.
+fn word_is_compound_failure_typename(word: &str) -> bool {
+    let stripped = word.strip_suffix('s').unwrap_or(word);
+    COMPOUND_FAILURE_SUFFIXES
+        .iter()
+        .any(|suf| stripped.len() > suf.len() && stripped.ends_with(suf))
+}
+
 /// `true` when content/source carries a failure or error signal.
-fn has_failure_signal(content_lc: &str) -> bool {
-    contains_any(content_lc, FAILURE_TOKENS)
+///
+/// Two complementary passes, both word-boundary (never bare-substring) so
+/// coincidental look-alikes (`exceptional`, `hispanic`, `terror`, `mirror`) are
+/// excluded:
+///
+///   1. lowercased stem + inflection ([`word_is_failure`]) — `error`, `errors`,
+///      `failed`, `panicked`, `exceptions`, …; and
+///   2. original-case compound type names ([`word_is_compound_failure_typename`])
+///      — `ParseError`, `IoError`, `NullPointerException`, … — which the prefix
+///      rule cannot see because the stem sits at the *end* of a delimiter-less
+///      compound.
+fn has_failure_signal(content: &str) -> bool {
+    let compound = content
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(word_is_compound_failure_typename);
+    if compound {
+        return true;
+    }
+    content
+        .to_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .any(word_is_failure)
 }
 
 /// Build the durable metadata for a stored event.
@@ -185,7 +268,9 @@ pub fn classify(content: &str, source_label: &str, ctx: &IntakeContext) -> Intak
     let source_lc = source_label.to_lowercase();
 
     // Rule 1 — failure override (highest priority, beats drop markers).
-    if has_failure_signal(&content_lc) {
+    // Uses the ORIGINAL-case `content` so the compound-type-name pass can see
+    // PascalCase error types (`ParseError`); the lowercase pass is internal.
+    if has_failure_signal(content) {
         let kind = if content_lc.contains("recipe") || source_lc.contains("recipe") {
             EventKind::RecipeFailure
         } else {
@@ -251,7 +336,7 @@ pub fn classify(content: &str, source_label: &str, ctx: &IntakeContext) -> Intak
 ///   noise, no failure) — the caller then drops the episode unless it still
 ///   needs the id for provenance.
 pub fn sanitize_transcript(transcript: &str) -> Option<String> {
-    if has_failure_signal(&transcript.to_lowercase()) {
+    if has_failure_signal(transcript) {
         return Some(transcript.to_string());
     }
     let kept: Vec<&str> = transcript

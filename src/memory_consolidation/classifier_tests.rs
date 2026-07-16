@@ -396,3 +396,146 @@ fn metadata_to_json_emits_all_five_keys_with_nulls() {
     assert!(json["cycle"].is_null(), "absent cycle renders as null");
     assert_eq!(json["importance"].as_f64(), Some(0.9));
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// FAILURE-SIGNAL FIDELITY: word-boundary + inflection matching
+//
+// The failure override must fire on genuine failure words and their inflections
+// but NOT on unrelated words that merely embed a failure stem as a substring.
+// The pre-fix naive substring scan mis-classified "exceptional" (⊃ "exception"),
+// "hispanic" (⊃ "panic"), and "terror" / "mirror" (⊃ "error") as full-importance
+// ActionFailures, polluting distillation with phantom failure facts.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// `true` when a decision stored the episode as a failure kind at full
+/// importance — the disposition the override produces.
+fn is_failure_store(decision: &crate::memory_consolidation::classifier::IntakeDecision) -> bool {
+    decision.is_store()
+        && decision.metadata().is_some_and(|m| {
+            matches!(
+                m.event_kind,
+                EventKind::ActionFailure | EventKind::RecipeFailure
+            )
+        })
+}
+
+/// Look-alike words that only *contain* a failure stem as a substring must NOT
+/// trigger the failure override. Each phrase carries no other meaningful marker,
+/// so absent a (spurious) failure signal it down-scopes as operational noise.
+#[test]
+fn failure_look_alikes_do_not_trigger_override() {
+    let benign = [
+        // "exceptional" ⊃ "exception" — derivational -al, not an inflection.
+        "delivered exceptional results this planning window",
+        // "hispanic" ⊃ "panic" — a wholly unrelated word.
+        "filed the hispanic community outreach note",
+        // "terror" ⊃ "error" — coincidental substring.
+        "a night of terror over the tricky refactor has passed",
+        // "mirror" ⊃ "error" — coincidental substring.
+        "mirror the staging cluster into the preview slot",
+        // "terrorism" ⊃ "error" plus a derivational -ism.
+        "read a briefing on counter-terrorism policy",
+    ];
+    for phrase in benign {
+        let decision = classify(phrase, "planning-notes", &empty_ctx());
+        assert!(
+            !is_failure_store(&decision),
+            "look-alike must NOT be a failure store: {phrase:?} → {decision:?}"
+        );
+        assert!(
+            decision.is_downscoped(),
+            "benign unmatched content down-scopes as operational: {phrase:?} → {decision:?}"
+        );
+    }
+}
+
+/// Genuine failure words — including plural / past / gerund inflections and the
+/// `c → ck` doubling in the panic family — MUST trigger the override at full
+/// importance. This guards against the fix over-tightening into false negatives.
+#[test]
+fn failure_inflections_trigger_override() {
+    let failing = [
+        "caught an exception in the request handler",
+        "unhandled exceptions in the parser stage",
+        "the deploy fails intermittently on cold start",
+        "unit test failing after the dependency bump",
+        "three errors surfaced in the worker log",
+        "repeated failures during the rollout",
+        "the worker panicked mid-batch",
+        "the process kept panicking under load",
+        "the service panics on empty input",
+    ];
+    for phrase in failing {
+        let decision = classify(phrase, "act", &empty_ctx());
+        assert!(
+            is_failure_store(&decision),
+            "genuine failure word must trigger the override: {phrase:?} → {decision:?}"
+        );
+        let meta = decision.metadata().expect("failure store carries metadata");
+        assert_eq!(
+            meta.importance, 0.9,
+            "failures are the highest-importance episodics: {phrase:?}"
+        );
+    }
+}
+
+/// The override still beats a drop marker when the failure word is an inflection
+/// (regression guard for A7 under the new word-boundary matcher).
+#[test]
+fn inflected_failure_overrides_drop_marker() {
+    let decision = classify(
+        "Session sess-xyz completed and persisted; two integration tests failing",
+        "session-persistence",
+        &empty_ctx(),
+    );
+    assert!(
+        is_failure_store(&decision),
+        "an inflected failure word must override the drop marker, got {decision:?}"
+    );
+}
+
+/// Compound PascalCase error/exception TYPE names — where the failure stem sits
+/// at the END of a delimiter-less compound token — MUST still trigger the
+/// override. These are a genuine failure-signal class (idiomatic Rust error
+/// types end in `Error`) that a naive whole-word prefix rule would miss.
+#[test]
+fn compound_error_type_names_trigger_override() {
+    let failing = [
+        "Encountered IoError: connection reset by peer",
+        "hit a ParseError while decoding the frame",
+        "threw NullPointerException at line 42",
+        "an IllegalStateException surfaced during shutdown",
+        "SendError propagated up the channel",
+        "the RuntimeException bubbled up",
+        "collected several ValidationErrors this pass",
+    ];
+    for phrase in failing {
+        let decision = classify(phrase, "act", &empty_ctx());
+        assert!(
+            is_failure_store(&decision),
+            "compound error/exception type name must trigger the override: {phrase:?} → {decision:?}"
+        );
+        let meta = decision.metadata().expect("failure store carries metadata");
+        assert_eq!(
+            meta.importance, 0.9,
+            "compound failure type names store at full importance: {phrase:?}"
+        );
+    }
+}
+
+/// The compound-type-name pass is CASE-SENSITIVE on the PascalCase segment, so
+/// it must NOT resurrect the lowercase look-alikes it is designed to skip:
+/// `terror` ends in the letters `error` but not in the capitalised `Error`.
+#[test]
+fn compound_pass_does_not_resurrect_lowercase_look_alikes() {
+    for phrase in [
+        "a night of terror over the tricky refactor has passed",
+        "read a briefing on counter-terrorism policy",
+    ] {
+        let decision = classify(phrase, "planning-notes", &empty_ctx());
+        assert!(
+            !is_failure_store(&decision),
+            "lowercase look-alike must stay excluded by the compound pass: {phrase:?} → {decision:?}"
+        );
+    }
+}
