@@ -1,0 +1,38 @@
+# Canonical agentic-test schema (name + agents[] + steps[] with params).
+#
+# Mirrors tests/qa-scenarios/dashboard-journal-merged-count.yaml (a same-era
+# dashboard self-consistency fix): a single `cli` agent runs a hermetic
+# regression script; the runner treats the script's non-zero exit as a step
+# failure, so this is a real pass/fail gate.
+name: simard-dashboard-brain-parse-consistency
+description: >-
+  The dashboard Brain-Failures tab's lifetime parse-failure count stays
+  self-consistent with the recent window (#4187). The lifetime counter keys on
+  the parsed metric_name against BRAIN_PARSE_METRIC_NAMES (both brain_parse_error
+  and brain_parse_failure), so it never silently reads 0 after the metric-name
+  transition while the recent window shows real failures, and never miscounts an
+  unrelated metric whose context merely mentions the string.
+version: "1.0"
+config:
+  timeout: 300000
+environment:
+  requires: []
+agents:
+  - name: cli-agent
+    type: cli
+    config: {}
+metadata:
+  tags:
+    - cli
+    - dashboard
+    - brain-failures
+  priority: high
+steps:
+  - name: Run the brain-failures parse-count consistency regression script
+    agent: cli-agent
+    action: run
+    params:
+      command: bash
+      args:
+        - scripts/qa-brain-parse-consistency.sh
+    timeout: 300000
