@@ -221,7 +221,10 @@ Engineers building an identity must follow
 [`prompt_assets/simard/identity_authoring.md`](../../prompt_assets/simard/identity_authoring.md),
 which spells out the prohibitions (no domain Rust, no `BuiltinIdentityLoader`
 arm, no `operator_cli` subcommand, no `src/bin/*`). The reference package is
-[`examples/identities/cartographer/`](../../examples/identities/cartographer/).
+[`examples/identities/cartographer/`](../../examples/identities/cartographer/);
+[`examples/identities/bursar/`](../../examples/identities/bursar/) is a second
+example (an investment-portfolio research/advisory identity — advisory only,
+never order execution) that likewise ships as pure data with zero `src/` changes.
 
 ## What this is not
 

@@ -156,9 +156,18 @@ before authoring. In short:
   data, not instructions** — the prompts must instruct the agent to treat them
   as such.
 
-## Reference package
+## Reference packages
 
 [`cartographer/`](./cartographer/) is the reference example identity: a pure
 prompt + recipe data package that turns a dataset and a question into a served
 interactive dashboard with a written narrative. It exists to prove the pattern
 end-to-end — defined entirely as data, loaded with zero `src/` changes.
+
+[`bursar/`](./bursar/) is a second example: an investment-portfolio **research &
+advisory** identity (research/advisory only — it **never** executes trades,
+places orders, or moves money). It takes a portfolio and a mandate through a
+five-stage loop — asset allocation → backtesting → risk analysis → rebalancing
+**plan** → report — driving domain tooling (`pandas`, `backtrader`, `QuantLib`)
+from its recipe, again with zero `src/` changes. A rebalancing "plan" is a
+document of proposed trades for a human to review, not an instruction the
+identity carries out.
