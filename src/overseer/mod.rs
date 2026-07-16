@@ -53,6 +53,7 @@ pub mod config;
 pub mod conflict;
 pub mod deploy;
 pub mod diagnosis;
+pub mod ecosystem_observe;
 pub mod failure_sink;
 pub mod guardrails;
 pub mod intervention;
@@ -237,6 +238,25 @@ pub struct Overseer {
     /// worktree cleanup. `None` until wired by `build_overseer`; when absent the
     /// tick simply skips the sweep.
     claim_reaper: Option<ClaimReaperSeams>,
+    /// The live agentic ecosystem-observe rail (issue #2419): the thin
+    /// [`ecosystem_observe::EcosystemObserver`] seam that invokes the
+    /// `ecosystem-observe` recipe on the Overseer cadence and forwards its
+    /// OPAQUE semantic brief into the gated launch machinery. `None` until wired
+    /// by `build_overseer`; when absent (bare constructor / tests) the pass is
+    /// skipped and the Overseer behaves exactly as before. This REPLACES the
+    /// retired single-repo Rust gap-scan survey as the cross-repo observation
+    /// SOURCE — Rust never queries or parses a repo; the observation lives in the
+    /// agent's reasoning and is handed forward as an opaque string.
+    ecosystem_observer: Option<Box<dyn ecosystem_observe::EcosystemObserver>>,
+    /// The stewarded roster (validated `owner/name` slugs) handed to the
+    /// ecosystem-observe recipe. Loaded once from `ecosystem_repos.toml` by
+    /// `build_overseer`; empty (and the pass skipped) until wired.
+    ecosystem_roster: Vec<String>,
+    /// Every-N cadence for the ecosystem-observe pass (reuses the gap-scan
+    /// cadence knob). Clamped to a floor of 1 by [`ecosystem_observe::should_observe`].
+    ecosystem_every_n: u64,
+    /// Monotonic tick counter driving the ecosystem-observe every-N cadence.
+    ecosystem_tick: u64,
 }
 
 /// The reaper's injected dependencies, bundled so the `Overseer` carries one
@@ -310,6 +330,14 @@ pub enum ActOutcome {
     },
 }
 
+/// The `target_repo` marker attached to ecosystem-observe launches. The
+/// AUTHORITATIVE repo for each surfaced Problem is named in the agent's brief
+/// prose (per `observe.md` / `problem_to_brief.md`); this stable
+/// observation-origin slug only feeds the launcher's dedup signature and hint,
+/// never a `cd`/clone. Keeping it constant lets `recipe_dedup_key` dedup off the
+/// brief content rather than a churning per-repo target.
+const ECOSYSTEM_OBSERVE_TARGET: &str = "rysweet/Simard";
+
 impl Overseer {
     /// Construct with default guardrails (HIGH-RISK gated, default daily budget).
     pub fn new(caps: Capabilities) -> Self {
@@ -346,6 +374,10 @@ impl Overseer {
             claim_reap_enabled: false,
             claim_reap_stale_secs: config::DEFAULT_CLAIM_REAP_STALE_SECS,
             claim_reaper: None,
+            ecosystem_observer: None,
+            ecosystem_roster: Vec::new(),
+            ecosystem_every_n: 1,
+            ecosystem_tick: 0,
         }
     }
 
@@ -382,6 +414,26 @@ impl Overseer {
     /// cadence). When off, observed gaps are held (never notified/filed).
     pub fn with_gap_scan_enabled(mut self, enabled: bool) -> Self {
         self.gap_scan_enabled = enabled;
+        self
+    }
+
+    /// Wire the live agentic ecosystem-observe rail (issue #2419): the stewarded
+    /// `roster` the OBSERVE agent scans, the [`ecosystem_observe::EcosystemObserver`]
+    /// seam that invokes the recipe, and the every-N cadence. Absent by default;
+    /// `build_overseer` wires it with the committed roster + a production
+    /// recipe-runner. Gated by [`Self::with_gap_scan_enabled`] — it REPLACES the
+    /// retired single-repo gap-scan survey as the observation source, so the same
+    /// `SIMARD_OVERSEER_GAP_SCAN` opt-out disables it and the same
+    /// `SIMARD_OVERSEER_GAP_SCAN_EVERY_N` sets its cadence.
+    pub fn with_ecosystem_observer(
+        mut self,
+        roster: Vec<String>,
+        observer: Box<dyn ecosystem_observe::EcosystemObserver>,
+        every_n: u64,
+    ) -> Self {
+        self.ecosystem_roster = roster;
+        self.ecosystem_observer = Some(observer);
+        self.ecosystem_every_n = every_n;
         self
     }
 
@@ -577,6 +629,16 @@ impl Overseer {
             plan.push(planned);
         }
 
+        // Live agentic ecosystem-observe (issue #2419): on the Overseer cadence,
+        // the thin rail invokes the `ecosystem-observe` recipe — an AGENT scans
+        // the stewarded roster with `gh` and REASONS to a prioritized, deduped
+        // Problem list, then briefs each into a `smart-orchestrator`
+        // task_description. Rust never queries or parses a repo; it only schedules
+        // the recipe and routes the agent's OPAQUE semantic brief into the SAME
+        // gated launch path every fix uses. Replaces the retired single-repo Rust
+        // gap-scan survey as the cross-repo observation SOURCE.
+        self.observe_ecosystem(&observed, &in_flight, &mut launches, &mut plan);
+
         Ok(CycleReport {
             observed,
             signals,
@@ -584,6 +646,81 @@ impl Overseer {
             plan,
             entries,
         })
+    }
+
+    /// One live agentic ecosystem-observe pass (issue #2419), appended to the
+    /// cycle plan when the rail is wired and due on the cadence.
+    ///
+    /// The observation itself is entirely agentic: the thin rail invokes the
+    /// `ecosystem-observe` recipe, whose OBSERVE agent runs `gh` across the
+    /// stewarded roster and REASONS to a deduped Problem list, and whose BRIEF
+    /// agent turns each Problem into a `smart-orchestrator` `task_description`.
+    /// Rust never queries or parses a repo — it receives only the agent's OPAQUE
+    /// semantic brief and routes it VERBATIM into a gated [`Intervention::LaunchRecipe`]
+    /// (the SAME budget / launch-cap / sequencer / in-flight-dedup / recursion
+    /// guard as every other launch).
+    ///
+    /// Fail-closed: an unwired observer, an off cadence, an empty roster, or a
+    /// "nothing actionable" / failed recipe run all leave the plan unchanged —
+    /// never a fabricated launch.
+    fn observe_ecosystem(
+        &mut self,
+        observed: &ObservedState,
+        in_flight: &[InFlightItem],
+        launches: &mut usize,
+        plan: &mut Vec<PlannedIntervention>,
+    ) {
+        if self.ecosystem_observer.is_none() {
+            return;
+        }
+        // Cadence: reuse the gap-scan enable + every-N gate (this pass replaced
+        // the gap-scan survey as the observation source). Advance the tick FIRST
+        // so a disabled/held pass still keeps the counter monotonic.
+        let tick = self.ecosystem_tick;
+        self.ecosystem_tick = self.ecosystem_tick.wrapping_add(1);
+        if !ecosystem_observe::should_observe(self.gap_scan_enabled, self.ecosystem_every_n, tick) {
+            return;
+        }
+        // Flatten Simard's in-flight OODA refs so the agent dedups against work
+        // an engineer already owns and never duplicates her OODA.
+        let inflight_refs: Vec<String> = in_flight
+            .iter()
+            .flat_map(|item| item.refs.iter().cloned())
+            .collect();
+        // Borrow the observer only for the call; the returned brief is owned, so
+        // the immutable borrow of `self` ends before the mutable `gate` below.
+        let outcome = {
+            let observer = self
+                .ecosystem_observer
+                .as_ref()
+                .expect("ecosystem_observer presence checked above");
+            observer.observe(&self.ecosystem_roster, &inflight_refs)
+        };
+        let brief = match outcome {
+            Ok(Some(brief)) => brief,
+            Ok(None) => return, // nothing actionable this pass — fabricate nothing
+            Err(e) => {
+                tracing::warn!(
+                    target: "overseer::ecosystem_observe",
+                    error = %e,
+                    "ecosystem-observe pass failed — degrading to no observation (no problems fabricated)"
+                );
+                return;
+            }
+        };
+        // Route the agent's OPAQUE brief into the SAME gated launch path. The
+        // brief prose names its own target repo (per `observe.md`); the
+        // launcher's `target_repo` stays the stable observation-origin marker,
+        // and per-launch dedup keys off the brief content via `recipe_dedup_key`.
+        let iv = Intervention::LaunchRecipe {
+            brief: RecipeBrief {
+                task_description: brief,
+                target_repo: ECOSYSTEM_OBSERVE_TARGET.to_string(),
+                sequence_group: None,
+            },
+        };
+        let planned = self.gate(&iv, observed, launches);
+        plan.push(planned);
     }
 
     /// Run ONE whole-pass, fail-closed cognitive-memory recall (issue #2628):
@@ -2064,6 +2201,7 @@ fn decide_blocked_goal(
 mod tests {
     use super::capabilities::*;
     use super::*;
+    use crate::error::SimardResult;
 
     // ── Fakes: each satisfies one capability with canned values. ────────────
     struct FakeStatus(ObservedState);
@@ -2475,6 +2613,210 @@ mod tests {
         assert!(
             matches!(res, Err(OverseerError::Capability { .. })),
             "a genuine capability/safety error must propagate as an error, got {res:?}"
+        );
+    }
+
+    // ── ecosystem-observe rail (issue #2419) ────────────────────────────────
+
+    /// A fake [`ecosystem_observe::EcosystemObserver`] that records the roster +
+    /// in-flight refs it was handed and returns a scripted outcome — no
+    /// subprocess, no `gh`, no recipe runner.
+    type EcoCallLog = std::sync::Arc<std::sync::Mutex<Vec<(Vec<String>, Vec<String>)>>>;
+    struct FakeEcoObserver {
+        outcome: SimardResult<Option<String>>,
+        seen: EcoCallLog,
+    }
+    impl FakeEcoObserver {
+        fn returning(outcome: SimardResult<Option<String>>) -> Self {
+            Self {
+                outcome,
+                seen: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+        /// Build one that shares its call log with the caller, so a test can
+        /// inspect what the rail forwarded after the observer is boxed.
+        fn with_log(outcome: SimardResult<Option<String>>) -> (Self, EcoCallLog) {
+            let seen: EcoCallLog = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            (
+                Self {
+                    outcome,
+                    seen: std::sync::Arc::clone(&seen),
+                },
+                seen,
+            )
+        }
+    }
+    impl ecosystem_observe::EcosystemObserver for FakeEcoObserver {
+        fn observe(
+            &self,
+            roster: &[String],
+            inflight_refs: &[String],
+        ) -> SimardResult<Option<String>> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((roster.to_vec(), inflight_refs.to_vec()));
+            match &self.outcome {
+                Ok(v) => Ok(v.clone()),
+                Err(_) => Err(crate::error::SimardError::AdapterInvocationFailed {
+                    base_type: "ecosystem-observe".to_string(),
+                    reason: "scripted failure".to_string(),
+                }),
+            }
+        }
+    }
+
+    fn overseer_with_eco(outcome: SimardResult<Option<String>>, every_n: u64) -> Overseer {
+        // No process-health signal, so any launch in the plan comes solely from
+        // the ecosystem-observe rail.
+        Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(true)
+            .with_ecosystem_observer(
+                vec!["rysweet/Simard".to_string(), "rysweet/azlin".to_string()],
+                Box::new(FakeEcoObserver::returning(outcome)),
+                every_n,
+            )
+    }
+
+    #[test]
+    fn ecosystem_observe_routes_brief_into_a_gated_launch() {
+        let brief = "PROBLEM: azlin CI red -> brief: fix flaky provisioning test".to_string();
+        let mut ov = overseer_with_eco(Ok(Some(brief.clone())), 1);
+        let report = ov.run_cycle().expect("cycle");
+        // The rail's brief became one admitted LaunchRecipe in the plan.
+        let launches: Vec<_> = report
+            .plan
+            .iter()
+            .filter(|p| p.intervention.label() == "launch_recipe")
+            .collect();
+        assert_eq!(launches.len(), 1, "the rail adds exactly one launch");
+        assert!(launches[0].admitted, "the launch is gated-admitted");
+        match &launches[0].intervention {
+            Intervention::LaunchRecipe { brief: b } => {
+                assert_eq!(
+                    b.task_description, brief,
+                    "the opaque brief is forwarded verbatim"
+                );
+                assert_eq!(b.target_repo, ECOSYSTEM_OBSERVE_TARGET);
+            }
+            other => panic!("expected LaunchRecipe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ecosystem_observe_none_adds_no_launch() {
+        let mut ov = overseer_with_eco(Ok(None), 1);
+        let report = ov.run_cycle().expect("cycle");
+        assert!(
+            report
+                .plan
+                .iter()
+                .all(|p| p.intervention.label() != "launch_recipe"),
+            "a None observation fabricates no launch"
+        );
+    }
+
+    #[test]
+    fn ecosystem_observe_failure_degrades_without_launch() {
+        let mut ov = overseer_with_eco(
+            Err(crate::error::SimardError::AdapterInvocationFailed {
+                base_type: "ecosystem-observe".to_string(),
+                reason: "boom".to_string(),
+            }),
+            1,
+        );
+        let report = ov
+            .run_cycle()
+            .expect("cycle must not error when the rail fails");
+        assert!(
+            report
+                .plan
+                .iter()
+                .all(|p| p.intervention.label() != "launch_recipe"),
+            "a rail failure degrades safely and fabricates no launch"
+        );
+    }
+
+    #[test]
+    fn ecosystem_observe_skipped_when_disabled() {
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(false) // opt-out disables the rail
+            .with_ecosystem_observer(
+                vec!["rysweet/Simard".to_string()],
+                Box::new(FakeEcoObserver::returning(Ok(Some("brief".to_string())))),
+                1,
+            );
+        let report = ov.run_cycle().expect("cycle");
+        assert!(
+            report
+                .plan
+                .iter()
+                .all(|p| p.intervention.label() != "launch_recipe"),
+            "the gap-scan opt-out also disables the ecosystem-observe rail"
+        );
+    }
+
+    #[test]
+    fn ecosystem_observe_respects_every_n_cadence() {
+        // every_n = 2 → observe on ticks 0, 2, 4; skip 1, 3.
+        let mut ov = overseer_with_eco(Ok(Some("brief".to_string())), 2);
+        let launched = |r: &CycleReport| {
+            r.plan
+                .iter()
+                .any(|p| p.intervention.label() == "launch_recipe")
+        };
+        assert!(launched(&ov.run_cycle().unwrap()), "tick 0 observes");
+        assert!(!launched(&ov.run_cycle().unwrap()), "tick 1 skipped");
+        assert!(launched(&ov.run_cycle().unwrap()), "tick 2 observes");
+        assert!(!launched(&ov.run_cycle().unwrap()), "tick 3 skipped");
+    }
+
+    #[test]
+    fn ecosystem_observe_unwired_is_a_noop() {
+        // No `.with_ecosystem_observer(...)` → the pass is skipped entirely.
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(true);
+        let report = ov.run_cycle().expect("cycle");
+        assert!(
+            report
+                .plan
+                .iter()
+                .all(|p| p.intervention.label() != "launch_recipe"),
+            "an unwired rail never contributes a launch"
+        );
+    }
+
+    #[test]
+    fn ecosystem_observe_hands_inflight_refs_for_dedup() {
+        let (observer, log) = FakeEcoObserver::with_log(Ok(None));
+        let in_flight = vec![InFlightItem {
+            id: "g1".to_string(),
+            source: "ooda".to_string(),
+            refs: vec!["issue:rysweet/Simard#42".to_string()],
+        }];
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, in_flight))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(true)
+            .with_ecosystem_observer(vec!["rysweet/Simard".to_string()], Box::new(observer), 1);
+        ov.run_cycle().expect("cycle");
+        let calls = log.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "the rail invokes the observer once per due tick"
+        );
+        assert_eq!(
+            calls[0].0,
+            vec!["rysweet/Simard".to_string()],
+            "the roster is forwarded to the observer"
+        );
+        assert_eq!(
+            calls[0].1,
+            vec!["issue:rysweet/Simard#42".to_string()],
+            "Simard's in-flight OODA refs are flattened and forwarded for dedup"
         );
     }
 }
