@@ -358,7 +358,7 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
         if(d.rate_per_hour){
           const r=d.rate_per_hour.long_term_total||0;
           const rDisp=Math.abs(r)<0.1?'0':r.toFixed(1);
-          rateEl.innerHTML='<div style="font-size:1.5rem;font-weight:700;color:#58a6ff;line-height:1">'+rDisp+'</div><div style="font-size:.75rem;color:#8b949e;margin-top:.15rem">long-term mem/hr</div>';
+          rateEl.innerHTML='<div style="font-size:1.5rem;font-weight:700;color:#58a6ff;line-height:1">'+rDisp+'</div><div style="font-size:.75rem;color:#8b949e;margin-top:.15rem">long-term mem/hr (24 h)</div>';
         }
 
         // SVG sparkline from snapshots
