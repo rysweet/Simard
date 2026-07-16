@@ -16,8 +16,10 @@ owner: simard
 doc_type: reference
 related:
   - ./overseer-activity-feed.md
+  - ./overseer-self-observation-stability.md
   - ../design/overseer.md
   - ../howto/review-overseer-workstream-gaps.md
+  - ../howto/diagnose-recurring-cognitive-memory-signature.md
   - ../howto/watch-overseer-activity.md
   - ./stewardship-api.md
   - ./no-progress-breaker-api.md
@@ -276,9 +278,33 @@ operator:
 
 The result: **one deduped item per recurring gap signature**, not one per tick.
 
-## Act path — notify + file (reuse existing plumbing)
+## Act path — the coverage closing edge (issue #4128, D3b)
 
-When Orient produces a `WorkstreamCoverage` problem, `act_flag_workstream_gaps`
+> **Update (issue #4128).** A `WorkstreamCoverage` problem now `decide`s to a
+> **closing edge that actually covers the gap** — an
+> `Intervention::LaunchRecipe` tagged with the `WORKSTREAM_COVERAGE_GROUP`
+> sequence group — instead of the old **notify-only** `FlagWorkstreamGaps`
+> routing. The notify-only path left the gap **uncovered**, so it re-surfaced
+> every window as the recurring `workstream-gap` signature (the exact incident in
+> #4128, A2). The launch is routed through the **same gate** as every other
+> launch and additionally **fails closed** without a distinct steward identity
+> (anti-recursion), is **held** while a coverage launch for the same gap set is
+> already in flight (the `inflight_investigations` dedup guard, keyed by the
+> per-gap `workstream-gap:<sorted sigs>` brief), is held when the gap-scan is
+> disabled (the `SIMARD_OVERSEER_GAP_SCAN` opt-out now matches the coverage
+> `sequence_group`), and carries a `task_description` **templated from structured
+> data only** (gap category + restricted-slug signature), never raw issue text.
+> The `Problem` `dedup_key` is keyed **per-gap** (`workstream-gap:<sig>`) rather
+> than the bare `workstream-gap` constant, so distinct gap sets no longer collapse
+> onto one key (which had starved the closing edge to a single gap).
+>
+> The `FlagWorkstreamGaps` intervention, its `act_flag_workstream_gaps` handler,
+> and the `WorkstreamGapsFlagged` outcome **still exist** and are still admitted by
+> the gate — only the `decide` **routing** for `WorkstreamCoverage` changed. The
+> notify-centric description below documents that retained machinery; it is no
+> longer the path a coverage gap takes by default.
+
+When it is invoked directly, `act_flag_workstream_gaps`
 (`src/overseer/mod.rs`) acts through the Overseer's **existing** escalation
 machinery — the same paths `goal_health` and M1 use — with no new bypass:
 
@@ -306,15 +332,18 @@ The act then returns **one** summarising `ActOutcome` (see
 separate `Escalated` / `IssueFiled` outcome, so gap activity is counted only on
 the gap-scan's own dedicated counters, never on the generic ones.
 
-**The gap-scan does not launch its own fix workstreams.** Surfacing (notify +
-file) is its whole job, mirroring `goal_health`, which self-heals/escalates but
-never launches. When an underlying anomaly warrants a fix, that fix is launched —
-if and only if the Overseer's existing guardrails permit — through the Overseer's
-**existing** anomaly→`LaunchRecipe` path (counted normally under
-`recipes_launched`), not through the gap act. The gap-scan opens **no** new
-auto-launch path and **no** new bypass. Any `task_description` on that existing
-path stays **Simard-templated from structured data**, never raw external issue
-text (guideline **C2**).
+**Since issue #4128 (D3b) the gap-scan closes the gap with a gated launch.** A
+`WorkstreamCoverage` problem decides to a `LaunchRecipe` tagged
+`WORKSTREAM_COVERAGE_GROUP` that launches a workstream to **cover** the uncovered
+work, so the gap stops recurring. This launch is **not** a new bypass: it is
+admitted through the **same gate** as every other launch (autonomy, per-cycle
+launch cap, budget, and the conflict sequencer), it **fails closed** without a
+distinct steward identity (the same anti-recursion guard the notify path
+enforced), it is **held** while an identical coverage launch is already in flight,
+and its `task_description` stays **Simard-templated from structured data** (gap
+category + restricted-slug signature), never raw external issue text (guideline
+**C2**). Underlying anomaly fixes still ride the Overseer's pre-existing
+anomaly→`LaunchRecipe` path, counted normally under `recipes_launched`.
 
 ### `OperatorNotification::workstream_gap`
 
@@ -521,9 +550,13 @@ It never blocks a tick and never writes.
   notification and **one** issue per recurring gap signature — never a flood.
 - **Reuses existing plumbing.** Notify and file go through the same
   `DualChannelNotifier` / `IssueFiler` paths `goal_health` / M1 use — same
-  escalation, same gates, no `--admin`, no `--no-verify`, no new bypass. The
-  gap-scan launches nothing itself; any anomaly fix rides the Overseer's existing
-  `LaunchRecipe` path and its counter, unchanged.
+  escalation, same gates, no `--admin`, no `--no-verify`, no new bypass. Since
+  issue #4128 a coverage gap decides to a **gated closing-edge** `LaunchRecipe`
+  (tagged `WORKSTREAM_COVERAGE_GROUP`): it is admitted only through the existing
+  launch gate, **fails closed** without a distinct steward identity, and is
+  in-flight-deduped — it opens no unguarded auto-launch path. Any other anomaly
+  fix still rides the Overseer's pre-existing `LaunchRecipe` path and its counter,
+  unchanged.
 - **Fails closed and never panics.** The gate fails closed on identity errors;
   the detector degrades every unreadable source to empty; a panicking tick is
   isolated and recorded, never swallowed.
@@ -554,9 +587,11 @@ notifications, filed-issue bodies, and `gh` reads. The gap-scan therefore:
 - **D1/D2:** never emits tokens, `SIMARD_DASHBOARD_TOKEN`, internal paths, or
   stack traces into notifications, issues, or logs; keeps `gh` credentials
   ambient.
-- **S1/S2/S3:** adds no new auto-launch path (launch stays behind existing
-  gates); two-layer dedup prevents notify/issue floods; the
-  `SIMARD_OVERSEER_GAP_SCAN` kill-switch is honoured.
+- **S1/S2/S3:** the only launch the gap-scan adds — the issue #4128 coverage
+  closing edge — stays **behind the existing launch gate** plus a fail-closed
+  steward-identity guard and in-flight dedup (no unguarded auto-launch path);
+  two-layer dedup prevents notify/issue floods; the `SIMARD_OVERSEER_GAP_SCAN`
+  kill-switch is honoured (its opt-out holds the coverage launch too).
 
 ## Testing
 
