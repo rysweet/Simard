@@ -32,6 +32,21 @@ use crate::overseer::signal::{
 /// against the operator's rejected "unblock it every cycle" antipattern.
 pub const RECURRENCE_ESCALATION_THRESHOLD: u32 = 3;
 
+/// Dead-band floor for a PERPETUAL, no-progress goal (issue #4124). A perpetual
+/// goal that is *self-healed* every cycle (auto-`UnblockGoal`) can re-park on the
+/// SAME root cause and re-emit the identical signature indefinitely while its
+/// recurrence sits in the `[2, 3)` band — below
+/// [`RECURRENCE_ESCALATION_THRESHOLD`] (3), so the general fast path never fires,
+/// yet at the detection floor (2), so cognitive memory keeps reporting the same
+/// recurring signature. Once a perpetual re-park's cause has recurred at this
+/// floor the Overseer ESCALATES its root cause ONCE (operator-visible, naming the
+/// missing dependency) instead of blindly re-unblocking it — terminating the loop
+/// without collapsing into the rejected "unblock it every cycle" antipattern.
+///
+/// This is strictly below [`RECURRENCE_ESCALATION_THRESHOLD`]: a first-time or
+/// single-recurrence false park (`recurrence < 2`) is still self-healed.
+pub const PERPETUAL_RECURRENCE_ESCALATION_THRESHOLD: u32 = 2;
+
 /// A prior occurrence of a problem's root cause, recalled from cognitive memory.
 /// The Overseer records one of these each time it acts on a cause (via
 /// amplihack-memory-lib); recall of them raises [`RootCause::recurrence`] so a

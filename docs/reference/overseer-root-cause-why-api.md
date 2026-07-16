@@ -21,6 +21,8 @@ related:
   - ../design/overseer.md
   - ./overseer-goal-board-health-api.md
   - ./overseer-activity-feed.md
+  - ./overseer-recurrence-dead-band-escalation-api.md
+  - ../howto/configure-overseer-recurrence-escalation.md
   - ./cognitive-memory-ranked-episodic-recall.md
   - ./no-progress-breaker-api.md
 ---

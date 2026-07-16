@@ -20,7 +20,9 @@ status: design — not yet implemented
 related:
   - ../design/overseer.md
   - ../reference/overseer-root-cause-why-api.md
+  - ../reference/overseer-recurrence-dead-band-escalation-api.md
   - ../howto/configure-overseer-root-cause-why.md
+  - ../howto/configure-overseer-recurrence-escalation.md
   - ./overseer-goal-board-health.md
   - ./perpetual-goal-no-progress-exemption.md
   - ../reference/overseer-goal-board-health-api.md

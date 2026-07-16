@@ -124,7 +124,10 @@ pub use wiring::{
 };
 
 pub use activity::ProblemEntry;
-pub use root_cause::{PriorOccurrence, RECURRENCE_ESCALATION_THRESHOLD, root_cause_signature};
+pub use root_cause::{
+    PERPETUAL_RECURRENCE_ESCALATION_THRESHOLD, PriorOccurrence, RECURRENCE_ESCALATION_THRESHOLD,
+    root_cause_signature,
+};
 
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::goal_curation::no_progress_breaker::{
@@ -1782,7 +1785,11 @@ pub fn decide(problem: &Problem) -> Intervention {
 ///   defect can be fixed without generating another tracking issue;
 /// - a first-time / infrequent PERPETUAL goal false-parked by the **no-progress**
 ///   safeguard is SELF-HEALED — auto-unblocked + reactivated (a root-cause fix
-///   for a false park, not a symptom patch);
+///   for a false park, not a symptom patch) — UNLESS its SAME cause has already
+///   recurred at [`PERPETUAL_RECURRENCE_ESCALATION_THRESHOLD`] (2, the recurrence
+///   dead-band floor below the general escalation threshold, issue #4124), in
+///   which case re-unblocking would just re-park it and re-emit the identical
+///   signature forever, so the ROOT CAUSE is ESCALATED once instead;
 /// - ANY OTHER goal carrying a "needs human review" marker is ESCALATED to the
 ///   operator WITH its root-cause WHY so the marker AND its analysis reach a human;
 /// - a plain operator-set / dependency block is surfaced in the periodic Report
@@ -1808,7 +1815,27 @@ fn decide_blocked_goal(
             why,
         };
     }
+    if perpetual
+        && is_no_progress_marker(&reason)
+        && recurrence >= PERPETUAL_RECURRENCE_ESCALATION_THRESHOLD
+    {
+        // #4124: close the recurrence DEAD-BAND. A perpetual no-progress goal is
+        // normally self-healed (auto-unblocked) every cycle, but if its SAME root
+        // cause has already recurred at the detection floor
+        // [`PERPETUAL_RECURRENCE_ESCALATION_THRESHOLD`] (2) — below the general
+        // fast path (3) yet enough for cognitive memory to keep reporting the
+        // identical recurring signature — blindly re-unblocking it just re-parks
+        // it and re-emits the signature forever (the rejected antipattern).
+        // Escalate the root cause ONCE instead so the loop terminates.
+        return Intervention::EscalateBlockedGoal {
+            goal_id,
+            reason,
+            why,
+        };
+    }
     if perpetual && is_no_progress_marker(&reason) {
+        // Below the dead-band floor this is a genuine one-off false park; the
+        // #2609 self-heal (auto-unblock + reactivate) is unchanged.
         return Intervention::UnblockGoal { goal_id, reason };
     }
     if needs_review {
