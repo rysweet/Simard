@@ -409,8 +409,8 @@ fn verify_still_not_ready_when_ci_red() {
 }
 
 /// Diff-scan preserved: a non-additive / risky diff never verifies ready.
-/// Since #4163 the style scans (stray-print / Bridge-naming) are judge-advisory,
-/// so the retained merge-safety gate exercised here is the additive one — a
+/// Since #4163 the two redundant style scans are judge-advisory, so the
+/// retained merge-safety gate exercised here is the additive one — a
 /// removed `pub` item (a breaking-API change) must still fail verify.
 #[test]
 fn verify_still_not_ready_on_dirty_diff() {
