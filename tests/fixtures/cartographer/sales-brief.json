@@ -1,0 +1,6 @@
+{
+  "name": "Regional sales performance",
+  "question": "Which region and product drive the most revenue over time?",
+  "dataset": "sales.csv",
+  "title": "Regional Sales Dashboard"
+}

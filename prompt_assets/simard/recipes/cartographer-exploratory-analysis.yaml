@@ -1,0 +1,76 @@
+# cartographer-exploratory-analysis.yaml — Cartographer goal-session recipe.
+#
+# Drives the exploratory-analysis phase of the Cartographer identity: take a
+# dataset + question and produce a profiled analysis, designed charts, an
+# interactive dashboard, and a written narrative via the `simard cartographer`
+# command surface. Parser-free / agentic: the CLI call is the business outcome;
+# the agent's prose is diagnostic only.
+#
+# Context vars (passed via -c):
+#   simard_binary  — path to the simard binary
+#   brief_path     — path to the analysis-brief JSON (name, question, dataset)
+#   out_dir        — directory to write the dashboard package into
+
+name: "cartographer-exploratory-analysis"
+description: "Cartographer — take a dataset + question to a profiled analysis, charts, and a dashboard"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "cartographer", "data", "analysis", "dashboard"]
+
+context: {}
+
+steps:
+  - id: "cartographer-analyze"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      # Cartographer — Exploratory Analysis
+
+      You are Simard Cartographer's exploratory-analysis actor. Interpret the
+      analysis brief directly; do not emit or parse a marker or JSON verdict.
+
+      brief path = {{brief_path}}
+      output dir = {{out_dir}}
+
+      ## Inspect
+
+      Read the analysis brief at `{{brief_path}}`. Confirm the dataset path, the
+      analytical question, and (optionally) the dataset format and title. If the
+      dataset is missing, empty, or unparseable, or the question is missing,
+      STOP and record the specific problem — do not invent findings.
+
+      ## Act
+
+      Profile the dataset, design the charts, and render the dashboard with your
+      bash tool:
+
+      "{{simard_binary}}" cartographer build \
+        --brief "{{brief_path}}" \
+        --out "{{out_dir}}"
+
+      This writes, under `{{out_dir}}`: `analysis.json` (column profile + chart
+      specs), `dashboard.html` (interactive Plotly dashboard), `narrative.md`
+      (the written story), `app.py` (Streamlit alternate delivery), and
+      `manifest.json`.
+
+      ## Verify
+
+      Read `{{out_dir}}/manifest.json`. Confirm `dashboard.html`, `narrative.md`,
+      and `analysis.json` exist and are non-empty, at least one chart was
+      designed, and `verification.ok` is true. If the CLI failed or verification
+      did not pass, stop and report the failure; do not fabricate success.
+
+  - id: "cartographer-analyze-verifier"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      Verify the analysis package produced by the prior step by inspecting the
+      manifest with your bash tool:
+
+      "{{simard_binary}}" cartographer inspect --out "{{out_dir}}"
+
+      If it reports the dashboard, narrative, and analysis are present and
+      verification passed, stop successfully. Otherwise, re-read the brief at
+      {{brief_path}} and the manifest, determine what is missing, and re-run
+      `{{simard_binary}} cartographer build --brief {{brief_path}} --out {{out_dir}}`.
+      The durable dashboard package is the only business outcome.

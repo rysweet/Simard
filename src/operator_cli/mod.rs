@@ -1,5 +1,6 @@
 mod args;
 mod atelier;
+mod cartographer;
 mod ci_health;
 mod creative_ideas;
 mod curation;
@@ -164,6 +165,17 @@ Design (Atelier identity):
   atelier inspect --out <dir> [--fabrication]
                          — re-read and re-verify an existing package manifest
 
+Data storytelling (Cartographer identity):
+  cartographer build (--brief <brief.json> | --dataset <data> --question <q>)
+                     --out <dir> [--no-streamlit] [--serve] [--host <addr>] [--port <n>] [--strict]
+                         — take a dataset + question to an interactive Plotly
+                           dashboard, a written narrative, an analysis JSON, and
+                           a Streamlit app; --serve serves the result over HTTP
+  cartographer inspect --out <dir>
+                         — re-read and re-verify an existing dashboard package
+  cartographer serve --out <dir> [--host <addr>] [--port <n>]
+                         — serve a built dashboard package over HTTP
+
 Compatibility binaries remain available: simard_operator_probe, simard-gym
 ";
 
@@ -247,6 +259,7 @@ where
     match command.as_str() {
         "engineer" => engineer::dispatch_engineer_command(args),
         "atelier" => atelier::dispatch_atelier_command(args),
+        "cartographer" => cartographer::dispatch_cartographer_command(args),
         "meeting" => meeting::dispatch_meeting_command(args),
         "goal" => goal::dispatch_goal_command(args),
         "goal-curation" => curation::dispatch_goal_curation_command(args),
@@ -373,7 +386,7 @@ where
 }
 
 pub fn operator_cli_usage() -> &'static str {
-    "usage: simard <engineer|atelier|meeting|goal-curation|improvement-curation|gym|ooda|memory|status|spawn|merge-pr|worktree-gc|disk-reclaim|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap|signal> ..."
+    "usage: simard <engineer|atelier|cartographer|meeting|goal-curation|improvement-curation|gym|ooda|memory|status|spawn|merge-pr|worktree-gc|disk-reclaim|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap|signal> ..."
 }
 
 pub fn operator_cli_help() -> &'static str {

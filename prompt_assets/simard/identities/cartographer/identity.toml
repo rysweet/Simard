@@ -1,0 +1,48 @@
+# Cartographer identity card — pluggable Simard identity for data storytelling
+# and interactive dashboards. Loadable via FileIdentityLoader by pointing
+# SIMARD_IDENTITY_PATH at this directory and selecting `simard-cartographer`.
+#
+# The `simard-cartographer` identity is also compiled into BuiltinIdentityLoader
+# so it is selectable out of the box; this card is the pluggable, file-based
+# equivalent for operators who deploy their own identity roster.
+
+[package]
+name = "simard-cartographer"
+version = "0.1.0"
+description = "Data storytelling & dashboards identity: exploratory analysis, visualization design, and interactive dashboard delivery"
+
+[[identities]]
+name = "simard-cartographer"
+default_mode = "engineer"
+supported_base_types = [
+  "local-harness",
+  "terminal-shell",
+  "rusty-clawd",
+  "copilot-sdk",
+  "claude-agent-sdk",
+  "ms-agent-framework",
+]
+required_capabilities = [
+  "prompt-assets",
+  "session-lifecycle",
+  "memory",
+  "evidence",
+  "reflection",
+]
+
+[[identities.prompt_assets]]
+id = "cartographer-system"
+path = "cartographer_system.md"
+
+[identities.memory_policy]
+allow_project_writes = false
+summary_scope = "session-summary"
+
+[[identities.seed_goals]]
+priority = 3
+title = "Turn a dataset and a question into a served, narrated dashboard"
+description = """
+Take a dataset plus an analytical question to a served interactive dashboard
+with a written narrative using the cartographer exploratory-analysis and
+dashboard-delivery goal-session recipes.
+"""

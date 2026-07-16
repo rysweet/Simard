@@ -76,6 +76,10 @@ simard
 |- atelier
 |  |- build --brief <brief.json> --out <dir> [--fabrication] [--strict]
 |  `- inspect --out <dir> [--fabrication]
+|- cartographer
+|  |- build (--brief <brief.json> | --dataset <data> --question <q>) --out <dir> [--no-streamlit] [--serve] [--host <addr>] [--port <n>] [--strict]
+|  |- inspect --out <dir>
+|  `- serve --out <dir> [--host <addr>] [--port <n>]
 |- update
 `- install [--simard-home PATH] [--dry-run] [--systemd-user-dir PATH] [--systemctl PATH]  # planned
 ```
@@ -546,6 +550,49 @@ Re-reads an existing package directory, re-runs verification against the
 persisted `manifest.json`, and prints the tool report and verification result
 without rebuilding. Also prints the available-tool report when `<dir>` does not
 yet contain a manifest.
+
+## Cartographer data storytelling commands
+
+The **Cartographer** identity (`simard-cartographer`) turns a dataset and a
+question into an exploratory analysis, an interactive dashboard, and a written
+narrative — served end-to-end. See
+[Tell data stories with Cartographer](../howto/tell-data-stories-with-cartographer.md)
+for the full workflow.
+
+### `simard cartographer build (--brief <brief.json> | --dataset <data> --question <q>) --out <dir> [--no-streamlit] [--serve] [--host <addr>] [--port <n>] [--strict]`
+
+Loads a dataset (CSV or JSON array) either from a brief file (JSON: `name`,
+`question`, `dataset`, optional `title`, `dataset_format`, `max_rows`,
+`max_points`) or ad-hoc from `--dataset` + `--question`, profiles the columns,
+designs charts, and renders the deliverables. Writes to `<dir>`:
+`analysis.json` (dataset profile + chart specs), `dashboard.html` (a
+self-contained interactive Plotly page), `narrative.md` (the written data
+story), `manifest.json`, and — unless `--no-streamlit` — `app.py` (a Streamlit
+app rendering the same dashboard).
+
+The core pipeline is pure Rust with no hard external dependency (Plotly.js is
+loaded in the browser from a CDN), so `build` works on any host. `--serve`
+serves the package over HTTP after building (`--host`/`--port`, default port
+`8787`). `--strict` exits non-zero if verification fails.
+
+Verification always requires the core deliverables: a loaded dataset, at least
+one chart, the interactive dashboard, the narrative, and the analysis document.
+
+Exit codes: `0` verified; `1` verification failed (or `--strict` and
+verification did not pass); non-zero on an invalid brief or unreadable dataset.
+
+### `simard cartographer inspect --out <dir>`
+
+Re-reads an existing package directory, re-runs verification against the
+persisted `manifest.json`, and prints the deliverable report and verification
+result without rebuilding. Also prints the available delivery-tool report
+(`python3`, `streamlit`, `node`).
+
+### `simard cartographer serve --out <dir> [--host <addr>] [--port <n>]`
+
+Serves an already-built package over HTTP with a built-in, path-traversal-safe
+static file server: `/` returns the interactive `dashboard.html` and the other
+package files are served by name. Default host `127.0.0.1`, default port `8787`.
 
 ## Compatibility mapping
 

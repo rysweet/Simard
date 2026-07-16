@@ -1,0 +1,81 @@
+# cartographer-dashboard-delivery.yaml — Cartographer goal-session recipe.
+#
+# Drives the dashboard-delivery phase of the Cartographer identity: from a
+# dataset + question, produce and then SERVE the interactive dashboard so the
+# result is a live, explorable dashboard end-to-end, and verify it against the
+# manifest. Parser-free / agentic.
+#
+# Context vars (passed via -c):
+#   simard_binary  — path to the simard binary
+#   brief_path     — path to the analysis-brief JSON (name, question, dataset)
+#   out_dir        — directory holding the dashboard package
+#   serve_port     — optional TCP port for the served dashboard (default 8787)
+
+name: "cartographer-dashboard-delivery"
+description: "Cartographer — deliver and serve an interactive dashboard + narrative from a dataset + question"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "cartographer", "dashboard", "serve", "delivery"]
+
+context: {}
+
+steps:
+  - id: "cartographer-deliver"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      # Cartographer — Dashboard Delivery
+
+      You are Simard Cartographer's dashboard-delivery actor. Interpret the
+      brief and the dataset directly; do not emit or parse a marker or JSON
+      verdict.
+
+      brief path = {{brief_path}}
+      output dir = {{out_dir}}
+
+      ## Inspect
+
+      Read the analysis brief at `{{brief_path}}` for the dataset and the
+      question the dashboard must answer. Ensure the dataset referenced by the
+      brief exists and is readable.
+
+      ## Act
+
+      Build (or refresh) the full dashboard package with your bash tool:
+
+      "{{simard_binary}}" cartographer build \
+        --brief "{{brief_path}}" \
+        --out "{{out_dir}}"
+
+      This emits `analysis.json`, `dashboard.html`, `narrative.md`, `app.py`,
+      and `manifest.json`. The dashboard is interactive (client-side Plotly) and
+      can be served over HTTP:
+
+      "{{simard_binary}}" cartographer serve --out "{{out_dir}}" --port {{serve_port}}
+
+      Serving is a long-running command — start it only to confirm the dashboard
+      is reachable, then stop it. The durable package is the business outcome.
+
+      ## Verify
+
+      Read `{{out_dir}}/manifest.json`. Confirm `dashboard.html`, `narrative.md`,
+      and `analysis.json` exist and are non-empty, at least one chart was
+      designed, and `verification.ok` is true. If a Streamlit runtime was
+      unavailable the Plotly `dashboard.html` is still the required interactive
+      deliverable — that is acceptable. If verification failed, stop and report;
+      do not fabricate success.
+
+  - id: "cartographer-deliver-verifier"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      Verify the dashboard package by inspecting the manifest with your bash
+      tool:
+
+      "{{simard_binary}}" cartographer inspect --out "{{out_dir}}"
+
+      If it reports the dashboard, narrative, and analysis are present and
+      verification passed, stop successfully. Otherwise re-read the brief at
+      {{brief_path}} and the manifest, determine what is missing, and re-run
+      `{{simard_binary}} cartographer build --brief {{brief_path}} --out {{out_dir}}`.
+      The durable, served, interactive dashboard is the only business outcome.

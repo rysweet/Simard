@@ -1,0 +1,45 @@
+name: cartographer-dataset-to-dashboard
+app_type: cli
+description: |
+  Outside-in coverage for the Cartographer data-storytelling &amp; dashboards
+  identity: a dataset + question must go end to end to an interactive dashboard,
+  a written narrative, and a machine-readable analysis, the dashboard must be
+  serveable over HTTP, and the shipped identity/policy/recipe assets must load
+  through the real Simard loaders.
+
+  Verified end to end:
+  - `src/cartographer/` unit tests: brief parsing/validation, CSV/JSON dataset
+    loading + column type inference + summary statistics, chart design
+    (histogram/bar/line/scatter + correlation), narrative generation, dashboard
+    HTML + Streamlit app rendering, the static dashboard server, and the
+    build/verify/inspect manifest orchestration.
+  - `tests/cartographer_assets_valid.rs`: the pluggable `simard-cartographer`
+    identity card loads via `FileIdentityLoader` in engineer mode, the
+    goal-session capability policy parses via `CapabilityPolicy::from_toml_file`
+    with the least-privilege shape, and both goal-session recipes drive the
+    `simard cartographer` CLI surface.
+  - `tests/cartographer_pipeline_e2e.rs`: `simard cartographer build` takes the
+    sample sales brief to `analysis.json`, `dashboard.html`, `narrative.md`,
+    `app.py`, and a `manifest.json` whose `verification.ok` is true; `inspect`
+    re-verifies it; and the built dashboard is served over HTTP and returns the
+    interactive Plotly page. The pipeline is pure-Rust with no external
+    dependency, so this suite always runs.
+
+  Schema note: the pinned `@gadugi/agentic-test` CLI runner gates only on
+  `run`-step exit codes and reads the command from `params.command`, so all
+  suites run under a single `bash -lc` wrapper that exits zero only when every
+  invoked `cargo test` reports success.
+metadata:
+  tags:
+    - cli
+    - cartographer
+    - identity
+agents:
+  - name: cli-agent
+    type: cli
+    command: bash
+steps:
+  - action: run
+    params:
+      command: "bash -lc 'set -euo pipefail; cargo test --lib cartographer 2>&1 | tee /tmp/cartographer-qa-unit.log | grep -q \"test result: ok\"; cargo test --test cartographer_assets_valid 2>&1 | tee /tmp/cartographer-qa-assets.log | grep -q \"test result: ok\"; cargo test --test cartographer_pipeline_e2e 2>&1 | tee /tmp/cartographer-qa-e2e.log | grep -q \"test result: ok\"'"
+    timeout: 600000
