@@ -160,21 +160,27 @@ impl<'a> InProcessFactSink<'a> {
 
 impl DistillFactSink for InProcessFactSink<'_> {
     fn commit_fact(&mut self, fact: &DistilledFact) -> SimardResult<bool> {
-        // Grounding is batch-membership for the in-process seam (O(1) set lookup).
-        // Trim the cited id before the lookup so this seam grounds a
-        // whitespace-padded `source_episode_id` (a routine LLM surface variation)
-        // exactly as the production store-existence seam does — `any_episode_exists`
-        // / `episode_exists` both `.trim()` the cited id before matching. The batch
-        // node ids are canonical/un-padded, so trimming only the cited id (not the
-        // stored ids) is precisely symmetric with that seam and keeps both write
-        // boundaries' store/quarantine disposition identical (the shared-gate
-        // invariant in `fact_reliability`).
-        let grounded = self.episode_ids.contains(fact.source_episode_id.trim());
+        // Normalize the cited id the same way the IPC server's grounding does
+        // (`any_episode_exists` trims each cited id), so a cited id an LLM
+        // re-emitted with stray surrounding whitespace still grounds — the two
+        // seams must decide every fact's disposition identically. Episode node
+        // ids never carry whitespace, so this is a no-op for a well-formed id.
+        let source_episode_id =
+            crate::fact_reliability::normalize_source_episode_id(&fact.source_episode_id);
+
+        // Grounding is batch-membership for the in-process seam (O(1) set lookup)
+        // over the normalized cited id — precisely symmetric with the production
+        // store-existence seam, which trims each cited id before matching. Batch
+        // node ids are canonical/un-padded, so normalizing only the cited id keeps
+        // both write boundaries' store/quarantine disposition identical.
+        let grounded = self.episode_ids.contains(source_episode_id);
 
         // Score → threshold → dedup → persist through the single shared gate, so
         // this in-process seam and the IPC server's `StoreFactGated` handler
-        // decide every fact's disposition identically.
-        let source = format!("distill:{}", fact.source_episode_id);
+        // decide every fact's disposition identically. The normalized id also
+        // threads provenance so the `DERIVES_FROM` edge resolves rather than
+        // dangling on a whitespace-padded key.
+        let source = format!("distill:{source_episode_id}");
         let decision = crate::fact_reliability::commit_gated_fact(
             self.memory,
             &fact.concept,
@@ -182,7 +188,7 @@ impl DistillFactSink for InProcessFactSink<'_> {
             grounded,
             &source,
             std::slice::from_ref(&fact.concept),
-            std::slice::from_ref(&fact.source_episode_id),
+            &[source_episode_id.to_string()],
         )?;
 
         match decision {

@@ -414,7 +414,7 @@ identically no matter which boundary writes it:
 
 | Signal | Weight | Meaning |
 |--------|--------|---------|
-| Provenance grounding | 0.5 | `source_episode_id` is one of the episodes fed to the recipe this pass (not hallucinated). **Necessary**: without it a fact tops out at 0.4 and is always quarantined. |
+| Provenance grounding | 0.5 | `source_episode_id` (trimmed via `fact_reliability::normalize_source_episode_id`) is one of the episodes fed to the recipe this pass (not hallucinated). Both seams normalize the cited id the same way, so an id an LLM re-emitted with stray surrounding whitespace still grounds (and threads a resolvable `DERIVES_FROM` edge) instead of being silently quarantined. **Necessary**: without grounding a fact tops out at 0.4 and is always quarantined. |
 | Content quality | ≤0.3 | Empty / whitespace-only content is a **hard gate** (score `0.0`); otherwise ≥3 words earns the full 0.3, 1–2 words a partial 0.15. |
 | Concept validity | 0.1 | Concept canonicalizes to one of `pr-pattern` / `bug-pattern` / `lesson-learned`. A **nudge, not a gate**. |
 

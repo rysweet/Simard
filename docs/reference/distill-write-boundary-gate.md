@@ -48,7 +48,19 @@ order:
    server holds no in-memory batch, so grounding is an existence lookup, not a
    batch scan: the fact is grounded if **at least one** supplied id resolves.
    An ungrounded fact (no id resolves) scores low and is quarantined — never
-   stored blind. The write records provenance to each resolved id.
+   stored blind. The write records provenance to each resolved id. Each cited id
+   is first passed through `fact_reliability::normalize_source_episode_id`
+   (trim surrounding whitespace, drop empties), and that **normalized** set is
+   used for *both* the existence check *and* the persisted `DERIVES_FROM` edges.
+   Episode node ids (UUID-v7 / ULID) never carry whitespace, so this is a no-op
+   for a well-formed id; it only rescues an id an LLM re-emitted with a stray
+   leading/trailing newline or space, which would otherwise fail the exact
+   grounding match — silently quarantining a genuinely grounded fact (lost
+   fact-yield) or, if grounded, dangling its `DERIVES_FROM` edge on the padded
+   key. The in-process stub seam normalizes its cited id identically before its
+   batch-membership lookup, so both seams ground and thread provenance the same
+   way (interior whitespace is preserved — a genuinely different id stays
+   ungrounded rather than silently folding).
 3. **Reliability scoring** — `fact_reliability::score_fact_reliability` computes a
    confidence in `[0.0, 1.0]` (already clamped into range by the scorer) from the
    fact and its resolved grounding. The client cannot supply this; any
@@ -116,6 +128,7 @@ exactly what lets the stub and the IPC handler agree on every decision.
 | `fact_reliability::commit_gated_fact(memory, concept, content, grounded, source_id, tags, source_episode_ids) -> SimardResult<FactGateDecision>` | The shared gate orchestration both seams call: score → threshold → identity-dedup → `store_fact_with_provenance`. Grounding is resolved by the caller; the returned `FactGateDecision` is `Stored { confidence, node_id }` or `Quarantined { confidence }` (a `confidence >= RELIABILITY_THRESHOLD` quarantine is a dedup skip, below is a low-reliability block). |
 | `fact_reliability::RELIABILITY_THRESHOLD` (re-exported as `distillation::DISTILL_RELIABILITY_THRESHOLD`) | Minimum confidence to store rather than quarantine (`0.5`). |
 | `fact_reliability::canonical_concept(label) -> Option<&'static str>` | Canonicalises / validates a concept label. |
+| `fact_reliability::normalize_source_episode_id(raw: &str) -> &str` | Canonical grounding / provenance key for a cited episode id: trim surrounding whitespace (no-op for a well-formed id; interior whitespace preserved). Both seams normalize with this so a padded id grounds and threads provenance identically. |
 
 > **G2 / D3 note.** #2679 homes the gate at the IPC handler that fronts
 > `amplihack-memory-lib`; it does **not** add a new memory-engine primitive, so
