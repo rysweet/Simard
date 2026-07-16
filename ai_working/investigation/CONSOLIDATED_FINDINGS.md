@@ -2576,3 +2576,134 @@ on §22's open landing-order question — narrowing it by arguing no hard *code*
 upsert-key-is-stable-under-nesting-or-land-D1-first" caveat open — plus the re-endorsed atomicity table, rejected levers,
 and `engineer_spawn`-is-not-a-fourth-defect ruling (§23.5). D1/D2/D3 remain live and unremediated; the L0→L1→L2→L3
 whole-loop remediation order (§16.3) stands; **no production `.rs` changed; no remediation landed.**
+
+## §24 — Seventeenth-wave net-new findings (HEAD `b47b6413`→`641f9c37`→`d187e414`, zero non-test source drift) — seven parallel dives across three HEADs: the **byte-for-byte empirical reproduction** of the self-ingestion growth loop with the decisive proof that the write-back dedup gate is *fueled* (not merely bypassed) by the growth it causes (`gate_dedup_hit=False` at every generation) (primary); the **second self-feed** — a recalled `RecurringSignature` is `ProblemKind::ProcessHealth` and `decide()`-routes to `LaunchRecipe` with the recurring-signature text as its task, so a self-observation can spawn a recipe to investigate itself (secondary); the **`×2`-is-honest verdict upgraded from reasoned to test-locked** by the `+99` two-lane decoupling tests, plus an independent VALIDATION verdict (full overseer **361/0**, discriminating probes **5/0**, verdict VALID) (primary + validator); the **measured 53/0 regression baseline** yielding the sharpest new landing-safety constraint — **D3 must be additive, not a Decide-arm swap**, because `tests_gap_scan.rs:852` hard-asserts `FlagWorkstreamGaps` and panics otherwise (tertiary); and the **"dead zone is a two-lane visibility/coverage gap, not a single-axis counter dead zone"** sharpening that names the missing rung as **Rung 4 (`else → Report`)** of `decide_blocked_goal` plus the workstream-gap ladder's absent second rung (tertiary)
+
+**Seven parallel deep dives across three consecutive HEADs**, folded here:
+a drift-recheck primary at `b47b6413` ([`primary_signature_emission_2x_verdict_DRIFT_RECHECK_HEAD_b47b6413.md`](./primary_signature_emission_2x_verdict_DRIFT_RECHECK_HEAD_b47b6413.md));
+a two-loops/dead-zone/token-class secondary and a landing-safe-remediation tertiary at `641f9c37`
+([`secondary_two_loops_deadzone_token_class_HEAD_641f9c37.md`](./secondary_two_loops_deadzone_token_class_HEAD_641f9c37.md),
+[`tertiary_architecture_LANDING_SAFE_REMEDIATION_HEAD_641f9c37.md`](./tertiary_architecture_LANDING_SAFE_REMEDIATION_HEAD_641f9c37.md));
+and a signature-construction/write-back primary, an escalation-ladder/missing-rung tertiary, an all-hypotheses verification re-run, and an independent validation verdict at `d187e414`
+([`primary_signature_construction_writeback_and_duplicated_prefix_loop_HEAD_d187e414.md`](./primary_signature_construction_writeback_and_duplicated_prefix_loop_HEAD_d187e414.md),
+[`tertiary_architecture_escalation_ladder_and_missing_rung_HEAD_d187e414.md`](./tertiary_architecture_escalation_ladder_and_missing_rung_HEAD_d187e414.md),
+[`verification_results_ALL_HYPOTHESES.md`](./verification_results_ALL_HYPOTHESES.md),
+[`VALIDATION_VERDICT_HEAD_d187e414.md`](./VALIDATION_VERDICT_HEAD_d187e414.md)).
+Drift re-check: `git diff --stat b47b6413..HEAD -- src/` is **empty**; the two intervening commits (`641f9c37`, `d187e414`)
+are `docs(investigation)`-only. The wider audit `git diff --stat dea65df8..HEAD -- src/` = **`src/overseer/tests_root_cause.rs` only**
+(the net-additive `+99` two-lane decoupling tests, already folded at §17/§20.4/§22.7/§23.4). **All non-test production source is
+byte-identical to the §22/§23 grounding**, so every load-bearing line number below re-verifies exact (all seven dives independently
+re-opened their citations; the validator published an exact-citation table and re-confirmed `mod.rs:1068-1073`, `signal.rs:362/463`,
+`root_cause.rs:33`, `mod.rs:1361` verbatim at `d187e414`). **Empirical re-grounding this wave:** full overseer suite **361/0**;
+`overseer::tests_root_cause` **21/0** (incl. both decoupling pins); the three-suite regression floor
+`tests_gap_scan`+`tests_goal_health`+`tests_root_cause` **53/0**; discriminating H0/H1/H2 probes **5/0**. **No verdict reversal
+across seventeen waves; D1/D2/D3 remain live and unmerged; no remediation landed.** This wave's contribution is *empirical* and
+*landing-safety*: it reproduces the D1 loop byte-for-byte, upgrades the honest-`×2` claim to test-locked, and pins the exact
+regression assertion that constrains the D3 fix shape. The five net refinements are §24.1–§24.5.
+
+- **24.1 — NET-NEW empirical: the duplicated prefix is a byte-for-byte-reproduced *growing* self-ingestion loop, and the write-back
+  dedup gate is FUELED (not merely bypassed) by the growth it causes (primary `d187e414` §3–§4).** A faithful mirror of the two exact
+  functions — `observation_signature` (`mod.rs:1068-1073`, the sole `|`/`overseer-obs:` producer at `1072`), the classify dedup_key
+  rule `sanitize_recalled(signature)` (`mod.rs:1359`), the 8192-byte cap (`capabilities.rs:468-482`), the `>=2` recall count
+  (`signal.rs:455-469`), and the full-signature write-back gate key (`mod.rs:548`) — seeded with the persistent set
+  `{goal:blocked:…-7f5afcca, workstream-gap}` reproduces the investigation blob's shape **exactly**: a run of
+  `overseer-obs:goal:blocked:…-7f5afcca` repeats followed by a run of `workstream-gap`, `+98 bytes/generation`, with **`overseer-obs:`
+  repeat count == generation count** (the real blob simply carries the full multi-goal payload under the same growth law). The decisive
+  new fact: **`gate_dedup_hit=False` at *every* generation.** Because step-5 write-back (`wiring.rs:301` → `observation_signature`) nests
+  the entire prior composite one level deeper each cycle, generation *G+1* is strictly longer than *G* → never byte-identical →
+  `write_back_gate.peek` (`mod.rs:548`) always returns `Deliver` and `commit` (`mod.rs:556`) records a fresh episode. **The idempotency
+  mechanism is structurally unable to converge this loop** — the very growth the loop causes defeats the dedup the gate promises; the
+  `mod.rs:1064-1067` "identical observations ⇒ identical signature" invariant holds only for a *fixed* input, which self-ingestion
+  guarantees never occurs. Growth is bounded only by the 8192-byte `sanitize_recalled` cap on the classify key (D1b), after which the
+  **corruption/false-merge regime** begins (the untruncated stored `[sig:…]` at `wiring.rs:1084` and the truncated classify key diverge:
+  distinct large composites collapse to the same 8192-byte prefix on the classify side → false merges, while the gate on the untruncated
+  sig still stores them). This **upgrades D1/D1b from reasoned to empirically-reproduced** and confirms the observed ≈5–7 `overseer-obs:`
+  repeats ⇒ ≈5–7 self-ingestion generations before capture. (Reproduction script was a `/tmp` scratch artifact, not committed.)
+
+- **24.2 — NET-NEW corroboration: a recalled `RecurringSignature` is `ProblemKind::ProcessHealth` and `decide()`-routes to
+  `LaunchRecipe` with the recurring-signature *text* as its task — a second self-feed that can spawn a recipe to investigate itself
+  (secondary `641f9c37` §4).** Beyond the write-back nesting (D1), the recall-derived `Signal::RecurringSignature` orients to a Problem
+  of kind `ProcessHealth` (`mod.rs:1357`); `decide()` routes `ProcessHealth` to **`Intervention::LaunchRecipe`** (`mod.rs:1429-1435`)
+  with `task_description = problem.summary` — i.e. the literal `"recurring signature seen 2× in cognitive memory (…)"` string
+  (`mod.rs:1361`). So a recalled self-observation can **spawn a recipe to investigate itself** — plausibly the very origin of this
+  investigation branch — throttled (not eliminated) by `gate()` + `max_launches_per_cycle`. This is a *second* self-referential edge
+  distinct from the signature-nesting one, and it sharpens the D1 fix direction: the write-back set must **exclude recall-derived
+  `ProblemKind::ProcessHealth`/`RecurringSignature` meta-problems** (both to stop the prefix nesting *and* to stop the self-spawn), not
+  merely filter `overseer-obs:` tokens from the join. Both self-feeds share the same non-filtered seam: `wiring.rs:301` passes
+  `&cycle.problems` whole, with no stripping of recall-derived problems.
+
+- **24.3 — NET-NEW: the "`×2` is honest" verdict is upgraded from *reasoned* to *test-locked*, and independently re-validated at HEAD
+  (primary `b47b6413` §4; validator `d187e414`).** The `+99` lines added to `tests_root_cause.rs` are two two-lane decoupling tests that
+  convert "the count is honest; audit the loop, not the counter" from argument to assertion:
+  `loud_lane_a_recurring_signature_does_not_feed_lane_b_recurrence` (`:490` — a `RecurringSignature{occurrences=10}`, loud above *both*
+  floors, with an empty Lane-B recall leaves `why.recurrence==0` and `decide` returns `UnblockGoal`) and
+  `lane_b_escalates_without_any_lane_a_signal` (`:536` — Lane B escalates on its own `>=3` recall with Lane A silent). Re-run at HEAD:
+  `overseer::tests_root_cause` → **21/0**, both green. This closes the bug-vs-honest question: **honest count, unhealthy loop** — the `×2`
+  is a real re-observation on Lane A (episodic recall, `signal.rs:455-469`) while escalation lives on the decoupled Lane B (root-cause
+  occurrences, floor `3`), so a stuck "`×2` forever" indicts a **missing convergence rung (D2/D3)**, never the counter. An **independent
+  validation pass** (`VALIDATION_VERDICT_HEAD_d187e414.md`) re-grounded all citations (zero drift), re-ran the full overseer suite
+  (**361/0**) and five discriminating H0/H1/H2 probes (**5/0**: `write_back_is_deduplicated_within_window`,
+  `whisper_gate_suppresses_an_identical_whisper_within_the_window`, `recurring_signature_emitted_when_two_episodes_share_signature`,
+  `recurring_signature_not_emitted_for_single_occurrence`, `a_perpetual_goal_is_never_reinvestigated_even_if_bare_blocked`), and returned
+  **VERDICT: VALID** — H0 (dedup-artifact null) correctly **REJECTED**, H1 (real re-observation) **SUPPORTED**. Caveat preserved: the
+  "exactly 2× after daemon restart" mechanism (H6, in-process `WhisperGate.last_delivered` at `guardrails.rs:294`, cleared on restart) is
+  a **plausible, source-consistent amplifier labelled "SUPPORTED (non-causal amplifier)"** — not a directly test-reproduced fact; the
+  dominant source of the specific `2` remains empirically unmeasured.
+
+- **24.4 — NET-NEW landing-safety constraint (measured, not inferred): the 53/0 regression baseline pins that D3 must be ADDITIVE, not a
+  Decide-arm swap (tertiary `641f9c37` §4).** The three-suite floor was *actually executed* at HEAD —
+  `cargo test -p simard --lib -- overseer::tests_gap_scan overseer::tests_goal_health overseer::tests_root_cause` → **53 passed; 0
+  failed**. Mapping each proposed change onto that surface yields the sharpest new constraint of the wave:
+  `tests_gap_scan.rs:852 decide_routes_workstream_coverage_to_flag_gaps` asserts **verbatim** that `decide()` on a `WorkstreamCoverage`
+  problem returns `Intervention::FlagWorkstreamGaps` and **`panic!`s on anything else**, and `:872
+  flag_workstream_gaps_is_routine_and_admitted_by_default_gate` pins `classify(FlagWorkstreamGaps)==RiskClass::Routine`. **Therefore a
+  Decide-arm *swap* to `LaunchRecipe` is rejected** (it breaks that assertion *and* launches on every first-seen gap → thrash). The
+  landing-safe D3 shape is: **keep** `decide(WorkstreamCoverage)==FlagWorkstreamGaps` for first-observation/below-threshold (both existing
+  tests stay unchanged and green) and **add** a *second* rung firing only when a **per-gap** signature has recurred `≥2×`, mirroring the
+  `decide_blocked_goal` recurrence pattern (`mod.rs:1610-1616`) and routed through the **existing** `launch.rs` edge already proven by the
+  sibling `StepFailure` arm (`mod.rs:1549-1581`) — keyed on `GapItem.signature` (INV-GAP-KEY: the Act gate already keys per-gap at
+  `mod.rs:901,932`), **never** the bare `"workstream-gap"` constant (`mod.rs:1371`), or all gaps fold into one launch. New behavior ⇒
+  **new** tests (`workstream_gap_recurring_2x_launches_keyed_on_gap_signature`, `first_observation_still_only_flags`), not edits to the
+  two existing assertions. D2 is likewise additive (existing terminal-shape assertions
+  `recurring_reblock_escalates_root_cause_not_blind_unblock`, `escalate_blocked_goal_notification_carries_the_why`,
+  `recurring_reblock_never_files_an_issue`, plus the two decoupling invariants must all stay green; add
+  `recurrence_counts_in_fact_content_not_node_multiplicity`, `why_gate_closed_classifies_instead_of_bare_park`); D1 breaks nothing (no
+  test asserts nesting) and adds `recall_derived_overseer_obs_excluded_from_next_signature` + a large-blob idempotency test for D1b. The
+  wave also **closes the strategy's "drift HAS landed" warning as a FALSE ALARM**: `mod.rs`/`observer.rs`/`signal.rs`/`wiring.rs`/
+  `guardrails.rs` are byte-identical to `6e3113bc` (only `tests_root_cause.rs` +99 differs); the newer filesystem mtimes are a
+  checkout/rebase artifact, not content drift.
+
+- **24.5 — NET-NEW sharpening: the "2↔3 dead zone" is a two-lane VISIBILITY/COVERAGE gap, not a single-axis counter dead zone, and the
+  missing remediation rung is precisely Rung 4 (`else → Report`) of `decide_blocked_goal` plus the workstream-gap ladder's absent second
+  rung (tertiary `d187e414` §1–§2).** The blocked-goal ladder `decide_blocked_goal` (`mod.rs:1603-1631`) has four ordered arms
+  (`recurrence>=3 → EscalateBlockedGoal`; `perpetual && is_no_progress_marker → UnblockGoal`; `needs_review → EscalateBlockedGoal`;
+  **`else → Report`**, surface-only). Lane A (`RecurringSignature`, floor `2`, `signal.rs:362/463`) and Lane B (`RootCause.recurrence`,
+  floor `3`, `root_cause.rs:33`) are **decoupled counters on different storage lanes** — `decide_blocked_goal` reads `recurrence` **only**
+  from Lane B and never from Lane A (now pinned by the two decoupling tests). So the operator-visible `×2` says **nothing** about whether
+  Lane B reached `3`; a goal recurring on Lane A can sit at `×2` **indefinitely** while Lane B stays `0`, because Lane-B accrual is starved
+  upstream by the WHY double-gate (`cycle.rs:582-583`). The "missing rung" is therefore **Rung 4** — a goal that is Lane-A-recurring yet
+  carries neither `perpetual`+no-progress nor `needs_review` is **visible, recurring, and terminal: observed forever, remediated never** —
+  and, on the gap side, the **absent second step** of the `WorkstreamCoverage` ladder (`mod.rs:1534-1543`, notify-only, no `launch.rs`
+  edge where the sibling `StepFailure` arm has one). **This is not fixed by moving a threshold:** lowering `3→2` would escalate honest
+  Lane-B transients and still would not help the double-gate-starved goals (whose Lane-B count is `0`, not `2`). The gap is structural (a
+  missing rung + a starved accrual gate), so **threshold moves stay rejected**, and the landing order re-endorses **D2 → D3 → D1 →
+  convergence gauges** (D2 the atomic WHY-gate-close + count-in-content upsert — never the `store_fact_with_caller_key` one-liner that
+  makes `>=3` dead code; D1/D3/gauges independent), consistent with §23.5 — with the §23.5 caveat still open that the implementation phase
+  must either land D1 before D2 **or** prove D2's upsert key is stable under nesting before deferring D1.
+
+**§24 delta:** verdict unchanged across all seventeen waves — the `×2` is an **honest, now test-locked** re-observation of a static,
+under-resourced, non-advancing problem set (Lane A `RecurringSignature.occurrences`, `signal.rs:455-469`), **not** a dedup/replay/
+collision artifact; the **defect is the response** — two observe-and-flag loops that never close (D2/D3) plus a self-feed whose *mutating*
+nested signature defeats the exact-string write-back gate (D1). This wave's net contribution is *empirical + landing-safety*: **(1)** the
+D1 loop is now reproduced **byte-for-byte** with the decisive `gate_dedup_hit=False`-every-generation proof that the write-back dedup gate
+is *fueled* by the growth it causes and can never converge, bounded only by the 8192-byte cap into a corruption/false-merge regime (D1b)
+(§24.1); **(2)** a **second self-feed** — recalled `RecurringSignature` (`ProblemKind::ProcessHealth`) routes to `LaunchRecipe` with its
+own summary as the task, letting a self-observation spawn a recipe to investigate itself (§24.2); **(3)** the honest-`×2` verdict upgraded
+from reasoned to **test-locked** by the `+99` two-lane decoupling tests (`21/0`) and independently re-validated (full overseer `361/0`,
+probes `5/0`, VERDICT VALID; H0 REJECTED, H1 SUPPORTED, H6 restart-amplifier labelled non-causal) (§24.3); **(4)** the **measured 53/0**
+regression baseline pinning that **D3 must be additive, not a Decide-arm swap** — `tests_gap_scan.rs:852` hard-asserts `FlagWorkstreamGaps`
+and panics otherwise, so the recurrence→launch rung is *added* (per-gap `≥2×`, keyed on `GapItem.signature`) over the preserved base arm —
+and closing the "drift has landed" warning as a false alarm (§24.4); and **(5)** the **two-lane-coverage-gap** sharpening naming the
+missing rung as **Rung 4 (`else → Report`)** of `decide_blocked_goal` plus the gap ladder's absent second rung, re-rejecting threshold
+moves and re-endorsing the **D2 → D3 → D1 → gauges** order with the D1↔D2 sequencing caveat still open (§24.5). D1/D2/D3 remain live and
+unremediated; the L0→L1→L2→L3 whole-loop remediation order (§16.3) stands; **no production `.rs` changed; no remediation landed.**
