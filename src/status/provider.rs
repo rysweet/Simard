@@ -6,9 +6,15 @@
 //! failing source degrades one section, never the whole report, and never
 //! panics.
 //!
-//! Sources that require the live memory/goal IPC socket or `gh` (memory, goals,
+//! Sources that require the live memory/goal IPC socket or `gh` (memory,
 //! workstreams, completed work, self-improvement) are wired incrementally; until
 //! then they report `unavailable` with an honest note rather than inventing data.
+//!
+//! The goal-board section IS wired ([`assemble_goals`], issue #4196): it reads
+//! the durable `goal-board:snapshot` through the same process-agnostic reader
+//! client that backs the dashboard `/api/goals` panel and the TUI goal board, so
+//! the unified Status snapshot surfaces active-goal state (active / blocked +
+//! why / not-started) instead of a bare `unavailable`.
 
 use std::path::PathBuf;
 
@@ -76,7 +82,7 @@ pub fn assemble(opts: &AssembleOptions) -> StatusSnapshot {
         resources: assemble_resources(main_pid, &opts.state_root),
         memory: assemble_memory(metrics.as_ref(), &opts.state_root),
         gym: assemble_gym(gym_skipped),
-        goals: SectionEnvelope::absent("goal board read deferred (see dashboard/TUI goal board)"),
+        goals: assemble_goals(&opts.state_root),
         workstreams: SectionEnvelope::absent("engineer registry not read in this context"),
         completed: SectionEnvelope::absent("gh: not queried in this context"),
         self_improvement: SectionEnvelope::absent("gh: not queried in this context"),
@@ -475,6 +481,85 @@ fn assemble_gym(skip_gym: bool) -> SectionEnvelope<Gym> {
     )
 }
 
+// ── goals ────────────────────────────────────────────────────────────────────
+
+/// Max characters of a goal's summary surfaced in the status snapshot. Keeps the
+/// GOAL BOARD terminal row compact (the renderer left-pads the summary to 42
+/// columns) while giving JSON consumers a meaningful first line.
+const GOAL_SUMMARY_CAP: usize = 80;
+
+/// Assemble the GOAL BOARD section from the durable `goal-board:snapshot`
+/// (issue #4196).
+///
+/// Reads through [`open_reader_client`](crate::memory_ipc::open_reader_client)
+/// — the exact process-agnostic ladder (in-process daemon Arc → daemon socket →
+/// direct on-disk open) that backs the dashboard `/api/goals` panel and the TUI
+/// goal board — then maps each active [`ActiveGoal`](crate::goal_curation::ActiveGoal)
+/// into a [`GoalItem`](super::GoalItem): the trailing-hash `short_id`, a
+/// `p{priority}` label, the [`GoalProgress`](crate::goal_curation::GoalProgress)
+/// `Display` (which carries the blocked reason as `blocked: …`), and a
+/// first-line-capped summary.
+///
+/// **Fail-visible** (mirrors [`assemble_overseer`] and the dashboard's
+/// fail-closed goal read, #2896): a reader-open or board-read fault degrades
+/// THIS one section to `error` with an honest note — it never panics and never
+/// fabricates goals. An empty-but-readable board reads back as a present, live,
+/// empty list, which is distinct from `unavailable`.
+fn assemble_goals(state_root: &std::path::Path) -> SectionEnvelope<super::GoalBoard> {
+    use crate::goal_curation::load_goal_board;
+    use crate::memory_ipc::open_reader_client;
+
+    let reader = match open_reader_client(state_root) {
+        Ok(r) => r,
+        Err(e) => return SectionEnvelope::error(format!("goal board reader unavailable: {e}")),
+    };
+    let board = match load_goal_board(reader.ops()) {
+        Ok(b) => b,
+        Err(e) => return SectionEnvelope::error(format!("goal board read failed: {e}")),
+    };
+
+    let active = board
+        .active
+        .iter()
+        .map(|g| super::GoalItem {
+            short_id: goal_short_id(&g.id),
+            priority: format!("p{}", g.priority),
+            status: g.status.to_string(),
+            summary: first_line_capped(&g.description, GOAL_SUMMARY_CAP),
+        })
+        .collect();
+
+    SectionEnvelope::live(super::GoalBoard { active }, None)
+}
+
+/// Derive a compact, stable handle for a goal id. Goal ids carry a trailing
+/// 8-hex disambiguator (e.g. `advance-…-parity-f29bb15c`); when present that
+/// suffix is the shortest unambiguous handle and is what operators recognise.
+/// Falls back to a char-capped first line for ids without such a suffix.
+fn goal_short_id(id: &str) -> String {
+    if let Some((_, tail)) = id.rsplit_once('-')
+        && (6..=12).contains(&tail.len())
+        && tail.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return tail.to_string();
+    }
+    first_line_capped(id, 16)
+}
+
+/// First non-empty logical line of `s`, trimmed and capped to `max` Unicode
+/// chars with a trailing `…` when truncated. Used for the goal summary so a
+/// multi-paragraph goal description renders as one compact board row.
+fn first_line_capped(s: &str, max: usize) -> String {
+    let first = s.lines().next().unwrap_or("").trim();
+    let mut chars = first.chars();
+    let head: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
 // ── telemetry / anomalies (derived from the metrics snapshot) ────────────────
 
 fn assemble_telemetry(
@@ -795,6 +880,31 @@ mod pure_helper_tests {
     }
 
     #[test]
+    fn goal_short_id_prefers_trailing_hex_suffix() {
+        assert_eq!(
+            goal_short_id("advance-rysweet-agent-kgpacks-rs-to-full-parity-f29bb15c"),
+            "f29bb15c"
+        );
+        // Non-hex trailing segment falls back to the char-capped id.
+        assert_eq!(goal_short_id("do-the-thing"), "do-the-thing");
+        // A too-long id is capped with an ellipsis.
+        assert_eq!(
+            goal_short_id("a-very-long-goal-id-with-no-hash-suffix"),
+            "a-very-long-goal…"
+        );
+        // A short bare id passes through unchanged.
+        assert_eq!(goal_short_id("g1"), "g1");
+    }
+
+    #[test]
+    fn first_line_capped_takes_first_line_and_caps() {
+        assert_eq!(first_line_capped("hello\nworld", 80), "hello");
+        assert_eq!(first_line_capped("  padded  \nnext", 80), "padded");
+        assert_eq!(first_line_capped("abcdef", 3), "abc…");
+        assert_eq!(first_line_capped("", 10), "");
+    }
+
+    #[test]
     fn snapshot_is_stale_uses_freshness_window() {
         assert!(!snapshot_is_stale(&snapshot::now_rfc3339()));
         let old = (chrono::Utc::now() - chrono::Duration::seconds(SNAPSHOT_FRESHNESS_SECS + 60))
@@ -903,8 +1013,17 @@ mod pure_helper_tests {
 
         assert_eq!(snap.schema_version, SCHEMA_VERSION);
         assert!(!snap.generated_at.is_empty());
+        // The goal board IS wired (#4196): a readable-but-empty board is a
+        // PRESENT live section (empty active list), distinct from `unavailable`.
+        assert!(
+            snap.goals.is_present(),
+            "goal board is wired and reads back present even when empty"
+        );
+        assert!(
+            snap.goals.data.as_ref().unwrap().active.is_empty(),
+            "a fresh state root has no active goals"
+        );
         // Sources not wired in this process context degrade to absent, never panic.
-        assert!(!snap.goals.is_present());
         assert!(!snap.completed.is_present());
         assert!(!snap.self_improvement.is_present());
     }
@@ -916,5 +1035,97 @@ mod pure_helper_tests {
         assert_eq!(opts.state_root, root);
         assert_eq!(opts.service_unit, "simard.service");
         assert!(opts.sections.is_none());
+    }
+}
+
+#[cfg(test)]
+mod goal_board_tests {
+    use super::*;
+    use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, save_goal_board};
+    use crate::memory_ipc::launch_writer_client;
+    use crate::status::{Availability, Freshness};
+
+    /// A unique, isolated on-disk state root per test invocation. The tier-2
+    /// cognitive store is cached per canonical root, so a fresh root gives a
+    /// hermetic board without touching the daemon or process-global writer
+    /// registration.
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "simard-status-goals-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn assemble_goals_maps_active_board_to_present_live_section() {
+        let root = temp_root("map");
+
+        // Persist a board with a blocked and a not-started goal through the same
+        // writer path production uses, then read it back via the wired provider.
+        let mut board = GoalBoard::new();
+        let mut blocked = ActiveGoal::new(
+            "audit-simard-s-test-coverage-and-raise-it-4d27c91a",
+            "Audit Simard's test coverage and raise it to >70%\nsecond paragraph ignored",
+            2,
+        );
+        blocked.status = GoalProgress::Blocked("typed blocker recorded in outcome 019f".into());
+        board.active.push(blocked);
+        board
+            .active
+            .push(ActiveGoal::new("plain-goal", "Do the plain thing", 5));
+
+        {
+            let writer = launch_writer_client(&root).expect("open writer");
+            save_goal_board(&board, writer.ops()).expect("persist board");
+        }
+
+        let env = assemble_goals(&root);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(env.availability, Availability::Ok);
+        assert_eq!(env.freshness, Freshness::Live);
+        assert!(env.note.is_none(), "a healthy read carries no error note");
+
+        let data = env.data.expect("present board carries data");
+        assert_eq!(data.active.len(), 2);
+
+        let g0 = &data.active[0];
+        assert_eq!(g0.short_id, "4d27c91a", "trailing hex suffix is the handle");
+        assert_eq!(g0.priority, "p2");
+        assert_eq!(g0.status, "blocked: typed blocker recorded in outcome 019f");
+        assert_eq!(
+            g0.summary, "Audit Simard's test coverage and raise it to >70%",
+            "summary is the first line only"
+        );
+
+        let g1 = &data.active[1];
+        assert_eq!(g1.priority, "p5");
+        assert_eq!(g1.status, "not-started");
+        assert_eq!(g1.summary, "Do the plain thing");
+    }
+
+    #[test]
+    fn assemble_goals_empty_board_is_present_not_unavailable() {
+        let root = temp_root("empty");
+        // No writes: a readable-but-empty board must read back PRESENT + live.
+        let env = assemble_goals(&root);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(env.availability, Availability::Ok);
+        assert_eq!(env.freshness, Freshness::Live);
+        assert!(
+            env.data
+                .expect("empty board still carries data")
+                .active
+                .is_empty(),
+            "an empty board is an empty active list, not `unavailable`"
+        );
     }
 }
