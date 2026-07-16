@@ -306,21 +306,32 @@ against (see `src/coin_gym/fixtures/improve_loop_snapshot.json`).
 
 The LOCAL COIN Gym goal
 (`build-a-local-coin-benchmark-harness-and-a-self-improvement-loop`, issue #2713)
-is **done** when both of the following hold — this is deliberately measurable so
-an operator (or the OODA loop) can certify completion instead of stalling:
+is **done** when all of the following hold — this is deliberately expressed as
+**tracked artifacts the OODA done-gate can verify** (a merged PR + a closed
+issue + a green CI gate), so an operator (or the completion gate in
+`src/goal_curation/completion_gate.rs`) can certify completion instead of
+stalling on unmeasurable prose:
 
 1. **`coin-gym verify` exits 0** — every LOCAL harness component passes its
    acceptance criterion (see the table above). This is the machine-checkable
-   done-gate for Phases 4 and 5.
-2. **Phase 3 (live VM grading) is acknowledged as externally gated.** Provisioning
+   done-gate for Phases 4 and 5. It is enforced on **every push and PR** by the
+   `coin-gym verify (LOCAL COIN Gym done-gate, issue #2713)` step in
+   `.github/workflows/verify.yml`, so "exits 0" is a continuously-tracked,
+   always-green CI gate — not a one-off local claim.
+2. **The tracking issue #2713 is CLOSED and the landing PR is MERGED.** The
+   done-gate (`completion_gate.rs`) certifies a goal only from hard evidence — a
+   merged PR in the goal's `wip_refs` (or referencing its issue) plus a closed
+   linked issue. Issue #2713 is CLOSED; the PR that wires the CI done-gate above
+   references it, giving the gate a merged-PR + closed-issue pair to verify.
+3. **Phase 3 (live VM grading) is acknowledged as externally gated.** Provisioning
    an `azlin` VM + Docker host and running `coin evaluate` / `coin verify` live is
    HIGH-RISK and operator-gated (#2823). It is **out of scope** for the LOCAL
    goal's done-gate and is tracked as a separate follow-up; the LOCAL goal does
    not block on it.
 
 Phases 1–2 (research, PR #2712) and Phases 4–5 (this harness) are complete;
-`coin-gym verify` keeps that verifiable at any time. What remains is the gated
-Phase-3 follow-up below.
+the CI `coin-gym verify` gate keeps that verifiable on every commit. What
+remains is the gated Phase-3 follow-up below.
 
 ## What is deferred
 

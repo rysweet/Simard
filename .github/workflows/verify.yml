@@ -172,6 +172,17 @@ jobs:
         # their own from-scratch builds entirely.
         run: cargo build --bin simard --locked
 
+      - name: coin-gym verify (LOCAL COIN Gym done-gate, issue #2713)
+        # Machine-checkable done-gate for the LOCAL COIN Gym goal
+        # (build-a-local-coin-benchmark-harness-and-a-self-improvement-loop).
+        # `coin-gym verify` runs the offline LOCAL harness acceptance self-check
+        # and exits non-zero if any criterion regresses, so the goal's
+        # done-criteria ("coin-gym verify exits 0") is expressed as a tracked,
+        # always-green CI gate the done-gate can rely on — not just prose. See
+        # docs/howto/run-the-coin-gym-harness.md ("Done-criteria for the LOCAL
+        # goal"). Incremental (~10s) — the crate is already compiled above.
+        run: cargo run --bin coin-gym --locked -- verify
+
       - name: Upload simard binary artifact
         # The real gates above (fmt, clippy, cargo test, the minimal-feature and
         # downstream binary builds) have all passed by this point; the binary
