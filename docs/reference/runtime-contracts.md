@@ -45,7 +45,7 @@ Simard does **not** expose:
 | meeting mode | `simard meeting run ...` | `simard_operator_probe meeting-run ...` |
 | meeting state readback | `simard meeting read ...` | `simard_operator_probe meeting-read ...` |
 | goal-curation mode | `simard goal-curation run ...` | `simard_operator_probe goal-curation-run ...` |
-| goal-curation state readback | `simard goal-curation read ...` | none |
+| goal-curation state readback | `simard goal-curation read ...` | `simard_operator_probe goal-curation-read ...` |
 | improvement-curation mode | `simard improvement-curation run ...` | `simard_operator_probe improvement-curation-run ...` |
 | improvement-curation state readback | `simard improvement-curation read ...` | `simard_operator_probe improvement-curation-read ...` |
 | review artifact persistence and readback | `simard review ...` | `simard_operator_probe review-run ...` and `review-read ...` |
@@ -347,9 +347,9 @@ Canonical entrypoints:
 - `simard goal-curation run <base-type> <topology> <structured-objective> [state-root]`
 - `simard goal-curation read <base-type> <topology> [state-root]`
 
-Compatibility surface: `simard_operator_probe goal-curation-run <base-type> <topology> <structured-objective> [state-root]`
+Compatibility surface: `simard_operator_probe goal-curation-run <base-type> <topology> <structured-objective> [state-root]` and `simard_operator_probe goal-curation-read <base-type> <topology> [state-root]`
 
-Goal-curation mode maintains durable backlog records and the active top five goals. The readback command exposes the stored goal register from the same validated state root without mutating it.
+Goal-curation mode maintains durable backlog records and the active top five goals. The readback command exposes the stored goal register from the same validated state root without mutating it. Unlike the strict three read subcommands (`meeting read`, `improvement-curation read`, `review read`), the goal-curation read path — on both the canonical and compatibility surface — keeps its optional positional `[state-root]` and continues to honor `SIMARD_STATE_ROOT`, preserving parity with goal-curation operator habits (see [Operator read-subcommand state-root contract](./operator-read-state-root-contract.md)).
 
 ### Improvement-curation mode
 

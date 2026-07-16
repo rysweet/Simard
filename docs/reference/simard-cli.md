@@ -526,7 +526,7 @@ See [Configure disk reclamation](../howto/configure-disk-reclamation.md) and the
 | `simard meeting run ...` | `simard_operator_probe meeting-run ...` |
 | `simard meeting read ...` | `simard_operator_probe meeting-read ...` |
 | `simard goal-curation run ...` | `simard_operator_probe goal-curation-run ...` |
-| `simard goal-curation read ...` | none |
+| `simard goal-curation read ...` | `simard_operator_probe goal-curation-read ...` |
 | `simard improvement-curation run ...` | `simard_operator_probe improvement-curation-run ...` |
 | `simard improvement-curation read ...` | `simard_operator_probe improvement-curation-read ...` |
 | `simard review run ...` | `simard_operator_probe review-run ...` |
@@ -1056,6 +1056,7 @@ Key behavior:
 - includes explicit zero-state lines for empty sections
 - strips terminal control sequences from persisted goal text before printing it
 - preserves `goal-curation run` as the only curation workflow
+- keeps `simard_operator_probe goal-curation-read ...` available for compatibility, with the same optional `[state-root]` and `SIMARD_STATE_ROOT` fallback
 - fails explicitly for invalid `state-root` values and unreadable or malformed durable goal state
 
 Example:
