@@ -153,15 +153,22 @@ deduped caller receive the same `WorkstreamHandle.id` and therefore `probe` the
 
 On every `spawn(brief)` call, under the `runs` mutex:
 
-1. **Reap finished runs.** `try_wait()` (via the `poll()` seam) each tracked run
-   and **evict** an entry only when its child has **definitively exited**,
-   unlinking its temp log at the same moment. A still-running child — or one whose
-   state is momentarily **indeterminate** (a `poll` `Err`) — is **kept**. This is
-   **fail-closed**: it matches the sibling `inflight_investigations` reconcile and
-   guarantees a transient poll error can never let a byte-identical recipe
-   relaunch. Suppression is still never *permanent*: a genuinely-completed run is
-   freed here, so a new occurrence of the same signature *after* the prior run
-   finished will spawn fresh.
+1. **Reap runs.** `try_wait()` (via the `poll()` seam) **every** tracked run so a
+   finished subprocess is always `wait`ed (no leaked OS zombie), but **evict** an
+   entry — unlinking its temp log at the same moment — **only** when it is the
+   signature being spawned now *and* its child has **definitively exited**. A
+   completed run belonging to a *different* signature is **kept** so its handle
+   holder (e.g. the dashboard `/api/feedback/status/{id}` poller sharing the
+   process-wide registry) can still read its terminal PR outcome; evicting it
+   here would silently turn a produced PR into an "unknown workstream" 404
+   (fail-visible result loss). Such runs are freed lazily when their own
+   signature next respawns, or on process exit. A still-running child — or one
+   whose state is momentarily **indeterminate** (a `poll` `Err`) — is **kept** for
+   its own signature. This is **fail-closed**: it matches the sibling
+   `inflight_investigations` reconcile and guarantees a transient poll error can
+   never let a byte-identical recipe relaunch. Suppression is still never
+   *permanent*: a genuinely-completed run of the same signature is freed here, so
+   a new occurrence of that signature *after* the prior run finished spawns fresh.
 2. **Dedup.** Compute `recipe_signature(brief)` and its `sig_token`. If a
    **still-running** entry exists for that token, **do not spawn**. Emit a visible
    warning (below) and return `WorkstreamHandle { id: sig_token }` pointing at the
@@ -206,8 +213,10 @@ tracing::warn!(
 
 Because a deduped caller holds the **same** `sig_token` id, it probes the shared
 run and observes the same terminal status as the original caller. Reaping only
-runs inside `spawn`, so a terminal status stays observable to a probing caller
-until the next `spawn` for that signature reaps it.
+runs inside `spawn`, and eviction is scoped to the signature being spawned, so a
+terminal status stays observable to a probing caller until the next `spawn` **for
+that same signature** reaps it — an unrelated signature's `spawn` never evicts
+it.
 
 ## The child-spawn seam (testability)
 
@@ -236,8 +245,10 @@ struct ChildExit {
 - **Production**: `RealChildSpawner` holds log-file creation, `Command`
   construction, `AMPLIHACK_AGENT_BINARY` inheritance, and `record_spawn_failure`
   behavior. The temp log is created **owner-only (0600)** on unix (it captures
-  recipe stdout/stderr, which can carry tokens) and is **unlinked when its run is
-  reaped**, so no orphaned secret-bearing logs accumulate in the temp dir.
+  recipe stdout/stderr, which can carry tokens) and is **unlinked when its run's
+  own signature is next reaped** (or on process exit), so secret-bearing logs are
+  cleaned up rather than accumulating indefinitely, while remaining readable by a
+  handle holder until then.
   `RealChild` wraps `std::process::Child` and maps `try_wait()` into `ChildExit`.
 - **Tests**: a `FakeChildSpawner` counts spawns and hands out `FakeChild`s whose
   exit is operator-controlled.

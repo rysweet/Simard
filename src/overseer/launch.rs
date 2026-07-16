@@ -25,14 +25,21 @@
 //! 47/28/12 min apart, wasting compute). [`AmplihackRecipeRunner::spawn`] is
 //! therefore **idempotent per signature**:
 //!
-//! 1. **Reap** — every tracked run is polled; an entry is evicted only when its
-//!    child has definitively **exited** (its temp log is unlinked at the same
-//!    time). A run that is still executing — or whose state is momentarily
-//!    indeterminate (a poll `Err`) — is **kept**, so a transient error can never
-//!    let a byte-identical recipe relaunch (fail-closed, matching the sibling
+//! 1. **Reap** — every tracked run is polled so a finished subprocess is always
+//!    `wait`ed (no leaked OS zombie), but an entry is **evicted** (and its temp
+//!    log unlinked) only when it is the signature being spawned *and* its child
+//!    has definitively **exited**. A completed run belonging to a *different*
+//!    signature is **kept** so its handle holder (e.g. the dashboard
+//!    `/api/feedback/status/{id}` poller) can still read its terminal PR outcome
+//!    — evicting it here would silently turn a produced PR into an "unknown
+//!    workstream" (fail-visible result loss); it is freed lazily when its own
+//!    signature next respawns, or on process exit. A run that is still executing
+//!    — or whose state is momentarily indeterminate (a poll `Err`) — is **kept**
+//!    for its own signature, so a transient error can never let a byte-identical
+//!    recipe relaunch (fail-closed, matching the sibling
 //!    `inflight_investigations` reconcile in [`crate::overseer`]). A genuinely
-//!    completed run is still freed here, so suppression is never permanent for a
-//!    real completion.
+//!    completed run of the same signature is still freed here, so suppression is
+//!    never permanent for a real completion.
 //! 2. **Suppress** — if a still-Running run exists for the same signature, no
 //!    second process is spawned; the existing run's handle is returned so the
 //!    deduped caller polls the SAME run. The suppression is **fail-visible**: a
@@ -365,15 +372,6 @@ fn shared_runs() -> Arc<Mutex<HashMap<String, RunEntry>>> {
         .clone()
 }
 
-impl Default for AmplihackRecipeRunner {
-    fn default() -> Self {
-        Self {
-            spawner: Box::new(RealChildSpawner),
-            runs: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-}
-
 impl AmplihackRecipeRunner {
     /// Production runner: a real `amplihack` spawner sharing the **process-wide**
     /// in-flight registry ([`shared_runs`]) so launch dedup survives the daemon's
@@ -420,22 +418,43 @@ impl RecipeRunner for AmplihackRecipeRunner {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        // Reap: evict an entry only when its child has DEFINITIVELY exited, and
-        // unlink its temp log at the same moment (no orphaned, owner-readable
-        // recipe output left in the temp dir). A still-running child — or one
-        // whose state is momentarily indeterminate (poll `Err`) — is KEPT so a
-        // duplicate launch stays suppressed. Fail-CLOSED: matches the sibling
-        // `inflight_investigations` reconcile and guarantees a transient poll
-        // error can never let a byte-identical recipe relaunch (#4125). A
-        // genuinely-completed run is still freed here, so suppression is never
-        // permanent for a real completion.
-        runs.retain(|_, entry| match entry.child.poll() {
-            Ok(Some(_)) => {
-                let _ = std::fs::remove_file(&entry.log_path);
-                false
+        // Reap. The `runs` map is process-wide and SHARED across launch paths
+        // (daemon tick + dashboard feedback — see the module docs), so reaping
+        // has two distinct jobs that must not be conflated:
+        //
+        //  * Poll EVERY tracked child on every spawn so a finished subprocess is
+        //    always `wait`ed — no OS zombie is ever leaked, including for entries
+        //    launched by a previous, now-discarded tick's Overseer that nothing
+        //    re-probes.
+        //  * EVICT (and unlink the temp log of) only the entry for the signature
+        //    being spawned right now. Evicting *another* path's completed run
+        //    here would delete a terminal result — and its still-unread log — out
+        //    from under a handle holder (e.g. the dashboard
+        //    `/api/feedback/status/{id}` poller), silently turning its produced
+        //    PR into an "unknown workstream" 404 (fail-visible result loss,
+        //    PR #4142 audit). Other paths' completed runs are therefore KEPT so
+        //    their holder can still read the outcome; they are freed lazily when
+        //    their OWN signature next respawns, or on process exit.
+        //
+        // A still-running child — or one whose poll is momentarily `Err` — is
+        // KEPT for its own signature so a duplicate launch stays suppressed.
+        // Fail-CLOSED: a transient poll error can never let a byte-identical
+        // recipe relaunch (#4125), matching the sibling `inflight_investigations`
+        // reconcile. A genuinely-completed run of the SAME signature is still
+        // freed here, so suppression is never permanent for a real completion.
+        let own_exited = matches!(
+            runs.get_mut(&token).map(|e| e.child.poll()),
+            Some(Ok(Some(_)))
+        );
+        for (key, entry) in runs.iter_mut() {
+            if key != &token {
+                // Zombie-reap other paths' children without evicting them.
+                let _ = entry.child.poll();
             }
-            _ => true,
-        });
+        }
+        if own_exited && let Some(entry) = runs.remove(&token) {
+            let _ = std::fs::remove_file(&entry.log_path);
+        }
 
         // Suppress: a still-Running run for this signature already exists — do
         // NOT spawn a second process; hand back the shared run (idempotent).
@@ -776,6 +795,35 @@ mod tests {
             spawner.spawns(),
             2,
             "distinct signatures must not dedup against each other"
+        );
+    }
+
+    #[test]
+    fn completed_run_survives_unrelated_spawn_for_its_holder() {
+        // The `runs` map is shared across launch paths (daemon + dashboard). A
+        // spawn for signature B must NOT evict signature A's already-completed
+        // run: A's handle holder (e.g. the dashboard status poller) must still be
+        // able to read A's terminal outcome. Before the fix, the global reap
+        // deleted A's entry (and its log) on B's spawn, turning A's produced PR
+        // into an "unknown workstream" error (PR #4142 audit).
+        let (runner, spawner) = fake_runner();
+        let brief_a = mk_brief("rysweet/Simard", "fix A");
+        let brief_b = mk_brief("rysweet/Simard", "fix B");
+
+        let ha = runner.spawn(&brief_a).unwrap();
+        spawner.finish(0, true); // A completes.
+
+        // An unrelated signature is launched on the SAME shared map.
+        let _hb = runner.spawn(&brief_b).unwrap();
+        assert_eq!(spawner.spawns(), 2, "B is a new signature and must spawn");
+
+        // A's holder can STILL read A's terminal status — it was not evicted.
+        assert_eq!(
+            runner.probe(&ha).unwrap(),
+            WorkstreamStatus::Failed {
+                reason: "recipe finished but produced no PR".to_string(),
+            },
+            "an unrelated spawn must not lose a completed run's terminal result"
         );
     }
 
