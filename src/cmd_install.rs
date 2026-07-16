@@ -22,7 +22,9 @@ Installs:
   $SIMARD_HOME/bin/simard
   $SIMARD_HOME/prompt_assets
   simard-ooda.service
-  simard-signal.service
+
+The OODA daemon hosts the Signal operator channel in-process; any obsolete
+separate simard-signal.service is decommissioned on install.
 ";
 
 pub fn handle_install<I>(args: I) -> Result<(), Box<dyn std::error::Error>>

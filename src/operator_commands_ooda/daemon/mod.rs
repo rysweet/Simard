@@ -28,6 +28,9 @@ mod brains;
 mod config;
 pub use config::DaemonDashboardConfig;
 
+mod signal_embed;
+use signal_embed::spawn_embedded_signal_channel;
+
 /// Seed the durable, brain-relative OODA cycle counter for a starting daemon
 /// (issue #1).
 ///
@@ -630,6 +633,17 @@ pub fn run_ooda_daemon(
             "[simard] OODA daemon: dashboard disabled (use --no-dashboard to suppress)",
         );
     }
+    // -----------------------------------------------------------------------
+
+    // --- embedded Signal operator channel ----------------------------------
+    // Fold the Signal channel into THIS daemon instead of a separate
+    // `simard-signal.service` process (converge-to-single-daemon). It runs on a
+    // dedicated background thread with a supervised reconnect-with-backoff loop,
+    // panic-isolated so it can never crash or stall the authoritative OODA
+    // cycle. DEFAULT-ON (opt-out via SIMARD_SIGNAL_ENABLED); dormant until a
+    // usable `[signal]` config is present. The guard is kept alive for the
+    // daemon's lifetime; the thread reads the shared `shutdown` flag.
+    let _embedded_signal = spawn_embedded_signal_channel(&state_root, Arc::clone(&shutdown));
     // -----------------------------------------------------------------------
 
     // Capture the binary mtime at startup so we can detect in-place upgrades.

@@ -66,6 +66,20 @@ fn assert_systemctl_logged(log: &Path, expected_terms: &[&str]) {
     );
 }
 
+fn assert_systemctl_not_logged(log: &Path, unexpected_terms: &[&str]) {
+    if !log.exists() {
+        return;
+    }
+    let contents = read(log);
+    let matched = contents
+        .lines()
+        .any(|line| unexpected_terms.iter().all(|term| line.contains(term)));
+    assert!(
+        !matched,
+        "fake systemctl log {log:?} must NOT contain a line with all terms {unexpected_terms:?}; log:\n{contents}"
+    );
+}
+
 fn assert_no_systemctl_invocation(log: &Path) {
     assert!(
         !log.exists(),
@@ -152,7 +166,10 @@ fn install_defaults_simard_home_under_home_and_uses_fake_systemctl() {
         "installer should place the live binary under the default $HOME/.simard"
     );
     assert!(unit_dir.join("simard-ooda.service").is_file());
-    assert!(unit_dir.join("simard-signal.service").is_file());
+    assert!(
+        !unit_dir.join("simard-signal.service").exists(),
+        "the separate signal service must no longer be installed (hosted in-process by OODA daemon)"
+    );
     let expected_service_path = format!(
         "Environment=PATH={}/.local/bin:{}/.cargo/bin:{}/bin:/usr/local/bin:/usr/bin:/bin",
         fake_home.display(),
@@ -163,21 +180,23 @@ fn install_defaults_simard_home_under_home_and_uses_fake_systemctl() {
         &unit_dir.join("simard-ooda.service"),
         &expected_service_path,
     );
-    assert_file_contains(
-        &unit_dir.join("simard-signal.service"),
-        &expected_service_path,
-    );
     assert_systemctl_logged(&systemctl_log, &["--user", "daemon-reload"]);
     assert_systemctl_logged(&systemctl_log, &["--user", "enable", "simard-ooda.service"]);
     assert_systemctl_logged(
         &systemctl_log,
-        &["--user", "enable", "simard-signal.service"],
-    );
-    assert_systemctl_logged(
-        &systemctl_log,
         &["--user", "restart", "simard-ooda.service"],
     );
+    // Convergence: the separate signal service is decommissioned, never
+    // enabled or restarted.
     assert_systemctl_logged(
+        &systemctl_log,
+        &["--user", "disable", "--now", "simard-signal.service"],
+    );
+    assert_systemctl_not_logged(
+        &systemctl_log,
+        &["--user", "enable", "simard-signal.service"],
+    );
+    assert_systemctl_not_logged(
         &systemctl_log,
         &["--user", "restart", "simard-signal.service"],
     );
@@ -287,13 +306,12 @@ fn install_writes_binary_prompt_assets_and_systemd_units_atomically_with_safe_pa
     );
 
     let ooda_unit = unit_dir.join("simard-ooda.service");
-    let signal_unit = unit_dir.join("simard-signal.service");
-    assert_file_contains(
-        &ooda_unit,
-        &format!("WorkingDirectory={}", simard_home.display()),
+    assert!(
+        !unit_dir.join("simard-signal.service").exists(),
+        "the separate signal service must no longer be installed (hosted in-process by OODA daemon)"
     );
     assert_file_contains(
-        &signal_unit,
+        &ooda_unit,
         &format!("WorkingDirectory={}", simard_home.display()),
     );
     assert_file_contains(
@@ -301,36 +319,25 @@ fn install_writes_binary_prompt_assets_and_systemd_units_atomically_with_safe_pa
         &format!("ExecStart={}/bin/simard ooda run", simard_home.display()),
     );
     assert_file_contains(
-        &signal_unit,
-        &format!("ExecStart={}/bin/simard signal run", simard_home.display()),
-    );
-    assert_file_contains(
         &ooda_unit,
         &format!(
             "Environment=SIMARD_PROMPT_ASSETS_DIR={}/prompt_assets/simard",
             simard_home.display()
         ),
     );
-    assert_file_contains(
-        &signal_unit,
-        &format!(
-            "Environment=SIMARD_PROMPT_ASSETS_DIR={}/prompt_assets/simard",
-            simard_home.display()
-        ),
-    );
-    for unit in [&ooda_unit, &signal_unit] {
-        let contents = read(unit);
+    {
+        let contents = read(&ooda_unit);
         assert!(
             !contents.contains("worktrees/main") && !contents.contains("/target/"),
-            "unit file {unit:?} must not reference a source checkout or build directory:\n{contents}"
+            "unit file {ooda_unit:?} must not reference a source checkout or build directory:\n{contents}"
         );
         assert!(
             contents.contains("Restart=always"),
-            "unit file {unit:?} must use Restart=always so the daemon self-recovers from a graceful exit-0 shutdown (e.g. a stray SIGTERM):\n{contents}"
+            "unit file {ooda_unit:?} must use Restart=always so the daemon self-recovers from a graceful exit-0 shutdown (e.g. a stray SIGTERM):\n{contents}"
         );
         assert!(
             !contents.contains("Restart=on-failure"),
-            "unit file {unit:?} must not use Restart=on-failure, which does not restart a clean exit:\n{contents}"
+            "unit file {ooda_unit:?} must not use Restart=on-failure, which does not restart a clean exit:\n{contents}"
         );
     }
 
@@ -338,13 +345,19 @@ fn install_writes_binary_prompt_assets_and_systemd_units_atomically_with_safe_pa
     assert_systemctl_logged(&systemctl_log, &["--user", "enable", "simard-ooda.service"]);
     assert_systemctl_logged(
         &systemctl_log,
-        &["--user", "enable", "simard-signal.service"],
-    );
-    assert_systemctl_logged(
-        &systemctl_log,
         &["--user", "restart", "simard-ooda.service"],
     );
+    // Convergence: the separate signal service is decommissioned, never
+    // enabled or restarted.
     assert_systemctl_logged(
+        &systemctl_log,
+        &["--user", "disable", "--now", "simard-signal.service"],
+    );
+    assert_systemctl_not_logged(
+        &systemctl_log,
+        &["--user", "enable", "simard-signal.service"],
+    );
+    assert_systemctl_not_logged(
         &systemctl_log,
         &["--user", "restart", "simard-signal.service"],
     );
@@ -616,4 +629,45 @@ fn prompt_asset_staging_failure_fails_closed_without_partial_binary_or_units() {
         "asset staging failure must not install systemd units"
     );
     assert_no_systemctl_invocation(&systemctl_log);
+}
+
+#[cfg(unix)]
+#[test]
+fn install_decommissions_a_preexisting_signal_unit() {
+    // A host upgraded from a build that deployed a separate
+    // simard-signal.service must converge: install removes the stale unit file
+    // and disables it, so the Signal channel runs ONLY in-process in the OODA
+    // daemon (never double-connected to signal-cli by two racing processes).
+    let temp = TempDir::new().expect("tempdir");
+    let fake_home = temp.path().join("home");
+    let unit_dir = temp.path().join("systemd-user");
+    let (systemctl, systemctl_log) = fake_systemctl(temp.path());
+
+    // Pre-seed the obsolete unit as if a prior install wrote it.
+    fs::create_dir_all(&unit_dir).expect("unit dir");
+    let stale_signal = unit_dir.join("simard-signal.service");
+    fs::write(&stale_signal, "[Unit]\nDescription=Simard Signal service\n")
+        .expect("seed stale signal unit");
+
+    simard()
+        .args(["install", "--systemd-user-dir"])
+        .arg(&unit_dir)
+        .arg("--systemctl")
+        .arg(&systemctl)
+        .env("HOME", &fake_home)
+        .assert()
+        .success();
+
+    assert!(
+        !stale_signal.exists(),
+        "install must remove the obsolete simard-signal.service unit file"
+    );
+    assert!(
+        unit_dir.join("simard-ooda.service").is_file(),
+        "install must still deploy the OODA unit"
+    );
+    assert_systemctl_logged(
+        &systemctl_log,
+        &["--user", "disable", "--now", "simard-signal.service"],
+    );
 }
