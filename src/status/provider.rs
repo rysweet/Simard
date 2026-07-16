@@ -97,7 +97,26 @@ fn llm_over_budget(llm: &SectionEnvelope<LlmUsage>) -> Option<bool> {
 
 // ── daemon ──────────────────────────────────────────────────────────────────
 
+/// Age (seconds) beyond which the `daemon_health.json` heartbeat is considered
+/// `stale`. Matches the `/api/status` threshold (`routes.rs`): cycle interval
+/// (300s) + max cycle runtime (~600s). With the heartbeat stamped at cycle
+/// start, a healthy daemon's heartbeat stays well under this.
+const DAEMON_HEARTBEAT_STALE_SECS: i64 = 900;
+
 fn assemble_daemon(opts: &AssembleOptions) -> SectionEnvelope<Daemon> {
+    // Prefer systemd when a unit is actually loaded; otherwise fall back to the
+    // durable `daemon_health.json` heartbeat so the snapshot stays
+    // process-agnostic in non-systemd deployments (dev / worktree / container).
+    match assemble_daemon_from_systemctl(opts) {
+        Some(env) => env,
+        None => assemble_daemon_from_heartbeat(),
+    }
+}
+
+/// Assemble the daemon section from `systemctl show`. Returns `Some(..)` only
+/// when the unit is genuinely loaded; `None` (unavailable / not-found /
+/// not-loaded) signals the caller to fall back to the durable heartbeat.
+fn assemble_daemon_from_systemctl(opts: &AssembleOptions) -> Option<SectionEnvelope<Daemon>> {
     let output = std::process::Command::new("systemctl")
         .args([
             "show",
@@ -108,8 +127,8 @@ fn assemble_daemon(opts: &AssembleOptions) -> SectionEnvelope<Daemon> {
 
     let output = match output {
         Ok(o) if o.status.success() => o,
-        Ok(_) => return SectionEnvelope::absent("systemctl: unit not found"),
-        Err(_) => return SectionEnvelope::absent("systemctl: unavailable"),
+        // systemctl ran but errored, or is unavailable — try the heartbeat.
+        Ok(_) | Err(_) => return None,
     };
 
     let text = String::from_utf8_lossy(&output.stdout);
@@ -121,11 +140,11 @@ fn assemble_daemon(opts: &AssembleOptions) -> SectionEnvelope<Daemon> {
     }
 
     // `systemctl show` exits 0 even for an unknown unit (reporting
-    // `LoadState=not-found`); treat anything not actually loaded as absent
-    // rather than rendering a phantom daemon.
+    // `LoadState=not-found`); treat anything not actually loaded as "no unit"
+    // and fall back to the heartbeat rather than rendering a phantom daemon.
     match props.get("LoadState").map(String::as_str) {
         Some("loaded") => {}
-        _ => return SectionEnvelope::absent("systemctl: unit not loaded"),
+        _ => return None,
     }
 
     let active = props.get("ActiveState").cloned().unwrap_or_default();
@@ -151,7 +170,99 @@ fn assemble_daemon(opts: &AssembleOptions) -> SectionEnvelope<Daemon> {
             .cloned(),
         n_restarts: props.get("NRestarts").and_then(|v| v.parse().ok()),
     };
-    SectionEnvelope::live(daemon, None)
+    Some(SectionEnvelope::live(daemon, None))
+}
+
+/// Path to the durable OODA heartbeat the daemon flushes each cycle
+/// (`dirs::data_local_dir()/simard/daemon_health.json`). This is the same file
+/// `/api/status`, `/api/activity`, and `/api/workboard` read, and — unlike the
+/// telemetry snapshot — it is *not* under `SIMARD_STATE_ROOT`, so it is resolved
+/// from the OS data-local dir rather than `opts.state_root`.
+fn daemon_health_path() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("/var/tmp"))
+        .join("simard")
+        .join("daemon_health.json")
+}
+
+/// Assemble the daemon section from the durable `daemon_health.json` heartbeat.
+/// Fail-visible: a missing / unreadable / unparseable heartbeat degrades this
+/// one section to `absent` with the honest `systemctl: unit not loaded` note
+/// (never panics, never fabricates a running daemon).
+fn assemble_daemon_from_heartbeat() -> SectionEnvelope<Daemon> {
+    read_daemon_heartbeat(&daemon_health_path(), chrono::Utc::now())
+}
+
+/// Read + map the heartbeat at `path` as of `now`. Split from
+/// [`assemble_daemon_from_heartbeat`] so tests can inject a temp path without
+/// mutating process-global `HOME` / `XDG_DATA_HOME`.
+fn read_daemon_heartbeat(
+    path: &std::path::Path,
+    now: chrono::DateTime<chrono::Utc>,
+) -> SectionEnvelope<Daemon> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return SectionEnvelope::absent("systemctl: unit not loaded"),
+    };
+    let health: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return SectionEnvelope::absent("systemctl: unit not loaded"),
+    };
+    daemon_from_heartbeat(&health, now)
+}
+
+/// Pure mapping from a parsed `daemon_health.json` heartbeat to the daemon
+/// section, given `now` (so it is deterministically testable). The heartbeat's
+/// `timestamp` drives freshness against [`DAEMON_HEARTBEAT_STALE_SECS`]:
+/// - fresh  → `state = "running (<phase>)"`, `freshness = live`
+/// - stale  → `state = "stale (<phase>)"`,   `freshness = stale`
+/// - no/invalid timestamp → `state = "unknown"`, `freshness = stale`
+///
+/// `as_of` is the heartbeat `timestamp`. `main_pid` / `n_restarts` are not
+/// recorded in the heartbeat, so they stay `None` (honest) rather than guessed.
+fn daemon_from_heartbeat(
+    health: &serde_json::Value,
+    now: chrono::DateTime<chrono::Utc>,
+) -> SectionEnvelope<Daemon> {
+    let timestamp = health.get("timestamp").and_then(|t| t.as_str());
+    let phase = health
+        .get("cycle_phase")
+        .and_then(|p| p.as_str())
+        .unwrap_or("")
+        .trim();
+
+    let fresh = timestamp
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .map(|ts| now.signed_duration_since(ts.with_timezone(&chrono::Utc)))
+        .map(|age| age.num_seconds() < DAEMON_HEARTBEAT_STALE_SECS);
+
+    let base = match fresh {
+        Some(true) => "running",
+        Some(false) => "stale",
+        None => "unknown",
+    };
+    let state = if phase.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base} ({phase})")
+    };
+
+    let daemon = Daemon {
+        state,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        main_pid: None,
+        deployed_commit: None,
+        instance_uptime: None,
+        running_since: None,
+        n_restarts: None,
+    };
+
+    let as_of = timestamp.map(|s| s.to_string());
+    if fresh == Some(true) {
+        SectionEnvelope::live(daemon, as_of)
+    } else {
+        SectionEnvelope::stale(daemon, as_of)
+    }
 }
 
 // ── resources ───────────────────────────────────────────────────────────────
@@ -916,5 +1027,131 @@ mod pure_helper_tests {
         assert_eq!(opts.state_root, root);
         assert_eq!(opts.service_unit, "simard.service");
         assert!(opts.sections.is_none());
+    }
+
+    // ── daemon heartbeat fallback (#4215) ─────────────────────────────
+    // In non-systemd deployments (dev / worktree / container) `systemctl show`
+    // reports no loaded unit, so `assemble_daemon` falls back to the durable
+    // `daemon_health.json` heartbeat instead of marking the daemon absent.
+
+    /// A fresh heartbeat renders the daemon as running (with phase) and live.
+    #[test]
+    fn daemon_from_heartbeat_fresh_is_running_live() {
+        let now = chrono::Utc::now();
+        let health = serde_json::json!({
+            "timestamp": (now - chrono::Duration::seconds(30)).to_rfc3339(),
+            "status": "running",
+            "cycle_phase": "sleep",
+            "cycle_number": 1723,
+        });
+        let env = daemon_from_heartbeat(&health, now);
+        assert_eq!(env.availability, Availability::Ok);
+        assert_eq!(env.freshness, Freshness::Live);
+        let d = env.data.as_ref().expect("running daemon carries data");
+        assert_eq!(d.state, "running (sleep)");
+        assert!(env.as_of.is_some(), "as_of carries the heartbeat timestamp");
+        // Fields the heartbeat does not record stay honestly None.
+        assert!(d.main_pid.is_none());
+        assert!(d.n_restarts.is_none());
+    }
+
+    /// A heartbeat older than the staleness window renders as stale, not absent.
+    #[test]
+    fn daemon_from_heartbeat_old_is_stale() {
+        let now = chrono::Utc::now();
+        let health = serde_json::json!({
+            "timestamp": (now
+                - chrono::Duration::seconds(DAEMON_HEARTBEAT_STALE_SECS + 60))
+            .to_rfc3339(),
+            "cycle_phase": "orient",
+        });
+        let env = daemon_from_heartbeat(&health, now);
+        assert_eq!(env.availability, Availability::Ok);
+        assert_eq!(env.freshness, Freshness::Stale);
+        assert_eq!(env.data.as_ref().unwrap().state, "stale (orient)");
+    }
+
+    /// No `cycle_phase` yields a bare state without an empty `( )` suffix.
+    #[test]
+    fn daemon_from_heartbeat_without_phase_has_no_suffix() {
+        let now = chrono::Utc::now();
+        let health = serde_json::json!({
+            "timestamp": now.to_rfc3339(),
+        });
+        let env = daemon_from_heartbeat(&health, now);
+        assert_eq!(env.data.as_ref().unwrap().state, "running");
+    }
+
+    /// A missing / invalid timestamp is "unknown" and stale — never fabricated
+    /// as running.
+    #[test]
+    fn daemon_from_heartbeat_missing_timestamp_is_unknown_stale() {
+        let now = chrono::Utc::now();
+        let health = serde_json::json!({ "cycle_phase": "decide" });
+        let env = daemon_from_heartbeat(&health, now);
+        assert_eq!(env.freshness, Freshness::Stale);
+        assert_eq!(env.data.as_ref().unwrap().state, "unknown (decide)");
+        assert!(env.as_of.is_none());
+    }
+
+    /// Fail-visible: a missing heartbeat file degrades this one section to
+    /// absent with the honest systemctl note (never panics, never fabricates).
+    #[test]
+    fn read_daemon_heartbeat_missing_file_is_absent() {
+        let missing = std::env::temp_dir().join(format!(
+            "simard-status-nohealth-{}-{}.json",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let env = read_daemon_heartbeat(&missing, chrono::Utc::now());
+        assert_eq!(env.availability, Availability::Unavailable);
+        assert_eq!(env.freshness, Freshness::Absent);
+        assert_eq!(env.note.as_deref(), Some("systemctl: unit not loaded"));
+    }
+
+    /// A readable, fresh heartbeat file reads back as a running/live daemon.
+    #[test]
+    fn read_daemon_heartbeat_reads_fresh_file_as_running() {
+        let now = chrono::Utc::now();
+        let dir = std::env::temp_dir().join(format!(
+            "simard-status-health-{}-{}",
+            std::process::id(),
+            now.timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("daemon_health.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "timestamp": now.to_rfc3339(),
+                "status": "running",
+                "cycle_phase": "act",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let env = read_daemon_heartbeat(&path, now);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(env.availability, Availability::Ok);
+        assert_eq!(env.freshness, Freshness::Live);
+        assert_eq!(env.data.as_ref().unwrap().state, "running (act)");
+    }
+
+    /// A corrupt (non-JSON) heartbeat also degrades to the honest absent note.
+    #[test]
+    fn read_daemon_heartbeat_corrupt_file_is_absent() {
+        let now = chrono::Utc::now();
+        let dir = std::env::temp_dir().join(format!(
+            "simard-status-badhealth-{}-{}",
+            std::process::id(),
+            now.timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("daemon_health.json");
+        std::fs::write(&path, b"{ this is not json").unwrap();
+        let env = read_daemon_heartbeat(&path, now);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(env.availability, Availability::Unavailable);
+        assert_eq!(env.note.as_deref(), Some("systemctl: unit not loaded"));
     }
 }
