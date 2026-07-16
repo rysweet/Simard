@@ -1498,6 +1498,18 @@ pub fn run_ooda_daemon(
                             g.supersedes_edges as i64,
                             &[(names::ATTR_TYPE, "SUPERSEDES")],
                         );
+                        // Emit the durable graph-memory grounding-coverage
+                        // self-metric from the SAME snapshot (no extra store
+                        // read): fraction of semantic facts connected into the
+                        // DERIVES_FROM provenance graph. Turns a grounding
+                        // regression — facts entering semantic memory without a
+                        // provenance edge — into a comparable, regressable
+                        // `metrics.jsonl` series instead of only raw edge-count
+                        // gauges. Best-effort; no-op on an empty store.
+                        crate::cognitive_memory::metrics::record_provenance_coverage_metric(
+                            g.facts_with_provenance,
+                            g.facts_total,
+                        );
                     }
                     // Flush the metrics snapshot with the per-cycle enrichment
                     // rollup section attached (issue #2942) so the dashboard's
