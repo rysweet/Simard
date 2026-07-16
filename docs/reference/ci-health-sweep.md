@@ -1,7 +1,7 @@
 ---
 title: CI-Health Sweep — Governed-Fleet Reference
 description: Reference for simard::ci_health and the `simard ci-health` subcommand — the codified, reproducible governed-fleet CI-health sweep that classifies each default-branch workflow as green, actionable_failure, or ignored(reason).
-last_updated: 2026-07-07
+last_updated: 2026-07-16
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -63,6 +63,36 @@ an active workflow whose latest run genuinely failed always does.
 Classification ([`classify::build_report`]) is a total, pure function over the
 [`FleetSnapshot`] — no I/O, no `gh`, no clock — so the verdict is deterministic
 and exhaustively unit-tested.
+
+### Transient-infra resilience (keeping green builds green)
+
+The sweep reads each workflow's **latest** default-branch run, so any conclusion
+it sees is what the steward acts on. That makes it sensitive to *transient
+GitHub-infrastructure* failures — a run whose real gates (fmt, clippy, tests)
+all pass but that GitHub marks `failure` because a non-gate infra step flaked.
+The recurring example is the artifact service returning
+`Failed to CreateArtifact: Request timeout` after `actions/upload-artifact`'s
+own five internal retries during a brownout, which fails the whole `verify`
+workflow even though the code is green. A single sweep landing inside that
+window would classify a self-healing blip as an `actionable_failure` and file a
+spurious tracking issue.
+
+Because the classifier is deliberately a pure function of the run conclusion
+(it does not scrape job logs), this class is mitigated **at the workflow level**
+rather than in classification: `.github/workflows/verify.yml` makes its artifact
+steps non-fatal so an artifact-service outage cannot turn an all-green run red.
+
+- The **diagnostic** `cargo-test log` upload is `continue-on-error` — nothing
+  consumes it, so its upload timing out must never fail the build.
+- The **binary** upload is `continue-on-error`, and its only consumer, the
+  `e2e-dashboard` job, falls back to rebuilding the binary (from the read-only
+  shared cargo cache) when the artifact download misses. A skipped upload
+  therefore self-heals within the same run instead of reddening the default
+  branch.
+
+The remedy for a genuine, non-transient default-branch failure is unchanged: it
+is an `actionable_failure`, turns the fleet red, and is routed to a
+deduplicated tracking issue by `--file-issues`.
 
 ## Module layout
 
