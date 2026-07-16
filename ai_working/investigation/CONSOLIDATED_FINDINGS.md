@@ -2740,7 +2740,7 @@ Both dives re-grounded every load-bearing citation **live at `d00e4c3f`** (1 com
 
 ---
 
-## §26 — Nineteenth-wave consolidation (HEAD `2191fcd2`, base dive HEAD `d00e4c3f`) — validation-only convergence + closing verdict
+## §27 — Nineteenth-wave (continued): closing convergence verdict + fixpoint (HEAD `2191fcd2`, base dive HEAD `d00e4c3f`) — validation-only, folds the tip minimal-remediation dive
 
 This wave folds the remaining parallel deep dives — two at base HEAD `d00e4c3f`
 ([`secondary_nesting_vs_duplication_VALIDATE_HEAD_d00e4c3f.md`](./secondary_nesting_vs_duplication_VALIDATE_HEAD_d00e4c3f.md),
@@ -2752,7 +2752,7 @@ landed a fix nor found a new mechanism. The tip dive independently re-confirms t
 geometry (no over-engineering) and reclassifies `resource:engineer_spawn` as **benign membership drift**, not a
 contradicting signal. Ground-truth re-checked live at the current branch tip `2191fcd2`.
 
-### 26.1 — Ground-truth re-verification (live at HEAD `2191fcd2`)
+### 27.1 — Ground-truth re-verification (live at HEAD `2191fcd2`)
 - `git diff --name-only cc55a6fb..HEAD -- '*.rs'` → **empty**; `git diff --name-only d00e4c3f..HEAD -- '*.rs'` → **empty**;
   `git status --porcelain -- src/` → **clean**. No production `.rs` changed anywhere in the corpus; the only non-doc
   `.rs` delta across the whole investigation remains the test `src/overseer/tests_root_cause.rs`.
@@ -2760,7 +2760,7 @@ contradicting signal. Ground-truth re-checked live at the current branch tip `21
   - `observation_signature` (`src/overseer/mod.rs:1068-1073`) — `sort_unstable()` → `dedup()` → `format!("overseer-obs:{}", keys.join("|"))`. **Sole producer** of the `overseer-obs:` prefix and `|`-join.
   - `outcome_records_occurrence` (`src/overseer/wiring.rs:612-627`) — arm lists `Launched|Merged|Deployed|IssueFiled|Escalated|Whispered|GoalUnblocked|GoalEscalated|ConflictResolved|GoalTransferred|Audited`; **`ActOutcome::Reported` is absent.** The Rung-4 terminal sink still never records.
 
-### 26.2 — Net-new from the d00e4c3f dives (nil mechanism; one framing sharpening)
+### 27.2 — Net-new from the d00e4c3f dives (nil mechanism; one framing sharpening)
 - **Secondary (VALIDATE):** re-confirms **"D1, not duplication"** at HEAD — the doubled `overseer-obs:…|overseer-obs:…`
   and literal `|workstream-gap|workstream-gap|` are the **positive fingerprint of D1 self-observation nesting** and are
   **structurally impossible** from per-token duplication (Orient merges same-`dedup_key` signals; `keys.dedup()` collapses
@@ -2771,19 +2771,19 @@ contradicting signal. Ground-truth re-checked live at the current branch tip `21
   (self-sealing). This is the same mechanism as §25.2, stated as a single load-bearing conjunction: *bare-park (D0 WHY-gate)
   ∧ terminal-non-recording-sink (Rung 4 `Reported ∉ outcome_records_occurrence`)* ⇒ the absorbing dead zone Lane-A ≥ 2 ∧ Lane-B < 3.
 
-### 26.3 — Settled answer (unchanged across nineteen waves)
+### 27.3 — Settled answer (unchanged across nineteen waves)
 1. **What the signature is:** the overseer's own **observation write-back signature** (`observation_signature`, `mod.rs:1068-1073`) — a sorted/deduped `|`-join of the current cycle's problem `dedup_key`s, prefixed `overseer-obs:`. It is a *faithful fingerprint of a static, unresolved problem set*, not a raw memory key.
 2. **Why "2×":** two decoupled counters. Lane A (`RECURRING_SIGNATURE_THRESHOLD = 2`, `signal.rs:362`) makes recurrence **visible** at 2 but never remediates; Lane B (`RECURRENCE_ESCALATION_THRESHOLD = 3`, `root_cause.rs:33`) is the only escalation gate and keys on a quantity the composite never increments. The signature parks in the absorbing **`[2,3)` dead zone**.
 3. **Why it recurs:** three coupled OODA loops never close — (L1) blocked-goal ladder Rung 4 `Report` is a terminal non-recording sink; (L2) `WorkstreamCoverage` is notify-only (`FlagWorkstreamGaps`, `mod.rs:1543`) with no closing edge; (L3) the overseer recalls and re-observes its own `overseer-obs:` bookkeeping (bounded self-feed). The problem set never changes, so the fingerprint repeats.
 4. **The `×2` is HONEST** (test-locked): not a dedup/storage/replay artifact (H0 REJECTED; H1–H8 SUPPORTED; overseer suite 361/0).
 
-### 26.4 — Minimal remediation (settled; none landed)
+### 27.4 — Minimal remediation (settled; none landed)
 - **D2 (make the dead zone reachable):** add `ActOutcome::Reported` to `outcome_records_occurrence` (`wiring.rs:612-627`) so acknowledged parks accrue toward Rung 1 — landing-safe (no test pins the exclusion; first observation still Reports).
 - **D3 (close the gap loop):** give `WorkstreamCoverage` a recurrence-aware ladder (1× Notify / ≥2× `LaunchRecipe` / ≥3× Escalate), keyed on **`GapItem.signature`** (INV-GAP-KEY), as an **additive** Decide arm (never swap `FlagWorkstreamGaps` — `tests_gap_scan.rs:852` hard-asserts it).
 - **D1 (stop self-ingestion):** a single-function write-boundary self-provenance filter in `write_back_observation` (`mod.rs:534-563`) dropping `overseer-obs:`-keyed recall-derived problems before `observation_signature`.
 - **L0 (prerequisite):** close the WHY-reasoner wiring so bare parks carry their real WHY down the ladder. Whole-loop order: **L0 → D2/D3 → D1**. **Do not** blind `unblock-all` (operator-rejected antipattern, `mod.rs:1588`).
 
-### 26.5 — Convergence / closure verdict
+### 27.5 — Convergence / closure verdict
 The investigation has reached a **fixpoint**: the last several waves are docs-only re-groundings that reproduce the
 identical verdict against byte-identical production source. **Continuing to spawn parallel re-observation waves that
 never land a fix is itself an instance of the very pathology under study** — an over-aggregated composite observed `N×`
