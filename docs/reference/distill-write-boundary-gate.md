@@ -55,7 +55,12 @@ order:
    client-provided `confidence` hint is ignored. There is **no** confidence floor
    — an ungrounded or empty fact keeps its genuinely low score so the threshold
    can quarantine it. (Fail-closed: an unscoreable input scores low, never stored
-   blind.)
+   blind.) The content-quality component scores **distinct informative words** —
+   alphanumeric-bearing tokens, case/punctuation-normalized and de-duplicated —
+   rather than raw whitespace tokens, so content that carries no information
+   (empty, whitespace-only, or punctuation/symbol-only such as `"... ... ..."`)
+   is hard-gated to `0.0`, and degenerate repetition (`"the the the"`) earns only
+   the partial short-content weight instead of full credit.
 4. **Threshold quarantine** — if the score is below
    `DISTILL_RELIABILITY_THRESHOLD`, the fact is **quarantined** (counted, not
    stored) so a low-reliability candidate can never corrupt past experience.

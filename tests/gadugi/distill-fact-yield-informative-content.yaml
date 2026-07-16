@@ -1,0 +1,91 @@
+name: distill-fact-yield-informative-content
+app_type: cli
+description: |
+  qa-team outside-in gate for the perpetual-cognition sub-goal "distillation
+  fact-yield" (and its reliability axis). The shared per-fact reliability scorer
+  `src/fact_reliability.rs::score_fact_reliability` — the single write-boundary
+  gate both the IPC `StoreFactGated` server seam and the in-process distiller
+  sink call — now scores its content-quality signal over DISTINCT INFORMATIVE
+  WORDS (alphanumeric-bearing tokens, case/punctuation-normalized and
+  de-duplicated) instead of raw whitespace tokens.
+
+  Two failure modes the old raw-token count let through are now closed, so
+  low-information candidates can no longer be promoted into semantic memory
+  (where they would otherwise pollute recall top-k and drag recall precision
+  down):
+
+    * Punctuation/symbol-only content ("... ... ...", "- - -") carried no more
+      information than an empty string yet counted as three "words" and, when
+      grounded, scored 0.9 and was STORED. It is now hard-gated to 0.0 and
+      quarantined, exactly like empty content.
+    * Degenerate repetition of one word ("the the the") is one distinct
+      informative word, so it earns only the partial short-content weight (0.15),
+      not the full 0.3.
+
+  Honest, genuinely multi-word content is unchanged: three or more distinct
+  informative words still earn the full content weight, so no real fact changes
+  disposition. This scenario pins that behaviour end-to-end over the real scorer
+  and the shared write-boundary gate. Hermetic: no network, no live host
+  mutation; the CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # Headline: the shared reliability scorer's informative-word content signal —
+  # punctuation-only hard-gate, repetition partial-weight, and unchanged full
+  # weight for honest multi-word content.
+  - action: run
+    params:
+      command: "cargo test --locked --lib fact_reliability_tests"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "punctuation_only_content_is_a_hard_zero_even_when_grounded ... ok"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "repeated_single_word_earns_only_partial_content_weight ... ok"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "three_distinct_informative_words_earn_full_content_weight ... ok"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Regression guard: the full distillation semantic-handoff contract (the
+  # write-boundary gate that consumes this scorer) stays green — no honest fact
+  # changes disposition.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_consolidation::distillation_semantic_handoff_tests"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+metadata:
+  tags:
+    - cli
+    - memory
+    - cognitive-memory
+    - distillation
+    - fact-yield
+    - reliability
+    - regression
+  priority: high
+  author: copilot
+  test_type: outside-in
