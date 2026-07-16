@@ -278,6 +278,11 @@ its own codebase, the amplihack framework internals, or external domain
 knowledge to enrich its orient/decide phases with grounded facts rather than
 relying solely on LLM training data.
 
+Simard's **native Rust reimplementation** of the knowledge-pack client
+("kgpacks-rs", `src/native_knowledge.rs` + `src/knowledge_client.rs`) is tracked to full parity
+with the Python agent-kgpacks contract by a measurable criteria checklist at
+`Specs/agent-kgpacks-rs-parity.md`.
+
 ### amplihack-rs ↔ amplihack-xpia-defender
 
 The XPIA defender library scans text, bash commands, URLs, and inter-agent
