@@ -201,6 +201,16 @@ the [Stewardship](./stewardship-api.md) dedup contract rather than forking it:
   front-matter plus CI-health specifics (repo, workflow, default branch, latest
   conclusion, run URL). Two failures that hash to the same signature in one
   sweep collapse to a single issue.
+- **Resilient to search-index lag.** GitHub's issue *search* index is
+  eventually consistent — a tracking issue filed seconds or minutes ago may not
+  be searchable yet, so two sweeps inside that window would each see an empty
+  search and file a duplicate. The dedup search
+  ([`RealGhClient::search_issues`]) defeats this: when the full-text search does
+  not already surface the signed issue, it complements the hits with a
+  **strongly-consistent** scan of the newest open issues
+  (`gh issue list --state open --limit <N>`, no `--search`) and dedups against
+  the union. This is what makes "exactly one issue per broken workflow" hold
+  across back-to-back sweeps, not just across well-separated ones.
 - **Fail-loud.** A `gh` error on the search propagates and **no** issue is filed
   for that signature — the loop never assumes "no matches" on a degraded search,
   matching the orchestrator steward's contract.

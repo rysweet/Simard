@@ -2,11 +2,14 @@
 //! [`RealGhClient`] subprocess implementation is the only network-touching
 //! surface in this module.
 
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::process::{Command, Output, Stdio};
 
 use crate::error::{SimardError, SimardResult};
+
+use super::dedup::find_existing;
 
 /// A GitHub issue as observed via `gh issue list` / `gh issue view`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,56 +153,139 @@ fn create_issue_execution_reason(error: CreateIssueExecutionError) -> String {
     }
 }
 
+/// How many of the newest open issues to scan directly — via the
+/// **strongly-consistent** `gh issue list` (no `--search`) — when the
+/// eventually-consistent search index has not yet surfaced a just-filed
+/// tracking issue. Bounds the cost of the lag-defeating fallback while
+/// comfortably covering the tracking issues a single governed repo accrues
+/// between two stewardship sweeps.
+const RECENT_OPEN_ISSUE_SCAN_LIMIT: usize = 100;
+
+/// A `gh issue list` variant used while resolving dedup candidates.
+enum IssueListQuery {
+    /// Full-text search of open-issue bodies for the stewardship signature.
+    /// Fast and exact, but backed by GitHub's **eventually-consistent** issue
+    /// search index — a tracking issue filed seconds/minutes ago may not be
+    /// indexed yet.
+    Signature(String),
+    /// The newest open issues (up to the given limit), fetched via the
+    /// **strongly-consistent** REST list (no `--search`). Used to catch a
+    /// signed tracking issue the search index has not indexed yet.
+    RecentOpen(usize),
+}
+
+/// Build the `gh issue list` argv for a dedup [`IssueListQuery`].
+fn issue_list_args(repo: &str, query: &IssueListQuery) -> Vec<String> {
+    let mut args = vec![
+        "issue".to_string(),
+        "list".to_string(),
+        "-R".to_string(),
+        repo.to_string(),
+        "--state".to_string(),
+        "open".to_string(),
+    ];
+    match query {
+        IssueListQuery::Signature(signature) => {
+            args.push("--search".to_string());
+            args.push(format!("stewardship-signature:{signature} in:body"));
+        }
+        IssueListQuery::RecentOpen(limit) => {
+            args.push("--limit".to_string());
+            args.push(limit.to_string());
+        }
+    }
+    args.push("--json".to_string());
+    args.push("number,url,title,body".to_string());
+    args
+}
+
+/// Parse `gh issue list --json number,url,title,body` output.
+fn parse_issue_list(stdout: &[u8]) -> SimardResult<Vec<GhIssue>> {
+    #[derive(serde::Deserialize)]
+    struct RawIssue {
+        number: u64,
+        url: String,
+        title: String,
+        body: String,
+    }
+    let raws: Vec<RawIssue> =
+        serde_json::from_slice(stdout).map_err(|e| SimardError::StewardshipGhCommandFailed {
+            reason: format!("failed to parse `gh issue list` JSON: {e}"),
+        })?;
+    Ok(raws
+        .into_iter()
+        .map(|r| GhIssue {
+            number: r.number,
+            url: r.url,
+            title: r.title,
+            body: r.body,
+        })
+        .collect())
+}
+
+/// Union two issue-candidate lists, de-duplicating by issue number while
+/// preserving order (search hits first, then any newest-open-issue hits the
+/// search index had not yet indexed).
+fn merge_issue_candidates(searched: Vec<GhIssue>, recent: Vec<GhIssue>) -> Vec<GhIssue> {
+    let mut seen: BTreeSet<u64> = BTreeSet::new();
+    let mut merged = Vec::with_capacity(searched.len() + recent.len());
+    for issue in searched.into_iter().chain(recent) {
+        if seen.insert(issue.number) {
+            merged.push(issue);
+        }
+    }
+    merged
+}
+
+/// Resolve the open issues to dedup a signature against, resilient to GitHub's
+/// eventually-consistent issue search index.
+///
+/// Strategy: run the fast full-text [`IssueListQuery::Signature`] search first.
+/// If it already surfaces the signed issue, return its hits unchanged (the
+/// common, already-indexed path — one `gh` call). Otherwise the tracking issue
+/// may exist but not be indexed yet, so complement the (possibly empty) search
+/// hits with a **strongly-consistent** [`IssueListQuery::RecentOpen`] scan and
+/// union the two. Without this fallback, two stewardship sweeps within the
+/// multi-minute search-index window each see an empty search and file a
+/// duplicate, breaking the "one issue per distinct failure" guarantee.
+///
+/// `list` performs one `gh issue list` per query; any error it returns
+/// propagates (fail-loud — a degraded search never silently yields "no match").
+fn resolve_dedup_candidates<F>(mut list: F, signature: &str) -> SimardResult<Vec<GhIssue>>
+where
+    F: FnMut(&IssueListQuery) -> SimardResult<Vec<GhIssue>>,
+{
+    let searched = list(&IssueListQuery::Signature(signature.to_string()))?;
+    if find_existing(&searched, signature).is_some() {
+        return Ok(searched);
+    }
+    let recent = list(&IssueListQuery::RecentOpen(RECENT_OPEN_ISSUE_SCAN_LIMIT))?;
+    Ok(merge_issue_candidates(searched, recent))
+}
+
+/// Shell out to `gh issue list` for one dedup [`IssueListQuery`] and parse it.
+fn run_gh_issue_list(repo: &str, query: &IssueListQuery) -> SimardResult<Vec<GhIssue>> {
+    let args = issue_list_args(repo, query);
+    let output = Command::new("gh").args(&args).output().map_err(|e| {
+        SimardError::StewardshipGhCommandFailed {
+            reason: format!("failed to spawn `gh issue list`: {e}"),
+        }
+    })?;
+    if !output.status.success() {
+        return Err(SimardError::StewardshipGhCommandFailed {
+            reason: format!(
+                "`gh issue list -R {repo}` exited {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    parse_issue_list(&output.stdout)
+}
+
 impl GhClient for RealGhClient {
     fn search_issues(&self, repo: &str, signature: &str) -> SimardResult<Vec<GhIssue>> {
-        let search = format!("stewardship-signature:{signature} in:body");
-        let output = std::process::Command::new("gh")
-            .args([
-                "issue",
-                "list",
-                "-R",
-                repo,
-                "--state",
-                "open",
-                "--search",
-                &search,
-                "--json",
-                "number,url,title,body",
-            ])
-            .output()
-            .map_err(|e| SimardError::StewardshipGhCommandFailed {
-                reason: format!("failed to spawn `gh issue list`: {e}"),
-            })?;
-        if !output.status.success() {
-            return Err(SimardError::StewardshipGhCommandFailed {
-                reason: format!(
-                    "`gh issue list -R {repo}` exited {}: {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
-            });
-        }
-        #[derive(serde::Deserialize)]
-        struct RawIssue {
-            number: u64,
-            url: String,
-            title: String,
-            body: String,
-        }
-        let raws: Vec<RawIssue> = serde_json::from_slice(&output.stdout).map_err(|e| {
-            SimardError::StewardshipGhCommandFailed {
-                reason: format!("failed to parse `gh issue list` JSON: {e}"),
-            }
-        })?;
-        Ok(raws
-            .into_iter()
-            .map(|r| GhIssue {
-                number: r.number,
-                url: r.url,
-                title: r.title,
-                body: r.body,
-            })
-            .collect())
+        resolve_dedup_candidates(|query| run_gh_issue_list(repo, query), signature)
     }
 
     fn create_issue(&self, repo: &str, title: &str, body: &str) -> SimardResult<GhIssue> {
@@ -217,6 +303,164 @@ mod tests {
     use std::process::Output;
 
     use super::{CreateIssueExecutionError, create_issue_with, execute_create_issue};
+    use super::{
+        GhIssue, IssueListQuery, RECENT_OPEN_ISSUE_SCAN_LIMIT, issue_list_args,
+        merge_issue_candidates, parse_issue_list, resolve_dedup_candidates,
+    };
+    use crate::error::SimardError;
+    use std::cell::RefCell;
+
+    fn issue(number: u64, signature: &str) -> GhIssue {
+        GhIssue {
+            number,
+            url: format!("https://github.com/o/r/issues/{number}"),
+            title: format!("[ci-health] wf-{number} failing"),
+            body: format!("filed-by: simard-stewardship\nstewardship-signature: {signature}\nbody",),
+        }
+    }
+
+    #[test]
+    fn issue_list_args_uses_search_for_signature_query() {
+        let args = issue_list_args("o/r", &IssueListQuery::Signature("cafef00dcafef00d".into()));
+        assert!(args.windows(2).any(|w| w
+            == [
+                "--search".to_string(),
+                "stewardship-signature:cafef00dcafef00d in:body".to_string()
+            ]));
+        assert!(!args.iter().any(|a| a == "--limit"));
+        assert_eq!(
+            args[0..6],
+            ["issue", "list", "-R", "o/r", "--state", "open"]
+        );
+    }
+
+    #[test]
+    fn issue_list_args_uses_limit_and_no_search_for_recent_open_query() {
+        let args = issue_list_args("o/r", &IssueListQuery::RecentOpen(42));
+        assert!(!args.iter().any(|a| a == "--search"));
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--limit".to_string(), "42".to_string()])
+        );
+    }
+
+    #[test]
+    fn merge_issue_candidates_dedups_by_number_preserving_search_first_order() {
+        let searched = vec![issue(10, "aaaaaaaaaaaaaaaa")];
+        let recent = vec![issue(10, "aaaaaaaaaaaaaaaa"), issue(9, "bbbbbbbbbbbbbbbb")];
+        let merged = merge_issue_candidates(searched, recent);
+        assert_eq!(
+            merged.iter().map(|i| i.number).collect::<Vec<_>>(),
+            vec![10, 9],
+            "issue #10 must appear once (search hit), #9 appended from recent scan"
+        );
+    }
+
+    #[test]
+    fn parse_issue_list_reads_gh_json() {
+        let json = br#"[{"number":7,"url":"u","title":"t","body":"b"}]"#;
+        let issues = parse_issue_list(json).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].number, 7);
+    }
+
+    /// A canned list executor recording which queries it was asked to run.
+    struct FakeList {
+        by_signature: Vec<GhIssue>,
+        recent: Vec<GhIssue>,
+        recent_err: bool,
+        queries: RefCell<Vec<String>>,
+    }
+
+    impl FakeList {
+        fn run(&self, query: &IssueListQuery) -> Result<Vec<GhIssue>, SimardError> {
+            match query {
+                IssueListQuery::Signature(_) => {
+                    self.queries.borrow_mut().push("signature".into());
+                    Ok(self.by_signature.clone())
+                }
+                IssueListQuery::RecentOpen(limit) => {
+                    assert_eq!(*limit, RECENT_OPEN_ISSUE_SCAN_LIMIT);
+                    self.queries.borrow_mut().push("recent".into());
+                    if self.recent_err {
+                        return Err(SimardError::StewardshipGhCommandFailed {
+                            reason: "recent scan failed".into(),
+                        });
+                    }
+                    Ok(self.recent.clone())
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_skips_recent_scan_when_search_already_finds_signed_issue() {
+        let sig = "cafef00dcafef00d";
+        let fake = FakeList {
+            by_signature: vec![issue(5, sig)],
+            recent: vec![],
+            recent_err: false,
+            queries: RefCell::new(Vec::new()),
+        };
+        let out = resolve_dedup_candidates(|q| fake.run(q), sig).unwrap();
+        assert_eq!(out.iter().map(|i| i.number).collect::<Vec<_>>(), vec![5]);
+        assert_eq!(
+            *fake.queries.borrow(),
+            vec!["signature".to_string()],
+            "recent scan must be skipped once search surfaces the signed issue"
+        );
+    }
+
+    /// Regression for the search-index-lag duplicate-filing bug: a just-filed
+    /// tracking issue is not yet in GitHub's search index, so the full-text
+    /// search returns empty — but the strongly-consistent recent-open-issue
+    /// scan surfaces it, so dedup finds the match instead of filing a duplicate.
+    #[test]
+    fn resolve_finds_signed_issue_via_recent_scan_when_search_index_lags() {
+        let sig = "cafef00dcafef00d";
+        let fake = FakeList {
+            by_signature: vec![], // search index has not indexed it yet
+            recent: vec![issue(9, "otherotherother0"), issue(8, sig)],
+            recent_err: false,
+            queries: RefCell::new(Vec::new()),
+        };
+        let out = resolve_dedup_candidates(|q| fake.run(q), sig).unwrap();
+        assert!(
+            super::find_existing(&out, sig).is_some(),
+            "the unindexed signed issue must be found via the recent scan"
+        );
+        assert_eq!(
+            *fake.queries.borrow(),
+            vec!["signature".to_string(), "recent".to_string()],
+            "an empty search must trigger the strongly-consistent recent scan"
+        );
+    }
+
+    #[test]
+    fn resolve_returns_no_match_when_neither_query_has_signature() {
+        let sig = "cafef00dcafef00d";
+        let fake = FakeList {
+            by_signature: vec![],
+            recent: vec![issue(9, "otherotherother0")],
+            recent_err: false,
+            queries: RefCell::new(Vec::new()),
+        };
+        let out = resolve_dedup_candidates(|q| fake.run(q), sig).unwrap();
+        assert!(super::find_existing(&out, sig).is_none());
+    }
+
+    #[test]
+    fn resolve_propagates_recent_scan_error_fail_loud() {
+        let sig = "cafef00dcafef00d";
+        let fake = FakeList {
+            by_signature: vec![],
+            recent: vec![],
+            recent_err: true,
+            queries: RefCell::new(Vec::new()),
+        };
+        let err = resolve_dedup_candidates(|q| fake.run(q), sig).unwrap_err();
+        assert!(err.to_string().contains("recent scan failed"));
+    }
 
     fn fake_gh(script_body: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
