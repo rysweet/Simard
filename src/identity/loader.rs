@@ -158,6 +158,38 @@ impl IdentityLoader for BuiltinIdentityLoader {
                 MemoryPolicy::default(),
                 request.contract.clone(),
             ),
+            // Data-storytelling identity: takes a dataset + question end-to-end
+            // to a served interactive dashboard with a written narrative
+            // (exploratory analysis -> visualization design -> app delivery).
+            // Runs in Engineer mode because delivery requires writing files and
+            // serving an app, so it needs the same base-type reach (including
+            // `terminal-shell`) as the engineer identity.
+            "simard-cartographer" => IdentityManifest::new(
+                "simard-cartographer",
+                request.package_version.clone(),
+                vec![PromptAssetRef::new(
+                    "cartographer-system",
+                    "simard/cartographer_system.md",
+                )],
+                vec![
+                    BaseTypeId::new("local-harness"),
+                    BaseTypeId::new("terminal-shell"),
+                    BaseTypeId::new("rusty-clawd"),
+                    BaseTypeId::new("copilot-sdk"),
+                    BaseTypeId::new("claude-agent-sdk"),
+                    BaseTypeId::new("ms-agent-framework"),
+                ],
+                capability_set([
+                    BaseTypeCapability::PromptAssets,
+                    BaseTypeCapability::SessionLifecycle,
+                    BaseTypeCapability::Memory,
+                    BaseTypeCapability::Evidence,
+                    BaseTypeCapability::Reflection,
+                ]),
+                OperatingMode::Engineer,
+                MemoryPolicy::default(),
+                request.contract.clone(),
+            ),
             "simard-composite-engineer" => IdentityManifest::compose(
                 "simard-composite-engineer",
                 request.package_version.clone(),
@@ -323,6 +355,52 @@ mod tests {
         assert!(
             !manifest.components.is_empty(),
             "composite should have components"
+        );
+    }
+
+    #[test]
+    fn builtin_loader_loads_cartographer_identity() {
+        let loader = BuiltinIdentityLoader;
+        let manifest = loader
+            .load(&IdentityLoadRequest::new(
+                "simard-cartographer",
+                "0.1.0",
+                test_contract(),
+            ))
+            .unwrap();
+        assert_eq!(manifest.name, "simard-cartographer");
+        assert_eq!(manifest.default_mode, OperatingMode::Engineer);
+        assert_eq!(manifest.prompt_assets.len(), 1);
+        assert_eq!(manifest.prompt_assets[0].id.as_str(), "cartographer-system");
+        assert_eq!(
+            manifest.prompt_assets[0].relative_path,
+            std::path::Path::new("simard/cartographer_system.md")
+        );
+    }
+
+    #[test]
+    fn builtin_loader_cartographer_serves_dashboards_via_terminal_shell() {
+        // Delivery (serving a dashboard, writing app files) requires the same
+        // terminal reach as the engineer identity.
+        let loader = BuiltinIdentityLoader;
+        let manifest = loader
+            .load(&IdentityLoadRequest::new(
+                "simard-cartographer",
+                "0.1.0",
+                test_contract(),
+            ))
+            .unwrap();
+        assert!(manifest.supports_base_type(&BaseTypeId::new("local-harness")));
+        assert!(manifest.supports_base_type(&BaseTypeId::new("terminal-shell")));
+        assert!(
+            manifest
+                .required_capabilities
+                .contains(&BaseTypeCapability::PromptAssets)
+        );
+        assert!(
+            manifest
+                .required_capabilities
+                .contains(&BaseTypeCapability::Memory)
         );
     }
 

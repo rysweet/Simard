@@ -1422,7 +1422,7 @@ From the repository root, use these Cargo forms:
 
 Notes:
 
-- `terminal-shell` is an engineer-only local terminal path
+- `terminal-shell` is a local terminal path accepted by the `simard-engineer` and `simard-cartographer` identities
 - unsupported topology and base-type pairs fail explicitly instead of degrading silently
 - `copilot-sdk` remains an explicit alias of the local harness implementation in this scaffold
 

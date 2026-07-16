@@ -1,0 +1,54 @@
+name: "Cartographer data-storytelling identity assets"
+description: "Outside-in verification that the simard-cartographer identity bootstraps end-to-end through the operator probe and that its prompt assets (cartographer_system.md plus the explore/visualize/deliver/narrative stage prompts) and the cartographer-dashboard recipe are present and encode the four-stage, dataset+question -> served-and-verified interactive dashboard with a written narrative workflow."
+version: "1.0.0"
+
+config:
+  timeout: 180000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 180000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Cartographer identity, prompts, and recipe are wired end-to-end"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/cartographer-identity-assets.sh"
+    timeout: 180000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "identity"
+    - "cartographer"
+    - "prompt-assets"
+    - "recipe"
+    - "outside-in"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

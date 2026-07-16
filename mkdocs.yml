@@ -97,6 +97,7 @@ nav:
     - Operational Autonomy Model: concepts/operational-autonomy-model.md
     - Adaptive Scaling: concepts/adaptive-scaling.md
     - Pluggable Identity: concepts/pluggable-identity.md
+    - Cartographer Identity (data storytelling & dashboards): concepts/cartographer-identity.md
     - Multi-Identity Host Isolation: concepts/multi-identity-host-isolation.md
     - Write-Authority Posture: concepts/write-authority-posture.md
     - Identity-Scoped Cognition (Seed Goals, Observe-Only Act): concepts/identity-scoped-cognition.md
@@ -165,6 +166,7 @@ nav:
     - Inspect and Clean Engineer Worktrees: howto/inspect-and-clean-engineer-worktrees.md
     - Grant Engineer Write Permissions: howto/grant-engineer-write-permissions.md
     - Edit the Engineer System Prompt: howto/edit-the-engineer-system-prompt.md
+    - Run the Cartographer Dashboard Workflow: howto/run-cartographer-dashboard.md
     - Run the OODA Daemon: howto/run-ooda-daemon.md
     - Spawn Engineers from the OODA Daemon: howto/spawn-engineers-from-ooda-daemon.md
     - Diagnose a Deferred/Serialized Engineer Spawn (overlap): howto/diagnose-a-deferred-engineer-spawn.md

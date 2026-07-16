@@ -32,7 +32,7 @@ Use the canonical surfaces `simard bootstrap run ...` and `simard engineer termi
 
 Provide the identity, base type, topology, objective, and state root yourself.
 
-For the builtin identities in this repo, the current scaffold accepts `local-harness`, `rusty-clawd`, or `copilot-sdk` as explicit base-type choices everywhere, and `simard-engineer` additionally accepts `terminal-shell` for a real local PTY-backed shell session. `rusty-clawd` is a distinct session backend, `terminal-shell` is intentionally local-only, and `copilot-sdk` remains an explicit alias of `local-harness`.
+For the builtin identities in this repo, the current scaffold accepts `local-harness`, `rusty-clawd`, or `copilot-sdk` as explicit base-type choices everywhere, and the `simard-engineer` and `simard-cartographer` identities additionally accept `terminal-shell` for a real local PTY-backed shell session. `rusty-clawd` is a distinct session backend, `terminal-shell` is intentionally local-only, and `copilot-sdk` remains an explicit alias of `local-harness`.
 
 ```bash
 cargo run --quiet --   bootstrap run simard-engineer local-harness single-process   "verify current reflection metadata"   "$PWD/target/simard-state"
