@@ -254,6 +254,13 @@ The self-check is hermetic and deterministic: it uses a throwaway temp home for
 tactic memory and never touches your real profiles. Live VM grading (Phase 3,
 #2823) is **externally gated** and intentionally out of this gate's scope.
 
+The same done-gate is reachable from the operator-probe surface as
+`simard_operator_probe coin-gym-verify` (no arguments), so the repo-grounded
+LOCAL COIN harness is exposed alongside the other operator-probe surfaces
+(`engineer-loop-run`, `terminal-run`, …). See the
+[runtime contracts reference](../reference/runtime-contracts.md) for the full
+operator-surface table.
+
 ### `profiles` — list isolated per-model run state
 
 ```bash
