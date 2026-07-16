@@ -2,12 +2,12 @@ use std::path::{Path, PathBuf};
 
 use super::command_context::CommandContext;
 use super::{
-    run_bootstrap_probe, run_engineer_loop_probe, run_engineer_read_probe, run_goal_curation_probe,
-    run_gym_compare, run_gym_list, run_gym_scenario, run_gym_suite, run_handoff_probe,
-    run_improvement_curation_probe, run_improvement_curation_read_probe, run_meeting_probe,
-    run_meeting_read_probe, run_review_probe, run_review_read_probe, run_terminal_probe,
-    run_terminal_probe_from_file, run_terminal_read_probe, run_terminal_recipe_list_probe,
-    run_terminal_recipe_probe, run_terminal_recipe_show_probe,
+    run_bootstrap_probe, run_concierge_probe, run_engineer_loop_probe, run_engineer_read_probe,
+    run_goal_curation_probe, run_gym_compare, run_gym_list, run_gym_scenario, run_gym_suite,
+    run_handoff_probe, run_improvement_curation_probe, run_improvement_curation_read_probe,
+    run_meeting_probe, run_meeting_read_probe, run_review_probe, run_review_read_probe,
+    run_terminal_probe, run_terminal_probe_from_file, run_terminal_read_probe,
+    run_terminal_recipe_list_probe, run_terminal_recipe_probe, run_terminal_recipe_show_probe,
 };
 
 pub fn dispatch_operator_probe<I>(args: I) -> Result<(), Box<dyn std::error::Error>>
@@ -26,6 +26,12 @@ where
             let state_root = next_optional_path(&mut args);
             reject_extra_args(args)?;
             run_bootstrap_probe(&identity, &base_type, &topology, &objective, state_root)?;
+        }
+        "concierge-run" => {
+            let topology = next_required(&mut args, "topology")?;
+            let brief = next_required(&mut args, "brief")?;
+            reject_extra_args(args)?;
+            run_concierge_probe(&topology, &brief)?;
         }
         "handoff-roundtrip" => {
             let identity = next_required(&mut args, "identity")?;
@@ -337,6 +343,10 @@ pub fn dispatch_probe_with_context(
             let base_type = ctx.require_base_type()?;
             let objective = ctx.require_objective()?;
             run_handoff_probe(identity, base_type, &ctx.topology, objective)?;
+        }
+        "concierge-run" => {
+            let brief = ctx.require_objective()?;
+            run_concierge_probe(&ctx.topology, brief)?;
         }
         other => return Err(format!("unsupported probe command '{other}'").into()),
     }
