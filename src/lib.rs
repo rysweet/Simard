@@ -36,6 +36,11 @@ pub mod cognitive_threads;
 // brand) plus a runnable reservations/PMS/housekeeping/channel-management
 // prototype. Self-contained domain brick; tests live in `#[cfg(test)]` siblings.
 pub mod concierge;
+// Gastronome identity: culinary design (menu, recipes, event service flow,
+// menu identity) plus a runnable kitchen app (scaling, costed shopping list,
+// nutrition/cost analysis, prep scheduling). Self-contained domain brick; tests
+// live in `#[cfg(test)]` siblings.
+pub mod gastronome;
 // Issue #2419: periodic brain self-examination + memory-hygiene pass — a
 // higher-level introspection layer that reuses the existing distillation /
 // statistics / expired-sensory infra (mirrors `disk_health`). Tests live in a
@@ -278,6 +283,12 @@ pub use engineer_loop::{
 pub use error::{SimardError, SimardResult};
 pub use evidence::{
     EvidenceRecord, EvidenceSource, EvidenceStore, FileBackedEvidenceStore, InMemoryEvidenceStore,
+};
+pub use gastronome::{
+    CostAnalysis, CoursePlan, GastronomeError, GastronomeOutcome, Ingredient, KitchenEngine,
+    MenuBrief, MenuConcept, MenuIdentity, MenuPlan, MenuSummary, NutritionAnalysis, PrepSchedule,
+    PrepScheduledTask, PrepTask, RecipePlan, ScaledRecipe, ServiceFlow, ServiceStage, ServiceStyle,
+    ShoppingLine, Station, design_menu, run_gastronome,
 };
 pub use goal_curation::{
     ActiveGoal, BacklogItem, CARRYOVER_CONCEPT, CarryoverVerification, DEFAULT_SEED_GOALS,

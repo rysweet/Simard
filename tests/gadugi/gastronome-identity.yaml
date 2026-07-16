@@ -1,0 +1,55 @@
+name: "Gastronome Identity End-to-End (culinary/menu/event design + kitchen operations app)"
+description: "Outside-in proof that the simard-gastronome identity designs a menu concept AND takes an event/menu brief to a costed, scaled, and scheduled plan end-to-end. Drives the operator-probe `gastronome-run` surface (design -> scale -> cost -> nutrition -> prep schedule, self-verified) and confirms the `simard-gastronome` identity bootstraps as a first-class identity."
+version: "1.0.0"
+
+config:
+  timeout: 360000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 360000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Gastronome designs a menu and verifies a costed, scheduled kitchen plan end-to-end"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/gastronome-identity.sh"
+    timeout: 360000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "gastronome"
+    - "culinary"
+    - "identity"
+    - "kitchen"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

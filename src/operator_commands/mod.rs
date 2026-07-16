@@ -3,6 +3,7 @@ mod concierge;
 mod dispatch;
 mod evidence;
 mod format;
+mod gastronome;
 mod goals;
 mod probe;
 mod recipes;
@@ -35,6 +36,7 @@ pub use concierge::run_concierge_probe;
 pub use dispatch::{
     dispatch_legacy_gym_cli, dispatch_operator_probe, dispatch_probe_with_context, gym_usage,
 };
+pub use gastronome::run_gastronome_probe;
 pub use probe::{run_bootstrap_probe, run_copilot_submit_probe, run_handoff_probe};
 
 // Re-export pub(crate) items from sub-modules so callers using

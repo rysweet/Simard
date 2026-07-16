@@ -1,0 +1,27 @@
+name: simard-gastronome-end-to-end
+app_type: cli
+description: |
+  Proves the Gastronome identity delivers on its "Done when" bar: take an
+  event/menu brief to a costed, scheduled menu plan end-to-end. Drives the
+  operator-probe `gastronome-run` surface, which designs the menu and runs the
+  kitchen app (scale -> cost -> nutrition -> prep schedule) with self-verified
+  invariants.
+
+  Schema note: the pinned `@gadugi/agentic-test` CLI runner only gates on
+  `run`-step exit codes and reads command text from `params.command`, so the
+  assertion is encoded in the exit code of a `bash -lc` wrapper that exits zero
+  only when the run reports both "Plan verified: yes" and a scaled sample dish.
+metadata:
+  tags:
+    - cli
+    - gastronome
+    - culinary
+agents:
+  - name: cli-agent
+    type: cli
+    command: bash
+steps:
+  - action: run
+    params:
+      command: "bash -lc 'OUT=$(cargo run --quiet --bin simard_operator_probe -- gastronome-run single-process \"Harvest Feast menu for a wedding of 120 guests, elegant plated\" 2>&1); echo \"$OUT\"; echo \"$OUT\" | grep -q \"Plan verified: yes\" && echo \"$OUT\" | grep -Eq \"Sample scaled dish: C[0-9]+\" && echo \"$OUT\" | grep -Eq \"Prep schedule: [0-9]+ minutes\" && echo \"$OUT\" | grep -q \"Session phase: complete\"'"
+    timeout: 360000
