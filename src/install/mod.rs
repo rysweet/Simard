@@ -106,6 +106,9 @@ pub fn run(config: InstallConfig) -> InstallResult<InstallOutcome> {
 
     rollback::print_guidance(&layout, prior_binary_backup.as_deref());
     systemd::activate(&systemctl)?;
+    // Converge existing hosts: tear down any separate simard-signal.service —
+    // the OODA daemon now hosts the Signal channel in-process.
+    systemd::decommission_signal(&systemctl, &layout.signal_unit_path)?;
 
     println!("Installed Simard to {}", layout.simard_home.display());
     println!(
@@ -113,9 +116,8 @@ pub fn run(config: InstallConfig) -> InstallResult<InstallOutcome> {
         layout.prompt_assets_dir.display()
     );
     println!(
-        "Installed user units: {}, {}",
-        layout.ooda_unit_path.display(),
-        layout.signal_unit_path.display()
+        "Installed user unit: {} (Signal channel is hosted in-process by the OODA daemon)",
+        layout.ooda_unit_path.display()
     );
 
     Ok(outcome(&layout, prior_binary_backup, true))
@@ -175,11 +177,13 @@ fn print_dry_run_plan(
     );
     println!("[dry-run] Would write user systemd units:");
     println!("  {}", layout.ooda_unit_path.display());
+    println!("[dry-run] Would decommission any obsolete separate Signal unit:");
     println!("  {}", layout.signal_unit_path.display());
     println!("[dry-run] Activation plan:");
     println!("  {systemctl} --user daemon-reload");
     println!("  {systemctl} --user enable simard-ooda.service");
-    println!("  {systemctl} --user enable simard-signal.service");
     println!("  {systemctl} --user restart simard-ooda.service");
-    println!("  {systemctl} --user restart simard-signal.service");
+    println!(
+        "  {systemctl} --user disable --now simard-signal.service  (decommission; ignored if absent)"
+    );
 }

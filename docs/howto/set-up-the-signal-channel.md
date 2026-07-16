@@ -173,9 +173,13 @@ cargo build --release
 ./target/release/simard install
 ```
 
-The installer writes and restarts `simard-signal.service` alongside
-`simard-ooda.service`. It uses `$SIMARD_HOME` as the service working directory
-and `$SIMARD_HOME/bin/simard signal run` as `ExecStart`.
+The installer writes and restarts `simard-ooda.service`. The OODA daemon hosts
+the Signal channel **in-process** (converge-to-single-daemon): it runs on a
+supervised background thread with reconnect-and-backoff, so there is no separate
+`simard-signal.service` to manage. If a prior install created one, `install`
+decommissions it (stops, disables, and removes the unit). The channel is
+DEFAULT-ON (opt out with `SIMARD_SIGNAL_ENABLED=0`) and stays dormant until a
+`[signal]` config table is present.
 
 User systemd services may not inherit the shell environment you used to run the
 installer. Prefer Signal and provider configuration in `$SIMARD_HOME/config.toml`.
@@ -184,7 +188,7 @@ the user systemd manager explicitly and restart:
 
 ```bash
 systemctl --user import-environment ANTHROPIC_API_KEY SIMARD_LLM_PROVIDER
-systemctl --user restart simard-signal.service
+systemctl --user restart simard-ooda.service
 ```
 
 Do not embed provider secrets in generated systemd units.
@@ -192,17 +196,17 @@ Do not embed provider secrets in generated systemd units.
 Verify the service:
 
 ```bash
-systemctl --user status simard-signal.service --no-pager
-journalctl --user -u simard-signal.service -n 100 --no-pager
+systemctl --user status simard-ooda.service --no-pager
+journalctl --user -u simard-ooda.service -n 100 --no-pager
 ```
 
 On startup Simard reads the `[signal]` table, connects to the signal-cli
 endpoint, and begins receiving inbound messages from allowlisted senders and
-sending notifications out. `simard signal run` remains available for foreground
-smoke tests, but long-running hosts should use the installer-managed
-`simard-signal.service`. Only a deliberately minimal `--no-default-features`
-build omits the Signal code; it still recognizes `simard signal run` but tells
-you to rebuild with the feature.
+sending notifications out — all inside the OODA daemon. `simard signal run`
+remains available for foreground smoke tests, but long-running hosts run the
+channel in-process via the installer-managed `simard-ooda.service`. Only a
+deliberately minimal `--no-default-features` build omits the Signal code; it
+still recognizes `simard signal run` but tells you to rebuild with the feature.
 
 ## 6. Verify the round trip
 
