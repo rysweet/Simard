@@ -165,6 +165,7 @@ nav:
     - Inspect and Clean Engineer Worktrees: howto/inspect-and-clean-engineer-worktrees.md
     - Grant Engineer Write Permissions: howto/grant-engineer-write-permissions.md
     - Edit the Engineer System Prompt: howto/edit-the-engineer-system-prompt.md
+    - Design a Hotel with the Concierge Identity: howto/design-a-hotel-with-concierge.md
     - Run the OODA Daemon: howto/run-ooda-daemon.md
     - Spawn Engineers from the OODA Daemon: howto/spawn-engineers-from-ooda-daemon.md
     - Diagnose a Deferred/Serialized Engineer Spawn (overlap): howto/diagnose-a-deferred-engineer-spawn.md

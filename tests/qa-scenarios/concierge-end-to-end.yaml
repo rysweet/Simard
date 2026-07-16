@@ -1,0 +1,50 @@
+name: concierge-end-to-end
+app_type: cli
+description: >
+  Verify `simard concierge demo` produces a hotel concept AND runs a
+  reservations/PMS prototype end-to-end (booking, check-in, housekeeping,
+  check-out, channel sync) — the Concierge acceptance bar.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+steps:
+  - action: run
+    params:
+      command: "cargo run --quiet -- concierge demo"
+    timeout: 600000
+  # Concept half.
+  - action: wait_for_output
+    params:
+      value: "Hotel Concept"
+    timeout: 8000
+  # Prototype half — all four operational services must appear in the trace.
+  - action: wait_for_output
+    params:
+      value: "BOOK"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "CHECKIN"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "CHECKOUT"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "HOUSEKEEPING"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "CHANNEL SYNC"
+    timeout: 8000
+  # Run summary proves bookings were actually made.
+  - action: wait_for_output
+    params:
+      value: "bookings made:"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

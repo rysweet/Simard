@@ -20,6 +20,7 @@ const EXPECTED_SUBCOMMANDS: &[&str] = &[
     "meeting",
     "goal-curation",
     "improvement-curation",
+    "concierge",
     "gym",
     "ooda",
     "spawn",

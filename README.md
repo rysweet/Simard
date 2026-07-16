@@ -26,6 +26,17 @@ Simard exposes five user-visible operating modes, each with its own success crit
 
 These are different operating modes, not cosmetic personas. Each mode owns its own command tree under the `simard` binary.
 
+## Pluggable identities
+
+Beyond the operating modes, Simard loads **pluggable identities** — domain-specific personas that inherit her engineering discipline. The first domain identity is **Concierge** (`simard concierge`), a hospitality-design + operations identity that both *designs hotels* (property layout, guest experience, brand) and *scaffolds the software to run them* (reservations, PMS front desk, housekeeping, channel management). Its deterministic backbone can design a hotel concept and run a reservations/PMS prototype end-to-end offline:
+
+```bash
+simard concierge demo          # design a hotel concept AND run its PMS prototype
+simard concierge scaffold --out ./my-hotel && simard concierge run ./my-hotel
+```
+
+See [Design a Hotel with the Concierge Identity](docs/howto/design-a-hotel-with-concierge.md).
+
 ## Daemon mode (autonomous OODA loop)
 
 Beyond the operator-driven modes above, Simard runs as a long-lived **autonomous daemon** that observes signals, ranks priorities, and dispatches engineer subprocesses without any human in the loop.

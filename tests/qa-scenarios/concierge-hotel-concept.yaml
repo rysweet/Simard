@@ -1,0 +1,38 @@
+name: concierge-hotel-concept
+app_type: cli
+description: >
+  Verify `simard concierge concept` designs a hotel concept covering all three
+  design surfaces (property layout, guest experience, brand design).
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+steps:
+  # Design the demo hotel concept. The CLI runner rejects any non-zero exit, so
+  # this already enforces a clean exit 0.
+  - action: run
+    params:
+      command: "cargo run --quiet -- concierge concept"
+    timeout: 600000
+  # The concept must contain the three design sections the Concierge owns.
+  - action: wait_for_output
+    params:
+      value: "## 1. Property Layout"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "## 2. Guest Experience"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "## 3. Brand Design"
+    timeout: 8000
+  # The room mix must be present (structural correctness of the layout).
+  - action: wait_for_output
+    params:
+      value: "Room mix"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

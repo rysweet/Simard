@@ -44,6 +44,7 @@ mod copilot_task_submit;
 // Issue #2527: one clearly-named operator↔Simard conversation abstraction. The
 // CLI/TUI meeting REPL and the dashboard chat are channels over the same
 // `MeetingBackend`; `SignalConversation` (feature-gated below) is a third.
+pub mod concierge;
 pub mod conversation_channel;
 pub mod cost_tracking;
 // Issue #2419 (design spike) / #2647 (wiring): the Creative Ideas subsystem — an

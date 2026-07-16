@@ -1,5 +1,6 @@
 mod args;
 mod ci_health;
+mod concierge;
 mod creative_ideas;
 mod curation;
 mod dashboard;
@@ -100,6 +101,19 @@ Product modes:
   improvement-curation run <base-type> <topology> <objective> [state-root]
   improvement-curation read <base-type> <topology> <state-root>
   creative-ideas consolidate [--apply]  — cluster + merge semantically-duplicate ideas (#2925)
+  concierge concept [brief] [--out <dir>] [--json]
+                         — design a hotel concept (property layout, guest
+                           experience, brand) from a brief or the demo brief
+  concierge scaffold [brief] --out <dir>
+                         — write concept.md + a runnable reservations/PMS
+                           prototype seed into <dir>
+  concierge run <dir> [--json]
+                         — execute a scaffolded reservations/PMS prototype
+                           end-to-end (booking → check-in → housekeeping →
+                           check-out → channel sync)
+  concierge demo [--out <dir>] [--json]
+                         — one-shot: design a hotel concept AND run its
+                           reservations/PMS prototype end-to-end
   gym list
   gym run <scenario-id>
   gym compare <scenario-id>
@@ -241,6 +255,7 @@ where
         "goal" => goal::dispatch_goal_command(args),
         "goal-curation" => curation::dispatch_goal_curation_command(args),
         "improvement-curation" => curation::dispatch_improvement_curation_command(args),
+        "concierge" => concierge::dispatch_concierge_command(args),
         "creative-ideas" => creative_ideas::dispatch_creative_ideas_command(args),
         "review" => review::dispatch_review_command(args),
         "gym" => gym::dispatch_gym_command(args),
@@ -363,7 +378,7 @@ where
 }
 
 pub fn operator_cli_usage() -> &'static str {
-    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|ooda|memory|status|spawn|merge-pr|worktree-gc|disk-reclaim|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap|signal> ..."
+    "usage: simard <engineer|meeting|goal-curation|improvement-curation|concierge|gym|ooda|memory|status|spawn|merge-pr|worktree-gc|disk-reclaim|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap|signal> ..."
 }
 
 pub fn operator_cli_help() -> &'static str {
