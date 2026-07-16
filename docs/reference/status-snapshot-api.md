@@ -62,15 +62,25 @@ rather than fabricating data:
 | LLM usage | `cost_tracking` ledger (`costs/ledger.jsonl`) + daily budget via `overseer::config::daily_budget_usd()` (single-sourced; always the enforced ceiling — see the [daily-budget display guard](./daily-budget-display-guard.md)) | ~~raw `$SIMARD_DAILY_BUDGET_USD`~~ |
 | Memory / brain | `metrics_snapshot.json` — the daemon-sampled `simard.memory.nodes` / `.edges` gauges | ~~LadybugDB open from the CLI~~ |
 | Gym | `$SIMARD_SKIP_GYM` | — |
-| Goal board | *deferred* — rendered `unavailable`; surfaced live in the daemon-hosted dashboard / TUI goal tabs | — |
+| Goal board | `open_reader_client` + `goal_curation::load_goal_board` — the durable `goal-board:snapshot` (the SAME reader that backs `/api/goals` and the TUI goal tab); each active goal maps to `{short_id, p{priority}, status, summary}` | ~~*deferred* / `unavailable`~~ |
 | Active workstreams | *deferred* — rendered `unavailable` (engineer registry) | — |
 | Completed work | *deferred* — rendered `unavailable`; `gh` is not queried on the process-agnostic path | — |
 | Self-improvement | *deferred* — rendered `unavailable` | — |
 | Telemetry / anomalies | derived from `metrics_snapshot.json` (distill fail %, ladder-exhausted, cardinality overflow) + `systemctl` `NRestarts` + budget | ~~`journalctl \| grep`~~ |
 
-Sections marked *deferred* still render their header and an honest
-`unavailable (<reason>)` line — the frame is always complete, and no section
-ever invents a `0`.
+The **goal board** is fully wired (issue #4196): `assemble_goals` reads the
+durable `goal-board:snapshot` through the same process-agnostic reader client
+the dashboard `/api/goals` panel and the TUI use, so `simard status`, the
+dashboard Overview "System Status" card, and the TUI Status tab all surface
+active-goal state (active / blocked + why / not-started) instead of a bare
+`unavailable`. It is **fail-visible**: a reader-open or board-read fault
+degrades only this section to `error` with an honest note; a readable-but-empty
+board reads back present + `live` with an empty `active` list — distinct from
+`unavailable`.
+
+The sections still marked *deferred* (active workstreams, completed work,
+self-improvement) render their header and an honest `unavailable (<reason>)`
+line — the frame is always complete, and no section ever invents a `0`.
 
 The counters, gauges, and histograms come from
 `~/.simard/telemetry/metrics_snapshot.json` (see
@@ -176,6 +186,16 @@ them into one number. See the [concept doc](../concepts/unified-telemetry-and-st
       "ledger_today": { "cost_usd": 1.87, "tokens_in": 412000, "tokens_out": 88000 },
       "daily_budget_usd": 25.0,
       "reconciliation": { "ledger_usd": 1.87, "credits": 940, "delta_flag": "ok" }
+    }
+  },
+  "goals": {
+    "availability": "ok",
+    "freshness": "live",
+    "data": {
+      "active": [
+        { "short_id": "2f9c1a04", "priority": "p0", "status": "in-progress(40%)", "summary": "Rationalize telemetry onto OpenTelemetry" },
+        { "short_id": "a13bf27e", "priority": "p1", "status": "blocked: waiting on upstream auth fix", "summary": "Fix auth token refresh" }
+      ]
     }
   },
   "completed": {
