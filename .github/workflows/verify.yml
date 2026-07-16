@@ -173,6 +173,16 @@ jobs:
         run: cargo build --bin simard --locked
 
       - name: Upload simard binary artifact
+        # The real gates above (fmt, clippy, cargo test, the minimal-feature and
+        # downstream binary builds) have all passed by this point; the binary
+        # exists locally. A transient GitHub artifact-service brownout
+        # (`Failed to CreateArtifact: Request timeout` after the action's own 5
+        # internal retries) must not turn that all-green run red. `e2e-dashboard`
+        # — the only consumer of this artifact — falls back to building the
+        # binary itself when the download misses, so a skipped upload self-heals
+        # instead of failing the fleet's default branch. See docs/reference/
+        # ci-health-sweep.md (transient-infra resilience).
+        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: simard-bin-${{ github.run_id }}-${{ github.run_attempt }}
@@ -181,7 +191,11 @@ jobs:
           retention-days: 1
 
       - name: Upload cargo-test log
+        # Diagnostics only — nothing consumes this artifact. A transient
+        # artifact-service timeout uploading a debug log must never fail an
+        # otherwise-green build.
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: cargo-test-log-${{ github.run_id }}-${{ github.run_attempt }}
@@ -408,10 +422,50 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Download simard binary from pre-commit job
+        id: download-bin
+        # Transient artifact-service brownouts can make the upstream upload skip
+        # (it is `continue-on-error`) or this download time out. Don't hard-fail
+        # the job on a miss — the fallback build below reproduces the same
+        # binary, so a default-branch infra blip never reds an all-green run.
+        continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: simard-bin-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/debug
+
+      # ── Fallback: rebuild the binary when the artifact download missed ──
+      # Only runs on the rare transient artifact-service miss. Reuses the
+      # read-only shared cargo cache (single writer is pre-commit on main), so a
+      # warm cache rebuilds the dev-profile binary in a few minutes rather than
+      # from scratch. On the common fast path (download succeeded) every step
+      # here is skipped and the job is unchanged.
+      - name: Prepare Rust runner for fallback build
+        if: steps.download-bin.outcome != 'success'
+        uses: ./.github/actions/rust-runner-prep
+
+      - name: Cache cargo registry and build artifacts (fallback build)
+        if: steps.download-bin.outcome != 'success'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: simard-ci-v2
+          save-if: false
+          cache-on-failure: true
+          cache-directories: |
+            ~/.cache/simard-lbug-precommit
+
+      - name: Provision lbug native static library link path (fallback build)
+        if: steps.download-bin.outcome != 'success'
+        shell: bash
+        run: |
+          lib_dir="$HOME/.cache/simard-lbug-precommit/lib"
+          scripts/provision-lbug-prebuilt.sh "$lib_dir" >/dev/null
+          echo "LBUG_LIBRARY_DIR=$lib_dir" >> "$GITHUB_ENV"
+          echo "LBUG_INCLUDE_DIR=$lib_dir" >> "$GITHUB_ENV"
+          rm -rf target/*/build/lbug-* target/*/.fingerprint/lbug-* 2>/dev/null || true
+
+      - name: Build simard binary (fallback for missed artifact)
+        if: steps.download-bin.outcome != 'success'
+        run: cargo build --bin simard --locked
 
       - name: Make simard binary executable
         run: chmod +x target/debug/simard
