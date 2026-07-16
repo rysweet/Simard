@@ -102,12 +102,19 @@ rm -rf "$COIN_GYM_HOME"
 # Both arms over the identical bundled sample target set.
 coin-gym run "Claude Opus 4.6" --strategy baseline --profile ref-baseline
 coin-gym run "Claude Opus 4.6" --strategy team     --profile ref-team
+
+# …or run both arms and print the consolidated verdict in one command:
+coin-gym bench "Claude Opus 4.6" --profile ref-bench
 ```
 
 Each `run` prints the arm's score directly; `coin-gym score <run-id>` re-prints
 it for a saved run and `coin-gym compare <run-id>` diffs it against the published
-leaderboard (see below). The exact reference numbers above are also asserted by
-`src/coin_gym/tests_cli.rs::execute_run_baseline_vs_team_shows_precision_tradeoff`,
+leaderboard (see below). `coin-gym bench <model>` runs both arms and emits the
+single-line verdict (`MULTIAGENT WINS` on the sample, precision +40 pts at equal
+reach). The exact reference numbers above are also asserted by
+`src/coin_gym/tests_cli.rs::execute_run_baseline_vs_team_shows_precision_tradeoff`
+and the `bench` verdict by
+`src/coin_gym/tests_bench.rs::verdict_on_sample_is_multiagent_wins_on_precision_at_equal_reach`,
 so `cargo test -p simard coin_gym` fails if the harness ever stops reproducing
 them.
 

@@ -182,7 +182,9 @@ fn explicit_profile_name_is_sanitised() {
 #[test]
 fn usage_lists_all_subcommands() {
     let usage = coin_gym_usage();
-    for cmd in ["run", "score", "compare", "improve", "contract", "profiles"] {
+    for cmd in [
+        "run", "bench", "score", "compare", "improve", "contract", "profiles",
+    ] {
         assert!(usage.contains(cmd), "usage should mention {cmd}");
     }
 }

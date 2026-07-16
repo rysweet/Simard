@@ -1,0 +1,55 @@
+name: simard-coin-gym-bench-verdict
+app_type: cli
+description: >-
+  Verify `coin-gym bench` runs BOTH arms (single-model baseline vs multi-agent
+  team) over the bundled sample target set and emits the consolidated
+  MULTIAGENT WINS verdict — the objective's DONE-criteria artifact that a
+  multi-agent team measurably beats the single-model baseline (LOCAL-ONLY,
+  offline scaffold). See docs/howto/run-the-coin-gym-harness.md.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+steps:
+  # Execute `coin-gym bench`. The CLI runner rejects any non-zero exit, so this
+  # step already enforces a clean exit 0 and proves the command ran both arms and
+  # produced a verdict without a VM (offline mock oracle, Phase 4).
+  - action: run
+    params:
+      command: "cargo run --quiet --bin coin-gym -- bench claude-opus-4.6 --profile qa-bench"
+    # Generous timeout: a cold `cargo run` may compile the binary first.
+    timeout: 600000
+  # The single-model baseline arm is reported.
+  - action: wait_for_output
+    params:
+      value: "baseline: run-id"
+    timeout: 8000
+  # The multi-agent team arm is reported.
+  - action: wait_for_output
+    params:
+      value: "team:     run-id"
+    timeout: 8000
+  # The team ties reach and lifts precision by +40 pts on the sample set.
+  - action: wait_for_output
+    params:
+      value: "reach +0.0 pts"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "precision +40.0 pts"
+    timeout: 8000
+  # The consolidated verdict: multi-agent beats the single-model baseline.
+  - action: wait_for_output
+    params:
+      value: "MULTIAGENT WINS"
+    timeout: 8000
+  # LOCAL-ONLY guardrail is stated in the verdict note.
+  - action: wait_for_output
+    params:
+      value: "LOCAL-ONLY"
+    timeout: 8000
+  # Re-confirm the bench command exited cleanly (exit code 0).
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
