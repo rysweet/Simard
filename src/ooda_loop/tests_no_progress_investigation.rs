@@ -37,7 +37,8 @@ use super::no_progress::{
 use crate::error::{SimardError, SimardResult};
 use crate::goal_curation::completion_gate::{DependencyState, EvidenceSource};
 use crate::goal_curation::no_progress_breaker::{
-    NO_PROGRESS_BREAKER_THRESHOLD, is_no_progress_marker,
+    NO_PROGRESS_BLOCKED_PREFIX, NO_PROGRESS_BREAKER_THRESHOLD,
+    SURFACED_INVESTIGATION_FAILURE_LIMIT, is_no_progress_marker,
 };
 use crate::goal_curation::no_progress_why::{
     Evidence, NoProgressClass, NoProgressWhy, NoProgressWhyReasoner,
@@ -210,6 +211,16 @@ fn state_with(goal: ActiveGoal) -> OodaState {
     let mut board = GoalBoard::new();
     board.active.push(goal);
     OodaState::new(board)
+}
+
+fn status_of<'a>(state: &'a OodaState, id: &str) -> &'a GoalProgress {
+    &state
+        .active_goals
+        .active
+        .iter()
+        .find(|g| g.id == id)
+        .unwrap_or_else(|| panic!("goal {id} left the board"))
+        .status
 }
 
 fn no_action_outcome(goal_id: &str) -> ActionOutcome {
@@ -841,4 +852,222 @@ fn genuinely_stuck_with_no_evidence_surfaces_investigation_error_never_parks_non
         GoalProgress::NotStarted => {}
         other => panic!("expected a fail-closed retriable state, got {other:?}"),
     }
+}
+
+// === (h) evidence-less re-investigation is BOUNDED, then escalated to a human =
+//
+// Issue #16 (#4096) fixed the live defect of parking a goal with a bare
+// `evidence=[(none)]` block by making the evidence-less terminal rung
+// *non-terminal* — it surfaces the failure and lets the goal re-investigate.
+// But an *unbounded* re-investigation is its OWN livelock: a goal whose
+// done-criteria are permanently unclear (the six `simard-identity-*` codename
+// goals) surfaces → resets → forever, making no shippable progress and NEVER
+// reaching a human. This asserts the bound: after
+// `SURFACED_INVESTIGATION_FAILURE_LIMIT` consecutive surfaced failures the
+// breaker stops spinning and escalates the goal to a human WITH the
+// re-investigation count as concrete evidence (never `(none)`) and a measurable
+// "make the done-criteria machine-checkable" ask.
+
+/// Drive one full stall episode (`threshold` no-action cycles) and return the
+/// last cycle's report — one episode yields exactly one terminal-rung decision.
+#[allow(clippy::too_many_arguments)]
+fn drive_episode(
+    state: &mut OodaState,
+    id: &str,
+    evidence: &dyn EvidenceSource,
+    reasoner: &dyn NoProgressWhyReasoner,
+    healer: &dyn PreconditionHealer,
+    dispatcher: &dyn NoProgressEngineerDispatcher,
+    filer: &dyn NoProgressIssueFiler,
+    threshold: u32,
+) -> super::no_progress::NoProgressBreakerReport {
+    let mut last = super::no_progress::NoProgressBreakerReport::default();
+    for _ in 1..=threshold {
+        last = drive(
+            state, id, evidence, reasoner, healer, dispatcher, filer, threshold,
+        );
+    }
+    last
+}
+
+#[test]
+fn evidenceless_reinvestigation_is_bounded_then_escalated_to_a_human() {
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let limit = SURFACED_INVESTIGATION_FAILURE_LIMIT;
+    let id = "simard-identity-concierge-hospitality-design";
+    // A goal with NO tracked issue/PR — the exact empty-evidence shape.
+    let goal = stuck_goal(id);
+    let mut state = state_with(goal);
+    // Spend the one guided-engineer retry up front so every stall episode goes
+    // straight to the evidence-less terminal rung (isolates the surfaced-failure
+    // bound from the one-shot engineer spawn).
+    state.no_progress_tracker.mark_guided_retry(id);
+
+    let evidence = FakeEvidence::stuck();
+    // The independent investigation classifies UNCLEAR-CRITERIA but can attach NO
+    // evidence, every single cycle — the permanently-unclear codename goal.
+    let reasoner = FakeReasoner::classifying(NoProgressClass::UnclearCriteria, vec![]);
+    let healer = RecordingHealer::ok();
+    let dispatcher = RecordingDispatcher::ok();
+    let filer = RecordingFiler::default();
+
+    // Episodes below the bound SURFACE the failure (fail-visible, retriable) and
+    // NEVER escalate — but each bumps the persisted surfaced-failure counter.
+    for episode in 1..limit {
+        let report = drive_episode(
+            &mut state,
+            id,
+            &evidence,
+            &reasoner,
+            &healer,
+            &dispatcher,
+            &filer,
+            threshold,
+        );
+        assert!(
+            report.investigation_errors.contains(&id.to_string()),
+            "episode {episode} (below the bound) must SURFACE the failure: {report:?}"
+        );
+        assert!(
+            !report.escalated.contains(&id.to_string()),
+            "episode {episode} (below the bound) must NOT escalate yet: {report:?}"
+        );
+        assert_eq!(
+            state.no_progress_tracker.surfaced_failures(id),
+            episode,
+            "each surfaced failure must bump the persisted consecutive counter"
+        );
+        assert!(
+            filer.calls.borrow().is_empty(),
+            "no human issue may be filed below the bound: {:?}",
+            filer.calls.borrow()
+        );
+        assert!(
+            matches!(status_of(&state, id), GoalProgress::NotStarted),
+            "a surfaced-but-not-escalated goal stays retriable (NotStarted)"
+        );
+    }
+
+    // The episode that REACHES the bound escalates to a human.
+    let report = drive_episode(
+        &mut state,
+        id,
+        &evidence,
+        &reasoner,
+        &healer,
+        &dispatcher,
+        &filer,
+        threshold,
+    );
+    assert!(
+        report.escalated.contains(&id.to_string()),
+        "reaching SURFACED_INVESTIGATION_FAILURE_LIMIT ({limit}) must ESCALATE the \
+         goal — the unbounded re-investigation livelock is broken: {report:?}"
+    );
+    assert!(
+        !report.investigation_errors.contains(&id.to_string()),
+        "the bounded-out episode escalates (terminal), it does not merely surface: {report:?}"
+    );
+
+    // The block reason carries the re-investigation COUNT as concrete evidence —
+    // never a bare `evidence=[(none)]` — and keeps the safeguard marker.
+    match status_of(&state, id) {
+        GoalProgress::Blocked(reason) => {
+            assert!(
+                !reason.contains("(none)"),
+                "the escalation must NEVER read as an evidence=[(none)] block: {reason}"
+            );
+            assert!(
+                is_no_progress_marker(reason) && reason.starts_with(NO_PROGRESS_BLOCKED_PREFIX),
+                "the escalation must keep the [OODA-SAFEGUARD] marker: {reason}"
+            );
+            assert!(
+                reason.contains(NoProgressClass::UnclearCriteria.token()),
+                "the escalation must name the accurate root cause class: {reason}"
+            );
+            assert!(
+                reason.contains(&format!("{limit} consecutive evidence-less investigations")),
+                "the escalation evidence must be the re-investigation count: {reason}"
+            );
+        }
+        other => panic!("expected a WHY-bearing Blocked escalation, got {other:?}"),
+    }
+
+    // Exactly one human triage issue is filed, and it asks for MEASURABLE
+    // done-criteria (the objective's mandate).
+    let calls = filer.calls.borrow();
+    assert_eq!(
+        calls.len(),
+        1,
+        "exactly one human triage issue must be filed"
+    );
+    let (title, body) = &calls[0];
+    assert!(
+        title.contains(id) && title.contains(NoProgressClass::UnclearCriteria.token()),
+        "the issue title must name the goal and its root cause: {title}"
+    );
+    assert!(
+        body.contains("measurable") && body.contains("machine-verifiable"),
+        "the issue body must ask a human to make the done-criteria measurable: {body}"
+    );
+    assert!(
+        body.contains("CLOSED") && body.contains("MERGED"),
+        "the ask must name concrete machine-checkable shapes (issue CLOSED / PR MERGED): {body}"
+    );
+
+    // No engineer was ever spawned in this test (the retry was pre-spent), and the
+    // surfaced-failure counter is cleared on escalation so a future re-entry gets a
+    // fresh window rather than escalating immediately.
+    assert!(
+        dispatcher.calls.borrow().is_empty(),
+        "no guided engineer is spawned once the retry is spent"
+    );
+    assert_eq!(
+        state.no_progress_tracker.surfaced_failures(id),
+        0,
+        "the surfaced-failure counter is cleared once the goal is escalated"
+    );
+}
+
+#[test]
+fn real_progress_resets_the_surfaced_failure_counter() {
+    // A goal that surfaces an evidence-less failure but then makes REAL progress
+    // must start a fresh surfaced-failure window — a transient investigation
+    // hiccup must never accumulate toward a spurious escalation.
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let id = "simard-identity-coherence";
+    let goal = stuck_goal(id);
+    let mut state = state_with(goal);
+    state.no_progress_tracker.mark_guided_retry(id);
+
+    let evidence = FakeEvidence::stuck();
+    let reasoner = FakeReasoner::classifying(NoProgressClass::GenuinelyStuck, vec![]);
+    let healer = RecordingHealer::ok();
+    let dispatcher = RecordingDispatcher::ok();
+    let filer = RecordingFiler::default();
+
+    // One surfaced failure accrues.
+    drive_episode(
+        &mut state,
+        id,
+        &evidence,
+        &reasoner,
+        &healer,
+        &dispatcher,
+        &filer,
+        threshold,
+    );
+    assert_eq!(
+        state.no_progress_tracker.surfaced_failures(id),
+        1,
+        "one surfaced failure must accrue"
+    );
+
+    // Real progress on the goal (a reviewer-accepted advance) resets the counter.
+    state.no_progress_tracker.record_progress(id);
+    assert_eq!(
+        state.no_progress_tracker.surfaced_failures(id),
+        0,
+        "real progress must reset the surfaced-failure window"
+    );
 }

@@ -324,7 +324,15 @@ fn terminal_stuck_with_no_evidence_surfaces_a_failure_never_a_none_block() {
             why,
             /* guided_retry_used */ true,
         ) {
-            NoProgressResolution::SurfaceInvestigationFailure { reason } => {
+            NoProgressResolution::SurfaceInvestigationFailure {
+                class: surfaced_class,
+                reason,
+            } => {
+                assert_eq!(
+                    surfaced_class, class,
+                    "the surfaced failure must carry the classified WHY so a bounded \
+                     escalation can name the accurate root cause"
+                );
                 assert!(
                     reason.contains(class.token()),
                     "the surfaced failure should name the classified WHY: {reason:?}"

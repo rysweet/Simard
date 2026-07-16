@@ -248,8 +248,37 @@ pub enum NoProgressResolution {
     /// [`investigation_errors`](crate::ooda_loop::no_progress::NoProgressBreakerReport::investigation_errors),
     /// takes **no** terminal action, and leaves the goal retriable (fail
     /// visible + fail closed) so the next investigation can recover real evidence.
-    SurfaceInvestigationFailure { reason: String },
+    ///
+    /// `class` is carried so that once the surfaced-failure retries are bounded
+    /// out (see
+    /// [`SURFACED_INVESTIGATION_FAILURE_LIMIT`]) the human escalation names the
+    /// accurate root cause (`UNCLEAR-CRITERIA` vs `GENUINELY-STUCK`) and tailors
+    /// the "make the done-criteria measurable" ask to it.
+    SurfaceInvestigationFailure {
+        class: NoProgressClass,
+        reason: String,
+    },
 }
+
+/// How many **consecutive** evidence-less
+/// [`SurfaceInvestigationFailure`](NoProgressResolution::SurfaceInvestigationFailure)
+/// outcomes a single goal may accrue before the breaker stops re-investigating
+/// and escalates it to a human (issue #16 follow-up).
+///
+/// `SurfaceInvestigationFailure` (issue #16) fixed the live defect of parking a
+/// goal with a bare `evidence=[(none)]` block by making the evidence-less
+/// terminal rung *non-terminal*: it resets the counter and lets the goal
+/// re-investigate next cycle. But an *unbounded* re-investigation is its own
+/// livelock — a goal whose done-criteria are **permanently** unclear (the six
+/// `simard-identity-*` codename goals) re-investigates → produces no evidence →
+/// surfaces → resets → forever, making **no shippable progress** and **never
+/// reaching a human**. This bound closes that livelock: after this many
+/// consecutive surfaced failures the goal is escalated to a human WITH the
+/// re-investigation count as concrete evidence — so the never-`evidence=[(none)]`
+/// invariant is preserved (the count is real evidence, not `(none)`) while the
+/// spin is broken and a human is finally asked to make the done-criteria
+/// measurable.
+pub const SURFACED_INVESTIGATION_FAILURE_LIMIT: u32 = 3;
 
 impl NoProgressResolution {
     /// `true` for every resolution that removes the goal from the no-action loop
@@ -420,6 +449,56 @@ fn why_escalation_issue(consecutive: u32, why: &NoProgressWhy) -> (String, Strin
     (title, body)
 }
 
+/// Build the escalation `(title, body)` for a goal whose evidence-less
+/// re-investigation was bounded out (issue #16 follow-up): after
+/// [`SURFACED_INVESTIGATION_FAILURE_LIMIT`] consecutive surfaced failures the
+/// breaker stops spinning and asks a **human** to make the done-criteria
+/// *measurable* so the done-gate can eventually certify (or the operator can
+/// re-scope / drop). The body is deliberately concrete and actionable — it names
+/// the exact, machine-checkable shapes the daemon can verify.
+pub(crate) fn surfaced_failure_escalation_issue(
+    goal_id: &str,
+    class: NoProgressClass,
+    surfaced_failures: u32,
+) -> (String, String) {
+    let token = class.token();
+    let title = format!(
+        "OODA no-progress breaker: goal '{goal_id}' has unmeasurable done-criteria ({token})"
+    );
+    let clarify = match class {
+        NoProgressClass::UnclearCriteria => {
+            "The goal's done-criteria are **not expressed as anything the done-gate \
+             can machine-check**, so the daemon can never certify it complete and \
+             its re-investigation produced no evidence every cycle."
+        }
+        _ => {
+            "The daemon found **no machine-resolvable cause** across repeated \
+             independent investigations, and each produced no evidence."
+        }
+    };
+    let body = format!(
+        "The OODA no-progress breaker re-investigated goal `{goal_id}` \
+         **{surfaced_failures} consecutive times** and each investigation classified \
+         it **{token}** while producing **no supporting evidence**. To avoid an \
+         unbounded evidence-less re-investigation livelock (which makes no shippable \
+         progress and never reaches a human), the goal has now been Blocked and \
+         surfaced for human triage.\n\n\
+         {clarify}\n\n\
+         **Action — make the done-criteria measurable.** Re-scope the goal so \
+         completion is machine-verifiable, e.g. one of:\n\
+         - a specific issue the daemon can observe as `CLOSED`,\n\
+         - a specific PR the daemon can observe as `MERGED`,\n\
+         - a specific file/command whose presence or output the done-gate can check.\n\n\
+         Alternatively, drop the goal if it is out of scope. The block reason \
+         carries the re-investigation count as evidence (never a bare \
+         `evidence=[(none)]`).\n\n\
+         Triggered by the surfaced-failure bound in \
+         `src/goal_curation/no_progress_breaker.rs` \
+         (`SURFACED_INVESTIGATION_FAILURE_LIMIT`)."
+    );
+    (title, body)
+}
+
 /// Map a classified [`NoProgressWhy`] to the resolution the breaker takes at the
 /// threshold (issue #16). This is the **pure** heart of the root-cause ladder;
 /// the side effects (transition, clone, defer, spawn, escalate) are performed by
@@ -460,6 +539,7 @@ pub fn resolution_for_why(
                 // action.
                 if why.evidence.is_empty() {
                     return NoProgressResolution::SurfaceInvestigationFailure {
+                        class: why.class,
                         reason: format!(
                             "independent investigation of a stalled goal classified {} but \
                              produced no supporting evidence at the terminal rung — refusing to \
@@ -520,6 +600,17 @@ pub struct NoProgressTracker {
     /// keeps pre-#17 snapshots deserializable (loads as an empty set).
     #[serde(default)]
     reinvestigated: HashSet<(String, String)>,
+    /// Per-goal count of **consecutive** evidence-less
+    /// [`SurfaceInvestigationFailure`](NoProgressResolution::SurfaceInvestigationFailure)
+    /// outcomes (issue #16 follow-up). Bumped every time the breaker surfaces an
+    /// evidence-less terminal failure for a goal and reset the instant the goal
+    /// makes real progress. Once it reaches
+    /// [`SURFACED_INVESTIGATION_FAILURE_LIMIT`] the breaker stops re-investigating
+    /// and escalates the goal to a human, breaking the unbounded re-investigation
+    /// livelock. `#[serde(default)]` keeps snapshots written before this counter
+    /// existed deserializable (loads as an empty map).
+    #[serde(default)]
+    surfaced_failures: HashMap<String, u32>,
 }
 
 impl NoProgressTracker {
@@ -543,6 +634,34 @@ impl NoProgressTracker {
         self.counts.remove(goal_id);
         self.guided_retries.remove(goal_id);
         self.reinvestigated.retain(|(id, _)| id != goal_id);
+        self.surfaced_failures.remove(goal_id);
+    }
+
+    /// Record one evidence-less surfaced investigation failure for `goal_id` and
+    /// return the new **consecutive** count (issue #16 follow-up). The breaker
+    /// compares this against [`SURFACED_INVESTIGATION_FAILURE_LIMIT`] to decide
+    /// whether to keep re-investigating (below the bound) or escalate to a human
+    /// (at/above it), so an evidence-less goal can never re-investigate forever.
+    pub fn record_surfaced_failure(&mut self, goal_id: &str) -> u32 {
+        let entry = self
+            .surfaced_failures
+            .entry(goal_id.to_string())
+            .or_insert(0);
+        *entry += 1;
+        *entry
+    }
+
+    /// Clear `goal_id`'s consecutive surfaced-failure count (issue #16 follow-up).
+    /// Called once the goal is escalated out of the re-investigation loop so a
+    /// later re-entry starts a fresh window rather than escalating immediately.
+    pub fn clear_surfaced_failures(&mut self, goal_id: &str) {
+        self.surfaced_failures.remove(goal_id);
+    }
+
+    /// Current consecutive surfaced-failure count for `goal_id` (`0` when
+    /// untracked) — read by tests and the breaker's bound check.
+    pub fn surfaced_failures(&self, goal_id: &str) -> u32 {
+        self.surfaced_failures.get(goal_id).copied().unwrap_or(0)
     }
 
     /// Reset only `goal_id`'s no-action counter, **preserving** any spent
@@ -593,6 +712,7 @@ impl NoProgressTracker {
         self.counts.retain(|id, _| live.contains(id));
         self.guided_retries.retain(|id| live.contains(id));
         self.reinvestigated.retain(|(id, _)| live.contains(id));
+        self.surfaced_failures.retain(|id, _| live.contains(id));
     }
 
     /// Record a no-action cycle for `goal_id` and return the breaker's

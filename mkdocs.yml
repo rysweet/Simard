@@ -132,6 +132,7 @@ nav:
     - Keeping the OODA Daemon Steerable: concepts/steerable-ooda-daemon.md
     - Perpetual Goals Exempt from No-Progress Hard-Block: concepts/perpetual-goal-no-progress-exemption.md
     - No-Progress Breaker Explains WHY and Self-Resolves: concepts/no-progress-root-cause-resolution.md
+    - Terminal No-Progress Stall Never Parks Empty Evidence: concepts/no-progress-terminal-investigation.md
     - Overseer Goal-Board Health: concepts/overseer-goal-board-health.md
     - Overseer Root-Cause (WHY) Principle: concepts/overseer-root-cause-why.md
     - Re-Investigating Already-Blocked OODA Goals: concepts/ooda-reinvestigate-blocked-goals.md

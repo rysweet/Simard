@@ -21,9 +21,10 @@ use crate::goal_curation::completion_gate::{
     CompletionEvidenceGate, CompletionVerdict, DependencyState, EvidenceSource,
 };
 use crate::goal_curation::no_progress_breaker::{
-    NO_PROGRESS_BREAKER_THRESHOLD, NoProgressResolution, NoProgressTracker, needs_reinvestigation,
+    NO_PROGRESS_BREAKER_THRESHOLD, NoProgressResolution, NoProgressTracker,
+    SURFACED_INVESTIGATION_FAILURE_LIMIT, needs_reinvestigation,
     no_progress_blocked_reason_with_why, obsolescence_reason, resolution_for_why,
-    verify_stuck_goal,
+    surfaced_failure_escalation_issue, verify_stuck_goal,
 };
 use crate::goal_curation::no_progress_why::{
     Evidence, NoProgressClass, NoProgressWhy, NoProgressWhyReasoner,
@@ -768,17 +769,66 @@ fn apply_resolution_side_effects(
                 "no-progress breaker: stuck after guided retry — BLOCKED WITH why + issue filed",
             );
         }
-        NoProgressResolution::SurfaceInvestigationFailure { reason } => {
-            // The independent investigation reached the terminal rung with NO
-            // evidence. A goal must NEVER be parked with `evidence=[(none)]`, so
-            // this is a SURFACED failure — not a bare block. Take no terminal
-            // action: record it in `investigation_errors` (fail visible) and
-            // leave the goal retriable so the next investigation can recover real
-            // evidence (fail closed). The guided-retry flag is preserved, so a
-            // future terminal rung goes straight here again rather than spawning a
-            // second engineer. On the re-investigation path the goal starts in a
-            // bare / `(none)` Blocked state, so un-block it to `NotStarted` so the
-            // brain can re-select it and a later cycle can re-investigate.
+        NoProgressResolution::SurfaceInvestigationFailure { class, reason } => {
+            // Bound the evidence-less re-investigation (issue #16 follow-up). The
+            // first fix (#4096) made this rung non-terminal so a goal is never
+            // parked with a bare `evidence=[(none)]` block — but an *unbounded*
+            // re-investigation is its own livelock: a goal whose done-criteria are
+            // permanently unclear surfaces → resets → forever, making no shippable
+            // progress and never reaching a human. After
+            // `SURFACED_INVESTIGATION_FAILURE_LIMIT` consecutive surfaced failures,
+            // stop spinning and escalate to a human WITH the re-investigation count
+            // as concrete evidence (so the never-`evidence=[(none)]` invariant
+            // holds — the count is real evidence, not `(none)`) and a measurable
+            // "make the done-criteria machine-checkable" ask.
+            let surfaced = tracker.record_surfaced_failure(goal_id);
+            if surfaced >= SURFACED_INVESTIGATION_FAILURE_LIMIT {
+                let why = NoProgressWhy::new(
+                    class,
+                    vec![Evidence::new(
+                        "re-investigation",
+                        goal_id,
+                        format!("{surfaced} consecutive evidence-less investigations"),
+                    )],
+                );
+                let blocked_reason = no_progress_blocked_reason_with_why(consecutive, &why);
+                let (issue_title, issue_body) =
+                    surfaced_failure_escalation_issue(goal_id, class, surfaced);
+                if let Some(g) = state
+                    .active_goals
+                    .active
+                    .iter_mut()
+                    .find(|g| g.id == goal_id)
+                {
+                    g.status = GoalProgress::Blocked(blocked_reason);
+                }
+                filer.file_issue(&issue_title, &issue_body);
+                tracker.clear_surfaced_failures(goal_id);
+                tracker.reset_count(goal_id);
+                report.escalated.push(goal_id.to_string());
+                tracing::warn!(
+                    target: "simard::ooda",
+                    goal = %goal_id,
+                    why = %class.token(),
+                    surfaced_failures = surfaced,
+                    "no-progress breaker: evidence-less re-investigation bounded out after \
+                     {surfaced} surfaced failures — BLOCKED WITH re-investigation count as \
+                     evidence + human triage issue filed to make the done-criteria measurable",
+                );
+                return;
+            }
+
+            // Below the bound: the independent investigation reached the terminal
+            // rung with NO evidence. A goal must NEVER be parked with
+            // `evidence=[(none)]`, so this is a SURFACED failure — not a bare
+            // block. Take no terminal action: record it in `investigation_errors`
+            // (fail visible) and leave the goal retriable so the next investigation
+            // can recover real evidence (fail closed). The guided-retry flag is
+            // preserved, so a future terminal rung goes straight here again rather
+            // than spawning a second engineer. On the re-investigation path the
+            // goal starts in a bare / `(none)` Blocked state, so un-block it to
+            // `NotStarted` so the brain can re-select it and a later cycle can
+            // re-investigate.
             if unblock_nonterminal
                 && let Some(g) = state
                     .active_goals
@@ -794,6 +844,7 @@ fn apply_resolution_side_effects(
                 target: "simard::ooda",
                 goal = %goal_id,
                 reason = %reason,
+                surfaced_failures = surfaced,
                 "no-progress breaker: evidence-less terminal outcome SURFACED as an \
                  investigation failure (never parked with evidence=[(none)]) — retriable",
             );

@@ -1,7 +1,7 @@
 ---
 title: The terminal no-progress stall never parks a goal with empty evidence
-description: Why the bottom rung of the no-progress ladder no longer stamps a stalled goal with a generic, evidence-free `why=GENUINELY-STUCK evidence=[(none)]` (which hit 12–13 of 20 live goals on 2026-07-15). The terminal rung reuses the existing guided-engineer (independent recipe-runner) investigation on the first stall, and on the terminal rung either escalates WITH concrete evidence or — when the investigation produced none — surfaces a fail-visible investigation gap instead of a bare block. Evidence-less already-blocked goals are folded into the re-investigation population, and a per-signature inflight guard prevents duplicate concurrent overseer investigations.
-last_updated: 2026-07-15
+description: Why the bottom rung of the no-progress ladder no longer stamps a stalled goal with a generic, evidence-free `why=GENUINELY-STUCK evidence=[(none)]` (which hit 12–13 of 20 live goals on 2026-07-15). The terminal rung reuses the existing guided-engineer (independent recipe-runner) investigation on the first stall, and on the terminal rung either escalates WITH concrete evidence or — when the investigation produced none — surfaces a fail-visible investigation gap instead of a bare block. That surfaced gap is bounded: after `SURFACED_INVESTIGATION_FAILURE_LIMIT` consecutive evidence-less surfaced failures the goal is escalated to a human with the re-investigation count as evidence and a measurable make-the-done-criteria-machine-checkable ask, so a permanently-unclear goal can never re-investigate forever. Evidence-less already-blocked goals are folded into the re-investigation population, and a per-signature inflight guard prevents duplicate concurrent overseer investigations.
+last_updated: 2026-07-16
 review_schedule: as-needed
 owner: simard
 doc_type: concept
@@ -16,12 +16,17 @@ related:
 
 # The terminal no-progress stall never parks a goal with empty evidence
 
-> **Status: implemented (issue #16).** The terminal-rung guard and the surfaced
-> investigation gap live in `src/goal_curation/no_progress_breaker.rs`
+> **Status: implemented (issue #16 + bound follow-up).** The terminal-rung guard
+> and the surfaced investigation gap live in
+> `src/goal_curation/no_progress_breaker.rs`
 > (`resolution_for_why`, `NoProgressResolution::SurfaceInvestigationFailure`, and
 > the `needs_reinvestigation` / `is_evidenceless_no_progress_block` population
-> predicates). The side effects (surface, un-block, retry) live in the
-> curate-phase adapter `src/ooda_loop/no_progress.rs`
+> predicates). The surfaced-gap bound lives alongside them
+> (`SURFACED_INVESTIGATION_FAILURE_LIMIT`,
+> `NoProgressTracker::record_surfaced_failure`,
+> `surfaced_failure_escalation_issue`). The side effects (surface, un-block,
+> retry, bounded escalation) live in the curate-phase adapter
+> `src/ooda_loop/no_progress.rs`
 > (`apply_resolution_side_effects`, `reinvestigate_bare_blocked_goals`). The
 > overseer inflight dedup guard lives in `src/overseer/mod.rs`
 > (`inflight_investigations`, `recipe_dedup_key`,
@@ -66,17 +71,50 @@ honest outcomes, never a bare stamp:
    + evidence attached (the issue-17 quality bar) — a real diagnosis, never
    `(none)`.
 
-3. **Surfaced investigation gap.** If the terminal rung is reached and the
-   investigation produced **no** evidence, that is itself a failure, not a
+3. **Surfaced investigation gap (bounded).** If the terminal rung is reached and
+   the investigation produced **no** evidence, that is itself a failure, not a
    silent generic block. `resolution_for_why` returns
    `NoProgressResolution::SurfaceInvestigationFailure`: the adapter records the
    goal in `NoProgressBreakerReport::investigation_errors` (fail visible), takes
    **no** terminal action, and leaves the goal retriable (fail closed) so the
    next investigation can recover real evidence. A surfaced gap is **not** a
-   firing.
+   firing — **until it is bounded out** (see below).
 
 No wall-clock timeout kills the investigation; the recipe-runner's own
 idle/liveness handling governs it.
+
+## The bound: a surfaced gap cannot re-investigate forever
+
+Outcome 3 fixes the *bare `(none)` block* defect, but a *permanently* unclear
+goal — one whose done-criteria are not expressible as anything the done-gate can
+machine-check — surfaces an evidence-less gap **every** cycle: it re-investigates
+→ produces no evidence → surfaces → resets → forever. That unbounded
+re-investigation is its own livelock: no shippable progress, and a human is
+**never** asked to help.
+
+The breaker now bounds it. `NoProgressTracker.surfaced_failures` counts a goal's
+**consecutive** evidence-less surfaced failures (reset the instant the goal makes
+real progress). Once the count reaches
+`SURFACED_INVESTIGATION_FAILURE_LIMIT` (3), `apply_resolution_side_effects` stops
+spinning and **escalates the goal to a human**:
+
+- the goal is set `Blocked` with a WHY-bearing reason whose evidence is the
+  re-investigation count itself — e.g.
+  `why=UNCLEAR-CRITERIA evidence=[re-investigation <goal> (3 consecutive
+  evidence-less investigations)]` — so the never-`evidence=[(none)]` invariant
+  **still holds** (the count is real evidence, not `(none)`);
+- a tracking issue is filed asking the operator to **make the done-criteria
+  measurable** — naming the concrete machine-checkable shapes the daemon can
+  verify (a specific issue observed `CLOSED`, a specific PR observed `MERGED`, or
+  a file/command whose output the done-gate can check) — or to drop the goal if
+  it is out of scope;
+- the surfaced-failure counter is cleared, so if a human later un-blocks the
+  goal it earns a fresh bounded window rather than re-escalating immediately.
+
+This closes the loop the objective demands: an evidence-less stall either
+recovers real evidence, or — after a bounded, finite number of honest surfaced
+retries — reaches a human with an actionable, measurable ask, instead of
+spinning indefinitely.
 
 ## The stranded already-blocked population
 
