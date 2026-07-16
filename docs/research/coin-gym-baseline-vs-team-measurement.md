@@ -6,7 +6,7 @@ description: >
   sample target set, why the team's abstention gate lifts precision, and the
   exact commands to reproduce it. A durable reference of a unit-tested harness
   property — LOCAL-ONLY, offline-scaffold; a real leaderboard grade is Phase 3.
-last_updated: 2026-07-08
+last_updated: 2026-07-16
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -67,6 +67,11 @@ central trade-off the harness is built to make observable. Reach is unchanged
 because abstaining never *reaches* a target the model would otherwise have
 reached; it only removes wrong submissions from the precision denominator.
 
+`coin-gym duel` decides this head-to-head automatically on COIN's targeted-track
+ordering — **reach first, then precision** — and prints
+`verdict: TEAM WINS` for the sample set (reach tied, precision +40 pts). See
+[Reproduce it](#reproduce-it).
+
 - **reach rate** = reached / total targets.
 - **precision** = reached / *submitted* inputs (abstain and no-submission are
   excluded from the denominator), which is what exposes over-claiming.
@@ -99,15 +104,25 @@ cargo build --bin coin-gym
 export COIN_GYM_HOME="$(pwd)/target/coin-gym-reference"
 rm -rf "$COIN_GYM_HOME"
 
-# Both arms over the identical bundled sample target set.
+# One-shot head-to-head: runs both arms over the identical bundled sample set
+# and prints the reach/precision deltas plus a verdict.
+coin-gym duel "Claude Opus 4.6" --profile ref
+
+# Or run each arm separately (equivalent; useful when you want one arm at a time).
 coin-gym run "Claude Opus 4.6" --strategy baseline --profile ref-baseline
 coin-gym run "Claude Opus 4.6" --strategy team     --profile ref-team
 ```
 
-Each `run` prints the arm's score directly; `coin-gym score <run-id>` re-prints
-it for a saved run and `coin-gym compare <run-id>` diffs it against the published
-leaderboard (see below). The exact reference numbers above are also asserted by
-`src/coin_gym/tests_cli.rs::execute_run_baseline_vs_team_shows_precision_tradeoff`,
+`duel` decides the winner on COIN's targeted-track ordering (**reach first,
+precision second**); on this sample the arms tie on reach (60.0%) and the team
+wins on precision (100.0% vs 60.0%, +40 pts), so it prints
+`verdict: TEAM WINS`. Each `run` prints the arm's score directly; `coin-gym
+score <run-id>` re-prints it for a saved run and `coin-gym compare <run-id>`
+diffs it against the published leaderboard (see below). The exact reference
+numbers above are also asserted by
+`src/coin_gym/tests_cli.rs::execute_run_baseline_vs_team_shows_precision_tradeoff`
+and the verdict by
+`src/coin_gym/tests_duel.rs::sample_duel_team_wins_on_precision_at_equal_reach`,
 so `cargo test -p simard coin_gym` fails if the harness ever stops reproducing
 them.
 
