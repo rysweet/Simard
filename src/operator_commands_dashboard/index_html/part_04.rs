@@ -252,10 +252,23 @@ pub(crate) const PART_04: &str = r#"            let fmt;
     function fmtDuration(s){if(s<60)return s+'s';const m=Math.floor(s/60);if(m<60)return m+'m '+s%60+'s';const h=Math.floor(m/60);return h+'h '+m%60+'m';}
     function wbGoalCard(g){
       const pct=g.progress_pct||0;
-      const barColor=g.status==='done'?'var(--green)':g.status.startsWith('blocked')?'var(--red)':'var(--accent)';
+      const isBlocked=g.status.startsWith('blocked');
+      /* Issue #4178: a lifecycle-BLOCKED goal uses amber (var(--yellow)
+         #d29922), NEVER the activity-failure red (var(--red) #f85149). This
+         mirrors issue #20's GOAL_STATUS_COLORS decision on the Goals tab so a
+         blocked goal is never mistaken for a failed one anywhere in the UI. */
+      const barColor=g.status==='done'?'var(--green)':isBlocked?'var(--yellow)':'var(--accent)';
+      /* Surface WHY the goal is blocked (issue #4178). Prefer the additive
+         clean `block_reason`; fall back to stripping the legacy `blocked: `
+         prefix so older payloads still render a reason. */
+      const reason=isBlocked?(g.block_reason||g.status.replace(/^blocked:\s*/,'')):'';
+      const blockedRow=isBlocked&&reason
+        ?`<div style="font-size:.72rem;color:var(--yellow);margin-bottom:.3rem"><strong>Blocked — </strong>${esc(reason)}</div>`
+        :'';
       return`<div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:.6rem;margin-bottom:.5rem">
         <div style="font-weight:600;font-size:.85rem;margin-bottom:.3rem">${esc(g.name)}</div>
         <div style="font-size:.75rem;color:#8b949e;margin-bottom:.4rem">${esc(g.description||'')}</div>
+        ${blockedRow}
         <div style="background:#21262d;border-radius:3px;height:6px;margin-bottom:.3rem">
           <div style="background:${barColor};height:100%;border-radius:3px;width:${pct}%;transition:width .3s"></div>
         </div>

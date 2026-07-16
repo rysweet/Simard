@@ -170,6 +170,14 @@ pub(crate) async fn workboard() -> Json<Value> {
                 .active
                 .iter()
                 .map(|g| {
+                    // `block_reason` is the clean, prefix-free reason for a
+                    // BLOCKED goal (issue #4178). The legacy `status` string
+                    // keeps its `"blocked: <reason>"` shape for back-compat
+                    // (the kanban classifier still keys off `startsWith`), but
+                    // the Workboard card must surface WHY a goal is blocked
+                    // without brittly re-parsing the Display string. `None` for
+                    // every non-blocked lifecycle state, so the field is omitted.
+                    let mut block_reason: Option<&str> = None;
                     let (status_str, progress_pct) = match &g.status {
                         crate::goal_curation::GoalProgress::Proposed => {
                             ("proposed".to_string(), 0u32)
@@ -181,19 +189,24 @@ pub(crate) async fn workboard() -> Json<Value> {
                             ("in_progress".to_string(), *percent)
                         }
                         crate::goal_curation::GoalProgress::Blocked(reason) => {
+                            block_reason = Some(reason.as_str());
                             (format!("blocked: {reason}"), 0)
                         }
                         crate::goal_curation::GoalProgress::Paused => ("paused".to_string(), 0),
                         crate::goal_curation::GoalProgress::Completed => ("done".to_string(), 100),
                     };
-                    json!({
+                    let mut goal_obj = json!({
                         "name": g.id,
                         "description": g.description,
                         "status": status_str,
                         "progress_pct": progress_pct,
                         "priority": g.priority,
                         "assigned_to": g.assigned_to,
-                    })
+                    });
+                    if let Some(reason) = block_reason {
+                        goal_obj["block_reason"] = json!(reason);
+                    }
+                    goal_obj
                 })
                 .collect()
         })
