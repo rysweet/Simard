@@ -1,5 +1,6 @@
 mod compose;
 mod contract;
+mod example_loader;
 mod file_loader;
 mod loader;
 mod manifest;
@@ -12,6 +13,7 @@ mod coverage_tests;
 
 // Re-export all public items so `crate::identity::X` still works.
 pub use contract::ManifestContract;
+pub use example_loader::{DEFAULT_EXAMPLE_IDENTITIES_DIR, load_example_identity};
 pub use file_loader::FileIdentityLoader;
 pub use loader::{BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader};
 pub use manifest::{
