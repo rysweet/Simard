@@ -50,6 +50,15 @@ mod tests_no_progress_investigation;
 #[cfg(test)]
 mod tests_no_progress_reinvestigation;
 
+// Issue #16 (follow-up, TDD): direct unit tests for the production
+// `DeterministicNoProgressReasoner` — pin the terminal-rung invariant that it
+// never returns an empty-evidence WHY, so the breaker can never author a bare
+// `evidence=[(none)]` block (the live-daemon defect that stranded the synthetic
+// `simard-identity-*` goals). A no-artifact stall is `UNCLEAR-CRITERIA` with a
+// named unmeasurable criterion; open work stays `GENUINELY-STUCK` with it.
+#[cfg(test)]
+mod tests_no_progress_reasoner;
+
 // Issue #2329: Observe-vs-Decide phase weights yield different ranked-recall
 // ordering of the same fact set, exercised against the real lbug-backed
 // `LibraryCognitiveMemory` adapter.
