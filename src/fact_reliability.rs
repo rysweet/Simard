@@ -154,6 +154,29 @@ pub fn fact_passes_gate(concept: &str, content: &str, grounded: bool) -> bool {
     score_fact_reliability(concept, content, grounded) >= RELIABILITY_THRESHOLD
 }
 
+/// Whether two concept labels denote the **same distillation category** for the
+/// purpose of the [`commit_gated_fact`] identity dedup.
+///
+/// Fact identity is `(concept, trimmed content)`: the dedup must only suppress a
+/// new fact that restates a prior of the *same* identity. The dedup's prior scan
+/// uses `search_facts(concept, ..)`, which matches the concept token against both
+/// the concept AND the content of stored facts, so it can surface a prior of a
+/// **different** category whose content merely mentions the new concept's token.
+/// This predicate keeps such a prior from blocking a genuinely distinct fact.
+///
+/// Comparison is surface-form tolerant, consistent with the rest of this module
+/// (see [`canonical_concept`]): when both labels canonicalize into
+/// [`KNOWN_CONCEPTS`] they match iff they canonicalize to the SAME known concept
+/// (so `Bug-Pattern` and `bug_pattern` are one identity); otherwise (one or both
+/// off-spec) they match iff they are equal ignoring surrounding whitespace and
+/// ASCII case.
+fn same_concept_identity(a: &str, b: &str) -> bool {
+    match (canonical_concept(a), canonical_concept(b)) {
+        (Some(ca), Some(cb)) => ca == cb,
+        _ => a.trim().eq_ignore_ascii_case(b.trim()),
+    }
+}
+
 /// Disposition of one write-boundary gate decision (issue #2679), returned by
 /// [`commit_gated_fact`].
 #[derive(Debug, Clone, PartialEq)]
@@ -227,15 +250,22 @@ pub fn commit_gated_fact(
     // version of the *same* fact (concept + content). `search_facts` is queried
     // with the new confidence as `min_confidence` so it returns only priors
     // strong enough to block; the explicit `>=` is belt-and-suspenders against a
-    // backend that ignores the filter.
+    // backend that ignores the filter. The concept-identity check
+    // ([`same_concept_identity`]) is REQUIRED, not incidental: `search_facts`
+    // matches the concept token against both the concept and the content of
+    // stored facts, so a prior of a *different* category whose content merely
+    // mentions this concept's token can surface here — without the concept guard
+    // it would wrongly quarantine a genuinely distinct new fact (silently
+    // lowering fact-yield).
     let new_content = content.trim();
     let existing = memory
         .search_facts(concept, DEDUP_PRIOR_SCAN_LIMIT, confidence)
         .unwrap_or_default();
-    if existing
-        .iter()
-        .any(|f| f.content.trim() == new_content && f.confidence >= confidence)
-    {
+    if existing.iter().any(|f| {
+        same_concept_identity(&f.concept, concept)
+            && f.content.trim() == new_content
+            && f.confidence >= confidence
+    }) {
         return Ok(FactGateDecision::Quarantined { confidence });
     }
 
@@ -253,4 +283,30 @@ pub fn commit_gated_fact(
         confidence,
         node_id,
     })
+}
+
+#[cfg(test)]
+mod concept_identity_tests {
+    use super::same_concept_identity;
+
+    #[test]
+    fn same_known_concept_across_surface_forms_is_one_identity() {
+        assert!(same_concept_identity("bug-pattern", "Bug_Pattern"));
+        assert!(same_concept_identity(" pr-pattern ", "PR pattern"));
+        assert!(same_concept_identity("lesson-learned", "lesson-learned"));
+    }
+
+    #[test]
+    fn distinct_known_concepts_are_distinct_identities() {
+        assert!(!same_concept_identity("bug-pattern", "lesson-learned"));
+        assert!(!same_concept_identity("pr-pattern", "bug-pattern"));
+    }
+
+    #[test]
+    fn off_spec_concepts_match_case_insensitively_only_when_equal() {
+        assert!(same_concept_identity("custom-x", "Custom-X"));
+        assert!(!same_concept_identity("custom-x", "custom-y"));
+        // A known concept never aliases onto an off-spec label.
+        assert!(!same_concept_identity("bug-pattern", "bugpattern"));
+    }
 }

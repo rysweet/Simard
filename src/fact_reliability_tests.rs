@@ -323,3 +323,113 @@ fn commit_gated_fact_stores_dedups_and_quarantines() {
         "an ungrounded empty fact scores below the threshold"
     );
 }
+
+/// Regression: fact identity is `(concept, trimmed content)`, so a prior of a
+/// DIFFERENT category must never dedup-block a genuinely distinct new fact —
+/// even when the prior's content mentions the new concept's token (which is
+/// exactly when `search_facts(concept, ..)` surfaces that unrelated prior).
+///
+/// Here a `lesson-learned` fact whose *content* contains the token `bug-pattern`
+/// is stored first. A new `bug-pattern` fact with the *same content* is then
+/// committed. The dedup scan for concept `bug-pattern` surfaces the prior
+/// `lesson-learned` fact (its content matches the token), but the two are
+/// different identities, so the new fact MUST be stored, not quarantined.
+#[test]
+fn commit_gated_fact_does_not_dedup_across_distinct_concepts() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::{FactGateDecision, commit_gated_fact};
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode("cross-concept identity episode", "engineer-cycle", None)
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let episode_ids = [ep.clone()];
+    // Content deliberately mentions the OTHER concept's token so the dedup scan
+    // for `bug-pattern` will surface this `lesson-learned` prior.
+    let shared_content = "always run the bug-pattern regression before merge";
+
+    let first = commit_gated_fact(
+        &mem,
+        "lesson-learned",
+        shared_content,
+        true,
+        &source,
+        &[],
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(first.stored(), "the first, distinct fact must be stored");
+
+    // Same content, DIFFERENT concept category → distinct identity → must store.
+    let second = commit_gated_fact(
+        &mem,
+        "bug-pattern",
+        shared_content,
+        true,
+        &source,
+        &[],
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    let FactGateDecision::Stored { .. } = second else {
+        panic!("a distinct-concept fact must not be dedup-quarantined; got {second:?}");
+    };
+
+    // Both categories now hold the fact — the cross-concept collision did not
+    // suppress the second write.
+    let bug_hits = mem
+        .search_facts("bug-pattern", 10, 0.0)
+        .expect("search_facts");
+    assert!(
+        bug_hits
+            .iter()
+            .any(|f| f.concept == "bug-pattern" && f.content.trim() == shared_content),
+        "the bug-pattern fact must be persisted, not lost to a cross-concept dedup"
+    );
+}
+
+/// Guard: a legitimate same-concept restatement (identical raw concept AND
+/// content) still dedup-quarantines after the concept-identity guard is added —
+/// the guard narrows dedup to same-identity only, it does not re-open a
+/// duplicate path for the genuine restatement case.
+#[test]
+fn commit_gated_fact_still_dedups_identical_same_concept_restatement() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::{FactGateDecision, commit_gated_fact};
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode("same-concept identity episode", "engineer-cycle", None)
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let episode_ids = [ep.clone()];
+    let content = "empty outcome list panics the cycle";
+
+    let first = commit_gated_fact(
+        &mem,
+        "bug-pattern",
+        content,
+        true,
+        &source,
+        &[],
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(first.stored(), "the first fact must be stored");
+
+    let dup = commit_gated_fact(
+        &mem,
+        "bug-pattern",
+        content,
+        true,
+        &source,
+        &[],
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        matches!(dup, FactGateDecision::Quarantined { .. }),
+        "an identical same-concept restatement must still dedup; got {dup:?}"
+    );
+}

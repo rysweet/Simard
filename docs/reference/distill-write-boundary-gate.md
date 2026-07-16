@@ -61,7 +61,12 @@ order:
    stored) so a low-reliability candidate can never corrupt past experience.
 5. **Identity dedup** — a weaker-or-equal new fact never clobbers a
    higher-confidence existing fact of the **same identity** (concept + content).
-   Distinct lessons that merely share a label still accumulate.
+   Identity spans **both** fields: distinct lessons that merely share a *label*
+   accumulate, and — symmetrically — identically-worded facts under **different
+   labels** are distinct identities and both accumulate (the prior-fact scan
+   matches the concept token against stored content too, so this guard is what
+   keeps an unrelated same-wording prior from suppressing a genuinely distinct
+   new fact).
 6. **Persist** — surviving facts are written with
    `store_fact_with_provenance` (computed confidence, **one `DERIVES_FROM` edge
    per supplied `source_episode_id`**, and a scalar `source_id` of
