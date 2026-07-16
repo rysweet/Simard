@@ -207,6 +207,20 @@ impl FactGateDecision {
 ///     distinguish it by `confidence >= RELIABILITY_THRESHOLD`).
 ///   - Survivors persist via `store_fact_with_provenance` with the gate-computed
 ///     confidence and the source-episode provenance edges.
+///
+/// ## Concept-label canonicalization (recall + dedup consistency)
+///
+/// Before the dedup lookup and the store, the concept is normalized to its
+/// canonical [`KNOWN_CONCEPTS`] form via [`canonical_concept`]. An LLM routinely
+/// varies the *surface form* of a label it clearly intends (`PR-Pattern`,
+/// `bug_pattern`, `Lesson Learned.`); persisting each variant verbatim fragments
+/// semantic memory along the concept axis — recall by the canonical label misses
+/// variant-stored facts, and two surface-variant restatements of the SAME fact
+/// never dedup against each other. Normalizing here — at the single shared write
+/// boundary — converges every recognized variant onto one label for BOTH seams.
+/// A genuinely off-spec concept does not canonicalize and is stored verbatim,
+/// preserving the "concept validity is a nudge, not a gate" contract: no fact is
+/// ever dropped or relabeled for an unrecognized concept.
 pub fn commit_gated_fact(
     memory: &dyn crate::cognitive_memory::CognitiveMemoryOps,
     concept: &str,
@@ -223,6 +237,16 @@ pub fn commit_gated_fact(
         return Ok(FactGateDecision::Quarantined { confidence });
     }
 
+    // Canonicalize the concept LABEL to its known-concept form before it is used
+    // as the dedup search key and the persisted label, so recognized surface-form
+    // variants ("PR-Pattern", "bug_pattern", "Lesson Learned.") converge onto one
+    // label instead of fragmenting semantic memory. A genuinely off-spec concept
+    // does not canonicalize and is stored verbatim (nudge, not gate).
+    let stored_concept: &str = match canonical_concept(concept) {
+        Some(canonical) => canonical,
+        None => concept,
+    };
+
     // Identity dedup: do not downgrade/duplicate an equal-or-stronger prior
     // version of the *same* fact (concept + content). `search_facts` is queried
     // with the new confidence as `min_confidence` so it returns only priors
@@ -230,7 +254,7 @@ pub fn commit_gated_fact(
     // backend that ignores the filter.
     let new_content = content.trim();
     let existing = memory
-        .search_facts(concept, DEDUP_PRIOR_SCAN_LIMIT, confidence)
+        .search_facts(stored_concept, DEDUP_PRIOR_SCAN_LIMIT, confidence)
         .unwrap_or_default();
     if existing
         .iter()
@@ -241,7 +265,7 @@ pub fn commit_gated_fact(
 
     // Persist with the gate-computed confidence and provenance edges.
     let node_id = memory.store_fact_with_provenance(
-        concept,
+        stored_concept,
         content,
         confidence,
         source_id,

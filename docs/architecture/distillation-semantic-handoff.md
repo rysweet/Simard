@@ -103,7 +103,9 @@ gone from the result path.
    nodes **in the store** (a store-existence check — the server holds no
    in-memory batch, and a fact is grounded if **at least one** supplied id
    resolves), ISAO-style reliability scoring, confidence clamp + minimum
-   threshold, low-reliability **quarantine**, and identity dedup, before
+   threshold, low-reliability **quarantine**, concept-label canonicalization
+   (recognized surface-form variants converge onto their known-concept label),
+   and identity dedup, before
    `store_fact_with_provenance` persists it with one `DERIVES_FROM` edge per
    supplied source episode. The gate now lives at the write boundary because
    direct agent writes bypass the old post-parse location. The client is never
