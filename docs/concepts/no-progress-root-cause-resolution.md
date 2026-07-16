@@ -150,6 +150,23 @@ a goal has already burned its one guided retry and stalled again. Even then the
 concrete cause and the artifacts, never a bare "needs human review". See the
 [block-reason contract](../reference/no-progress-root-cause-resolution-api.md#block-reason-contract).
 
+**Escalation links the filed tracking issue back to the goal.** The escalation
+files a `gh` tracking issue *and* records it on the goal as an `issue`
+`wip_ref` (label-prefixed `[no-progress-tracking] `). This is what finally makes
+an `UNCLEAR-CRITERIA` goal's done-criteria *measurable*: the reason those
+synthetic `simard-identity-*` goals stalled was literally "no tracked PR/issue
+the done-gate can verify", and without the back-link the breaker filed a
+tracking issue but **orphaned** it — the goal's `wip_refs` stayed empty, so
+[`has_derivable_signal`](../reference/completion-evidence-gate-api.md) stayed
+`false` and the done-gate still had nothing to check. With the link the done-gate
+can observe the tracking issue as `CLOSED` (and a human/dashboard can navigate
+goal → issue). The link is **idempotent**: a goal already carrying its
+breaker-authored tracking issue is never re-filed, so a re-stall can never spam
+duplicate `ooda-stuck` issues. The shared side effect is
+`escalate_with_tracking_issue` in `src/ooda_loop/no_progress.rs`, used by every
+escalation path (on-transition, re-investigation, and the bounded
+surfaced-failure escalation).
+
 ## Re-investigating already-blocked goals (issue #17)
 
 The ladder above investigates a stall **only at the cycle the goal crosses the

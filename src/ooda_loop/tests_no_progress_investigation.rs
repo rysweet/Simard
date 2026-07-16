@@ -134,6 +134,13 @@ impl RecordingHealer {
             result: Ok(()),
         }
     }
+
+    fn failing(err: &str) -> Self {
+        Self {
+            calls: RefCell::new(Vec::new()),
+            result: Err(err.to_string()),
+        }
+    }
 }
 
 impl PreconditionHealer for RecordingHealer {
@@ -174,10 +181,13 @@ struct RecordingFiler {
 }
 
 impl NoProgressIssueFiler for RecordingFiler {
-    fn file_issue(&self, title: &str, body: &str) {
-        self.calls
-            .borrow_mut()
-            .push((title.to_string(), body.to_string()));
+    fn file_issue(&self, title: &str, body: &str) -> Option<super::no_progress::FiledIssue> {
+        let mut calls = self.calls.borrow_mut();
+        calls.push((title.to_string(), body.to_string()));
+        Some(super::no_progress::FiledIssue {
+            number: format!("{}", 9000 + calls.len()),
+            url: None,
+        })
     }
 }
 
@@ -1069,5 +1079,287 @@ fn real_progress_resets_the_surfaced_failure_counter() {
         state.no_progress_tracker.surfaced_failures(id),
         0,
         "real progress must reset the surfaced-failure window"
+    );
+}
+
+// === (i) UNCLEAR-CRITERIA escalation LINKS the tracking issue so the =========
+//         done-criteria become measurable (the WHY this change closes)
+//
+// The synthetic `simard-identity-*` codename goals stalled as UNCLEAR-CRITERIA
+// with the WHY `done-criteria <id> (unmeasurable: no tracked PR/issue the
+// done-gate can verify)`. The breaker filed a tracking issue but ORPHANED it —
+// never linked it back to the goal — so the goal's `wip_refs` stayed empty,
+// `has_derivable_signal` stayed `false`, and the done-gate could never verify
+// completion. This asserts the fix: escalation links the filed tracking issue
+// as an `issue` wip_ref, giving the goal a derivable signal the done-gate can
+// finally check — the done-criteria are now measurable.
+
+/// Return the goal's breaker-authored tracking-issue refs (kind `issue`, label
+/// prefixed `[no-progress-tracking] `).
+fn tracking_issue_refs<'a>(state: &'a OodaState, id: &str) -> Vec<&'a WipRef> {
+    state
+        .active_goals
+        .active
+        .iter()
+        .find(|g| g.id == id)
+        .map(|g| {
+            g.wip_refs
+                .iter()
+                .filter(|w| {
+                    w.kind.eq_ignore_ascii_case("issue")
+                        && w.label.starts_with("[no-progress-tracking] ")
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// True when the goal carries a tracked `pr`/`issue` wip_ref — the specific
+/// signal the WHY names ("no tracked PR/issue the done-gate can verify"). Note
+/// this is narrower than `has_derivable_signal`, which also counts a
+/// self-affecting change; the WHY is precisely about the *tracked-artifact* gap.
+fn has_tracked_pr_or_issue(state: &OodaState, id: &str) -> bool {
+    state
+        .active_goals
+        .active
+        .iter()
+        .find(|g| g.id == id)
+        .map(|g| {
+            g.wip_refs
+                .iter()
+                .any(|w| w.kind.eq_ignore_ascii_case("pr") || w.kind.eq_ignore_ascii_case("issue"))
+        })
+        .unwrap_or(false)
+}
+
+#[test]
+fn unclear_criteria_escalation_links_tracking_issue_making_criteria_measurable() {
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let id = "simard-identity-bursar-investment-portfolio";
+    // The canonical shape: a synthetic identity goal with NO tracked artifact.
+    let goal = stuck_goal(id);
+    assert!(
+        goal.wip_refs.is_empty(),
+        "fixture must model a goal with structurally unmeasurable done-criteria"
+    );
+    let mut state = state_with(goal);
+    assert!(
+        !has_tracked_pr_or_issue(&state, id),
+        "before escalation the goal has NO tracked PR/issue — the exact WHY"
+    );
+    // Pre-spend the one guided-engineer retry so the next stall reaches the
+    // terminal Escalate rung directly.
+    state.no_progress_tracker.mark_guided_retry(id);
+
+    let evidence = FakeEvidence::stuck();
+    // The production reasoner classifies a no-artifact stall UNCLEAR-CRITERIA
+    // with the named unmeasurable criterion (non-empty evidence) — so the
+    // terminal rung ESCALATES (files an issue), not surfaces.
+    let reasoner = FakeReasoner::classifying(
+        NoProgressClass::UnclearCriteria,
+        vec![Evidence::new(
+            "done-criteria",
+            id,
+            "unmeasurable: no tracked PR/issue the done-gate can verify",
+        )],
+    );
+    let healer = RecordingHealer::ok();
+    let dispatcher = RecordingDispatcher::ok();
+    let filer = RecordingFiler::default();
+
+    let report = drive_episode(
+        &mut state,
+        id,
+        &evidence,
+        &reasoner,
+        &healer,
+        &dispatcher,
+        &filer,
+        threshold,
+    );
+
+    assert!(
+        report.escalated.contains(&id.to_string()),
+        "an UNCLEAR-CRITERIA goal past its guided retry must escalate: {report:?}"
+    );
+    assert_eq!(
+        filer.calls.borrow().len(),
+        1,
+        "exactly one tracking issue is filed"
+    );
+
+    // THE fix: the filed tracking issue is LINKED back to the goal as a tracked
+    // artifact, so the done-criteria are now machine-verifiable.
+    let refs = tracking_issue_refs(&state, id);
+    assert_eq!(
+        refs.len(),
+        1,
+        "the filed tracking issue must be linked to the goal as an `issue` wip_ref"
+    );
+    assert_eq!(
+        refs[0].ref_id, "9001",
+        "the linked ref must carry the filed issue number: {:?}",
+        refs[0]
+    );
+
+    assert!(
+        has_tracked_pr_or_issue(&state, id),
+        "after linking the tracking issue the goal HAS a tracked PR/issue — its \
+         done-criteria are now measurable (no longer 'no tracked PR/issue')"
+    );
+    let goal = state
+        .active_goals
+        .active
+        .iter()
+        .find(|g| g.id == id)
+        .expect("goal stays on the board");
+    assert!(
+        crate::goal_curation::completion_gate::has_derivable_signal(goal),
+        "the linked tracking issue is a derivable signal the done-gate can check"
+    );
+    assert!(
+        matches!(goal.status, GoalProgress::Blocked(_)),
+        "the goal is Blocked pending the tracking issue's resolution"
+    );
+}
+
+#[test]
+fn re_escalation_is_idempotent_no_duplicate_tracking_issue() {
+    // A goal already carrying its breaker tracking issue must never spawn a
+    // DUPLICATE `ooda-stuck` issue on a re-stall — the link is idempotent.
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let id = "simard-identity-bursar-investment-portfolio";
+    let mut state = state_with(stuck_goal(id));
+    state.no_progress_tracker.mark_guided_retry(id);
+
+    let evidence = FakeEvidence::stuck();
+    let reasoner = FakeReasoner::classifying(
+        NoProgressClass::UnclearCriteria,
+        vec![Evidence::new(
+            "done-criteria",
+            id,
+            "unmeasurable: no tracked PR/issue the done-gate can verify",
+        )],
+    );
+    let healer = RecordingHealer::ok();
+    let dispatcher = RecordingDispatcher::ok();
+    let filer = RecordingFiler::default();
+
+    // First escalation files + links exactly one issue.
+    drive_episode(
+        &mut state,
+        id,
+        &evidence,
+        &reasoner,
+        &healer,
+        &dispatcher,
+        &filer,
+        threshold,
+    );
+    assert_eq!(filer.calls.borrow().len(), 1);
+    assert_eq!(tracking_issue_refs(&state, id).len(), 1);
+
+    // Simulate an operator un-blocking the goal so it re-stalls, then escalate
+    // again: the guarded escalation must NOT file a second issue nor append a
+    // second link.
+    if let Some(g) = state.active_goals.active.iter_mut().find(|g| g.id == id) {
+        g.status = GoalProgress::NotStarted;
+    }
+    let report = drive_episode(
+        &mut state,
+        id,
+        &evidence,
+        &reasoner,
+        &healer,
+        &dispatcher,
+        &filer,
+        threshold,
+    );
+
+    assert!(
+        report.escalated.contains(&id.to_string()),
+        "the re-stall still escalates (Blocked WITH why): {report:?}"
+    );
+    assert_eq!(
+        filer.calls.borrow().len(),
+        1,
+        "no DUPLICATE tracking issue may be filed for an already-tracked goal"
+    );
+    assert_eq!(
+        tracking_issue_refs(&state, id).len(),
+        1,
+        "the goal keeps exactly one linked tracking issue"
+    );
+}
+
+#[test]
+fn heal_failure_escalation_also_links_the_tracking_issue() {
+    // The MISSING-PRECONDITION heal-failure rung is the OTHER escalation branch
+    // that files a tracking issue. It must ALSO link the issue back to the goal
+    // (same measurability guarantee) — otherwise a permanently-unhealable
+    // precondition would re-strand the goal with an orphaned issue, exactly the
+    // bug this change closes for the UNCLEAR-CRITERIA path.
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let id = "mirror-unclonable-repo";
+    let mut goal = stuck_goal(id);
+    goal.repo = Some("unclonable-repo".to_string());
+    let mut state = state_with(goal);
+    assert!(
+        !has_tracked_pr_or_issue(&state, id),
+        "fixture starts with no tracked PR/issue"
+    );
+
+    let mut evidence = FakeEvidence::stuck();
+    evidence.repo_present = false;
+    let reasoner = FakeReasoner::classifying(
+        NoProgressClass::MissingPrecondition,
+        vec![Evidence::new("repo", "unclonable-repo", "absent")],
+    );
+    // Healing the precondition fails every cycle (e.g. the repo genuinely cannot
+    // be cloned), so the breaker escalates WITH the clone error as evidence.
+    let healer = RecordingHealer::failing("clone failed: repository not found");
+    let dispatcher = RecordingDispatcher::ok();
+    let filer = RecordingFiler::default();
+
+    let report = drive_episode(
+        &mut state,
+        id,
+        &evidence,
+        &reasoner,
+        &healer,
+        &dispatcher,
+        &filer,
+        threshold,
+    );
+
+    assert!(
+        report.escalated.contains(&id.to_string()),
+        "a repeatedly-failing precondition heal must escalate: {report:?}"
+    );
+    assert_eq!(
+        filer.calls.borrow().len(),
+        1,
+        "exactly one tracking issue is filed for the failed heal"
+    );
+    // THE fix, on this branch too: the filed issue is linked back to the goal.
+    let refs = tracking_issue_refs(&state, id);
+    assert_eq!(
+        refs.len(),
+        1,
+        "the heal-failure escalation must LINK its tracking issue, not orphan it"
+    );
+    assert!(
+        has_tracked_pr_or_issue(&state, id),
+        "after linking, the goal has a tracked issue the done-gate can verify"
+    );
+    let goal = state
+        .active_goals
+        .active
+        .iter()
+        .find(|g| g.id == id)
+        .expect("goal stays on the board");
+    assert!(
+        matches!(goal.status, GoalProgress::Blocked(_)),
+        "the goal is Blocked pending the tracking issue's resolution"
     );
 }
