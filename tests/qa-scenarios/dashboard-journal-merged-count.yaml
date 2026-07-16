@@ -1,0 +1,33 @@
+# Canonical agentic-test schema (name + agents[] + steps[] with params).
+#
+# Mirrors tests/qa-scenarios/dashboard-goal-persistence.yaml (the repo's
+# canonical exemplar): a single `cli` agent runs a hermetic regression script;
+# the runner treats the script's non-zero exit as a step failure, so this is a
+# real pass/fail gate.
+name: simard-dashboard-journal-merged-count
+description: >-
+  The dashboard Journal tab's `merged` PR count reflects the day's real landed
+  changes instead of being structurally zero (#4140). Guards the journal PR
+  source that now feeds merged PRs through with the canonical "merged" outcome.
+version: "1.0"
+config:
+  timeout: 300000
+environment:
+  requires: []
+agents:
+  - name: cli-agent
+    type: cli
+    config: {}
+metadata:
+  tags:
+    - cli
+  priority: high
+steps:
+  - name: Run the journal merged-PR-count regression script
+    agent: cli-agent
+    action: run
+    params:
+      command: bash
+      args:
+        - scripts/qa-journal-merged-count.sh
+    timeout: 300000

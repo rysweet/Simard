@@ -97,6 +97,18 @@ pub struct OpenPrSummary {
     pub url: String,
 }
 
+/// One merged-PR summary for the journal's day-scoped "landed changes" table.
+/// Sourced from
+/// `gh pr list --state merged --search "merged:YYYY-MM-DD" --json number,title,url`.
+/// Deliberately minimal: unlike [`OpenPrSummary`] a merged PR has no live gates
+/// left to evaluate, so only the fields the journal renders are carried.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct MergedPrSummary {
+    pub number: u32,
+    pub title: String,
+    pub url: String,
+}
+
 impl OpenPrSummary {
     /// Project this listing summary into a [`PrSnapshot`] so the same
     /// [`evaluate_objective_gates`] used by `merge_pr_if_merge_ready` can
@@ -129,6 +141,23 @@ pub trait PrGhClient {
     /// exercise the per-PR merge path don't need to grow a stub. The
     /// dashboard handler relies on [`RealPrGhClient`]'s override.
     fn list_open_prs(&self, _repo: &str, _limit: u32) -> SimardResult<Vec<OpenPrSummary>> {
+        Ok(Vec::new())
+    }
+    /// `gh pr list --repo <repo> --state merged --search "merged:<date>" --json number,title,url --limit <limit>`.
+    ///
+    /// Added for the operator dashboard's Journal tab (#4140): the daily journal
+    /// needs the PRs that *merged* on a given day so `merged_pr_count` reflects
+    /// real landed changes instead of being structurally zero. `date` is the UTC
+    /// calendar day the search is scoped to. Default impl returns `Ok(vec![])`
+    /// so existing test fakes that only exercise the per-PR merge path or the
+    /// open-PR list don't need to grow a stub; production wires
+    /// [`RealPrGhClient`]'s override.
+    fn list_merged_prs(
+        &self,
+        _repo: &str,
+        _date: chrono::NaiveDate,
+        _limit: u32,
+    ) -> SimardResult<Vec<MergedPrSummary>> {
         Ok(Vec::new())
     }
 }
@@ -314,6 +343,38 @@ impl PrGhClient for RealPrGhClient {
             parse_pr_list_json(&stdout)
         })
     }
+
+    fn list_merged_prs(
+        &self,
+        repo: &str,
+        date: chrono::NaiveDate,
+        limit: u32,
+    ) -> SimardResult<Vec<MergedPrSummary>> {
+        retry_transient_gh("gh pr list --state merged", || {
+            let limit_s = limit.to_string();
+            // GitHub search: `merged:YYYY-MM-DD` matches PRs merged on that
+            // exact UTC calendar day.
+            let search = format!("merged:{}", date.format("%Y-%m-%d"));
+            let stdout = run_gh_checked(
+                &format!("gh pr list --repo {repo} --state merged --search {search}"),
+                &[
+                    "pr",
+                    "list",
+                    "--repo",
+                    repo,
+                    "--state",
+                    "merged",
+                    "--search",
+                    &search,
+                    "--json",
+                    "number,title,url",
+                    "--limit",
+                    &limit_s,
+                ],
+            )?;
+            parse_merged_pr_list_json(&stdout)
+        })
+    }
 }
 
 /// Parse `gh pr view --json body,statusCheckRollup,mergeable,reviewDecision,baseRefName`
@@ -465,6 +526,35 @@ pub fn parse_pr_list_json(stdout: &[u8]) -> SimardResult<Vec<OpenPrSummary>> {
                 checks,
                 url: r.url,
             }
+        })
+        .collect())
+}
+
+/// Parse `gh pr list --state merged --json number,title,url` stdout into
+/// [`MergedPrSummary`] rows. Mirrors [`parse_pr_list_json`] but for the reduced
+/// merged-PR shape the journal needs (#4140). An empty array yields an empty
+/// vec (a quiet, no-merge day is honest, not an error).
+pub fn parse_merged_pr_list_json(stdout: &[u8]) -> SimardResult<Vec<MergedPrSummary>> {
+    #[derive(serde::Deserialize)]
+    struct RawMergedPr {
+        #[serde(default)]
+        number: u32,
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        url: String,
+    }
+    let raws: Vec<RawMergedPr> = serde_json::from_slice(stdout).map_err(|e| {
+        SimardError::MergeAuthorityEvaluationFailed {
+            reason: format!("could not parse `gh pr list --state merged` JSON: {e}"),
+        }
+    })?;
+    Ok(raws
+        .into_iter()
+        .map(|r| MergedPrSummary {
+            number: r.number,
+            title: r.title,
+            url: r.url,
         })
         .collect())
 }
@@ -1478,6 +1568,35 @@ mod tests {
     fn parse_pr_list_json_accepts_empty_array() {
         let prs = parse_pr_list_json(b"[]").unwrap();
         assert!(prs.is_empty());
+    }
+
+    #[test]
+    fn parse_merged_pr_list_json_round_trips_journal_shape() {
+        // The exact `gh pr list --state merged --json number,title,url` shape.
+        let stdout = br#"[
+            {"number": 4117, "title": "fix(journal): collapse duplicate dates",
+             "url": "https://github.com/rysweet/Simard/pull/4117"},
+            {"number": 4122, "title": "fix(dashboard): bound memory growth window",
+             "url": "https://github.com/rysweet/Simard/pull/4122"}
+        ]"#;
+        let merged = parse_merged_pr_list_json(stdout).expect("parses");
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].number, 4117);
+        assert_eq!(merged[0].title, "fix(journal): collapse duplicate dates");
+        assert_eq!(merged[1].number, 4122);
+        assert!(merged[1].url.ends_with("/pull/4122"));
+    }
+
+    #[test]
+    fn parse_merged_pr_list_json_accepts_empty_array() {
+        // A quiet, no-merge day is honest — an empty vec, not an error.
+        let merged = parse_merged_pr_list_json(b"[]").unwrap();
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn parse_merged_pr_list_json_rejects_malformed_json() {
+        assert!(parse_merged_pr_list_json(b"not json").is_err());
     }
 
     // ─── Transient gh retry / resilience (Step 8b) ─────────────────────────
