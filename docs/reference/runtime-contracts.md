@@ -50,6 +50,7 @@ Simard does **not** expose:
 | improvement-curation state readback | `simard improvement-curation read ...` | `simard_operator_probe improvement-curation-read ...` |
 | review artifact persistence and readback | `simard review ...` | `simard_operator_probe review-run ...` and `review-read ...` |
 | benchmark scenarios and suites | `simard gym ...` | `simard-gym ...` |
+| LOCAL COIN Gym harness done-gate | `coin-gym verify` | `simard_operator_probe coin-gym-verify` |
 | concierge identity end-to-end probe | none | `simard_operator_probe concierge-run ...` |
 | handoff export/restore roundtrip probe | none | `simard_operator_probe handoff-roundtrip ...` |
 
@@ -464,6 +465,38 @@ The gym also supports persisted run-to-run comparison for a single scenario:
 - comparison output includes current, previous, and delta values for `unnecessary_action_count` and `retry_count`
 - if one side of the comparison comes from an older artifact that lacks either field, compare renders that value and its delta as `unmeasured` instead of inventing `0`
 - comparison artifacts are written under `target/simard-gym/comparisons/<scenario-id>/`
+
+### LOCAL COIN Gym harness
+
+Canonical entrypoint: `coin-gym verify`
+
+Compatibility surface: `simard_operator_probe coin-gym-verify`
+
+The LOCAL COIN Gym harness (`src/coin_gym/`) benchmarks the COIN
+code-reasoning-by-reachability shape locally, scoring a single-model **baseline**
+against a multi-agent **team** with a skwaq-style failure-analysis plus
+overfitting-reviewer gate. `coin-gym verify` is its machine-checkable
+**done-gate**: it exercises every harness component — target loader, baseline
+runner, team runner, scorer, leaderboard comparator, the self-improvement loop,
+and the `coin evaluate`/`coin verify` contract wiring — offline against the
+built-in sample snapshot and exits non-zero if any LOCAL acceptance criterion
+fails.
+
+`simard_operator_probe coin-gym-verify` re-exposes that exact done-gate through
+the operator-probe dispatcher, so the repo-grounded LOCAL COIN harness is
+reachable from the same surface as the other repo-grounded engineer surfaces
+(`engineer-loop-run`, `terminal-run`, …) rather than only from the standalone
+`coin-gym` binary. The probe takes no arguments, is hermetic and offline
+(self-improvement tactic memory is isolated under a throwaway temp directory so
+it never touches a user's real profiles), and prints one `PASS`/`FAIL` row per
+criterion followed by the aggregate result.
+
+> [!IMPORTANT]
+> This is a **LOCAL-only** gate. Live VM grading (`coin evaluate`/`coin verify`,
+> Phase 3, issue #2823) is externally gated on a provisioned Docker host and is
+> intentionally out of this gate's scope. The probe never reaches the network
+> and never posts results anywhere. See
+> [How to run the COIN Gym harness](../howto/run-the-coin-gym-harness.md).
 
 ### Bootstrap contract
 

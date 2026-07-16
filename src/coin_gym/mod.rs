@@ -67,6 +67,17 @@ use scorer::{Score, score_run};
 use target_loader::DemoScenario;
 use types::{CoinGymError, CoinGymResult, RunReport, Strategy, TargetFamily};
 
+/// Scope note for the LOCAL COIN Gym acceptance done-gate.
+///
+/// Shared verbatim by the `coin-gym verify` CLI gate ([`cmd_verify`]) and the
+/// operator-probe surface (`simard_operator_probe coin-gym-verify`,
+/// `crate::operator_commands::run_coin_gym_verify_probe`) so the two can never
+/// drift on what the gate does and does not cover. Rendered after a `scope: `
+/// prefix by the CLI and a `Scope:` label by the probe.
+pub(crate) const LOCAL_ACCEPTANCE_SCOPE_NOTE: &str = "LOCAL offline harness only. \
+     Live VM grading (`coin evaluate`/`coin verify`) is Phase 3 — externally gated \
+     on a provisioned Docker host (issue #2823) and intentionally out of this gate.";
+
 /// CLI usage string.
 #[must_use]
 pub fn coin_gym_usage() -> &'static str {
@@ -827,11 +838,7 @@ fn cmd_verify(rest: &[String]) -> CoinGymResult<()> {
         report.passed_count(),
         report.total()
     );
-    println!(
-        "scope: LOCAL offline harness only. Live VM grading (`coin evaluate`/`coin verify`) is \
-         Phase 3 — externally gated on a provisioned Docker host (issue #2823) and intentionally \
-         out of this gate."
-    );
+    println!("scope: {LOCAL_ACCEPTANCE_SCOPE_NOTE}");
 
     if report.all_passed() {
         Ok(())
