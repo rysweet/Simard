@@ -956,6 +956,166 @@ impl<C: ConversationChannel + Send> SignalSender for ConversationSignalSender<C>
     }
 }
 
+/// Env-driven configuration for the local Signal JSON-RPC service (#4178).
+///
+/// Parallels [`EmailConfig`]: a live transport is selected only when the
+/// principals are present. `addr` defaults to the running local service and is
+/// never part of the "configured" check — exactly mirroring how `EmailConfig`
+/// treats `SMTP_HOST`/`SMTP_PORT` versus the `from`/`to` principals.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignalRpcConfig {
+    /// `host:port` of the JSON-RPC service (default `127.0.0.1:7583`).
+    pub addr: String,
+    /// The Signal account/number to send AS (`SIMARD_SIGNAL_RPC_ACCOUNT`).
+    pub account: Option<String>,
+    /// The operator's Signal number to send TO (`SIMARD_SIGNAL_RPC_RECIPIENT`).
+    pub recipient: Option<String>,
+}
+
+impl Default for SignalRpcConfig {
+    fn default() -> Self {
+        Self {
+            addr: Self::DEFAULT_ADDR.to_string(),
+            account: None,
+            recipient: None,
+        }
+    }
+}
+
+impl SignalRpcConfig {
+    /// The running local Signal JSON-RPC service the operator's tooling uses.
+    const DEFAULT_ADDR: &'static str = "127.0.0.1:7583";
+
+    pub fn from_env() -> Self {
+        Self::from_lookup(|k| std::env::var(k).ok())
+    }
+
+    /// Injectable-env constructor (tests build a fixed map), mirroring
+    /// [`EmailConfig::from_lookup`] so unit tests need no global-env mutation.
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
+        Self {
+            addr: lookup("SIMARD_SIGNAL_RPC_ADDR")
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|| Self::DEFAULT_ADDR.to_string()),
+            account: lookup("SIMARD_SIGNAL_RPC_ACCOUNT")
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string()),
+            recipient: lookup("SIMARD_SIGNAL_RPC_RECIPIENT")
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string()),
+        }
+    }
+
+    /// Configured iff BOTH an account AND a recipient are set (mirrors
+    /// [`EmailConfig::is_configured`]). `addr` alone never counts.
+    pub fn is_configured(&self) -> bool {
+        self.account.is_some() && self.recipient.is_some()
+    }
+}
+
+/// A minimal, dependency-free, timeout-bounded JSON-RPC-over-TCP [`SignalSender`]
+/// for the running local Signal service (#4178). It mirrors the [`TcpSmtpSender`]
+/// philosophy: only `std::net` + the crate's `serde_json`, no async/tokio, no
+/// `signal` cargo feature, no heavyweight RPC dependency. Every read/write is
+/// timeout-bounded so a hung service can never block the synchronous merge path,
+/// and any connection/timeout/protocol error surfaces as `Err` so the channel
+/// records a `Failed` (NEVER a silent drop).
+#[derive(Clone, Debug)]
+pub struct JsonRpcSignalSender {
+    config: SignalRpcConfig,
+}
+
+impl JsonRpcSignalSender {
+    /// Per-operation connect/read/write budget. The merge path is synchronous, so
+    /// this is deliberately short — fail fast rather than block a merge.
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    pub fn new(config: SignalRpcConfig) -> Self {
+        Self { config }
+    }
+}
+
+impl SignalSender for JsonRpcSignalSender {
+    fn send_text(&self, text: &str) -> Result<(), String> {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::{TcpStream, ToSocketAddrs};
+
+        let account = self
+            .config
+            .account
+            .clone()
+            .ok_or_else(|| "signal account unset".to_string())?;
+        let recipient = self
+            .config
+            .recipient
+            .clone()
+            .ok_or_else(|| "signal recipient unset".to_string())?;
+
+        // `recipient` is a single-element array, matching the service's `send`
+        // params. `serde_json` guarantees correct escaping of the message body.
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "send",
+            "params": {
+                "account": account,
+                "recipient": [recipient],
+                "message": text,
+            }
+        });
+        let mut line =
+            serde_json::to_string(&request).map_err(|e| format!("signal encode: {e}"))?;
+        line.push('\n');
+
+        let socket = self
+            .config
+            .addr
+            .to_socket_addrs()
+            .map_err(|e| format!("resolve {} failed: {e}", self.config.addr))?
+            .next()
+            .ok_or_else(|| format!("no socket address for {}", self.config.addr))?;
+        let stream = TcpStream::connect_timeout(&socket, Self::TIMEOUT)
+            .map_err(|e| format!("connect {} failed: {e}", self.config.addr))?;
+        stream
+            .set_read_timeout(Some(Self::TIMEOUT))
+            .map_err(|e| format!("signal set_read_timeout: {e}"))?;
+        stream
+            .set_write_timeout(Some(Self::TIMEOUT))
+            .map_err(|e| format!("signal set_write_timeout: {e}"))?;
+
+        let mut writer = stream
+            .try_clone()
+            .map_err(|e| format!("signal clone: {e}"))?;
+        writer
+            .write_all(line.as_bytes())
+            .map_err(|e| format!("signal write: {e}"))?;
+        writer.flush().map_err(|e| format!("signal flush: {e}"))?;
+
+        let mut reader = BufReader::new(stream);
+        let mut response = String::new();
+        let read = reader
+            .read_line(&mut response)
+            .map_err(|e| format!("signal read: {e}"))?;
+        if read == 0 || response.trim().is_empty() {
+            return Err("empty response from Signal service".to_string());
+        }
+
+        let value: serde_json::Value = serde_json::from_str(response.trim_end())
+            .map_err(|e| format!("invalid JSON-RPC reply: {e}"))?;
+        if let Some(err) = value.get("error") {
+            return Err(format!("signal send error: {err}"));
+        }
+        if value.get("result").is_some() {
+            return Ok(());
+        }
+        Err(format!(
+            "JSON-RPC reply had neither result nor error: {}",
+            response.trim()
+        ))
+    }
+}
+
 /// The Signal notification channel. When no sender is wired (e.g. the `signal`
 /// feature is off, or signal-cli is unconfigured) it returns
 /// [`ChannelDelivery::Queued`] (never dropped); otherwise it delegates to the
@@ -969,13 +1129,21 @@ impl SignalNotifyChannel {
         Self { sender }
     }
 
-    /// Production channel. A live Signal transport requires the daemon's async
-    /// runtime + a configured `SignalConversation` (feature `signal`), which the
-    /// operator wires explicitly; absent that, the channel queues (logged),
-    /// never drops. See [`ConversationSignalSender`] for the adapter used when a
-    /// channel IS available.
+    /// Production channel. When the local Signal JSON-RPC service is configured
+    /// ([`SignalRpcConfig::is_configured`]: `SIMARD_SIGNAL_RPC_ACCOUNT` +
+    /// `SIMARD_SIGNAL_RPC_RECIPIENT` both set) it builds a LIVE
+    /// [`JsonRpcSignalSender`], so operator notifications are actually POSTed to
+    /// the running service and return [`ChannelDelivery::Sent`] — exactly
+    /// mirroring how [`EmailNotifyChannel::from_env`] selects a real SMTP
+    /// transport from env (#4178). Absent that configuration it wires no sender,
+    /// so the channel queues (logged), never drops.
     pub fn from_env() -> Self {
-        Self::new(None)
+        let config = SignalRpcConfig::from_env();
+        if config.is_configured() {
+            Self::new(Some(Box::new(JsonRpcSignalSender::new(config))))
+        } else {
+            Self::new(None)
+        }
     }
 }
 
@@ -1204,7 +1372,11 @@ mod tests {
                 EmailConfig::default(),
                 Box::new(TcpSmtpSender),
             )),
-            Box::new(SignalNotifyChannel::from_env()),
+            // Explicitly unwired (no sender) so this stays an env-independent
+            // assertion of the never-drop Queued contract. `from_env()` now
+            // selects a LIVE sender when the RPC env is configured (#4178), so a
+            // configured process env would otherwise turn this into Sent/Failed.
+            Box::new(SignalNotifyChannel::new(None)),
         ]);
         let report = notifier.notify(&sample());
         assert!(report.dispatched(), "notification must still dispatch");
@@ -1306,12 +1478,305 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn signal_channel_queues_when_unwired() {
+        // The #4178 wiring makes `from_env()` construct a LIVE JSON-RPC sender
+        // when SIMARD_SIGNAL_RPC_ACCOUNT + SIMARD_SIGNAL_RPC_RECIPIENT are set.
+        // This regression test pins the UNCONFIGURED fail-safe (Queued, never
+        // dropped), so it must first ensure those vars are absent; otherwise a
+        // configured process env would make `from_env()` pick a sender and this
+        // Queued path would never run.
+        // SAFETY: env mutation is serialized via #[serial_test::serial(cognitive_memory)].
+        unsafe {
+            std::env::remove_var("SIMARD_SIGNAL_RPC_ADDR");
+            std::env::remove_var("SIMARD_SIGNAL_RPC_ACCOUNT");
+            std::env::remove_var("SIMARD_SIGNAL_RPC_RECIPIENT");
+        }
         let ch = SignalNotifyChannel::from_env();
         assert!(matches!(
             ch.deliver(&sample()),
             ChannelDelivery::Queued { .. }
         ));
+    }
+
+    // ── Signal JSON-RPC transport (#4178): make queued notifications DELIVER ──
+    //
+    // These tests specify the contract for the wiring fix: a dependency-free,
+    // timeout-bounded JSON-RPC-over-TCP `SignalSender` (`JsonRpcSignalSender`)
+    // selected from env by `SignalRpcConfig`, so a merge notification is actually
+    // POSTed to the running Signal service (127.0.0.1:7583) and returns Sent —
+    // while the unconfigured path stays Queued (never dropped) and any transport
+    // error becomes Failed (never a silent drop).
+
+    /// A tiny in-test JSON-RPC listener for exercising [`JsonRpcSignalSender`]. It
+    /// binds an ephemeral loopback port, accepts exactly one connection, reads one
+    /// request line, and — when `reply` is `Some` — writes it back followed by a
+    /// newline (the framing the sender reads). When `reply` is `None` the socket is
+    /// closed WITHOUT a reply, modelling a hung/closed Signal service (⇒ `Err`).
+    /// The captured request line is returned through the join handle so tests can
+    /// assert the exact wire shape.
+    fn spawn_signal_rpc_listener(
+        reply: Option<&'static str>,
+    ) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local addr").to_string();
+        let handle = std::thread::spawn(move || {
+            let (stream, _peer) = listener.accept().expect("accept one connection");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+            let mut request_line = String::new();
+            reader
+                .read_line(&mut request_line)
+                .expect("read one request line");
+            if let Some(body) = reply {
+                let mut w = stream;
+                w.write_all(body.as_bytes()).expect("write reply body");
+                w.write_all(b"\n").expect("write reply newline");
+                w.flush().expect("flush reply");
+            }
+            // Dropping `stream`/`reader` closes the connection.
+            request_line
+        });
+        (addr, handle)
+    }
+
+    /// A [`SignalRpcConfig`] pointed at the in-test listener `addr`, configured with
+    /// deterministic (non-secret) test principals.
+    fn signal_rpc_config_at(addr: &str) -> SignalRpcConfig {
+        let addr = addr.to_string();
+        SignalRpcConfig::from_lookup(move |k| match k {
+            "SIMARD_SIGNAL_RPC_ADDR" => Some(addr.clone()),
+            "SIMARD_SIGNAL_RPC_ACCOUNT" => Some("+15550001111".to_string()),
+            "SIMARD_SIGNAL_RPC_RECIPIENT" => Some("+15550002222".to_string()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn signal_rpc_config_detects_configuration_and_defaults_addr() {
+        // account + recipient ⇒ configured; addr defaults to the local service.
+        let configured = SignalRpcConfig::from_lookup(|k| match k {
+            "SIMARD_SIGNAL_RPC_ACCOUNT" => Some("+15550001111".to_string()),
+            "SIMARD_SIGNAL_RPC_RECIPIENT" => Some("+15550002222".to_string()),
+            _ => None,
+        });
+        assert!(
+            configured.is_configured(),
+            "account + recipient ⇒ configured"
+        );
+        assert_eq!(
+            configured.addr, "127.0.0.1:7583",
+            "addr defaults to the running local Signal JSON-RPC service"
+        );
+
+        // Missing recipient ⇒ NOT configured (mirrors EmailConfig::is_configured).
+        let no_recipient = SignalRpcConfig::from_lookup(|k| match k {
+            "SIMARD_SIGNAL_RPC_ACCOUNT" => Some("+15550001111".to_string()),
+            _ => None,
+        });
+        assert!(
+            !no_recipient.is_configured(),
+            "account alone is not configured"
+        );
+
+        // Missing account ⇒ NOT configured.
+        let no_account = SignalRpcConfig::from_lookup(|k| match k {
+            "SIMARD_SIGNAL_RPC_RECIPIENT" => Some("+15550002222".to_string()),
+            _ => None,
+        });
+        assert!(
+            !no_account.is_configured(),
+            "recipient alone is not configured"
+        );
+
+        // A custom addr override is honored.
+        let custom = SignalRpcConfig::from_lookup(|k| match k {
+            "SIMARD_SIGNAL_RPC_ADDR" => Some("127.0.0.1:9999".to_string()),
+            "SIMARD_SIGNAL_RPC_ACCOUNT" => Some("+1".to_string()),
+            "SIMARD_SIGNAL_RPC_RECIPIENT" => Some("+2".to_string()),
+            _ => None,
+        });
+        assert_eq!(
+            custom.addr, "127.0.0.1:9999",
+            "explicit addr overrides default"
+        );
+        assert!(custom.is_configured());
+
+        // Whitespace-only principals are treated as unset (defensive, like Email).
+        let blank = SignalRpcConfig::from_lookup(|k| match k {
+            "SIMARD_SIGNAL_RPC_ACCOUNT" => Some("   ".to_string()),
+            "SIMARD_SIGNAL_RPC_RECIPIENT" => Some("+2".to_string()),
+            _ => None,
+        });
+        assert!(
+            !blank.is_configured(),
+            "a whitespace-only account must not count as configured"
+        );
+
+        // Nothing set ⇒ NOT configured.
+        assert!(!SignalRpcConfig::from_lookup(|_| None).is_configured());
+    }
+
+    #[test]
+    fn json_rpc_signal_sender_posts_wellformed_request_and_maps_result_to_ok() {
+        let (addr, handle) = spawn_signal_rpc_listener(Some(
+            r#"{"jsonrpc":"2.0","id":1,"result":{"timestamp":1700000000000}}"#,
+        ));
+        let sender = JsonRpcSignalSender::new(signal_rpc_config_at(&addr));
+
+        let res = sender.send_text("operator: PR #4180 merged");
+        assert_eq!(
+            res,
+            Ok(()),
+            "a JSON-RPC result ⇒ Ok(()) (channel records Sent)"
+        );
+
+        let request = handle.join().expect("listener thread joins");
+        let v: serde_json::Value =
+            serde_json::from_str(request.trim_end()).expect("request must be a single JSON line");
+        assert_eq!(v["jsonrpc"], "2.0", "JSON-RPC 2.0 envelope: {v}");
+        assert!(
+            v["id"].is_number() || v["id"].is_string(),
+            "a request id is present: {v}"
+        );
+        assert_eq!(v["method"], "send", "method must be \"send\": {v}");
+        assert_eq!(
+            v["params"]["account"], "+15550001111",
+            "sends AS the configured account: {v}"
+        );
+        assert_eq!(
+            v["params"]["recipient"],
+            serde_json::json!(["+15550002222"]),
+            "recipient is a single-element array of the operator number: {v}"
+        );
+        assert_eq!(
+            v["params"]["message"], "operator: PR #4180 merged",
+            "the message body is carried verbatim: {v}"
+        );
+    }
+
+    #[test]
+    fn json_rpc_signal_sender_maps_error_response_to_err() {
+        let (addr, handle) = spawn_signal_rpc_listener(Some(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"unregistered account"}}"#,
+        ));
+        let sender = JsonRpcSignalSender::new(signal_rpc_config_at(&addr));
+
+        let res = sender.send_text("x");
+        assert!(
+            res.is_err(),
+            "a JSON-RPC error object ⇒ Err (channel records Failed, never a silent drop): {res:?}"
+        );
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn json_rpc_signal_sender_maps_closed_socket_to_err() {
+        // The service accepts and reads the request but closes WITHOUT replying.
+        let (addr, handle) = spawn_signal_rpc_listener(None);
+        let sender = JsonRpcSignalSender::new(signal_rpc_config_at(&addr));
+
+        let res = sender.send_text("x");
+        assert!(
+            res.is_err(),
+            "an empty/closed response ⇒ Err, never a false Ok: {res:?}"
+        );
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn json_rpc_signal_sender_maps_connection_failure_to_err() {
+        // Bind then immediately drop to obtain a definitely-closed loopback port;
+        // connecting to it must fail fast as Err (never a silent drop, never Ok).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        drop(listener);
+        let sender = JsonRpcSignalSender::new(signal_rpc_config_at(&addr));
+
+        assert!(
+            sender.send_text("x").is_err(),
+            "a connection failure to a down service ⇒ Err"
+        );
+    }
+
+    #[test]
+    fn dual_notifier_signal_delivers_sent_for_merge_when_configured() {
+        // The end-to-end contract: a configured Signal channel composed into the
+        // DualChannelNotifier POSTs a kind="merge" notification and returns Sent.
+        assert_eq!(sample().kind, "merge", "fixture is a merge notification");
+
+        let (addr, handle) =
+            spawn_signal_rpc_listener(Some(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#));
+        let signal = SignalNotifyChannel::new(Some(Box::new(JsonRpcSignalSender::new(
+            signal_rpc_config_at(&addr),
+        ))));
+        let notifier = DualChannelNotifier::new(vec![Box::new(signal)]);
+
+        let report = notifier.notify(&sample());
+        assert!(report.dispatched(), "must dispatch: {report:?}");
+        let (_, delivery) = report
+            .per_channel
+            .iter()
+            .find(|(n, _)| n == "signal")
+            .expect("signal channel present in report");
+        assert_eq!(
+            *delivery,
+            ChannelDelivery::Sent,
+            "a configured Signal channel POSTs the merge and returns Sent: {report:?}"
+        );
+
+        let request = handle.join().expect("listener thread joins");
+        let v: serde_json::Value =
+            serde_json::from_str(request.trim_end()).expect("request must be valid JSON");
+        assert_eq!(
+            v["method"], "send",
+            "merge was POSTed via JSON-RPC send: {v}"
+        );
+        // The operator-readable problem text reaches the wire (present whether or
+        // not the body is marker-wrapped under the `signal` feature).
+        assert!(
+            v["params"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("distillation parse-failure"),
+            "the human-readable body reaches Signal: {v}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn signal_channel_from_env_builds_live_sender_when_configured() {
+        // With SIMARD_SIGNAL_RPC_ACCOUNT + SIMARD_SIGNAL_RPC_RECIPIENT set,
+        // `from_env()` must build a LIVE sender (Some), so a merge delivery is
+        // actually POSTed and returns Sent instead of Queued.
+        let (addr, handle) =
+            spawn_signal_rpc_listener(Some(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#));
+        // SAFETY: env mutation is serialized via #[serial_test::serial(cognitive_memory)].
+        unsafe {
+            std::env::set_var("SIMARD_SIGNAL_RPC_ADDR", &addr);
+            std::env::set_var("SIMARD_SIGNAL_RPC_ACCOUNT", "+15550001111");
+            std::env::set_var("SIMARD_SIGNAL_RPC_RECIPIENT", "+15550002222");
+        }
+        let ch = SignalNotifyChannel::from_env();
+        let out = ch.deliver(&sample());
+        // SAFETY: env mutation is serialized via #[serial_test::serial(cognitive_memory)].
+        unsafe {
+            std::env::remove_var("SIMARD_SIGNAL_RPC_ADDR");
+            std::env::remove_var("SIMARD_SIGNAL_RPC_ACCOUNT");
+            std::env::remove_var("SIMARD_SIGNAL_RPC_RECIPIENT");
+        }
+        assert_eq!(
+            out,
+            ChannelDelivery::Sent,
+            "from_env() with account+recipient set must build a live sender and POST (Sent)"
+        );
+        let request = handle.join().expect("listener thread joins");
+        assert!(
+            request.contains("\"method\""),
+            "a JSON-RPC request reached the wire via from_env(): {request}"
+        );
     }
 
     // ── Part A: Signal notifications carry the anti-self-ingest marker (#2631) ─

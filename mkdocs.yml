@@ -250,6 +250,7 @@ nav:
     - Configure Overseer Goal-Board Health: howto/configure-overseer-goal-board-health.md
     - Configure Overseer Memory Recall: howto/configure-overseer-memory-recall.md
     - Configure Overseer Email Notifications: howto/configure-overseer-email-notifications.md
+    - Configure Overseer Signal Notifications: howto/configure-overseer-signal-rpc-notifications.md
     - Review Overseer Workstream Gaps: howto/review-overseer-workstream-gaps.md
     - Diagnose Recurring Cognitive-Memory Signature: howto/diagnose-recurring-cognitive-memory-signature.md
     - Configure Overseer Root-Cause Principle: howto/configure-overseer-root-cause-why.md
@@ -275,6 +276,7 @@ nav:
     - Overseer Goal-Board Health API: reference/overseer-goal-board-health-api.md
     - Overseer Memory-Recall API: reference/overseer-memory-recall-api.md
     - Overseer Operator Notifications: reference/overseer-operator-notifications.md
+    - Overseer Signal JSON-RPC Transport: reference/overseer-signal-jsonrpc-transport.md
     - Overseer Workstream Gap-Scan: reference/overseer-workstream-gap-scan.md
     - Overseer Root-Cause (WHY) API: reference/overseer-root-cause-why-api.md
     - Overseer Self-Observation Stability: reference/overseer-self-observation-stability.md
