@@ -995,9 +995,24 @@ pub(crate) fn reinvestigate_bare_blocked_goals(
 /// own failure). Signals, in ladder order: the done-gate certifies
 /// `ALREADY-COMPLETE`; an obsolescence marker means `OBSOLETE`; an absent
 /// governed repo means `MISSING-PRECONDITION`; a pending upstream means
-/// `UPSTREAM-DEPENDENCY`; anything else is `GENUINELY-STUCK`. An evidence-source
-/// error on the auxiliary signals downgrades to `GENUINELY-STUCK` (fail closed —
-/// never self-heal / self-defer on an unknown state).
+/// `UPSTREAM-DEPENDENCY`. At the terminal rung a goal that still references open
+/// work is `GENUINELY-STUCK` (evidence = those open artifacts); a goal with **no**
+/// tracked artifact the done-gate can ever check is `UNCLEAR-CRITERIA` (evidence
+/// = the named unmeasurable criterion) — the synthetic `simard-identity-*` goals.
+/// An evidence-source error on the auxiliary signals downgrades to
+/// `GENUINELY-STUCK` (fail closed — never self-heal / self-defer on an unknown
+/// state), tagging the errored probe so the WHY is still concrete.
+///
+/// **Invariant (issue #16 follow-up):** this reasoner never returns an
+/// empty-evidence WHY for either **block-authoring terminal class**
+/// (`GENUINELY-STUCK` / `UNCLEAR-CRITERIA`) — the only classes whose evidence
+/// renders into a human-facing `GoalProgress::Blocked` reason. Every such branch
+/// attaches at least one concrete [`Evidence`], so the breaker can never author a
+/// bare `evidence=[(none)]` block — the exact live-daemon defect that stranded
+/// the `simard-identity-*` / coverage / parity goals with a generic,
+/// evidence-free stamp. (`ALREADY-COMPLETE` routes to auto-complete and
+/// `OBSOLETE` to drop, so neither renders into a block; their evidence is
+/// narrative only.)
 pub(crate) struct DeterministicNoProgressReasoner<'a> {
     evidence: &'a dyn EvidenceSource,
 }
@@ -1048,6 +1063,37 @@ fn stuck_evidence(goal: &ActiveGoal) -> Vec<Evidence> {
         .collect()
 }
 
+/// Evidence for an `UNCLEAR-CRITERIA` goal (issue #16 follow-up): a stalled goal
+/// that reached the terminal rung with **no** tracked artifact the done-gate can
+/// ever check — no open/closed PR or issue, no absent precondition, no upstream.
+/// Its done-criteria are therefore structurally unmeasurable (the synthetic
+/// `simard-identity-*` goals). This names that missing, measurable criterion so
+/// the WHY is concrete and evidence-backed rather than a bare `(none)` stamp —
+/// the exact live-daemon `evidence=[(none)]` defect this closes.
+fn unclear_criteria_evidence(goal: &ActiveGoal) -> Vec<Evidence> {
+    vec![Evidence::new(
+        "done-criteria",
+        goal.id.clone(),
+        "unmeasurable: no tracked PR/issue the done-gate can verify",
+    )]
+}
+
+/// Evidence for a `GENUINELY-STUCK` goal reached by a **fail-closed downgrade**
+/// (issue #16 follow-up): an auxiliary signal (`repo-presence` /
+/// `dependency-state`) errored, so the reasoner cannot self-heal / self-defer and
+/// commits to `GENUINELY-STUCK`. The errored probe is named as evidence (and any
+/// open artifacts appended) so the downgrade never renders `evidence=[(none)]`;
+/// the full error is already surfaced via `tracing::error!`.
+fn downgrade_evidence(goal: &ActiveGoal, signal: &str) -> Vec<Evidence> {
+    let mut evidence = vec![Evidence::new(
+        "signal",
+        signal.to_string(),
+        "unknown: evidence probe errored",
+    )];
+    evidence.extend(stuck_evidence(goal));
+    evidence
+}
+
 impl NoProgressWhyReasoner for DeterministicNoProgressReasoner<'_> {
     fn investigate(&self, goal: &ActiveGoal) -> SimardResult<NoProgressWhy> {
         // 1. Done-gate positively certifies completion (the kgpacks-rs incident).
@@ -1084,7 +1130,7 @@ impl NoProgressWhyReasoner for DeterministicNoProgressReasoner<'_> {
                 );
                 return Ok(NoProgressWhy::new(
                     NoProgressClass::GenuinelyStuck,
-                    stuck_evidence(goal),
+                    downgrade_evidence(goal, "repo-presence"),
                 ));
             }
         }
@@ -1107,15 +1153,29 @@ impl NoProgressWhyReasoner for DeterministicNoProgressReasoner<'_> {
                 );
                 return Ok(NoProgressWhy::new(
                     NoProgressClass::GenuinelyStuck,
-                    stuck_evidence(goal),
+                    downgrade_evidence(goal, "dependency-state"),
                 ));
             }
         }
-        // 5. No machine-resolvable cause found.
-        Ok(NoProgressWhy::new(
-            NoProgressClass::GenuinelyStuck,
-            stuck_evidence(goal),
-        ))
+        // 5. No machine-resolvable cause found. Split the terminal rung by whether
+        //    the goal still references open work the done-gate could ever track:
+        //      - open artifacts present  -> GENUINELY-STUCK (evidence = them);
+        //      - no tracked artifact     -> UNCLEAR-CRITERIA (evidence = the named
+        //        unmeasurable criterion) — the synthetic simard-identity-* goals.
+        //    Never emit an empty-evidence GENUINELY-STUCK block: that is the exact
+        //    live-daemon `evidence=[(none)]` defect (issue #16 follow-up).
+        let open_artifacts = stuck_evidence(goal);
+        if open_artifacts.is_empty() {
+            Ok(NoProgressWhy::new(
+                NoProgressClass::UnclearCriteria,
+                unclear_criteria_evidence(goal),
+            ))
+        } else {
+            Ok(NoProgressWhy::new(
+                NoProgressClass::GenuinelyStuck,
+                open_artifacts,
+            ))
+        }
     }
 }
 
