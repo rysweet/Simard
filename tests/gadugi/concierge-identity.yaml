@@ -1,0 +1,51 @@
+name: "Concierge hospitality identity end-to-end"
+description: "Outside-in verification that the simard-concierge identity is real and runnable: (1) the builtin loader bootstraps simard-concierge through the operator probe (the repo-grounded engineer-loop-run surface), (2) the bundled dependency-free reservations/PMS reference prototype passes its end-to-end reservation -> check-in -> housekeeping -> check-out smoke test (including a live HTTP round-trip), and (3) the Rust asset/identity contract in tests/concierge_identity_assets.rs holds. Proves the identity can produce a hotel concept AND a runnable reservations/PMS prototype end-to-end."
+version: "1.0.0"
+
+config:
+  timeout: 900000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 900000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Concierge identity bootstraps and its PMS prototype runs green"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/concierge-identity.sh"
+    timeout: 900000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "identity"
+    - "concierge"
+    - "hospitality"
+    - "prompt-assets"
+    - "prototype"

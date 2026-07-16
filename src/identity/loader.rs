@@ -158,6 +158,32 @@ impl IdentityLoader for BuiltinIdentityLoader {
                 MemoryPolicy::default(),
                 request.contract.clone(),
             ),
+            "simard-concierge" => IdentityManifest::new(
+                "simard-concierge",
+                request.package_version.clone(),
+                vec![PromptAssetRef::new(
+                    "concierge-system",
+                    "simard/concierge_system.md",
+                )],
+                vec![
+                    BaseTypeId::new("local-harness"),
+                    BaseTypeId::new("terminal-shell"),
+                    BaseTypeId::new("rusty-clawd"),
+                    BaseTypeId::new("copilot-sdk"),
+                    BaseTypeId::new("claude-agent-sdk"),
+                    BaseTypeId::new("ms-agent-framework"),
+                ],
+                capability_set([
+                    BaseTypeCapability::PromptAssets,
+                    BaseTypeCapability::SessionLifecycle,
+                    BaseTypeCapability::Memory,
+                    BaseTypeCapability::Evidence,
+                    BaseTypeCapability::Reflection,
+                ]),
+                OperatingMode::Engineer,
+                MemoryPolicy::default(),
+                request.contract.clone(),
+            ),
             "simard-composite-engineer" => IdentityManifest::compose(
                 "simard-composite-engineer",
                 request.package_version.clone(),
@@ -226,6 +252,26 @@ mod tests {
             .unwrap();
         assert_eq!(manifest.name, "simard-engineer");
         assert_eq!(manifest.default_mode, OperatingMode::Engineer);
+    }
+
+    #[test]
+    fn builtin_loader_loads_concierge_identity() {
+        let loader = BuiltinIdentityLoader;
+        let manifest = loader
+            .load(&IdentityLoadRequest::new(
+                "simard-concierge",
+                "0.1.0",
+                test_contract(),
+            ))
+            .unwrap();
+        assert_eq!(manifest.name, "simard-concierge");
+        assert_eq!(manifest.default_mode, OperatingMode::Engineer);
+        assert_eq!(manifest.prompt_assets[0].id.as_str(), "concierge-system");
+        assert_eq!(
+            manifest.prompt_assets[0].relative_path.to_str().unwrap(),
+            "simard/concierge_system.md"
+        );
+        assert!(manifest.supports_base_type(&BaseTypeId::new("local-harness")));
     }
 
     #[test]

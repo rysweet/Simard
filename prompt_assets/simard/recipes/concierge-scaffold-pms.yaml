@@ -1,0 +1,81 @@
+# concierge-scaffold-pms.yaml — Concierge operations recipe: concept -> runnable
+# reservations/PMS prototype.
+#
+# Drives the simard-concierge operations phases (reservations/PMS, housekeeping,
+# channel management) to scaffold a RUNNABLE reservations/PMS prototype from a
+# hotel concept. Starts from the bundled pure-Rust reference example at
+# examples/concierge_reservations_pms.rs (Simard is a pure-Rust daemon, #3181 —
+# no Python in the tree) and seeds it with the concept's room types + rate plans.
+#
+# Context vars (passed via -c):
+#   concept_path      — path to the concept produced by concierge-hotel-concept
+#   scaffold_dir      — directory to write the runnable prototype into
+#   evidence_output   — FILE the agent writes the run/verify evidence to
+
+name: "concierge-scaffold-pms"
+description: "Scaffold a runnable reservations/PMS prototype from a hotel concept"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "concierge", "hospitality", "operations", "pms"]
+
+context:
+  concept_path: ""
+  scaffold_dir: ""
+  evidence_output: ""
+
+steps:
+  - id: "scaffold-reservations-pms"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      You are the **Simard Concierge** working the operations phases. You take
+      the hotel concept and scaffold a RUNNABLE reservations/PMS prototype — real
+      software a reviewer can start and exercise, not an illustration.
+
+      ## Inputs
+
+      - **concept**: read the concept document at `{{concept_path}}`. Its
+        `property_layout` room-type table and `brand_design` rate-plan table are
+        the seed for the software.
+      - **reference prototype**: the pure-Rust example at
+        examples/concierge_reservations_pms.rs (Simard is a pure-Rust daemon,
+        #3181 — do NOT introduce Python). It has a domain core (`Hotel`,
+        `RoomType`, `RatePlan`, `Room`, `Reservation`, availability, `reserve`,
+        `check_in`, `check_out`, folio, housekeeping lifecycle + board, channel
+        snapshot), a `seed_hotel` concept seed, a self-verifying
+        `run_end_to_end_demo` / `main`, and `#[test]`s wired into `cargo test`.
+
+      ## Do
+
+      1. **Seed from the concept.** Edit `seed_hotel` so the `type_code`s / counts
+         come from the concept's room-type table and the `plan_code`s /
+         `base_rate`s come from the concept's rate-plan table. Same identifiers as
+         the concept document. (Adapt the example in place, or copy it under
+         `{{scaffold_dir}}` and keep it building.)
+      2. **Follow the operations phase prompts**:
+         reservations/PMS  -> prompt_assets/simard/concierge/reservations_pms.md
+         housekeeping       -> prompt_assets/simard/concierge/housekeeping.md
+         channel management -> prompt_assets/simard/concierge/channel_management.md
+      3. **Preserve the invariants**: availability never negative; shared
+         inventory across channels; check-out settles the folio and marks the
+         room dirty; out-of-order rooms excluded from availability.
+      4. **Keep it runnable and extend the tests.** If the concept needs a
+         capability the scaffold lacks, add it AND extend the example's demo /
+         `#[test]`s.
+
+      ## Verify (do not skip)
+
+      Run:
+
+          cargo run --example concierge_reservations_pms
+          cargo test --example concierge_reservations_pms
+
+      The demo must print `result: ok. N checks passed; 0 failed` and exit 0, and
+      the tests must be green.
+
+      ## Output (hard contract)
+
+      WRITE evidence to the FILE at `{{evidence_output}}`: the seeded room types
+      and rate plans, the exact run/test commands, and the captured
+      `result: ok. N checks passed; 0 failed` and `test result: ok.` lines. Never
+      claim runnable without the captured output.

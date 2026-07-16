@@ -56,6 +56,14 @@ path = "src/bin/simard_tui/main.rs"
 name = "supply-chain-steward"
 path = "src/bin/supply_chain_steward.rs"
 
+# Reference reservations/PMS prototype for the simard-concierge identity.
+# `test = true` wires its unit/invariant tests into `cargo test` (the example is
+# also runnable as a self-verifying demo: `cargo run --example concierge_reservations_pms`).
+[[example]]
+name = "concierge_reservations_pms"
+path = "examples/concierge_reservations_pms.rs"
+test = true
+
 [dependencies]
 # De-fork phase 2b (issue #2307): the amplihack-memory-lib `CognitiveMemory`
 # (persistent, lbug-backed `GraphStore`) is now the SOLE cognitive-memory
