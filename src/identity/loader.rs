@@ -189,7 +189,7 @@ impl IdentityLoader for BuiltinIdentityLoader {
                 request.package_version.clone(),
                 vec![PromptAssetRef::new(
                     "concierge-system",
-                    "simard/concierge_system.md",
+                    "simard/identities/concierge/concierge_system.md",
                 )],
                 vec![
                     BaseTypeId::new("local-harness"),
@@ -294,7 +294,7 @@ mod tests {
         assert_eq!(manifest.default_mode, OperatingMode::Orchestrator);
         assert_eq!(
             manifest.prompt_assets[0].relative_path,
-            std::path::Path::new("simard/concierge_system.md")
+            std::path::Path::new("simard/identities/concierge/concierge_system.md")
         );
     }
 
