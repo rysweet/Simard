@@ -998,6 +998,11 @@ pub(crate) fn reinvestigate_bare_blocked_goals(
 /// `UPSTREAM-DEPENDENCY`; anything else is `GENUINELY-STUCK`. An evidence-source
 /// error on the auxiliary signals downgrades to `GENUINELY-STUCK` (fail closed —
 /// never self-heal / self-defer on an unknown state).
+///
+/// Every `GENUINELY-STUCK` classification carries **non-empty** evidence: when
+/// the goal has no tracked artifacts, [`stuck_evidence`] synthesizes a concrete
+/// item naming the unmeasurable-done-criteria condition, so the reasoner can
+/// never emit the `evidence=[(none)]` shape that stranded the live-daemon goals.
 pub(crate) struct DeterministicNoProgressReasoner<'a> {
     evidence: &'a dyn EvidenceSource,
 }
@@ -1028,9 +1033,26 @@ fn artifact_evidence(goal: &ActiveGoal) -> Vec<Evidence> {
         .collect()
 }
 
-/// Narrative evidence for a `GENUINELY-STUCK` goal: its still-open artifacts.
+/// Narrative evidence for a `GENUINELY-STUCK` goal.
+///
+/// Prefers the goal's still-open tracked artifacts (open PRs / issues). When the
+/// goal has **no** tracked artifacts — the exact live-daemon shape (the
+/// `simard-identity-*` and coverage/coin/parity goals, verified 2026-07-15)
+/// whose empty `wip_refs` made this return `[]` and, past the guided retry,
+/// stamped an `evidence=[(none)]` dead-end — it synthesizes one concrete,
+/// self-describing evidence item naming the observed stuck condition: the goal
+/// exposes no machine-measurable done-criteria (nothing the done-gate can
+/// certify), which is *why* it is genuinely stuck.
+///
+/// This upholds the invariant that a `GENUINELY-STUCK` classification NEVER
+/// carries empty evidence, so the terminal rung escalates with an actionable WHY
+/// (asking a human to add measurable done-criteria or drop the goal) instead of
+/// livelocking as an evidence-less surfaced investigation failure. It is the
+/// root-cause fix at the source; the downstream evidence-less guard in the
+/// breaker (`SurfaceInvestigationFailure`) remains as defense-in-depth.
 fn stuck_evidence(goal: &ActiveGoal) -> Vec<Evidence> {
-    goal.wip_refs
+    let artifacts: Vec<Evidence> = goal
+        .wip_refs
         .iter()
         .filter_map(|w| match w.kind.to_ascii_lowercase().as_str() {
             "pr" => Some(Evidence::new(
@@ -1045,7 +1067,17 @@ fn stuck_evidence(goal: &ActiveGoal) -> Vec<Evidence> {
             )),
             _ => None,
         })
-        .collect()
+        .collect();
+    if !artifacts.is_empty() {
+        return artifacts;
+    }
+    // No tracked artifacts: name the observed stuck condition so a GENUINELY-STUCK
+    // WHY is never empty. Nothing the done-gate can measure exists for this goal.
+    vec![Evidence::new(
+        "done-criteria",
+        goal.id.clone(),
+        "not machine-measurable: no tracked work refs and no derivable completion signal",
+    )]
 }
 
 impl NoProgressWhyReasoner for DeterministicNoProgressReasoner<'_> {

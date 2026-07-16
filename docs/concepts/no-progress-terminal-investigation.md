@@ -35,10 +35,10 @@ stalled goal and self-resolves the machine-fixable causes. Its bottom rung —
 independent recipe-runner investigation) on the first stall, then escalates to a
 human on the second. The escalation embedded the classification's evidence.
 
-But the deterministic reasoner's `stuck_evidence(goal)` returns only the goal's
-still-open tracked issues/PRs. A goal that never produced a tracked artifact —
-the six `simard-identity-*` goals, the coverage/coin/parity goals — has **empty**
-evidence, so the terminal escalation rendered:
+But the deterministic reasoner's `stuck_evidence(goal)` historically returned
+only the goal's still-open tracked issues/PRs. A goal that never produced a
+tracked artifact — the six `simard-identity-*` goals, the coverage/coin/parity
+goals — had **empty** evidence, so the terminal escalation rendered:
 
 ```text
 🔒 [OODA-SAFEGUARD] OODA goal made no shippable progress for 3 consecutive
@@ -49,6 +49,26 @@ A generic, non-actionable stamp. On the live daemon (2026-07-15) **12–13 of 20
 active goals were parked this way. The contrast is one goal (issue-17/WS2) that
 carried a rich, specific diagnosis: a concrete WHY backed by evidence. That is
 the bar every blocked goal must meet.
+
+## The source fix: `stuck_evidence` is never empty
+
+The root cause is fixed at the source. `stuck_evidence(goal)` now **always**
+returns at least one evidence item. When a goal has no tracked artifacts it
+synthesizes a concrete, self-describing item naming the observed stuck
+condition — the goal exposes no machine-measurable done-criteria and no
+derivable completion signal, keyed to the goal id:
+
+```text
+🔒 [OODA-SAFEGUARD] … why=GENUINELY-STUCK evidence=[done-criteria
+<goal-id> (not machine-measurable: no tracked work refs and no derivable
+completion signal)]
+```
+
+So an artifact-less `GENUINELY-STUCK` goal now takes the **evidence-backed
+blocker** outcome (below): past its guided retry it escalates with an actionable
+WHY + a filed tracking issue asking a human to add measurable done-criteria (or
+drop the goal), rather than livelocking. The `evidence=[(none)]` shape is no
+longer producible by the production reasoner.
 
 ## The rule: never `evidence=[(none)]`
 
@@ -66,14 +86,17 @@ honest outcomes, never a bare stamp:
    + evidence attached (the issue-17 quality bar) — a real diagnosis, never
    `(none)`.
 
-3. **Surfaced investigation gap.** If the terminal rung is reached and the
-   investigation produced **no** evidence, that is itself a failure, not a
-   silent generic block. `resolution_for_why` returns
+3. **Surfaced investigation gap (defense-in-depth).** If the terminal rung is
+   reached and the investigation *still* produced **no** evidence — which the
+   production `stuck_evidence` no longer does, but an injected or future reasoner
+   could — that is itself a failure, not a silent generic block.
+   `resolution_for_why` returns
    `NoProgressResolution::SurfaceInvestigationFailure`: the adapter records the
    goal in `NoProgressBreakerReport::investigation_errors` (fail visible), takes
    **no** terminal action, and leaves the goal retriable (fail closed) so the
    next investigation can recover real evidence. A surfaced gap is **not** a
-   firing.
+   firing. This guard remains as a last line of defense even though the source
+   fix guarantees the production reasoner never emits empty evidence.
 
 No wall-clock timeout kills the investigation; the recipe-runner's own
 idle/liveness handling governs it.

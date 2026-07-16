@@ -31,8 +31,8 @@
 use std::cell::RefCell;
 
 use super::no_progress::{
-    NoProgressEngineerDispatcher, NoProgressIssueFiler, PreconditionHealer,
-    apply_no_progress_breaker_investigated,
+    DeterministicNoProgressReasoner, NoProgressEngineerDispatcher, NoProgressIssueFiler,
+    PreconditionHealer, apply_no_progress_breaker_investigated,
 };
 use crate::error::{SimardError, SimardResult};
 use crate::goal_curation::completion_gate::{DependencyState, EvidenceSource};
@@ -841,4 +841,94 @@ fn genuinely_stuck_with_no_evidence_surfaces_investigation_error_never_parks_non
         GoalProgress::NotStarted => {}
         other => panic!("expected a fail-closed retriable state, got {other:?}"),
     }
+}
+
+// === (g) source fix: GENUINELY-STUCK from the production reasoner is NEVER =====
+// ===     empty-evidence, even for a goal with no tracked artifacts ============
+
+#[test]
+fn deterministic_reasoner_genuinely_stuck_never_yields_empty_evidence() {
+    // THE root-cause fix (issue #16, live-daemon defect verified 2026-07-15): the
+    // `simard-identity-*` goals never produced a tracked issue/PR, so their
+    // `wip_refs` are empty. The deterministic reasoner used to derive
+    // GENUINELY-STUCK evidence *solely* from those refs, yielding `[]` and — past
+    // the guided retry — an `evidence=[(none)]` livelock (surfaced-failure →
+    // un-block → re-investigate → repeat forever, never advancing).
+    //
+    // The source fix: when the reasoner reaches the terminal "no machine-
+    // resolvable cause" branch for a goal with NO tracked artifacts, it must
+    // synthesize a concrete, self-describing evidence item naming the observed
+    // stuck condition (done-criteria not machine-measurable) rather than return
+    // empty evidence. This makes the WHY actionable — the terminal rung escalates
+    // WITH a concrete reason + files a tracking issue asking a human to add
+    // measurable done-criteria — instead of livelocking.
+    let goal = stuck_goal("simard-identity-cartographer-data-storytelling");
+    assert!(
+        goal.wip_refs.is_empty(),
+        "fixture must model the live-daemon shape: a goal with no tracked artifacts"
+    );
+
+    // `FakeEvidence::stuck()` refutes every machine-resolvable signal (no merged
+    // PR / closed issue / deploy, repo present, no upstream dependency), so the
+    // reasoner falls all the way through to the terminal GENUINELY-STUCK branch.
+    let evidence = FakeEvidence::stuck();
+    let reasoner = DeterministicNoProgressReasoner::new(&evidence);
+
+    let why = reasoner
+        .investigate(&goal)
+        .expect("deterministic reasoner returns Ok");
+
+    assert_eq!(
+        why.class,
+        NoProgressClass::GenuinelyStuck,
+        "a goal with no resolvable cause classifies GENUINELY-STUCK"
+    );
+    assert!(
+        !why.evidence.is_empty(),
+        "the source fix: GENUINELY-STUCK must NEVER carry empty evidence, got {:?}",
+        why.evidence
+    );
+    assert_ne!(
+        why.render_evidence(),
+        "(none)",
+        "the WHY must never render the evidence=[(none)] sentinel"
+    );
+    // The synthesized evidence must name the actual stuck condition (unmeasurable
+    // done-criteria) so a human escalation is actionable, and reference the goal.
+    let rendered = why.render_evidence();
+    assert!(
+        rendered.contains("done-criteria") && rendered.contains("machine-measurable"),
+        "synthesized evidence must name the unmeasurable-done-criteria condition: {rendered}"
+    );
+    assert!(
+        rendered.contains("simard-identity-cartographer-data-storytelling"),
+        "synthesized evidence must reference the stuck goal: {rendered}"
+    );
+}
+
+#[test]
+fn deterministic_reasoner_genuinely_stuck_prefers_open_artifacts_when_present() {
+    // When the goal DOES have tracked artifacts, the reasoner still prefers the
+    // concrete open-PR/issue evidence (unchanged behavior) — the synthesized
+    // fallback only fills the empty-evidence gap, it never masks real refs.
+    let mut goal = stuck_goal("goal-with-open-pr");
+    goal.wip_refs.push(pr_ref("123"));
+
+    let evidence = FakeEvidence::stuck();
+    let reasoner = DeterministicNoProgressReasoner::new(&evidence);
+
+    let why = reasoner
+        .investigate(&goal)
+        .expect("deterministic reasoner returns Ok");
+
+    assert_eq!(why.class, NoProgressClass::GenuinelyStuck);
+    let rendered = why.render_evidence();
+    assert!(
+        rendered.contains("pr") && rendered.contains("#123") && rendered.contains("OPEN"),
+        "open-artifact evidence must be preferred when present: {rendered}"
+    );
+    assert!(
+        !rendered.contains("not machine-measurable"),
+        "the synthesized fallback must not fire when real artifacts exist: {rendered}"
+    );
 }

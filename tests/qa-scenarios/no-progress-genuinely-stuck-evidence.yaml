@@ -1,0 +1,61 @@
+name: no-progress-genuinely-stuck-evidence
+app_type: cli
+description: |
+  Regression guard for the live-daemon defect (2026-07-15) where 12–13 of 20
+  active goals — including the `simard-identity-*` goals that never produced a
+  tracked issue/PR — stalled as `why=GENUINELY-STUCK evidence=[(none)]` and
+  livelocked (surfaced-failure -> un-block -> re-investigate -> repeat), never
+  advancing.
+
+  The source fix makes the production deterministic reasoner's
+  `stuck_evidence(goal)` NEVER return empty: when a stuck goal has no tracked
+  artifacts it synthesizes one concrete, self-describing evidence item naming the
+  observed stuck condition (done-criteria not machine-measurable). So the
+  terminal rung escalates WITH an actionable WHY instead of an evidence-free
+  stamp, breaking the livelock. When real open artifacts exist they are still
+  preferred, so the synthesized fallback never masks concrete refs. The
+  downstream `SurfaceInvestigationFailure` guard remains as defense-in-depth.
+agents:
+  - name: cargo-test-runner
+    type: cli
+    command: cargo
+
+steps:
+  # Source fix: a wip-ref-less GENUINELY-STUCK goal classifies with NON-EMPTY,
+  # self-describing evidence — never evidence=[(none)].
+  - action: run
+    command: "cargo test --lib ooda_loop::tests_no_progress_investigation::deterministic_reasoner_genuinely_stuck_never_yields_empty_evidence"
+    timeout: 300s
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
+
+  # The synthesized fallback must not fire when real open artifacts exist; the
+  # concrete open-PR/issue evidence is still preferred (unchanged behavior).
+  - action: run
+    command: "cargo test --lib ooda_loop::tests_no_progress_investigation::deterministic_reasoner_genuinely_stuck_prefers_open_artifacts_when_present"
+    timeout: 300s
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
+
+  # Defense-in-depth: an injected empty-evidence reasoner is still surfaced as an
+  # investigation failure and never parked with evidence=[(none)].
+  - action: run
+    command: "cargo test --lib ooda_loop::tests_no_progress_investigation::genuinely_stuck_with_no_evidence_surfaces_investigation_error_never_parks_none"
+    timeout: 300s
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
+
+  # Full no-progress suite stays green (no regression in the ladder).
+  - action: run
+    command: "cargo test --lib no_progress"
+    timeout: 600s
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
