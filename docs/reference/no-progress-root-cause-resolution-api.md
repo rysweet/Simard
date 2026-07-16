@@ -323,8 +323,17 @@ pub enum DependencyState {
 ```
 
 An `Err` from either method is treated as `GENUINELY-STUCK` by the deterministic
-classifier (fail closed — never self-heal or self-complete on unknown state) and
-is logged.
+classifier (fail closed — never self-heal or self-complete on unknown state),
+is logged, and attaches the concrete error as `investigation-error` evidence so
+the downgrade is never evidence-less.
+
+At the fallthrough (no auxiliary signal matched) the deterministic classifier
+splits on whether the goal tracks a checkable artifact: a goal with **no**
+tracked PR/issue is `UNCLEAR-CRITERIA` (its done-criteria are not expressed as
+anything the gate can certify), carrying a `done-criteria … not measurable`
+evidence item; a goal that tracks an open PR/issue the gate examined but could
+not certify is `GENUINELY-STUCK`, carrying that open artifact as evidence.
+Consequently the deterministic reasoner can never emit `evidence=[(none)]`.
 
 ## Adapter: the resolution driver
 
@@ -415,7 +424,7 @@ guided retry per goal:
 | Failure | Behaviour |
 | --- | --- |
 | Reasoner `Err` | Take NO terminal action; record in `investigation_errors`, preserve the counter, retry next cycle. Logged at `error`. Never a silent block or completion. |
-| `repo_present` / `dependency_goal_state` `Err` (deterministic reasoner) | Downgrade to `GENUINELY-STUCK`; never self-heal/self-complete on unknown state. Logged. |
+| `repo_present` / `dependency_goal_state` `Err` (deterministic reasoner) | Downgrade to `GENUINELY-STUCK` with the concrete error attached as `investigation-error` evidence (never evidence-less); never self-heal/self-complete on unknown state. Logged. |
 | Clone (`Heal`) failure | `Escalate` with the `MISSING-PRECONDITION` WHY + a `clone-error` `Evidence`. |
 | `dispatch_spawn_engineer` rejected (`SpawnEngineer`) | Mark the guided retry spent; escalate with the WHY on the next stall. |
 | Issue filing failure | Goal is already `Blocked`+sentinel; log `error`, never abort the cycle (matches `GhIssueFiler`). |

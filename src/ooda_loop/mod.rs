@@ -43,6 +43,13 @@ mod tests_no_progress;
 #[cfg(test)]
 mod tests_no_progress_investigation;
 
+// Unit tests for the production `DeterministicNoProgressReasoner`: every finding
+// it emits carries concrete evidence — it can never produce `evidence=[(none)]`.
+// A stall with no checkable PR/issue is classified UNCLEAR-CRITERIA (not an
+// evidence-less GENUINELY-STUCK).
+#[cfg(test)]
+mod tests_no_progress_reasoner;
+
 // Issue #17 (TDD): integration tests for the already-blocked re-investigation
 // pass — each cycle scans the board for goals parked in a BARE `[OODA-SAFEGUARD]
 // … needs human review` block and re-runs the WHY reasoner + resolution ladder

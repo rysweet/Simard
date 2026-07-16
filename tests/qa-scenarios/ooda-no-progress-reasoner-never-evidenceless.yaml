@@ -1,0 +1,37 @@
+name: ooda-no-progress-reasoner-never-evidenceless
+app_type: cli
+description: |
+  Regression coverage for the GENUINELY-STUCK evidence=[(none)] stall.
+
+  The production `DeterministicNoProgressReasoner` used to fall through its
+  ladder to `GENUINELY-STUCK` for any stall, and its `stuck_evidence` was empty
+  when the goal tracked no PR/issue (the `simard-identity-*` shape) — so the
+  daemon authored a content-free `why=GENUINELY-STUCK evidence=[(none)]`
+  diagnosis that gave the guided engineer nothing to act on.
+
+  Fixed end to end:
+  - a stall with no checkable PR/issue is now `UNCLEAR-CRITERIA`, carrying
+    evidence that names the gap (route to a guided engineer to make the
+    done-criteria measurable);
+  - a stall that tracks an open, unmerged PR/issue stays `GENUINELY-STUCK`,
+    carrying that artifact as evidence;
+  - the two evidence-source error downgrades attach the concrete error as
+    evidence.
+  Consequently the reasoner can never emit `evidence=[(none)]`.
+
+  Schema note: the pinned `@gadugi/agentic-test` CLI runner only gates on
+  `run`-step exit codes and reads command text from `params.command`, so the
+  reasoner regression tests run under a single `bash -lc` wrapper that exits
+  zero only when all five report a passing "test result: ok".
+metadata:
+  tags:
+    - cli
+agents:
+  - name: cli-agent
+    type: cli
+    command: bash
+steps:
+  - action: run
+    params:
+      command: "bash -lc 'set -euo pipefail; OUT=$(cargo test --lib ooda_loop::tests_no_progress_reasoner 2>&1); echo \"$OUT\"; echo \"$OUT\" | grep -q \"5 passed\"'"
+    timeout: 300000

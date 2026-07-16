@@ -207,7 +207,20 @@ signals the daemon can gather without the brain:
 | done-gate verdict | [`verify_stuck_goal`](../reference/no-progress-breaker-api.md#noprogressresolution) over the [completion-evidence gate](../reference/completion-evidence-gate-api.md) | `ALREADY-COMPLETE` / `OBSOLETE` |
 | governed repo present? | `EvidenceSource::repo_present` | `MISSING-PRECONDITION` |
 | dependency goal / PR state | `EvidenceSource::dependency_goal_state` | `UPSTREAM-DEPENDENCY` |
-| none of the above | — | `UNCLEAR-CRITERIA` / `GENUINELY-STUCK` |
+| fallthrough, goal has **no** checkable PR/issue | goal `wip_refs` | `UNCLEAR-CRITERIA` |
+| fallthrough, goal tracks an open PR/issue the gate couldn't certify | goal `wip_refs` | `GENUINELY-STUCK` |
+
+The fallthrough split is deliberate. A stalled goal that tracks **no** PR or
+issue has done-criteria the gate can never point at — that is
+`UNCLEAR-CRITERIA` (route to a guided engineer to make the criteria measurable),
+carrying evidence that names the gap (`done-criteria … not measurable — no
+tracked PR/issue for the done-gate to certify`). Only a goal that *does* track an
+open, unmerged artifact the gate examined but could not certify is
+`GENUINELY-STUCK`, and it carries that open artifact as its evidence. This is why
+the deterministic reasoner can **never** emit `evidence=[(none)]`: the
+no-artifact shape (historically the `simard-identity-*` incident) is now
+`UNCLEAR-CRITERIA` with a concrete gap, and the evidence-source error downgrades
+attach the concrete error as evidence.
 
 This mirrors the sibling **brain-failure** safeguard, which is likewise "a
 deterministic safeguard enforced by simard, NOT a brain decision — the brain is

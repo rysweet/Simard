@@ -995,9 +995,16 @@ pub(crate) fn reinvestigate_bare_blocked_goals(
 /// own failure). Signals, in ladder order: the done-gate certifies
 /// `ALREADY-COMPLETE`; an obsolescence marker means `OBSOLETE`; an absent
 /// governed repo means `MISSING-PRECONDITION`; a pending upstream means
-/// `UPSTREAM-DEPENDENCY`; anything else is `GENUINELY-STUCK`. An evidence-source
+/// `UPSTREAM-DEPENDENCY`. At the fallthrough the classifier splits on whether the
+/// goal tracks any artifact the done-gate can check: an open PR/issue it could
+/// not certify is `GENUINELY-STUCK` (carrying that artifact as evidence); a goal
+/// with **no** checkable PR/issue has done-criteria the gate can never certify —
+/// `UNCLEAR-CRITERIA` (with evidence naming the gap), the exact shape that
+/// historically produced an evidence-less `GENUINELY-STUCK`. An evidence-source
 /// error on the auxiliary signals downgrades to `GENUINELY-STUCK` (fail closed —
-/// never self-heal / self-defer on an unknown state).
+/// never self-heal / self-defer on an unknown state) carrying the concrete error
+/// as evidence. Every finding is therefore evidence-bearing: the reasoner can
+/// never emit `evidence=[(none)]`.
 pub(crate) struct DeterministicNoProgressReasoner<'a> {
     evidence: &'a dyn EvidenceSource,
 }
@@ -1048,6 +1055,49 @@ fn stuck_evidence(goal: &ActiveGoal) -> Vec<Evidence> {
         .collect()
 }
 
+/// Does the goal carry any artifact the done-gate can actually check — a tracked
+/// PR or issue? When it does not, the goal's done-criteria are not expressed as
+/// anything the gate can certify: the definition of
+/// [`NoProgressClass::UnclearCriteria`], and the exact shape (empty `wip_refs`)
+/// that historically made [`stuck_evidence`] empty and produced an evidence-less
+/// `GENUINELY-STUCK` block.
+fn has_checkable_artifact(goal: &ActiveGoal) -> bool {
+    goal.wip_refs
+        .iter()
+        .any(|w| matches!(w.kind.to_ascii_lowercase().as_str(), "pr" | "issue"))
+}
+
+/// Evidence naming *why* the done-gate can never certify an
+/// [`NoProgressClass::UnclearCriteria`] stall, so the classification is never
+/// evidence-less. Points the guided engineer at the concrete gap — there is no
+/// tracked PR/issue for the gate to evaluate — which is precisely the
+/// "make the done-criteria measurable" instruction the guided task carries.
+fn unmeasurable_criteria_evidence(goal: &ActiveGoal) -> Vec<Evidence> {
+    vec![Evidence::new(
+        "done-criteria",
+        goal.id.clone(),
+        "not measurable — no tracked PR/issue for the done-gate to certify",
+    )]
+}
+
+/// Evidence for a `GENUINELY-STUCK` downgrade forced by an evidence-source
+/// failure on an auxiliary signal: the goal's open artifacts (if any) plus the
+/// concrete error, so the fail-closed downgrade is never evidence-less
+/// (fail closed AND fail visible). `signal` names the errored probe.
+fn error_downgrade_evidence(
+    goal: &ActiveGoal,
+    signal: &str,
+    err: &crate::error::SimardError,
+) -> Vec<Evidence> {
+    let mut ev = stuck_evidence(goal);
+    ev.push(Evidence::new(
+        "investigation-error",
+        signal,
+        err.to_string(),
+    ));
+    ev
+}
+
 impl NoProgressWhyReasoner for DeterministicNoProgressReasoner<'_> {
     fn investigate(&self, goal: &ActiveGoal) -> SimardResult<NoProgressWhy> {
         // 1. Done-gate positively certifies completion (the kgpacks-rs incident).
@@ -1084,7 +1134,7 @@ impl NoProgressWhyReasoner for DeterministicNoProgressReasoner<'_> {
                 );
                 return Ok(NoProgressWhy::new(
                     NoProgressClass::GenuinelyStuck,
-                    stuck_evidence(goal),
+                    error_downgrade_evidence(goal, "repo_present", &e),
                 ));
             }
         }
@@ -1107,15 +1157,32 @@ impl NoProgressWhyReasoner for DeterministicNoProgressReasoner<'_> {
                 );
                 return Ok(NoProgressWhy::new(
                     NoProgressClass::GenuinelyStuck,
-                    stuck_evidence(goal),
+                    error_downgrade_evidence(goal, "dependency_goal_state", &e),
                 ));
             }
         }
-        // 5. No machine-resolvable cause found.
-        Ok(NoProgressWhy::new(
-            NoProgressClass::GenuinelyStuck,
-            stuck_evidence(goal),
-        ))
+        // 5. No machine-resolvable cause found. Split the terminal shape so the
+        //    classification is actionable and never evidence-less:
+        //    - the goal tracks an open PR/issue the done-gate examined but could
+        //      not certify → GENUINELY-STUCK, carrying those open artifacts as
+        //      evidence (non-empty because an artifact exists);
+        //    - the goal tracks NO checkable artifact at all → its done-criteria
+        //      are not expressed as anything the gate can check
+        //      (UNCLEAR-CRITERIA). This is the exact shape that used to emit
+        //      `GENUINELY-STUCK evidence=[(none)]`; route it to the guided
+        //      engineer to make the criteria measurable, with evidence naming the
+        //      gap so the diagnosis is never empty.
+        if has_checkable_artifact(goal) {
+            Ok(NoProgressWhy::new(
+                NoProgressClass::GenuinelyStuck,
+                stuck_evidence(goal),
+            ))
+        } else {
+            Ok(NoProgressWhy::new(
+                NoProgressClass::UnclearCriteria,
+                unmeasurable_criteria_evidence(goal),
+            ))
+        }
     }
 }
 
