@@ -37,3 +37,4 @@ scripts/dashboard-audit/out/
 # Guard: never commit stray PR/engineer worktree dirs as gitlinks (breaks release checkout submodule step)
 pr*-worktree/
 *-worktree/
+.simard/

@@ -26,7 +26,9 @@ use crate::error::SimardResult;
 use crate::journal::jargon::scrub_jargon;
 use crate::journal::providers::PrListSource;
 use crate::journal::types::PrSummary;
-use crate::stewardship::merge_authority::{OpenPrSummary, PrGhClient, evaluate_objective_gates};
+use crate::stewardship::merge_authority::{
+    MergedPrSummary, OpenPrSummary, PrGhClient, evaluate_objective_gates,
+};
 
 /// `gh pr list` page size for the journal's PR table. Matches the dashboard's
 /// Merge Readiness panel (#1880); 50 covers the active repo without paginating.
@@ -114,6 +116,19 @@ pub fn open_pr_to_summary(pr: &OpenPrSummary, base_allowlist: &[String]) -> PrSu
     }
 }
 
+/// Map one [`MergedPrSummary`] (a PR that landed on the journalled day) into a
+/// journal [`PrSummary`] with the canonical `"merged"` outcome (#4140). The
+/// outcome string is the exact token [`crate::journal::types::JournalEntry::merged_pr_count`]
+/// counts, so a landed change is finally reflected in the day's merge total.
+#[must_use]
+pub fn merged_pr_to_summary(pr: &MergedPrSummary) -> PrSummary {
+    PrSummary {
+        number: u64::from(pr.number),
+        plain_summary: plainify_pr_title(&pr.title),
+        outcome: "merged".to_string(),
+    }
+}
+
 /// Production [`PrListSource`] over the `gh pr list` PR-readiness service.
 ///
 /// Wraps a stewardship [`PrGhClient`] (in production the `gh`-shelling
@@ -151,23 +166,41 @@ impl<'a> GhPrListSource<'a> {
 }
 
 impl PrListSource for GhPrListSource<'_> {
-    fn prs_for_date(&self, _date: NaiveDate) -> SimardResult<Vec<PrSummary>> {
+    fn prs_for_date(&self, date: NaiveDate) -> SimardResult<Vec<PrSummary>> {
         // Honest degradation: a `gh` blip yields an empty proposal table (logged)
         // rather than failing the whole tick, so the narrative is still written.
-        match self.gh.list_open_prs(self.repo, self.limit) {
-            Ok(open) => Ok(open
+        // The day's OPEN proposals (readiness snapshot) come first...
+        let mut rows: Vec<PrSummary> = match self.gh.list_open_prs(self.repo, self.limit) {
+            Ok(open) => open
                 .iter()
                 .map(|pr| open_pr_to_summary(pr, &self.base_allowlist))
-                .collect()),
+                .collect(),
             Err(e) => {
                 tracing::warn!(
                     target: "simard::journal",
                     error = %e,
                     repo = self.repo,
-                    "journal PR fetch failed; the day's proposal table degrades to empty"
+                    "journal open-PR fetch failed; the day's proposal table degrades to empty"
                 );
-                Ok(Vec::new())
+                Vec::new()
+            }
+        };
+        // ...then the changes that actually MERGED on `date`, tagged with the
+        // canonical "merged" outcome so `merged_pr_count` reflects reality
+        // instead of being structurally zero (#4140). A merged-fetch blip
+        // degrades to "no merges surfaced" rather than failing the tick.
+        match self.gh.list_merged_prs(self.repo, date, self.limit) {
+            Ok(merged) => rows.extend(merged.iter().map(merged_pr_to_summary)),
+            Err(e) => {
+                tracing::warn!(
+                    target: "simard::journal",
+                    error = %e,
+                    repo = self.repo,
+                    date = %date,
+                    "journal merged-PR fetch failed; the day's merged changes degrade to empty"
+                );
             }
         }
+        Ok(rows)
     }
 }
