@@ -36,6 +36,12 @@ path = "src/bin/simard_engineer_step.rs"
 name = "simard-engineer-loop-recipe"
 path = "src/bin/simard_engineer_loop_recipe.rs"
 
+# Gastronome identity kitchen app: turns a kitchen brief bundle (pantry +
+# recipes + menu + event brief) into a costed, scheduled menu plan end-to-end.
+[[bin]]
+name = "simard-gastronome"
+path = "src/bin/simard_gastronome.rs"
+
 [[bin]]
 name = "simard-audit-pass01"
 path = "src/bin/simard_audit_pass01.rs"

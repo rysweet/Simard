@@ -1,0 +1,91 @@
+name: simard-gastronome-menu-plan
+app_type: cli
+description: |
+  Outside-in verification of the Gastronome kitchen app (`simard-gastronome`):
+  the pluggable culinary/menu/event-design identity's end-to-end "brief in,
+  costed and scheduled menu plan out" contract.
+
+  Proves the CLI: (a) plans the built-in demo brief end-to-end with a costed
+  menu, per-guest nutrition, and a back-scheduled prep timetable; (b) plans the
+  shipped example bundle within budget and dietary-compliant under `--strict`
+  (exit 0); (c) emits a machine-readable JSON `MenuPlan`; and (d) fails a
+  `--strict` run with the sentinel exit code 3 when the plan is over budget.
+
+  Each step asserts specific output substrings and exit codes, so a regression
+  that silently drops costing, scheduling, or the strict gate fails the scenario
+  rather than passing vacuously.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+steps:
+  # (a) Plan the built-in demo brief end-to-end (text output). First invocation
+  # may compile the bin, hence the generous timeout.
+  - action: run
+    params:
+      command: "cargo run --quiet --bin simard-gastronome -- --demo"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "Menu & cost"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "Nutrition per guest"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "Prep schedule"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "Total cost"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # (b) Plan the shipped example bundle; --strict makes over-budget /
+  # non-compliant a non-zero exit. A clean exit 0 proves it is within budget and
+  # dietary compliant.
+  - action: run
+    params:
+      command: "cargo run --quiet --bin simard-gastronome -- plan docs/examples/gastronome-harvest-dinner.json --strict"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "within budget"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # (c) JSON output parses field markers of a MenuPlan.
+  - action: run
+    params:
+      command: "cargo run --quiet --bin simard-gastronome -- plan docs/examples/gastronome-harvest-dinner.json --format json"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "\"service_time\""
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "\"schedule\""
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # (d) The strict gate: an impossibly tight budget yields the sentinel exit 3.
+  - action: run
+    params:
+      command: "cargo run --quiet --bin simard-gastronome -- plan docs/examples/gastronome-tight-budget.json --strict"
+    timeout: 300000
+  - action: validate_exit_code
+    params:
+      value: "3"
+    timeout: 5000
