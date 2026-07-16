@@ -272,6 +272,7 @@ nav:
     - Overseer Memory-Recall API: reference/overseer-memory-recall-api.md
     - Overseer Operator Notifications: reference/overseer-operator-notifications.md
     - Overseer Workstream Gap-Scan: reference/overseer-workstream-gap-scan.md
+    - Overseer Recurring-Signature Blockage Diagnosis: reference/overseer-recurring-signature-diagnosis.md
     - Overseer Root-Cause (WHY) API: reference/overseer-root-cause-why-api.md
     - simard-engineer-step CLI: reference/simard-engineer-step.md
     - simard-tui Dashboard: reference/simard-tui.md

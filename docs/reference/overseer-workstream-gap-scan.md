@@ -16,6 +16,7 @@ owner: simard
 doc_type: reference
 related:
   - ./overseer-activity-feed.md
+  - ./overseer-recurring-signature-diagnosis.md
   - ../design/overseer.md
   - ../howto/review-overseer-workstream-gaps.md
   - ../howto/watch-overseer-activity.md

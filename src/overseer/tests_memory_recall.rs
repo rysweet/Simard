@@ -1058,3 +1058,194 @@ fn adapter_prospective_joins_keys_into_one_probe() {
         probes[0]
     );
 }
+
+// ══════════════════ Hypothesis verification (issue #2841, round 2) ═══════════
+//
+// Executable verification of the two round-1 hypotheses behind the recurring
+// `overseer-obs:` blockage signature. Each hypothesis gets a CONFIRM test that
+// reproduces the defect THROUGH THE REAL CODE PATH and a REFUTE-BY-FIX test that
+// shows the proposed guard collapses it.
+//
+//   H1  Self-recall amplification: `recall_episodic` (wiring.rs:1013-1031)
+//       returns the Overseer's OWN `source_label = "overseer"` write-backs with
+//       provenance DROPPED (`RecalledEpisode` has no source_label), so
+//       `signals_from` (signal.rs:455-470) re-counts them as independent
+//       evidence and re-emits `RecurringSignature` from self-authored data.
+//   H2  Re-wrap growth: `observation_signature` (mod.rs:1081-1086) prefixes the
+//       composite key with another `overseer-obs:` every generation (no
+//       idempotence), so the key grows/nests without bound and each grown key is
+//       a distinct `WhisperGate` dedup key that suppression cannot collapse.
+
+use crate::overseer::signal::{Problem, ProblemKind, RECURRING_SIGNATURE_THRESHOLD};
+
+const COMPOSITE_SIG: &str =
+    "overseer-obs:goal:blocked:advance-parity|quality:gym_skipped|workstream-gap";
+
+/// A `CognitiveEpisode` exactly as the Overseer's OWN write-back stores it:
+/// content carries the `[sig:…]` marker (`record_observation`, wiring.rs:1084)
+/// and provenance is the fixed `OVERSEER_SOURCE_LABEL` ("overseer").
+fn overseer_authored_episode(node_id: &str, signature: &str) -> CognitiveEpisode {
+    CognitiveEpisode {
+        node_id: node_id.to_string(),
+        content: format!("overseer observed 1 problem(s): parity blocked [sig:{signature}]"),
+        source_label: "overseer".to_string(),
+        temporal_index: 0,
+        compressed: false,
+    }
+}
+
+fn problem_with_key(dedup_key: &str) -> Problem {
+    Problem {
+        kind: ProblemKind::ProcessHealth,
+        priority: Priority::High,
+        dedup_key: dedup_key.to_string(),
+        summary: "recurring signature".to_string(),
+        evidence: vec![],
+        why: None,
+    }
+}
+
+#[test]
+fn h1_confirm_self_recall_reemits_recurring_signature_from_own_writebacks() {
+    // Two prior OVERSEER-authored episodes (its own write-backs) share the
+    // composite signature. Recall them through the REAL `MemoryRecallOps` adapter
+    // (recall_episodes_ranked → search_episodes_by_keywords → recall_episodic).
+    let backing = Arc::new(RecordingCogMem {
+        episodes: vec![
+            overseer_authored_episode("e1", COMPOSITE_SIG),
+            overseer_authored_episode("e2", COMPOSITE_SIG),
+        ],
+        ..RecordingCogMem::default()
+    });
+    let adapter = MemoryRecallOps::new(backing as Arc<dyn CognitiveMemoryOps>);
+
+    let recalled = adapter
+        .recall_episodic(&keys(&["parity"], &[COMPOSITE_SIG]), 5)
+        .expect("recall");
+
+    // The real read path recovered the Overseer's own `[sig:…]` marker AND kept
+    // no provenance — both self-authored episodes now look like independent
+    // evidence (there is no `source_label` on `RecalledEpisode` to filter on).
+    assert_eq!(
+        recalled.len(),
+        2,
+        "both self-authored episodes are recalled"
+    );
+    assert!(
+        recalled
+            .iter()
+            .all(|e| e.failure_signature.as_deref() == Some(COMPOSITE_SIG)),
+        "parse_failure_signature recovers the overseer's own composite sig: {recalled:?}"
+    );
+
+    // Feed them into Orient exactly as a tick does.
+    let state = ObservedState {
+        recall: Some(snapshot_with_episodes(recalled)),
+        ..ObservedState::default()
+    };
+    assert!(
+        signals_from(&state).contains(&Signal::RecurringSignature {
+            signature: COMPOSITE_SIG.to_string(),
+            occurrences: 2,
+        }),
+        "H1 CONFIRMED: RecurringSignature is emitted purely from the Overseer's \
+         OWN write-backs — a self-recall amplification loop with no provenance gate"
+    );
+}
+
+#[test]
+fn h1_refute_by_fix_provenance_filter_collapses_the_loop() {
+    // The P1 fix applied where provenance still exists (CognitiveEpisode carries
+    // `source_label`, unlike the flattened RecalledEpisode): drop overseer-authored
+    // episodes before they are mapped/counted.
+    let backing_eps = vec![
+        overseer_authored_episode("e1", COMPOSITE_SIG),
+        overseer_authored_episode("e2", COMPOSITE_SIG),
+    ];
+    let surviving: Vec<&CognitiveEpisode> = backing_eps
+        .iter()
+        .filter(|e| e.source_label != "overseer") // the missing gate
+        .collect();
+    assert!(
+        surviving.is_empty(),
+        "every episode driving the recurrence is overseer-authored: {backing_eps:?}"
+    );
+
+    // With the filter applied nothing self-authored survives recall.
+    let recalled: Vec<RecalledEpisode> = surviving
+        .iter()
+        .map(|e| RecalledEpisode {
+            id: e.node_id.clone(),
+            summary: e.content.clone(),
+            failure_signature: Some(COMPOSITE_SIG.to_string()),
+            score: 0.0,
+        })
+        .collect();
+    let state = ObservedState {
+        recall: Some(snapshot_with_episodes(recalled)),
+        ..ObservedState::default()
+    };
+    assert!(
+        !signals_from(&state)
+            .iter()
+            .any(|s| matches!(s, Signal::RecurringSignature { .. })),
+        "H1 REFUTED-BY-FIX: a source_label provenance filter drops all \
+         self-authored episodes, so occurrences fall below the threshold \
+         ({RECURRING_SIGNATURE_THRESHOLD}) and RecurringSignature stops recurring"
+    );
+}
+
+#[test]
+fn h2_confirm_observation_signature_stacks_prefix_each_generation() {
+    // Generation 1: a fresh problem's dedup_key → exactly one overseer-obs: prefix.
+    let gen1 = super::observation_signature(&[problem_with_key("goal:blocked:foo")]);
+    assert_eq!(gen1, "overseer-obs:goal:blocked:foo");
+
+    // The RecurringSignature→Problem mapping (mod.rs:1372) sets
+    // dedup_key = sanitize_recalled(signature) = gen1 verbatim (no control chars).
+    // Feeding THAT problem back into the next observation STACKS a second prefix.
+    let gen2 = super::observation_signature(&[problem_with_key(&gen1)]);
+    assert_eq!(
+        gen2, "overseer-obs:overseer-obs:goal:blocked:foo",
+        "H2 CONFIRMED: no idempotence — the prefix stacks +1 per generation"
+    );
+
+    // And it is UNBOUNDED: generation 3 nests a third prefix.
+    let gen3 = super::observation_signature(&[problem_with_key(&gen2)]);
+    assert_eq!(
+        gen3.matches("overseer-obs:").count(),
+        3,
+        "each generation nests one more prefix → a distinct WhisperGate dedup key: {gen3}"
+    );
+}
+
+#[test]
+fn h2_refute_by_fix_idempotent_signature_is_a_fixed_point() {
+    // The proposed fix: strip an existing `overseer-obs:` prefix before re-wrapping.
+    fn observation_signature_idempotent(problems: &[Problem]) -> String {
+        let mut keys: Vec<&str> = problems
+            .iter()
+            .map(|p| p.dedup_key.as_str().trim_start_matches("overseer-obs:"))
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        format!("overseer-obs:{}", keys.join("|"))
+    }
+
+    let g1 = observation_signature_idempotent(&[problem_with_key("goal:blocked:foo")]);
+    let g2 = observation_signature_idempotent(&[problem_with_key(&g1)]);
+    let g3 = observation_signature_idempotent(&[problem_with_key(&g2)]);
+
+    assert_eq!(g1, "overseer-obs:goal:blocked:foo");
+    assert_eq!(
+        g2, g1,
+        "an idempotent signature is a FIXED POINT across generations"
+    );
+    assert_eq!(g3, g1);
+    assert_eq!(
+        g2.matches("overseer-obs:").count(),
+        1,
+        "H2 REFUTED-BY-FIX: bounding the prefix at one yields the SAME key every \
+         tick, so WhisperGate dedup finally suppresses it"
+    );
+}
