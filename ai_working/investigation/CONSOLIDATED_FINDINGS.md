@@ -2242,3 +2242,184 @@ trap — the gap closing-edge ledger must key on `GapItem.signature`, never the 
 [3] closing rungs`, with a per-rung keep-green/deliberately-update regression matrix (§21.4). D1/D2/D3 remain live
 and unremediated; the L0→L1→L2→L3 whole-loop remediation order (§16.3) stands; **no production `.rs` changed; no
 remediation landed.**
+
+## §22 — Fifteenth-wave net-new findings (HEAD `7293de99`/`3fac68a5`, zero non-test source drift) — six parallel dives: the **two-counter-system** framing + exact half-open `[0,900)`s window boundary (primary), the full named-emitter `①→⑧` pipeline with the **`signal.rs:644-647` literal-title display emitter** (secondary/primary), the **disjoint-detector `blocked`-skip proof** that gap and blocked goals can *never* co-derive + the **`routing.rs` dead-end** read (secondary), the **dedup-gate-defeated-by-mutating-signature** mechanism as the ~20 KB-blob cause (tertiary), the architect **REJECT-persist-`last_delivered`** verdict + **no-threshold-move** ruling with the conditional episode-store idempotency key (tertiary), and the specialist **source-frozen-since-`dea65df8`** reconciliation (144-test re-pin + the `ooda_loop/cycle.rs` path fix)
+
+**Six parallel deep dives**, folded here — two primaries at HEAD `3fac68a5`
+([`primary_signature_emitter_token_assembly_and_2x_semantics_HEAD_3fac68a5.md`](./primary_signature_emitter_token_assembly_and_2x_semantics_HEAD_3fac68a5.md),
+[`primary_signature_assembly_emission_pipeline_and_idempotency_gate_HEAD_3fac68a5.md`](./primary_signature_assembly_emission_pipeline_and_idempotency_gate_HEAD_3fac68a5.md)),
+two secondaries at HEAD `7293de99`/`3fac68a5`
+([`secondary_emission_pipeline_and_two_loops_HEAD_7293de99.md`](./secondary_emission_pipeline_and_two_loops_HEAD_7293de99.md),
+[`secondary_nesting_vs_dup_and_gap_spawn_routing_HEAD_3fac68a5.md`](./secondary_nesting_vs_dup_and_gap_spawn_routing_HEAD_3fac68a5.md)),
+two tertiary/architect at HEAD `3fac68a5`/`7293de99`
+([`tertiary_architecture_SPAWN_GAP_COUPLING_AND_SELFFEED_HEAD_3fac68a5.md`](./tertiary_architecture_SPAWN_GAP_COUPLING_AND_SELFFEED_HEAD_3fac68a5.md),
+[`tertiary_architecture_IDEMPOTENCY_DURABILITY_AND_REMEDIATION_RUNG_HEAD_7293de99.md`](./tertiary_architecture_IDEMPOTENCY_DURABILITY_AND_REMEDIATION_RUNG_HEAD_7293de99.md)),
+and a knowledge-archaeologist specialist at HEAD `3fac68a5`
+([`specialist_RECONCILIATION_VALIDATE_DONT_REDERIVE_HEAD_3fac68a5.md`](./specialist_RECONCILIATION_VALIDATE_DONT_REDERIVE_HEAD_3fac68a5.md)).
+Drift re-check: `git diff --stat f455c06d..HEAD -- src/` (the §21 pin → this HEAD) is **empty** — the two intervening
+commits (`d6ba8b25`, `3fac68a5`) plus HEAD `7293de99` are all `docs(investigation)/*.md`-only. The specialist's wider
+audit `git diff --stat dea65df8..HEAD -- src/` = **1 file, +99** (only `src/overseer/tests_root_cause.rs`, the
+net-additive decoupling pins added at `f9cefec1`, already folded at §17/§20.4). **All non-test production source is
+byte-identical to the §20/§21 grounding**, so every load-bearing line number below re-verifies exact (each dive
+independently re-opened its citations).
+**Empirical re-grounding this wave (re-run during consolidation at HEAD `7293de99`):**
+`overseer::tests_root_cause` → **21/0** (incl. `loud_lane_a_recurring_signature_does_not_feed_lane_b_recurrence`),
+`overseer::tests_memory_recall` → **32/0**, `overseer::tests_gap_scan` → **21/0**, `overseer::tests_whisper` → **28/0**,
+`no_progress` → **77/0** = **179 passed, 0 failed**. **No verdict reversal across fifteen waves; D1/D2/D3 remain live and
+unmerged; no remediation landed.** This wave is a **re-grounding + emitter-precision + fix-lever-adjudication** pass:
+the *self-referential* `2×` verdict, the *two-non-closing-loops* structure, the *dead-zone*, the *benign
+`engineer_spawn`*, and the *correlational-not-causal spawn↔gap* readings all re-confirm at the current HEAD, and the six
+dives contribute seven net refinements (§22.1–§22.7).
+
+- **22.1 — NET-NEW framing: the `2×` comes from *two disjoint counter systems*, and only one surfaces (primary §3).**
+  Prior waves established the `2×` is `RecurringSignature.occurrences` and not a gate artifact; this wave makes the
+  distinction load-bearing and names both systems. **System A (the recall fold)** — `signals_from` builds
+  `counts: BTreeMap<&str,u32>`, +1 per recalled episode whose parsed `failure_signature` equals the signature, and
+  emits `RecurringSignature{signature,occurrences}` at `occurrences >= RECURRING_SIGNATURE_THRESHOLD (=2)`
+  (`signal.rs:455-470`, threshold `:362`); this **is** the rendered `2×`. **System B (the WhisperGate internals)** —
+  `last_delivered: HashMap<String,i64>` + `deliveries: Vec<i64>` (`guardrails.rs:294-295`) drive **suppression
+  decisions only**, are never read by the fold, never rendered. Consequence: a plausible misfix — "reset/persist the
+  dedup counter" — targets **system B and would only throttle honest re-observations feeding system A**, hiding a true
+  signal. **Exact window boundary (net-new):** `peek` suppresses **iff** in `last_delivered` **and**
+  `now - last < window_secs` with **strict `<`** (`guardrails.rs:314`), so with `window_secs=900` (`mod.rs:299`) the
+  suppression window is **half-open `[0,900)` s** — gap `<900` Suppress, gap `==900` Deliver (`900 < 900` false), gap
+  `>900` Deliver; the virtual-clock test pins it exactly (`Deliver@0`, `Suppress@899`, `Deliver@901`,
+  `whisper_gate_suppresses_an_identical_whisper_within_the_window`). `commit` runs only after a successful store
+  (`mod.rs:555-556`, fail-open-on-error); `admit == peek + commit-on-Deliver` (`guardrails.rs:336-342`) so the whisper
+  suite faithfully models the production path.
+
+- **22.2 — NET-NEW emitter precision: the *literal investigation-question title* is emitted at `signal.rs:644-647`,
+  distinct from the `mod.rs:1353-1363` classify arm (secondary §1, primary §1).** The full `①→⑧` named pipeline
+  re-verified verbatim: ① token synthesis (`classify_signal` arms — `goal:blocked:{id}` `mod.rs:1336`, bare
+  `workstream-gap` `mod.rs:1371`, `resource:engineer_spawn` `mod.rs:1270`) → ② composite emitter
+  `observation_signature = "overseer-obs:"+sort∘dedup∘join("\|")` (`mod.rs:1068-1073`) → ③ human body
+  `observation_content` (`mod.rs:1079-1089`) → ④ caller+gate `write_back_observation` (`mod.rs:534-563`) → ⑤ fixed-
+  provenance persist `record_observation`/`store_episode` (`wiring.rs:1076-1091`, `OVERSEER_SOURCE_LABEL` `:952`) → ⑥
+  recall parse-back `parse_failure_signature`/`recall_episodic` (`wiring.rs:976-986,1013-1030`) → ⑦ recall fold →
+  `RecurringSignature{occurrences}` (`signal.rs:455-470`) → ⑧ classify re-admission (`mod.rs:1353-1363`). **The refined
+  detail:** the human-visible string *"recurring failure signature '{sig}' seen {N} time(s)"* — which matches the
+  investigation-question wrapper verbatim — is produced by the **`signal_to_problem` display arm at `signal.rs:644-647`**,
+  a separate emit site from the `classify_signal` `RecurringSignature` arm (`mod.rs:1359-1363`) that mints the recall
+  `dedup_key`. Two emitters, one string family: `signal.rs:644-647` renders the *summary the operator sees*;
+  `mod.rs:1359` mints the *key that re-enters the composite*. **`record_observation` stores exactly one episode per
+  admitted `Deliver`** (`wiring.rs:1084-1089`, single `store_episode` node_id), so `occurrences=2` **cannot** arise from
+  a non-idempotent episodic write — it necessarily means two genuinely-persisted episodes (primary §2 decision matrix,
+  re-confirmed).
+
+- **22.3 — NET-NEW causal-independence proof: `goal:blocked:*` and `workstream-gap` are minted by *disjoint detectors
+  over non-overlapping goal partitions* — `detect_workstream_gaps` explicitly *skips blocked goals* (secondary §2).**
+  The strongest form yet of the "spawn↔gap and blocked↔gap are not causally coupled" verdict. `detect_workstream_gaps`
+  (`sensor.rs:288-320`) contains `if matches!(g.status, GoalProgress::Blocked(_)) { continue; }` with the comment
+  *"Blocked goals flow through goal_health; never re-flag them here."* Therefore the `goal:blocked:<slug>-<hash>` tokens
+  and the `workstream-gap` token derive from **two separate detectors over provably non-overlapping goal sets**, and
+  **neither reads `live_engineers`**. Combined with the leaf-signal table — `EngineerSpawnRate{live}` reads only
+  `state.live_engineers` (`sensor.rs:123`) and `WorkstreamGap{gaps}` reads only `state.workstream_gaps` (injected at
+  `wiring.rs:772`; the read-only snapshot leaves it empty, `sensor.rs:153`), with both volatile counts (`{live}`,
+  `{gaps.len()}`) landing in **summaries only, never a `dedup_key`** — this closes the causal question at the *detector*
+  level, not just the signal level: there is **no code edge** binding the three tokens; their only relationship is
+  set-hash co-membership in one write-back composite (**over-aggregation**) plus a *latent, code-invisible* common cause
+  (an under-resourced Simard). **Do not special-case the pair; any resource-aware gap launch must NOT read the spawn
+  signal** or it would *manufacture* the coupling the code correctly lacks.
+
+- **22.4 — NET-NEW dead-end read: `stewardship/routing.rs` is a dormant `source_module→TargetRepo` router that never
+  reads `live_engineers` or gap counts and is off the notify-only path entirely (secondary §2 `routing.rs`).** A direct
+  whole-file read (53 lines) settles the "does routing couple gap↔spawn?" question: `route_failure` (`routing.rs:39-52`)
+  matches only a source-module *string* against `AMPLIHACK_KEYWORDS`/`SIMARD_KEYWORDS` and falls back to `rysweet/Simard`;
+  it **never reads either signal field**, and it only *mentions* the Overseer's gap briefs in a comment
+  (`routing.rs:12-14`). Because `WorkstreamCoverage` is **notify-only** (`mod.rs:1534-1543`, no `FileIssue`/`LaunchRecipe`
+  edge), gap briefs never reach the filing path that would even invoke `route_failure`. **`routing.rs` contributes
+  nothing to the signature** — confirming the strategy's own "potential dead end" and removing it from the suspect set.
+
+- **22.5 — NET-NEW mechanism: the exact-string dedup gate is *defeated by the mutating (nesting) signature* — this is
+  what inflates one record to the ~20 KB blob (tertiary §3, secondary §1).** The 5-edge self-feed cycle
+  `[E1] observation_signature (mod.rs:1068-1073) → [E2] record_observation embeds [sig:…] (wiring.rs:1084) →
+  [E3] recall parse-back (wiring.rs:1025) → [E4] signals_from ≥2 → RecurringSignature (signal.rs:455-470) →
+  [E5] classify dedup_key = sanitize_recalled(signature) = "overseer-obs:…" (mod.rs:1359) → back to [E1]` re-read
+  verbatim. The sharpened architectural point: `write_back_observation` gates on `write_back_gate.peek(&signature)`
+  (`mod.rs:548`), an **exact-string** WhisperGate — but edge `[E5]→[E1]` **mutates** the signature every cycle (each
+  nesting level `overseer-obs:overseer-obs:…` is a *different* string), so every write-back looks novel → always
+  `Deliver` → re-persisted. **The dedup primitive is defeated by the very feedback it is meant to suppress**; each
+  nested fragment carries its own full `goal:blocked` block, so concatenating nested snapshots is exactly what grows one
+  record into the ~20 KB pipe-delimited blob. This also *proves* the `workstream-gap|workstream-gap` doubling is D1
+  nesting, **not** two distinct gap keys — the `WorkstreamCoverage` Problem carries the single bare dedup_key
+  `"workstream-gap"` (`mod.rs:1371`), and `observation_signature`'s `sort_unstable();dedup()` (`mod.rs:1069-1072`)
+  collapses only *adjacent equals within one snapshot*, so a literal doubling can arise **only** from a nested recalled
+  fragment sorting beside a freshly-emitted bare key — a positive fingerprint of the self-feed.
+
+- **22.6 — NET-NEW architect adjudication of the two fix-levers this mandate owned: (a) persisting `last_delivered` is
+  REJECTED; (b) no threshold (`2`/`3`) moves — the only legitimate "rung between 2 and 3" is the D3 per-gap
+  `≥2×→LaunchRecipe` partition *on Lane A* (idempotency tertiary §1–§2).** Two candidate "quick fixes" are definitively
+  ruled out with cited justification. **(a) Persist the whisper gate → REJECT (four reasons):** it (i) *hides a true
+  signal* — the composite is a faithful fingerprint of a still-open set, so muting the post-restart second episode
+  manufactures a false "converged" reading (the count must fall because *the loop closed*, not because *the gate
+  remembered*); (ii) *duplicates durability that already lives, by design, on Lane B* — the cross-restart recurrence
+  ledger is `store_fact` occurrences read as `recurrence` (`mod.rs:1034`,`:1613`); persisting the gate stands up a
+  second competing durable counter on the wrong (episode) lane; (iii) *adds a real correctness surface for no product
+  gain* (stale-slot pruning at boot, clock-skew, unbounded keyspace, "is a 901 s-old delivery still suppressed after a
+  20-min outage?"), whereas the primitive is provably correct *because* it is volatile (`guardrails.rs:291-333`,
+  `tests_whisper.rs:437-475`); (iv) the `2×` is a *symptom of missing closing edges*, so even a perfect durable gate
+  leaves the open backlog forever — removing the persistent condition (D1/D2/D3) removes restart re-emission at the
+  source. **(b) Move `2` or `3` → REJECT:** the lanes are **decoupled and share no counter** (now codified by
+  `tests_root_cause.rs:490` `loud_lane_a_…`), so "between 2 and 3" is **not** a single-axis dead zone a number can
+  close — Lane A's `×2` carries *no information* about Lane B reaching `3`, and a generic "escalate at 2" on Lane B
+  would fire on honest transients (a false-positive machine). **The one legitimate rung** is the **D3 per-gap
+  recurrence partition keyed on `GapItem.signature` at the `gap_gate` commit site (`mod.rs:884-948`, key `:901`):
+  1× → Notify, ≥2× → `LaunchRecipe`** via the existing `launch.rs` edge every sibling High arm already has
+  (`WorkstreamCoverage` is the sole High arm lacking it, `mod.rs:1534-1543`) — this is the one place `2` (not `3`) is
+  correct, *because a recurring coverage gap has no benign transient explanation*, and it sits on Lane A, not a re-tuned
+  Lane B. **Conditional durable-dedup (subordinate, not the fix):** *iff* restart-flapping is *empirically* confirmed as
+  the dominant `2×` source, add an idempotency key `(signature, floor(now/900))` at the **episode-store boundary**
+  (`record_observation`/`store_episode`, `mod.rs:554`) — a count-in-content window bucket mirroring D2 discipline — which
+  dedups the *persisted artifact* without teaching the volatile gate to lie; recorded as a **convergence-gauge-phase
+  follow-up**, never the minimal safe fix.
+
+- **22.7 — NET-NEW reconciliation baseline: source is *frozen since `dea65df8`* (only `tests_root_cause.rs` +99 added),
+  all load-bearing citations re-pin exact, 144 referenced tests green, and the `overseer/cycle.rs → ooda_loop/cycle.rs`
+  path is corrected (specialist §1–§5).** The knowledge-archaeologist audit over the 69-artifact / 15-HEAD corpus
+  establishes that the *code under investigation has been frozen since before `dea65df8`* — the waves are re-validation
+  of a **stable** target, not tracking a moving one, which is why re-derivation has near-zero expected value. Every
+  ledger citation re-pins identically at HEAD (`observation_signature` `mod.rs:1068-1073`; Lane-B ratchet
+  `store_fact` `mod.rs:1034`; notify-only both modes `mod.rs:1534-1543` + `observer.rs:120`; thresholds `signal.rs:362`
+  =2, `root_cause.rs:33` =3; `store_fact_with_caller_key` = `DedupMode::CallerKey` "exactly one live fact survives per
+  key" `library_adapter.rs:885-890`; recall reads live-only `library_adapter.rs:763,773,830`). **One path correction
+  (cosmetic, not logic drift):** the WHY double-gate lives at **`src/ooda_loop/cycle.rs:583`**
+  (`no_progress_investigation_enabled()`), **not** `src/overseer/cycle.rs` (which does not exist); any doc citing a bare
+  `cycle.rs:582-702` should read `ooda_loop/cycle.rs`. **Two forward-carried remedy traps re-affirmed as implementation
+  guardrails:** (i) D2 must use a **count-in-content caller-key upsert** (increment `occurrence_count`, `first_seen`/
+  `last_seen`, escalation reading the field not `recall.len()`) — the literal `store_fact_with_caller_key` one-liner
+  collapses recall to 1 and makes `mod.rs:1613` **dead code**; (ii) D3 must key the coverage ledger on
+  `GapItem.signature`, **not** the bare `"workstream-gap"` dedup_key (`mod.rs:1371`), or all gaps fold into one issue
+  (INV-GAP-KEY). Specialist recommendation: **evidence base is saturated — proceed to implementation, not further
+  investigation.**
+
+**Open ordering question surfaced this wave (honest divergence, not a reversal).** Two landing orders coexist across
+the six dives and must be reconciled at the implementation phase: **(A) D1-first** — `[1] write-back self-feed cut →
+[2] Lane-B count-in-content (atomic) → [3] closing rungs` (secondary §8, tertiary SPAWN_GAP §5, matching §20.5/§21.4),
+justified because freezing the signature *set* first gives the signature-keyed upsert a fixed target (*an upsert cannot
+collapse a moving nested key*); versus **(B) D2-first** — `D2 (WHY-gate close + count-in-content, atomic) → D3 (per-gap
+rung) → D1 (write-back filter) → convergence gauges` (specialist §6, idempotency tertiary §3), justified because D2/D3
+drain the blocked/gap populations while D1 is a pure/local *shape* fix. **Reconciliation:** the two do **not** conflict
+on the atomic-latch requirement (D2 gate+counter ship together) nor on the endpoints (convergence gauges last); they
+differ only on whether the write-back filter (D1) is a **prerequisite** for D2's idempotent upsert or a **cosmetic last
+step**. The §21.4 dependency argument (an upsert cannot collapse a *moving* nested key, so the set must be frozen first)
+favors **order (A)**; the implementation phase should either land D1 before D2 or prove D2's upsert key is stable under
+nesting before deferring D1.
+
+**§22 delta:** verdict unchanged across all fifteen waves — the `×2` is an **honest** two-counter-system reading
+(recall-fold `occurrences` = system A, `signal.rs:455-470`; **not** the WhisperGate internals = system B,
+`guardrails.rs:294-295`) of a non-advancing board, its half-open `[0,900)` s window boundary now pinned exactly; the
+**defect is the response** — two observe-and-flag loops that never close, an unguarded self-feed whose *mutating* nested
+signature **defeats the exact-string dedup gate** (the ~20 KB-blob cause), and a `2↔3` **cross-lane visibility** gap
+(codified by `tests_root_cause.rs:490`), not a threshold-arithmetic gap. This wave re-grounds every load-bearing
+citation at HEAD `7293de99`/`3fac68a5` (zero non-test source drift; fresh **179/0** across five suites) and adds seven
+refinements: **(1)** the two-counter-system framing + exact `[0,900)` boundary that pre-empts a "reset/persist the dedup
+counter" misfix (§22.1); **(2)** the `signal.rs:644-647` literal-title *display* emitter distinguished from the
+`mod.rs:1359` *key* emitter (§22.2); **(3)** the disjoint-detector `blocked`-skip proof (`sensor.rs:288-320`) that gap
+and blocked goals can never co-derive (§22.3); **(4)** the `routing.rs` dead-end read removing it from the suspect set
+(§22.4); **(5)** the dedup-gate-defeated-by-mutating-signature mechanism as the blob cause (§22.5); **(6)** the architect
+REJECT-persist-`last_delivered` (four reasons) + no-threshold-move ruling, with the only legit rung being D3 per-gap
+`≥2×→LaunchRecipe` on Lane A and a conditional episode-store `(signature, floor(now/900))` idempotency key (§22.6); and
+**(7)** the source-frozen-since-`dea65df8` reconciliation with the `ooda_loop/cycle.rs` path fix and two forward-carried
+remedy traps (§22.7). It also surfaces one **open landing-order question** (D1-first vs D2-first) for the implementation
+phase. D1/D2/D3 remain live and unremediated; the L0→L1→L2→L3 whole-loop remediation order (§16.3) stands; **no
+production `.rs` changed; no remediation landed.**
