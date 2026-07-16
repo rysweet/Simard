@@ -409,13 +409,16 @@ fn verify_still_not_ready_when_ci_red() {
 }
 
 /// Diff-scan preserved: a non-additive / risky diff never verifies ready.
+/// Since #4163 the style scans (stray-print / Bridge-naming) are judge-advisory,
+/// so the retained merge-safety gate exercised here is the additive one — a
+/// removed `pub` item (a breaking-API change) must still fail verify.
 #[test]
 fn verify_still_not_ready_on_dirty_diff() {
     let dirty = "\
 +++ b/src/x.rs
-@@ -0,0 +1,2 @@
-+struct HttpConnector;
-+    println!(\"noise\");
+@@ -1,2 +1,1 @@
+-pub fn removed_api() {}
+ fn keep() {}
 ";
     let gh = ScriptedGh::new(green());
     let (ops, _e, _s) = ops_with(
@@ -428,7 +431,7 @@ fn verify_still_not_ready_on_dirty_diff() {
     );
     assert!(
         !ops.verify(REPO, 1).expect("verify runs").ready,
-        "the deterministic diff-scans must still fail a risky diff"
+        "the deterministic diff-scans must still fail a risky (non-additive) diff"
     );
 }
 
