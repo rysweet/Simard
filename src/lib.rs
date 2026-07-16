@@ -32,6 +32,12 @@ pub mod rpc_transport;
 // engineer action-slot scheduler), which is unrelated and untouched. See
 // `docs/reference/cognitive-thread-scheduling.md`.
 pub mod cognitive_threads;
+// Atelier identity: furniture / industrial-product design (parametric part
+// model, material + joinery selection, finish) plus a runnable fabrication
+// engine that emits cut lists, BOMs, and fabrication-ready exports (OpenSCAD,
+// STL, STEP, SVG render). Self-contained domain brick; tests live in
+// `#[cfg(test)]` siblings.
+pub mod atelier;
 // Concierge identity: hospitality design (property layout, guest experience,
 // brand) plus a runnable reservations/PMS/housekeeping/channel-management
 // prototype. Self-contained domain brick; tests live in `#[cfg(test)]` siblings.
@@ -236,6 +242,12 @@ pub use agent_roles::{AgentRole, identity_for_role, role_for_objective};
 pub use agent_supervisor::{
     HeartbeatStatus, SubordinateConfig, SubordinateHandle, check_heartbeat, kill_subordinate,
     max_retries_per_goal, spawn_subordinate,
+};
+pub use atelier::{
+    Aesthetic, AtelierError, AtelierOutcome, BomLine, CutPiece, Dimensions, ExportArtifact,
+    ExportFormat, FabricationEngine, Finish, Joinery, Material, Part, ProductBrief,
+    ProductCategory, ProductConcept, design_product, export_is_well_formed, run_atelier,
+    verify_engine,
 };
 pub use base_type_claude_agent_sdk::claude_agent_sdk_adapter;
 pub use base_type_copilot::{CopilotAdapterConfig, CopilotSdkAdapter, parse_copilot_response};

@@ -99,6 +99,7 @@ nav:
     - Autonomous-Merge Review Gate (agentic merge-judge): concepts/autonomous-merge-review-gate.md
     - Adaptive Scaling: concepts/adaptive-scaling.md
     - Pluggable Identity: concepts/pluggable-identity.md
+    - Atelier Identity (Furniture / Industrial Design + Fabrication): concepts/atelier-identity.md
     - Concierge Identity (Hospitality Design + Ops Software): concepts/concierge-identity.md
     - Multi-Identity Host Isolation: concepts/multi-identity-host-isolation.md
     - Write-Authority Posture: concepts/write-authority-posture.md

@@ -1,0 +1,56 @@
+name: "Atelier Identity End-to-End (furniture / industrial design + fabrication)"
+description: "Outside-in proof that the simard-atelier identity designs a physical-product concept AND produces a runnable fabrication package end-to-end. Drives the operator-probe `atelier-run` surface (design -> parts -> cut list -> BOM -> fabrication-ready exports STEP/STL/OpenSCAD + SVG render, self-verified) and confirms the `simard-atelier` identity bootstraps as a first-class identity."
+version: "1.0.0"
+
+config:
+  timeout: 360000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 360000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Atelier designs a product and verifies a runnable fabrication package end-to-end"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/atelier-identity.sh"
+    timeout: 360000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "atelier"
+    - "furniture"
+    - "industrial-design"
+    - "identity"
+    - "fabrication"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

@@ -1,0 +1,29 @@
+name: simard-atelier-end-to-end
+app_type: cli
+description: |
+  Proves the Atelier identity delivers on its "Done when" bar: take a product
+  brief to an exported model plus a render, end-to-end. Drives the operator-probe
+  `atelier-run` surface, which designs the product and produces the fabrication
+  package (cut list -> BOM -> fabrication-ready exports STEP/STL/OpenSCAD + SVG
+  render) with self-verified invariants.
+
+  Schema note: the pinned `@gadugi/agentic-test` CLI runner only gates on
+  `run`-step exit codes and reads command text from `params.command`, so the
+  assertion is encoded in the exit code of a `bash -lc` wrapper that exits zero
+  only when the run reports "Prototype verified: yes", an SVG render line, and a
+  STEP export.
+metadata:
+  tags:
+    - cli
+    - atelier
+    - furniture
+    - fabrication
+agents:
+  - name: cli-agent
+    type: cli
+    command: bash
+steps:
+  - action: run
+    params:
+      command: "bash -lc 'OUT=$(cargo run --quiet --bin simard_operator_probe -- atelier-run single-process \"Larch dining table in solid oak, 1800x900x740mm\" 2>&1); echo \"$OUT\"; echo \"$OUT\" | grep -q \"Prototype verified: yes\" && echo \"$OUT\" | grep -Eq \"STEP \\(ISO-10303-21\\) -> .+\\.step\" && echo \"$OUT\" | grep -Eq \"Render: .+-elevation\\.svg\" && echo \"$OUT\" | grep -q \"Session phase: complete\"'"
+    timeout: 360000
