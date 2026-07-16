@@ -1,0 +1,28 @@
+name: simard-concierge-end-to-end
+app_type: cli
+description: |
+  Proves the Concierge identity delivers on its "Done when" bar: produce a hotel
+  concept PLUS a runnable reservations/PMS prototype end-to-end. Drives the
+  operator-probe `concierge-run` surface, which designs the hotel and runs the
+  booking lifecycle (book -> check-in -> check-out -> housekeeping -> restored
+  availability) with self-verified invariants.
+
+  Schema note: the pinned `@gadugi/agentic-test` CLI runner only gates on
+  `run`-step exit codes and reads command text from `params.command`, so the
+  assertion is encoded in the exit code of a `bash -lc` wrapper that exits zero
+  only when the run reports both "Prototype verified: yes" and a checked-out
+  sample reservation.
+metadata:
+  tags:
+    - cli
+    - concierge
+    - hospitality
+agents:
+  - name: cli-agent
+    type: cli
+    command: bash
+steps:
+  - action: run
+    params:
+      command: "bash -lc 'OUT=$(cargo run --quiet --bin simard_operator_probe -- concierge-run single-process \"Harbor Light in Lisbon, a 120-room boutique waterfront hotel\" 2>&1); echo \"$OUT\"; echo \"$OUT\" | grep -q \"Prototype verified: yes\" && echo \"$OUT\" | grep -Eq \"Sample reservation: RES-[0-9]+\" && echo \"$OUT\" | grep -q \"status CheckedOut\" && echo \"$OUT\" | grep -q \"Session phase: complete\"'"
+    timeout: 360000

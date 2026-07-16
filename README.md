@@ -415,6 +415,7 @@ Native git hooks (Python-free) mirror the CI gates locally. Enroll once with `gi
 - [Base type adapters reference](docs/reference/base-type-adapters.md)
 - [Agent composition](docs/architecture/agent-composition.md)
 - [Truthful runtime metadata](docs/concepts/truthful-runtime-metadata.md)
+- [Concierge identity (hospitality design + operations software)](docs/concepts/concierge-identity.md)
 
 ## License
 
