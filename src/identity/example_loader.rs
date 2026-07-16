@@ -20,14 +20,14 @@ use crate::error::{SimardError, SimardResult};
 pub const DEFAULT_EXAMPLE_IDENTITIES_DIR: &str = "examples/identities";
 
 /// Validate `name` as a single, safe path segment BEFORE any filesystem
-/// access. Mirrors the identity-name rule used by the file loader: non-empty,
-/// ASCII, and only alphanumeric characters or hyphens. This rejects `..`,
+/// access. Mirrors the identity-name rule used by the file loader: non-empty
+/// and only ASCII alphanumeric characters or hyphens. This rejects `..`,
 /// `a/b`, `/etc/passwd`, and empty names, so `name` can never traverse out of
 /// `base_dir`.
 fn validate_example_name(base_dir: &Path, name: &str) -> SimardResult<()> {
-    let is_valid = !name.is_empty()
-        && name.is_ascii()
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    // Single pass: `is_ascii_alphanumeric()` and `== '-'` are both ASCII-only,
+    // so this predicate already implies `name.is_ascii()` — no separate scan.
+    let is_valid = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
     if is_valid {
         return Ok(());
     }
