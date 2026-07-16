@@ -135,6 +135,67 @@ fn grounded_short_content_known_concept_scores_point_seven_five() {
     assert!(fact_passes_gate("pr-pattern", "squash fixups", true));
 }
 
+/// Punctuation/symbol-only content carries no more information than an empty
+/// string, so it extends the same HARD gate: score 0.0 and quarantine, even
+/// when grounded and labelled with a known concept (which would otherwise reach
+/// 0.5 + 0.3 + 0.1 = 0.9 under the old raw-token count that treated `"..."` as
+/// three "words"). This is the fact-yield-quality fix: a wall of punctuation
+/// must never be promoted into semantic memory.
+#[test]
+fn punctuation_only_content_is_a_hard_zero_even_when_grounded() {
+    for junk in ["... ... ...", "- - -", "??? !!! ///", "—— —— ——", ". , ; :"] {
+        assert_eq!(
+            score_fact_reliability("bug-pattern", junk, true),
+            0.0,
+            "punctuation/symbol-only content {junk:?} carries no information and is quarantined"
+        );
+        assert!(
+            !fact_passes_gate("bug-pattern", junk, true),
+            "punctuation/symbol-only content {junk:?} must never clear the gate"
+        );
+    }
+}
+
+/// Degenerate repetition of a single word is one *distinct* informative word,
+/// not three, so it earns only the partial short-content weight (0.15), not the
+/// full 0.3. Under the old raw-token count `"the the the"` scored the full
+/// content weight; scoring distinct informative words closes that loophole.
+#[test]
+fn repeated_single_word_earns_only_partial_content_weight() {
+    // grounded + 1 distinct word (0.15) + known concept (0.1) = 0.75, not 0.9.
+    let s = score_fact_reliability("lesson-learned", "the the the the", true);
+    assert!(
+        (s - 0.75).abs() < 1e-9,
+        "repeated single word is one distinct informative word (partial weight), got {s}"
+    );
+    // Case/punctuation variants of the same word still collapse to one distinct
+    // word, so surface churn cannot inflate the count to the full weight.
+    let variants = score_fact_reliability("lesson-learned", "Recall recall, recall. RECALL", true);
+    assert!(
+        (variants - 0.75).abs() < 1e-9,
+        "case/punctuation variants of one word stay one distinct word, got {variants}"
+    );
+}
+
+/// Three genuinely distinct informative words earn the full content weight,
+/// confirming the informative-word count agrees with the raw-token count on
+/// honest content — only degenerate content changes disposition.
+#[test]
+fn three_distinct_informative_words_earn_full_content_weight() {
+    // grounded (0.5) + ≥3 distinct words (0.3) + known concept (0.1) = 0.9.
+    let s = score_fact_reliability("bug-pattern", "retry saturates the socket", true);
+    assert!(
+        (s - 0.9).abs() < 1e-9,
+        "three+ distinct informative words earn the full content weight, got {s}"
+    );
+    // Numbers count as informative words too.
+    let numeric = score_fact_reliability("pr-pattern", "1 2 3", true);
+    assert!(
+        (numeric - 0.9).abs() < 1e-9,
+        "distinct numeric tokens are informative words, got {numeric}"
+    );
+}
+
 /// An off-spec concept loses the 0.1 concept-validity component but a grounded,
 /// well-worded fact still clears the gate (0.5 + 0.3 = 0.8). Concept validity is
 /// a nudge, not a gate.

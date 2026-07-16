@@ -101,6 +101,48 @@ pub fn canonical_concept(raw: &str) -> Option<&'static str> {
     }
 }
 
+/// Number of distinct informative words the content-quality signal in
+/// [`score_fact_reliability`] needs to distinguish before it awards full credit.
+/// The scorer only cares about the `0` / `1–2` / `≥3` bucket, so the informative-
+/// word scan stops once this many distinct words are seen (bounding the work on
+/// the up-to-64 KiB content body).
+const FULL_CONTENT_WORD_BUCKET: usize = 3;
+
+/// Count DISTINCT *informative* words in `content`, stopping once `cap` distinct
+/// words have been seen.
+///
+/// An **informative** word is a whitespace-delimited token bearing at least one
+/// alphanumeric character; a token made only of punctuation/symbols (`"..."`,
+/// `"-"`, `"—"`) carries no information and is skipped. Each informative token is
+/// normalized before the distinctness check — folded to lowercase with every
+/// non-alphanumeric character stripped — so `"recall"`, `"Recall"` and
+/// `"recall."` collapse to a single distinct word and mere repetition
+/// (`"the the the"`) cannot inflate the count past one.
+///
+/// This is the information proxy the content-quality signal scores against,
+/// replacing a raw `split_whitespace` token count that treated punctuation
+/// tokens and repeated words as if each carried fresh information. The scan is
+/// linear in the (length-capped) content and only runs at fact-commit time, off
+/// the recall hot path.
+fn distinct_informative_words(content: &str, cap: usize) -> usize {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for token in content.split_whitespace() {
+        let normalized: String = token
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect();
+        if normalized.is_empty() {
+            continue; // punctuation/symbol-only token — carries no information
+        }
+        seen.insert(normalized);
+        if seen.len() >= cap {
+            break;
+        }
+    }
+    seen.len()
+}
+
 /// Self-assess the reliability of one distilled fact (issue #2433, BGML's
 /// *information self-assessment ownership*, §IV). Returns a confidence score in
 /// `[0.0, 1.0]` from cheap, locally-available signals — no extra LLM call:
@@ -108,19 +150,23 @@ pub fn canonical_concept(raw: &str) -> Option<&'static str> {
 /// | Signal | Weight | Rationale |
 /// |--------|--------|-----------|
 /// | **Provenance grounding** | 0.5 | Resolved by the caller: batch-membership for the in-process sink, store-existence for the IPC handler. A source that cannot be grounded is unverifiable / hallucinated provenance — the strongest unreliability signal. |
-/// | **Content quality** | ≤0.3 | Empty / whitespace-only content carries no information and is a HARD gate (score `0.0`); otherwise ≥3 words earns the full weight, 1–2 words a partial 0.15. |
+/// | **Content quality** | ≤0.3 | Scored over *distinct informative words* (alphanumeric-bearing tokens, case/punctuation-normalized and de-duplicated), not raw whitespace tokens. Content with zero informative words — empty, whitespace-only, or punctuation/symbol-only (`"... ... ..."`) — carries no information and is a HARD gate (score `0.0`); otherwise ≥3 distinct informative words earns the full weight, 1–2 a partial 0.15. Degenerate repetition (`"the the the"`) has one distinct word, so it only earns the partial weight. |
 /// | **Concept validity** | 0.1 | Awarded when the concept canonicalizes into [`KNOWN_CONCEPTS`]. |
 ///
-/// A nominal fact (grounded, ≥3 words, known concept) scores `0.9`. Because
-/// grounding (0.5) is *necessary* to clear [`RELIABILITY_THRESHOLD`] (0.5), an
-/// ungrounded fact tops out at `0.4` (content + concept) and an empty fact scores
-/// `0.0`; both are quarantined.
+/// A nominal fact (grounded, ≥3 distinct informative words, known concept) scores
+/// `0.9`. Because grounding (0.5) is *necessary* to clear
+/// [`RELIABILITY_THRESHOLD`] (0.5), an ungrounded fact tops out at `0.4` (content
+/// + concept) and a no-information fact scores `0.0`; both are quarantined.
 pub fn score_fact_reliability(concept: &str, content: &str, grounded: bool) -> f64 {
-    // (0) Hard gate: empty / whitespace-only content carries no information and
-    // is quarantined unconditionally, regardless of how trustworthy its
-    // provenance looks. We only need the 0 / 1–2 / ≥3 word bucket, so stop after
-    // the third word instead of scanning the whole (up to 64 KiB) content.
-    let words = content.split_whitespace().take(3).count();
+    // (0) Hard gate: content that carries no information is quarantined
+    // unconditionally, regardless of how trustworthy its provenance looks. This
+    // covers empty / whitespace-only content AND content made only of
+    // punctuation/symbol tokens (`"... ... ..."`), which carry exactly as much
+    // information as an empty string. Distinctness also means degenerate
+    // repetition (`"the the the"`) counts as a single word, not three. We only
+    // need the 0 / 1–2 / ≥3 bucket, so the scan stops after the third distinct
+    // informative word instead of walking the whole (up to 64 KiB) content.
+    let words = distinct_informative_words(content, FULL_CONTENT_WORD_BUCKET);
     if words == 0 {
         return 0.0;
     }
@@ -132,8 +178,9 @@ pub fn score_fact_reliability(concept: &str, content: &str, grounded: bool) -> f
         score += 0.5;
     }
 
-    // (2) Content quality (content is non-empty here — see the hard gate above).
-    if words >= 3 {
+    // (2) Content quality (content has ≥1 informative word here — see the hard
+    // gate above).
+    if words >= FULL_CONTENT_WORD_BUCKET {
         score += 0.3;
     } else {
         score += 0.15;
