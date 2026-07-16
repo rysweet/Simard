@@ -20,6 +20,7 @@
 //! [`improve_loop`] behind `coin-gym improve --holdout fresh`.
 
 pub mod agent_runner;
+pub mod duel;
 pub mod executor;
 pub mod improve;
 pub mod improve_loop;
@@ -33,6 +34,8 @@ pub mod types;
 mod tests_agent_runner;
 #[cfg(test)]
 mod tests_cli;
+#[cfg(test)]
+mod tests_duel;
 #[cfg(test)]
 mod tests_executor;
 #[cfg(test)]
@@ -54,6 +57,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use agent_runner::{AgentRunner, BaselineStrategy, FixtureReasoner, TeamStrategy};
+use duel::{DuelReport, decide};
 use executor::{
     ANSWER_BLOB_BIN, ANSWER_BLOB_HARNESS, ANSWER_UNREACHABLE_MD, CoinEvaluateConfig,
     CoinEvaluateExecutor, EvaluateSource, LOCAL_ONLY, MockHarnessExecutor,
@@ -73,6 +77,7 @@ pub fn coin_gym_usage() -> &'static str {
      \n\
      commands:\n\
      \x20 run <model> [--strategy baseline|team] [--profile <name>] [--targets <path>]\n\
+     \x20 duel <model> [--profile <name>] [--targets <path>]\n\
      \x20 score <run-id> [--profile <name>]\n\
      \x20 compare <run-id> [--profile <name>]\n\
      \x20 improve <run-id> [--profile <name>] [--holdout fresh]\n\
@@ -80,7 +85,10 @@ pub fn coin_gym_usage() -> &'static str {
      \x20 profiles\n\
      \n\
      Offline scaffold (Phase 4): runs grade against a mock oracle. Live grading\n\
-     needs `coin evaluate` on a Docker host (Phase 3, issue #2823). `improve\n\
+     needs `coin evaluate` on a Docker host (Phase 3, issue #2823). `duel` runs\n\
+     the single-model baseline and the multi-agent team head-to-head over one\n\
+     target set and prints which arm wins on COIN's reach-then-precision metric.\n\
+     `improve\n\
      --holdout fresh` runs the Phase-5 self-improvement loop (failure-analyst →\n\
      overfitting gate → verify on held-out fresh → keep/rollback + durable tactic\n\
      memory) offline. `contract` prints the real coin evaluate/verify wiring\n\
@@ -115,6 +123,7 @@ where
     let rest = &argv[1..];
     match command.as_str() {
         "run" => cmd_run(home, rest),
+        "duel" => cmd_duel(home, rest),
         "score" => cmd_score(home, rest),
         "compare" => cmd_compare(home, rest),
         "improve" => cmd_improve(home, rest),
@@ -263,6 +272,90 @@ pub(crate) fn execute_run(
             AgentRunner::new(&s, &executor, model, snapshot).run(&scenario.targets.pinned)
         }
     }
+}
+
+// ── duel ─────────────────────────────────────────────────────────────────────
+
+/// Run the single-model **baseline** and the multi-agent **team** head-to-head
+/// over one target set, persist both runs under the profile, and print which arm
+/// wins on COIN's reach-then-precision ordering. This is the harness's central
+/// question — "does multiagent beat single-model?" — as one reproducible,
+/// LOCAL-ONLY command instead of two `run`s eyeballed by hand.
+fn cmd_duel(home: &Path, rest: &[String]) -> CoinGymResult<()> {
+    let parsed = parse_args(rest, &["profile", "targets"])?;
+    let model = parsed
+        .positionals
+        .first()
+        .ok_or_else(|| CoinGymError::Usage("duel: expected <model>".to_string()))?
+        .clone();
+    let scenario = match parsed.flags.get("targets") {
+        Some(path) => DemoScenario::from_path(Path::new(path))?,
+        None => DemoScenario::sample()?,
+    };
+    validate_offline_scenario(&scenario)?;
+    let profile_name = parsed.flags.get("profile").map_or_else(
+        || profiles::sanitize_name(&model),
+        |p| profiles::sanitize_name(p),
+    );
+
+    // Both arms over the identical target set — the only variable is the strategy.
+    let baseline = execute_run(&model, Strategy::Baseline, &scenario)?;
+    let team = execute_run(&model, Strategy::Team, &scenario)?;
+
+    ensure_profile(home, &profile_name, &model)?;
+    let baseline_path = persist_run(home, &profile_name, &baseline, &scenario)?;
+    let team_path = persist_run(home, &profile_name, &team, &scenario)?;
+
+    let report = decide(&baseline, &team);
+    println!("duel:    {} (baseline vs team)", report.model);
+    println!("snapshot:{}", report.snapshot);
+    println!("profile: {profile_name}");
+    println!("targets: {}", report.targets);
+    println!("saved:   {}", baseline_path.display());
+    println!("saved:   {}", team_path.display());
+    print_offline_note(report.offline_scaffold);
+    print_duel(&report);
+    Ok(())
+}
+
+/// Persist one run (report + targets + offline scaffold) under a profile.
+fn persist_run(
+    home: &Path,
+    profile: &str,
+    report: &RunReport,
+    scenario: &DemoScenario,
+) -> CoinGymResult<std::path::PathBuf> {
+    let persisted = PersistedRun {
+        report: report.clone(),
+        targets: scenario.targets.clone(),
+        offline: scenario.offline_scaffold(),
+    };
+    save_run(home, profile, &persisted)
+}
+
+/// Render a head-to-head [`DuelReport`].
+fn print_duel(report: &DuelReport) {
+    print_duel_arm(&report.baseline);
+    print_duel_arm(&report.team);
+    println!(
+        "delta:   reach {:+.1} pts   precision {:+.1} pts   (team − baseline)",
+        report.reach_delta_pct, report.precision_delta_pct
+    );
+    println!("verdict: {} — {}", report.verdict.label(), report.reason);
+}
+
+fn print_duel_arm(arm: &duel::ArmSummary) {
+    println!(
+        "{:<9}reach {:.1}% ({}/{})   precision {:.1}% ({}/{})   {}",
+        arm.strategy.label(),
+        arm.reach_pct,
+        arm.reached,
+        arm.total,
+        arm.precision_pct,
+        arm.reached,
+        arm.submitted,
+        arm.histogram,
+    );
 }
 
 // ── score ────────────────────────────────────────────────────────────────────

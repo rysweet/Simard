@@ -1,7 +1,7 @@
 ---
 title: Run the LOCAL COIN Gym harness
 description: Operator guide for the coin-gym CLI — a local harness that runs the COIN benchmark shape, scores vs. the published leaderboard, and A/Bs a single-model baseline against a multi-agent team.
-last_updated: 2026-07-08
+last_updated: 2026-07-16
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -46,6 +46,7 @@ default, overridable with the `COIN_GYM_HOME` environment variable.
 
 ```text
 coin-gym run <model> [--strategy baseline|team] [--profile <name>] [--targets <path>]
+coin-gym duel    <model> [--profile <name>] [--targets <path>]
 coin-gym score   <run-id> [--profile <name>]
 coin-gym compare <run-id> [--profile <name>]
 coin-gym improve <run-id> [--profile <name>] [--holdout fresh]
@@ -82,6 +83,40 @@ team      reach 60.0% (3/5)   precision 100.0% (3/3)  R:3/W:0/A:2/T:0/N:0/E:0
 For the per-target breakdown, the reproduction commands, and the leaderboard-
 comparison caveat, see
 [COIN Gym — baseline vs. team measurement](../research/coin-gym-baseline-vs-team-measurement.md).
+
+### `duel` — baseline vs. team head-to-head, with a verdict
+
+```bash
+coin-gym duel claude-opus-4.6 --profile opus
+```
+
+`duel` is the harness's central question — *does the multi-agent team beat the
+single-model baseline?* — as **one reproducible command**. It runs **both arms
+over the identical target set**, persists both runs under the profile, and
+prints which arm wins on COIN's own metric ordering: **reach first, precision
+second** (the published targeted track sorts by reach; precision is the
+over-claim penalty). A reach tie decided on precision is a genuine result — the
+team removed wrong submissions without giving up any reach.
+
+```text
+duel:    claude-opus-4.6 (baseline vs team)
+snapshot:you/coin@v1-sample
+profile: opus
+targets: 5
+saved:   …/profiles/opus/runs/claude-opus-4-6-baseline-….json
+saved:   …/profiles/opus/runs/claude-opus-4-6-team-….json
+note:   OFFLINE SCAFFOLD (mock oracle) — not a real coin evaluate grade (Phase 3)
+baseline reach 60.0% (3/5)   precision 60.0% (3/5)   R:3/W:2/A:0/T:0/N:0/E:0
+team     reach 60.0% (3/5)   precision 100.0% (3/3)  R:3/W:0/A:2/T:0/N:0/E:0
+delta:   reach +0.0 pts   precision +40.0 pts   (team − baseline)
+verdict: TEAM WINS — reach tied at 60.0%, but the team's abstention gate lifted
+         precision +40.0 pts (100.0% vs 60.0%) — fewer over-claims for the same reach
+```
+
+The saved runs are ordinary run files, so `score`, `compare`, and `improve` work
+on either arm afterwards. Like every offline-scaffold result, the verdict is a
+reproducible *trade-off* on the mock oracle, **not** a live-model capability
+claim (Phase 3, #2823); **LOCAL-ONLY** — nothing is submitted externally.
 
 ### `score` — reach / precision + family split
 
