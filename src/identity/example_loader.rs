@@ -211,7 +211,7 @@ path = "prompts/gastronome_system.md"
         let base = TempDir::new().unwrap();
         for bad in ["../evil", "..", "a/b", "/etc/passwd", ""] {
             let err = load_example_identity(base.path(), bad, &test_request("x"))
-                .unwrap_err_or_else_panic(bad);
+                .expect_err(&format!("traversal/invalid name {bad:?} must be rejected"));
             assert!(
                 matches!(err, SimardError::IdentityTomlParseError { .. }),
                 "traversal/invalid name {bad:?} must be rejected as IdentityTomlParseError, got: {err:?}"
@@ -262,18 +262,5 @@ path = "../../secret.md"
             5,
             "cartographer ships 5 phase prompts (system + explore + visualize + narrative + deliver)"
         );
-    }
-
-    // ── Small helper: turn a Result into its Err, panicking with context ─
-    trait UnwrapErrOrPanic<T> {
-        fn unwrap_err_or_else_panic(self, ctx: &str) -> SimardError;
-    }
-    impl UnwrapErrOrPanic<IdentityManifest> for SimardResult<IdentityManifest> {
-        fn unwrap_err_or_else_panic(self, ctx: &str) -> SimardError {
-            match self {
-                Ok(_) => panic!("expected error for input {ctx:?} but got Ok"),
-                Err(e) => e,
-            }
-        }
     }
 }
