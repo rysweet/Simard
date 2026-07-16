@@ -6,16 +6,21 @@
 //! failing source degrades one section, never the whole report, and never
 //! panics.
 //!
-//! Sources that require the live memory/goal IPC socket or `gh` (memory, goals,
+//! Sources that require the live memory/goal IPC socket or `gh` (memory,
 //! workstreams, completed work, self-improvement) are wired incrementally; until
 //! then they report `unavailable` with an honest note rather than inventing data.
+//! The **goal board** is fully wired (it reads the same durable, process-agnostic
+//! `goal-board:snapshot` the dashboard `/api/goals` panel and the TUI goal board
+//! render), so the unified Status snapshot no longer reports goals as "deferred".
 
 use std::path::PathBuf;
 
 use super::{
-    CopilotTurn, Daemon, DiskUsage, EdgeCounts, Gym, LedgerWindow, LlmUsage, MemoryBrain,
-    NodeCounts, Resources, SectionEnvelope, StatusSnapshot, TelemetrySignals,
+    CopilotTurn, Daemon, DiskUsage, EdgeCounts, GoalBoard, GoalItem, Gym, LedgerWindow, LlmUsage,
+    MemoryBrain, NodeCounts, Resources, SectionEnvelope, StatusSnapshot, TelemetrySignals,
 };
+use crate::goal_curation::load_goal_board;
+use crate::memory_ipc::open_reader_client;
 use crate::overseer::activity::{self, OverseerActivity};
 use crate::telemetry::{names, snapshot};
 
@@ -76,7 +81,7 @@ pub fn assemble(opts: &AssembleOptions) -> StatusSnapshot {
         resources: assemble_resources(main_pid, &opts.state_root),
         memory: assemble_memory(metrics.as_ref(), &opts.state_root),
         gym: assemble_gym(gym_skipped),
-        goals: SectionEnvelope::absent("goal board read deferred (see dashboard/TUI goal board)"),
+        goals: assemble_goals(&opts.state_root),
         workstreams: SectionEnvelope::absent("engineer registry not read in this context"),
         completed: SectionEnvelope::absent("gh: not queried in this context"),
         self_improvement: SectionEnvelope::absent("gh: not queried in this context"),
@@ -475,6 +480,63 @@ fn assemble_gym(skip_gym: bool) -> SectionEnvelope<Gym> {
     )
 }
 
+// ── goals ────────────────────────────────────────────────────────────────────
+
+/// Assemble the GOAL BOARD section from the durable, process-agnostic goal
+/// board — the same `goal-board:snapshot` the dashboard's `/api/goals` panel and
+/// the TUI goal board render.
+///
+/// Reads through [`open_reader_client`], which prefers the daemon's in-process
+/// writer / IPC socket and otherwise opens the on-disk store read-only, so the
+/// section is identical whether it is assembled from the daemon, the
+/// `simard status` CLI, or the TUI. Fail-visible: a reader-open or load failure
+/// degrades THIS section to `error` with an honest note; it never panics and
+/// never fabricates data. A genuinely empty board reads back as a present,
+/// live, empty `active` list — distinct from an unreadable one.
+fn assemble_goals(state_root: &std::path::Path) -> SectionEnvelope<GoalBoard> {
+    let reader = match open_reader_client(state_root) {
+        Ok(r) => r,
+        Err(e) => return SectionEnvelope::error(format!("goal board reader open failed: {e}")),
+    };
+    let board = match load_goal_board(reader.ops()) {
+        Ok(b) => b,
+        Err(e) => return SectionEnvelope::error(format!("goal board read failed: {e}")),
+    };
+
+    let active = board
+        .active
+        .iter()
+        .map(|g| GoalItem {
+            short_id: g.id.clone(),
+            priority: format!("p{}", g.priority),
+            status: g.status.to_string(),
+            summary: goal_summary_line(&g.description),
+        })
+        .collect();
+
+    SectionEnvelope::live(GoalBoard { active }, None)
+}
+
+/// Collapse a (possibly multi-paragraph) goal description into a single, capped
+/// line for the one-line-per-goal status render. Takes the first non-empty line
+/// and truncates it to 72 Unicode characters with an ellipsis so a long goal
+/// brief cannot line-wrap or blow up the terminal / dashboard `<pre>` layout.
+fn goal_summary_line(description: &str) -> String {
+    const MAX: usize = 72;
+    let first = description
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    let mut chars = first.chars();
+    let head: String = chars.by_ref().take(MAX).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
 // ── telemetry / anomalies (derived from the metrics snapshot) ────────────────
 
 fn assemble_telemetry(
@@ -739,6 +801,38 @@ mod pure_helper_tests {
     }
 
     #[test]
+    fn goal_summary_line_takes_first_nonempty_line_trimmed() {
+        assert_eq!(
+            goal_summary_line("\n\n  Raise coverage to 70%  \nmore detail\n"),
+            "Raise coverage to 70%"
+        );
+    }
+
+    #[test]
+    fn goal_summary_line_caps_long_lines_with_ellipsis() {
+        let long = "x".repeat(200);
+        let out = goal_summary_line(&long);
+        // 72 payload chars + the single ellipsis char.
+        assert_eq!(out.chars().count(), 73);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn goal_summary_line_is_char_boundary_safe_on_multibyte() {
+        // A run of multi-byte chars must truncate on a char boundary (no panic).
+        let s = "é".repeat(100);
+        let out = goal_summary_line(&s);
+        assert_eq!(out.chars().count(), 73);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn goal_summary_line_empty_description_is_empty() {
+        assert_eq!(goal_summary_line(""), "");
+        assert_eq!(goal_summary_line("   \n  \n"), "");
+    }
+
+    #[test]
     fn llm_over_budget_compares_spend_to_budget() {
         let over = SectionEnvelope::live(
             LlmUsage {
@@ -893,9 +987,11 @@ mod pure_helper_tests {
     }
 
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn assemble_is_total_and_degrades_unwired_sources_to_absent() {
         let dir =
             std::env::temp_dir().join(format!("simard-status-assemble-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let opts = AssembleOptions::with_state_root(dir.clone());
         let snap = assemble(&opts);
@@ -903,10 +999,24 @@ mod pure_helper_tests {
 
         assert_eq!(snap.schema_version, SCHEMA_VERSION);
         assert!(!snap.generated_at.is_empty());
-        // Sources not wired in this process context degrade to absent, never panic.
-        assert!(!snap.goals.is_present());
+        // `gh`-backed sources are still unwired in this process context and
+        // degrade to absent, never panic.
         assert!(!snap.completed.is_present());
         assert!(!snap.self_improvement.is_present());
+        // The goal board IS wired: reading an empty state root yields a present,
+        // live, *empty* board rather than the old permanent "deferred" absent.
+        assert!(
+            snap.goals.is_present(),
+            "goals section must be wired (present), got {:?}",
+            snap.goals
+        );
+        assert!(
+            snap.goals
+                .data
+                .as_ref()
+                .is_some_and(|g| g.active.is_empty()),
+            "an empty state root must read back an empty active goal list"
+        );
     }
 
     #[test]
@@ -916,5 +1026,109 @@ mod pure_helper_tests {
         assert_eq!(opts.state_root, root);
         assert_eq!(opts.service_unit, "simard.service");
         assert!(opts.sections.is_none());
+    }
+}
+
+#[cfg(test)]
+mod goals_assembly_tests {
+    //! `assemble_goals` reads the durable goal board — the reported bug was the
+    //! Status snapshot permanently reporting goals as "deferred/unavailable"
+    //! while the live board (`/api/goals`, TUI) was fully readable. These tests
+    //! pin the wired behavior so it cannot regress to a hard-coded absent.
+    //!
+    //! They register the same tier-0 in-process cognitive-memory writer that
+    //! production wires, mirroring `operator_commands_dashboard::tests_goals_crud`,
+    //! and are serialized on the `cognitive_memory` key.
+
+    use super::*;
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::goal_curation::{
+        ActiveGoal, GoalBoard as CurationBoard, GoalProgress, save_goal_board,
+    };
+    use crate::memory_ipc::{clear_in_process_writer, register_in_process_writer};
+    use crate::test_support::HermeticState;
+    use std::sync::Arc;
+
+    /// Keeps the shared tier-0 writer registered for a test and clears it on drop.
+    struct SharedMemoryGuard {
+        writer: Arc<dyn CognitiveMemoryOps>,
+    }
+
+    impl SharedMemoryGuard {
+        fn register(state: &HermeticState) -> Self {
+            let writer: Arc<dyn CognitiveMemoryOps> = Arc::new(
+                LibraryCognitiveMemory::open(state.state_root())
+                    .expect("open shared cognitive memory"),
+            );
+            register_in_process_writer(state.state_root().to_path_buf(), Arc::clone(&writer));
+            Self { writer }
+        }
+        fn ops(&self) -> &dyn CognitiveMemoryOps {
+            self.writer.as_ref()
+        }
+    }
+
+    impl Drop for SharedMemoryGuard {
+        fn drop(&mut self) {
+            clear_in_process_writer();
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn assemble_goals_reads_and_maps_the_durable_board() {
+        let state = HermeticState::new();
+        let guard = SharedMemoryGuard::register(&state);
+
+        let mut board = CurationBoard::new();
+        board.active.push(ActiveGoal {
+            id: "raise-coverage-abc123".to_string(),
+            description: "Raise test coverage above 70% line coverage across the crate\n\
+                          with meaningful, behavior-verifying tests."
+                .to_string(),
+            priority: 2,
+            status: GoalProgress::InProgress { percent: 40 },
+            assigned_to: Some("simard".to_string()),
+            repo: None,
+            current_activity: None,
+            wip_refs: vec![],
+            last_progress_update_at: None,
+            parent_goal_id: None,
+            priority_explicit: false,
+            labels: vec![],
+        });
+        save_goal_board(&board, guard.ops()).expect("seed board");
+
+        let env = assemble_goals(state.state_root());
+        assert!(env.is_present(), "goals must be present after a real read");
+        let data = env.data.expect("goals data present");
+        assert_eq!(data.active.len(), 1);
+        let g = &data.active[0];
+        assert_eq!(g.short_id, "raise-coverage-abc123");
+        assert_eq!(g.priority, "p2");
+        assert_eq!(g.status, "in-progress(40%)");
+        // Summary collapses to the first line (no embedded newline) and is short.
+        assert!(!g.summary.contains('\n'));
+        assert!(g.summary.starts_with("Raise test coverage above 70%"));
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn assemble_goals_empty_board_is_present_not_deferred() {
+        let state = HermeticState::new();
+        let guard = SharedMemoryGuard::register(&state);
+        save_goal_board(&CurationBoard::new(), guard.ops()).expect("seed empty board");
+
+        let env = assemble_goals(state.state_root());
+        assert!(
+            env.is_present(),
+            "an empty-but-readable board is present (live), never the old 'deferred' absent"
+        );
+        assert!(env.data.as_ref().is_some_and(|g| g.active.is_empty()));
+        // Regression guard: the honest "deferred/unavailable" note is gone.
+        assert!(
+            env.note.as_deref().unwrap_or("").is_empty(),
+            "a successfully-read board must not carry an 'unavailable' note"
+        );
     }
 }

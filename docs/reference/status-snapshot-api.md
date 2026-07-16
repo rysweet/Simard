@@ -62,7 +62,7 @@ rather than fabricating data:
 | LLM usage | `cost_tracking` ledger (`costs/ledger.jsonl`) + daily budget via `overseer::config::daily_budget_usd()` (single-sourced; always the enforced ceiling — see the [daily-budget display guard](./daily-budget-display-guard.md)) | ~~raw `$SIMARD_DAILY_BUDGET_USD`~~ |
 | Memory / brain | `metrics_snapshot.json` — the daemon-sampled `simard.memory.nodes` / `.edges` gauges | ~~LadybugDB open from the CLI~~ |
 | Gym | `$SIMARD_SKIP_GYM` | — |
-| Goal board | *deferred* — rendered `unavailable`; surfaced live in the daemon-hosted dashboard / TUI goal tabs | — |
+| Goal board | `goal-board:snapshot` via the read-only memory client (`open_reader_client` → `goal_curation::load_goal_board`) — the same durable board the daemon-hosted dashboard `/api/goals` and the TUI goal tab render | ~~permanent `unavailable`~~ |
 | Active workstreams | *deferred* — rendered `unavailable` (engineer registry) | — |
 | Completed work | *deferred* — rendered `unavailable`; `gh` is not queried on the process-agnostic path | — |
 | Self-improvement | *deferred* — rendered `unavailable` | — |
