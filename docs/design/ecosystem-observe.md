@@ -97,6 +97,12 @@ across prompt and doc prose.
 
 **File:** `prompt_assets/simard/ecosystem_repos.toml`
 
+The rail resolves this file **install-first** — `~/.simard/prompt_assets/simard/ecosystem_repos.toml`
+(the deployed install location) is preferred over the in-tree
+`<repo_root>/prompt_assets/simard/ecosystem_repos.toml`, mirroring how the recipe
+resolves (§3). See [Ecosystem-roster path resolution](../reference/ecosystem-roster-resolution.md)
+for the resolution ladder and the fail-visible/fail-open wiring contract.
+
 ```toml
 # The repositories Simard's Overseer stewards. This is the single source of truth
 # for the ecosystem roster: the ecosystem-observe recipe reads it, and the prose
@@ -362,7 +368,11 @@ The feature reuses the existing Overseer cadence knobs — no new env vars.
 | `SIMARD_OVERSEER_GAP_SCAN_EVERY_N` | `1` | Run the observation pass once every N Overseer ticks. Unset/empty/`0`/negative clamp to `1`. |
 
 The stewarded roster itself is configured by editing
-`prompt_assets/simard/ecosystem_repos.toml` (data, not env).
+`ecosystem_repos.toml` (data, not env). On a deployed daemon edit the installed
+copy at `~/.simard/prompt_assets/simard/ecosystem_repos.toml`; in a source
+checkout edit the in-tree `<repo_root>/prompt_assets/simard/ecosystem_repos.toml`.
+The rail resolves it install-first — see
+[Ecosystem-roster path resolution](../reference/ecosystem-roster-resolution.md).
 
 ## Examples
 
@@ -463,6 +473,8 @@ point-in-time report docs are committed.
 
 - [`docs/design/overseer.md`](./overseer.md) — the Overseer's meta-OODA loop and
   capability map.
+- [Ecosystem-roster path resolution](../reference/ecosystem-roster-resolution.md) —
+  how the rail resolves `ecosystem_repos.toml` install-first and its wiring contract.
 - [`docs/ecosystem-map.md`](../ecosystem-map.md) — the human-readable repository
   inventory (points at `ecosystem_repos.toml` for the stewarded roster).
 - `prompt_assets/simard/overseer/observe.md` — the OBSERVE prompt.
