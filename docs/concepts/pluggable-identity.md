@@ -173,7 +173,7 @@ legitimately live in `src/`. This does not change.
 ### Example non-engineering identities → data-only packages
 
 Identities that merely *demonstrate* what the framework can produce —
-cartographer, gastronome, bursar, and the like — are **not** part of Simard's
+cartographer, gastronome, bursar, concierge, and the like — are **not** part of Simard's
 daemon. They are authored as **data-only packages**
 under [`examples/identities/<name>/`](../../examples/identities/README.md):
 
@@ -225,6 +225,9 @@ arm, no `operator_cli` subcommand, no `src/bin/*`). The reference package is
 [`examples/identities/bursar/`](../../examples/identities/bursar/) is a second
 example (an investment-portfolio research/advisory identity — advisory only,
 never order execution) that likewise ships as pure data with zero `src/` changes.
+[`examples/identities/concierge/`](../../examples/identities/concierge/) is a
+further hospitality-domain example (distinct from Simard's own built-in
+`simard-concierge` identity), also pure data with zero `src/` changes.
 
 ## What this is not
 
