@@ -19,6 +19,7 @@ related:
   - ./operational-autonomy-model.md
   - ./enrichment-observability.md
   - ./stewardship-mode.md
+  - ./autonomous-merge-review-gate.md
   - ../reference/ready-prs-sensor-api.md
   - ../reference/cross-repo-merge-authority.md
   - ../howto/enable-autonomous-self-merge-canary.md

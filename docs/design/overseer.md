@@ -203,7 +203,7 @@ is an orchestrator over shipped code, not a reimplementation.
 | `Intervention` | Capability trait | Existing Simard reuse (file:line) |
 |----------------|------------------|-----------------------------------|
 | `LaunchRecipe{brief}` | `RecipeLauncher` | `amplihack recipe run amplifier-bundle/recipes/smart-orchestrator.yaml -c task_description=…` (`src/bin/simard_engineer_loop_recipe.rs:51`, `src/bin/simard_self_improve_recipe.rs:50`); `recipe-runner-rs` + `AMPLIHACK_AGENT_BINARY` (`src/stewardship/recipe_merge_judge.rs:191`); concurrency via `agent_supervisor::spawn_subordinate` (`src/agent_supervisor/lifecycle/spawn.rs:27`); output parse `recipe_output::extract` (`src/recipe_output/extract.rs`). |
-| `VerifyAndMergePr{repo,pr}` | `PrOps::verify` + `PrOps::merge` | gates `evaluate_objective_gates` (`src/stewardship/merge_authority.rs:495`); merge `merge_pr_if_merge_ready` (`:564`); review `review_pipeline::{review_diff,should_commit}` (`src/review_pipeline.rs:128,147`). |
+| `VerifyAndMergePr{repo,pr}` | `PrOps::verify` + `PrOps::merge` | objective pre-filter `evaluate_objective_gates` (`src/stewardship/merge_authority.rs:495`); authoritative review+merge `merge_pr_if_merge_ready_with_judge` (`src/stewardship/merge_authority.rs`) driven by the agentic merge-judge `build_merge_judge` over `prompt_assets/simard/merge_readiness_judge.md`. **No `review_pipeline` in the merge path** — the merge-judge is the sole reviewer (see [autonomous-merge review gate](../concepts/autonomous-merge-review-gate.md)). |
 | `ResolveConflict{repo,pr}` | `PrOps::resolve_conflict` | `git_guardrails::check_git_safety` (`src/git_guardrails.rs:41`) around the union-merge / `--no-verify` push. |
 | `Deploy{commit}` | `Deployer` | `self_deploy::orchestrator::SelfDeployOrchestrator::run` (`src/self_deploy/orchestrator.rs:229`); `self_relaunch::{build_canary,verify_canary,all_gates_passed,default_gates,handover}` (`src/self_relaunch/*`); marker `env!("SIMARD_GIT_HASH")` via `self_deploy::health`. |
 | `FileIssue{run}` | `IssueFiler` | `stewardship::process_orchestrator_run` (`src/stewardship/mod.rs:51`); dedup `stewardship::{failure_signature,find_existing}` (`src/stewardship/dedup.rs`); no goal-board mutation. |
@@ -292,9 +292,14 @@ files.
 
 ### pr-verify checklist
 
-`PrOps::verify` runs a checklist before any merge. Items 1–2 and 7 reuse existing
-code; items 3–6 are **new additive diff-scans** this design introduces (they do not
-exist yet):
+`PrOps::verify` is a **deterministic, review-free objective pre-filter**. It runs the
+objective gates (items 1–2, reuse existing code) plus the additive diff-scans (items
+3–6, **new** to this design), and nothing else. It performs **no** LLM/code review:
+the review decision is made exactly once, downstream, by the agentic **merge-judge**
+in `PrOps::merge` (see
+[autonomous-merge review gate](../concepts/autonomous-merge-review-gate.md)).
+`verify().ready == true` means *eligible to proceed to the authoritative merge*, not
+*approved to merge*.
 
 | # | Check | Status |
 |---|-------|--------|
@@ -304,9 +309,17 @@ exist yet):
 | 4 | No stray `print!`/`println!`/`eprintln!` in added `src/**` | **new** diff-scan |
 | 5 | Additive / non-breaking (no removed `pub` items) | **new** diff-scan |
 | 6 | PRD (`Specs/ProductArchitecture.md`) preserved | **new** check |
-| 7 | No Bug/Security finding ≥ High | reuse `review_pipeline::should_commit` |
 
-See `prompt_assets/simard/overseer/pr_verify.md` and `deploy_gate.md`.
+> **No review check in `verify()`.** The former check #7 ("No Bug/Security finding ≥
+> High" via `review_pipeline::should_commit`) is **removed** from `verify()`. It was
+> driven by a `DiffReviewer` that never had a production implementation, so in
+> production it was hardcoded fail-closed and `verify().ready` was **always false** —
+> which is why every eligible engineer PR escalated and none merged. Merge review is
+> now the sole responsibility of the agentic merge-judge invoked in `PrOps::merge`,
+> which fails closed (`RefusingMergeJudge`) when no LLM provider is configured.
+
+See `prompt_assets/simard/overseer/pr_verify.md`,
+`prompt_assets/simard/merge_readiness_judge.md`, and `deploy_gate.md`.
 
 ## Persisted state
 
@@ -428,7 +441,7 @@ Each phase is independently shippable, additive, and gated behind an env flag
 | Milestone | Scope | Reuse | Test strategy | Exit criteria |
 |-----------|-------|-------|---------------|---------------|
 | **M1 — read-only observer** | Observe + Orient + `Report` + `FileIssue` only. Optional packaging as an `impl CognitiveThread` sensor. No launches, no merges, no deploy. | `status::assemble`; `stewardship::process_orchestrator_run` (deduped issues); `cost_tracking`. | Unit: `signals_from` thresholds; `orient` dedup vs in-flight; issue-filer idempotency with a fake `GhClient` (no network). | Runs behind flag; emits a report + files deduped issues; provably takes no write action beyond issue-filing. |
-| **M2 — autonomous fix-launching + PR verify/merge** | `LaunchRecipe` (smart-orchestrator), poll → PR, `VerifyAndMergePr` for green/merge-ready PRs (routine autonomy). | `spawn_subordinate` / recipe runner; `merge_pr_if_merge_ready`; `evaluate_objective_gates`; `review_pipeline`; NEW pr-verify diff-scans (Bridge / `print!` / additive / PRD). | Unit: budget gate holds launches; per-cycle launch cap; pr-verify checklist pass/fail on fixture diffs; merge only when `ready`. Integration: fake recipe runner + fake `PrGhClient`. | Launches a fix for a seeded process problem and merges the resulting green PR through the gated authority, in a fixture. |
+| **M2 — autonomous fix-launching + PR verify/merge** | `LaunchRecipe` (smart-orchestrator), poll → PR, `VerifyAndMergePr` for green/merge-ready PRs (routine autonomy). | `spawn_subordinate` / recipe runner; `merge_pr_if_merge_ready_with_judge` + `build_merge_judge` (agentic merge-judge, sole reviewer); `evaluate_objective_gates`; NEW pr-verify diff-scans (Bridge / `print!` / additive / PRD). | Unit: budget gate holds launches; per-cycle launch cap; pr-verify checklist pass/fail on fixture diffs; merge only when `ready`. Integration: fake recipe runner + fake `PrGhClient`. | Launches a fix for a seeded process problem and merges the resulting green PR through the gated authority, in a fixture. |
 | **M3 — guarded deploy + goal transfer** | `Deploy` (HIGH-RISK, opt-in) via canary gates + marker update; `ResolveConflict`; `TransferGoal` via meeting REPL. | `SelfDeployOrchestrator` + `self_relaunch` gates + marker; `git_guardrails`; `run_meeting_repl` + handoff. | Unit: deploy gate refuses no-op/rollback/red-canary/crash-loop; HIGH-RISK gated off by default; recursion guard refuses own PRs. Integration: fake deployer/canary; meeting handoff round-trip. | With opt-in, advances the deployed-commit marker only on a green canary; otherwise escalates. Never touches `~/.simard/worktrees`. |
 | **M4 — audits + self-tuning** | `RunAudit` loops (crusty-old-engineer-gated) on demand; recurring self-audit; threshold self-tuning of `SIMARD_OVERSEER_*` knobs. | `self_quality_audit::run_self_quality_audit`; `monthly-self-quality-audit.yaml`; telemetry history. | Unit: audit scope routing; tuning stays within clamped floors; no unbounded growth. | Runs a bounded audit loop and adjusts thresholds within floors, all observable in telemetry. |
 

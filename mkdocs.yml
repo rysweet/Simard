@@ -96,6 +96,7 @@ nav:
   - Concepts:
     - Operational Autonomy Model: concepts/operational-autonomy-model.md
     - Autonomous Self-Merge Sensor (ready_prs wire): concepts/autonomous-self-merge-sensor.md
+    - Autonomous-Merge Review Gate (agentic merge-judge): concepts/autonomous-merge-review-gate.md
     - Adaptive Scaling: concepts/adaptive-scaling.md
     - Pluggable Identity: concepts/pluggable-identity.md
     - Multi-Identity Host Isolation: concepts/multi-identity-host-isolation.md
@@ -370,6 +371,7 @@ nav:
     - PR-Finalization Review Pipeline: reference/pr-finalization-pipeline.md
     - Cross-Repo Merge Authority: reference/cross-repo-merge-authority.md
     - ready_prs Sensor API: reference/ready-prs-sensor-api.md
+    - Autonomous-Merge Review Gate API: reference/autonomous-merge-review-gate.md
     - "No Point-in-Time Report Docs Scan (pr-verify #8)": reference/no-point-in-time-docs-scan.md
     - Completion-Evidence Gate API: reference/completion-evidence-gate-api.md
     - Outcome-Verification API: reference/outcome-verification-api.md

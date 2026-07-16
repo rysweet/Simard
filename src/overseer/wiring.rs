@@ -598,6 +598,9 @@ fn describe_act_error(iv: &Intervention, err: &OverseerError) -> String {
         } => ("budget", format!("${spent_usd:.2} of ${budget_usd:.2}")),
         OverseerError::Recursion { subject } => ("recursion", format!("own {subject}")),
         OverseerError::Conflict { with } => ("conflict", format!("overlaps {with}")),
+        OverseerError::NotMergeReady { pr, reason } => {
+            ("merge readiness", format!("PR #{pr}: {reason}"))
+        }
     };
     sanitize_detail(&format!(
         "did: {} failed — {kind}: {detail} (isolated)",
@@ -1773,6 +1776,32 @@ mod tests {
         assert!(
             held.contains("verify-merge is opt-in; escalated to operator"),
             "must carry the gate reason so 'no action' is explained: {held:?}"
+        );
+    }
+
+    #[test]
+    fn describe_act_error_handles_not_merge_ready_in_plain_english() {
+        // #4097: NotMergeReady normally maps to an escalation (handled in act()),
+        // but describe_act_error's classifier must exhaustively cover it and
+        // render a plain-English, jargon-free, target-named line.
+        let err = OverseerError::NotMergeReady {
+            pr: 4097,
+            reason: "the merge-readiness review did not approve this change yet".to_string(),
+        };
+        let s = describe_act_error(
+            &Intervention::VerifyAndMergePr {
+                repo: "rysweet/Simard".to_string(),
+                pr: 4097,
+            },
+            &err,
+        );
+        assert!(
+            s.contains("4097"),
+            "an act line must name the target PR: {s:?}"
+        );
+        assert!(
+            !s.contains("check #7") && !s.contains("DiffReviewer"),
+            "no internal gate jargon may leak into the operator feed: {s:?}"
         );
     }
 
