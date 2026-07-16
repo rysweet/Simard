@@ -96,4 +96,17 @@ printf '%s\n' "$HELP_OUT" | grep -F -- "--file-issues" >/dev/null
 # tests: parse_run_diagnosis, RunDiagnosis::render, and the steward embedding).
 printf '%s\n' "$HELP_OUT" | grep -F "root-cause" >/dev/null
 
+# ── 6. Resolution: --file-issues also closes recovered tracking issues ──────
+# The write is bidirectional: besides filing one issue per still-broken
+# workflow, the same sweep CLOSES any open tracking issue whose workflow is
+# green again, so the fleet keeps exactly one open issue per still-broken
+# workflow and none for already-recovered ones. The offline path cannot
+# exercise the live close, but the CLI's documented contract must advertise it
+# (behavioural coverage is in the ci_health unit tests:
+# steward_issue_resolution::* — signature parity with filing, closing only
+# green workflows, skipping failing/ignored/cache-served ones, and fail-loud
+# search/close error propagation).
+printf '%s\n' "$HELP_OUT" | grep -F "green-evidence comment" >/dev/null
+printf '%s\n' "$HELP_OUT" | grep -F "still-broken" >/dev/null
+
 echo "ci-health-sweep: PASS"

@@ -24,10 +24,11 @@
 //!
 //! See `docs/reference/ci-health-sweep.md`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::process::Command;
 
-use crate::error::SimardResult;
-use crate::stewardship::{GhClient, StewardshipOutcome, failure_signature, find_existing};
+use crate::error::{SimardError, SimardResult};
+use crate::stewardship::{GhClient, GhIssue, StewardshipOutcome, failure_signature, find_existing};
 
 use super::diagnose::RunDiagnostics;
 use super::{ActionableFailure, FleetReport};
@@ -46,14 +47,21 @@ fn issue_title(failure: &ActionableFailure) -> String {
     )
 }
 
-/// The distinct-failure signature for a CI actionable failure: keyed on
-/// `<repo> :: <workflow>` (see module docs). The volatile run id/url and the
-/// specific failing conclusion are deliberately excluded so the same broken
-/// workflow hashes identically across sweeps and across a `failure`/`timed_out`
-/// flap.
-pub fn ci_failure_signature(failure: &ActionableFailure) -> String {
-    let identity = format!("{} :: {}", failure.repo, failure.workflow);
+/// The distinct-failure signature for a `<repo> :: <workflow>` identity — the
+/// stable key shared by *filing* a broken workflow and *resolving* it once it is
+/// green again. Keyed only on repo+workflow (see module docs): the volatile run
+/// id/url and the specific failing conclusion are deliberately excluded so the
+/// same workflow hashes identically across sweeps, across a `failure`/`timed_out`
+/// flap, and across the failure→green transition.
+pub fn ci_signature_for(repo: &str, workflow: &str) -> String {
+    let identity = format!("{repo} :: {workflow}");
     failure_signature(CI_FAILURE_KIND, &identity)
+}
+
+/// The distinct-failure signature for a CI actionable failure. Thin wrapper over
+/// [`ci_signature_for`] so a failure and its later green result hash identically.
+pub fn ci_failure_signature(failure: &ActionableFailure) -> String {
+    ci_signature_for(&failure.repo, &failure.workflow)
 }
 
 /// Issue body embedding the dedup front-matter (matching the stewardship
@@ -171,6 +179,295 @@ pub fn file_issues_for_report(
             url: new.url,
             signature,
         });
+    }
+    Ok(outcomes)
+}
+
+// ── Resolution: close a tracking issue once its workflow is green again ──────
+
+/// Outcome of resolving (closing) a CI-health tracking issue whose workflow has
+/// returned to green. One per issue actually closed; a green workflow with no
+/// open tracking issue produces nothing (it was never broken, or was already
+/// resolved), so this vector holds only real state transitions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolutionOutcome {
+    pub repo: String,
+    pub workflow: String,
+    pub issue_number: u64,
+    pub url: String,
+    pub signature: String,
+}
+
+/// The reads+write root-cause *resolution* needs: list a repo's open ci-health
+/// tracking issues **once**, and close the ones whose workflow is green again.
+/// Factored into its own trait (rather than extended onto [`GhClient`], which
+/// many modules implement) so the resolution surface has exactly one production
+/// impl and one test fake.
+pub trait CiIssueResolver {
+    /// List the **open** ci-health tracking issues in `repo` — those carrying the
+    /// `ci-health-workflow:` marker this steward files. One `gh` call per repo,
+    /// so a healthy fleet is scanned in O(repos) requests rather than
+    /// O(green-workflows); resolution then matches signatures locally.
+    fn list_open_tracking_issues(&self, repo: &str) -> SimardResult<Vec<GhIssue>>;
+    /// Close issue `number` in `repo`, posting `comment` as the closing comment.
+    /// Fail-loud: a `gh` error propagates so a degraded close is never mistaken
+    /// for a resolved issue.
+    fn close_issue(&self, repo: &str, number: u64, comment: &str) -> SimardResult<()>;
+}
+
+/// Upper bound on open issues fetched per repo when resolving. The REST
+/// issue-list endpoint (`gh issue list`, no `--search`) is paged internally by
+/// `gh` up to this many issues; it is sized comfortably above the governed
+/// fleet's per-repo open-issue volumes so a real tracking issue is never
+/// truncated away, while still bounding work on an unexpectedly huge repo.
+const OPEN_ISSUE_LIST_LIMIT: usize = 1000;
+
+/// The unique body marker every CI-health tracking issue carries (see
+/// [`issue_body`]). Substring-matched **locally** to select this steward's
+/// tracking issues from a repo's open issues — GitHub's tokenizing issue search
+/// splits `ci-health-workflow` into separate words and so cannot select them
+/// reliably (nor bound the result to them), which is why resolution filters in
+/// process rather than via a `--search` qualifier.
+const CI_HEALTH_ISSUE_MARKER: &str = "ci-health-workflow:";
+
+/// Whether `body` belongs to a CI-health tracking issue this steward filed.
+pub(crate) fn is_ci_health_tracking_issue(body: &str) -> bool {
+    body.contains(CI_HEALTH_ISSUE_MARKER)
+}
+
+/// Production [`CiIssueResolver`] that shells out to `gh`.
+#[derive(Default)]
+pub struct RealCiIssueResolver;
+
+impl RealCiIssueResolver {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl CiIssueResolver for RealCiIssueResolver {
+    fn list_open_tracking_issues(&self, repo: &str) -> SimardResult<Vec<GhIssue>> {
+        // Use the REST issue-list endpoint (core rate limit, ~5000/hr) rather
+        // than the Search API (~30/min secondary limit): resolution runs once
+        // per repo, and a green fleet would otherwise burn a search call per
+        // green workflow. We over-fetch the repo's open issues (bounded by
+        // OPEN_ISSUE_LIST_LIMIT) and filter locally to this steward's tracking
+        // issues by their unique body marker — GitHub's tokenizing search cannot
+        // select them reliably, so a `--search` pre-filter would both miss real
+        // issues past its window on a busy repo and return false positives.
+        let limit = OPEN_ISSUE_LIST_LIMIT.to_string();
+        let output = Command::new("gh")
+            .args([
+                "issue",
+                "list",
+                "-R",
+                repo,
+                "--state",
+                "open",
+                "--limit",
+                &limit,
+                "--json",
+                "number,url,title,body",
+            ])
+            .output()
+            .map_err(|e| SimardError::CiHealthGhCommandFailed {
+                reason: format!("failed to spawn `gh issue list -R {repo}`: {e}"),
+            })?;
+        if !output.status.success() {
+            return Err(SimardError::CiHealthGhCommandFailed {
+                reason: format!(
+                    "`gh issue list -R {repo}` exited {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            });
+        }
+        let all = parse_tracking_issue_list(&output.stdout)?;
+        Ok(all
+            .into_iter()
+            .filter(|issue| is_ci_health_tracking_issue(&issue.body))
+            .collect())
+    }
+
+    fn close_issue(&self, repo: &str, number: u64, comment: &str) -> SimardResult<()> {
+        let num = number.to_string();
+        let output = Command::new("gh")
+            .args([
+                "issue",
+                "close",
+                &num,
+                "-R",
+                repo,
+                "--comment",
+                comment,
+                "--reason",
+                "completed",
+            ])
+            .output()
+            .map_err(|e| SimardError::CiHealthGhCommandFailed {
+                reason: format!("failed to spawn `gh issue close {num} -R {repo}`: {e}"),
+            })?;
+        if !output.status.success() {
+            return Err(SimardError::CiHealthGhCommandFailed {
+                reason: format!(
+                    "`gh issue close {num} -R {repo}` exited {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// The closing comment posted when a broken workflow is green again. Deterministic
+/// (no time, no I/O) so it is exhaustively testable. Links the green run when its
+/// id was captured, else names the default-branch run generically.
+fn resolution_comment(repo: &str, workflow: &str, branch: &str, run_id: Option<u64>) -> String {
+    let green_evidence = match run_id {
+        Some(id) => format!(
+            "[latest run](https://github.com/{repo}/actions/runs/{id})",
+            repo = repo,
+            id = id
+        ),
+        None => "its latest default-branch run".to_string(),
+    };
+    format!(
+        "\u{2705} Resolved by Simard's CI-health steward.\n\
+         \n\
+         The `{workflow}` workflow's {green_evidence} on `{repo}`@`{branch}` \
+         default branch is now green, so the failure this issue tracked has \
+         cleared. Closing per the tracking contract — this issue tracks the \
+         broken workflow only *until its default-branch CI is green again*.\n\
+         \n\
+         If `{workflow}` fails again, the next `simard ci-health --file-issues` \
+         sweep files a fresh tracking issue under the same stewardship signature.\n",
+        workflow = workflow,
+        green_evidence = green_evidence,
+        repo = repo,
+        branch = branch,
+    )
+}
+
+/// Parse `gh issue list --json number,url,title,body` output into [`GhIssue`]s.
+/// A malformed response is an error (never a silently-empty list that would make
+/// resolution wrongly conclude "no tracking issues to close").
+fn parse_tracking_issue_list(stdout: &[u8]) -> SimardResult<Vec<GhIssue>> {
+    #[derive(serde::Deserialize)]
+    struct RawIssue {
+        number: u64,
+        url: String,
+        title: String,
+        body: String,
+    }
+    let raws: Vec<RawIssue> =
+        serde_json::from_slice(stdout).map_err(|e| SimardError::CiHealthGhCommandFailed {
+            reason: format!("failed to parse `gh issue list` JSON: {e}"),
+        })?;
+    Ok(raws
+        .into_iter()
+        .map(|r| GhIssue {
+            number: r.number,
+            url: r.url,
+            title: r.title,
+            body: r.body,
+        })
+        .collect())
+}
+
+/// Close every open `[ci-health]` tracking issue whose workflow is now **green**
+/// — the "until its default-branch CI is green again" half of the tracking
+/// contract that [`file_issues_for_report`] opens.
+///
+/// For each freshly-collected repo in `report` (cache-served repos carry no
+/// workflow list and are skipped — their green issues are resolved on the next
+/// full sweep of that repo), the repo's open ci-health tracking issues are
+/// listed **once** (O(repos) `gh` calls, not O(green-workflows)), then each
+/// **green** workflow is matched against that list locally by its
+/// [`ci_signature_for`] signature. A match is closed with a green-evidence
+/// comment and reported. A repo with no open tracking issues costs a single list
+/// call and no per-workflow work.
+///
+/// Conservative by construction: only a workflow verdict of exactly `green`
+/// resolves an issue. A workflow that is `ignored` (in-progress, disabled, no
+/// run, cancelled/skipped) never closes a tracking issue — an in-flight rerun of
+/// a previously-broken workflow keeps its issue open until it *concludes* green.
+/// A green workflow whose signature still has a **live actionable failure** this
+/// sweep (a same-`name:` sibling file is broken, collapsing to the same
+/// signature/issue) is also skipped, so a green sibling never closes an issue
+/// that is still tracking a real failure — matching filing's "file if any is
+/// broken" rule.
+///
+/// Fail-loud: a `gh` list or close error propagates (never a silent partial
+/// resolution). Returns one [`ResolutionOutcome`] per issue actually closed, in
+/// repo-then-workflow order; a fleet with no now-green tracked workflows yields
+/// an empty vector without any close call.
+pub fn resolve_issues_for_report(
+    report: &FleetReport,
+    resolver: &dyn CiIssueResolver,
+) -> SimardResult<Vec<ResolutionOutcome>> {
+    // Signatures that still have a live actionable failure this sweep. Filing
+    // keys a tracking issue on `ci_failure_signature` and files whenever *any*
+    // workflow with that signature is broken; resolution must therefore refuse
+    // to close a signature that is still failing — otherwise a repo with two
+    // workflow *files* sharing a `name:` (which collapse to one signature/issue,
+    // yet are classified independently), where one file is green and the other
+    // is failing, would have its still-broken tracking issue closed by the green
+    // one. That is the exact failure filing is (re-)recording this same sweep,
+    // so closing it would flap the issue closed/re-opened. Keying on the same
+    // `report.actionable_failures` filing uses guarantees parity.
+    let failing_signatures: HashSet<String> = report
+        .actionable_failures
+        .iter()
+        .map(ci_failure_signature)
+        .collect();
+
+    let mut outcomes = Vec::new();
+    for repo in &report.repos {
+        if repo.green_from_cache {
+            continue;
+        }
+        // Cheap pre-check: a repo with no green workflow has nothing to resolve,
+        // so skip the list call entirely.
+        if !repo.workflows.iter().any(|wf| wf.verdict == "green") {
+            continue;
+        }
+        let open_issues = resolver.list_open_tracking_issues(&repo.slug)?;
+        if open_issues.is_empty() {
+            continue;
+        }
+        // Two green workflow files can share a `name:` and so hash to one
+        // signature/issue (filing collapses them identically); track which issue
+        // numbers were already closed this repo so such a pair closes the shared
+        // issue exactly once rather than double-closing it.
+        let mut closed_this_repo: HashSet<u64> = HashSet::new();
+        for wf in &repo.workflows {
+            if wf.verdict != "green" {
+                continue;
+            }
+            let signature = ci_signature_for(&repo.slug, &wf.name);
+            // A green workflow whose signature still carries a live failure this
+            // sweep (a same-signature sibling is broken) must not close the
+            // shared tracking issue — it is still tracking a real failure.
+            if failing_signatures.contains(&signature) {
+                continue;
+            }
+            let Some(issue) = find_existing(&open_issues, &signature) else {
+                continue;
+            };
+            if !closed_this_repo.insert(issue.number) {
+                continue;
+            }
+            let comment = resolution_comment(&repo.slug, &wf.name, &repo.default_branch, wf.run_id);
+            resolver.close_issue(&repo.slug, issue.number, &comment)?;
+            outcomes.push(ResolutionOutcome {
+                repo: repo.slug.clone(),
+                workflow: wf.name.clone(),
+                issue_number: issue.number,
+                url: issue.url.clone(),
+                signature,
+            });
+        }
     }
     Ok(outcomes)
 }

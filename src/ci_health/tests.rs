@@ -1321,6 +1321,414 @@ mod steward_issue_filing {
     }
 }
 
+mod steward_issue_resolution {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use super::super::classify::{ActionableFailure, FleetReport, RepoReport, WorkflowReport};
+    use super::super::steward::{
+        CiIssueResolver, ci_failure_signature, ci_signature_for, is_ci_health_tracking_issue,
+        resolve_issues_for_report,
+    };
+    use crate::error::SimardError;
+    use crate::stewardship::GhIssue;
+
+    /// Fake [`CiIssueResolver`]: serves a pre-seeded per-repo list of open
+    /// tracking issues and records every list/close call, with optional injected
+    /// errors on either operation.
+    #[derive(Default)]
+    struct FakeResolver {
+        /// Open tracking issues to return from `list_open_tracking_issues`, keyed
+        /// by repo slug.
+        issues: Mutex<HashMap<String, Vec<GhIssue>>>,
+        list_error: Mutex<Option<String>>,
+        close_error: Mutex<Option<String>>,
+        list_calls: Mutex<Vec<String>>,
+        close_calls: Mutex<Vec<(String, u64, String)>>,
+    }
+
+    impl FakeResolver {
+        fn new() -> Self {
+            Self::default()
+        }
+        /// Seed an open tracking issue carrying `sig` in its body, so
+        /// `list_open_tracking_issues`+`find_existing` resolves it.
+        fn seed_issue(&self, repo: &str, sig: &str, number: u64) {
+            self.issues
+                .lock()
+                .unwrap()
+                .entry(repo.to_string())
+                .or_default()
+                .push(GhIssue {
+                    number,
+                    url: format!("https://github.com/{repo}/issues/{number}"),
+                    title: format!("[ci-health] failing on {repo}"),
+                    body: format!("filed-by: simard-stewardship\nstewardship-signature: {sig}\n"),
+                });
+        }
+        fn fail_list(&self, reason: &str) {
+            *self.list_error.lock().unwrap() = Some(reason.to_string());
+        }
+        fn fail_close(reason: &str) -> Self {
+            Self {
+                close_error: Mutex::new(Some(reason.to_string())),
+                ..Self::default()
+            }
+        }
+        fn list_calls(&self) -> Vec<String> {
+            self.list_calls.lock().unwrap().clone()
+        }
+        fn close_calls(&self) -> Vec<(String, u64, String)> {
+            self.close_calls.lock().unwrap().clone()
+        }
+    }
+
+    impl CiIssueResolver for FakeResolver {
+        fn list_open_tracking_issues(&self, repo: &str) -> Result<Vec<GhIssue>, SimardError> {
+            self.list_calls.lock().unwrap().push(repo.to_string());
+            if let Some(reason) = self.list_error.lock().unwrap().clone() {
+                return Err(SimardError::CiHealthGhCommandFailed { reason });
+            }
+            Ok(self
+                .issues
+                .lock()
+                .unwrap()
+                .get(repo)
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        fn close_issue(&self, repo: &str, number: u64, comment: &str) -> Result<(), SimardError> {
+            self.close_calls
+                .lock()
+                .unwrap()
+                .push((repo.to_string(), number, comment.to_string()));
+            if let Some(reason) = self.close_error.lock().unwrap().clone() {
+                return Err(SimardError::CiHealthGhCommandFailed { reason });
+            }
+            Ok(())
+        }
+    }
+
+    fn wf(name: &str, verdict: &str, run_id: Option<u64>) -> WorkflowReport {
+        WorkflowReport {
+            name: name.to_string(),
+            verdict: verdict.to_string(),
+            conclusion: None,
+            reason: None,
+            run_id,
+        }
+    }
+
+    /// A one-repo fresh report with the given workflows.
+    fn report(slug: &str, workflows: Vec<WorkflowReport>) -> FleetReport {
+        FleetReport {
+            green: !workflows.iter().any(|w| w.verdict == "actionable_failure"),
+            repos_checked: 1,
+            repos_from_cache: 0,
+            workflows_checked: workflows.len(),
+            actionable_failures: Vec::new(),
+            repos: vec![RepoReport {
+                slug: slug.to_string(),
+                default_branch: "main".to_string(),
+                green_from_cache: false,
+                workflows,
+            }],
+        }
+    }
+
+    #[test]
+    fn closes_the_tracking_issue_of_a_now_green_workflow() {
+        let repo = "rysweet/amplihack-rs";
+        let sig = ci_signature_for(repo, "Code Atlas");
+        let resolver = FakeResolver::new();
+        resolver.seed_issue(repo, &sig, 938);
+
+        let outcomes = resolve_issues_for_report(
+            &report(repo, vec![wf("Code Atlas", "green", Some(42))]),
+            &resolver,
+        )
+        .unwrap();
+
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].repo, repo);
+        assert_eq!(outcomes[0].workflow, "Code Atlas");
+        assert_eq!(outcomes[0].issue_number, 938);
+        assert_eq!(outcomes[0].signature, sig);
+        // The issue was actually closed, with a green-evidence comment linking
+        // the now-green run.
+        let calls = resolver.close_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, repo);
+        assert_eq!(calls[0].1, 938);
+        assert!(calls[0].2.contains("now green"), "comment: {}", calls[0].2);
+        assert!(
+            calls[0]
+                .2
+                .contains("https://github.com/rysweet/amplihack-rs/actions/runs/42"),
+            "comment: {}",
+            calls[0].2
+        );
+        assert!(calls[0].2.contains("Code Atlas"), "comment: {}", calls[0].2);
+        // The repo's open issues were listed exactly once (O(repos), not
+        // O(green-workflows)).
+        assert_eq!(resolver.list_calls(), vec![repo.to_string()]);
+    }
+
+    #[test]
+    fn the_resolution_signature_matches_the_filing_signature() {
+        // The signature resolution keys on must equal the one filing used, or a
+        // filed issue would never be found to close.
+        let f = ActionableFailure {
+            repo: "rysweet/azlin".to_string(),
+            default_branch: "main".to_string(),
+            workflow: "CI".to_string(),
+            conclusion: "failure".to_string(),
+            run_id: Some(1),
+            run_url: Some("https://github.com/rysweet/azlin/actions/runs/1".to_string()),
+        };
+        assert_eq!(
+            ci_signature_for("rysweet/azlin", "CI"),
+            ci_failure_signature(&f)
+        );
+    }
+
+    #[test]
+    fn a_green_workflow_without_a_tracking_issue_closes_nothing() {
+        let repo = "rysweet/Simard";
+        let resolver = FakeResolver::new(); // no seeded issue → empty list
+
+        let outcomes = resolve_issues_for_report(
+            &report(repo, vec![wf("verify", "green", Some(9))]),
+            &resolver,
+        )
+        .unwrap();
+
+        assert!(outcomes.is_empty());
+        assert!(resolver.close_calls().is_empty());
+        // It still *listed* the repo (that is how it learns there is no issue),
+        // but closed nothing.
+        assert_eq!(resolver.list_calls(), vec![repo.to_string()]);
+    }
+
+    #[test]
+    fn a_repo_with_no_green_workflow_is_not_even_listed() {
+        // The cheap pre-check skips the list call for a repo that has no green
+        // workflow to resolve.
+        let repo = "rysweet/amplihack-rs";
+        let resolver = FakeResolver::new();
+
+        let outcomes = resolve_issues_for_report(
+            &report(
+                repo,
+                vec![
+                    wf("CI", "actionable_failure", Some(8)),
+                    wf("Auto Release", "ignored", None),
+                ],
+            ),
+            &resolver,
+        )
+        .unwrap();
+
+        assert!(outcomes.is_empty());
+        assert!(resolver.list_calls().is_empty());
+        assert!(resolver.close_calls().is_empty());
+    }
+
+    #[test]
+    fn only_green_workflows_are_considered_for_resolution() {
+        // A failing and an ignored (in-progress) workflow must never close an
+        // issue — only the green one is a resolution candidate.
+        let repo = "rysweet/amplihack-rs";
+        let resolver = FakeResolver::new();
+        let green_sig = ci_signature_for(repo, "Publish Snapshot Release");
+        resolver.seed_issue(repo, &green_sig, 940);
+        // Seed an issue for the still-failing workflow too — it must NOT be closed.
+        resolver.seed_issue(repo, &ci_signature_for(repo, "CI"), 100);
+
+        let outcomes = resolve_issues_for_report(
+            &report(
+                repo,
+                vec![
+                    wf("Publish Snapshot Release", "green", Some(7)),
+                    wf("CI", "actionable_failure", Some(8)),
+                    wf("Auto Release", "ignored", None),
+                ],
+            ),
+            &resolver,
+        )
+        .unwrap();
+
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].issue_number, 940);
+        // Exactly one list (the repo, once); no per-workflow calls.
+        assert_eq!(resolver.list_calls(), vec![repo.to_string()]);
+        // Only the green workflow's issue is closed; #100 stays open.
+        let closed: Vec<u64> = resolver.close_calls().into_iter().map(|c| c.1).collect();
+        assert_eq!(closed, vec![940]);
+    }
+
+    #[test]
+    fn cache_served_repos_are_skipped() {
+        let resolver = FakeResolver::new();
+        let mut r = report("rysweet/RustyClawd", Vec::new());
+        r.repos[0].green_from_cache = true;
+        r.repos_from_cache = 1;
+
+        let outcomes = resolve_issues_for_report(&r, &resolver).unwrap();
+
+        assert!(outcomes.is_empty());
+        assert!(resolver.list_calls().is_empty());
+        assert!(resolver.close_calls().is_empty());
+    }
+
+    #[test]
+    fn a_degraded_list_propagates_and_closes_nothing() {
+        let resolver = FakeResolver::new();
+        resolver.fail_list("`gh issue list` exited 1");
+
+        let err = resolve_issues_for_report(
+            &report("rysweet/azlin", vec![wf("CI", "green", Some(1))]),
+            &resolver,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, SimardError::CiHealthGhCommandFailed { .. }));
+        // Fail-loud: nothing is closed while the list is degraded.
+        assert!(resolver.close_calls().is_empty());
+    }
+
+    #[test]
+    fn a_close_failure_propagates() {
+        let repo = "rysweet/azlin";
+        let sig = ci_signature_for(repo, "CI");
+        let resolver = FakeResolver::fail_close("`gh issue close` exited 1");
+        resolver.seed_issue(repo, &sig, 55);
+
+        let err =
+            resolve_issues_for_report(&report(repo, vec![wf("CI", "green", Some(2))]), &resolver)
+                .unwrap_err();
+
+        assert!(matches!(err, SimardError::CiHealthGhCommandFailed { .. }));
+    }
+
+    #[test]
+    fn comment_without_a_run_id_names_the_run_generically() {
+        let repo = "rysweet/azlin";
+        let sig = ci_signature_for(repo, "Rust CI");
+        let resolver = FakeResolver::new();
+        resolver.seed_issue(repo, &sig, 77);
+
+        resolve_issues_for_report(&report(repo, vec![wf("Rust CI", "green", None)]), &resolver)
+            .unwrap();
+
+        let calls = resolver.close_calls();
+        assert_eq!(calls.len(), 1);
+        // No fabricated run URL when the id was not captured.
+        assert!(
+            !calls[0].2.contains("/actions/runs/"),
+            "comment: {}",
+            calls[0].2
+        );
+        assert!(
+            calls[0].2.contains("its latest default-branch run"),
+            "comment: {}",
+            calls[0].2
+        );
+    }
+
+    #[test]
+    fn two_green_workflows_sharing_a_name_close_the_shared_issue_once() {
+        // Two workflow files sharing a `name:` hash to one signature, so filing
+        // opened a single issue for the pair. Resolution must close that one
+        // issue exactly once — never double-close it (which would post a second
+        // comment and, on an already-closed issue, could fail-loud).
+        let repo = "rysweet/amplihack-rs";
+        let sig = ci_signature_for(repo, "CI");
+        let resolver = FakeResolver::new();
+        resolver.seed_issue(repo, &sig, 500);
+
+        let outcomes = resolve_issues_for_report(
+            &report(
+                repo,
+                vec![wf("CI", "green", Some(1)), wf("CI", "green", Some(2))],
+            ),
+            &resolver,
+        )
+        .unwrap();
+
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].issue_number, 500);
+        let closed: Vec<u64> = resolver.close_calls().into_iter().map(|c| c.1).collect();
+        assert_eq!(closed, vec![500]);
+    }
+
+    #[test]
+    fn a_green_workflow_does_not_close_an_issue_a_same_name_sibling_still_fails() {
+        // Two workflow *files* share the name `CI` (they classify independently
+        // but collapse to one signature/issue): file A is green, file B is an
+        // actionable failure. Filing (re-)files/matches the shared issue for the
+        // still-broken B, so resolution must NOT close it off the green A —
+        // otherwise the operator sees a close/re-open flap and the real failure
+        // goes untracked.
+        let repo = "rysweet/amplihack-rs";
+        let sig = ci_signature_for(repo, "CI");
+        let resolver = FakeResolver::new();
+        resolver.seed_issue(repo, &sig, 600);
+
+        let mut r = report(
+            repo,
+            vec![
+                wf("CI", "green", Some(1)),
+                wf("CI", "actionable_failure", Some(2)),
+            ],
+        );
+        // Mirror what build_report would emit: the failing sibling is a live
+        // actionable failure this sweep, keyed on the same signature.
+        r.actionable_failures = vec![ActionableFailure {
+            repo: repo.to_string(),
+            default_branch: "main".to_string(),
+            workflow: "CI".to_string(),
+            conclusion: "failure".to_string(),
+            run_id: Some(2),
+            run_url: Some("https://github.com/rysweet/amplihack-rs/actions/runs/2".to_string()),
+        }];
+        r.green = false;
+
+        let outcomes = resolve_issues_for_report(&r, &resolver).unwrap();
+
+        // Nothing closed: the shared issue is still tracking the failing sibling.
+        assert!(outcomes.is_empty(), "outcomes: {outcomes:?}");
+        assert!(
+            resolver.close_calls().is_empty(),
+            "must not close an issue whose signature still has a live failure"
+        );
+    }
+
+    #[test]
+    fn the_local_tracking_issue_filter_selects_only_ci_health_issues() {
+        // The production list step over-fetches a repo's open issues (GitHub's
+        // tokenizing search cannot select tracking issues reliably) and filters
+        // locally by the unique `ci-health-workflow:` marker. That marker must be
+        // exactly the one filing embeds, and must not fire on look-alike text
+        // that merely mentions the words "ci", "health", or "workflow".
+        // A real filed body (marker present) is selected.
+        let real = "filed-by: simard-stewardship\nstewardship-signature: abcd1234\n\
+                    ci-health-repo: rysweet/azlin\nci-health-workflow: CI\n";
+        assert!(is_ci_health_tracking_issue(real));
+
+        // A backlog issue that merely tokenizes to the same search words is NOT
+        // selected (this is exactly the false-positive class GitHub search
+        // returns, which the local filter must reject).
+        let decoy = "Steward CI / GitHub Actions health across all governance repos; \
+                     this workflow gap keeps recurring.";
+        assert!(!is_ci_health_tracking_issue(decoy));
+
+        // The bare hyphenated word without the trailing `:` field is not a match.
+        assert!(!is_ci_health_tracking_issue("see ci-health-workflow docs"));
+    }
+}
+
 mod diagnosis {
     use super::super::diagnose::{FailedJob, RunDiagnosis, parse_run_diagnosis};
 
