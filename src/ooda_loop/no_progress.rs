@@ -46,13 +46,55 @@ fn is_breaker_defer_ref(wip: &WipRef) -> bool {
         && wip.label.starts_with(NO_PROGRESS_DEFER_LABEL_PREFIX)
 }
 
+/// Label prefix on the breaker-authored tracking-issue [`WipRef`] the escalation
+/// path links back to a stuck goal. Two jobs:
+///
+/// * **Makes the done-criteria measurable.** A stalled goal with *no* tracked
+///   PR/issue has structurally unmeasurable done-criteria — `UNCLEAR-CRITERIA`
+///   ("no tracked PR/issue the done-gate can verify"). Linking the filed
+///   tracking issue gives the goal a derivable signal
+///   ([`crate::goal_curation::completion_gate::has_derivable_signal`]) the
+///   done-gate can finally observe (`CLOSED`), turning the WHY that stranded the
+///   synthetic `simard-identity-*` goals into a checkable criterion.
+/// * **Idempotence.** A goal already carrying its breaker tracking issue is
+///   never re-filed, so a re-stall can never spam duplicate `ooda-stuck` issues.
+const NO_PROGRESS_TRACKING_LABEL_PREFIX: &str = "[no-progress-tracking] ";
+
+/// True when `wip` is a breaker-authored tracking-issue link (the escalation
+/// artifact authored by [`link_tracking_issue`]).
+fn is_breaker_tracking_ref(wip: &WipRef) -> bool {
+    wip.kind.eq_ignore_ascii_case("issue")
+        && wip.label.starts_with(NO_PROGRESS_TRACKING_LABEL_PREFIX)
+}
+
+/// A tracking issue the breaker successfully filed for an escalated goal.
+///
+/// Returned by [`NoProgressIssueFiler::file_issue`] so the caller can link the
+/// issue back to the goal as a tracked artifact ([`link_tracking_issue`]) — the
+/// step that converts an `UNCLEAR-CRITERIA` goal's *structurally unmeasurable*
+/// done-criteria ("no tracked PR/issue the done-gate can verify") into a
+/// machine-verifiable signal the done-gate can observe as `CLOSED`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FiledIssue {
+    /// The issue number without a leading `#`, e.g. `"4231"`.
+    pub number: String,
+    /// The issue URL when the filer could resolve one.
+    pub url: Option<String>,
+}
+
 /// Files a tracking issue for a goal the breaker escalated. Injected so tests
 /// exercise the escalation path without shelling out to `gh`.
 pub(crate) trait NoProgressIssueFiler {
-    /// File (or attempt to file) a tracking issue. Failures must be logged, not
-    /// propagated: the goal is already Blocked with the sentinel, and a missing
-    /// issue must never abort the cycle.
-    fn file_issue(&self, title: &str, body: &str);
+    /// File (or attempt to file) a tracking issue. Returns the filed issue's
+    /// reference on success so the caller can [`link_tracking_issue`] it back to
+    /// the goal (making the done-criteria measurable); returns `None` when
+    /// filing failed or the issue number could not be resolved.
+    ///
+    /// Failures must be logged, not propagated: the goal is already Blocked with
+    /// the sentinel, and a missing issue must never abort the cycle. Returning
+    /// `None` simply means the goal stays Blocked without a linked artifact
+    /// (no worse than before this linkage existed).
+    fn file_issue(&self, title: &str, body: &str) -> Option<FiledIssue>;
 }
 
 /// Production filer: `gh issue create --label ooda-stuck`, mirroring the
@@ -60,7 +102,7 @@ pub(crate) trait NoProgressIssueFiler {
 pub(crate) struct GhIssueFiler;
 
 impl NoProgressIssueFiler for GhIssueFiler {
-    fn file_issue(&self, title: &str, body: &str) {
+    fn file_issue(&self, title: &str, body: &str) -> Option<FiledIssue> {
         match std::process::Command::new("gh")
             .args([
                 "issue",
@@ -75,11 +117,20 @@ impl NoProgressIssueFiler for GhIssueFiler {
             .output()
         {
             Ok(out) if out.status.success() => {
+                // `gh issue create` prints the created issue's URL on success,
+                // e.g. `https://github.com/rysweet/Simard/issues/4231`.
+                let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let number = parse_issue_number(&url);
                 tracing::warn!(
                     target: "simard::ooda",
                     title = %title,
+                    issue = number.as_deref().unwrap_or("?"),
                     "no-progress breaker: tracking issue filed for stuck goal",
                 );
+                number.map(|number| FiledIssue {
+                    url: (!url.is_empty()).then(|| url.clone()),
+                    number,
+                })
             }
             Ok(out) => {
                 tracing::error!(
@@ -87,6 +138,7 @@ impl NoProgressIssueFiler for GhIssueFiler {
                     stderr = %String::from_utf8_lossy(&out.stderr),
                     "no-progress breaker: gh issue create failed (goal still Blocked)",
                 );
+                None
             }
             Err(e) => {
                 tracing::error!(
@@ -94,7 +146,90 @@ impl NoProgressIssueFiler for GhIssueFiler {
                     error = %e,
                     "no-progress breaker: gh spawn failed (goal still Blocked)",
                 );
+                None
             }
+        }
+    }
+}
+
+/// Parse the issue number from a `gh issue create` success line, which prints
+/// the created issue's URL (e.g. `https://github.com/owner/repo/issues/4231`).
+/// Returns `None` when the trailing path segment is not a bare number, so a
+/// malformed / unexpected output never fabricates a bogus link.
+fn parse_issue_number(url: &str) -> Option<String> {
+    let last = url.trim().trim_end_matches('/').rsplit('/').next()?;
+    (!last.is_empty() && last.chars().all(|c| c.is_ascii_digit())).then(|| last.to_string())
+}
+
+/// Link a filed tracking `issue` to `goal` as a tracked artifact so the done-gate
+/// gains a derivable signal
+/// ([`crate::goal_curation::completion_gate::has_derivable_signal`]) and the
+/// goal's done-criteria become machine-verifiable (the tracking issue observed
+/// as `CLOSED`). Idempotent: a no-op when the goal already references this issue
+/// number, so a re-escalation never appends a duplicate ref.
+fn link_tracking_issue(goal: &mut ActiveGoal, filed: &FiledIssue) {
+    let num = filed.number.trim_start_matches('#');
+    let already = goal
+        .wip_refs
+        .iter()
+        .any(|w| w.kind.eq_ignore_ascii_case("issue") && w.ref_id.trim_start_matches('#') == num);
+    if already {
+        return;
+    }
+    goal.wip_refs.push(WipRef {
+        kind: "issue".to_string(),
+        ref_id: num.to_string(),
+        label: format!("{NO_PROGRESS_TRACKING_LABEL_PREFIX}#{num}"),
+        url: filed.url.clone(),
+    });
+}
+
+/// The escalation side effect shared by every breaker path: set the goal
+/// `Blocked` with `blocked_reason`, then file a tracking issue and **link it
+/// back to the goal** as a tracked artifact — unless the goal already carries a
+/// breaker-authored tracking issue, in which case no duplicate is filed
+/// (idempotent).
+///
+/// Linking the issue is what makes an `UNCLEAR-CRITERIA` goal's done-criteria
+/// measurable: without it the breaker filed a tracking issue but *orphaned* it,
+/// so the goal's `wip_refs` stayed empty, `has_derivable_signal` stayed `false`,
+/// and the done-gate could never verify completion — the exact WHY
+/// ("no tracked PR/issue the done-gate can verify") that stranded the synthetic
+/// `simard-identity-*` goals. With the link the done-gate can observe the
+/// tracking issue as `CLOSED` and certify the goal, or a human can navigate
+/// goal → issue to resolve/re-scope it.
+fn escalate_with_tracking_issue(
+    state: &mut OodaState,
+    goal_id: &str,
+    blocked_reason: String,
+    issue_title: &str,
+    issue_body: &str,
+    filer: &dyn NoProgressIssueFiler,
+) {
+    // Idempotence: never file a second tracking issue for a goal already linked
+    // to one (a re-stall must not spam duplicate `ooda-stuck` issues).
+    let already_tracked = state
+        .active_goals
+        .active
+        .iter()
+        .find(|g| g.id == goal_id)
+        .is_some_and(|g| g.wip_refs.iter().any(is_breaker_tracking_ref));
+
+    let filed = if already_tracked {
+        None
+    } else {
+        filer.file_issue(issue_title, issue_body)
+    };
+
+    if let Some(g) = state
+        .active_goals
+        .active
+        .iter_mut()
+        .find(|g| g.id == goal_id)
+    {
+        g.status = GoalProgress::Blocked(blocked_reason);
+        if let Some(issue) = &filed {
+            link_tracking_issue(g, issue);
         }
     }
 }
@@ -342,20 +477,19 @@ pub(crate) fn apply_no_progress_breaker_with_threshold(
                 issue_title,
                 issue_body,
             } => {
-                if let Some(g) = state
-                    .active_goals
-                    .active
-                    .iter_mut()
-                    .find(|g| g.id == goal_id)
-                {
-                    g.status = GoalProgress::Blocked(blocked_reason);
-                }
-                filer.file_issue(&issue_title, &issue_body);
+                escalate_with_tracking_issue(
+                    state,
+                    goal_id,
+                    blocked_reason,
+                    &issue_title,
+                    &issue_body,
+                    filer,
+                );
                 report.escalated.push(goal_id.to_string());
                 tracing::warn!(
                     target: "simard::ooda",
                     goal = %goal_id,
-                    "no-progress breaker: unresolved after threshold — BLOCKED + tracking issue filed",
+                    "no-progress breaker: unresolved after threshold — BLOCKED + tracking issue filed and linked",
                 );
             }
             // The base breaker's ladder ([`resolve_no_progress`]) only yields the
@@ -651,15 +785,13 @@ fn apply_resolution_side_effects(
                         .evidence
                         .push(Evidence::new("clone-error", goal_id, err.clone()));
                     let blocked_reason = no_progress_blocked_reason_with_why(consecutive, &why_err);
-                    if let Some(g) = state
-                        .active_goals
-                        .active
-                        .iter_mut()
-                        .find(|g| g.id == goal_id)
-                    {
-                        g.status = GoalProgress::Blocked(blocked_reason.clone());
-                    }
-                    filer.file_issue(
+                    // Route through the shared helper so the filed tracking issue
+                    // is LINKED back to the goal (measurable done-criteria) and a
+                    // re-stall never spams a duplicate `ooda-stuck` issue.
+                    escalate_with_tracking_issue(
+                        state,
+                        goal_id,
+                        blocked_reason,
                         &format!(
                             "OODA no-progress breaker: precondition heal failed for '{goal_id}'"
                         ),
@@ -667,6 +799,7 @@ fn apply_resolution_side_effects(
                             "Healing the MISSING-PRECONDITION for goal `{goal_id}` failed: \
                              {err}\n\nThe goal has been Blocked with the WHY attached."
                         ),
+                        filer,
                     );
                     tracker.reset_count(goal_id);
                     report.escalated.push(goal_id.to_string());
@@ -752,21 +885,20 @@ fn apply_resolution_side_effects(
             issue_title,
             issue_body,
         } => {
-            if let Some(g) = state
-                .active_goals
-                .active
-                .iter_mut()
-                .find(|g| g.id == goal_id)
-            {
-                g.status = GoalProgress::Blocked(blocked_reason);
-            }
-            filer.file_issue(&issue_title, &issue_body);
+            escalate_with_tracking_issue(
+                state,
+                goal_id,
+                blocked_reason,
+                &issue_title,
+                &issue_body,
+                filer,
+            );
             tracker.reset_count(goal_id);
             report.escalated.push(goal_id.to_string());
             tracing::warn!(
                 target: "simard::ooda",
                 goal = %goal_id,
-                "no-progress breaker: stuck after guided retry — BLOCKED WITH why + issue filed",
+                "no-progress breaker: stuck after guided retry — BLOCKED WITH why + issue filed and linked",
             );
         }
         NoProgressResolution::SurfaceInvestigationFailure { class, reason } => {
@@ -794,15 +926,14 @@ fn apply_resolution_side_effects(
                 let blocked_reason = no_progress_blocked_reason_with_why(consecutive, &why);
                 let (issue_title, issue_body) =
                     surfaced_failure_escalation_issue(goal_id, class, surfaced);
-                if let Some(g) = state
-                    .active_goals
-                    .active
-                    .iter_mut()
-                    .find(|g| g.id == goal_id)
-                {
-                    g.status = GoalProgress::Blocked(blocked_reason);
-                }
-                filer.file_issue(&issue_title, &issue_body);
+                escalate_with_tracking_issue(
+                    state,
+                    goal_id,
+                    blocked_reason,
+                    &issue_title,
+                    &issue_body,
+                    filer,
+                );
                 tracker.clear_surfaced_failures(goal_id);
                 tracker.reset_count(goal_id);
                 report.escalated.push(goal_id.to_string());
@@ -813,7 +944,7 @@ fn apply_resolution_side_effects(
                     surfaced_failures = surfaced,
                     "no-progress breaker: evidence-less re-investigation bounded out after \
                      {surfaced} surfaced failures — BLOCKED WITH re-investigation count as \
-                     evidence + human triage issue filed to make the done-criteria measurable",
+                     evidence + human triage issue filed and linked to make the done-criteria measurable",
                 );
                 return;
             }
@@ -1318,3 +1449,75 @@ impl NoProgressEngineerDispatcher for QueueingEngineerDispatcher {
 
 /// Default production threshold re-export for the cycle wiring.
 pub(crate) const INVESTIGATED_BREAKER_THRESHOLD: u32 = NO_PROGRESS_BREAKER_THRESHOLD;
+
+#[cfg(test)]
+mod tests_tracking_issue_link {
+    use super::{FiledIssue, link_tracking_issue, parse_issue_number};
+    use crate::goal_curation::{ActiveGoal, WipRef};
+
+    #[test]
+    fn parse_issue_number_extracts_trailing_number_from_gh_url() {
+        assert_eq!(
+            parse_issue_number("https://github.com/rysweet/Simard/issues/4231").as_deref(),
+            Some("4231"),
+        );
+        // Trailing slash tolerated.
+        assert_eq!(
+            parse_issue_number("https://github.com/o/r/issues/12/").as_deref(),
+            Some("12"),
+        );
+    }
+
+    #[test]
+    fn parse_issue_number_rejects_non_numeric_or_empty() {
+        assert_eq!(parse_issue_number(""), None);
+        assert_eq!(parse_issue_number("not a url"), None);
+        assert_eq!(
+            parse_issue_number("https://github.com/o/r/pull/abc"),
+            None,
+            "a non-numeric tail must never fabricate a bogus link",
+        );
+    }
+
+    #[test]
+    fn link_tracking_issue_appends_a_recognisable_issue_ref() {
+        let mut goal = ActiveGoal::new("g", "d", 1);
+        link_tracking_issue(
+            &mut goal,
+            &FiledIssue {
+                number: "4231".to_string(),
+                url: Some("https://example/issues/4231".to_string()),
+            },
+        );
+        assert_eq!(goal.wip_refs.len(), 1);
+        let w = &goal.wip_refs[0];
+        assert_eq!(w.kind, "issue");
+        assert_eq!(w.ref_id, "4231");
+        assert!(super::is_breaker_tracking_ref(w));
+        assert_eq!(w.url.as_deref(), Some("https://example/issues/4231"));
+    }
+
+    #[test]
+    fn link_tracking_issue_is_idempotent_for_the_same_issue_number() {
+        let mut goal = ActiveGoal::new("g", "d", 1);
+        // Pre-existing reference to the same issue (leading '#' tolerated).
+        goal.wip_refs.push(WipRef {
+            kind: "issue".to_string(),
+            ref_id: "#4231".to_string(),
+            label: "some earlier ref".to_string(),
+            url: None,
+        });
+        link_tracking_issue(
+            &mut goal,
+            &FiledIssue {
+                number: "4231".to_string(),
+                url: None,
+            },
+        );
+        assert_eq!(
+            goal.wip_refs.len(),
+            1,
+            "no duplicate ref for an issue number the goal already carries",
+        );
+    }
+}

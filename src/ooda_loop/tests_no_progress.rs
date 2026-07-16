@@ -48,10 +48,16 @@ struct RecordingFiler {
 }
 
 impl NoProgressIssueFiler for RecordingFiler {
-    fn file_issue(&self, title: &str, body: &str) {
-        self.calls
-            .borrow_mut()
-            .push((title.to_string(), body.to_string()));
+    fn file_issue(&self, title: &str, body: &str) -> Option<super::no_progress::FiledIssue> {
+        let mut calls = self.calls.borrow_mut();
+        calls.push((title.to_string(), body.to_string()));
+        // Fabricate a deterministic, distinct issue number per filing so the
+        // escalation path can link it back to the goal (mirrors `gh` returning
+        // the created issue's number).
+        Some(super::no_progress::FiledIssue {
+            number: format!("{}", 9000 + calls.len()),
+            url: None,
+        })
     }
 }
 
