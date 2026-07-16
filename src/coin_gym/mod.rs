@@ -19,6 +19,7 @@
 //! loop with verify/rollback (Phase 5, issue #2825) is implemented offline in
 //! [`improve_loop`] behind `coin-gym improve --holdout fresh`.
 
+pub mod ab;
 pub mod agent_runner;
 pub mod executor;
 pub mod improve;
@@ -29,6 +30,8 @@ pub mod scorer;
 pub mod target_loader;
 pub mod types;
 
+#[cfg(test)]
+mod tests_ab;
 #[cfg(test)]
 mod tests_agent_runner;
 #[cfg(test)]
@@ -53,6 +56,7 @@ mod tests_types;
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use ab::StrategyComparison;
 use agent_runner::{AgentRunner, BaselineStrategy, FixtureReasoner, TeamStrategy};
 use executor::{
     ANSWER_BLOB_BIN, ANSWER_BLOB_HARNESS, ANSWER_UNREACHABLE_MD, CoinEvaluateConfig,
@@ -73,6 +77,7 @@ pub fn coin_gym_usage() -> &'static str {
      \n\
      commands:\n\
      \x20 run <model> [--strategy baseline|team] [--profile <name>] [--targets <path>]\n\
+     \x20 ab <model> [--profile <name>] [--targets <path>]\n\
      \x20 score <run-id> [--profile <name>]\n\
      \x20 compare <run-id> [--profile <name>]\n\
      \x20 improve <run-id> [--profile <name>] [--holdout fresh]\n\
@@ -80,7 +85,9 @@ pub fn coin_gym_usage() -> &'static str {
      \x20 profiles\n\
      \n\
      Offline scaffold (Phase 4): runs grade against a mock oracle. Live grading\n\
-     needs `coin evaluate` on a Docker host (Phase 3, issue #2823). `improve\n\
+     needs `coin evaluate` on a Docker host (Phase 3, issue #2823). `ab` runs the\n\
+     single-model baseline and the multi-agent team over the same target set and\n\
+     reports the head-to-head reach/precision delta + verdict. `improve\n\
      --holdout fresh` runs the Phase-5 self-improvement loop (failure-analyst →\n\
      overfitting gate → verify on held-out fresh → keep/rollback + durable tactic\n\
      memory) offline. `contract` prints the real coin evaluate/verify wiring\n\
@@ -115,6 +122,7 @@ where
     let rest = &argv[1..];
     match command.as_str() {
         "run" => cmd_run(home, rest),
+        "ab" => cmd_ab(home, rest),
         "score" => cmd_score(home, rest),
         "compare" => cmd_compare(home, rest),
         "improve" => cmd_improve(home, rest),
@@ -195,6 +203,67 @@ fn cmd_run(home: &Path, rest: &[String]) -> CoinGymResult<()> {
     println!("saved:   {}", path.display());
     print_offline_note(report.offline_scaffold);
     print_score(&score);
+    Ok(())
+}
+
+// ── ab (baseline vs. team) ───────────────────────────────────────────────────
+
+/// Run **both** arms — single-model `baseline` and multi-agent `team` — over the
+/// same target set and report the head-to-head. This is the first-class form of
+/// the Gym's central question: *does the multi-agent team beat the single-model
+/// baseline?* Both arms are persisted under the profile (same model) so each can
+/// be re-`score`d or `compare`d later.
+fn cmd_ab(home: &Path, rest: &[String]) -> CoinGymResult<()> {
+    let parsed = parse_args(rest, &["profile", "targets"])?;
+    let model = parsed
+        .positionals
+        .first()
+        .ok_or_else(|| CoinGymError::Usage("ab: expected <model>".to_string()))?
+        .clone();
+    let scenario = match parsed.flags.get("targets") {
+        Some(path) => DemoScenario::from_path(Path::new(path))?,
+        None => DemoScenario::sample()?,
+    };
+    validate_offline_scenario(&scenario)?;
+    let profile_name = parsed.flags.get("profile").map_or_else(
+        || profiles::sanitize_name(&model),
+        |p| profiles::sanitize_name(p),
+    );
+
+    let baseline = execute_run(&model, Strategy::Baseline, &scenario)?;
+    let team = execute_run(&model, Strategy::Team, &scenario)?;
+    ensure_profile(home, &profile_name, &model)?;
+    let baseline_path = save_run(
+        home,
+        &profile_name,
+        &PersistedRun {
+            report: baseline.clone(),
+            targets: scenario.targets.clone(),
+            offline: scenario.offline_scaffold(),
+        },
+    )?;
+    let team_path = save_run(
+        home,
+        &profile_name,
+        &PersistedRun {
+            report: team.clone(),
+            targets: scenario.targets.clone(),
+            offline: scenario.offline_scaffold(),
+        },
+    )?;
+
+    let comparison = StrategyComparison::from_reports(&baseline, &team);
+    println!("model:    {}", comparison.model);
+    println!("snapshot: {}", comparison.snapshot);
+    println!("profile:  {profile_name}");
+    println!(
+        "baseline: {}  (saved {})",
+        baseline.run_id,
+        baseline_path.display()
+    );
+    println!("team:     {}  (saved {})", team.run_id, team_path.display());
+    print_offline_note(comparison.offline_scaffold);
+    print_ab(&comparison);
     Ok(())
 }
 
@@ -540,4 +609,34 @@ fn print_score(score: &Score) {
         );
     }
     println!("  histogram: {}", score.histogram.render());
+}
+
+/// Render a baseline-vs-team head-to-head comparison.
+fn print_ab(cmp: &StrategyComparison) {
+    println!(
+        "baseline: reach {:.1}%  ({}/{})   precision {:.1}%  ({}/{})   {}",
+        cmp.baseline.overall.reach_pct(),
+        cmp.baseline.overall.reached,
+        cmp.baseline.overall.total,
+        cmp.baseline.overall.precision_pct(),
+        cmp.baseline.overall.reached,
+        cmp.baseline.overall.submitted,
+        cmp.baseline.histogram.render(),
+    );
+    println!(
+        "team:     reach {:.1}%  ({}/{})   precision {:.1}%  ({}/{})   {}",
+        cmp.team.overall.reach_pct(),
+        cmp.team.overall.reached,
+        cmp.team.overall.total,
+        cmp.team.overall.precision_pct(),
+        cmp.team.overall.reached,
+        cmp.team.overall.submitted,
+        cmp.team.histogram.render(),
+    );
+    println!(
+        "delta:    reach {:+.1} pts   precision {:+.1} pts   (team − baseline)",
+        cmp.reach_delta_pct, cmp.precision_delta_pct
+    );
+    println!("verdict:  {}", cmp.verdict.label());
+    println!("note: {}", cmp.note);
 }

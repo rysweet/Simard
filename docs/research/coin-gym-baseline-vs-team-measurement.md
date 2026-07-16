@@ -104,11 +104,26 @@ coin-gym run "Claude Opus 4.6" --strategy baseline --profile ref-baseline
 coin-gym run "Claude Opus 4.6" --strategy team     --profile ref-team
 ```
 
+Or, equivalently, run **both arms in one call** with the head-to-head verdict:
+
+```bash
+coin-gym ab "Claude Opus 4.6" --profile ref-ab
+```
+
+```text
+baseline: reach 60.0%  (3/5)   precision 60.0%  (3/5)   R:3/W:2/A:0/T:0/N:0/E:0
+team:     reach 60.0%  (3/5)   precision 100.0%  (3/3)  R:3/W:0/A:2/T:0/N:0/E:0
+delta:    reach +0.0 pts   precision +40.0 pts   (team − baseline)
+verdict:  TEAM-WINS
+```
+
 Each `run` prints the arm's score directly; `coin-gym score <run-id>` re-prints
 it for a saved run and `coin-gym compare <run-id>` diffs it against the published
 leaderboard (see below). The exact reference numbers above are also asserted by
-`src/coin_gym/tests_cli.rs::execute_run_baseline_vs_team_shows_precision_tradeoff`,
-so `cargo test -p simard coin_gym` fails if the harness ever stops reproducing
+`src/coin_gym/tests_cli.rs::execute_run_baseline_vs_team_shows_precision_tradeoff`
+and by `src/coin_gym/tests_ab.rs::compare_strategies_scores_team_win_on_bundled_sample`
+(which also pins the `TEAM-WINS` verdict and the +40-pt precision delta), so
+`cargo test -p simard coin_gym` fails if the harness ever stops reproducing
 them.
 
 > **Provenance.** These reference figures were last reproduced end-to-end by

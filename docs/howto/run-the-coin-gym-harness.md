@@ -46,6 +46,7 @@ default, overridable with the `COIN_GYM_HOME` environment variable.
 
 ```text
 coin-gym run <model> [--strategy baseline|team] [--profile <name>] [--targets <path>]
+coin-gym ab  <model> [--profile <name>] [--targets <path>]
 coin-gym score   <run-id> [--profile <name>]
 coin-gym compare <run-id> [--profile <name>]
 coin-gym improve <run-id> [--profile <name>] [--holdout fresh]
@@ -82,6 +83,39 @@ team      reach 60.0% (3/5)   precision 100.0% (3/3)  R:3/W:0/A:2/T:0/N:0/E:0
 For the per-target breakdown, the reproduction commands, and the leaderboard-
 comparison caveat, see
 [COIN Gym — baseline vs. team measurement](../research/coin-gym-baseline-vs-team-measurement.md).
+
+### `ab` — baseline vs. team head-to-head in one call
+
+```bash
+coin-gym ab claude-opus-4.6 --profile opus
+```
+
+`ab` answers the Gym's central question directly — *does the multi-agent team
+beat the single-model baseline?* — by running **both** arms over the **same**
+target set, persisting each arm under the profile (so either can be re-`score`d
+or `compare`d later), and printing the head-to-head with a Pareto-domination
+verdict. It is the single-command form of the two `run` invocations above.
+
+```text
+baseline: reach 60.0%  (3/5)   precision 60.0%  (3/5)   R:3/W:2/A:0/T:0/N:0/E:0
+team:     reach 60.0%  (3/5)   precision 100.0%  (3/3)  R:3/W:0/A:2/T:0/N:0/E:0
+delta:    reach +0.0 pts   precision +40.0 pts   (team − baseline)
+verdict:  TEAM-WINS
+```
+
+The **verdict** classifies the two arms by Pareto domination over
+(reach, precision):
+
+- `TEAM-WINS` — the team is at least as good on both metrics and strictly better
+  on at least one (the bundled sample: equal reach, +40 pts precision).
+- `BASELINE-WINS` — the baseline dominates by the same rule.
+- `TIE` — equal on both metrics.
+- `MIXED` — a genuine trade-off (one metric up, the other down); neither
+  dominates.
+
+Like every offline-scaffold run the delta is a deterministic property of the
+abstention design, **not** a live-model grade on a real COIN snapshot (Phase 3,
+issue #2823). **LOCAL-ONLY:** nothing is ever submitted externally.
 
 ### `score` — reach / precision + family split
 
