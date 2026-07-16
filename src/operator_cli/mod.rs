@@ -1,5 +1,6 @@
 mod args;
 mod atelier;
+mod cartographer;
 mod ci_health;
 mod creative_ideas;
 mod curation;
@@ -164,6 +165,16 @@ Design (Atelier identity):
   atelier inspect --out <dir> [--fabrication]
                          — re-read and re-verify an existing package manifest
 
+Data storytelling (Cartographer identity):
+  cartographer build --brief <study.json> --out <dir> [--target html|streamlit|observable] [--strict]
+                         — take a dataset + question to a served interactive
+                           dashboard (Plotly + D3), a written narrative, and
+                           optional Streamlit / Observable sources
+  cartographer inspect --out <dir>
+                         — re-read and re-verify an existing package manifest
+  cartographer serve --out <dir> [--port <n>] [--self-check]
+                         — serve the built dashboard over HTTP
+
 Compatibility binaries remain available: simard_operator_probe, simard-gym
 ";
 
@@ -247,6 +258,7 @@ where
     match command.as_str() {
         "engineer" => engineer::dispatch_engineer_command(args),
         "atelier" => atelier::dispatch_atelier_command(args),
+        "cartographer" => cartographer::dispatch_cartographer_command(args),
         "meeting" => meeting::dispatch_meeting_command(args),
         "goal" => goal::dispatch_goal_command(args),
         "goal-curation" => curation::dispatch_goal_curation_command(args),
@@ -373,7 +385,7 @@ where
 }
 
 pub fn operator_cli_usage() -> &'static str {
-    "usage: simard <engineer|atelier|meeting|goal-curation|improvement-curation|gym|ooda|memory|status|spawn|merge-pr|worktree-gc|disk-reclaim|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap|signal> ..."
+    "usage: simard <engineer|atelier|cartographer|meeting|goal-curation|improvement-curation|gym|ooda|memory|status|spawn|merge-pr|worktree-gc|disk-reclaim|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap|signal> ..."
 }
 
 pub fn operator_cli_help() -> &'static str {

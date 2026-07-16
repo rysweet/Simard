@@ -1,0 +1,43 @@
+name: cartographer-dataset-to-dashboard
+app_type: cli
+description: |
+  Outside-in coverage for the Cartographer data-storytelling identity: a study
+  brief (dataset + question) must go end to end to a written narrative, designed
+  charts, and a served interactive dashboard, and the shipped
+  identity/policy/recipe assets must load through the real Simard loaders.
+
+  Verified end to end:
+  - `src/cartographer/` unit tests: brief parsing/validation, CSV/JSON dataset
+    parsing + profiling, findings analysis, chart design, narrative rendering,
+    dashboard (HTML/Streamlit/Observable) generation, the static serve self
+    check, tool probing, and the build/verify/inspect manifest orchestration.
+  - `tests/cartographer_assets_valid.rs`: the pluggable `simard-cartographer`
+    identity card loads via `FileIdentityLoader` in engineer mode, the
+    goal-session capability policy parses via `CapabilityPolicy::from_toml_file`
+    with the least-privilege shape, and all three goal-session recipes drive the
+    `simard cartographer` CLI surface.
+  - `tests/cartographer_pipeline_e2e.rs`: `simard cartographer build` takes the
+    sample regional-sales brief to `narrative.md`, `charts.json`,
+    `dashboard.html`, and a `manifest.json` whose `verification.ok` is true, and
+    `simard cartographer serve --self-check` returns the interactive dashboard
+    over HTTP (status 200, non-empty body). The happy path is pure Rust with no
+    external dependency, so the end-to-end suite always runs.
+
+  Schema note: the pinned `@gadugi/agentic-test` CLI runner gates only on
+  `run`-step exit codes and reads the command from `params.command`, so all
+  suites run under a single `bash -lc` wrapper that exits zero only when every
+  invoked `cargo test` reports success.
+metadata:
+  tags:
+    - cli
+    - cartographer
+    - identity
+agents:
+  - name: cli-agent
+    type: cli
+    command: bash
+steps:
+  - action: run
+    params:
+      command: "bash -lc 'set -euo pipefail; cargo test --lib cartographer 2>&1 | tee /tmp/cartographer-qa-unit.log | grep -q \"test result: ok\"; cargo test --test cartographer_assets_valid 2>&1 | tee /tmp/cartographer-qa-assets.log | grep -q \"test result: ok\"; cargo test --test cartographer_pipeline_e2e 2>&1 | tee /tmp/cartographer-qa-e2e.log | grep -q \"test result: ok\"'"
+    timeout: 600000

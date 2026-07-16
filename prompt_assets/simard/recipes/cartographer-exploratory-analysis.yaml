@@ -1,0 +1,75 @@
+# cartographer-exploratory-analysis.yaml — Cartographer goal-session recipe.
+#
+# Drives the exploratory-analysis phase of the Cartographer identity: take a
+# study brief (dataset + question) and profile the data, surface findings, and
+# produce the narrative + charts via the `simard cartographer` command surface.
+# Parser-free / agentic: the CLI call is the business outcome; the agent's prose
+# is diagnostic only.
+#
+# Context vars (passed via -c):
+#   simard_binary  — path to the simard binary
+#   brief_path     — path to the study-brief JSON
+#   out_dir        — directory to write the dashboard package into
+
+name: "cartographer-exploratory-analysis"
+description: "Cartographer — profile a dataset and surface findings for a question"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "cartographer", "data", "eda", "analysis"]
+
+context: {}
+
+steps:
+  - id: "cartographer-analyze"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      # Cartographer — Exploratory Analysis
+
+      You are Simard Cartographer's exploratory-analysis actor. Interpret the
+      study brief directly; do not emit or parse a marker or JSON verdict.
+
+      brief path = {{brief_path}}
+      output dir = {{out_dir}}
+
+      ## Inspect
+
+      Read the study brief at `{{brief_path}}`. Confirm the analytical question
+      and the dataset source (file path or inline CSV). If the dataset is empty,
+      malformed, or the question references columns that cannot exist in the
+      data, STOP and record the specific problem — do not fabricate findings.
+
+      ## Act
+
+      Profile the data and produce the narrative + charts with your bash tool:
+
+      "{{simard_binary}}" cartographer build \
+        --brief "{{brief_path}}" \
+        --out "{{out_dir}}"
+
+      This writes, under `{{out_dir}}`: `dataset.csv` (profiled data),
+      `charts.json` (designed charts), `narrative.md` (the data story),
+      `dashboard.html` (interactive dashboard), and `manifest.json`.
+
+      ## Verify
+
+      Read `{{out_dir}}/manifest.json`. Confirm the dataset loaded (non-zero
+      rows and columns), at least one finding and chart were produced, and
+      `verification.ok` is true. If the CLI failed or verification did not pass,
+      stop and report the failure; do not fabricate success.
+
+  - id: "cartographer-analyze-verifier"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      Verify the exploratory-analysis package produced by the prior step by
+      inspecting the manifest with your bash tool:
+
+      "{{simard_binary}}" cartographer inspect --out "{{out_dir}}"
+
+      If it reports the dataset loaded, charts were designed, the narrative is
+      present, and verification passed, stop successfully. Otherwise, re-read the
+      brief at {{brief_path}} and the manifest, determine what is missing, and
+      re-run
+      `{{simard_binary}} cartographer build --brief {{brief_path}} --out {{out_dir}}`.
+      The durable, verified dashboard package is the only business outcome.

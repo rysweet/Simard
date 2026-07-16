@@ -1,0 +1,83 @@
+# cartographer-visualization-design.yaml — Cartographer goal-session recipe.
+#
+# Drives the visualization-design phase of the Cartographer identity: take a
+# study brief and design charts grounded in real dataset columns, refining the
+# delivery target (HTML / Streamlit / Observable) via the `simard cartographer`
+# command surface. Parser-free / agentic: the CLI call is the business outcome;
+# the agent's prose is diagnostic only.
+#
+# Context vars (passed via -c):
+#   simard_binary  — path to the simard binary
+#   brief_path     — path to the study-brief JSON
+#   out_dir        — directory to write the dashboard package into
+#   app_target     — delivery target: html | streamlit | observable
+
+name: "cartographer-visualization-design"
+description: "Cartographer — design dataset-grounded charts and a delivery target"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "cartographer", "visualization", "charts", "design"]
+
+context:
+  app_target: "html"
+
+steps:
+  - id: "cartographer-design"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      # Cartographer — Visualization Design
+
+      You are Simard Cartographer's visualization-design actor. Interpret the
+      study brief directly; do not emit or parse a marker or JSON verdict.
+
+      brief path = {{brief_path}}
+      output dir = {{out_dir}}
+      delivery target = {{app_target}}
+
+      ## Inspect
+
+      Read the study brief at `{{brief_path}}` and any existing package under
+      `{{out_dir}}`. Confirm which columns are numeric, temporal, and
+      categorical, and which column hints (x, y, color, time) the brief supplies.
+      A chart must be grounded in columns that actually exist — if a hint names a
+      missing column, STOP and record it; do not invent a chart.
+
+      ## Act
+
+      Design the charts and render the dashboard for the chosen delivery target
+      with your bash tool:
+
+      "{{simard_binary}}" cartographer build \
+        --brief "{{brief_path}}" \
+        --out "{{out_dir}}" \
+        --target "{{app_target}}"
+
+      This designs scatter / line / bar / histogram charts from the column kinds
+      and hints, writes `charts.json` and the interactive `dashboard.html`, and
+      emits the Streamlit `app.py` or Observable `.ojs` source when that target
+      is requested. When the optional runtime is absent, the source is still
+      emitted and the manifest records the runtime as unavailable.
+
+      ## Verify
+
+      Read `{{out_dir}}/manifest.json`. Confirm every designed chart references
+      existing dataset columns, the dashboard embeds the data, and
+      `verification.ok` is true. If verification failed, stop and report; do not
+      claim charts that are not grounded in the data.
+
+  - id: "cartographer-design-verifier"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      Verify the visualization-design package by inspecting the manifest with
+      your bash tool:
+
+      "{{simard_binary}}" cartographer inspect --out "{{out_dir}}"
+
+      If it reports the charts are grounded in the dataset, the dashboard is
+      interactive, and verification passed, stop successfully. Otherwise re-read
+      the brief at {{brief_path}} and the manifest, determine what is missing or
+      ungrounded, and re-run
+      `{{simard_binary}} cartographer build --brief {{brief_path}} --out {{out_dir}} --target {{app_target}}`.
+      The durable, verified dashboard package is the only business outcome.

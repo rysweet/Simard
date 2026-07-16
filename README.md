@@ -340,6 +340,19 @@ Atelier drives OpenSCAD (with optional FreeCAD/Blender) to export an STL, a
 render, a cut list, and a BOM from a JSON product brief. See
 [Design furniture with Atelier](docs/howto/design-with-atelier.md).
 
+### Cartographer data-storytelling mode
+```bash
+# Cartographer identity: dataset + question -> narrative + served interactive dashboard
+simard cartographer build --brief study.json --out ./pkg
+simard cartographer serve --out ./pkg --self-check   # prove the dashboard serves
+simard cartographer inspect --out ./pkg              # re-verify an existing package
+```
+Cartographer profiles a dataset, surfaces findings, designs charts, writes the
+narrative, and renders a self-contained interactive dashboard (Plotly + D3)
+served by a built-in HTTP server — pure Rust, with optional Streamlit/Observable
+delivery. See
+[Tell data stories with Cartographer](docs/howto/tell-data-stories-with-cartographer.md).
+
 ### Self-management
 ```bash
 simard update                          # self-update to the latest release

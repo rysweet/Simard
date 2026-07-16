@@ -1,0 +1,16 @@
+{
+  "title": "Regional Sales Storytelling",
+  "question": "How does advertising spend relate to revenue across regions over the first half of 2024?",
+  "dataset": {
+    "path": "regional-sales.csv",
+    "format": "csv"
+  },
+  "app_target": "html",
+  "hints": {
+    "x": "ad_spend",
+    "y": "revenue",
+    "color": "region",
+    "time": "month"
+  },
+  "audience": "Revenue and growth stakeholders reviewing the H1 marketing efficiency."
+}

@@ -1,0 +1,82 @@
+# cartographer-dashboard-delivery.yaml — Cartographer goal-session recipe.
+#
+# Drives the dashboard-delivery phase of the Cartographer identity: build the
+# package (if needed) and serve the interactive dashboard over HTTP, verifying
+# it with a serve self-check via the `simard cartographer` command surface.
+# Parser-free / agentic: the served, self-checked dashboard is the business
+# outcome; the agent's prose is diagnostic only.
+#
+# Context vars (passed via -c):
+#   simard_binary  — path to the simard binary
+#   brief_path     — path to the study-brief JSON
+#   out_dir        — directory that holds / receives the dashboard package
+
+name: "cartographer-dashboard-delivery"
+description: "Cartographer — serve the interactive dashboard and self-check it"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "cartographer", "dashboard", "serve", "delivery"]
+
+context: {}
+
+steps:
+  - id: "cartographer-deliver"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      # Cartographer — Dashboard Delivery
+
+      You are Simard Cartographer's dashboard-delivery actor. Interpret the
+      study brief and the built package directly; do not emit or parse a marker
+      or JSON verdict.
+
+      brief path = {{brief_path}}
+      output dir = {{out_dir}}
+
+      ## Inspect
+
+      Ensure the dashboard package already exists under `{{out_dir}}` (run the
+      cartographer-exploratory-analysis recipe first if it does not). Read the
+      brief at `{{brief_path}}` for the question the served dashboard must help
+      answer.
+
+      ## Act
+
+      Build (or refresh) the package and then serve-and-self-check it with your
+      bash tool:
+
+      "{{simard_binary}}" cartographer build \
+        --brief "{{brief_path}}" \
+        --out "{{out_dir}}"
+
+      "{{simard_binary}}" cartographer serve \
+        --out "{{out_dir}}" \
+        --self-check
+
+      The serve self-check binds an ephemeral port, issues one HTTP request for
+      the dashboard, and exits non-zero unless it returns status 200 with a
+      non-empty interactive page.
+
+      ## Verify
+
+      Confirm the serve self-check reported PASS (status 200, non-empty body)
+      and that `{{out_dir}}/manifest.json` has `verification.ok` true with the
+      `dashboard-interactive` check passing. If serving or verification failed,
+      stop and report; do not claim a dashboard that does not serve.
+
+  - id: "cartographer-deliver-verifier"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      Verify delivery by re-inspecting the package and re-serving with a
+      self-check using your bash tool:
+
+      "{{simard_binary}}" cartographer inspect --out "{{out_dir}}"
+      "{{simard_binary}}" cartographer serve --out "{{out_dir}}" --self-check
+
+      If inspect reports verification passed and the serve self-check reports
+      PASS, stop successfully. Otherwise re-read the brief at {{brief_path}} and
+      the manifest, determine what is missing, and re-run
+      `{{simard_binary}} cartographer build --brief {{brief_path}} --out {{out_dir}}`
+      before serving again. The durable, served, self-checked dashboard is the
+      only business outcome.

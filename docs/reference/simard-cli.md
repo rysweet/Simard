@@ -76,6 +76,10 @@ simard
 |- atelier
 |  |- build --brief <brief.json> --out <dir> [--fabrication] [--strict]
 |  `- inspect --out <dir> [--fabrication]
+|- cartographer
+|  |- build --brief <study.json> --out <dir> [--target html|streamlit|observable] [--strict]
+|  |- inspect --out <dir>
+|  `- serve --out <dir> [--port <n>] [--self-check]
 |- update
 `- install [--simard-home PATH] [--dry-run] [--systemd-user-dir PATH] [--systemctl PATH]  # planned
 ```
@@ -546,6 +550,46 @@ Re-reads an existing package directory, re-runs verification against the
 persisted `manifest.json`, and prints the tool report and verification result
 without rebuilding. Also prints the available-tool report when `<dir>` does not
 yet contain a manifest.
+
+## Cartographer data-storytelling commands
+
+The **Cartographer** identity (`simard-cartographer`) turns a dataset and a
+question into a written narrative and a served interactive dashboard. See
+[Tell data stories with Cartographer](../howto/tell-data-stories-with-cartographer.md)
+for the full workflow.
+
+### `simard cartographer build --brief <study.json> --out <dir> [--target html|streamlit|observable] [--strict]`
+
+Reads a study brief (JSON: `title`, `question`, `dataset` (a `.csv`/`.json`
+path or inline `csv`), optional `app_target`, `hints`, `audience`), profiles the
+dataset, surfaces findings, designs charts, writes the narrative, and renders a
+self-contained interactive dashboard. Writes to `<dir>`: `dataset.csv`,
+`charts.json`, `narrative.md`, `dashboard.html`, `manifest.json`, and — when the
+target is `streamlit` or `observable` — an `app.py` or `notebook.ojs` delivery
+source. `--target` overrides the brief's delivery target.
+
+Verification requires the core deliverables (dataset loaded, at least one
+grounded chart, a narrative with an explicit Answer, and an interactive
+dashboard that embeds the data). `--strict` exits non-zero when verification
+fails.
+
+Exit codes: `0` verified; `1` verification failed (with `--strict`) or the
+dataset/brief was invalid. The happy path has no external tool dependency;
+Streamlit/Observable availability is recorded, never required.
+
+### `simard cartographer inspect --out <dir>`
+
+Re-reads an existing package directory, re-runs verification against the
+persisted `manifest.json`, and prints the verification result without
+rebuilding.
+
+### `simard cartographer serve --out <dir> [--port <n>] [--self-check]`
+
+Serves the built dashboard over HTTP from `<dir>`. With `--self-check`, binds an
+ephemeral port, issues one request for `dashboard.html`, prints a PASS/FAIL line,
+and exits non-zero on failure — the automation-friendly proof that the dashboard
+serves. Without `--self-check`, binds `127.0.0.1:<port>` (`0` picks an ephemeral
+port) and serves until stopped.
 
 ## Compatibility mapping
 

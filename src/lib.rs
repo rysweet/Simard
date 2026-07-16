@@ -17,6 +17,11 @@ pub mod base_types;
 pub mod bootstrap;
 pub mod build_lock;
 pub mod cargo_jobs;
+// Cartographer identity: data storytelling & dashboards. Takes a dataset +
+// question end-to-end to a served interactive dashboard (Plotly/D3) with a
+// written narrative, plus optional Streamlit/Observable delivery sources.
+// Self-contained domain brick; tests live in `#[cfg(test)]` siblings.
+pub mod cartographer;
 pub mod ci_health;
 pub mod cmd_cleanup;
 pub mod cmd_ensure_deps;
