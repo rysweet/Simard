@@ -13,7 +13,7 @@
 //! executor that delegates to `coin evaluate` (real Docker wiring is Phase 3), a
 //! scorer, a leaderboard comparator, an offline failure-analyst plus
 //! overfitting-reviewer gate, profiles, and the
-//! `coin-gym run|score|compare|improve|profiles` CLI. The whole pipeline runs
+//! `coin-gym run|matchup|score|compare|improve|profiles` CLI. The whole pipeline runs
 //! offline against a mock oracle so it is exercised without a VM. Live grading
 //! (Phase 3 VM) remains a follow-up on issue #2823; the live self-improvement
 //! loop with verify/rollback (Phase 5, issue #2825) is implemented offline in
@@ -24,6 +24,7 @@ pub mod executor;
 pub mod improve;
 pub mod improve_loop;
 pub mod leaderboard;
+pub mod matchup;
 pub mod profiles;
 pub mod scorer;
 pub mod target_loader;
@@ -41,6 +42,8 @@ mod tests_improve;
 mod tests_improve_loop;
 #[cfg(test)]
 mod tests_leaderboard;
+#[cfg(test)]
+mod tests_matchup;
 #[cfg(test)]
 mod tests_profiles;
 #[cfg(test)]
@@ -61,6 +64,7 @@ use executor::{
 use improve::analyze_and_review;
 use improve_loop::{SelfImproveReport, run_self_improvement};
 use leaderboard::compare_to_leaderboard;
+use matchup::{StrategyMatchup, decide_matchup};
 use profiles::{PersistedRun, default_home, ensure_profile, list_profiles, load_run, save_run};
 use scorer::{Score, score_run};
 use target_loader::DemoScenario;
@@ -73,6 +77,7 @@ pub fn coin_gym_usage() -> &'static str {
      \n\
      commands:\n\
      \x20 run <model> [--strategy baseline|team] [--profile <name>] [--targets <path>]\n\
+     \x20 matchup <model> [--profile <name>] [--targets <path>]\n\
      \x20 score <run-id> [--profile <name>]\n\
      \x20 compare <run-id> [--profile <name>]\n\
      \x20 improve <run-id> [--profile <name>] [--holdout fresh]\n\
@@ -115,6 +120,7 @@ where
     let rest = &argv[1..];
     match command.as_str() {
         "run" => cmd_run(home, rest),
+        "matchup" => cmd_matchup(home, rest),
         "score" => cmd_score(home, rest),
         "compare" => cmd_compare(home, rest),
         "improve" => cmd_improve(home, rest),
@@ -196,6 +202,88 @@ fn cmd_run(home: &Path, rest: &[String]) -> CoinGymResult<()> {
     print_offline_note(report.offline_scaffold);
     print_score(&score);
     Ok(())
+}
+
+// ── matchup ────────────────────────────────────────────────────────────────
+
+/// Run the single-model **baseline** and the multi-agent **team** over the same
+/// pinned targets, persist both runs, and print the head-to-head verdict.
+///
+/// This is the COIN Gym's core measurement: does the multi-agent pattern beat
+/// single-model execution on the LOCAL leaderboard? LOCAL-ONLY — nothing is
+/// submitted externally.
+fn cmd_matchup(home: &Path, rest: &[String]) -> CoinGymResult<()> {
+    let parsed = parse_args(rest, &["profile", "targets"])?;
+    let model = parsed
+        .positionals
+        .first()
+        .ok_or_else(|| CoinGymError::Usage("matchup: expected <model>".to_string()))?
+        .clone();
+    let scenario = match parsed.flags.get("targets") {
+        Some(path) => DemoScenario::from_path(Path::new(path))?,
+        None => DemoScenario::sample()?,
+    };
+    validate_offline_scenario(&scenario)?;
+    let profile_name = parsed.flags.get("profile").map_or_else(
+        || profiles::sanitize_name(&model),
+        |p| profiles::sanitize_name(p),
+    );
+    ensure_profile(home, &profile_name, &model)?;
+
+    // Both strategies grade against the SAME targets/oracle so the comparison is
+    // apples-to-apples; only the reasoning scaffold differs.
+    let baseline_report = execute_run(&model, Strategy::Baseline, &scenario)?;
+    let team_report = execute_run(&model, Strategy::Team, &scenario)?;
+
+    let baseline_path = save_run(
+        home,
+        &profile_name,
+        &PersistedRun {
+            report: baseline_report.clone(),
+            targets: scenario.targets.clone(),
+            offline: scenario.offline_scaffold(),
+        },
+    )?;
+    let team_path = save_run(
+        home,
+        &profile_name,
+        &PersistedRun {
+            report: team_report.clone(),
+            targets: scenario.targets.clone(),
+            offline: scenario.offline_scaffold(),
+        },
+    )?;
+
+    let baseline_score = score_run(&baseline_report);
+    let team_score = score_run(&team_report);
+    let result = decide_matchup(&baseline_score, &team_score);
+
+    println!("model:    {}", result.model);
+    println!("snapshot: {}", baseline_report.snapshot);
+    println!("profile:  {profile_name}");
+    println!("targets:  {}", result.targets);
+    print_offline_note(result.offline_scaffold);
+    print_matchup(&result);
+    println!("baseline: {}", baseline_path.display());
+    println!("team:     {}", team_path.display());
+    Ok(())
+}
+
+/// Render a baseline-vs-team [`StrategyMatchup`].
+fn print_matchup(m: &StrategyMatchup) {
+    println!(
+        "reach:     baseline {:.1}%  vs team {:.1}%  (Δ {:+.1} pp)",
+        m.baseline_reach_pct, m.team_reach_pct, m.reach_delta_pp
+    );
+    println!(
+        "precision: baseline {:.1}%  vs team {:.1}%  (Δ {:+.1} pp)",
+        m.baseline_precision_pct, m.team_precision_pct, m.precision_delta_pp
+    );
+    println!(
+        "verdict:  {} (multiagent vs single-model)",
+        m.verdict.label()
+    );
+    println!("note:     LOCAL comparison only — nothing submitted externally.");
 }
 
 /// Guard against **hollow** offline runs: an offline scaffold run grades against

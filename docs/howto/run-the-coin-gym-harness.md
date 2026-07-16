@@ -46,6 +46,7 @@ default, overridable with the `COIN_GYM_HOME` environment variable.
 
 ```text
 coin-gym run <model> [--strategy baseline|team] [--profile <name>] [--targets <path>]
+coin-gym matchup <model> [--profile <name>] [--targets <path>]
 coin-gym score   <run-id> [--profile <name>]
 coin-gym compare <run-id> [--profile <name>]
 coin-gym improve <run-id> [--profile <name>] [--holdout fresh]
@@ -82,6 +83,34 @@ team      reach 60.0% (3/5)   precision 100.0% (3/3)  R:3/W:0/A:2/T:0/N:0/E:0
 For the per-target breakdown, the reproduction commands, and the leaderboard-
 comparison caveat, see
 [COIN Gym — baseline vs. team measurement](../research/coin-gym-baseline-vs-team-measurement.md).
+
+### `matchup` — baseline vs. team head-to-head in one shot
+
+```bash
+coin-gym matchup claude-opus-4.6 --profile duel
+```
+
+`matchup` answers the COIN Gym's central question directly: **does the
+multi-agent team beat single-model execution?** It runs *both* strategies over
+the **same** pinned targets, persists both runs under the profile, and prints
+the reach/precision deltas plus a `TEAM-WINS` / `BASELINE-WINS` / `TIE` verdict.
+Reach rate (COIN's headline metric) decides the winner; precision (which
+penalises over-claiming) breaks reach ties. On the bundled sample:
+
+```text
+model:    claude-opus-4.6
+snapshot: you/coin@v1-sample
+profile:  duel
+targets:  5
+reach:     baseline 60.0%  vs team 60.0%  (Δ +0.0 pp)
+precision: baseline 60.0%  vs team 100.0%  (Δ +40.0 pp)
+verdict:  TEAM-WINS (multiagent vs single-model)
+note:     LOCAL comparison only — nothing submitted externally.
+```
+
+The two persisted run-ids are printed so you can `score`, `compare`, or
+`improve` either side afterwards. LOCAL-ONLY: nothing is ever submitted
+externally or posted to any leaderboard.
 
 ### `score` — reach / precision + family split
 
