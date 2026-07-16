@@ -653,3 +653,443 @@ fn effect_mutation_request_id(job: &EffectJob, operation: &str) -> String {
 pub struct GoalSessionExecution {
     pub outcome: TerminalOutcome,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::typed_ooda::{
+        Action, ActionKind, AdmissionSnapshot, AuthenticatedToolContext, CapabilityError,
+        CapabilityErrorCode, CapabilityGrant, CapabilityHandler, CapabilityPolicy, FileIssueAction,
+        OpaqueBytes, PullRequestRef, RepositoryRef, RequestMergeAction, TerminalKind,
+    };
+    use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // A deterministic effect executor whose behaviour is fixed per test and
+    // which records how many times it was invoked. This lets tests assert that
+    // the outbox worker only executes an effect exactly when it should.
+    enum FakeMode {
+        Succeed,
+        Permanent,
+        Retryable,
+    }
+
+    struct FakeEffects {
+        mode: FakeMode,
+        calls: AtomicUsize,
+    }
+
+    impl FakeEffects {
+        fn new(mode: FakeMode) -> Self {
+            Self {
+                mode,
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl EffectExecutor for FakeEffects {
+        fn execute(&self, _job: &EffectJob) -> Result<EffectResult, EffectExecutionError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            match self.mode {
+                FakeMode::Succeed => Ok(EffectResult::Succeeded {
+                    evidence: Vec::new(),
+                }),
+                FakeMode::Permanent => Err(EffectExecutionError::permanent("permanent boom")),
+                FakeMode::Retryable => Err(EffectExecutionError::retryable("transient boom")),
+            }
+        }
+    }
+
+    fn handler() -> CapabilityHandler {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Leak the tempdir so the sqlite file outlives the handler for the whole
+        // test; the OS reclaims it when the test process exits.
+        let path = dir.keep().join("outcomes.sqlite3");
+        CapabilityHandler::open(path, CapabilityPolicy::new("policy-v1")).expect("open handler")
+    }
+
+    fn admission() -> AdmissionSnapshot {
+        AdmissionSnapshot {
+            concurrent_engineers: 0,
+            disk_used_percent: 1,
+            active_claims: BTreeSet::new(),
+            policy_revision: "policy-v1".to_string(),
+        }
+    }
+
+    fn invocation(session: &str, cycle: &str, goal: &str) -> GoalSessionInvocation {
+        GoalSessionInvocation {
+            session_id: session.to_string(),
+            cycle_id: cycle.to_string(),
+            goal_id: goal.to_string(),
+            task: OpaqueBytes::from(b"task".to_vec()),
+            reason: OpaqueBytes::from(b"reason".to_vec()),
+            observe_output: OpaqueBytes::from(b"observe".to_vec()),
+            orient_output: OpaqueBytes::from(b"orient".to_vec()),
+            decide_output: OpaqueBytes::from(b"decide".to_vec()),
+        }
+    }
+
+    fn no_action_actor(session: &str) -> AuthenticatedToolContext {
+        AuthenticatedToolContext::new(
+            "goal-session-actor",
+            session,
+            [CapabilityGrant::RecordNoAction],
+        )
+    }
+
+    fn file_issue_action() -> Action {
+        Action::FileIssue(FileIssueAction {
+            repository: RepositoryRef::new("rysweet", "Simard"),
+            title: OpaqueBytes::from(b"a real issue title".to_vec()),
+            body: OpaqueBytes::from(b"body".to_vec()),
+            labels: Vec::new(),
+        })
+    }
+
+    fn merge_action() -> Action {
+        Action::RequestMerge(RequestMergeAction {
+            pull_request: PullRequestRef {
+                repository: RepositoryRef::new("rysweet", "Simard"),
+                number: 7,
+            },
+            expected_head_sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            strategy: "squash".to_string(),
+        })
+    }
+
+    #[test]
+    fn error_types_expose_code_message_and_conversions() {
+        let cycle = CycleError::new(CycleErrorCode::ToolFailed, "boom");
+        assert_eq!(cycle.code(), CycleErrorCode::ToolFailed);
+        assert_eq!(cycle.to_string(), "boom");
+
+        let nonzero = RecipeProcessError::nonzero_exit(3);
+        assert_eq!(nonzero.to_string(), "recipe process exited with status 3");
+        assert_eq!(RecipeProcessError::failed("nope").to_string(), "nope");
+
+        let from_capability: RecipeProcessError =
+            CapabilityError::new(CapabilityErrorCode::PermissionDenied, "denied").into();
+        assert_eq!(from_capability.to_string(), "denied");
+
+        assert_eq!(EffectExecutionError::permanent("dead").to_string(), "dead");
+        assert_eq!(
+            EffectExecutionError::retryable("later").to_string(),
+            "later"
+        );
+    }
+
+    #[test]
+    fn execute_actor_step_records_a_no_action_terminal() {
+        let executor = GoalSessionExecutor::new(
+            handler(),
+            no_action_actor("session-1"),
+            admission(),
+            Box::new(FakeEffects::new(FakeMode::Succeed)),
+        );
+        assert_eq!(
+            executor
+                .handler()
+                .terminal_for_cycle("session-1", "cycle-1")
+                .unwrap(),
+            None
+        );
+
+        let inv = invocation("session-1", "cycle-1", "goal-1");
+        let execution = executor
+            .execute(&inv, |inv, tools| {
+                tools
+                    .record_no_action(
+                        "req-noaction",
+                        OpaqueBytes::from(b"nothing to do".to_vec()),
+                        inv.reason.clone(),
+                        Vec::new(),
+                    )
+                    .map(|_| ())
+                    .map_err(RecipeProcessError::from)
+            })
+            .expect("no-action execution succeeds");
+        assert_eq!(execution.outcome.kind, TerminalKind::NoAction);
+        // A no-action terminal has no downstream effect, so complete_outcome_effect
+        // must be a no-op and never touch the effect executor.
+        let durable = executor
+            .handler()
+            .terminal_for_cycle("session-1", "cycle-1")
+            .unwrap()
+            .expect("durable terminal persisted");
+        assert_eq!(durable.outcome_id, execution.outcome.outcome_id);
+    }
+
+    #[test]
+    fn execute_actor_step_rejects_session_mismatch() {
+        let executor = GoalSessionExecutor::new(
+            handler(),
+            no_action_actor("session-real"),
+            admission(),
+            Box::new(FakeEffects::new(FakeMode::Succeed)),
+        );
+        let inv = invocation("session-other", "cycle-1", "goal-1");
+        let error = executor
+            .execute_actor_step(&inv, |_, _| Ok(()))
+            .expect_err("session mismatch must fail");
+        assert_eq!(error.code(), CycleErrorCode::ToolFailed);
+    }
+
+    #[test]
+    fn execute_actor_step_rejects_bound_cycle_goal_mismatch() {
+        let actor = no_action_actor("session-1").bound_to_cycle_goal("other-cycle", "other-goal");
+        let executor = GoalSessionExecutor::new(
+            handler(),
+            actor,
+            admission(),
+            Box::new(FakeEffects::new(FakeMode::Succeed)),
+        );
+        let inv = invocation("session-1", "cycle-1", "goal-1");
+        let error = executor
+            .execute_actor_step(&inv, |_, _| Ok(()))
+            .expect_err("bound cycle/goal mismatch must fail");
+        assert_eq!(error.code(), CycleErrorCode::ToolFailed);
+    }
+
+    #[test]
+    fn execute_actor_step_rejects_multiple_terminal_attempts() {
+        let executor = GoalSessionExecutor::new(
+            handler(),
+            no_action_actor("session-1"),
+            admission(),
+            Box::new(FakeEffects::new(FakeMode::Succeed)),
+        );
+        let inv = invocation("session-1", "cycle-1", "goal-1");
+        let error = executor
+            .execute_actor_step(&inv, |inv, tools| {
+                let _ = tools.record_no_action(
+                    "req-1",
+                    OpaqueBytes::from(b"first".to_vec()),
+                    inv.reason.clone(),
+                    Vec::new(),
+                );
+                let _ = tools.record_no_action(
+                    "req-2",
+                    OpaqueBytes::from(b"second".to_vec()),
+                    inv.reason.clone(),
+                    Vec::new(),
+                );
+                Ok(())
+            })
+            .expect_err("two terminal calls must fail");
+        assert_eq!(error.code(), CycleErrorCode::MultipleTerminalAttempts);
+    }
+
+    #[test]
+    fn execute_actor_step_surfaces_failed_capability_as_tool_failed() {
+        let executor = GoalSessionExecutor::new(
+            handler(),
+            no_action_actor("session-1"),
+            admission(),
+            Box::new(FakeEffects::new(FakeMode::Succeed)),
+        );
+        let inv = invocation("session-1", "cycle-1", "goal-1");
+        let error = executor
+            .execute_actor_step(&inv, |inv, tools| {
+                // Empty reason is rejected by the ledger; the tool records the
+                // failure, and the executor must convert it to ToolFailed.
+                let _ = tools.record_no_action(
+                    "req-empty",
+                    OpaqueBytes::from(Vec::new()),
+                    inv.reason.clone(),
+                    Vec::new(),
+                );
+                Ok(())
+            })
+            .expect_err("failed capability must fail");
+        assert_eq!(error.code(), CycleErrorCode::ToolFailed);
+    }
+
+    #[test]
+    fn execute_actor_step_maps_recipe_process_error() {
+        let executor = GoalSessionExecutor::new(
+            handler(),
+            no_action_actor("session-1"),
+            admission(),
+            Box::new(FakeEffects::new(FakeMode::Succeed)),
+        );
+        let inv = invocation("session-1", "cycle-1", "goal-1");
+        let error = executor
+            .execute_actor_step(&inv, |_, _| {
+                Err(RecipeProcessError::failed("actor crashed"))
+            })
+            .expect_err("recipe process failure must propagate");
+        assert_eq!(error.code(), CycleErrorCode::RecipeFailed);
+        assert!(error.to_string().contains("actor crashed"));
+    }
+
+    #[test]
+    fn execute_actor_step_requires_a_durable_terminal() {
+        let executor = GoalSessionExecutor::new(
+            handler(),
+            no_action_actor("session-1"),
+            admission(),
+            Box::new(FakeEffects::new(FakeMode::Succeed)),
+        );
+        let inv = invocation("session-1", "cycle-1", "goal-1");
+        let error = executor
+            .execute_actor_step(&inv, |_, _| Ok(()))
+            .expect_err("no terminal recorded must fail");
+        assert_eq!(error.code(), CycleErrorCode::MissingTerminal);
+    }
+
+    #[test]
+    fn execute_with_effects_dispatches_a_successful_action_effect() {
+        let actor = AuthenticatedToolContext::new(
+            "goal-session-actor",
+            "session-1",
+            [CapabilityGrant::RecordAction(ActionKind::FileIssue)],
+        )
+        .scoped_to_repository(RepositoryRef::new("rysweet", "Simard"));
+        let executor = GoalSessionExecutor::new(
+            handler(),
+            actor,
+            admission(),
+            Box::new(FakeEffects::new(FakeMode::Succeed)),
+        );
+        let effects = FakeEffects::new(FakeMode::Succeed);
+        let inv = invocation("session-1", "cycle-1", "goal-1");
+        let execution = executor
+            .execute_with_effects(&inv, &effects, |_, tools| {
+                tools
+                    .record_action(
+                        "req-file-issue",
+                        file_issue_action(),
+                        OpaqueBytes::from(b"raw".to_vec()),
+                        Vec::new(),
+                    )
+                    .map(|_| ())
+                    .map_err(RecipeProcessError::from)
+            })
+            .expect("action execution succeeds");
+        assert_eq!(execution.outcome.kind, TerminalKind::Action);
+        assert_eq!(
+            effects.calls(),
+            1,
+            "the pending effect must be executed once"
+        );
+
+        // The effect is now succeeded; a second dispatch is a no-op and must not
+        // execute the effect again.
+        let worker = OutboxWorker::new(
+            executor.handler(),
+            &effects,
+            "test-worker",
+            Duration::from_secs(60),
+        );
+        worker
+            .dispatch_outcome(&execution.outcome)
+            .expect("idempotent redispatch");
+        assert_eq!(effects.calls(), 1, "succeeded effect must not re-run");
+    }
+
+    fn record_pending_action(handler: &CapabilityHandler, action: Action) -> TerminalOutcome {
+        let actor = AuthenticatedToolContext::new(
+            "goal-session-actor",
+            "session-1",
+            [CapabilityGrant::RecordAction(action.kind())],
+        )
+        .scoped_to_repository(RepositoryRef::new("rysweet", "Simard"))
+        .bound_to_cycle_goal("cycle-1", "goal-1");
+        handler
+            .record_action(
+                &actor,
+                crate::typed_ooda::RecordActionRequest {
+                    identity: crate::typed_ooda::TerminalRequestIdentity::new(
+                        "req-action",
+                        "session-1",
+                        "cycle-1",
+                        "goal-1",
+                    ),
+                    action,
+                    raw_semantic: OpaqueBytes::from(b"raw".to_vec()),
+                    evidence: Vec::new(),
+                },
+                &AdmissionSnapshot {
+                    concurrent_engineers: 0,
+                    disk_used_percent: 1,
+                    active_claims: BTreeSet::new(),
+                    policy_revision: "policy-v1".to_string(),
+                },
+            )
+            .expect("record action")
+    }
+
+    #[test]
+    fn outbox_worker_retries_transient_effect_failures() {
+        let handler = handler();
+        let outcome = record_pending_action(&handler, file_issue_action());
+        let effects = FakeEffects::new(FakeMode::Retryable);
+        let worker = OutboxWorker::new(&handler, &effects, "test-worker", Duration::from_secs(60));
+        let error = worker
+            .dispatch_outcome(&outcome)
+            .expect_err("retryable failure must surface");
+        assert_eq!(error.code(), CycleErrorCode::DownstreamFailed);
+        assert!(error.to_string().contains("retryable"));
+        // The effect returns to pending, so a fresh worker can claim it again.
+        let job = handler
+            .effect_for_outcome(&outcome.outcome_id)
+            .expect("query effect")
+            .expect("effect");
+        assert_eq!(job.state.as_str(), "pending");
+    }
+
+    #[test]
+    fn outbox_worker_records_permanent_effect_failures() {
+        let handler = handler();
+        let outcome = record_pending_action(&handler, file_issue_action());
+        let effects = FakeEffects::new(FakeMode::Permanent);
+        let worker = OutboxWorker::new(&handler, &effects, "test-worker", Duration::from_secs(60));
+        let error = worker
+            .dispatch_outcome(&outcome)
+            .expect_err("permanent failure must surface");
+        assert_eq!(error.code(), CycleErrorCode::DownstreamFailed);
+        let job = handler
+            .effect_for_outcome(&outcome.outcome_id)
+            .expect("query effect")
+            .expect("effect");
+        assert_eq!(job.state.as_str(), "failed");
+    }
+
+    #[test]
+    fn outbox_worker_blocks_privileged_effects_without_approval() {
+        let handler = handler();
+        let outcome = record_pending_action(&handler, merge_action());
+        let effects = FakeEffects::new(FakeMode::Succeed);
+        let worker = OutboxWorker::new(&handler, &effects, "test-worker", Duration::from_secs(60));
+        let error = worker
+            .dispatch_outcome(&outcome)
+            .expect_err("privileged effect without approval must be blocked");
+        assert_eq!(error.code(), CycleErrorCode::DownstreamFailed);
+        assert_eq!(effects.calls(), 0, "blocked effect must not execute");
+        assert!(error.to_string().contains("approval"));
+    }
+
+    #[test]
+    fn outbox_worker_drains_pending_effects() {
+        let handler = handler();
+        let outcome = record_pending_action(&handler, file_issue_action());
+        let effects = FakeEffects::new(FakeMode::Succeed);
+        let worker = OutboxWorker::new(&handler, &effects, "test-worker", Duration::from_secs(60));
+        let drained = worker.drain_pending(8).expect("drain succeeds");
+        assert_eq!(drained, 1);
+        assert_eq!(effects.calls(), 1);
+        let job = handler
+            .effect_for_outcome(&outcome.outcome_id)
+            .expect("query effect")
+            .expect("effect");
+        assert_eq!(job.state.as_str(), "succeeded");
+        // Nothing left to drain.
+        assert_eq!(worker.drain_pending(8).expect("second drain"), 0);
+    }
+}

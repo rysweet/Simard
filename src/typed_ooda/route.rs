@@ -420,3 +420,179 @@ mod agent_binary_rail_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// RAII guard that overrides an env var for the duration of a test and
+    /// restores the previous value (or unset) on drop. Tests using it MUST be
+    /// `#[serial_test::serial(cognitive_memory)]` because the process environment is global.
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &Path) -> Self {
+            let prev = std::env::var_os(key);
+            // SAFETY: env mutation is serialised via `#[serial_test::serial(cognitive_memory)]`.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.prev.take() {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    fn write_trusted_assets(root: &Path) {
+        let recipes = root.join("prompt_assets/simard/recipes");
+        let policies = root.join("prompt_assets/simard/policies");
+        fs::create_dir_all(&recipes).expect("create recipes dir");
+        fs::create_dir_all(&policies).expect("create policies dir");
+        fs::write(recipes.join(RECIPE_FILENAME), TRUSTED_RECIPE).expect("write recipe");
+        fs::write(policies.join(POLICY_FILENAME), TRUSTED_POLICY).expect("write policy");
+    }
+
+    #[test]
+    fn ledger_path_appends_the_canonical_relative_path() {
+        let path = crate::typed_ooda::ledger_path(Path::new("/state/root"));
+        assert_eq!(path, Path::new("/state/root/typed-ooda/outcomes.sqlite3"));
+    }
+
+    #[test]
+    fn bounded_diagnostic_file_reports_missing_file() {
+        let missing = std::env::temp_dir().join(format!("simard-missing-{}", uuid::Uuid::now_v7()));
+        assert_eq!(
+            bounded_diagnostic_file(&missing),
+            "diagnostic output unavailable"
+        );
+    }
+
+    #[test]
+    fn bounded_diagnostic_file_returns_short_content_verbatim() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("diag.txt");
+        fs::write(&path, b"boom happened here").expect("write diag");
+        assert_eq!(bounded_diagnostic_file(&path), "boom happened here");
+    }
+
+    #[test]
+    fn bounded_diagnostic_file_truncates_oversized_content() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("diag.txt");
+        fs::write(&path, vec![b'x'; 8192]).expect("write diag");
+        let diagnostic = bounded_diagnostic_file(&path);
+        assert!(diagnostic.contains("[diagnostic truncated after 4096 bytes]"));
+        // 4096 'x' bytes plus the truncation notice.
+        assert!(diagnostic.starts_with(&"x".repeat(4096)));
+        assert!(diagnostic.len() < 8192);
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn resolve_recipe_runner_rejects_relative_configuration() {
+        let _guard = EnvGuard::set("SIMARD_RECIPE_RUNNER_BIN", Path::new("relative/runner"));
+        let error = resolve_recipe_runner().expect_err("relative path must be rejected");
+        assert_eq!(error.code(), CycleErrorCode::RecipeFailed);
+        assert!(error.to_string().contains("absolute file"));
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn resolve_recipe_runner_rejects_absolute_but_missing_file() {
+        let missing = std::env::temp_dir().join(format!("simard-runner-{}", uuid::Uuid::now_v7()));
+        let _guard = EnvGuard::set("SIMARD_RECIPE_RUNNER_BIN", &missing);
+        let error = resolve_recipe_runner().expect_err("missing file must be rejected");
+        assert_eq!(error.code(), CycleErrorCode::RecipeFailed);
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn resolve_recipe_runner_accepts_absolute_existing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runner = dir.path().join("recipe-runner-rs");
+        fs::write(&runner, b"#!/bin/sh\n").expect("write runner");
+        let _guard = EnvGuard::set("SIMARD_RECIPE_RUNNER_BIN", &runner);
+        let resolved = resolve_recipe_runner().expect("existing absolute file accepted");
+        assert_eq!(resolved, runner);
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn production_loads_and_validates_installed_assets() {
+        let home = tempfile::tempdir().expect("home tempdir");
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        let _home_guard = EnvGuard::set("HOME", home.path());
+        write_trusted_assets(repo.path());
+
+        let route = TypedGoalSessionRoute::production(repo.path()).expect("production route");
+        assert_eq!(
+            route.recipe_path(),
+            repo.path()
+                .join("prompt_assets/simard/recipes")
+                .join(RECIPE_FILENAME)
+        );
+        assert_eq!(
+            route.policy_path(),
+            repo.path()
+                .join("prompt_assets/simard/policies")
+                .join(POLICY_FILENAME)
+        );
+        // load_policy must parse the trusted TOML into a usable policy.
+        let policy = route.load_policy().expect("policy parses");
+        assert!(!policy.revision.is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn production_fails_when_assets_are_not_installed() {
+        let home = tempfile::tempdir().expect("home tempdir");
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        let _home_guard = EnvGuard::set("HOME", home.path());
+
+        let error =
+            TypedGoalSessionRoute::production(repo.path()).expect_err("missing assets must fail");
+        assert_eq!(error.code(), CycleErrorCode::RecipeFailed);
+        assert!(error.to_string().contains("not installed"));
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn production_rejects_a_tampered_recipe() {
+        let home = tempfile::tempdir().expect("home tempdir");
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        let _home_guard = EnvGuard::set("HOME", home.path());
+        write_trusted_assets(repo.path());
+        // Corrupt the recipe so it no longer matches the trusted compiled asset.
+        let recipe_path = repo
+            .path()
+            .join("prompt_assets/simard/recipes")
+            .join(RECIPE_FILENAME);
+        fs::write(&recipe_path, "tampered: true\n").expect("overwrite recipe");
+
+        let error = TypedGoalSessionRoute::production(repo.path())
+            .expect_err("tampered recipe must be rejected");
+        assert_eq!(error.code(), CycleErrorCode::RecipeFailed);
+        assert!(error.to_string().contains("trusted compiled asset"));
+    }
+
+    #[test]
+    fn context_error_wraps_io_errors_as_recipe_failures() {
+        let io = std::io::Error::other("pipe broke");
+        let error = context_error(io);
+        assert_eq!(error.code(), CycleErrorCode::RecipeFailed);
+        assert!(error.to_string().contains("pipe broke"));
+    }
+}

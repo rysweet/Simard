@@ -748,8 +748,19 @@ mod tests {
     }
 
     #[test]
-    fn resolve_agent_command_returns_valid_command() {
-        let _result = resolve_agent_command();
+    fn resolve_agent_command_maps_provider_to_a_known_agent() {
+        // Config may be unavailable in a headless test env; but whenever it
+        // resolves, the command must be one of the two supported agents with
+        // its canonical argv — never an empty or arbitrary program.
+        if let Ok((program, args)) = resolve_agent_command() {
+            match program.as_str() {
+                "copilot" => {
+                    assert_eq!(args, vec!["--allow-all-tools", "--allow-all-paths"]);
+                }
+                "claude" => assert_eq!(args, vec!["-p", "--allowedTools", "all"]),
+                other => panic!("unexpected agent program: {other:?}"),
+            }
+        }
     }
 
     #[test]
