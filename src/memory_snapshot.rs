@@ -299,12 +299,22 @@ mod tests {
 
     #[test]
     fn snapshot_dir_uses_override() {
-        let dir = snapshot_dir(Some(Path::new("/custom/path")));
-        // We cannot guarantee the dir is created (may not have perms) but
-        // the path should be returned when the override is given and the
-        // parent exists or creation succeeds.  On CI the parent may not
-        // exist, so just verify the function does not panic.
-        let _ = dir;
+        // Point the override at a unique, creatable temp path and verify the
+        // returned directory is exactly the override and was created — not
+        // merely that the call "does not panic".
+        let base =
+            std::env::temp_dir().join(format!("simard-snapshot-override-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let got = snapshot_dir(Some(base.as_path())).expect("override under temp dir must resolve");
+        assert_eq!(
+            got, base,
+            "snapshot_dir must return the override path verbatim"
+        );
+        assert!(
+            base.exists(),
+            "snapshot_dir must create the override directory"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

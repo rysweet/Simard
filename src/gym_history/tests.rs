@@ -30,7 +30,14 @@ fn score_record_construction() {
 
 #[test]
 fn open_creates_schema() {
-    let _h = mem_history();
+    // Opening must create the schema, so a query against a fresh, empty DB
+    // succeeds and returns no record (a missing table would surface as an
+    // error/panic inside `latest`).
+    let h = mem_history();
+    assert!(
+        h.latest("progressive", "never-recorded").is_none(),
+        "fresh history must query cleanly against the created schema"
+    );
 }
 
 #[test]

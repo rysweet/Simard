@@ -204,17 +204,6 @@ fn benchmark_scenarios_objective_not_empty() {
 }
 
 #[test]
-fn benchmark_scenarios_topology_is_known_variant() {
-    for scenario in crate::benchmark_scenarios() {
-        match scenario.topology {
-            crate::runtime::RuntimeTopology::SingleProcess
-            | crate::runtime::RuntimeTopology::MultiProcess
-            | crate::runtime::RuntimeTopology::Distributed => {}
-        }
-    }
-}
-
-#[test]
 fn benchmark_scenarios_min_evidence_is_reasonable() {
     for scenario in crate::benchmark_scenarios() {
         assert!(
