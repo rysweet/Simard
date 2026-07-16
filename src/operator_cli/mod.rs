@@ -1,4 +1,5 @@
 mod args;
+mod atelier;
 mod ci_health;
 mod creative_ideas;
 mod curation;
@@ -70,6 +71,10 @@ Product modes:
   meeting repl [topic]
   meeting resume             — resume an interrupted meeting from the last WIP checkpoint
   meeting resume --discard   — discard the saved WIP checkpoint without resuming
+  atelier fabricate --brief <path.json> [--out <dir>]
+                         — Atelier identity: product brief -> parametric model,
+                           cut list, BOM, and (with OpenSCAD/FreeCAD) STL/STEP + render
+  atelier demo [--out <dir>]  — run the Atelier pipeline on a built-in example brief
   goal list                — print active + backlog snapshot to stdout
   goal add <p> <desc>      — add a new active goal at priority p (1-7)
   goal demote <goal-id>    — move an active goal to the backlog
@@ -238,6 +243,7 @@ where
     match command.as_str() {
         "engineer" => engineer::dispatch_engineer_command(args),
         "meeting" => meeting::dispatch_meeting_command(args),
+        "atelier" => atelier::dispatch_atelier_command(args),
         "goal" => goal::dispatch_goal_command(args),
         "goal-curation" => curation::dispatch_goal_curation_command(args),
         "improvement-curation" => curation::dispatch_improvement_curation_command(args),

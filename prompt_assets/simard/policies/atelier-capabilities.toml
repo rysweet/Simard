@@ -1,0 +1,53 @@
+# Simard Atelier — industrial & furniture design identity capabilities.
+#
+# Companion to prompt_assets/simard/atelier_system.md and the built-in
+# `simard-atelier` identity manifest. Describes the goal-session capability
+# surface the Atelier identity operates within.
+
+policy_id = "atelier-identity-policy-v1"
+identity = "simard-atelier"
+operating_mode = "engineer"
+
+# Product families the Atelier engine can design and fabricate.
+product_kinds = ["table", "shelf", "box"]
+
+# Fabrication artifacts the identity is expected to produce for a completed
+# product brief. Deterministic artifacts are always produced; tool-backed
+# exports degrade gracefully when the CAD binary is absent.
+deterministic_artifacts = [
+  "model.scad",
+  "cut_list.csv",
+  "bom.json",
+  "brief.json",
+  "export_step.py",
+  "manifest.json",
+]
+tool_backed_artifacts = [
+  "model.stl",
+  "model.step",
+  "render.png",
+]
+
+# External fabrication tools the identity may drive. Missing tools are skipped,
+# not fatal.
+[tools]
+openscad = { role = "parametric-model", produces = ["stl", "png"] }
+freecad = { role = "brep-export", produces = ["step"], binary = "freecadcmd" }
+blender = { role = "beauty-render", produces = ["png", "mp4"], binary = "blender" }
+# On a headless host (no X display) the PNG render is transparently wrapped in
+# `xvfb-run` so OpenSCAD can create the OpenGL context it requires.
+xvfb = { role = "headless-display", binary = "xvfb-run", optional = true }
+
+# Definition of "done" for an Atelier goal session: a product brief taken to an
+# exported model plus a render, with a cut list and BOM.
+[completion]
+require_model_export = true      # STL or STEP
+require_render = true            # PNG
+require_cut_list = true
+require_bill_of_materials = true
+
+[limits]
+max_dimension_mm = 5000.0
+min_dimension_mm = 1.0
+max_interior_shelves = 50
+max_quantity = 1000

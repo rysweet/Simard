@@ -1,0 +1,57 @@
+name: "Atelier identity: product brief -> exported model + render (graceful degradation)"
+description: "Outside-in proof that the `simard-atelier` built-in identity (industrial & furniture design) meets its headline done condition — a product brief is taken end-to-end to an EXPORTED MODEL plus a RENDER, alongside a cut list and a bill of materials — and degrades gracefully when CAD tools are absent instead of failing the goal session. Two layers: (a) name-pinned in-tree unit tests for the deterministic fabrication engine (OpenSCAD codegen, cut list, BOM), the loader identity registration, and the `simard atelier` CLI dispatch — the pipeline tests inject a fake tool runner so they are hermetic (no CAD binary, no network); (b) a real black-box run of the shipped `simard atelier demo` CLI into a temp dir, asserting the deterministic artifacts (parametric .scad, cut_list.csv, bom.json, manifest.json) are ALWAYS produced, and that the model/render (STL/PNG) are either `produced` (OpenSCAD present, including headless via xvfb-run) or `skipped-tool-missing` (OpenSCAD absent) — a `failed` model or a missing deterministic artifact is not tolerated. This keeps the scenario green on any host while still closing the end-to-end loop wherever OpenSCAD is installed. The named tests are asserted to have actually run so a rename cannot silently no-op the scenario."
+version: "1.0.0"
+
+config:
+  timeout: 600000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 600000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Atelier brief -> model + render end-to-end (fabrication engine + CLI)"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/atelier-brief-to-model-and-render.sh"
+    timeout: 600000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "identity"
+    - "atelier"
+    - "fabrication"
+    - "end-to-end"
+    - "graceful-degradation"
+    - "coverage"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"
