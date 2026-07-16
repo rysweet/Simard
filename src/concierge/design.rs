@@ -154,10 +154,34 @@ pub struct PropertyLayout {
 
 impl PropertyLayout {
     /// Total number of physical rooms across all categories.
+    ///
+    /// Uses saturating addition so an adversarial, externally-deserialized
+    /// concept can never trigger an overflow panic; a saturated total simply
+    /// fails the room-count invariant in [`HotelConcept::verify_design`].
     #[must_use]
     pub fn total_rooms(&self) -> u32 {
-        self.room_mix.iter().map(|plan| plan.count).sum()
+        self.room_mix
+            .iter()
+            .fold(0_u32, |acc, plan| acc.saturating_add(plan.count))
     }
+}
+
+/// The structured result of checking a [`HotelConcept`] against the hospitality
+/// design invariants.
+///
+/// This is the **measurable done-criteria** for the "design a hotel concept"
+/// goal: it mirrors the operational verification that
+/// [`crate::concierge::run_concierge`] already produces for the PMS half, so a
+/// designed concept is certifiably well-formed (or not) rather than only
+/// implicitly asserted by scattered tests. `ok` is true only when every
+/// invariant held; `notes` records one `ok: …` / `FAIL: …` line per check so an
+/// operator or a done-gate can see exactly which criterion failed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesignVerification {
+    /// Whether every design invariant held.
+    pub ok: bool,
+    /// One human-readable line per checked invariant (`ok: …` or `FAIL: …`).
+    pub notes: Vec<String>,
 }
 
 /// A stage in the guest journey with its concrete touchpoints.
@@ -180,6 +204,101 @@ pub struct HotelConcept {
     pub brand: BrandIdentity,
     pub layout: PropertyLayout,
     pub guest_experience: GuestExperience,
+}
+
+impl HotelConcept {
+    /// Check the concept against the hospitality design invariants and return a
+    /// structured [`DesignVerification`].
+    ///
+    /// These invariants are the measurable done-criteria for the "design a hotel
+    /// concept" goal — every concept `design_hotel` produces satisfies them, and
+    /// an externally-supplied or model-enriched concept can be certified (or
+    /// rejected) against the same bar. The checks are pure and deterministic.
+    ///
+    /// Invariants:
+    /// 1. The room mix totals exactly the brief's `room_count`.
+    /// 2. Floors are `>= 1` and hold every room (`floors * 20 >= total_rooms`).
+    /// 3. Every room category is well-formed (non-empty `code`/`name`, and
+    ///    `count`, `capacity`, `base_rate_cents` all `> 0`).
+    /// 4. An accessible category (`ADA`) is planned — a non-negotiable
+    ///    hospitality requirement.
+    /// 5. A premium/suite category (`STE`) is planned.
+    /// 6. At least one public space is planned.
+    /// 7. The brand carries the brief's name, a 3-colour palette, and a tagline
+    ///    that references the location.
+    /// 8. The guest-experience journey covers the full arc (`>= 5` stages) and
+    ///    every stage has at least one concrete touchpoint.
+    #[must_use]
+    pub fn verify_design(&self) -> DesignVerification {
+        let mut notes = Vec::new();
+        let mut ok = true;
+        let mut check = |condition: bool, pass: &str, fail: &str| {
+            if condition {
+                notes.push(format!("ok: {pass}"));
+            } else {
+                notes.push(format!("FAIL: {fail}"));
+                ok = false;
+            }
+        };
+
+        let total = self.layout.total_rooms();
+        check(
+            total == self.brief.room_count,
+            "room mix totals the brief room count",
+            "room mix does not total the brief room count",
+        );
+        check(
+            self.layout.floors >= 1 && self.layout.floors.saturating_mul(ROOMS_PER_FLOOR) >= total,
+            "floors hold every planned room",
+            "floors cannot hold every planned room",
+        );
+        check(
+            self.layout.room_mix.iter().all(|plan| {
+                !plan.code.trim().is_empty()
+                    && !plan.name.trim().is_empty()
+                    && plan.count > 0
+                    && plan.capacity > 0
+                    && plan.base_rate_cents > 0
+            }),
+            "every room category is well-formed",
+            "a room category is malformed (empty code/name or zero count/capacity/rate)",
+        );
+        check(
+            self.layout.room_mix.iter().any(|plan| plan.code == "ADA"),
+            "an accessible room category is planned",
+            "no accessible room category is planned",
+        );
+        check(
+            self.layout.room_mix.iter().any(|plan| plan.code == "STE"),
+            "a premium suite category is planned",
+            "no premium suite category is planned",
+        );
+        check(
+            !self.layout.public_spaces.is_empty(),
+            "at least one public space is planned",
+            "no public spaces are planned",
+        );
+        check(
+            self.brand.name == self.brief.name
+                && self.brand.palette.len() == 3
+                && self.brand.palette.iter().all(|c| !c.trim().is_empty())
+                && self.brand.tagline.contains(&self.brief.location),
+            "brand carries the name, a 3-colour palette, and a located tagline",
+            "brand is missing the name, a 3-colour palette, or a located tagline",
+        );
+        check(
+            self.guest_experience.stages.len() >= 5
+                && self
+                    .guest_experience
+                    .stages
+                    .iter()
+                    .all(|stage| !stage.touchpoints.is_empty()),
+            "guest-experience journey covers the full arc with touchpoints",
+            "guest-experience journey is incomplete or has an empty stage",
+        );
+
+        DesignVerification { ok, notes }
+    }
 }
 
 const MIN_ROOMS: u32 = 8;
@@ -550,5 +669,118 @@ mod tests {
         assert_eq!(concept.brand.name, "Cedar");
         assert!(concept.brand.tagline.contains("Aspen"));
         assert_eq!(concept.brand.palette.len(), 3);
+    }
+
+    #[test]
+    fn designed_concept_passes_all_design_invariants() {
+        for (positioning, count) in [
+            (Positioning::Economy, 8_u32),
+            (Positioning::Midscale, 37),
+            (Positioning::Upscale, 120),
+            (Positioning::Luxury, 500),
+        ] {
+            let brief = HotelBrief::new("Invariant", "Testville", positioning, count, "t");
+            let concept = design_hotel(&brief).unwrap();
+            let verification = concept.verify_design();
+            assert!(
+                verification.ok,
+                "designed concept must satisfy every design invariant for {count} rooms: {:?}",
+                verification.notes
+            );
+            assert!(
+                verification.notes.iter().all(|n| n.starts_with("ok:")),
+                "no invariant should FAIL for a designed concept: {:?}",
+                verification.notes
+            );
+        }
+    }
+
+    #[test]
+    fn verify_design_flags_room_mix_total_mismatch() {
+        let brief = HotelBrief::new("Mismatch", "Nowhere", Positioning::Midscale, 80, "t");
+        let mut concept = design_hotel(&brief).unwrap();
+        // Corrupt the mix so it no longer totals room_count.
+        concept.layout.room_mix[0].count += 5;
+        let verification = concept.verify_design();
+        assert!(!verification.ok);
+        assert!(
+            verification
+                .notes
+                .iter()
+                .any(|n| n.contains("FAIL") && n.contains("room mix")),
+            "must flag the room-mix total mismatch: {:?}",
+            verification.notes
+        );
+    }
+
+    #[test]
+    fn verify_design_flags_missing_accessible_category() {
+        let brief = HotelBrief::new("NoAda", "Nowhere", Positioning::Midscale, 80, "t");
+        let mut concept = design_hotel(&brief).unwrap();
+        let removed = concept
+            .layout
+            .room_mix
+            .iter()
+            .position(|plan| plan.code == "ADA")
+            .expect("designed mix has an ADA category");
+        // Fold the accessible rooms into standard so the total still matches.
+        let ada_count = concept.layout.room_mix[removed].count;
+        concept.layout.room_mix.remove(removed);
+        concept.layout.room_mix[0].count += ada_count;
+        let verification = concept.verify_design();
+        assert!(!verification.ok);
+        assert!(
+            verification
+                .notes
+                .iter()
+                .any(|n| n.contains("FAIL") && n.contains("accessible")),
+            "must flag the missing accessible category: {:?}",
+            verification.notes
+        );
+    }
+
+    #[test]
+    fn verify_design_flags_malformed_palette_and_tagline() {
+        let brief = HotelBrief::new("Brandless", "Gotham", Positioning::Upscale, 60, "t");
+        let mut concept = design_hotel(&brief).unwrap();
+        concept.brand.palette.pop();
+        concept.brand.tagline = "no location here".to_string();
+        let verification = concept.verify_design();
+        assert!(!verification.ok);
+        assert!(
+            verification
+                .notes
+                .iter()
+                .any(|n| n.contains("FAIL") && n.contains("brand")),
+            "must flag the malformed brand: {:?}",
+            verification.notes
+        );
+    }
+
+    #[test]
+    fn verify_design_flags_empty_guest_experience_stage() {
+        let brief = HotelBrief::new("Empty", "Nowhere", Positioning::Midscale, 80, "t");
+        let mut concept = design_hotel(&brief).unwrap();
+        concept.guest_experience.stages[0].touchpoints.clear();
+        let verification = concept.verify_design();
+        assert!(!verification.ok);
+        assert!(
+            verification
+                .notes
+                .iter()
+                .any(|n| n.contains("FAIL") && n.contains("guest-experience")),
+            "must flag the empty guest-experience stage: {:?}",
+            verification.notes
+        );
+    }
+
+    #[test]
+    fn design_verification_serializes_roundtrip() {
+        let brief = HotelBrief::new("Serde", "Seattle", Positioning::Midscale, 40, "t");
+        let concept = design_hotel(&brief).unwrap();
+        let verification = concept.verify_design();
+        let json = serde_json::to_string(&verification).unwrap();
+        let round: DesignVerification = serde_json::from_str(&json).unwrap();
+        assert_eq!(round, verification);
     }
 }

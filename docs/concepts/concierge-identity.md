@@ -35,6 +35,12 @@ concept and the prototype can be exercised in CI without any model call.
 - `concierge::design_hotel(&brief) -> HotelConcept` — property layout (floors,
   room mix summing exactly to the room count, public spaces), a staged
   guest-experience journey, and a brand identity.
+- `HotelConcept::verify_design() -> DesignVerification` — certifies the concept
+  against the hospitality design invariants (below), returning `ok` plus one
+  `ok: …` / `FAIL: …` note per check. This is the measurable done-criteria for
+  the "design a hotel concept" goal, mirroring the operational verification the
+  PMS half already produces. `run_concierge` runs it first and fails closed if a
+  concept is malformed.
 - `concierge::PmsEngine::from_concept(&concept)` — seeds room types and numbered
   rooms, then supports:
   - **Reservations**: `book`, `check_in`, `check_out`, `cancel` with correct
@@ -49,6 +55,23 @@ concept and the prototype can be exercised in CI without any model call.
   fully restored; the reservation reaches checked-out).
 
 ### Verified invariants
+
+**Design invariants** (`HotelConcept::verify_design`, the design goal's
+done-criteria):
+
+1. The room mix totals exactly the brief's room count.
+2. Floors are `>= 1` and hold every planned room.
+3. Every room category is well-formed (non-empty code/name; positive count,
+   capacity, and rate).
+4. An accessible (`ADA`) category and a premium suite (`STE`) category are
+   planned.
+5. At least one public space is planned.
+6. The brand carries the brief's name, a 3-colour palette, and a tagline that
+   references the location.
+7. The guest-experience journey covers the full arc (`>= 5` stages), each with
+   at least one concrete touchpoint.
+
+**Operational invariants** (`run_concierge`, the end-to-end goal's done-criteria):
 
 1. Generated room count equals the sum of the designed `room_mix` counts.
 2. A booking reduces published availability by exactly one for the booked night.
@@ -79,7 +102,7 @@ cargo run --bin simard_operator_probe -- \
 ```
 
 A passing `concierge-run` ends with a `RES-…` sample reservation,
-`Prototype verified: yes`, and `Session phase: complete`.
+`Concept verified: yes`, `Prototype verified: yes`, and `Session phase: complete`.
 
 ## Tests
 

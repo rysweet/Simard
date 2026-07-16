@@ -45,7 +45,13 @@ title = "Design a hotel concept from a brief"
 description = """
 Take a hospitality brief to a concrete hotel concept — property layout (floors,
 room mix, public spaces), a staged guest-experience journey, and a brand
-identity — using the concierge hotel-design goal-session recipe.
+identity — using the concierge hotel-design goal-session recipe. Done when the
+concept passes every hospitality design invariant: `HotelConcept::verify_design`
+returns `ok = true` (room mix totals the room count; floors hold every room;
+every category is well-formed; an accessible and a suite category are planned;
+at least one public space is planned; the brand carries the name, a 3-colour
+palette, and a located tagline; the guest-experience journey covers the full
+arc). The `concierge-run` operator probe reports `Concept verified: yes`.
 """
 
 [[identities.seed_goals]]

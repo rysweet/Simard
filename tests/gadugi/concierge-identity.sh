@@ -23,6 +23,7 @@ printf '%s\n' "$RUN_OUTPUT" | grep -F "Probe mode: concierge-run" >/dev/null
 printf '%s\n' "$RUN_OUTPUT" | grep -F "Hotel: Harbor Light" >/dev/null
 printf '%s\n' "$RUN_OUTPUT" | grep -F "Location: Lisbon" >/dev/null
 printf '%s\n' "$RUN_OUTPUT" | grep -F "Total rooms: 120" >/dev/null
+printf '%s\n' "$RUN_OUTPUT" | grep -F "Concept verified: yes" >/dev/null
 printf '%s\n' "$RUN_OUTPUT" | grep -E "Sample reservation: RES-[0-9]+" >/dev/null
 printf '%s\n' "$RUN_OUTPUT" | grep -F "status CheckedOut" >/dev/null
 printf '%s\n' "$RUN_OUTPUT" | grep -F "Prototype verified: yes" >/dev/null

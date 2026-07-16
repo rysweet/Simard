@@ -27,8 +27,8 @@ use chrono::{Duration, NaiveDate};
 use serde::{Deserialize, Serialize};
 
 pub use design::{
-    BrandIdentity, ExperienceStage, GuestExperience, HotelBrief, HotelConcept, Positioning,
-    PropertyLayout, RoomTypePlan, design_hotel,
+    BrandIdentity, DesignVerification, ExperienceStage, GuestExperience, HotelBrief, HotelConcept,
+    Positioning, PropertyLayout, RoomTypePlan, design_hotel,
 };
 pub use pms::{
     Channel, ChannelAvailability, Housekeeping, PmsEngine, Reservation, ReservationStatus, Room,
@@ -105,7 +105,12 @@ pub struct ConciergeOutcome {
     pub room_type_count: usize,
     pub sample_stay: StaySummary,
     pub direct_availability_on_arrival: u32,
-    /// Whether every post-run invariant held.
+    /// Whether the designed concept satisfied every hospitality design
+    /// invariant (the measurable done-criteria for the design half).
+    pub concept_verified: bool,
+    /// One `ok: …` / `FAIL: …` line per checked design invariant.
+    pub design_verification_notes: Vec<String>,
+    /// Whether every post-run operational invariant held.
     pub verified: bool,
     pub verification_notes: Vec<String>,
 }
@@ -124,6 +129,17 @@ fn demo_arrival() -> NaiveDate {
 /// violated.
 pub fn run_concierge(brief: &HotelBrief) -> Result<ConciergeOutcome, ConciergeError> {
     let concept = design_hotel(brief)?;
+
+    // Certify the design half against the hospitality design invariants before
+    // scaffolding — the measurable done-criteria for "design a hotel concept".
+    // Fail closed so a malformed concept never reaches the PMS scaffold.
+    let design_verification = concept.verify_design();
+    if !design_verification.ok {
+        return Err(ConciergeError::VerificationFailed {
+            reason: design_verification.notes.join("; "),
+        });
+    }
+
     let mut engine = PmsEngine::from_concept(&concept);
 
     let total_rooms = u32::try_from(engine.room_count()).unwrap_or(u32::MAX);
@@ -238,6 +254,8 @@ pub fn run_concierge(brief: &HotelBrief) -> Result<ConciergeOutcome, ConciergeEr
         room_type_count,
         sample_stay,
         direct_availability_on_arrival,
+        concept_verified: design_verification.ok,
+        design_verification_notes: design_verification.notes,
         verified,
         verification_notes: notes,
     })
@@ -276,6 +294,17 @@ pub fn render_report(outcome: &ConciergeOutcome) -> String {
         "Public spaces: {}\n",
         concept.layout.public_spaces.join(", ")
     ));
+    out.push_str(&format!(
+        "Concept verified: {}\n",
+        if outcome.concept_verified {
+            "yes"
+        } else {
+            "no"
+        }
+    ));
+    for note in &outcome.design_verification_notes {
+        out.push_str(&format!("  - {note}\n"));
+    }
     out.push_str("Guest experience:\n");
     for stage in &concept.guest_experience.stages {
         out.push_str(&format!(
@@ -322,6 +351,15 @@ mod tests {
             HotelBrief::from_prompt("Aurora Lodge in Reykjavik, a 120-room upscale design hotel");
         let outcome = run_concierge(&brief).unwrap();
         assert!(outcome.verified);
+        assert!(outcome.concept_verified);
+        assert!(
+            outcome
+                .design_verification_notes
+                .iter()
+                .all(|n| n.starts_with("ok:")),
+            "design invariants must all pass: {:?}",
+            outcome.design_verification_notes
+        );
         assert_eq!(outcome.total_rooms, 120);
         assert_eq!(
             outcome.sample_stay.final_status,
@@ -350,6 +388,7 @@ mod tests {
         assert!(report.contains("Probe mode: concierge-run"));
         assert!(report.contains("Hotel: Reportel"));
         assert!(report.contains("Total rooms: 200"));
+        assert!(report.contains("Concept verified: yes"));
         assert!(report.contains("Sample reservation: RES-"));
         assert!(report.contains("Prototype verified: yes"));
         assert!(report.contains("Session phase: complete"));
