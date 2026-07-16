@@ -32,7 +32,12 @@ jobs:
         uses: ./.github/actions/rust-runner-prep
 
       - name: Install Rust nightly toolchain
-        uses: dtolnay/rust-toolchain@5b842231ba77f5c045dba54ac5560fed2db780e2 # nightly
+        # SHA-pins dtolnay's immutable `v1` release tag (reachable + tagged) and
+        # selects the channel via the `toolchain:` input. A force-pushed branch
+        # tip (`# nightly`/`# stable`) orphans the pinned commit and breaks
+        # Dependabot's github_actions updater ("no such commit"), the same
+        # failure mode noted for taiki-e/install-action below.
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: nightly-2026-07-01
           components: llvm-tools-preview

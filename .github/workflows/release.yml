@@ -56,7 +56,14 @@ jobs:
 
       - name: Install Rust toolchain
         if: steps.tag_check.outputs.exists == 'false'
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        # SHA-pins dtolnay's immutable `v1` release tag (reachable + tagged, so
+        # Dependabot's github_actions updater can always resolve it — a
+        # force-pushed branch-tip pin orphans and breaks it with "no such
+        # commit"). The `v1` action requires an explicit `toolchain:` input, so
+        # we pass `stable` to preserve the stable channel exactly.
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
 
       - name: Cache cargo
         if: steps.tag_check.outputs.exists == 'false'
