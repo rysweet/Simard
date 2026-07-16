@@ -518,6 +518,9 @@ built, these must be resolved — they are hard gates, not advice.
 
 ## Related reading
 
+- [Ecosystem Observe](./ecosystem-observe.md) — the live, agentic multi-repo
+  observation chain (recipe + prompts + thin rail) that is now the Overseer's
+  observation SOURCE, replacing the single-repo Rust gap-scan.
 - [Operational autonomy model](../concepts/operational-autonomy-model.md) — the
   autonomy boundary and HIGH-RISK gating this design inherits.
 - [Cognitive-thread scheduling](../reference/cognitive-thread-scheduling.md) and

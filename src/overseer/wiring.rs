@@ -44,8 +44,9 @@ use crate::overseer::capabilities::{
     RecalledProcedure, RecalledProspective, RecordOutcome,
 };
 use crate::overseer::config::{
-    claim_reap_enabled, claim_reap_stale_secs, gap_scan_enabled, goal_health_enabled,
-    memory_recall_enabled, overseer_author_login, overseer_interval_secs, whisper_enabled,
+    claim_reap_enabled, claim_reap_stale_secs, gap_scan_enabled, gap_scan_every_n,
+    goal_health_enabled, memory_recall_enabled, overseer_author_login, overseer_interval_secs,
+    whisper_enabled,
 };
 use crate::overseer::deploy::GuardedDeployer;
 use crate::overseer::guardrails::RecursionGuard;
@@ -56,8 +57,7 @@ use crate::overseer::merge_ops::MergePrOps;
 use crate::overseer::notify::DualChannelNotifier;
 use crate::overseer::observer::StewardshipIssueFiler;
 use crate::overseer::sensor::{
-    SnapshotStatusReader, SurveyedIssue, blocked_goals_from_board, detect_workstream_gaps,
-    in_flight_from_board,
+    SnapshotStatusReader, blocked_goals_from_board, detect_workstream_gaps, in_flight_from_board,
 };
 use crate::overseer::signal::{DETAIL_CAP, GapItem, Signal, sanitize_detail};
 use crate::overseer::{ActOutcome, Capabilities, CycleReport, Overseer};
@@ -764,158 +764,18 @@ impl GoalCurator for BoardGoalCurator {
                 return Ok(Vec::new());
             }
         };
-        // High-signal open issues + open-PR issue coverage are best-effort
-        // external `gh` reads; each degrades to empty (logged) so a network hiccup
-        // never aborts the scan nor invents a gap. Anomalies flow through from the
-        // Observe pass; correlating a specific anomaly to an in-flight fix is left
-        // to the durable per-signature dedup (M1 issue + gap gate) rather than a
-        // brittle text match.
-        let issues = survey_high_signal_open_issues(OVERSEER_SURVEY_REPO);
-        let coverage = issue_coverage_from_open_prs(OVERSEER_SURVEY_REPO);
-        Ok(detect_workstream_gaps(
-            &board, &issues, anomalies, &coverage,
-        ))
+        // Ecosystem observation is no longer a single-repo Rust survey-and-parse
+        // (issue #2419): the agentic `ecosystem-observe` recipe is now the
+        // observation SOURCE for cross-repo work (see the
+        // `EcosystemObserver` rail + `docs/design/ecosystem-observe.md`). What
+        // remains here is the INTERNAL goal-board / anomaly hygiene detector,
+        // which reads Simard's OWN in-memory board state — not a repo code
+        // sensor. It never calls `gh`, never parses issue/PR JSON, and holds no
+        // per-repo observation. Anomalies flow through from the Observe pass;
+        // correlating a specific anomaly to an in-flight fix is left to the
+        // durable per-signature dedup (M1 issue + gap gate).
+        Ok(detect_workstream_gaps(&board, &[], anomalies, &[]))
     }
-}
-
-/// The repo the Overseer surveys for high-signal open issues + open PRs — its own
-/// stewarded repo (`rysweet/Simard`), per the gap-scan directive.
-const OVERSEER_SURVEY_REPO: &str = "rysweet/Simard";
-
-/// Upper bound on issues / PRs pulled in one survey, so the `gh` reads stay cheap
-/// and the candidate set bounded regardless of backlog size.
-const OVERSEER_SURVEY_LIMIT: u32 = 100;
-
-/// Best-effort label-aware survey of OPEN issues via `gh issue list --json
-/// number,title,labels`. Any failure (spawn, non-zero exit, JSON parse) degrades
-/// to an empty list (logged via tracing) — no gap is ever fabricated from a failed
-/// read, and there is no stray `print`. The detector filters these to the
-/// high-signal, uncovered ones.
-fn survey_high_signal_open_issues(repo: &str) -> Vec<SurveyedIssue> {
-    let output = match std::process::Command::new("gh")
-        .args([
-            "issue",
-            "list",
-            "-R",
-            repo,
-            "--state",
-            "open",
-            "--json",
-            "number,title,labels",
-            "--limit",
-            &OVERSEER_SURVEY_LIMIT.to_string(),
-        ])
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::warn!(
-                target: "overseer::gap_scan", repo, error = %e,
-                "gap-scan: `gh issue list` spawn failed; degrading to no issue gaps"
-            );
-            return Vec::new();
-        }
-    };
-    if !output.status.success() {
-        tracing::warn!(
-            target: "overseer::gap_scan", repo,
-            status = %output.status,
-            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
-            "gap-scan: `gh issue list` failed; degrading to no issue gaps"
-        );
-        return Vec::new();
-    }
-    #[derive(serde::Deserialize)]
-    struct RawLabel {
-        name: String,
-    }
-    #[derive(serde::Deserialize)]
-    struct RawIssue {
-        number: u64,
-        title: String,
-        labels: Vec<RawLabel>,
-    }
-    match serde_json::from_slice::<Vec<RawIssue>>(&output.stdout) {
-        Ok(raws) => raws
-            .into_iter()
-            .map(|r| SurveyedIssue {
-                repo: repo.to_string(),
-                number: r.number,
-                title: r.title,
-                labels: r.labels.into_iter().map(|l| l.name).collect(),
-            })
-            .collect(),
-        Err(e) => {
-            tracing::warn!(
-                target: "overseer::gap_scan", repo, error = %e,
-                "gap-scan: `gh issue list` JSON parse failed; degrading to no issue gaps"
-            );
-            Vec::new()
-        }
-    }
-}
-
-/// Build the ISSUE coverage set from the OPEN PRs: an issue with an open PR
-/// referencing it is not a gap. Best-effort — a `gh pr list` failure degrades to
-/// empty coverage (logged), so the worst case is flagging an already-covered issue
-/// (bounded by the per-signature dedup), never a panic. Issue references are read
-/// structurally: `#<n>` tokens in the PR title, and the `issue-<n>` / `issue/<n>`
-/// branch-naming convention.
-fn issue_coverage_from_open_prs(repo: &str) -> Vec<String> {
-    use crate::stewardship::merge_authority::{PrGhClient, RealPrGhClient};
-    let prs = match RealPrGhClient::new().list_open_prs(repo, OVERSEER_SURVEY_LIMIT) {
-        Ok(prs) => prs,
-        Err(e) => {
-            tracing::warn!(
-                target: "overseer::gap_scan", repo, error = %e,
-                "gap-scan: `gh pr list` failed; degrading to no open-PR issue coverage"
-            );
-            return Vec::new();
-        }
-    };
-    let mut coverage = Vec::new();
-    for pr in &prs {
-        for n in issue_refs_from_pr(&pr.title, &pr.head_ref_name) {
-            coverage.push(format!("issue:{repo}#{n}"));
-        }
-    }
-    coverage
-}
-
-/// Extract the issue numbers an open PR references, structurally: every `#<n>`
-/// token in the title, plus the digits after an `issue-` / `issue/` marker in the
-/// branch name (Simard's branch convention).
-fn issue_refs_from_pr(title: &str, branch: &str) -> Vec<u64> {
-    let mut nums = hash_issue_numbers(title);
-    let lower = branch.to_ascii_lowercase();
-    for marker in ["issue-", "issue/"] {
-        if let Some(pos) = lower.find(marker) {
-            let digits: String = lower[pos + marker.len()..]
-                .chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect();
-            if let Ok(n) = digits.parse::<u64>() {
-                nums.push(n);
-            }
-        }
-    }
-    nums
-}
-
-/// Collect every `#<digits>` issue reference in `text`.
-fn hash_issue_numbers(text: &str) -> Vec<u64> {
-    let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(pos) = rest.find('#') {
-        let after = &rest[pos + 1..];
-        let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if let Ok(n) = digits.parse::<u64>() {
-            out.push(n);
-        }
-        // Advance past this `#` (and any digits) to find the next reference.
-        rest = &after[digits.len()..];
-    }
-    out
 }
 
 /// Lowercase, hyphenate, and bound a title into a stable backlog id fragment.
@@ -1159,6 +1019,7 @@ pub fn build_overseer(
     repo_root: std::path::PathBuf,
     state_root: std::path::PathBuf,
 ) -> Overseer {
+    let repo_root_for_ecosystem = repo_root.clone();
     let overseer = Overseer::new(assemble_capabilities(
         Arc::clone(&mem),
         repo_root,
@@ -1200,6 +1061,22 @@ pub fn build_overseer(
     // a one-off false-park into a detected recurring root cause it escalates
     // instead of re-patching.
     .with_memory(mem);
+
+    // Live agentic ecosystem-observe rail (issue #2419): REPLACES the retired
+    // single-repo Rust gap-scan survey as the cross-repo observation SOURCE. On
+    // the Overseer cadence the thin rail invokes the `ecosystem-observe` recipe —
+    // an AGENT runs `gh` across the stewarded roster and REASONS to a deduped
+    // Problem list, then briefs each into a `smart-orchestrator` run — and routes
+    // the agent's OPAQUE brief into the SAME gated launch path. Rust never queries
+    // or parses a repo. Wiring is fail-visible: if the committed roster fails to
+    // load, or `recipe-runner-rs`/the recipe is unavailable, the rail is simply
+    // not wired this build (the pass is skipped) rather than aborting the tick.
+    let overseer = match build_ecosystem_observer(&repo_root_for_ecosystem) {
+        Some((roster, observer)) => {
+            overseer.with_ecosystem_observer(roster, observer, gap_scan_every_n())
+        }
+        None => overseer,
+    };
 
     // Periodic stale-engineer-claim reaper (issue #4099): sweep + reclaim the
     // `engineer_claims` leak independent of per-goal polling. Wire the shared
@@ -1252,12 +1129,52 @@ fn build_claim_reaper_seams(
     ))
 }
 
+/// Load the committed stewarded roster and build the production ecosystem-observe
+/// rail. Returns `None` (fail-visible log) if the roster cannot be loaded or
+/// `recipe-runner-rs`/the recipe is unavailable, so the build proceeds without
+/// the rail rather than panicking. The `owner/name` roster lives in
+/// `prompt_assets/simard/ecosystem_repos.toml` as pure DATA.
+fn build_ecosystem_observer(
+    repo_root: &std::path::Path,
+) -> Option<(
+    Vec<String>,
+    Box<dyn crate::overseer::ecosystem_observe::EcosystemObserver>,
+)> {
+    use crate::overseer::ecosystem_observe::{
+        RecipeEcosystemObserver, SpawnEcosystemRecipeRunner, load_ecosystem_roster,
+    };
+
+    let roster_path = repo_root.join("prompt_assets/simard/ecosystem_repos.toml");
+    let roster = match load_ecosystem_roster(&roster_path) {
+        Ok(roster) => roster,
+        Err(error) => {
+            tracing::warn!(
+                target: "simard::ecosystem_observe",
+                error = %error,
+                roster_path = %roster_path.display(),
+                "[simard] ecosystem-observe NOT wired: failed to load stewarded roster",
+            );
+            return None;
+        }
+    };
+    let runner = match SpawnEcosystemRecipeRunner::new(repo_root) {
+        Some(runner) => runner,
+        None => {
+            tracing::warn!(
+                target: "simard::ecosystem_observe",
+                "[simard] ecosystem-observe NOT wired: recipe-runner-rs or ecosystem-observe.yaml unavailable",
+            );
+            return None;
+        }
+    };
+    Some((roster, Box::new(RecipeEcosystemObserver::new(runner))))
+}
+
 /// Resolve the acting Overseer's tick cadence (seconds), clamped to the config
 /// floor so self-tuning can never drive a hot loop.
 pub fn overseer_tick_interval_secs() -> u64 {
     overseer_interval_secs()
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

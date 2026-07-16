@@ -29,6 +29,17 @@ related:
 
 # Overseer workstream gap-scan reference
 
+> **Retired as the observation SOURCE (#2419).** The single-repo Rust
+> survey-and-parse described here (`OVERSEER_SURVEY_REPO`,
+> `survey_high_signal_open_issues`, `issue_coverage_from_open_prs`,
+> `detect_workstream_gaps → Vec<GapItem> → FlagWorkstreamGaps`) has been replaced
+> as the way the Overseer discovers work. Observation is now the agentic,
+> multi-repo [ecosystem-observe chain](../design/ecosystem-observe.md): an agent
+> runs `gh` across the stewarded roster and reasons to a deduped Problem list, with
+> Rust reduced to a thin cadence/routing rail. The `SIMARD_OVERSEER_GAP_SCAN` /
+> `SIMARD_OVERSEER_GAP_SCAN_EVERY_N` cadence knobs are preserved and now gate the
+> ecosystem-observe pass. This page is retained for historical context.
+
 The acting **Overseer** already runs its own Observe/Orient/Decide/Act loop
 alongside Simard's engineer OODA — filing stewardship issues, launching fix
 workstreams, verifying and merging green PRs, and escalating genuine blocks (see
