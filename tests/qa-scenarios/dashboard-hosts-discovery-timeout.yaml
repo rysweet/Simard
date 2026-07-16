@@ -1,0 +1,34 @@
+# Canonical agentic-test schema (name + agents[] + steps[] with params).
+#
+# Guards the `/api/hosts` VM-discovery timeout + cache fix: a slow `azlin list`
+# must not block the Hosts tab unbounded, and the response must carry the
+# additive `discovery_timed_out` / `discovery_stale` flags. A single `cli` agent
+# runs the hermetic regression script; a non-zero exit is a real pass/fail gate.
+name: simard-dashboard-hosts-discovery-timeout
+description: >-
+  Standalone dashboard /api/hosts bounds slow azlin discovery with a hard
+  timeout, caches results, and flags timed-out/stale discovery instead of
+  blocking the Hosts tab.
+version: "1.0"
+config:
+  timeout: 300000
+environment:
+  requires: []
+agents:
+  - name: cli-agent
+    type: cli
+    config: {}
+metadata:
+  tags:
+    - cli
+    - dashboard
+  priority: high
+steps:
+  - name: Run the standalone dashboard hosts-discovery timeout regression script
+    agent: cli-agent
+    action: run
+    params:
+      command: bash
+      args:
+        - scripts/qa-dashboard-hosts-discovery.sh
+    timeout: 300000
