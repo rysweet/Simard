@@ -92,7 +92,9 @@ steps non-fatal so an artifact-service outage cannot turn an all-green run red.
 
 The remedy for a genuine, non-transient default-branch failure is unchanged: it
 is an `actionable_failure`, turns the fleet red, and is routed to a
-deduplicated tracking issue by `--file-issues`.
+deduplicated tracking issue by `--file-issues` — which also **closes** that
+issue once the workflow is green again (see [Closing tracking issues when a
+workflow recovers](#closing-tracking-issues-when-a-workflow-recovers---file-issues)).
 
 ## Module layout
 
@@ -105,7 +107,7 @@ src/ci_health/
 ├── gh.rs         GhWorkflowClient trait (incl. head_sha), RealGhWorkflowClient, pure parse/join helpers, fixture loader
 ├── diagnose.rs   RunDiagnostics trait + RealGhRunDiagnostics, parse_run_diagnosis, RunDiagnosis/FailedJob (root-cause of a failing run)
 ├── report.rs     render_human
-├── steward.rs    actionable-failure -> deduplicated-issue steward (ci_failure_signature, file_issues_for_report)
+├── steward.rs    actionable-failure -> deduplicated-issue steward (ci_signature_for/ci_failure_signature, file_issues_for_report) + green-again resolution (CiIssueResolver, resolve_issues_for_report)
 └── tests.rs      unit tests
 ```
 
@@ -173,9 +175,10 @@ simard ci-health [--json] [--no-cache] [--file-issues] [--from-json <path>]
                        last-known-green head-SHA cache (the cache is still
                        refreshed from this sweep). Alias: --refresh.
   --file-issues        For each distinct actionable failure, file a
-                       deduplicated tracking issue in the failing repo
-                       (see below). Read-only by default; this flag opts in to
-                       the write. Rejected with --from-json.
+                       deduplicated tracking issue in the failing repo, and
+                       close any open tracking issue whose workflow is green
+                       again (see below). Read-only by default; this flag opts
+                       in to the writes. Rejected with --from-json.
   --from-json <path>   Classify an offline snapshot fixture instead of calling
                        `gh` (the fixture shape mirrors the live snapshot).
 ```
@@ -280,6 +283,76 @@ live sweep and is rejected when combined with `--from-json` (filing real issues
 from an offline fixture would be wrong). The exit code still follows the verdict
 (non-zero while any actionable failure exists); the filed/matched issues are
 printed after the report.
+
+#### Closing tracking issues when a workflow recovers (`--file-issues`)
+
+A tracking issue promises, in its own body, to track a broken workflow *"until
+its default-branch CI is green again."* Filing without a matching **close**
+would leave that promise unkept: a workflow that failed, got a tracking issue,
+and later went green would keep a stale open issue forever, violating the goal's
+*"one issue/PR per distinct failure"* hygiene. So the `--file-issues` write is
+bidirectional. In the same pass, [`resolve_issues_for_report`] closes the
+tracking issue of every workflow that is **green again**:
+
+- **Keyed on the same signature.** Filing and resolution share one signature
+  helper, [`ci_signature_for`] (`<repo> :: <workflow>`), so the issue a green
+  workflow resolves is exactly the one its earlier failure filed — proven by a
+  signature-parity unit test. Each freshly-collected repo that has **any** green
+  workflow has its open issues listed **once** via the REST issue-list endpoint
+  (`gh issue list -R <repo> --state open --limit <N> --json
+  number,url,title,body`), filtered **locally** to this steward's tracking
+  issues by their unique `ci-health-workflow:` body marker, and each green
+  workflow is then matched against that filtered list by signature. A hit is
+  closed with `gh issue close --reason completed` and a **green-evidence
+  comment** that links the now-green run (or names the default-branch run
+  generically when the run id was not captured).
+- **Why not a `--search` pre-filter.** GitHub's issue *search* tokenizes
+  `ci-health-workflow` into separate words, so `--search "ci-health-workflow
+  in:body"` both returns unrelated issues that merely mention those words and,
+  worse, can push a real tracking issue past its result window on a busy repo
+  (e.g. a governed repo with hundreds of open issues) — silently failing to
+  close it. Listing on the core REST endpoint and matching the exact marker
+  in-process is truncation-safe up to `<N>` open issues per repo (sized well
+  above governed-repo volumes) and also avoids the Search API's ~30/min
+  secondary rate limit.
+- **O(repos), not O(green-workflows).** Resolution costs one issue-list request
+  per freshly-collected repo (a repo with no green workflow, or no open tracking
+  issue, does no per-workflow work), so a healthy fleet is reconciled in a
+  handful of core-API `gh` calls — rather than one Search-API call per green
+  workflow.
+- **Files before it resolves.** Within `--file-issues`, filing (the
+  correctness-critical path — a genuinely-broken workflow must get a tracking
+  issue) runs first, then resolution, so a resolution `gh` error can never
+  starve filing.
+- **One close per shared issue.** Two workflow files sharing a `name:` hash to
+  one signature, so filing opens a single issue for the pair; resolution tracks
+  the issue numbers it has closed this repo so such a pair closes that one issue
+  exactly once (no duplicate comment or spurious already-closed error).
+- **Conservative — only `green` resolves, and never over a live failure.** A
+  workflow verdict of exactly `green` closes an issue. A **still-failing**
+  workflow (its issue stays open, and is instead matched/re-filed by the filing
+  half) and every **ignored** signal — an in-progress rerun, a disabled
+  workflow, a cancelled/skipped run, a never-run workflow — never close a
+  tracking issue. In particular, an in-flight rerun of a previously-broken
+  workflow keeps its issue open until it *concludes* green, so a
+  red→(rerunning)→green transition never closes prematurely. A green workflow
+  whose signature still has a **live actionable failure** this sweep (a
+  same-`name:` sibling file is broken and collapses to the same signature/issue)
+  is also skipped — keyed on the same `actionable_failures` set filing uses — so
+  a green sibling never closes the issue that is still tracking its broken twin
+  (which would otherwise flap the issue closed then re-opened next sweep).
+- **Cache-aware.** A repo served from the last-known-green SHA cache carries no
+  workflow list this sweep, so its issues are resolved on the next full
+  (`--no-cache`) sweep or the next time a commit re-collects it. In practice the
+  failing→green transition *always* re-collects the repo (its cache entry was
+  invalidated while it was failing), so resolution fires exactly at the
+  transition; a steadily-green cached repo has no open issue left to close.
+- **Fail-loud.** A `gh` error on either the list or the close propagates — a
+  degraded list never silently resolves nothing, and a failed close is never
+  mistaken for a resolved issue. Resolution runs **even when the fleet is green**,
+  because a green fleet can still carry stale issues from a since-recovered
+  failure; the closed issues are printed after the report alongside any
+  filed/matched ones.
 
 ### Governed fleet
 

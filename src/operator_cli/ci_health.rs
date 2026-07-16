@@ -9,8 +9,9 @@
 //! See `docs/reference/ci-health-sweep.md`.
 
 use crate::ci_health::{
-    RealGhRunDiagnostics, RealGhWorkflowClient, file_issues_for_report, render_human,
-    report_to_json, sweep_fixture, sweep_live_with_options,
+    RealCiIssueResolver, RealGhRunDiagnostics, RealGhWorkflowClient, file_issues_for_report,
+    render_human, report_to_json, resolve_issues_for_report, sweep_fixture,
+    sweep_live_with_options,
 };
 use crate::stewardship::{RealGhClient, StewardshipOutcome};
 
@@ -27,8 +28,11 @@ Usage: simard ci-health [--json] [--no-cache] [--file-issues] [--from-json <path
                        tracking issue in the failing repo (dedupes against any
                        open issue already carrying the same
                        stewardship-signature). New issues embed a root-cause
-                       block naming the failing job(s)/step(s). Read-only by
-                       default; this flag opts in to the write. Rejected with
+                       block naming the failing job(s)/step(s). Conversely, any
+                       open tracking issue whose workflow is GREEN again this
+                       sweep is closed with a green-evidence comment, keeping
+                       one open issue per *still-broken* workflow. Read-only by
+                       default; this flag opts in to the writes. Rejected with
                        --from-json.
   --from-json <path>   Classify an offline snapshot fixture instead of calling
                        `gh` (the fixture shape mirrors the live snapshot).
@@ -52,7 +56,11 @@ broken workflow is never re-filed. Each newly-filed issue embeds a root-cause
 block pinpointing which job(s) and step(s) of the failing run failed (read from
 `gh run view --json jobs`) so a fixer needn't hunt through the run to find the
 failure, and links the run for the failing logs; a diagnosis that cannot be
-fetched is recorded as unavailable rather than omitted.
+fetched is recorded as unavailable rather than omitted. The same pass also
+*resolves* the other direction: any open tracking issue whose workflow's latest
+default-branch run is now green is closed with a green-evidence comment, so the
+fleet keeps exactly one open issue per still-broken workflow and none for
+already-recovered ones.
 
 Exit code: 0 when the fleet is green; non-zero when any actionable failure
 exists.
@@ -134,7 +142,7 @@ pub(super) fn dispatch_ci_health_command(
     }
 
     if flags.file_issues {
-        file_actionable_issues(&report)?;
+        steward_issues(&report)?;
     }
 
     if report.green {
@@ -148,37 +156,65 @@ pub(super) fn dispatch_ci_health_command(
     }
 }
 
-/// File a deduplicated tracking issue for each distinct actionable failure and
-/// print the outcomes to stderr (so `--json` stdout stays pure report JSON). A
-/// green fleet is a no-op. Any `gh` failure propagates so the caller sees a
-/// non-zero exit (never a silent partial filing).
-fn file_actionable_issues(
+/// Reconcile the fleet's tracking issues with the sweep: file a deduplicated
+/// tracking issue for each distinct actionable failure, and close any open
+/// tracking issue whose workflow is green again. Outcomes print to stderr (so
+/// `--json` stdout stays pure report JSON).
+///
+/// Filing runs first (the correctness-critical path — a genuinely-broken
+/// workflow must get a tracking issue), then resolution, so a resolution error
+/// can never starve filing. Resolution runs even when the fleet is green — a
+/// green fleet can still carry stale tracking issues from a since-recovered
+/// failure. Any `gh` failure propagates so the caller sees a non-zero exit
+/// (never a silent partial reconciliation).
+fn steward_issues(
     report: &crate::ci_health::FleetReport,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if report.green {
         eprintln!("ci-health: fleet green; no actionable failures to file.");
-        return Ok(());
+    } else {
+        let outcomes =
+            file_issues_for_report(report, &RealGhClient::new(), &RealGhRunDiagnostics::new())?;
+        eprintln!(
+            "ci-health: filed/matched {} deduplicated tracking issue(s):",
+            outcomes.len()
+        );
+        for outcome in &outcomes {
+            match outcome {
+                StewardshipOutcome::FiledNew {
+                    repo,
+                    issue_number,
+                    url,
+                    signature,
+                } => eprintln!("  filed   {repo}#{issue_number} [{signature}] {url}"),
+                StewardshipOutcome::MatchedExisting {
+                    repo,
+                    issue_number,
+                    url,
+                    signature,
+                } => eprintln!("  matched {repo}#{issue_number} [{signature}] {url}"),
+            }
+        }
     }
-    let outcomes =
-        file_issues_for_report(report, &RealGhClient::new(), &RealGhRunDiagnostics::new())?;
-    eprintln!(
-        "ci-health: filed/matched {} deduplicated tracking issue(s):",
-        outcomes.len()
-    );
-    for outcome in &outcomes {
-        match outcome {
-            StewardshipOutcome::FiledNew {
-                repo,
-                issue_number,
-                url,
-                signature,
-            } => eprintln!("  filed   {repo}#{issue_number} [{signature}] {url}"),
-            StewardshipOutcome::MatchedExisting {
-                repo,
-                issue_number,
-                url,
-                signature,
-            } => eprintln!("  matched {repo}#{issue_number} [{signature}] {url}"),
+
+    // Resolution runs after filing so a resolution `gh` error can never starve
+    // the correctness-critical filing path above.
+    let resolved = resolve_issues_for_report(report, &RealCiIssueResolver::new())?;
+    if resolved.is_empty() {
+        eprintln!("ci-health: no recovered workflows with an open tracking issue to close.");
+    } else {
+        eprintln!(
+            "ci-health: closed {} tracking issue(s) for now-green workflow(s):",
+            resolved.len()
+        );
+        for outcome in &resolved {
+            eprintln!(
+                "  closed  {repo}#{num} [{workflow}] {url}",
+                repo = outcome.repo,
+                num = outcome.issue_number,
+                workflow = outcome.workflow,
+                url = outcome.url,
+            );
         }
     }
     Ok(())
