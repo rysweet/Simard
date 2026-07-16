@@ -323,3 +323,123 @@ fn commit_gated_fact_stores_dedups_and_quarantines() {
         "an ungrounded empty fact scores below the threshold"
     );
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// dedup_content_key: whitespace-robust identity for the dedup step. A fact
+// restated with only interior/surrounding whitespace variation is the SAME
+// fact and must not be promoted twice (redundant facts inflate memory and
+// dilute recall precision).
+// ───────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn dedup_content_key_collapses_interior_and_edge_whitespace() {
+    use crate::fact_reliability::dedup_content_key;
+
+    let canonical = "empty outcome list panics cycle";
+    // Leading/trailing whitespace, a double interior space, a tab, and a
+    // wrapped newline all fold onto the same single-spaced key.
+    assert_eq!(
+        dedup_content_key("  empty outcome list panics cycle  "),
+        canonical
+    );
+    assert_eq!(
+        dedup_content_key("empty  outcome list panics cycle"),
+        canonical
+    );
+    assert_eq!(
+        dedup_content_key("empty\toutcome list panics cycle"),
+        canonical
+    );
+    assert_eq!(
+        dedup_content_key("empty outcome list\npanics cycle"),
+        canonical
+    );
+}
+
+#[test]
+fn dedup_content_key_preserves_case_and_distinct_words() {
+    use crate::fact_reliability::dedup_content_key;
+
+    // Case is significant (identifiers / error strings) → NOT folded.
+    assert_ne!(
+        dedup_content_key("CI fails on flaky test"),
+        dedup_content_key("ci fails on flaky test")
+    );
+    // Genuinely different content keeps a different key.
+    assert_ne!(
+        dedup_content_key("off-by-one in retry loop"),
+        dedup_content_key("empty outcome list panics cycle")
+    );
+    // Empty / whitespace-only content normalizes to the empty key.
+    assert_eq!(dedup_content_key("   \t\n "), "");
+}
+
+/// A grounded, known-concept fact that restates an already-stored fact with ONLY
+/// interior-whitespace variation is recognized as the same fact and quarantined
+/// as a dedup (its score still clears the threshold), so no redundant near-
+/// duplicate is promoted. Before this fix, exact `content.trim()` equality
+/// missed the whitespace variant and stored a second copy.
+#[test]
+fn commit_gated_fact_dedups_whitespace_variant_restatement() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::{FactGateDecision, commit_gated_fact};
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode("episode payload for dedup test", "engineer-cycle", None)
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let tags = [String::from("bug-pattern")];
+    let episode_ids = [ep.clone()];
+
+    // (1) Store the canonical fact.
+    let stored = commit_gated_fact(
+        &mem,
+        "bug-pattern",
+        "empty outcome list panics cycle",
+        true,
+        &source,
+        &tags,
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(stored.stored(), "canonical fact must be stored first");
+
+    // (2) Restate it with a double interior space + surrounding whitespace →
+    // dedup quarantine (same lesson), and its score still clears the threshold
+    // so it is distinguishable from a low-reliability block.
+    let variant = commit_gated_fact(
+        &mem,
+        "bug-pattern",
+        "  empty  outcome list panics cycle ",
+        true,
+        &source,
+        &tags,
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        !variant.stored(),
+        "a whitespace-only restatement must dedup, not create a redundant fact"
+    );
+    assert!(
+        variant.confidence() >= RELIABILITY_THRESHOLD,
+        "a dedup quarantine cleared the threshold; only the prior blocks it"
+    );
+
+    // (3) A genuinely different fact under the same concept is still stored.
+    let distinct = commit_gated_fact(
+        &mem,
+        "bug-pattern",
+        "off-by-one in retry loop drops last item",
+        true,
+        &source,
+        &tags,
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        matches!(distinct, FactGateDecision::Stored { .. }),
+        "distinct content must still be promoted"
+    );
+}

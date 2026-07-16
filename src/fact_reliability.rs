@@ -154,6 +154,32 @@ pub fn fact_passes_gate(concept: &str, content: &str, grounded: bool) -> bool {
     score_fact_reliability(concept, content, grounded) >= RELIABILITY_THRESHOLD
 }
 
+/// Normalize fact content into the **identity key** used by [`commit_gated_fact`]'s
+/// dedup step: trim, then collapse every run of interior whitespace to a single
+/// ASCII space.
+///
+/// The dedup step asks "does this new fact merely restate an equal-or-stronger
+/// existing fact of the same identity?". A restatement that differs only in
+/// surrounding or interior whitespace — an LLM re-emitting the same lesson across
+/// distillation passes with a stray double space, a tab, or a wrapped newline —
+/// carries the identical lesson and must NOT be promoted a second time. Exact
+/// `trim()` equality misses that case: `"empty  outcome list"` and
+/// `"empty outcome list"` compare unequal and both get stored, inflating semantic
+/// memory with a redundant fact and dragging down recall precision. Collapsing
+/// interior whitespace folds those trivial variants onto one key.
+///
+/// This affects the dedup *comparison* only — a fact that survives the gate is
+/// still stored **verbatim** via `store_fact_with_provenance`, so no content is
+/// rewritten. Case is deliberately preserved: distilled content can carry
+/// case-significant tokens (identifiers, error strings), so two facts differing
+/// only in case are left as distinct rather than silently merged.
+pub fn dedup_content_key(content: &str) -> String {
+    // `split_whitespace` already trims leading/trailing whitespace and treats any
+    // run of Unicode whitespace as one separator, so joining with a single space
+    // yields the canonical single-spaced form in one pass.
+    content.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Disposition of one write-boundary gate decision (issue #2679), returned by
 /// [`commit_gated_fact`].
 #[derive(Debug, Clone, PartialEq)]
@@ -227,14 +253,18 @@ pub fn commit_gated_fact(
     // version of the *same* fact (concept + content). `search_facts` is queried
     // with the new confidence as `min_confidence` so it returns only priors
     // strong enough to block; the explicit `>=` is belt-and-suspenders against a
-    // backend that ignores the filter.
-    let new_content = content.trim();
+    // backend that ignores the filter. Content is compared on the
+    // whitespace-normalized [`dedup_content_key`] so a restatement that differs
+    // only in interior/surrounding whitespace is recognized as the same fact
+    // (the survivor is still stored verbatim — only this comparison is
+    // normalized).
+    let new_key = dedup_content_key(content);
     let existing = memory
         .search_facts(concept, DEDUP_PRIOR_SCAN_LIMIT, confidence)
         .unwrap_or_default();
     if existing
         .iter()
-        .any(|f| f.content.trim() == new_content && f.confidence >= confidence)
+        .any(|f| dedup_content_key(&f.content) == new_key && f.confidence >= confidence)
     {
         return Ok(FactGateDecision::Quarantined { confidence });
     }
