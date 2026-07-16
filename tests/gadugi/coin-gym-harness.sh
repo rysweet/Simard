@@ -9,6 +9,9 @@
 #   2. The multi-agent TEAM strategy lifts precision over the single-model
 #      BASELINE at equal reach — the central baseline-vs-team design property
 #      (baseline 3R/2W = 60% precision; team 3R/2A = 100% precision).
+#   2b. `matchup` runs BOTH strategies over the same targets in one shot and
+#      declares a TEAM-WINS verdict (equal reach, +40pp precision), persisting a
+#      baseline and a team run under one profile — LOCAL comparison only.
 #   3. `score`, `compare`, and `improve` reload a saved run and report
 #      reach/precision, leaderboard deltas, and gated tactic proposals.
 #   4. The overfitting-reviewer gate ACCEPTs the analyst's general tactics, and
@@ -48,6 +51,20 @@ printf '%s\n' "$TEAM"
 printf '%s\n' "$TEAM" | grep -F "reach: 60.0%" >/dev/null
 printf '%s\n' "$TEAM" | grep -F "precision: 100.0%" >/dev/null
 printf '%s\n' "$TEAM" | grep -F "R:3/W:0/A:2/T:0/N:0/E:0" >/dev/null
+
+# --- 2b. matchup: baseline vs team head-to-head, one command ------------------
+# `matchup` runs both strategies over the same targets and declares a verdict.
+# On the sample: equal reach, team precision +40pp ⇒ TEAM-WINS. Both runs are
+# persisted under the profile.
+MATCHUP="$(run_gym matchup claude-opus-4.6 --profile duel)"
+printf '%s\n' "$MATCHUP"
+printf '%s\n' "$MATCHUP" | grep -F "reach:     baseline 60.0%  vs team 60.0%  (Δ +0.0 pp)" >/dev/null
+printf '%s\n' "$MATCHUP" | grep -F "precision: baseline 60.0%  vs team 100.0%  (Δ +40.0 pp)" >/dev/null
+printf '%s\n' "$MATCHUP" | grep -F "verdict:  TEAM-WINS" >/dev/null
+printf '%s\n' "$MATCHUP" | grep -F "LOCAL comparison only" >/dev/null
+# The head-to-head persists a baseline run and a team run under the one profile.
+DUEL="$(run_gym profiles)"
+printf '%s\n' "$DUEL" | grep -F "duel" >/dev/null
 
 # --- 3. score / compare / improve reload the saved baseline run ---------------
 RUN_ID="$(printf '%s\n' "$BASELINE" | awk '/^run-id:/ { print $2; exit }')"
