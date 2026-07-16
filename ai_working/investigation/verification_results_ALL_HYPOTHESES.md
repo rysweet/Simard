@@ -6,6 +6,54 @@
 This extends [`verification_results.md`](./verification_results.md) (H1-focused) to a
 complete per-hypothesis matrix, each with the concrete test run and its outcome.
 
+**Re-executed on HEAD `cc55a6fb`** (`cargo test -p simard --lib`, 2026-07-16):
+- Source is **byte-identical** to every prior verified HEAD: `git diff --stat b47b6413..HEAD -- src/`
+  is **empty**, `git diff --stat 87206fbb..HEAD -- src/` is **empty**, and `git status --porcelain
+  -- src/` is clean. The intervening commits (`87206fbb` §24 seventeenth-wave consolidation, `cc55a6fb`
+  emission-pipeline re-grounding + nesting-loop reproduction) are all `docs(investigation)/*.md`-only —
+  **no production `.rs` changed, so every source citation below still holds and no fix is merged.**
+- Test binary compiles clean (`cargo test -p simard --lib overseer:: --no-run` → `Finished` in 59s;
+  `simard v0.32.1`).
+- Full overseer suite (`overseer::`): **361 passed, 0 failed** (7960 filtered) — unchanged.
+- Every hypothesis's named discriminating probe re-run **green** at this HEAD:
+  - **H0** (null: dedup/replay/collision) — `write_back_is_deduplicated_within_window`,
+    `write_back_persists_again_for_a_distinct_signature`,
+    `whisper_gate_suppresses_an_identical_whisper_within_the_window`,
+    `whisper_gate_caps_whispers_per_rolling_hour` (co-run with H1 batch, **7/0**) — **pass** → H0
+    **REJECTED** (dedup gate works; the count is honest).
+  - **H1** (real re-observation loop) — `recurring_signature_emitted_when_two_episodes_share_signature`,
+    `recurring_signature_not_emitted_for_single_occurrence`,
+    `orient_raises_recurring_signature_to_high_priority` (H0+H1 batch **7/0**) — **pass** → H1 **SUPPORTED**.
+  - **H2** (WHY reasoner double-gated → bare park) — `no_progress_reinvestigation` broad filter
+    **21 passed**, incl. smoking gun
+    `ooda_loop::tests_no_progress_reinvestigation::a_perpetual_goal_is_never_reinvestigated_even_if_bare_blocked`
+    re-run `--exact` (**1 passed**) → INV-WHY still violable → H2 **SUPPORTED**.
+  - **H3** (`WorkstreamCoverage` has no closing edge) — `decide_routes_workstream_coverage_to_flag_gaps`,
+    `flagged_gap_never_constructs_an_issue_brief`,
+    `flags_gaps_notifies_both_channels_without_filing_then_dedupes_on_repeat`,
+    `workstream_gap_maps_to_a_workstream_coverage_problem_at_high_priority` (**4/0**) — **pass** → H3
+    **SUPPORTED** (notify-only, no launch/file rung).
+  - **H4** (self-observation write-back feedback) — source invariant re-pinned: `keys.dedup()`
+    collapses adjacent-equal only (`mod.rs:1071`), and the recall-derived summaries are only
+    `sanitize_recalled`-cleaned then still written back (`mod.rs:1082`, admission import `mod.rs:93`) →
+    H4 **SUPPORTED (bounded)**.
+  - **H5** (2×↔3× dead zone) — `overseer::tests_root_cause::loud_lane_a_recurring_signature_does_not_feed_lane_b_recurrence`
+    (**1/0**) + source: `RECURRING_SIGNATURE_THRESHOLD = 2` (`signal.rs:362`, used `signal.rs:463`) vs
+    `RECURRENCE_ESCALATION_THRESHOLD = 3` (`root_cause.rs:33`) → lanes decoupled → H5 **SUPPORTED**.
+  - **H6** (non-idempotent counters, compounding) — source re-pinned: `record_occurrence` uses
+    non-deduping `store_fact` (`mod.rs:1034`); `WhisperGate.last_delivered` is an in-process `HashMap`
+    (`guardrails.rs:294`) → H6 **SUPPORTED (non-causal amplifier)**.
+  - **H7** (blocked ↔ gap = one problem, two views) — `delegates_blocked_goals_to_goal_health_and_never_reflags_them`,
+    `decide_routes_a_blocked_goal_by_shape`, `perpetual_no_progress_goal_is_unblocked_once_and_not_escalated`,
+    `needs_review_goal_escalates_to_operator_on_both_channels` (**4/0**) — **pass** → H7 **SUPPORTED**.
+  - **H8** (three token families = one under-throughput) — generalization of H7; no source drift on the
+    benign-`engineer_spawn` finding (summary-only, never in signature) → H8 **SUPPORTED (med-high)**.
+- **Verdict matrix unchanged from all prior runs; all discriminating tests green at HEAD `cc55a6fb`.**
+  Batch tallies this run: full overseer **361/0**; H0/H1 recurring-signature + whisper-gate batch
+  **7/0**; H2 ladder (broad filter) **21/0**; H2 smoking-gun `--exact` **1/0**; H3 gap-closing-edge
+  batch **4/0**; H5 dead-zone probe **1/0**; H7 blocked↔gap batch **4/0**. No production `.rs` changed;
+  no remediation landed.
+
 **Re-executed on HEAD `b47b6413`** (`cargo test -p simard --lib`, 2026-07-16):
 - Source is **byte-identical** to the previous verification run (`a68296c6`): `git diff --stat
   a68296c6..HEAD -- src/` is **empty** and `git status --porcelain -- src/` is clean. The intervening
