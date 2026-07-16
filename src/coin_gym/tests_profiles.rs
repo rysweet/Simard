@@ -1,5 +1,5 @@
 use super::profiles::{
-    DEFAULT_HOME, PersistedRun, default_home, ensure_profile, list_profiles, load_run,
+    DEFAULT_HOME, PersistedRun, default_home, ensure_profile, list_profiles, list_runs, load_run,
     sanitize_name, save_run,
 };
 use super::target_loader::TargetSet;
@@ -115,4 +115,26 @@ fn list_profiles_is_empty_then_sorted() {
         .map(|p| p.name)
         .collect();
     assert_eq!(names, vec!["alpha".to_string(), "zeta".to_string()]);
+}
+
+#[test]
+fn list_runs_is_empty_missing_then_sorted() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    // A profile that was never created yields an empty list, not an error.
+    assert!(list_runs(home, "ghost").unwrap().is_empty());
+
+    ensure_profile(home, "opus", "claude-opus-4.6").unwrap();
+    // Freshly created profile with no runs is also empty.
+    assert!(list_runs(home, "opus").unwrap().is_empty());
+
+    // Save two runs out of run-id order; list_runs sorts by run id.
+    save_run(home, "opus", &persisted("b-run-2")).unwrap();
+    save_run(home, "opus", &persisted("a-run-1")).unwrap();
+    let ids: Vec<String> = list_runs(home, "opus")
+        .unwrap()
+        .into_iter()
+        .map(|r| r.report.run_id)
+        .collect();
+    assert_eq!(ids, vec!["a-run-1".to_string(), "b-run-2".to_string()]);
 }

@@ -201,6 +201,36 @@ pub fn load_run(home: &Path, profile: Option<&str>, run_id: &str) -> CoinGymResu
     )))
 }
 
+/// List every persisted run under `profile`, sorted by run id for determinism.
+///
+/// A missing profile (or a profile with no runs) yields an empty list rather
+/// than an error, so a fresh home is a clean empty leaderboard rather than a
+/// failure. Files that fail to parse are skipped (a partially written run must
+/// not sink the whole listing); the caller sees only loadable runs.
+///
+/// # Errors
+/// Returns [`CoinGymError::Io`] if the runs directory exists but cannot be read.
+pub fn list_runs(home: &Path, profile: &str) -> CoinGymResult<Vec<PersistedRun>> {
+    let dir = runs_dir(home, profile);
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let entries = std::fs::read_dir(&dir)
+        .map_err(|e| CoinGymError::Io(format!("read {}: {e}", dir.display())))?;
+    let mut runs = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| CoinGymError::Io(format!("dir entry: {e}")))?;
+        let path = entry.path();
+        if path.extension().is_some_and(|x| x == "json")
+            && let Ok(run) = read_persisted_run(&path)
+        {
+            runs.push(run);
+        }
+    }
+    runs.sort_by(|a, b| a.report.run_id.cmp(&b.report.run_id));
+    Ok(runs)
+}
+
 fn read_persisted_run(path: &Path) -> CoinGymResult<PersistedRun> {
     let raw = std::fs::read_to_string(path)
         .map_err(|_| CoinGymError::NotFound(format!("run file {}", path.display())))?;

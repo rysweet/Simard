@@ -50,6 +50,7 @@ coin-gym score   <run-id> [--profile <name>]
 coin-gym compare <run-id> [--profile <name>]
 coin-gym improve <run-id> [--profile <name>] [--holdout fresh]
 coin-gym contract [--dataset <repo>] [--revision <tag>] [--split a,b] [--project x,y] [--source rebuild|image]
+coin-gym leaderboard [--profile <name>]
 coin-gym profiles
 ```
 
@@ -212,6 +213,46 @@ target set (comma-separate to repeat), and `--source` picks rebuild-vs-image.
 The executor (`src/coin_gym/executor.rs`) builds this exact argv, writes the
 `/answer/` submission per the contract, and reads back `reached`; the live
 Docker invocation itself is gated behind Phase 3.
+
+### `leaderboard` — LOCAL standings (does multiagent beat single-model?)
+
+```bash
+coin-gym run "Claude Opus 4.6" --strategy baseline --profile opus
+coin-gym run "Claude Opus 4.6" --strategy team     --profile opus-team
+coin-gym leaderboard              # pool every profile's saved runs
+coin-gym leaderboard --profile opus   # scope to one profile
+```
+
+Ranks the harness's **own** saved runs against each other — the **LOCAL**
+comparison the Gym exists to make. This is distinct from `compare`: `compare`
+diffs one run against COIN's *published* board ("is our harness calibrated?");
+`leaderboard` ranks *our* runs against *each other* ("does the multiagent team
+beat the single-model baseline *here*?"). Runs are ranked by **reach** (COIN's
+headline metric) then **precision** (its over-claim tiebreak), and the
+best-of-arm **baseline-vs-team** verdict states plainly whether the team climbed
+above the baseline:
+
+```text
+LOCAL leaderboard (all profiles) under target/coin-gym
+LOCAL-ONLY: local run comparison only — never submitted or posted externally
+rank  strategy  reach     precision  run-id  (profile)
+   1  team       60.0%    100.0%    Claude-Opus-4-6-team-…  (opus-team)
+   2  baseline   60.0%     60.0%    Claude-Opus-4-6-baseline-…  (opus)
+baseline-vs-team: reach 60.0% → 60.0% (+0.0 pts), precision 60.0% → 100.0% (+40.0 pts)
+verdict: multi-agent team CLIMBS ABOVE the single-model baseline (reach +0.0 pts, precision +40.0 pts)
+note:   OFFLINE SCAFFOLD (mock oracle) — the verdict is a control-flow /
+        precision-design demonstration, not a live-model result …
+```
+
+The team "climbs above" the baseline when it **strictly reaches more**, or
+**matches reach and over-claims strictly less** (higher precision) — the exact
+trade-off the harness is built to make observable. On an **offline scaffold**
+board the verdict is a control-flow / precision-design demonstration, not a
+live-model capability result; a real grade needs `coin evaluate` on the Phase-3
+VM (#2823). **LOCAL-ONLY:** the standings are never submitted or posted
+externally. For the reference numbers and the per-target breakdown behind this
+verdict, see
+[COIN Gym — baseline vs. team measurement](../research/coin-gym-baseline-vs-team-measurement.md).
 
 ### `profiles` — list isolated per-model run state
 

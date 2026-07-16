@@ -106,7 +106,11 @@ coin-gym run "Claude Opus 4.6" --strategy team     --profile ref-team
 
 Each `run` prints the arm's score directly; `coin-gym score <run-id>` re-prints
 it for a saved run and `coin-gym compare <run-id>` diffs it against the published
-leaderboard (see below). The exact reference numbers above are also asserted by
+leaderboard (see below). `coin-gym leaderboard` ranks the two saved arms against
+**each other** — the LOCAL standings — and prints the best-of-arm verdict
+(`multi-agent team CLIMBS ABOVE the single-model baseline …`), the direct
+operator view of the +40-point precision gain documented here. The exact
+reference numbers above are also asserted by
 `src/coin_gym/tests_cli.rs::execute_run_baseline_vs_team_shows_precision_tradeoff`,
 so `cargo test -p simard coin_gym` fails if the harness ever stops reproducing
 them.

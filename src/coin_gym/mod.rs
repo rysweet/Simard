@@ -24,6 +24,7 @@ pub mod executor;
 pub mod improve;
 pub mod improve_loop;
 pub mod leaderboard;
+pub mod local_leaderboard;
 pub mod profiles;
 pub mod scorer;
 pub mod target_loader;
@@ -41,6 +42,8 @@ mod tests_improve;
 mod tests_improve_loop;
 #[cfg(test)]
 mod tests_leaderboard;
+#[cfg(test)]
+mod tests_local_leaderboard;
 #[cfg(test)]
 mod tests_profiles;
 #[cfg(test)]
@@ -61,7 +64,10 @@ use executor::{
 use improve::analyze_and_review;
 use improve_loop::{SelfImproveReport, run_self_improvement};
 use leaderboard::compare_to_leaderboard;
-use profiles::{PersistedRun, default_home, ensure_profile, list_profiles, load_run, save_run};
+use local_leaderboard::{LocalLeaderboard, build_local_leaderboard};
+use profiles::{
+    PersistedRun, default_home, ensure_profile, list_profiles, list_runs, load_run, save_run,
+};
 use scorer::{Score, score_run};
 use target_loader::DemoScenario;
 use types::{CoinGymError, CoinGymResult, RunReport, Strategy};
@@ -77,6 +83,7 @@ pub fn coin_gym_usage() -> &'static str {
      \x20 compare <run-id> [--profile <name>]\n\
      \x20 improve <run-id> [--profile <name>] [--holdout fresh]\n\
      \x20 contract [--dataset <repo>] [--revision <tag>] [--split a,b] [--project x,y] [--source rebuild|image]\n\
+     \x20 leaderboard [--profile <name>]\n\
      \x20 profiles\n\
      \n\
      Offline scaffold (Phase 4): runs grade against a mock oracle. Live grading\n\
@@ -84,7 +91,9 @@ pub fn coin_gym_usage() -> &'static str {
      --holdout fresh` runs the Phase-5 self-improvement loop (failure-analyst →\n\
      overfitting gate → verify on held-out fresh → keep/rollback + durable tactic\n\
      memory) offline. `contract` prints the real coin evaluate/verify wiring\n\
-     without running anything (LOCAL-ONLY). See\n\
+     without running anything (LOCAL-ONLY). `leaderboard` ranks saved runs\n\
+     LOCALLY so the multiagent team's climb over the single-model baseline is\n\
+     visible (LOCAL-ONLY — never posted externally). See\n\
      docs/howto/run-the-coin-gym-harness.md."
 }
 
@@ -119,6 +128,7 @@ where
         "compare" => cmd_compare(home, rest),
         "improve" => cmd_improve(home, rest),
         "contract" => cmd_contract(rest),
+        "leaderboard" => cmd_leaderboard(home, rest),
         "profiles" => cmd_profiles(home, rest),
         other => Err(CoinGymError::Usage(format!(
             "unknown command '{other}'\n{}",
@@ -467,6 +477,98 @@ fn cmd_contract(rest: &[String]) -> CoinGymResult<()> {
     println!("  abstain:  /answer/{ANSWER_UNREACHABLE_MD}  (and NO {ANSWER_BLOB_BIN})");
     println!("verdict:  read `reached` from each result.json (never re-checked locally)");
     Ok(())
+}
+
+// ── leaderboard ──────────────────────────────────────────────────────────────
+
+/// Rank the harness's own saved runs LOCALLY so the multi-agent team's climb
+/// over the single-model baseline is visible. `--profile` scopes to one
+/// profile; without it, every profile's runs are pooled.
+///
+/// LOCAL-ONLY: reads only locally saved run state and prints to stdout. Nothing
+/// is fetched or submitted externally, and no leaderboard entry is ever posted.
+fn cmd_leaderboard(home: &Path, rest: &[String]) -> CoinGymResult<()> {
+    let parsed = parse_args(rest, &["profile"])?;
+    let profile = sanitized_profile(&parsed);
+
+    let mut labeled: Vec<(String, RunReport)> = Vec::new();
+    let scope = match &profile {
+        Some(name) => {
+            for run in list_runs(home, name)? {
+                labeled.push((name.clone(), run.report));
+            }
+            format!("profile '{name}'")
+        }
+        None => {
+            for p in list_profiles(home)? {
+                for run in list_runs(home, &p.name)? {
+                    labeled.push((p.name.clone(), run.report));
+                }
+            }
+            "all profiles".to_string()
+        }
+    };
+
+    let board = build_local_leaderboard(scope, labeled);
+    print_local_leaderboard(home, &board);
+    Ok(())
+}
+
+/// Render a [`LocalLeaderboard`]: the LOCAL-ONLY banner, the ranked standings,
+/// the offline-scaffold caveat, and the baseline-vs-team verdict.
+fn print_local_leaderboard(home: &Path, board: &LocalLeaderboard) {
+    println!(
+        "LOCAL leaderboard ({}) under {}",
+        board.scope,
+        home.display()
+    );
+    println!("LOCAL-ONLY: local run comparison only — never submitted or posted externally");
+
+    if board.standings.is_empty() {
+        println!("no runs yet — run `coin-gym run <model> --strategy baseline|team` first");
+        return;
+    }
+
+    println!("rank  strategy  reach     precision  run-id  (profile)");
+    for s in &board.standings {
+        println!(
+            "{:>4}  {:<8}  {:>5.1}%    {:>5.1}%    {}  ({})",
+            s.rank,
+            s.strategy.label(),
+            s.reach_pct,
+            s.precision_pct,
+            s.run_id,
+            s.profile,
+        );
+    }
+
+    match &board.baseline_vs_team {
+        Some(cmp) => {
+            println!(
+                "baseline-vs-team: reach {:.1}% → {:.1}% ({:+.1} pts), precision {:.1}% → {:.1}% ({:+.1} pts)",
+                cmp.baseline_reach_pct,
+                cmp.team_reach_pct,
+                cmp.reach_delta_pct,
+                cmp.baseline_precision_pct,
+                cmp.team_precision_pct,
+                cmp.precision_delta_pct,
+            );
+            println!("verdict: {}", cmp.verdict);
+        }
+        None => {
+            println!(
+                "baseline-vs-team: need at least one `baseline` run AND one `team` run to compare"
+            );
+        }
+    }
+
+    if board.any_offline_scaffold {
+        println!(
+            "note:   OFFLINE SCAFFOLD (mock oracle) — the verdict is a control-flow / \
+             precision-design demonstration, not a live-model result; a real grade needs \
+             `coin evaluate` on the Phase-3 VM (issue #2823)"
+        );
+    }
 }
 
 // ── profiles ─────────────────────────────────────────────────────────────────

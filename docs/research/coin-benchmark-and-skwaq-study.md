@@ -672,15 +672,19 @@ coin-gym run    <model> [--strategy baseline|team]   # evaluate on the target se
 coin-gym score  <run-id>                             # reach/precision + family split
 coin-gym compare <run-id>                            # local vs published leaderboard
 coin-gym improve <suite> --holdout fresh             # one self-improvement cycle
+coin-gym leaderboard [--profile <name>]              # LOCAL standings: does team beat baseline?
 coin-gym profiles                                    # list per-model isolated state
 ```
 
 > **Implemented (Phase 4).** The Phase-4 CLI landed as
 > `coin-gym run <model> [--strategy baseline|team] [--profile <name>] [--targets <path>]`,
-> `score|compare|improve <run-id> [--profile <name>]`, and `profiles`. The
-> `improve` command runs the **offline** failure-analyst + overfitting-reviewer
-> gate over a saved run; the live `--holdout fresh` verify/rollback cycle
-> sketched above needs live grading and is Phase 5. See
+> `score|compare|improve <run-id> [--profile <name>]`, `leaderboard [--profile
+> <name>]`, and `profiles`. The `improve` command runs the **offline**
+> failure-analyst + overfitting-reviewer gate over a saved run; the live
+> `--holdout fresh` verify/rollback cycle sketched above needs live grading and
+> is Phase 5. `leaderboard` ranks the harness's own saved runs LOCALLY so the
+> multi-agent team's climb over the single-model baseline is directly observable
+> (LOCAL-ONLY — never posted externally). See
 > [Run the LOCAL COIN Gym harness](../howto/run-the-coin-gym-harness.md). The
 > reproducible baseline-vs-team result on the bundled sample target set — the
 > abstention gate lifting precision from 60% to 100% at equal reach — is recorded

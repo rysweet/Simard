@@ -100,6 +100,42 @@ fn profiles_command_runs_on_empty_and_populated_home() {
 }
 
 #[test]
+fn leaderboard_command_runs_empty_scoped_and_pooled() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    // Empty home: no runs anywhere.
+    dispatch_with_home(home, args(&["leaderboard"])).unwrap();
+
+    // Save a baseline and a team run in the same profile.
+    let scenario = DemoScenario::sample().unwrap();
+    for strategy in [Strategy::Baseline, Strategy::Team] {
+        let report = execute_run("claude-opus-4.6", strategy, &scenario).unwrap();
+        ensure_profile(home, "opus", "claude-opus-4.6").unwrap();
+        save_run(
+            home,
+            "opus",
+            &PersistedRun {
+                report,
+                targets: scenario.targets.clone(),
+                offline: scenario.offline_scaffold(),
+            },
+        )
+        .unwrap();
+    }
+
+    // Scoped to the profile and pooled across all profiles both succeed.
+    dispatch_with_home(home, args(&["leaderboard", "--profile", "opus"])).unwrap();
+    dispatch_with_home(home, args(&["leaderboard"])).unwrap();
+}
+
+#[test]
+fn leaderboard_rejects_unknown_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let err = dispatch_with_home(dir.path(), args(&["leaderboard", "--bogus", "x"])).unwrap_err();
+    assert!(err.to_string().contains("unknown flag"));
+}
+
+#[test]
 fn unknown_command_errors_with_usage() {
     let dir = tempfile::tempdir().unwrap();
     let err = dispatch_with_home(dir.path(), args(&["frobnicate"])).unwrap_err();
@@ -182,7 +218,15 @@ fn explicit_profile_name_is_sanitised() {
 #[test]
 fn usage_lists_all_subcommands() {
     let usage = coin_gym_usage();
-    for cmd in ["run", "score", "compare", "improve", "contract", "profiles"] {
+    for cmd in [
+        "run",
+        "score",
+        "compare",
+        "improve",
+        "contract",
+        "leaderboard",
+        "profiles",
+    ] {
         assert!(usage.contains(cmd), "usage should mention {cmd}");
     }
 }
