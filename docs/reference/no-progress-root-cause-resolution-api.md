@@ -323,8 +323,30 @@ pub enum DependencyState {
 ```
 
 An `Err` from either method is treated as `GENUINELY-STUCK` by the deterministic
-classifier (fail closed — never self-heal or self-complete on unknown state) and
-is logged.
+classifier (fail closed — never self-heal or self-complete on unknown state), is
+logged, **and carries the concrete probe error as evidence** so the downgrade is
+never evidence-less (see the never-`(none)` invariant below).
+
+### The deterministic reasoner never emits an evidence-less WHY
+
+The production `DeterministicNoProgressReasoner` (`src/ooda_loop/no_progress.rs`)
+guarantees every classification it returns carries **non-empty** evidence — it
+can never itself render `why=… evidence=[(none)]` (the 2026-07-15 live-daemon
+defect that stranded the six `simard-identity-*` seed goals). Its terminal step
+splits on whether the goal produced any tracked, checkable artifact:
+
+| Terminal shape | Class | Evidence |
+| --- | --- | --- |
+| Open tracked artifact (issue/PR still `OPEN`) | `GENUINELY-STUCK` | that open artifact, e.g. `pr #7 (OPEN)` |
+| **No** tracked, checkable artifact | `UNCLEAR-CRITERIA` | `criteria <goal-id> (no measurable done-criteria …)` |
+| Reasoner probe (`repo_present` / `dependency_goal_state`) errored | `GENUINELY-STUCK` | any open artifacts **plus** `reasoner-error <probe> (…)` |
+
+`UNCLEAR-CRITERIA` and `GENUINELY-STUCK` share the same resolution rung, so this
+split changes no downstream behaviour — it only makes the WHY honest: an
+artifactless goal is diagnosed as *its done-criteria are not expressed as
+anything the done-gate can certify* and escalated (after the guided-engineer
+retry) with an actionable ask to re-scope with measurable done-criteria, instead
+of looping forever on an empty-evidence block.
 
 ## Adapter: the resolution driver
 

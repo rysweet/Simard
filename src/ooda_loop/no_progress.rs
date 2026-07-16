@@ -1048,6 +1048,40 @@ fn stuck_evidence(goal: &ActiveGoal) -> Vec<Evidence> {
         .collect()
 }
 
+/// Evidence for an `UNCLEAR-CRITERIA` stall: a goal that reached the terminal
+/// rung with **no** tracked, checkable artifact — no open issue/PR, no
+/// closed/merged completion signal the done-gate can certify. The done-criteria
+/// are simply not expressed as anything measurable, and *that finding is itself
+/// the evidence*, so the classification is never evidence-less (`(none)`).
+///
+/// This is the exact shape of the `simard-identity-*` seed goals that stranded
+/// the live daemon on 2026-07-15 with `why=GENUINELY-STUCK evidence=[(none)]`:
+/// aspirational goals that never produced a tracked artifact. Naming the missing
+/// measurable criterion turns a dead-end stamp into an actionable escalation
+/// ("re-scope with measurable done-criteria").
+fn unclear_criteria_evidence(goal: &ActiveGoal) -> Vec<Evidence> {
+    vec![Evidence::new(
+        "criteria",
+        goal.id.clone(),
+        "no measurable done-criteria (no tracked issue/PR the done-gate can certify)",
+    )]
+}
+
+/// Evidence for a `GENUINELY-STUCK` downgrade forced by a failed reasoner probe.
+///
+/// Combines the goal's still-open artifacts with the concrete probe error, so a
+/// probe-error downgrade is **never** evidence-less even when the goal has no
+/// tracked artifact — the errored probe is itself the diagnosis.
+fn stuck_evidence_with_probe_error(
+    goal: &ActiveGoal,
+    probe: &str,
+    err: &crate::error::SimardError,
+) -> Vec<Evidence> {
+    let mut ev = stuck_evidence(goal);
+    ev.push(Evidence::new("reasoner-error", probe, err.to_string()));
+    ev
+}
+
 impl NoProgressWhyReasoner for DeterministicNoProgressReasoner<'_> {
     fn investigate(&self, goal: &ActiveGoal) -> SimardResult<NoProgressWhy> {
         // 1. Done-gate positively certifies completion (the kgpacks-rs incident).
@@ -1084,7 +1118,7 @@ impl NoProgressWhyReasoner for DeterministicNoProgressReasoner<'_> {
                 );
                 return Ok(NoProgressWhy::new(
                     NoProgressClass::GenuinelyStuck,
-                    stuck_evidence(goal),
+                    stuck_evidence_with_probe_error(goal, "repo_present", &e),
                 ));
             }
         }
@@ -1107,15 +1141,32 @@ impl NoProgressWhyReasoner for DeterministicNoProgressReasoner<'_> {
                 );
                 return Ok(NoProgressWhy::new(
                     NoProgressClass::GenuinelyStuck,
-                    stuck_evidence(goal),
+                    stuck_evidence_with_probe_error(goal, "dependency_goal_state", &e),
                 ));
             }
         }
-        // 5. No machine-resolvable cause found.
-        Ok(NoProgressWhy::new(
-            NoProgressClass::GenuinelyStuck,
-            stuck_evidence(goal),
-        ))
+        // 5. No machine-resolvable cause found. Split the terminal case so the
+        //    WHY is NEVER evidence-less (the live-daemon `evidence=[(none)]`
+        //    defect that stranded ~12-13 of 20 goals on 2026-07-15):
+        //    - The goal produced tracked artifacts still open => GENUINELY-STUCK,
+        //      evidenced by those open issues/PRs — a real stall on tracked work.
+        //    - The goal produced NO checkable artifact => its done-criteria are
+        //      not expressed as anything the done-gate can certify =>
+        //      UNCLEAR-CRITERIA, evidenced by the unmeasurable-criteria finding.
+        //      (Both classes share the same resolution rung, so behaviour is
+        //      unchanged — only the WHY is now honest and never `(none)`.)
+        let open_artifacts = stuck_evidence(goal);
+        if open_artifacts.is_empty() {
+            Ok(NoProgressWhy::new(
+                NoProgressClass::UnclearCriteria,
+                unclear_criteria_evidence(goal),
+            ))
+        } else {
+            Ok(NoProgressWhy::new(
+                NoProgressClass::GenuinelyStuck,
+                open_artifacts,
+            ))
+        }
     }
 }
 

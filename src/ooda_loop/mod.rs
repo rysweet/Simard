@@ -50,6 +50,13 @@ mod tests_no_progress_investigation;
 #[cfg(test)]
 mod tests_no_progress_reinvestigation;
 
+// Live-daemon regression (2026-07-15): unit tests for the production
+// `DeterministicNoProgressReasoner`, pinning the invariant that it NEVER returns
+// an evidence-less classification (the `why=GENUINELY-STUCK evidence=[(none)]`
+// stamp that stranded the `simard-identity-*` seed goals).
+#[cfg(test)]
+mod tests_no_progress_reasoner;
+
 // Issue #2329: Observe-vs-Decide phase weights yield different ranked-recall
 // ordering of the same fact set, exercised against the real lbug-backed
 // `LibraryCognitiveMemory` adapter.

@@ -78,6 +78,36 @@ honest outcomes, never a bare stamp:
 No wall-clock timeout kills the investigation; the recipe-runner's own
 idle/liveness handling governs it.
 
+## Defense in depth: the deterministic reasoner never emits `(none)`
+
+The adapter's terminal guard above is the *outer* net. The *inner* net is the
+production `DeterministicNoProgressReasoner` (`src/ooda_loop/no_progress.rs`)
+itself: it now guarantees it can never even produce an evidence-less
+classification, so a `(none)` block cannot originate from the deterministic
+rail at all.
+
+Its terminal step (`investigate`, "no machine-resolvable cause") splits on
+whether the goal produced any tracked, checkable artifact:
+
+- **Open tracked artifact** (an issue/PR still `OPEN`) → `GENUINELY-STUCK`,
+  evidenced by that artifact — a real stall on tracked work.
+- **No** tracked, checkable artifact — the exact shape of the six
+  `simard-identity-*` seed goals — → `UNCLEAR-CRITERIA`, evidenced by a concrete
+  `criteria <goal-id> (no measurable done-criteria …)` finding. The goal's
+  done-criteria are not expressed as anything the done-gate can certify, and that
+  finding is itself the evidence.
+- A reasoner **probe error** (`repo_present` / `dependency_goal_state`) still
+  fails closed to `GENUINELY-STUCK`, but now attaches the concrete
+  `reasoner-error <probe> (…)` as evidence rather than an empty list.
+
+`UNCLEAR-CRITERIA` and `GENUINELY-STUCK` share the same resolution rung
+(`resolution_for_why`), so this split changes no downstream behaviour — it only
+makes the WHY honest and non-empty. Because the reasoner never returns empty
+evidence, an artifactless stall now escalates (after the guided-engineer retry)
+**with** an actionable diagnosis ("re-scope with measurable done-criteria")
+instead of stranding on an empty-evidence block. Pinned by
+`src/ooda_loop/tests_no_progress_reasoner.rs`.
+
 ## The stranded already-blocked population
 
 The [re-investigation pass](./no-progress-root-cause-resolution.md#re-investigating-already-blocked-goals-issue-17)

@@ -1,0 +1,67 @@
+name: ooda-no-progress-reasoner-never-evidenceless
+app_type: cli
+description: |
+  Regression guard for the 2026-07-15 live-daemon defect where the OODA
+  no-progress breaker parked stalled goals with a generic, evidence-free
+  `why=GENUINELY-STUCK evidence=[(none)]` block — hitting the six
+  `simard-identity-*` seed goals (including
+  simard-identity-concierge-hospitality-design), which never produced a tracked
+  issue/PR so `stuck_evidence` was empty.
+
+  The fix makes the production `DeterministicNoProgressReasoner` never emit an
+  evidence-less classification: an artifactless stall is classified
+  UNCLEAR-CRITERIA with a concrete "no measurable done-criteria" finding, an
+  open-artifact stall is GENUINELY-STUCK evidenced by that artifact, and a
+  reasoner probe error downgrades to GENUINELY-STUCK carrying the concrete probe
+  error as evidence. These scenarios drive the shipped `cargo test` surface for
+  the reasoner and assert the never-`(none)` invariant holds.
+agents:
+  - name: cargo-test-runner
+    type: cli
+    command: cargo
+
+steps:
+  # Artifactless goal -> UNCLEAR-CRITERIA with concrete, non-empty evidence.
+  - action: run
+    command: "cargo test --lib ooda_loop::tests_no_progress_reasoner::artifactless_goal_classifies_unclear_criteria_with_non_empty_evidence"
+    timeout: 240s
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
+
+  # Open tracked artifact -> GENUINELY-STUCK evidenced by that artifact.
+  - action: run
+    command: "cargo test --lib ooda_loop::tests_no_progress_reasoner::open_artifact_goal_classifies_genuinely_stuck_with_that_artifact"
+    timeout: 240s
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
+
+  # repo_present probe error -> GENUINELY-STUCK carrying the probe error.
+  - action: run
+    command: "cargo test --lib ooda_loop::tests_no_progress_reasoner::repo_probe_error_downgrades_to_genuinely_stuck_with_the_error_as_evidence"
+    timeout: 240s
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
+
+  # dependency probe error -> GENUINELY-STUCK carrying the probe error.
+  - action: run
+    command: "cargo test --lib ooda_loop::tests_no_progress_reasoner::dependency_probe_error_downgrades_to_genuinely_stuck_with_the_error_as_evidence"
+    timeout: 240s
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
+
+  # The headline invariant: no terminal classification ever renders `(none)`.
+  - action: run
+    command: "cargo test --lib ooda_loop::tests_no_progress_reasoner::no_terminal_classification_is_ever_evidence_less"
+    timeout: 240s
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
