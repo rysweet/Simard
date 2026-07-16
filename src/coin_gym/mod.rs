@@ -20,6 +20,7 @@
 //! [`improve_loop`] behind `coin-gym improve --holdout fresh`.
 
 pub mod agent_runner;
+pub mod bench;
 pub mod executor;
 pub mod improve;
 pub mod improve_loop;
@@ -31,6 +32,8 @@ pub mod types;
 
 #[cfg(test)]
 mod tests_agent_runner;
+#[cfg(test)]
+mod tests_bench;
 #[cfg(test)]
 mod tests_cli;
 #[cfg(test)]
@@ -54,6 +57,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use agent_runner::{AgentRunner, BaselineStrategy, FixtureReasoner, TeamStrategy};
+use bench::{BenchVerdict, bench_verdict};
 use executor::{
     ANSWER_BLOB_BIN, ANSWER_BLOB_HARNESS, ANSWER_UNREACHABLE_MD, CoinEvaluateConfig,
     CoinEvaluateExecutor, EvaluateSource, LOCAL_ONLY, MockHarnessExecutor,
@@ -73,13 +77,16 @@ pub fn coin_gym_usage() -> &'static str {
      \n\
      commands:\n\
      \x20 run <model> [--strategy baseline|team] [--profile <name>] [--targets <path>]\n\
+     \x20 bench <model> [--profile <name>] [--targets <path>]\n\
      \x20 score <run-id> [--profile <name>]\n\
      \x20 compare <run-id> [--profile <name>]\n\
      \x20 improve <run-id> [--profile <name>] [--holdout fresh]\n\
      \x20 contract [--dataset <repo>] [--revision <tag>] [--split a,b] [--project x,y] [--source rebuild|image]\n\
      \x20 profiles\n\
      \n\
-     Offline scaffold (Phase 4): runs grade against a mock oracle. Live grading\n\
+     Offline scaffold (Phase 4): runs grade against a mock oracle. `bench` runs\n\
+     BOTH arms (single-model baseline vs multi-agent team) over one target set and\n\
+     prints a consolidated MULTIAGENT WINS/TIE/REGRESSION verdict. Live grading\n\
      needs `coin evaluate` on a Docker host (Phase 3, issue #2823). `improve\n\
      --holdout fresh` runs the Phase-5 self-improvement loop (failure-analyst →\n\
      overfitting gate → verify on held-out fresh → keep/rollback + durable tactic\n\
@@ -115,6 +122,7 @@ where
     let rest = &argv[1..];
     match command.as_str() {
         "run" => cmd_run(home, rest),
+        "bench" => cmd_bench(home, rest),
         "score" => cmd_score(home, rest),
         "compare" => cmd_compare(home, rest),
         "improve" => cmd_improve(home, rest),
@@ -196,6 +204,80 @@ fn cmd_run(home: &Path, rest: &[String]) -> CoinGymResult<()> {
     print_offline_note(report.offline_scaffold);
     print_score(&score);
     Ok(())
+}
+
+// ── bench ──────────────────────────────────────────────────────────────────────
+
+/// Run **both** arms (single-model `baseline` and multi-agent `team`) over the
+/// same target set and print a consolidated baseline-vs-multiagent verdict. This
+/// is the objective's headline artifact: one reproducible command answering
+/// "does the multi-agent team measurably beat the single-model baseline?".
+fn cmd_bench(home: &Path, rest: &[String]) -> CoinGymResult<()> {
+    let parsed = parse_args(rest, &["profile", "targets"])?;
+    let model = parsed
+        .positionals
+        .first()
+        .ok_or_else(|| CoinGymError::Usage("bench: expected <model>".to_string()))?
+        .clone();
+    let scenario = match parsed.flags.get("targets") {
+        Some(path) => DemoScenario::from_path(Path::new(path))?,
+        None => DemoScenario::sample()?,
+    };
+    validate_offline_scenario(&scenario)?;
+    let profile_name = parsed.flags.get("profile").map_or_else(
+        || profiles::sanitize_name(&model),
+        |p| profiles::sanitize_name(p),
+    );
+    ensure_profile(home, &profile_name, &model)?;
+
+    let baseline = run_and_save(home, &profile_name, &model, Strategy::Baseline, &scenario)?;
+    let team = run_and_save(home, &profile_name, &model, Strategy::Team, &scenario)?;
+
+    let baseline_score = score_run(&baseline);
+    let team_score = score_run(&team);
+    let verdict = bench_verdict(&baseline_score, &team_score);
+    print_bench(&profile_name, &baseline, &team, &verdict);
+    Ok(())
+}
+
+/// Execute one arm and persist it under `profile`, returning its report.
+fn run_and_save(
+    home: &Path,
+    profile: &str,
+    model: &str,
+    strategy: Strategy,
+    scenario: &DemoScenario,
+) -> CoinGymResult<RunReport> {
+    let report = execute_run(model, strategy, scenario)?;
+    let persisted = PersistedRun {
+        report: report.clone(),
+        targets: scenario.targets.clone(),
+        offline: scenario.offline_scaffold(),
+    };
+    save_run(home, profile, &persisted)?;
+    Ok(report)
+}
+
+/// Render the consolidated baseline-vs-team verdict.
+fn print_bench(profile: &str, baseline: &RunReport, team: &RunReport, verdict: &BenchVerdict) {
+    println!("model:    {}", verdict.model);
+    println!("profile:  {profile}");
+    println!("snapshot: {}", baseline.snapshot);
+    println!(
+        "baseline: run-id {}  reach {:.1}%  precision {:.1}%",
+        baseline.run_id, verdict.baseline_reach_pct, verdict.baseline_precision_pct
+    );
+    println!(
+        "team:     run-id {}  reach {:.1}%  precision {:.1}%",
+        team.run_id, verdict.team_reach_pct, verdict.team_precision_pct
+    );
+    println!(
+        "delta:    reach {:+.1} pts   precision {:+.1} pts",
+        verdict.reach_delta_pct, verdict.precision_delta_pct
+    );
+    print_offline_note(verdict.offline_scaffold);
+    println!("verdict:  {}", verdict.outcome.label());
+    println!("note: {}", verdict.note);
 }
 
 /// Guard against **hollow** offline runs: an offline scaffold run grades against

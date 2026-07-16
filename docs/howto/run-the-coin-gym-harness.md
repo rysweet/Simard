@@ -46,12 +46,40 @@ default, overridable with the `COIN_GYM_HOME` environment variable.
 
 ```text
 coin-gym run <model> [--strategy baseline|team] [--profile <name>] [--targets <path>]
+coin-gym bench   <model> [--profile <name>] [--targets <path>]
 coin-gym score   <run-id> [--profile <name>]
 coin-gym compare <run-id> [--profile <name>]
 coin-gym improve <run-id> [--profile <name>] [--holdout fresh]
 coin-gym contract [--dataset <repo>] [--revision <tag>] [--split a,b] [--project x,y] [--source rebuild|image]
 coin-gym profiles
 ```
+
+### `bench` — one command: single-model baseline vs. multi-agent team
+
+```bash
+coin-gym bench claude-opus-4.6 --profile opus
+```
+
+`bench` runs **both** arms over the *same* target set — the single-model
+`baseline` and the multi-agent `team` — persists both runs under the profile, and
+prints one consolidated verdict answering the question the harness exists to
+answer: **does the multi-agent team measurably beat the single-model baseline?**
+It is the two-step `run --strategy baseline` + `run --strategy team` collapsed
+into a single reproducible artifact. On the bundled sample:
+
+```text
+model:    claude-opus-4.6
+baseline: reach 60.0%  precision 60.0%
+team:     reach 60.0%  precision 100.0%
+delta:    reach +0.0 pts   precision +40.0 pts
+verdict:  MULTIAGENT WINS
+```
+
+The verdict is `MULTIAGENT WINS` when the team strictly improves reach or
+precision without regressing the other, `REGRESSION` when either metric drops
+(never reported silently as a win), and `TIE` otherwise. **LOCAL-ONLY:** the
+verdict is never submitted externally, and in Phase 4 both arms grade against the
+offline mock oracle (a real grade is Phase 3, #2823).
 
 ### `run` — evaluate a model on the target set
 
