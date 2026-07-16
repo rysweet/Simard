@@ -168,7 +168,7 @@ complete behavior), never to a wrong verdict.
 ## `simard ci-health`
 
 ```
-simard ci-health [--json] [--no-cache] [--file-issues] [--from-json <path>]
+simard ci-health [--json] [--no-cache] [--file-issues] [--exit-zero] [--from-json <path>]
 
   --json               Emit the FleetReport as JSON (default: human table).
   --no-cache           Force a full re-collection of every repo, ignoring the
@@ -179,6 +179,10 @@ simard ci-health [--json] [--no-cache] [--file-issues] [--from-json <path>]
                        close any open tracking issue whose workflow is green
                        again (see below). Read-only by default; this flag opts
                        in to the writes. Rejected with --from-json.
+  --exit-zero          Exit 0 even on a red fleet, as long as the sweep itself
+                       ran without an operational error. For the unattended
+                       scheduled sweep (see below); an actual gh/parse error
+                       still exits non-zero.
   --from-json <path>   Classify an offline snapshot fixture instead of calling
                        `gh` (the fixture shape mirrors the live snapshot).
 ```
@@ -201,7 +205,11 @@ simard ci-health [--json] [--no-cache] [--file-issues] [--from-json <path>]
   so a stale failing run of an infrequently-triggered workflow can never be
   silently dropped and reported as green.
 - **Exit code** follows the verdict: `0` when the fleet is green, non-zero when
-  any actionable failure exists (mirrors `simard self-health`).
+  any actionable failure exists (mirrors `simard self-health`). `--exit-zero`
+  overrides only that verdict — a red fleet still exits `0` — for the unattended
+  [scheduled sweep](#scheduled-recurring-sweep); an operational error (a failed
+  `gh`/parse) is surfaced *before* the verdict, so `--exit-zero` never masks a
+  broken sweep, only a truthfully-reported red fleet.
 
 The human report leads with a greppable banner (`CI-HEALTH: GREEN` /
 `CI-HEALTH: FAILING`) and a per-repo breakdown; each actionable failure is
@@ -360,6 +368,40 @@ tracking issue of every workflow that is **green again**:
 the ecosystem table in `prompt_assets/simard/engineer_system.md` (note
 `amplihack` → `amplihack-rs` on GitHub).
 
+## Scheduled recurring sweep
+
+Detection + filing only catches a regression when *something runs the sweep*.
+Running it by hand each cycle is exactly the un-evidenced, human-in-the-loop
+process this steward exists to replace, so the sweep also runs unattended on a
+cadence via **`.github/workflows/ci-health.yml`** — the CI-health analogue of
+the supply-chain steward's `advisory-scan.yml`.
+
+- **Trigger.** `schedule` (daily, `17 5 * * *` UTC — offset from advisory-scan's
+  06:00 so the two stewards don't contend for a runner) plus `workflow_dispatch`
+  for on-demand/manual sweeps. It never runs on `push`/`pull_request`, so it is
+  fully decoupled from PR gating and can never block unrelated work.
+- **Command.** `simard ci-health --no-cache --file-issues --exit-zero`:
+  - `--no-cache` re-audits every repo each run (no green-SHA skips), so a
+    regression is caught the same day it lands rather than on the next
+    cache-invalidating change.
+  - `--file-issues` is the human-free alarm: each distinct actionable failure
+    becomes one deduplicated tracking issue (with a root-cause block) in the
+    failing repo, and recovered workflows' issues are closed.
+  - `--exit-zero` keeps the *run itself* green on a red fleet. The alarm is the
+    filed tracking issue, not a red run — and if this scheduled run went red on
+    a sibling's failure, the next sweep would classify Simard's own `ci-health`
+    workflow as a fresh actionable failure and file a tracking issue for it, a
+    self-referential loop. An actual `gh`/parse error still fails the run.
+- **Auth.** `GH_TOKEN` is `secrets.STEWARD_GH_TOKEN` falling back to the
+  workflow's `github.token`. Cross-repo issue writes (a sibling repo's failure
+  files an issue in *that* repo) need a token with fleet-wide `issues:write`;
+  the default token is scoped to this repo only. With the bot token absent, the
+  green path and Simard's own issues still work, and a sibling failure surfaces
+  as a fail-loud `gh issue create` error (a visible red run) rather than a
+  silently-dropped failure — fail-safe, not fail-open, matching advisory-scan.
+- **Concurrency.** A `ci-health` concurrency group (no cancel-in-progress) means
+  two runs never race on the same tracking issues.
+
 ## Reproducing a captured sweep
 
 The offline path makes any sweep reproducible without network access: capture a
@@ -374,4 +416,5 @@ failure turns the fleet red.
 - Concept: [Goal Stewardship Mode](../concepts/stewardship-mode.md)
 - [Stewardship API](./stewardship-api.md) — orchestrator-failure → issue routing
 - [Cross-Repo Merge Authority](./cross-repo-merge-authority.md)
-- Source: `src/ci_health/`, `src/operator_cli/ci_health.rs`
+- Source: `src/ci_health/`, `src/operator_cli/ci_health.rs`,
+  `.github/workflows/ci-health.yml` (scheduled runner)
