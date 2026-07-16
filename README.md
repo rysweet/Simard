@@ -330,6 +330,16 @@ simard gym compare <scenario-id>       # compare results
 simard gym run-suite <suite-id>        # run a suite
 ```
 
+### Atelier design mode
+```bash
+# Atelier identity: product brief -> 3D model + render + fabrication package
+simard atelier build --brief brief.json --out ./pkg --fabrication
+simard atelier inspect --out ./pkg     # re-verify an existing package
+```
+Atelier drives OpenSCAD (with optional FreeCAD/Blender) to export an STL, a
+render, a cut list, and a BOM from a JSON product brief. See
+[Design furniture with Atelier](docs/howto/design-with-atelier.md).
+
 ### Self-management
 ```bash
 simard update                          # self-update to the latest release

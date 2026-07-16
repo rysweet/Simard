@@ -1,4 +1,5 @@
 mod args;
+mod atelier;
 mod ci_health;
 mod creative_ideas;
 mod curation;
@@ -155,6 +156,14 @@ Operator utilities:
   review read <base-type> <topology> <state-root>
   bootstrap run <identity> <base-type> <topology> <objective> [state-root]
 
+Design (Atelier identity):
+  atelier build --brief <brief.json> --out <dir> [--fabrication] [--strict]
+                         — take a product brief to a parametric model
+                           (OpenSCAD), STL mesh, PNG render, cut list, and BOM;
+                           --fabrication also emits a STEP solid when available
+  atelier inspect --out <dir> [--fabrication]
+                         — re-read and re-verify an existing package manifest
+
 Compatibility binaries remain available: simard_operator_probe, simard-gym
 ";
 
@@ -237,6 +246,7 @@ where
 
     match command.as_str() {
         "engineer" => engineer::dispatch_engineer_command(args),
+        "atelier" => atelier::dispatch_atelier_command(args),
         "meeting" => meeting::dispatch_meeting_command(args),
         "goal" => goal::dispatch_goal_command(args),
         "goal-curation" => curation::dispatch_goal_curation_command(args),
@@ -363,7 +373,7 @@ where
 }
 
 pub fn operator_cli_usage() -> &'static str {
-    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|ooda|memory|status|spawn|merge-pr|worktree-gc|disk-reclaim|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap|signal> ..."
+    "usage: simard <engineer|atelier|meeting|goal-curation|improvement-curation|gym|ooda|memory|status|spawn|merge-pr|worktree-gc|disk-reclaim|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap|signal> ..."
 }
 
 pub fn operator_cli_help() -> &'static str {
