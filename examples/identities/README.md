@@ -181,3 +181,27 @@ from its recipe, again with zero `src/` changes. A rebalancing "plan" is a
 document of proposed trades for a human to review, not an instruction the
 identity carries out.
 
+[`atelier/`](./atelier/) is a fourth example: an industrial & furniture /
+product-design identity that turns a parametric product brief into a
+**fabrication-ready package** — a 3D model, a render, and fabrication exports
+(STEP/STL, a cut list, and a bill of materials) — through a five-stage loop
+(brief → model → render → fabricate → handoff). Its recipes drive external CAD
+tooling (Blender `bpy`, FreeCAD, OpenSCAD) directly from their agent sessions,
+again with zero `src/` changes.
+
+> **Note:** this example `atelier` package is **distinct** from Simard's own
+> compiled-in `simard-atelier` identity in `BuiltinIdentityLoader`. They share a
+> theme but are different things: `simard-atelier` is how Simard herself
+> operates; `examples/identities/atelier/` is a data-only demonstration of the
+> pluggable-identity framework, loaded by `load_example_identity` with zero
+> `src/` changes.
+
+Its two goal-session recipes are
+[`atelier-parametric-modeling.yaml`](./atelier/recipes/atelier-parametric-modeling.yaml)
+(brief → parametric model → render, building and verifying manifold geometry)
+and
+[`atelier-fabrication-export.yaml`](./atelier/recipes/atelier-fabrication-export.yaml)
+(export STEP/STL + cut list + BOM → persist the package with a design/build
+narrative). `tests/atelier_example_identity_valid.rs` — run by the
+`tests/qa-scenarios/atelier-example-identity.yaml` scenario — proves the package
+loads through the data-driven loader and its recipes drive the full pipeline.
