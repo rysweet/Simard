@@ -941,12 +941,12 @@ fn cache_round_trips_through_disk_and_tolerates_missing_or_corrupt() {
     assert!(GreenShaCache::load(&path).is_empty());
 }
 
-// ─────────────────── CI-health → deduplicated-issue bridge ──────────────────
+// ────────────────── CI-health → deduplicated-issue steward ───────────────────
 //
-// These pin the `steward` bridge that converts an actionable-failure report
+// These pin the `steward` module that converts an actionable-failure report
 // into deduplicated tracking issues (the "one issue per distinct failure" half
 // of the standing CI-health goal), reusing the stewardship dedup contract.
-mod steward_bridge {
+mod steward_issue_filing {
     use std::collections::HashMap;
     use std::sync::Mutex;
 

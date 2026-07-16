@@ -74,7 +74,7 @@ src/ci_health/
 ├── cache.rs      GreenShaCache — persisted {repo -> last-known-green head SHA}
 ├── gh.rs         GhWorkflowClient trait (incl. head_sha), RealGhWorkflowClient, pure parse/join helpers, fixture loader
 ├── report.rs     render_human
-├── steward.rs    actionable-failure -> deduplicated-issue bridge (ci_failure_signature, file_issues_for_report)
+├── steward.rs    actionable-failure -> deduplicated-issue steward (ci_failure_signature, file_issues_for_report)
 └── tests.rs      unit tests
 ```
 
@@ -178,7 +178,7 @@ as a stable `FleetReport` object.
 
 Detecting failures is only half of the standing CI-health stewardship goal; the
 other half is *"dedupe to one issue/PR per distinct failure."* The
-[`ci_health::steward`] bridge (`src/ci_health/steward.rs`) converts a
+[`ci_health::steward`] module (`src/ci_health/steward.rs`) converts a
 [`FleetReport`]'s actionable failures into deduplicated GitHub issues, reusing
 the [Stewardship](./stewardship-api.md) dedup contract rather than forking it:
 
@@ -193,7 +193,7 @@ the [Stewardship](./stewardship-api.md) dedup contract rather than forking it:
 - **Target repo is the failing repo itself.** Unlike orchestrator-failure
   routing, a CI failure's repo is already known (it is a governed repo), so no
   routing matrix is consulted — the issue is filed in the repo whose CI failed.
-- **Dedup, then file.** For each distinct signature the bridge searches the
+- **Dedup, then file.** For each distinct signature the steward searches the
   target repo (`gh issue list -R <repo> --state open --search
   "stewardship-signature:<sig> in:body"`). A match short-circuits to
   `MatchedExisting` (no new issue); otherwise a new issue is filed with the

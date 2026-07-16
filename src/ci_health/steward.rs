@@ -1,4 +1,4 @@
-//! Bridge from a CI-health [`FleetReport`]'s actionable failures to the
+//! Route a CI-health [`FleetReport`]'s actionable failures into the
 //! deduplicated GitHub-issue pipeline — the "dedupe to one issue/PR per
 //! distinct failure" half of the standing CI-health stewardship goal.
 //!
