@@ -1,0 +1,130 @@
+name: "Gastronome — Culinary/Menu/Event-Design Identity + Prep App"
+description: >
+  Outside-in qa-team gate for the Simard Gastronome identity. Proves the
+  "done when" acceptance criterion: the pluggable Gastronome identity
+  bootstraps through the operator probe (inspect -> act -> verify -> persist),
+  and the runnable prep app (`simard-gastronome`) turns an event/menu brief
+  into a costed, nutritionally analysed, prep-scheduled menu plan end-to-end
+  — both from the builtin recipe book (`demo`) and from an external event
+  brief + pluggable recipe book (`plan`), in human-readable and JSON form.
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "test-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Gastronome identity bootstraps through the operator probe"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo run --quiet --bin simard_operator_probe --
+        bootstrap-run simard-gastronome local-harness single-process
+        "design a costed, scheduled menu plan"
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "Identity: simard-gastronome"
+        - "Session phase: complete"
+        - "Shutdown: stopped"
+
+  - name: "Prep app demo produces a full costed/scheduled menu plan"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: "cargo run --quiet --bin simard-gastronome -- demo"
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "MENU PLAN"
+        - "TOTAL"
+        - "Nutrition (per guest)"
+        - "Shopping list"
+        - "Prep schedule"
+        - "kitchen call"
+
+  - name: "Prep app plans an external event brief with a pluggable recipe book"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo run --quiet --bin simard-gastronome -- plan
+        --brief examples/gastronome/event_brief.json
+        --recipes examples/gastronome/recipes.json
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "MENU PLAN"
+        - "Shopping list"
+        - "Prep schedule"
+
+  - name: "Prep app emits a machine-readable JSON plan"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo run --quiet --bin simard-gastronome -- plan
+        --brief examples/gastronome/event_brief.json
+        --recipes examples/gastronome/recipes.json --json
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "\"event\""
+        - "\"menu\""
+        - "\"shopping_list\""
+        - "\"schedule\""
+
+  - name: "Full outside-in harness script (bootstrap + demo + plan + json)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: "bash tests/gadugi/gastronome-identity.sh"
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "gastronome-identity: PASS"
+
+assertions: []
+
+cleanup:
+  - name: "Test agent cleanup"
+    agent: "test-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "identity"
+    - "gastronome"
+    - "menu-planning"
+    - "prep-app"
+    - "outside-in"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"
