@@ -237,12 +237,32 @@ pub fn freecad_step(assembly: &Assembly, step: &Path, work_dir: &Path) -> Render
 }
 
 /// Blender script: import an STL and render a PNG. Written to temp at runtime.
+///
+/// STL import must work across Blender releases: Blender 4.1 removed the legacy
+/// `bpy.ops.import_mesh.stl` add-on operator and replaced it with the native
+/// `bpy.ops.wm.stl_import`. We prefer the new operator and fall back to the
+/// legacy add-on (enabling it if needed) so the render path is not silently
+/// broken on modern Blender.
 pub const BLENDER_RENDER_SCRIPT: &str = r#"# Simard Atelier — Blender STL render (generated at runtime)
 import bpy, sys
 argv = sys.argv[sys.argv.index("--") + 1:]
 stl_path, out_path = argv[0], argv[1]
 bpy.ops.wm.read_factory_settings(use_empty=True)
-bpy.ops.import_mesh.stl(filepath=stl_path)
+
+def _import_stl(path):
+    # Blender 4.1+ ships a native importer under the window-manager namespace.
+    if "stl_import" in dir(bpy.ops.wm):
+        bpy.ops.wm.stl_import(filepath=path)
+        return
+    # Older Blender: the legacy add-on operator; enable the add-on if needed.
+    try:
+        import addon_utils
+        addon_utils.enable("io_mesh_stl")
+    except Exception:
+        pass
+    bpy.ops.import_mesh.stl(filepath=path)
+
+_import_stl(stl_path)
 bpy.ops.object.camera_add(location=(3, -3, 2))
 cam = bpy.context.object
 bpy.context.scene.camera = cam
@@ -343,6 +363,7 @@ mod tests {
         assert!(FREECAD_STEP_SCRIPT.contains("exportStep"));
         assert!(FREECAD_STEP_SCRIPT.contains("Part.makeBox"));
         assert!(BLENDER_RENDER_SCRIPT.contains("import_mesh.stl"));
+        assert!(BLENDER_RENDER_SCRIPT.contains("wm.stl_import"));
         assert!(BLENDER_RENDER_SCRIPT.contains("render.render"));
     }
 
