@@ -489,7 +489,7 @@ The contract depends on passing the same validated state root across commands, n
 
 ## Identity and backend contract
 
-The builtin identities currently advertised by the loader are `simard-engineer`, `simard-meeting`, `simard-goal-curator`, `simard-improvement-curator`, `simard-gym`, and the composite `simard-composite-engineer`. All of them accept `local-harness`, `rusty-clawd`, and `copilot-sdk`; `simard-engineer` additionally accepts `terminal-shell` for the local terminal-backed path.
+The builtin identities currently advertised by the loader are `simard-engineer`, `simard-meeting`, `simard-goal-curator`, `simard-improvement-curator`, `simard-gym`, `simard-bursar`, and the composite `simard-composite-engineer`. All of them accept `local-harness`, `rusty-clawd`, and `copilot-sdk`; `simard-engineer` and `simard-bursar` additionally accept `terminal-shell` for the local terminal-backed path (`simard-bursar` runs pandas/backtrader/QuantLib analytics through it). `simard-bursar` operates in the research/advisory-only `bursar` mode and never places or executes orders — see [The Bursar identity](../concepts/bursar-identity.md).
 
 Reflection reports both the selected base type and the honest backend identity. For example:
 

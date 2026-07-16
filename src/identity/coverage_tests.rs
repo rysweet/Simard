@@ -54,6 +54,7 @@ fn operating_mode_display_matches_serde_for_all_variants() {
         OperatingMode::Improvement,
         OperatingMode::Gym,
         OperatingMode::Orchestrator,
+        OperatingMode::Bursar,
     ];
     for mode in modes {
         let display = mode.to_string();

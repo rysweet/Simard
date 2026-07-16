@@ -97,6 +97,7 @@ nav:
     - Operational Autonomy Model: concepts/operational-autonomy-model.md
     - Adaptive Scaling: concepts/adaptive-scaling.md
     - Pluggable Identity: concepts/pluggable-identity.md
+    - Bursar Identity: concepts/bursar-identity.md
     - Multi-Identity Host Isolation: concepts/multi-identity-host-isolation.md
     - Write-Authority Posture: concepts/write-authority-posture.md
     - Identity-Scoped Cognition (Seed Goals, Observe-Only Act): concepts/identity-scoped-cognition.md
@@ -215,6 +216,7 @@ nav:
     - Respond to a Proactive Advisory Remediation: howto/respond-to-a-proactive-advisory-remediation.md
     - Configure Adaptive Scaling: howto/configure-adaptive-scaling.md
     - Configure Pluggable Identity: howto/configure-pluggable-identity.md
+    - Run the Bursar Identity: howto/run-the-bursar-identity.md
     - Run a Second Agent Identity: howto/run-a-second-agent-identity.md
     - Configure Episode Hygiene and Promotion: howto/configure-episode-hygiene-and-promotion.md
     - Inspect Improvement Curation State: howto/inspect-improvement-curation-state.md

@@ -1,0 +1,63 @@
+name: "Bursar identity — bootstrap and analytics base type"
+description: >
+  Outside-in gate for the simard-bursar identity (investment portfolio research
+  & management, research/advisory only — never order execution). Verifies the
+  builtin loader advertises simard-bursar and that it bootstraps end-to-end
+  through the operator probe's repo-grounded engineer-loop surface on both the
+  local-harness base type and the terminal-shell base type (which it needs to
+  run pandas/backtrader/QuantLib analytics). Drives tests/gadugi/bursar-identity.sh.
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "simard-bursar bootstraps on local-harness and terminal-shell"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/bursar-identity.sh"
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "Identity: simard-bursar"
+        - "PASS: simard-bursar identity bootstraps on local-harness and terminal-shell"
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "identity"
+    - "bursar"
+    - "outside-in"
+  priority: "high"
+  author: "simard-engineer"
+  test_type: "outside-in"

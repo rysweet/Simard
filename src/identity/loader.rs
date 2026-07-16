@@ -158,6 +158,32 @@ impl IdentityLoader for BuiltinIdentityLoader {
                 MemoryPolicy::default(),
                 request.contract.clone(),
             ),
+            "simard-bursar" => IdentityManifest::new(
+                "simard-bursar",
+                request.package_version.clone(),
+                vec![PromptAssetRef::new(
+                    "bursar-system",
+                    "simard/bursar_system.md",
+                )],
+                vec![
+                    BaseTypeId::new("local-harness"),
+                    BaseTypeId::new("terminal-shell"),
+                    BaseTypeId::new("rusty-clawd"),
+                    BaseTypeId::new("copilot-sdk"),
+                    BaseTypeId::new("claude-agent-sdk"),
+                    BaseTypeId::new("ms-agent-framework"),
+                ],
+                capability_set([
+                    BaseTypeCapability::PromptAssets,
+                    BaseTypeCapability::SessionLifecycle,
+                    BaseTypeCapability::Memory,
+                    BaseTypeCapability::Evidence,
+                    BaseTypeCapability::Reflection,
+                ]),
+                OperatingMode::Bursar,
+                MemoryPolicy::default(),
+                request.contract.clone(),
+            ),
             "simard-composite-engineer" => IdentityManifest::compose(
                 "simard-composite-engineer",
                 request.package_version.clone(),
@@ -359,5 +385,63 @@ mod tests {
             .unwrap();
         assert!(!manifest.prompt_assets.is_empty());
         assert_eq!(manifest.prompt_assets[0].id.as_str(), "engineer-system");
+    }
+
+    #[test]
+    fn builtin_loader_loads_bursar_identity() {
+        let loader = BuiltinIdentityLoader;
+        let manifest = loader
+            .load(&IdentityLoadRequest::new(
+                "simard-bursar",
+                "0.1.0",
+                test_contract(),
+            ))
+            .unwrap();
+        assert_eq!(manifest.name, "simard-bursar");
+        assert_eq!(manifest.default_mode, OperatingMode::Bursar);
+    }
+
+    #[test]
+    fn builtin_loader_bursar_has_bursar_system_prompt() {
+        let loader = BuiltinIdentityLoader;
+        let manifest = loader
+            .load(&IdentityLoadRequest::new(
+                "simard-bursar",
+                "0.1.0",
+                test_contract(),
+            ))
+            .unwrap();
+        assert!(!manifest.prompt_assets.is_empty());
+        assert_eq!(manifest.prompt_assets[0].id.as_str(), "bursar-system");
+    }
+
+    #[test]
+    fn builtin_loader_bursar_supports_terminal_shell_for_analytics() {
+        let loader = BuiltinIdentityLoader;
+        let manifest = loader
+            .load(&IdentityLoadRequest::new(
+                "simard-bursar",
+                "0.1.0",
+                test_contract(),
+            ))
+            .unwrap();
+        // Bursar runs pandas/backtrader/QuantLib analytics, so it must carry
+        // the terminal-shell base type just like the engineer identity.
+        assert!(manifest.supports_base_type(&BaseTypeId::new("terminal-shell")));
+        assert!(manifest.supports_base_type(&BaseTypeId::new("local-harness")));
+    }
+
+    #[test]
+    fn builtin_loader_bursar_memory_policy_is_read_only() {
+        let loader = BuiltinIdentityLoader;
+        let manifest = loader
+            .load(&IdentityLoadRequest::new(
+                "simard-bursar",
+                "0.1.0",
+                test_contract(),
+            ))
+            .unwrap();
+        // Research/advisory posture: never allow project-level writes.
+        assert!(!manifest.memory_policy.allow_project_writes);
     }
 }

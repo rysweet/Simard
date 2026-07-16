@@ -279,6 +279,7 @@ fn agent_program_for_manifest(manifest: &IdentityManifest) -> SimardResult<Arc<d
         OperatingMode::Engineer | OperatingMode::Gym | OperatingMode::Orchestrator => {
             Ok(Arc::new(ObjectiveRelayProgram::try_default()?))
         }
+        OperatingMode::Bursar => Ok(Arc::new(ObjectiveRelayProgram::try_default()?)),
     }
 }
 

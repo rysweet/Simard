@@ -18,9 +18,10 @@ related:
 
 ## The problem
 
-Simard ships with five built-in identities (`simard-engineer`,
+Simard ships with six built-in identities (`simard-engineer`,
 `simard-meeting`, `simard-gym`, `simard-goal-curator`,
-`simard-improvement-curator`) plus one composite (`simard-composite-engineer`).
+`simard-improvement-curator`, `simard-bursar`) plus one composite
+(`simard-composite-engineer`).
 These are compiled into the binary via `BuiltinIdentityLoader`.
 
 This works for Simard's own repository, but breaks down when Simard operates

@@ -23,6 +23,10 @@ pub enum OperatingMode {
     Gym,
     /// Workflow orchestration — recipe routing and workstream dispatch.
     Orchestrator,
+    /// Investment portfolio research & management — asset allocation,
+    /// backtesting, risk analysis, rebalancing, and reporting. Research and
+    /// advisory only; NEVER places or executes orders.
+    Bursar,
 }
 
 impl Display for OperatingMode {
@@ -34,6 +38,7 @@ impl Display for OperatingMode {
             Self::Improvement => "improvement",
             Self::Gym => "gym",
             Self::Orchestrator => "orchestrator",
+            Self::Bursar => "bursar",
         };
         f.write_str(label)
     }
@@ -50,6 +55,7 @@ impl FromStr for OperatingMode {
             "improvement" => Ok(Self::Improvement),
             "gym" => Ok(Self::Gym),
             "orchestrator" => Ok(Self::Orchestrator),
+            "bursar" => Ok(Self::Bursar),
             other => Err(format!("unknown operating mode: '{other}'")),
         }
     }
@@ -96,6 +102,7 @@ mod tests {
         assert_eq!(OperatingMode::Improvement.to_string(), "improvement");
         assert_eq!(OperatingMode::Gym.to_string(), "gym");
         assert_eq!(OperatingMode::Orchestrator.to_string(), "orchestrator");
+        assert_eq!(OperatingMode::Bursar.to_string(), "bursar");
     }
 
     #[test]
@@ -140,6 +147,7 @@ mod tests {
             OperatingMode::Improvement,
             OperatingMode::Gym,
             OperatingMode::Orchestrator,
+            OperatingMode::Bursar,
         ];
         for mode in modes {
             let json = serde_json::to_string(&mode).unwrap();
@@ -176,6 +184,10 @@ mod tests {
         assert_eq!(
             "orchestrator".parse::<OperatingMode>().unwrap(),
             OperatingMode::Orchestrator
+        );
+        assert_eq!(
+            "bursar".parse::<OperatingMode>().unwrap(),
+            OperatingMode::Bursar
         );
     }
 
