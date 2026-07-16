@@ -1,0 +1,82 @@
+# gastronome-menu-design.yaml — Gastronome identity menu-design recipe.
+#
+# Drives the Simard Gastronome identity: takes an event/menu brief (and an
+# optional existing kitchen book of priced, nutrition-tagged ingredients and
+# recipes) and produces a COSTED, SCHEDULED menu plan end-to-end, backed by the
+# deterministic `simard-kitchen` engine (src/gastronome/).
+#
+# The agent designs/selects recipes, assembles a book.toml, runs
+# `simard-kitchen plan --json` for ground-truth cost/nutrition/schedule,
+# verifies against the brief (budget + dietary + feasibility), and returns the
+# plan, the reproducible book.toml, and chef's advisory notes.
+#
+# Context vars (passed via -c):
+#   brief         — the event/menu brief (name, guests, service time, budget,
+#                   dietary constraints, desired courses/style)
+#   kitchen_book  — optional existing book.toml to design against ("" to build
+#                   a fresh one)
+#   repo_path     — repository root (so `simard-kitchen` is runnable)
+#
+# Output markers (parsed by callers):
+#   MENU_PLAN: <plan text>
+#   BOOK_TOML: <fenced toml>
+#   BUDGET_OK=<true|false>
+#   COST_PER_GUEST=<amount>
+#   CHEF_NOTES: <advisory>
+
+name: "gastronome-menu-design"
+description: "Gastronome: turn an event/menu brief into a costed, scheduled menu plan"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "gastronome", "culinary", "menu", "catering", "event"]
+
+context:
+  brief: ""
+  kitchen_book: ""
+  repo_path: "."
+
+steps:
+  - id: "gastronome-menu-design"
+    type: "agent"
+    agent: "default"
+    # Prompt mirrors prompt_assets/simard/gastronome_menu_design.md (kept inline
+    # so the recipe runner needs no asset-resolution step, matching the other
+    # recipes in this directory).
+    prompt: |
+      You are the Simard **Gastronome** designing a menu for a specific brief.
+      Turn the brief into a COSTED, SCHEDULED menu plan using the deterministic
+      `simard-kitchen` engine, then advise on flavor, seasonality, and dietary
+      fit.
+
+      ## Inputs
+      - brief: {{brief}}
+      - kitchen_book (optional book.toml, "" to build fresh): {{kitchen_book}}
+      - repo_path: {{repo_path}}
+
+      ## Procedure
+      1. Design/select recipes that match the style, season, and dietary
+         constraints. For each recipe set a realistic yield (`servings`),
+         `prep_minutes`, `cook_minutes`, and any `depends_on` prerequisites.
+         Price every ingredient per base unit and tag allergens/diets.
+      2. Assemble a `book.toml` with `[[ingredient]]`, `[[recipe]]`, and a
+         `[brief]` per the Gastronome schema (mass ingredients use gram/kilogram,
+         volume uses milliliter/liter, count uses each; families must match).
+      3. From `{{repo_path}}` run `simard-kitchen plan --file book.toml --json`
+         and treat its `total_cost`, `cost_per_guest`, `within_budget`,
+         `nutrition_per_guest`, `shopping_list`, and `schedule` as ground truth.
+      4. Verify against the brief: cost per guest <= budget, every dietary
+         constraint satisfied by ingredient tags, kitchen call time feasible,
+         per-guest nutrition sensible. If any check fails, adjust and re-run.
+      5. Advise: flavor balance, substitutions for common allergies, make-ahead
+         tips keyed to the schedule, and staffing/equipment caveats.
+
+      ## Required output markers (each on its own line)
+      MENU_PLAN: <human-readable plan: courses, shopping list, cost, nutrition
+                  per guest, prep schedule>
+      BOOK_TOML: <the exact book.toml used, fenced, for reproducibility>
+      BUDGET_OK=<true|false>
+      COST_PER_GUEST=<amount>
+      CHEF_NOTES: <advisory notes>
+
+      Be honest about estimates and never silently violate a brief constraint.
+    output: "gastronome_menu_plan"

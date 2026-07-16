@@ -162,6 +162,7 @@ nav:
   - How-To Guides:
     - Fix a No-`bridge` Naming Guard Failure: howto/fix-a-no-bridge-naming-guard-failure.md
     - Run the LOCAL COIN Gym Harness: howto/run-the-coin-gym-harness.md
+    - Design a Menu with the Gastronome Identity: howto/design-a-menu-with-gastronome.md
     - Terminal to Engineer: howto/move-from-terminal-recipes-into-engineer-runs.md
     - Use the Agent-Orchestration Engineer Loop: howto/use-agent-orchestration-engineer-loop.md
     - Bootstrap and Reflection: howto/configure-bootstrap-and-inspect-reflection.md

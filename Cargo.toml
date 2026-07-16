@@ -12,6 +12,12 @@ path = "src/bin/simard_gym.rs"
 name = "coin-gym"
 path = "src/bin/coin_gym.rs"
 
+# Gastronome identity's small "run a kitchen" app: turns a culinary/event brief
+# into a costed, scheduled menu plan. Thin wrapper over `simard::gastronome`.
+[[bin]]
+name = "simard-kitchen"
+path = "src/bin/simard_kitchen.rs"
+
 [[bin]]
 name = "simard-rust-gym"
 path = "src/bin/simard_rust_gym.rs"

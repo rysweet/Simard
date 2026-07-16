@@ -87,6 +87,11 @@ pub mod greeting_banner;
 // `docs/research/coin-benchmark-and-skwaq-study.md` (design) and
 // `docs/howto/run-the-coin-gym-harness.md` (usage).
 pub mod coin_gym;
+// Gastronome: a pluggable Simard identity for culinary, menu, and event design.
+// The offline engine turns an event/menu brief into a costed, scheduled menu
+// plan (with nutrition + a shopping list) and backs the `simard-kitchen` CLI.
+// See `docs/howto/design-a-menu-with-gastronome.md`.
+pub mod gastronome;
 pub mod gym;
 pub mod gym_client;
 pub mod gym_history;
@@ -378,6 +383,7 @@ pub use engineer_handoff::{
     SHARED_DEFAULT_STATE_ROOT_SOURCE, SHARED_EXPLICIT_STATE_ROOT_SOURCE,
     TERMINAL_HANDOFF_FILE_NAME, TERMINAL_MODE_BOUNDARY,
 };
+pub use gastronome::{dispatch_gastronome_cli, gastronome_usage};
 pub use metadata::{BackendDescriptor, Freshness, FreshnessState, Provenance};
 pub use operator_cli::{dispatch_operator_cli, operator_cli_help, operator_cli_usage};
 pub use operator_commands::{
