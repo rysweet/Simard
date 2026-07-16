@@ -536,6 +536,8 @@ See [Configure disk reclamation](../howto/configure-disk-reclamation.md) and the
 
 Shipped terminal surface: `simard engineer copilot-submit <topology> [state-root] [--json]`. It has no compatibility surface and is documented later on this page as the bounded one-shot local Copilot submission contract.
 
+Two compatibility-only probe subcommands ship without a canonical `simard ...` equivalent: `simard_operator_probe concierge-run <topology> <brief>` (the in-process Concierge identity prototype) and `simard_operator_probe handoff-roundtrip <identity> <base-type> <topology> <objective>` (the handoff export/import roundtrip probe). Both are documented in the [runtime contracts reference](runtime-contracts.md).
+
 ## Shared state-root contract
 
 When a command accepts `[state-root]`, Simard validates it before any persistence write or read that depends on durable operator state.

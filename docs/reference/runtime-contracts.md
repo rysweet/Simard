@@ -35,6 +35,7 @@ Simard does **not** expose:
 | Runtime behavior | Canonical surface | Compatibility surface |
 | --- | --- | --- |
 | explicit bootstrap | `simard bootstrap run ...` | `simard_operator_probe bootstrap-run ...` |
+| handoff export/import roundtrip probe | none | `simard_operator_probe handoff-roundtrip ...` |
 | bounded engineer loop | `simard engineer run ...` | `simard_operator_probe engineer-loop-run ...` |
 | engineer state readback | `simard engineer read ...` | `simard_operator_probe engineer-read ...` |
 | terminal-backed engineer substrate | `simard engineer terminal ...` | `simard_operator_probe terminal-run ...` |
@@ -49,6 +50,7 @@ Simard does **not** expose:
 | improvement-curation mode | `simard improvement-curation run ...` | `simard_operator_probe improvement-curation-run ...` |
 | improvement-curation state readback | `simard improvement-curation read ...` | `simard_operator_probe improvement-curation-read ...` |
 | review artifact persistence and readback | `simard review ...` | `simard_operator_probe review-run ...` and `review-read ...` |
+| concierge identity end-to-end prototype | none | `simard_operator_probe concierge-run ...` |
 | benchmark scenarios and suites | `simard gym ...` | `simard-gym ...` |
 
 ## Canonical CLI surface
@@ -475,6 +477,26 @@ The operator-facing bootstrap contract is now explicit:
 - identity, base type, and topology mismatches fail explicitly
 - there is no public zero-argument bootstrap path
 - state-root validation runs before durable artifacts are read or written
+
+### Concierge identity probe
+
+Compatibility-only surface: `simard_operator_probe concierge-run <topology> <brief>`
+
+The concierge probe has no canonical `simard ...` command; it ships only through the compatibility binary. It runs the Concierge identity end-to-end in-process: it parses the free-text hotel `<brief>` (the untrusted objective), designs a hotel, scaffolds and drives a reservations/PMS prototype, and prints the verified outcome report followed by the resolved topology.
+
+- the `<topology>` argument is validated for parity with the other probes even though the prototype runs in-process; an invalid topology fails explicitly
+- a thin or empty `<brief>` falls back to safe defaults rather than failing
+- the probe takes no `[state-root]` positional; trailing arguments are rejected
+
+### Handoff roundtrip probe
+
+Compatibility-only surface: `simard_operator_probe handoff-roundtrip <identity> <base-type> <topology> <objective>`
+
+The handoff roundtrip probe has no canonical `simard ...` command; it ships only through the compatibility binary. It runs a bounded local session, exports the latest durable handoff snapshot, restores a runtime from that snapshot, and prints the restored identity, base type, topology, exported memory/evidence record counts, and restored session phase and backend identities to prove export→import roundtrip fidelity.
+
+- the probe derives its own durable state root internally under the `handoff-roundtrip` mode; it does **not** accept an operator-supplied `[state-root]` positional
+- required values (`<identity> <base-type> <topology> <objective>`) are passed positionally, and identity/base-type/topology mismatches fail explicitly
+- trailing arguments are rejected
 
 ## Durable carryover contract
 
