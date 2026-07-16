@@ -50,6 +50,7 @@ coin-gym score   <run-id> [--profile <name>]
 coin-gym compare <run-id> [--profile <name>]
 coin-gym improve <run-id> [--profile <name>] [--holdout fresh]
 coin-gym contract [--dataset <repo>] [--revision <tag>] [--split a,b] [--project x,y] [--source rebuild|image]
+coin-gym verify
 coin-gym profiles
 ```
 
@@ -213,6 +214,46 @@ The executor (`src/coin_gym/executor.rs`) builds this exact argv, writes the
 `/answer/` submission per the contract, and reads back `reached`; the live
 Docker invocation itself is gated behind Phase 3.
 
+### `verify` — LOCAL harness acceptance self-check (the done-gate)
+
+```bash
+coin-gym verify
+```
+
+Runs the **measurable done-criteria** for the LOCAL harness offline against the
+built-in sample snapshot and prints a PASS/FAIL matrix. It exercises every
+component of the design (issue #2713) and asserts a concrete postcondition for
+each, then **exits non-zero if any criterion fails** — so it is a runnable,
+CI-friendly done-gate rather than a subjective judgement:
+
+```text
+coin-gym verify — LOCAL harness acceptance self-check
+snapshot: built-in sample (offline mock oracle)
+  [PASS] target-loader            5 pinned + 2 held-out-fresh target(s); both families present
+  [PASS] baseline-runner          5 outcome(s) for 5 pinned target(s)
+  [PASS] team-runner              5 outcome(s) for 5 pinned target(s)
+  [PASS] scorer                   reach 60.0% / precision 60.0%; 2 family split; histogram covers 5/5 outcome(s)
+  [PASS] leaderboard-comparator   compared vs published 'GPT-5.4' (reach Δ +37.1 pts, material-deviation=true)
+  [PASS] self-improvement-loop    held-out reach 0.0% → 100.0% (kept 2, rolled back 0); memory 0 → 2 tactic(s)
+  [PASS] contract-wiring          evaluate (8 args) + verify (4 args) argv present; LOCAL-ONLY=true
+result: 7/7 criteria passed
+scope: LOCAL offline harness only. …
+```
+
+| Criterion | Measured postcondition |
+|-----------|------------------------|
+| `target-loader` | pinned **and** held-out-fresh slices non-empty; both families present |
+| `baseline-runner` | exactly one graded outcome per pinned target |
+| `team-runner` | exactly one graded outcome per pinned target |
+| `scorer` | bounded reach/precision, per-family split, histogram covers every outcome |
+| `leaderboard-comparator` | a published model diffs against its leaderboard row |
+| `self-improvement-loop` | held-out reach does not regress; durable tactic memory never shrinks |
+| `contract-wiring` | non-empty `coin evaluate` / `coin verify` argv (LOCAL-ONLY) |
+
+The self-check is hermetic and deterministic: it uses a throwaway temp home for
+tactic memory and never touches your real profiles. Live VM grading (Phase 3,
+#2823) is **externally gated** and intentionally out of this gate's scope.
+
 ### `profiles` — list isolated per-model run state
 
 ```bash
@@ -253,6 +294,26 @@ against (see `src/coin_gym/fixtures/improve_loop_snapshot.json`).
 > `split` (`codeql_only` → frontier, `gcs_reachable` → non-trivial-reachable) —
 > via `DatasetSource` in `src/coin_gym/target_loader.rs`, pinned by `revision`
 > and reserving a held-out fresh slice as the anti-overfit oracle.
+
+## Done-criteria for the LOCAL goal
+
+The LOCAL COIN Gym goal
+(`build-a-local-coin-benchmark-harness-and-a-self-improvement-loop`, issue #2713)
+is **done** when both of the following hold — this is deliberately measurable so
+an operator (or the OODA loop) can certify completion instead of stalling:
+
+1. **`coin-gym verify` exits 0** — every LOCAL harness component passes its
+   acceptance criterion (see the table above). This is the machine-checkable
+   done-gate for Phases 4 and 5.
+2. **Phase 3 (live VM grading) is acknowledged as externally gated.** Provisioning
+   an `azlin` VM + Docker host and running `coin evaluate` / `coin verify` live is
+   HIGH-RISK and operator-gated (#2823). It is **out of scope** for the LOCAL
+   goal's done-gate and is tracked as a separate follow-up; the LOCAL goal does
+   not block on it.
+
+Phases 1–2 (research, PR #2712) and Phases 4–5 (this harness) are complete;
+`coin-gym verify` keeps that verifiable at any time. What remains is the gated
+Phase-3 follow-up below.
 
 ## What is deferred
 
