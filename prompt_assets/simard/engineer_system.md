@@ -284,6 +284,17 @@ has an open PR (yours or a prior engineer's):
   fix the failing checks, fill in any missing merge-ready evidence, and push to
   the same branch. **Never open a second PR for an issue that already has one** —
   duplicate PRs waste a review slot and a CI run and will be closed.
+- **Label every PR you open with `simard-autonomous`.** When you create a PR, pass
+  `--label simard-autonomous` to `gh pr create` (or add it after the fact with
+  `gh pr edit <PR> --add-label simard-autonomous`). This label is the **primary**
+  marker Simard's autonomous self-merge sensor uses to positively identify *your*
+  engineering PRs and distinguish them from the operator's own review PRs, which
+  share the same author login **and** the same common branch prefixes (`feat/`,
+  `fix/`, `chore/`). Only an `engineer/` or `chore/advisory-` branch is treated as
+  self-identifying without the label; on any `feat/`, `fix/`, or `chore/` branch —
+  which you and the operator both use — the label is the **only** thing that makes
+  your PR eligible, so **always apply it**. A PR without the label on a shared
+  branch prefix will never be auto-merged.
 - **Drive it to landing.** Once CI is green and all six merge-ready criteria have
   evidence, merge it through the gated authority — `simard merge-pr <PR>` for a
   `rysweet/Simard` PR, or `simard merge-pr <PR> --repo <owner/repo>` for a PR in

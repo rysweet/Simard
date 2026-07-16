@@ -305,12 +305,17 @@ impl MergePrOps {
         ))
     }
 
-    /// Build the operator notification from the merged PR.
+    /// Build the operator notification from the merged PR. The `problem` text is
+    /// deliberately PLAIN ENGLISH — it names what was solved (the PR title) and
+    /// that it cleared every check and review, with NO internal gate jargon
+    /// ("objective gates", "pr-verify scans", "base allow-list", "MergeJudge").
+    /// The PR link rides `pr_url` so the operator can open the merged PR from
+    /// their phone. See `docs/reference/overseer-operator-notifications.md`.
     fn notification(&self, repo: &str, pr: u32, title: &str) -> MergeNotification {
         MergeNotification {
             problem: format!(
-                "A merge-ready PR passed the objective gates (CI green + mergeable + \
-                 base allow-list) and the Overseer pr-verify safety scans, and was merged: {title}"
+                "Merged: \"{title}\". It passed every check and review, so Simard \
+                 merged it for you."
             ),
             pr_title: title.to_string(),
             pr_url: format!("https://github.com/{repo}/pull/{pr}"),
@@ -492,8 +497,13 @@ impl PrOps for MergePrOps {
     /// — a busy repo can never crowd Simard's PRs out of the fetch window, and
     /// only her PRs are transferred + parsed) and keeps only those that
     /// are (a) authored by the configured automerge author (re-verified with a
-    /// case-insensitive whole-login in-process match as defense-in-depth) and
-    /// (b) pass the cheap objective pre-filter
+    /// case-insensitive whole-login in-process match as defense-in-depth),
+    /// (b) prove Simard-origin — the G3 engineer-PR gate: they carry the durable
+    /// [`SIMARD_ENGINEER_PR_LABEL`] (primary) OR ride a Rust-deterministic
+    /// engineer-only branch namespace ([`is_engineer_branch`]: secondary), which
+    /// is what separates Simard's OWN engineer PRs from the operator's own review
+    /// PRs when both share the same author login — and (c) pass the cheap
+    /// objective pre-filter
     /// ([`evaluate_objective_gates`]: base allow-list + `mergeable == MERGEABLE`
     /// + all checks green) computed from the already-fetched listing fields.
     ///
@@ -502,8 +512,12 @@ impl PrOps for MergePrOps {
     /// downstream in `merge_authority` and remains the single source of merge
     /// truth. Every failure mode is fail-closed AND fail-visible:
     /// - no automerge author configured => empty (logged) — cannot distinguish own PRs;
+    /// - a PR that is neither labeled nor on an engineer branch => excluded (never a candidate);
     /// - a `gh pr list` error for a repo => that repo is skipped (logged), others still surveyed;
     /// - an empty allowlist => empty, and `gh` is never even called.
+    ///
+    /// [`SIMARD_ENGINEER_PR_LABEL`]: crate::overseer::config::SIMARD_ENGINEER_PR_LABEL
+    /// [`is_engineer_branch`]: crate::overseer::config::is_engineer_branch
     fn survey_ready_prs(&self, repos: &[String]) -> Vec<PrRef> {
         let Some(author) = self.automerge_author.as_deref() else {
             if !repos.is_empty() {
@@ -547,6 +561,26 @@ impl PrOps for MergePrOps {
                 // look-alike or human PR through). An empty author (missing
                 // object) can never match, so it still fails closed.
                 if !pr.author.eq_ignore_ascii_case(author) {
+                    continue;
+                }
+                // G3 engineer-PR gate (#4097 safe-enablement). The author filter
+                // (G2) alone is INSUFFICIENT: Simard's engineer PRs AND the
+                // operator's OWN review PRs are authored by the same `gh` login
+                // (e.g. `rysweet`), so G2 would make the operator's review PRs
+                // (e.g. #3142 `cogthreads/…`) eligible to auto-merge — which is
+                // unacceptable. Narrow to PRs that PROVE Simard-origin: they
+                // carry the durable `simard-autonomous` label (PRIMARY, works on
+                // shared `feat/`/`fix/` prefixes) OR ride a Rust-deterministic
+                // engineer-only branch namespace (SECONDARY, defense-in-depth for
+                // when the best-effort label was not applied). A PR with NEITHER
+                // marker is NEVER a candidate, even when author + CI + mergeable
+                // all pass. This is a pure NARROWING — it can only remove.
+                let is_engineer_pr = pr
+                    .labels
+                    .iter()
+                    .any(|l| crate::overseer::config::is_engineer_pr_label(l))
+                    || crate::overseer::config::is_engineer_branch(&pr.head_ref_name);
+                if !is_engineer_pr {
                     continue;
                 }
                 // Cheap objective pre-filter from the ALREADY-FETCHED listing
@@ -875,11 +909,21 @@ mod tests {
         assert_eq!(gh.merges(), 1, "exactly one squash-merge (no --admin path)");
         assert_eq!(email.lock().unwrap().len(), 1, "email notified");
         assert_eq!(signal.lock().unwrap().len(), 1, "signal notified");
-        // The notification carries the problem + PR title + link.
+        // The notification carries the plain-English problem + PR title + link,
+        // with no internal gate jargon leaking to the operator (R5).
         let n = &email.lock().unwrap()[0];
         assert!(n.link.as_deref().unwrap().contains("/pull/7"));
         assert!(n.autonomous);
-        assert!(n.problem.contains("merge-ready"));
+        assert!(
+            n.problem.contains("passed every check and review"),
+            "the notification must explain in plain English what happened"
+        );
+        assert!(
+            !n.problem.contains("objective gates")
+                && !n.problem.contains("pr-verify")
+                && !n.problem.contains("allow-list"),
+            "the operator notification must not surface internal gate jargon"
+        );
     }
 
     #[test]
@@ -1210,15 +1254,43 @@ mod tests {
         base: &str,
         check_state: &str,
     ) -> crate::stewardship::merge_authority::OpenPrSummary {
+        // Default helper builds an ENGINEER-identified PR (carries the durable
+        // `simard-autonomous` label) so the pre-#4097 candidate expectations —
+        // which predate the G3 engineer-PR gate — stay valid. Operator-shaped
+        // PRs (no label, non-engineer branch) are built with `open_pr_full`.
+        open_pr_full(
+            number,
+            author,
+            mergeable,
+            base,
+            check_state,
+            &format!("feat/{number}"),
+            &[crate::overseer::config::SIMARD_ENGINEER_PR_LABEL],
+        )
+    }
+
+    /// Full control over the head branch + labels so a test can build an
+    /// operator-shaped PR (no engineer label, non-engineer branch) or an
+    /// engineer PR identified solely by its branch namespace.
+    fn open_pr_full(
+        number: u32,
+        author: &str,
+        mergeable: &str,
+        base: &str,
+        check_state: &str,
+        head: &str,
+        labels: &[&str],
+    ) -> crate::stewardship::merge_authority::OpenPrSummary {
         crate::stewardship::merge_authority::OpenPrSummary {
             number,
             title: format!("candidate PR #{number}"),
-            head_ref_name: format!("feat/{number}"),
+            head_ref_name: head.to_string(),
             base_ref_name: base.to_string(),
             mergeable: mergeable.to_string(),
             checks: vec![check("ci", check_state)],
             url: format!("https://github.com/rysweet/Simard/pull/{number}"),
             author: author.to_string(),
+            labels: labels.iter().map(|s| s.to_string()).collect(),
         }
     }
 
@@ -1441,6 +1513,194 @@ mod tests {
         assert!(
             ops.survey_ready_prs(&[repo.to_string()]).is_empty(),
             "author match must be EXACT — no substring/prefix — so human & look-alike PRs are excluded"
+        );
+    }
+
+    // ── G3: engineer-PR gate (issue #4097) ───────────────────────────────────
+    //
+    // The author filter (G2) is necessary but NOT sufficient: Simard's engineer
+    // PRs AND the operator's OWN review PRs are both authored by the same login
+    // (`rysweet`). Turning the sensor on with only G2 would make the operator's
+    // own review PRs (e.g. #3142 `cogthreads/…`) eligible to auto-merge — which
+    // is unacceptable. G3 narrows candidates to PRs that PROVE Simard-origin:
+    // they carry the durable `simard-autonomous` label (primary) OR ride a
+    // Rust-deterministic engineer-only branch namespace (secondary). A PR that
+    // has NEITHER is NEVER a candidate, even when author + CI + mergeable all
+    // pass. G3 is a pure NARROWING of G2 — it can only ever remove candidates.
+
+    /// THE safety test. An operator-shaped review PR — same author as the
+    /// engineer identity (`rysweet`), green CI, MERGEABLE, targeting `main`, but
+    /// with NO `simard-autonomous` label and a non-engineer branch — must be
+    /// EXCLUDED. Modeled on #3142 (`cogthreads/…`), which must NEVER auto-merge.
+    #[test]
+    fn survey_excludes_operator_review_pr_without_label_or_engineer_branch() {
+        let author = "rysweet";
+        let repo = "rysweet/Simard";
+        let mut by_repo = HashMap::new();
+        by_repo.insert(
+            repo.to_string(),
+            Ok(vec![
+                // #3142-shaped operator review PR: author matches, fully green,
+                // but no engineer label and a `cogthreads/…` branch.
+                open_pr_full(
+                    3142,
+                    author,
+                    "MERGEABLE",
+                    "main",
+                    "SUCCESS",
+                    "cogthreads/dashboard",
+                    &[],
+                ),
+                // Operator manual change on a SHARED `feat/` prefix, still no label.
+                open_pr_full(
+                    3200,
+                    author,
+                    "MERGEABLE",
+                    "main",
+                    "SUCCESS",
+                    "feat/operator-hotfix",
+                    &[],
+                ),
+            ]),
+        );
+        let gh = ListingGh::new(by_repo);
+        let (ops, seen) = survey_ops(gh.clone(), Some(author));
+
+        assert!(
+            ops.survey_ready_prs(&[repo.to_string()]).is_empty(),
+            "an operator review PR (no engineer label, non-engineer branch) must \
+             NEVER be a candidate, even when author + CI + mergeable all pass"
+        );
+        assert_eq!(gh.merges(), 0, "the sensor must never merge");
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "excluding an operator PR must be silent — no notification"
+        );
+    }
+
+    /// An engineer PR identified by the durable `simard-autonomous` LABEL is a
+    /// candidate even on a SHARED branch prefix (`feat/…`) that an operator
+    /// could also use — the label is the primary, prefix-independent marker.
+    #[test]
+    fn survey_includes_engineer_pr_identified_by_label() {
+        let author = "rysweet";
+        let repo = "rysweet/Simard";
+        let mut by_repo = HashMap::new();
+        by_repo.insert(
+            repo.to_string(),
+            Ok(vec![open_pr_full(
+                500,
+                author,
+                "MERGEABLE",
+                "main",
+                "SUCCESS",
+                "feat/some-shared-prefix",
+                &[crate::overseer::config::SIMARD_ENGINEER_PR_LABEL],
+            )]),
+        );
+        let gh = ListingGh::new(by_repo);
+        let (ops, _seen) = survey_ops(gh, Some(author));
+
+        assert_eq!(
+            ops.survey_ready_prs(&[repo.to_string()]),
+            vec![pr_ref(repo, 500)],
+            "a labeled engineer PR is a candidate even on a shared branch prefix"
+        );
+    }
+
+    /// An engineer PR identified ONLY by its Rust-deterministic engineer branch
+    /// namespace (`engineer/…`) — with NO label — is still a candidate: the
+    /// branch prefix is the secondary, defense-in-depth marker for the case
+    /// where the best-effort label was not applied.
+    #[test]
+    fn survey_includes_engineer_pr_identified_by_branch_prefix() {
+        let author = "rysweet";
+        let repo = "rysweet/Simard";
+        let mut by_repo = HashMap::new();
+        by_repo.insert(
+            repo.to_string(),
+            Ok(vec![
+                open_pr_full(
+                    600,
+                    author,
+                    "MERGEABLE",
+                    "main",
+                    "SUCCESS",
+                    "engineer/600-ab12cd34",
+                    &[],
+                ),
+                open_pr_full(
+                    601,
+                    author,
+                    "MERGEABLE",
+                    "main",
+                    "SUCCESS",
+                    "chore/advisory-rustsec-2024-0001",
+                    &[],
+                ),
+            ]),
+        );
+        let gh = ListingGh::new(by_repo);
+        let (ops, _seen) = survey_ops(gh, Some(author));
+
+        assert_eq!(
+            ops.survey_ready_prs(&[repo.to_string()]),
+            vec![pr_ref(repo, 600), pr_ref(repo, 601)],
+            "engineer-only branch namespaces qualify even without the label"
+        );
+    }
+
+    /// Mixed repo, shared author: only the engineer-identified PRs survive G3;
+    /// the operator review PR is excluded. This is the exact enablement scenario
+    /// that was previously impossible (both authored by `rysweet`).
+    #[test]
+    fn survey_separates_engineer_prs_from_operator_prs_under_shared_author() {
+        let author = "rysweet";
+        let repo = "rysweet/Simard";
+        let mut by_repo = HashMap::new();
+        by_repo.insert(
+            repo.to_string(),
+            Ok(vec![
+                // ✓ engineer PR by label
+                open_pr_full(
+                    700,
+                    author,
+                    "MERGEABLE",
+                    "main",
+                    "SUCCESS",
+                    "feat/engineer-work",
+                    &[crate::overseer::config::SIMARD_ENGINEER_PR_LABEL],
+                ),
+                // ✓ engineer PR by branch namespace
+                open_pr_full(
+                    701,
+                    author,
+                    "MERGEABLE",
+                    "main",
+                    "SUCCESS",
+                    "engineer/701-ffff0000",
+                    &[],
+                ),
+                // ✗ operator review PR — same author, green, but neither marker
+                open_pr_full(
+                    3142,
+                    author,
+                    "MERGEABLE",
+                    "main",
+                    "SUCCESS",
+                    "cogthreads/review",
+                    &[],
+                ),
+            ]),
+        );
+        let gh = ListingGh::new(by_repo);
+        let (ops, _seen) = survey_ops(gh, Some(author));
+
+        assert_eq!(
+            ops.survey_ready_prs(&[repo.to_string()]),
+            vec![pr_ref(repo, 700), pr_ref(repo, 701)],
+            "under a shared author, only engineer-marked PRs are candidates; the \
+             operator review PR is excluded"
         );
     }
 
