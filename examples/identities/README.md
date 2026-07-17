@@ -1,7 +1,7 @@
 # Example identities — data-only identity packages
 
 This directory is the durable home for **example non-engineering identities**
-(cartographer, atelier, concierge, gastronome, bursar, kinema, loremaster, terra, maestro, sommelier, …). These are
+(cartographer, atelier, concierge, gastronome, bursar, kinema, loremaster, terra, vitruvia, maestro, sommelier, …). These are
 **examples of what Simard's pluggable-identity framework can produce** — they are
 **not** part of Simard's own daemon.
 
@@ -261,7 +261,24 @@ sessions it spawns, again with zero `src/` changes. Its assets are validated
 end-to-end by `tests/terra_assets_valid.rs` and the
 `tests/qa-scenarios/terra-world-build-end-to-end.yaml` scenario.
 
-[`maestro/`](./maestro/) is a ninth example: a **music composition &
+[`vitruvia/`](./vitruvia/) is a ninth example: an **architecture & interior
+design** identity (named for Vitruvius) that turns a program/site brief into a
+designed building — a code-aware BIM floor plan, an interior layout, technical
+drawings (plans and elevations), and a rendered walkthrough. Its two goal-session
+recipes are
+[`vitruvia-massing-plan.yaml`](./vitruvia/recipes/vitruvia-massing-plan.yaml)
+(program → massing → code-aware IFC floor plan, verifying space areas, egress,
+and accessibility) and
+[`vitruvia-drawings-walkthrough.yaml`](./vitruvia/recipes/vitruvia-drawings-walkthrough.yaml)
+(interiors → plans/elevations → rendered walkthrough → persist the package with a
+design narrative). Its recipes drive real BIM/CAD tooling — Blender + the
+BlenderBIM / IfcOpenShell IFC toolkit and FreeCAD's Arch/BIM + TechDraw
+workbenches — directly from their agent sessions, again with zero `src/` changes.
+`tests/vitruvia_example_identity_valid.rs` — run by the
+`tests/qa-scenarios/vitruvia-example-identity.yaml` scenario — proves the package
+loads through the data-driven loader and its recipes drive the full pipeline.
+
+[`maestro/`](./maestro/) is a tenth example: a **music composition &
 production** identity that turns a musical brief into an **engraved score**
 (readable notation) plus a **rendered audio track** (playable audio). Its
 five-stage recipe (compose → arrange → engrave → produce → score & production

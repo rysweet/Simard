@@ -242,6 +242,11 @@ a campaign brief into a playable module — world lore, NPCs, XP-budget-balanced
 encounters, session prep — and then runs a session end to end (initiative →
 combat → resolution, seeded dice), again driving its domain tooling (an SRD rules
 engine, a seeded dice roller, a Foundry VTT exporter) entirely from its recipes.
+[`vitruvia/`](../../examples/identities/vitruvia/) is a further example in the
+architecture & interior-design domain: it turns a program/site brief into a
+code-aware BIM floor plan, interiors, technical drawings (plans and elevations),
+and a rendered walkthrough, driving Blender + BlenderBIM / IfcOpenShell and
+FreeCAD from its recipes — again with zero `src/` changes.
 
 ## What this is not
 
