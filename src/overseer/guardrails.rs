@@ -262,6 +262,15 @@ impl ConflictSequencer {
     pub fn release(&mut self, group: &str) {
         self.active_groups.retain(|a| a != group);
     }
+
+    /// Clear all active groups. The sequencer serialises the sweeps PLANNED
+    /// within a single OODA cycle (like the per-cycle launch cap); cross-cycle
+    /// dedup is the in-flight guard's + backoff gate's job. Reset at the top of
+    /// each [`crate::overseer::Overseer::run_cycle`] so a group admitted in a
+    /// prior cycle never permanently locks out later coverage of that group.
+    pub fn reset(&mut self) {
+        self.active_groups.clear();
+    }
 }
 
 /// A whisper gate's decision: deliver the whisper, or suppress it as a duplicate
@@ -386,6 +395,117 @@ impl WhisperGate {
         let decision = self.peek(signature, now_secs);
         if decision == WhisperDecision::Deliver {
             self.commit(signature, now_secs);
+        }
+        decision
+    }
+}
+
+/// A [`BackoffGate`]'s decision for one key at one instant: surface the signal /
+/// launch (`Admit`) or hold it as a duplicate within the current backoff window
+/// (`Suppress`). Suppression can only ever REDUCE actions; on any ambiguity
+/// (clock regression, overflow) the gate fails toward `Admit` — it never
+/// permanently silences a real, recurring signal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackoffDecision {
+    Admit,
+    Suppress,
+}
+
+/// Per-key exponential-backoff suppressor on an INJECTED `now_secs` clock
+/// (Problem 1 / issue #4186; meta bugs #4255, #4126). It closes the
+/// duplicate-issue hole where the Overseer re-launches an identical
+/// `WorkstreamCoverage` recipe (or re-emits an identical recurring signature)
+/// every tick once the prior covering workstream has COMPLETED — the exact
+/// churn that spawned duplicate backlog issues
+/// (#4186/#4190/#4191/#4198/#4201/#4203/#4206).
+///
+/// Contract (mirrors the [`WhisperGate`] peek/commit split so the act path can
+/// commit only after a successful launch):
+///
+/// * [`new`](BackoffGate::new)`(base_window_secs, multiplier, max_window_secs)`.
+/// * [`peek`](BackoffGate::peek) decides WITHOUT recording.
+/// * [`commit`](BackoffGate::commit) records an admitted occurrence and GROWS
+///   that key's window `× multiplier` (saturating, hard-capped at
+///   `max_window_secs`); after a silence `>= 2 × current_window` the window
+///   RESETS to `base_window_secs`, so a genuinely-recurring gap is never
+///   permanently silenced.
+/// * [`admit`](BackoffGate::admit) = peek-then-commit-on-`Admit`.
+///
+/// Every key tracks an independent window, so one noisy signature can never
+/// starve an unrelated one. A non-monotonic clock (`now` before the last admit)
+/// is treated as "window elapsed" and admits (fail toward surfacing).
+#[derive(Clone, Debug)]
+pub struct BackoffGate {
+    base_window_secs: i64,
+    multiplier: i64,
+    max_window_secs: i64,
+    /// Per key: `(last_admit_secs, current_window_secs)`.
+    state: std::collections::HashMap<String, (i64, i64)>,
+}
+
+impl BackoffGate {
+    /// A gate with a `base_window_secs` initial suppression window that grows
+    /// `× multiplier` per admitted occurrence, hard-capped at `max_window_secs`.
+    pub fn new(base_window_secs: i64, multiplier: i64, max_window_secs: i64) -> Self {
+        Self {
+            base_window_secs,
+            multiplier,
+            max_window_secs,
+            state: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Decide WITHOUT recording — the act path uses this so it can commit only
+    /// after a successful launch/emit (a failed launch must not consume the
+    /// dedup slot). An unseen key, an elapsed window, or a backwards clock jump
+    /// all admit; only a re-occurrence strictly INSIDE the current window is
+    /// suppressed.
+    pub fn peek(&self, key: &str, now_secs: i64) -> BackoffDecision {
+        match self.state.get(key) {
+            None => BackoffDecision::Admit,
+            Some(&(last_admit, window)) => {
+                let elapsed = now_secs - last_admit;
+                // Clock regression ⇒ fail toward surfacing (never suppress on a
+                // clock we cannot trust).
+                if elapsed < 0 || elapsed >= window {
+                    BackoffDecision::Admit
+                } else {
+                    BackoffDecision::Suppress
+                }
+            }
+        }
+    }
+
+    /// Record an admitted occurrence of `key` at `now_secs`, arming (or growing)
+    /// its suppression window. The first occurrence arms the base window; each
+    /// subsequent one grows it `× multiplier` (saturating, capped), UNLESS the
+    /// silence since the last admit was `>= 2 × current_window`, in which case
+    /// the window resets to the base (so a real recurrence resurfaces promptly).
+    pub fn commit(&mut self, key: &str, now_secs: i64) {
+        let next_window = match self.state.get(key) {
+            None => self.base_window_secs,
+            Some(&(last_admit, window)) => {
+                let elapsed = now_secs - last_admit;
+                // A backwards clock or a long silence (>= 2× the current window)
+                // resets to the base window rather than growing it.
+                if elapsed < 0 || elapsed >= window.saturating_mul(2) {
+                    self.base_window_secs
+                } else {
+                    window
+                        .saturating_mul(self.multiplier)
+                        .min(self.max_window_secs)
+                }
+            }
+        };
+        self.state.insert(key.to_string(), (now_secs, next_window));
+    }
+
+    /// Decide and, on `Admit`, record the occurrence in one call. Used by unit
+    /// tests; the production act path peeks then commits on success.
+    pub fn admit(&mut self, key: &str, now_secs: i64) -> BackoffDecision {
+        let decision = self.peek(key, now_secs);
+        if decision == BackoffDecision::Admit {
+            self.commit(key, now_secs);
         }
         decision
     }

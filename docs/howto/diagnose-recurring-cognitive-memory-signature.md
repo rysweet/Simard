@@ -14,9 +14,12 @@ related:
   - ../reference/overseer-self-observation-stability.md
   - ../reference/overseer-memory-recall-api.md
   - ../reference/overseer-workstream-gap-scan.md
+  - ../reference/overseer-backoff-gate-api.md
   - ../reference/no-progress-reinvestigation-api.md
   - ./reinvestigate-bare-blocked-goals.md
   - ./review-overseer-workstream-gaps.md
+  - ./configure-overseer-gap-scan-backoff.md
+  - ../concepts/gap-scan-backoff-dedup.md
   - ../design/overseer.md
 ---
 
@@ -93,6 +96,33 @@ covering launch or filed issue through the shared `gate()` — no notify-only
 dead-end, and no launch/issue spam. See
 [review the Overseer's workstream gaps](./review-overseer-workstream-gaps.md).
 
+### 4. Duplicate gap-cover work is backed off, not re-fired (#4186)
+
+Per-signature keying (D3) stops *distinct* gaps from sharing a slot, but it does
+not by itself stop the **same** still-open gap from being acted on again next
+tick. The gap-scan act path now runs an in-process exponential-backoff
+duplicate-suppression gate
+([BackoffGate reference](../reference/overseer-backoff-gate-api.md)):
+
+- **Exponential `BackoffGate`.** The first occurrence of a gap signature is
+  surfaced immediately; each later occurrence within the current window is
+  suppressed, and the window **doubles** each admit (900s → 1800s → 1h → …
+  capped at 24h), resetting after a long silence. So a persistent gap is covered
+  **once** and then rate-limited, not re-filed every tick — this is what ends the
+  seven duplicate *"Cover uncovered backlog workstream(s)"* issues
+  ([#4190](https://github.com/rysweet/Simard/issues/4190) …
+  [#4206](https://github.com/rysweet/Simard/issues/4206)). A cross-process
+  open-issue equivalence check (for the cold-start/restart case) is planned as
+  future work, not part of this change.
+
+The dedup **key is signature-stable**, so *"seen 3×"* and *"seen 4×"* collapse to
+one key: the honest recurrence count (above) is preserved, only the *duplicate
+action* is suppressed. Confirm the healthy steady state via the tick's held-plan
+reason — a covered gap is held with *"an equivalent coverage was launched
+recently (backoff window)"*, **not** a new issue. See
+[configure gap-scan backoff](./configure-overseer-gap-scan-backoff.md) to tune
+the window.
+
 ## If a bare-blocked goal is genuinely done but still parked
 
 1. Confirm the daemon is on a post-#4128 binary.
@@ -104,7 +134,10 @@ dead-end, and no launch/issue spam. See
 ## What you should *not* do
 
 - **Do not** "fix" the 2× by widening the dedup window — that suppresses an honest
-  signal instead of removing its cause.
+  signal instead of removing its cause. (This is distinct from the #4186 gap-cover
+  `BackoffGate`, which suppresses duplicate *actions* on an already-covered gap
+  while leaving the honest recurrence count intact — see
+  [gap-scan dedup & backoff](../concepts/gap-scan-backoff-dedup.md).)
 - **Do not** re-implement the kgpacks-rs int8-PQ-embed work to "unblock" #17 — the
   work is already merged; the defect is the *safeguard that mis-read done as
   stuck*, which #4128 fixes.

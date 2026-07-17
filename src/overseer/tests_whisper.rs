@@ -44,7 +44,7 @@ use crate::overseer::config::{
     SIMARD_OVERSEER_WHISPER_ENV, overseer_author_login, whisper_enabled_from,
 };
 use crate::overseer::guardrails::{
-    AutonomyGate, RiskClass, WhisperDecision, WhisperGate, classify,
+    AutonomyGate, BackoffDecision, BackoffGate, RiskClass, WhisperDecision, WhisperGate, classify,
 };
 use crate::overseer::intervention::Intervention;
 use crate::overseer::notify::{
@@ -913,5 +913,238 @@ fn a_whisper_is_advisory_and_never_becomes_a_goal() {
     assert!(
         board.backlog.is_empty(),
         "no backlog item created from a whisper"
+    );
+}
+
+// ═══════════════════ BackoffGate: exponential dedup + backoff ════════════════
+//
+// TDD (RED) contract for the new `guardrails::{BackoffGate, BackoffDecision}`
+// primitive (Problem 1 / issue #4186; meta bugs #4255, #4126). It closes the
+// duplicate-issue hole where the Overseer re-emits an identical
+// recurring-signature signal and re-launches an identical
+// `WorkstreamCoverage` recipe every tick — spawning duplicate backlog issues
+// (#4186/#4190/#4191/#4198/#4201/#4203/#4206) and duplicate recurring-signature
+// issues (#4108/#4124).
+//
+// The gate is a per-key, exponential-backoff suppressor on an INJECTED
+// `now_secs` clock (daemon uses wall-clock; tests drive a virtual clock).
+// Contract:
+//   * `new(base_window_secs, multiplier, max_window_secs)`.
+//   * `peek(key, now) -> BackoffDecision` decides WITHOUT recording (the act
+//     path peeks, then commits only on a successful launch/emit).
+//   * `commit(key, now)` records an admitted occurrence and GROWS that key's
+//     suppression window `× multiplier` (saturating, hard-capped at
+//     `max_window_secs`); after a silence `>= 2 × current_window` the window
+//     RESETS to `base_window_secs` (so a genuinely-recurring gap is never
+//     permanently silenced).
+//   * `admit(key, now)` = peek-then-commit-on-Admit, used by unit tests.
+//   * Suppression can only ever REDUCE actions; on any ambiguity (clock
+//     regression / overflow) it FAILS TOWARD SURFACING (Admit), never silence.
+
+#[test]
+fn backoff_suppresses_an_identical_key_within_the_current_window() {
+    // 900s base window, ×2 growth, 24h cap.
+    let mut gate = BackoffGate::new(900, 2, 86_400);
+
+    // First occurrence of a key is always admitted (never seen before).
+    assert_eq!(gate.admit("sig-a", 0), BackoffDecision::Admit);
+
+    // Re-occurrences inside the 900s window are suppressed as duplicates.
+    assert_eq!(
+        gate.admit("sig-a", 300),
+        BackoffDecision::Suppress,
+        "same key 300s later is a duplicate within the 900s window"
+    );
+    assert_eq!(
+        gate.admit("sig-a", 899),
+        BackoffDecision::Suppress,
+        "still inside the 900s window at 899s"
+    );
+
+    // Once the window fully elapses the same key may surface again.
+    assert_eq!(
+        gate.admit("sig-a", 900),
+        BackoffDecision::Admit,
+        "at exactly the window boundary the key is admitted again"
+    );
+}
+
+#[test]
+fn backoff_peek_does_not_record_only_commit_does() {
+    // The act path peeks first and commits only after a successful launch, so a
+    // failed/aborted launch must NOT consume the dedup slot.
+    let mut gate = BackoffGate::new(900, 2, 86_400);
+
+    // Peeking never mutates state: an unseen key peeks Admit repeatedly.
+    assert_eq!(gate.peek("k", 0), BackoffDecision::Admit);
+    assert_eq!(
+        gate.peek("k", 10),
+        BackoffDecision::Admit,
+        "peek must not record — a second peek is still Admit"
+    );
+
+    // Only an explicit commit arms the window.
+    gate.commit("k", 10);
+    assert_eq!(
+        gate.peek("k", 200),
+        BackoffDecision::Suppress,
+        "after commit, a re-occurrence inside the window is suppressed"
+    );
+}
+
+#[test]
+fn backoff_window_grows_exponentially_per_admitted_occurrence() {
+    // Small numbers make the doubling obvious: 100 → 200 → 400 → 800 …
+    let mut gate = BackoffGate::new(100, 2, 10_000);
+
+    // Admit #1 at t=0 arms the base 100s window.
+    assert_eq!(gate.admit("k", 0), BackoffDecision::Admit);
+    assert_eq!(gate.admit("k", 99), BackoffDecision::Suppress);
+
+    // Admit #2 at t=100 grows the window to 200s.
+    assert_eq!(gate.admit("k", 100), BackoffDecision::Admit);
+    assert_eq!(
+        gate.admit("k", 299),
+        BackoffDecision::Suppress,
+        "the window doubled to 200s (suppressed until t=300)"
+    );
+
+    // Admit #3 at t=300 grows the window to 400s.
+    assert_eq!(gate.admit("k", 300), BackoffDecision::Admit);
+    assert_eq!(
+        gate.admit("k", 699),
+        BackoffDecision::Suppress,
+        "the window doubled again to 400s (suppressed until t=700)"
+    );
+
+    // Admit #4 at t=700 grows the window to 800s.
+    assert_eq!(gate.admit("k", 700), BackoffDecision::Admit);
+    assert_eq!(
+        gate.admit("k", 1499),
+        BackoffDecision::Suppress,
+        "the window doubled again to 800s (suppressed until t=1500)"
+    );
+}
+
+#[test]
+fn backoff_window_resets_to_base_after_a_long_silence() {
+    // A backoff that only ever grows would permanently silence a genuinely
+    // recurring gap. After a silence of >= 2 × current_window the window RESETS
+    // to base, so the signal surfaces promptly when it recurs later.
+    let mut gate = BackoffGate::new(100, 2, 10_000);
+
+    assert_eq!(gate.admit("k", 0), BackoffDecision::Admit); // window 100
+    assert_eq!(gate.admit("k", 100), BackoffDecision::Admit); // grows to 200
+    assert_eq!(gate.admit("k", 300), BackoffDecision::Admit); // grows to 400
+
+    // Now go quiet far longer than 2 × 400 = 800s. The next occurrence resets
+    // the window back to the 100s base.
+    let t = 300 + 5_000;
+    assert_eq!(
+        gate.admit("k", t),
+        BackoffDecision::Admit,
+        "after a long silence the key surfaces again"
+    );
+    assert_eq!(
+        gate.admit("k", t + 99),
+        BackoffDecision::Suppress,
+        "window reset to the 100s base (suppressed until +100)"
+    );
+    assert_eq!(
+        gate.admit("k", t + 100),
+        BackoffDecision::Admit,
+        "and re-admits at the base boundary — never permanently silenced"
+    );
+}
+
+#[test]
+fn backoff_keys_are_independent() {
+    // One noisy signature must never suppress an unrelated one.
+    let mut gate = BackoffGate::new(900, 2, 86_400);
+
+    assert_eq!(gate.admit("a", 0), BackoffDecision::Admit);
+    assert_eq!(
+        gate.admit("b", 0),
+        BackoffDecision::Admit,
+        "a distinct key is never a duplicate of another"
+    );
+
+    assert_eq!(gate.admit("a", 100), BackoffDecision::Suppress);
+    assert_eq!(
+        gate.admit("b", 100),
+        BackoffDecision::Suppress,
+        "each key tracks its own independent window"
+    );
+    // A brand-new key is still admitted while the others are suppressed.
+    assert_eq!(gate.admit("c", 100), BackoffDecision::Admit);
+}
+
+#[test]
+fn backoff_clock_regression_fails_toward_surfacing() {
+    // A non-monotonic injected clock (now < last admit) must be treated as
+    // "window elapsed" and ADMIT — the fail-safe direction is to surface a real
+    // signal, never to silence it.
+    let mut gate = BackoffGate::new(900, 2, 86_400);
+
+    assert_eq!(gate.admit("k", 1_000), BackoffDecision::Admit);
+    assert_eq!(
+        gate.admit("k", 500),
+        BackoffDecision::Admit,
+        "a backwards clock jump must admit (fail toward surfacing), never suppress"
+    );
+}
+
+#[test]
+fn backoff_window_saturates_at_cap_without_overflow() {
+    // A pathological multiplier must not panic: growth uses saturating math and
+    // is hard-capped at `max_window_secs`.
+    let mut gate = BackoffGate::new(1, i64::MAX, 5);
+
+    assert_eq!(gate.admit("k", 0), BackoffDecision::Admit); // window 1
+    // Growth would overflow i64; it must saturate and clamp to the 5s cap.
+    assert_eq!(gate.admit("k", 1), BackoffDecision::Admit);
+    assert_eq!(
+        gate.admit("k", 5),
+        BackoffDecision::Suppress,
+        "window clamped to the 5s cap (suppressed until +5), no overflow panic"
+    );
+    assert_eq!(
+        gate.admit("k", 6),
+        BackoffDecision::Admit,
+        "and re-admits once the capped window elapses"
+    );
+}
+
+#[test]
+fn backoff_never_permanently_silences_a_capped_key() {
+    // Even at the cap, the gate only suppresses WITHIN a window and always
+    // re-admits once it elapses — suppression is bounded, never terminal.
+    let mut gate = BackoffGate::new(1_000, 2, 3_000);
+
+    // Re-occur at each window boundary so the window GROWS (the silence is never
+    // >= 2× the window, so it never resets) until it SATURATES at the 3000s cap.
+    // Mirror the gate's own capped growth to know where each admit lands.
+    let mut t = 0i64;
+    let mut window = 1_000i64;
+    for _ in 0..5 {
+        assert_eq!(gate.admit("k", t), BackoffDecision::Admit);
+        t += window;
+        window = window.saturating_mul(2).min(3_000);
+    }
+    // The window is now saturated at the 3000s cap; the final admit above landed
+    // at `t - window` and armed a full 3000s suppression window.
+    let last_admit = t - window;
+    assert_eq!(window, 3_000, "the window saturated at the cap");
+    // Within the capped window a duplicate is still suppressed…
+    assert_eq!(
+        gate.admit("k", last_admit + 2_999),
+        BackoffDecision::Suppress,
+        "within the capped 3000s window a duplicate is suppressed"
+    );
+    // …and past the capped window it admits again — bounded suppression only.
+    assert_eq!(
+        gate.admit("k", last_admit + 3_000),
+        BackoffDecision::Admit,
+        "past the capped window the key is admitted again — never permanently silenced"
     );
 }
