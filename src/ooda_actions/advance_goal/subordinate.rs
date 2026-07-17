@@ -542,13 +542,11 @@ pub fn validate_subordinate_completion(
 }
 
 // ---------------------------------------------------------------------------
-// TDD tests (issue #4232) — Tombstoned-goal engineer reaper.
+// Tests (issue #4232) — Tombstoned-goal engineer reaper.
 //
 // These are written against the public contract in
-// `docs/reference/tombstoned-goal-engineer-reaper-api.md`. They MUST fail in
-// the red phase (the module ships a no-op placeholder for
-// `reap_engineers_for_tombstoned_goals`) and MUST pass once the real
-// reconciliation lands, WITHOUT further test edits.
+// `docs/reference/tombstoned-goal-engineer-reaper-api.md` and exercise the
+// shipped `reap_engineers_for_tombstoned_goals` reconciliation directly.
 //
 // Contract under test:
 //   pub fn reap_engineers_for_tombstoned_goals(
