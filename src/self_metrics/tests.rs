@@ -218,3 +218,72 @@ fn malformed_lines_skipped() {
         assert_eq!(entries.len(), 1);
     });
 }
+
+/// Regression: the metrics *writer* must honor `SIMARD_STATE_ROOT` so it agrees
+/// with the state-root-aware dashboard *reader*.
+///
+/// Before `metrics_dir()` routed through `crate::state_root::simard_state_root`,
+/// it hardcoded `$HOME/.simard/metrics`. That diverged from the dashboard, which
+/// reads `metrics/metrics.jsonl` under `simard_state_root()`. The practical
+/// symptoms were (1) operators who relocated their state root saw stale/empty
+/// cost & brain-failure tabs, and (2) hermetic tests (which set
+/// `SIMARD_STATE_ROOT` to a temp dir) leaked fixture metrics into the operator's
+/// real `~/.simard/metrics/metrics.jsonl`, permanently polluting the live
+/// dashboard's lifetime counters. This test pins the writer to the state root
+/// and asserts nothing leaks to `$HOME`.
+#[test]
+#[serial(cognitive_memory)]
+fn record_metric_follows_state_root_not_home() {
+    use crate::state_root::STATE_ROOT_ENV;
+
+    let base = env::current_dir()
+        .unwrap()
+        .join("target")
+        .join("test-metrics-state-root");
+    let _ = fs::remove_dir_all(&base);
+    let home_dir = base.join("home");
+    let state_root = base.join("relocated-state");
+    fs::create_dir_all(&home_dir).unwrap();
+    fs::create_dir_all(&state_root).unwrap();
+
+    let prev_home = env::var_os("HOME");
+    let prev_state_root = env::var_os(STATE_ROOT_ENV);
+    // SAFETY: keyed into the `cognitive_memory` serial group, so no other test
+    // reads/writes these env vars concurrently; both are restored below.
+    unsafe {
+        env::set_var("HOME", &home_dir);
+        env::set_var(STATE_ROOT_ENV, &state_root);
+    }
+
+    record_metric("brain_parse_failure", 1.0, "{\"goal_id\":\"regression\"}").unwrap();
+
+    // The metrics file lives under SIMARD_STATE_ROOT, not $HOME/.simard.
+    let written = metrics_file_path();
+    assert!(
+        written.starts_with(&state_root),
+        "metrics path {written:?} must be under SIMARD_STATE_ROOT {state_root:?}"
+    );
+    assert!(
+        written.exists(),
+        "metrics file must exist under the state root"
+    );
+    // Nothing must have leaked into $HOME/.simard/metrics.
+    let home_metrics = home_dir.join(".simard").join("metrics");
+    assert!(
+        !home_metrics.exists(),
+        "no metrics dir must be created under $HOME when SIMARD_STATE_ROOT is set (found {home_metrics:?})"
+    );
+
+    // Restore env before dropping the temp dirs.
+    unsafe {
+        match prev_home {
+            Some(v) => env::set_var("HOME", v),
+            None => env::remove_var("HOME"),
+        }
+        match prev_state_root {
+            Some(v) => env::set_var(STATE_ROOT_ENV, v),
+            None => env::remove_var(STATE_ROOT_ENV),
+        }
+    }
+    let _ = fs::remove_dir_all(&base);
+}

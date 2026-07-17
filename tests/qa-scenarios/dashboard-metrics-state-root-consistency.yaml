@@ -1,0 +1,39 @@
+# Canonical agentic-test schema (name + agents[] + steps[] with params).
+#
+# Mirrors tests/qa-scenarios/dashboard-brain-parse-consistency.yaml (a same-era
+# dashboard self-consistency fix): a single `cli` agent runs a hermetic
+# regression script; the runner treats the script's non-zero exit as a step
+# failure, so this is a real pass/fail gate.
+name: simard-dashboard-metrics-state-root-consistency
+description: >-
+  The self-improvement metrics writer resolves its directory through the shared
+  state-root ladder (SIMARD_STATE_ROOT then $HOME/.simard), so it agrees with
+  the state-root-aware dashboard reader. Before the fix metrics_dir() hardcoded
+  $HOME/.simard/metrics: relocated operators saw stale/empty costs and
+  brain-failure tabs, and hermetic tests leaked fixture metrics into the real
+  metrics.jsonl, polluting the live dashboard's lifetime counters.
+version: "1.0"
+config:
+  timeout: 300000
+environment:
+  requires: []
+agents:
+  - name: cli-agent
+    type: cli
+    config: {}
+metadata:
+  tags:
+    - cli
+    - dashboard
+    - metrics
+    - state-root
+  priority: high
+steps:
+  - name: Run the metrics writer state-root consistency regression script
+    agent: cli-agent
+    action: run
+    params:
+      command: bash
+      args:
+        - scripts/qa-metrics-state-root-consistency.sh
+    timeout: 300000

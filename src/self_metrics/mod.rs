@@ -1,7 +1,9 @@
 //! Self-improvement metrics collection and reporting.
 //!
 //! Tracks bugs fixed, PRs merged, test count, and cycle duration over time.
-//! Metrics are stored as newline-delimited JSON in `~/.simard/metrics/metrics.jsonl`.
+//! Metrics are stored as newline-delimited JSON in `<state_root>/metrics/metrics.jsonl`,
+//! where `<state_root>` follows [`crate::state_root::simard_state_root`]
+//! (`SIMARD_STATE_ROOT` when set, else `$HOME/.simard`).
 
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -20,12 +22,30 @@ pub struct MetricEntry {
     pub context: String,
 }
 
-/// Return the directory where metrics are stored: `~/.simard/metrics/`.
+/// Return the directory where metrics are stored: `<state_root>/metrics/`.
+///
+/// Routes through [`crate::state_root::simard_state_root`] so the metrics
+/// *writer* honors the same precedence ladder (`SIMARD_STATE_ROOT` →
+/// `$HOME/.simard`) as every other state-root-aware caller, including the
+/// dashboard *reader* (`/api/brain-failures`, `/api/costs`, `/api/metrics`),
+/// which resolves `metrics/metrics.jsonl` under `simard_state_root()`.
+///
+/// Before this routed through the shared resolver it hardcoded
+/// `$HOME/.simard/metrics`, which diverged from the reader in two ways
+/// (issue: metrics writer ignored `SIMARD_STATE_ROOT`):
+///   1. Operators who relocated their state root via `SIMARD_STATE_ROOT` had
+///      metrics written to `$HOME/.simard/metrics` while the dashboard read
+///      from `$SIMARD_STATE_ROOT/metrics` — so costs / brain-failures /
+///      metrics tabs showed stale or empty data.
+///   2. Hermetic tests (which set `SIMARD_STATE_ROOT` to a temp dir) still
+///      appended fixture metrics to the operator's real
+///      `~/.simard/metrics/metrics.jsonl`, permanently polluting the live
+///      dashboard's lifetime counters with unit-test noise.
+///
+/// Production behavior is unchanged when `SIMARD_STATE_ROOT` is unset, since
+/// `simard_state_root()` then resolves to `$HOME/.simard`.
 fn metrics_dir() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/usr/local"));
-    home.join(".simard").join("metrics")
+    crate::state_root::simard_state_root().join("metrics")
 }
 
 /// Return the path to the metrics JSONL file.
