@@ -42,7 +42,10 @@ mod tests_orchestrator;
 use std::path::PathBuf;
 use std::time::Duration;
 
-pub use drain::{DrainOutcome, drain_to_quiescence, mark_draining, unmark_draining};
+pub use drain::{
+    DrainOutcome, EngineerRequeue, InFlightEngineer, drain_by_requeue, drain_to_quiescence,
+    mark_draining, unmark_draining,
+};
 pub use errors::SafeUpdateError;
 pub use pretest::{PretestOutcome, run_pretest};
 pub use rollback::{RollbackOutcome, do_rollback};
@@ -68,8 +71,10 @@ pub struct UpdateConfig {
     /// Minimum minutes since the last update attempt (success *or* failure)
     /// before another attempt is allowed.
     pub min_minutes_since_last_attempt: u32,
-    /// Maximum seconds to wait for in-flight engineer dispatches to drain
-    /// before failing the orchestration with `DrainTimeout`.
+    /// Best-effort grace window (seconds) allowing in-flight engineer
+    /// dispatches to finish *naturally* before the update proceeds. The drain
+    /// never fails or kills an engineer when this elapses — the self-deploy
+    /// path checkpoints and requeues any still-in-flight goals instead.
     pub drain_timeout_seconds: u64,
     /// Maximum seconds to allow the new binary's `self-test` to run.
     pub pretest_timeout_seconds: u64,

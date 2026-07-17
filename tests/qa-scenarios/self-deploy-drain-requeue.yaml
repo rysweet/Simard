@@ -1,0 +1,61 @@
+name: self-deploy-drain-requeue
+app_type: cli
+description: |
+  Validates the redesigned self-deploy drain (fix: self-deploy so Simard can
+  deploy her latest merged code even while busy running engineers):
+  - The drain NEVER fails on a wall-clock timeout with engineers in flight.
+  - The drain NEVER kills a producing engineer (worktree left intact).
+  - drain_by_requeue marks draining and requeues every in-flight engineer's
+    goal onto the board, and never aborts when a single requeue fails.
+  - The production requeue releases the worktree claim sentinel so a restarted
+    binary re-picks-up the goal, without touching the rest of the worktree.
+agents:
+  - name: cargo-test-runner
+    type: cli
+    command: cargo
+
+steps:
+  # Drain never fails / never kills when an engineer is still in flight.
+  - action: run
+    command: "cargo test --lib -- --exact safe_update::drain::tests::drain_never_fails_with_a_fake_engineer_still_in_flight"
+    timeout: 240s
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
+
+  # drain_by_requeue marks draining and requeues all in-flight engineers.
+  - action: run
+    command: "cargo test --lib -- --exact safe_update::drain::tests::drain_by_requeue_marks_draining_and_requeues_all"
+    timeout: 240s
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
+
+  # A single requeue failure never aborts the deploy.
+  - action: run
+    command: "cargo test --lib -- --exact safe_update::drain::tests::drain_by_requeue_never_aborts_when_a_requeue_fails"
+    timeout: 240s
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
+
+  # Production requeue releases the claim sentinel without touching the worktree.
+  - action: run
+    command: "cargo test --lib -- --exact self_deploy::requeue::tests::requeue_releases_the_claim_sentinel_without_touching_the_worktree"
+    timeout: 240s
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
+
+  # Grace-only drain (download rail) also never fails and keeps the flag set.
+  - action: run
+    command: "cargo test --lib -- --exact safe_update::tests_orchestrator::drain_grace_never_fails_and_keeps_flag_in_place"
+    timeout: 240s
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"

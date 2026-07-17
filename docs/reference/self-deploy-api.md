@@ -192,6 +192,42 @@ Matching is conservative: **both** the executable-path equality and the
 `engineer run` argv token are required, so unrelated `simard` invocations and
 the incoming daemon are never killed.
 
+In the self-deploy path the reaper additionally **spares every live engineer**:
+because the swap is `rename(2)`-based (safe against a running executable), a
+producing engineer never has to be killed to free the old inode. The
+orchestrator reaps only stale entries whose process is already gone; live
+producers were already checkpointed and requeued by the drain (see below).
+
+## Drain: checkpoint + requeue (never kill, never timeout)
+
+```rust
+/// One engineer observed in flight at drain time.
+pub struct InFlightEngineer { pub goal_id: String, pub worktree: PathBuf, pub pid: Option<i32> }
+
+/// Effect the drain uses to checkpoint + requeue in-flight engineers.
+/// Implementations MUST NOT kill or signal any process.
+pub trait EngineerRequeue {
+    fn in_flight(&self) -> Vec<InFlightEngineer>;
+    fn requeue(&self, engineer: &InFlightEngineer) -> Result<(), SafeUpdateError>;
+}
+
+/// Mark draining, then checkpoint + requeue every in-flight engineer's goal.
+/// Never waits on a wall-clock timeout, never fails because engineers remain,
+/// never kills a producing engineer.
+pub fn drain_by_requeue<R: EngineerRequeue>(
+    state_dir: &Path,
+    requeue: &R,
+) -> Result<DrainOutcome, SafeUpdateError>;
+```
+
+The production `EngineerRequeue` (`self_deploy::ProdEngineerRequeue`) enumerates
+the live engineer set from the worktree claim sentinels
+(`engineer_worktree::live_claimed_engineers`) and requeues each goal by
+**releasing its claim sentinel** (`.simard-engineer-claim`) — the goal record and
+the engineer's `SessionCheckpoint` already persist, so releasing the claim makes
+the goal re-pickable by a restarted binary. `DrainTimeout` is retained in
+`SafeUpdateError` for backward compatibility but is **no longer produced**.
+
 ## `SelfDeployOrchestrator`
 
 ```rust

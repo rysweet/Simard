@@ -2,9 +2,10 @@
 //! merged self-change into a verified-running daemon, or rolls back.
 //!
 //! Order (load-bearing): build candidate from merged source → run gates +
-//! candidate self-test → dual protective backup → drain → orphan-reap →
-//! atomic swap → restart via [`DaemonRestarter`] → post-deploy health check →
-//! rollback on a failed health check. Idempotent and loud.
+//! candidate self-test → dual protective backup → drain (checkpoint + requeue
+//! in-flight engineers; never kill, never timeout-abort) → reap only stale
+//! orphans → atomic swap → restart via [`DaemonRestarter`] → post-deploy health
+//! check → rollback on a failed health check. Idempotent and loud.
 //!
 //! Extends — does not replace — the existing `safe_update` and `self_relaunch`
 //! modules. See `docs/concepts/reconcile-and-self-deploy.md` and
@@ -311,32 +312,47 @@ impl DeployEffects for ProdDeployEffects<'_> {
     }
 
     fn drain(&self) -> Result<(), SafeUpdateError> {
-        match &self.config.engineer_worktrees_root {
-            Some(root) => crate::safe_update::drain::drain_to_quiescence_with_root(
-                &self.config.state_dir,
-                self.config.drain_timeout_seconds,
-                root,
-            )
-            .map(|_| ()),
-            None => crate::safe_update::drain_to_quiescence(
-                &self.config.state_dir,
-                self.config.drain_timeout_seconds,
-            )
-            .map(|_| ()),
-        }
+        // Never kill a producing engineer and never fail the deploy on a
+        // wall-clock timeout: mark draining (so no NEW engineers start), then
+        // checkpoint + requeue every in-flight engineer's goal onto the board.
+        // Their goal state persists, so the restarted binary re-picks them up.
+        // The engineer-worktrees root lives directly under the resolved state
+        // root; the config override (tests) supplies its parent.
+        let state_root = match &self.config.engineer_worktrees_root {
+            Some(root) => root
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| root.clone()),
+            None => crate::state_root::simard_state_root(),
+        };
+        let requeue = super::requeue::ProdEngineerRequeue::new(state_root);
+        crate::safe_update::drain::drain_by_requeue(&self.config.state_dir, &requeue).map(|_| ())
     }
 
     fn reap_orphans(&self) -> Result<usize, SafeUpdateError> {
+        // Self-deploy uses rename-based atomic swap, which is safe against a
+        // running executable, so we NEVER have to kill a producing engineer to
+        // free the old inode. Spare every LIVE engineer subprocess (the drain
+        // already checkpointed + requeued their goals); reap only genuinely
+        // stale entries whose process is already gone.
         let self_pid = std::process::id() as i32;
         let orphans = super::orphan::find_engineer_orphans(self.install_path, self_pid, None)
             .map_err(|e| SafeUpdateError::SwapFailed {
                 reason: format!("orphan scan failed: {e}"),
             })?;
-        match super::orphan::reap_engineer_orphans(&orphans, self.config.orphan_kill_grace_seconds)
-        {
+        let (live, stale): (Vec<_>, Vec<_>) = orphans
+            .into_iter()
+            .partition(|o| crate::engineer_worktree::is_pid_alive_public(o.pid));
+        for o in &live {
+            tracing::info!(
+                pid = o.pid,
+                "[self-deploy] sparing live producing engineer (never killed; goal already requeued)"
+            );
+        }
+        match super::orphan::reap_engineer_orphans(&stale, self.config.orphan_kill_grace_seconds) {
             Ok(n) => Ok(n),
             Err(_) => Err(SafeUpdateError::OrphanReapTimeout {
-                pid: orphans.first().map(|o| o.pid).unwrap_or(0),
+                pid: stale.first().map(|o| o.pid).unwrap_or(0),
             }),
         }
     }

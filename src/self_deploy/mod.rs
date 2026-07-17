@@ -26,6 +26,7 @@ pub mod drift;
 pub mod health;
 pub mod orchestrator;
 pub mod orphan;
+pub mod requeue;
 pub mod restart;
 pub mod source_prep;
 
@@ -41,6 +42,7 @@ pub use orchestrator::{DeploySourceKind, SelfDeployOrchestrator, SelfDeployOutco
 pub use orphan::{
     OrphanEngineer, find_engineer_orphans, match_engineer_orphan, reap_engineer_orphans,
 };
+pub use requeue::ProdEngineerRequeue;
 pub use restart::{DaemonRestarter, FakeRestarter, SystemdOrExecRestarter};
 pub use source_prep::{
     GitSourcePreparer, SelfDeploySourcePreparer, self_deploy_src_dir, self_deploy_target_dir,
