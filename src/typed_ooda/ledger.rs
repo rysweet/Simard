@@ -987,6 +987,32 @@ impl CapabilityHandler {
             .transpose()
     }
 
+    /// Session-scoped terminal read-back (issue #4197): return the MOST RECENT
+    /// terminal (highest rowid) recorded under `session_id`, regardless of which
+    /// `cycle_id` recorded it, or `None` when the session has no terminal. With a
+    /// stable per-goal `session_id`, this lets a later OODA tick recognise that a
+    /// goal-session already reached a terminal state (and is therefore `done`)
+    /// instead of perpetually re-surfacing it as blocked. Fails CLOSED on an
+    /// invalid `session_id`.
+    pub fn terminal_for_session(
+        &self,
+        session_id: &str,
+    ) -> CapabilityResult<Option<TerminalOutcome>> {
+        validate_identifier("session id", session_id)?;
+        let connection = self.lock()?;
+        let json: Option<Vec<u8>> = connection
+            .query_row(
+                "SELECT outcome_json FROM terminal_outcomes WHERE session_id=?1 \
+                 ORDER BY rowid DESC LIMIT 1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(persistence)?;
+        json.map(|value| serde_json::from_slice(&value).map_err(serialization))
+            .transpose()
+    }
+
     pub fn list_terminals(&self, limit: usize) -> CapabilityResult<Vec<TerminalOutcome>> {
         if limit == 0 || limit > 10_000 {
             return Err(CapabilityError::new(
@@ -3050,6 +3076,160 @@ mod engineer_claim_lease_tests {
             handler.list_engineer_claims().expect("list after release"),
             vec![claim_key_for("g2")],
             "released claim must be gone; the untouched claim remains"
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TDD (issue #4197): SESSION-SCOPED terminal read-back.
+//
+// With a stable per-goal `session_id` (see `derive_session_id`), the ledger
+// needs a session-scoped read path so a later tick can recognise that a
+// goal-session already reached a terminal state (and is therefore `done`),
+// without knowing which specific `cycle_id` recorded it.
+//
+// Fix contract (additive; existing `terminal_for_cycle` / `terminal_for_request`
+// are unchanged):
+//
+//   CapabilityHandler::terminal_for_session(&self, session_id: &str)
+//       -> CapabilityResult<Option<TerminalOutcome>>
+//
+//   * Returns `Some(outcome)` if ANY terminal exists for `session_id`, choosing
+//     the MOST RECENT one (highest rowid) when several cycles recorded terminals
+//     under the same session.
+//   * Returns `None` when no terminal exists for the session.
+//   * Rejects an invalid `session_id` via `validate_identifier` (fail-closed).
+//
+// These tests are written FIRST and MUST FAIL until `terminal_for_session`
+// exists.
+#[cfg(test)]
+mod terminal_for_session_tests {
+    use super::*;
+
+    const REPO_OWNER: &str = "rysweet";
+    const REPO_NAME: &str = "Simard";
+    const POLICY_REVISION: &str = "policy-v1";
+
+    fn open_handler(dir: &std::path::Path) -> CapabilityHandler {
+        CapabilityHandler::open(
+            dir.join("outcomes.sqlite3"),
+            CapabilityPolicy::new(POLICY_REVISION),
+        )
+        .expect("open capability handler")
+    }
+
+    fn admission() -> AdmissionSnapshot {
+        AdmissionSnapshot {
+            concurrent_engineers: 0,
+            disk_used_percent: 1,
+            active_claims: BTreeSet::new(),
+            policy_revision: POLICY_REVISION.to_string(),
+        }
+    }
+
+    /// Record one `SpawnEngineer` terminal outcome under an explicit
+    /// (session, cycle, request) triple. Mirrors the production goal-session
+    /// path: a stable `session_id` with a per-cycle `cycle_id`.
+    fn record_terminal(
+        handler: &CapabilityHandler,
+        session_id: &str,
+        cycle_id: &str,
+        request_id: &str,
+        goal_id: &str,
+    ) -> TerminalOutcome {
+        let claim_key = format!("{REPO_OWNER}/{REPO_NAME}:{goal_id}");
+        let actor = AuthenticatedToolContext::new(
+            "goal-session-actor",
+            session_id,
+            [CapabilityGrant::RecordAction(ActionKind::SpawnEngineer)],
+        )
+        .scoped_to_repository(RepositoryRef::new(REPO_OWNER, REPO_NAME))
+        .bound_to_cycle_goal(cycle_id, goal_id)
+        .with_engineer_permissions(["repo_read"]);
+        let request = RecordActionRequest {
+            identity: TerminalRequestIdentity::new(request_id, session_id, cycle_id, goal_id),
+            action: Action::SpawnEngineer(SpawnEngineerAction {
+                task: OpaqueBytes::from(b"advance the goal".to_vec()),
+                repository: RepositoryRef::new(REPO_OWNER, REPO_NAME),
+                base_type: BaseType::Copilot,
+                requested_permissions: ["repo_read".to_string()].into_iter().collect(),
+                claim_key: claim_key.clone(),
+            }),
+            raw_semantic: OpaqueBytes::from(b"spawn engineer".to_vec()),
+            evidence: Vec::new(),
+        };
+        let outcome = handler
+            .record_action(&actor, request, &admission())
+            .expect("record_action must record a terminal");
+        // Release the per-goal engineer claim so the NEXT tick can spawn again —
+        // mirrors the real cross-tick lifecycle, where the prior engineer's claim
+        // is released before the goal is re-advanced under the same session id.
+        handler
+            .release_engineer_claim(&claim_key)
+            .expect("release engineer claim between ticks");
+        outcome
+    }
+
+    /// CORE REGRESSION for #4197: a terminal recorded under a stable session id
+    /// is readable back by session, so a later tick can see the goal is done.
+    #[test]
+    fn terminal_for_session_reads_back_recorded_terminal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handler = open_handler(dir.path());
+        let session = "ooda-goal-alpha";
+
+        record_terminal(&handler, session, "cycle-0", "request-0", "goal-alpha");
+
+        let found = handler
+            .terminal_for_session(session)
+            .expect("terminal_for_session query must succeed");
+        let outcome = found.expect("a terminal recorded under this session must read back");
+        assert_eq!(outcome.session_id, session);
+    }
+
+    /// A session with no recorded terminal reads back as `None` (still blocked).
+    #[test]
+    fn terminal_for_session_returns_none_when_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handler = open_handler(dir.path());
+
+        let found = handler
+            .terminal_for_session("ooda-never-recorded")
+            .expect("query must succeed");
+        assert!(found.is_none(), "no terminal recorded -> None");
+    }
+
+    /// CROSS-TICK: terminals from multiple cycles share one stable session id;
+    /// the session-scoped read returns the MOST RECENT terminal.
+    #[test]
+    fn terminal_for_session_returns_latest_across_cycles() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handler = open_handler(dir.path());
+        let session = "ooda-goal-beta";
+
+        record_terminal(&handler, session, "cycle-0", "request-0", "goal-beta");
+        record_terminal(&handler, session, "cycle-1", "request-1", "goal-beta");
+
+        let outcome = handler
+            .terminal_for_session(session)
+            .expect("query must succeed")
+            .expect("session has terminals");
+        assert_eq!(outcome.session_id, session);
+        assert_eq!(
+            outcome.cycle_id, "cycle-1",
+            "session-scoped read must return the most recent cycle's terminal"
+        );
+    }
+
+    /// Fail-closed on a malformed session id.
+    #[test]
+    fn terminal_for_session_rejects_invalid_identifier() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handler = open_handler(dir.path());
+
+        assert!(
+            handler.terminal_for_session("bad id!").is_err(),
+            "an invalid session identifier must be rejected"
         );
     }
 }

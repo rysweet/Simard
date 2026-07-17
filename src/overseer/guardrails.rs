@@ -278,8 +278,10 @@ pub enum WhisperDecision {
 /// (`now_secs`) so the daemon uses wall-clock while tests drive a virtual clock:
 ///
 /// 1. **Dedup window** — the same whisper signature is suppressed while it is
-///    within `window_secs` of its last delivery, so a persistent condition is
-///    not re-injected every cycle.
+///    within its active window of its last delivery, so a persistent condition
+///    is not re-injected every cycle. Under [`with_backoff`](WhisperGate::with_backoff)
+///    this window grows exponentially per re-delivery (capped); the fixed-window
+///    [`new`](WhisperGate::new) keeps it constant.
 /// 2. **Per-hour cap** — at most `cap_per_hour` whispers are delivered within any
 ///    rolling hour, so a noisy Overseer cannot flood Simard's inbox.
 ///
@@ -289,29 +291,74 @@ pub enum WhisperDecision {
 /// delivery so a failed/panicking sink does not consume the dedup slot.
 #[derive(Clone, Debug)]
 pub struct WhisperGate {
-    window_secs: i64,
+    /// First (strike-1) suppression window. Also the constant window in the
+    /// fixed-window `new(..)` mode (where `base_secs == cap_secs`).
+    base_secs: i64,
+    /// Upper bound the per-signature window may grow to under backoff. Equal to
+    /// `base_secs` in fixed-window mode, so the window never grows there.
+    cap_secs: i64,
     cap_per_hour: usize,
     last_delivered: std::collections::HashMap<String, i64>,
+    /// Per-signature delivery (strike) count. Drives the exponential backoff
+    /// window; only committed deliveries advance it.
+    strikes: std::collections::HashMap<String, u32>,
     deliveries: Vec<i64>,
 }
 
 impl WhisperGate {
-    /// A gate with a `window_secs` dedup window and a `cap_per_hour` rolling-hour
-    /// delivery cap.
+    /// A gate with a fixed `window_secs` dedup window and a `cap_per_hour`
+    /// rolling-hour delivery cap. Equivalent to a degenerate backoff whose
+    /// window never grows (`base == cap`), preserving the original semantics.
     pub fn new(window_secs: i64, cap_per_hour: usize) -> Self {
+        Self::with_backoff(window_secs, window_secs, cap_per_hour)
+    }
+
+    /// A gate whose per-signature suppression window grows EXPONENTIALLY on each
+    /// re-delivery of the SAME signature: the first window is `base_secs`, then
+    /// doubles per re-delivery, capped at `cap_secs`. The `cap_per_hour`
+    /// rolling-hour delivery cap applies exactly as in [`new`](WhisperGate::new).
+    ///
+    /// Because the blocked-goal signature is per goal id (`escalate:{goal_id}` /
+    /// `unblock:{goal_id}`), a change in the blocked-goal SET surfaces as a NEW
+    /// signature that fires immediately (strike 0) — the "re-fires on state
+    /// change" contract — while a persistently-blocked goal is escalated once
+    /// and then suppressed for a widening cooldown instead of every tick.
+    pub fn with_backoff(base_secs: i64, cap_secs: i64, cap_per_hour: usize) -> Self {
         Self {
-            window_secs,
+            base_secs,
+            cap_secs: cap_secs.max(base_secs),
             cap_per_hour,
             last_delivered: std::collections::HashMap::new(),
+            strikes: std::collections::HashMap::new(),
             deliveries: Vec::new(),
         }
+    }
+
+    /// The active suppression window for `signature`, given how many times it has
+    /// already been delivered: `min(base * 2^(strikes - 1), cap)`. A signature
+    /// with no prior delivery uses the base window. Saturates instead of
+    /// overflowing for very large strike counts.
+    fn window_for(&self, signature: &str) -> i64 {
+        let strikes = self.strikes.get(signature).copied().unwrap_or(0);
+        if strikes <= 1 {
+            return self.base_secs;
+        }
+        let exp = strikes - 1;
+        let grown = if exp >= 62 {
+            self.cap_secs
+        } else {
+            self.base_secs
+                .checked_mul(1i64 << exp)
+                .unwrap_or(self.cap_secs)
+        };
+        grown.min(self.cap_secs)
     }
 
     /// Decide WITHOUT recording — the act path uses this so it can commit only
     /// after a successful delivery.
     pub fn peek(&self, signature: &str, now_secs: i64) -> WhisperDecision {
         if let Some(&last) = self.last_delivered.get(signature)
-            && now_secs - last < self.window_secs
+            && now_secs - last < self.window_for(signature)
         {
             return WhisperDecision::SuppressDuplicate;
         }
@@ -323,10 +370,12 @@ impl WhisperGate {
         WhisperDecision::Deliver
     }
 
-    /// Record a successful delivery of `signature` at `now_secs` (updates the
-    /// dedup window and the rolling-hour budget, pruning stale entries).
+    /// Record a successful delivery of `signature` at `now_secs` (advances the
+    /// per-signature strike/backoff window and the rolling-hour budget, pruning
+    /// stale entries).
     pub fn commit(&mut self, signature: &str, now_secs: i64) {
         self.last_delivered.insert(signature.to_string(), now_secs);
+        *self.strikes.entry(signature.to_string()).or_insert(0) += 1;
         self.deliveries.push(now_secs);
         let hour_ago = now_secs - 3600;
         self.deliveries.retain(|&t| t > hour_ago);
@@ -486,5 +535,163 @@ mod tests {
             .is_err(),
             "merge opt-in must not leak into HIGH-RISK deploy authority"
         );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TDD (issue #4255): per-signature EXPONENTIAL BACKOFF for the blocked-goal
+// escalation path.
+//
+// These tests are written FIRST and MUST FAIL until `WhisperGate` grows an
+// additive `with_backoff` constructor. They pin the contract:
+//
+//   WhisperGate::with_backoff(base_secs: i64, cap_secs: i64, cap_per_hour: usize)
+//
+// Semantics (additive; the existing fixed-window `new(..)` is unchanged):
+//   * The suppression window for a signature GROWS each time that *same*
+//     signature is DELIVERED (committed). With `strikes` = number of prior
+//     deliveries of the signature, the active window is
+//         window = min(base_secs * 2^(strikes - 1), cap_secs)
+//     i.e. first window == `base_secs`, then doubles per re-delivery, capped.
+//   * Only DELIVERED (committed) whispers advance the strike count — a
+//     suppressed peek never grows the window (mirrors the act path, which
+//     commits only after a successful dispatch).
+//   * Backoff is PER SIGNATURE: distinct signatures have independent strike
+//     counts and windows. Because the blocked-goal signature is per goal id
+//     (`escalate:{goal_id}` / `unblock:{goal_id}`), a change in the blocked-goal
+//     SET surfaces as a *new* signature that fires immediately (strike 0) — this
+//     is the "re-fires on state change" requirement.
+//   * The rolling-hour delivery cap (`cap_per_hour`) still applies exactly as in
+//     `new(..)`.
+#[cfg(test)]
+mod whisper_backoff_tests {
+    use super::*;
+
+    const BASE: i64 = 100;
+    const CAP: i64 = 1000;
+
+    /// A single blocked-goal cluster that stays blocked escalates ONCE, is then
+    /// suppressed within the (growing) window, and re-fires only after the
+    /// cooldown elapses — with the window DOUBLING on each re-delivery.
+    #[test]
+    fn same_signature_backoff_grows_exponentially_until_capped() {
+        let mut gate = WhisperGate::with_backoff(BASE, CAP, 1000);
+        let sig = "escalate:goal-alpha";
+
+        // Strike 1: first escalation delivers; window becomes `BASE` (=100).
+        assert_eq!(gate.admit(sig, 0), WhisperDecision::Deliver);
+        assert_eq!(gate.peek(sig, 50), WhisperDecision::SuppressDuplicate);
+        assert_eq!(gate.peek(sig, 99), WhisperDecision::SuppressDuplicate);
+
+        // Strike 2: window (100) elapsed -> re-fire; next window doubles to 200.
+        assert_eq!(gate.admit(sig, 100), WhisperDecision::Deliver);
+        assert_eq!(
+            gate.peek(sig, 299),
+            WhisperDecision::SuppressDuplicate,
+            "199s after the 2nd delivery is still inside the 200s window"
+        );
+
+        // Strike 3: window (200) elapsed -> re-fire; next window doubles to 400.
+        assert_eq!(gate.admit(sig, 300), WhisperDecision::Deliver);
+        assert_eq!(gate.peek(sig, 699), WhisperDecision::SuppressDuplicate);
+
+        // Strike 4: window (400) elapsed -> re-fire; next window doubles to 800.
+        assert_eq!(gate.admit(sig, 700), WhisperDecision::Deliver);
+
+        // Strike 5: window (800) elapsed -> re-fire; next window would be 1600
+        // but is CAPPED at CAP (=1000).
+        assert_eq!(gate.admit(sig, 1500), WhisperDecision::Deliver);
+        assert_eq!(
+            gate.peek(sig, 2499),
+            WhisperDecision::SuppressDuplicate,
+            "999s after the capped delivery is still inside the 1000s cap window"
+        );
+        assert_eq!(
+            gate.peek(sig, 2500),
+            WhisperDecision::Deliver,
+            "the window must never exceed the cap"
+        );
+    }
+
+    /// Backoff state is isolated per signature: one goal's escalating cooldown
+    /// must not suppress a DIFFERENT goal's first escalation.
+    #[test]
+    fn backoff_is_per_signature() {
+        let mut gate = WhisperGate::with_backoff(BASE, CAP, 1000);
+
+        assert_eq!(
+            gate.admit("escalate:goal-alpha", 0),
+            WhisperDecision::Deliver
+        );
+        // A distinct goal escalates immediately (its own strike 0), even though
+        // goal-alpha is mid-cooldown.
+        assert_eq!(
+            gate.admit("escalate:goal-beta", 10),
+            WhisperDecision::Deliver
+        );
+
+        assert_eq!(
+            gate.peek("escalate:goal-alpha", 50),
+            WhisperDecision::SuppressDuplicate
+        );
+        assert_eq!(
+            gate.peek("escalate:goal-beta", 50),
+            WhisperDecision::SuppressDuplicate
+        );
+    }
+
+    /// A change to the blocked-goal SET presents as a NEW signature (per-goal
+    /// key), which must fire immediately regardless of another goal's active
+    /// cooldown — this is the "re-fires on cluster/state change" contract.
+    #[test]
+    fn cluster_change_new_signature_fires_immediately() {
+        let mut gate = WhisperGate::with_backoff(BASE, CAP, 1000);
+
+        assert_eq!(
+            gate.admit("escalate:goal-alpha", 0),
+            WhisperDecision::Deliver
+        );
+        assert_eq!(
+            gate.peek("escalate:goal-alpha", 30),
+            WhisperDecision::SuppressDuplicate
+        );
+
+        // The cluster changes: goal-gamma is newly blocked. Its signature has
+        // never been delivered, so it escalates at once (strike 0).
+        assert_eq!(
+            gate.admit("escalate:goal-gamma", 30),
+            WhisperDecision::Deliver,
+            "a newly-blocked goal must escalate immediately, not inherit backoff"
+        );
+    }
+
+    /// The rolling-hour delivery cap is preserved by the backoff constructor.
+    #[test]
+    fn hour_cap_still_enforced_under_backoff() {
+        let mut gate = WhisperGate::with_backoff(BASE, CAP, 2);
+
+        assert_eq!(gate.admit("escalate:g-a", 0), WhisperDecision::Deliver);
+        assert_eq!(gate.admit("escalate:g-b", 1), WhisperDecision::Deliver);
+        // Third distinct signature within the hour trips the cap, not the window.
+        assert_eq!(
+            gate.admit("escalate:g-c", 2),
+            WhisperDecision::SuppressCapReached
+        );
+    }
+
+    /// `peek` must not advance the strike count — only a committed delivery
+    /// grows the window (the act path peeks first, commits only on success).
+    #[test]
+    fn peek_does_not_grow_backoff_window() {
+        let mut gate = WhisperGate::with_backoff(BASE, CAP, 1000);
+        let sig = "escalate:goal-delta";
+
+        assert_eq!(gate.admit(sig, 0), WhisperDecision::Deliver);
+        // Many peeks while suppressed must not inflate the window beyond BASE.
+        for t in 1..100 {
+            assert_eq!(gate.peek(sig, t), WhisperDecision::SuppressDuplicate);
+        }
+        // Exactly one BASE window later it re-fires (peeks did not double it).
+        assert_eq!(gate.peek(sig, 100), WhisperDecision::Deliver);
     }
 }

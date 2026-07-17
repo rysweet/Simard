@@ -13,7 +13,9 @@ use crate::typed_ooda::{
 };
 
 use super::repo_resolver;
-use super::spawn::{find_live_engineer_for_goal, lock_state, typed_ooda_state_root};
+use super::spawn::{
+    derive_session_id, find_live_engineer_for_goal, lock_state, typed_ooda_state_root,
+};
 use crate::ooda_actions::make_outcome;
 
 pub(crate) fn run(
@@ -24,7 +26,11 @@ pub(crate) fn run(
 ) -> ActionOutcome {
     let cycle_number = lock_state(state).cycle_count;
     let cycle_id = format!("cycle-{cycle_number}-{}", goal.id);
-    let session_id = format!("ooda-{}", uuid::Uuid::now_v7());
+    // Issue #4197: derive a STABLE session id from the goal identity so a terminal
+    // recorded on an earlier tick is readable back on later ticks (the goal can be
+    // marked done instead of perpetually re-surfacing as blocked). `cycle_id` stays
+    // per-cycle to preserve the append-only `UNIQUE(session_id, cycle_id)` guard.
+    let session_id = derive_session_id(&goal.id);
     let (observe_output, orient_output) = {
         let guard = lock_state(state);
         let observe = match serde_json::to_vec(&guard.last_observation) {
