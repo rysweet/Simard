@@ -247,7 +247,7 @@ let mem = LibraryCognitiveMemory::in_memory()?;
 | `get_statistics()` | `get_statistics() -> HashMap<String, usize>` | Folded into the typed `CognitiveStatistics` DTO. |
 | `mark_episode_distilled(node_id)` | `mark_episode_distilled(node_id) -> bool` | **Implemented (Phase 2b).** Delegates; the returned `bool` (false if the id is absent) is ignored to satisfy the trait's `Result<()>` no-payload contract. |
 | `list_undistilled_episodes(limit)` | `list_undistilled_episodes(limit) -> Vec<EpisodicMemory>` | **Implemented (Phase 2b).** Delegates and converts to `CognitiveEpisode`. |
-| `search_episodes_by_keywords(keywords, limit)` | `get_episodes(usize::MAX, include_compressed = true)` + filter | Recall all episodes (compressed included so consolidation sources stay recallable), filter on case-insensitive `content.contains`, short-circuit at `limit`. |
+| `search_episodes_by_keywords(keywords, limit)` | `get_episodes(usize::MAX, include_compressed = true)` + filter | Recall all episodes (compressed included so consolidation sources stay recallable), then a **marker-safe word-boundary** filter: a clean alphanumeric keyword matches at a word boundary (`shares_word_prefix`), a phrase/marker keyword keeps case-insensitive `content.contains`; short-circuit at `limit`. See [Keyword matching](#keyword-matching-word-boundary-vs-substring). |
 | `search_episodes_starting_with(prefix, limit)` | `get_episodes(usize::MAX, include_compressed = true)` + filter | Recall all episodes, filter on `content.starts_with`, pair each match with the library record's `created_at` to build the `(content, recorded_at)` return. |
 | `is_read_only()` | n/a | Always `false` — the library backend is a writer (no read-only constructor). |
 | `checkpoint()` | library `close()` (CHECKPOINT) | Issues a LadybugDB CHECKPOINT, collapsing the WAL into the main file so a subsequent reopen of the same path observes all committed writes. |
@@ -426,7 +426,7 @@ Two trait methods have no single library call and are composed in the adapter:
 
 | Method | Why it matters | Adapter implementation |
 |---|---|---|
-| `search_episodes_by_keywords` | keyword episode recall | recall **all** episodes via `get_episodes(usize::MAX, include_compressed = true)`, filter on case-insensitive `content.contains`, short-circuit at `limit` |
+| `search_episodes_by_keywords` | keyword episode recall | recall **all** episodes via `get_episodes(usize::MAX, include_compressed = true)`, apply the **marker-safe word-boundary** keyword filter (see below), short-circuit at `limit` |
 | `search_episodes_starting_with` | progress-evidence `since` timestamp gate | recall all episodes, filter on `content.starts_with`, pair each with the record's `created_at` |
 
 These remain in-adapter because the library does not expose an equivalent
@@ -434,6 +434,34 @@ single-shot query at the pinned commit. Promoting them into the library is a
 desirable upstream follow-up (tracked at
 [amplihack-memory-lib#85](https://github.com/rysweet/amplihack-memory-lib/issues/85)).
 No trait method panics or silently degrades.
+
+### Keyword matching: word-boundary vs substring
+
+`search_episodes_by_keywords` partitions its query keywords by shape so it gets
+recall precision on natural-language callers **without** breaking the callers
+that depend on exact-substring match:
+
+- A **clean** keyword — non-empty and entirely alphanumeric, the shape the
+  natural-language callers emit (`cognitive_threads::creative_ideas` recalls with
+  `"meeting"` / `"conversation"` / `"decision"`, and `memory_consolidation::tokenize_objective`
+  produces the same) — is matched at a **word boundary** via `shares_word_prefix`:
+  the keyword must be a prefix of a whole word in the episode content. A short
+  token merely embedded in the interior or suffix of an unrelated word (`test` in
+  "latest", `own` in "download", `decision` in "indecision") no longer floats an
+  off-topic episode into recall, while a query stem still recalls its inflected
+  forms (`deploy` → "deployed" / "deploys"). This is the same word-boundary gate
+  `recall_episodes_ranked` uses, extended to the flat keyword scan.
+- A keyword carrying **any non-alphanumeric character** — a phrase or, crucially,
+  a bracketed provenance **marker** (`[reflect-occ=…]`, `[reflect-key=…|…]`) that
+  `memory_consolidation::reflection_lessons` writes and re-filters on with exact
+  `content.contains(marker)` — keeps the legacy case-insensitive **substring**
+  semantics. Its dedup / recurring-failure counting is unchanged.
+
+The word-boundary tokenization is skipped entirely on the marker-only path (no
+clean keyword present), so `reflection_lessons::count_recurring_failures` (which
+scans with `limit = u32::MAX`) does no extra work. The pure helpers are
+unit-tested in `library_adapter::word_boundary_gate_tests`; the end-to-end
+contract is pinned in `cognitive_memory::tests_whole_word_episode_recall`.
 
 ---
 

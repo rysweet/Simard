@@ -1319,20 +1319,58 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         if keywords.is_empty() {
             return Ok(vec![]);
         }
-        let needles: Vec<String> = keywords.iter().map(|k| k.to_lowercase()).collect();
+        // Partition the query keywords by shape — a recall-quality gate that
+        // mirrors, for this flat keyword scan, the word-boundary relevance gate
+        // `recall_episodes_ranked` already applies:
+        //   * a CLEAN token (non-empty, every char alphanumeric — the shape the
+        //     natural-language callers emit, e.g. `creative_ideas` ->
+        //     "meeting"/"conversation"/"decision", and `tokenize_objective`) is
+        //     matched at a WORD BOUNDARY via `shares_word_prefix`, so a token
+        //     merely embedded in the interior/suffix of an unrelated content word
+        //     ("test" in "latest", "own" in "download", "decision" in
+        //     "indecision") no longer floats an off-topic episode into recall;
+        //   * a keyword carrying ANY non-alphanumeric char — a phrase or,
+        //     crucially, a bracketed provenance MARKER (`[reflect-occ=…]`,
+        //     `[reflect-key=…|…]`) that `memory_consolidation::reflection_lessons`
+        //     dedup relies on — keeps the exact case-insensitive SUBSTRING
+        //     semantics its callers re-filter on (`content.contains(marker)`).
+        // This closes the substring-recall gap on the clean-token callers while
+        // preserving, by construction, the exact-marker substring path the flat
+        // scan was deliberately kept on.
+        let mut clean_needles: HashSet<String> = HashSet::new();
+        let mut raw_needles: Vec<String> = Vec::new();
+        for keyword in keywords {
+            let lowered = keyword.to_lowercase();
+            if lowered.is_empty() {
+                continue;
+            }
+            if lowered.chars().all(char::is_alphanumeric) {
+                clean_needles.insert(lowered);
+            } else {
+                raw_needles.push(lowered);
+            }
+        }
+        if clean_needles.is_empty() && raw_needles.is_empty() {
+            return Ok(vec![]);
+        }
+        let has_clean = !clean_needles.is_empty();
         // Include compressed episodes so consolidation sources remain recallable
         // by keyword (matching native, whose query has no compressed filter).
         // `get_episodes` already returns newest-first by `temporal_index`.
-        // `take(limit)` short-circuits the per-episode lowercase/contains scan
-        // (and the DTO conversion) once `limit` matches are found, instead of
-        // converting every match and truncating afterwards.
+        // `take(limit)` short-circuits the per-episode scan (and the DTO
+        // conversion) once `limit` matches are found, instead of converting every
+        // match and truncating afterwards. The `has_clean` guard skips the
+        // word-boundary tokenization entirely on the marker-only path
+        // (`reflection_lessons::count_recurring_failures` scans with
+        // `limit = u32::MAX`), so that path does no extra work.
         let episodes: Vec<CognitiveEpisode> = self
             .lock()?
             .get_episodes(usize::MAX, true)
             .into_iter()
             .filter(|e| {
                 let content = e.content.to_lowercase();
-                needles.iter().any(|kw| content.contains(kw))
+                (has_clean && shares_word_prefix(&content, &clean_needles))
+                    || raw_needles.iter().any(|kw| content.contains(kw))
             })
             .take(limit as usize)
             .map(to_episode)
