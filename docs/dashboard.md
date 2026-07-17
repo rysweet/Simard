@@ -311,6 +311,37 @@ priority ascending. See
 [Goals tab hierarchy & differentiated priorities](reference/dashboard-goal-hierarchy-priority.md)
 for the full reference.
 
+### Goals tab: active lifecycle breakdown
+
+The active-goals count line breaks the board down by lifecycle state instead of
+showing a single conflated total. The board's `active` set legitimately holds
+goals that are **blocked**, **paused**, **not started**, or already
+**completed** but not yet archived off the board — so a bare "20 active goal(s)"
+badly overstates in-flight work and hides how many goals are stuck or finished.
+(On a live host, 18 "active" goals were 9 `completed` + 6 `blocked` +
+3 `not-started` with **0 actually in progress** — a fact the old count line
+could not surface.)
+
+`/api/goals` therefore returns an additive `active_status_breakdown` object with
+a faithful per-`GoalProgress`-variant count — always all six keys, zero when
+unused:
+
+```json
+"active_status_breakdown": {
+  "proposed": 0, "not_started": 3, "in_progress": 0,
+  "blocked": 6, "paused": 0, "completed": 9
+}
+```
+
+The buckets partition the active board, so they always sum to `active_count`
+(which is preserved for back-compat). Counting is faithful — an
+`InProgress { percent: 100 }` goal is `in_progress`, never `completed`; the
+terminal view is `GoalProgress::is_terminal` layered additively. The Goals tab
+appends only the **nonzero** buckets to the count line, in a fixed order
+(in progress · blocked · paused · not started · proposed · completed), via the
+`goalBreakdownText` helper — e.g. `18 active goal(s) — 6 blocked · 3 not
+started · 9 completed`.
+
 ### Goals tab → Work Board: plain-English Task Memory & Recent Actions
 
 A live Playwright audit of the **Work Board** sub-section (in the **Goals** tab)

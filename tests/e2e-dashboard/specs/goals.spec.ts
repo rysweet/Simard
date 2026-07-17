@@ -61,6 +61,46 @@ test.describe('Goals Tab @structural', () => {
     await expect(idleRow).toBeVisible();
   });
 
+  test('goals tab shows active lifecycle breakdown next to the count', async ({
+    authenticatedPage,
+  }) => {
+    // The active board mixes in-progress, blocked, and already-completed goals.
+    // The count line must break them down so the operator can see what Simard
+    // is ACTUALLY working on right now — not just a conflated "3 active goal(s)".
+    await authenticatedPage.route('**/api/goals', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          active: [
+            { id: 'g1', description: 'In flight', priority: 1, status: 'in-progress(50%)', status_progress: { InProgress: { percent: 50 } }, current_activity: null, wip_refs: [] },
+            { id: 'g2', description: 'Waiting on upstream', priority: 2, status: 'blocked: upstream', status_progress: { Blocked: 'upstream' }, current_activity: null, wip_refs: [] },
+            { id: 'g3', description: 'Finished but not archived', priority: 3, status: 'completed', status_progress: 'Completed', current_activity: null, wip_refs: [] },
+          ],
+          backlog: [],
+          active_count: 3,
+          backlog_count: 0,
+          active_status_breakdown: {
+            proposed: 0, not_started: 0, in_progress: 1, blocked: 1, paused: 0, completed: 1,
+          },
+        }),
+      }),
+    );
+
+    await authenticatedPage.goto('/');
+    await authenticatedPage.locator('.tab[data-tab="goals"]').click();
+
+    const countLine = authenticatedPage.locator('#goals-active').getByText('3 active goal(s)');
+    await expect(countLine).toBeVisible();
+    // Only nonzero buckets, in priority order (in progress · blocked · completed).
+    await expect(countLine).toContainText('1 in progress');
+    await expect(countLine).toContainText('1 blocked');
+    await expect(countLine).toContainText('1 completed');
+    // Zero buckets must be omitted (no "0 paused" noise).
+    await expect(countLine).not.toContainText('paused');
+    await expect(countLine).not.toContainText('proposed');
+  });
+
   test('goals tab shows backlog with promote button', async ({
     authenticatedPage,
   }) => {
