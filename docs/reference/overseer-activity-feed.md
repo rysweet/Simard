@@ -207,6 +207,16 @@ the fix cannot mask a real fault.
 > forgets to set `cycle_failed`, the explicit `panicked` guard still forces
 > `"erroring"`. Do **not** "simplify" it away.
 
+> **Transient cycle failures self-heal to `"backoff"` (#893).** A `cycle_failed`
+> tick whose underlying `run_cycle()` error is a transient, externally-caused
+> blip (upstream `5xx`, timeout, connection reset, rate-limit) routes the
+> meta-thread to a self-clearing `"backoff"` for one cadence instead of
+> `"erroring"`, bounded by a consecutive-transient ceiling so a sustained outage
+> still escalates. See the
+> [Overseer tick self-healing reference](./overseer-tick-self-healing.md) for
+> the `transient_cycle_failure` field, the fail-closed classifier, and the
+> escalation ceiling.
+
 ### Bounded by construction
 
 `recent` is capped at **`N = 100`** ticks, evicting oldest-first, and the cap is

@@ -1,0 +1,75 @@
+name: episode-classifier-whole-word-completion
+app_type: cli
+description: |
+  qa-team outside-in gate for the perpetual-cognition sub-goals "recall quality"
+  and "distillation fact-yield". The episode-ingestion classifier
+  (`src/memory_consolidation/classifier.rs::classify`) decides, at every
+  `store_episode` intake site, whether an event is operational noise (DROP),
+  low-value bookkeeping (DOWN-SCOPE), or a meaningful episodic worth
+  full-importance storage (STORE). Distillation later mines the STORED,
+  high-importance episodes into semantic facts, so a misclassification here
+  propagates straight into recall top-k.
+
+  Rule 3's durable-completion signal used a bare-substring `contains("merged")`
+  scan. That single token fired inside the git-status vocabulary `unmerged` /
+  `submerged` — which name the OPPOSITE of a completed merge (an outstanding,
+  un-completed one) — promoting benign/negative bookkeeping to a durable
+  `ActionCompleted` episode at 0.7-band importance. Distillation would then mine
+  that phantom completion into a phantom "action completed" fact, polluting
+  recall top-k and dragging recall precision down.
+
+  The signal now matches `merged` at word boundaries (mirroring the whole-word
+  policy already adopted by the failure-signal pass in the same classifier and
+  by the knowledge-pack relevance scorer), so `unmerged`/`submerged` down-scope
+  to the operational tier while a genuine whole-word `merged` still classifies
+  as a durable completion — no real completion changes disposition. This
+  scenario pins that behaviour over the real classifier. Hermetic: no network,
+  no live host mutation; the CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # Headline: `unmerged`/`submerged` no longer misclassify as a durable
+  # completion, and a genuine whole-word `merged` still does — plus the full
+  # classifier suite (failure-signal whole-word overrides, drop/down-scope
+  # tiers) stays green so nothing else changed disposition.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_consolidation::classifier"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "unmerged_paths_are_not_a_durable_completion ... ok"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "whole_word_merged_is_still_a_durable_completion ... ok"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "meaningful_completed_action_is_stored ... ok"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+metadata:
+  tags:
+    - cli
+    - memory
+    - cognitive-memory
+    - classifier
+    - distillation
+    - fact-yield
+    - recall-quality
+    - regression
+  priority: high
+  author: copilot
+  test_type: outside-in

@@ -450,6 +450,60 @@ fn to_library_weights(w: RecallWeightSet) -> RecallWeights {
 }
 
 // ---------------------------------------------------------------------------
+// Word-boundary episodic-recall relevance gate
+// ---------------------------------------------------------------------------
+
+/// Tokenize `text` into its set of distinct lowercase alphanumeric words.
+///
+/// Splitting on any run of non-alphanumeric characters (rather than only
+/// whitespace) means punctuation attached to a token is folded away — `"kafka,"`
+/// and `"kafka"` both yield the bare word `kafka`, and `"durable-recall"` yields
+/// `{durable, recall}`. Empty tokens produced by leading/trailing/repeated
+/// separators are dropped. This is the same tokenization
+/// [`crate::knowledge_context`] and [`crate::memory_consolidation::tokenize_objective`]
+/// use, so the recall gate scores relevance on the same word basis as the rest
+/// of the cognition stack.
+fn tokenize_words(text: &str) -> HashSet<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// `true` iff `content` shares a keyword with the query at a WORD BOUNDARY: some
+/// `needle` query token is a prefix of a whole word in `content`.
+///
+/// This is the episodic-recall relevance gate. It replaces a raw-substring gate
+/// (`content.to_lowercase().contains(kw)`) that matched a query token wherever
+/// it was embedded — including the INTERIOR or SUFFIX of an unrelated content
+/// word (`act` in "reactor" / "contract", `test` in "latest", `own` in
+/// "download"), floating off-topic episodes into the ranked set that feeds the
+/// OODA cycle's working context and degrading recall precision.
+///
+/// Anchoring the match to a word boundary (prefix of a content word) removes
+/// those interior/suffix false positives while PRESERVING the inflectional
+/// recall the live path depends on — a query stem still recalls its inflected
+/// forms (`deploy` → "deployed" / "deploys" / "deployment", `sync` → "syncing").
+/// A pure whole-word (equality) gate would drop those legitimate recalls; a raw
+/// substring gate admits the interior noise. Word-boundary prefix matching is
+/// the middle ground, and aligns episodic recall with the word-boundary policy
+/// adopted elsewhere in the cognition stack (`knowledge_context::relevance_score`,
+/// `memory_consolidation::classifier`, `fact_reliability`; PR #4241 lineage).
+///
+/// `needles` is the pre-tokenized query word set (see [`tokenize_words`]);
+/// `content` is tokenized on the same word basis. Content with no alphanumeric
+/// words shares nothing and is gated out.
+fn shares_word_prefix(content: &str, needles: &HashSet<String>) -> bool {
+    content
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .any(|w| {
+            let word = w.to_lowercase();
+            needles.iter().any(|needle| word.starts_with(needle))
+        })
+}
+
+// ---------------------------------------------------------------------------
 // Library record -> Simard DTO converters
 // ---------------------------------------------------------------------------
 
@@ -1306,18 +1360,27 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         // `&mut self`, so we still lock for write. `limit = usize::MAX` defers
         // truncation until *after* the keyword gate, so a relevant episode
         // ranked behind recent noise is not dropped before the gate runs.
-        let needles: Vec<String> = query
-            .split_whitespace()
-            .map(str::to_lowercase)
-            .filter(|s| !s.is_empty())
-            .collect();
+        //
+        // The relevance gate is WORD-BOUNDARY, not raw substring: a query token
+        // gates an episode in only when it is a prefix of a whole word in the
+        // episode's content, not when it is merely *embedded* in the interior or
+        // suffix of an unrelated word (`act` in "reactor" / "contract", `test`
+        // in "latest", `own` in "download"). Substring matching floated such
+        // off-topic episodes into the ranked set that feeds the OODA cycle's
+        // working context, degrading recall precision. Anchoring to a word
+        // boundary preserves the inflectional recall the path depends on
+        // (`deploy` still recalls "deployed" / "deploys") while dropping the
+        // interior/suffix noise — aligning episodic recall with the
+        // word-boundary policy adopted by `knowledge_context::relevance_score`,
+        // `memory_consolidation::classifier`, and `fact_reliability` (PR #4241
+        // lineage). Tokenizing the query on non-alphanumeric runs (not only
+        // whitespace) also folds any punctuation attached to a query token onto
+        // its bare word so it can still match.
+        let needles: HashSet<String> = tokenize_words(query);
         if needles.is_empty() {
             return Ok(vec![]);
         }
-        let matches_kw = |content: &str| {
-            let c = content.to_lowercase();
-            needles.iter().any(|kw| c.contains(kw))
-        };
+        let matches_kw = |content: &str| shares_word_prefix(content, &needles);
 
         let options = RecallOptions {
             limit: usize::MAX,
@@ -1477,5 +1540,80 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         // a subsequent reopen of the same path observes all committed writes.
         self.lock()?.close();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod word_boundary_gate_tests {
+    use super::{shares_word_prefix, tokenize_words};
+
+    #[test]
+    fn tokenize_words_folds_case_and_punctuation() {
+        let words = tokenize_words("Deploy, the durable-recall PATH!");
+        // Lowercased, split on every non-alphanumeric run (so the comma, the
+        // hyphen and the trailing `!` are separators), empties dropped.
+        for expected in ["deploy", "the", "durable", "recall", "path"] {
+            assert!(
+                words.contains(expected),
+                "missing {expected:?} in {words:?}"
+            );
+        }
+        assert_eq!(words.len(), 5, "distinct words only: {words:?}");
+    }
+
+    #[test]
+    fn tokenize_words_empty_for_no_alphanumerics() {
+        assert!(tokenize_words("   ,.;-—  ").is_empty());
+        assert!(tokenize_words("").is_empty());
+    }
+
+    #[test]
+    fn shares_word_prefix_rejects_interior_and_suffix_embedding() {
+        let needles = tokenize_words("act test own");
+        // Every match would be interior/suffix, not a word-boundary prefix.
+        assert!(!shares_word_prefix(
+            "the reactor signed a contract",
+            &needles
+        ));
+        assert!(!shares_word_prefix("the latest greatest contest", &needles));
+        assert!(!shares_word_prefix("download the file", &needles));
+    }
+
+    #[test]
+    fn shares_word_prefix_accepts_word_boundary_match() {
+        let needles = tokenize_words("act log own");
+        assert!(shares_word_prefix("we act on the alert", &needles));
+        assert!(shares_word_prefix("check the log file", &needles));
+        assert!(shares_word_prefix("this is my own note", &needles));
+    }
+
+    #[test]
+    fn shares_word_prefix_preserves_inflectional_recall() {
+        // A query stem must still recall its inflected forms — the recall the
+        // live OODA path depends on (a pure whole-word/equality gate would drop
+        // these).
+        let needles = tokenize_words("deploy");
+        assert!(shares_word_prefix("deployed the payment service", &needles));
+        assert!(shares_word_prefix("two deploys ran today", &needles));
+        assert!(shares_word_prefix("the deployment succeeded", &needles));
+        // But an unrelated interior embedding of the stem is still rejected.
+        assert!(!shares_word_prefix("we redeployed nothing new", &needles));
+    }
+
+    #[test]
+    fn shares_word_prefix_is_case_insensitive_and_punctuation_tolerant() {
+        let needles = tokenize_words("authentication");
+        // ALL-CAPS content, punctuation-attached word — still a boundary match.
+        assert!(shares_word_prefix(
+            "DEPLOYED THE AUTHENTICATION, OK",
+            &needles
+        ));
+    }
+
+    #[test]
+    fn shares_word_prefix_false_on_empty_content() {
+        let needles = tokenize_words("deploy");
+        assert!(!shares_word_prefix("", &needles));
+        assert!(!shares_word_prefix("   ...   ", &needles));
     }
 }

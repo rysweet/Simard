@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
@@ -897,6 +897,14 @@ pub fn run_ooda_daemon(
     let mut overseer_gap_scan_tick_idx: u64 = 0;
     // Prevents overlapping ticks from stacking up if one runs long.
     let overseer_tick_running = Arc::new(AtomicBool::new(false));
+    // #893: running count of CONSECUTIVE transient (self-healable) cycle
+    // failures, owned by the daemon across ticks (each tick rebuilds the
+    // Overseer on a fresh thread). Reset to 0 on any completed tick; incremented
+    // on a transient failure; left unchanged on a fatal one. Bounded by
+    // `overseer_transient_ceiling` — beyond it the meta-thread escalates from
+    // "backoff" to "erroring" so a hard-down dependency can't hide forever.
+    let overseer_consecutive_transient = Arc::new(AtomicU32::new(0));
+    let overseer_transient_ceiling = crate::overseer::config::overseer_transient_backoff_ceiling();
     let overseer_repo_root = memories.repo_root.clone();
     daemon_log(
         &state_root,
@@ -1274,6 +1282,39 @@ pub fn run_ooda_daemon(
                     &format!("[simard] OODA cycle: memory cache sync failed: {e}"),
                 );
             }
+            // Issue #4232: reap any in-flight engineer whose goal was
+            // removed/completed (tombstoned) since the last cycle. Tombstone-
+            // gated, never a wall-clock timeout — a healthy engineer whose goal
+            // is still on the board is never touched. Reuses `kill_subordinate`
+            // (SIGTERM) + the existing worktree/claim cleanup chokepoint. Runs
+            // here, inside the block where `cycle_tombstones` is in scope, so it
+            // reuses the already-loaded tombstone set. The registry disk-read +
+            // JSON parse is gated behind a cheap in-memory check so the common
+            // steady-state cycle (nothing tombstoned) pays no extra I/O.
+            let reaped_goal_ids = if crate::ooda_actions::advance_goal::has_tombstoned_engineer(
+                &state,
+                &cycle_tombstones,
+            ) {
+                let subagent_registry = crate::subagent_sessions::load();
+                crate::ooda_actions::advance_goal::reap_engineers_for_tombstoned_goals(
+                    &mut state,
+                    &cycle_tombstones,
+                    &subagent_registry,
+                )
+            } else {
+                Vec::new()
+            };
+            if !reaped_goal_ids.is_empty() {
+                daemon_log(
+                    &state_root,
+                    &format!(
+                        "[simard] OODA cycle: reaped {} in-flight engineer(s) for \
+                         tombstoned goal(s): {}",
+                        reaped_goal_ids.len(),
+                        reaped_goal_ids.join(", "),
+                    ),
+                );
+            }
         }
         // Snapshot the pre-cycle active ids so the post-cycle commit can
         // tombstone any goal that left the board (archived / dropped / done).
@@ -1599,6 +1640,8 @@ pub fn run_ooda_daemon(
                     .is_ok()
             {
                 let running = Arc::clone(&overseer_tick_running);
+                let consecutive_transient_counter = Arc::clone(&overseer_consecutive_transient);
+                let transient_ceiling = overseer_transient_ceiling;
                 let mem_for_tick = Arc::clone(&shared_mem);
                 let repo_root_for_tick = overseer_repo_root.clone();
                 let state_root_for_tick = state_root.clone();
@@ -1677,10 +1720,26 @@ pub fn run_ooda_daemon(
                         // the tick already completed — so it is logged and the
                         // daemon continues.
                         let mut feed_threads = Vec::with_capacity(thread_healths.len() + 1);
+                        // #893: update the consecutive-transient self-heal
+                        // counter from this tick, then derive the meta-thread's
+                        // health. Reset on a completed tick; increment on a
+                        // transient failure (count INCLUDES this tick); leave
+                        // unchanged on a fatal failure.
+                        let cycle_failed = report.panicked || report.cycle_failed;
+                        let consecutive_transient = if !cycle_failed {
+                            consecutive_transient_counter.store(0, Ordering::SeqCst);
+                            0
+                        } else if report.transient_cycle_failure {
+                            consecutive_transient_counter.fetch_add(1, Ordering::SeqCst) + 1
+                        } else {
+                            consecutive_transient_counter.load(Ordering::SeqCst)
+                        };
                         feed_threads.push(
                             crate::overseer::activity::OverseerThreadStatus::overseer_meta(
                                 feed_cadence_secs,
-                                !report.panicked && !report.cycle_failed,
+                                &report,
+                                consecutive_transient,
+                                transient_ceiling,
                             ),
                         );
                         for h in &thread_healths {

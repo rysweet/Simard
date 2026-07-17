@@ -173,6 +173,24 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|n| haystack.contains(n))
 }
 
+/// Case-insensitive **whole-word** membership: `true` iff `word` (already
+/// lowercase and alphanumeric) appears as a complete alphanumeric-delimited
+/// token in `haystack_lc`.
+///
+/// Unlike a raw [`str::contains`], a longer token that merely *embeds* `word`
+/// does NOT match — `merged` must not fire inside the git terms `unmerged` /
+/// `submerged`, which name the OPPOSITE (an outstanding, un-completed merge)
+/// yet a bare-substring scan promoted to a durable [`EventKind::ActionCompleted`]
+/// episode at 0.7-band importance, polluting the episodic memory distillation
+/// later mines for facts. This mirrors the word-boundary policy the
+/// failure-signal pass ([`word_is_failure`]) and the knowledge-pack relevance
+/// scorer already adopt.
+fn contains_word(haystack_lc: &str, word: &str) -> bool {
+    haystack_lc
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| w == word)
+}
+
 /// Compound error/exception TYPE-NAME suffixes (e.g. `ParseError`, `IoError`,
 /// `NullPointerException`). Idiomatic error types — especially in Rust, where
 /// they conventionally end in `Error` — routinely appear as a single
@@ -306,9 +324,15 @@ pub fn classify(content: &str, source_label: &str, ctx: &IntakeContext) -> Intak
         return IntakeDecision::Store(store_meta(0.8, EventKind::Handoff, ctx));
     }
     // Durable action completion (opened/merged PR, etc.).
+    //
+    // `opened pr` / `pull request` are multi-word phrases that cannot embed in
+    // a single word, so a substring scan is already whole-word-safe for them.
+    // `merged`, by contrast, is a single token that a bare-substring scan also
+    // fires for inside `unmerged` / `submerged` — git vocabulary naming an
+    // outstanding, NOT-completed merge — so it is matched at word boundaries.
     if content_lc.contains("opened pr")
         || content_lc.contains("pull request")
-        || content_lc.contains("merged")
+        || contains_word(&content_lc, "merged")
     {
         return IntakeDecision::Store(store_meta(0.7, EventKind::ActionCompleted, ctx));
     }

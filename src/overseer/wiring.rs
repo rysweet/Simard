@@ -193,6 +193,18 @@ pub struct OverseerTickReport {
     /// before this field existed deserialize with `cycle_failed = false` and
     /// the feed `SCHEMA_VERSION` does not change.
     pub cycle_failed: bool,
+    /// Additive (#893). `true` **only** when a `cycle_failed` tick's underlying
+    /// `run_cycle()` error was a *transient*, externally-caused fault (an
+    /// upstream `5xx`, a timeout, a connection reset, a rate-limit) as
+    /// classified by the fail-closed [`is_transient`]. A panic is never
+    /// transient. It is deliberately **separate** from `cycle_failed`: the
+    /// cycle still failed (so `cycle_failed` stays `true`), but the *reason* is
+    /// self-clearing, so the daemon can route the `overseer` meta-thread to a
+    /// bounded `"backoff"` for one cadence instead of latching `"erroring"`.
+    /// Covered by the struct-level `#[serde(default)]` (conservative `false`),
+    /// so legacy feed records deserialize safely and `SCHEMA_VERSION` is
+    /// unchanged.
+    pub transient_cycle_failure: bool,
     /// Wall-clock duration of the tick in milliseconds.
     pub duration_ms: u64,
     /// Human-readable lines describing WHAT was observed this tick — the ranked
@@ -205,6 +217,46 @@ pub struct OverseerTickReport {
     /// (`held: …`), and isolated failures. Bounded to [`DETAIL_CAP`] with a
     /// `(+N more)` sentinel. Additive (issue #21); empty on no-action ticks.
     pub action_details: Vec<String>,
+}
+
+/// Fail-closed classifier: is this `run_cycle` failure a *transient*, external,
+/// self-clearing fault the next tick can simply retry (issue #893)?
+///
+/// Only a [`OverseerError::Capability`] whose `detail` names a **known**
+/// retryable upstream fault — an HTTP `5xx` (`500`/`502`/`503`/`504`), a
+/// gateway/service-unavailable, a timeout, a connection reset, or a rate-limit
+/// (`429`) — is transient. **Everything else is fatal**: an unknown/opaque
+/// capability detail, and *every* non-`Capability` variant (those are gate /
+/// budget / recursion / conflict / not-ready **decisions**, never infrastructure
+/// blips). This is the SR-1 invariant — a real defect must still latch
+/// `"erroring"`, so the allowlist is explicit and the wildcard arm returns
+/// `false`.
+pub fn is_transient(err: &OverseerError) -> bool {
+    let OverseerError::Capability { detail, .. } = err else {
+        return false;
+    };
+    let d = detail.to_ascii_lowercase();
+    // Explicit allowlist of known-retryable upstream signals. Matching any one
+    // routes to self-healing; nothing else does.
+    const TRANSIENT_SIGNALS: &[&str] = &[
+        "500",
+        "502",
+        "503",
+        "504",
+        "5xx",
+        "bad gateway",
+        "gateway timeout",
+        "service unavailable",
+        "temporarily unavailable",
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection refused",
+        "rate limit",
+        "429",
+        "too many requests",
+    ];
+    TRANSIENT_SIGNALS.iter().any(|needle| d.contains(needle))
 }
 
 /// Run ONE Overseer meta-OODA turn: `run_cycle` (Observe→Orient→Decide→plan)
@@ -332,9 +384,14 @@ pub fn overseer_tick_detailed(
         Err(e) => {
             report.errors += 1;
             report.cycle_failed = true;
+            // Record WHY the cycle failed: a transient upstream blip is
+            // self-healable (routes the meta-thread to a bounded "backoff"),
+            // while a fatal/opaque fault stays latched "erroring" (#893).
+            report.transient_cycle_failure = is_transient(&e);
             tracing::warn!(
                 target: "overseer::tick",
                 error = %e,
+                transient = report.transient_cycle_failure,
                 "overseer run_cycle failed — isolated, no actions taken"
             );
         }
@@ -367,6 +424,7 @@ pub fn overseer_tick_detailed(
         errors = report.errors,
         panicked = report.panicked,
         cycle_failed = report.cycle_failed,
+        transient_cycle_failure = report.transient_cycle_failure,
         duration_ms = report.duration_ms,
         "overseer tick complete"
     );
@@ -1601,6 +1659,85 @@ mod tests {
             report.cycle_failed,
             "run_cycle returned Err — the tick's cycle failed and must surface \
              cycle_failed so health stays erroring (#4080)"
+        );
+    }
+
+    // ── #893: a TRANSIENT cycle failure must be self-healable (not latched) ──
+    //
+    // #4080 stopped isolated act errors from pinning the meta-thread, but a
+    // genuine `run_cycle` failure still latches "erroring" even when its cause is
+    // an external, self-clearing fault (a GitHub 503, a timeout, a rate limit).
+    // The fix records WHY the cycle failed: the Err arm classifies the error via
+    // `is_transient` and sets an additive `transient_cycle_failure` alongside
+    // `cycle_failed`. These tests pin that the flag is populated correctly at the
+    // tick boundary. The health mapping it feeds is pinned in tests_self_healing.
+
+    #[test]
+    fn a_transient_run_cycle_error_marks_transient_cycle_failure() {
+        // The Observe pass fails with a retryable upstream fault (HTTP 503). The
+        // tick's cycle fails (cycle_failed) BUT the failure is transient, so
+        // `transient_cycle_failure` must also be set so the daemon can self-heal
+        // to "backoff" instead of latching "erroring".
+        struct TransientErrStatus;
+        impl StatusReader for TransientErrStatus {
+            fn snapshot(&self) -> Result<ObservedState, OverseerError> {
+                Err(OverseerError::Capability {
+                    what: "status",
+                    detail: "upstream returned HTTP 503 Service Unavailable".to_string(),
+                })
+            }
+        }
+        let (prs, _merges) = RecordingPrs::new(true);
+        let mut overseer = Overseer::new(caps_with(Box::new(TransientErrStatus), Box::new(prs)));
+        let report = overseer_tick(&mut overseer);
+        assert!(!report.panicked, "a transient error is not a panic");
+        assert!(
+            report.cycle_failed,
+            "a run_cycle Err is still a cycle failure (cycle_failed stays true)"
+        );
+        assert!(
+            report.transient_cycle_failure,
+            "a 503 upstream fault is transient — transient_cycle_failure must be set (#893)"
+        );
+    }
+
+    #[test]
+    fn a_fatal_run_cycle_error_leaves_transient_cycle_failure_false() {
+        // A non-retryable (opaque/fatal) cycle failure must NOT be marked
+        // transient — it should latch "erroring", so `transient_cycle_failure`
+        // stays false while `cycle_failed` is true. This is the fail-closed side.
+        struct FatalErrStatus;
+        impl StatusReader for FatalErrStatus {
+            fn snapshot(&self) -> Result<ObservedState, OverseerError> {
+                Err(OverseerError::Capability {
+                    what: "status",
+                    detail: "malformed config: unknown field `widget`".to_string(),
+                })
+            }
+        }
+        let (prs, _merges) = RecordingPrs::new(true);
+        let mut overseer = Overseer::new(caps_with(Box::new(FatalErrStatus), Box::new(prs)));
+        let report = overseer_tick(&mut overseer);
+        assert!(!report.panicked);
+        assert!(report.cycle_failed, "a run_cycle Err is a cycle failure");
+        assert!(
+            !report.transient_cycle_failure,
+            "an unknown/fatal fault must NOT be transient (fail-closed) so it still latches erroring"
+        );
+    }
+
+    #[test]
+    fn a_panicking_tick_is_never_transient() {
+        // A panic is the most severe cycle failure and is never self-healed:
+        // `panicked` and `cycle_failed` are set but `transient_cycle_failure` is
+        // false so the meta-thread maps to "erroring".
+        let (prs, _merges) = RecordingPrs::new(true);
+        let mut overseer = Overseer::new(caps_with(Box::new(PanicStatus), Box::new(prs)));
+        let report = run_overseer_tick_isolated(&mut overseer);
+        assert!(report.panicked && report.cycle_failed);
+        assert!(
+            !report.transient_cycle_failure,
+            "a panic is never transient — it must map to erroring, not backoff (#893)"
         );
     }
 
