@@ -1,7 +1,7 @@
 # Example identities — data-only identity packages
 
 This directory is the durable home for **example non-engineering identities**
-(cartographer, atelier, concierge, gastronome, bursar, kinema, sommelier, …). These are
+(cartographer, atelier, concierge, gastronome, bursar, kinema, maestro, sommelier, …). These are
 **examples of what Simard's pluggable-identity framework can produce** — they are
 **not** part of Simard's own daemon.
 
@@ -224,6 +224,17 @@ animation sequence with a written motion brief. Its four-stage recipe
 (Grease Pencil for 2D, armature rigging + Cycles/EEVEE for 3D), Synfig (vector 2D
 tweening), and Natron (node-based compositing) — entirely from its recipe and the
 agent sessions it spawns, again with zero `src/` changes.
+
+[`maestro/`](./maestro/) is a seventh example: a **music composition &
+production** identity that turns a musical brief into an **engraved score**
+(readable notation) plus a **rendered audio track** (playable audio). Its
+five-stage recipe (compose → arrange → engrave → produce → score & production
+brief) drives real domain tooling — LilyPond and MuseScore for engraving, MIDI +
+open-source synths (FluidSynth, TiMidity++) for the DAW / render pass, and ffmpeg
+for encoding / mastering — entirely from its recipe and the agent sessions it
+spawns, again with zero `src/` changes. Its assets are validated end-to-end by
+`tests/maestro_assets_valid.rs` and the
+`tests/qa-scenarios/maestro-score-to-audio.yaml` scenario.
 
 > **All domain tooling lives in the recipes.** Atelier's OpenSCAD/FreeCAD/Blender
 > steps and concierge's booking / PMS / channel-management workflows run inside
