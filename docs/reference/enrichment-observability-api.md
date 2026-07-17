@@ -383,8 +383,8 @@ figures — performs one **bounded** scan of `metrics/metrics.jsonl`. It is a
 
 | `freshness` | Condition | Panel renders |
 |---|---|---|
-| `live` | Snapshot present and newer than the cycle interval | Numbers + green freshness dot |
-| `stale` | Snapshot present but older than the staleness threshold | Numbers + amber "stale" note |
+| `live` | Snapshot present and within the freshness window (900s — the daemon-liveness bound: cycle interval + one max cycle runtime, so a healthy once-per-cycle flush is never falsely stale) | Numbers + green freshness dot |
+| `stale` | Snapshot present but older than the 900s freshness window (daemon stopped flushing) | Numbers + amber "stale" note |
 | `missing` | No snapshot yet (fresh brain, or daemon not running) | `available:false`, `Not tracked yet` |
 
 ### Failure contract

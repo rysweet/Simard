@@ -197,6 +197,62 @@ mod tests {
         );
     }
 
+    // ── freshness window matches the once-per-cycle flush cadence ───────────
+    //
+    // The daemon flushes this snapshot once per OODA cycle, so a healthy reader
+    // routinely sees a `captured_at` several hundred seconds old (cycle runtime
+    // + the ~300s inter-cycle sleep). The freshness window is 900s — matching
+    // the dashboard's daemon-liveness check — so such a snapshot is `live`, not
+    // a false `stale`. Regression guard for the historical 300s threshold that
+    // fired on essentially every healthy cycle.
+
+    fn seed_snapshot_aged(state_root: &Path, enrichment: Value, age_secs: i64) {
+        let path = crate::telemetry::snapshot::snapshot_path(state_root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let captured_at = (chrono::Utc::now() - chrono::Duration::seconds(age_secs)).to_rfc3339();
+        let snap = json!({
+            "schema_version": 1,
+            "captured_at": captured_at,
+            "counters": [],
+            "gauges": [],
+            "histograms": [],
+            "overflow_series": 0,
+            "enrichment": enrichment,
+        });
+        std::fs::write(&path, serde_json::to_vec_pretty(&snap).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn once_per_cycle_aged_snapshot_is_live_not_stale() {
+        let tmp = TempDir::new().unwrap();
+        // 600s ≈ one full cycle old: well past the old 300s threshold but within
+        // a single healthy cycle. Must NOT be classified stale.
+        seed_snapshot_aged(tmp.path(), full_enrichment_section(), 600);
+
+        let (status, Json(body)) = enrichment_core(tmp.path(), None, None);
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["freshness"], "live",
+            "a snapshot flushed one cycle ago (600s) must be live, not a false stale"
+        );
+        assert_eq!(body["available"], true);
+    }
+
+    #[test]
+    fn genuinely_old_snapshot_is_stale() {
+        let tmp = TempDir::new().unwrap();
+        // 1000s > the 900s freshness window: a daemon that stopped flushing.
+        seed_snapshot_aged(tmp.path(), full_enrichment_section(), 1000);
+
+        let (_status, Json(body)) = enrichment_core(tmp.path(), None, None);
+
+        assert_eq!(
+            body["freshness"], "stale",
+            "a snapshot older than the freshness window is stale"
+        );
+    }
+
     // ── route registration + fail-closed auth (source scan) ─────────────────
 
     fn routes_source() -> String {
