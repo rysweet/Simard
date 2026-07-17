@@ -263,4 +263,93 @@ path = "../../secret.md"
             "cartographer ships 5 phase prompts (system + explore + visualize + narrative + deliver)"
         );
     }
+
+    // ── Example packages: atelier + concierge parse, load, are NOT builtin ─
+    //
+    // These re-homed EXAMPLE identities (formerly wrongly baked into `src/`)
+    // must load purely as `examples/identities/<name>/` DATA packages via the
+    // data-driven loader, with ZERO `BuiltinIdentityLoader` registration.
+
+    #[test]
+    fn atelier_example_parses_and_loads() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let base = repo_root.join(DEFAULT_EXAMPLE_IDENTITIES_DIR);
+        let manifest = load_example_identity(&base, "atelier", &test_request("atelier"))
+            .expect("the examples/identities/atelier data package must load");
+        assert_eq!(manifest.name, "atelier");
+        assert_eq!(
+            manifest.default_mode,
+            OperatingMode::Engineer,
+            "atelier is an agentic example that engineers a fabrication package via external CAD tooling"
+        );
+        assert_eq!(
+            manifest.prompt_assets.len(),
+            6,
+            "atelier ships system + brief + model + render + fabricate + handoff phase prompts"
+        );
+
+        // Data-driven, not compiled in: BuiltinIdentityLoader must NOT know it.
+        let builtin_err = BuiltinIdentityLoader
+            .load(&test_request("atelier"))
+            .expect_err("atelier must NOT be registered in BuiltinIdentityLoader");
+        let _ = builtin_err;
+    }
+
+    #[test]
+    fn concierge_example_parses_and_loads() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let base = repo_root.join(DEFAULT_EXAMPLE_IDENTITIES_DIR);
+        let manifest = load_example_identity(&base, "concierge", &test_request("concierge"))
+            .expect("the examples/identities/concierge data package must load");
+        assert_eq!(manifest.name, "concierge");
+        assert_eq!(
+            manifest.default_mode,
+            OperatingMode::Curator,
+            "concierge is an agentic example that designs a hotel concept + operations package"
+        );
+        assert_eq!(
+            manifest.prompt_assets.len(),
+            5,
+            "concierge ships system + intake + experience + operations + deliver phase prompts"
+        );
+
+        // Data-driven, not compiled in: BuiltinIdentityLoader must NOT know it.
+        let builtin_err = BuiltinIdentityLoader
+            .load(&test_request("concierge"))
+            .expect_err("concierge must NOT be registered in BuiltinIdentityLoader");
+        let _ = builtin_err;
+    }
+
+    /// Simard's OWN operating identities MUST remain compiled into the builtin
+    /// loader — deleting the atelier/concierge example arms must not touch them.
+    #[test]
+    fn own_operating_identities_remain_builtin() {
+        for own in [
+            "simard-engineer",
+            "simard-meeting",
+            "simard-gym",
+            "simard-goal-curator",
+            "simard-improvement-curator",
+            "simard-composite-engineer",
+        ] {
+            BuiltinIdentityLoader
+                .load(&test_request(own))
+                .unwrap_or_else(|e| {
+                    panic!("own identity {own:?} must stay builtin-loadable: {e:?}")
+                });
+        }
+    }
+
+    /// The removed example arms must be GONE from the builtin loader.
+    #[test]
+    fn removed_example_arms_absent_from_builtin() {
+        for removed in ["simard-atelier", "simard-concierge"] {
+            let err = BuiltinIdentityLoader
+                .load(&test_request(removed))
+                .expect_err(&format!(
+                    "{removed:?} example arm must be removed from BuiltinIdentityLoader"
+                ));
+            let _ = err;
+        }
+    }
 }

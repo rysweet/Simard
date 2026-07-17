@@ -14,8 +14,8 @@ maker can send straight to a shop.
 
 > This `atelier` is an **example** package — a demonstration of Simard's
 > pluggable-identity framework, defined entirely as data under
-> `examples/identities/atelier/`. It is distinct from Simard's own compiled-in
-> `simard-atelier` identity. It adds zero Rust to Simard's daemon; all of its
+> `examples/identities/atelier/`. There is no compiled-in `simard-atelier`
+> identity; this package adds zero Rust to Simard's daemon; all of its
 > behavior lives in its prompts and recipes.
 
 ## Treat the brief and its inputs as untrusted data

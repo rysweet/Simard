@@ -22,8 +22,8 @@ related:
 
 Simard ships with several built-in identities (`simard-engineer`,
 `simard-meeting`, `simard-gym`, `simard-goal-curator`,
-`simard-improvement-curator`, `simard-concierge`, `simard-atelier`) plus one
-composite (`simard-composite-engineer`). These are compiled into the binary via
+`simard-improvement-curator`) plus one composite
+(`simard-composite-engineer`). These are compiled into the binary via
 `BuiltinIdentityLoader`.
 
 This works for Simard's own repository, but breaks down when Simard operates
@@ -159,22 +159,25 @@ matters where each one lives.
 
 The identities Simard uses to operate *herself* —
 `simard-engineer`, `simard-meeting`, `simard-gym`, `simard-goal-curator`,
-`simard-improvement-curator`, `simard-concierge`, `simard-atelier`, and the
-composite — are **compiled into `BuiltinIdentityLoader`** in
+`simard-improvement-curator`, and the `simard-composite-engineer` composite —
+are **compiled into `BuiltinIdentityLoader`** in
 `src/identity/loader.rs`. They are part of the daemon's own behavior and
 legitimately live in `src/`. This does not change.
 
-> **Naming note:** `simard-atelier` and `simard-concierge` are Simard's *own*
-> operating identities and stay compiled in. Do not confuse them with
-> hypothetical `atelier`/`concierge`-style **example** packages — the boundary
-> is defined by where an identity lives (compiled `BuiltinIdentityLoader` arm
-> vs. data under `examples/identities/`), not by its theme.
+> **Naming note:** the built-in roster is limited to the identities Simard uses
+> to run herself (engineer, meeting, gym, the two curators, and the composite).
+> Non-engineering personas such as **atelier** (industrial & furniture design)
+> and **concierge** (hospitality design + operations) are **example** identities
+> and live as data-only packages under `examples/identities/`, not as
+> `BuiltinIdentityLoader` arms. The boundary is defined by where an identity
+> lives — a compiled `BuiltinIdentityLoader` arm vs. data under
+> `examples/identities/` — not by its theme.
 
 ### Example non-engineering identities → data-only packages
 
 Identities that merely *demonstrate* what the framework can produce —
-cartographer, gastronome, bursar, concierge, and the like — are **not** part of Simard's
-daemon. They are authored as **data-only packages**
+cartographer, atelier, concierge, gastronome, bursar, and the like — are **not**
+part of Simard's daemon. They are authored as **data-only packages**
 under [`examples/identities/<name>/`](../../examples/identities/README.md):
 
 ```
@@ -190,7 +193,7 @@ They are loaded at runtime by the data-driven file loader, not compiled in:
 use simard::identity::{load_example_identity, DEFAULT_EXAMPLE_IDENTITIES_DIR};
 
 let manifest = load_example_identity(
-    DEFAULT_EXAMPLE_IDENTITIES_DIR.as_ref(), // repo-root examples/identities (overridable)
+    DEFAULT_EXAMPLE_IDENTITIES_DIR.as_ref(), // examples/identities, relative to cwd (overridable)
     "cartographer",
     &request,
 )?;
@@ -226,8 +229,13 @@ arm, no `operator_cli` subcommand, no `src/bin/*`). The reference package is
 example (an investment-portfolio research/advisory identity — advisory only,
 never order execution) that likewise ships as pure data with zero `src/` changes.
 [`examples/identities/concierge/`](../../examples/identities/concierge/) is a
-further hospitality-domain example (distinct from Simard's own built-in
-`simard-concierge` identity), also pure data with zero `src/` changes.
+further hospitality-domain example (a data-only package with no compiled-in
+`simard-concierge` counterpart), also pure data with zero `src/` changes.
+
+[`atelier/`](../../examples/identities/atelier/) and
+[`concierge/`](../../examples/identities/concierge/) demonstrate the same pattern
+in the industrial-design and hospitality domains, each driving its domain tooling
+(OpenSCAD/CAD; a booking-software scaffold) entirely from its recipes.
 
 ## What this is not
 

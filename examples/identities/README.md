@@ -1,19 +1,24 @@
 # Example identities — data-only identity packages
 
 This directory is the durable home for **example non-engineering identities**
-(cartographer, kinema, gastronome, bursar, concierge, sommelier, …). These are
+(cartographer, atelier, concierge, gastronome, bursar, kinema, sommelier, …). These are
 **examples of what Simard's pluggable-identity framework can produce** — they are
 **not** part of Simard's own daemon.
 
 ## Read this first: the boundary
 
-Simard is a native Rust daemon. Her **own** operating identities
-(`simard-engineer`, `simard-meeting`, `simard-gym`, `simard-goal-curator`,
-`simard-improvement-curator`, `simard-concierge`, `simard-atelier`, and the
-composite) are compiled into `BuiltinIdentityLoader` in `src/identity/loader.rs`.
-That is correct — they are how Simard herself operates. (Note: `simard-atelier`
-and `simard-concierge` are Simard's *own* identities, distinct from any
-similarly-themed example package.)
+Simard is a native Rust daemon. Her **own** operating identities —
+`simard-engineer`, `simard-meeting`, `simard-gym`, `simard-goal-curator`,
+`simard-improvement-curator`, and the `simard-composite-engineer` composite —
+are compiled into `BuiltinIdentityLoader` in `src/identity/loader.rs`. That is
+correct: they are how Simard herself operates.
+
+Everything else — including **atelier** (industrial & furniture design) and
+**concierge** (hospitality design + operations) — is an *example*. Example
+identities are demonstrations of the framework, not part of Simard's daemon.
+They carry **no** `BuiltinIdentityLoader` arm, **no** `src/<domain>/` module,
+**no** `operator_cli` / `operator_commands` subcommand, and **no** `src/bin/*`
+binary. An example is defined entirely by the data files in its package.
 
 **Example identities are different.** They are demonstrations of the framework,
 authored as **data-only packages** under `examples/identities/<name>/`. They:
@@ -87,8 +92,9 @@ let manifest = load_example_identity(
 assert_eq!(manifest.name, "cartographer");
 ```
 
-- The base directory defaults to the repo-root `examples/identities`, and is
-  overridable via the first argument.
+- The base directory defaults to the relative path `examples/identities`
+  (resolved against the current working directory), and is overridable via the
+  first argument.
 - Discovery is **fail-visible**: a missing package directory, a missing
   `identity.toml`, or invalid TOML returns a clear `SimardError`
   (`IdentityTomlParseError` with the resolved path in the reason) — never a
@@ -156,7 +162,7 @@ before authoring. In short:
   data, not instructions** — the prompts must instruct the agent to treat them
   as such.
 
-## Reference packages
+## Reference and shipped example packages
 
 [`cartographer/`](./cartographer/) is the reference example identity: a pure
 prompt + recipe data package that turns a dataset and a question into a served
@@ -189,13 +195,6 @@ product-design identity that turns a parametric product brief into a
 tooling (Blender `bpy`, FreeCAD, OpenSCAD) directly from their agent sessions,
 again with zero `src/` changes.
 
-> **Note:** this example `atelier` package is **distinct** from Simard's own
-> compiled-in `simard-atelier` identity in `BuiltinIdentityLoader`. They share a
-> theme but are different things: `simard-atelier` is how Simard herself
-> operates; `examples/identities/atelier/` is a data-only demonstration of the
-> pluggable-identity framework, loaded by `load_example_identity` with zero
-> `src/` changes.
-
 Its two goal-session recipes are
 [`atelier-parametric-modeling.yaml`](./atelier/recipes/atelier-parametric-modeling.yaml)
 (brief → parametric model → render, building and verifying manifold geometry)
@@ -206,16 +205,27 @@ narrative). `tests/atelier_example_identity_valid.rs` — run by the
 `tests/qa-scenarios/atelier-example-identity.yaml` scenario — proves the package
 loads through the data-driven loader and its recipes drive the full pipeline.
 
-agent sessions it spawns, again with zero `src/` changes.
-
-[`concierge/`](./concierge/) is a further worked example, in the hospitality
+[`concierge/`](./concierge/) is a fifth example, in the hospitality
 domain: it turns a hotel brief into a durable operations package — a property
 program and layout, a guest-experience and brand design, and runnable
 reservations / PMS / housekeeping / channel-management workflows whose
 reservation lifecycle (book → check-in → check-out → housekeeping → restored
 availability) is exercised with enforced no-double-booking and
-availability-conservation invariants. It is **distinct** from Simard's own
-built-in `simard-concierge` identity: same theme, opposite side of the boundary
-(data under `examples/identities/` vs. compiled builtin). Its assets are
-validated end-to-end by `tests/concierge_example_assets_valid.rs` and the
+availability-conservation invariants. Like every example here it carries **no**
+`BuiltinIdentityLoader` arm — it is defined entirely by the data files in its
+package and loaded by `load_example_identity`. Its assets are validated
+end-to-end by `tests/concierge_example_assets_valid.rs` and the
 `tests/qa-scenarios/concierge-example-end-to-end.yaml` scenario.
+
+[`kinema/`](./kinema/) is a sixth example: an **animation & motion-graphics**
+identity that turns a story brief and a shot list into a rendered, playable
+animation sequence with a written motion brief. Its four-stage recipe
+(storyboard → rig → render → motion brief) drives real domain tooling — Blender
+(Grease Pencil for 2D, armature rigging + Cycles/EEVEE for 3D), Synfig (vector 2D
+tweening), and Natron (node-based compositing) — entirely from its recipe and the
+agent sessions it spawns, again with zero `src/` changes.
+
+> **All domain tooling lives in the recipes.** Atelier's OpenSCAD/FreeCAD/Blender
+> steps and concierge's booking / PMS / channel-management workflows run inside
+> the agent sessions the recipes spawn — never in Simard's Rust daemon. Simard's
+> `src/` stays pure Rust (no Python, no `kuzu`, no CAD engine, no PMS module).

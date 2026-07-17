@@ -73,9 +73,6 @@ simard
 |- handover [--canary-dir=PATH]
 |- disk-reclaim [--apply] [--report-json] [--target-pct=N]
 |  `- exec --candidates <json|@file|@-> [--apply] [--report-json]
-|- atelier
-|  |- build --brief <brief.json> --out <dir> [--fabrication] [--strict]
-|  `- inspect --out <dir> [--fabrication]
 |- update
 `- install [--simard-home PATH] [--dry-run] [--systemd-user-dir PATH] [--systemctl PATH]  # planned
 ```
@@ -515,37 +512,6 @@ claims — a hand-edited candidate list cannot make it delete a protected path.
 
 See [Configure disk reclamation](../howto/configure-disk-reclamation.md) and the
 [Disk reclaim API reference](disk-reclaim-api.md).
-
-## Atelier design commands
-
-The **Atelier** identity (`simard-atelier`) turns a product brief into a
-parametric 3D model, a render, and a fabrication package. See
-[Design furniture with Atelier](../howto/design-with-atelier.md) for the full
-workflow.
-
-### `simard atelier build --brief <brief.json> --out <dir> [--fabrication] [--strict]`
-
-Reads a product brief (JSON: name, `kind`, `dimensions_mm`, `material`,
-optional `parameters`, `hardware`, `finish`, `budget`), generates parametric
-geometry, and drives OpenSCAD to export the model. Writes to `<dir>`:
-`model.scad`, `model.stl`, `render.png` (when a display or `xvfb-run` is
-available), `manifest.json`, and — with `--fabrication` — `cutlist.csv` and
-`bom.csv`. `model.step` is additionally exported when FreeCAD (`freecadcmd`)
-is installed.
-
-Verification always requires the core deliverables (valid geometry, STL, cut
-list, BOM, stock-fit). The render and budget checks are advisory. `--strict`
-promotes the advisory checks (render present, within budget) to hard failures.
-
-Exit codes: `0` verified; `1` verification failed (or a `--strict` advisory
-check failed); non-zero on invalid brief or a missing required tool (OpenSCAD).
-
-### `simard atelier inspect --out <dir> [--fabrication]`
-
-Re-reads an existing package directory, re-runs verification against the
-persisted `manifest.json`, and prints the tool report and verification result
-without rebuilding. Also prints the available-tool report when `<dir>` does not
-yet contain a manifest.
 
 ## Compatibility mapping
 

@@ -51,7 +51,6 @@ Simard does **not** expose:
 | review artifact persistence and readback | `simard review ...` | `simard_operator_probe review-run ...` and `review-read ...` |
 | benchmark scenarios and suites | `simard gym ...` | `simard-gym ...` |
 | LOCAL COIN Gym harness done-gate | `coin-gym verify` | `simard_operator_probe coin-gym-verify` |
-| concierge identity end-to-end probe | none | `simard_operator_probe concierge-run ...` |
 | handoff export/restore roundtrip probe | none | `simard_operator_probe handoff-roundtrip ...` |
 
 ## Canonical CLI surface
@@ -510,22 +509,6 @@ The operator-facing bootstrap contract is now explicit:
 - identity, base type, and topology mismatches fail explicitly
 - there is no public zero-argument bootstrap path
 - state-root validation runs before durable artifacts are read or written
-
-### Concierge probe
-
-Compatibility surface: `simard_operator_probe concierge-run <topology> <brief>`
-
-This probe has no canonical `simard` subcommand; it ships only through the
-`simard_operator_probe` compatibility binary. It drives the Concierge identity
-end-to-end from a free-text hotel `brief`: designing the hotel, scaffolding and
-driving a reservations/PMS prototype, and printing the verified outcome report.
-
-- `topology` is validated for parity with the other probes even though the
-  prototype runs in-process
-- the `brief` is treated as untrusted input; a thin or empty brief falls back to
-  defaults rather than failing
-- an invalid topology or a failed end-to-end verification invariant fails
-  explicitly
 
 ### Handoff roundtrip probe
 

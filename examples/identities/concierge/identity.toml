@@ -4,8 +4,10 @@
 # (`load_example_identity`), NOT compiled into `BuiltinIdentityLoader`. It adds
 # ZERO Rust to `src/`, no operator_cli subcommand, and no `src/bin/*`.
 #
-# NAMING: this example identity is named `concierge`. It is DISTINCT from
-# Simard's OWN built-in `simard-concierge` identity (which lives in
+# NAMING: this example identity is named `concierge`. There is **no** built-in
+# `simard-concierge` identity — Simard's OWN compiled-in identities are only
+# `simard-engineer`, `simard-meeting`, `simard-gym`, `simard-goal-curator`,
+# `simard-improvement-curator`, and `simard-composite-engineer` (in
 # `src/identity/loader.rs`). The boundary is defined by WHERE an identity lives
 # (compiled builtin vs. data under `examples/identities/`), not by its theme.
 #

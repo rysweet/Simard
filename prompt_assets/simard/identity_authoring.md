@@ -36,8 +36,7 @@ When building an example identity, you must **NOT**:
 - ❌ Add an arm to the `BuiltinIdentityLoader` match in `src/identity/loader.rs`.
   That match is reserved for Simard's **own** operating identities
   (`simard-engineer`, `simard-meeting`, `simard-gym`, `simard-goal-curator`,
-  `simard-improvement-curator`, `simard-concierge`, `simard-atelier`,
-  composite). Example
+  `simard-improvement-curator`, `simard-composite-engineer`). Example
   identities never appear there.
 - ❌ Add an `operator_cli` subcommand for the identity.
 - ❌ Add a `src/bin/<domain>.rs` binary for the identity.
