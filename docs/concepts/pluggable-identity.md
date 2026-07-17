@@ -236,6 +236,11 @@ further hospitality-domain example (a data-only package with no compiled-in
 [`concierge/`](../../examples/identities/concierge/) demonstrate the same pattern
 in the industrial-design and hospitality domains, each driving its domain tooling
 (OpenSCAD/CAD; a booking-software scaffold) entirely from its recipes.
+[`vitruvia/`](../../examples/identities/vitruvia/) is a further example in the
+architecture & interior-design domain: it turns a program/site brief into a
+code-aware BIM floor plan, interiors, technical drawings (plans and elevations),
+and a rendered walkthrough, driving Blender + BlenderBIM / IfcOpenShell and
+FreeCAD from its recipes — again with zero `src/` changes.
 
 ## What this is not
 
