@@ -1,7 +1,7 @@
 # Example identities — data-only identity packages
 
 This directory is the durable home for **example non-engineering identities**
-(cartographer, atelier, concierge, gastronome, bursar, kinema, loremaster, sommelier, …). These are
+(cartographer, atelier, concierge, gastronome, bursar, kinema, loremaster, terra, sommelier, …). These are
 **examples of what Simard's pluggable-identity framework can produce** — they are
 **not** part of Simard's own daemon.
 
@@ -246,9 +246,25 @@ arm — it is defined entirely by the data files in its package and loaded by
 `tests/loremaster_example_assets_valid.rs` and the
 `tests/qa-scenarios/loremaster-example-end-to-end.yaml` scenario.
 
+[`terra/`](./terra/) is an eighth example: a **virtual-worlds & game-level**
+identity that turns a world brief into a **launchable, navigable 3D scene** — end
+to end. Its four-stage recipe (world design & blockout → terrain & asset authoring
+→ scene assembly → world brief) plans the spaces, navigation graph, and
+interaction beats; authors the terrain and assets in Blender and exports glTF/.glb;
+wires them into a runnable scene with a player controller, collision, a baked
+navmesh, and interaction triggers; and **verifies the scene launches and is
+navigable**. It drives real domain tooling — Godot (game levels, GDScript,
+`NavigationRegion3D` navmesh, headless `godot --headless --export-release` build),
+Blender (terrain + asset authoring via `bpy`, glTF/.glb export), and A-Frame /
+WebXR (in-browser explorable 3D worlds) — entirely from its recipe and the agent
+sessions it spawns, again with zero `src/` changes. Its assets are validated
+end-to-end by `tests/terra_assets_valid.rs` and the
+`tests/qa-scenarios/terra-world-build-end-to-end.yaml` scenario.
+
 > **All domain tooling lives in the recipes.** Atelier's OpenSCAD/FreeCAD/Blender
-> steps, concierge's booking / PMS / channel-management workflows, and
-> loremaster's SRD rules engine / seeded dice roller / Foundry VTT exporter run
+> steps, concierge's booking / PMS / channel-management workflows,
+> loremaster's SRD rules engine / seeded dice roller / Foundry VTT exporter, and
+> terra's Godot / Blender / A-Frame world-building tooling run
 > inside the agent sessions the recipes spawn — never in Simard's Rust daemon.
 > Simard's `src/` stays pure Rust (no Python, no `kuzu`, no CAD engine, no PMS
-> module, no dice engine).
+> module, no dice engine, no game engine).
