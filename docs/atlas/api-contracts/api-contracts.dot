@@ -1,0 +1,115 @@
+// Code Atlas — API Contracts (Graphviz source of truth)
+// Derived from Rust source; see docs/atlas/api-contracts/README.md
+// "Evidence anchors" for the file:line citation of every route/method/enum.
+// Render: dot -Tsvg api-contracts.dot -o api-contracts-dot.svg
+digraph api_contracts {
+    rankdir=LR;
+    fontname="Helvetica";
+    labelloc="t";
+    label="Simard — API Contracts (58 REST + 3 WS, JSON-RPC, IPC enums)";
+    node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=10, fillcolor="#eef4fb", color="#33628f"];
+    edge [fontname="Helvetica", fontsize=9, color="#555555"];
+
+    client [label="Operator / peer process", shape=oval, fillcolor="#e7e7f6"];
+
+    // ---- HTTP surface behind require_auth ------------------------------
+    subgraph cluster_auth {
+        label="require_auth trust boundary\nroutes.rs:124  auth.rs:76";
+        style="rounded,filled";
+        fillcolor="#f2f8f2";
+        color="#7fa87f";
+
+        subgraph cluster_status {
+            label="Status / metrics  routes.rs:46-49,75,80-83,108";
+            style="rounded,filled"; fillcolor="#ffffff"; color="#cccccc";
+            r_status [label="GET /api/status, /api/issues,\n/api/metrics, /api/costs\n/api/budget (GET|POST)\n/api/status/snapshot\n/api/memory, /api/cognition/recall-precision"];
+        }
+        subgraph cluster_goals {
+            label="Goals  routes.rs:51-56";
+            style="rounded,filled"; fillcolor="#ffffff"; color="#cccccc";
+            r_goals [label="/api/goals (GET|POST)\n/api/goals/seed (POST)\n/api/goals/promote|demote/{id} (POST)\n/api/goals/{id} (DELETE)\n/api/goals/{id}/status (PUT)"];
+        }
+        subgraph cluster_dist {
+            label="Distributed / hosts  routes.rs:57-62";
+            style="rounded,filled"; fillcolor="#ffffff"; color="#cccccc";
+            r_dist [label="/api/distributed (GET)\n/api/vm/vacate (POST)\n/api/hosts (GET|POST|DELETE)"];
+        }
+        subgraph cluster_reg {
+            label="Registry / lock / procs  routes.rs:63-74";
+            style="rounded,filled"; fillcolor="#ffffff"; color="#cccccc";
+            r_reg [label="/api/logs, /api/processes (GET)\n/api/registry (GET|POST|DELETE)\n/api/registry/reap (POST)\n/api/agent-graph (GET)\n/api/build-lock (GET)\n/api/build-lock/release (POST)"];
+        }
+        subgraph cluster_mem {
+            label="Memory  routes.rs:76-79";
+            style="rounded,filled"; fillcolor="#ffffff"; color="#cccccc";
+            r_mem [label="/api/memory/recent (GET)\n/api/memory/history (GET)\n/api/memory/search (POST)\n/api/memory/graph (GET)"];
+        }
+        subgraph cluster_work {
+            label="Work / OODA / PRs  routes.rs:84-95";
+            style="rounded,filled"; fillcolor="#ffffff"; color="#cccccc";
+            r_work [label="/api/enrichment, /api/merge-judge,\n/api/merge-readiness, /api/traces,\n/api/activity, /api/workboard,\n/api/current-work, /api/ooda-thinking,\n/api/ooda-cycles, /api/brain-failures,\n/api/overseer, /api/prs (GET)"];
+        }
+        subgraph cluster_journal {
+            label="Journal  routes.rs:96-99";
+            style="rounded,filled"; fillcolor="#ffffff"; color="#cccccc";
+            r_journal [label="/api/journal/dates (GET)\n/api/journal/search (POST)\n/api/journal/entry|render/{date} (GET)"];
+        }
+        subgraph cluster_ideas {
+            label="Creative ideas  routes.rs:100-107";
+            style="rounded,filled"; fillcolor="#ffffff"; color="#cccccc";
+            r_ideas [label="/api/creative-ideas (GET)\n/api/creative-ideas/search|run (POST)\n/api/creative-ideas/{id}/promote|prune (POST)"];
+        }
+        subgraph cluster_chat {
+            label="Feedback / sessions / chat  routes.rs:109-116";
+            style="rounded,filled"; fillcolor="#ffffff"; color="#cccccc";
+            r_chat [label="/api/feedback (POST)\n/api/feedback/status/{id} (GET)\n/api/subagent-sessions (GET)\n/api/chat/sessions[/{id}] (GET)\n/api/azlin/tmux-sessions (GET)"];
+        }
+        subgraph cluster_ws {
+            label="WebSockets  routes.rs:114-120";
+            style="rounded,filled"; fillcolor="#eef8ff"; color="#66aadd";
+            r_ws [label="/ws/chat\n/ws/agent_log/{agent_name}\n/ws/tmux_attach/{host}/{session}", fillcolor="#dbeeff"];
+        }
+        r_root [label="GET / (index)  routes.rs:123", fillcolor="#f6f6f6"];
+    }
+
+    // ---- Public (pre-auth) routes --------------------------------------
+    subgraph cluster_public {
+        label="Public (pre-auth)  auth.rs:79-82";
+        style="rounded,filled";
+        fillcolor="#fbeeee";
+        color="#cc9988";
+        r_login [label="POST /api/login  routes.rs:121\nGET /login  routes.rs:122", fillcolor="#f8dcdc"];
+    }
+
+    client -> r_login [label="unauthenticated"];
+    client -> r_status [label="cookie / Bearer / ?token\nauth.rs:104,111-131", color="#7fa87f"];
+    client -> r_ws [label="authenticated WS", color="#7fa87f"];
+
+    // ---- JSON-RPC wire contract ----------------------------------------
+    subgraph cluster_rpc {
+        label="JSON-RPC (one JSON object per line)  rpc.rs:11";
+        style="rounded,filled";
+        fillcolor="#f8eef4";
+        color="#a76a92";
+        rpc_req [label="RpcRequest {id, method, params}\nrpc.rs:14"];
+        rpc_res [label="RpcResponse {id, result?, error?}\nrpc.rs:26"];
+        rpc_err [label="RpcErrorPayload {code, message}  rpc.rs:35\n-32601 method-not-found | -32603 internal\n-32000 timeout | -32001 transport\nrpc.rs:41-44", fillcolor="#f3dcec"];
+        rpc_health [label="bridge.health -> RpcHealth {server_name, healthy}\nrpc.rs:48,78"];
+    }
+    client -> rpc_req [label="request"];
+    rpc_req -> rpc_res [label="reply"];
+    rpc_res -> rpc_err [label="error variant"];
+    rpc_req -> rpc_health [label="method"];
+
+    // ---- IPC serde enums ----------------------------------------------
+    subgraph cluster_ipc {
+        label="IPC serde enums";
+        style="rounded,filled";
+        fillcolor="#fbf6ee";
+        color="#c39b5b";
+        ipc_mem [label="MemoryRequest / MemoryResponse\nframed JSON over memory.sock\nMAX_FRAME 8 MiB\nmemory_ipc/mod.rs:158,300,352"];
+        ipc_msg [label="IpcMessage (tag=type, snake_case)\nping|pong|task_assign|task_result|shutdown\nruntime_ipc/mod.rs:20-25,29-35"];
+    }
+    client -> ipc_mem [label="framed JSON", style=dashed];
+    client -> ipc_msg [label="subprocess coord", style=dashed];
+}

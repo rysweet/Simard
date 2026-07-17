@@ -1,0 +1,63 @@
+%% Code Atlas — Runtime Topology (Mermaid source of truth)
+%% Derived from Rust source; see README.md "Evidence anchors" for file:line.
+%% Render: mmdc --no-sandbox -i runtime-topology-mermaid.mmd -o runtime-topology-mermaid.svg
+flowchart TB
+    simard["simard (default-run bin)<br/>src/main.rs:8"]
+    dispatch["dispatch_operator_cli()<br/>operator_cli/mod.rs:219"]
+    simard -->|args| dispatch
+
+    subgraph surfaces["Long-lived runtime surfaces"]
+        dashboard["dashboard serve<br/>operator_cli/mod.rs:250"]
+        ooda["ooda run<br/>operator_cli/mod.rs:249"]
+        memcmd["memory stats|dump<br/>operator_cli/mod.rs:252"]
+        spawncmd["spawn agent goal<br/>operator_cli/mod.rs:254"]
+        signalcmd["signal run<br/>operator_cli/mod.rs:251"]
+    end
+    dispatch --> dashboard
+    dispatch --> ooda
+    dispatch --> memcmd
+    dispatch --> spawncmd
+    dispatch --> signalcmd
+
+    subgraph tasks["Async tasks / loops (tokio)"]
+        dash_task["spawn_dashboard_task(rt, port)<br/>axum::serve @ 0.0.0.0:port<br/>dashboard/mod.rs:244-260"]
+        ooda_cycle["run_ooda_cycle()<br/>observe->orient->decide->act->review<br/>ooda_loop/cycle.rs:28"]
+        mem_accept["memory_ipc::spawn_server()<br/>UnixListener accept loop<br/>memory_ipc/server.rs:29"]
+        supervisor["agent_supervisor<br/>child procs; hive-fact heartbeats<br/>agent_supervisor/mod.rs:1-9"]
+        overseer["overseer (planned)<br/>design sketch, not wired<br/>overseer/mod.rs:1-18"]
+    end
+    dashboard --> dash_task
+    ooda --> ooda_cycle
+    memcmd --> mem_accept
+    spawncmd --> supervisor
+
+    subgraph channels["Wire channels"]
+        mem_sock[("Memory IPC<br/>UnixListener memory.sock<br/>MemoryRequest/Response<br/>memory_ipc/mod.rs:158,300")]
+        rt_ipc[("Runtime IPC<br/>newline-JSON IpcMessage<br/>spawn_subprocess()<br/>runtime_ipc/mod.rs:20,177")]
+        rpc_ch[("RPC line-delimited JSON<br/>RpcRequest/RpcResponse<br/>rpc.rs:14,26")]
+        hive_bus[("HiveEventBus<br/>tokio::broadcast cap 1024<br/>hive_event_bus/mod.rs:229-244")]
+    end
+
+    rcm["RemoteCognitiveMemory backend"]
+    child_proc["subprocess child<br/>--ipc-socket path"]
+    rpc_srv["RPC servers (knowledge/gym)<br/>rpc_transport/native.rs:26"]
+    subscribers["HiveEvent subscribers<br/>subscribe()/publish()<br/>hive_event_bus/mod.rs:275,284"]
+
+    mem_accept -->|serve| mem_sock
+    mem_sock -->|dispatch| rcm
+    memcmd -.->|client framed JSON| mem_sock
+
+    supervisor -->|spawn| rt_ipc
+    rt_ipc -->|accept| child_proc
+
+    ooda_cycle -->|request| rpc_ch
+    rpc_ch -->|one JSON/line| rpc_srv
+
+    supervisor -->|publish facts| hive_bus
+    ooda_cycle -->|publish| hive_bus
+    hive_bus -->|broadcast| subscribers
+
+    overseer -.->|planned| hive_bus
+
+    classDef planned stroke-dasharray: 5 5,fill:#f0f0f0,stroke:#999;
+    class overseer planned;
