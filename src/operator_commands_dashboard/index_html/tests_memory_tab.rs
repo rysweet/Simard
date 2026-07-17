@@ -308,3 +308,47 @@ fn memory_graph_has_neutral_empty_state_message() {
          genuinely-empty store (distinct from the error overlay)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Recent-memories last-hour consistency: the headline count
+// (`#mem-recent-count` = `last_hour_count`) and the panel copy must never
+// contradict each other. On the library backend per-item listing is
+// unavailable (`available:false`, `items:[]`) yet `last_hour_count` can be
+// positive; the empty-items copy must therefore branch on `last_hour_count`,
+// not only on the aggregate `total`. Otherwise the panel shows e.g.
+// "313 items remembered in the last hour" beside "No new memories in the last
+// hour" — a self-contradiction that misreports live memory health.
+// ---------------------------------------------------------------------------
+
+/// The recent-memories empty-state must read the last-hour count and, when it is
+/// positive, must NOT emit the "No new memories in the last hour" copy — that
+/// would contradict the headline `#mem-recent-count` number.
+#[test]
+fn recent_memories_empty_state_branches_on_last_hour_count() {
+    let html: &str = &INDEX_HTML;
+    let body = js_function(html, "fetchRecentMemories");
+    assert!(
+        body.contains("d.last_hour_count||0"),
+        "fetchRecentMemories must derive the last-hour count for its empty-state \
+         branch so a positive last-hour count is never rendered as \"No new \
+         memories in the last hour\" (which contradicts the #mem-recent-count \
+         headline); body: {body}"
+    );
+    assert!(
+        body.contains("recorded in the last hour"),
+        "when the last-hour count is positive but per-item detail is unavailable, \
+         the panel must state that memories WERE recorded in the last hour, \
+         consistent with the headline count; body: {body}"
+    );
+    // The truthful zero-window copy must still exist for last_hour_count == 0.
+    assert!(
+        body.contains("No new memories in the last hour"),
+        "the zero-last-hour branch must still say \"No new memories in the last \
+         hour\" when nothing was recorded this hour; body: {body}"
+    );
+    assert!(
+        body.contains("No memories stored yet"),
+        "the empty-store branch must still fall back to \"No memories stored yet\" \
+         when total is zero (#2358); body: {body}"
+    );
+}

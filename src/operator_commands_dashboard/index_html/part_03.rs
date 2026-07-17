@@ -401,9 +401,19 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
         totalEl.textContent=(d.total||0).toLocaleString()+' total';
         if(!d.items||d.items.length===0){
           const total=d.total||0;
-          listEl.innerHTML=total>0
-            ?'<span style="color:#8b949e">No new memories in the last hour — '+total.toLocaleString()+' total stored.</span>'
-            :'<span style="color:#8b949e">No memories stored yet. Simard will remember things as it works.</span>';
+          const lastHour=d.last_hour_count||0;
+          if(lastHour>0){
+            // Per-item detail is unavailable on the library backend, but memories
+            // WERE recorded this hour — never contradict the big last-hour count
+            // with "no new memories" (that misreports live memory health). Surface
+            // an honest, consistent summary that agrees with the headline number.
+            const noun=lastHour===1?'memory':'memories';
+            listEl.innerHTML='<span style="color:#8b949e">'+lastHour.toLocaleString()+' '+noun+' recorded in the last hour. Per-item detail isn\u2019t available on this backend yet — see the memory graph for the per-type breakdown. '+total.toLocaleString()+' total stored.</span>';
+          }else{
+            listEl.innerHTML=total>0
+              ?'<span style="color:#8b949e">No new memories in the last hour — '+total.toLocaleString()+' total stored.</span>'
+              :'<span style="color:#8b949e">No memories stored yet. Simard will remember things as it works.</span>';
+          }
           return;
         }
         const catColors={'Learned fact':'#58a6ff','Past event':'#3fb950','Current task context':'#f0883e','How-to knowledge':'#a371f7','Planned reminder':'#d29922','Recent observation':'#8b949e'};
