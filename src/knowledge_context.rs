@@ -97,14 +97,14 @@ const MIN_TOKEN_LEN: usize = 2;
 /// Score a pack's relevance to an objective by **whole-word** keyword overlap.
 ///
 /// The objective and the pack text (`name` + `description`) are each tokenized
-/// into lowercase alphanumeric words. The score is the number of **distinct**
-/// objective tokens (length >= [`MIN_TOKEN_LEN`]) that appear as a whole word in
-/// the pack's word set.
+/// into lowercase alphanumeric words. The score is the number of **distinct,
+/// non-stopword** objective tokens (length >= [`MIN_TOKEN_LEN`]) that appear as
+/// a whole word in the pack's word set.
 ///
-/// Two properties matter for recall precision, and both replace weaknesses of an
-/// earlier raw-substring scan (mirroring the word-boundary policy already adopted
-/// by [`crate::memory_consolidation::classifier`] and
-/// [`crate::fact_reliability`]):
+/// Three properties matter for recall precision, each replacing a weakness of an
+/// earlier scan (mirroring the word-boundary and stopword policy already adopted
+/// by [`crate::memory_consolidation`], [`crate::memory_consolidation::classifier`]
+/// and [`crate::fact_reliability`]):
 ///
 ///   * **Whole-word, not substring.** A short token no longer matches when it is
 ///     merely *embedded* in an unrelated pack word — `go` must not match
@@ -116,6 +116,14 @@ const MIN_TOKEN_LEN: usize = 2;
 ///   * **Distinct tokens, not repetitions.** A word repeated in the objective
 ///     counts once, so a verbose objective that restates one term cannot inflate
 ///     a pack's score and distort the ranking.
+///   * **Stopwords carry no signal.** Common English stopwords (`the`, `with`,
+///     `how`, `from`, …) are dropped via the shared
+///     [`crate::memory_consolidation::is_recall_stopword`] predicate — the SAME
+///     source of truth the episodic-recall tokenizer
+///     ([`crate::memory_consolidation::tokenize_objective`]) uses. Without this,
+///     a stopword the objective happens to share with an off-topic pack's
+///     name/description counted as a match, inflating that pack's score and
+///     re-opening the top-N crowd-out failure mode above by a different route.
 fn relevance_score(objective: &str, pack: &KnowledgePackInfo) -> usize {
     let pack_words = word_set(&format!("{} {}", pack.name, pack.description));
 
@@ -123,6 +131,7 @@ fn relevance_score(objective: &str, pack: &KnowledgePackInfo) -> usize {
         .split(|c: char| !c.is_alphanumeric())
         .filter(|t| t.len() >= MIN_TOKEN_LEN)
         .map(str::to_lowercase)
+        .filter(|t| !crate::memory_consolidation::is_recall_stopword(t))
         .collect();
 
     objective_tokens
@@ -295,6 +304,63 @@ mod tests {
             relevance_score("rust rust rust programming", &pack),
             2,
             "distinct tokens {{rust, programming}} => 2, not 4"
+        );
+    }
+
+    #[test]
+    fn relevance_score_ignores_stopwords() {
+        // Common English stopwords carry no topical signal and must NOT count as
+        // matches, even when the objective shares them with a pack's
+        // name/description. Otherwise a stopword overlap inflates an off-topic
+        // pack's score and can crowd a genuinely relevant pack out of the top-N
+        // cut. The shared source of truth is
+        // `memory_consolidation::is_recall_stopword`, which the episodic-recall
+        // tokenizer also uses.
+        //
+        // The pack's word set is composed entirely of stopwords, and the
+        // objective's ONLY overlap with it is via those stopwords — so a
+        // stopword-blind scan would have scored 5+ here. With filtering the
+        // topical score is exactly zero.
+        let pack = KnowledgePackInfo {
+            name: "faq".to_string(),
+            description: "the and with this that from how why what when where".to_string(),
+            article_count: 10,
+            section_count: 20,
+        };
+        assert_eq!(
+            relevance_score("how the rust with this from that", &pack),
+            0,
+            "stopword-only overlap ('how','the','with','this','from','that') must not score"
+        );
+    }
+
+    #[test]
+    fn relevance_score_stopword_does_not_crowd_out_topical_pack() {
+        // Regression guard for the crowd-out failure mode: a topical pack that
+        // shares one genuine keyword must out-rank an off-topic pack that only
+        // shares stopwords with the objective.
+        let objective = "How to fix this Rust ownership with the borrow checker";
+        let topical = KnowledgePackInfo {
+            name: "rust-expert".to_string(),
+            description: "Rust ownership borrow checker".to_string(),
+            article_count: 100,
+            section_count: 400,
+        };
+        let off_topic = KnowledgePackInfo {
+            name: "faq".to_string(),
+            description: "how this with the that".to_string(),
+            article_count: 10,
+            section_count: 20,
+        };
+        let topical_score = relevance_score(objective, &topical);
+        let off_topic_score = relevance_score(objective, &off_topic);
+        assert_eq!(
+            off_topic_score, 0,
+            "off-topic pack shares only stopwords => 0, got {off_topic_score}"
+        );
+        assert!(
+            topical_score > off_topic_score,
+            "topical pack ({topical_score}) must out-rank stopword-only pack ({off_topic_score})"
         );
     }
 

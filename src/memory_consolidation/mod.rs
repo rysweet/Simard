@@ -488,10 +488,29 @@ pub(crate) const GOAL_BOARD_SNAPSHOT_CONCEPT: &str = "goal-board:snapshot";
 /// for episodic recall (PR-C, issue #2281, problem 4). These tokens
 /// add zero signal to a `CONTAINS` search and would only inflate
 /// the OR-clause without changing the recall set.
+///
+/// This is the single source of truth for the recall-hygiene stopword
+/// set. Both recall seams that tokenize an objective consult it via
+/// [`is_recall_stopword`]:
+///
+///   * episodic/procedural recall — [`tokenize_objective`] below, and
+///   * planning-context knowledge-pack relevance —
+///     [`crate::knowledge_context::relevance_score`].
+///
+/// Keeping one list prevents the two seams from drifting apart on which
+/// words carry no topical signal.
 const TOKEN_STOPWORDS: &[&str] = &[
     "the", "and", "for", "with", "this", "that", "from", "has", "was", "were", "will", "into",
     "when", "where", "what", "why", "how",
 ];
+
+/// True when `token` is a common English stopword that carries no topical
+/// signal for recall (see [`TOKEN_STOPWORDS`]). The shared predicate both
+/// recall seams call so they gate identical words; `token` is expected to be
+/// already lowercased (the tokenizers lowercase before the check).
+pub(crate) fn is_recall_stopword(token: &str) -> bool {
+    TOKEN_STOPWORDS.contains(&token)
+}
 
 /// Tokenize the objective text into keywords for
 /// [`CognitiveMemoryOps::search_episodes_by_keywords`] **and** for
@@ -523,7 +542,7 @@ pub(crate) fn tokenize_objective(objective: &str) -> Vec<String> {
         if raw.len() < 3 {
             continue;
         }
-        if TOKEN_STOPWORDS.contains(&raw) {
+        if is_recall_stopword(raw) {
             continue;
         }
         if seen.insert(raw.to_string()) {

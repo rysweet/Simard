@@ -1,0 +1,85 @@
+name: knowledge-context-stopword-relevance
+app_type: cli
+description: |
+  Outside-in proof that planning-context knowledge-pack relevance scoring
+  (`knowledge_context::relevance_score`) drops common English STOPWORDS before
+  counting objective/pack keyword overlap — a recall-quality axis of the
+  standing cognition-improvement goal.
+
+  Background. #4241 already made the scan whole-word and distinct-token, but it
+  still counted generic stopwords ("the", "with", "how", "from", "this", ...)
+  as matches. The episodic-recall tokenizer
+  (`memory_consolidation::tokenize_objective`, PR-C #2281) has always dropped
+  these because they add zero topical signal. The two recall seams disagreed:
+  an objective that merely shared a stopword with an off-topic pack's
+  name/description inflated that pack's relevance, creating spurious ties that
+  could crowd a genuinely relevant pack out of the top-`MAX_PACKS_PER_OBJECTIVE`
+  (3) cut — the SAME crowd-out failure mode #4241 addressed, reached by a
+  different route.
+
+  The fix routes both seams through one shared source of truth
+  (`memory_consolidation::is_recall_stopword`) and filters stopwords out of the
+  objective token set in `relevance_score`. Public surface unchanged
+  (`enrich_planning_context` intact); a private helper only.
+
+  This scenario drives the hermetic, in-process unit tests that pin the
+  corrected contract:
+    - a stopword-only objective/pack overlap scores zero (no spurious
+      relevance);
+    - a topical pack sharing one genuine keyword out-ranks an off-topic pack
+      that shares only stopwords (crowd-out regression guard);
+    - the pre-existing whole-word / distinct-token / pack-selection / empty /
+      cap behaviours are unregressed;
+    - `memory_consolidation`'s recall tokenizer (the shared stopword seam) is
+      unregressed.
+  No network, no live host mutation. The CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # The relevance-scoring contract, including the new stopword tests and the
+  # pre-existing whole-word / distinct-token / pack-selection / cap behaviours.
+  - action: run
+    params:
+      command: "cargo test --locked --lib knowledge_context"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # The shared stopword source of truth lives in memory_consolidation; prove the
+  # episodic/procedural recall tokenizer that consumes it is unregressed.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_consolidation"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Broader base-type turn suite proves no regression in the planning-context
+  # preparation path that consumes `enrich_planning_context`.
+  - action: run
+    params:
+      command: "cargo test --locked --lib base_type_turn"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
