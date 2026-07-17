@@ -10,15 +10,15 @@ This layer maps Simard's direct Cargo dependencies and a one-hop view of the lar
 
 ![compile deps external runtime (dot)](compile-deps-external-runtime-dot.svg)
 
-![compile deps external runtime (mermaid)](compile-deps-external-runtime.svg)
+![compile deps external runtime (mermaid)](compile-deps-external-runtime-mermaid.svg)
 
 ![compile deps dev build (dot)](compile-deps-external-dev-build-dot.svg)
 
-![compile deps dev build (mermaid)](compile-deps-external-dev-build.svg)
+![compile deps dev build (mermaid)](compile-deps-external-dev-build-mermaid.svg)
 
 ![compile deps internal modules (dot)](compile-deps-internal-modules-dot.svg)
 
-![compile deps internal modules (mermaid)](compile-deps-internal-modules.svg)
+![compile deps internal modules (mermaid)](compile-deps-internal-modules-mermaid.svg)
 
 ## Evidence anchors
 

@@ -35,7 +35,7 @@ MERGE (p:Process {id: 'cargo'})            SET p.evidence = 'src/self_relaunch/c
 
 // ---- Ports / network endpoints ---------------------------------------------
 MERGE (n:Port {id: 'dashboard-8080'})   SET n.endpoint = '0.0.0.0:8080', n.protocol = 'HTTP+WebSocket (Axum)', n.evidence = 'src/operator_commands_dashboard/mod.rs:253';
-MERGE (n:Port {id: 'signal-rpc-7583'})  SET n.endpoint = '127.0.0.1:7583', n.protocol = 'newline-delimited JSON-RPC 2.0 over TCP', n.evidence = 'src/signal_conversation/config.rs:17';
+MERGE (n:Port {id: 'signal-rpc-7583'})  SET n.endpoint = '127.0.0.1:7583', n.protocol = 'newline-delimited JSON-RPC 2.0 over TCP', n.evidence = 'src/overseer/notify.rs:1044';
 
 // ---- Data stores -----------------------------------------------------------
 MERGE (d:DataStore {id: 'lbug-cognitive'}) SET d.detail = 'embedded lbug graph store at <state_root>/cognitive', d.evidence = 'src/memory_ipc/launcher.rs:252';
@@ -53,7 +53,7 @@ MERGE (y:Symbol {id: 'signal-gating'}) SET y.detail = 'deploy / merge #NNNN requ
 
 // ---- Env vars that gate behaviour ------------------------------------------
 MERGE (e:EnvVar {id: 'SIMARD_SIGNAL_ENABLED'})  SET e.evidence = 'src/operator_commands_ooda/daemon/signal_embed.rs:38';
-MERGE (e:EnvVar {id: 'SIMARD_SIGNAL_RPC_ADDR'}) SET e.evidence = 'src/overseer/notify.rs:987';
+MERGE (e:EnvVar {id: 'SIMARD_SIGNAL_RPC_ADDR'}) SET e.evidence = 'src/overseer/notify.rs:1054';
 MERGE (e:EnvVar {id: 'SIMARD_MEMORY_SOCKET'})   SET e.evidence = 'src/memory_ipc/mod.rs:90';
 
 // ---- User journeys ---------------------------------------------------------
