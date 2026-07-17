@@ -225,6 +225,61 @@ fn meaningful_completed_action_is_stored() {
     );
 }
 
+/// Regression (whole-word durable-completion matching): git status vocabulary
+/// naming an *outstanding* merge — `unmerged` / `submerged` — must NOT be
+/// promoted to a durable [`EventKind::ActionCompleted`] episode. A bare-substring
+/// `contains("merged")` scan fired inside those tokens, injecting a phantom
+/// "action completed" episodic (0.7-band importance) that distillation would
+/// later mine into a phantom completion fact, dragging recall precision down.
+/// With no failure or other meaningful signal present, such content falls
+/// through to the operational down-scope tier instead.
+#[test]
+fn unmerged_paths_are_not_a_durable_completion() {
+    for content in [
+        "act: 3 unmerged paths remain after rebase; conflicts still outstanding",
+        "act: the changelog section is submerged under the release notes header",
+    ] {
+        let decision = classify(content, "act-outcome", &ctx(Some("ship-feature"), Some(5)));
+        assert!(
+            !decision.is_store(),
+            "'{content}' embeds 'merged' inside 'unmerged'/'submerged' and must NOT \
+             be stored as a durable completion, got {decision:?}"
+        );
+        let meta = decision
+            .metadata()
+            .expect("down-scoped episodes carry metadata");
+        assert!(
+            !matches!(meta.event_kind, EventKind::ActionCompleted),
+            "'{content}' must not classify as ActionCompleted, got {:?}",
+            meta.event_kind
+        );
+        assert!(
+            decision.is_downscoped() && meta.is_operational,
+            "unmatched non-failure content down-scopes to the operational tier, got {decision:?}"
+        );
+    }
+}
+
+/// Complement of [`unmerged_paths_are_not_a_durable_completion`]: a genuine
+/// `merged` used as a whole word still classifies as a durable completion, so the
+/// word-boundary tightening does not regress the real signal it protects.
+#[test]
+fn whole_word_merged_is_still_a_durable_completion() {
+    let decision = classify(
+        "act: merged PR #7 for goal ship-feature",
+        "act-outcome",
+        &ctx(Some("ship-feature"), Some(6)),
+    );
+    assert!(decision.is_store(), "a real merged PR must be stored");
+    let meta = decision.metadata().expect("stored carries metadata");
+    assert!(
+        matches!(meta.event_kind, EventKind::ActionCompleted),
+        "whole-word 'merged' → ActionCompleted, got {:?}",
+        meta.event_kind
+    );
+    assert!(meta.importance >= 0.7);
+}
+
 /// Handoffs between sessions/worktrees are durable coordination events.
 #[test]
 fn meaningful_handoff_is_stored() {
