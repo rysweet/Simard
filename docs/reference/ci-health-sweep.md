@@ -100,12 +100,12 @@ workflow recovers](#closing-tracking-issues-when-a-workflow-recovers---file-issu
 
 ```
 src/ci_health/
-├── mod.rs        public entrypoint, GOVERNED_REPOS, sweep_live/sweep_fixture/report_to_json, run_sweep
+├── mod.rs        public entrypoint, governed_repos() (embedded ecosystem roster), sweep_live/sweep_fixture/report_to_json, run_sweep
 ├── types.rs      WorkflowState, RunConclusion, WorkflowRun/Snapshot, RepoSnapshot (head_sha, green_from_cache), FleetSnapshot
 ├── classify.rs   WorkflowVerdict, IgnoreReason, build_report, repo_cacheable, update_cache_from_report, FleetReport (serializable DTOs)
 ├── cache.rs      GreenShaCache — persisted {repo -> last-known-green head SHA}
 ├── gh.rs         GhWorkflowClient trait (incl. head_sha), RealGhWorkflowClient, pure parse/join helpers, fixture loader
-├── diagnose.rs   RunDiagnostics trait + RealGhRunDiagnostics, parse_run_diagnosis, RunDiagnosis/FailedJob (root-cause of a failing run)
+├── diagnose.rs   RunDiagnostics trait + RealGhRunDiagnostics, parse_run_diagnosis, parse_failure_annotations, RunDiagnosis/FailedJob (root-cause: failing jobs/steps + their failure annotations)
 ├── report.rs     render_human
 ├── steward.rs    actionable-failure -> deduplicated-issue steward (ci_signature_for/ci_failure_signature, file_issues_for_report) + green-again resolution (CiIssueResolver, resolve_issues_for_report)
 └── tests.rs      unit tests
@@ -113,7 +113,7 @@ src/ci_health/
 
 ## Last-known-green head-SHA cache
 
-Re-reading every workflow and its latest run for all ten `GOVERNED_REPOS` on
+Re-reading every workflow and its latest run for all ten governed repos on
 every cycle is wasteful when the fleet is already green and unchanged — the
 churn loop the standing CI-health goal kept falling into. To break it, the sweep
 caches, per repo, the default-branch **head commit SHA** at which the repo was
@@ -188,7 +188,7 @@ simard ci-health [--json] [--no-cache] [--file-issues] [--exit-zero] [--from-jso
 ```
 
 - Without `--from-json`, the sweep reads live GitHub state via `gh` for every
-  slug in [`ci_health::GOVERNED_REPOS`]: the repo's default branch
+  slug in [`ci_health::governed_repos`]: the repo's default branch
   (`gh repo view`), its default-branch head commit SHA
   (`gh api repos/<owner>/<repo>/commits/<default> --jq .sha`, the cache key),
   workflow states + ids (`gh workflow list --json name,state,id`), and
@@ -263,10 +263,11 @@ Tracking *that* a workflow broke is not enough to act on it — the goal's third
 clause is *"diagnose root cause."* So every **newly-filed** issue embeds a
 `## Root cause` block pinpointing which of the failing run's job(s) and step(s)
 failed, read from `gh run view <run_id> --json jobs` by [`ci_health::diagnose`]
-(`src/ci_health/diagnose.rs`). This localizes the failure — a human or a
-downstream `ci-diagnostic` fixer sees *which job and step* failed without
-hunting through the run — and links the run for the failing logs, an on-ramp to
-*"launch a fix."*
+(`src/ci_health/diagnose.rs`), **and the concrete error text** for each failing
+job (see "Error annotations" below). This localizes the failure — a human or a
+downstream `ci-diagnostic` fixer sees *which job and step* failed and *what*
+broke without hunting through the run — and links the run for the failing logs,
+an on-ramp to *"launch a fix."*
 
 - **Structured, not log-scraped.** Diagnosis reads the jobs API, whose
   `jobs[].conclusion` / `jobs[].steps[].conclusion` name the failing job and
@@ -275,6 +276,21 @@ hunting through the run — and links the run for the failing logs, an on-ramp t
   `skipped` / `success` steps are never mistaken for the root cause. A failing
   job with no individually-failing step (e.g. a `timed_out` job) is rendered
   with its own reported conclusion rather than a guessed cause.
+- **Error annotations — *what* broke, not only *which* step.** Naming the failing
+  step still leaves a fixer opening the run to read the actual error. So for each
+  failing job the diagnosis also reads its GitHub **check-run failure
+  annotations** — `gh api repos/{repo}/check-runs/{job_id}/annotations`, keeping
+  only `annotation_level == "failure"` — and embeds them as nested bullets under
+  the job. These carry the concrete error text (`error[E0432]: unresolved
+  import`, `Process completed with exit code 101`, a failing assertion), so the
+  tracked issue is directly actionable. This is still *structured API data, not
+  scraped logs*: `warning`/`notice` annotations (deprecation notices, lint hints)
+  are dropped as non-causal. The embed is **bounded** — at most a few annotations
+  per job, each collapsed to one line and length-truncated, with an explicit
+  `(+N more …)` marker when truncated so nothing is silently dropped — and
+  **best-effort**: a job whose annotations cannot be fetched/parsed simply shows
+  none (the job/step names still stand), so annotation enrichment never fails the
+  diagnosis, which itself never blocks filing.
 - **Best-effort, never blocks tracking.** Filing the tracking issue is the
   correctness-critical act; a diagnosis that cannot be fetched (a `gh` error, a
   malformed jobs response, or a failure whose run id was not captured) must not
@@ -364,9 +380,14 @@ tracking issue of every workflow that is **green again**:
 
 ### Governed fleet
 
-`GOVERNED_REPOS` is the source of truth in code for the swept slugs; it mirrors
-the ecosystem table in `prompt_assets/simard/engineer_system.md` (note
-`amplihack` → `amplihack-rs` on GitHub).
+The swept slugs come from [`ci_health::governed_repos`], which parses the
+ecosystem's **single source of truth** — `prompt_assets/simard/ecosystem_repos.toml`
+— embedded at compile time (`include_str!`) and validated by the same parser the
+Overseer's `ecosystem-observe` sweep uses (note `amplihack` → `amplihack-rs` on
+GitHub). There is no second hardcoded roster to drift: adding a repo to that TOML
+(its documented "one-line edit, no code change" contract) extends this sweep on
+the next build. An empty or corrupt embedded roster is a fail-loud error, never a
+silently empty sweep that would report the fleet green.
 
 ## Scheduled recurring sweep
 
@@ -401,6 +422,20 @@ the supply-chain steward's `advisory-scan.yml`.
   silently-dropped failure — fail-safe, not fail-open, matching advisory-scan.
 - **Concurrency.** A `ci-health` concurrency group (no cancel-in-progress) means
   two runs never race on the same tracking issues.
+- **Build & cache.** The sweep runs `cargo run --bin simard`, so it must compile
+  the full `simard` binary before it can audit the fleet. To stay inside the
+  job's 20-minute `timeout-minutes`, the `Swatinem/rust-cache` step restores —
+  read-only (`save-if: false`, so it never poisons the shared cache) — the same
+  `shared-key: simard-ci-v2` warm build cache that `main` writes for
+  `verify.yml`, turning a cold from-scratch build into a few-minute incremental
+  one. Because `simard` links the native `liblbug.a` (and rust-cache evicts
+  lbug's in-registry prebuilt archive while keeping the build-script output that
+  references it), a **Provision lbug** step runs `scripts/provision-lbug-prebuilt.sh`
+  and exports `LBUG_LIBRARY_DIR`/`LBUG_INCLUDE_DIR` so the link path is stable —
+  the single source of truth also used by `verify.yml`. Without the warm cache
+  the sweep did a full cold build that overran the timeout and cancelled mid-run
+  (advisory-scan avoids this only because its `supply-chain-steward` binary is
+  small enough to build cold in ~5 minutes).
 
 ## Reproducing a captured sweep
 

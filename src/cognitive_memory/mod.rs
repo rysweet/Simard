@@ -505,14 +505,21 @@ pub trait CognitiveMemoryOps: Send + Sync {
         Ok(vec![])
     }
 
-    /// Return up to `limit` recent episodes whose `content` contains
-    /// at least one of the supplied keywords (case-insensitive
-    /// substring). Newest first.
+    /// Return up to `limit` recent episodes whose `content` matches at least
+    /// one of the supplied keywords, newest first.
     ///
-    /// Default impl returns empty so legacy backends keep compiling.
-    /// [`LibraryCognitiveMemory`] overrides this with a case-insensitive
-    /// keyword-overlap scan ordered newest-first. Issue #2281, PR-C, problem 4;
-    /// #2299.
+    /// [`LibraryCognitiveMemory`] matches a **clean** keyword (non-empty, all
+    /// alphanumeric — the shape the natural-language callers emit) at a **word
+    /// boundary** (the keyword is a prefix of a whole content word), so a short
+    /// token embedded in the interior/suffix of an unrelated word ("test" in
+    /// "latest") no longer spuriously recalls, while its inflected forms still do
+    /// ("deploy" -> "deployed"). A keyword carrying any non-alphanumeric char —
+    /// a phrase or a bracketed provenance marker (`[reflect-occ=…]`) — keeps the
+    /// exact case-insensitive **substring** semantics its `reflection_lessons`
+    /// callers re-filter on.
+    ///
+    /// Default impl returns empty so legacy backends keep compiling. Issue #2281,
+    /// PR-C, problem 4; #2299.
     fn search_episodes_by_keywords(
         &self,
         _keywords: &[String],
@@ -960,3 +967,11 @@ mod tests_recall_precision_bench;
 // Simard), and that the move is behaviour-preserving (parity gate).
 #[cfg(test)]
 mod tests_recall_precision_delegation;
+
+// Recall quality: `search_episodes_by_keywords` matches CLEAN alphanumeric
+// keywords at a WORD BOUNDARY (marker-safe), extending the word-boundary gate
+// `recall_episodes_ranked` already uses to the flat keyword scan while keeping
+// the exact-marker substring path `reflection_lessons` depends on. Pins the
+// end-to-end contract against the live `LibraryCognitiveMemory` backend.
+#[cfg(test)]
+mod tests_whole_word_episode_recall;

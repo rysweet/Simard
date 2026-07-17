@@ -85,6 +85,8 @@ mod tests_memory_recall;
 #[cfg(test)]
 mod tests_root_cause;
 #[cfg(test)]
+mod tests_self_healing;
+#[cfg(test)]
 mod tests_selfmerge_fix;
 #[cfg(test)]
 mod tests_whisper;
@@ -102,8 +104,8 @@ pub use config::{
 };
 pub use diagnosis::{FailureCause, FailureDiagnosis, classify_terminal_failure};
 pub use guardrails::{
-    AutonomyGate, BudgetGate, ConflictSequencer, RecursionGuard, RiskClass, Subject,
-    WhisperDecision, WhisperGate, classify,
+    AutonomyGate, BackoffDecision, BackoffGate, BudgetGate, ConflictSequencer, RecursionGuard,
+    RiskClass, Subject, WhisperDecision, WhisperGate, classify,
 };
 pub use intervention::{Intervention, PlannedIntervention, Remediation, RemediationClass};
 pub use observer::{StewardshipIssueFiler, decide_read_only, is_m1_permitted};
@@ -257,6 +259,17 @@ pub struct Overseer {
     ecosystem_every_n: u64,
     /// Monotonic tick counter driving the ecosystem-observe every-N cadence.
     ecosystem_tick: u64,
+    /// Injected wall-clock seam (Unix seconds) the gap-scan dedup backoff reads.
+    /// The daemon uses real wall-clock ([`now_secs`]); tests inject a virtual
+    /// clock via [`Overseer::with_clock`] so the backoff window is deterministic.
+    clock: Box<dyn Fn() -> i64 + Send + Sync>,
+    /// Exponential-backoff dedup gate on the `WorkstreamCoverage` launch path
+    /// (Problem 1 / issue #4186). The in-flight guard only holds a duplicate
+    /// WHILE the covering workstream runs; once it COMPLETES, an unchanged,
+    /// still-recurring gap would re-launch every tick. This gate suppresses an
+    /// equivalent relaunch (keyed by the same [`recipe_dedup_key`]) within a
+    /// growing, bounded window even after completion — never permanently.
+    coverage_backoff: BackoffGate,
 }
 
 /// The reaper's injected dependencies, bundled so the `Overseer` carries one
@@ -353,10 +366,14 @@ impl Overseer {
             whisper_gate: WhisperGate::new(900, 5),
             whisper_enabled: false,
             notifier: None,
-            // 15-minute dedup window so a persistent blocked goal is self-healed
-            // / escalated once per window (never in a per-tick loop); a generous
-            // per-hour cap covers many distinct goals without flooding.
-            blocked_goal_gate: WhisperGate::new(900, 20),
+            // Blocked-goal escalation uses EXPONENTIAL BACKOFF (issue #4255): a
+            // persistently-blocked goal is escalated once, then its per-goal
+            // signature is suppressed for a window that DOUBLES each re-fire
+            // (15m → 30m → 1h → … capped at 4h) instead of re-escalating every
+            // ~15-minute tick. A change in the blocked-goal SET presents as a new
+            // per-goal signature that fires immediately. A generous per-hour cap
+            // covers many distinct goals without flooding.
+            blocked_goal_gate: WhisperGate::with_backoff(900, 14_400, 20),
             goal_health_enabled: false,
             // Off by default in the bare constructor; the daemon enables it from
             // `config::memory_recall_enabled`. 15-minute dedup window so a
@@ -378,6 +395,12 @@ impl Overseer {
             ecosystem_roster: Vec::new(),
             ecosystem_every_n: 1,
             ecosystem_tick: 0,
+            clock: Box::new(now_secs),
+            coverage_backoff: BackoffGate::new(
+                config::overseer_backoff_base_secs(),
+                config::overseer_backoff_multiplier(),
+                config::overseer_backoff_max_secs(),
+            ),
         }
     }
 
@@ -465,6 +488,14 @@ impl Overseer {
         self
     }
 
+    /// Inject the wall-clock seam (Unix seconds) the gap-scan dedup backoff reads
+    /// (Problem 1 / issue #4186). Defaults to real wall-clock; tests inject a
+    /// deterministic virtual clock so the exponential backoff window is testable.
+    pub fn with_clock(mut self, clock: Box<dyn Fn() -> i64 + Send + Sync>) -> Self {
+        self.clock = clock;
+        self
+    }
+
     /// Wire the cognitive-memory handle (amplihack-memory-lib, G2) used by the
     /// root-cause analysis to recall prior occurrences of a problem's root cause
     /// and record new ones. `None` until wired: the analysis degrades gracefully
@@ -510,6 +541,14 @@ impl Overseer {
         // skip a duplicate launch than to double-launch on a transient error) —
         // exactly the "two PIDs on one signature" defect this guard closes.
         self.reconcile_inflight_investigations();
+
+        // The conflict sequencer serialises the coverage/sweep launches PLANNED
+        // within THIS cycle (analogous to the per-cycle `launches` cap reset
+        // below). Reset it here so a `sequence_group` admitted in a prior cycle
+        // does not permanently lock out later coverage of that group — cross
+        // -cycle dedup of an identical recurring launch is the in-flight guard's
+        // and the coverage backoff's job, not the sequencer's.
+        self.sequencer.reset();
 
         // Periodic stale-engineer-claim reaper (issue #4099): a synchronous,
         // thread-less sweep alongside the reconcile above. Reclaims every
@@ -922,6 +961,32 @@ impl Overseer {
             );
         }
 
+        // Gap-scan coverage backoff (Problem 1 / issue #4186; meta bugs #4255,
+        // #4126): the in-flight guard above only holds a duplicate WHILE the
+        // covering workstream runs. Once it COMPLETES, an unchanged, still
+        // -recurring gap would re-launch an equivalent `WorkstreamCoverage`
+        // recipe EVERY tick — the churn that spawned duplicate backlog issues
+        // (#4186/#4190/#4191/#4198/#4201/#4203/#4206). The exponential backoff
+        // suppresses that relaunch (keyed by the same `recipe_dedup_key`) within
+        // a growing, BOUNDED window even after completion, yet always re-admits
+        // once the window elapses (never permanent silence). Scoped to the
+        // coverage sequence group so ordinary process-health / cross-cutting
+        // investigations are unaffected. Checked BEFORE the cost gate so a held
+        // duplicate never consumes a per-cycle launch slot; only PEEKED here (the
+        // window is armed in `act` on a successful launch).
+        if let Intervention::LaunchRecipe { brief } = iv
+            && brief.sequence_group.as_deref() == Some(WORKSTREAM_COVERAGE_GROUP)
+            && self
+                .coverage_backoff
+                .peek(&recipe_dedup_key(brief), (self.clock)())
+                == BackoffDecision::Suppress
+        {
+            return held_plan(
+                iv,
+                "held: an equivalent coverage was launched recently (backoff window)",
+            );
+        }
+
         // Autonomy: HIGH-RISK requires opt-in, else it is escalated (held).
         if let Err(e) = self.autonomy.admit(iv) {
             return held_plan(iv, e.to_string());
@@ -978,6 +1043,15 @@ impl Overseer {
                 // completes (reconciled at the top of `run_cycle`).
                 self.inflight_investigations
                     .insert(recipe_dedup_key(brief), handle.clone());
+                // Arm the coverage backoff window (Problem 1 / issue #4186) so an
+                // equivalent coverage is not relaunched every tick AFTER this
+                // workstream completes and frees its in-flight slot. Only the
+                // coverage closing edge is deduped this way; ordinary
+                // investigations rely on the in-flight guard alone.
+                if brief.sequence_group.as_deref() == Some(WORKSTREAM_COVERAGE_GROUP) {
+                    self.coverage_backoff
+                        .commit(&recipe_dedup_key(brief), (self.clock)());
+                }
                 Ok(ActOutcome::Launched(handle))
             }
             Intervention::VerifyAndMergePr { repo, pr } => {
