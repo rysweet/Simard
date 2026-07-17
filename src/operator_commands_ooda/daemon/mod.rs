@@ -1791,6 +1791,50 @@ pub fn run_ooda_daemon(
                                 "[simard] WARN: journal tick panicked (isolated; loop continues)",
                             ),
                         }
+
+                        // ── Past-day merged-PR reconciliation (#4225) ───────
+                        // Once a day passes its entry freezes, so a PR that
+                        // merged after the day's final tick — or an entry that
+                        // froze before the #4140 merged-PR wiring shipped —
+                        // leaves the dashboard reporting `merged: 0` forever.
+                        // Fold each recent past day's REAL merges back into its
+                        // frozen entry through a deliberately merged-only seam
+                        // (so a backfill can never graft today's still-open PRs
+                        // onto a historical day). Panic-isolated like the tick;
+                        // a `gh` blip degrades honestly per day rather than
+                        // failing. Today is never touched — that stays the live
+                        // tick's job above.
+                        let recon = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let merged_src = crate::journal::GhMergedPrSource::new(&gh, repo);
+                            crate::journal::reconcile_recent_days(
+                                mem_for_journal.as_ref(),
+                                &merged_src,
+                                chrono::Utc::now().date_naive(),
+                                crate::journal::reconcile_lookback_days(),
+                            )
+                        }));
+                        match recon {
+                            Ok(Ok(rep)) if rep.days_updated > 0 || rep.days_degraded > 0 => {
+                                daemon_log(
+                                    &state_root_for_journal,
+                                    &format!(
+                                        "[simard] journal: reconciled past days (examined={}, updated={}, degraded={})",
+                                        rep.days_examined, rep.days_updated, rep.days_degraded
+                                    ),
+                                )
+                            }
+                            // Nothing to backfill — stay quiet so the daemon log
+                            // is not spammed on every cadence.
+                            Ok(Ok(_)) => {}
+                            Ok(Err(e)) => daemon_log(
+                                &state_root_for_journal,
+                                &format!("[simard] WARN: journal reconciliation failed: {e}"),
+                            ),
+                            Err(_) => daemon_log(
+                                &state_root_for_journal,
+                                "[simard] WARN: journal reconciliation panicked (isolated; loop continues)",
+                            ),
+                        }
                     });
                 if let Err(e) = spawn {
                     // Spawn failed — clear the guard so the next cadence retries.
