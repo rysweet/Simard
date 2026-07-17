@@ -1,0 +1,81 @@
+name: failure-signature-uuid-stability
+app_type: cli
+description: |
+  Outside-in proof that the stewardship failure-signature normalizer folds
+  volatile hyphenated UUIDs (the system's ubiquitous session / node / run
+  identifiers, minted as UUIDv7) to the stable `<UUID>` placeholder, so two runs
+  of the SAME underlying failure that differ ONLY in an embedded id collapse to
+  ONE signature.
+
+  Before this fix `redact_token` neutralized paths, run-ids, ISO timestamps, and
+  all-hex hashes, but a canonical UUID slipped through verbatim because its
+  interior hyphens make the token non-hex. That defeated both halves of the
+  cognition rail the signature drives:
+    - stewardship GitHub-issue dedup (the same failure filed a fresh issue every
+      run), and
+    - recurrence recall (`run_id = overseer-<sig>` and the root-cause occurrence
+      key never matched across occurrences, so a recurring failure was never
+      recalled as recurring).
+  Both are axes of the standing cognition-improvement goal: graph-memory recall
+  quality and reasoner reliability.
+
+  This scenario drives the hermetic, in-process unit tests that pin the
+  corrected contract:
+    - a bare / prefixed / embedded UUID is redacted (`ooda-<uuid>` -> `ooda-<UUID>`);
+    - a failure differing only by its session UUID shares one `failure_signature`;
+    - genuinely different failures still keep distinct signatures (no
+      over-collapse);
+    - non-UUID hyphenated hex (git ranges, ISO dates, truncated ids) is left
+      untouched by the strict `8-4-4-4-12` gate.
+  It also re-runs the broader stewardship suite to prove the existing dedup /
+  routing / sanitization contract is unregressed. No network, no live host
+  mutation. The CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # The UUID-redaction contract in isolation.
+  - action: run
+    params:
+      command: "cargo test --locked --lib stewardship::dedup::uuid_redaction_tests"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # The full stewardship suite proves dedup / routing / sanitization did not
+  # regress under the new normalization rule.
+  - action: run
+    params:
+      command: "cargo test --locked --lib stewardship::"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # The overseer recall path consumes the same signature to detect recurring
+  # root causes; re-run it to prove recurrence recall is unregressed.
+  - action: run
+    params:
+      command: "cargo test --locked --lib overseer::"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
