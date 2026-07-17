@@ -168,7 +168,34 @@ fn table_has_column(conn: &Connection, table: &str, col: &str) -> bool {
     rows.flatten().any(|name| name.eq_ignore_ascii_case(col))
 }
 
+/// Relevance weight of a keyword found in an article's **title**. A title hit is
+/// a stronger topical signal than a passing mention in the body, so it is scored
+/// above [`CONTENT_MATCH_WEIGHT`] when ranking candidates.
+const TITLE_MATCH_WEIGHT: i64 = 2;
+
+/// Relevance weight of a keyword found only in an article's **content** body.
+const CONTENT_MATCH_WEIGHT: i64 = 1;
+
 /// Query the articles table for matching content.
+///
+/// Candidate articles are gathered by a LIKE-based keyword search (any keyword
+/// hit qualifies — recall breadth) and then **ranked by keyword coverage** so
+/// the most on-topic article survives the `limit` cut. Each keyword contributes
+/// [`TITLE_MATCH_WEIGHT`] when it appears in the title and
+/// [`CONTENT_MATCH_WEIGHT`] when it appears in the body; the per-article score is
+/// the sum across the distinct query keywords, and rows are returned
+/// highest-score-first (`ORDER BY … DESC LIMIT`).
+///
+/// This fixes a recall-quality defect: without the `ORDER BY`, SQLite returned
+/// matching rows in arbitrary storage (rowid) order, so an article matching a
+/// single keyword purely because it was inserted earlier could crowd a genuinely
+/// on-topic article — one matching every keyword — out of the `limit` results,
+/// starving the reasoner's planning context of the most relevant knowledge. The
+/// coverage ranking mirrors the whole-word / keyword-coverage relevance policy
+/// already adopted by [`crate::knowledge_context`] and
+/// [`crate::fact_reliability`]. (The LIKE probes stay substring-based to preserve
+/// recall breadth for stemmed/compound forms; ranking, not membership, is what
+/// governs which candidates survive the cut.)
 ///
 /// When the matched table carries a `url` column, each returned [`SourceInfo`]
 /// is populated with the article's source URL so answers trace back to a
@@ -176,20 +203,35 @@ fn table_has_column(conn: &Connection, table: &str, col: &str) -> bool {
 /// schema has no `url` column degrade gracefully to `url: None` (unchanged
 /// behaviour).
 fn query_articles(conn: &Connection, keywords: &[&str], limit: usize) -> Vec<SourceInfo> {
-    // Build a LIKE-based search (pack databases don't always have FTS).
-    let like_clauses: Vec<String> = keywords
-        .iter()
-        .map(|k| {
-            format!(
-                "(title LIKE '%{kw}%' OR content LIKE '%{kw}%')",
-                kw = k.replace('\'', "''")
-            )
-        })
-        .collect();
+    // Build a LIKE-based search (pack databases don't always have FTS). Escape
+    // each keyword's single quotes once and reuse the escaped form for both the
+    // WHERE membership clause and the ORDER BY relevance score below.
+    let escaped: Vec<String> = keywords.iter().map(|k| k.replace('\'', "''")).collect();
 
-    if like_clauses.is_empty() {
+    if escaped.is_empty() {
         return Vec::new();
     }
+
+    let where_clause = escaped
+        .iter()
+        .map(|kw| format!("(title LIKE '%{kw}%' OR content LIKE '%{kw}%')"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+
+    // Relevance score: reward keyword COVERAGE, weighting a title hit above a
+    // content-only hit. Ranking the candidates by this score (DESC) before the
+    // LIMIT keeps the most on-topic article instead of dropping it for an
+    // arbitrary earlier-in-table row that matched a single keyword.
+    let score_expr = escaped
+        .iter()
+        .map(|kw| {
+            format!(
+                "(CASE WHEN title LIKE '%{kw}%' THEN {TITLE_MATCH_WEIGHT} ELSE 0 END) \
+                 + (CASE WHEN content LIKE '%{kw}%' THEN {CONTENT_MATCH_WEIGHT} ELSE 0 END)"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" + ");
 
     // Try "articles" table first, then "nodes"/"entities" as fallback.
     for table in &["articles", "nodes", "entities"] {
@@ -202,9 +244,10 @@ fn query_articles(conn: &Connection, keywords: &[&str], limit: usize) -> Vec<Sou
             "NULL AS url"
         };
         let sql = format!(
-            "SELECT title, COALESCE(section, '') as section, {url_col} FROM {table} WHERE {clauses} LIMIT {limit}",
+            "SELECT title, COALESCE(section, '') as section, {url_col} FROM {table} WHERE {where_clause} ORDER BY ({score_expr}) DESC LIMIT {limit}",
             table = table,
-            clauses = like_clauses.join(" OR "),
+            where_clause = where_clause,
+            score_expr = score_expr,
             limit = limit,
         );
 
@@ -814,5 +857,88 @@ mod tests {
         assert!(response.result.is_some());
         let result = response.result.unwrap();
         assert_eq!(result["confidence"], 0.0);
+    }
+
+    /// Build an in-memory `articles` table whose rows are inserted in the given
+    /// order, so a test can prove that ranking — not storage (rowid) order —
+    /// governs which candidates survive the `limit` cut.
+    fn ranking_conn(rows: &[(&str, &str)]) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE articles (title TEXT, section TEXT, content TEXT);")
+            .unwrap();
+        for (title, content) in rows {
+            conn.execute(
+                "INSERT INTO articles (title, section, content) VALUES (?1, 'Sec', ?2)",
+                rusqlite::params![title, content],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn query_articles_ranks_most_relevant_first() {
+        // Three single-keyword articles are inserted BEFORE the one article that
+        // covers every keyword. Under the old arbitrary rowid order the
+        // single-keyword rows would lead; coverage ranking must surface the
+        // full-coverage article first.
+        let conn = ranking_conn(&[
+            ("Notes A", "this mentions rust only"),
+            ("Notes B", "this mentions ownership only"),
+            ("Notes C", "this mentions memory only"),
+            (
+                "Rust Ownership Memory Guide",
+                "covers rust ownership and memory management",
+            ),
+        ]);
+        let sources = query_articles(&conn, &["rust", "ownership", "memory"], 5);
+        assert!(!sources.is_empty(), "expected keyword matches");
+        assert_eq!(
+            sources[0].title,
+            "Rust Ownership Memory Guide",
+            "the article covering every keyword must rank first, got: {:?}",
+            sources.iter().map(|s| &s.title).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn query_articles_limit_keeps_most_relevant() {
+        // The recall-quality regression this fix targets: with `limit = 1`, an
+        // article matching a single keyword purely because it was inserted first
+        // must NOT crowd out the article matching every keyword. Without the
+        // ORDER BY, rowid order returned "Notes A" and dropped the guide.
+        let conn = ranking_conn(&[
+            ("Notes A", "this mentions rust only"),
+            ("Notes B", "this mentions ownership only"),
+            ("Notes C", "this mentions memory only"),
+            (
+                "Rust Ownership Memory Guide",
+                "covers rust ownership and memory management",
+            ),
+        ]);
+        let sources = query_articles(&conn, &["rust", "ownership", "memory"], 1);
+        assert_eq!(sources.len(), 1, "limit must be honoured");
+        assert_eq!(
+            sources[0].title, "Rust Ownership Memory Guide",
+            "the single kept result must be the most on-topic article, not an \
+             arbitrary earlier-in-table single-keyword row"
+        );
+    }
+
+    #[test]
+    fn query_articles_prefers_title_over_content_match() {
+        // Two articles match the same single keyword: one in the body only, one
+        // in the title. A title hit is the stronger topical signal and must rank
+        // above a passing content mention (TITLE_MATCH_WEIGHT > CONTENT_MATCH_WEIGHT).
+        let conn = ranking_conn(&[
+            ("General Notes", "a passage about ownership rules"),
+            ("Ownership Deep Dive", "deep dive into the model"),
+        ]);
+        let sources = query_articles(&conn, &["ownership"], 5);
+        assert_eq!(sources.len(), 2, "both articles match the keyword");
+        assert_eq!(
+            sources[0].title, "Ownership Deep Dive",
+            "a title match must outrank a content-only match"
+        );
     }
 }

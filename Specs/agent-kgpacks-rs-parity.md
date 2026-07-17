@@ -61,6 +61,7 @@ implemented; acceptance test is the definition of done) · **OUT-OF-SCOPE**.
 | KGP-Q3 | Empty / too-short questions degrade to a graceful low-confidence answer | `native_knowledge_transport_empty_question`, `query_pack_db_handles_empty_question_keywords` green | DONE | `native_knowledge.rs::query_pack_db` keyword filter |
 | KGP-Q6 | Answer synthesis truncates snippets on a UTF-8 char boundary | `query_pack_db_finds_matching_articles` green + no panic on multibyte content | DONE | `native_knowledge.rs::build_answer` + `util::string_truncate` |
 | KGP-Q7 | Each source surfaces its `section` | asserted within KGP-M/query tests | DONE | `native_knowledge.rs::SourceInfo.section` |
+| KGP-Q8 | Retrieval **ranks candidates by keyword coverage** (a title hit weighted above a content-only mention) so the `limit` cut keeps the most on-topic article instead of returning matches in arbitrary storage (rowid) order | `query_articles_ranks_most_relevant_first`, `query_articles_limit_keeps_most_relevant`, `query_articles_prefers_title_over_content_match` green | DONE | `native_knowledge.rs::query_articles` (`ORDER BY <coverage score> DESC`), `TITLE_MATCH_WEIGHT` / `CONTENT_MATCH_WEIGHT` |
 | KGP-Q4 | Keyword search binds parameters instead of string-interpolating LIKE clauses | NEW test: a question keyword containing `%`, `_`, and `'` returns correct rows and cannot alter the SQL | OPEN | `native_knowledge.rs::query_articles` currently interpolates escaped keywords |
 | KGP-Q5 | GraphRAG retrieval: traverse entity + relationship tables (multi-hop), not only a single-table LIKE scan | NEW test: a pack fixture with `relationships` yields a graph-grounded answer joining linked entities | OPEN | `native_knowledge.rs::query_articles` comment: "simplified version of the Python `KnowledgeGraphAgent.query()`" |
 
@@ -119,3 +120,14 @@ with its acceptance test already specified above:
   source citation URLs (degrading to `None` for urlless pack schemas). This is
   the first measurable parity advance and the reason this goal is no longer
   `GENUINELY-STUCK`.
+- **2026-07-17** — **KGP-Q8 closed** (recall quality): `query_articles` now
+  ranks candidate articles by keyword coverage (`ORDER BY` a score summing
+  `TITLE_MATCH_WEIGHT` per title hit and `CONTENT_MATCH_WEIGHT` per content hit,
+  DESC) before applying `limit`. Previously the query had no `ORDER BY`, so
+  SQLite returned matches in arbitrary rowid order and an earlier-inserted
+  single-keyword article could crowd the full-coverage article out of the
+  `limit` results — starving the reasoner's planning-context enrichment
+  (`enrich_planning_context` → `knowledge.query`) of the most relevant
+  knowledge. The LIKE membership probes stay substring-based (recall breadth);
+  ranking governs which candidates survive the cut. KGP-Q4 (parameterize the
+  LIKE search) remains OPEN and orthogonal.
