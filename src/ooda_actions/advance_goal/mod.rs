@@ -40,6 +40,9 @@ use spawn::is_brain_failure_marker;
 #[allow(unused_imports)]
 pub use spawn::find_live_engineer_for_goal;
 use subordinate::advance_goal_with_subordinate;
+// Issue #4232: re-exported so the daemon OODA loop can reap in-flight
+// engineers whose goal was removed/completed (tombstoned) since the last cycle.
+pub use subordinate::reap_engineers_for_tombstoned_goals;
 // re-exported for cfg(test) consumers in ooda_actions/tests_advance_goal.rs (false-positive of clippy unused_imports on lib pass — see #1405)
 #[allow(unused_imports)]
 pub use subordinate::validate_subordinate_completion;

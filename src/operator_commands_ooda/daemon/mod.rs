@@ -1274,6 +1274,31 @@ pub fn run_ooda_daemon(
                     &format!("[simard] OODA cycle: memory cache sync failed: {e}"),
                 );
             }
+            // Issue #4232: reap any in-flight engineer whose goal was
+            // removed/completed (tombstoned) since the last cycle. Tombstone-
+            // gated, never a wall-clock timeout — a healthy engineer whose goal
+            // is still on the board is never touched. Reuses `kill_subordinate`
+            // (SIGTERM) + the existing worktree/claim cleanup chokepoint. Runs
+            // here, inside the block where `cycle_tombstones` is in scope, so it
+            // reuses the already-loaded tombstone set.
+            let subagent_registry = crate::subagent_sessions::load();
+            let reaped_goal_ids =
+                crate::ooda_actions::advance_goal::reap_engineers_for_tombstoned_goals(
+                    &mut state,
+                    &cycle_tombstones,
+                    &subagent_registry,
+                );
+            if !reaped_goal_ids.is_empty() {
+                daemon_log(
+                    &state_root,
+                    &format!(
+                        "[simard] OODA cycle: reaped {} in-flight engineer(s) for \
+                         tombstoned goal(s): {}",
+                        reaped_goal_ids.len(),
+                        reaped_goal_ids.join(", "),
+                    ),
+                );
+            }
         }
         // Snapshot the pre-cycle active ids so the post-cycle commit can
         // tombstone any goal that left the board (archived / dropped / done).
