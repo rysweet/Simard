@@ -94,6 +94,7 @@ locking protocol and wiring.
 | `<root>/state/` | Durable state files (goal store, scaling state) | `~/.simard/state/` |
 | `<root>/state/goal_store.json` | File-backed goal records (flock-protected) | `~/.simard/state/goal_store.json` |
 | `<root>/goals/` | Legacy durable goal board snapshots (superseded by cognitive memory) | `~/.simard/goals/` |
+| `<root>/metrics/metrics.jsonl` | Self-improvement metrics (cycle counters, `brain_parse_failure`, costs) written by `self_metrics` and read by the dashboard | `~/.simard/metrics/metrics.jsonl` |
 | `<root>/bin/check_vm.sh` | Operator VM-probe script the dashboard **Distributed** panel runs (`/api/distributed`, via `simard_state_root()` since #2835) | `~/.simard/bin/check_vm.sh` |
 
 > Setting `SIMARD_STATE_ROOT=/x` relocates **all** of the above
