@@ -99,13 +99,32 @@ including by recency — so a recent but topically-unrelated episode earns a
 non-zero score and would surface. Simard's episodic recall is **relevance-gated**
 (an objective recalls only episodes that share a keyword with it; an unrelated
 objective recalls *nothing*), and that contract is preserved: the adapter gates
-the ranked output to episodes whose `content` contains at least one query keyword
-(case-insensitive substring, matching `search_episodes_by_keywords`). The gate is
-applied **before** truncation, so a relevant episode ranked behind recent noise
-is not dropped before the gate runs. The net effect is "rank the keyword-relevant
-episodes" — the multi-signal ranking upgrades the *ordering* among relevant
-candidates without widening the *set* beyond what lexical recall would have
-returned.
+the ranked output to episodes whose `content` shares a query keyword at a **word
+boundary**. The gate is applied **before** truncation, so a relevant episode
+ranked behind recent noise is not dropped before the gate runs. The net effect
+is "rank the keyword-relevant episodes" — the multi-signal ranking upgrades the
+*ordering* among relevant candidates without widening the *set* beyond what
+lexical recall would have returned.
+
+**Word-boundary matching (not raw substring).** The query is tokenized on
+non-alphanumeric runs (so punctuation attached to a token — `"deploy,"` — folds
+onto the bare word `deploy`), and a query token gates an episode in only when it
+is a **prefix of a whole word** in the episode's content, matched
+case-insensitively. This replaces an earlier raw-substring gate
+(`content.to_lowercase().contains(kw)`) that matched a token wherever it was
+embedded, including the interior or suffix of an unrelated content word — `act`
+in "re**act**or" / "contr**act**", `test` in "la**test**", `own` in
+"d**own**load" (interior) — floating off-topic episodes into the ranked set that
+feeds the OODA cycle's working context and degrading recall precision. Anchoring
+the match to a word boundary drops that interior/suffix noise while **preserving
+inflectional recall**: a query stem still recalls its inflected forms (`deploy`
+recalls "deployed" / "deploys" / "deployment"), which a stricter whole-word
+(equality) gate would have dropped. This aligns episodic recall with the
+word-boundary relevance policy already adopted by
+`knowledge_context::relevance_score`, `memory_consolidation::classifier`, and
+`fact_reliability`. (The separate flat `search_episodes_by_keywords` scan keeps
+its exact case-insensitive substring semantics, which its exact-marker callers —
+e.g. reflection recurrence markers — depend on.)
 
 ### Per-phase weights (shared with fact recall)
 
