@@ -1,0 +1,99 @@
+// Code Atlas — Runtime Topology (Graphviz source of truth)
+// Derived from Rust source; see docs/atlas/runtime-topology/README.md
+// "Evidence anchors" for the file:line citation of every node/edge.
+// Render: dot -Tsvg runtime-topology.dot -o runtime-topology-dot.svg
+digraph runtime_topology {
+    rankdir=TB;
+    fontname="Helvetica";
+    labelloc="t";
+    label="Simard — Runtime Topology (processes, async tasks, IPC/RPC channels)";
+    node [shape=box, style="rounded,filled", fontname="Helvetica", fillcolor="#eef4fb", color="#33628f"];
+    edge [fontname="Helvetica", fontsize=10, color="#555555"];
+
+    // ---- Entry / dispatch ----------------------------------------------
+    subgraph cluster_entry {
+        label="Entrypoint / dispatch";
+        style="rounded,filled";
+        fillcolor="#f6f6f6";
+        color="#999999";
+        simard      [label="simard (default-run bin)\nsrc/main.rs:8", fillcolor="#dbe9f8"];
+        dispatch    [label="dispatch_operator_cli()\nsrc/operator_cli/mod.rs:219"];
+    }
+    simard -> dispatch [label="args"];
+
+    // ---- Long-lived runtime surfaces -----------------------------------
+    subgraph cluster_surfaces {
+        label="Long-lived runtime surfaces";
+        style="rounded,filled";
+        fillcolor="#f2f8f2";
+        color="#7fa87f";
+        dashboard   [label="dashboard serve\noperator_cli/mod.rs:250"];
+        ooda        [label="ooda run\noperator_cli/mod.rs:249"];
+        memcmd      [label="memory stats|dump\noperator_cli/mod.rs:252"];
+        spawncmd    [label="spawn <agent> <goal>\noperator_cli/mod.rs:254"];
+        signalcmd   [label="signal run\noperator_cli/mod.rs:251"];
+    }
+    dispatch -> dashboard;
+    dispatch -> ooda;
+    dispatch -> memcmd;
+    dispatch -> spawncmd;
+    dispatch -> signalcmd;
+
+    // ---- Async tasks / loops -------------------------------------------
+    subgraph cluster_tasks {
+        label="Async tasks / loops (tokio)";
+        style="rounded,filled";
+        fillcolor="#fbf6ee";
+        color="#c39b5b";
+        dash_task   [label="spawn_dashboard_task(rt, port)\naxum::serve @ 0.0.0.0:port\ndashboard/mod.rs:244-260"];
+        ooda_cycle  [label="run_ooda_cycle()\nobserve->orient->decide->act->review\nooda_loop/cycle.rs:28"];
+        mem_accept  [label="memory_ipc::spawn_server()\nUnixListener accept loop\nmemory_ipc/server.rs:29"];
+        supervisor  [label="agent_supervisor\nchild processes; hive-fact heartbeats\nagent_supervisor/mod.rs:1-9"];
+        overseer    [label="overseer (planned)\ndesign sketch, not wired\noverseer/mod.rs:1-18", style="rounded,filled,dashed", fillcolor="#f0f0f0"];
+    }
+    dashboard -> dash_task;
+    ooda      -> ooda_cycle;
+    memcmd    -> mem_accept;
+    spawncmd  -> supervisor;
+
+    // ---- Channels ------------------------------------------------------
+    subgraph cluster_channels {
+        label="Wire channels";
+        style="rounded,filled";
+        fillcolor="#f8eef4";
+        color="#a76a92";
+        mem_sock    [label="Memory IPC\nUnixListener {state_root}/memory.sock\nframed JSON MemoryRequest/Response\nmemory_ipc/mod.rs:158,300", shape=cylinder, fillcolor="#f3dcec"];
+        rt_ipc      [label="Runtime IPC\nnewline-JSON IpcMessage over stdio/unix\nspawn_subprocess()\nruntime_ipc/mod.rs:20,177", shape=cylinder, fillcolor="#f3dcec"];
+        rpc_ch      [label="RPC (line-delimited JSON)\nRpcRequest/RpcResponse\nlaunch_all_clients()\nrpc.rs:14,26; rpc_subprocess_launcher.rs:64", shape=cylinder, fillcolor="#f3dcec"];
+        hive_bus    [label="HiveEventBus\ntokio::broadcast fan-out (cap 1024)\nhive_event_bus/mod.rs:229-244", shape=cylinder, fillcolor="#f3dcec"];
+    }
+
+    // ---- Backends / peers ----------------------------------------------
+    rcm         [label="RemoteCognitiveMemory\ncognitive-memory backend", fillcolor="#e7e7f6"];
+    runtime     [label="Runtime driver (MultiProcess)\nspawn_subordinate()\nruntime/mod.rs:201,213", fillcolor="#dbe9f8"];
+    child_proc  [label="subprocess child\n(--ipc-socket <path>)", fillcolor="#e7e7f6"];
+    eng_child   [label="engineer subprocess\n`engineer run single-process` (opt. tmux)\nagent_supervisor/lifecycle/spawn.rs:27", fillcolor="#e7e7f6"];
+    rpc_srv     [label="RPC servers\n(knowledge / gym, native transport)\nrpc_transport/native.rs:26", fillcolor="#e7e7f6"];
+    subscribers [label="HiveEvent subscribers\nsubscribe()/publish()\nhive_event_bus/mod.rs:275,284", fillcolor="#e7e7f6"];
+
+    mem_accept -> mem_sock  [label="serve"];
+    mem_sock   -> rcm       [label="dispatch"];
+    memcmd     -> mem_sock  [label="client (framed JSON)", style=dashed];
+
+    // Runtime IPC (spawn_subprocess) is driven by the MultiProcess Runtime
+    // driver, not the agent supervisor. The supervisor spawns engineer
+    // subprocesses directly and coordinates via hive facts, never raw IPC.
+    runtime    -> rt_ipc    [label="spawn_subprocess"];
+    supervisor -> eng_child [label="spawn child process\n(hive-fact heartbeats, no raw IPC)"];
+    rt_ipc     -> child_proc[label="accept()"];
+
+    ooda_cycle -> rpc_ch    [label="request"];
+    rpc_ch     -> rpc_srv   [label="one JSON/line"];
+
+    supervisor -> hive_bus  [label="publish facts"];
+    ooda_cycle -> hive_bus  [label="publish"];
+    hive_bus   -> subscribers [label="broadcast"];
+
+    // overseer relationship (planned, dashed)
+    overseer -> hive_bus [style=dashed, color="#999999", label="planned"];
+}

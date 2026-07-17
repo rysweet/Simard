@@ -1,0 +1,45 @@
+%% Code Atlas — API Contracts (Mermaid source of truth)
+%% Derived from Rust source; see README.md "Evidence anchors" for file:line.
+%% Render: echo '{"args":["--no-sandbox"]}' > pp.json && mmdc -p pp.json -i api-contracts-mermaid.mmd -o api-contracts-mermaid.svg
+flowchart LR
+    client(["Operator / peer process"])
+
+    subgraph public["Public pre-auth (auth.rs:79-82)"]
+        r_login["POST /api/login (routes.rs:121)<br/>GET /login (routes.rs:122)"]
+    end
+
+    subgraph auth["require_auth boundary (routes.rs:124, auth.rs:76)"]
+        r_status["Status / metrics<br/>routes.rs:46-49,75,80-83,108"]
+        r_goals["Goals<br/>routes.rs:51-56"]
+        r_dist["Distributed / hosts<br/>routes.rs:57-62"]
+        r_reg["Registry / lock / procs<br/>routes.rs:63-74"]
+        r_mem["Memory<br/>routes.rs:76-79"]
+        r_work["Work / OODA / PRs<br/>routes.rs:84-95"]
+        r_journal["Journal<br/>routes.rs:96-99"]
+        r_ideas["Creative ideas<br/>routes.rs:100-107"]
+        r_chat["Feedback / sessions / chat<br/>routes.rs:109-116"]
+        r_ws["WebSockets: /ws/chat,<br/>/ws/agent_log/{agent_name},<br/>/ws/tmux_attach/{host}/{session}<br/>routes.rs:114-120"]
+        r_root["GET / index<br/>routes.rs:123"]
+    end
+
+    client -->|unauthenticated| r_login
+    client -->|cookie / Bearer / ?token<br/>auth.rs:104,111-131| r_status
+    client -->|authenticated WS| r_ws
+
+    subgraph rpc["JSON-RPC one JSON/line (rpc.rs:11)"]
+        rpc_req["RpcRequest {id, method, params}<br/>rpc.rs:14"]
+        rpc_res["RpcResponse {id, result?, error?}<br/>rpc.rs:26"]
+        rpc_err["RpcErrorPayload {code, message} rpc.rs:35<br/>-32601 method-not-found | -32603 internal<br/>-32000 timeout | -32001 transport<br/>rpc.rs:41-44"]
+        rpc_health["bridge.health -> RpcHealth<br/>{server_name, healthy}<br/>rpc.rs:48,78"]
+    end
+    client -->|request| rpc_req
+    rpc_req -->|reply| rpc_res
+    rpc_res -->|error variant| rpc_err
+    rpc_req -->|method| rpc_health
+
+    subgraph ipc["IPC serde enums"]
+        ipc_mem["MemoryRequest / MemoryResponse<br/>framed JSON over memory.sock<br/>MAX_FRAME 8 MiB<br/>memory_ipc/mod.rs:158,300,352"]
+        ipc_msg["IpcMessage tag=type snake_case<br/>ping|pong|task_assign|task_result|shutdown<br/>runtime_ipc/mod.rs:20-25,29-35"]
+    end
+    client -.->|framed JSON| ipc_mem
+    client -.->|subprocess coord| ipc_msg
