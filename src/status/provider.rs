@@ -58,7 +58,11 @@ impl AssembleOptions {
 }
 
 /// Age (seconds) beyond which the telemetry snapshot is considered `stale`.
-const SNAPSHOT_FRESHNESS_SECS: i64 = 300;
+///
+/// Single-sourced from [`crate::telemetry::snapshot::FRESHNESS_SECS`] so the
+/// dashboard's `GET /api/enrichment` — which classifies the SAME once-per-cycle
+/// snapshot — and this status provider always agree on `live`/`stale`.
+const SNAPSHOT_FRESHNESS_SECS: i64 = crate::telemetry::snapshot::FRESHNESS_SECS;
 
 /// Assemble the full snapshot. Never panics; degraded sources become
 /// `unavailable`/`absent` sections.
@@ -1021,6 +1025,12 @@ mod pure_helper_tests {
         let old = (chrono::Utc::now() - chrono::Duration::seconds(SNAPSHOT_FRESHNESS_SECS + 60))
             .to_rfc3339();
         assert!(snapshot_is_stale(&old));
+        // A once-per-cycle-aged snapshot (600s: cycle runtime + inter-cycle
+        // sleep) is NOT stale — the window matches the daemon-liveness bound so
+        // the status view never contradicts a `running` daemon. Regression guard
+        // for the historical 300s threshold that fired every healthy cycle.
+        let one_cycle_old = (chrono::Utc::now() - chrono::Duration::seconds(600)).to_rfc3339();
+        assert!(!snapshot_is_stale(&one_cycle_old));
         // Tolerant: an unparseable timestamp is treated as fresh, not stale.
         assert!(!snapshot_is_stale("not-a-timestamp"));
     }
