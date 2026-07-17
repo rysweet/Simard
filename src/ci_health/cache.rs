@@ -1,7 +1,7 @@
 //! Last-known-green default-branch head-SHA cache — the churn-breaker.
 //!
 //! The governed-fleet sweep re-reads every workflow and its latest run for all
-//! [`GOVERNED_REPOS`](super::GOVERNED_REPOS) on every cycle. When the fleet is
+//! [`governed_repos`](super::governed_repos) on every cycle. When the fleet is
 //! already green and unchanged, that is a wasteful full re-audit. This cache
 //! records, per repo, the default-branch **head commit SHA** at which the repo
 //! was last verified green. On the next sweep, a repo whose head SHA is
