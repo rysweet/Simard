@@ -89,6 +89,45 @@ pub fn is_no_progress_marker(reason: &str) -> bool {
     reason.starts_with(NO_PROGRESS_BLOCKED_PREFIX)
 }
 
+/// Translate a stored block `reason` into a PLAIN-ENGLISH sentence for operator
+/// surfaces — the dashboard and any human-facing feed (issue #4276). A
+/// safeguard-authored marker (`🔒 [OODA-SAFEGUARD] … why=… evidence=[…]`) is
+/// opaque jargon to a person; this renders it as a plain sentence, free of every
+/// machine token (`OODA-SAFEGUARD`, `UNCLEAR-CRITERIA`, `evidence=[`, `why=`, the
+/// 🔒 lock). A NON-marker reason (an operator-set or dependency block) is already
+/// human-readable and returned unchanged.
+pub fn humanize_block_reason(reason: &str) -> String {
+    if !is_no_progress_marker(reason) {
+        return reason.to_string();
+    }
+    // Marker shape: `{PREFIX}{count}{SUFFIX}` (legacy) or
+    // `{PREFIX}{count} consecutive no-action cycles; why={TOKEN} evidence=[…]`.
+    // Extract the leading consecutive-cycle count without surfacing the marker.
+    let tail = reason
+        .strip_prefix(NO_PROGRESS_BLOCKED_PREFIX)
+        .unwrap_or(reason);
+    let count: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let cycles = if count.is_empty() {
+        String::new()
+    } else {
+        format!(" for {count} cycles")
+    };
+    // Detect the unclear/unmeasurable-criteria class for a more specific sentence,
+    // WITHOUT ever echoing the class token to the operator.
+    if reason.contains(crate::goal_curation::NoProgressClass::UnclearCriteria.token()) {
+        format!(
+            "Simard couldn't tell when this goal is finished{cycles}, so it made no \
+             shippable progress. It needs a checkable finish condition (a specific \
+             issue CLOSED, PR MERGED, or file/command the done-gate can verify)."
+        )
+    } else {
+        format!(
+            "Simard couldn't make shippable progress on this goal{cycles} and needs \
+             human review to re-scope or unblock it."
+        )
+    }
+}
+
 /// True when `reason` is a **bare** no-progress safeguard block (issue #17): it
 /// carries the [`NO_PROGRESS_BLOCKED_PREFIX`] marker (so
 /// [`is_no_progress_marker`] holds) but has **no** [`NoProgressClass`] WHY token

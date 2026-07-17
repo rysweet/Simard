@@ -189,8 +189,13 @@ pub(crate) async fn workboard() -> Json<Value> {
                             ("in_progress".to_string(), *percent)
                         }
                         crate::goal_curation::GoalProgress::Blocked(reason) => {
+                            // Surface a PLAIN-ENGLISH block reason to the operator
+                            // (issue #4276) — never the raw safeguard marker. A
+                            // non-marker (operator/dependency) block is returned
+                            // unchanged by the humanizer.
                             block_reason = Some(reason.as_str());
-                            (format!("blocked: {reason}"), 0)
+                            let human = crate::goal_curation::humanize_block_reason(reason);
+                            (format!("blocked: {human}"), 0)
                         }
                         crate::goal_curation::GoalProgress::Paused => ("paused".to_string(), 0),
                         crate::goal_curation::GoalProgress::Completed => ("done".to_string(), 100),
@@ -204,7 +209,10 @@ pub(crate) async fn workboard() -> Json<Value> {
                         "assigned_to": g.assigned_to,
                     });
                     if let Some(reason) = block_reason {
-                        goal_obj["block_reason"] = json!(reason);
+                        // Plain-English block reason for the operator (issue
+                        // #4276); the JS prefers this `block_reason` field.
+                        goal_obj["block_reason"] =
+                            json!(crate::goal_curation::humanize_block_reason(reason));
                     }
                     goal_obj
                 })

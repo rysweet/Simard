@@ -59,6 +59,7 @@ impl MergeNotification {
             kind: "merge",
             headline: self.pr_title.clone(),
             problem: self.problem.clone(),
+            next_step: String::new(),
             link: Some(self.pr_url.clone()),
             repo: self.repo.clone(),
             autonomous: self.autonomous,
@@ -72,12 +73,16 @@ impl MergeNotification {
 /// of operator event.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OperatorNotification {
-    /// Event kind for the subject/logs: `"merge"` | `"deploy"`.
+    /// Event kind for the subject/logs: `"merge"` | `"deploy"` | `"goal-blocked"`
+    /// | `"workstream-gap"` | `"whisper"`.
     pub kind: &'static str,
     /// One-line headline (email subject core / Signal first line).
     pub headline: String,
     /// Plain-language explanation of the problem/why.
     pub problem: String,
+    /// Plain-language recommended NEXT STEP for the operator. Empty for kinds
+    /// (merge/deploy) that have no actionable follow-up.
+    pub next_step: String,
     /// Optional canonical link (PR url / commit url).
     pub link: Option<String>,
     pub repo: String,
@@ -108,6 +113,29 @@ impl OperatorNotification {
                 problem = self.problem,
             );
         }
+        // A blocked-goal / escalation is UNRESOLVED and needs a human — it must
+        // NOT reuse the merge/deploy "Problem solved:" template (issue #4276 bug).
+        // Render an accurate "Action needed" heading that leads with the
+        // plain-English problem and the recommended next step.
+        if self.kind == "goal-blocked" {
+            let next = if self.next_step.trim().is_empty() {
+                String::new()
+            } else {
+                format!("\n\nRecommended next step:\n  {}", self.next_step)
+            };
+            let link = self
+                .link
+                .as_deref()
+                .map(|l| format!("\n\nDetails:\n  {l}"))
+                .unwrap_or_default();
+            return format!(
+                "Action needed — a goal is blocked in {repo}.\n\nProblem:\n  {problem}{next}{link}\n",
+                repo = self.repo,
+                problem = self.problem,
+                next = next,
+                link = link,
+            );
+        }
         let who = if self.autonomous {
             "The Overseer autonomously"
         } else {
@@ -135,6 +163,7 @@ impl OperatorNotification {
             kind: "deploy",
             headline: format!("deployed {}", short_commit(commit)),
             problem: format!("Deployed {commit} (previous {previous}); {gate_summary}"),
+            next_step: String::new(),
             link: None,
             repo: repo.to_string(),
             autonomous: true,
@@ -153,6 +182,7 @@ impl OperatorNotification {
                 urgency.label()
             ),
             problem: note.to_string(),
+            next_step: String::new(),
             link: None,
             repo: "rysweet/Simard".to_string(),
             autonomous: true,
@@ -171,7 +201,32 @@ impl OperatorNotification {
             problem: format!(
                 "Goal `{goal_id}` is blocked and needs human review.\n  Reason: {reason}"
             ),
+            next_step: String::new(),
             link: None,
+            repo: "rysweet/Simard".to_string(),
+            autonomous: true,
+        }
+    }
+
+    /// Build a PLAIN-ENGLISH triaged blocked-goal escalation (issue #4276). Unlike
+    /// [`goal_blocked`](Self::goal_blocked) / [`goal_blocked_with_why`](Self::goal_blocked_with_why),
+    /// the operator-facing body carries a jargon-free `problem` statement and a
+    /// concrete recommended `next_step` (never the raw `🔒 [OODA-SAFEGUARD] …
+    /// why=UNCLEAR-CRITERIA evidence=[…]` marker), plus an optional `link` to the
+    /// tracking issue that already holds the full detail. `link = None` is legal
+    /// (fail-open — the escalation still fires).
+    pub fn goal_blocked_triaged(
+        goal_id: &str,
+        problem: &str,
+        next_step: &str,
+        link: Option<&str>,
+    ) -> Self {
+        Self {
+            kind: "goal-blocked",
+            headline: format!("goal {goal_id} is blocked — action needed"),
+            problem: problem.to_string(),
+            next_step: next_step.to_string(),
+            link: link.map(str::to_string),
             repo: "rysweet/Simard".to_string(),
             autonomous: true,
         }
@@ -204,6 +259,7 @@ impl OperatorNotification {
             kind: "workstream-gap",
             headline: format!("{count} uncovered workstream(s)"),
             problem: body,
+            next_step: String::new(),
             link: None,
             repo: "rysweet/Simard".to_string(),
             autonomous: true,
@@ -222,6 +278,7 @@ impl OperatorNotification {
                 "Goal `{goal_id}` is blocked and needs human review.\n  WHY (root cause): {why}\n  \
                  Reason: {reason}"
             ),
+            next_step: String::new(),
             link: None,
             repo: "rysweet/Simard".to_string(),
             autonomous: true,
