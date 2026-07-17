@@ -461,7 +461,15 @@ pub(crate) const PART_04: &str = r#"            let fmt;
                   }
                   const det=o.detail||'';
                   const detLow=det.toLowerCase();
-                  const hasArtifact=detLow.indexOf('pr #')>=0||detLow.indexOf('commit')>=0;
+                  // 'commit' matches the outcome-ledger verb 'committed', which
+                  // the typed OODA ledger uses for BOTH a real action
+                  // ("…committed and effect completed") and the two no-progress
+                  // terminals ("typed no-action committed", "…blocked terminal
+                  // committed"). Only real progress produced an artifact, so
+                  // exclude the no-progress bookkeeping phrases (#4292).
+                  const hasArtifact=(detLow.indexOf('pr #')>=0||detLow.indexOf('commit')>=0)
+                    &&detLow.indexOf('no-action committed')<0
+                    &&detLow.indexOf('blocked terminal committed')<0;
                   const isAssessmentOnly=detLow.indexOf('assessed')>=0&&detLow.indexOf('verified=0')>=0;
                   const linkIcon=hasArtifact?'<span style="color:#2ea043;margin-right:4px" title="produced artifact">🔗</span>':'';
                   const assessBadge=(!hasArtifact&&isAssessmentOnly)?' <span class="badge-assessment" style="background:#fb8500;color:#fff;padding:1px 6px;border-radius:3px;font-size:11px;margin-left:6px">assessment only</span>':'';

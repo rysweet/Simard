@@ -85,8 +85,14 @@ touches the OODA reasoner or the persisted cycle reports.
 - The row's representative **Time** is the timestamp of the most-recent cycle in
   the run.
 - **Progressing** cycles (those that launched work or produced an artifact —
-  `pr #`, `commit`, `launched`, `dispatched`, or a live spawned engineer) are
+  `pr #`, `effect completed`, `completed terminal`, `commit(s)`,
+  `committed=true`, `launched`, `dispatched`, or a live spawned engineer) are
   **never** collapsed together; each distinct forward step keeps its own row.
+  Progress is keyed on these unambiguous phrases, **not** the bare token
+  `commit`: the typed OODA ledger commits *every* terminal — including the
+  no-progress `"typed no-action committed"` and `"typed blocked terminal
+  committed"` — with the verb "committed", so matching `commit` mislabelled
+  no-action and blocked cycles as progressing (fixed in #4292).
 - **Deferring** cycles (a deliberate no-action deferral to an already-active,
   healthy engineer) collapse by the goal set they defer on.
 - **Reasoning** cycles (anything else) collapse by their *normalized decision
