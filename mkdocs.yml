@@ -135,6 +135,10 @@ nav:
     - No-Progress Breaker Explains WHY and Self-Resolves: concepts/no-progress-root-cause-resolution.md
     - Terminal No-Progress Stall Never Parks Empty Evidence: concepts/no-progress-terminal-investigation.md
     - Overseer Goal-Board Health: concepts/overseer-goal-board-health.md
+    - Stable Goal-Session Identity: concepts/stable-goal-session-identity.md
+    - Blocked-Goal Escalation Backoff: concepts/blocked-goal-escalation-backoff.md
+    - PID-Reuse-Safe Subordinate Reaper: concepts/pid-reuse-safe-subordinate-reaper.md
+    - Coverage Comment Transient Resilience: concepts/coverage-comment-transient-resilience.md
     - Overseer Root-Cause (WHY) Principle: concepts/overseer-root-cause-why.md
     - Re-Investigating Already-Blocked OODA Goals: concepts/ooda-reinvestigate-blocked-goals.md
     - Authoritative Goal-Board Store: concepts/authoritative-goal-board-store.md
@@ -270,6 +274,10 @@ nav:
     - Stale-Engineer-Claim Reaper API: reference/claim-reaper-api.md
     - Tombstoned-Goal Engineer Reaper API: reference/tombstoned-goal-engineer-reaper-api.md
     - Typed OODA Goal-Session Deterministic Rails: reference/typed-ooda-goal-session-rails.md
+    - Stable Goal-Session Identity API: reference/stable-goal-session-identity-api.md
+    - WhisperGate Exponential-Backoff API: reference/whisper-gate-backoff-api.md
+    - Subordinate Kill PID-Guard API: reference/subordinate-kill-pid-guard-api.md
+    - Coverage Comment Resilience: reference/coverage-comment-resilience.md
     - Telemetry Metrics: reference/telemetry-metrics.md
     - Recall-Precision Hybrid Measurement: reference/recall-precision-hybrid-api.md
     - Enrichment Observability API: reference/enrichment-observability-api.md

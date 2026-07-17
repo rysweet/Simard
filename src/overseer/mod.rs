@@ -355,10 +355,14 @@ impl Overseer {
             whisper_gate: WhisperGate::new(900, 5),
             whisper_enabled: false,
             notifier: None,
-            // 15-minute dedup window so a persistent blocked goal is self-healed
-            // / escalated once per window (never in a per-tick loop); a generous
-            // per-hour cap covers many distinct goals without flooding.
-            blocked_goal_gate: WhisperGate::new(900, 20),
+            // Blocked-goal escalation uses EXPONENTIAL BACKOFF (issue #4255): a
+            // persistently-blocked goal is escalated once, then its per-goal
+            // signature is suppressed for a window that DOUBLES each re-fire
+            // (15m → 30m → 1h → … capped at 4h) instead of re-escalating every
+            // ~15-minute tick. A change in the blocked-goal SET presents as a new
+            // per-goal signature that fires immediately. A generous per-hour cap
+            // covers many distinct goals without flooding.
+            blocked_goal_gate: WhisperGate::with_backoff(900, 14_400, 20),
             goal_health_enabled: false,
             // Off by default in the bare constructor; the daemon enables it from
             // `config::memory_recall_enabled`. 15-minute dedup window so a
