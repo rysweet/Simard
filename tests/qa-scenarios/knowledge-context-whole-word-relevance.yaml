@@ -1,0 +1,62 @@
+name: knowledge-context-whole-word-relevance
+app_type: cli
+description: |
+  Outside-in proof that planning-context knowledge-pack relevance scoring
+  (`knowledge_context::relevance_score`) selects packs by WHOLE-WORD keyword
+  overlap with the objective, instead of the earlier raw-substring scan — a
+  recall-quality axis of the standing cognition-improvement goal.
+
+  The substring scan mis-fired whenever a short objective token was merely
+  *embedded* in an unrelated pack word — `go` inside "category" / "algorithm",
+  `test` inside "latest", `own` inside "download". Those spurious hits inflated
+  an off-topic pack's relevance and could crowd a genuinely relevant pack out of
+  the top-N (`MAX_PACKS_PER_OBJECTIVE`) cut, injecting off-topic knowledge into
+  the planning prompt and degrading reasoner reliability. The scan also
+  double-counted repeated objective words, letting a verbose objective that
+  restates one term distort the ranking.
+
+  This scenario drives the hermetic, in-process `knowledge_context` unit tests
+  that pin the corrected contract:
+    - a token embedded in an unrelated pack word (`go`/`test` vs
+      "category"/"algorithm"/"latest") does NOT match; the same tokens DO match
+      as whole words;
+    - a word repeated in the objective counts once (distinct-token scoring), so
+      repetition cannot inflate a pack's score;
+    - the existing pack-selection / empty-context / cap behaviours are
+      unregressed.
+  No network, no live host mutation. The CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # The relevance-scoring contract, including the new whole-word + distinct-token
+  # tests and the pre-existing pack-selection / cap behaviours.
+  - action: run
+    params:
+      command: "cargo test --locked --lib knowledge_context"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Broader base-type turn suite proves no regression in the planning-context
+  # preparation path that consumes `enrich_planning_context`.
+  - action: run
+    params:
+      command: "cargo test --locked --lib base_type_turn"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

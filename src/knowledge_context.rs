@@ -5,6 +5,8 @@
 //! queries the top packs to produce a [`PlanningContext`] that can be
 //! injected into the planning prompt.
 
+use std::collections::HashSet;
+
 use crate::error::SimardResult;
 use crate::knowledge_client::{KnowledgeClient, KnowledgePackInfo, KnowledgeQueryResult};
 
@@ -87,23 +89,56 @@ pub fn enrich_planning_context(
     })
 }
 
-/// Score a pack's relevance to an objective by keyword overlap.
-///
-/// The objective is tokenized into lowercase words, and each word is
-/// checked against the pack name and description. The score is the
-/// number of matching tokens.
-fn relevance_score(objective: &str, pack: &KnowledgePackInfo) -> usize {
-    let objective_tokens: Vec<&str> = objective
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| t.len() >= 2)
-        .collect();
+/// Minimum length of an objective token considered for relevance scoring.
+/// One-character tokens (`a`, `1`, stray operators split off punctuation) carry
+/// no topical signal and would match too indiscriminately.
+const MIN_TOKEN_LEN: usize = 2;
 
-    let pack_text = format!("{} {}", pack.name, pack.description).to_lowercase();
+/// Score a pack's relevance to an objective by **whole-word** keyword overlap.
+///
+/// The objective and the pack text (`name` + `description`) are each tokenized
+/// into lowercase alphanumeric words. The score is the number of **distinct**
+/// objective tokens (length >= [`MIN_TOKEN_LEN`]) that appear as a whole word in
+/// the pack's word set.
+///
+/// Two properties matter for recall precision, and both replace weaknesses of an
+/// earlier raw-substring scan (mirroring the word-boundary policy already adopted
+/// by [`crate::memory_consolidation::classifier`] and
+/// [`crate::fact_reliability`]):
+///
+///   * **Whole-word, not substring.** A short token no longer matches when it is
+///     merely *embedded* in an unrelated pack word — `go` must not match
+///     `category`/`algorithm`, `test` must not match `latest`, `own` must not
+///     match `download`. Substring hits inflated the relevance of unrelated packs
+///     and could crowd a genuinely relevant pack out of the
+///     [`MAX_PACKS_PER_OBJECTIVE`] cut, injecting off-topic knowledge into the
+///     planning prompt.
+///   * **Distinct tokens, not repetitions.** A word repeated in the objective
+///     counts once, so a verbose objective that restates one term cannot inflate
+///     a pack's score and distort the ranking.
+fn relevance_score(objective: &str, pack: &KnowledgePackInfo) -> usize {
+    let pack_words = word_set(&format!("{} {}", pack.name, pack.description));
+
+    let objective_tokens: HashSet<String> = objective
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.len() >= MIN_TOKEN_LEN)
+        .map(str::to_lowercase)
+        .collect();
 
     objective_tokens
         .iter()
-        .filter(|token| pack_text.contains(&token.to_lowercase()))
+        .filter(|token| pack_words.contains(*token))
         .count()
+}
+
+/// Tokenize `text` into a set of distinct lowercase alphanumeric words for
+/// whole-word membership tests. Empty tokens (produced by leading/trailing or
+/// repeated separators) are dropped.
+fn word_set(text: &str) -> HashSet<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(str::to_lowercase)
+        .collect()
 }
 
 #[cfg(test)]
@@ -217,6 +252,50 @@ mod tests {
         };
         let score = relevance_score("Fix Rust ownership issue", &pack);
         assert_eq!(score, 0);
+    }
+
+    #[test]
+    fn relevance_score_requires_whole_word_match() {
+        // A short objective token must NOT match when it is merely *embedded* in
+        // an unrelated pack word: `go` inside `category`/`algorithm`, `test`
+        // inside `latest`. A raw-substring scan spuriously matched these and
+        // inflated an unrelated pack's relevance.
+        let pack = KnowledgePackInfo {
+            name: "algorithms-expert".to_string(),
+            description: "Sorting category latest algorithm".to_string(),
+            article_count: 10,
+            section_count: 20,
+        };
+        assert_eq!(
+            relevance_score("go test", &pack),
+            0,
+            "'go'/'test' embedded in 'category'/'algorithm'/'latest' must not match"
+        );
+        // The same tokens DO match when present as whole words.
+        let go_pack = KnowledgePackInfo {
+            name: "go-expert".to_string(),
+            description: "Go test tooling".to_string(),
+            article_count: 10,
+            section_count: 20,
+        };
+        assert_eq!(relevance_score("go test", &go_pack), 2);
+    }
+
+    #[test]
+    fn relevance_score_counts_distinct_tokens_only() {
+        // A word repeated in the objective must count once, so a verbose
+        // objective that restates one term cannot inflate a pack's score.
+        let pack = KnowledgePackInfo {
+            name: "rust-expert".to_string(),
+            description: "Rust programming language".to_string(),
+            article_count: 100,
+            section_count: 400,
+        };
+        assert_eq!(
+            relevance_score("rust rust rust programming", &pack),
+            2,
+            "distinct tokens {{rust, programming}} => 2, not 4"
+        );
     }
 
     #[test]
