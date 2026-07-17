@@ -1,0 +1,54 @@
+name: "Prebuilt liblbug archive is content-verified before it is linked"
+description: "Outside-in verification of the CI-health supply-chain fix for the lbug prebuilt provisioner (issue #2471). scripts/provision-lbug-prebuilt.sh downloads a version-pinned liblbug-static-*.tar.gz release asset and statically links it into every CI build; TLS + version/repo pinning authenticate the transport and URL but not the content, so a tampered-at-rest asset would be linked unnoticed. The fix pins each asset's SHA-256 in the code-reviewed manifest scripts/lbug-prebuilt.sha256 and refuses (fail-closed) to extract any tarball whose hash does not match. Asserts (no network): the real verify gate accepts a matching hash and refuses both a mismatch and an unknown pin, verification runs before extraction, the manifest pins the CI-consumed asset, and the Rust regression guard passes."
+version: "1.0.0"
+
+config:
+  timeout: 600000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 600000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "lbug prebuilt is SHA-256 verified before extraction, fail-closed, and stays wired"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/ci-harden-lbug-checksum.sh"
+    timeout: 600000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "ci-health"
+    - "supply-chain"
+    - "checksum"
+    - "guardrail"
+    - "github-actions"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"
