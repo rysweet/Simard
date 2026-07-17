@@ -101,6 +101,52 @@ pub const MIN_OVERSEER_INTERVAL_SECS: u64 = 60;
 /// or non-positive. Mirrors the OODA loop's historical default.
 pub const DEFAULT_DAILY_BUDGET_USD: f64 = 500.0;
 
+/// Env var (#893) that overrides how many *consecutive* transient cycle failures
+/// the `overseer` meta-thread will self-heal through (mapping to `"backoff"`)
+/// before it escalates to `"erroring"`. Unset/empty/unparseable/zero/negative
+/// all fall back to [`DEFAULT_OVERSEER_TRANSIENT_BACKOFF_CEILING`] — a bad value
+/// can never disable self-healing.
+pub const OVERSEER_TRANSIENT_BACKOFF_CEILING_ENV: &str =
+    "SIMARD_OVERSEER_TRANSIENT_BACKOFF_CEILING";
+
+/// Default consecutive-transient self-heal ceiling (#893). Bounded so a
+/// hard-down dependency that fails transiently forever cannot hide behind an
+/// infinite backoff (SR-2) — after this many consecutive transient failures the
+/// meta-thread escalates to `"erroring"`. Must be `>= 1` so at least one
+/// self-healing backoff is always permitted.
+pub const DEFAULT_OVERSEER_TRANSIENT_BACKOFF_CEILING: u32 = 3;
+
+/// Env var (Problem 1 / issue #4186) setting the BASE suppression window
+/// (seconds) of the gap-scan dedup [`crate::overseer::guardrails::BackoffGate`].
+/// Unset/empty/unparseable/zero/negative all fall back to
+/// [`DEFAULT_OVERSEER_BACKOFF_BASE_SECS`] — a bad base can never collapse the
+/// window to `0` and let every duplicate coverage relaunch through.
+pub const SIMARD_OVERSEER_BACKOFF_BASE_SECS_ENV: &str = "SIMARD_OVERSEER_BACKOFF_BASE_SECS";
+
+/// Env var (Problem 1 / issue #4186) setting the exponential GROWTH multiplier of
+/// the gap-scan dedup [`crate::overseer::guardrails::BackoffGate`]. Must be `> 1`
+/// so the window genuinely grows; unset/empty/unparseable/`<= 1` all fall back to
+/// [`DEFAULT_OVERSEER_BACKOFF_MULTIPLIER`].
+pub const SIMARD_OVERSEER_BACKOFF_MULTIPLIER_ENV: &str = "SIMARD_OVERSEER_BACKOFF_MULTIPLIER";
+
+/// Env var (Problem 1 / issue #4186) setting the hard CAP (seconds) on the
+/// gap-scan dedup [`crate::overseer::guardrails::BackoffGate`] window, bounding
+/// suppression so a genuinely-recurring gap is never silenced longer than this.
+/// Unset/empty/unparseable/zero/negative all fall back to
+/// [`DEFAULT_OVERSEER_BACKOFF_MAX_SECS`].
+pub const SIMARD_OVERSEER_BACKOFF_MAX_SECS_ENV: &str = "SIMARD_OVERSEER_BACKOFF_MAX_SECS";
+
+/// Default base suppression window (15 min) for the gap-scan dedup backoff — the
+/// same window the sibling [`WhisperGate`]-based dedup rails use.
+pub const DEFAULT_OVERSEER_BACKOFF_BASE_SECS: i64 = 900;
+
+/// Default exponential growth multiplier for the gap-scan dedup backoff.
+pub const DEFAULT_OVERSEER_BACKOFF_MULTIPLIER: i64 = 2;
+
+/// Default hard cap (24 h) on the gap-scan dedup backoff window: suppression is
+/// bounded so a real recurring gap always resurfaces within a day.
+pub const DEFAULT_OVERSEER_BACKOFF_MAX_SECS: i64 = 86_400;
+
 /// Resolve the Overseer master flag from an env resolver. Fail-safe: only an
 /// explicit truthy value (`1`/`true`/`yes`/`on`, case-insensitive) enables the
 /// Overseer; everything else — including an unset var — leaves it OFF.
@@ -243,6 +289,97 @@ pub fn gap_scan_every_n_from(lookup: impl Fn(&str) -> Option<String>) -> u64 {
 /// Production entry point: read the real process environment.
 pub fn gap_scan_every_n() -> u64 {
     gap_scan_every_n_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the consecutive-transient self-heal ceiling `N` (#893) from an env
+/// resolver. Fail-safe: unset/empty/whitespace/unparseable/zero/negative all
+/// fall back to [`DEFAULT_OVERSEER_TRANSIENT_BACKOFF_CEILING`] — a garbage value
+/// can never disable self-healing (the floor is always `>= 1`).
+pub fn overseer_transient_backoff_ceiling_from(lookup: impl Fn(&str) -> Option<String>) -> u32 {
+    match lookup(OVERSEER_TRANSIENT_BACKOFF_CEILING_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => s
+            .parse::<u32>()
+            .ok()
+            .filter(|n| *n >= 1)
+            .unwrap_or(DEFAULT_OVERSEER_TRANSIENT_BACKOFF_CEILING),
+        _ => DEFAULT_OVERSEER_TRANSIENT_BACKOFF_CEILING,
+    }
+}
+
+/// Production entry point: read the real process environment.
+pub fn overseer_transient_backoff_ceiling() -> u32 {
+    overseer_transient_backoff_ceiling_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the gap-scan dedup backoff BASE window (seconds) from an env resolver
+/// (Problem 1 / issue #4186). Fail-safe: unset/empty/whitespace/unparseable/
+/// zero/negative all fall back to [`DEFAULT_OVERSEER_BACKOFF_BASE_SECS`] — a
+/// garbage base can never collapse the suppression window to `0`.
+pub fn overseer_backoff_base_secs_from(lookup: impl Fn(&str) -> Option<String>) -> i64 {
+    match lookup(SIMARD_OVERSEER_BACKOFF_BASE_SECS_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => s
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_OVERSEER_BACKOFF_BASE_SECS),
+        _ => DEFAULT_OVERSEER_BACKOFF_BASE_SECS,
+    }
+}
+
+/// Production entry point: read the real process environment.
+pub fn overseer_backoff_base_secs() -> i64 {
+    overseer_backoff_base_secs_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the gap-scan dedup backoff GROWTH multiplier from an env resolver
+/// (Problem 1 / issue #4186). Fail-safe: unset/empty/whitespace/unparseable or
+/// any value `<= 1` (which would stop the window growing) all fall back to
+/// [`DEFAULT_OVERSEER_BACKOFF_MULTIPLIER`].
+pub fn overseer_backoff_multiplier_from(lookup: impl Fn(&str) -> Option<String>) -> i64 {
+    match lookup(SIMARD_OVERSEER_BACKOFF_MULTIPLIER_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => s
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n > 1)
+            .unwrap_or(DEFAULT_OVERSEER_BACKOFF_MULTIPLIER),
+        _ => DEFAULT_OVERSEER_BACKOFF_MULTIPLIER,
+    }
+}
+
+/// Production entry point: read the real process environment.
+pub fn overseer_backoff_multiplier() -> i64 {
+    overseer_backoff_multiplier_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the gap-scan dedup backoff hard CAP (seconds) from an env resolver
+/// (Problem 1 / issue #4186). Fail-safe: unset/empty/whitespace/unparseable/
+/// zero/negative all fall back to [`DEFAULT_OVERSEER_BACKOFF_MAX_SECS`].
+pub fn overseer_backoff_max_secs_from(lookup: impl Fn(&str) -> Option<String>) -> i64 {
+    match lookup(SIMARD_OVERSEER_BACKOFF_MAX_SECS_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => s
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_OVERSEER_BACKOFF_MAX_SECS),
+        _ => DEFAULT_OVERSEER_BACKOFF_MAX_SECS,
+    }
+}
+
+/// Production entry point: read the real process environment.
+pub fn overseer_backoff_max_secs() -> i64 {
+    overseer_backoff_max_secs_from(|k| std::env::var(k).ok())
 }
 
 /// Resolve whether the stale-engineer-claim reaper (issue #4099) is enabled.
@@ -829,6 +966,115 @@ mod tests {
         assert!(
             !is_engineer_branch(""),
             "an empty head ref must never qualify (fail-closed)"
+        );
+    }
+
+    // ── Overseer gap-scan backoff params (Problem 1 / issue #4186) ───────────
+    //
+    // TDD (RED) contract for the `SIMARD_OVERSEER_BACKOFF_*` env accessors that
+    // parameterise the new `guardrails::BackoffGate`. They mirror the existing
+    // `*_from(lookup)` + clamp pattern (`gap_scan_every_n_from`,
+    // `overseer_transient_backoff_ceiling_from`): a garbage / out-of-range value
+    // must never DISABLE suppression or cause overflow, so every accessor
+    // fails-safe to its documented default.
+
+    #[test]
+    fn backoff_base_secs_defaults_and_honours_valid_values() {
+        assert_eq!(
+            overseer_backoff_base_secs_from(env(&[])),
+            DEFAULT_OVERSEER_BACKOFF_BASE_SECS,
+            "unset ⇒ default base window"
+        );
+        assert_eq!(DEFAULT_OVERSEER_BACKOFF_BASE_SECS, 900);
+        assert_eq!(
+            overseer_backoff_base_secs_from(env(&[(
+                SIMARD_OVERSEER_BACKOFF_BASE_SECS_ENV,
+                "1800"
+            )])),
+            1800,
+            "an explicit positive value is honoured"
+        );
+    }
+
+    #[test]
+    fn backoff_base_secs_fails_safe_on_bad_values() {
+        // Empty / whitespace / garbage / zero / negative all clamp to the
+        // default — a bad base window can never collapse the suppression window
+        // to 0 (which would let every duplicate through).
+        for bad in ["", "   ", "abc", "0", "-5", "9.5"] {
+            assert_eq!(
+                overseer_backoff_base_secs_from(env(&[(
+                    SIMARD_OVERSEER_BACKOFF_BASE_SECS_ENV,
+                    bad
+                )])),
+                DEFAULT_OVERSEER_BACKOFF_BASE_SECS,
+                "{bad:?} must fall back to the default base window"
+            );
+        }
+    }
+
+    #[test]
+    fn backoff_multiplier_defaults_and_rejects_le_one() {
+        assert_eq!(
+            overseer_backoff_multiplier_from(env(&[])),
+            DEFAULT_OVERSEER_BACKOFF_MULTIPLIER,
+            "unset ⇒ default multiplier"
+        );
+        assert_eq!(DEFAULT_OVERSEER_BACKOFF_MULTIPLIER, 2);
+        assert_eq!(
+            overseer_backoff_multiplier_from(env(&[(SIMARD_OVERSEER_BACKOFF_MULTIPLIER_ENV, "3")])),
+            3,
+            "an explicit multiplier > 1 is honoured"
+        );
+        // A multiplier <= 1 would make the backoff never grow (or shrink),
+        // defeating the purpose — every such value must clamp to the default.
+        for bad in ["1", "0", "-2", "", "abc"] {
+            assert_eq!(
+                overseer_backoff_multiplier_from(env(&[(
+                    SIMARD_OVERSEER_BACKOFF_MULTIPLIER_ENV,
+                    bad
+                )])),
+                DEFAULT_OVERSEER_BACKOFF_MULTIPLIER,
+                "{bad:?} must clamp to the default multiplier (reject <= 1)"
+            );
+        }
+    }
+
+    #[test]
+    fn backoff_max_secs_defaults_and_fails_safe() {
+        assert_eq!(
+            overseer_backoff_max_secs_from(env(&[])),
+            DEFAULT_OVERSEER_BACKOFF_MAX_SECS,
+            "unset ⇒ default 24h cap"
+        );
+        assert_eq!(DEFAULT_OVERSEER_BACKOFF_MAX_SECS, 86_400);
+        assert_eq!(
+            overseer_backoff_max_secs_from(env(&[(SIMARD_OVERSEER_BACKOFF_MAX_SECS_ENV, "3600")])),
+            3600,
+            "an explicit positive cap is honoured"
+        );
+        for bad in ["", "  ", "nope", "0", "-1"] {
+            assert_eq!(
+                overseer_backoff_max_secs_from(env(&[(SIMARD_OVERSEER_BACKOFF_MAX_SECS_ENV, bad)])),
+                DEFAULT_OVERSEER_BACKOFF_MAX_SECS,
+                "{bad:?} must fall back to the default cap"
+            );
+        }
+    }
+
+    #[test]
+    fn backoff_defaults_form_a_coherent_growing_bounded_window() {
+        // base < cap and multiplier > 1 — the invariant the BackoffGate needs so
+        // the window genuinely grows yet stays bounded. Enforced at compile time
+        // (these are `const`s) so a future edit that breaks the invariant fails
+        // the build, not just this test.
+        const _: () = assert!(
+            DEFAULT_OVERSEER_BACKOFF_BASE_SECS < DEFAULT_OVERSEER_BACKOFF_MAX_SECS,
+            "the base window must be below the cap"
+        );
+        const _: () = assert!(
+            DEFAULT_OVERSEER_BACKOFF_MULTIPLIER > 1,
+            "the multiplier must grow the window"
         );
     }
 }

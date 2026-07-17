@@ -1,0 +1,93 @@
+name: whole-word-episode-recall
+app_type: cli
+description: |
+  Outside-in proof that the flat keyword episode scan
+  (`LibraryCognitiveMemory::search_episodes_by_keywords`) admits episodes by a
+  marker-safe WORD-BOUNDARY keyword match instead of the earlier raw-substring
+  scan — a recall-quality axis of the standing cognition-improvement goal.
+
+  The sibling ranked path (`recall_episodes_ranked`) was already moved to a
+  word-boundary gate, but the flat `search_episodes_by_keywords` scan was left on
+  raw substring (`content.to_lowercase().contains(kw)`) because its bracketed
+  provenance-MARKER callers (`memory_consolidation::reflection_lessons`) depend
+  on exact-substring match. Its OTHER callers, though, pass clean
+  natural-language tokens (`cognitive_threads::creative_ideas` recalls with
+  "meeting" / "conversation" / "decision"), and for those a short token merely
+  *embedded* in the interior/suffix of an unrelated episode word — `test` inside
+  "latest", `own` inside "download", `decision` inside "indecision" — spuriously
+  recalled an off-topic episode, diluting keyword recall and, downstream,
+  reasoner reliability.
+
+  The scan now partitions its query keywords by shape:
+    - a CLEAN alphanumeric keyword is matched at a WORD BOUNDARY (a prefix of a
+      whole content word) via the same `shares_word_prefix` gate the ranked path
+      uses — dropping the interior/suffix noise while PRESERVING the inflectional
+      recall the live path depends on (`meeting` still recalls "meetings");
+    - a phrase or bracketed MARKER keyword (any non-alphanumeric char) keeps the
+      exact case-insensitive SUBSTRING semantics `reflection_lessons` dedup /
+      recurring-failure counting rely on.
+
+  This scenario drives the hermetic, in-process tests that pin the corrected
+  contract against the live lbug-backed `LibraryCognitiveMemory` adapter:
+    - an interior/suffix-embedded token (`decision` vs "indecision", `test` vs
+      "latest") does NOT surface the episode; the same token DOES surface a
+      word-boundary match;
+    - the real `creative_ideas` tokens recall only the on-topic episode;
+    - a query stem still recalls its inflected form (`meeting` -> "meetings");
+    - a bracketed provenance marker still matches as a substring, and a different
+      marker does not (marker recall stays exact);
+    - the pure word-boundary helpers (`tokenize_words` / `shares_word_prefix`)
+      reject interior/suffix embeddings and accept boundary matches;
+    - existing consolidation recall/count behaviours (including the exact-marker
+      `reflection_lessons` dedup) are unregressed.
+  No network, no live host mutation. The CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # The end-to-end word-boundary + marker-safe contract on the live backend.
+  - action: run
+    params:
+      command: "cargo test --locked --lib cognitive_memory::tests_whole_word_episode_recall"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # The pure word-boundary gate helpers (tokenize_words / shares_word_prefix)
+  # that the clean-token path reuses.
+  - action: run
+    params:
+      command: "cargo test --locked --lib cognitive_memory::library_adapter::word_boundary_gate_tests"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Broader consolidation suite proves no regression in the exact-marker
+  # reflection-lessons dedup / recurring-failure counting that depends on the
+  # preserved substring path.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_consolidation"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

@@ -973,3 +973,200 @@ fn a_coverage_gap_decides_to_a_terminal_closing_edge() {
          gets covered and stops recurring — not a notify-only action: {iv:?}"
     );
 }
+
+// ═══════════════════ 4. BackoffGate dedup on the coverage launch ═════════════
+//
+// TDD (RED) contract for wiring the new `guardrails::BackoffGate` into the
+// `WorkstreamCoverage` `LaunchRecipe` path (Problem 1 / issue #4186; meta bugs
+// #4255, #4126). The pre-existing in-flight guard only holds a duplicate WHILE
+// the covering workstream is still running; once it COMPLETES, an unchanged,
+// still-recurring gap would re-launch every tick — the exact hole that spawned
+// duplicate backlog issues #4186/#4190/#4191/#4198/#4201/#4203/#4206.
+//
+// The BackoffGate closes it: keyed by the same `recipe_dedup_key` the in-flight
+// rail uses, it SUPPRESSES a relaunch of an equivalent coverage within the
+// (exponentially growing) backoff window even after the prior workstream has
+// completed — yet always re-admits once the window elapses (never permanent
+// silence). The window clock is INJECTED via `Overseer::with_clock` so these
+// tests drive a deterministic virtual clock.
+
+use std::sync::atomic::{AtomicI64, Ordering};
+
+/// A `RecipeLauncher` whose launched workstreams COMPLETE immediately (poll ⇒
+/// `ProducedPr`), so the in-flight dedup slot is freed on the next tick and the
+/// BackoffGate becomes the ONLY thing that can hold a relaunch. Counts launches.
+struct CompletingRecipes {
+    launched: Arc<Mutex<usize>>,
+}
+impl RecipeLauncher for CompletingRecipes {
+    fn launch(&self, _b: &RecipeBrief) -> Result<WorkstreamHandle, OverseerError> {
+        *self.launched.lock().unwrap() += 1;
+        Ok(WorkstreamHandle {
+            id: "ws-cover".to_string(),
+        })
+    }
+    fn poll(&self, _h: &WorkstreamHandle) -> Result<WorkstreamStatus, OverseerError> {
+        // Already delivered a PR ⇒ terminal, so reconcile frees the in-flight slot.
+        Ok(WorkstreamStatus::ProducedPr {
+            repo: "rysweet/Simard".to_string(),
+            pr: 1,
+        })
+    }
+}
+
+/// A goal-store fake whose gap survey can be SWAPPED between ticks, so a test
+/// can present a different (distinct-signature) gap set on a later tick.
+struct SwappableGapStore {
+    gaps: Arc<Mutex<Vec<GapItem>>>,
+}
+impl GoalCurator for SwappableGapStore {
+    fn propose(&self, _g: &GoalBrief) -> Result<(), OverseerError> {
+        Ok(())
+    }
+    fn in_flight(&self) -> Result<Vec<InFlightItem>, OverseerError> {
+        Ok(vec![])
+    }
+    fn blocked_goals(&self) -> Result<Vec<BlockedGoal>, OverseerError> {
+        Ok(vec![])
+    }
+    fn workstream_gaps(&self, _anomalies: &[String]) -> Result<Vec<GapItem>, OverseerError> {
+        Ok(self.gaps.lock().unwrap().clone())
+    }
+}
+
+/// Capabilities around a swappable gap survey + immediately-completing recipes,
+/// returning the shared launch counter and the shared swappable gap handle.
+type CapsWithSwappableGaps = (Capabilities, Arc<Mutex<usize>>, Arc<Mutex<Vec<GapItem>>>);
+fn caps_completing_swappable(initial: Vec<GapItem>) -> CapsWithSwappableGaps {
+    let launched = Arc::new(Mutex::new(0usize));
+    let gaps = Arc::new(Mutex::new(initial));
+    let caps = Capabilities {
+        status: Box::new(FakeStatus(ObservedState::default())),
+        recipes: Box::new(CompletingRecipes {
+            launched: launched.clone(),
+        }),
+        prs: Box::new(FakePrs),
+        deployer: Box::new(FakeDeployer),
+        meetings: Box::new(FakeMeetings),
+        issues: Box::new(RecordingIssues {
+            filed: Arc::new(Mutex::new(Vec::new())),
+        }),
+        goals: Box::new(SwappableGapStore { gaps: gaps.clone() }),
+        auditor: Box::new(FakeAuditor),
+        memory: Box::new(crate::overseer::capabilities::InertMemoryRecall),
+    };
+    (caps, launched, gaps)
+}
+
+/// A virtual clock the test advances; injected via `Overseer::with_clock`.
+fn virtual_clock() -> (Arc<AtomicI64>, Box<dyn Fn() -> i64 + Send + Sync>) {
+    let now = Arc::new(AtomicI64::new(0));
+    let handle = now.clone();
+    (now, Box::new(move || handle.load(Ordering::SeqCst)))
+}
+
+#[test]
+fn coverage_relaunch_is_suppressed_within_the_backoff_window_after_completion() {
+    // The gap recurs unchanged; the covering workstream completes immediately.
+    let (caps, launched, _gaps) = caps_completing_swappable(vec![sample_goal_gap()]);
+    let (now, clock) = virtual_clock();
+
+    let mut ov = Overseer::new(caps)
+        .with_identity(overseer_identity())
+        .with_gap_scan_enabled(true)
+        .with_clock(clock);
+
+    // Tick 1 at t=0: launches the covering workstream (arms the backoff window).
+    now.store(0, Ordering::SeqCst);
+    let first = overseer_tick(&mut ov);
+    assert_eq!(
+        first.recipes_launched, 1,
+        "the recurring gap is covered by exactly one launched workstream: {first:?}"
+    );
+    assert_eq!(*launched.lock().unwrap(), 1);
+
+    // Tick 2 at t=300 (< 900s base window). The prior workstream COMPLETED, so
+    // the in-flight guard no longer holds it — only the BackoffGate can. The
+    // equivalent coverage must NOT re-launch.
+    now.store(300, Ordering::SeqCst);
+    let second = overseer_tick(&mut ov);
+    assert_eq!(
+        second.recipes_launched, 0,
+        "an equivalent coverage is NOT relaunched within the backoff window even \
+         though its prior workstream already completed: {second:?}"
+    );
+    assert!(
+        second.held >= 1,
+        "the duplicate coverage relaunch is HELD by the backoff gate: {second:?}"
+    );
+    assert_eq!(
+        *launched.lock().unwrap(),
+        1,
+        "still exactly one launch — no duplicate backlog workstream was spawned"
+    );
+}
+
+#[test]
+fn coverage_relaunch_is_admitted_once_the_backoff_window_elapses() {
+    // Suppression is bounded: past the window the still-recurring gap surfaces
+    // again so a genuinely-uncovered gap is never permanently silenced.
+    let (caps, launched, _gaps) = caps_completing_swappable(vec![sample_goal_gap()]);
+    let (now, clock) = virtual_clock();
+
+    let mut ov = Overseer::new(caps)
+        .with_identity(overseer_identity())
+        .with_gap_scan_enabled(true)
+        .with_clock(clock);
+
+    now.store(0, Ordering::SeqCst);
+    assert_eq!(overseer_tick(&mut ov).recipes_launched, 1);
+
+    // Past the 900s base window the equivalent coverage may relaunch.
+    now.store(901, Ordering::SeqCst);
+    let later = overseer_tick(&mut ov);
+    assert_eq!(
+        later.recipes_launched, 1,
+        "past the backoff window the still-recurring gap is covered again \
+         (bounded suppression, never permanent silence): {later:?}"
+    );
+    assert_eq!(*launched.lock().unwrap(), 2);
+}
+
+#[test]
+fn a_distinct_gap_signature_is_not_suppressed_by_another_keys_backoff() {
+    // One noisy coverage key must not starve an unrelated gap. Swapping to a
+    // DIFFERENT gap set (distinct signature ⇒ distinct recipe_dedup_key) still
+    // launches while the first key is inside its backoff window.
+    let (caps, launched, gaps) = caps_completing_swappable(vec![sample_goal_gap()]);
+    let (now, clock) = virtual_clock();
+
+    let mut ov = Overseer::new(caps)
+        .with_identity(overseer_identity())
+        .with_gap_scan_enabled(true)
+        .with_clock(clock);
+
+    // Tick 1 at t=0 covers the goal gap (arms backoff for key-A).
+    now.store(0, Ordering::SeqCst);
+    assert_eq!(overseer_tick(&mut ov).recipes_launched, 1);
+
+    // Swap to a DIFFERENT gap (distinct signature) and tick at t=300, still
+    // inside key-A's window. Key-B is unrelated ⇒ it must launch.
+    *gaps.lock().unwrap() = vec![sample_anomaly_gap()];
+    now.store(300, Ordering::SeqCst);
+    let second = overseer_tick(&mut ov);
+    assert_eq!(
+        second.recipes_launched, 1,
+        "a distinct gap signature is unaffected by another key's backoff: {second:?}"
+    );
+    assert_eq!(*launched.lock().unwrap(), 2);
+
+    // Swap BACK to the original goal gap, still inside key-A's window ⇒ suppressed.
+    *gaps.lock().unwrap() = vec![sample_goal_gap()];
+    now.store(400, Ordering::SeqCst);
+    let third = overseer_tick(&mut ov);
+    assert_eq!(
+        third.recipes_launched, 0,
+        "the original key is still within its own backoff window: {third:?}"
+    );
+    assert_eq!(*launched.lock().unwrap(), 2);
+}

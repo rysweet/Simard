@@ -352,6 +352,29 @@ jobs:
         # package-lock.json (checked against the GitHub Advisory Database).
         run: npm audit --audit-level=high
 
+  scripts-tests:
+    # Unit tests for the CI helper scripts under .github/scripts (issue #4231):
+    # the resilient coverage-comment poster (retry/backoff on transient GitHub
+    # 5xx/429/network errors + non-fatal tolerance of a persistent outage, so a
+    # failed comment post never fails the required `coverage` check). Pure Node
+    # (node:test), no dependencies, lockfile-independent.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+
+      - name: Run .github/scripts unit tests
+        run: node --test .github/scripts/*.test.mjs
+
   install-real:
     runs-on: ubuntu-latest
     timeout-minutes: 120

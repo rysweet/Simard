@@ -1,0 +1,63 @@
+name: idea-extraction-whole-word-signal
+app_type: cli
+description: |
+  Outside-in proof that research-idea extraction
+  (`research_tracker::idea_extraction::matched_keywords`) scores a developer
+  activity fact by WHOLE-WORD signal-keyword overlap, instead of the earlier
+  raw-substring scan — a fact-yield (proposal-precision) axis of the standing
+  cognition-improvement goal.
+
+  The substring scan mis-fired whenever a short signal keyword was merely
+  *embedded* in an unrelated word — `rl` inside "world" / "curl" / "url", `rag`
+  inside "storage" / "average" / "fragment", `agent` inside "reagent". Because
+  a single keyword hit (`MIN_KEYWORD_HITS == 1`) is enough to surface a
+  `research:` proposal, one phantom substring match turned ordinary,
+  research-irrelevant developer activity into an off-topic proposal, degrading
+  the fact-yield of the extraction pass.
+
+  This scenario drives the hermetic, in-process `idea_extraction` unit tests
+  that pin the corrected contract:
+    - a keyword embedded in an unrelated word (`rl`/`rag`/`agent` vs
+      "world"/"storage"/"reagent") does NOT match; the same keywords DO match as
+      whole words;
+    - pluralized signals still match (`agents`, `embeddings`, `llms`) so recall
+      is unregressed;
+    - hyphenated compound keywords (`chain-of-thought`, `multi-agent`) match as
+      a single phrase;
+    - the existing extract_ideas / summarize behaviours are unregressed.
+  No network, no live host mutation. The CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # The signal-matching contract, including the new whole-word / plural /
+  # compound tests and the pre-existing extraction behaviours.
+  - action: run
+    params:
+      command: "cargo test --locked --lib idea_extraction"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Broader research_tracker suite proves no regression in the surrounding
+  # activity-polling / idea-proposal path.
+  - action: run
+    params:
+      command: "cargo test --locked --lib research_tracker"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

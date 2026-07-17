@@ -43,9 +43,38 @@ jobs:
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # Restore the SAME warm shared cache that main writes for verify.yml
+          # (single writer is main; see verify.yml `shared-key: simard-ci-v2`).
+          # Without this the sweep uses a default job-scoped key that never
+          # matches, so it rebuilds the whole `simard` monolith from scratch —
+          # a cold build that overran this job's 20-minute timeout and cancelled
+          # the sweep. Restoring the warm cache rebuilds the dev-profile binary
+          # in a few minutes instead, keeping the daily sweep well inside budget.
+          shared-key: simard-ci-v2
           # Read-only: the scheduled sweep must never poison the shared PR/verify
           # build cache with its default-branch build artifacts.
           save-if: "false"
+          # lbug's prebuilt static archive lives here; rust-cache restores around
+          # but evicts the copy inside the registry-source tree, so provision it
+          # explicitly below (mirrors verify.yml's fallback rebuild).
+          cache-directories: |
+            ~/.cache/simard-lbug-precommit
+
+      - name: Provision lbug native static library link path
+        # `simard` links the native `liblbug.a`. rust-cache evicts lbug's
+        # in-registry prebuilt archive while keeping the build-script output that
+        # references it, so a warm-cache build would otherwise fail to link (or
+        # fall back to a slow from-source lbug rebuild). Point lbug at a stable
+        # prebuilt copy via LBUG_LIBRARY_DIR/INCLUDE_DIR — the single source of
+        # truth used by verify.yml — and drop stale lbug build fingerprints so
+        # the build script re-runs against the provisioned path.
+        shell: bash
+        run: |
+          lib_dir="$HOME/.cache/simard-lbug-precommit/lib"
+          scripts/provision-lbug-prebuilt.sh "$lib_dir" >/dev/null
+          echo "LBUG_LIBRARY_DIR=$lib_dir" >> "$GITHUB_ENV"
+          echo "LBUG_INCLUDE_DIR=$lib_dir" >> "$GITHUB_ENV"
+          rm -rf target/*/build/lbug-* target/*/.fingerprint/lbug-* 2>/dev/null || true
 
       - name: Run CI-health sweep (detect, file/resolve deduplicated tracking issues)
         env:

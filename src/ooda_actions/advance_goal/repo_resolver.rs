@@ -176,7 +176,16 @@ mod tests {
 
     /// RAII guard that sets `HOME` for the duration of a test and restores the
     /// previous value (or unset) on drop. Tests that use it MUST be annotated
-    /// `#[serial_test::serial]` because the process environment is global.
+    /// `#[serial_test::serial(cognitive_memory)]` — NOT the bare `#[serial]`.
+    /// A write to `HOME` can tear a concurrent `SIMARD_STATE_ROOT` read (glibc
+    /// `setenv` may `realloc(environ)`), so every lib-test-binary mutator that
+    /// touches `HOME` (or the cognitive-memory state-root env surface) shares
+    /// the ONE `cognitive_memory` serial key (issues #2360/#2375; see docs/testing/cognitive-memory-serial-isolation.md). The
+    /// bare `#[serial]` uses an INDEPENDENT lock, so it would let these HOME
+    /// writers run concurrently with `cognitive_memory` tests that read `HOME`
+    /// (e.g. the cost-ledger meeting-turn regression), reintroducing the race.
+    /// The serial-guard meta-test cannot see the `set_var` hidden inside this
+    /// helper method, so this key is an author obligation, not an auto-check.
     struct HomeGuard {
         prev: Option<std::ffi::OsString>,
     }
@@ -184,8 +193,9 @@ mod tests {
     impl HomeGuard {
         fn set(value: &Path) -> Self {
             let prev = std::env::var_os("HOME");
-            // SAFETY: env mutation is serialised via `#[serial_test::serial]`,
-            // so no other thread reads/writes the environment concurrently.
+            // SAFETY: env mutation is serialised via
+            // `#[serial_test::serial(cognitive_memory)]`, so no other thread
+            // reads/writes the environment concurrently.
             unsafe {
                 std::env::set_var("HOME", value);
             }
@@ -286,7 +296,7 @@ mod tests {
     // ── Resolution: ecosystem repo ($HOME/src/<slug>) ──────────────────────
 
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(cognitive_memory)]
     fn resolve_ecosystem_slug_returns_src_path() {
         let home = tempdir().expect("home tempdir");
         let target = home.path().join("src").join("amplihack-rs");
@@ -304,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(cognitive_memory)]
     fn resolve_missing_target_repo_is_err() {
         let home = tempdir().expect("home tempdir");
         // No $HOME/src/ghost-repo created.
@@ -318,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(cognitive_memory)]
     fn resolve_non_git_directory_is_err() {
         let home = tempdir().expect("home tempdir");
         let plain = home.path().join("src").join("not-a-repo");
@@ -334,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(cognitive_memory)]
     fn resolve_rejects_traversal_slug() {
         let home = tempdir().expect("home tempdir");
         let _home = HomeGuard::set(home.path());
@@ -349,7 +359,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(cognitive_memory)]
     fn resolve_rejects_symlink_escape_from_src_root() {
         // A real git repo OUTSIDE $HOME/src, reached via a symlink placed
         // inside $HOME/src, must be rejected by the containment check.
@@ -375,7 +385,7 @@ mod tests {
     // ── Composition: resolve → allocate the engineer worktree in the target ─
 
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(cognitive_memory)]
     fn resolved_target_repo_hosts_the_engineer_worktree() {
         // The core BUG-1 guarantee: a goal targeting "amplihack-rs" must get
         // its engineer worktree branched off the amplihack-rs repo — NOT the

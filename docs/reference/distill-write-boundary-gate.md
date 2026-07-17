@@ -77,8 +77,8 @@ order:
    `DISTILL_RELIABILITY_THRESHOLD`, the fact is **quarantined** (counted, not
    stored) so a low-reliability candidate can never corrupt past experience.
 5. **Identity dedup** — a weaker-or-equal new fact never clobbers a
-   higher-confidence existing fact of the **same identity** (concept + content).
-   Distinct lessons that merely share a label still accumulate.
+   higher-confidence existing fact of the **same identity** (canonical concept +
+   content). Distinct lessons that merely share a label still accumulate.
 6. **Persist** — surviving facts are written with
    `store_fact_with_provenance` (computed confidence, **one `DERIVES_FROM` edge
    per supplied `source_episode_id`**, and a scalar `source_id` of
@@ -88,6 +88,19 @@ order:
 7. **Pass ledger** — the disposition (stored / quarantined) is recorded against
    the request's opaque `pass_id` so the scheduler can report accurate counts
    without parsing anything.
+
+**Concept canonicalization.** `commit_gated_fact` folds the concept through
+`canonical_concept` **once** at the top of the gate, so a concept that maps into
+the closed `KNOWN_CONCEPTS` set is scored, **deduped, and stored** under its
+canonical label. The surface variants an LLM routinely emits for the same
+label — `"PR-Pattern"`, `"pr_pattern"`, `"pr-pattern."` — therefore land as one
+concept rather than fragmenting across spellings. Fragmentation would split the
+graph's concept vocabulary, let a variant-labeled restatement slip past the
+identity-dedup (promoting a duplicate that inflates semantic memory and drags
+recall precision down), and hide a fact from a recall that queries the canonical
+label. A genuinely off-spec concept (one that canonicalizes to `None`) is stored
+**verbatim** — canonicalization folds recognized labels, it never coerces a
+different concept into the closed set.
 
 Because the gate is server-side, the same guarantees hold whether a fact arrives
 from the distiller, a manual `simard memory remember`, or any future agentic
@@ -125,7 +138,7 @@ exactly what lets the stub and the IPC handler agree on every decision.
 |--------|---------|
 | `fact_reliability::score_fact_reliability(concept: &str, content: &str, grounded: bool) -> f64` | Confidence in `[0.0, 1.0]` from the fact's concept/content and whether its provenance resolved. Deterministic; fail-closed (ungrounded / empty → low → quarantined). No batch argument. |
 | `fact_reliability::fact_passes_gate(concept, content, grounded) -> bool` | Thin predicate: `score >= RELIABILITY_THRESHOLD`. The shared store/quarantine decision. |
-| `fact_reliability::commit_gated_fact(memory, concept, content, grounded, source_id, tags, source_episode_ids) -> SimardResult<FactGateDecision>` | The shared gate orchestration both seams call: score → threshold → identity-dedup → `store_fact_with_provenance`. Grounding is resolved by the caller; the returned `FactGateDecision` is `Stored { confidence, node_id }` or `Quarantined { confidence }` (a `confidence >= RELIABILITY_THRESHOLD` quarantine is a dedup skip, below is a low-reliability block). |
+| `fact_reliability::commit_gated_fact(memory, concept, content, grounded, source_id, tags, source_episode_ids) -> SimardResult<FactGateDecision>` | The shared gate orchestration both seams call: **canonicalize concept** → score → threshold → identity-dedup → `store_fact_with_provenance`. A `KNOWN_CONCEPTS` variant is deduped/stored under its canonical label; an off-spec concept is kept verbatim. Grounding is resolved by the caller; the returned `FactGateDecision` is `Stored { confidence, node_id }` or `Quarantined { confidence }` (a `confidence >= RELIABILITY_THRESHOLD` quarantine is a dedup skip, below is a low-reliability block). |
 | `fact_reliability::RELIABILITY_THRESHOLD` (re-exported as `distillation::DISTILL_RELIABILITY_THRESHOLD`) | Minimum confidence to store rather than quarantine (`0.5`). |
 | `fact_reliability::canonical_concept(label) -> Option<&'static str>` | Canonicalises / validates a concept label. |
 | `fact_reliability::normalize_source_episode_id(raw: &str) -> &str` | Canonical grounding / provenance key for a cited episode id: trim surrounding whitespace (no-op for a well-formed id; interior whitespace preserved). Both seams normalize with this so a padded id grounds and threads provenance identically. |

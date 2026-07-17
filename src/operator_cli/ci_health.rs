@@ -67,9 +67,10 @@ repo+workflow) is converted into a deduplicated GitHub issue in the failing
 repo, reusing the stewardship-signature dedup contract so an already-tracked
 broken workflow is never re-filed. Each newly-filed issue embeds a root-cause
 block pinpointing which job(s) and step(s) of the failing run failed (read from
-`gh run view --json jobs`) so a fixer needn't hunt through the run to find the
-failure, and links the run for the failing logs; a diagnosis that cannot be
-fetched is recorded as unavailable rather than omitted. The same pass also
+`gh run view --json jobs`) and the concrete error text for each failing job (its
+GitHub check-run failure annotations) so a fixer sees what broke without hunting
+through the run, and links the run for the failing logs; a diagnosis that cannot
+be fetched is recorded as unavailable rather than omitted. The same pass also
 *resolves* the other direction: any open tracking issue whose workflow's latest
 default-branch run is now green is closed with a green-evidence comment, so the
 fleet keeps exactly one open issue per still-broken workflow and none for
