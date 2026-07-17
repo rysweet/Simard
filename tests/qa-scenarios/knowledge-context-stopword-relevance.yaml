@@ -1,0 +1,65 @@
+name: knowledge-context-stopword-relevance
+app_type: cli
+description: |
+  Outside-in proof that planning-context knowledge-pack relevance scoring
+  (`knowledge_context::relevance_score`) drops English function-word stopwords
+  before scoring objective/pack overlap — a recall-quality axis of the standing
+  cognition-improvement goal.
+
+  After #4241 the scan is whole-word and distinct-token, but it still scored
+  every distinct objective token >= 2 chars, including grammatical function
+  words. Because this seam admits 2-char tokens (`MIN_TOKEN_LEN == 2`), short
+  function words (`of, to, in, on, at, by, is, it`) plus longer ones
+  (`the, and, for, with, …`) that coincidentally appeared in both the objective
+  and an off-topic pack's `name + description` each added +1 to that pack's
+  relevance. Those filler hits could crowd a genuinely relevant pack out of the
+  top-N (`MAX_PACKS_PER_OBJECTIVE`) cut, injecting off-topic knowledge into the
+  planning prompt and degrading reasoner reliability. This aligns the seam with
+  the stopword policy already used for episodic/procedural recall in
+  `memory_consolidation::tokenize_objective`.
+
+  This scenario drives the hermetic, in-process `knowledge_context` unit tests
+  that pin the corrected contract:
+    - an objective made only of stopwords scores 0 against any pack;
+    - shared stopwords do not inflate a pack that shares one genuine topical
+      token (score is 1, not 1 + N);
+    - legitimate short technical tokens (`go`, `os`, `io`) are NOT dropped, so a
+      real match is never lost to over-filtering;
+    - the existing whole-word / distinct-token / pack-selection / empty-context /
+      cap behaviours are unregressed.
+  No network, no live host mutation. The CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # The relevance-scoring contract, including the new stopword tests and the
+  # pre-existing whole-word / distinct-token / pack-selection / cap behaviours.
+  - action: run
+    params:
+      command: "cargo test --locked --lib knowledge_context"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Broader base-type turn suite proves no regression in the planning-context
+  # preparation path that consumes `enrich_planning_context`.
+  - action: run
+    params:
+      command: "cargo test --locked --lib base_type_turn"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

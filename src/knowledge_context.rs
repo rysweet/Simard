@@ -94,16 +94,56 @@ pub fn enrich_planning_context(
 /// no topical signal and would match too indiscriminately.
 const MIN_TOKEN_LEN: usize = 2;
 
+/// Common English **function words** dropped before relevance scoring.
+///
+/// These grammatical stopwords carry no topical signal: a coincidence between an
+/// objective stopword and the same word in a pack's `name + description` says
+/// nothing about whether the pack is relevant to the objective. Left in, each
+/// such coincidence adds +1 to an off-topic pack's [`relevance_score`], which can
+/// crowd a genuinely relevant pack out of the [`MAX_PACKS_PER_OBJECTIVE`] cut and
+/// inject off-topic knowledge into the planning prompt — a recall-precision loss
+/// on the reasoner's planning path (`enrich_planning_context`, consumed by
+/// `base_type_turn`).
+///
+/// This mirrors the stopword policy already adopted for episodic/procedural
+/// recall by [`crate::memory_consolidation::tokenize_objective`]. That seam drops
+/// tokens shorter than 3 characters *before* its stopword check, so it never
+/// needed the 2-character function words (`of, to, in, on, at, by, is, it`, …)
+/// that this seam does: [`MIN_TOKEN_LEN`] is 2 here, so those short function
+/// words reach the score unless dropped. The set below therefore includes them.
+///
+/// The list is deliberately restricted to closed-class grammatical words
+/// (articles, conjunctions, prepositions, pronouns, auxiliary/modal verbs,
+/// wh-words, negations/quantifiers). It excludes open-class task terms — a verb
+/// like `fix`/`add` or a noun like `bug`/`test` can be genuinely topical — and
+/// excludes short tokens that are legitimate technical topics (`go`, `os`, `io`,
+/// `ml`, `js`, `db`, `ci`, `cd`), so a real match is never dropped.
+const RELEVANCE_STOPWORDS: &[&str] = &[
+    "an", "the", "this", "that", "these", "those", "such", "and", "or", "but", "nor", "yet", "so",
+    "of", "to", "in", "on", "at", "by", "for", "with", "from", "into", "onto", "over", "under",
+    "about", "up", "it", "its", "we", "our", "us", "you", "your", "they", "them", "their", "he",
+    "she", "his", "her", "my", "me", "is", "am", "are", "was", "were", "be", "been", "being",
+    "has", "have", "had", "do", "does", "did", "will", "would", "can", "could", "should", "shall",
+    "may", "might", "must", "what", "when", "where", "why", "how", "which", "who", "whom", "whose",
+    "not", "no", "all", "any", "some", "than", "then", "as", "if",
+];
+
+/// Whether `token` (already lowercase) is a relevance-scoring stopword.
+fn is_relevance_stopword(token: &str) -> bool {
+    RELEVANCE_STOPWORDS.contains(&token)
+}
+
 /// Score a pack's relevance to an objective by **whole-word** keyword overlap.
 ///
 /// The objective and the pack text (`name` + `description`) are each tokenized
 /// into lowercase alphanumeric words. The score is the number of **distinct**
-/// objective tokens (length >= [`MIN_TOKEN_LEN`]) that appear as a whole word in
-/// the pack's word set.
+/// objective tokens (length >= [`MIN_TOKEN_LEN`], excluding
+/// [`RELEVANCE_STOPWORDS`]) that appear as a whole word in the pack's word set.
 ///
-/// Two properties matter for recall precision, and both replace weaknesses of an
-/// earlier raw-substring scan (mirroring the word-boundary policy already adopted
-/// by [`crate::memory_consolidation::classifier`] and
+/// Three properties matter for recall precision, replacing weaknesses of an
+/// earlier raw-substring scan (mirroring the word-boundary and stopword policies
+/// already adopted by [`crate::memory_consolidation::classifier`],
+/// [`crate::memory_consolidation::tokenize_objective`], and
 /// [`crate::fact_reliability`]):
 ///
 ///   * **Whole-word, not substring.** A short token no longer matches when it is
@@ -116,6 +156,11 @@ const MIN_TOKEN_LEN: usize = 2;
 ///   * **Distinct tokens, not repetitions.** A word repeated in the objective
 ///     counts once, so a verbose objective that restates one term cannot inflate
 ///     a pack's score and distort the ranking.
+///   * **Stopwords carry no signal.** A grammatical function word
+///     (`the, of, to, is, and, …`) that coincidentally appears in both the
+///     objective and an off-topic pack's text is dropped, so it cannot add
+///     spurious relevance to a pack that shares only filler words with the
+///     objective.
 fn relevance_score(objective: &str, pack: &KnowledgePackInfo) -> usize {
     let pack_words = word_set(&format!("{} {}", pack.name, pack.description));
 
@@ -123,6 +168,7 @@ fn relevance_score(objective: &str, pack: &KnowledgePackInfo) -> usize {
         .split(|c: char| !c.is_alphanumeric())
         .filter(|t| t.len() >= MIN_TOKEN_LEN)
         .map(str::to_lowercase)
+        .filter(|t| !is_relevance_stopword(t))
         .collect();
 
     objective_tokens
@@ -295,6 +341,67 @@ mod tests {
             relevance_score("rust rust rust programming", &pack),
             2,
             "distinct tokens {{rust, programming}} => 2, not 4"
+        );
+    }
+
+    #[test]
+    fn relevance_score_ignores_stopwords() {
+        // Grammatical function words shared between the objective and a pack's
+        // text carry no topical signal and must NOT contribute to relevance.
+        // Both short (2-char) and longer function words are dropped, since this
+        // seam admits 2-char tokens (MIN_TOKEN_LEN == 2).
+        let pack = KnowledgePackInfo {
+            name: "the-of-and".to_string(),
+            description: "to in on at by is it with for this that from".to_string(),
+            article_count: 10,
+            section_count: 20,
+        };
+        assert_eq!(
+            relevance_score(
+                "the of and to in on at by is it with for this that from",
+                &pack
+            ),
+            0,
+            "an objective made only of stopwords must score 0 against any pack"
+        );
+    }
+
+    #[test]
+    fn relevance_score_stopwords_do_not_inflate_a_genuine_match() {
+        // A pack that shares exactly one genuine topical token with the objective
+        // plus a handful of coincidental filler words must score 1 (the genuine
+        // token), never 1 + N (the filler). Otherwise a pack sharing only filler
+        // could be ranked above a truly relevant pack in the
+        // MAX_PACKS_PER_OBJECTIVE cut.
+        let pack = KnowledgePackInfo {
+            name: "docker-expert".to_string(),
+            // shares filler {the, in, on, of, with} and one real token {docker}
+            description: "guide to the docker daemon in production with images".to_string(),
+            article_count: 80,
+            section_count: 300,
+        };
+        assert_eq!(
+            relevance_score("run the docker build on the host with of", &pack),
+            1,
+            "only the topical token 'docker' counts; shared stopwords add nothing"
+        );
+    }
+
+    #[test]
+    fn relevance_score_keeps_short_technical_tokens() {
+        // Short tokens that are legitimate technical topics (NOT function words)
+        // must still match — the stopword drop must not over-reach. `go`, `os`
+        // and `io` are deliberately excluded from RELEVANCE_STOPWORDS.
+        let pack = KnowledgePackInfo {
+            name: "go-runtime".to_string(),
+            description: "Go os io scheduler internals".to_string(),
+            article_count: 10,
+            section_count: 20,
+        };
+        assert_eq!(
+            relevance_score("go os io tuning", &pack),
+            3,
+            "legit technical tokens {{go, os, io}} must survive stopword filtering"
         );
     }
 
