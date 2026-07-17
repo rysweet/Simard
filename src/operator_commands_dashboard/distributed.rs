@@ -40,6 +40,25 @@ pub(crate) fn remote_vms_from_hosts(hosts: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// Resolve the path to the `check_vm.sh` VM-probe script the Distributed panel
+/// runs, rooted at the canonical durable state root.
+///
+/// Routes through [`super::routes::resolve_state_root`] — the single resolver
+/// the rest of the dashboard uses, which delegates to
+/// [`crate::state_root::simard_state_root`] — so `SIMARD_STATE_ROOT` is honored
+/// *with* the resolver's sanitization (empty / relative / NUL-bearing values are
+/// rejected) and the `$HOME/.simard` fallback comes from the resolver's
+/// `home_default()` rather than a hardcoded `/home/azureuser`. This completes
+/// the resolver consolidation begun in #2798 (issue #2835): the former inline
+/// `std::env::var("SIMARD_STATE_ROOT")` read bypassed both sanitization and the
+/// canonical fallback, so any future change to the resolution ladder silently
+/// would not have applied to this path.
+fn check_vm_script_path() -> std::path::PathBuf {
+    super::routes::resolve_state_root()
+        .join("bin")
+        .join("check_vm.sh")
+}
+
 pub(crate) async fn distributed() -> Json<Value> {
     // Query the Simard VM status via azlin connect with a timeout so the
     // dashboard doesn't hang if the bastion is slow.
@@ -52,15 +71,10 @@ pub(crate) async fn distributed() -> Json<Value> {
     let vm_status = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         tokio::task::spawn_blocking(|| {
-            let state_root = std::env::var("SIMARD_STATE_ROOT").unwrap_or_else(|_| {
-                format!(
-                    "{}/.simard",
-                    std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".into())
-                )
-            });
-            let script = format!("{}/bin/check_vm.sh", state_root);
+            let script = check_vm_script_path();
             std::process::Command::new("systemd-run")
-                .args(["--user", "--pipe", "--quiet", &script])
+                .args(["--user", "--pipe", "--quiet"])
+                .arg(&script)
                 .output()
         }),
     )
@@ -434,5 +448,79 @@ mod tests {
     fn strips_osc_sequence() {
         let input = "\x1b]0;title\x07visible";
         assert_eq!(strip_ansi_codes(input), "visible");
+    }
+
+    // ---- check_vm_script_path (issue #2835) -------------------------------
+
+    /// Scoped env override that restores the previous value on drop, mirroring
+    /// the guard in `state_root.rs` tests. Env access is process-global, so the
+    /// tests that use it share the `simard_state_root_env` serial group.
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var_os(key);
+            // SAFETY: these tests are serialized via #[serial].
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: these tests are serialized via #[serial].
+            unsafe {
+                match self.prev.take() {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(simard_state_root_env, cognitive_memory)]
+    fn script_path_honors_absolute_state_root_env() {
+        let _g = EnvGuard::set("SIMARD_STATE_ROOT", "/tmp/simard-distributed-test");
+        assert_eq!(
+            check_vm_script_path(),
+            std::path::PathBuf::from("/tmp/simard-distributed-test/bin/check_vm.sh")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(simard_state_root_env, cognitive_memory)]
+    fn script_path_rejects_relative_state_root_env() {
+        // A relative SIMARD_STATE_ROOT is sanitized away by the canonical
+        // resolver; the former inline read would have honored it verbatim.
+        let _g = EnvGuard::set("SIMARD_STATE_ROOT", "relative/path");
+        let path = check_vm_script_path();
+        assert!(
+            !path.starts_with("relative/path"),
+            "relative env root must be rejected, got {path:?}"
+        );
+        assert!(path.ends_with("bin/check_vm.sh"), "got {path:?}");
+    }
+
+    #[test]
+    #[serial_test::serial(simard_state_root_env, cognitive_memory)]
+    fn script_path_has_no_hardcoded_home_fallback() {
+        // With an absolute override the resolver never touches HOME, so the
+        // legacy `/home/azureuser` literal can never leak into the path.
+        let _g = EnvGuard::set("SIMARD_STATE_ROOT", "/srv/simard-alt-root");
+        let path = check_vm_script_path();
+        assert!(
+            !path.to_string_lossy().contains("/home/azureuser"),
+            "no hardcoded home fallback expected, got {path:?}"
+        );
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/srv/simard-alt-root/bin/check_vm.sh")
+        );
     }
 }
