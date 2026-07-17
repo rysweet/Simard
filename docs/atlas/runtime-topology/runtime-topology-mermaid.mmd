@@ -1,6 +1,6 @@
 %% Code Atlas — Runtime Topology (Mermaid source of truth)
 %% Derived from Rust source; see README.md "Evidence anchors" for file:line.
-%% Render: mmdc --no-sandbox -i runtime-topology-mermaid.mmd -o runtime-topology-mermaid.svg
+%% Render: echo '{"args":["--no-sandbox"]}' > pp.json && mmdc -p pp.json -i runtime-topology-mermaid.mmd -o runtime-topology-mermaid.svg
 flowchart TB
     simard["simard (default-run bin)<br/>src/main.rs:8"]
     dispatch["dispatch_operator_cli()<br/>operator_cli/mod.rs:219"]

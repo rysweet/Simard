@@ -17,7 +17,9 @@ never as real values.
 ![API contracts — Mermaid](api-contracts-mermaid.svg)
 
 > Rendering: `api-contracts-dot.svg` is produced by `dot -Tsvg`;
-> `api-contracts-mermaid.svg` by `mmdc --no-sandbox`. If `mmdc` fails in a
+> `api-contracts-mermaid.svg` by `mmdc` (mermaid-cli 10+ takes sandbox flags via
+> a puppeteer config file, e.g. `-p pp.json` where `pp.json` is
+> `{"args":["--no-sandbox"]}`). If `mmdc` fails in a
 > sandboxed environment, the Mermaid SVG falls back to a `dot`-rendered copy and
 > the failure is noted here.
 
@@ -272,7 +274,9 @@ Serialized via `IpcMessage::to_bytes` / `from_bytes`
 # From repo root. Requires graphviz (dot) and mermaid CLI (mmdc); no Python/kuzu.
 dot -Tsvg docs/atlas/api-contracts/api-contracts.dot \
     -o docs/atlas/api-contracts/api-contracts-dot.svg
-mmdc --no-sandbox \
+# mermaid-cli 10+ passes sandbox flags via a puppeteer config, not --no-sandbox:
+echo '{"args":["--no-sandbox","--disable-setuid-sandbox"]}' > /tmp/mmdc-pp.json
+mmdc -p /tmp/mmdc-pp.json \
     -i docs/atlas/api-contracts/api-contracts-mermaid.mmd \
     -o docs/atlas/api-contracts/api-contracts-mermaid.svg
 # On mmdc failure, fall back:

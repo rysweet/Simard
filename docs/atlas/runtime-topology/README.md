@@ -19,7 +19,9 @@ runtime state, secrets, host names, or IPs are reproduced here.
 ![Runtime topology — Mermaid](runtime-topology-mermaid.svg)
 
 > Rendering: `runtime-topology-dot.svg` is produced by `dot -Tsvg`;
-> `runtime-topology-mermaid.svg` by `mmdc --no-sandbox`. If `mmdc` fails in a
+> `runtime-topology-mermaid.svg` by `mmdc` (mermaid-cli 10+ takes sandbox flags
+> via a puppeteer config file, e.g. `-p pp.json` where `pp.json` is
+> `{"args":["--no-sandbox"]}`). If `mmdc` fails in a
 > sandboxed environment (puppeteer/Chromium unavailable), the Mermaid SVG falls
 > back to a `dot`-rendered copy and the failure is noted here.
 
@@ -240,7 +242,9 @@ All entities above trace to these source locations:
 # From repo root. Requires graphviz (dot) and mermaid CLI (mmdc); no Python/kuzu.
 dot -Tsvg docs/atlas/runtime-topology/runtime-topology.dot \
     -o docs/atlas/runtime-topology/runtime-topology-dot.svg
-mmdc --no-sandbox \
+# mermaid-cli 10+ passes sandbox flags via a puppeteer config, not --no-sandbox:
+echo '{"args":["--no-sandbox","--disable-setuid-sandbox"]}' > /tmp/mmdc-pp.json
+mmdc -p /tmp/mmdc-pp.json \
     -i docs/atlas/runtime-topology/runtime-topology-mermaid.mmd \
     -o docs/atlas/runtime-topology/runtime-topology-mermaid.svg
 # On mmdc failure, fall back:
