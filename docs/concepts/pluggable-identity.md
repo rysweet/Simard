@@ -176,7 +176,7 @@ legitimately live in `src/`. This does not change.
 ### Example non-engineering identities → data-only packages
 
 Identities that merely *demonstrate* what the framework can produce —
-cartographer, atelier, concierge, gastronome, bursar, and the like — are **not**
+cartographer, atelier, concierge, gastronome, bursar, loremaster, and the like — are **not**
 part of Simard's daemon. They are authored as **data-only packages**
 under [`examples/identities/<name>/`](../../examples/identities/README.md):
 
@@ -236,6 +236,12 @@ further hospitality-domain example (a data-only package with no compiled-in
 [`concierge/`](../../examples/identities/concierge/) demonstrate the same pattern
 in the industrial-design and hospitality domains, each driving its domain tooling
 (OpenSCAD/CAD; a booking-software scaffold) entirely from its recipes.
+[`loremaster/`](../../examples/identities/loremaster/) is a tabletop-RPG
+campaign-designer / game-master example (open SRD content, Foundry VTT): it turns
+a campaign brief into a playable module — world lore, NPCs, XP-budget-balanced
+encounters, session prep — and then runs a session end to end (initiative →
+combat → resolution, seeded dice), again driving its domain tooling (an SRD rules
+engine, a seeded dice roller, a Foundry VTT exporter) entirely from its recipes.
 
 ## What this is not
 
