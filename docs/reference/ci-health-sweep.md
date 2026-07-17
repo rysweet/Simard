@@ -105,7 +105,7 @@ src/ci_health/
 ├── classify.rs   WorkflowVerdict, IgnoreReason, build_report, repo_cacheable, update_cache_from_report, FleetReport (serializable DTOs)
 ├── cache.rs      GreenShaCache — persisted {repo -> last-known-green head SHA}
 ├── gh.rs         GhWorkflowClient trait (incl. head_sha), RealGhWorkflowClient, pure parse/join helpers, fixture loader
-├── diagnose.rs   RunDiagnostics trait + RealGhRunDiagnostics, parse_run_diagnosis, RunDiagnosis/FailedJob (root-cause of a failing run)
+├── diagnose.rs   RunDiagnostics trait + RealGhRunDiagnostics, parse_run_diagnosis, parse_failure_annotations, RunDiagnosis/FailedJob (root-cause: failing jobs/steps + their failure annotations)
 ├── report.rs     render_human
 ├── steward.rs    actionable-failure -> deduplicated-issue steward (ci_signature_for/ci_failure_signature, file_issues_for_report) + green-again resolution (CiIssueResolver, resolve_issues_for_report)
 └── tests.rs      unit tests
@@ -263,10 +263,11 @@ Tracking *that* a workflow broke is not enough to act on it — the goal's third
 clause is *"diagnose root cause."* So every **newly-filed** issue embeds a
 `## Root cause` block pinpointing which of the failing run's job(s) and step(s)
 failed, read from `gh run view <run_id> --json jobs` by [`ci_health::diagnose`]
-(`src/ci_health/diagnose.rs`). This localizes the failure — a human or a
-downstream `ci-diagnostic` fixer sees *which job and step* failed without
-hunting through the run — and links the run for the failing logs, an on-ramp to
-*"launch a fix."*
+(`src/ci_health/diagnose.rs`), **and the concrete error text** for each failing
+job (see "Error annotations" below). This localizes the failure — a human or a
+downstream `ci-diagnostic` fixer sees *which job and step* failed and *what*
+broke without hunting through the run — and links the run for the failing logs,
+an on-ramp to *"launch a fix."*
 
 - **Structured, not log-scraped.** Diagnosis reads the jobs API, whose
   `jobs[].conclusion` / `jobs[].steps[].conclusion` name the failing job and
@@ -275,6 +276,21 @@ hunting through the run — and links the run for the failing logs, an on-ramp t
   `skipped` / `success` steps are never mistaken for the root cause. A failing
   job with no individually-failing step (e.g. a `timed_out` job) is rendered
   with its own reported conclusion rather than a guessed cause.
+- **Error annotations — *what* broke, not only *which* step.** Naming the failing
+  step still leaves a fixer opening the run to read the actual error. So for each
+  failing job the diagnosis also reads its GitHub **check-run failure
+  annotations** — `gh api repos/{repo}/check-runs/{job_id}/annotations`, keeping
+  only `annotation_level == "failure"` — and embeds them as nested bullets under
+  the job. These carry the concrete error text (`error[E0432]: unresolved
+  import`, `Process completed with exit code 101`, a failing assertion), so the
+  tracked issue is directly actionable. This is still *structured API data, not
+  scraped logs*: `warning`/`notice` annotations (deprecation notices, lint hints)
+  are dropped as non-causal. The embed is **bounded** — at most a few annotations
+  per job, each collapsed to one line and length-truncated, with an explicit
+  `(+N more …)` marker when truncated so nothing is silently dropped — and
+  **best-effort**: a job whose annotations cannot be fetched/parsed simply shows
+  none (the job/step names still stand), so annotation enrichment never fails the
+  diagnosis, which itself never blocks filing.
 - **Best-effort, never blocks tracking.** Filing the tracking issue is the
   correctness-critical act; a diagnosis that cannot be fetched (a `gh` error, a
   malformed jobs response, or a failure whose run id was not captured) must not

@@ -1053,7 +1053,9 @@ mod steward_issue_filing {
                 jobs: vec![FailedJob {
                     name: "build".to_string(),
                     conclusion: "failure".to_string(),
+                    job_id: Some(101),
                     failed_steps: vec!["compile".to_string()],
+                    annotations: vec!["`error[E0432]: unresolved import`".to_string()],
                 }],
                 ..Self::default()
             }
@@ -1265,6 +1267,12 @@ mod steward_issue_filing {
         // The canned failing job+step are named so a fixer needn't re-fetch logs.
         assert!(body.contains("job `build`"), "body was:\n{body}");
         assert!(body.contains("step `compile`"), "body was:\n{body}");
+        // …and the concrete error text (the job's failure annotation) is embedded
+        // so the fixer sees *what* broke, not only *which* step.
+        assert!(
+            body.contains("error[E0432]: unresolved import"),
+            "body was:\n{body}"
+        );
     }
 
     #[test]
@@ -1730,7 +1738,9 @@ mod steward_issue_resolution {
 }
 
 mod diagnosis {
-    use super::super::diagnose::{FailedJob, RunDiagnosis, parse_run_diagnosis};
+    use super::super::diagnose::{
+        FailedJob, RunDiagnosis, parse_failure_annotations, parse_run_diagnosis,
+    };
 
     const RUN_URL: &str = "https://github.com/rysweet/amplihack-rs/actions/runs/42";
 
@@ -1742,6 +1752,7 @@ mod diagnosis {
           "jobs": [
             {
               "name": "build-atlas",
+              "databaseId": 555,
               "conclusion": "failure",
               "steps": [
                 {"name": "Set up job", "conclusion": "success"},
@@ -1765,7 +1776,9 @@ mod diagnosis {
                 failed_jobs: vec![FailedJob {
                     name: "build-atlas".to_string(),
                     conclusion: "failure".to_string(),
+                    job_id: Some(555),
                     failed_steps: vec!["Render DOT diagrams".to_string()],
+                    annotations: vec![],
                 }],
             }
         );
@@ -1814,12 +1827,16 @@ mod diagnosis {
                 FailedJob {
                     name: "build-atlas".to_string(),
                     conclusion: "failure".to_string(),
+                    job_id: Some(1),
                     failed_steps: vec!["Render DOT diagrams".to_string()],
+                    annotations: vec![],
                 },
                 FailedJob {
                     name: "Build aarch64".to_string(),
                     conclusion: "failure".to_string(),
+                    job_id: Some(2),
                     failed_steps: vec!["Build (native)".to_string(), "Package".to_string()],
+                    annotations: vec![],
                 },
             ],
         };
@@ -1832,6 +1849,49 @@ mod diagnosis {
     }
 
     #[test]
+    fn render_embeds_a_failing_jobs_error_annotations_as_nested_bullets() {
+        // Beyond naming the failing step, the job's failure annotations (the
+        // concrete error text) are embedded so a fixer sees *what* broke.
+        let d = RunDiagnosis {
+            run_id: 42,
+            failed_jobs: vec![FailedJob {
+                name: "test".to_string(),
+                conclusion: "failure".to_string(),
+                job_id: Some(9),
+                failed_steps: vec!["cargo test".to_string()],
+                annotations: vec![
+                    "`Process completed with exit code 101.`".to_string(),
+                    "`src/lib.rs:12`: `error[E0432]: unresolved import`".to_string(),
+                ],
+            }],
+        };
+        let out = d.render(RUN_URL);
+        // The step is named, and the error text follows as indented sub-bullets.
+        assert!(out.contains("- job `test` \u{2192} step `cargo test`"));
+        assert!(out.contains("    - `Process completed with exit code 101.`"));
+        assert!(out.contains("    - `src/lib.rs:12`: `error[E0432]: unresolved import`"));
+    }
+
+    #[test]
+    fn render_of_a_stepless_failing_job_still_shows_its_annotations() {
+        // A job that failed without any step failing (e.g. timed_out) still
+        // surfaces its error annotations under its conclusion line.
+        let d = RunDiagnosis {
+            run_id: 5,
+            failed_jobs: vec![FailedJob {
+                name: "deploy".to_string(),
+                conclusion: "failure".to_string(),
+                job_id: Some(3),
+                failed_steps: vec![],
+                annotations: vec!["`The self-hosted runner lost communication`".to_string()],
+            }],
+        };
+        let out = d.render(RUN_URL);
+        assert!(out.contains("job `deploy` concluded `failure`"));
+        assert!(out.contains("    - `The self-hosted runner lost communication`"));
+    }
+
+    #[test]
     fn render_of_a_failing_job_with_no_failing_step_reports_its_conclusion() {
         // A stepless failing job (e.g. a timed-out job) is described by its own
         // reported conclusion, not a guessed cause.
@@ -1840,7 +1900,9 @@ mod diagnosis {
             failed_jobs: vec![FailedJob {
                 name: "deploy".to_string(),
                 conclusion: "timed_out".to_string(),
+                job_id: Some(4),
                 failed_steps: vec![],
+                annotations: vec![],
             }],
         };
         let out = d.render(RUN_URL);
@@ -1860,5 +1922,85 @@ mod diagnosis {
         assert!(out.starts_with("## Root cause\n"));
         assert!(out.contains("No failing job/step was identified"));
         assert!(out.contains(&format!("[run 7]({RUN_URL})")));
+    }
+
+    // ── Failure-annotation parsing ──────────────────────────────────────────
+
+    #[test]
+    fn parse_annotations_keeps_only_failure_level_and_formats_message() {
+        // A `warning` (deprecation) and a `failure` annotation; only the failure
+        // survives. The `.github` placeholder path adds no locus, so the message
+        // is rendered plainly.
+        let json = br#"[
+          {"annotation_level": "warning", "message": "Node.js 20 is deprecated.", "path": ".github", "start_line": 2},
+          {"annotation_level": "failure", "message": "Process completed with exit code 101.", "path": ".github", "start_line": 915}
+        ]"#;
+        let lines = parse_failure_annotations(json).unwrap();
+        assert_eq!(
+            lines,
+            vec!["Process completed with exit code 101.".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_annotations_prefixes_a_real_path_and_line_locus() {
+        // A real source path + line becomes a backticked `path:line` locus; the
+        // message — which itself contains backticks — is rendered plainly so its
+        // inline code is not double-wrapped into broken markdown.
+        let json = br#"[
+          {"annotation_level": "failure", "message": "error[E0432]: unresolved import `foo`", "path": "src/lib.rs", "start_line": 12}
+        ]"#;
+        let lines = parse_failure_annotations(json).unwrap();
+        assert_eq!(
+            lines,
+            vec!["`src/lib.rs:12`: error[E0432]: unresolved import `foo`".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_annotations_collapses_multiline_and_truncates_long_messages() {
+        let long = "x".repeat(500);
+        let json = format!(
+            r#"[{{"annotation_level": "failure", "message": "line one\n   line two\n{long}", "path": "", "start_line": null}}]"#
+        );
+        let lines = parse_failure_annotations(json.as_bytes()).unwrap();
+        assert_eq!(lines.len(), 1);
+        let line = &lines[0];
+        // Newlines/indentation collapsed to single spaces.
+        assert!(line.starts_with("line one line two"));
+        // Truncated with an ellipsis (bounded length, not the full 500 chars).
+        assert!(line.contains('…'));
+        assert!(line.chars().count() < 500);
+    }
+
+    #[test]
+    fn parse_annotations_caps_count_and_notes_the_remainder() {
+        // Eight failure annotations → at most five embedded, plus an explicit
+        // "(+3 more …)" marker so the truncation is visible, never silent.
+        let mut items = String::from("[");
+        for i in 0..8 {
+            if i > 0 {
+                items.push(',');
+            }
+            items.push_str(&format!(
+                r#"{{"annotation_level": "failure", "message": "err {i}", "path": "", "start_line": null}}"#
+            ));
+        }
+        items.push(']');
+        let lines = parse_failure_annotations(items.as_bytes()).unwrap();
+        assert_eq!(lines.len(), 6, "5 annotations + 1 remainder marker");
+        assert_eq!(lines[5], "(+3 more failure annotation(s))");
+    }
+
+    #[test]
+    fn parse_annotations_of_an_empty_array_is_empty_not_an_error() {
+        assert!(parse_failure_annotations(b"[]").unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_annotations_of_malformed_json_is_an_error() {
+        // So a caller can treat annotations as unavailable, never a false
+        // "no error text".
+        assert!(parse_failure_annotations(b"not json").is_err());
     }
 }

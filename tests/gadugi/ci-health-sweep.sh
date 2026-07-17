@@ -90,11 +90,14 @@ HELP_OUT="$(cargo run --quiet --bin simard -- ci-health --help 2>/dev/null)"
 printf '%s\n' "$HELP_OUT" | grep -F -- "--file-issues" >/dev/null
 # ── 5. Root-cause diagnosis is advertised as part of the file-issues write ──
 # Each newly-filed tracking issue embeds the failing run's failing jobs/steps
-# so the tracked failure is actionable without re-fetching logs. The offline
-# path cannot exercise the live diagnosis write, but the CLI's documented
-# contract must advertise it (behavioural coverage is in the ci_health unit
-# tests: parse_run_diagnosis, RunDiagnosis::render, and the steward embedding).
+# AND the concrete error text (its check-run failure annotations) so the tracked
+# failure is actionable without re-fetching logs. The offline path cannot
+# exercise the live diagnosis write, but the CLI's documented contract must
+# advertise it (behavioural coverage is in the ci_health unit tests:
+# parse_run_diagnosis, parse_failure_annotations, RunDiagnosis::render, and the
+# steward embedding).
 printf '%s\n' "$HELP_OUT" | grep -F "root-cause" >/dev/null
+printf '%s\n' "$HELP_OUT" | grep -F "failure annotations" >/dev/null
 
 # ── 6. Resolution: --file-issues also closes recovered tracking issues ──────
 # The write is bidirectional: besides filing one issue per still-broken

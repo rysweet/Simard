@@ -37,7 +37,8 @@ pub use classify::{
     repo_cacheable, update_cache_from_report,
 };
 pub use diagnose::{
-    FailedJob, RealGhRunDiagnostics, RunDiagnosis, RunDiagnostics, parse_run_diagnosis,
+    FailedJob, RealGhRunDiagnostics, RunDiagnosis, RunDiagnostics, parse_failure_annotations,
+    parse_run_diagnosis,
 };
 pub use gh::{
     GhWorkflowClient, RealGhWorkflowClient, build_repo_snapshot, collect_fleet,
