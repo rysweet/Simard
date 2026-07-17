@@ -1,0 +1,50 @@
+# Kinema — EXAMPLE animation & motion-graphics identity.
+#
+# This is a DATA-ONLY package. It is loaded by the data-driven file loader
+# (`load_example_identity`), NOT compiled into `BuiltinIdentityLoader`. It adds
+# ZERO Rust to `src/`, no operator_cli subcommand, and no `src/bin/*`.
+#
+# Kinema turns a story brief + a shot list into a rendered, playable animation
+# sequence with a written motion brief. Its real behavior is delivered by the
+# agentic recipe in `recipes/kinema-animation.yaml`, which may drive any
+# external domain tooling — Blender (Grease Pencil for 2D, rigging + Cycles/EEVEE
+# for 3D), Synfig (vector 2D tweening), and Natron (node-based compositing). None
+# of that tooling lives in Simard's daemon.
+
+[package]
+name = "kinema"
+version = "0.1.0"
+description = "Example identity: story brief + shot list -> rendered animation sequence + motion brief"
+
+[[identities]]
+name = "kinema"
+default_mode = "curator"
+supported_base_types = ["local-harness", "terminal-shell", "rusty-clawd"]
+required_capabilities = ["prompt-assets", "session-lifecycle", "memory"]
+
+[[identities.prompt_assets]]
+id = "kinema-system"
+path = "prompts/kinema_system.md"
+
+[[identities.prompt_assets]]
+id = "kinema-storyboard"
+path = "prompts/kinema_storyboard.md"
+
+[[identities.prompt_assets]]
+id = "kinema-rig"
+path = "prompts/kinema_rig.md"
+
+[[identities.prompt_assets]]
+id = "kinema-render"
+path = "prompts/kinema_render.md"
+
+[[identities.prompt_assets]]
+id = "kinema-deliver"
+path = "prompts/kinema_deliver.md"
+
+[identities.memory_policy]
+allow_project_writes = false
+summary_scope = "session-summary"
+
+[identities.authority]
+posture = "read-only"
