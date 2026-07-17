@@ -43,8 +43,20 @@ jobs:
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # Reuse the SAME warm cargo cache that `verify.yml` populates on main
+          # (single writer: verify's main-branch run). Without this explicit
+          # shared-key rust-cache derives a per-job key from the job name
+          # (`sweep`), a namespace nothing ever writes to — so every scheduled
+          # sweep was a guaranteed cache MISS and rebuilt the whole workspace
+          # from scratch, which overran the 20-minute job budget before the
+          # sweep binary even started (the run was cancelled mid-`rustc`). With
+          # the shared key the sweep restores verify's dev-profile artifacts and
+          # only incrementally rebuilds + runs, finishing in a few minutes. This
+          # mirrors verify.yml's read-only fallback-build job.
+          shared-key: simard-ci-v2
           # Read-only: the scheduled sweep must never poison the shared PR/verify
-          # build cache with its default-branch build artifacts.
+          # build cache with its default-branch build artifacts (verify's
+          # main-branch run is the sole writer of `simard-ci-v2`).
           save-if: "false"
 
       - name: Run CI-health sweep (detect, file/resolve deduplicated tracking issues)

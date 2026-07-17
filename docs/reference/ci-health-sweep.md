@@ -1,7 +1,7 @@
 ---
 title: CI-Health Sweep — Governed-Fleet Reference
 description: Reference for simard::ci_health and the `simard ci-health` subcommand — the codified, reproducible governed-fleet CI-health sweep that classifies each default-branch workflow as green, actionable_failure, or ignored(reason).
-last_updated: 2026-07-16
+last_updated: 2026-07-17
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -401,6 +401,17 @@ the supply-chain steward's `advisory-scan.yml`.
   silently-dropped failure — fail-safe, not fail-open, matching advisory-scan.
 - **Concurrency.** A `ci-health` concurrency group (no cancel-in-progress) means
   two runs never race on the same tracking issues.
+- **Build cache.** The sweep is a Rust binary, so the job must build `simard`
+  before it can audit the fleet. It restores the **same** warm cargo cache that
+  `verify.yml` populates on `main` (Swatinem `rust-cache` with
+  `shared-key: simard-ci-v2`, `save-if: false` — read-only, so the scheduled
+  sweep never poisons the shared PR/verify cache). Without that explicit shared
+  key rust-cache derives a per-job key from the job name (`sweep`), a namespace
+  nothing ever writes to; every scheduled sweep was then a guaranteed cache
+  miss that rebuilt the whole workspace from scratch and overran the 20-minute
+  job budget before the sweep binary even started. Sharing verify's cache turns
+  the cold rebuild into a few-minute incremental one, mirroring verify.yml's
+  read-only fallback-build job.
 
 ## Reproducing a captured sweep
 
