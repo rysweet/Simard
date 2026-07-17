@@ -401,6 +401,20 @@ the supply-chain steward's `advisory-scan.yml`.
   silently-dropped failure — fail-safe, not fail-open, matching advisory-scan.
 - **Concurrency.** A `ci-health` concurrency group (no cancel-in-progress) means
   two runs never race on the same tracking issues.
+- **Build & cache.** The sweep runs `cargo run --bin simard`, so it must compile
+  the full `simard` binary before it can audit the fleet. To stay inside the
+  job's 20-minute `timeout-minutes`, the `Swatinem/rust-cache` step restores —
+  read-only (`save-if: false`, so it never poisons the shared cache) — the same
+  `shared-key: simard-ci-v2` warm build cache that `main` writes for
+  `verify.yml`, turning a cold from-scratch build into a few-minute incremental
+  one. Because `simard` links the native `liblbug.a` (and rust-cache evicts
+  lbug's in-registry prebuilt archive while keeping the build-script output that
+  references it), a **Provision lbug** step runs `scripts/provision-lbug-prebuilt.sh`
+  and exports `LBUG_LIBRARY_DIR`/`LBUG_INCLUDE_DIR` so the link path is stable —
+  the single source of truth also used by `verify.yml`. Without the warm cache
+  the sweep did a full cold build that overran the timeout and cancelled mid-run
+  (advisory-scan avoids this only because its `supply-chain-steward` binary is
+  small enough to build cold in ~5 minutes).
 
 ## Reproducing a captured sweep
 
