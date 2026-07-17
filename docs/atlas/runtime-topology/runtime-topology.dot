@@ -70,7 +70,9 @@ digraph runtime_topology {
 
     // ---- Backends / peers ----------------------------------------------
     rcm         [label="RemoteCognitiveMemory\ncognitive-memory backend", fillcolor="#e7e7f6"];
+    runtime     [label="Runtime driver (MultiProcess)\nspawn_subordinate()\nruntime/mod.rs:201,213", fillcolor="#dbe9f8"];
     child_proc  [label="subprocess child\n(--ipc-socket <path>)", fillcolor="#e7e7f6"];
+    eng_child   [label="engineer subprocess\n`engineer run single-process` (opt. tmux)\nagent_supervisor/lifecycle/spawn.rs:27", fillcolor="#e7e7f6"];
     rpc_srv     [label="RPC servers\n(knowledge / gym, native transport)\nrpc_transport/native.rs:26", fillcolor="#e7e7f6"];
     subscribers [label="HiveEvent subscribers\nsubscribe()/publish()\nhive_event_bus/mod.rs:275,284", fillcolor="#e7e7f6"];
 
@@ -78,7 +80,11 @@ digraph runtime_topology {
     mem_sock   -> rcm       [label="dispatch"];
     memcmd     -> mem_sock  [label="client (framed JSON)", style=dashed];
 
-    supervisor -> rt_ipc    [label="spawn"];
+    // Runtime IPC (spawn_subprocess) is driven by the MultiProcess Runtime
+    // driver, not the agent supervisor. The supervisor spawns engineer
+    // subprocesses directly and coordinates via hive facts, never raw IPC.
+    runtime    -> rt_ipc    [label="spawn_subprocess"];
+    supervisor -> eng_child [label="spawn child process\n(hive-fact heartbeats, no raw IPC)"];
     rt_ipc     -> child_proc[label="accept()"];
 
     ooda_cycle -> rpc_ch    [label="request"];

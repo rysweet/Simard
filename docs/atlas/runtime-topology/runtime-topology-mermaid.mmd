@@ -39,7 +39,9 @@ flowchart TB
     end
 
     rcm["RemoteCognitiveMemory backend"]
+    runtime["Runtime driver (MultiProcess)<br/>spawn_subordinate()<br/>runtime/mod.rs:201,213"]
     child_proc["subprocess child<br/>--ipc-socket path"]
+    eng_child["engineer subprocess<br/>engineer run single-process (opt. tmux)<br/>agent_supervisor/lifecycle/spawn.rs:27"]
     rpc_srv["RPC servers (knowledge/gym)<br/>rpc_transport/native.rs:26"]
     subscribers["HiveEvent subscribers<br/>subscribe()/publish()<br/>hive_event_bus/mod.rs:275,284"]
 
@@ -47,7 +49,8 @@ flowchart TB
     mem_sock -->|dispatch| rcm
     memcmd -.->|client framed JSON| mem_sock
 
-    supervisor -->|spawn| rt_ipc
+    runtime -->|spawn_subprocess| rt_ipc
+    supervisor -->|spawn child process| eng_child
     rt_ipc -->|accept| child_proc
 
     ooda_cycle -->|request| rpc_ch

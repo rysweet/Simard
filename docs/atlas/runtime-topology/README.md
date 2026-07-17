@@ -234,6 +234,9 @@ All entities above trace to these source locations:
 - `src/operator_commands_dashboard/mod.rs:244-260` — `spawn_dashboard_task(...)`
 - `src/ooda_loop/cycle.rs:28` — `pub fn run_ooda_cycle(...)`
 - `src/agent_supervisor/mod.rs:1-9` — supervisor module doc (child processes, hive-fact heartbeats)
+- `src/agent_supervisor/lifecycle/spawn.rs:27` — `spawn_subordinate(...)` spawns an `engineer run single-process` child via `Command` (optionally tmux), not raw IPC
+- `src/runtime/mod.rs:201` — `Runtime::spawn_subordinate(...)` (MultiProcess topology driver)
+- `src/runtime/mod.rs:213` — `runtime_ipc::spawn_subprocess(...)` call site (the real Runtime IPC spawn driver)
 - `src/overseer/mod.rs:1-18` — overseer module doc (design sketch, not wired into `main`)
 
 ## Regeneration
