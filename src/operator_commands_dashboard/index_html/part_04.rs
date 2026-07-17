@@ -485,6 +485,18 @@ pub(crate) const PART_04: &str = r#"            let fmt;
     }
 
     /* --- OODA Cycle History (issue #2135) --- */
+    // Honest cycle-count label: the endpoint returns `total_cycles` (rows in the
+    // bounded window) and `latest_cycle_number` (the authoritative cumulative
+    // cycle count, #1680). When the daemon has run more cycles than the window
+    // shows, say so explicitly instead of rendering the capped window size as
+    // the lifetime total.
+    function cycleCountLabel(d){
+      const shown=d.total_cycles||0;
+      const lifetime=d.latest_cycle_number||0;
+      return lifetime>shown
+        ? `Showing last ${shown} of ${lifetime} cycles run`
+        : `${shown} cycles recorded`;
+    }
     async function fetchOodaCycles(){
       try{
         const d=await apiFetch('/api/ooda-cycles');
@@ -497,14 +509,14 @@ pub(crate) const PART_04: &str = r#"            let fmt;
         // a trend, render only an honest cycle count — never a permanently
         // broken "not enough data" chart/placeholder.
         if(dir==='insufficient_data'){
-          trendEl.innerHTML=`<div style="color:#8b949e;font-size:.85rem">${d.total_cycles||0} cycles recorded</div>`;
+          trendEl.innerHTML=`<div style="color:#8b949e;font-size:.85rem">${cycleCountLabel(d)}</div>`;
         }else{
           const trendColors={improving:'var(--green)',degrading:'var(--red)',stable:'var(--yellow)'};
           const trendLabels={improving:'↓ Improving',degrading:'↑ Degrading',stable:'→ Stable'};
           const trendColor=trendColors[dir]||'#8b949e';
           let trendHtml=`<div style="display:flex;gap:1.5rem;align-items:center;flex-wrap:wrap">
             <div><strong style="color:${trendColor}">${trendLabels[dir]||dir}</strong></div>
-            <div style="color:#8b949e;font-size:.85rem">${d.total_cycles||0} cycles recorded</div>`;
+            <div style="color:#8b949e;font-size:.85rem">${cycleCountLabel(d)}</div>`;
           if(trend.recent_avg_secs!=null){
             trendHtml+=`<div style="font-size:.85rem">Recent avg: <strong>${trend.recent_avg_secs}s</strong></div>
               <div style="font-size:.85rem">Older avg: <strong>${trend.older_avg_secs}s</strong></div>
