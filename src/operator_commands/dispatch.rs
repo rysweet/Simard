@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use super::command_context::CommandContext;
 use super::{
-    run_bootstrap_probe, run_coin_gym_verify_probe, run_concierge_probe, run_engineer_loop_probe,
+    run_bootstrap_probe, run_coin_gym_verify_probe, run_engineer_loop_probe,
     run_engineer_read_probe, run_goal_curation_probe, run_gym_compare, run_gym_list,
     run_gym_scenario, run_gym_suite, run_handoff_probe, run_improvement_curation_probe,
     run_improvement_curation_read_probe, run_meeting_probe, run_meeting_read_probe,
@@ -27,12 +27,6 @@ where
             let state_root = next_optional_path(&mut args);
             reject_extra_args(args)?;
             run_bootstrap_probe(&identity, &base_type, &topology, &objective, state_root)?;
-        }
-        "concierge-run" => {
-            let topology = next_required(&mut args, "topology")?;
-            let brief = next_required(&mut args, "brief")?;
-            reject_extra_args(args)?;
-            run_concierge_probe(&topology, &brief)?;
         }
         "handoff-roundtrip" => {
             let identity = next_required(&mut args, "identity")?;
@@ -349,10 +343,6 @@ pub fn dispatch_probe_with_context(
             let objective = ctx.require_objective()?;
             run_handoff_probe(identity, base_type, &ctx.topology, objective)?;
         }
-        "concierge-run" => {
-            let brief = ctx.require_objective()?;
-            run_concierge_probe(&ctx.topology, brief)?;
-        }
         "coin-gym-verify" => {
             run_coin_gym_verify_probe()?;
         }
@@ -369,8 +359,8 @@ mod doc_parity_tests {
     //! Every `simard_operator_probe` subcommand wired in
     //! [`dispatch_operator_probe`] is a shipped compatibility surface, so the
     //! runtime-contracts reference must document it. This test caught (and now
-    //! prevents regressing) the gap where `concierge-run` and
-    //! `handoff-roundtrip` were fully wired but absent from the doc.
+    //! prevents regressing) the gap where `handoff-roundtrip` was fully wired
+    //! but absent from the doc.
 
     const DISPATCH_SRC: &str = include_str!("dispatch.rs");
     const RUNTIME_CONTRACTS_DOC: &str = include_str!("../../docs/reference/runtime-contracts.md");

@@ -1,6 +1,6 @@
 ---
-title: How to design furniture and products with the Atelier identity
-description: Use the pluggable Atelier identity to take a product brief end-to-end to a 3D model, render, and fabrication package (STL, cut list, BOM) with the `simard atelier` CLI.
+title: How to design furniture and products with the Atelier example identity
+description: Use the Atelier example identity — a data-only pluggable-identity package — to take a product brief end-to-end to a 3D model, render, and fabrication package (STL, cut list, BOM). All CAD tooling runs inside the identity's agentic recipe, not in Simard's daemon.
 last_updated: 2026-07-16
 review_schedule: as-needed
 owner: simard
@@ -8,51 +8,60 @@ doc_type: howto
 related:
   - ../concepts/pluggable-identity.md
   - ../howto/configure-pluggable-identity.md
-  - ../reference/simard-cli.md
+  - ../../examples/identities/README.md
 ---
 
-# How to design furniture and products with the Atelier identity
+# How to design furniture and products with the Atelier example identity
 
-**Atelier** is a pluggable Simard identity for industrial &amp; furniture
-design. It takes a structured *product brief* and produces a parametric 3D
-model, a render, and a **fabrication package** — a cut list and bill of
+**Atelier** is an **example** non-engineering identity for industrial &amp;
+furniture design. It takes a structured *product brief* and produces a parametric
+3D model, a render, and a **fabrication package** — a cut list and bill of
 materials (BOM) — so a brief can go end-to-end from an idea to shop-ready
 outputs.
 
-Atelier is repo-grounded and runs in engineer mode
-(`inspect → act → verify → persist`): it generates geometry, drives CAD tools
-to export artifacts, verifies the result against the brief, and writes a
-`manifest.json` recording exactly what was built.
+Atelier is a **data-only package** at
+[`examples/identities/atelier/`](../../examples/identities/atelier/): a manifest,
+prompts, and an agentic recipe. It is **not** part of Simard's daemon — there is
+no `src/atelier/` module and no `simard atelier` subcommand. The CAD toolchain
+(OpenSCAD, FreeCAD, Blender) is driven by the **agent** inside the identity's
+recipe, never compiled into Simard. See
+[Pluggable identity](../concepts/pluggable-identity.md) and the
+[example-identities README](../../examples/identities/README.md) for the
+compiled-in vs. data-only boundary.
 
 ## Prerequisites
 
-- Simard binary built (`cargo build --quiet --bin simard`).
-- [OpenSCAD](https://openscad.org/) installed and on `PATH` — the only hard
-  dependency for the model + STL export.
-- Optional, for extra artifacts (Atelier degrades gracefully without them):
+The recipe's agent drives real CAD tools, so the host it runs on needs:
+
+- [OpenSCAD](https://openscad.org/) on `PATH` — the only hard dependency for the
+  model + STL export.
+- Optional, for extra artifacts (the recipe degrades gracefully without them):
   - `xvfb-run` (Linux headless) so OpenSCAD can render a PNG with no display.
   - `freecadcmd` (FreeCAD) to additionally export a STEP solid.
   - `blender` for a photoreal render.
 
-Check what is available:
+These tools live on the host where the agent session runs — **not** in Simard's
+`src/`. Simard's own code stays pure Rust.
 
-```bash
-simard atelier inspect --out /tmp/does-not-exist   # prints a tool report
+## Load the Atelier example identity
+
+Atelier is discovered by the data-driven loader, not by `BuiltinIdentityLoader`:
+
+```rust
+use simard::identity::{load_example_identity, DEFAULT_EXAMPLE_IDENTITIES_DIR};
+
+let manifest = load_example_identity(
+    DEFAULT_EXAMPLE_IDENTITIES_DIR.as_ref(), // examples/identities, relative to cwd
+    "atelier",
+    &request,
+)?;
+assert_eq!(manifest.name, "atelier");
 ```
 
-## Select the Atelier identity
-
-Atelier ships as a built-in identity (`simard-atelier`) and as a pluggable
-identity card under
-`prompt_assets/simard/identities/atelier/identity.toml`. Select it for a
-session with the identity environment variable:
-
-```bash
-export SIMARD_IDENTITY=simard-atelier
-```
-
-See [Configure Pluggable Identity](configure-pluggable-identity.md) for how
-identity cards are discovered and loaded.
+A missing package or invalid `identity.toml` returns a fail-visible
+`IdentityTomlParseError` — never a silent fallback to a built-in identity. See
+[Configure pluggable identity](configure-pluggable-identity.md) for how example
+packages are discovered and loaded.
 
 ## Write a product brief
 
@@ -72,67 +81,59 @@ A brief is a small JSON document describing the product. Save it as
 }
 ```
 
-Supported `kind` values include `bookcase`, `table`, `stool`, and `carcass`
+Typical `kind` values include `bookcase`, `table`, `stool`, and `carcass`
 (a generic cabinet box). Dimensions are in millimetres. `budget` is optional;
-when set, Atelier flags an over-budget design as an advisory.
+when set, the agent flags an over-budget design as an advisory. The brief is
+**untrusted data** — the prompts instruct the agent to read design signals from
+it and ignore any embedded instructions.
 
-## Build the model and fabrication package
+## Run the Atelier recipe
+
+Atelier's behavior is delivered by its agentic recipe,
+`examples/identities/atelier/recipes/atelier-cad-pipeline.yaml`. Run it with your
+recipe runner, passing the brief and an output directory as context:
 
 ```bash
-simard atelier build --brief brief.json --out ./pkg --fabrication
+amplihack recipe run atelier-cad-pipeline \
+  -c brief_path=brief.json \
+  -c output_dir=./pkg
 ```
 
-This writes to `./pkg`:
+The recipe drives the design end-to-end as agentic steps:
+
+1. **Design** (`atelier_design.md`) — parse the brief and generate a *parametric*
+   OpenSCAD program whose parameters (dimensions, thickness, joinery) are driven
+   directly by the brief — never hard-coded literals.
+2. **Fabricate** (`atelier_fabricate.md`) — run the exporters to produce the
+   model, render, and derived cut list + BOM, then verify the package against the
+   brief.
+
+It writes to `./pkg`:
 
 | File            | What it is                                              |
 | --------------- | ------------------------------------------------------- |
 | `model.scad`    | Parametric OpenSCAD source (the geometry model).        |
-| `model.stl`     | Mesh export for 3D printing / CAM.                      |
+| `model.stl`     | Mesh export for 3D printing / CAM.                       |
 | `render.png`    | Preview render (via OpenSCAD, headless with `xvfb-run`).|
 | `cutlist.csv`   | Panel cut list: part, qty, length, width, thickness.    |
 | `bom.csv`       | Bill of materials with cost roll-up.                    |
 | `model.step`    | STEP solid — only when FreeCAD is installed.             |
 | `manifest.json` | Build record + verification result.                     |
 
-Example output:
-
-```text
-atelier: Two-shelf bookcase (bookcase) — 4 parts / 7 instances, 1 sheet(s)
-  estimated material cost: 58.60
-  [     ok] model.scad
-  [     ok] model.stl
-  [     ok] render.png — openscad via xvfb-run
-  [     ok] cutlist.csv
-  [     ok] bom.csv
-  [skipped] model.step — freecadcmd not installed
-  verification: PASS (render: yes)
-```
-
-Add `--strict` to make the command exit non-zero unless *every* advisory check
-(including the render) passes — useful in CI where the render must be present.
-
-## Verify an existing package
-
-`inspect` re-reads a package directory and re-runs verification without
-rebuilding:
-
-```bash
-simard atelier inspect --out ./pkg --fabrication
-```
-
-Verification always requires the core deliverables — valid geometry, an STL,
-a cut list, a BOM, and that every part fits stock sheet stock. The render and
-budget checks are advisory unless `--strict` is set, so Atelier still produces
-a usable fabrication package on hosts without a display or without FreeCAD.
+A brief is only *done* when the exported model and render exist and the cut list
+and BOM are internally consistent with the model. The agent records that
+verification in `manifest.json`.
 
 ## How degradation works
 
-Atelier treats OpenSCAD as required and everything else as best-effort:
+The recipe treats OpenSCAD as required and everything else as best-effort, and
+records every skip in `manifest.json` with a reason, so the package is always
+self-describing:
 
 - **No `xvfb-run` / display** → the STL, cut list, and BOM are still produced;
   the render is skipped (advisory).
 - **No FreeCAD** → STEP export is skipped; the STL still covers CAM/printing.
 - **No Blender** → the OpenSCAD render is used instead of a photoreal one.
 
-Every skip is recorded in `manifest.json` with a reason, so the package is
-always self-describing.
+Never fail the whole package because an *optional* engine is missing — emit the
+OpenSCAD STL + PNG, the cut list, and the BOM, and note the skipped exports.

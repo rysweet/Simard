@@ -5,7 +5,6 @@ pub mod agent_registry;
 pub mod agent_roles;
 pub mod agent_supervisor;
 pub mod amplihack_freshness_gate;
-pub mod atelier;
 pub mod base_type_claude_agent_sdk;
 pub mod base_type_copilot;
 pub mod base_type_harness;
@@ -33,10 +32,6 @@ pub mod rpc_transport;
 // engineer action-slot scheduler), which is unrelated and untouched. See
 // `docs/reference/cognitive-thread-scheduling.md`.
 pub mod cognitive_threads;
-// Concierge identity: hospitality design (property layout, guest experience,
-// brand) plus a runnable reservations/PMS/housekeeping/channel-management
-// prototype. Self-contained domain brick; tests live in `#[cfg(test)]` siblings.
-pub mod concierge;
 // Issue #2419: periodic brain self-examination + memory-hygiene pass — a
 // higher-level introspection layer that reuses the existing distillation /
 // statistics / expired-sensory infra (mirrors `disk_health`). Tests live in a
@@ -262,12 +257,6 @@ pub use bootstrap::{
 };
 pub use build_lock::{BuildLock, BuildLockGuard};
 pub use cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
-pub use concierge::{
-    BrandIdentity, Channel, ChannelAvailability, ConciergeError, ConciergeOutcome, GuestExperience,
-    HotelBrief, HotelConcept, Housekeeping, PmsEngine, Positioning, PropertyLayout, Reservation,
-    ReservationStatus, Room, RoomType, RoomTypePlan, StaySummary, design_hotel, render_report,
-    run_concierge,
-};
 pub use cost_tracking::{
     CostEntry, CostSummary, daily_summary, estimate_tokens, record_cost, weekly_summary,
 };

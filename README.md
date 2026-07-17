@@ -330,14 +330,13 @@ simard gym compare <scenario-id>       # compare results
 simard gym run-suite <suite-id>        # run a suite
 ```
 
-### Atelier design mode
-```bash
-# Atelier identity: product brief -> 3D model + render + fabrication package
-simard atelier build --brief brief.json --out ./pkg --fabrication
-simard atelier inspect --out ./pkg     # re-verify an existing package
-```
-Atelier drives OpenSCAD (with optional FreeCAD/Blender) to export an STL, a
-render, a cut list, and a BOM from a JSON product brief. See
+### Atelier example identity (industrial & furniture design)
+Atelier is an **example**, data-only pluggable identity — not a `simard`
+subcommand. It takes a product-brief JSON end-to-end to a parametric 3D model,
+render, and fabrication package (STL, cut list, BOM) via its agentic recipe,
+which drives OpenSCAD (with optional FreeCAD/Blender) on the host — never
+compiled into Simard. Load it with `load_example_identity(..., "atelier", …)`
+from [`examples/identities/atelier/`](examples/identities/atelier/). See
 [Design furniture with Atelier](docs/howto/design-with-atelier.md).
 
 ### Self-management

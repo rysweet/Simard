@@ -1,6 +1,7 @@
 # atelier-parametric-modeling.yaml — Recipe-runner recipe for the Simard Atelier
 # EXAMPLE industrial & furniture-design identity (the data-only `atelier`
-# example package, distinct from Simard's compiled-in `simard-atelier`).
+# example package under `examples/identities/atelier/`, loaded by the
+# data-driven file loader with zero `src/` changes).
 #
 # Takes a parametric product brief end to end to a BUILT, VERIFIED 3D model with
 # a render, via three stages that mirror the standalone stage prompts:
