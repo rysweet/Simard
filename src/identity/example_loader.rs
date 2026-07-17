@@ -19,6 +19,97 @@ use crate::error::{SimardError, SimardResult};
 /// Default repository-relative home for example identity packages.
 pub const DEFAULT_EXAMPLE_IDENTITIES_DIR: &str = "examples/identities";
 
+/// Derive the list of EXAMPLE identity package names from `base_dir`, purely
+/// from the directory tree — the single source of truth for the self-maintaining
+/// index (issue #4274). This has ZERO coupling to any specific identity name.
+///
+/// A subdirectory of `base_dir` is an example identity package **iff** it
+/// contains an `identity.toml`. Loose files (e.g. the shared `README.md`) and
+/// package-less directories are excluded. Each candidate directory name is
+/// validated as a safe single path segment ([`validate_example_name`]); an
+/// unsafe name is a HARD [`SimardError`] rather than a silent skip, so a
+/// dropped or tampered package can never vanish from the derived index.
+///
+/// The returned names are sorted ascending (byte-wise), so the derivation — and
+/// anything rendered from it — is deterministic and order-stable regardless of
+/// filesystem enumeration order. Adding a new package is therefore a pure data
+/// change: the new name simply appears in sorted position.
+///
+/// Fail-visible: any I/O failure while reading `base_dir` (including a missing
+/// base directory) propagates as a [`SimardError`] — never a silent empty list.
+pub fn list_example_identities(base_dir: &Path) -> SimardResult<Vec<String>> {
+    let entries =
+        std::fs::read_dir(base_dir).map_err(|source| SimardError::IdentityTomlParseError {
+            path: base_dir.to_path_buf(),
+            reason: format!(
+                "failed to read example identities directory '{}': {source}",
+                base_dir.display()
+            ),
+        })?;
+
+    let mut names: Vec<String> = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| SimardError::IdentityTomlParseError {
+            path: base_dir.to_path_buf(),
+            reason: format!(
+                "failed to enumerate an entry in '{}': {source}",
+                base_dir.display()
+            ),
+        })?;
+
+        // Only real directories are package candidates. Use file_type() (a
+        // symlink is NOT followed here) so a stray symlink cannot masquerade
+        // as a package directory.
+        let file_type =
+            entry
+                .file_type()
+                .map_err(|source| SimardError::IdentityTomlParseError {
+                    path: entry.path(),
+                    reason: format!("failed to stat '{}': {source}", entry.path().display()),
+                })?;
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        // A directory is a package iff it holds an identity.toml.
+        if !entry.path().join("identity.toml").is_file() {
+            continue;
+        }
+
+        // The directory name must be a valid, safe identity name. An invalid
+        // name is fail-visible, never silently skipped.
+        let name = entry.file_name().to_string_lossy().into_owned();
+        validate_example_name(base_dir, &name)?;
+        names.push(name);
+    }
+
+    names.sort_unstable();
+    Ok(names)
+}
+
+/// Render the derived example-identity index as the Markdown block body that
+/// lives between the `BEGIN`/`END GENERATED IDENTITY INDEX` markers in
+/// `examples/identities/README.md`.
+///
+/// Emits exactly one `- [<name>](./<name>/README.md)\n` line per package, in the
+/// ascending order produced by [`list_example_identities`]. Each entry links to
+/// that package's own `README.md` — the package is self-describing, so its blurb
+/// is package-owned rather than centrally enumerated. The output is
+/// deterministic and byte-stable; a staleness test asserts the committed block
+/// equals this render, so the index can never drift.
+///
+/// Names are validated by [`list_example_identities`] to be ASCII alphanumeric
+/// plus hyphens, which excludes every Markdown/HTML metacharacter — so a package
+/// name can never inject link or HTML markup into the rendered index.
+pub fn render_identity_index(base_dir: &Path) -> SimardResult<String> {
+    let names = list_example_identities(base_dir)?;
+    let mut out = String::new();
+    for name in names {
+        out.push_str(&format!("- [{name}](./{name}/README.md)\n"));
+    }
+    Ok(out)
+}
+
 /// Validate `name` as a single, safe path segment BEFORE any filesystem
 /// access. Mirrors the identity-name rule used by the file loader: non-empty
 /// and only ASCII alphanumeric characters or hyphens. This rejects `..`,
