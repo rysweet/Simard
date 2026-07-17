@@ -3,6 +3,14 @@ use serial_test::serial;
 use std::env;
 
 /// Helper: set HOME to a temp dir so tests don't pollute the real home.
+///
+/// Also **unsets `SIMARD_STATE_ROOT`** for the closure's duration so metric
+/// resolution deterministically follows the temp HOME. `metrics_dir()` resolves
+/// through `crate::state_root::simard_state_root()`, whose precedence is
+/// `SIMARD_STATE_ROOT` → `$HOME/.simard`; sibling tests (and CI) may leave
+/// `SIMARD_STATE_ROOT` set, which would otherwise win over the temp HOME and
+/// let these tests read/write a shared, uncleaned metrics dir (cross-test
+/// contamination). Both env vars are restored on exit.
 fn with_temp_home<F: FnOnce()>(f: F) {
     let dir = env::current_dir()
         .unwrap()
@@ -10,16 +18,24 @@ fn with_temp_home<F: FnOnce()>(f: F) {
         .join("test-metrics-home");
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    // Temporarily override HOME
+    // Temporarily override HOME and clear any inherited/leaked state-root env.
     let prev = env::var_os("HOME");
-    // SAFETY: tests using this helper are run serially (single-threaded
-    // within this module) and restore HOME afterwards.
-    unsafe { env::set_var("HOME", &dir) };
+    let prev_state_root = env::var_os(crate::state_root::STATE_ROOT_ENV);
+    // SAFETY: tests using this helper are serialised via `#[serial(cognitive_memory)]`
+    // (the crate's env-mutation key) and restore both vars afterwards.
+    unsafe {
+        env::set_var("HOME", &dir);
+        env::remove_var(crate::state_root::STATE_ROOT_ENV);
+    }
     f();
-    // Restore HOME
+    // Restore HOME and SIMARD_STATE_ROOT
     match prev {
         Some(v) => unsafe { env::set_var("HOME", v) },
         None => unsafe { env::remove_var("HOME") },
+    }
+    match prev_state_root {
+        Some(v) => unsafe { env::set_var(crate::state_root::STATE_ROOT_ENV, v) },
+        None => unsafe { env::remove_var(crate::state_root::STATE_ROOT_ENV) },
     }
     let _ = fs::remove_dir_all(&dir);
 }
