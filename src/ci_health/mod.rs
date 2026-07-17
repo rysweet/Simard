@@ -59,6 +59,12 @@ use tracing::warn;
 /// GitHub `owner/repo` slug. Source of truth: the ecosystem table in
 /// `prompt_assets/simard/engineer_system.md` (note `amplihack` → `amplihack-rs`
 /// on GitHub).
+///
+/// A drift-guard test (`tests::governed_fleet_coverage`) parses that ecosystem
+/// table and asserts it matches this const exactly, so a governed repo can never
+/// be onboarded to the doc but silently omitted here (which would quietly narrow
+/// "across all governed repos"). `simard ci-health --list-repos` prints this
+/// list for auditing.
 pub const GOVERNED_REPOS: &[&str] = &[
     "rysweet/Simard",
     "rysweet/RustyClawd",

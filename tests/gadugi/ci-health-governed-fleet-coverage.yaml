@@ -1,0 +1,53 @@
+name: "CI-health governed-fleet coverage"
+description: "Outside-in verification that the CI-health steward's scope — 'across all governed repos' — is complete, enforced, and auditable. Drives the shipped `simard ci-health --list-repos` (and `--list-repos --json`) surface and cross-checks its output against the governed-fleet source of truth: the ecosystem table in prompt_assets/simard/engineer_system.md. Asserts the CLI fleet equals the documented fleet exactly (both directions, including Simard itself), that --list-repos is network-free and short-circuits before any sweep so a stray --file-issues cannot turn a coverage query into a live issue-filing write, and that the surface is advertised in help. Complements the in-crate drift-guard test (ci_health::tests::governed_fleet_coverage) by validating the same invariant from outside the binary, so a governed repo onboarded to the doc but dropped from the swept GOVERNED_REPOS const is caught here too."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "simard ci-health --list-repos prints exactly the documented governed fleet"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/ci-health-governed-fleet-coverage.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "ci-health"
+    - "stewardship"
+    - "governed-fleet"
+    - "outside-in"
+  priority: "high"
+  author: "simard-engineer"
+  test_type: "outside-in"

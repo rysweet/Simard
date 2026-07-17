@@ -1862,3 +1862,164 @@ mod diagnosis {
         assert!(out.contains(&format!("[run 7]({RUN_URL})")));
     }
 }
+
+/// Drift guard: the governed fleet the sweep iterates ([`GOVERNED_REPOS`]) must
+/// stay in lock-step with its documented source of truth — the "Your Ecosystem"
+/// table in `prompt_assets/simard/engineer_system.md`. Onboarding a governed
+/// repo to that table but forgetting the const would silently drop it from every
+/// CI-health sweep, quietly narrowing "across all governed repos" — exactly the
+/// failure this module exists to prevent. The doc is embedded at compile time so
+/// the guard is working-directory independent and a moved/renamed doc fails the
+/// build rather than skipping the check.
+mod governed_fleet_coverage {
+    use crate::ci_health::GOVERNED_REPOS;
+    use std::collections::BTreeSet;
+
+    /// The single source of truth for the governed fleet, embedded at compile
+    /// time (relative to this file: `src/ci_health/` → repo root).
+    const ENGINEER_SYSTEM_MD: &str = include_str!("../../prompt_assets/simard/engineer_system.md");
+
+    /// Pull the `owner/repo` slugs out of the "Your Ecosystem" markdown table.
+    ///
+    /// Pure and total. Scoped to the section between the `## Your Ecosystem`
+    /// heading and the next `## ` heading, so `rysweet/...` slugs mentioned
+    /// elsewhere in the prompt (e.g. the frozen upstream-pin table) can never
+    /// leak in. Within that section, a table row's **second** cell is taken as a
+    /// slug iff it matches `owner/repo` shape; the header (`GitHub`) and
+    /// separator (`---`) rows fail that shape and are skipped.
+    fn parse_ecosystem_slugs(md: &str) -> Vec<String> {
+        let mut in_section = false;
+        let mut slugs = Vec::new();
+        for line in md.lines() {
+            if line.starts_with("## ") {
+                // Enter on the ecosystem heading; leave on the next H2.
+                in_section = line.trim() == "## Your Ecosystem";
+                continue;
+            }
+            if !in_section {
+                continue;
+            }
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with('|') {
+                continue;
+            }
+            // `| Name | owner/repo | Purpose |` → cells ["", " Name ", ...].
+            let cells: Vec<&str> = trimmed.split('|').map(str::trim).collect();
+            // cells[0] is the empty string before the leading pipe; the second
+            // *content* cell (index 2) is the GitHub slug column.
+            if let Some(candidate) = cells.get(2)
+                && is_owner_repo_slug(candidate)
+            {
+                slugs.push((*candidate).to_string());
+            }
+        }
+        slugs
+    }
+
+    /// A conservative `owner/repo` shape check: exactly one `/`, both halves
+    /// non-empty and composed only of characters GitHub allows in a slug. This
+    /// is what rejects the `GitHub` header cell and the `---` separator cell.
+    fn is_owner_repo_slug(s: &str) -> bool {
+        let Some((owner, repo)) = s.split_once('/') else {
+            return false;
+        };
+        let ok = |part: &str| {
+            !part.is_empty()
+                && part
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        };
+        // `ok(repo)` already rejects any embedded `/` (it is not an allowed
+        // slug char), so `owner/repo/extra` fails without a separate check.
+        ok(owner) && ok(repo)
+    }
+
+    #[test]
+    fn governed_repos_const_matches_ecosystem_doc_exactly() {
+        let doc: BTreeSet<String> = parse_ecosystem_slugs(ENGINEER_SYSTEM_MD)
+            .into_iter()
+            .collect();
+        let konst: BTreeSet<String> = GOVERNED_REPOS.iter().map(|s| s.to_string()).collect();
+
+        // Sanity: the doc actually parsed a plausible fleet (guards against a
+        // silently-empty parse passing vacuously if the table moved/reshaped).
+        assert!(
+            doc.len() >= 5,
+            "parsed only {} slugs from the ecosystem table — the parser or the \
+             doc's table shape likely changed: {doc:?}",
+            doc.len()
+        );
+
+        let missing_from_const: Vec<&String> = doc.difference(&konst).collect();
+        let missing_from_doc: Vec<&String> = konst.difference(&doc).collect();
+        assert!(
+            missing_from_const.is_empty() && missing_from_doc.is_empty(),
+            "GOVERNED_REPOS drifted from the ecosystem table in \
+             prompt_assets/simard/engineer_system.md.\n  \
+             in the doc but not GOVERNED_REPOS (add to the const): {missing_from_const:?}\n  \
+             in GOVERNED_REPOS but not the doc (add to the table or drop from the const): \
+             {missing_from_doc:?}"
+        );
+    }
+
+    #[test]
+    fn governed_repos_has_no_duplicates() {
+        let unique: BTreeSet<&&str> = GOVERNED_REPOS.iter().collect();
+        assert_eq!(
+            unique.len(),
+            GOVERNED_REPOS.len(),
+            "GOVERNED_REPOS contains a duplicate slug"
+        );
+    }
+
+    #[test]
+    fn parser_scopes_to_the_ecosystem_section_only() {
+        // A rysweet/ slug in a *different* section (like the frozen pin table)
+        // must not be picked up — only the ecosystem table defines the fleet.
+        let md = "\
+## Your Ecosystem
+
+| Repository | GitHub | Purpose |
+|---|---|---|
+| Simard | rysweet/Simard | You. |
+| azlin | rysweet/azlin | VM orchestration. |
+
+## Upstream pins
+
+| Crate | Repo |
+|---|---|
+| rustyclawd-core | rysweet/RustyClawd |
+";
+        let slugs = parse_ecosystem_slugs(md);
+        assert_eq!(slugs, vec!["rysweet/Simard", "rysweet/azlin"]);
+        assert!(
+            !slugs.iter().any(|s| s == "rysweet/RustyClawd"),
+            "a slug from a later section leaked into the fleet: {slugs:?}"
+        );
+    }
+
+    #[test]
+    fn parser_skips_header_and_separator_rows() {
+        let md = "\
+## Your Ecosystem
+
+| Repository | GitHub | Purpose |
+|---|---|---|
+| Simard | rysweet/Simard | You. |
+";
+        // Only the one data row's slug — never `GitHub` or `---`.
+        assert_eq!(parse_ecosystem_slugs(md), vec!["rysweet/Simard"]);
+    }
+
+    #[test]
+    fn is_owner_repo_slug_accepts_real_slugs_and_rejects_table_furniture() {
+        assert!(is_owner_repo_slug("rysweet/amplihack-rs"));
+        assert!(is_owner_repo_slug("rysweet/gadugi-agentic-test"));
+        // Header cell, separator cell, and malformed slugs are not slugs.
+        assert!(!is_owner_repo_slug("GitHub"));
+        assert!(!is_owner_repo_slug("---"));
+        assert!(!is_owner_repo_slug("rysweet/"));
+        assert!(!is_owner_repo_slug("/Simard"));
+        assert!(!is_owner_repo_slug("rysweet/a/b"));
+    }
+}

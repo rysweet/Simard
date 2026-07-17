@@ -140,6 +140,9 @@ Product modes:
   ci-health [--json] [--no-cache] [--file-issues] [--exit-zero]
                          — sweep active default-branch CI across the governed fleet (green-SHA cached;
                            --file-issues dedupes tracking issues, --exit-zero for the scheduled sweep)
+  ci-health --list-repos [--json]
+                         — print the governed fleet the sweep covers (no network); the auditable
+                           list behind `across all governed repos`
   self-deploy [--check]  — close the merged-but-not-running gap (operator-only)
   safe-update            — drain → snapshot → pre-test → swap → exec
   rollback               — restore the latest backup over the install path

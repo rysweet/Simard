@@ -9,8 +9,8 @@
 //! See `docs/reference/ci-health-sweep.md`.
 
 use crate::ci_health::{
-    RealCiIssueResolver, RealGhRunDiagnostics, RealGhWorkflowClient, file_issues_for_report,
-    render_human, report_to_json, resolve_issues_for_report, sweep_fixture,
+    GOVERNED_REPOS, RealCiIssueResolver, RealGhRunDiagnostics, RealGhWorkflowClient,
+    file_issues_for_report, render_human, report_to_json, resolve_issues_for_report, sweep_fixture,
     sweep_live_with_options,
 };
 use crate::stewardship::{RealGhClient, StewardshipOutcome};
@@ -19,7 +19,17 @@ pub(super) const CI_HEALTH_HELP: &str = "\
 Simard ci-health subcommand
 
 Usage: simard ci-health [--json] [--no-cache] [--file-issues] [--exit-zero] [--from-json <path>]
+       simard ci-health --list-repos [--json]
 
+  --list-repos         Print the governed fleet this sweep covers (Simard + its
+                       governed sibling repos, by `owner/repo`) and exit 0
+                       without touching the network. With --json, emit
+                       `{\"count\": N, \"repos\": [...]}`; otherwise one slug per
+                       line. This is the auditable answer to \"which repos does
+                       `across all governed repos` actually mean?\" — the same
+                       list the live sweep iterates, kept in lock-step with the
+                       ecosystem table in prompt_assets/simard/engineer_system.md
+                       by a drift-guard test. Ignores the sweep flags below.
   --json               Emit the FleetReport as JSON (default: human table).
   --no-cache           Force a full re-collection of every repo, ignoring the
                        last-known-green head-SHA cache (the cache is still
@@ -86,6 +96,7 @@ struct Flags {
     no_cache: bool,
     file_issues: bool,
     exit_zero: bool,
+    list_repos: bool,
     from_json: Option<String>,
 }
 
@@ -94,6 +105,7 @@ fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, Box<dyn std:
     let mut no_cache = false;
     let mut file_issues = false;
     let mut exit_zero = false;
+    let mut list_repos = false;
     let mut from_json = None;
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
@@ -102,6 +114,7 @@ fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, Box<dyn std:
             "--no-cache" | "--refresh" => no_cache = true,
             "--file-issues" => file_issues = true,
             "--exit-zero" => exit_zero = true,
+            "--list-repos" => list_repos = true,
             "--from-json" => {
                 let path = args
                     .next()
@@ -132,6 +145,7 @@ fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, Box<dyn std:
         no_cache,
         file_issues,
         exit_zero,
+        list_repos,
         from_json,
     })
 }
@@ -162,6 +176,30 @@ fn exit_result(
     }
 }
 
+/// Render the governed fleet for `--list-repos`. Deterministic and pure (no I/O,
+/// no network) so it is exhaustively testable. `json` selects the machine shape
+/// `{"count": N, "repos": [...]}`; otherwise one `owner/repo` slug per line. Both
+/// forms end in a newline and preserve `GOVERNED_REPOS` order (Simard first).
+fn render_governed_repos(repos: &[&str], json: bool) -> String {
+    if json {
+        // Build via serde so escaping/shape are correct by construction rather
+        // than by hand (serde_json is already a core dependency here). Append a
+        // trailing newline so both output forms are newline-terminated.
+        let value = serde_json::json!({ "count": repos.len(), "repos": repos });
+        let mut out = serde_json::to_string_pretty(&value)
+            .unwrap_or_else(|_| "{\"count\":0,\"repos\":[]}".to_string());
+        out.push('\n');
+        out
+    } else {
+        let mut out = String::new();
+        for repo in repos {
+            out.push_str(repo);
+            out.push('\n');
+        }
+        out
+    }
+}
+
 /// Dispatch `simard ci-health`. Returns `Ok(())` when the fleet is green and an
 /// `Err` (non-zero exit) when any actionable failure exists, matching the
 /// `self-health` convention. With `--exit-zero`, a red fleet still returns
@@ -171,6 +209,16 @@ pub(super) fn dispatch_ci_health_command(
     args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let flags = parse_flags(args)?;
+
+    // `--list-repos` is a standalone informational mode: print the governed
+    // fleet the sweep covers and exit 0 without any network call. It composes
+    // only with `--json` (output shape) and deliberately ignores the sweep
+    // flags, so a stray `--file-issues` etc. can never turn a "which repos?"
+    // query into a live, issue-filing sweep.
+    if flags.list_repos {
+        print!("{}", render_governed_repos(GOVERNED_REPOS, flags.json));
+        return Ok(());
+    }
 
     let report = match &flags.from_json {
         Some(path) => {
@@ -271,7 +319,7 @@ fn steward_issues(
 
 #[cfg(test)]
 mod tests {
-    use super::{Flags, exit_result, parse_flags};
+    use super::{Flags, exit_result, parse_flags, render_governed_repos};
 
     fn parse(args: &[&str]) -> Result<Flags, String> {
         parse_flags(args.iter().map(|s| s.to_string())).map_err(|e| e.to_string())
@@ -285,7 +333,52 @@ mod tests {
         let set = parse(&["--exit-zero"]).expect("--exit-zero parses");
         assert!(set.exit_zero);
         // Orthogonal to the other flags — none are implied.
-        assert!(!set.json && !set.no_cache && !set.file_issues && set.from_json.is_none());
+        assert!(
+            !set.json
+                && !set.no_cache
+                && !set.file_issues
+                && !set.list_repos
+                && set.from_json.is_none()
+        );
+    }
+
+    #[test]
+    fn list_repos_flag_parses_and_defaults_false() {
+        let default = parse(&[]).expect("empty args parse");
+        assert!(!default.list_repos, "--list-repos defaults off");
+
+        let set = parse(&["--list-repos"]).expect("--list-repos parses");
+        assert!(set.list_repos);
+        // Standalone informational mode — implies none of the sweep flags.
+        assert!(!set.json && !set.no_cache && !set.file_issues && !set.exit_zero);
+
+        let with_json = parse(&["--list-repos", "--json"]).expect("composes with --json");
+        assert!(with_json.list_repos && with_json.json);
+    }
+
+    #[test]
+    fn render_governed_repos_human_is_one_slug_per_line() {
+        let out = render_governed_repos(&["rysweet/Simard", "rysweet/azlin"], false);
+        assert_eq!(out, "rysweet/Simard\nrysweet/azlin\n");
+    }
+
+    #[test]
+    fn render_governed_repos_json_carries_count_and_ordered_repos() {
+        let out = render_governed_repos(&["rysweet/Simard", "rysweet/azlin"], true);
+        // Parse it back to prove it is valid JSON with the promised shape/order.
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(v["count"], 2);
+        assert_eq!(v["repos"][0], "rysweet/Simard");
+        assert_eq!(v["repos"][1], "rysweet/azlin");
+        assert!(out.ends_with("\n"), "output ends in a newline");
+    }
+
+    #[test]
+    fn render_governed_repos_json_handles_empty_fleet() {
+        let out = render_governed_repos(&[], true);
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(v["count"], 0);
+        assert!(v["repos"].as_array().expect("repos is array").is_empty());
     }
 
     #[test]

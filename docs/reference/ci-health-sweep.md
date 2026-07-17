@@ -169,7 +169,18 @@ complete behavior), never to a wrong verdict.
 
 ```
 simard ci-health [--json] [--no-cache] [--file-issues] [--exit-zero] [--from-json <path>]
+simard ci-health --list-repos [--json]
 
+  --list-repos         Print the governed fleet this sweep covers (Simard + its
+                       governed sibling repos, by `owner/repo`) and exit 0
+                       without touching the network. With `--json`, emit
+                       `{"count": N, "repos": [...]}`; otherwise one slug per
+                       line, in `GOVERNED_REPOS` order (Simard first). This is
+                       the auditable, machine-readable answer to *which repos
+                       does "across all governed repos" actually mean?* — the
+                       same list the live sweep iterates. Ignores the sweep
+                       flags below, so a stray `--file-issues` can never turn a
+                       coverage query into a writing sweep.
   --json               Emit the FleetReport as JSON (default: human table).
   --no-cache           Force a full re-collection of every repo, ignoring the
                        last-known-green head-SHA cache (the cache is still
@@ -367,6 +378,21 @@ tracking issue of every workflow that is **green again**:
 `GOVERNED_REPOS` is the source of truth in code for the swept slugs; it mirrors
 the ecosystem table in `prompt_assets/simard/engineer_system.md` (note
 `amplihack` → `amplihack-rs` on GitHub).
+
+**Drift guard.** Because "across all governed repos" is only as complete as this
+const, a `#[cfg(test)]` test (`ci_health::tests::governed_fleet_coverage`)
+embeds that prompt doc at compile time (`include_str!`), parses the `owner/repo`
+slugs out of the ecosystem table, and asserts they exactly equal
+`GOVERNED_REPOS` (set-equal, no duplicates). Onboarding a governed repo to the
+ecosystem table but forgetting the const — which would silently drop that repo
+from every sweep — now fails CI instead of quietly narrowing coverage. Moving or
+renaming the prompt doc fails the build (the `include_str!` breaks), which is the
+same guard by another route.
+
+**Inspecting coverage.** `simard ci-health --list-repos [--json]` prints the
+governed fleet the sweep covers without any network call — the auditable answer
+to *which repos does the sweep actually iterate?*. It is a standalone
+informational mode that ignores the sweep flags.
 
 ## Scheduled recurring sweep
 
