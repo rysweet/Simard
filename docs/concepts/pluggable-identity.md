@@ -22,7 +22,8 @@ related:
 
 Simard ships with several built-in identities (`simard-engineer`,
 `simard-meeting`, `simard-gym`, `simard-goal-curator`,
-`simard-improvement-curator`, `simard-concierge`, `simard-atelier`) plus one
+`simard-improvement-curator`, `simard-concierge`, `simard-atelier`,
+`simard-kinema`) plus one
 composite (`simard-composite-engineer`). These are compiled into the binary via
 `BuiltinIdentityLoader`.
 
@@ -159,12 +160,14 @@ matters where each one lives.
 
 The identities Simard uses to operate *herself* —
 `simard-engineer`, `simard-meeting`, `simard-gym`, `simard-goal-curator`,
-`simard-improvement-curator`, `simard-concierge`, `simard-atelier`, and the
+`simard-improvement-curator`, `simard-concierge`, `simard-atelier`,
+`simard-kinema`, and the
 composite — are **compiled into `BuiltinIdentityLoader`** in
 `src/identity/loader.rs`. They are part of the daemon's own behavior and
 legitimately live in `src/`. This does not change.
 
-> **Naming note:** `simard-atelier` and `simard-concierge` are Simard's *own*
+> **Naming note:** `simard-atelier`, `simard-concierge`, and `simard-kinema`
+> are Simard's *own*
 > operating identities and stay compiled in. Do not confuse them with
 > hypothetical `atelier`/`concierge`-style **example** packages — the boundary
 > is defined by where an identity lives (compiled `BuiltinIdentityLoader` arm

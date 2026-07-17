@@ -1,0 +1,77 @@
+# kinema-storyboarding.yaml — Kinema goal-session recipe.
+#
+# Drives the storyboarding phase of the Kinema identity: take a shot brief and
+# produce a storyboard (ordered key panels) plus the derived rig, vector source,
+# and rendered frame sequence via the `simard kinema` command surface.
+# Parser-free / agentic: the CLI call is the business outcome; the agent's prose
+# is diagnostic only.
+#
+# Context vars (passed via -c):
+#   simard_binary  — path to the simard binary
+#   brief_path     — path to the shot-brief JSON
+#   out_dir        — directory to write the animation package into
+
+name: "kinema-storyboarding"
+description: "Kinema — take a shot brief to a storyboard of key panels"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "kinema", "animation", "storyboard", "motion-graphics"]
+
+context: {}
+
+steps:
+  - id: "kinema-storyboard"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      # Kinema — Storyboarding
+
+      You are Simard Kinema's storyboarding actor. Interpret the shot brief
+      directly; do not emit or parse a marker or JSON verdict.
+
+      brief path = {{brief_path}}
+      output dir = {{out_dir}}
+
+      ## Inspect
+
+      Read the shot brief at `{{brief_path}}`. Confirm the animation style, fps,
+      duration, resolution, and that every object has at least one keyframe. If
+      any required parameter is missing, contradictory, or impossible, STOP and
+      record the specific problem — do not guess.
+
+      ## Act
+
+      Build the package (which derives the storyboard) with your bash tool:
+
+      "{{simard_binary}}" kinema build \
+        --brief "{{brief_path}}" \
+        --out "{{out_dir}}"
+
+      This writes, under `{{out_dir}}`: `storyboard.json` + `storyboard.md`
+      (the key panels), `rig.json`, `shot.sif` (Synfig vector source),
+      `frames/frame_*.png` (the rendered sequence), `sequence.json`, and
+      `manifest.json`. The pure-Rust rasterizer always renders the sequence;
+      Blender/Synfig/Natron are attempted when available and recorded as skipped
+      when not.
+
+      ## Verify
+
+      Read `{{out_dir}}/manifest.json`. Confirm the storyboard panels exist,
+      `panel_count` is at least 1, and `verification.ok` is true. If the CLI
+      failed or verification did not pass, stop and report the failure; do not
+      fabricate success.
+
+  - id: "kinema-storyboard-verifier"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      Verify the storyboard produced by the prior step by inspecting the
+      manifest with your bash tool:
+
+      "{{simard_binary}}" kinema inspect --out "{{out_dir}}"
+
+      If it reports the storyboard/rig are present and verification passed, stop
+      successfully. Otherwise, re-read the brief at {{brief_path}} and the
+      manifest, determine what is missing, and re-run
+      `{{simard_binary}} kinema build --brief {{brief_path}} --out {{out_dir}}`.
+      The durable storyboard + package is the only business outcome.

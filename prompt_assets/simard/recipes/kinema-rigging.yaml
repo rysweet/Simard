@@ -1,0 +1,74 @@
+# kinema-rigging.yaml — Kinema goal-session recipe.
+#
+# Drives the rigging phase of the Kinema identity: derive an armature for every
+# object in the shot (a full skeleton for characters, a transform rig for shapes)
+# so the renderer can pose and animate them, via the `simard kinema` command
+# surface. Parser-free / agentic.
+#
+# Context vars (passed via -c):
+#   simard_binary  — path to the simard binary
+#   brief_path     — path to the shot-brief JSON
+#   out_dir        — directory holding the animation package
+
+name: "kinema-rigging"
+description: "Kinema — derive an armature for every object in the shot"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "kinema", "animation", "rigging", "armature"]
+
+context: {}
+
+steps:
+  - id: "kinema-rig"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      # Kinema — Rigging
+
+      You are Simard Kinema's rigging actor. Interpret the brief and the shot
+      directly; do not emit or parse a marker or JSON verdict.
+
+      brief path = {{brief_path}}
+      output dir = {{out_dir}}
+
+      ## Inspect
+
+      Read the shot brief at `{{brief_path}}`. Identify which objects are
+      characters (which need a full head/torso/arms/legs skeleton) and which are
+      simple shapes (which need only a transform rig). If an object's kind or
+      keyframes are missing or contradictory, STOP and record the problem.
+
+      ## Act
+
+      Produce (or refresh) the package, which derives the rig, with your bash
+      tool:
+
+      "{{simard_binary}}" kinema build \
+        --brief "{{brief_path}}" \
+        --out "{{out_dir}}"
+
+      This writes `rig.json` under `{{out_dir}}` (one armature per object)
+      alongside the storyboard, `shot.sif`, the rendered `frames/`, and
+      `manifest.json`. Every object in the brief must have a corresponding
+      armature with at least one bone.
+
+      ## Verify
+
+      Read `{{out_dir}}/manifest.json`. Confirm `bone_count` is at least one per
+      object, the number of armatures equals the number of objects, and
+      `verification.ok` is true. If verification failed, stop and report; do not
+      fabricate success.
+
+  - id: "kinema-rig-verifier"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      Verify the rig by inspecting the manifest with your bash tool:
+
+      "{{simard_binary}}" kinema inspect --out "{{out_dir}}"
+
+      If it reports the rig is present (an armature per object) and verification
+      passed, stop successfully. Otherwise re-read the brief at {{brief_path}}
+      and the manifest, determine what is missing, and re-run
+      `{{simard_binary}} kinema build --brief {{brief_path}} --out {{out_dir}}`.
+      The durable rig + package is the only business outcome.

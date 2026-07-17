@@ -9,6 +9,7 @@ mod disk_reclaim;
 mod engineer;
 mod goal;
 mod gym;
+mod kinema;
 mod meeting;
 mod memory;
 mod merge;
@@ -164,6 +165,15 @@ Design (Atelier identity):
   atelier inspect --out <dir> [--fabrication]
                          — re-read and re-verify an existing package manifest
 
+Animation (Kinema identity):
+  kinema build --brief <shot.json> --out <dir> [--no-grease-pencil] [--no-composite] [--strict]
+                         — take a shot brief to a storyboard, a rig, a Synfig
+                           vector source, and a rendered PNG frame sequence;
+                           Blender (Grease Pencil)/Synfig/Natron are used when
+                           installed and skipped gracefully otherwise
+  kinema inspect --out <dir>
+                         — re-read and re-verify an existing sequence manifest
+
 Compatibility binaries remain available: simard_operator_probe, simard-gym
 ";
 
@@ -247,6 +257,7 @@ where
     match command.as_str() {
         "engineer" => engineer::dispatch_engineer_command(args),
         "atelier" => atelier::dispatch_atelier_command(args),
+        "kinema" => kinema::dispatch_kinema_command(args),
         "meeting" => meeting::dispatch_meeting_command(args),
         "goal" => goal::dispatch_goal_command(args),
         "goal-curation" => curation::dispatch_goal_curation_command(args),
@@ -373,7 +384,7 @@ where
 }
 
 pub fn operator_cli_usage() -> &'static str {
-    "usage: simard <engineer|atelier|meeting|goal-curation|improvement-curation|gym|ooda|memory|status|spawn|merge-pr|worktree-gc|disk-reclaim|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap|signal> ..."
+    "usage: simard <engineer|atelier|kinema|meeting|goal-curation|improvement-curation|gym|ooda|memory|status|spawn|merge-pr|worktree-gc|disk-reclaim|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap|signal> ..."
 }
 
 pub fn operator_cli_help() -> &'static str {

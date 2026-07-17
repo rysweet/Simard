@@ -1,0 +1,77 @@
+# kinema-rendering.yaml — Kinema goal-session recipe.
+#
+# Drives the rendering phase of the Kinema identity: take a shot brief all the
+# way to a rendered animated PNG frame sequence via the `simard kinema` command
+# surface, driving Blender (Grease Pencil), Synfig, and Natron when available and
+# the built-in rasterizer otherwise. Parser-free / agentic: the CLI call is the
+# business outcome; the agent's prose is diagnostic only.
+#
+# Context vars (passed via -c):
+#   simard_binary  — path to the simard binary
+#   brief_path     — path to the shot-brief JSON
+#   out_dir        — directory to write the rendered animation package into
+
+name: "kinema-rendering"
+description: "Kinema — render a shot brief to an animated PNG frame sequence end-to-end"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "kinema", "animation", "render", "blender", "synfig", "natron"]
+
+context: {}
+
+steps:
+  - id: "kinema-render"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      # Kinema — Rendering
+
+      You are Simard Kinema's rendering actor. Interpret the shot brief and the
+      built storyboard/rig directly; do not emit or parse a marker or JSON
+      verdict.
+
+      brief path = {{brief_path}}
+      output dir = {{out_dir}}
+
+      ## Inspect
+
+      Read the brief at `{{brief_path}}` for the style, fps, duration, and
+      resolution. Confirm the storyboard and rig already exist under
+      `{{out_dir}}` (run the kinema-storyboarding / kinema-rigging recipes first
+      if they do not). If the brief cannot render (no objects, impossible
+      timing), STOP and record the specific problem.
+
+      ## Act
+
+      Render the full animated sequence with your bash tool:
+
+      "{{simard_binary}}" kinema build \
+        --brief "{{brief_path}}" \
+        --out "{{out_dir}}"
+
+      The built-in rasterizer always renders `frames/frame_*.png` (one PNG per
+      frame) and writes `sequence.json`. Blender (Grease Pencil), Synfig, and
+      Natron are additionally driven when installed and recorded as skipped when
+      not — a missing external engine never blocks the render.
+
+      ## Verify
+
+      Read `{{out_dir}}/manifest.json`. Confirm `frames_rendered` equals
+      `frame_count` (every expected frame present and non-empty), the sequence
+      descriptor is consistent, and `verification.ok` is true. If a frame is
+      missing or verification failed, stop and report; do not fabricate success.
+
+  - id: "kinema-render-verifier"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      Verify the rendered sequence by inspecting the manifest with your bash
+      tool:
+
+      "{{simard_binary}}" kinema inspect --out "{{out_dir}}"
+
+      If it reports every expected frame is present, the sequence is consistent,
+      and verification passed, stop successfully. Otherwise re-read the brief at
+      {{brief_path}} and the manifest, determine what is missing, and re-run
+      `{{simard_binary}} kinema build --brief {{brief_path}} --out {{out_dir}}`.
+      The durable, verified rendered frame sequence is the only business outcome.

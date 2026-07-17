@@ -1,0 +1,43 @@
+{
+  "name": "hero-crossing",
+  "style": "2d",
+  "fps": 12,
+  "duration_s": 2.0,
+  "resolution": { "width": 320, "height": 240 },
+  "background": { "r": 18, "g": 22, "b": 33 },
+  "notes": "A hero walks across the frame while a beacon pulses behind them.",
+  "objects": [
+    {
+      "name": "hero",
+      "kind": "character",
+      "color": { "r": 240, "g": 200, "b": 60 },
+      "size": 0.16,
+      "keyframes": [
+        { "t": 0.0, "x": 0.1, "y": 0.62, "scale": 1.0, "opacity": 1.0 },
+        { "t": 1.0, "x": 0.5, "y": 0.58, "scale": 1.0, "opacity": 1.0 },
+        { "t": 2.0, "x": 0.9, "y": 0.62, "scale": 1.0, "opacity": 1.0 }
+      ]
+    },
+    {
+      "name": "beacon",
+      "kind": "circle",
+      "color": { "r": 90, "g": 170, "b": 255 },
+      "size": 0.08,
+      "keyframes": [
+        { "t": 0.0, "x": 0.5, "y": 0.28, "scale": 0.6, "opacity": 0.5 },
+        { "t": 1.0, "x": 0.5, "y": 0.28, "scale": 1.4, "opacity": 1.0 },
+        { "t": 2.0, "x": 0.5, "y": 0.28, "scale": 0.6, "opacity": 0.5 }
+      ]
+    },
+    {
+      "name": "ground",
+      "kind": "rect",
+      "color": { "r": 40, "g": 54, "b": 66 },
+      "size": 0.5,
+      "keyframes": [
+        { "t": 0.0, "x": 0.5, "y": 0.9, "scale": 2.0, "opacity": 1.0 },
+        { "t": 2.0, "x": 0.5, "y": 0.9, "scale": 2.0, "opacity": 1.0 }
+      ]
+    }
+  ]
+}

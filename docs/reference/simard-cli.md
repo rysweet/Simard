@@ -76,6 +76,9 @@ simard
 |- atelier
 |  |- build --brief <brief.json> --out <dir> [--fabrication] [--strict]
 |  `- inspect --out <dir> [--fabrication]
+|- kinema
+|  |- build --brief <shot.json> --out <dir> [--no-grease-pencil] [--no-composite] [--strict]
+|  `- inspect --out <dir>
 |- update
 `- install [--simard-home PATH] [--dry-run] [--systemd-user-dir PATH] [--systemctl PATH]  # planned
 ```
@@ -546,6 +549,47 @@ Re-reads an existing package directory, re-runs verification against the
 persisted `manifest.json`, and prints the tool report and verification result
 without rebuilding. Also prints the available-tool report when `<dir>` does not
 yet contain a manifest.
+
+## Kinema animation commands
+
+The **Kinema** identity (`simard-kinema`) turns a shot brief into a storyboard,
+a rig, a Synfig vector source, and a rendered animated PNG frame sequence. See
+[Animate a shot with Kinema](../howto/animate-with-kinema.md) for the full
+workflow.
+
+Unlike Atelier, Kinema's rendered sequence is produced by a guaranteed,
+dependency-free pure-Rust rasterizer, so a shot always renders end to end.
+Blender (Grease Pencil), Synfig, and Natron are driven additionally when
+installed and are skipped gracefully otherwise.
+
+### `simard kinema build --brief <shot.json> --out <dir> [--no-grease-pencil] [--no-composite] [--strict]`
+
+Reads a shot brief (JSON: `name`, `style`, `fps`, `duration_s`, `resolution`,
+optional `background`, `notes`, and an `objects` array of animated `circle` /
+`rect` / `character` entries with `keyframes`), extracts a storyboard, derives a
+rig (one armature per object — a full head/torso/limbs skeleton for characters),
+emits a Synfig `.sif` vector source, and renders every frame. Writes to `<dir>`:
+`storyboard.json`, `storyboard.md`, `rig.json`, `shot.sif`, `frames/frame_*.png`
+(one PNG per frame), `sequence.json`, and `manifest.json`. When installed,
+Blender writes `blender/`, Synfig writes `synfig/`, and Natron writes
+`composite/`. `--no-grease-pencil` / `--no-composite` disable the optional
+Blender / Natron passes.
+
+Verification always requires the core deliverables (storyboard present, rig
+present, every expected frame rendered, sequence descriptor consistent, vector
+source present). The external-render check is advisory. `--strict` exits
+non-zero when the produced sequence fails verification.
+
+Exit codes: `0` verified; `1` verification failed under `--strict`; non-zero on
+an invalid brief. A missing external engine never fails the build.
+
+### `simard kinema inspect --out <dir>`
+
+Re-reads an existing package directory and re-verifies it against what is
+actually on disk: it recomputes how many frames survive and flips the
+`frames-rendered` check (and the aggregate `verification.ok`) to `false` if any
+required frame has gone missing or empty since build time. Exits non-zero when
+verification does not pass.
 
 ## Compatibility mapping
 

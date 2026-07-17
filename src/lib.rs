@@ -106,6 +106,7 @@ pub mod identity_precedence;
 pub mod improvements;
 pub mod install;
 pub mod journal;
+pub mod kinema;
 pub mod knowledge_client;
 pub mod knowledge_context;
 pub mod meeting_backend;

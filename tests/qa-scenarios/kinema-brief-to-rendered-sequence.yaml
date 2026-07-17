@@ -1,0 +1,47 @@
+name: kinema-brief-to-rendered-sequence
+app_type: cli
+description: |
+  Outside-in coverage for the Kinema 2D/3D animation &amp; motion-graphics
+  identity: a shot brief must go end to end to a rendered animated PNG frame
+  sequence — alongside a storyboard, a rig, and a Synfig vector source — and the
+  shipped identity/policy/recipe assets must load through the real Simard
+  loaders.
+
+  Verified end to end:
+  - `src/kinema/` unit tests: shot-brief parsing/validation, keyframe timeline
+    sampling, storyboard beat extraction, rig (armature) derivation, the
+    dependency-free PNG encoder, the frame rasterizer, Synfig `.sif` generation
+    and graceful external-tool degradation, and the build/verify/inspect
+    manifest orchestration.
+  - `tests/kinema_assets_valid.rs`: the pluggable `simard-kinema` identity card
+    loads via `FileIdentityLoader` in engineer mode, the goal-session capability
+    policy parses via `CapabilityPolicy::from_toml_file` with the least-privilege
+    shape, and all three goal-session recipes (storyboarding, rigging, rendering)
+    drive the `simard kinema` CLI surface.
+  - `tests/kinema_pipeline_e2e.rs`: `simard kinema build` takes the sample
+    hero-crossing brief to a `frames/` directory of real PNGs, a storyboard, a
+    rig, `shot.sif`, `sequence.json`, and a `manifest.json` whose
+    `verification.ok` is true; `inspect` re-verifies and flips to failure when a
+    rendered frame is removed.
+
+  Schema note: the pinned `@gadugi/agentic-test` CLI runner gates only on
+  `run`-step exit codes and reads the command from `params.command`, so all
+  suites run under a single `bash -lc` wrapper that exits zero only when every
+  invoked `cargo test` reports success. Unlike the OpenSCAD-gated Atelier
+  end-to-end suite, Kinema's happy path renders in pure Rust and therefore never
+  skips: the animated sequence must render on any host.
+metadata:
+  tags:
+    - cli
+    - kinema
+    - identity
+    - animation
+agents:
+  - name: cli-agent
+    type: cli
+    command: bash
+steps:
+  - action: run
+    params:
+      command: "bash -lc 'set -euo pipefail; cargo test --lib kinema 2>&1 | tee /tmp/kinema-qa-unit.log | grep -q \"test result: ok\"; cargo test --test kinema_assets_valid 2>&1 | tee /tmp/kinema-qa-assets.log | grep -q \"test result: ok\"; cargo test --test kinema_pipeline_e2e 2>&1 | tee /tmp/kinema-qa-e2e.log | grep -q \"test result: ok\"'"
+    timeout: 600000
