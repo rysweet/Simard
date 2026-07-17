@@ -218,3 +218,84 @@ fn malformed_lines_skipped() {
         assert_eq!(entries.len(), 1);
     });
 }
+
+// ---------------------------------------------------------------------------
+// Daily-window collectors (bug: `--limit 5` capped prs_merged/bugs_fixed at 5)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn since_24h_search_ts_is_gh_timestamp_format() {
+    let ts = since_24h_search_ts();
+    // `YYYY-MM-DDTHH:MM:SSZ` — the format GitHub search date qualifiers accept.
+    assert_eq!(ts.len(), 20, "unexpected timestamp length: {ts}");
+    assert!(ts.ends_with('Z'), "must be UTC/Zulu: {ts}");
+    assert_eq!(&ts[4..5], "-");
+    assert_eq!(&ts[10..11], "T");
+    let parsed = chrono::DateTime::parse_from_rfc3339(&ts);
+    assert!(parsed.is_ok(), "must be RFC3339-parseable: {ts}");
+    // Window must look ~24h back, not "now" and not the epoch.
+    let now = Utc::now();
+    let dt = parsed.unwrap().with_timezone(&Utc);
+    let delta = (now - dt).num_minutes();
+    assert!(
+        (23 * 60..=25 * 60).contains(&delta),
+        "expected ~24h ago, got {delta} minutes"
+    );
+}
+
+#[test]
+fn prs_merged_gh_args_window_and_no_low_cap() {
+    let args = prs_merged_gh_args("2026-07-16T00:00:00Z");
+    assert_eq!(args[0], "pr");
+    assert_eq!(args[1], "list");
+    // The daily count must be time-windowed, not "most recent N".
+    assert!(
+        args.iter().any(|a| a == "merged:>=2026-07-16T00:00:00Z"),
+        "missing merged-since search filter: {args:?}"
+    );
+    // Regression guard: the old `--limit 5` saturated a 52-merge day at 5.
+    let limit = limit_value(&args);
+    assert!(
+        limit >= 100,
+        "row limit must exceed plausible daily throughput, got {limit}"
+    );
+    assert!(args.iter().any(|a| a == "merged"), "must filter merged PRs");
+}
+
+#[test]
+fn bugs_fixed_gh_args_window_and_no_low_cap() {
+    let args = bugs_fixed_gh_args("2026-07-16T00:00:00Z");
+    assert_eq!(args[0], "issue");
+    assert_eq!(args[1], "list");
+    assert!(
+        args.iter().any(|a| a == "closed:>=2026-07-16T00:00:00Z"),
+        "missing closed-since search filter: {args:?}"
+    );
+    assert!(args.iter().any(|a| a == "bug"), "must filter the bug label");
+    let limit = limit_value(&args);
+    assert!(
+        limit >= 100,
+        "row limit must exceed plausible daily throughput, got {limit}"
+    );
+}
+
+/// Extract the numeric value following `--limit` in a gh arg list.
+fn limit_value(args: &[String]) -> u32 {
+    let idx = args
+        .iter()
+        .position(|a| a == "--limit")
+        .expect("--limit arg");
+    args[idx + 1].parse().expect("numeric --limit value")
+}
+
+#[test]
+fn count_gh_json_rows_counts_array_length() {
+    assert!(
+        (count_gh_json_rows(r#"[{"number":1},{"number":2},{"number":3}]"#) - 3.0).abs()
+            < f64::EPSILON
+    );
+    assert!((count_gh_json_rows("[]") - 0.0).abs() < f64::EPSILON);
+    // Malformed / error output must not poison the metric.
+    assert!((count_gh_json_rows("gh: not authenticated") - 0.0).abs() < f64::EPSILON);
+    assert!((count_gh_json_rows("") - 0.0).abs() < f64::EPSILON);
+}

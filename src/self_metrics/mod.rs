@@ -167,49 +167,90 @@ pub struct DailyReport {
 // Metric collection helpers — gather values from external tools
 // ---------------------------------------------------------------------------
 
-/// Count recently closed bug issues via `gh issue list`.
+/// Upper bound on rows requested from `gh` when counting a 24h window.
+///
+/// The daily collectors report a *count*, not a sample, so the limit only
+/// needs to exceed the plausible number of merges/closures in a single day.
+/// It is deliberately far above any realistic daily throughput so the reported
+/// number reflects reality instead of saturating (the previous `--limit 5`
+/// capped `prs_merged`/`bugs_fixed` at 5, making the dashboard under-report a
+/// 52-merge day as "5").
+const DAILY_WINDOW_ROW_LIMIT: &str = "500";
+
+/// GitHub search timestamp (`YYYY-MM-DDTHH:MM:SSZ`) for 24 hours ago.
+///
+/// Used to window the daily collectors so they count merges/closures within the
+/// `daily_report` period instead of returning an unbounded "most recent N".
+fn since_24h_search_ts() -> String {
+    (Utc::now() - chrono::Duration::hours(24))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
+}
+
+/// Build the `gh issue list` args that count bug issues closed since `since`.
+fn bugs_fixed_gh_args(since: &str) -> Vec<String> {
+    vec![
+        "issue".into(),
+        "list".into(),
+        "--state".into(),
+        "closed".into(),
+        "--label".into(),
+        "bug".into(),
+        "--search".into(),
+        format!("closed:>={since}"),
+        "--limit".into(),
+        DAILY_WINDOW_ROW_LIMIT.into(),
+        "--json".into(),
+        "number".into(),
+    ]
+}
+
+/// Build the `gh pr list` args that count PRs merged since `since`.
+fn prs_merged_gh_args(since: &str) -> Vec<String> {
+    vec![
+        "pr".into(),
+        "list".into(),
+        "--state".into(),
+        "merged".into(),
+        "--search".into(),
+        format!("merged:>={since}"),
+        "--limit".into(),
+        DAILY_WINDOW_ROW_LIMIT.into(),
+        "--json".into(),
+        "number".into(),
+    ]
+}
+
+/// Count the elements in a `gh ... --json number` JSON array response.
+///
+/// Malformed / empty output counts as `0.0` so a transient `gh` failure never
+/// poisons the metric with a spurious value.
+fn count_gh_json_rows(raw: &str) -> f64 {
+    serde_json::from_str::<Vec<serde_json::Value>>(raw)
+        .map(|v| v.len() as f64)
+        .unwrap_or(0.0)
+}
+
+/// Count bug issues closed in the last 24h via `gh issue list`.
 pub fn collect_bugs_fixed() -> f64 {
+    let since = since_24h_search_ts();
     let output = std::process::Command::new("gh")
-        .args([
-            "issue",
-            "list",
-            "--state",
-            "closed",
-            "--label",
-            "bug",
-            "--search",
-            "sort:updated-desc",
-            "--limit",
-            "5",
-            "--json",
-            "number",
-        ])
+        .args(bugs_fixed_gh_args(&since))
         .output();
     match output {
-        Ok(o) if o.status.success() => {
-            let raw = String::from_utf8_lossy(&o.stdout);
-            serde_json::from_str::<Vec<serde_json::Value>>(&raw)
-                .map(|v| v.len() as f64)
-                .unwrap_or(0.0)
-        }
+        Ok(o) if o.status.success() => count_gh_json_rows(&String::from_utf8_lossy(&o.stdout)),
         _ => 0.0,
     }
 }
 
-/// Count recently merged PRs via `gh pr list`.
+/// Count PRs merged in the last 24h via `gh pr list`.
 pub fn collect_prs_merged() -> f64 {
+    let since = since_24h_search_ts();
     let output = std::process::Command::new("gh")
-        .args([
-            "pr", "list", "--state", "merged", "--limit", "5", "--json", "number",
-        ])
+        .args(prs_merged_gh_args(&since))
         .output();
     match output {
-        Ok(o) if o.status.success() => {
-            let raw = String::from_utf8_lossy(&o.stdout);
-            serde_json::from_str::<Vec<serde_json::Value>>(&raw)
-                .map(|v| v.len() as f64)
-                .unwrap_or(0.0)
-        }
+        Ok(o) if o.status.success() => count_gh_json_rows(&String::from_utf8_lossy(&o.stdout)),
         _ => 0.0,
     }
 }
@@ -232,10 +273,10 @@ pub fn collect_test_count() -> f64 {
 /// `cycle_duration` is the elapsed wall-clock time for the OODA cycle.
 pub fn collect_and_record_all(cycle_duration: Duration) -> Result<(), Box<dyn std::error::Error>> {
     let bugs = collect_bugs_fixed();
-    record_metric("bugs_fixed", bugs, "closed issues with bug label (last 5)")?;
+    record_metric("bugs_fixed", bugs, "bug issues closed in last 24h")?;
 
     let prs = collect_prs_merged();
-    record_metric("prs_merged", prs, "recently merged PRs (last 5)")?;
+    record_metric("prs_merged", prs, "PRs merged in last 24h")?;
 
     let tests = collect_test_count();
     record_metric("test_count", tests, "count of #[test] in src/")?;
