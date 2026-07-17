@@ -218,3 +218,58 @@ fn malformed_lines_skipped() {
         assert_eq!(entries.len(), 1);
     });
 }
+
+// ── count_entries_since — pure core of the activity collectors ──────────────
+// Regression coverage for the dashboard daily-report bug where prs_merged /
+// bugs_fixed were counted from `gh ... --limit 5` with no time filter, so both
+// were structurally pinned at a constant 5.0 regardless of real 24h activity.
+
+#[test]
+fn count_entries_since_filters_by_window() {
+    let now = Utc::now();
+    let raw = format!(
+        "[{{\"number\":1,\"mergedAt\":\"{}\"}},\
+          {{\"number\":2,\"mergedAt\":\"{}\"}},\
+          {{\"number\":3,\"mergedAt\":\"{}\"}}]",
+        (now - chrono::Duration::hours(1)).to_rfc3339(),
+        (now - chrono::Duration::hours(2)).to_rfc3339(),
+        (now - chrono::Duration::hours(48)).to_rfc3339(),
+    );
+    let since = now - chrono::Duration::hours(24);
+    // Two of the three merges are inside the 24h window; the 48h-old one is out.
+    assert_eq!(count_entries_since(&raw, since, "mergedAt"), 2.0);
+}
+
+#[test]
+fn count_entries_since_counts_all_in_window_not_capped_at_five() {
+    // A busy day well beyond the old --limit 5 cap: every entry is recent.
+    let now = Utc::now();
+    let recent = (now - chrono::Duration::minutes(30)).to_rfc3339();
+    let items: Vec<String> = (0..42)
+        .map(|n| format!("{{\"number\":{n},\"mergedAt\":\"{recent}\"}}"))
+        .collect();
+    let raw = format!("[{}]", items.join(","));
+    let since = now - chrono::Duration::hours(24);
+    assert_eq!(count_entries_since(&raw, since, "mergedAt"), 42.0);
+}
+
+#[test]
+fn count_entries_since_skips_missing_and_unparseable_timestamps() {
+    let now = Utc::now();
+    let recent = (now - chrono::Duration::hours(1)).to_rfc3339();
+    let raw = format!(
+        "[{{\"number\":1,\"closedAt\":\"{recent}\"}},\
+          {{\"number\":2,\"closedAt\":null}},\
+          {{\"number\":3,\"closedAt\":\"not-a-date\"}},\
+          {{\"number\":4}}]"
+    );
+    let since = now - chrono::Duration::hours(24);
+    assert_eq!(count_entries_since(&raw, since, "closedAt"), 1.0);
+}
+
+#[test]
+fn count_entries_since_empty_and_malformed_json() {
+    let since = Utc::now() - chrono::Duration::hours(24);
+    assert_eq!(count_entries_since("[]", since, "mergedAt"), 0.0);
+    assert_eq!(count_entries_since("not json", since, "mergedAt"), 0.0);
+}
