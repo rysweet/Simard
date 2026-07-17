@@ -1,0 +1,72 @@
+digraph ServiceComponentsOverview {
+  rankdir=TB;
+  graph [fontname="Arial", fontsize=10, labelloc=t, label="Simard service components overview"];
+  node [shape=box, style="rounded,filled", fillcolor="#f9fff8", color="#597a5b", fontname="Arial", fontsize=9];
+  edge [color="#5f6d5f", fontname="Arial", fontsize=8];
+
+  daemon [label="OODA daemon and scheduler"];
+  ooda [label="OODA loop and actions"];
+  threads [label="Cognitive threads"];
+  memory [label="Cognitive memory lbug store"];
+  overseer [label="Acting Overseer"];
+  goals [label="Goal board and curation"];
+  meetings [label="Meetings and facilitator"];
+  engineer [label="Engineer loop and worktrees"];
+  gym [label="Gym and benchmarking"];
+  self_improve [label="Self-improve and self-deploy"];
+  signal [label="Signal conversation"];
+  operator [label="Operator CLI and dashboard"];
+  journal [label="Journal"];
+  telemetry [label="Telemetry and self-metrics"];
+
+  daemon -> ooda [label="runs cycle"];
+  daemon -> memory [label="opens clients"];
+  daemon -> goals [label="loads and commits"];
+  daemon -> threads [label="registers"];
+  daemon -> overseer [label="ticks"];
+  daemon -> journal [label="background"];
+  daemon -> telemetry [label="collects"];
+  daemon -> operator [label="serves"];
+  daemon -> self_improve [label="self relaunch gates"];
+
+  ooda -> memory [label="recall and distill"];
+  ooda -> goals [label="prioritize and persist"];
+  ooda -> engineer [label="advance goal"];
+  ooda -> overseer [label="prompted judgment"];
+  ooda -> self_improve [label="improvement action"];
+  ooda -> gym [label="score signals"];
+  ooda -> meetings [label="handoffs"];
+  ooda -> telemetry [label="metrics"];
+
+  threads -> memory [label="creative ideas and analysis"];
+  threads -> goals [label="idea to goal"];
+  threads -> telemetry [label="health"];
+
+  overseer -> telemetry [label="status"];
+  overseer -> goals [label="board observe"];
+  overseer -> memory [label="recall"];
+  overseer -> engineer [label="workstreams"];
+  overseer -> self_improve [label="merge deploy"];
+  overseer -> meetings [label="whispers"];
+
+  meetings -> memory [label="handoff memory"];
+  meetings -> goals [label="new goals"];
+  meetings -> engineer [label="agent session"];
+  signal -> meetings [label="channel"];
+
+  operator -> daemon [label="commands/status"];
+  operator -> memory [label="live graph"];
+  operator -> goals [label="board edit"];
+  operator -> meetings [label="chat/UI"];
+  operator -> overseer [label="tab"];
+  operator -> telemetry [label="metrics APIs"];
+
+  engineer -> goals [label="claims"];
+  engineer -> memory [label="IPC"];
+  engineer -> gym [label="verification"];
+
+  gym -> self_improve [label="scores"];
+  self_improve -> memory [label="outcomes"];
+  journal -> memory [label="episodes and PRs"];
+  journal -> operator [label="dashboard"];
+}

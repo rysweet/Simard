@@ -1,0 +1,34 @@
+sequenceDiagram
+  autonumber
+  participant Tick as overseer::wiring tick
+  participant Overseer as Overseer::run_cycle
+  participant Goals as Goal capability
+  participant Sensor as overseer::sensor
+  participant Signals as overseer::signal
+  participant Root as root_cause
+  participant Decide as overseer::decide
+  participant Act as Overseer::act
+  participant Notify as operator notifier
+
+  Tick->>Overseer: run_cycle()
+  Overseer->>Goals: observe_board()
+  Goals->>Sensor: blocked_goals_from_board(board)
+  Sensor-->>Overseer: BlockedGoal[]
+  Overseer->>Signals: signals_from(observed)
+  Signals-->>Overseer: Signal::GoalBlocked per blocked goal
+  Overseer->>Overseer: orient(signals, in_flight) to Problem::GoalHygiene
+  Overseer->>Root: analyze(problem, observed, recall)
+  Root-->>Overseer: WHY with recurrence/context
+  Overseer->>Decide: decide(problem)
+  alt recurring re-park or needs review
+    Decide-->>Overseer: EscalateBlockedGoal(goal_id, reason, why)
+    Tick->>Act: act(EscalateBlockedGoal)
+    Act->>Notify: goal_blocked_with_why(goal_id, reason, why)
+    Notify-->>Act: dispatch report
+  else perpetual false-parked no-progress block
+    Decide-->>Overseer: UnblockGoal(goal_id, reason)
+    Tick->>Act: act(UnblockGoal)
+    Act->>Goals: unblock goal on board
+  else not actionable
+    Decide-->>Overseer: Report
+  end
