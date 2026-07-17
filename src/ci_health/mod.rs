@@ -56,25 +56,44 @@ pub use types::{
 use crate::error::{SimardError, SimardResult};
 use tracing::warn;
 
-/// The amplihack ecosystem fleet: Simard plus its governed sibling repos, by
-/// GitHub `owner/repo` slug. Source of truth: the ecosystem table in
-/// `prompt_assets/simard/engineer_system.md` (note `amplihack` → `amplihack-rs`
-/// on GitHub).
-pub const GOVERNED_REPOS: &[&str] = &[
-    "rysweet/Simard",
-    "rysweet/RustyClawd",
-    "rysweet/amplihack-rs",
-    "rysweet/azlin",
-    "rysweet/amplihack-memory-lib",
-    "rysweet/amplihack-agent-eval",
-    "rysweet/agent-kgpacks",
-    "rysweet/amplihack-recipe-runner",
-    "rysweet/amplihack-xpia-defender",
-    "rysweet/gadugi-agentic-test",
-];
+/// The governed-fleet roster, embedded from the ecosystem's **single source of
+/// truth**: `prompt_assets/simard/ecosystem_repos.toml`. That file documents
+/// itself as "the single source of truth for the ecosystem roster … adding
+/// stewardship for a new repo is a one-line edit here — no code change." The
+/// Overseer's `ecosystem-observe` sweep already reads it; embedding the *same*
+/// file here (at compile time) makes the CI-health sweep honor that contract too
+/// — a repo added to the roster is swept on the next build, with no second
+/// hardcoded list to silently drift out of sync (a drift that would let a
+/// newly-governed repo's red CI go unswept and the fleet be reported green).
+const ECOSYSTEM_ROSTER_TOML: &str = include_str!("../../prompt_assets/simard/ecosystem_repos.toml");
 
-/// Run a live sweep of [`GOVERNED_REPOS`], using and updating the persistent
-/// last-known-green head-SHA cache so an unchanged-green fleet is a cheap no-op.
+/// The amplihack ecosystem fleet — Simard plus its governed sibling repos, by
+/// GitHub `owner/repo` slug — parsed from the embedded [`ECOSYSTEM_ROSTER_TOML`]
+/// (note `amplihack` → `amplihack-rs` on GitHub). Reuses the Overseer's roster
+/// parser/validator so both stewards resolve an identical roster from identical
+/// bytes.
+///
+/// Fail-loud: a corrupt or empty embedded roster is an `Err`, never a silently
+/// empty sweep — an empty repo list would classify as zero actionable failures
+/// and report the fleet **green**, the exact false-green this module exists to
+/// prevent. Because the roster is embedded at compile time from a committed,
+/// already-parsed data file, this error is unreachable in a well-formed build
+/// and is covered by a unit test; it is surfaced rather than `unwrap`-panicked
+/// so a steward never aborts mid-sweep.
+pub fn governed_repos() -> SimardResult<Vec<String>> {
+    crate::overseer::ecosystem_observe::parse_ecosystem_roster(ECOSYSTEM_ROSTER_TOML).map_err(
+        |reason| SimardError::CiHealthGhCommandFailed {
+            reason: format!(
+                "failed to load embedded ecosystem roster \
+                 (prompt_assets/simard/ecosystem_repos.toml): {reason}"
+            ),
+        },
+    )
+}
+
+/// Run a live sweep of the governed fleet ([`governed_repos`]), using and
+/// updating the persistent last-known-green head-SHA cache so an unchanged-green
+/// fleet is a cheap no-op.
 ///
 /// The cache is loaded from [`GreenShaCache::default_path`], consulted by
 /// [`collect_fleet`] to skip unchanged-green repos, reconciled against the fresh
@@ -91,13 +110,15 @@ pub fn sweep_live_with_options(
     gh: &dyn GhWorkflowClient,
     use_cache: bool,
 ) -> SimardResult<FleetReport> {
+    let roster = governed_repos()?;
+    let repos: Vec<&str> = roster.iter().map(String::as_str).collect();
     let path = GreenShaCache::default_path();
     let mut cache = if use_cache {
         GreenShaCache::load(&path)
     } else {
         GreenShaCache::empty()
     };
-    let report = run_sweep(gh, GOVERNED_REPOS, &mut cache)?;
+    let report = run_sweep(gh, &repos, &mut cache)?;
     if let Err(e) = cache.save(&path) {
         warn!(
             path = %path.display(),

@@ -83,10 +83,27 @@ pub fn load_ecosystem_roster(path: &Path) -> SimardResult<Vec<String>> {
         path: path.to_path_buf(),
         reason: format!("read ecosystem roster failed: {e}"),
     })?;
-    let parsed: RosterFile = toml::from_str(&raw).map_err(|e| SimardError::PromptAssetRead {
+    parse_ecosystem_roster(&raw).map_err(|reason| SimardError::PromptAssetRead {
         path: path.to_path_buf(),
-        reason: format!("parse ecosystem roster failed: {e}"),
-    })?;
+        reason,
+    })
+}
+
+/// Parse & validate a roster from its TOML **text** — the path-agnostic core
+/// shared by the filesystem loader [`load_ecosystem_roster`] and any
+/// compile-time-embedded roster (e.g. the CI-health sweep, which `include_str!`s
+/// the same `ecosystem_repos.toml` so the roster has exactly one source of
+/// truth). Returns the validated `owner/name` slugs in file order.
+///
+/// Each slug is checked with [`is_valid_slug`]; a malformed slug is skipped with
+/// a logged warning. An empty roster (no valid slugs — the file was empty or
+/// every slug was malformed) is an **error** (the `Err` reason), never a silent
+/// empty pass, so a caller can fail loud instead of concluding an empty fleet is
+/// healthy. The error carries only a human-readable reason; the caller wraps it
+/// in whatever error type fits its context (a filesystem path, an embed marker).
+pub fn parse_ecosystem_roster(raw: &str) -> Result<Vec<String>, String> {
+    let parsed: RosterFile =
+        toml::from_str(raw).map_err(|e| format!("parse ecosystem roster failed: {e}"))?;
 
     let mut roster = Vec::with_capacity(parsed.repo.len());
     for entry in parsed.repo {
@@ -103,10 +120,7 @@ pub fn load_ecosystem_roster(path: &Path) -> SimardResult<Vec<String>> {
     }
 
     if roster.is_empty() {
-        return Err(SimardError::PromptAssetRead {
-            path: path.to_path_buf(),
-            reason: "ecosystem roster has no valid owner/name slugs".to_string(),
-        });
+        return Err("ecosystem roster has no valid owner/name slugs".to_string());
     }
     Ok(roster)
 }
@@ -643,6 +657,31 @@ slug = "bad"
     fn roster_no_entries_is_error() {
         let f = write_tmp("schema_version = 1\n");
         assert!(load_ecosystem_roster(f.path()).is_err());
+    }
+
+    #[test]
+    fn parse_str_core_is_path_agnostic_and_matches_the_file_loader() {
+        // The extracted string parser (shared with the CI-health sweep's embedded
+        // roster) validates and orders slugs identically to the file loader, with
+        // no filesystem involved.
+        let toml = r#"
+schema_version = 1
+[[repo]]
+slug = "rysweet/Simard"
+[[repo]]
+slug = "not-a-slug"
+[[repo]]
+slug = "rysweet/azlin"
+"#;
+        let roster = parse_ecosystem_roster(toml).unwrap();
+        assert_eq!(
+            roster,
+            vec!["rysweet/Simard".to_string(), "rysweet/azlin".to_string()],
+        );
+        // Empty / all-malformed rosters are an Err reason, never a silent empty
+        // pass — the same fail-loud contract the file loader wraps in an error.
+        assert!(parse_ecosystem_roster("schema_version = 1\n").is_err());
+        assert!(parse_ecosystem_roster("not valid toml {{").is_err());
     }
 
     #[test]
