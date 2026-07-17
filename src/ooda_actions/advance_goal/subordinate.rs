@@ -608,7 +608,8 @@ mod reap_tests {
     impl StateRootGuard {
         fn set(root: &Path) -> Self {
             let prev = std::env::var_os("SIMARD_STATE_ROOT");
-            // SAFETY: tests in this module are serialized via #[serial].
+            // SAFETY: tests in this module are serialized via #[serial_test::serial(cognitive_memory)],
+            // the canonical group guarding the process-global SIMARD_STATE_ROOT env var.
             unsafe { std::env::set_var("SIMARD_STATE_ROOT", root) };
             Self { prev }
         }
@@ -616,7 +617,8 @@ mod reap_tests {
 
     impl Drop for StateRootGuard {
         fn drop(&mut self) {
-            // SAFETY: tests in this module are serialized via #[serial].
+            // SAFETY: tests in this module are serialized via #[serial_test::serial(cognitive_memory)],
+            // the canonical group guarding the process-global SIMARD_STATE_ROOT env var.
             match &self.prev {
                 Some(v) => unsafe { std::env::set_var("SIMARD_STATE_ROOT", v) },
                 None => unsafe { std::env::remove_var("SIMARD_STATE_ROOT") },
@@ -720,7 +722,7 @@ mod reap_tests {
     // -- Test (a): tombstoned goal's engineer IS reaped ---------------------
 
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(cognitive_memory)]
     fn reaps_engineer_and_cleans_worktree_when_goal_tombstoned() {
         let parent = tempdir().expect("tempdir");
         let state_dir = tempdir().expect("tempdir");
@@ -762,7 +764,7 @@ mod reap_tests {
     // -- Test (b): healthy engineer for a present goal is NOT reaped --------
 
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(cognitive_memory)]
     fn does_not_reap_engineer_for_present_active_goal() {
         let parent = tempdir().expect("tempdir");
         let state_dir = tempdir().expect("tempdir");
@@ -805,7 +807,7 @@ mod reap_tests {
     // -- Test (c): Blocked-but-present goal's engineer is NOT reaped --------
 
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(cognitive_memory)]
     fn does_not_reap_engineer_for_blocked_but_present_goal() {
         let parent = tempdir().expect("tempdir");
         let state_dir = tempdir().expect("tempdir");
@@ -849,7 +851,7 @@ mod reap_tests {
     // -- Test (d): reconciliation is idempotent -----------------------------
 
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(cognitive_memory)]
     fn reaping_is_idempotent_second_cycle_is_a_noop() {
         let parent = tempdir().expect("tempdir");
         let state_dir = tempdir().expect("tempdir");
@@ -886,7 +888,7 @@ mod reap_tests {
     // -- Test (e): registry miss still cleans the worktree ------------------
 
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(cognitive_memory)]
     fn reaps_worktree_even_when_registry_has_no_live_row() {
         let parent = tempdir().expect("tempdir");
         let state_dir = tempdir().expect("tempdir");
@@ -926,7 +928,7 @@ mod reap_tests {
     // -- Test (f): only the tombstoned engineer is reaped, others survive ---
 
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(cognitive_memory)]
     fn reaps_only_tombstoned_engineer_and_leaves_others_running() {
         let parent = tempdir().expect("tempdir");
         let state_dir = tempdir().expect("tempdir");
@@ -983,7 +985,7 @@ mod reap_tests {
     // This asserts the selector directly (no real signal is sent).
 
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(cognitive_memory)]
     fn selects_live_registry_row_and_ignores_ended_rows() {
         let goal_id = "gone-goal";
         const STALE_PID: u32 = 999_999; // a pid we must NEVER target
