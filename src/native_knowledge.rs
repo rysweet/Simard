@@ -122,9 +122,21 @@ fn query_pack_db(
         .map_err(|e| format!("cannot open pack database: {e}"))?;
 
     // Search for articles/sections matching keywords from the question.
+    //
+    // Keep only DISTINCT keywords (case-folded). The relevance ranking in
+    // [`query_articles`] scores keyword COVERAGE, so a query word repeated
+    // across the question ("rust ... rust") would otherwise count twice and
+    // over-reward an article that merely mentions that one word — the same
+    // double-counting the distinct-token discipline of `knowledge_context`
+    // (#4241) removes at pack-selection level. SQLite's default `LIKE` is ASCII
+    // case-insensitive, so folding the dedup key with `to_ascii_lowercase`
+    // matches how the keyword is later compared. First-seen surface form and
+    // order are preserved for the readable answer message (`keywords.join`).
+    let mut seen = std::collections::HashSet::new();
     let keywords: Vec<&str> = question
         .split_whitespace()
         .filter(|w| w.len() > 2)
+        .filter(|w| seen.insert(w.to_ascii_lowercase()))
         .collect();
 
     if keywords.is_empty() {
@@ -183,8 +195,10 @@ const CONTENT_MATCH_WEIGHT: i64 = 1;
 /// the most on-topic article survives the `limit` cut. Each keyword contributes
 /// [`TITLE_MATCH_WEIGHT`] when it appears in the title and
 /// [`CONTENT_MATCH_WEIGHT`] when it appears in the body; the per-article score is
-/// the sum across the distinct query keywords, and rows are returned
-/// highest-score-first (`ORDER BY … DESC LIMIT`).
+/// the sum across the distinct query keywords (the caller de-duplicates keywords
+/// case-insensitively, so a repeated query word cannot double-count), and rows
+/// are returned highest-score-first with a deterministic `title ASC` tie-break
+/// among equal-score matches (`ORDER BY … DESC, title ASC LIMIT`).
 ///
 /// This fixes a recall-quality defect: without the `ORDER BY`, SQLite returned
 /// matching rows in arbitrary storage (rowid) order, so an article matching a
@@ -221,7 +235,10 @@ fn query_articles(conn: &Connection, keywords: &[&str], limit: usize) -> Vec<Sou
     // Relevance score: reward keyword COVERAGE, weighting a title hit above a
     // content-only hit. Ranking the candidates by this score (DESC) before the
     // LIMIT keeps the most on-topic article instead of dropping it for an
-    // arbitrary earlier-in-table row that matched a single keyword.
+    // arbitrary earlier-in-table row that matched a single keyword. A
+    // deterministic `title ASC` tie-break (applied in the ORDER BY below) then
+    // fixes the order of equal-score matches so recall is reproducible run to
+    // run rather than falling back to SQLite's arbitrary storage order.
     let score_expr = escaped
         .iter()
         .map(|kw| {
@@ -244,7 +261,7 @@ fn query_articles(conn: &Connection, keywords: &[&str], limit: usize) -> Vec<Sou
             "NULL AS url"
         };
         let sql = format!(
-            "SELECT title, COALESCE(section, '') as section, {url_col} FROM {table} WHERE {where_clause} ORDER BY ({score_expr}) DESC LIMIT {limit}",
+            "SELECT title, COALESCE(section, '') as section, {url_col} FROM {table} WHERE {where_clause} ORDER BY ({score_expr}) DESC, title ASC LIMIT {limit}",
             table = table,
             where_clause = where_clause,
             score_expr = score_expr,
@@ -939,6 +956,72 @@ mod tests {
         assert_eq!(
             sources[0].title, "Ownership Deep Dive",
             "a title match must outrank a content-only match"
+        );
+    }
+
+    #[test]
+    fn query_articles_breaks_score_ties_by_title_ascending() {
+        // Three articles match the single keyword equally (same score). Inserted
+        // in reverse-alphabetical order, they must still come back title
+        // ASCending rather than in SQLite's arbitrary storage order — so recall
+        // is deterministic and reproducible run to run.
+        let conn = ranking_conn(&[
+            ("Zebra ownership", "x"),
+            ("Mango ownership", "y"),
+            ("Apple ownership", "z"),
+        ]);
+        let titles: Vec<String> = query_articles(&conn, &["ownership"], 5)
+            .into_iter()
+            .map(|s| s.title)
+            .collect();
+        assert_eq!(
+            titles,
+            vec![
+                "Apple ownership".to_string(),
+                "Mango ownership".to_string(),
+                "Zebra ownership".to_string(),
+            ],
+            "equal-score matches must order by title ASC deterministically"
+        );
+    }
+
+    #[test]
+    fn query_pack_db_dedups_repeated_keywords() {
+        // A query word repeated across the question must not double-count in the
+        // coverage ranking. 'Rust Intro' matches only "rust" (title, score 2);
+        // 'Ownership Guide' matches "ownership" (title) and "borrowing" (body)
+        // for score 3. With DISTINCT keywords the guide outranks the intro; if
+        // "rust rust" double-counted, the intro would score 4 and wrongly lead.
+        let tmp = TempDir::new().unwrap();
+        let pack_dir = tmp.path().join("dedup-pack");
+        fs::create_dir_all(&pack_dir).unwrap();
+        fs::write(
+            pack_dir.join("manifest.json"),
+            serde_json::to_string(&serde_json::json!({
+                "name": "dedup-pack",
+                "description": "dedup-pack knowledge pack",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let db_path = pack_dir.join("pack.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE articles (title TEXT, section TEXT, content TEXT);
+             INSERT INTO articles VALUES ('Rust Intro', 'A', 'a short introduction');
+             INSERT INTO articles VALUES ('Ownership Guide', 'B', 'covers borrowing rules');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let (_answer, sources, _confidence) =
+            query_pack_db(&db_path, "rust rust ownership borrowing", 5).unwrap();
+        assert_eq!(
+            sources.first().map(|s| s.title.as_str()),
+            Some("Ownership Guide"),
+            "repeated 'rust' must not double-count and vault the single-keyword \
+             article above the higher-coverage one; got: {:?}",
+            sources.iter().map(|s| &s.title).collect::<Vec<_>>()
         );
     }
 }
