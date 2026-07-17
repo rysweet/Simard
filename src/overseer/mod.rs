@@ -85,6 +85,8 @@ mod tests_memory_recall;
 #[cfg(test)]
 mod tests_root_cause;
 #[cfg(test)]
+mod tests_self_healing;
+#[cfg(test)]
 mod tests_selfmerge_fix;
 #[cfg(test)]
 mod tests_whisper;
