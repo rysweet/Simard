@@ -1,0 +1,37 @@
+sequenceDiagram
+  autonumber
+  participant Daemon as operator_commands_ooda::daemon
+  participant Store as goal_board_store
+  participant Cache as goal_curation cache
+  participant Cycle as ooda_loop::cycle
+  participant Memory as CognitiveMemoryOps
+  participant Brain as ooda_brain reasoners
+  participant Actions as ooda_actions
+  participant Persist as goal_board_store commit
+
+  Daemon->>Store: load(state_root)
+  Store-->>Daemon: PersistentGoalState(board, tracker, cycle_count)
+  Daemon->>Store: filter_tombstoned + heal_stale_no_progress_blocks
+  Daemon->>Cache: overwrite_memory_cache(board)
+  Daemon->>Cycle: run_ooda_cycle(state, memories, config)
+  Cycle->>Memory: intake_memory_operations(cycle objective)
+  Cycle->>Memory: consolidation_intake(session, objective)
+  Cycle->>Cycle: observe(state, memories)
+  Cycle->>Memory: reconcile_board_prospectives(board)
+  Cycle->>Memory: preparation_memory_operations_with_active_slugs_phased
+  Memory-->>Cycle: PreparedContext(facts, triggers, procedures, episodes)
+  Cycle->>Brain: orient_with_brain or orient
+  Brain-->>Cycle: priorities
+  Cycle->>Brain: decide_with_brain or decide
+  Brain-->>Cycle: planned actions
+  Cycle->>Cycle: ensure_goal_coverage(planned_actions, cap)
+  Cycle->>Actions: act(planned_actions, memories, state, cap)
+  Actions-->>Cycle: ActionOutcome[]
+  Cycle->>Memory: execution_memory_operations(outcome.detail)
+  Cycle->>Memory: store_procedure for successful outcomes
+  Cycle->>Memory: reflection_memory_operations(transcript)
+  Cycle->>Memory: consolidate_episodes + prune_expired_sensory
+  Cycle-->>Daemon: CycleReport + mutated OodaState
+  Daemon->>Persist: commit_cycle(state_root, board, tracker, cycle_count, tombstones)
+  Persist-->>Daemon: committed board
+  Daemon->>Cache: overwrite_memory_cache(committed board)

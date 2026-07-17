@@ -1,0 +1,26 @@
+digraph compile_deps_external_dev_build {
+    graph [rankdir=LR, labelloc="t", label="Simard direct dev build feature dependencies", fontsize=20];
+    node [shape=box, style="rounded,filled", fillcolor="#f6ffed", color="#2da44e", fontname="Arial"];
+    edge [color="#586069", fontname="Arial"];
+
+    simard [label="simard"];
+    build_deps [label="build-dependencies"];
+    dev_deps [label="dev-dependencies"];
+    features [label="features"];
+    chrono_build [label="chrono =0.4.44\nbuild timestamp"];
+    assert_cmd [label="assert_cmd =2.2.1"];
+    proptest [label="proptest =1.11.0"];
+    serial_test [label="serial_test =3.4.0"];
+    syn [label="syn =2.0.117\nfull visit"];
+    proc_macro2 [label="proc-macro2 =1.0.106\nspan-locations"];
+    default_feature [label="default\nsignal dashboard_audit"];
+    slow_tests [label="slow-tests\nopt in"];
+    dashboard_audit [label="dashboard-audit\nheadless_chrome regex url"];
+    signal [label="signal\ndefault enabled"];
+
+    simard -> {build_deps dev_deps features};
+    build_deps -> chrono_build;
+    dev_deps -> {assert_cmd proptest serial_test syn proc_macro2};
+    features -> {default_feature slow_tests dashboard_audit signal};
+    default_feature -> {signal dashboard_audit};
+}

@@ -1,0 +1,86 @@
+flowchart LR
+  subgraph Systemd[systemd user unit]
+    U["simard-ooda.service<br/>Type=simple; Restart=always"]
+    E["ExecStart: simard ooda run"]
+    U -->|unit renders| E
+  end
+
+  subgraph Daemon[daemon process]
+    D["simard binary<br/>operator_cli::ooda run"]
+    OODA["OODA loop + scheduler"]
+    Typed["typed OODA actor"]
+    Eng["engineer / goal sessions"]
+    Ov["overseer"]
+    Threads["cognitive threads"]
+    Dash["embedded dashboard task"]
+    Sig["embedded Signal thread"]
+    MemSrv["memory-ipc server thread"]
+  end
+
+  subgraph CLI[spawned CLI tools / child processes]
+    RR["recipe-runner-rs"]
+    Amp["amplihack recipe run"]
+    GH["gh CLI"]
+    Git["git CLI"]
+    Sys["systemctl --user"]
+    Tmux["tmux"]
+    Jctl["journalctl"]
+    Curl["curl"]
+    Cargo["cargo"]
+    Agent["provider agent binary"]
+  end
+
+  subgraph Net[network services / ports]
+    HTTP(["dashboard HTTP/WebSocket<br/>0.0.0.0:8080 default"])
+    Signal(["signal-cli JSON-RPC<br/>127.0.0.1:7583 default"])
+    Loop(["loopback listener<br/>127.0.0.1:0 probes/tests"])
+  end
+
+  subgraph Store[storage / IPC]
+    Sock[("memory IPC socket<br/>&lt;state_root&gt;/memory.sock<br/>or SIMARD_MEMORY_SOCKET")]
+    Lbug[("embedded lbug graph store")]
+    State[("SIMARD_STATE_ROOT<br/>~/.simard/state default")]
+    Key[("~/.simard/.dashkey")]
+    Files[("journal / health / sessions")]
+  end
+
+  E -->|starts| D
+  D --> OODA
+  D -->|spawn task| Dash
+  D -->|spawn thread| Sig
+  D -->|spawn thread| MemSrv
+  D --> Threads
+  D --> Ov
+  OODA --> Typed --> Eng
+
+  Dash -->|axum HTTP + WS| HTTP
+  Dash -->|auth code| Key
+  Dash -->|tier-1 client| Sock
+  Dash --> GH
+  Dash --> Jctl
+  Dash --> Tmux
+
+  Sig -->|newline JSON-RPC over TCP| Signal
+  Signal -->|receive events| Sig
+  Sig -->|meeting memory| Sock
+  Sig -->|agent proxy| Agent
+
+  MemSrv -->|framed JSON over Unix socket| Sock --> Lbug
+  State --> Sock
+  State --> Lbug
+
+  OODA --> Sock
+  Threads --> Sock
+  Ov -->|launch workstreams| Amp --> Agent
+  Eng -->|spawn recipes| RR --> Agent
+  Typed -->|goal-session recipe| RR
+  OODA -->|recipe brains| RR
+  OODA --> Git
+  OODA --> GH
+  Ov --> Git
+  Ov --> GH
+  D --> Sys
+  D --> Cargo
+  D --> Curl
+  D --> Files
+  Ov --> Loop

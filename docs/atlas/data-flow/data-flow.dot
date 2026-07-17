@@ -1,0 +1,126 @@
+digraph SimardDataFlow {
+  rankdir=LR;
+  graph [fontsize=10, fontname="Arial", compound=true];
+  node [shape=box, style="rounded,filled", fillcolor="#f8fbff", fontname="Arial", fontsize=10];
+  edge [fontname="Arial", fontsize=9];
+
+  subgraph cluster_memory_read {
+    label="OODA prepare-context READ path";
+    color="#7aa6c2";
+    active_goals [label="active goals\nOodaState.active_goals"];
+    objective_probe [label="build_objective_probe"];
+    prep_ctx [label="preparation_memory_operations_with_active_slugs_phased"];
+    ranked_facts [label="recall_facts_ranked\nfilter + round-robin"];
+    goal_facts [label="search_facts(goal-store:record)\nlatest by slug"];
+    triggers [label="check_triggers"];
+    procedure_recall [label="tokenized recall_procedure"];
+    episode_recall [label="recall_episodes_ranked"];
+    remote_read [label="RemoteCognitiveMemory\nMemoryRequest"];
+    ipc_dispatch [label="memory_ipc::server dispatch"];
+    lbug_store [label="LibraryCognitiveMemory\nstate_root/cognitive lbug store", fillcolor="#fff6df"];
+    context_summary [label="push_working(context-summary)"];
+    prepared_context [label="PreparedContext"];
+    ooda_prompt [label="OODA prompt/context"];
+    active_goals -> objective_probe -> prep_ctx;
+    prep_ctx -> ranked_facts -> remote_read;
+    prep_ctx -> goal_facts -> remote_read;
+    prep_ctx -> triggers -> remote_read;
+    prep_ctx -> procedure_recall -> remote_read;
+    prep_ctx -> episode_recall -> remote_read;
+    remote_read -> ipc_dispatch -> lbug_store;
+    prep_ctx -> context_summary -> remote_read;
+    prep_ctx -> prepared_context -> ooda_prompt;
+  }
+
+  subgraph cluster_memory_write {
+    label="OODA act WRITE + consolidation path";
+    color="#8fc27a";
+    act_outcomes [label="act outcomes"];
+    execution_memory [label="execution_memory_operations"];
+    sensory [label="record_sensory(pty-output)"];
+    working [label="push_working(execution-output)"];
+    procedure_store [label="compose_procedure_name\nstore_procedure"];
+    reflection [label="reflection_memory_operations"];
+    episode_store [label="store_episode(session-reflection)"];
+    fact_store [label="store_fact w/provenance"];
+    memory_write [label="CognitiveMemoryOps writes"];
+    consolidate [label="consolidate_episodes\nprune_expired_sensory"];
+    act_outcomes -> execution_memory;
+    execution_memory -> sensory -> memory_write;
+    execution_memory -> working -> memory_write;
+    act_outcomes -> procedure_store -> memory_write;
+    act_outcomes -> reflection;
+    reflection -> episode_store -> memory_write;
+    reflection -> fact_store -> memory_write;
+    memory_write -> ipc_dispatch;
+    memory_write -> lbug_store;
+    lbug_store -> consolidate;
+  }
+
+  subgraph cluster_goals {
+    label="Goal lifecycle and storage";
+    color="#c29a7a";
+    goal_mutation [label="operator/meeting/OODA mutation"];
+    store_load [label="goal_board_store::load"];
+    goal_json [label="<state_root>/state/goal_board.json\nauthoritative", fillcolor="#fff6df"];
+    heal_filter [label="filter_tombstoned\nheal stale no-progress"];
+    ooda_board [label="OodaState.active_goals"];
+    cache_sync [label="overwrite_memory_cache"];
+    snapshot_cache [label="goal-board:snapshot fact\nderived cache", fillcolor="#fff6df"];
+    commit_cycle [label="goal_board_store::commit_cycle"];
+    reconcile [label="reconcile + tombstones\nno-progress tracker"];
+    legacy_readers [label="legacy/dashboard/prepare readers"];
+    goal_mutation -> store_load -> goal_json -> heal_filter -> ooda_board;
+    ooda_board -> cache_sync -> snapshot_cache -> legacy_readers;
+    ooda_board -> commit_cycle -> reconcile -> goal_json;
+  }
+
+  subgraph cluster_engineer {
+    label="Engineer-loop goal to PR path";
+    color="#b78ad3";
+    planned_spawn [label="PlannedAction spawn_engineer"];
+    dispatch_spawn [label="dispatch_spawn_engineer"];
+    repo_resolve [label="resolve target repo"];
+    admission [label="overlap/resource admission"];
+    worktree [label="EngineerWorktree::allocate"];
+    subordinate [label="spawn_subordinate"];
+    child [label="tmux/direct child\nsimard engineer run single-process"];
+    agent_prompt [label="spawn_agent_for_goal\nbuild_agent_prompt"];
+    amplihack [label="amplihack copilot/RustyClawd"];
+    pr [label="PR via engineer tools"];
+    merge [label="merge authority/operator"];
+    planned_spawn -> dispatch_spawn -> repo_resolve -> admission -> worktree -> subordinate -> child -> agent_prompt -> amplihack -> pr -> merge;
+  }
+
+  subgraph cluster_signal {
+    label="Signal message in/out path";
+    color="#d3c36b";
+    signal_cli [label="signal-cli JSON-RPC\n127.0.0.1:7583"];
+    json_recv [label="JsonRpcTransport recv_line"];
+    parse [label="parse_incoming"];
+    recv_gate [label="SignalConversation::recv\nself-echo/sync/allowlist/gate"];
+    meeting_turn [label="Inbound turn"];
+    session_index [label="operators.json\noperator -> session"];
+    backend [label="MeetingBackend"];
+    session_file [label="signal_sessions/<session_id>.json", fillcolor="#fff6df"];
+    send [label="SignalConversation::send/reply"];
+    json_send [label="JsonRpcTransport send_line"];
+    signal_cli -> json_recv -> parse -> recv_gate -> meeting_turn -> session_index -> backend -> session_file;
+    backend -> send -> json_send -> signal_cli;
+  }
+
+  subgraph cluster_deploy {
+    label="Merged PR self-deploy path";
+    color="#78b7ac";
+    target_commit [label="target merged commit SHA"];
+    source_prep [label="GitSourcePreparer\nfetch + detached checkout"];
+    candidate [label="build_self_deploy_candidate"];
+    gate_backup [label="self-test + baseline + backup"];
+    drain_reap [label="drain engineers + reap orphans"];
+    swap_restart [label="atomic swap + restart"];
+    health [label="health probe"];
+    rollback [label="rollback on unhealthy"];
+    merge -> target_commit -> source_prep -> candidate -> gate_backup -> drain_reap -> swap_restart -> health;
+    health -> rollback [label="if unhealthy"];
+  }
+}
