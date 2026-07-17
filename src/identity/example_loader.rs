@@ -20,14 +20,14 @@ use crate::error::{SimardError, SimardResult};
 pub const DEFAULT_EXAMPLE_IDENTITIES_DIR: &str = "examples/identities";
 
 /// Validate `name` as a single, safe path segment BEFORE any filesystem
-/// access. Mirrors the identity-name rule used by the file loader: non-empty,
-/// ASCII, and only alphanumeric characters or hyphens. This rejects `..`,
+/// access. Mirrors the identity-name rule used by the file loader: non-empty
+/// and only ASCII alphanumeric characters or hyphens. This rejects `..`,
 /// `a/b`, `/etc/passwd`, and empty names, so `name` can never traverse out of
 /// `base_dir`.
 fn validate_example_name(base_dir: &Path, name: &str) -> SimardResult<()> {
-    let is_valid = !name.is_empty()
-        && name.is_ascii()
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    // Single pass: `is_ascii_alphanumeric()` and `== '-'` are both ASCII-only,
+    // so this predicate already implies `name.is_ascii()` — no separate scan.
+    let is_valid = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
     if is_valid {
         return Ok(());
     }
@@ -211,7 +211,7 @@ path = "prompts/gastronome_system.md"
         let base = TempDir::new().unwrap();
         for bad in ["../evil", "..", "a/b", "/etc/passwd", ""] {
             let err = load_example_identity(base.path(), bad, &test_request("x"))
-                .unwrap_err_or_else_panic(bad);
+                .expect_err(&format!("traversal/invalid name {bad:?} must be rejected"));
             assert!(
                 matches!(err, SimardError::IdentityTomlParseError { .. }),
                 "traversal/invalid name {bad:?} must be rejected as IdentityTomlParseError, got: {err:?}"
@@ -262,18 +262,5 @@ path = "../../secret.md"
             5,
             "cartographer ships 5 phase prompts (system + explore + visualize + narrative + deliver)"
         );
-    }
-
-    // ── Small helper: turn a Result into its Err, panicking with context ─
-    trait UnwrapErrOrPanic<T> {
-        fn unwrap_err_or_else_panic(self, ctx: &str) -> SimardError;
-    }
-    impl UnwrapErrOrPanic<IdentityManifest> for SimardResult<IdentityManifest> {
-        fn unwrap_err_or_else_panic(self, ctx: &str) -> SimardError {
-            match self {
-                Ok(_) => panic!("expected error for input {ctx:?} but got Ok"),
-                Err(e) => e,
-            }
-        }
     }
 }

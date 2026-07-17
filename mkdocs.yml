@@ -286,6 +286,7 @@ nav:
     - Dashboard Memory Tab: reference/dashboard-memory-tab.md
     - Dashboard Memory Graph Fail-Loud: reference/dashboard-memory-graph-fail-loud.md
     - Dashboard Memory Last-Hour Count: reference/dashboard-memory-recent-last-hour-count.md
+    - Dashboard Memory Growth Rate Window: reference/dashboard-memory-growth-rate-window.md
     - Dashboard Memory Records Count: reference/dashboard-memory-records-count.md
     - Journal API: reference/journal-api.md
     - Journal Narrative Result Channel: reference/journal-narrative-result-channel.md

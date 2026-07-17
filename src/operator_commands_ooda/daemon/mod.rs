@@ -28,6 +28,9 @@ mod brains;
 mod config;
 pub use config::DaemonDashboardConfig;
 
+mod signal_embed;
+use signal_embed::spawn_embedded_signal_channel;
+
 /// Seed the durable, brain-relative OODA cycle counter for a starting daemon
 /// (issue #1).
 ///
@@ -630,6 +633,17 @@ pub fn run_ooda_daemon(
             "[simard] OODA daemon: dashboard disabled (use --no-dashboard to suppress)",
         );
     }
+    // -----------------------------------------------------------------------
+
+    // --- embedded Signal operator channel ----------------------------------
+    // Fold the Signal channel into THIS daemon instead of a separate
+    // `simard-signal.service` process (converge-to-single-daemon). It runs on a
+    // dedicated background thread with a supervised reconnect-with-backoff loop,
+    // panic-isolated so it can never crash or stall the authoritative OODA
+    // cycle. DEFAULT-ON (opt-out via SIMARD_SIGNAL_ENABLED); dormant until a
+    // usable `[signal]` config is present. The guard is kept alive for the
+    // daemon's lifetime; the thread reads the shared `shutdown` flag.
+    let _embedded_signal = spawn_embedded_signal_channel(&state_root, Arc::clone(&shutdown));
     // -----------------------------------------------------------------------
 
     // Capture the binary mtime at startup so we can detect in-place upgrades.
@@ -1498,6 +1512,18 @@ pub fn run_ooda_daemon(
                             g.supersedes_edges as i64,
                             &[(names::ATTR_TYPE, "SUPERSEDES")],
                         );
+                        // Emit the durable graph-memory grounding-coverage
+                        // self-metric from the SAME snapshot (no extra store
+                        // read): fraction of semantic facts connected into the
+                        // DERIVES_FROM provenance graph. Turns a grounding
+                        // regression — facts entering semantic memory without a
+                        // provenance edge — into a comparable, regressable
+                        // `metrics.jsonl` series instead of only raw edge-count
+                        // gauges. Best-effort; no-op on an empty store.
+                        crate::cognitive_memory::metrics::record_provenance_coverage_metric(
+                            g.facts_with_provenance,
+                            g.facts_total,
+                        );
                     }
                     // Flush the metrics snapshot with the per-cycle enrichment
                     // rollup section attached (issue #2942) so the dashboard's
@@ -1620,7 +1646,7 @@ pub fn run_ooda_daemon(
                                  held={} goals_unblocked={} goals_escalated={} \
                                  memory_recalls={} memory_writes={} memory_errors={} \
                                  workstream_gaps_detected={} workstream_gaps_suppressed={} \
-                                 errors={} panicked={} ({}ms)",
+                                 errors={} panicked={} cycle_failed={} ({}ms)",
                                 report.problems,
                                 report.issues_filed,
                                 report.recipes_launched,
@@ -1637,6 +1663,7 @@ pub fn run_ooda_daemon(
                                 report.workstream_gaps_suppressed,
                                 report.errors,
                                 report.panicked,
+                                report.cycle_failed,
                                 report.duration_ms,
                             ),
                         );
@@ -1653,7 +1680,7 @@ pub fn run_ooda_daemon(
                         feed_threads.push(
                             crate::overseer::activity::OverseerThreadStatus::overseer_meta(
                                 feed_cadence_secs,
-                                !report.panicked && report.errors == 0,
+                                !report.panicked && !report.cycle_failed,
                             ),
                         );
                         for h in &thread_healths {

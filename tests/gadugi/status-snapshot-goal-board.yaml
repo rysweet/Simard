@@ -1,0 +1,53 @@
+name: "Status Snapshot Goal Board: surface the live board, not 'deferred' (issue #4196)"
+description: "Outside-in operator check that the unified Status snapshot (dashboard Overview 'System Status' GET /api/status/snapshot, the `simard status` CLI, and the TUI Status tab) surfaces the LIVE goal board instead of the retired `availability: unavailable / note: 'goal board read deferred'` placeholder. The snapshot's goal-board leg was hard-coded absent in src/status/provider.rs even though the durable `goal-board:snapshot` reader (open_reader_client + load_goal_board) already backs /api/goals and the TUI, so an operator reading the single consolidated snapshot could never see active/blocked(+why)/not-started goal state. Boots the real dashboard binary, authenticates with the dashkey, reads /api/status/snapshot and /api/goals, and asserts the snapshot goal board is ok/live with the mapped GoalItem shape (short_id, p{priority}, status, summary), stays in parity with the live /api/goals board (matching active goals; blocked goals surface their blocked status), and that the terminal `rendered` block contains a GOAL BOARD section and no longer carries the deferred note."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 0
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Status snapshot surfaces the live goal board (ok/live, not deferred)"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/status-snapshot-goal-board.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "dashboard"
+    - "status"
+    - "goals"
+    - "self-understanding"
+    - "self-serve-dashboard-improvement"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

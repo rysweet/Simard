@@ -109,4 +109,23 @@ printf '%s\n' "$HELP_OUT" | grep -F "root-cause" >/dev/null
 printf '%s\n' "$HELP_OUT" | grep -F "green-evidence comment" >/dev/null
 printf '%s\n' "$HELP_OUT" | grep -F "still-broken" >/dev/null
 
+# ── 7. --exit-zero suppresses the red-fleet non-zero exit (scheduled sweep) ──
+# The unattended scheduled runner (.github/workflows/ci-health.yml) reports a
+# broken fleet via the filed tracking issue, not a red run; letting the run go
+# red would make Simard's own ci-health workflow a fresh actionable failure the
+# next sweep re-detects. So `--exit-zero` on the SAME failing fixture still
+# prints the FAILING verdict but exits 0.
+set +e
+EXITZERO_OUT="$(run_ci_health --exit-zero --from-json "$FAILING_FIXTURE")"
+EXITZERO_CODE=$?
+set -e
+printf '%s\n' "$EXITZERO_OUT"
+printf '%s\n' "$EXITZERO_OUT" | grep -F "CI-HEALTH: FAILING" >/dev/null
+if [ "$EXITZERO_CODE" -ne 0 ]; then
+  echo "FAIL: --exit-zero returned non-zero on a red fleet (verdict must be suppressed)" >&2
+  exit 1
+fi
+# The flag is advertised in help as the scheduled-sweep escape hatch.
+printf '%s\n' "$HELP_OUT" | grep -F -- "--exit-zero" >/dev/null
+
 echo "ci-health-sweep: PASS"

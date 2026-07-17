@@ -163,7 +163,16 @@ prompt + recipe data package that turns a dataset and a question into a served
 interactive dashboard with a written narrative. It exists to prove the pattern
 end-to-end — defined entirely as data, loaded with zero `src/` changes.
 
-[`bursar/`](./bursar/) is a second example: an investment-portfolio **research &
+[`gastronome/`](./gastronome/) is a second worked example in the same shape: a
+culinary menu- and event-design identity that turns a menu brief and its
+constraints (headcount, dietary needs, budget, service time) into a costed,
+nutrition-analyzed, service-scaled menu with a prep schedule. Its four-stage
+recipe (compose → nutrition & cost → scale → schedule) shows how a data-only
+identity drives real domain rigor (a nutrition table, a costing roll-up, yield
+math, backward-from-service scheduling) entirely from prompts and a recipe, with
+zero `src/` changes.
+
+[`bursar/`](./bursar/) is a third example: an investment-portfolio **research &
 advisory** identity (research/advisory only — it **never** executes trades,
 places orders, or moves money). It takes a portfolio and a mandate through a
 five-stage loop — asset allocation → backtesting → risk analysis → rebalancing
@@ -171,3 +180,4 @@ five-stage loop — asset allocation → backtesting → risk analysis → rebal
 from its recipe, again with zero `src/` changes. A rebalancing "plan" is a
 document of proposed trades for a human to review, not an instruction the
 identity carries out.
+

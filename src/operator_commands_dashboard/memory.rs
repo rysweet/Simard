@@ -18,6 +18,13 @@ const SNAPSHOT_MIN_INTERVAL_SECS: i64 = 300;
 /// (#2679). A snapshot whose `epoch_secs` is at-or-before `now - this` is the
 /// one-hour-ago baseline the live long-term total is diffed against.
 const TRAILING_WINDOW_SECS: f64 = 3600.0;
+/// Trailing window, in seconds, over which the "mem/hr" growth rate is measured
+/// (#4107). The rate is a *recent-activity* signal, so it is anchored at the
+/// newest sample and looks back at most this far — 24 hours. Older snapshots in
+/// the retained ring buffer (which spans weeks, including multi-day
+/// daemon-down gaps) are ignored so an active hour of memory formation is not
+/// diluted to ~0/hr by a multi-week denominator.
+const GROWTH_RATE_WINDOW_SECS: f64 = 86_400.0;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct MemorySnapshot {
@@ -94,40 +101,73 @@ pub(crate) fn trend_label(deltas: &MemoryDeltas) -> &'static str {
     }
 }
 
-/// Compute a per-hour growth rate from a slice of snapshots using the oldest
-/// and newest entries within the window.
+/// A zero growth-rate payload — every rail reports `0.0/hr`. Returned when
+/// there is no usable pair of samples inside the trailing window (fewer than
+/// two snapshots, no prior sample within the window, or a degenerate zero-span
+/// pair), so the served rate is an honest "insufficient recent data" rather
+/// than a distorted whole-history figure.
+fn zero_rate() -> Value {
+    json!({
+        "total": 0.0,
+        "long_term_total": 0.0,
+        "episodic": 0.0,
+        "semantic": 0.0,
+        "procedural": 0.0,
+        "prospective": 0.0,
+    })
+}
+
+/// Compute a per-hour memory growth rate over a bounded trailing window (#4107).
+///
+/// The rate is a *recent-activity* signal. It is anchored at the **newest**
+/// snapshot and diffs against the **oldest snapshot still inside the trailing
+/// [`GROWTH_RATE_WINDOW_SECS`] window** (`epoch_secs >= newest - window`, edge
+/// inclusive). Snapshots older than the window — which in the retained
+/// ring-buffer can be weeks old and separated by multi-day daemon-down gaps —
+/// are ignored so they cannot dilute the denominator.
+///
+/// Returns [`zero_rate`] when there is no usable in-window pair:
+///   * fewer than two snapshots total;
+///   * only the newest sample lies inside the window (fresh daemon after a long
+///     gap) — an honest "insufficient recent data" rather than a distorted
+///     whole-span figure;
+///   * the in-window baseline and newest share an epoch (zero elapsed span).
+///
+/// This mirrors the bounded-window discipline of [`select_last_hour_baseline`]
+/// (#2679); the previous implementation used `snapshots[0]` (oldest *retained*)
+/// and divided by the full multi-week span, so the advertised "per hour" figure
+/// was meaningless.
 pub(crate) fn rate_per_hour(snapshots: &[MemorySnapshot]) -> Value {
     if snapshots.len() < 2 {
-        return json!({
-            "total": 0.0,
-            "long_term_total": 0.0,
-            "episodic": 0.0,
-            "semantic": 0.0,
-            "procedural": 0.0,
-            "prospective": 0.0,
-        });
+        return zero_rate();
     }
-    let oldest = &snapshots[0];
     let newest = &snapshots[snapshots.len() - 1];
-    let elapsed_hours = (newest.epoch_secs - oldest.epoch_secs) / 3600.0;
+    let window_start = newest.epoch_secs - GROWTH_RATE_WINDOW_SECS;
+
+    // Oldest snapshot at-or-after the window edge, excluding the newest itself.
+    // The buffer is appended in time order, so the first in-window entry is the
+    // oldest one inside the window.
+    let baseline = snapshots[..snapshots.len() - 1]
+        .iter()
+        .find(|s| s.epoch_secs >= window_start);
+
+    let baseline = match baseline {
+        Some(b) => b,
+        None => return zero_rate(),
+    };
+
+    let elapsed_hours = (newest.epoch_secs - baseline.epoch_secs) / 3600.0;
     if elapsed_hours < 0.001 {
-        return json!({
-            "total": 0.0,
-            "long_term_total": 0.0,
-            "episodic": 0.0,
-            "semantic": 0.0,
-            "procedural": 0.0,
-            "prospective": 0.0,
-        });
+        return zero_rate();
     }
     let rate = |newer: u64, older: u64| -> f64 { (newer as f64 - older as f64) / elapsed_hours };
     json!({
-        "total": rate(newest.total, oldest.total),
-        "long_term_total": rate(newest.long_term_total, oldest.long_term_total),
-        "episodic": rate(newest.episodic, oldest.episodic),
-        "semantic": rate(newest.semantic, oldest.semantic),
-        "procedural": rate(newest.procedural, oldest.procedural),
-        "prospective": rate(newest.prospective, oldest.prospective),
+        "total": rate(newest.total, baseline.total),
+        "long_term_total": rate(newest.long_term_total, baseline.long_term_total),
+        "episodic": rate(newest.episodic, baseline.episodic),
+        "semantic": rate(newest.semantic, baseline.semantic),
+        "procedural": rate(newest.procedural, baseline.procedural),
+        "prospective": rate(newest.prospective, baseline.prospective),
     })
 }
 
@@ -219,6 +259,7 @@ pub(crate) async fn memory_history() -> Json<Value> {
         "snapshots": history,
         "deltas": deltas,
         "rate_per_hour": rate,
+        "rate_window_secs": GROWTH_RATE_WINDOW_SECS,
         "trend": trend,
         "snapshot_count": history.len(),
         "sample_interval_seconds": SNAPSHOT_MIN_INTERVAL_SECS,
@@ -990,6 +1031,94 @@ mod tests_memory_history {
         }];
         let r = rate_per_hour(&single);
         assert_eq!(r["total"], 0.0);
+    }
+
+    /// Build a snapshot at `epoch_secs` with every long-term rail equal to
+    /// `long_term` (split across episodic) so the rate math is easy to assert.
+    fn snap_at(epoch_secs: f64, long_term: u64) -> MemorySnapshot {
+        MemorySnapshot {
+            timestamp: "".into(),
+            epoch_secs,
+            sensory: 0,
+            working: 0,
+            episodic: long_term,
+            semantic: 0,
+            procedural: 0,
+            prospective: 0,
+            total: long_term,
+            long_term_total: long_term,
+        }
+    }
+
+    /// #4107: an ancient baseline outside the trailing 24 h window must NOT be
+    /// used. The rate is anchored at the newest sample and diffs against the
+    /// oldest sample *inside* the window, so a multi-week-old first snapshot
+    /// cannot dilute the denominator to a meaningless near-zero figure.
+    #[test]
+    fn rate_per_hour_ignores_ancient_baseline_outside_window() {
+        let day = 86_400.0;
+        // Newest at t=40 days. An ancient sample 39 days ago (outside the 24 h
+        // window) plus a fresh one 1 h before newest (inside the window).
+        let newest_t = 40.0 * day;
+        let snaps = vec![
+            snap_at(newest_t - 39.0 * day, 100), // ancient, out of window
+            snap_at(newest_t - 3600.0, 200),     // 1 h ago, in window
+            snap_at(newest_t, 260),              // newest
+        ];
+        let r = rate_per_hour(&snaps);
+        // Windowed: (260 - 200) / 1 h = 60/hr — NOT the whole-history
+        // (260 - 100) / (~40 days) ≈ 0.17/hr the naive calc would report.
+        assert_eq!(r["long_term_total"], 60.0);
+        assert_eq!(r["episodic"], 60.0);
+    }
+
+    /// #4107: when only the newest sample lies inside the trailing window
+    /// (a fresh daemon after a long down-gap), report 0.0 — an honest
+    /// "insufficient recent data" rather than a distorted whole-span figure.
+    #[test]
+    fn rate_per_hour_no_recent_sample_reports_zero() {
+        let day = 86_400.0;
+        let newest_t = 10.0 * day;
+        let snaps = vec![
+            snap_at(newest_t - 8.0 * day, 100), // way outside the 24 h window
+            snap_at(newest_t, 500),             // newest — the only in-window sample
+        ];
+        let r = rate_per_hour(&snaps);
+        assert_eq!(r["long_term_total"], 0.0, "no in-window baseline → 0.0");
+        assert_eq!(r["total"], 0.0);
+    }
+
+    /// #4107: the trailing-window edge is inclusive. A baseline exactly at
+    /// `newest - GROWTH_RATE_WINDOW_SECS` is used (not dropped by an off-by-one).
+    #[test]
+    fn rate_per_hour_window_edge_is_inclusive() {
+        let newest_t = 1_000_000.0;
+        let snaps = vec![
+            // Exactly 24 h before newest — must be included.
+            snap_at(newest_t - GROWTH_RATE_WINDOW_SECS, 100),
+            snap_at(newest_t, 124),
+        ];
+        let r = rate_per_hour(&snaps);
+        // (124 - 100) / 24 h = 1.0/hr.
+        assert_eq!(r["long_term_total"], 1.0);
+    }
+
+    /// #4107: a sample just *outside* the window edge is excluded, and the
+    /// oldest sample still *inside* the window becomes the baseline.
+    #[test]
+    fn rate_per_hour_selects_oldest_in_window_baseline() {
+        let newest_t = 1_000_000.0;
+        let snaps = vec![
+            // 1 second past the 24 h edge — excluded.
+            snap_at(newest_t - GROWTH_RATE_WINDOW_SECS - 1.0, 0),
+            // Oldest inside the window (12 h ago) — the chosen baseline.
+            snap_at(newest_t - 12.0 * 3600.0, 100),
+            snap_at(newest_t - 3600.0, 130),
+            snap_at(newest_t, 160),
+        ];
+        let r = rate_per_hour(&snaps);
+        // (160 - 100) / 12 h = 5.0/hr, using the oldest in-window sample.
+        assert_eq!(r["long_term_total"], 5.0);
     }
 
     #[test]
