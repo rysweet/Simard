@@ -56,17 +56,30 @@ pub enum Intervention {
     /// advisory whisper steering Simard to carve a bounded shippable sub-goal.
     /// Capability: `GoalCurator::unblock` (+ optional `whisper_ops::WhisperSink`).
     UnblockGoal { goal_id: String, reason: String },
-    /// ESCALATE a genuinely-blocked goal carrying a "needs human review" marker to
-    /// the operator (email + Signal) with the goal id + reason + the root-cause
-    /// **WHY**, so the marker AND its analysis actually reach a human — closing the
-    /// silent-failure gap.
-    /// Capability: `notify::OperatorNotifier`.
+    /// ESCALATE a genuinely-blocked goal carrying a "needs human review" marker.
+    /// This is a THIN agentic trigger (issue #4276, guideline G3): the Overseer's
+    /// `act` hands the escalation to the agentic triage recipe
+    /// (`prompt_assets/simard/overseer/escalation_triage.md`) — which owns the
+    /// escalate-vs-course-correct DECISION — and, in parallel, notifies the
+    /// operator on both channels (email + Signal) with a PLAIN-ENGLISH `problem`
+    /// and recommended `next_step` (never the raw machine marker) plus an optional
+    /// `link` to the tracking issue that already holds the detail.
+    /// Capability: `RecipeLauncher::launch` + `notify::OperatorNotifier`.
     EscalateBlockedGoal {
         goal_id: String,
         reason: String,
-        /// The root-cause analysis (one-line WHY) carried into the operator
-        /// notification so the human sees *why*, not just the bare symptom.
+        /// The root-cause analysis (one-line WHY) carried for telemetry / the
+        /// triage recipe's structured context — NOT the operator-facing text.
         why: String,
+        /// Plain-English statement of WHAT is wrong (no `UNCLEAR-CRITERIA
+        /// evidence=[…]` / `OODA-SAFEGUARD` jargon) — the operator-facing problem.
+        problem: String,
+        /// Concrete recommended NEXT STEP the operator (or the triage recipe) can
+        /// act on, in plain English.
+        next_step: String,
+        /// Optional canonical link to the tracking issue that already holds the
+        /// full detail. Fail-open: `None` never blocks the escalation.
+        link: Option<String>,
     },
     /// FLAG the backlog-coverage gaps the recurring gap-scan found — important
     /// work with no active workstream (uncovered high-priority goals, high-signal

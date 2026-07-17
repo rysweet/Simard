@@ -73,6 +73,8 @@ pub mod wiring;
 #[cfg(test)]
 mod tests_diagnosis;
 #[cfg(test)]
+mod tests_escalation_triage;
+#[cfg(test)]
 mod tests_gap_scan;
 #[cfg(test)]
 mod tests_goal_health;
@@ -1096,7 +1098,17 @@ impl Overseer {
                 goal_id,
                 reason,
                 why,
-            } => self.act_escalate_blocked_goal(goal_id, reason, why),
+                problem,
+                next_step,
+                link,
+            } => self.act_escalate_blocked_goal(
+                goal_id,
+                reason,
+                why,
+                problem,
+                next_step,
+                link.as_deref(),
+            ),
             Intervention::FlagWorkstreamGaps { gaps } => self.act_flag_workstream_gaps(gaps),
         }
     }
@@ -1232,15 +1244,31 @@ impl Overseer {
         }
     }
 
-    /// ESCALATE a genuinely-blocked "needs human review" goal to the operator on
-    /// BOTH channels (email + Signal) with the goal id + reason, so the marker
-    /// actually reaches a human. Deduped so it never re-fires in a loop; fails
-    /// CLOSED without a DISTINCT steward identity (anti-recursion).
+    /// ESCALATE a genuinely-blocked "needs human review" goal — as a THIN AGENTIC
+    /// TRIGGER (issue #4276, guideline G3). Mirrors the StepFailure →
+    /// `self_diagnose.md` seam: rather than a terminal notify-and-count, the
+    /// Overseer hands the escalation to the agentic triage recipe
+    /// (`escalation_triage.md`) through the SAME `RecipeLauncher` seam, and the
+    /// recipe owns the escalate-vs-course-correct DECISION (rewrite an unmeasurable
+    /// done-gate, complete a goal already delivered by a merged PR, or ask the
+    /// operator ONE specific question — emitting a plain-English Signal per step).
+    ///
+    /// The Rust part stays thin: it (1) fails CLOSED without a DISTINCT steward
+    /// identity (anti-recursion), (2) dedups via the SAME in-flight investigation
+    /// set the recipe-launch path uses (a re-escalation while triage is still in
+    /// flight launches nothing), (3) launches the triage recipe and consumes ONLY
+    /// the `WorkstreamHandle` (never brittle-parses recipe stdout), and (4) sends
+    /// the operator a PLAIN-ENGLISH notification (problem + next step + tracking
+    /// link — never the raw marker) on both channels, fail-open on the notifier.
+    #[allow(clippy::too_many_arguments)]
     fn act_escalate_blocked_goal(
         &mut self,
         goal_id: &str,
         reason: &str,
         why: &str,
+        problem: &str,
+        next_step: &str,
+        link: Option<&str>,
     ) -> Result<ActOutcome, OverseerError> {
         if !self.recursion.is_configured() {
             return Err(OverseerError::Recursion {
@@ -1249,37 +1277,76 @@ impl Overseer {
                 ),
             });
         }
-        let signature = format!("escalate:{goal_id}");
-        let now = now_secs();
-        match self.blocked_goal_gate.peek(&signature, now) {
-            WhisperDecision::Deliver => {
-                let notifier = self.notifier.as_ref().ok_or(OverseerError::Capability {
-                    what: "notify.operator",
-                    detail: "no operator notifier configured".to_string(),
-                })?;
-                // Carry the root-cause WHY into the operator notification so a
-                // human receives the analysis, not just the bare symptom.
-                let notification =
-                    OperatorNotification::goal_blocked_with_why(goal_id, reason, why);
-                let report = notifier.notify(&notification);
-                // Consume the dedup slot only after a dispatch attempt (the
-                // notifier itself never drops — it queues/logs on failure).
-                self.blocked_goal_gate.commit(&signature, now);
-                tracing::info!(
-                    target: "overseer::goal_health",
-                    goal_id,
-                    reason,
-                    action = "escalate",
-                    dispatched = report.dispatched(),
-                    all_sent = report.all_sent(),
-                    "overseer escalated a genuinely-blocked needs-human-review goal to the operator"
-                );
-                Ok(ActOutcome::GoalEscalated {
-                    goal_id: goal_id.to_string(),
-                })
-            }
-            other => Ok(Self::goal_health_suppressed("escalate", goal_id, other)),
+
+        // Build the agentic triage brief. The task description carries the
+        // structured context (goal id + plain-English problem + next step + the
+        // internal WHY) and points the agent at the recipe asset — exactly like
+        // the self_diagnose seam. `recipe_dedup_key` derives a stable per-goal key
+        // from this text, so a re-escalation of the same goal reuses the same slot.
+        let brief = RecipeBrief {
+            task_description: format!(
+                "Triage and course-correct a blocked goal before escalating to a human. \
+                 Follow prompt_assets/simard/overseer/escalation_triage.md. \
+                 Goal id: {goal_id}. Problem (plain English): {problem} \
+                 Recommended next step: {next_step} \
+                 Internal diagnostic WHY (translate to plain English, do not surface \
+                 raw): {why}. Reason marker (translate, do not surface raw): {reason}. \
+                 Decide root-cause + course-correction (rewrite an unmeasurable \
+                 done-gate to be machine-checkable, complete a goal already delivered \
+                 by a merged PR, or ask the operator ONE specific plain-English \
+                 question), and send a jargon-free Signal message per step.",
+            ),
+            target_repo: "rysweet/Simard".to_string(),
+            sequence_group: None,
+        };
+        let key = recipe_dedup_key(&brief);
+
+        // In-flight dedup: never launch a SECOND triage for a goal whose triage is
+        // still running (the same mechanism the recipe-launch path uses). A
+        // flapping goal cannot spawn triage every cycle.
+        if self.inflight_investigations.contains_key(&key) {
+            tracing::debug!(
+                target: "overseer::goal_health",
+                goal_id,
+                action = "escalate",
+                reason = "duplicate",
+                "overseer suppressed a blocked-goal escalation (triage already in flight)"
+            );
+            return Ok(ActOutcome::GoalHealthSuppressed {
+                reason: "duplicate",
+            });
         }
+
+        // Hand off to the agentic triage recipe and hold ONLY the handle.
+        let handle = self.caps.recipes.launch(&brief)?;
+        self.inflight_investigations.insert(key, handle.clone());
+
+        // Notify the operator in PLAIN ENGLISH (fail-open: only when a notifier is
+        // configured — a missing notifier never blocks the agentic triage launch).
+        if let Some(notifier) = self.notifier.as_ref() {
+            let notification =
+                OperatorNotification::goal_blocked_triaged(goal_id, problem, next_step, link);
+            let report = notifier.notify(&notification);
+            tracing::info!(
+                target: "overseer::goal_health",
+                goal_id,
+                action = "escalate",
+                triage_workstream = %handle.id,
+                dispatched = report.dispatched(),
+                all_sent = report.all_sent(),
+                "overseer launched agentic escalation-triage and notified the operator in plain English"
+            );
+        } else {
+            tracing::info!(
+                target: "overseer::goal_health",
+                goal_id,
+                action = "escalate",
+                triage_workstream = %handle.id,
+                "overseer launched agentic escalation-triage (no operator notifier configured)"
+            );
+        }
+
+        Ok(ActOutcome::Launched(handle))
     }
 
     /// Map a non-`Deliver` dedup-gate decision for a goal-board health action
@@ -2249,26 +2316,76 @@ fn decide_blocked_goal(
     recurrence: u32,
     why: String,
 ) -> Intervention {
-    // Recurring re-park: notify once through the existing per-goal escalation
-    // gate. Do not turn a goal-board observation into another GitHub issue.
-    if recurrence >= RECURRENCE_ESCALATION_THRESHOLD {
-        return Intervention::EscalateBlockedGoal {
-            goal_id,
-            reason,
-            why,
-        };
-    }
-    if perpetual && is_no_progress_marker(&reason) {
+    // A false-parked perpetual goal (a bare no-progress safeguard block) is still
+    // SELF-HEALED locally — auto-unblocked + reactivated — because that is a
+    // deterministic root-cause fix for a false park, not a judgement call that
+    // needs agentic triage. Everything that genuinely needs a human decision is
+    // handed to the agentic triage recipe (see below), so this stays a narrow,
+    // safe self-heal rail rather than a competing escalate-vs-course-correct
+    // heuristic.
+    if perpetual && is_no_progress_marker(&reason) && recurrence < RECURRENCE_ESCALATION_THRESHOLD {
         return Intervention::UnblockGoal { goal_id, reason };
     }
-    if needs_review {
+
+    // Otherwise route to the AGENTIC escalation-triage recipe (issue #4276). The
+    // recurrence count and `needs_review` flag are now only TRIGGERS that decide
+    // whether triage runs — the escalate-vs-course-correct DECISION itself is
+    // owned by the recipe, never by this bare integer threshold. A recurring
+    // re-park OR a needs-review block both hand off to triage.
+    if recurrence >= RECURRENCE_ESCALATION_THRESHOLD || needs_review {
+        let (problem, next_step) = plain_english_blocked(&goal_id, &reason, recurrence);
         return Intervention::EscalateBlockedGoal {
             goal_id,
             reason,
             why,
+            problem,
+            next_step,
+            // Fail-open (issue #4276, A1): the tracking issue that holds the full
+            // detail is filed in the goal-curation path and is not reachable at
+            // this seam, so no link is threaded here — the operator still gets the
+            // plain-English problem + next step, and the triage recipe surfaces the
+            // detail. Never block the escalation on link presence.
+            link: None,
         };
     }
     Intervention::Report
+}
+
+/// Translate a blocked-goal's internal marker + diagnostic WHY into a
+/// PLAIN-ENGLISH `(problem, next_step)` for the operator (issue #4276). The raw
+/// marker (`🔒 [OODA-SAFEGUARD] … why=UNCLEAR-CRITERIA evidence=[…]`) and the
+/// one-line WHY are internal jargon; this is the human-facing seed text the
+/// agentic triage recipe further refines. It is deliberately free of every
+/// machine token so the operator never sees `OODA-SAFEGUARD` / `UNCLEAR-CRITERIA`
+/// / `evidence=[` / `why=` / the 🔒 lock marker.
+fn plain_english_blocked(goal_id: &str, reason: &str, recurrence: u32) -> (String, String) {
+    let no_progress = is_no_progress_marker(reason);
+    let recurring = recurrence >= RECURRENCE_ESCALATION_THRESHOLD;
+    let problem = if no_progress {
+        format!(
+            "Goal \"{goal_id}\" is stuck: Simard can't automatically tell when it is \
+             finished, so it keeps re-investigating without shipping anything and is \
+             making no real progress."
+        )
+    } else if recurring {
+        format!(
+            "Goal \"{goal_id}\" keeps getting blocked for the same reason over and over, \
+             so Simard is unable to move it forward on its own."
+        )
+    } else {
+        format!("Goal \"{goal_id}\" is blocked and Simard can't move it forward on its own.")
+    };
+    let next_step = if no_progress {
+        "Give the goal a finish condition a test or check can confirm — for example a \
+         specific issue CLOSED, a specific PR MERGED, or a file/command the done-gate \
+         can check — or close the goal if a merged PR already delivered it."
+            .to_string()
+    } else {
+        "Review the goal, then either give it a concrete, checkable finish line or close \
+         it if it is out of scope or already delivered."
+            .to_string()
+    };
+    (problem, next_step)
 }
 
 #[cfg(test)]
