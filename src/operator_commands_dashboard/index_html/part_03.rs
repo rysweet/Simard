@@ -32,6 +32,16 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
             (cur?' <button class="btn" style="font-size:.7rem;padding:2px 6px;margin-left:6px" onclick="setGoalTagFilter(\'\')">Clear</button>':'');
         }
         renderGoalTagFilter(d.active||[]);
+        // Human-readable breakdown of the active board by lifecycle state, so
+        // the count line distinguishes goals actually in progress from ones
+        // that are blocked / paused / not-yet-archived Completed. Only nonzero
+        // buckets are shown, in a fixed, meaningful order.
+        function goalBreakdownText(bd){
+          if(!bd||typeof bd!=='object') return '';
+          const order=[['in_progress','in progress'],['blocked','blocked'],['paused','paused'],['not_started','not started'],['proposed','proposed'],['completed','completed']];
+          const parts=order.filter(function(p){ return (bd[p[0]]||0)>0; }).map(function(p){ return bd[p[0]]+' '+p[1]; });
+          return parts.length?(' \u2014 '+parts.join(' \u00b7 ')):'';
+        }
         const activeFiltered=(d.active||[]).filter(goalMatchesTagFilter);
         if(d.active?.length){
           // Issue #2695 follow-up: render the active goals as a priority-ordered
@@ -141,7 +151,7 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
             <tr><th>Priority</th><th>ID</th><th>Description</th><th>Status</th><th>Current Activity</th><th>Actions</th></tr>
             ${rowsHtml}
           </table>
-          <div style="margin-top:.5rem;color:#8b949e;font-size:.8rem">${window.goalsTagFilter?(activeFiltered.length+' / '+d.active_count+' active goal(s) (filtered by tag)'):(d.active_count+' active goal(s)')}</div>`;
+          <div style="margin-top:.5rem;color:#8b949e;font-size:.8rem">${window.goalsTagFilter?(activeFiltered.length+' / '+d.active_count+' active goal(s) (filtered by tag)'):(d.active_count+' active goal(s)'+goalBreakdownText(d.active_status_breakdown))}</div>`;
         }else{document.getElementById('goals-active').innerHTML='<span style="color:#8b949e">No active goals. Use "Seed Default Goals" or run the agent daemon to generate goals from meetings.</span>';}
         if(d.backlog?.length){
           document.getElementById('goals-backlog').innerHTML=`<table class="proc-table">
