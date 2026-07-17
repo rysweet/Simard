@@ -1,7 +1,7 @@
 # Example identities — data-only identity packages
 
 This directory is the durable home for **example non-engineering identities**
-(cartographer, kinema, gastronome, bursar, sommelier, …). These are
+(cartographer, kinema, gastronome, bursar, concierge, sommelier, …). These are
 **examples of what Simard's pluggable-identity framework can produce** — they are
 **not** part of Simard's own daemon.
 
@@ -206,10 +206,16 @@ narrative). `tests/atelier_example_identity_valid.rs` — run by the
 `tests/qa-scenarios/atelier-example-identity.yaml` scenario — proves the package
 loads through the data-driven loader and its recipes drive the full pipeline.
 
-[`kinema/`](./kinema/) is a fifth example: an **animation & motion-graphics**
-identity that turns a story brief and a shot list into a rendered, playable
-animation sequence with a written motion brief. Its four-stage recipe
-(storyboard → rig → render → motion brief) drives real domain tooling — Blender
-(Grease Pencil for 2D, armature rigging + Cycles/EEVEE for 3D), Synfig (vector 2D
-tweening), and Natron (node-based compositing) — entirely from its recipe and the
 agent sessions it spawns, again with zero `src/` changes.
+
+[`concierge/`](./concierge/) is a further worked example, in the hospitality
+domain: it turns a hotel brief into a durable operations package — a property
+program and layout, a guest-experience and brand design, and runnable
+reservations / PMS / housekeeping / channel-management workflows whose
+reservation lifecycle (book → check-in → check-out → housekeeping → restored
+availability) is exercised with enforced no-double-booking and
+availability-conservation invariants. It is **distinct** from Simard's own
+built-in `simard-concierge` identity: same theme, opposite side of the boundary
+(data under `examples/identities/` vs. compiled builtin). Its assets are
+validated end-to-end by `tests/concierge_example_assets_valid.rs` and the
+`tests/qa-scenarios/concierge-example-end-to-end.yaml` scenario.

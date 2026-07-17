@@ -1,0 +1,56 @@
+# Concierge — EXAMPLE non-engineering identity (hospitality design & operations).
+#
+# This is a DATA-ONLY package. It is loaded by the data-driven file loader
+# (`load_example_identity`), NOT compiled into `BuiltinIdentityLoader`. It adds
+# ZERO Rust to `src/`, no operator_cli subcommand, and no `src/bin/*`.
+#
+# NAMING: this example identity is named `concierge`. It is DISTINCT from
+# Simard's OWN built-in `simard-concierge` identity (which lives in
+# `src/identity/loader.rs`). The boundary is defined by WHERE an identity lives
+# (compiled builtin vs. data under `examples/identities/`), not by its theme.
+#
+# The concierge turns a hotel/hospitality brief into a durable hospitality
+# operations package: a property program & layout, a guest-experience & brand
+# design, and runnable reservations / PMS / housekeeping / channel-management
+# workflow specs. Its real behavior is delivered by the agentic recipes in
+# `recipes/`, which may drive any external domain tooling (a PMS simulator, a
+# floor-plan library, a channel-manager mock, …). None of that tooling lives in
+# Simard's daemon.
+
+[package]
+name = "concierge"
+version = "0.1.0"
+description = "Example identity: hospitality brief -> property layout + guest-experience/brand design + reservations/PMS/housekeeping/channel-management workflows"
+
+[[identities]]
+name = "concierge"
+default_mode = "curator"
+supported_base_types = ["local-harness", "terminal-shell", "rusty-clawd"]
+required_capabilities = ["prompt-assets", "session-lifecycle", "memory"]
+
+[[identities.prompt_assets]]
+id = "concierge-system"
+path = "prompts/concierge_system.md"
+
+[[identities.prompt_assets]]
+id = "concierge-intake"
+path = "prompts/concierge_intake.md"
+
+[[identities.prompt_assets]]
+id = "concierge-experience"
+path = "prompts/concierge_experience.md"
+
+[[identities.prompt_assets]]
+id = "concierge-operations"
+path = "prompts/concierge_operations.md"
+
+[[identities.prompt_assets]]
+id = "concierge-deliver"
+path = "prompts/concierge_deliver.md"
+
+[identities.memory_policy]
+allow_project_writes = false
+summary_scope = "session-summary"
+
+[identities.authority]
+posture = "read-only"
