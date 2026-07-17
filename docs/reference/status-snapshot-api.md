@@ -57,7 +57,7 @@ rather than fabricating data:
 
 | Section | Source (`src/status/provider.rs`) | Not this |
 |---|---|---|
-| Daemon / uptime | `systemctl show simard.service` (`LoadState`, `ActiveState`, `MainPID`, `NRestarts`, `ExecMainStartTimestamp`) | ~~`journalctl \| grep`~~ |
+| Daemon / uptime | `systemctl show simard.service` (`LoadState`, `ActiveState`, `MainPID`, `NRestarts`, `ExecMainStartTimestamp`); **falls back to the durable `daemon_health.json` heartbeat** when no systemd unit is loaded (#4215) | ~~`journalctl \| grep`~~ |
 | Resource snapshot | `/proc/loadavg`, `/proc/meminfo`, `/proc/<daemon-pid>/status` (RSS), `statvfs` (disk), `pgrep` (live engineers) | — |
 | LLM usage | `cost_tracking` ledger (`costs/ledger.jsonl`) + daily budget via `overseer::config::daily_budget_usd()` (single-sourced; always the enforced ceiling — see the [daily-budget display guard](./daily-budget-display-guard.md)) | ~~raw `$SIMARD_DAILY_BUDGET_USD`~~ |
 | Memory / brain | `metrics_snapshot.json` — the daemon-sampled `simard.memory.nodes` / `.edges` gauges | ~~LadybugDB open from the CLI~~ |
@@ -86,6 +86,25 @@ The counters, gauges, and histograms come from
 `~/.simard/telemetry/metrics_snapshot.json` (see
 [telemetry reference](./telemetry-metrics.md)), so the report reflects the same
 values the daemon exports — without reading daemon RAM.
+
+### Daemon section: systemd + heartbeat fallback (#4215)
+
+The daemon section prefers `systemctl show` whenever a `simard.service` unit is
+genuinely loaded. In non-systemd deployments (dev worktrees, containers, or any
+host where the daemon runs as a plain `simard ooda run` process) no unit is
+loaded, so the section instead reads the durable `daemon_health.json` heartbeat
+the OODA loop flushes each cycle — the same file `/api/status`, `/api/activity`,
+and `/api/workboard` already consult. This keeps the "process-agnostic" promise
+literal: the snapshot reports the daemon as **running** (with the current cycle
+phase, e.g. `running (sleep)`) when the heartbeat is fresh (< 900 s old, matching
+the `/api/status` staleness window), **stale** when the heartbeat has aged out,
+and only falls all the way back to `unavailable` (note `systemctl: unit not
+loaded`) when neither systemd nor a readable heartbeat is present. Before #4215
+the section was assembled from `systemctl show` alone, so a running daemon on a
+non-systemd host was permanently mislabelled `unavailable` — hiding the most
+basic self-understanding fact behind a contradiction with the sibling health
+endpoints. `main_pid` / `n_restarts` stay `null` on the heartbeat path (the
+heartbeat does not record them) rather than being guessed.
 
 ## Types
 
