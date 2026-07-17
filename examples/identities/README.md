@@ -1,7 +1,7 @@
 # Example identities — data-only identity packages
 
 This directory is the durable home for **example non-engineering identities**
-(cartographer, atelier, concierge, gastronome, bursar, kinema, loremaster, terra, vitruvia, sommelier, …). These are
+(cartographer, atelier, concierge, gastronome, bursar, kinema, loremaster, terra, vitruvia, maestro, sommelier, …). These are
 **examples of what Simard's pluggable-identity framework can produce** — they are
 **not** part of Simard's own daemon.
 
@@ -277,6 +277,17 @@ workbenches — directly from their agent sessions, again with zero `src/` chang
 `tests/vitruvia_example_identity_valid.rs` — run by the
 `tests/qa-scenarios/vitruvia-example-identity.yaml` scenario — proves the package
 loads through the data-driven loader and its recipes drive the full pipeline.
+
+[`maestro/`](./maestro/) is a tenth example: a **music composition &
+production** identity that turns a musical brief into an **engraved score**
+(readable notation) plus a **rendered audio track** (playable audio). Its
+five-stage recipe (compose → arrange → engrave → produce → score & production
+brief) drives real domain tooling — LilyPond and MuseScore for engraving, MIDI +
+open-source synths (FluidSynth, TiMidity++) for the DAW / render pass, and ffmpeg
+for encoding / mastering — entirely from its recipe and the agent sessions it
+spawns, again with zero `src/` changes. Its assets are validated end-to-end by
+`tests/maestro_assets_valid.rs` and the
+`tests/qa-scenarios/maestro-score-to-audio.yaml` scenario.
 
 > **All domain tooling lives in the recipes.** Atelier's OpenSCAD/FreeCAD/Blender
 > steps, concierge's booking / PMS / channel-management workflows,
