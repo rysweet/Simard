@@ -1,0 +1,53 @@
+name: kinema-storyboard-to-render
+app_type: cli
+description: |
+  Outside-in coverage for the EXAMPLE Kinema animation &amp; motion-graphics
+  identity: a story brief + shot list must go end to end — storyboard → rig →
+  render → motion brief — through the identity's agentic recipe, and the shipped
+  DATA-ONLY package must load through the real Simard data-driven loader with a
+  ZERO-line `src/` footprint.
+
+  Kinema is an example non-engineering identity authored purely as data under
+  `examples/identities/kinema/` (identity.toml + prompts/ + recipes/). It is
+  loaded by `load_example_identity` (the thin data-driven rail), NEVER compiled
+  into `BuiltinIdentityLoader`, and adds no domain Rust to `src/`, no
+  operator_cli subcommand, and no `src/bin/*`. All domain tooling — Blender
+  (Grease Pencil for 2D, armature rigging + Cycles/EEVEE for 3D), Synfig (vector
+  2D tweening), and Natron (node-based compositing) — lives in the recipe and the
+  agent sessions it spawns.
+
+  Verified end to end by `tests/kinema_assets_valid.rs`:
+  - the shipped `examples/identities/kinema/` package loads via the data-driven
+    `load_example_identity` rail in curator mode, exposing all five phase prompts
+    (system + storyboard + rig + render + deliver);
+  - the identity declares a read-only write posture and no project writes;
+  - the package is NOT a builtin (the `BuiltinIdentityLoader` rejects it), proving
+    it is data-driven, not compiled in;
+  - every referenced prompt file exists, carries its stage heading, and instructs
+    the agent to treat inputs as untrusted data;
+  - the goal-session recipe `recipes/kinema-animation.yaml` drives the full
+    four-stage pipeline (storyboard → rig-and-block → render → write-motion-brief),
+    threads the `brief_path` / `shot_list` / `assets_dir` / `output_dir` / `fps` /
+    `resolution` context vars, and shells out to Blender / Synfig / Natron; and
+  - a misspelled example name fails visibly (fail-closed), never silently falling
+    back to a builtin identity.
+
+  Schema note: the pinned `@gadugi/agentic-test` CLI runner gates only on
+  `run`-step exit codes and reads the command from `params.command`, so the suite
+  runs under a single `bash -lc` wrapper that exits zero only when the
+  `kinema_assets_valid` integration test reports success.
+metadata:
+  tags:
+    - cli
+    - kinema
+    - identity
+    - example
+agents:
+  - name: cli-agent
+    type: cli
+    command: bash
+steps:
+  - action: run
+    params:
+      command: "bash -lc 'set -euo pipefail; cargo test --test kinema_assets_valid 2>&1 | tee /tmp/kinema-qa.log | grep -q \"test result: ok\"'"
+    timeout: 600000
