@@ -339,6 +339,16 @@ compiled into Simard. Load it with `load_example_identity(..., "atelier", …)`
 from [`examples/identities/atelier/`](examples/identities/atelier/). See
 [Design furniture with Atelier](docs/howto/design-with-atelier.md).
 
+### Vitruvia example identity (architecture & interior design)
+Vitruvia is an **example**, data-only pluggable identity — not a `simard`
+subcommand. It takes a program/site-brief JSON end-to-end to a code-aware BIM
+floor plan, interior layout, technical drawings (plans and elevations), and a
+rendered walkthrough via two agentic recipes, which drive Blender + BlenderBIM /
+IfcOpenShell (with optional FreeCAD) on the host — never compiled into Simard.
+Load it with `load_example_identity(..., "vitruvia", …)` from
+[`examples/identities/vitruvia/`](examples/identities/vitruvia/). See
+[Design buildings with Vitruvia](docs/howto/design-with-vitruvia.md).
+
 ### Self-management
 ```bash
 simard update                          # self-update to the latest release

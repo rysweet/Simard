@@ -1,0 +1,66 @@
+# Vitruvia — EXAMPLE architecture & interior-design identity.
+#
+# This is a DATA-ONLY package. It is loaded by the data-driven file loader
+# (`load_example_identity`), NOT compiled into `BuiltinIdentityLoader`. It adds
+# ZERO Rust to `src/`, no operator_cli subcommand, and no `src/bin/*`.
+#
+# NOTE: `vitruvia` is an EXAMPLE identity — there is no compiled-in
+# `simard-vitruvia`; Simard's own identities are the built-ins in
+# `src/identity/loader.rs` (see `examples/identities/README.md`). This package
+# is a demonstration of the pluggable-identity framework, defined entirely as
+# data under `examples/identities/vitruvia/`. It is named for Vitruvius, the
+# Roman architect whose "firmitas, utilitas, venustas" (durability, usefulness,
+# beauty) still frames what a building must deliver.
+#
+# The vitruvia turns a program/site brief into a designed building: a
+# code-aware floor plan, interior layout, and technical drawings (plans and
+# elevations) plus a rendered walkthrough. Its real behavior is delivered by the
+# agentic recipes under `recipes/`, which drive external domain tooling
+# (Blender + the BlenderBIM / IfcOpenShell IFC toolkit, and FreeCAD's Arch/BIM
+# and TechDraw workbenches). None of that tooling lives in Simard's daemon.
+
+[package]
+name = "vitruvia"
+version = "0.1.0"
+description = "Example identity: program/site brief -> code-aware floor plan + interiors + plans/elevations + rendered walkthrough (Blender+BlenderBIM/IFC, FreeCAD)"
+
+[[identities]]
+name = "vitruvia"
+default_mode = "engineer"
+supported_base_types = ["local-harness", "terminal-shell", "rusty-clawd"]
+required_capabilities = ["prompt-assets", "session-lifecycle", "memory"]
+
+[[identities.prompt_assets]]
+id = "vitruvia-system"
+path = "prompts/vitruvia_system.md"
+
+[[identities.prompt_assets]]
+id = "vitruvia-program"
+path = "prompts/vitruvia_program.md"
+
+[[identities.prompt_assets]]
+id = "vitruvia-massing"
+path = "prompts/vitruvia_massing.md"
+
+[[identities.prompt_assets]]
+id = "vitruvia-plan"
+path = "prompts/vitruvia_plan.md"
+
+[[identities.prompt_assets]]
+id = "vitruvia-interiors"
+path = "prompts/vitruvia_interiors.md"
+
+[[identities.prompt_assets]]
+id = "vitruvia-drawings"
+path = "prompts/vitruvia_drawings.md"
+
+[[identities.prompt_assets]]
+id = "vitruvia-walkthrough"
+path = "prompts/vitruvia_walkthrough.md"
+
+[identities.memory_policy]
+allow_project_writes = false
+summary_scope = "session-summary"
+
+[identities.authority]
+posture = "scoped-write"
