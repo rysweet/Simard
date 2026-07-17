@@ -322,6 +322,22 @@ fn select_live_session<'a>(
         .max_by_key(|s| s.created_at)
 }
 
+/// Cheap in-memory predicate: does any in-flight engineer's goal appear in
+/// `tombstones`? Pure `HashSet` lookups over the (typically tiny)
+/// `engineer_worktrees` map — no allocation, no I/O.
+///
+/// The daemon uses this to skip the per-cycle subagent-registry disk read +
+/// JSON parse entirely on the common steady-state path where nothing needs
+/// reaping. It is the single source of truth for the tombstone-only reap
+/// predicate, so the guard here and the victim selection in
+/// [`reap_engineers_for_tombstoned_goals`] can never drift apart.
+pub fn has_tombstoned_engineer(state: &OodaState, tombstones: &HashSet<String>) -> bool {
+    state
+        .engineer_worktrees
+        .keys()
+        .any(|goal_id| tombstones.contains(goal_id.as_str()))
+}
+
 /// Reap every in-flight engineer whose goal has been tombstoned
 /// (removed via `simard goal remove` or completed via `simard goal complete`).
 ///
@@ -344,6 +360,13 @@ pub fn reap_engineers_for_tombstoned_goals(
     tombstones: &HashSet<String>,
     registry: &subagent_sessions::Registry,
 ) -> Vec<String> {
+    // Cheap gate: bail before any allocation when no in-flight engineer's goal
+    // is tombstoned (the overwhelmingly common case). Same predicate the daemon
+    // uses to skip the registry disk-load, so behaviour cannot drift.
+    if !has_tombstoned_engineer(state, tombstones) {
+        return Vec::new();
+    }
+
     // Collect victims first (owned) so the subsequent `&mut state` reaping never
     // overlaps a borrow of `state.engineer_worktrees`. Predicate is
     // tombstone-only: absence from the active board is deliberately NOT a
