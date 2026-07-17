@@ -316,16 +316,16 @@ impl DeployEffects for ProdDeployEffects<'_> {
         // wall-clock timeout: mark draining (so no NEW engineers start), then
         // checkpoint + requeue every in-flight engineer's goal onto the board.
         // Their goal state persists, so the restarted binary re-picks them up.
-        // The engineer-worktrees root lives directly under the resolved state
-        // root; the config override (tests) supplies its parent.
-        let state_root = match &self.config.engineer_worktrees_root {
-            Some(root) => root
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| root.clone()),
-            None => crate::state_root::simard_state_root(),
+        let requeue = match &self.config.engineer_worktrees_root {
+            // The config override IS the worktrees directory itself; scan it
+            // directly (it may not be named `engineer-worktrees`).
+            Some(worktrees_root) => {
+                super::requeue::ProdEngineerRequeue::from_worktrees_root(worktrees_root.clone())
+            }
+            None => {
+                super::requeue::ProdEngineerRequeue::new(crate::state_root::simard_state_root())
+            }
         };
-        let requeue = super::requeue::ProdEngineerRequeue::new(state_root);
         crate::safe_update::drain::drain_by_requeue(&self.config.state_dir, &requeue).map(|_| ())
     }
 

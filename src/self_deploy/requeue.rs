@@ -22,28 +22,41 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::engineer_worktree::{ENGINEER_CLAIM_FILE, live_claimed_engineers};
+use crate::engineer_worktree::{
+    ENGINEER_CLAIM_FILE, WORKTREES_SUBDIR, live_claimed_engineers_in_worktrees,
+};
 use crate::safe_update::SafeUpdateError;
 use crate::safe_update::drain::{EngineerRequeue, InFlightEngineer};
 
-/// Production requeue effect. Reads the live engineer set from
-/// `<state_root>/engineer-worktrees/` and releases each worktree's claim
-/// sentinel so a restarted binary re-picks up the goal.
+/// Production requeue effect. Scans the engineer-worktrees directory for the
+/// live engineer set and releases each worktree's claim sentinel so a restarted
+/// binary re-picks up the goal.
 pub struct ProdEngineerRequeue {
-    state_root: PathBuf,
+    /// The directory that directly contains the per-engineer worktrees
+    /// (i.e. `<state_root>/engineer-worktrees`).
+    worktrees_root: PathBuf,
 }
 
 impl ProdEngineerRequeue {
     /// Build a requeue effect rooted at `state_root` (the directory that holds
     /// the `engineer-worktrees/` subdir — i.e. `~/.simard`).
     pub fn new(state_root: PathBuf) -> Self {
-        Self { state_root }
+        let worktrees_root = state_root.join(WORKTREES_SUBDIR);
+        Self { worktrees_root }
+    }
+
+    /// Build a requeue effect directly from the worktrees directory (the dir
+    /// that contains the per-engineer worktrees). Used when a caller already
+    /// holds that path — e.g. the `engineer_worktrees_root` config override,
+    /// which may not be named `engineer-worktrees`.
+    pub fn from_worktrees_root(worktrees_root: PathBuf) -> Self {
+        Self { worktrees_root }
     }
 }
 
 impl EngineerRequeue for ProdEngineerRequeue {
     fn in_flight(&self) -> Vec<InFlightEngineer> {
-        live_claimed_engineers(&self.state_root)
+        live_claimed_engineers_in_worktrees(&self.worktrees_root)
             .into_iter()
             .map(|e| InFlightEngineer {
                 goal_id: e.goal_id,
@@ -142,5 +155,26 @@ mod tests {
         assert_eq!(live.len(), 1, "expected one live-claimed engineer");
         assert_eq!(live[0].goal_id, "fix-abc");
         assert_eq!(live[0].pid, Some(self_pid));
+    }
+
+    #[test]
+    fn from_worktrees_root_scans_the_dir_directly_even_when_oddly_named() {
+        // An override directory that is NOT named `engineer-worktrees` must be
+        // scanned directly, not via a WORKTREES_SUBDIR re-join.
+        let worktrees = tempdir().unwrap();
+        let self_pid = std::process::id() as i32;
+        let starttime = crate::engineer_worktree::read_pid_starttime_public(self_pid);
+        let wt = worktrees.path().join("build-thing-1700000000-def456");
+        std::fs::create_dir_all(&wt).unwrap();
+        let sentinel = match starttime {
+            Some(st) => format!("{self_pid}\n{st}\n"),
+            None => format!("{self_pid}\n"),
+        };
+        std::fs::write(wt.join(ENGINEER_CLAIM_FILE), sentinel).unwrap();
+
+        let requeue = ProdEngineerRequeue::from_worktrees_root(worktrees.path().to_path_buf());
+        let live = requeue.in_flight();
+        assert_eq!(live.len(), 1, "expected one live-claimed engineer");
+        assert_eq!(live[0].goal_id, "build-thing");
     }
 }
