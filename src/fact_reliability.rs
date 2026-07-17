@@ -301,13 +301,18 @@ impl FactGateDecision {
 /// differs per seam. Everything downstream of grounding is identical and lives
 /// here:
 ///
+///   - The concept is canonicalized ONCE up front (see [`canonical_concept`]):
+///     it is scored, deduped, AND stored under its canonical [`KNOWN_CONCEPTS`]
+///     label, so surface variants ("PR-Pattern", "pr_pattern", "pr-pattern.")
+///     that already SCORE identically also store/dedup identically. An off-spec
+///     concept (canonicalizes to `None`) is preserved verbatim.
 ///   - Confidence is ALWAYS [`score_fact_reliability`]'s output, never a client
 ///     hint.
 ///   - Below [`RELIABILITY_THRESHOLD`] → [`FactGateDecision::Quarantined`].
 ///   - A weaker-or-equal restatement never clobbers an existing equal-or-stronger
-///     fact of the same identity (`concept` + trimmed `content`); such a fact is
-///     also quarantined (its score still cleared the threshold, so the caller can
-///     distinguish it by `confidence >= RELIABILITY_THRESHOLD`).
+///     fact of the same identity (canonical `concept` + trimmed `content`); such
+///     a fact is also quarantined (its score still cleared the threshold, so the
+///     caller can distinguish it by `confidence >= RELIABILITY_THRESHOLD`).
 ///   - Survivors persist via `store_fact_with_provenance` with the gate-computed
 ///     confidence and the source-episode provenance edges.
 pub fn commit_gated_fact(
@@ -319,6 +324,21 @@ pub fn commit_gated_fact(
     tags: &[String],
     source_episode_ids: &[String],
 ) -> crate::error::SimardResult<FactGateDecision> {
+    // Canonicalize the concept ONCE at the write boundary. A concept that maps
+    // into the closed KNOWN_CONCEPTS set is scored, deduped, AND stored under its
+    // canonical label, so the surface variants an LLM routinely emits —
+    // "PR-Pattern", "pr_pattern", "pr-pattern." — that already SCORE identically
+    // via `canonical_concept` also STORE and DEDUP identically rather than
+    // fragmenting the same concept across variant labels. Fragmentation splits
+    // the graph's concept vocabulary, lets a variant-labeled restatement escape
+    // the identity-dedup below (a duplicate fact is then promoted, inflating
+    // semantic memory and dragging recall precision down), and hides a fact from a
+    // recall that queries the canonical label. A genuinely off-spec concept
+    // (canonicalizes to `None`) is preserved VERBATIM, matching the conservative
+    // surface-form policy of `dedup_content_key` / `normalize_source_episode_id`.
+    // Canonicalization is idempotent, so the score is unchanged either way.
+    let concept = canonical_concept(concept).unwrap_or(concept);
+
     let confidence = score_fact_reliability(concept, content, grounded);
 
     // Threshold quarantine.
