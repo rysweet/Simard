@@ -1,7 +1,7 @@
 ---
 title: Library-backed Cognitive Memory (the sole backend)
 description: How Simard's CognitiveMemoryOps trait is backed by amplihack-memory-lib's persistent CognitiveMemory through the LibraryCognitiveMemory adapter. As of de-fork Phase 2b this is the ONLY on-disk cognitive-memory backend; the native LadybugDB fork has been deleted.
-last_updated: 2026-07-03
+last_updated: 2026-07-18
 owner: simard
 doc_type: reference
 related:
@@ -427,6 +427,7 @@ Two trait methods have no single library call and are composed in the adapter:
 | Method | Why it matters | Adapter implementation |
 |---|---|---|
 | `search_episodes_by_keywords` | keyword episode recall | recall **all** episodes via `get_episodes(usize::MAX, include_compressed = true)`, apply the **marker-safe word-boundary** keyword filter (see below), short-circuit at `limit` |
+| `search_facts` | keyword fact recall | delegate matching to `library.search_facts`, then apply the **marker-safe word-boundary** relevance gate on a clean natural-language query (see below); wildcard/empty bypass it |
 | `search_episodes_starting_with` | progress-evidence `since` timestamp gate | recall all episodes, filter on `content.starts_with`, pair each with the record's `created_at` |
 
 These remain in-adapter because the library does not expose an equivalent
@@ -462,6 +463,35 @@ clean keyword present), so `reflection_lessons::count_recurring_failures` (which
 scans with `limit = u32::MAX`) does no extra work. The pure helpers are
 unit-tested in `library_adapter::word_boundary_gate_tests`; the end-to-end
 contract is pinned in `cognitive_memory::tests_whole_word_episode_recall`.
+
+### Keyword matching (facts): the same gate on `search_facts`
+
+`search_facts` applies the identical clean/raw partition to the **fact** path.
+The library matches each query token as a raw case-insensitive substring of a
+fact's `concept` OR `content`, so a clean natural-language token floated facts in
+on the interior/suffix of an unrelated word (`act` in "reactor", `own` in
+"download", `test` in "latest") — polluting the capped working-context recall
+`base_type_turn::prepare_turn_context` feeds to reasoning. The adapter now
+post-filters the library's results:
+
+- A **clean** query token (entirely alphanumeric) is kept only when it is a
+  prefix of a whole word in the `concept` OR `content` (`shares_word_prefix` on
+  both fields), dropping interior/suffix noise while preserving inflectional
+  recall (`deploy` → "deployed").
+- A **raw** token (any non-alphanumeric char — a hyphenated concept like
+  `bug-pattern`, or a `journal:` / `goal-edge:` / `sub:` marker) keeps the
+  library's exact substring semantics its callers store and re-filter on. A query
+  with no clean token bypasses the gate, so concept/marker callers are unaffected.
+
+Truncation to `limit` is **deferred until after** the gate (the library is queried
+unbounded on the clean-token path), so a relevant fact ranked behind an
+interior-substring false positive is not dropped before the gate runs — matching
+`recall_episodes_ranked`. Wildcard (`"*"`) / empty queries keep the return-all
+path and are never gated. The pure helpers (`partition_fact_query`,
+`fact_shares_query_relevance`) are unit-tested in
+`library_adapter::fact_query_gate_tests`; the end-to-end contract is pinned in
+`cognitive_memory::tests_fact_recall_word_boundary`. See also
+[Tokenized fact recall › Word-boundary relevance gate](../reference/cognitive-memory-fact-recall.md#word-boundary-relevance-gate-recall-precision).
 
 ---
 

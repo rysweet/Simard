@@ -975,3 +975,13 @@ mod tests_recall_precision_delegation;
 // end-to-end contract against the live `LibraryCognitiveMemory` backend.
 #[cfg(test)]
 mod tests_whole_word_episode_recall;
+
+// Recall quality: `search_facts` gates a CLEAN natural-language query token at a
+// WORD BOUNDARY (concept OR content), extending the word-boundary recall gate
+// already applied to episodic recall to the FACT path so an interior/suffix
+// substring (`act` in "reactor", `own` in "download") no longer floats an
+// off-topic fact into the capped turn/OODA working-context recall. Concept and
+// colon-marker queries keep the library's exact substring semantics. Pins the
+// end-to-end contract against the live `LibraryCognitiveMemory` backend.
+#[cfg(test)]
+mod tests_fact_recall_word_boundary;
