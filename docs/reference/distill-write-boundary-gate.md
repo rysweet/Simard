@@ -1,7 +1,7 @@
 ---
 title: Distill write-boundary gate & memory-IPC gated write
 description: Reference for the single authoritative write-boundary gate that scores, quarantines, and dedups every distilled fact server-side (issue #2679 / #2433), the additive memory-IPC StoreFactGated / StoreProcedureProvenance requests and FactWrite response, the shared fact_reliability scorer, the removal of the parse_fail telemetry class, and the daemon socket hardening (0600/0700 + MAX_FRAME).
-last_updated: 2026-07-06
+last_updated: 2026-07-18
 owner: simard
 doc_type: reference
 related:
@@ -78,7 +78,20 @@ order:
    stored) so a low-reliability candidate can never corrupt past experience.
 5. **Identity dedup** — a weaker-or-equal new fact never clobbers a
    higher-confidence existing fact of the **same identity** (concept + content).
-   Distinct lessons that merely share a label still accumulate.
+   The concept is first folded to its **stable identity label** via
+   `fact_reliability::concept_identity` (the canonical known-concept form for a
+   closed-set label, else the raw label unchanged), so every surface variant of a
+   closed-set concept — `"bug_pattern"`, `"Bug-Pattern"`, `"bug-pattern"` — is
+   scored, searched, compared, and **stored** under one label. This matters
+   because the store's `search_facts` concept lookup is case-insensitive but
+   **separator-sensitive**: a fact stored under `"bug-pattern"` is invisible to a
+   raw `"bug_pattern"` query, so without folding, an underscore restatement would
+   miss the prior and promote a redundant near-duplicate (inflating semantic
+   memory and dragging down recall precision — the concept-label analogue of the
+   whitespace-robust content dedup). The dedup equality check also requires
+   concept-identity equality, so a content-key collision under a *genuinely
+   different* concept can never false-block a distinct lesson. Distinct lessons
+   that merely share a label still accumulate.
 6. **Persist** — surviving facts are written with
    `store_fact_with_provenance` (computed confidence, **one `DERIVES_FROM` edge
    per supplied `source_episode_id`**, and a scalar `source_id` of
@@ -128,6 +141,7 @@ exactly what lets the stub and the IPC handler agree on every decision.
 | `fact_reliability::commit_gated_fact(memory, concept, content, grounded, source_id, tags, source_episode_ids) -> SimardResult<FactGateDecision>` | The shared gate orchestration both seams call: score → threshold → identity-dedup → `store_fact_with_provenance`. Grounding is resolved by the caller; the returned `FactGateDecision` is `Stored { confidence, node_id }` or `Quarantined { confidence }` (a `confidence >= RELIABILITY_THRESHOLD` quarantine is a dedup skip, below is a low-reliability block). |
 | `fact_reliability::RELIABILITY_THRESHOLD` (re-exported as `distillation::DISTILL_RELIABILITY_THRESHOLD`) | Minimum confidence to store rather than quarantine (`0.5`). |
 | `fact_reliability::canonical_concept(label) -> Option<&'static str>` | Canonicalises / validates a concept label. |
+| `fact_reliability::concept_identity(label) -> &str` | The stable identity label a concept is stored and deduplicated under: the canonical known-concept form when `canonical_concept` accepts the label, else the raw label unchanged. Folds closed-set surface variants (`"bug_pattern"`, `"Bug-Pattern"`) onto one label so the separator-sensitive `search_facts` dedup lookup can't miss a prior; off-spec labels stay verbatim. |
 | `fact_reliability::normalize_source_episode_id(raw: &str) -> &str` | Canonical grounding / provenance key for a cited episode id: trim surrounding whitespace (no-op for a well-formed id; interior whitespace preserved). Both seams normalize with this so a padded id grounds and threads provenance identically. |
 
 > **G2 / D3 note.** #2679 homes the gate at the IPC handler that fronts

@@ -555,3 +555,224 @@ fn commit_gated_fact_dedups_whitespace_variant_restatement() {
         "distinct content must still be promoted"
     );
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// concept_identity: fold known-concept surface variants to one stable label so
+// the separator-sensitive dedup lookup can't miss a prior stored under a
+// different surface form; leave off-spec labels verbatim.
+// ───────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn concept_identity_folds_known_and_preserves_offspec() {
+    use crate::fact_reliability::concept_identity;
+    // Every surface variant of a closed-set concept folds to the canonical label.
+    for raw in [
+        "bug-pattern",
+        "bug_pattern",
+        "Bug-Pattern",
+        "BUG PATTERN",
+        " bug-pattern ",
+    ] {
+        assert_eq!(
+            concept_identity(raw),
+            "bug-pattern",
+            "known-concept surface variant {raw:?} must fold to the canonical label"
+        );
+    }
+    assert_eq!(concept_identity("pr_pattern"), "pr-pattern");
+    assert_eq!(concept_identity("Lesson Learned"), "lesson-learned");
+    // A genuinely off-spec label is preserved verbatim (never rewritten/merged).
+    assert_eq!(concept_identity("architecture-note"), "architecture-note");
+    assert_eq!(concept_identity("custom_label"), "custom_label");
+}
+
+/// The dedup step must recognize a prior stored under a DIFFERENT surface form of
+/// the SAME closed-set concept. The store's `search_facts` concept lookup is
+/// case-insensitive but separator-sensitive, so a fact stored under
+/// `"bug-pattern"` is invisible to a raw `"bug_pattern"` query. Before folding the
+/// concept to its identity label at the write boundary, the underscore variant
+/// missed the prior and a redundant near-duplicate was promoted — inflating
+/// semantic memory and dragging down recall precision.
+#[test]
+fn commit_gated_fact_dedups_concept_surface_variant() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::commit_gated_fact;
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode(
+            "episode payload for concept-variant dedup",
+            "engineer-cycle",
+            None,
+        )
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let episode_ids = [ep.clone()];
+    let content = "empty outcome list panics cycle";
+
+    // (1) Store the fact under the canonical hyphenated concept.
+    let stored = commit_gated_fact(
+        &mem,
+        "bug-pattern",
+        content,
+        true,
+        &source,
+        &[String::from("bug-pattern")],
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        stored.stored(),
+        "canonical-concept fact must be stored first"
+    );
+
+    // (2) Restate the SAME lesson under an underscore surface variant of the SAME
+    // concept → dedup quarantine (not a redundant second fact). Its score still
+    // clears the threshold, so it is distinguishable from a low-reliability block.
+    let variant = commit_gated_fact(
+        &mem,
+        "bug_pattern",
+        content,
+        true,
+        &source,
+        &[String::from("bug_pattern")],
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        !variant.stored(),
+        "an underscore surface variant of the same concept must dedup, not create a duplicate"
+    );
+    assert!(
+        variant.confidence() >= RELIABILITY_THRESHOLD,
+        "a dedup quarantine cleared the threshold; only the prior blocks it"
+    );
+
+    // The store holds exactly ONE fact for this lesson, under the canonical label.
+    let found = mem.search_facts("bug-pattern", 10, 0.0).unwrap_or_default();
+    let matches: Vec<_> = found.iter().filter(|f| f.content == content).collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "exactly one copy of the lesson must exist, got {}: {:?}",
+        matches.len(),
+        matches
+            .iter()
+            .map(|f| f.concept.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A known-concept fact committed under a non-canonical surface form is STORED
+/// under the canonical label, so recall consolidates every surface variant of the
+/// lesson under one concept rather than splitting it across `"bug-pattern"` and
+/// `"bug_pattern"`.
+#[test]
+fn commit_gated_fact_stores_canonical_concept_label() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::{FactGateDecision, commit_gated_fact};
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode(
+            "episode payload for canonical-store",
+            "engineer-cycle",
+            None,
+        )
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let episode_ids = [ep.clone()];
+
+    let stored = commit_gated_fact(
+        &mem,
+        "Bug_Pattern",
+        "off-by-one in retry loop drops last item",
+        true,
+        &source,
+        &[String::from("Bug_Pattern")],
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        matches!(stored, FactGateDecision::Stored { .. }),
+        "a well-formed known-concept fact must be stored, got {stored:?}"
+    );
+
+    // The stored fact carries the CANONICAL concept label, not the raw surface form.
+    let found = mem.search_facts("bug-pattern", 10, 0.0).unwrap_or_default();
+    assert_eq!(
+        found.iter().filter(|f| f.concept == "bug-pattern").count(),
+        1,
+        "the fact must be stored under the canonical 'bug-pattern' label"
+    );
+    assert!(
+        found.iter().all(|f| f.concept != "Bug_Pattern"),
+        "the raw non-canonical surface form must NOT be persisted"
+    );
+}
+
+/// Belt-and-suspenders: a content-key collision under a GENUINELY DIFFERENT
+/// concept must never false-block a new fact. Two facts with identical content
+/// but distinct closed-set concepts are BOTH promoted — the dedup predicate now
+/// requires concept-identity equality, so a shared content key alone cannot
+/// quarantine a distinct-concept fact.
+///
+/// The shared content deliberately contains the SECOND concept's keyword
+/// (`lesson-learned`) so the second commit's `search_facts("lesson-learned", …)`
+/// genuinely surfaces the first (`bug-pattern`) fact as a content match — that is
+/// the exact input that would false-block without the concept-identity guard.
+#[test]
+fn commit_gated_fact_does_not_cross_block_distinct_concepts() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::{FactGateDecision, commit_gated_fact};
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode("episode payload for cross-concept", "engineer-cycle", None)
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let episode_ids = [ep.clone()];
+    // Content carries the second concept's keyword so the second commit's concept
+    // search actually returns the first fact (a real content-key collision).
+    let content = "lesson-learned handling of an empty retry queue drops items";
+
+    let first = commit_gated_fact(
+        &mem,
+        "bug-pattern",
+        content,
+        true,
+        &source,
+        &[String::from("bug-pattern")],
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(matches!(first, FactGateDecision::Stored { .. }));
+
+    // Precondition: the second concept's search really does surface the first
+    // fact as a content match, so this test exercises the concept-identity guard
+    // rather than passing vacuously on an empty result set.
+    let cross = mem
+        .search_facts("lesson-learned", 10, 0.0)
+        .unwrap_or_default();
+    assert!(
+        cross
+            .iter()
+            .any(|f| f.content == content && f.concept == "bug-pattern"),
+        "the bug-pattern fact must surface under a lesson-learned content search for this test to be meaningful"
+    );
+
+    let second = commit_gated_fact(
+        &mem,
+        "lesson-learned",
+        content,
+        true,
+        &source,
+        &[String::from("lesson-learned")],
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        matches!(second, FactGateDecision::Stored { .. }),
+        "identical content under a distinct concept must still be promoted, got {second:?}"
+    );
+}

@@ -101,6 +101,34 @@ pub fn canonical_concept(raw: &str) -> Option<&'static str> {
     }
 }
 
+/// The **stable identity label** a concept is stored and deduplicated under: the
+/// canonical known-concept form when the raw label canonicalizes into
+/// [`KNOWN_CONCEPTS`], otherwise the raw label unchanged.
+///
+/// This exists because the semantic store's `search_facts` concept lookup is
+/// case-insensitive but **separator-sensitive**: a fact stored under
+/// `"bug-pattern"` is NOT found by a `"bug_pattern"` (underscore) query. So when
+/// an LLM distiller emits the same lesson across passes with different concept
+/// *surface forms* — `"bug-pattern"` one pass, `"bug_pattern"` or `"Bug Pattern"`
+/// the next, all of which [`canonical_concept`] already folds together — the
+/// dedup step in [`commit_gated_fact`] would search under the raw variant, miss
+/// the equal-or-stronger prior, and promote a redundant near-duplicate. That
+/// inflates semantic memory and drags down recall precision — exactly the
+/// failure mode [`dedup_content_key`] closes for *content* surface variants,
+/// left open here for the *concept* label.
+///
+/// Folding a known concept to its canonical label at the write boundary means
+/// every surface variant of a closed-set concept is stored, searched, and
+/// compared under one identity, so the dedup lookup reliably surfaces the prior
+/// and recall consolidates the lesson under a single concept. Off-spec concepts
+/// (those [`canonical_concept`] returns `None` for) are left verbatim — the
+/// conservative surface-form policy already used by [`dedup_content_key`] and
+/// [`normalize_source_episode_id`]: an unknown label is never silently rewritten
+/// or merged onto another.
+pub fn concept_identity(concept: &str) -> &str {
+    canonical_concept(concept).unwrap_or(concept)
+}
+
 /// Number of distinct informative words the content-quality signal in
 /// [`score_fact_reliability`] needs to distinguish before it awards full credit.
 /// The scorer only cares about the `0` / `1–2` / `≥3` bucket, so the informative-
@@ -303,11 +331,16 @@ impl FactGateDecision {
 ///
 ///   - Confidence is ALWAYS [`score_fact_reliability`]'s output, never a client
 ///     hint.
+///   - The concept is folded to its stable identity label via
+///     [`concept_identity`] first, so every surface variant of a closed-set
+///     concept (`"bug_pattern"`, `"Bug-Pattern"`, `"bug-pattern"`) is scored,
+///     searched, deduplicated, and STORED under one canonical label — the dedup
+///     lookup can no longer miss a prior stored under a different surface form.
 ///   - Below [`RELIABILITY_THRESHOLD`] → [`FactGateDecision::Quarantined`].
 ///   - A weaker-or-equal restatement never clobbers an existing equal-or-stronger
-///     fact of the same identity (`concept` + trimmed `content`); such a fact is
-///     also quarantined (its score still cleared the threshold, so the caller can
-///     distinguish it by `confidence >= RELIABILITY_THRESHOLD`).
+///     fact of the same identity (folded `concept` + trimmed `content`); such a
+///     fact is also quarantined (its score still cleared the threshold, so the
+///     caller can distinguish it by `confidence >= RELIABILITY_THRESHOLD`).
 ///   - Survivors persist via `store_fact_with_provenance` with the gate-computed
 ///     confidence and the source-episode provenance edges.
 pub fn commit_gated_fact(
@@ -319,6 +352,14 @@ pub fn commit_gated_fact(
     tags: &[String],
     source_episode_ids: &[String],
 ) -> crate::error::SimardResult<FactGateDecision> {
+    // Fold the concept to its stable identity label (canonical known-concept
+    // form, else the raw label) so every surface variant of a closed-set concept
+    // is scored, searched, compared, and STORED under one identity. Without this
+    // the separator-sensitive `search_facts` lookup below misses a prior stored
+    // under a different surface form of the same concept, and the redundant fact
+    // is promoted. See [`concept_identity`].
+    let concept = concept_identity(concept);
+
     let confidence = score_fact_reliability(concept, content, grounded);
 
     // Threshold quarantine.
@@ -334,15 +375,19 @@ pub fn commit_gated_fact(
     // whitespace-normalized [`dedup_content_key`] so a restatement that differs
     // only in interior/surrounding whitespace is recognized as the same fact
     // (the survivor is still stored verbatim — only this comparison is
-    // normalized).
+    // normalized). The prior's concept is folded through [`concept_identity`]
+    // before the equality check so a content-key collision under a *genuinely
+    // different* concept can never false-block a new fact, while surface variants
+    // of the *same* concept still dedup (both now store under one label).
     let new_key = dedup_content_key(content);
     let existing = memory
         .search_facts(concept, DEDUP_PRIOR_SCAN_LIMIT, confidence)
         .unwrap_or_default();
-    if existing
-        .iter()
-        .any(|f| dedup_content_key(&f.content) == new_key && f.confidence >= confidence)
-    {
+    if existing.iter().any(|f| {
+        concept_identity(&f.concept) == concept
+            && dedup_content_key(&f.content) == new_key
+            && f.confidence >= confidence
+    }) {
         return Ok(FactGateDecision::Quarantined { confidence });
     }
 

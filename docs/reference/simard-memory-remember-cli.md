@@ -1,7 +1,7 @@
 ---
 title: Memory write CLI (`simard memory remember`)
 description: Operator and agent reference for `simard memory remember` and `simard memory remember-procedure` — the per-record cognitive-memory WRITE commands the distiller agent calls (one process = one fact) so distilled knowledge reaches memory as tool calls instead of a scraped JSON envelope (issue #2679).
-last_updated: 2026-07-06
+last_updated: 2026-07-18
 owner: simard
 doc_type: reference
 related:
@@ -66,7 +66,7 @@ Usage: simard memory remember
 
 | Flag | Required | Meaning |
 |------|----------|---------|
-| `--concept <LABEL>` | yes | Concept label for the fact. The distiller uses `pr-pattern`, `bug-pattern`, or `lesson-learned`; other callers may use any non-empty label. |
+| `--concept <LABEL>` | yes | Concept label for the fact. The distiller uses `pr-pattern`, `bug-pattern`, or `lesson-learned`; other callers may use any non-empty label. A closed-set label given in a surface variant (`bug_pattern`, `Bug-Pattern`) is **normalized to its canonical form** at the write boundary (`fact_reliability::concept_identity`) so every variant is stored and deduplicated under one label; an off-spec label is stored verbatim. |
 | `--content <TEXT>` | yes | The fact body — a short, declarative sentence. Stored verbatim. Length-capped at the IPC handler (see [write-boundary gate](./distill-write-boundary-gate.md#input-validation-framing)). |
 | `--source-episode-id <ID>` | no (repeatable) | `node_id` of a source episode this fact derives from; repeat for several. The daemon writes **one `DERIVES_FROM` edge per id**, grounds the fact if **at least one** id resolves to a real episode node in the store, and sets the scalar `source_id` to `distill:{first id}`. |
 | `--confidence <0..1>` | no | A confidence **hint** only. The server IGNORES it and re-derives the stored confidence from the write-boundary gate; it is accepted (and range-parsed) purely so a caller may pass one without erroring. |

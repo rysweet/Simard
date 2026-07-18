@@ -1,0 +1,120 @@
+name: distill-concept-identity-dedup
+app_type: cli
+description: |
+  qa-team outside-in gate for the perpetual-cognition sub-goals "distillation
+  fact-yield" and "recall quality". The shared per-fact write-boundary gate
+  `src/fact_reliability.rs::commit_gated_fact` — the single gate both the IPC
+  `StoreFactGated` server seam and the in-process distiller sink call — now folds
+  a fact's concept to its STABLE IDENTITY LABEL (`concept_identity`) before it
+  scores, searches, deduplicates, and STORES the fact.
+
+  This closes a concept-label analogue of the whitespace-robust CONTENT dedup.
+  The semantic store's `search_facts` concept lookup is case-insensitive but
+  SEPARATOR-SENSITIVE: a fact stored under "bug-pattern" is invisible to a raw
+  "bug_pattern" (underscore) query. So when an LLM distiller re-emits the same
+  lesson across passes with a different concept surface form — "bug-pattern" one
+  pass, "bug_pattern" or "Bug-Pattern" the next, all of which `canonical_concept`
+  already folds together — the dedup step used to search under the raw variant,
+  miss the equal-or-stronger prior, and promote a redundant near-duplicate. That
+  inflates semantic memory and drags recall precision down (the duplicate floats
+  into recall top-k).
+
+  Two behaviours are now pinned end-to-end over the real gate and the real
+  in-memory store:
+
+    * A known-concept surface variant ("bug_pattern") that restates an already
+      stored lesson deduplicates instead of being promoted a second time, and the
+      surviving fact is stored under the CANONICAL "bug-pattern" label so recall
+      consolidates every variant under one concept.
+    * A content-key collision under a GENUINELY DIFFERENT concept can no longer
+      false-block a distinct lesson — the dedup equality check now also requires
+      concept-identity equality, so distinct lessons that merely share content
+      still both accumulate.
+
+  Off-spec concepts (labels outside the closed set) are left verbatim — never
+  silently rewritten or merged — matching the conservative surface-form policy of
+  `dedup_content_key` and `normalize_source_episode_id`. Hermetic: no network, no
+  live host mutation; the CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # Headline: the shared write-boundary gate folds the concept to its identity
+  # label so surface variants dedup and store canonically, and distinct concepts
+  # are never cross-blocked.
+  - action: run
+    params:
+      command: "cargo test --locked --lib fact_reliability_tests"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "concept_identity_folds_known_and_preserves_offspec ... ok"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "commit_gated_fact_dedups_concept_surface_variant ... ok"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "commit_gated_fact_stores_canonical_concept_label ... ok"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "commit_gated_fact_does_not_cross_block_distinct_concepts ... ok"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Regression guard: the full distillation semantic-handoff contract (the
+  # write-boundary gate that consumes this identity fold) stays green — no honest
+  # fact changes disposition.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_consolidation::distillation_semantic_handoff_tests"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Regression guard: the IPC `StoreFactGated` server seam that shares the same
+  # gate stays green — both seams still decide every fact identically.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_ipc::server::server_gate_tests"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+metadata:
+  tags:
+    - cli
+    - memory
+    - cognitive-memory
+    - distillation
+    - fact-yield
+    - recall
+    - recall-precision
+    - reliability
+    - regression
+  priority: high
+  author: copilot
+  test_type: outside-in
