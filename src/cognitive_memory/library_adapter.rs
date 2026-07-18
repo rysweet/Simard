@@ -167,6 +167,15 @@ pub struct LibraryCognitiveMemory {
     /// memory under `$HOME/.simard` (issues #1923 / #1925).
     #[cfg_attr(not(test), allow(dead_code))]
     state_root: Option<std::path::PathBuf>,
+    /// Cross-process open-serialization guard (issue: lbug lock-contention
+    /// mistaken for corruption). Held for the lifetime of this handle so no
+    /// other process can open the same store concurrently and trip lbug's
+    /// lock-conflict-as-corruption rebuild (which wipes memory). Declared
+    /// **last** so it drops **after** `inner` — the advisory `flock` is
+    /// released only once the underlying lbug store has finished closing and
+    /// dropped its own PID lock. `None` for the in-memory test constructor.
+    #[allow(dead_code)]
+    open_guard: Option<super::open_guard::CognitiveOpenGuard>,
 }
 
 impl LibraryCognitiveMemory {
@@ -182,6 +191,16 @@ impl LibraryCognitiveMemory {
     /// Returns [`SimardError::PersistentStoreIo`] if the underlying LadybugDB
     /// store cannot be opened.
     pub fn open(state_root: &Path) -> SimardResult<Self> {
+        // Serialize cross-process opens BEFORE touching the library. lbug takes
+        // a POSIX/PID lock on the store and mis-classifies a lock conflict from
+        // a *second* concurrent process as catalog corruption — quarantining the
+        // DB and rebuilding it EMPTY. Acquiring this guard first means the
+        // library never sees a concurrent open on this path: a transient race
+        // waits (bounded backoff) and then proceeds, and a genuinely
+        // still-held store makes us FAIL LOUD here rather than let the library
+        // wipe memory. Same-process re-opens share the guard (no self-deadlock).
+        let open_guard = super::open_guard::CognitiveOpenGuard::acquire(state_root)?;
+
         // Use the shared `LIVE_STORE_SUBDIR` constant (not a bare literal) so the
         // path the daemon opens and the verified-backup resolver `live_store_path`
         // are anchored to one source of truth and cannot silently drift (#2420).
@@ -200,6 +219,7 @@ impl LibraryCognitiveMemory {
             inner: Mutex::new(inner),
             fact_seq,
             state_root: Some(state_root.to_path_buf()),
+            open_guard: Some(open_guard),
         })
     }
 
@@ -230,6 +250,7 @@ impl LibraryCognitiveMemory {
             inner: Mutex::new(inner),
             fact_seq: AtomicU64::new(0),
             state_root: None,
+            open_guard: None,
         })
     }
 

@@ -442,6 +442,7 @@ nav:
     - Verified Backups of the Live Store: operations/verified-backups.md
     - Cognitive-Memory Durability: operations/cognitive-memory-durability.md
     - Cognitive-Memory WAL Recovery Runbook: operations/cognitive-memory-wal-recovery-runbook.md
+    - Cognitive-Memory Open Serialization: reference/cognitive-memory-open-serialization.md
     - Meeting REPL & Handoff Ingestion: operations/meeting-handoffs.md
     - Progress-Evidence Kill Switch: operations/progress-evidence-kill-switch.md
     - Outcome-Verification Kill Switch: operations/outcome-verification-kill-switch.md
