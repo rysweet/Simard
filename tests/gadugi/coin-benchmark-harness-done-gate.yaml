@@ -1,0 +1,55 @@
+name: "Coin-benchmark-harness blocked-goal triage is durable and its done-gate is fail-open"
+description: "TDD contract for the Overseer blocked-goal triage of goal build-a-local-coin-benchmark-harness-and-a-self-09e65e35 (decision complete-delivered-goal). Two bricks under test. Brick A: the durable operations record docs/operations/coin-benchmark-harness-goal-signal-2026-07-18.md must carry the verified-state evidence (issue #2713 CLOSED, PR #4171 MERGED), the four operator Signal messages, and a six-field OUTPUT JSON (decision complete-delivered-goal, escalate null), with zero internal marker/lock tokens leaking to operators, and be linked from the operations index. Brick B: scripts/check-coin-benchmark-harness-done-gate.sh is a read-only, fail-open helper proving the finish condition (issue #2713 CLOSED and PR #4171 MERGED, optionally coin-gym verify exits 0). PASS => exit 0; a genuinely failed criterion => non-zero; gh missing/unauthenticated/offline => WARN + exit 0 (never a silent PASS). Every gh call pinned to rysweet/Simard; strict mode; no set -x; no token leakage. The suite is deterministic and offline via a fake gh/coin-gym. It fails until Brick B ships — tests are written first."
+version: "1.0.0"
+
+config:
+  timeout: 600000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 600000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "operations record + done-gate helper satisfy the triage contract (offline, fail-open)"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/coin-benchmark-harness-done-gate.sh"
+    timeout: 600000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "overseer"
+    - "blocked-goal-triage"
+    - "done-gate"
+    - "fail-open"
+    - "coin-gym"
+    - "outside-in"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

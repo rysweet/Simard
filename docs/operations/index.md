@@ -11,6 +11,7 @@ Simard deployment.
 | [Cognitive-Memory WAL Recovery Runbook](cognitive-memory-wal-recovery-runbook.md) | Corrupt-WAL recovery, `memory import`, startup auto-restore, asset preservation (#2550) |
 | [Meeting REPL & Handoff Ingestion](meeting-handoffs.md) | Routing operator intent into the OODA loop |
 | [Progress-Evidence Kill Switch](progress-evidence-kill-switch.md) | `SIMARD_PROGRESS_EVIDENCE=off` and when to use it |
+| [Blocked-Goal Triage — Coin Benchmark Harness](coin-benchmark-harness-goal-signal-2026-07-18.md) | Completing a goal already delivered by merged PRs; the `coin-gym verify` done-gate |
 
 Related how-to guides:
 
