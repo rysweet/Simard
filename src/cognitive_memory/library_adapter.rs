@@ -503,6 +503,89 @@ fn shares_word_prefix(content: &str, needles: &HashSet<String>) -> bool {
         })
 }
 
+/// A `search_facts` query partitioned into the two token shapes the fact-recall
+/// relevance gate ([`fact_shares_query_relevance`]) treats differently — exactly
+/// mirroring the clean/raw partition [`LibraryCognitiveMemory::search_episodes_by_keywords`]
+/// already applies to keyword episode recall.
+struct FactQueryNeedles {
+    /// Whitespace tokens that are entirely alphanumeric — the shape a
+    /// natural-language recall query emits (a turn objective, `"rust"`,
+    /// `"project"`). These match at a WORD BOUNDARY (prefix of a whole word).
+    clean: HashSet<String>,
+    /// Whitespace tokens carrying any non-alphanumeric char — a concept label
+    /// (`"bug-pattern"`), a marker (`"journal:2026-07-18"`, `"goal-edge:blocks"`,
+    /// `"sub:abc"`), or a punctuated phrase. These keep the library's exact
+    /// case-insensitive SUBSTRING semantics their callers store and re-filter on.
+    raw: Vec<String>,
+}
+
+/// Partition a `search_facts` query into [`FactQueryNeedles`], lowercasing every
+/// token. Empty tokens (from repeated separators) are dropped. A token is CLEAN
+/// iff every character is alphanumeric; otherwise it is RAW.
+fn partition_fact_query(query: &str) -> FactQueryNeedles {
+    let mut clean: HashSet<String> = HashSet::new();
+    let mut raw: Vec<String> = Vec::new();
+    for token in query.split_whitespace() {
+        let lowered = token.to_lowercase();
+        if lowered.is_empty() {
+            continue;
+        }
+        if lowered.chars().all(char::is_alphanumeric) {
+            clean.insert(lowered);
+        } else {
+            raw.push(lowered);
+        }
+    }
+    FactQueryNeedles { clean, raw }
+}
+
+/// `true` iff a fact is genuinely relevant to `needles` — the fact-recall
+/// relevance gate that closes the interior/suffix substring-recall gap on the
+/// FACT path, mirroring the word-boundary gate `recall_episodes_ranked` /
+/// `search_episodes_by_keywords` already apply to episode recall (PR #4241
+/// lineage).
+///
+/// The upstream library's `search_facts` matches a query token as a raw
+/// case-insensitive SUBSTRING of a fact's concept OR content, so a clean
+/// natural-language token floated facts in on the INTERIOR/SUFFIX of an
+/// unrelated word — `"act"` recalled "re**act**or" and "artif**act**", `"own"`
+/// recalled "d**own**load", `"test"` recalled "la**test**" — polluting the
+/// capped working-context recall the turn/OODA path (`base_type_turn::
+/// prepare_turn_context`) feeds to reasoning and dragging fact recall precision
+/// down. A fact is relevant iff:
+///
+///   * some CLEAN token is a prefix of a whole word in the concept OR content
+///     (word-boundary match) — this drops the interior/suffix noise while
+///     PRESERVING the inflectional recall the live path depends on (`deploy`
+///     still recalls "deployed"/"deploys"), OR
+///   * some RAW token is a case-insensitive substring of the concept OR content
+///     — preserving verbatim the exact concept/marker lookups (`"bug-pattern"`,
+///     `"journal:2026-07-18"`, `"goal-edge:blocks"`) their callers store and
+///     re-filter on.
+///
+/// Both fields are checked because the library matches a query against concept
+/// AND content, so gating on content alone would drop a legitimate concept hit.
+fn fact_shares_query_relevance(concept: &str, content: &str, needles: &FactQueryNeedles) -> bool {
+    if !needles.clean.is_empty()
+        && (shares_word_prefix(content, &needles.clean)
+            || shares_word_prefix(concept, &needles.clean))
+    {
+        return true;
+    }
+    if !needles.raw.is_empty() {
+        let content_lc = content.to_lowercase();
+        let concept_lc = concept.to_lowercase();
+        if needles
+            .raw
+            .iter()
+            .any(|kw| content_lc.contains(kw.as_str()) || concept_lc.contains(kw.as_str()))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 // ---------------------------------------------------------------------------
 // Library record -> Simard DTO converters
 // ---------------------------------------------------------------------------
@@ -799,7 +882,33 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
             top.retain(|f| f.confidence >= min_confidence);
             top
         } else {
-            guard.search_facts(query, limit as usize, min_confidence)
+            let needles = partition_fact_query(query);
+            if needles.clean.is_empty() {
+                // Pure concept/marker query (every token carries a non-alphanumeric
+                // char — a hyphenated concept like `bug-pattern`, or a `journal:` /
+                // `goal-edge:` / `sub:` marker). Preserve the library's exact
+                // substring semantics AND its `limit` verbatim: these callers store
+                // and re-filter on that precise surface form, so the word-boundary
+                // gate does not apply and must add no behavior.
+                guard.search_facts(query, limit as usize, min_confidence)
+            } else {
+                // Natural-language (or mixed) query: apply the word-boundary
+                // relevance gate so a clean token no longer floats a fact in on the
+                // INTERIOR/SUFFIX of an unrelated word (`act` in "reactor", `own` in
+                // "download"), aligning FACT recall precision with the episodic
+                // recall gate (PR #4241 lineage). Truncation is deferred until AFTER
+                // the gate — the library is queried unbounded (`usize::MAX`) so a
+                // genuinely relevant fact ranked behind an interior-substring false
+                // positive is not dropped before the gate runs (mirroring
+                // `recall_episodes_ranked`), then the surviving set is capped to
+                // `limit`.
+                guard
+                    .search_facts(query, usize::MAX, min_confidence)
+                    .into_iter()
+                    .filter(|f| fact_shares_query_relevance(&f.concept, &f.content, &needles))
+                    .take(limit as usize)
+                    .collect()
+            }
         };
         Ok(facts.into_iter().map(to_fact).collect())
     }
@@ -1653,5 +1762,119 @@ mod word_boundary_gate_tests {
         let needles = tokenize_words("deploy");
         assert!(!shares_word_prefix("", &needles));
         assert!(!shares_word_prefix("   ...   ", &needles));
+    }
+}
+
+#[cfg(test)]
+mod fact_query_gate_tests {
+    use super::{fact_shares_query_relevance, partition_fact_query};
+
+    #[test]
+    fn partition_splits_clean_and_raw_tokens() {
+        // Clean natural-language words fold to lowercase in the clean set; a
+        // hyphenated concept and a colon marker land in the raw set verbatim
+        // (lowercased); empty tokens from repeated separators are dropped.
+        let n = partition_fact_query("Reactor  bug-pattern journal:2026-07-18 OWNS");
+        assert!(n.clean.contains("reactor"));
+        assert!(n.clean.contains("owns"));
+        assert_eq!(n.clean.len(), 2, "clean: {:?}", n.clean);
+        assert!(n.raw.contains(&"bug-pattern".to_string()));
+        assert!(n.raw.contains(&"journal:2026-07-18".to_string()));
+        assert_eq!(n.raw.len(), 2, "raw: {:?}", n.raw);
+    }
+
+    #[test]
+    fn clean_token_gate_rejects_interior_and_suffix_but_keeps_word_boundary() {
+        // `act` must not float a fact in on the interior of "reactor"/"artifact"
+        // or the suffix of a word, but must keep a genuine word-boundary hit.
+        let n = partition_fact_query("act");
+        assert!(!fact_shares_query_relevance(
+            "bug-pattern",
+            "the reactor overheated badly",
+            &n
+        ));
+        assert!(!fact_shares_query_relevance(
+            "bug-pattern",
+            "download the latest artifact",
+            &n
+        ));
+        assert!(fact_shares_query_relevance(
+            "bug-pattern",
+            "act quickly on failures",
+            &n
+        ));
+    }
+
+    #[test]
+    fn clean_token_gate_preserves_inflectional_recall() {
+        // A stem still recalls its inflected forms (the live-path recall a pure
+        // whole-word gate would drop).
+        let n = partition_fact_query("deploy");
+        assert!(fact_shares_query_relevance(
+            "lesson-learned",
+            "deployed the payment service",
+            &n
+        ));
+        assert!(fact_shares_query_relevance(
+            "lesson-learned",
+            "two deploys ran today",
+            &n
+        ));
+    }
+
+    #[test]
+    fn clean_token_gate_matches_on_concept_field_too() {
+        // The library matches a query against concept AND content, so a clean
+        // token that is a word-boundary prefix of the CONCEPT keeps the fact even
+        // when the content shares nothing.
+        let n = partition_fact_query("pr");
+        assert!(fact_shares_query_relevance(
+            "pr-pattern",
+            "unrelated body text",
+            &n
+        ));
+    }
+
+    #[test]
+    fn raw_token_gate_preserves_marker_substring_semantics() {
+        // A colon marker keeps the library's exact substring lookup — matched
+        // against either field — so marker/concept callers are unaffected.
+        let n = partition_fact_query("journal:2026-07-18");
+        assert!(n.clean.is_empty());
+        assert!(fact_shares_query_relevance(
+            "journal:2026-07-18",
+            "{\"body\":\"...\"}",
+            &n
+        ));
+        assert!(!fact_shares_query_relevance(
+            "journal:2026-07-19",
+            "unrelated",
+            &n
+        ));
+    }
+
+    #[test]
+    fn mixed_query_keeps_fact_via_either_clean_or_raw_token() {
+        // A mixed query gates the clean token at a word boundary while still
+        // honoring the raw marker substring.
+        let n = partition_fact_query("reactor goal-edge:blocks");
+        // Kept via the clean word-boundary token.
+        assert!(fact_shares_query_relevance(
+            "bug-pattern",
+            "the reactor tripped",
+            &n
+        ));
+        // Kept via the raw marker substring even though the clean token misses.
+        assert!(fact_shares_query_relevance(
+            "goal-edge:blocks",
+            "edge payload",
+            &n
+        ));
+        // Dropped: clean token only interior-embeds and no raw token matches.
+        assert!(!fact_shares_query_relevance(
+            "bug-pattern",
+            "subreactor note",
+            &n
+        ));
     }
 }

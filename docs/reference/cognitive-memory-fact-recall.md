@@ -1,7 +1,7 @@
 ---
 title: Tokenized fact recall in preparation
 description: How search_facts tokenizes a multi-word objective into keywords and ORs one CONTAINS clause per token so semantic facts (including goal-store:record facts) actually surface into the OODA prepared context instead of always returning zero.
-last_updated: 2026-07-03
+last_updated: 2026-07-18
 owner: cognitive-memory
 related:
   - ../architecture/cognitive-memory.md
@@ -149,6 +149,65 @@ The trait signature is unchanged. Historical sections below describe the deleted
 native fork's `ORDER BY f.id DESC LIMIT ...` query shape; current ordering and
 query construction are delegated to the library backend through
 `LibraryCognitiveMemory`.
+
+---
+
+## Word-boundary relevance gate (recall precision)
+
+The library backend matches each query token as a **raw case-insensitive
+substring** of a fact's `concept` OR `content`. Tokenized recall (above) fixed
+the "facts always zero" defect, but raw substring matching reintroduced the
+opposite failure — **interior/suffix false positives**: a short natural-language
+token floats a fact in on the *interior* of an unrelated word. Empirically, for
+a fact whose content is `"the reactor overheated"`:
+
+| query   | raw-substring match? | genuinely relevant? |
+|---------|----------------------|---------------------|
+| `reactor` | yes (whole word)   | yes                 |
+| `react`   | yes (prefix)       | yes                 |
+| `deploy`  | yes → `deployed`   | yes (inflection)    |
+| `act`     | yes → re**act**or  | **no** (interior)   |
+| `own`     | yes → d**own**load | **no** (interior)   |
+| `test`    | yes → la**test**   | **no** (suffix)     |
+
+Those off-topic facts crowd the **capped** working-context recall that
+`base_type_turn::prepare_turn_context` feeds to reasoning (and every other
+natural-language `search_facts` caller), dragging fact recall precision — and
+effective distillation fact-yield — down. This is the same defect the **episodic**
+recall gate already removed (`recall_episodes_ranked` /
+`search_episodes_by_keywords`, PR #4241 lineage); `search_facts` now applies the
+analogous gate to the FACT path.
+
+`LibraryCognitiveMemory::search_facts` partitions the query into two token shapes
+(mirroring `search_episodes_by_keywords`) and post-filters the backend's results:
+
+- **CLEAN token** — every character alphanumeric (a natural-language word: a turn
+  objective, `"rust"`, `"project"`). Kept only when it is a **prefix of a whole
+  word** in the `concept` OR `content` (a word-boundary match). This drops the
+  interior/suffix noise while preserving the **inflectional** recall the live path
+  depends on (`deploy` still recalls "deployed"/"deploys"). Both fields are
+  checked because the backend matches against both.
+- **RAW token** — carries any non-alphanumeric character (a hyphenated concept
+  like `bug-pattern`, or a marker like `journal:2026-07-18`, `goal-edge:blocks`,
+  `sub:<id>`). Keeps the backend's **exact case-insensitive substring** semantics
+  its callers store and re-filter on. A query with *no* clean token bypasses the
+  gate entirely, so concept/marker callers are unaffected.
+
+A fact is relevant iff some clean token word-boundary-matches **or** some raw
+token substring-matches (either field). The gate only ever **removes** interior/
+suffix false positives — it never adds a fact the backend did not return, and it
+never reorders. Truncation to `limit` is **deferred until after** the gate (the
+backend is queried unbounded), so a genuinely relevant fact ranked behind an
+interior-substring false positive is not dropped before the gate runs — matching
+`recall_episodes_ranked`.
+
+Wildcard (`"*"`) and empty/blank queries are unchanged: they map to the backend's
+"return all" path and are never gated.
+
+The pure gate helpers (`partition_fact_query`, `fact_shares_query_relevance`,
+`shares_word_prefix`) are unit-tested in `library_adapter::fact_query_gate_tests`;
+the end-to-end contract is pinned against the live in-memory backend in
+`src/cognitive_memory/tests_fact_recall_word_boundary.rs`.
 
 ---
 
