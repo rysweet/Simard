@@ -222,11 +222,31 @@ pub fn drain_by_requeue<R: EngineerRequeue>(
 
 The production `EngineerRequeue` (`self_deploy::ProdEngineerRequeue`) enumerates
 the live engineer set from the worktree claim sentinels
-(`engineer_worktree::live_claimed_engineers`) and requeues each goal by
-**releasing its claim sentinel** (`.simard-engineer-claim`) — the goal record and
-the engineer's `SessionCheckpoint` already persist, so releasing the claim makes
-the goal re-pickable by a restarted binary. `DrainTimeout` is retained in
+(`engineer_worktree::live_claimed_engineers`). It **leaves a still-live
+engineer's claim sentinel (`.simard-engineer-claim`) intact**: the liveness-based
+dedup (`find_live_engineer_for_goal`) keeps the goal leased to that producing
+engineer, which finishes its PR on the old inode after the swap — so the
+restarted binary does **not** duplicate the goal. Only a **dead or missing**
+claim is released, freeing that goal for re-pickup. The goal record and the
+engineer's `SessionCheckpoint` persist regardless. `DrainTimeout` is retained in
 `SafeUpdateError` for backward compatibility but is **no longer produced**.
+
+### Reopening dispatch (`draining.flag` lifecycle)
+
+`drain_by_requeue` sets `draining.flag` (in `default_state_dir()`) so the
+dispatch gate refuses *new* engineers during the swap window. That flag is
+always reopened afterward:
+
+- **Success / restart path:** the incoming binary clears a stale `draining.flag`
+  at boot (`run_ooda_daemon`) **unless** an `ExecHandover` upgrade is in flight
+  (the classic safe-update validate rail owns the flag in that case and clears
+  it itself).
+- **Any post-drain abort:** the orchestrator calls `undrain()` before returning,
+  reopening dispatch on the old binary that keeps serving.
+
+Because the systemd unit sets `KillMode=process`, a `systemctl restart` signals
+only the daemon process — the spared engineer children survive the restart and
+finish on the old inode.
 
 ## `SelfDeployOrchestrator`
 

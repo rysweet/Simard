@@ -149,14 +149,18 @@ flowchart TD
    mutates the daemon without a verified protective copy of both state and code.
 4. **Drain — never kill, never abort on a timeout.** The drain sets
    `draining.flag` so the engineer-dispatch site refuses *new* dispatches (the
-   brain treats that refusal as expected, not a failure), then **checkpoints and
-   requeues** each in-flight engineer's goal back onto the board by releasing its
-   worktree claim sentinel (`.simard-engineer-claim`). Their `SessionCheckpoint`
-   and goal record already persist, so the goal becomes re-pickable and the
-   restarted binary resumes it. The drain **never** waits on a wall-clock
-   timeout, **never** fails the deploy because engineers remain, and **never**
-   kills a producing engineer. This is the fix for "deploys never succeed while
-   busy": Simard can deploy her latest merged code even while running engineers.
+   brain treats that refusal as expected, not a failure). It **leaves each
+   still-live** engineer's worktree claim sentinel (`.simard-engineer-claim`)
+   **intact** — the liveness-based dedup keeps the goal leased to that producing
+   engineer so the restarted binary does not duplicate it — and releases only a
+   dead/missing claim. Their `SessionCheckpoint` and goal record persist. The
+   drain **never** waits on a wall-clock timeout, **never** fails the deploy
+   because engineers remain, and **never** kills a producing engineer. This is
+   the fix for "deploys never succeed while busy": Simard can deploy her latest
+   merged code even while running engineers. The `draining.flag` is always
+   reopened afterward: the incoming binary clears a stale flag at boot (unless an
+   `ExecHandover` upgrade is in flight), and any post-drain abort calls
+   `undrain()` on the still-serving old binary.
 5. **Reap only stale orphans; spare live producers.** Because the swap is
    `rename(2)`-based, it is safe against a still-running executable — a producing
    engineer keeps the old binary's inode and can finish its PR on the old code
@@ -169,7 +173,9 @@ flowchart TD
    installs.
 7. **Restart** through an injectable `DaemonRestarter`. The production default
    prefers `systemctl --user restart simard-ooda` when the unit is detected and
-   otherwise falls back to the existing coordinated `exec()` handover. Tests and
+   otherwise falls back to the existing coordinated `exec()` handover. The unit
+   sets `KillMode=process`, so the restart signals only the daemon — the spared
+   engineer children survive it and finish on the old inode. Tests and
    the recipe inject a fake restarter — **the recipe never live-restarts the
    operator's daemon**.
 8. **Post-deploy health check** (`simard self-health`). All probes must pass; see
