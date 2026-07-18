@@ -1,6 +1,6 @@
 use rusqlite::{Connection, TransactionBehavior, params};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 pub(super) fn initialize(connection: &mut Connection, now_millis: i64) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -118,6 +118,25 @@ pub(super) fn initialize(connection: &mut Connection, now_millis: i64) -> rusqli
             ON effect_jobs(state, lease_expires_at);
         CREATE INDEX IF NOT EXISTS authorization_decisions_effect_idx
             ON authorization_decisions(effect_id, recorded_at);
+        -- Done-gate PR emission ledger (Problem 4, issues #4166/#4189): the
+        -- durable, authoritative guard that makes done-gate PR emission
+        -- idempotent per goal. One row per goal-identity key; NEVER deleted — a
+        -- completed PR transitions `state` instead, so the emission outlives the
+        -- engineer that opened it. UNIQUE(repo, pr_number) makes a second goal
+        -- claiming the same PR a visible conflict rather than a silent duplicate.
+        CREATE TABLE IF NOT EXISTS goal_pr_emissions (
+            goal_key TEXT PRIMARY KEY,
+            goal_id TEXT NOT NULL,
+            repo TEXT NOT NULL,
+            pr_number INTEGER NOT NULL,
+            pr_url TEXT NOT NULL,
+            head_ref TEXT NOT NULL,
+            state TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE(repo, pr_number)
+        );
+        CREATE INDEX IF NOT EXISTS goal_pr_emissions_open_idx
+            ON goal_pr_emissions(goal_key, state);
         ",
     )?;
 
@@ -197,7 +216,7 @@ pub(super) fn initialize(connection: &mut Connection, now_millis: i64) -> rusqli
         DO UPDATE SET spent=MAX(spent, excluded.spent);
         ",
     )?;
-    transaction.execute_batch("PRAGMA user_version = 1")?;
+    transaction.execute_batch("PRAGMA user_version = 2")?;
     transaction.commit()
 }
 

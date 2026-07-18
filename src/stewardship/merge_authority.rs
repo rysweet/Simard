@@ -110,6 +110,23 @@ pub struct OpenPrSummary {
     pub labels: Vec<String>,
 }
 
+/// Purpose-scoped view of an open PR carrying its **body**, used only by
+/// idempotent done-gate goal-emission reconciliation (Problem 4, issues
+/// [#4166]/[#4189]). A separate DTO is required because [`OpenPrSummary`]
+/// (shared with the dashboard and self-merge sensor) carries **no** `body`
+/// field, and widening it would bloat those unrelated fetches. Sourced from
+/// `gh pr list --state open --label simard-autonomous --json number,url,headRefName,body`.
+///
+/// [#4166]: https://github.com/rysweet/Simard/issues/4166
+/// [#4189]: https://github.com/rysweet/Simard/issues/4189
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct GoalPrRef {
+    pub number: u32,
+    pub url: String,
+    pub head_ref_name: String,
+    pub body: String,
+}
+
 /// One merged-PR summary for the journal's day-scoped "landed changes" table.
 /// Sourced from
 /// `gh pr list --state merged --search "merged:YYYY-MM-DD" --json number,title,url`.
@@ -195,6 +212,23 @@ pub trait PrGhClient {
         _date: chrono::NaiveDate,
         _limit: u32,
     ) -> SimardResult<Vec<MergedPrSummary>> {
+        Ok(Vec::new())
+    }
+
+    /// List open PRs (with bodies) for idempotent done-gate goal-emission
+    /// reconciliation (Problem 4). The advisory, best-effort detection seam
+    /// behind the durable `goal_pr_emissions` ledger: a match must ALSO satisfy
+    /// the `Simard-Goal-Key:` body trailer or the `engineer/{goal-key}-` branch
+    /// convention before it suppresses emission — the `simard-autonomous` label
+    /// is a filter, not authorization.
+    ///
+    /// Default impl returns `Ok(vec![])` so every existing fake — and, until the
+    /// advisory reconciliation is wired, [`RealPrGhClient`] itself — keeps
+    /// compiling unchanged. The intended `RealPrGhClient` override runs
+    /// `gh pr list --state open --label simard-autonomous --json number,url,headRefName,body`;
+    /// the durable `goal_pr_emissions` ledger is the primary guard and does not
+    /// depend on this method returning live rows.
+    fn list_open_goal_prs(&self, _repo: &str, _limit: u32) -> SimardResult<Vec<GoalPrRef>> {
         Ok(Vec::new())
     }
 }
