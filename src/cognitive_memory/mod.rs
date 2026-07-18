@@ -836,6 +836,12 @@ pub mod creative_idea;
 mod library_adapter;
 pub use library_adapter::LibraryCognitiveMemory;
 
+// Cross-process open serialization for the lbug-backed store. Prevents a
+// transient lock conflict between two processes from being mis-classified by
+// the library as catalog corruption (which quarantines the DB and rebuilds it
+// empty, wiping cognitive memory). See the module docs for the full rationale.
+mod open_guard;
+
 // Issue #2420: migration-aware live-store path resolution. Re-exported at the
 // module root so the verified-backup path (`memory_backup`) and the daemon both
 // reference `cognitive_memory::live_store_path` — the single source of truth for

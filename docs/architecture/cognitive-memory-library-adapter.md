@@ -203,6 +203,20 @@ pub fn open(state_root: &Path) -> SimardResult<Self> {
 - The adapter **never** opens, reads, writes, or migrates the abandoned native
   store at `~/.simard/cognitive_memory.ladybug`. No data migration runs.
 
+### Cross-process open serialization
+
+Before delegating to `open_persistent`, `open` acquires a cross-process advisory
+`flock` on the sidecar `state_root/cognitive.open.lock`
+(`cognitive_memory::open_guard`). lbug takes a POSIX/PID lock on the store and
+mis-classifies a *lock conflict* from a second concurrent process as *catalog
+corruption* — quarantining the DB and rebuilding it EMPTY. Serializing opens at
+this seam means the library never sees a concurrent open on the same path: a
+transient race waits (bounded backoff) and proceeds, while a store still held by
+another live process makes the second opener **fail loud** instead of wiping
+memory. Same-process opens share the lock (re-entrant, matching lbug's per-PID
+semantics). See
+[Cognitive-Memory Open Serialization](../reference/cognitive-memory-open-serialization.md).
+
 ---
 
 ## API reference

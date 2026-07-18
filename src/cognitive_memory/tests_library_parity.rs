@@ -581,3 +581,142 @@ mod library {
         );
     }
 }
+
+/// Regression: a transient cross-process lock conflict must never be
+/// mis-classified (by the library) as catalog corruption and wipe cognitive
+/// memory. Simard serializes opens at the [`LibraryCognitiveMemory::open`] seam
+/// (`cognitive_memory::open_guard`), so a store that another live process holds
+/// open makes a second opener **fail loud** instead of proceeding into lbug's
+/// lock-conflict-as-corruption rebuild. The winner's records always survive.
+///
+/// The "other process" is simulated with a raw exclusive `flock` on the sidecar
+/// open-lock file: `flock` treats independent open-file-descriptions as
+/// distinct even within one PID, so this reproduces cross-process contention
+/// deterministically in a single test process.
+#[cfg(all(test, unix))]
+mod lock_contention_no_wipe {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use std::os::unix::io::AsRawFd;
+    use std::path::{Path, PathBuf};
+
+    const BUDGET_ENV: &str = "SIMARD_COGNITIVE_OPEN_LOCK_TIMEOUT_MS";
+
+    fn sidecar_lock_path(root: &Path) -> PathBuf {
+        let base = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        base.join(crate::cognitive_memory::open_guard::OPEN_LOCK_FILE)
+    }
+
+    /// A raw exclusive `flock` standing in for another live process's open.
+    struct ForeignHolder {
+        _file: std::fs::File,
+    }
+
+    impl ForeignHolder {
+        fn hold(lock_path: &Path) -> Self {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .read(true)
+                .open(lock_path)
+                .expect("open sidecar lock file");
+            let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            assert_eq!(ret, 0, "foreign holder must acquire the sidecar flock");
+            Self { _file: file }
+        }
+    }
+
+    impl Drop for ForeignHolder {
+        fn drop(&mut self) {
+            unsafe {
+                libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
+            }
+        }
+    }
+
+    fn count_quarantines(root: &Path) -> usize {
+        std::fs::read_dir(root)
+            .map(|rd| {
+                rd.filter_map(Result::ok)
+                    .filter(|e| {
+                        e.file_name()
+                            .to_string_lossy()
+                            .contains("cognitive.corrupt-")
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn concurrent_open_of_same_path_never_wipes_records() {
+        // Keep the fail-loud path fast and deterministic.
+        // SAFETY: single-threaded test body, and the `cognitive_memory` serial
+        // gate prevents any concurrent cognitive-store open from observing this.
+        unsafe { std::env::set_var(BUDGET_ENV, "300") };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+
+        // 1. Winner writes a durable fact, then releases the store (drop ->
+        //    lbug checkpoint + PID-lock release, and our open-guard release).
+        {
+            let winner = LibraryCognitiveMemory::open(&root).expect("open winner store");
+            let id = winner
+                .store_fact("durable", "must survive contention", 0.95, &[], "test")
+                .expect("store durable fact");
+            assert!(!id.is_empty(), "store_fact must return an id");
+        }
+
+        // Sanity: the fact is on disk before we introduce contention.
+        {
+            let check = LibraryCognitiveMemory::open(&root).expect("reopen for baseline");
+            let hits = check.search_facts("durable", 10, 0.0).expect("search");
+            assert_eq!(hits.len(), 1, "baseline: the fact must be persisted");
+        }
+
+        // 2. Simulate another live process holding the store open.
+        let holder = ForeignHolder::hold(&sidecar_lock_path(&root));
+
+        // 3. A second open MUST fail loud — never quarantine + rebuild empty.
+        let contended = LibraryCognitiveMemory::open(&root);
+        let contended_err = contended
+            .err()
+            .expect("a contended open must fail loud, not silently rebuild an empty store");
+        match contended_err {
+            crate::error::SimardError::PersistentStoreIo { action, reason, .. } => {
+                assert_eq!(action, "acquire_open_lock");
+                assert!(
+                    reason.contains("held open by another process"),
+                    "error must explain the contention, got: {reason}"
+                );
+            }
+            other => panic!("expected a PersistentStoreIo fail-loud, got {other:?}"),
+        }
+
+        // 4. No destructive quarantine artifact was produced.
+        assert_eq!(
+            count_quarantines(&root),
+            0,
+            "a contended open must NOT quarantine the DB (no cognitive.corrupt-* rebuild)"
+        );
+
+        // 5. Release the foreign holder; the store reopens and the record still
+        //    exists — it was never wiped.
+        drop(holder);
+        // SAFETY: see the set_var note above.
+        unsafe { std::env::remove_var(BUDGET_ENV) };
+
+        let survivor = LibraryCognitiveMemory::open(&root).expect("reopen after contention clears");
+        let hits = survivor
+            .search_facts("durable", 10, 0.0)
+            .expect("search after contention");
+        assert_eq!(
+            hits.len(),
+            1,
+            "the winner's record must survive the contention (never wiped)"
+        );
+        assert_eq!(hits[0].content, "must survive contention");
+    }
+}
