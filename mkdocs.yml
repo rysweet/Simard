@@ -116,6 +116,7 @@ nav:
     - Improvement Context — Execution-Evidence Gap: concepts/improvement-context-execution-evidence-gap.md
     - Closing the Procedural-Learning Loop: concepts/procedural-learning-loop.md
     - Reconcile-and-Self-Deploy: concepts/reconcile-and-self-deploy.md
+    - Self-Deploy Release Adoption: concepts/self-deploy-release-adoption.md
     - Deploy-Aware Done-Gate: concepts/deploy-aware-done-gate.md
     - Closed-Loop Outcome Verification (live-verified done): concepts/closed-loop-outcome-verification.md
     - Dependency/Overlap-Aware Engineer Scheduling: concepts/dependency-overlap-aware-scheduling.md
@@ -311,7 +312,12 @@ nav:
     - amplihack Freshness Gate: reference/amplihack-freshness-gate.md
     - Multi-Binary Self-Update: reference/multi-binary-self-update.md
     - Self-Deploy API: reference/self-deploy-api.md
+    - Self-Deploy Release-Adoption API: reference/self-deploy-release-adoption-api.md
     - Self-Deploy Source Prep & Warm Target Dir: reference/self-deploy-source-prep.md
+    - Goal-Board Authoritative Cycle Persistence: reference/goal-board-authoritative-cycle-persistence.md
+    - E2BIG Errno → Signal Alignment: reference/e2big-errno-signal-alignment.md
+    - OODA-Core Doc-Drift Reconciliation: reference/ooda-core-doc-drift-reconciliation.md
+    - Runbook — Land amplihack-rs#893: reference/land-amplihack-rs-pr-893.md
     - State-Root Resolution: reference/state-root-resolution.md
     - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
     - Runtime Contracts: reference/runtime-contracts.md

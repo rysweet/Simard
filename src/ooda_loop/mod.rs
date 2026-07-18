@@ -23,6 +23,8 @@ mod summary;
 mod types;
 
 #[cfg(test)]
+mod tests_authoritative_persist_4287;
+#[cfg(test)]
 mod tests_observe;
 #[cfg(test)]
 mod tests_orient;
