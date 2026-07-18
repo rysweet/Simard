@@ -189,10 +189,21 @@ async fn memory_recent_reports_n_items_remembered_in_last_hour() {
         serde_json::json!(t0 + N_IN_WINDOW),
         "`total` must stay the live aggregate stored count: {val}",
     );
+    // Per-item recent listing now works on the library backend: the same reader
+    // that backs /api/memory/graph enumerates episodes. This test writes only
+    // semantic facts (no episodes), so the recent-episode feed is empty — but
+    // the capability is available, so `available` is true and `items` is an
+    // empty array (not the retired always-`false` stub).
     assert_eq!(
         val["available"],
-        serde_json::json!(false),
-        "per-item listing stays unavailable on the library backend (#2307): {val}",
+        serde_json::json!(true),
+        "per-item recent listing is now available on the library backend: {val}",
+    );
+    assert!(val["items"].is_array(), "`items` must be an array: {val}",);
+    assert_eq!(
+        val["items"].as_array().map(|a| a.len()),
+        Some(0),
+        "no episodes were written, so the recent-episode feed is empty: {val}",
     );
     assert!(val["note"].is_string(), "`note` must be preserved: {val}");
     assert!(
@@ -295,8 +306,115 @@ async fn memory_recent_fails_closed_on_unreadable_store() {
 }
 
 // ---------------------------------------------------------------------------
-// Unit: pure window-boundary semantics for select_last_hour_baseline
+// Integration: per-item recent-episode feed (the #1997 "Recent Memories" panel)
 // ---------------------------------------------------------------------------
+
+/// Recent episodes MUST surface as `items` in the frontend's expected shape
+/// (`category`/`summary`/`timestamp`), newest-first. Pins the fix that replaced
+/// the always-empty `items:[]` + `available:false` stub — the Memory tab's
+/// "Recent Memories" panel could never show anything even while thousands of
+/// episodes were stored.
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn memory_recent_lists_recent_episodes_newest_first() {
+    let state = HermeticState::new();
+    let guard = SharedMemoryGuard::register(&state);
+
+    // Store three distinct episodes in order; `list_all_episodes` returns them
+    // newest-first, so the last stored ("gamma") must appear first.
+    for content in ["alpha episode", "beta episode", "gamma episode"] {
+        guard
+            .ops()
+            .store_episode(content, "tdd-recent-items", None)
+            .expect("store_episode must persist a new episodic node");
+    }
+
+    let resp = memory_recent_at(state.state_root()).await;
+    let val = &resp.0;
+
+    assert!(
+        val.get("error").is_none(),
+        "a healthy live read must NOT fail closed: {val}",
+    );
+    assert_eq!(
+        val["available"],
+        serde_json::json!(true),
+        "per-item recent listing is available once episodes exist: {val}",
+    );
+
+    let items = val["items"].as_array().expect("items must be an array");
+    assert_eq!(
+        items.len(),
+        3,
+        "all three stored episodes must be listed: {val}",
+    );
+
+    // Newest-first: the most recently stored episode is item 0.
+    assert_eq!(
+        items[0]["summary"].as_str(),
+        Some("gamma episode"),
+        "episodes must be newest-first (gamma stored last): {val}",
+    );
+    assert_eq!(
+        items[0]["category"].as_str(),
+        Some("Past event"),
+        "episodes render under the 'Past event' category the frontend colors: {val}",
+    );
+    // Every item carries the frontend-required fields.
+    for item in items {
+        assert!(
+            item["summary"].is_string(),
+            "each item needs a `summary`: {item}",
+        );
+        assert!(
+            item.get("category").and_then(|c| c.as_str()) == Some("Past event"),
+            "each item needs the 'Past event' category: {item}",
+        );
+        // `timestamp` is always JSON `null` for library-backed episodes: the
+        // backend stores a monotonic ordinal, not a wall-clock instant, so the
+        // frontend omits the "time ago" label. The key must still be present.
+        assert!(
+            item.get("timestamp").is_some(),
+            "each item must carry a `timestamp` key: {item}",
+        );
+        assert!(
+            item["timestamp"].is_null(),
+            "library-backed episodes have no wall-clock time, so `timestamp` is null: {item}",
+        );
+    }
+}
+
+/// The recent-episode feed is bounded: even with more episodes than the cap,
+/// the endpoint returns at most `RECENT_ITEMS_MAX` items so the panel stays a
+/// glance, not an unbounded dump.
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn memory_recent_bounds_item_count() {
+    let state = HermeticState::new();
+    let guard = SharedMemoryGuard::register(&state);
+
+    // Store comfortably more episodes than the cap (25).
+    for i in 0..40 {
+        guard
+            .ops()
+            .store_episode(&format!("episode {i}"), "tdd-recent-cap", None)
+            .expect("store_episode must persist");
+    }
+
+    let resp = memory_recent_at(state.state_root()).await;
+    let val = &resp.0;
+
+    let items = val["items"].as_array().expect("items must be an array");
+    assert!(
+        items.len() <= 25,
+        "recent-item feed must be capped at 25, got {}: {val}",
+        items.len(),
+    );
+    assert!(
+        !items.is_empty(),
+        "with 40 episodes stored the feed must not be empty: {val}",
+    );
+}
 
 /// A snapshot EXACTLY at the window edge (`now − 3600`) is "at-or-before" and
 /// MUST be selected as the baseline. Locks the `<= cutoff` boundary so an

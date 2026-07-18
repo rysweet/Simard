@@ -1,0 +1,38 @@
+# Canonical agentic-test schema (name + agents[] + steps[] with params).
+#
+# The installed `gadugi-test` / `@gadugi/agentic-test` binary validates and runs
+# scenarios through `ScenarioLoader` (canonical format), which requires a `name`,
+# a `steps` array, and a non-empty `agents` array. A single `cli` agent runs the
+# hermetic regression script; the agent's command runner treats a non-zero exit
+# code as a step failure, so the script's own `exit 1` on a wrong/empty recent
+# list makes this a real pass/fail gate (not a cosmetic assertion).
+name: simard-dashboard-memory-recent-items
+description: >-
+  Standalone dashboard's Memory tab "Recent Memories" panel
+  (GET /api/memory/recent) lists the newest episodic memories newest-first with
+  available:true, instead of the retired always-empty stub that claimed per-item
+  recent listing was unavailable on the library backend.
+version: "1.0"
+config:
+  timeout: 240000
+environment:
+  requires: []
+agents:
+  - name: cli-agent
+    type: cli
+    config: {}
+metadata:
+  tags:
+    - cli
+    - dashboard
+    - memory
+  priority: high
+steps:
+  - name: Run the standalone dashboard recent-memory-items regression script
+    agent: cli-agent
+    action: run
+    params:
+      command: bash
+      args:
+        - scripts/qa-dashboard-memory-recent-items.sh
+    timeout: 240000

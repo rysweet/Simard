@@ -36,9 +36,12 @@ all day ([#2679](https://github.com/rysweet/Simard/issues/2679)).
 `memory_recent()` in `operator_commands_dashboard/memory.rs` read the aggregate
 `total` live — through the healthy `open_reader_client(state_root)?.ops()
 .get_statistics()?` path — but returned `last_hour_count` as a **literal `0`**.
-The per-item recent listing had been stubbed during de-fork Phase 2b (#2307,
-because the library backend exposes no "list nodes newer than T" API), and the
-last-hour field was left hardcoded rather than computed. The engine read was
+The per-item recent listing had also been stubbed during de-fork Phase 2b
+(#2307): the library backend exposes no "list nodes newer than T" API, so both
+the last-hour field and the `items` list were hardcoded rather than computed.
+The last-hour field is now computed (below); the `items` list is now populated
+from the newest stored episodes via `list_all_episodes` (newest-first) — the
+same shared reader that backs `/api/memory/graph`. The engine read was
 never broken: the defect was a **stale placeholder binding** in the dashboard's
 aggregation layer.
 
@@ -59,8 +62,10 @@ dashboard.
 | No snapshot history yet (cold start / <1 h uptime) | `0` — a snapshot is seeded so the metric self-heals on the next poll | same as above |
 | Live cognitive store unreachable | `—` (em dash) | the `error` string rendered in red |
 
-¹ The per-item recent list stays unavailable on the library backend (#2307);
-the headline count is the honest signal that memory *is* moving. Note the count
+¹ The list body still shows this headline summary line; the per-item recent
+list is now populated separately from the newest stored episodes (see the
+`items` field below). The headline count is the honest signal that memory *is*
+moving. Note the count
 is **net** growth (additions minus pruning/consolidation over the hour), not a
 gross count of every item written: an hour that adds many items but prunes at
 least as many reads `0`. For per-type deltas and growth rates, see
@@ -82,11 +87,19 @@ no placeholder on the normal path.
 
 ```jsonc
 {
-  "items": [],                 // per-item listing unavailable on the library backend (#2307)
+  "items": [                   // newest episodic memories, newest-first (capped at 25)
+    {
+      "category": "Past event",          // the frontend category the panel color-codes
+      "summary": "OODA cycle #1857: 5 actions (4/5 succeeded)…",  // episode content (bounded)
+      "timestamp": null,                 // always null: library episodes carry no wall-clock time (see below)
+      "source": "ooda-cycle",            // the episode's source label
+      "node_id": "epi_…"                 // stable episode node id
+    }
+  ],
   "total": 41822,              // live aggregate stored count across all six memory types
   "last_hour_count": 27,       // LIVE net growth of long-term memory over the trailing hour
-  "available": false,          // refers to the per-item `items` list, not the count
-  "note": "`last_hour_count` is the net growth of long-term memory (episodic+semantic+procedural+prospective) over the trailing hour, derived from snapshot history; per-item listing is unavailable on the library backend (#2307). See /api/memory/history for per-type deltas.",
+  "available": true,           // per-item recent listing is available on the library backend
+  "note": "Recent items are the newest episodic memories (events Simard recorded), newest-first; `total` is the live aggregate stored count across all six memory types. See /api/memory/graph for the full per-type graph and /api/memory/history for the per-type growth breakdown.",
   "server_time": "2026-07-07T18:34:00Z"
 }
 ```
@@ -97,21 +110,23 @@ no placeholder on the normal path.
 |-------|------|---------|
 | `last_hour_count` | `integer` (`u64`) on the normal path; `null` on the error path | Net growth of **long-term** memory (episodic + semantic + procedural + prospective) over the trailing hour, clamped to ≥ 0. This is the value bound to `#mem-recent-count`. |
 | `total` | `integer` (`u64`); **omitted on the error path** | Live aggregate stored count across **all six** memory types (`CognitiveStatistics::total()`); rendered beside the headline as `<total> total`. Present with the same value on the normal path (unchanged by this fix); on the error path the payload omits it, mirroring `GET /api/memory/history`. |
-| `items` | array | Always `[]` on the library backend — per-item recent listing is unavailable (#2307). Unchanged by this fix. |
-| `available` | `bool` | Refers to the per-item `items` list (`false` on the library backend), **not** to the headline count. Unchanged by this fix. |
-| `note` | `string` | Human-readable, path-free explanation of what `last_hour_count` measures and where per-type deltas live. |
+| `items` | array of objects | The newest **episodic** memories, newest-first (by `temporal_index`), capped at 25. Each item carries `category` (always `"Past event"`), `summary` (bounded episode content), `timestamp` (always JSON `null` — the library backend records episodes with a monotonic ordinal, not a wall-clock instant, and does not surface the episode's `created_at`, so the frontend omits the "time ago" label), `source`, and `node_id`. Populated through the same shared reader (`open_reader_client` → `list_all_episodes`) that backs `/api/memory/graph`. Empty `[]` when the store holds no episodes or the episode read fails. |
+| `available` | `bool` | Whether per-item recent listing succeeded (`true` when the reader enumerated episodes; `false` on the error path or when the episode read failed). |
+| `note` | `string` | Human-readable, path-free explanation of what `items`/`total` show and where the per-type graph and deltas live. |
 | `server_time` | `string` (RFC 3339) | Server timestamp of the read. |
 | `error` | `string` (only on the error path) | Present only when the live reader could not be opened / read. On this path `last_hour_count` is `null`, `available` is `false`, and `items` is `[]`. |
 
 **Back-compatible.** On the normal (success) path, every field that existed
 before the fix (`items`, `total`, `available`, `note`, `server_time`) is
-preserved with the same type and meaning. The only behavioural change there is
-that `last_hour_count` went from a constant `0` to a computed value. No field
-was removed or renamed on the success path. On read failure the endpoint now
-**fails closed** — `last_hour_count` is `null`, a new `error` field is added,
-and the count-only fields (`total`, `note`) are omitted — instead of the prior
-behaviour of returning `total: 0` with no `error`. This deliberately aligns the
-failure shape with `GET /api/memory/history`.
+preserved with the same type. The behavioural changes are that
+`last_hour_count` went from a constant `0` to a computed value, and `items`/
+`available` went from the retired always-`[]`/`false` stub to the live
+newest-episodes feed the Memory tab's "Recent Memories" panel already knew how
+to render. No field was removed or renamed on the success path. On read failure
+the endpoint **fails closed** — `last_hour_count` is `null`, a new `error` field
+is added, and the count-only fields (`total`, `note`) are omitted — instead of
+the prior behaviour of returning `total: 0` with no `error`. This deliberately
+aligns the failure shape with `GET /api/memory/history`.
 
 ### How `last_hour_count` is computed
 
@@ -202,7 +217,7 @@ curl -s --cookie "session=<code>" http://localhost:8080/api/memory/recent \
 {
   "last_hour_count": 27,
   "total": 41822,
-  "available": false
+  "available": true
 }
 ```
 
@@ -361,8 +376,11 @@ data-source semantics so the count cannot silently regress to `0`:
   reports honest movement across episodes, procedures, and prospective triggers,
   so it never implies memory is idle. Fixing the distillation rate itself is out
   of scope for this display fix.
-- **Per-item recent listing.** Still unavailable on the library backend
-  (#2307); `items` remains `[]`.
+- **Per-item recent listing.** Now populated from the newest stored episodes
+  (newest-first, capped at 25) through the same shared reader that backs
+  `/api/memory/graph`; `available` is `true` on the normal path. Per-episode
+  wall-clock time is not retained by the library backend, so each item's
+  `timestamp` is `null` (the panel omits the "time ago" label).
 - **Frontend markup / label.** The caption already reads
   "items remembered / in the last hour" and is now accurate — no UI redesign.
 
