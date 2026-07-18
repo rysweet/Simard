@@ -389,15 +389,28 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
     }
 
     /* --- Recent Memories (plain-English view, #1997) --- */
+    /* #4318: label the "items remembered" number with the window it truly
+       covers. When memory-history snapshots are sparse the baseline can be
+       older than an hour, so the count spans >1h; say so instead of always
+       claiming "in the last hour". */
+    function formatRecentWindow(secs){
+      if(secs==null||typeof secs!=='number'||!isFinite(secs)) return 'in the last hour';
+      if(Math.abs(secs-3600)<=900) return 'in the last hour';
+      if(secs<3600){const m=Math.max(1,Math.round(secs/60));return 'in the last '+m+' min';}
+      const h=secs/3600;
+      return 'in the last '+(h>=10?String(Math.round(h)):h.toFixed(1))+'h';
+    }
     async function fetchRecentMemories(){
       const countEl=document.getElementById('mem-recent-count');
       const totalEl=document.getElementById('mem-recent-total');
       const listEl=document.getElementById('mem-recent-list');
+      const winEl=document.getElementById('mem-recent-window');
       listEl.innerHTML='<span class="loading">Loading recent memories…</span>';
       try{
         const d=await apiFetch('/api/memory/recent');
-        if(d.error){listEl.innerHTML='<span class="err">'+esc(d.error)+'</span>';countEl.textContent='—';return;}
+        if(d.error){listEl.innerHTML='<span class="err">'+esc(d.error)+'</span>';countEl.textContent='—';if(winEl)winEl.textContent='in the last hour';return;}
         countEl.textContent=d.last_hour_count;
+        if(winEl) winEl.textContent=formatRecentWindow(d.last_hour_window_secs);
         totalEl.textContent=(d.total||0).toLocaleString()+' total';
         if(!d.items||d.items.length===0){
           const total=d.total||0;

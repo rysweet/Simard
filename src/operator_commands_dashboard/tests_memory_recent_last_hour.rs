@@ -35,6 +35,7 @@ use crate::memory_ipc::{
 };
 use crate::operator_commands_dashboard::memory::{
     MemorySnapshot, memory_recent_at, save_history, select_last_hour_baseline,
+    select_last_hour_baseline_snapshot,
 };
 use crate::test_support::HermeticState;
 
@@ -372,5 +373,127 @@ fn baseline_is_none_for_empty_history() {
         select_last_hour_baseline(&[], 1_000_000.0),
         None,
         "empty history has no baseline snapshot",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Unit: honest window semantics for select_last_hour_baseline_snapshot (#4318)
+// ---------------------------------------------------------------------------
+
+/// The snapshot-returning variant must pick the SAME baseline as the scalar
+/// variant (same `long_term_total`), so exposing `epoch_secs` never changes the
+/// count — only lets the caller report the true window it covers.
+#[test]
+fn baseline_snapshot_matches_scalar_variant() {
+    let now = 1_000_000.0;
+    let history = vec![
+        snapshot(now - 10_800.0, 5),       // 3h ago
+        snapshot(now - 7_200.0, 20),       // 2h ago
+        snapshot(now - ONE_HOUR_SECS, 40), // exactly 1h ago — chosen
+        snapshot(now - 60.0, 99),          // in-window
+    ];
+    let snap = select_last_hour_baseline_snapshot(&history, now).expect("baseline snapshot");
+    assert_eq!(
+        snap.long_term_total,
+        select_last_hour_baseline(&history, now).unwrap(),
+        "the snapshot variant must reference the same baseline as the scalar one",
+    );
+    assert_eq!(snap.epoch_secs, now - ONE_HOUR_SECS);
+}
+
+/// The core #4318 pin: when the history is SPARSE and the newest snapshot
+/// at-or-before `now − 1h` is much older than an hour, the exposed `epoch_secs`
+/// yields a window well beyond 3600 s — the honest signal the caption uses to
+/// stop claiming "in the last hour".
+#[test]
+fn baseline_snapshot_exposes_window_beyond_one_hour_when_sparse() {
+    let now = 1_000_000.0;
+    // A 2.6h-old snapshot straddled by a large gap: the only at-or-before-edge
+    // baseline is 9_360 s old, so the delta really spans 2.6h, not 1h.
+    let stale_age = 2.6 * 3600.0;
+    let history = vec![
+        snapshot(now - stale_age, 9071), // 2.6h ago — the chosen baseline
+        snapshot(now - 180.0, 9341),     // 3 min ago — in-window, ignored as baseline
+    ];
+    let snap = select_last_hour_baseline_snapshot(&history, now).expect("baseline snapshot");
+    let window = now - snap.epoch_secs;
+    assert!(
+        window > ONE_HOUR_SECS,
+        "a sparse-history baseline must expose a window > 1h so the caption is honest, got {window}s",
+    );
+    assert!(
+        (window - stale_age).abs() < 1.0,
+        "window must equal the true elapsed time since the baseline snapshot",
+    );
+}
+
+/// Empty history exposes no baseline snapshot — the handler then reports a
+/// `null` window rather than a fabricated one.
+#[test]
+fn baseline_snapshot_is_none_for_empty_history() {
+    assert!(
+        select_last_hour_baseline_snapshot(&[], 1_000_000.0).is_none(),
+        "empty history has no baseline snapshot to derive a window from",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Integration: the endpoint surfaces the honest window (#4318)
+// ---------------------------------------------------------------------------
+
+/// A fresh, ~1h-old baseline: the endpoint reports a `last_hour_window_secs`
+/// close to one hour, so the caption legitimately says "in the last hour".
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn memory_recent_window_is_about_one_hour_for_fresh_baseline() {
+    let state = HermeticState::new();
+    let guard = SharedMemoryGuard::register(&state);
+    let t0 = live_long_term_total(guard.ops());
+
+    // Baseline 61 min ago (just past the edge) — the tightest honest baseline.
+    seed_history_baseline(&state, ONE_HOUR_SECS + 60.0, t0);
+
+    let resp = memory_recent_at(state.state_root()).await;
+    let val = &resp.0;
+
+    let window = val["last_hour_window_secs"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("last_hour_window_secs must be numeric: {val}"));
+    assert!(
+        (window - (ONE_HOUR_SECS + 60.0)).abs() < 120.0,
+        "a ~1h baseline must report a ~1h window (got {window}s): {val}",
+    );
+}
+
+/// The core #4318 endpoint pin: a SPARSE history whose only at-or-before-edge
+/// baseline is 2.6h old must surface `last_hour_window_secs` > 3600, proving the
+/// count spans more than an hour and the caption must not claim "in the last
+/// hour". Against the pre-fix code (no window field) this assertion fails.
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn memory_recent_reports_window_beyond_one_hour_for_stale_baseline() {
+    let state = HermeticState::new();
+    let guard = SharedMemoryGuard::register(&state);
+    let t0 = live_long_term_total(guard.ops());
+
+    // Sparse history: the sole at-or-before-edge baseline is 2.6h old.
+    let stale_age = 2.6 * 3600.0;
+    let baseline = snapshot(chrono::Utc::now().timestamp() as f64 - stale_age, t0);
+    save_history(&state.state_root().join("memory_history.json"), &[baseline]);
+
+    let resp = memory_recent_at(state.state_root()).await;
+    let val = &resp.0;
+
+    let window = val["last_hour_window_secs"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("last_hour_window_secs must be numeric: {val}"));
+    assert!(
+        window > ONE_HOUR_SECS,
+        "a 2.6h-stale baseline must report a window > 1h so the caption stays honest \
+         (got {window}s): {val}",
+    );
+    assert!(
+        (window - stale_age).abs() < 120.0,
+        "the reported window must match the true elapsed time since the baseline: {val}",
     );
 }

@@ -85,6 +85,7 @@ no placeholder on the normal path.
   "items": [],                 // per-item listing unavailable on the library backend (#2307)
   "total": 41822,              // live aggregate stored count across all six memory types
   "last_hour_count": 27,       // LIVE net growth of long-term memory over the trailing hour
+  "last_hour_window_secs": 3660, // ACTUAL elapsed time that delta covers (#4318); null with no baseline
   "available": false,          // refers to the per-item `items` list, not the count
   "note": "`last_hour_count` is the net growth of long-term memory (episodic+semantic+procedural+prospective) over the trailing hour, derived from snapshot history; per-item listing is unavailable on the library backend (#2307). See /api/memory/history for per-type deltas.",
   "server_time": "2026-07-07T18:34:00Z"
@@ -96,6 +97,7 @@ no placeholder on the normal path.
 | Field | Type | Meaning |
 |-------|------|---------|
 | `last_hour_count` | `integer` (`u64`) on the normal path; `null` on the error path | Net growth of **long-term** memory (episodic + semantic + procedural + prospective) over the trailing hour, clamped to ≥ 0. This is the value bound to `#mem-recent-count`. |
+| `last_hour_window_secs` | `number` (seconds, ≥ 0) on the normal path; `null` when there is no baseline or on the error path | The **actual** elapsed time the `last_hour_count` delta spans — `now − baseline.epoch_secs` (#4318). Because the baseline is a discrete snapshot, this can exceed one hour when history is sparse. The caption (`#mem-recent-window`) reads "in the last hour" only when this is within ±15 min of 3600 s; otherwise it renders the real window (e.g. "in the last 2.6h"), so the number is never labeled dishonestly. |
 | `total` | `integer` (`u64`); **omitted on the error path** | Live aggregate stored count across **all six** memory types (`CognitiveStatistics::total()`); rendered beside the headline as `<total> total`. Present with the same value on the normal path (unchanged by this fix); on the error path the payload omits it, mirroring `GET /api/memory/history`. |
 | `items` | array | Always `[]` on the library backend — per-item recent listing is unavailable (#2307). Unchanged by this fix. |
 | `available` | `bool` | Refers to the per-item `items` list (`false` on the library backend), **not** to the headline count. Unchanged by this fix. |
@@ -112,6 +114,11 @@ was removed or renamed on the success path. On read failure the endpoint now
 and the count-only fields (`total`, `note`) are omitted — instead of the prior
 behaviour of returning `total: 0` with no `error`. This deliberately aligns the
 failure shape with `GET /api/memory/history`.
+
+`last_hour_window_secs` (#4318) is **additive**: it is a new field on both the
+success path (numeric, or `null` when there is no baseline) and the error path
+(`null`). No existing consumer breaks — clients that ignore it see the same
+`last_hour_count` behaviour as before.
 
 ### How `last_hour_count` is computed
 
@@ -144,10 +151,14 @@ last_hour_count = max(0, live_long_term_total − baseline_long_term_total)
 
 Because baselines are discrete snapshots taken at most every
 `SNAPSHOT_MIN_INTERVAL_SECS` (5 min), the window edge has a granularity of about
-one sample interval. That is disclosed in the `note` and is intentional — the
-goal is an **honest non-zero** signal that memory is moving, not sub-second
-window exactness. The helper always selects the closest sample **at or before**
-the edge, bounding the error to one interval.
+one sample interval **when snapshots are dense**. When the daemon is down or
+throttled, history can be **sparse**: the most-recent snapshot at-or-before the
+one-hour edge may be several hours old, so `last_hour_count` then spans that
+longer interval — not one hour. Rather than hide this, the endpoint reports the
+true span in `last_hour_window_secs` (#4318) and the caption labels the number
+with the real window ("in the last hour" only when it genuinely is ~1h). The
+helper always selects the closest sample **at or before** the edge; the honest
+window keeps the headline from ever overstating a one-hour rate.
 
 ### Snapshot history and the read-path side effect
 

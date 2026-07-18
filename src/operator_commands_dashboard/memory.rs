@@ -283,6 +283,23 @@ pub(crate) async fn memory_history() -> Json<Value> {
 ///   3. Empty history has no baseline (`None`); the caller then diffs the live
 ///      total against itself, yielding an honest `0`.
 pub(crate) fn select_last_hour_baseline(history: &[MemorySnapshot], now_secs: f64) -> Option<u64> {
+    select_last_hour_baseline_snapshot(history, now_secs).map(|s| s.long_term_total)
+}
+
+/// Reference-returning variant of [`select_last_hour_baseline`].
+///
+/// Returns the baseline [`MemorySnapshot`] itself (not just its long-term total)
+/// so callers can also read its `epoch_secs` and report the ACTUAL window the
+/// trailing-hour delta covers. This matters when the snapshot history is sparse:
+/// if the most-recent snapshot at-or-before `now − 3600` is, say, 2.6 h old
+/// (a multi-hour gap straddling the one-hour mark), the delta spans 2.6 h, not
+/// one hour. Exposing the chosen snapshot lets the endpoint surface
+/// `last_hour_window_secs` so the caption can stay honest instead of always
+/// claiming "in the last hour" (#4318).
+pub(crate) fn select_last_hour_baseline_snapshot(
+    history: &[MemorySnapshot],
+    now_secs: f64,
+) -> Option<&MemorySnapshot> {
     if history.is_empty() {
         return None;
     }
@@ -297,7 +314,6 @@ pub(crate) fn select_last_hour_baseline(history: &[MemorySnapshot], now_secs: f6
         .filter(|s| s.epoch_secs <= cutoff)
         .max_by(cmp_epoch)
         .or_else(|| history.iter().min_by(cmp_epoch))
-        .map(|s| s.long_term_total)
 }
 
 /// `GET /api/memory/recent` — recent-memory listing.
@@ -319,6 +335,11 @@ pub(crate) fn select_last_hour_baseline(history: &[MemorySnapshot], now_secs: f6
 /// operators "remembered 0 items in the last hour" even while long-term memory
 /// was actively growing. It now reports the LIVE net growth of long-term memory
 /// over the trailing hour, computed by [`memory_recent_at`].
+///
+/// `last_hour_window_secs` (#4318): the ACTUAL elapsed time the `last_hour_count`
+/// delta covers. Because snapshots can be sparse, the baseline may be older than
+/// one hour, so this field lets the caption stay honest ("in the last hour" only
+/// when the window truly is ~1h). It is `null` when there is no baseline.
 pub(crate) async fn memory_recent() -> Json<Value> {
     memory_recent_at(&resolve_state_root()).await
 }
@@ -333,9 +354,11 @@ pub(crate) async fn memory_recent() -> Json<Value> {
 /// prospective) is read through the single shared reader
 /// (`open_reader_client` → `get_statistics`) and the baseline is the
 /// most-recent `memory_history.json` snapshot at-or-before `now − 1h`
-/// (see [`select_last_hour_baseline`]). The read fails closed: on a live-read
-/// error it returns an `error` payload with `last_hour_count: null` — never a
-/// misleading `0`.
+/// (see [`select_last_hour_baseline_snapshot`]). `last_hour_window_secs` reports
+/// the true elapsed time that delta spans, so a sparse-history baseline older
+/// than one hour is labeled honestly rather than as "the last hour" (#4318). The
+/// read fails closed: on a live-read error it returns an `error` payload with
+/// `last_hour_count: null` — never a misleading `0`.
 pub(crate) async fn memory_recent_at(state_root: &std::path::Path) -> Json<Value> {
     // Preserved back-compat note describing the per-item listing limitation.
     let note = "Per-item recent-memory listing is unavailable on the library \
@@ -354,6 +377,7 @@ pub(crate) async fn memory_recent_at(state_root: &std::path::Path) -> Json<Value
                     "items": [],
                     "total": Value::Null,
                     "last_hour_count": Value::Null,
+                    "last_hour_window_secs": Value::Null,
                     "available": false,
                     "note": note,
                     "error": format!("Cannot read cognitive memory: {e}"),
@@ -383,10 +407,22 @@ pub(crate) async fn memory_recent_at(state_root: &std::path::Path) -> Json<Value
     let baseline = select_last_hour_baseline(&history, now_secs).unwrap_or(live_long_term);
     let last_hour_count = live_long_term.saturating_sub(baseline);
 
+    // The ACTUAL elapsed time the `last_hour_count` delta covers (#4318). When
+    // snapshots are sparse the baseline can be much older than one hour, so the
+    // count is over a longer window than the caption implies. Surface the real
+    // window (seconds, ≥ 0) — `null` when there is no baseline — so the frontend
+    // labels the number honestly ("in the last hour" only when it truly is). The
+    // window is read from the SAME baseline snapshot the count uses, so the two
+    // can never disagree.
+    let last_hour_window_secs = select_last_hour_baseline_snapshot(&history, now_secs)
+        .map(|s| json!((now_secs - s.epoch_secs).max(0.0)))
+        .unwrap_or(Value::Null);
+
     Json(json!({
         "items": [],
         "total": total,
         "last_hour_count": last_hour_count,
+        "last_hour_window_secs": last_hour_window_secs,
         "available": false,
         "note": note,
         "server_time": chrono::Utc::now().to_rfc3339(),
