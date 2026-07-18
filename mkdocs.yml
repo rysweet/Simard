@@ -470,6 +470,7 @@ nav:
     - Safe Self-Update: safe-self-update.md
     - Pre-Commit Setup: operations/pre-commit-setup.md
     - "Operator Update: Session Checkpoint & Resume Goal": operations/engineer-session-checkpoint-resume-goal-signal-2026-07-18.md
+    - "Operator Update: Local COIN Benchmark Harness Goal": operations/coin-benchmark-harness-goal-signal-2026-07-18.md
     - "Operator Update: Blocked-Goal Signal Flood Goal": operations/blocked-goal-signal-flood-goal-signal-2026-07-18.md
   - Operator Dashboard:
     - Azlin Tmux Sessions Panel: operator-dashboard/azlin-tmux-sessions.md
