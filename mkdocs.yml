@@ -469,6 +469,7 @@ nav:
     - Creative-Ideas Semantic-Dedup Kill Switch: operations/creative-ideas-semantic-dedup-kill-switch.md
     - Safe Self-Update: safe-self-update.md
     - Pre-Commit Setup: operations/pre-commit-setup.md
+    - "Operator Update: agent-kgpacks-rs Full-Parity Goal": operations/agent-kgpacks-rs-parity-goal-signal-2026-07-18.md
   - Operator Dashboard:
     - Azlin Tmux Sessions Panel: operator-dashboard/azlin-tmux-sessions.md
     - Event-Bus Stats in Cluster Topology: operator-dashboard/event-bus-stats.md
