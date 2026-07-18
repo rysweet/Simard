@@ -464,6 +464,29 @@ scans with `limit = u32::MAX`) does no extra work. The pure helpers are
 unit-tested in `library_adapter::word_boundary_gate_tests`; the end-to-end
 contract is pinned in `cognitive_memory::tests_whole_word_episode_recall`.
 
+#### Singular/plural folding closes the prefix asymmetry
+
+A word-boundary **prefix** gate is directional: it recalls `test` → "tests"
+(the query is a prefix of the content word) but not the reverse, because
+`"test".starts_with("tests")` is false. So a query phrased in the plural
+(`memory_consolidation::tokenize_objective` emits raw objective tokens, e.g.
+`"stabilize the flaky tests"`) silently missed an episode written in the
+singular ("wrote a **test** …") — dropping a genuinely relevant prior from the
+reasoner's working context.
+
+`shares_word_prefix` therefore also admits a **conservative singular/plural
+fold** (`needle_matches_word`): a plural query token matches the singular content
+word by whole-word **equality** of a generated variant — regular `-s`/`-es`
+(`tests` → "test", `caches` → "cache") and the shape-changing `-y` ↔ `-ies` pair
+in both directions (`categories` ↔ "category"). Folding matches only on equality
+(never a prefix) and only when the stripped stem clears a two-character minimum,
+so — unlike a prefix on a stripped stem — it cannot re-introduce the interior
+over-matching the word-boundary rule removed (`buses` does not surface
+"business"; `is` does not fold to "i"). This is the same guarded folding
+`knowledge_context::token_matches_pack` applies to pack selection (PR #4241
+lineage), now shared by episodic, keyword, and fact recall so the cognition
+stack folds regular plurals uniformly.
+
 ### Keyword matching (facts): the same gate on `search_facts`
 
 `search_facts` applies the identical clean/raw partition to the **fact** path.

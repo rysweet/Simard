@@ -470,8 +470,79 @@ fn tokenize_words(text: &str) -> HashSet<String> {
         .collect()
 }
 
+/// Minimum length a de-pluralized needle stem must clear before it is allowed to
+/// fold onto a content word (mirrors `knowledge_context`'s `MIN_TOKEN_LEN`), so a
+/// short token never collapses onto a one/zero-character fragment — e.g. `"is"`
+/// does not fold to `"i"`, and the fold can never re-introduce broad matching.
+const MIN_FOLDED_STEM_LEN: usize = 2;
+
+/// `true` iff query token `needle` is relevant to a single content `word` — the
+/// per-(needle, word) predicate [`shares_word_prefix`] applies across the query
+/// word set and the tokenized content.
+///
+/// Two match shapes, in precedence order:
+///  1. **Word-boundary prefix** (`word.starts_with(needle)`): the primary gate,
+///     which preserves the inflectional recall the live path depends on — a
+///     query stem still recalls its inflected forms (`deploy` → "deployed" /
+///     "deploys" / "deployment", `sync` → "syncing"). This also covers the
+///     additive regular plural (`test` → "tests", `box` → "boxes").
+///  2. **Conservative singular/plural fold by EQUALITY**: closes the direction
+///     the prefix rule alone cannot — a PLURAL query token recalling the
+///     SINGULAR content word (`tests` → "test", `caches` → "cache",
+///     `categories` → "category"), plus the shape-changing `-y`↔`-ies` pair in
+///     both directions (`category` → "categories"). Folding matches only on
+///     whole-word EQUALITY of a generated variant (never a prefix) and only when
+///     the stem clears [`MIN_FOLDED_STEM_LEN`], so — unlike a prefix on a
+///     stripped stem — it cannot re-introduce the interior over-matching the
+///     word-boundary rule removed. This is the same guarded folding
+///     `knowledge_context::token_matches_pack` applies to pack selection
+///     (PR #4241 lineage), now extended to episodic/keyword/fact recall so the
+///     whole cognition stack folds regular plurals uniformly.
+///
+/// Both arguments are already lowercase (the caller lowercases content words and
+/// [`tokenize_words`] lowercases needles); the variants operate on ASCII
+/// inflectional endings only.
+fn needle_matches_word(needle: &str, word: &str) -> bool {
+    if word.starts_with(needle) {
+        return true;
+    }
+    // Subtractive regular plural: plural needle → singular content word. `-es`
+    // is tried before `-s` so a base is not over-generated (`caches` also folds
+    // via `-s` → "cache", which the OR below still reaches).
+    if needle
+        .strip_suffix("es")
+        .filter(|s| s.len() >= MIN_FOLDED_STEM_LEN)
+        .is_some_and(|s| s == word)
+        || needle
+            .strip_suffix('s')
+            .filter(|s| s.len() >= MIN_FOLDED_STEM_LEN)
+            .is_some_and(|s| s == word)
+    {
+        return true;
+    }
+    // `-y` ↔ `-ies`, both directions (the stem changes, so the prefix branch
+    // misses these): `categories` → "category" and `category` → "categories".
+    if needle
+        .strip_suffix("ies")
+        .filter(|s| s.len() >= MIN_FOLDED_STEM_LEN)
+        .is_some_and(|s| word.strip_suffix('y') == Some(s))
+    {
+        return true;
+    }
+    if needle.len() > MIN_FOLDED_STEM_LEN
+        && needle
+            .strip_suffix('y')
+            .is_some_and(|s| word.strip_suffix("ies") == Some(s))
+    {
+        return true;
+    }
+    false
+}
+
 /// `true` iff `content` shares a keyword with the query at a WORD BOUNDARY: some
-/// `needle` query token is a prefix of a whole word in `content`.
+/// `needle` query token matches a whole word in `content` per
+/// [`needle_matches_word`] — a word-boundary prefix, or a conservative
+/// singular/plural fold.
 ///
 /// This is the episodic-recall relevance gate. It replaces a raw-substring gate
 /// (`content.to_lowercase().contains(kw)`) that matched a query token wherever
@@ -480,15 +551,16 @@ fn tokenize_words(text: &str) -> HashSet<String> {
 /// "download"), floating off-topic episodes into the ranked set that feeds the
 /// OODA cycle's working context and degrading recall precision.
 ///
-/// Anchoring the match to a word boundary (prefix of a content word) removes
-/// those interior/suffix false positives while PRESERVING the inflectional
-/// recall the live path depends on — a query stem still recalls its inflected
-/// forms (`deploy` → "deployed" / "deploys" / "deployment", `sync` → "syncing").
-/// A pure whole-word (equality) gate would drop those legitimate recalls; a raw
-/// substring gate admits the interior noise. Word-boundary prefix matching is
-/// the middle ground, and aligns episodic recall with the word-boundary policy
-/// adopted elsewhere in the cognition stack (`knowledge_context::relevance_score`,
-/// `memory_consolidation::classifier`, `fact_reliability`; PR #4241 lineage).
+/// Anchoring the match to a word boundary removes those interior/suffix false
+/// positives while PRESERVING the inflectional recall the live path depends on
+/// (`deploy` → "deployed"), and — via the fold in [`needle_matches_word`] — also
+/// recalls the singular form of a plural query token (`tests` → "test"), the
+/// asymmetry a prefix-only gate leaves open. A pure whole-word (equality) gate
+/// would drop the inflectional recalls; a raw substring gate admits interior
+/// noise. This aligns episodic recall with the word-boundary + plural-folding
+/// policy adopted elsewhere in the cognition stack
+/// (`knowledge_context::relevance_score`, `memory_consolidation::classifier`,
+/// `fact_reliability`; PR #4241 lineage).
 ///
 /// `needles` is the pre-tokenized query word set (see [`tokenize_words`]);
 /// `content` is tokenized on the same word basis. Content with no alphanumeric
@@ -499,7 +571,9 @@ fn shares_word_prefix(content: &str, needles: &HashSet<String>) -> bool {
         .filter(|t| !t.is_empty())
         .any(|w| {
             let word = w.to_lowercase();
-            needles.iter().any(|needle| word.starts_with(needle))
+            needles
+                .iter()
+                .any(|needle| needle_matches_word(needle, &word))
         })
 }
 
@@ -1762,6 +1836,64 @@ mod word_boundary_gate_tests {
         let needles = tokenize_words("deploy");
         assert!(!shares_word_prefix("", &needles));
         assert!(!shares_word_prefix("   ...   ", &needles));
+    }
+
+    #[test]
+    fn shares_word_prefix_folds_plural_query_onto_singular_content() {
+        // The asymmetry a prefix-only gate leaves open: a PLURAL query token must
+        // recall the SINGULAR-form content word. Prefix alone misses these
+        // (`"test".starts_with("tests")` is false); the conservative singular
+        // fold closes it.
+        assert!(shares_word_prefix(
+            "wrote a test for the parser",
+            &tokenize_words("tests")
+        ));
+        assert!(shares_word_prefix(
+            "warmed the cache on startup",
+            &tokenize_words("caches")
+        ));
+        assert!(shares_word_prefix(
+            "the box was shipped",
+            &tokenize_words("boxes")
+        ));
+    }
+
+    #[test]
+    fn shares_word_prefix_folds_y_ies_both_directions() {
+        // The `-y` ↔ `-ies` pair changes the stem, so the prefix branch misses it
+        // in BOTH directions; the fold handles each.
+        assert!(shares_word_prefix(
+            "the category was wrong",
+            &tokenize_words("categories")
+        ));
+        assert!(shares_word_prefix(
+            "ran several categories of checks",
+            &tokenize_words("category")
+        ));
+    }
+
+    #[test]
+    fn shares_word_prefix_fold_does_not_reintroduce_interior_matching() {
+        // Folding matches only on whole-word EQUALITY of a generated variant, so a
+        // stripped stem must NOT prefix-match an unrelated longer word: the stem
+        // "bus" (from the plural "buses") must not surface "business".
+        assert!(!shares_word_prefix(
+            "the business plan shipped",
+            &tokenize_words("buses")
+        ));
+        // A plural query must not fold onto a same-prefix but distinct word:
+        // "tests" (stem "test") must not gate in "testing".
+        assert!(!shares_word_prefix(
+            "the testing harness is flaky",
+            &tokenize_words("tests")
+        ));
+    }
+
+    #[test]
+    fn shares_word_prefix_short_token_never_folds_to_fragment() {
+        // A short token cannot collapse onto a one/zero-character stem: `"is"`
+        // must not fold to `"i"` and gate in an episode that merely contains "i".
+        assert!(!shares_word_prefix("i wrote it", &tokenize_words("is")));
     }
 }
 
