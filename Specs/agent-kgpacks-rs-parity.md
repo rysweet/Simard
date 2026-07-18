@@ -100,6 +100,27 @@ cargo test --lib knowledge_client
 Out-of-scope `KGP-B*` criteria do **not** gate parity; they are tracked
 separately for the Phase 9+ pack-authoring work.
 
+### Machine-checkable finish signal (what the done-gate observes)
+
+So the Overseer's no-progress safeguard can **certify** completion instead of
+re-investigating every cycle, "full parity" is bound to a single artifact the
+daemon can observe:
+
+- **Tracking issue [rysweet/Simard#4321](https://github.com/rysweet/Simard/issues/4321) is `CLOSED`.**
+  The issue closes only when the last OPEN criteria (KGP-Q4, KGP-T3, KGP-Q5)
+  ship and the two acceptance suites above are green.
+- **One command reports done-or-what's-left:**
+
+  ```
+  scripts/check-agent-kgpacks-rs-parity-done-gate.sh
+  ```
+
+  It exits `0` only when issue #4321 is `CLOSED` (full parity delivered), and
+  exits `1` otherwise — printing the exact remaining criteria by name as the
+  concrete next step. Offline (no `gh`), it derives the same verdict from this
+  spec's criteria table and the two acceptance suites. The OODA done-gate can
+  invoke it as its single completion check.
+
 ## Ordered backlog (so the next cycle is never stuck)
 
 Work the OPEN criteria top-to-bottom; each is a self-contained, shippable unit

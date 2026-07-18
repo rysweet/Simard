@@ -11,6 +11,7 @@ Simard deployment.
 | [Cognitive-Memory WAL Recovery Runbook](cognitive-memory-wal-recovery-runbook.md) | Corrupt-WAL recovery, `memory import`, startup auto-restore, asset preservation (#2550) |
 | [Meeting REPL & Handoff Ingestion](meeting-handoffs.md) | Routing operator intent into the OODA loop |
 | [Progress-Evidence Kill Switch](progress-evidence-kill-switch.md) | `SIMARD_PROGRESS_EVIDENCE=off` and when to use it |
+| [agent-kgpacks-rs Parity Goal — Operator Update](agent-kgpacks-rs-parity-goal-signal-2026-07-18.md) | Plain-English finish line for the Rust knowledge-lookup rewrite goal (issue #4321 + done-gate check) |
 
 Related how-to guides:
 
