@@ -562,6 +562,25 @@ fn assemble_memory(
     let store_path = state_root.join("cognitive");
     let store_size_bytes = std::fs::metadata(&store_path).ok().map(|meta| meta.len());
 
+    // Distillation health from the published `simard.distill.runs{result="ok"}`
+    // counter — the same telemetry source the Telemetry section reads for
+    // `distill_fail_pct`. Previously `cognitive_processes` was hard-coded to
+    // `CognitiveHealth::default()`, so the Overview "cognitive" line rendered
+    // `distillation absent` even while distillation was demonstrably running
+    // (the counter was flushed and `distill_fail_pct` was live). Read it here so
+    // the line reflects reality. Fail-closed to `None` (→ "absent") until the
+    // daemon has flushed the counter — never a fabricated zero. (`parse_fail`
+    // was removed in #2679; `ok` is the sole `result` value.)
+    let distillation = m
+        .counter(names::DISTILL_RUNS, &[(names::ATTR_RESULT, "ok")])
+        .map(|runs| {
+            if runs == 0 {
+                "idle".to_string()
+            } else {
+                format!("{runs} runs")
+            }
+        });
+
     let memory = MemoryBrain {
         store_path: store_path.display().to_string(),
         store_size_bytes,
@@ -569,7 +588,13 @@ fn assemble_memory(
         nodes_total,
         nodes,
         edges,
-        cognitive_processes: super::CognitiveHealth::default(),
+        cognitive_processes: super::CognitiveHealth {
+            distillation,
+            // Consolidation and introspection have no published telemetry
+            // counter yet, so they remain honestly `absent` (a separate
+            // instrumentation change would surface them the same way).
+            ..super::CognitiveHealth::default()
+        },
         brains_llm_backed: None,
         brain_fallbacks: m.counter(names::BRAIN_ESCALATIONS, &[]),
         decide_ladder_exhausted: m.counter(names::BRAIN_LADDER_EXHAUSTED, &[]),
@@ -1087,6 +1112,73 @@ mod pure_helper_tests {
         assert_eq!(data.nodes.semantic, Some(20));
         assert_eq!(data.nodes_total, Some(30));
         assert_eq!(data.backend, "amplihack-memory-lib");
+    }
+
+    #[test]
+    fn assemble_memory_populates_distillation_from_distill_runs() {
+        // A published `simard.distill.runs{result="ok"}` counter must surface on
+        // the cognitive line instead of the permanent "absent" the hard-coded
+        // default produced.
+        let mut m = snapshot::MetricsSnapshot::empty();
+        m.gauges.push(snapshot::GaugeSeries {
+            name: names::MEMORY_NODES.to_string(),
+            attrs: vec![(names::ATTR_TYPE.to_string(), "episodic".to_string())],
+            value: 5,
+        });
+        m.counters.push(snapshot::CounterSeries {
+            name: names::DISTILL_RUNS.to_string(),
+            attrs: vec![(names::ATTR_RESULT.to_string(), "ok".to_string())],
+            value: 12,
+        });
+        let env = assemble_memory(Some(&m), std::path::Path::new("/nonexistent-simard-state"));
+        assert!(env.is_present());
+        let data = env.data.as_ref().unwrap();
+        assert_eq!(
+            data.cognitive_processes.distillation.as_deref(),
+            Some("12 runs")
+        );
+        // No consolidation/introspection telemetry → honestly absent.
+        assert_eq!(data.cognitive_processes.consolidation, None);
+        assert_eq!(data.cognitive_processes.introspection, None);
+    }
+
+    #[test]
+    fn assemble_memory_distillation_absent_without_distill_counter() {
+        // Node gauges present but no distill counter flushed yet → the cognitive
+        // line stays honestly "absent" rather than a fabricated zero/idle.
+        let mut m = snapshot::MetricsSnapshot::empty();
+        m.gauges.push(snapshot::GaugeSeries {
+            name: names::MEMORY_NODES.to_string(),
+            attrs: vec![(names::ATTR_TYPE.to_string(), "episodic".to_string())],
+            value: 5,
+        });
+        let env = assemble_memory(Some(&m), std::path::Path::new("/nonexistent-simard-state"));
+        assert!(env.is_present());
+        let data = env.data.as_ref().unwrap();
+        assert_eq!(data.cognitive_processes.distillation, None);
+    }
+
+    #[test]
+    fn assemble_memory_distillation_idle_when_counter_zero() {
+        // A flushed-but-zero counter is a real signal (distillation configured,
+        // no run yet) — surfaced as "idle", distinct from "absent".
+        let mut m = snapshot::MetricsSnapshot::empty();
+        m.gauges.push(snapshot::GaugeSeries {
+            name: names::MEMORY_NODES.to_string(),
+            attrs: vec![(names::ATTR_TYPE.to_string(), "episodic".to_string())],
+            value: 5,
+        });
+        m.counters.push(snapshot::CounterSeries {
+            name: names::DISTILL_RUNS.to_string(),
+            attrs: vec![(names::ATTR_RESULT.to_string(), "ok".to_string())],
+            value: 0,
+        });
+        let env = assemble_memory(Some(&m), std::path::Path::new("/nonexistent-simard-state"));
+        let data = env.data.as_ref().unwrap();
+        assert_eq!(
+            data.cognitive_processes.distillation.as_deref(),
+            Some("idle")
+        );
     }
 
     #[test]

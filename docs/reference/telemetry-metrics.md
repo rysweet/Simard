@@ -123,6 +123,16 @@ Migrated from the human line
 `[simard] distill: N episodes -> F facts, P procedures, M marked`, which is
 still emitted verbatim.
 
+**Consumed by the Status snapshot.** `simard.distill.runs{result="ok"}` also
+feeds the unified Status snapshot's MEMORY / BRAIN **cognitive** line
+(`GET /api/status/snapshot` → `data.memory.data.cognitive_processes.distillation`,
+Overview "System Status", `simard status`, TUI Status tab). It renders `idle`
+for a flushed-but-zero counter, `N runs` once runs have completed, and stays
+honestly `absent` until the daemon first flushes the counter — the same
+counter the Telemetry section already derives `distill_fail_pct` from, so the
+two never contradict each other. (`consolidation` and `introspection` on that
+line have no published counter yet and remain `absent`.)
+
 ### Brain — `simard.brain.*`
 
 | Metric | Type | Attributes | Meaning |
