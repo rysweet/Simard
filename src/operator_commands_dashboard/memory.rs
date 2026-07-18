@@ -304,15 +304,21 @@ pub(crate) fn select_last_hour_baseline(history: &[MemorySnapshot], now_secs: f6
 ///
 /// De-fork Phase 2b (issue #2307): this panel previously enumerated every
 /// node type with raw Cypher against the deleted native LadybugDB schema. The
-/// library backend exposes no equivalent "list all nodes by type" API through
-/// `CognitiveMemoryOps`, so the per-item listing is reported as unavailable
-/// rather than reading the abandoned native store.
+/// per-item listing was then stubbed to always-empty on the library backend.
 ///
-/// The *aggregate* stored total, however, is available via the same
-/// `get_statistics()` path that `/api/memory/history` uses. We surface it as
-/// `total` so the Memory tab can stop telling a human "No memories stored yet"
-/// while tens of thousands of memories are actually held (#2358). The per-item
-/// list stays empty/unavailable on this backend.
+/// That stub was stale: the same shared reader (`open_reader_client`) that
+/// backs `/api/memory/graph` DOES enumerate per-item memory through
+/// `CognitiveMemoryOps::list_all_episodes` (newest-first by `temporal_index`).
+/// So the Memory tab's "Recent Memories" panel (frontend #1997) — which already
+/// ships a renderer expecting `items:[{category,summary,timestamp}]` — was
+/// permanently empty even while the daemon logged thousands of episodes. We now
+/// populate `items` from the most recent episodes so the panel answers "what
+/// has Simard been remembering/observing recently?".
+///
+/// The *aggregate* stored total is available via the same `get_statistics()`
+/// path that `/api/memory/history` uses. We surface it as `total` so the Memory
+/// tab can stop telling a human "No memories stored yet" while tens of
+/// thousands of memories are actually held (#2358).
 ///
 /// `last_hour_count` (#2679): this field previously returned a hardcoded literal
 /// `0` — a placeholder left by de-fork Phase 2b (#2307) — so the dashboard told
@@ -337,30 +343,48 @@ pub(crate) async fn memory_recent() -> Json<Value> {
 /// error it returns an `error` payload with `last_hour_count: null` — never a
 /// misleading `0`.
 pub(crate) async fn memory_recent_at(state_root: &std::path::Path) -> Json<Value> {
-    // Preserved back-compat note describing the per-item listing limitation.
-    let note = "Per-item recent-memory listing is unavailable on the library \
-                backend (de-fork Phase 2b, #2307); `total` is the live aggregate \
-                stored count. See /api/memory/history for the per-type breakdown.";
+    let note = "Recent items are the newest episodic memories (events Simard \
+                recorded), newest-first; `total` is the live aggregate stored \
+                count across all six memory types. See /api/memory/graph for the \
+                full per-type graph and /api/memory/history for the per-type \
+                growth breakdown.";
 
-    // Live read via the SAME shared reader path `/api/memory/history` uses so
-    // the count reflects real writes, not a divergent store.
-    let stats =
-        match open_reader_client(state_root).and_then(|reader| reader.ops().get_statistics()) {
-            Ok(s) => s,
-            Err(e) => {
-                // Fail closed (#2561 prior art): surface the error and emit a null
-                // count so the frontend renders "—", never a misleading 0.
-                return Json(json!({
-                    "items": [],
-                    "total": Value::Null,
-                    "last_hour_count": Value::Null,
-                    "available": false,
-                    "note": note,
-                    "error": format!("Cannot read cognitive memory: {e}"),
-                    "server_time": chrono::Utc::now().to_rfc3339(),
-                }));
-            }
-        };
+    // Open the shared reader ONCE and reuse it for both the aggregate statistics
+    // (drives `last_hour_count`/`total`) and the per-item episode enumeration
+    // (drives `items`) — the same reader path `/api/memory/graph` uses, so the
+    // listing reflects real writes, not a divergent store.
+    let reader = match open_reader_client(state_root) {
+        Ok(r) => r,
+        Err(e) => {
+            // Fail closed (#2561 prior art): surface the error and emit a null
+            // count so the frontend renders "—", never a misleading 0.
+            return Json(json!({
+                "items": [],
+                "total": Value::Null,
+                "last_hour_count": Value::Null,
+                "available": false,
+                "note": note,
+                "error": format!("Cannot read cognitive memory: {e}"),
+                "server_time": chrono::Utc::now().to_rfc3339(),
+            }));
+        }
+    };
+    let ops = reader.ops();
+
+    let stats = match ops.get_statistics() {
+        Ok(s) => s,
+        Err(e) => {
+            return Json(json!({
+                "items": [],
+                "total": Value::Null,
+                "last_hour_count": Value::Null,
+                "available": false,
+                "note": note,
+                "error": format!("Cannot read cognitive memory: {e}"),
+                "server_time": chrono::Utc::now().to_rfc3339(),
+            }));
+        }
+    };
 
     let total = stats.total();
     // "Remembered" ⇒ consolidated long-term memory (facts + procedures +
@@ -383,14 +407,60 @@ pub(crate) async fn memory_recent_at(state_root: &std::path::Path) -> Json<Value
     let baseline = select_last_hour_baseline(&history, now_secs).unwrap_or(live_long_term);
     let last_hour_count = live_long_term.saturating_sub(baseline);
 
+    // Per-item recent feed: the newest episodes (newest-first by temporal_index),
+    // capped. Episodes are the only memory type carrying a wall-clock timestamp,
+    // so they form the natural time-ordered "recent activity" stream. A read
+    // failure here is best-effort (the aggregate above is still valid): report an
+    // empty list with `available:false` rather than failing the whole endpoint.
+    let (items, items_available) = match ops.list_all_episodes(RECENT_ITEMS_MAX as u32) {
+        Ok(episodes) => (build_recent_episode_items(&episodes), true),
+        Err(_) => (Vec::new(), false),
+    };
+
     Json(json!({
-        "items": [],
+        "items": items,
         "total": total,
         "last_hour_count": last_hour_count,
-        "available": false,
+        "available": items_available,
         "note": note,
         "server_time": chrono::Utc::now().to_rfc3339(),
     }))
+}
+
+/// Maximum number of recent per-item episodes returned by `/api/memory/recent`.
+/// Bounds the payload; the panel is a "recent glance", not a full dump (the
+/// graph tab covers exhaustive enumeration).
+const RECENT_ITEMS_MAX: usize = 25;
+
+/// Map recent episodes to the frontend "Recent Memories" item shape
+/// (`{category, summary, timestamp, ...}`, part_03.rs `fetchRecentMemories`).
+/// Episodes render under the "Past event" category. `summary`/content is bounded
+/// by [`GRAPH_NODE_CONTENT_MAX`] so a single large episode cannot bloat the
+/// payload.
+///
+/// `timestamp` is always `null`: the library backend's only episode writer path
+/// (`LibraryCognitiveMemory::store_episode`) records episodes with
+/// `temporal_index: None`, so the library assigns a monotonic ordinal
+/// (1, 2, 3, …) — an ordering key, not a wall-clock instant — and does not
+/// surface the episode's `created_at` on [`CognitiveEpisode`]. Emitting the
+/// ordinal as an epoch would render a nonsensical 1970s date, so we omit it and
+/// let the frontend drop the "time ago" label. Newest-first ordering is still
+/// correct because it derives from the `temporal_index` sort, not this field.
+fn build_recent_episode_items(
+    episodes: &[crate::memory_cognitive::CognitiveEpisode],
+) -> Vec<Value> {
+    episodes
+        .iter()
+        .map(|e| {
+            json!({
+                "category": "Past event",
+                "summary": truncate_graph_content(&e.content),
+                "timestamp": Value::Null,
+                "source": e.source_label,
+                "node_id": e.node_id,
+            })
+        })
+        .collect()
 }
 
 pub(crate) async fn memory_search(Json(body): Json<Value>) -> Json<Value> {
