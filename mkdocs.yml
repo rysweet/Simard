@@ -362,6 +362,7 @@ nav:
     - Maximum Safe Parallelism: reference/maximum-safe-parallelism.md
     - OODA Coverage Parallelism Ceiling: reference/ooda-coverage-parallelism-ceiling.md
     - Concurrent Engineer Dispatch: reference/concurrent-engineer-dispatch.md
+    - Engineer Session Checkpoint & Resume: reference/engineer-session-checkpoint-resume.md
     - Engineer-Admission API (overlap-aware scheduling): reference/engineer-admission-api.md
     - OODA Engineer-Admission Recipe & Prompt Schema: reference/ooda-engineer-admission-recipe.md
     - Resource-Admission API (resource-aware admission): reference/resource-admission-api.md
