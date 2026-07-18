@@ -180,6 +180,7 @@ fn install_defaults_simard_home_under_home_and_uses_fake_systemctl() {
         &unit_dir.join("simard-ooda.service"),
         &expected_service_path,
     );
+    assert_file_contains(&unit_dir.join("simard-ooda.service"), "KillMode=process");
     assert_systemctl_logged(&systemctl_log, &["--user", "daemon-reload"]);
     assert_systemctl_logged(&systemctl_log, &["--user", "enable", "simard-ooda.service"]);
     assert_systemctl_logged(

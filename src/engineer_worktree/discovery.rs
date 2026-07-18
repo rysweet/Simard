@@ -36,9 +36,17 @@ pub struct LiveEngineerWorktree {
 /// rows, never a panic — so a dashboard read never fails because of transient
 /// filesystem state.
 pub fn live_claimed_engineers(state_root: &Path) -> Vec<LiveEngineerWorktree> {
-    let root = state_root.join(WORKTREES_SUBDIR);
+    live_claimed_engineers_in_worktrees(&state_root.join(WORKTREES_SUBDIR))
+}
+
+/// Like [`live_claimed_engineers`] but scans an explicit worktrees directory
+/// (the dir that directly contains the per-engineer worktrees), without
+/// re-joining [`WORKTREES_SUBDIR`]. Lets callers that already hold the
+/// worktrees root — or a test override that is not named `engineer-worktrees`
+/// — enumerate it directly. Same I/O-tolerant contract.
+pub fn live_claimed_engineers_in_worktrees(worktrees_root: &Path) -> Vec<LiveEngineerWorktree> {
     let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&root) else {
+    let Ok(entries) = std::fs::read_dir(worktrees_root) else {
         return out;
     };
     for entry in entries.flatten() {

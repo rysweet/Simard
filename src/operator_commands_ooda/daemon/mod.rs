@@ -60,6 +60,48 @@ fn seed_cycle_count(persistent_cycle_count: u32, state_root: &std::path::Path) -
     }
 }
 
+fn clear_stale_draining_flag_at_boot(state_root: &std::path::Path) {
+    // Engineer dispatch checks safe_update::default_state_dir(), which is
+    // `<state_root>/state` for the default daemon root; clear that canonical
+    // gate even when the daemon was booted with a different state_root override.
+    let state_dir = crate::safe_update::default_state_dir();
+    clear_stale_draining_flag_at_boot_in(&state_dir, state_root);
+}
+
+fn clear_stale_draining_flag_at_boot_in(state_dir: &std::path::Path, log_root: &std::path::Path) {
+    let should_clear = match crate::safe_update::state::read_status(state_dir) {
+        Ok(None) => true,
+        Ok(Some(status)) => status.phase != crate::safe_update::state::UpgradePhase::ExecHandover,
+        Err(e) => {
+            daemon_log(
+                log_root,
+                &format!(
+                    "[simard] boot: could not read upgrade status; preserving draining.flag: {e}"
+                ),
+            );
+            false
+        }
+    };
+    if !should_clear {
+        return;
+    }
+
+    let flag = crate::safe_update::draining_flag_path(state_dir);
+    if !flag.exists() {
+        return;
+    }
+    match crate::safe_update::drain::unmark_draining(state_dir) {
+        Ok(()) => daemon_log(
+            log_root,
+            "[simard] boot: cleared stale draining.flag (no ExecHandover upgrade in flight) — resuming engineer dispatch",
+        ),
+        Err(e) => daemon_log(
+            log_root,
+            &format!("[simard] boot: failed to clear stale draining.flag; continuing boot: {e}"),
+        ),
+    }
+}
+
 /// Resolve the identity-scoped cognition (#3125) for the daemon from the
 /// environment, **fail-closed**.
 ///
@@ -200,6 +242,7 @@ pub fn run_ooda_daemon(
     let state_root = state_root_override.unwrap_or_else(memory_ipc::default_state_root);
 
     std::fs::create_dir_all(&state_root)?;
+    clear_stale_draining_flag_at_boot(&state_root);
 
     // Freshness gate at daemon startup (issue #439): belt-and-suspenders run of
     // `amplihack update` under the same cross-process lock and TTL the per-spawn
@@ -2113,6 +2156,35 @@ mod tests {
             outcome_verify_brain: None,
             live_signals: None,
         }
+    }
+
+    #[test]
+    fn boot_clear_removes_stale_draining_flag_without_exec_handover() {
+        let state = tempfile::tempdir().unwrap();
+        let log_root = tempfile::tempdir().unwrap();
+        crate::safe_update::drain::mark_draining(state.path()).unwrap();
+
+        clear_stale_draining_flag_at_boot_in(state.path(), log_root.path());
+
+        assert!(!crate::safe_update::draining_flag_path(state.path()).exists());
+    }
+
+    #[test]
+    fn boot_clear_preserves_draining_flag_during_exec_handover() {
+        let state = tempfile::tempdir().unwrap();
+        let log_root = tempfile::tempdir().unwrap();
+        crate::safe_update::drain::mark_draining(state.path()).unwrap();
+        let status = crate::safe_update::state::UpgradeStatus::exec_handover(
+            Some("new".into()),
+            Some("old".into()),
+            1,
+            60,
+        );
+        crate::safe_update::state::write_status(state.path(), &status).unwrap();
+
+        clear_stale_draining_flag_at_boot_in(state.path(), log_root.path());
+
+        assert!(crate::safe_update::draining_flag_path(state.path()).exists());
     }
 
     // ── shutdown_daemon ─────────────────────────────────────────────

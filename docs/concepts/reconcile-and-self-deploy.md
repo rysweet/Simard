@@ -111,8 +111,8 @@ flowchart TD
     C -->|any gate fails| X2[(abort: GateFailed)]
     C --> D[3. dual protective backup]
     D -->|memory OR binary backup fails| X3[(abort: BackupFailed — loud, no swap)]
-    D --> E[4. drain in-flight engineers]
-    E --> F[5. orphan-kill stale 'engineer run' processes]
+    D --> E[4. drain: checkpoint + requeue in-flight engineers]
+    E --> F[5. reap only STALE 'engineer run' processes; spare live producers]
     F --> G[6. atomic binary swap]
     G --> H[7. restart via DaemonRestarter]
     H --> V{8. post-deploy health check}
@@ -147,22 +147,35 @@ flowchart TD
    If **either** backup fails, the deploy **aborts loudly** and the daemon is left
    untouched. Repairing a broken backup is its own goal — the self-deploy never
    mutates the daemon without a verified protective copy of both state and code.
-4. **Drain** in-flight engineer dispatch within `drain_timeout_seconds`. While the
-   `draining.flag` is present, the engineer-dispatch site refuses new dispatches
-   (the brain treats that refusal as expected, not a failure).
-5. **Orphan-kill** stale engineer subprocesses. Drain stops *new* dispatch, but a
-   subprocess already executing `bin/simard engineer run …` keeps the old binary's
-   inode open. Swapping under it causes **"Text file busy"** and a silent restart
-   of the **old** binary. The orphan-kill step terminates exactly those
-   processes — executable path equal to the target install path **and** argv
-   containing `engineer run`, excluding the daemon itself and the incoming
-   PID — by numeric SIGTERM, a bounded wait, then SIGKILL. It is idempotent: no
+4. **Drain — never kill, never abort on a timeout.** The drain sets
+   `draining.flag` so the engineer-dispatch site refuses *new* dispatches (the
+   brain treats that refusal as expected, not a failure). It **leaves each
+   still-live** engineer's worktree claim sentinel (`.simard-engineer-claim`)
+   **intact** — the liveness-based dedup keeps the goal leased to that producing
+   engineer so the restarted binary does not duplicate it — and releases only a
+   dead/missing claim. Their `SessionCheckpoint` and goal record persist. The
+   drain **never** waits on a wall-clock timeout, **never** fails the deploy
+   because engineers remain, and **never** kills a producing engineer. This is
+   the fix for "deploys never succeed while busy": Simard can deploy her latest
+   merged code even while running engineers. The `draining.flag` is always
+   reopened afterward: the incoming binary clears a stale flag at boot (unless an
+   `ExecHandover` upgrade is in flight), and any post-drain abort calls
+   `undrain()` on the still-serving old binary.
+5. **Reap only stale orphans; spare live producers.** Because the swap is
+   `rename(2)`-based, it is safe against a still-running executable — a producing
+   engineer keeps the old binary's inode and can finish its PR on the old code
+   with no "Text file busy". The reaper therefore **spares every live engineer**
+   and cleans up only genuinely stale entries (executable path equal to the
+   target install path **and** argv containing `engineer run`, whose process is
+   already gone), excluding the daemon and the incoming PID. It is idempotent: no
    matches is success.
 6. **Atomic swap.** `rename(2)` first, copy-then-rename fallback for cross-device
    installs.
 7. **Restart** through an injectable `DaemonRestarter`. The production default
    prefers `systemctl --user restart simard-ooda` when the unit is detected and
-   otherwise falls back to the existing coordinated `exec()` handover. Tests and
+   otherwise falls back to the existing coordinated `exec()` handover. The unit
+   sets `KillMode=process`, so the restart signals only the daemon — the spared
+   engineer children survive it and finish on the old inode. Tests and
    the recipe inject a fake restarter — **the recipe never live-restarts the
    operator's daemon**.
 8. **Post-deploy health check** (`simard self-health`). All probes must pass; see
