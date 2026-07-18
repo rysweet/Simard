@@ -58,6 +58,8 @@ pub(crate) trait DeployEffects {
     fn take_backup(&self) -> Result<ProtectiveBackup, SafeUpdateError>;
     /// Drain in-flight engineer dispatches to quiescence.
     fn drain(&self) -> Result<(), SafeUpdateError>;
+    /// Reopen engineer dispatch after a terminal post-drain abort.
+    fn undrain(&self) -> Result<(), SafeUpdateError>;
     /// Reap stale `engineer run` orphans bound to the old binary; returns count.
     fn reap_orphans(&self) -> Result<usize, SafeUpdateError>;
     /// Atomically replace the install path with the candidate.
@@ -92,12 +94,28 @@ pub(crate) fn run_sequence<E: DeployEffects>(
     let baseline = effects.capture_baseline_facts();
     let backup = effects.take_backup()?;
 
-    // 4) Drain in-flight engineers, then reap orphans holding the old inode.
+    // 4) Drain in-flight engineers, then run the swap window.
     effects.drain()?;
+    let outcome = run_after_drain(effects, &candidate, baseline, backup);
+    // The drain set draining.flag to pause NEW dispatch during the swap window.
+    // On the real systemd/exec success path the process is already replaced here
+    // (this line is unreachable) and the new binary clears the stale flag at boot.
+    // On ANY abort after drain the OLD binary keeps serving, so we MUST reopen
+    // dispatch here. Clearing on the (test-only) fake-success path is harmless.
+    let _ = effects.undrain();
+    outcome
+}
+
+fn run_after_drain<E: DeployEffects>(
+    effects: &E,
+    candidate: &Path,
+    baseline: Option<u64>,
+    backup: ProtectiveBackup,
+) -> Result<SelfDeployOutcome, SafeUpdateError> {
     let reaped = effects.reap_orphans()?;
 
     // 5) Atomic swap, then restart.
-    effects.swap(&candidate)?;
+    effects.swap(candidate)?;
     if let Err(e) = effects.restart() {
         return rollback_then(effects, &format!("restart failed: {e}"));
     }
@@ -327,6 +345,10 @@ impl DeployEffects for ProdDeployEffects<'_> {
             }
         };
         crate::safe_update::drain::drain_by_requeue(&self.config.state_dir, &requeue).map(|_| ())
+    }
+
+    fn undrain(&self) -> Result<(), SafeUpdateError> {
+        crate::safe_update::drain::unmark_draining(&self.config.state_dir)
     }
 
     fn reap_orphans(&self) -> Result<usize, SafeUpdateError> {

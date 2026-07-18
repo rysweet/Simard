@@ -68,16 +68,16 @@ pub struct InFlightEngineer {
 /// instead of waiting for them or killing them.
 ///
 /// Implementations MUST NOT kill or signal any process: a producing engineer is
-/// left running (rename-based atomic swap is safe against a running binary) and
-/// its goal is simply released back onto the board so a restarted binary
-/// re-picks it up. Requeue is best-effort — returning `Ok(())` even when the
-/// engineer has already exited is correct.
+/// left running (rename-based atomic swap is safe against a running binary).
+/// Implementations must preserve a live engineer's goal lease and only release
+/// claims that are already dead or missing. Requeue is best-effort — returning
+/// `Ok(())` even when the engineer has already exited is correct.
 pub trait EngineerRequeue {
     /// Enumerate the engineers currently in flight.
     fn in_flight(&self) -> Vec<InFlightEngineer>;
 
-    /// Requeue one engineer's goal onto the board so a restarted binary
-    /// re-picks it up. MUST NOT kill the process.
+    /// Requeue one engineer's goal without killing it. Live claims should stay
+    /// intact; dead claims may be released so a restarted binary can pick them up.
     fn requeue(&self, engineer: &InFlightEngineer) -> Result<(), SafeUpdateError>;
 }
 
@@ -87,8 +87,8 @@ pub trait EngineerRequeue {
 /// **never** kills a producing engineer.
 ///
 /// A per-engineer requeue failure is logged and skipped rather than aborting
-/// the deploy: the goal record already persists on the board, and the restart
-/// makes any still-live claim stale, so the goal is re-picked-up regardless.
+/// the deploy: the goal record already persists on the board, and live claim
+/// sentinels continue to protect still-running engineers from duplicate dispatch.
 pub fn drain_by_requeue<R: EngineerRequeue>(
     state_dir: &Path,
     requeue: &R,
@@ -336,7 +336,8 @@ mod tests {
         assert!(draining_flag_path(dir.path()).exists());
     }
 
-    /// Fake requeue that records the engineers it was asked to requeue.
+    /// Fake requeue that records the engineers it was asked to handle. The
+    /// production implementation leaves live claim sentinels intact.
     struct FakeRequeue {
         engineers: Vec<InFlightEngineer>,
         requeued: std::cell::RefCell<Vec<String>>,
@@ -369,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn drain_by_requeue_marks_draining_and_requeues_all() {
+    fn drain_by_requeue_marks_draining_and_invokes_requeue_for_all() {
         let dir = tempdir().unwrap();
         let requeue = FakeRequeue {
             engineers: vec![eng("goal-a"), eng("goal-b")],

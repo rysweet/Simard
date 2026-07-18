@@ -3,22 +3,22 @@
 //! The self-deploy drain ([`crate::safe_update::drain::drain_by_requeue`])
 //! never kills a producing engineer and never fails on a wall-clock timeout.
 //! Instead it enumerates the LIVE engineer set from the on-disk worktree claim
-//! sentinels and **requeues** each one's goal back onto the board so a
-//! restarted binary re-picks it up. The engineer's own `SessionCheckpoint`
+//! sentinels and reconciles each one's goal lease so a restarted binary can
+//! safely reason about it. The engineer's own `SessionCheckpoint`
 //! (written at every phase boundary — see
 //! `src/engineer_loop/types.rs::SessionCheckpoint`) already persists its
-//! progress, and the goal record persists as `Active`, so the requeue only has
-//! to make the goal **re-pickable**.
+//! progress, and the goal record persists as `Active`.
 //!
 //! Re-pickability is gated by
 //! [`crate::ooda_actions::advance_goal::find_live_engineer_for_goal`], which
 //! treats a goal as claimed only while its worktree claim sentinel names a
-//! *live* process. Removing the sentinel therefore releases the goal back onto
-//! the board without touching the running engineer. We deliberately do **not**
-//! signal or kill the process: rename-based atomic swap
+//! *live* process. Therefore a still-live engineer must keep its sentinel so
+//! the restarted daemon does not duplicate the same goal; only a dead or
+//! pid-less claim is removed to free the goal. We deliberately do **not** signal
+//! or kill the process: rename-based atomic swap
 //! ([`crate::safe_update::swap::atomic_install`]) is safe against a running
 //! executable, so a producing engineer is free to finish its PR on the old
-//! inode while the restarted binary picks up any goal that did not finish.
+//! inode.
 
 use std::path::{Path, PathBuf};
 
@@ -29,8 +29,8 @@ use crate::safe_update::SafeUpdateError;
 use crate::safe_update::drain::{EngineerRequeue, InFlightEngineer};
 
 /// Production requeue effect. Scans the engineer-worktrees directory for the
-/// live engineer set and releases each worktree's claim sentinel so a restarted
-/// binary re-picks up the goal.
+/// live engineer set. Live claims are left intact so a restarted binary does
+/// not duplicate a producing engineer's goal.
 pub struct ProdEngineerRequeue {
     /// The directory that directly contains the per-engineer worktrees
     /// (i.e. `<state_root>/engineer-worktrees`).
@@ -67,6 +67,17 @@ impl EngineerRequeue for ProdEngineerRequeue {
     }
 
     fn requeue(&self, engineer: &InFlightEngineer) -> Result<(), SafeUpdateError> {
+        if let Some(pid) = engineer.pid
+            && crate::engineer_worktree::is_pid_alive_public(pid)
+        {
+            tracing::info!(
+                goal_id = %engineer.goal_id,
+                pid = pid,
+                "[self-deploy] left live engineer's claim intact (survives atomic swap; keeps goal lease)"
+            );
+            return Ok(());
+        }
+
         release_claim(&engineer.worktree).map_err(|reason| SafeUpdateError::DrainIo {
             action: "release engineer claim".into(),
             path: engineer.worktree.join(ENGINEER_CLAIM_FILE),
@@ -75,7 +86,7 @@ impl EngineerRequeue for ProdEngineerRequeue {
         tracing::info!(
             goal_id = %engineer.goal_id,
             worktree = %engineer.worktree.display(),
-            "[self-deploy] requeued engineer goal onto the board (claim released; process left running)"
+            "[self-deploy] released dead engineer's claim so the goal can be picked up"
         );
         Ok(())
     }
@@ -103,9 +114,10 @@ mod tests {
     }
 
     #[test]
-    fn requeue_releases_the_claim_sentinel_without_touching_the_worktree() {
+    fn requeue_leaves_live_claim_sentinel_without_touching_the_worktree() {
         let wt = tempdir().unwrap();
-        write_claim(wt.path(), 4321);
+        let self_pid = std::process::id() as i32;
+        write_claim(wt.path(), self_pid);
         // A marker file standing in for the engineer's in-progress work.
         std::fs::write(wt.path().join("work.txt"), b"in progress").unwrap();
 
@@ -113,11 +125,31 @@ mod tests {
         let engineer = InFlightEngineer {
             goal_id: "fix-thing".into(),
             worktree: wt.path().to_path_buf(),
-            pid: Some(4321),
+            pid: Some(self_pid),
         };
         requeue.requeue(&engineer).unwrap();
 
-        // Claim released → goal re-pickable; the rest of the worktree is intact.
+        // Claim retained → restarted daemon sees the live lease and does not
+        // duplicate this producing engineer's goal.
+        assert!(wt.path().join(ENGINEER_CLAIM_FILE).exists());
+        assert!(wt.path().join("work.txt").exists());
+    }
+
+    #[test]
+    fn requeue_releases_dead_claim_sentinel_without_touching_the_worktree() {
+        let wt = tempdir().unwrap();
+        let dead_pid = i32::MAX;
+        write_claim(wt.path(), dead_pid);
+        std::fs::write(wt.path().join("work.txt"), b"in progress").unwrap();
+
+        let requeue = ProdEngineerRequeue::new(PathBuf::from("/unused"));
+        let engineer = InFlightEngineer {
+            goal_id: "fix-dead".into(),
+            worktree: wt.path().to_path_buf(),
+            pid: Some(dead_pid),
+        };
+        requeue.requeue(&engineer).unwrap();
+
         assert!(!wt.path().join(ENGINEER_CLAIM_FILE).exists());
         assert!(wt.path().join("work.txt").exists());
     }
