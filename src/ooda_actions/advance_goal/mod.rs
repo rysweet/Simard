@@ -29,6 +29,10 @@ mod overlap;
 // so `spawn::dispatch_spawn_engineer` can invoke the gate.
 pub(crate) mod resource_admission;
 mod subordinate;
+// Problem 4 (issues #4166/#4189): goal-identity dedup bricks for idempotent
+// done-gate PR emission. `pub(crate)` so `spawn::dispatch_spawn_engineer` can
+// consult them from its third guard; exercised by inline unit tests.
+pub(crate) mod goal_dedup;
 #[cfg(not(test))]
 pub(crate) mod typed_goal_session;
 #[cfg(test)]

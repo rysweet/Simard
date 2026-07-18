@@ -30,7 +30,7 @@ mod tests_extra;
 pub use dedup::{failure_signature, find_existing, normalize};
 pub use gh_client::{GhClient, GhIssue, RealGhClient};
 pub use merge_authority::{
-    BASE_ALLOWLIST_ENV, DEFAULT_BASE_ALLOWLIST, MergeOutcome, OpenPrSummary, PrGhClient,
+    BASE_ALLOWLIST_ENV, DEFAULT_BASE_ALLOWLIST, GoalPrRef, MergeOutcome, OpenPrSummary, PrGhClient,
     PrSnapshot, RealPrGhClient, base_allowlist_from_env, evaluate_objective_gates,
     merge_pr_if_merge_ready, merge_pr_if_merge_ready_with_allowlist,
     merge_pr_if_merge_ready_with_judge, parse_pr_list_json,

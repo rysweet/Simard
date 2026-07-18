@@ -287,6 +287,111 @@ impl CapabilityHandler {
         rows.map(|row| row.map_err(persistence)).collect()
     }
 
+    /// Upsert a done-gate PR emission row (Problem 4, issues #4166/#4189).
+    ///
+    /// Called by the engineer PR-emission contract after `gh pr create`, and by
+    /// the advisory `gh` reconciliation when it adopts a pre-existing PR.
+    /// Idempotent on `goal_key` via `ON CONFLICT(goal_key) DO UPDATE`. The
+    /// `UNIQUE(repo, pr_number)` constraint makes a concurrent re-record of a
+    /// *different* goal onto the same PR a visible conflict rather than a
+    /// silent duplicate. This row is NEVER deleted — a completed PR transitions
+    /// `state` instead — so an emission outlives the engineer that opened it.
+    // Eight positional fields mirror the durable `goal_pr_emissions` row and the
+    // engineer PR-emission contract's call site; grouping them into a struct here
+    // would only relocate the arity without improving the persistence seam.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_goal_pr_emission(
+        &self,
+        goal_key: &str,
+        goal_id: &str,
+        repo: &str,
+        pr_number: u32,
+        pr_url: &str,
+        head_ref: &str,
+        state: EmissionState,
+        now_millis: i64,
+    ) -> CapabilityResult<()> {
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(persistence)?;
+        transaction
+            .execute(
+                "INSERT INTO goal_pr_emissions(
+                    goal_key, goal_id, repo, pr_number, pr_url, head_ref, state, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                ON CONFLICT(goal_key) DO UPDATE SET
+                    goal_id = excluded.goal_id,
+                    repo = excluded.repo,
+                    pr_number = excluded.pr_number,
+                    pr_url = excluded.pr_url,
+                    head_ref = excluded.head_ref,
+                    state = excluded.state,
+                    updated_at = excluded.updated_at",
+                params![
+                    goal_key,
+                    goal_id,
+                    repo,
+                    i64::from(pr_number),
+                    pr_url,
+                    head_ref,
+                    state.as_str(),
+                    now_millis,
+                ],
+            )
+            .map_err(persistence)?;
+        transaction.commit().map_err(persistence)?;
+        Ok(())
+    }
+
+    /// Indexed point-lookup of the OPEN emission for a goal-key, if any. The
+    /// primary (authoritative) guard consulted by `dispatch_spawn_engineer`.
+    /// Rows in a non-`open` state are never returned.
+    pub fn find_open_goal_pr_emission(
+        &self,
+        goal_key: &str,
+    ) -> CapabilityResult<Option<GoalPrEmission>> {
+        let connection = self.lock()?;
+        let row = connection
+            .query_row(
+                "SELECT goal_key, goal_id, repo, pr_number, pr_url, head_ref, state
+                 FROM goal_pr_emissions
+                 WHERE goal_key = ?1 AND state = 'open'",
+                params![goal_key],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(persistence)?;
+
+        let Some((goal_key, goal_id, repo, pr_number, pr_url, head_ref, state_text)) = row else {
+            return Ok(None);
+        };
+        let state = EmissionState::from_text(&state_text).ok_or_else(|| {
+            persistence_message(format!("unknown goal_pr_emissions state {state_text:?}"))
+        })?;
+        let pr_number = u32::try_from(pr_number)
+            .map_err(|_| persistence_message("goal_pr_emissions.pr_number out of range"))?;
+        Ok(Some(GoalPrEmission {
+            goal_key,
+            goal_id,
+            repo,
+            pr_number,
+            pr_url,
+            head_ref,
+            state,
+        }))
+    }
+
     pub fn register_actor_session(
         &self,
         actor: &AuthenticatedToolContext,
@@ -2647,6 +2752,231 @@ fn is_constraint(error: &rusqlite::Error) -> bool {
 pub enum EffectResult {
     Succeeded { evidence: Vec<EvidenceRef> },
     Failed { error: String },
+}
+
+/// Lifecycle state of a done-gate PR emission (Problem 4). A row transitions
+/// through these states and is NEVER deleted, so the emission outlives the
+/// engineer that opened the PR. Serialized as the lowercase TEXT stored in
+/// `goal_pr_emissions.state`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EmissionState {
+    Open,
+    Merged,
+    Closed,
+    Superseded,
+}
+
+impl EmissionState {
+    /// The canonical lowercase TEXT persisted in the `state` column.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EmissionState::Open => "open",
+            EmissionState::Merged => "merged",
+            EmissionState::Closed => "closed",
+            EmissionState::Superseded => "superseded",
+        }
+    }
+
+    /// Parse the persisted TEXT back into an `EmissionState`. Unknown values
+    /// yield `None` (total, no panic).
+    pub fn from_text(text: &str) -> Option<Self> {
+        match text {
+            "open" => Some(EmissionState::Open),
+            "merged" => Some(EmissionState::Merged),
+            "closed" => Some(EmissionState::Closed),
+            "superseded" => Some(EmissionState::Superseded),
+            _ => None,
+        }
+    }
+}
+
+/// A durable done-gate PR emission row read back from `goal_pr_emissions`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalPrEmission {
+    pub goal_key: String,
+    pub goal_id: String,
+    pub repo: String,
+    pub pr_number: u32,
+    pub pr_url: String,
+    pub head_ref: String,
+    pub state: EmissionState,
+}
+
+#[cfg(test)]
+mod goal_pr_emission_tests {
+    //! Contract for the `goal_pr_emissions` ledger (Problem 4, issues
+    //! #4166/#4189): the durable, authoritative guard that makes done-gate PR
+    //! emission idempotent per goal. GREEN against the schema-v2 migration and
+    //! the upsert/open-lookup implemented on `CapabilityHandler`.
+
+    use super::*;
+
+    fn handler(dir: &std::path::Path) -> CapabilityHandler {
+        CapabilityHandler::open(
+            dir.join("outcomes.sqlite3"),
+            CapabilityPolicy::new("policy-v1"),
+        )
+        .expect("open capability handler")
+    }
+
+    #[test]
+    fn record_then_find_open_returns_the_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let h = handler(dir.path());
+        h.record_goal_pr_emission(
+            "4f2a9c1e7b3d0a58",
+            "coin-benchmark",
+            "rysweet/Simard",
+            4326,
+            "https://github.com/rysweet/Simard/pull/4326",
+            "engineer/4f2a9c1e7b3d0a58-coin",
+            EmissionState::Open,
+            1_000,
+        )
+        .expect("record emission");
+
+        let found = h
+            .find_open_goal_pr_emission("4f2a9c1e7b3d0a58")
+            .expect("lookup ok")
+            .expect("an open emission exists");
+        assert_eq!(found.goal_key, "4f2a9c1e7b3d0a58");
+        assert_eq!(found.goal_id, "coin-benchmark");
+        assert_eq!(found.repo, "rysweet/Simard");
+        assert_eq!(found.pr_number, 4326);
+        assert_eq!(found.state, EmissionState::Open);
+    }
+
+    #[test]
+    fn find_open_returns_none_for_unknown_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let h = handler(dir.path());
+        assert!(
+            h.find_open_goal_pr_emission("ffffffffffffffff")
+                .expect("lookup ok")
+                .is_none(),
+        );
+    }
+
+    #[test]
+    fn upsert_on_conflict_updates_state_in_place() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let h = handler(dir.path());
+        h.record_goal_pr_emission(
+            "aaaa000011112222",
+            "goal-a",
+            "rysweet/Simard",
+            100,
+            "https://github.com/rysweet/Simard/pull/100",
+            "engineer/aaaa000011112222-a",
+            EmissionState::Open,
+            1_000,
+        )
+        .expect("record open");
+
+        // Same goal_key ⇒ ON CONFLICT UPDATE, not a second row.
+        h.record_goal_pr_emission(
+            "aaaa000011112222",
+            "goal-a",
+            "rysweet/Simard",
+            100,
+            "https://github.com/rysweet/Simard/pull/100",
+            "engineer/aaaa000011112222-a",
+            EmissionState::Merged,
+            2_000,
+        )
+        .expect("record merged");
+
+        // No longer open ⇒ the open-lookup returns None.
+        assert!(
+            h.find_open_goal_pr_emission("aaaa000011112222")
+                .expect("lookup ok")
+                .is_none(),
+            "a merged emission must not be returned by the open-lookup",
+        );
+    }
+
+    #[test]
+    fn closed_emission_is_not_returned_by_open_lookup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let h = handler(dir.path());
+        h.record_goal_pr_emission(
+            "bbbb333344445555",
+            "goal-b",
+            "rysweet/Simard",
+            200,
+            "https://github.com/rysweet/Simard/pull/200",
+            "engineer/bbbb333344445555-b",
+            EmissionState::Closed,
+            1_000,
+        )
+        .expect("record closed");
+        assert!(
+            h.find_open_goal_pr_emission("bbbb333344445555")
+                .expect("lookup ok")
+                .is_none(),
+        );
+    }
+
+    #[test]
+    fn unique_repo_pr_number_rejects_a_second_goal_on_the_same_pr() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let h = handler(dir.path());
+        h.record_goal_pr_emission(
+            "1111111111111111",
+            "goal-one",
+            "rysweet/Simard",
+            777,
+            "https://github.com/rysweet/Simard/pull/777",
+            "engineer/1111111111111111-one",
+            EmissionState::Open,
+            1_000,
+        )
+        .expect("first emission");
+
+        // A DIFFERENT goal_key claiming the SAME (repo, pr_number) must conflict
+        // rather than silently duplicate.
+        let result = h.record_goal_pr_emission(
+            "2222222222222222",
+            "goal-two",
+            "rysweet/Simard",
+            777,
+            "https://github.com/rysweet/Simard/pull/777",
+            "engineer/2222222222222222-two",
+            EmissionState::Open,
+            2_000,
+        );
+        assert!(
+            result.is_err(),
+            "UNIQUE(repo, pr_number) must reject a second goal on the same PR",
+        );
+    }
+
+    #[test]
+    fn migration_is_idempotent_and_persists_across_reopen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        {
+            let h = handler(dir.path());
+            h.record_goal_pr_emission(
+                "cccc666677778888",
+                "goal-c",
+                "rysweet/Simard",
+                4324,
+                "https://github.com/rysweet/Simard/pull/4324",
+                "engineer/cccc666677778888-c",
+                EmissionState::Open,
+                1_000,
+            )
+            .expect("record emission");
+        }
+        // Reopening the same store re-runs `initialize` (v2 → v2 no-op) and the
+        // durable row survives.
+        let h2 = handler(dir.path());
+        let found = h2
+            .find_open_goal_pr_emission("cccc666677778888")
+            .expect("lookup ok")
+            .expect("emission persisted across reopen");
+        assert_eq!(found.pr_number, 4324);
+    }
 }
 
 #[cfg(test)]
