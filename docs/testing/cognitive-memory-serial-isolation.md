@@ -162,15 +162,17 @@ if**, at run time, it does any of:
 
 - **(A)** Constructs a `HermeticState` (`::new`, `::new_in`, `::default`,
   `new_with_temp`).
-- **(B)** Calls `set_var` / `remove_var` on **any** process-global variable.
-  The race is var-agnostic, so `HOME`, `CARGO_TARGET_DIR`, `TZ`, etc. all count
-  — not only `SIMARD_STATE_ROOT` and `SIMARD_MEMORY_SOCKET`. *Enforcement note:*
-  since [#2375](https://github.com/rysweet/Simard/issues/2375) the `serial_guard`
+- **(B)** Calls `set_var` / `remove_var` on **any** process-global variable —
+  directly, or through a **recognized env-helper** (`EnvGuard::set`/`unset`,
+  `SkipGuard::set`/`clear`). The race is var-agnostic, so `HOME`,
+  `CARGO_TARGET_DIR`, `SIMARD_SKIP_GYM`, `TZ`, etc. all count — not only
+  `SIMARD_STATE_ROOT` and `SIMARD_MEMORY_SOCKET`. *Enforcement note:* since
+  [#2375](https://github.com/rysweet/Simard/issues/2375) the `serial_guard`
   meta-test auto-detects (B) for **every** variable (`EnvWatch::AnyVar`), so this
-  is no longer only an author obligation — an unkeyed `set_var`/`remove_var` of
-  any name fails the build. The rule-(C) *read* check remains scoped to
-  `READ_WATCHED_VARS` (the state-root surface minus `HOME`). See *Process-wide
-  enforcement* below.
+  is no longer only an author obligation — an unkeyed `set_var`/`remove_var` (or
+  recognized-helper mutation) of any name fails the build. The rule-(C) *read*
+  check remains scoped to `READ_WATCHED_VARS` (the state-root surface minus
+  `HOME`). See *Process-wide enforcement* below.
 - **(C)** Reads `SIMARD_STATE_ROOT` / `SIMARD_MEMORY_SOCKET` from the global
   env, directly or via `resolve_state_root()` / `memory_ipc::socket_path_for`
   default resolution.
@@ -372,7 +374,7 @@ mitigation:
 | Blind spot | Why the scanner misses it | Mitigation |
 |------------|---------------------------|------------|
 | Tests synthesized by a declarative or proc macro (no literal `#[test]` fn in source) | The AST holds the macro *invocation*, not the generated `#[test]` items | Emit such tests from a generator that already attaches the `cognitive_memory` key, or add an `allowlist` entry; call out the macro in review. |
-| Env mutation reached only through an unrecognized project helper (a custom wrapper that calls `set_var` internally) | The visitor matches a fixed trigger set, not arbitrary transitive call graphs | Keep env mutation behind the recognized helpers (`HermeticState`, direct `set_var`/`remove_var`); register new helper names in the trigger set when introduced. |
+| Env mutation reached only through an unrecognized project helper (a custom wrapper that calls `set_var` internally) | The visitor matches a fixed trigger set, not arbitrary transitive call graphs | Keep env mutation behind the recognized helpers (`HermeticState`, `EnvGuard::set`/`unset`, `SkipGuard::set`/`clear`, direct `set_var`/`remove_var`); register new helper names in the trigger set when introduced. |
 | `#[cfg(...)]`-gated tests | The cfg predicate is not evaluated | None needed — the function is still parsed structurally and audited. |
 | `src/bin/**` and `tests/**` | Separate processes, out of scope by design (see [Scope](#scope-which-test-binary)) | Excluded via `AuditOptions::excluded_prefixes`. |
 
