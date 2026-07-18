@@ -928,76 +928,50 @@ fn run_fake_meeting_turn_with_session(
 /// exceed the bare objective's token count. This assertion FAILS on the buggy
 /// code (recorded == bare) and PASSES on the fix (recorded > bare).
 ///
-/// HOME is redirected to a per-test temp dir so the cost ledger
-/// (`$HOME/.simard/costs/ledger.jsonl`) is isolated; the entry is matched by a
-/// unique session id so a concurrent meeting test sharing the process-global
-/// temp HOME cannot substitute its own entry. Mutating HOME requires the
-/// `cognitive_memory` serial key (see
-/// docs/testing/cognitive-memory-serial-isolation.md).
+/// The cost ledger is isolated via a thread-local [`LedgerPathGuard`] (issue
+/// #4322 de-flake) rather than by mutating the process-global `HOME`. The old
+/// approach raced with any concurrent test that also touched `HOME`, flaking on
+/// identical commits; the thread-local override cannot be observed by other
+/// threads, so this test no longer needs the `cognitive_memory` serial key.
 #[cfg(unix)]
 #[test]
-#[serial_test::serial(cognitive_memory)]
 fn meeting_turn_records_full_enriched_prompt_tokens_not_bare_objective() {
-    let home = tempfile::TempDir::new().unwrap();
-    let prev_home = std::env::var_os("HOME");
-    // SAFETY: serialised via #[serial(cognitive_memory)] — no concurrent env
-    // mutation can tear this write (see the EnvBinding invariant in
-    // test_support::hermetic).
-    unsafe {
-        std::env::set_var("HOME", home.path());
-    }
+    let ledger_dir = tempfile::TempDir::new().unwrap();
+    let ledger = ledger_dir
+        .path()
+        .join(".simard")
+        .join("costs")
+        .join("ledger.jsonl");
+    let _ledger_guard = crate::cost_tracking::LedgerPathGuard::set(&ledger);
 
-    let result = std::panic::catch_unwind(|| {
-        let session_id = "session-00000000-0000-0000-0000-000000004164";
-        let objective = "Meeting objective body for the #4164 cost-accounting regression.";
-        let (_dir, bin) = fake_copilot("FAKE-COPILOT-OK: meeting reply");
-        run_fake_meeting_turn_with_session(
-            "copilot-meeting-cost-4164",
-            &bin,
-            session_id,
-            objective,
-        );
+    let session_id = "session-00000000-0000-0000-0000-000000004164";
+    let objective = "Meeting objective body for the #4164 cost-accounting regression.";
+    let (_dir, bin) = fake_copilot("FAKE-COPILOT-OK: meeting reply");
+    run_fake_meeting_turn_with_session("copilot-meeting-cost-4164", &bin, session_id, objective);
 
-        let ledger = home
-            .path()
-            .join(".simard")
-            .join("costs")
-            .join("ledger.jsonl");
-        let contents = std::fs::read_to_string(&ledger)
-            .expect("meeting turn must write a cost ledger entry under the temp HOME");
-        let entry = contents
-            .lines()
-            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-            .find(|e| {
-                e.get("session_id").and_then(|v| v.as_str()) == Some(session_id)
-                    && e.get("model").and_then(|v| v.as_str()) == Some("copilot-meeting")
-            })
-            .expect("a copilot-meeting cost entry for this session must be recorded");
+    let contents = std::fs::read_to_string(&ledger)
+        .expect("meeting turn must write a cost ledger entry under the guarded path");
+    let entry = contents
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|e| {
+            e.get("session_id").and_then(|v| v.as_str()) == Some(session_id)
+                && e.get("model").and_then(|v| v.as_str()) == Some("copilot-meeting")
+        })
+        .expect("a copilot-meeting cost entry for this session must be recorded");
 
-        let recorded_prompt_tokens = entry
-            .get("prompt_tokens_est")
-            .and_then(|v| v.as_u64())
-            .expect("prompt_tokens_est must be a number");
-        let bare_objective_tokens = crate::cost_tracking::estimate_tokens(objective.len());
+    let recorded_prompt_tokens = entry
+        .get("prompt_tokens_est")
+        .and_then(|v| v.as_u64())
+        .expect("prompt_tokens_est must be a number");
+    let bare_objective_tokens = crate::cost_tracking::estimate_tokens(objective.len());
 
-        assert!(
-            recorded_prompt_tokens > bare_objective_tokens,
-            "meeting prompt cost must reflect the full enriched prompt streamed on \
-             stdin (issue #4164), not the bare objective: \
-             recorded={recorded_prompt_tokens} bare_objective_tokens={bare_objective_tokens}"
-        );
-    });
-
-    // SAFETY: restore HOME before propagating any panic (same serial key).
-    unsafe {
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
-    if let Err(e) = result {
-        std::panic::resume_unwind(e);
-    }
+    assert!(
+        recorded_prompt_tokens > bare_objective_tokens,
+        "meeting prompt cost must reflect the full enriched prompt streamed on \
+         stdin (issue #4164), not the bare objective: \
+         recorded={recorded_prompt_tokens} bare_objective_tokens={bare_objective_tokens}"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -516,7 +516,7 @@ impl CopilotSdkSession {
                 self.turn_count, self.request.topology
             ),
         ) {
-            eprintln!("[simard] cost tracking write failed: {e}");
+            tracing::warn!(error = %e, "cost tracking write failed (meeting turn)");
         }
 
         let objective_summary = objective_metadata(&input.objective);
@@ -589,7 +589,7 @@ impl CopilotSdkSession {
                 self.turn_count, self.request.topology
             ),
         ) {
-            eprintln!("[simard] cost tracking write failed: {e}");
+            tracing::warn!(error = %e, "cost tracking write failed (PTY turn)");
         }
 
         let objective_summary = objective_metadata(&input.objective);

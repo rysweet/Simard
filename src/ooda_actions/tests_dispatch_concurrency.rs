@@ -169,12 +169,16 @@ fn concurrent_dispatch_parallelizes_and_respects_cap() {
         "cap=1 must serialize dispatch; peak={peak_serial}"
     );
 
-    // The cap=N run must be substantially faster than the cap=1 run. This is
-    // robust to per-call overhead (both runs incur the same N input builds);
-    // only the sleep parallelizes.
+    // The cap=N run must be faster than the cap=1 run: only the sleep
+    // parallelizes, so wall-clock *direction* is a stable signal even though the
+    // exact ratio is not. A brittle `parallel_elapsed * 2 <= serial_elapsed`
+    // ratio assertion flaked under CI scheduling jitter on identical commits
+    // (issue #4328). Concurrency itself is already proven structurally above by
+    // run_count==N (L144), peak_parallel>=2 (L150), and peak_serial<=1 (L167);
+    // this directional check is a secondary guard, not the primary proof.
     assert!(
-        parallel_elapsed * 2 <= serial_elapsed,
-        "concurrent dispatch must be >=2x faster than serialized: parallel={parallel_elapsed:?}, serial={serial_elapsed:?}"
+        parallel_elapsed < serial_elapsed,
+        "concurrent dispatch must be faster than serialized: parallel={parallel_elapsed:?}, serial={serial_elapsed:?}"
     );
 }
 

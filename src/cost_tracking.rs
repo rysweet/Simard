@@ -40,7 +40,67 @@ const DEFAULT_OUTPUT_COST_PER_TOKEN: f64 = 15.0 / 1_000_000.0;
 /// Rough character-to-token ratio (4 characters ≈ 1 token).
 const CHARS_PER_TOKEN: u64 = 4;
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only, thread-local cost-ledger path override consulted first by
+    /// [`ledger_path`]. Because it is thread-local, concurrently-running tests
+    /// on other threads never observe it — this is the race-proof replacement
+    /// for mutating the process-global `HOME` to isolate the ledger.
+    static LEDGER_PATH_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only RAII guard that redirects the cost ledger to `target` for the
+/// current thread only, restoring the previous resolution when dropped.
+///
+/// Unlike mutating `HOME`, this cannot race with concurrent tests: the
+/// override lives in a thread-local, so a meeting-cost test can isolate its
+/// ledger without a serial key and without tearing another test's environment.
+/// `Drop` always runs (including on panic), so the override is never leaked.
+#[cfg(test)]
+pub(crate) struct LedgerPathGuard {
+    _private: (),
+}
+
+#[cfg(test)]
+impl LedgerPathGuard {
+    /// Redirect [`ledger_path`] to `target` on the current thread until the
+    /// returned guard is dropped.
+    pub(crate) fn set(target: &std::path::Path) -> Self {
+        LEDGER_PATH_OVERRIDE.with(|cell| {
+            *cell.borrow_mut() = Some(target.to_path_buf());
+        });
+        LedgerPathGuard { _private: () }
+    }
+}
+
+#[cfg(test)]
+impl Drop for LedgerPathGuard {
+    fn drop(&mut self) {
+        LEDGER_PATH_OVERRIDE.with(|cell| {
+            *cell.borrow_mut() = None;
+        });
+    }
+}
+
+/// Resolve the cost-ledger path. In test builds the resolution order is:
+/// 1. a thread-local [`LedgerPathGuard`] override;
+/// 2. the `SIMARD_COST_LEDGER` environment variable, if set;
+/// 3. the `$HOME`-derived default `~/.simard/costs/ledger.jsonl`.
+///
+/// Both override branches are strictly `#[cfg(test)]`-gated: a non-test build
+/// resolves the ledger from `$HOME` exactly as before, so the production
+/// cost-tracking path is byte-for-byte unchanged.
 fn ledger_path() -> PathBuf {
+    #[cfg(test)]
+    {
+        if let Some(path) = LEDGER_PATH_OVERRIDE.with(|cell| cell.borrow().clone()) {
+            return path;
+        }
+        if let Some(path) = std::env::var_os("SIMARD_COST_LEDGER") {
+            return PathBuf::from(path);
+        }
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
     PathBuf::from(home)
         .join(".simard")
@@ -300,5 +360,131 @@ mod tests {
         }
         assert_eq!(entries.len(), 2);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── Brick B: test-only cost-ledger path override (issue #4322 de-flake) ──
+    //
+    // These tests specify the contract for the `LedgerPathGuard` thread-local
+    // seam that makes the meeting-turn cost test race-proof: `ledger_path()`
+    // must consult a thread-local override first, then a `SIMARD_COST_LEDGER`
+    // env fallback, then the `$HOME`-derived default. They are written before
+    // the implementation (TDD) and therefore FAIL to compile until the seam
+    // (`LedgerPathGuard`, `LEDGER_PATH_OVERRIDE`, and the `SIMARD_COST_LEDGER`
+    // branch in `ledger_path()`) exists. Once implemented they must pass.
+
+    #[test]
+    fn ledger_guard_redirects_ledger_path_and_clears_on_drop() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("nested").join("ledger.jsonl");
+
+        // Before any guard, resolution is the HOME-derived default — never our
+        // unique temp target.
+        assert_ne!(ledger_path(), target);
+
+        {
+            let _guard = LedgerPathGuard::set(&target);
+            assert_eq!(
+                ledger_path(),
+                target,
+                "an active LedgerPathGuard must redirect ledger_path() to its target"
+            );
+        }
+
+        // Dropping the guard (including via panic, since Drop always runs)
+        // clears the thread-local override and restores default resolution.
+        assert_ne!(
+            ledger_path(),
+            target,
+            "dropping the guard must clear the thread-local override"
+        );
+    }
+
+    #[test]
+    fn ledger_guard_redirects_record_cost_writes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("costs").join("ledger.jsonl");
+        let _guard = LedgerPathGuard::set(&target);
+
+        let session_id = "guard-redirect-session";
+        record_cost(session_id, "test-model", 400, 40, "brick-b unit test")
+            .expect("record_cost must succeed writing to the guarded path");
+
+        let contents = fs::read_to_string(&target)
+            .expect("record_cost must write the entry to the guarded ledger path");
+        let found = contents
+            .lines()
+            .filter_map(|l| serde_json::from_str::<CostEntry>(l).ok())
+            .any(|e| e.session_id == session_id && e.model == "test-model");
+        assert!(
+            found,
+            "the guarded ledger must contain the entry recorded through record_cost"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn ledger_guard_takes_precedence_over_env_fallback() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let guard_target = tmp.path().join("thread-local.jsonl");
+        let env_target = tmp.path().join("env-fallback.jsonl");
+
+        // SAFETY: serialised via the cognitive_memory key so no concurrent test
+        // observes this transient env mutation; it is cleared before returning.
+        unsafe {
+            std::env::set_var("SIMARD_COST_LEDGER", &env_target);
+        }
+        let resolved = {
+            let _guard = LedgerPathGuard::set(&guard_target);
+            ledger_path()
+        };
+        unsafe {
+            std::env::remove_var("SIMARD_COST_LEDGER");
+        }
+
+        assert_eq!(
+            resolved, guard_target,
+            "thread-local override must take precedence over SIMARD_COST_LEDGER"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn simard_cost_ledger_env_overrides_default_when_no_guard() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let env_target = tmp.path().join("env-only.jsonl");
+
+        // SAFETY: serialised via the cognitive_memory key so the process-global
+        // env is not torn between set and read; cleared before returning.
+        unsafe {
+            std::env::set_var("SIMARD_COST_LEDGER", &env_target);
+        }
+        let resolved = ledger_path();
+        unsafe {
+            std::env::remove_var("SIMARD_COST_LEDGER");
+        }
+
+        assert_eq!(
+            resolved, env_target,
+            "SIMARD_COST_LEDGER must override the default path when no guard is set"
+        );
+    }
+
+    #[test]
+    fn record_cost_surfaces_unwritable_ledger_as_err() {
+        // Point the ledger at a path whose parent is an existing *file*, so
+        // create_dir_all / open must fail. record_cost has to surface this as
+        // Err — which the meeting path then logs via tracing::warn! — rather
+        // than silently presenting a failed write as "entry not recorded".
+        let tmp = tempfile::TempDir::new().unwrap();
+        let file_as_parent = tmp.path().join("not-a-dir");
+        fs::write(&file_as_parent, b"x").unwrap();
+        let bad = file_as_parent.join("costs").join("ledger.jsonl");
+
+        let _guard = LedgerPathGuard::set(&bad);
+        let result = record_cost("err-session", "m", 10, 5, "unwritable ledger");
+        assert!(
+            result.is_err(),
+            "record_cost must return Err when the ledger path is unwritable"
+        );
     }
 }
