@@ -282,6 +282,7 @@ nav:
     - Tombstoned-Goal Engineer Reaper API: reference/tombstoned-goal-engineer-reaper-api.md
     - Typed OODA Goal-Session Deterministic Rails: reference/typed-ooda-goal-session-rails.md
     - Stable Goal-Session Identity API: reference/stable-goal-session-identity-api.md
+    - Actor-Session Scope-Key API: reference/actor-session-scope-key-api.md
     - WhisperGate Exponential-Backoff API: reference/whisper-gate-backoff-api.md
     - Subordinate Kill PID-Guard API: reference/subordinate-kill-pid-guard-api.md
     - Coverage Comment Resilience: reference/coverage-comment-resilience.md
