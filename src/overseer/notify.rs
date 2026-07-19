@@ -136,6 +136,22 @@ impl OperatorNotification {
                 link = link,
             );
         }
+        // The merge-reasoning-disabled alert (issue #4097, R3) is an operator
+        // WARNING, not a "problem solved" — render an accurate "Action needed"
+        // heading so a silent hard-OFF becomes a loud, actionable message.
+        if self.kind == "merge-reasoning-disabled" {
+            let next = if self.next_step.trim().is_empty() {
+                String::new()
+            } else {
+                format!("\n\nRecommended next step:\n  {}", self.next_step)
+            };
+            return format!(
+                "Action needed — agentic merge-queue reasoning is DISABLED in {repo}.\n\nProblem:\n  {problem}{next}\n",
+                repo = self.repo,
+                problem = self.problem,
+                next = next,
+            );
+        }
         let who = if self.autonomous {
             "The Overseer autonomously"
         } else {
@@ -279,6 +295,30 @@ impl OperatorNotification {
                  Reason: {reason}"
             ),
             next_step: String::new(),
+            link: None,
+            repo: "rysweet/Simard".to_string(),
+            autonomous: true,
+        }
+    }
+
+    /// Build the one-time "merge reasoning DISABLED" alert (issue #4097, R3).
+    /// When an operator EXPLICITLY sets `SIMARD_MERGE_REASONING_SCOPE` to a
+    /// disable value, the agentic observe/orient merge-queue pass is turned off.
+    /// That must be LOUD, not a silent hard-OFF: this notification is sent once
+    /// (deduped by the caller) alongside the WARN log + overseer status field.
+    pub fn merge_reasoning_disabled(reason: &str) -> Self {
+        Self {
+            kind: "merge-reasoning-disabled",
+            headline: "agentic merge-queue reasoning DISABLED".to_string(),
+            problem: format!(
+                "The Overseer's agentic observe/orient merge-queue + issue reasoning is \
+                 DISABLED by explicit operator configuration.\n  Reason: {reason}\n  While \
+                 disabled, no open PRs or issues are reasoned about and no autonomous merge \
+                 hygiene runs. Unset SIMARD_MERGE_REASONING_SCOPE to restore default-on \
+                 reasoning over the governed roster."
+            ),
+            next_step: "If this was unintended, unset or correct SIMARD_MERGE_REASONING_SCOPE."
+                .to_string(),
             link: None,
             repo: "rysweet/Simard".to_string(),
             autonomous: true,

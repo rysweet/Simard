@@ -163,6 +163,13 @@ pub struct OverseerTickReport {
     /// Backlog-coverage gaps SUPPRESSED this tick (a recurring gap within the
     /// dedup window — not re-notified/re-filed).
     pub workstream_gaps_suppressed: usize,
+    /// Open PRs judged STALE by the agentic merge-queue reasoner (#4097) and
+    /// flagged with a `gh pr comment` this tick. A DEDICATED counter, never
+    /// folded into `prs_merged` / `escalations`.
+    pub stale_prs_flagged: usize,
+    /// Open PRs judged DUPLICATE by the agentic merge-queue reasoner (#4097) and
+    /// closed with `gh pr close` this tick. A DEDICATED counter.
+    pub duplicate_prs_closed: usize,
     /// Capability errors encountered while acting (isolated, never fatal).
     pub errors: usize,
     /// Completed whole cognitive-memory recall passes this tick (issue #2628):
@@ -492,6 +499,8 @@ fn tally_outcome(report: &mut OverseerTickReport, outcome: &ActOutcome) {
             report.workstream_gaps_detected += flagged;
             report.workstream_gaps_suppressed += suppressed;
         }
+        ActOutcome::StalePrFlagged { .. } => report.stale_prs_flagged += 1,
+        ActOutcome::DuplicatePrClosed { .. } => report.duplicate_prs_closed += 1,
         ActOutcome::ConflictResolved
         | ActOutcome::GoalTransferred
         | ActOutcome::Reported
@@ -583,6 +592,12 @@ fn intervention_target(iv: &Intervention) -> String {
         Intervention::FlagWorkstreamGaps { gaps } => {
             format!("flag {} uncovered workstream(s)", gaps.len())
         }
+        Intervention::FlagStalePr { repo, pr, .. } => format!("flag stale PR {repo}#{pr}"),
+        Intervention::CloseDuplicatePr {
+            repo,
+            pr,
+            duplicate_of,
+        } => format!("close duplicate PR {repo}#{pr} (dup of #{duplicate_of})"),
     }
 }
 
@@ -646,6 +661,16 @@ fn describe_action(iv: &Intervention, outcome: &ActOutcome) -> String {
             } else {
                 format!("workstream gaps suppressed — {suppressed} within the dedup window")
             }
+        }
+        ActOutcome::StalePrFlagged { repo, pr } => {
+            format!("flagged stale PR {repo}#{pr} (agentic merge-queue reasoning)")
+        }
+        ActOutcome::DuplicatePrClosed {
+            repo,
+            pr,
+            duplicate_of,
+        } => {
+            format!("closed duplicate PR {repo}#{pr} (dup of #{duplicate_of})")
         }
     };
     sanitize_detail(&format!("did: {body}"))
@@ -1155,6 +1180,23 @@ pub fn build_overseer(
         None => overseer,
     };
 
+    // Live agentic observe-merge-queue reasoner rail (issue #4097): the FIX for
+    // the dead-wire allowlist sensor. On the Overseer cadence the thin rail
+    // invokes the `observe-merge-queue` recipe — an AGENT surveys open PRs +
+    // issues across the governed roster with `gh` and REASONS to a bounded brief —
+    // and the rail parses it FAIL-CLOSED into `reasoned_prs` / `triaged_issues` +
+    // a re-narrowed `ready_prs` projection. Reasoning is default-ON over the
+    // governed roster; merge AUTHORIZATION stays narrow behind the objective +
+    // agentic gate. Wiring is fail-visible: if the roster fails to load, or
+    // `recipe-runner-rs`/the recipe is unavailable, the rail is simply not wired
+    // this build (the pass is skipped) rather than aborting the tick.
+    let overseer = match build_merge_queue_reasoner(&repo_root_for_ecosystem) {
+        Some((roster, reasoner)) => {
+            overseer.with_merge_queue_reasoner(roster, reasoner, gap_scan_every_n())
+        }
+        None => overseer,
+    };
+
     // Periodic stale-engineer-claim reaper (issue #4099): sweep + reclaim the
     // `engineer_claims` leak independent of per-goal polling. Wire the shared
     // ledger chokepoint, the worktree liveness probe, and the orphan cleanup —
@@ -1268,6 +1310,65 @@ fn build_ecosystem_observer(
         }
     };
     Some((roster, Box::new(RecipeEcosystemObserver::new(runner))))
+}
+
+/// Load the governed roster and build the production observe-merge-queue reasoner
+/// rail (#4097). Returns `None` (fail-visible log) if the roster cannot be loaded
+/// or `recipe-runner-rs`/the recipe is unavailable, so the build proceeds without
+/// the rail rather than panicking. Reuses the SAME committed roster
+/// (`ecosystem_repos.toml`, pure DATA) as the governed reasoning scope, per the
+/// design (Simard's governed repos are default-in-scope for merge REASONING while
+/// the merge ACTION stays behind the objective + agentic gate).
+fn build_merge_queue_reasoner(
+    repo_root: &std::path::Path,
+) -> Option<(
+    Vec<String>,
+    Box<dyn crate::overseer::merge_queue_observe::MergeQueueReasoner>,
+)> {
+    use crate::overseer::ecosystem_observe::{
+        ECOSYSTEM_ROSTER_FILENAME, load_ecosystem_roster, resolve_ecosystem_roster_path,
+    };
+    use crate::overseer::merge_queue_observe::{
+        RecipeMergeQueueReasoner, SpawnMergeQueueRecipeRunner,
+    };
+
+    let roster_path = match resolve_ecosystem_roster_path(repo_root, None) {
+        Some(path) => path,
+        None => {
+            let in_tree_candidate = repo_root
+                .join("prompt_assets/simard")
+                .join(ECOSYSTEM_ROSTER_FILENAME);
+            tracing::warn!(
+                target: "simard::merge_queue_observe",
+                in_tree_candidate = %in_tree_candidate.display(),
+                "[simard] observe-merge-queue NOT wired: failed to resolve governed roster (no roster at the installed or in-tree location)",
+            );
+            return None;
+        }
+    };
+    let roster = match load_ecosystem_roster(&roster_path) {
+        Ok(roster) => roster,
+        Err(error) => {
+            tracing::warn!(
+                target: "simard::merge_queue_observe",
+                error = %error,
+                roster_path = %roster_path.display(),
+                "[simard] observe-merge-queue NOT wired: failed to load governed roster",
+            );
+            return None;
+        }
+    };
+    let runner = match SpawnMergeQueueRecipeRunner::new(repo_root) {
+        Some(runner) => runner,
+        None => {
+            tracing::warn!(
+                target: "simard::merge_queue_observe",
+                "[simard] observe-merge-queue NOT wired: recipe-runner-rs or observe-merge-queue.yaml unavailable",
+            );
+            return None;
+        }
+    };
+    Some((roster, Box::new(RecipeMergeQueueReasoner::new(runner))))
 }
 
 /// Resolve the acting Overseer's tick cadence (seconds), clamped to the config

@@ -576,6 +576,100 @@ impl PrOps for MergePrOps {
         }
         candidates
     }
+
+    /// Flag a STALE PR (#4097) with `gh pr comment`. Builds the positional argv
+    /// via [`flag_stale_pr_argv`] (structurally incapable of `--admin`/
+    /// `--no-verify`) and runs it through the SAME `gh` client the merge path
+    /// uses. Read-only-ish: adds a comment, never merges or closes. Fail-visible.
+    fn flag_stale_pr(&self, repo: &str, pr: u32, note: &str) -> Result<(), OverseerError> {
+        let argv = crate::overseer::intervention::flag_stale_pr_argv(repo, pr, note);
+        self.gh
+            .run_gh(&argv)
+            .map_err(|e| cap("flag_stale_pr", e.to_string()))
+    }
+
+    /// Close a DUPLICATE PR (#4097) with `gh pr close`, referencing the original.
+    /// Builds the positional argv via [`close_duplicate_pr_argv`] (never
+    /// `--admin`/`--no-verify`) and runs it through the same `gh` client.
+    /// Fail-visible.
+    fn close_duplicate_pr(
+        &self,
+        repo: &str,
+        pr: u32,
+        duplicate_of: u32,
+    ) -> Result<(), OverseerError> {
+        let argv = crate::overseer::intervention::close_duplicate_pr_argv(repo, pr, duplicate_of);
+        self.gh
+            .run_gh(&argv)
+            .map_err(|e| cap("close_duplicate_pr", e.to_string()))
+    }
+
+    /// Re-narrow the agentic `ReadyForMerge` proposals into the PRs authorized to
+    /// merge (#4097) — the DETERMINISTIC safety rail. Fetches the AUTHORITATIVE
+    /// `gh` open-PR facts (author, head branch, mergeable/checks/base/labels) per
+    /// proposed repo (ONE `list_open_prs` per repo), matches each proposed PR
+    /// number, and runs [`project_ready_prs`](crate::overseer::project_ready_prs).
+    /// A repo whose listing errors is skipped (fail-visible); a proposed PR not
+    /// found in the authoritative listing is dropped (fail-closed). The agent can
+    /// only PROPOSE — this rail confirms every gate against ground truth.
+    fn project_reasoned_ready_prs(
+        &self,
+        reasoned: &[crate::overseer::capabilities::ReasonedPr],
+        overseer_login: &str,
+    ) -> Vec<PrRef> {
+        use crate::overseer::capabilities::PrDisposition;
+        use crate::overseer::{ProjectionCandidate, project_ready_prs};
+        use std::collections::BTreeMap;
+
+        let ready: Vec<&crate::overseer::capabilities::ReasonedPr> = reasoned
+            .iter()
+            .filter(|r| r.disposition == PrDisposition::ReadyForMerge)
+            .collect();
+        if ready.is_empty() {
+            return Vec::new();
+        }
+
+        // Fetch each distinct repo's authoritative open-PR listing exactly once.
+        let mut repos: Vec<&str> = ready.iter().map(|r| r.repo.as_str()).collect();
+        repos.sort_unstable();
+        repos.dedup();
+        let mut by_repo: BTreeMap<&str, Vec<crate::stewardship::OpenPrSummary>> = BTreeMap::new();
+        for repo in repos {
+            match self.gh.list_open_prs(repo, 100) {
+                Ok(list) => {
+                    by_repo.insert(repo, list);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "overseer::merge",
+                        repo = %repo,
+                        error = %e,
+                        "observe-merge-queue projection: `gh pr list` failed — skipping this \
+                         repo (fail-visible); other repos still projected"
+                    );
+                }
+            }
+        }
+
+        // Build candidates from the AUTHORITATIVE facts; drop any proposal whose
+        // PR is absent from the live listing (fail-closed).
+        let mut candidates = Vec::new();
+        for r in ready {
+            let Some(list) = by_repo.get(r.repo.as_str()) else {
+                continue;
+            };
+            let Some(summary) = list.iter().find(|s| s.number == r.pr) else {
+                continue;
+            };
+            candidates.push(ProjectionCandidate {
+                reasoned: (*r).clone(),
+                author_login: summary.author.clone(),
+                head_ref: summary.head_ref_name.clone(),
+                snapshot: summary.to_snapshot(),
+            });
+        }
+        project_ready_prs(&candidates, &self.base_allowlist, overseer_login)
+    }
 }
 
 fn cap(what: &'static str, detail: String) -> OverseerError {

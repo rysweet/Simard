@@ -60,6 +60,7 @@ pub mod intervention;
 pub mod launch;
 pub mod meeting_ops;
 pub mod merge_ops;
+pub mod merge_queue_observe;
 pub mod notify;
 pub mod observer;
 pub mod pr_verify;
@@ -85,6 +86,8 @@ mod tests_m2;
 #[cfg(test)]
 mod tests_memory_recall;
 #[cfg(test)]
+mod tests_merge_queue_reasoning;
+#[cfg(test)]
 mod tests_root_cause;
 #[cfg(test)]
 mod tests_self_healing;
@@ -94,10 +97,11 @@ mod tests_selfmerge_fix;
 mod tests_whisper;
 
 pub use capabilities::{
-    Auditor, BlockedGoal, Deployer, GoalCurator, IssueFiler, MeetingHost, MemoryRecall,
-    MemorySnapshot, ObservationEpisode, ObservedState, OrchestratorRunBrief, OverseerError, PrOps,
+    Auditor, BlockedGoal, Deployer, GoalCurator, IssueFiler, IssuePriority, IssueReadiness,
+    MeetingHost, MemoryRecall, MemorySnapshot, MergeReasoningStatus, ObservationEpisode,
+    ObservedState, OrchestratorRunBrief, OverseerError, PrDisposition, PrOps, PrRef, ReasonedPr,
     RecallBudget, RecallKeys, RecalledEpisode, RecalledFact, RecalledProcedure,
-    RecalledProspective, RecipeBrief, RecipeLauncher, RecordOutcome, StatusReader,
+    RecalledProspective, RecipeBrief, RecipeLauncher, RecordOutcome, StatusReader, TriagedIssue,
     sanitize_recalled,
 };
 pub use config::{
@@ -138,6 +142,8 @@ use crate::goal_curation::no_progress_breaker::{
     NO_PROGRESS_BREAKER_THRESHOLD, is_no_progress_marker,
 };
 use crate::overseer::notify::{OperatorNotification, OperatorNotifier};
+use crate::stewardship::PrSnapshot;
+use crate::stewardship::merge_authority::evaluate_objective_gates;
 use capabilities::{
     DeployReport, GoalBrief, InFlightItem, IssueOutcome, WorkstreamHandle, WorkstreamStatus,
 };
@@ -272,6 +278,32 @@ pub struct Overseer {
     /// equivalent relaunch (keyed by the same [`recipe_dedup_key`]) within a
     /// growing, bounded window even after completion — never permanently.
     coverage_backoff: BackoffGate,
+    /// The agentic observe/orient merge-queue reasoner rail (#4097). When wired
+    /// (`build_overseer` with a resolved recipe-runner), each due tick invokes the
+    /// `observe-merge-queue` recipe — an AGENT surveys open PRs + issues across the
+    /// governed roster and REASONS to a bounded brief — and the rail parses it
+    /// FAIL-CLOSED into `ObservedState.reasoned_prs` / `triaged_issues`. Absent by
+    /// default (bare constructor / tests) so the pass is skipped and the Overseer
+    /// behaves exactly as before. The reasoning is BROAD; merge AUTHORIZATION stays
+    /// narrow behind [`project_ready_prs`] + the downstream merge-authority gate.
+    merge_queue_reasoner: Option<Box<dyn merge_queue_observe::MergeQueueReasoner>>,
+    /// The governed reasoning roster (validated `owner/name` slugs) handed to the
+    /// `observe-merge-queue` recipe as the DEFAULT scope. Loaded once from
+    /// `ecosystem_repos.toml` by `build_overseer`; the resolved scope
+    /// ([`config::merge_reasoning_scope`]) is default-ON over this roster and only
+    /// an EXPLICIT operator disable turns it off (loud). Empty (pass skipped) until
+    /// wired.
+    merge_queue_roster: Vec<String>,
+    /// Every-N cadence for the merge-queue observe pass (reuses the gap-scan
+    /// cadence knob, like the ecosystem pass). Clamped to a floor of 1.
+    merge_queue_every_n: u64,
+    /// Monotonic tick counter driving the merge-queue observe every-N cadence.
+    merge_queue_tick: u64,
+    /// One-time latch for the R3 "merge reasoning DISABLED" operator notification
+    /// (#4097): an EXPLICIT operator disable is surfaced LOUD once (WARN log +
+    /// status field + a single dual-channel NotifyOperator), never re-sent every
+    /// tick while it stays disabled.
+    merge_reasoning_disabled_notified: bool,
 }
 
 /// The reaper's injected dependencies, bundled so the `Overseer` carries one
@@ -343,6 +375,19 @@ pub enum ActOutcome {
         flagged: usize,
         suppressed: usize,
     },
+    /// An open PR judged STALE by the agentic merge-queue reasoner (#4097) was
+    /// flagged with a `gh pr comment` (never a merge/close).
+    StalePrFlagged {
+        repo: String,
+        pr: u32,
+    },
+    /// An open PR judged a DUPLICATE by the agentic reasoner (#4097) was closed
+    /// with `gh pr close`, referencing the original.
+    DuplicatePrClosed {
+        repo: String,
+        pr: u32,
+        duplicate_of: u32,
+    },
 }
 
 /// The `target_repo` marker attached to ecosystem-observe launches. The
@@ -403,6 +448,11 @@ impl Overseer {
                 config::overseer_backoff_multiplier(),
                 config::overseer_backoff_max_secs(),
             ),
+            merge_queue_reasoner: None,
+            merge_queue_roster: Vec::new(),
+            merge_queue_every_n: 1,
+            merge_queue_tick: 0,
+            merge_reasoning_disabled_notified: false,
         }
     }
 
@@ -459,6 +509,27 @@ impl Overseer {
         self.ecosystem_roster = roster;
         self.ecosystem_observer = Some(observer);
         self.ecosystem_every_n = every_n;
+        self
+    }
+
+    /// Wire the live agentic observe/orient merge-queue reasoner rail (#4097):
+    /// the governed `roster` the reasoning agent surveys, the
+    /// [`merge_queue_observe::MergeQueueReasoner`] seam that invokes the
+    /// `observe-merge-queue` recipe, and the every-N cadence. Absent by default;
+    /// `build_overseer` wires it with the committed roster + a production
+    /// recipe-runner. Gated by [`Self::with_gap_scan_enabled`] (the same opt-out
+    /// family as the ecosystem pass); the resolved reasoning SCOPE is default-ON
+    /// over the roster and only an EXPLICIT `SIMARD_MERGE_REASONING_SCOPE` disable
+    /// turns it off (loud).
+    pub fn with_merge_queue_reasoner(
+        mut self,
+        roster: Vec<String>,
+        reasoner: Box<dyn merge_queue_observe::MergeQueueReasoner>,
+        every_n: u64,
+    ) -> Self {
+        self.merge_queue_roster = roster;
+        self.merge_queue_reasoner = Some(reasoner);
+        self.merge_queue_every_n = every_n;
         self
     }
 
@@ -594,6 +665,21 @@ impl Overseer {
         // in `merge_authority`. A survey failure degrades to empty inside the
         // ops layer (fail-visible), never aborts the cycle.
         observed.ready_prs = self.caps.prs.survey_ready_prs(&config::automerge_repos());
+
+        // Agentic observe/orient merge-queue + issue reasoning (#4097). This is
+        // the fix for the dead-wire allowlist above: the imperative
+        // `survey_ready_prs` rail is EMPTY when `SIMARD_AUTOMERGE_*` are unset, so
+        // it reasoned about ZERO open PRs. This pass instead REASONS agentically
+        // over the governed roster (default-ON) each due tick — surveying open
+        // PRs (CI/mergeable/review/staleness/duplication) and issues (priority/
+        // readiness/next-action) — and populates `reasoned_prs` / `triaged_issues`
+        // + a re-narrowed `ready_prs` projection. Reasoning is BROAD; merge
+        // AUTHORIZATION stays narrow behind `project_ready_prs` + the downstream
+        // merge-authority gate. Placed BEFORE `signals_from` so the reasoned state
+        // flows through the SAME signals → orient → decide → gate pipeline every
+        // other observation uses. Fail-closed: an unwired rail / off cadence /
+        // empty scope / degraded recipe leaves the observation unchanged.
+        self.observe_merge_queue(&mut observed, &in_flight);
 
         // Drain diagnosed step failures (#2640, PART 2) from the process-global
         // failure sink into this Observe pass, so a caught decision-cycle /
@@ -764,7 +850,157 @@ impl Overseer {
         plan.push(planned);
     }
 
-    /// Run ONE whole-pass, fail-closed cognitive-memory recall (issue #2628):
+    /// One agentic observe/orient merge-queue + issue reasoning pass (#4097),
+    /// enriching `observed` with `reasoned_prs` / `triaged_issues` /
+    /// `merge_reasoning_status` and a re-narrowed `ready_prs` projection when the
+    /// rail is wired and due on the cadence.
+    ///
+    /// The reasoning itself is entirely agentic: the thin rail invokes the
+    /// `observe-merge-queue` recipe, whose agent runs `gh` across the governed
+    /// roster and REASONS to a bounded brief. Rust never queries or parses a repo
+    /// here — it receives the agent's OPAQUE brief, parses it FAIL-CLOSED against
+    /// the roster trust boundary ([`merge_queue_observe::parse_merge_queue_brief`]),
+    /// and re-narrows the `ReadyForMerge` proposals through the DETERMINISTIC rail
+    /// ([`PrOps::project_reasoned_ready_prs`] → [`project_ready_prs`]) before any
+    /// PR reaches the merge gate. Reasoning is BROAD; authorization is NARROW.
+    ///
+    /// Scope resolution (R2/R3): default-ON over the governed roster when
+    /// `SIMARD_MERGE_REASONING_SCOPE` is unset; narrowed (still on) when it names
+    /// an explicit subset; and LOUD-disabled (WARN log + status field + a one-time
+    /// dual-channel NotifyOperator) only when it is EXPLICITLY set to a disable
+    /// value. Unset is never a silent hard-OFF.
+    ///
+    /// Fail-closed: an unwired reasoner, an off cadence, an empty scope, or a
+    /// degraded recipe run leaves `observed` unchanged (no fabricated reasoning).
+    fn observe_merge_queue(&mut self, observed: &mut ObservedState, in_flight: &[InFlightItem]) {
+        if self.merge_queue_reasoner.is_none() {
+            return;
+        }
+        // Cadence: reuse the gap-scan enable + every-N gate (same opt-out family
+        // as the ecosystem pass). Advance the tick FIRST so a disabled/held pass
+        // still keeps the counter monotonic.
+        let tick = self.merge_queue_tick;
+        self.merge_queue_tick = self.merge_queue_tick.wrapping_add(1);
+        if !ecosystem_observe::should_observe(self.gap_scan_enabled, self.merge_queue_every_n, tick)
+        {
+            return;
+        }
+
+        // Resolve the reasoning SCOPE (R2/R3). Default-ON over the roster; an
+        // EXPLICIT operator disable is LOUD, never a silent hard-OFF.
+        let scope = config::merge_reasoning_scope(&self.merge_queue_roster);
+        let scope_repos: Vec<String> = match scope {
+            config::MergeReasoningScope::Disabled => {
+                let reason = format!(
+                    "{} explicitly set to a disable value",
+                    config::SIMARD_MERGE_REASONING_SCOPE_ENV
+                );
+                observed.merge_reasoning_status = MergeReasoningStatus::Disabled {
+                    reason: reason.clone(),
+                };
+                tracing::warn!(
+                    target: "overseer::merge",
+                    reason = %reason,
+                    "observe-merge-queue: agentic merge-queue reasoning DISABLED by explicit \
+                     operator configuration — no open PRs/issues will be reasoned about this tick \
+                     (loud, not a silent hard-OFF)"
+                );
+                self.notify_merge_reasoning_disabled_once(&reason);
+                return;
+            }
+            config::MergeReasoningScope::Roster => {
+                observed.merge_reasoning_status = MergeReasoningStatus::RosterWide;
+                self.merge_queue_roster.clone()
+            }
+            config::MergeReasoningScope::Explicit(list) => {
+                observed.merge_reasoning_status = MergeReasoningStatus::Narrowed {
+                    repos: list.clone(),
+                };
+                list
+            }
+        };
+        // A configured-but-empty scope is nothing to reason about; the rail's own
+        // empty-scope guard also fails closed, but returning here avoids spawning
+        // the recipe for no repos.
+        if scope_repos.is_empty() {
+            return;
+        }
+
+        // Flatten Simard's in-flight OODA refs so the agent dedups against work an
+        // engineer already owns and never re-proposes it.
+        let inflight_refs: Vec<String> = in_flight
+            .iter()
+            .flat_map(|item| item.refs.iter().cloned())
+            .collect();
+
+        let request = merge_queue_observe::MergeQueueObserveRequest {
+            scope: scope_repos.clone(),
+            inflight_refs,
+            escalation_note: String::new(),
+        };
+        // Borrow the reasoner only for the call; the returned brief is owned, so
+        // the immutable borrow of `self` ends before the mutable projection below.
+        let outcome = {
+            let reasoner = self
+                .merge_queue_reasoner
+                .as_ref()
+                .expect("merge_queue_reasoner presence checked above");
+            reasoner.observe(request)
+        };
+        let brief = match outcome {
+            Ok(Some(brief)) => brief,
+            Ok(None) => return, // nothing actionable this pass — fabricate nothing
+            Err(e) => {
+                tracing::warn!(
+                    target: "overseer::merge",
+                    error = %e,
+                    "observe-merge-queue pass failed — degrading to no reasoning (no PRs/issues fabricated)"
+                );
+                return;
+            }
+        };
+
+        // Parse the OPAQUE brief FAIL-CLOSED against the roster trust boundary.
+        let parsed = merge_queue_observe::parse_merge_queue_brief(&brief, &scope_repos);
+        observed.reasoned_prs = parsed.reasoned_prs;
+        observed.triaged_issues = parsed.triaged_issues;
+
+        // Re-narrow the BROAD `ReadyForMerge` proposals into the NARROW set of PRs
+        // authorized to merge, against AUTHORITATIVE `gh` facts (#4097). This is
+        // the deterministic safety rail — it can only ever REMOVE candidates. The
+        // result becomes a DERIVED view of `ready_prs` (unioned with the existing
+        // deterministic survey), the ONLY thing that drives `PrReadyToMerge` into
+        // the gated merge chain. An agent can never widen merge authorization.
+        let overseer_login = self.recursion.author_login.clone();
+        let projected = self
+            .caps
+            .prs
+            .project_reasoned_ready_prs(&observed.reasoned_prs, &overseer_login);
+        for pr in projected {
+            if !observed.ready_prs.contains(&pr) {
+                observed.ready_prs.push(pr);
+            }
+        }
+    }
+
+    /// Send the R3 "merge reasoning DISABLED" alert to the operator on BOTH
+    /// channels exactly ONCE (#4097), latched so a persistent disable is surfaced
+    /// loud a single time rather than re-notified every tick. No-op when no
+    /// notifier is wired (the WARN log + status field still surface it).
+    fn notify_merge_reasoning_disabled_once(&mut self, reason: &str) {
+        if self.merge_reasoning_disabled_notified {
+            return;
+        }
+        if let Some(notifier) = self.notifier.as_ref() {
+            let notification = OperatorNotification::merge_reasoning_disabled(reason);
+            let report = notifier.notify(&notification);
+            // Latch regardless of per-channel delivery result: the WARN log and
+            // status field already carry it, and re-sending every tick would spam
+            // the operator. A failed channel is recorded in the report/logs.
+            let _ = report;
+        }
+        self.merge_reasoning_disabled_notified = true;
+    }
     /// bounded semantic + episodic + procedural + prospective reads keyed off the
     /// cycle's `keys`. The `?` on each sub-read makes the pass **atomic**: if any
     /// one read errors, the whole pass returns `Err` and the successful reads are
@@ -1110,6 +1346,44 @@ impl Overseer {
                 link.as_deref(),
             ),
             Intervention::FlagWorkstreamGaps { gaps } => self.act_flag_workstream_gaps(gaps),
+            // Agentic merge-queue hygiene (#4097). Anti-recursion fail-closed:
+            // both act on an open PR autonomously, so — like the coverage launch —
+            // they require a DISTINCT configured steward identity before firing.
+            // The argv is built by the intervention.rs builders that can never
+            // carry `--admin`/`--no-verify`.
+            Intervention::FlagStalePr { repo, pr, note } => {
+                if !self.recursion.is_configured() {
+                    return Err(OverseerError::Recursion {
+                        subject: format!(
+                            "flag stale PR {repo}#{pr} (unconfigured steward identity)"
+                        ),
+                    });
+                }
+                self.caps.prs.flag_stale_pr(repo, *pr, note)?;
+                Ok(ActOutcome::StalePrFlagged {
+                    repo: repo.clone(),
+                    pr: *pr,
+                })
+            }
+            Intervention::CloseDuplicatePr {
+                repo,
+                pr,
+                duplicate_of,
+            } => {
+                if !self.recursion.is_configured() {
+                    return Err(OverseerError::Recursion {
+                        subject: format!(
+                            "close duplicate PR {repo}#{pr} (unconfigured steward identity)"
+                        ),
+                    });
+                }
+                self.caps.prs.close_duplicate_pr(repo, *pr, *duplicate_of)?;
+                Ok(ActOutcome::DuplicatePrClosed {
+                    repo: repo.clone(),
+                    pr: *pr,
+                    duplicate_of: *duplicate_of,
+                })
+            }
         }
     }
 
@@ -2070,7 +2344,105 @@ fn classify_signal(s: &Signal) -> (ProblemKind, Priority, String, String) {
                 None => format!("OODA step failed — root cause {}", cause.as_str()),
             },
         ),
+        // Agentic merge-queue reasoning (#4097): a PR judged STALE. A merge-queue
+        // hygiene problem — flag it (comment), never merge. Low priority (advisory
+        // cleanup). Dedup keyed per-PR so a recurring stale PR flags at most once.
+        Signal::StalePrDetected { repo, pr } => (
+            ProblemKind::DeliveryReady,
+            Priority::Low,
+            format!("delivery:stale-pr:{repo}#{pr}"),
+            format!("PR {repo}#{pr} judged stale — no recent activity"),
+        ),
+        // A PR judged a DUPLICATE of another (#4097): close the duplicate,
+        // referencing the original. Low priority hygiene; dedup keyed per-PR.
+        Signal::DuplicatePrDetected {
+            repo,
+            pr,
+            duplicate_of,
+        } => (
+            ProblemKind::DeliveryReady,
+            Priority::Low,
+            format!("delivery:dup-pr:{repo}#{pr}"),
+            format!("PR {repo}#{pr} judged a duplicate of #{duplicate_of}"),
+        ),
+        // An open ISSUE triaged READY with no active workstream (#4097): the same
+        // backlog-coverage family as the gap-scan, so it ranks the same. Dedup
+        // keyed per-issue so a recurring ready issue surfaces at most once.
+        Signal::IssueNeedsWorkstream {
+            repo,
+            issue,
+            next_action,
+        } => (
+            ProblemKind::WorkstreamCoverage,
+            Priority::Normal,
+            format!("workstream:issue:{repo}#{issue}"),
+            format!("issue {repo}#{issue} ready with no workstream — next: {next_action}"),
+        ),
     }
+}
+
+/// A single reasoned PR paired with the ground-truth GitHub facts the
+/// re-narrowing projection needs (#4097). The agentic reasoner PROPOSES via
+/// [`ReasonedPr`]; the rail confirms Simard-origin + objective-mergeability from
+/// these authoritative fields before anything is authorized to merge.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectionCandidate {
+    /// The agentic reviewer's proposal for this PR.
+    pub reasoned: ReasonedPr,
+    /// `author.login` from `gh` — the anti-recursion author guard's input.
+    pub author_login: String,
+    /// `headRefName` from `gh` — the engineer-branch narrowing's input.
+    pub head_ref: String,
+    /// The objective-gate snapshot (`mergeable`, checks, base, labels) from `gh`.
+    pub snapshot: PrSnapshot,
+}
+
+/// Re-narrow the BROAD agentic reasoning into the NARROW set of PRs authorized to
+/// merge (#4097). This is the deterministic safety rail that guarantees a
+/// broadened REASONING scope can NEVER widen merge AUTHORIZATION: only a PR that
+/// passes EVERY gate below is projected into `ObservedState.ready_prs` (which is
+/// the ONLY thing that drives `Signal::PrReadyToMerge` → the gated merge chain).
+///
+/// A candidate is authorized iff ALL hold:
+/// 1. disposition is exactly [`PrDisposition::ReadyForMerge`] (a proposal to
+///    merge — `NeedsWork`/`Stale`/`Duplicate` are never merge candidates);
+/// 2. the author is NOT the overseer bot (`overseer_login`) — anti-recursion, so
+///    the Overseer never merges its own artifact;
+/// 3. the PR proves Simard-origin — it carries the engineer-PR label OR rides an
+///    engineer-exclusive branch namespace (the same G3 narrowing
+///    [`merge_ops`](crate::overseer::merge_ops) applies), so an operator's own
+///    review PR sharing the author login is never merged;
+/// 4. it passes the objective gates ([`evaluate_objective_gates`]: base-allowlist
+///    + `MERGEABLE` + all checks green).
+///
+/// This is a pure NARROWING — it can only ever remove candidates. The
+/// authoritative six-criteria merge-authority gate (with the agentic MergeJudge)
+/// still runs downstream; this only decides which PRs are even proposed to it.
+pub fn project_ready_prs(
+    candidates: &[ProjectionCandidate],
+    base_allowlist: &[String],
+    overseer_login: &str,
+) -> Vec<PrRef> {
+    candidates
+        .iter()
+        .filter(|c| c.reasoned.disposition == PrDisposition::ReadyForMerge)
+        // Anti-recursion author guard: never the overseer bot's own PR.
+        .filter(|c| !c.author_login.eq_ignore_ascii_case(overseer_login))
+        // Engineer-PR narrowing: prove Simard-origin (label OR engineer branch).
+        .filter(|c| {
+            c.snapshot
+                .labels
+                .iter()
+                .any(|l| config::is_engineer_pr_label(l))
+                || config::is_engineer_branch(&c.head_ref)
+        })
+        // Objective gates: base-allowlist + MERGEABLE + all checks green.
+        .filter(|c| evaluate_objective_gates(&c.snapshot, base_allowlist).is_ok())
+        .map(|c| PrRef {
+            repo: c.reasoned.repo.clone(),
+            pr: c.reasoned.pr,
+        })
+        .collect()
 }
 
 /// Decide: choose one `Intervention` for a `Problem`. Illustrative routing; a
@@ -2080,11 +2452,36 @@ pub fn decide(problem: &Problem) -> Intervention {
     match problem.kind {
         ProblemKind::DeliveryReady => {
             for s in &problem.evidence {
-                if let Signal::PrReadyToMerge { repo, pr } = s {
-                    return Intervention::VerifyAndMergePr {
-                        repo: repo.clone(),
-                        pr: *pr,
-                    };
+                match s {
+                    Signal::PrReadyToMerge { repo, pr } => {
+                        return Intervention::VerifyAndMergePr {
+                            repo: repo.clone(),
+                            pr: *pr,
+                        };
+                    }
+                    // A stale-PR proposal (#4097): flag it with a comment (never a
+                    // merge/close), gated under MergeAuthority.
+                    Signal::StalePrDetected { repo, pr } => {
+                        return Intervention::FlagStalePr {
+                            repo: repo.clone(),
+                            pr: *pr,
+                            note: problem.summary.clone(),
+                        };
+                    }
+                    // A duplicate-PR proposal (#4097): close it referencing the
+                    // original, gated under MergeAuthority.
+                    Signal::DuplicatePrDetected {
+                        repo,
+                        pr,
+                        duplicate_of,
+                    } => {
+                        return Intervention::CloseDuplicatePr {
+                            repo: repo.clone(),
+                            pr: *pr,
+                            duplicate_of: *duplicate_of,
+                        };
+                    }
+                    _ => {}
                 }
             }
             Intervention::Report
@@ -2219,6 +2616,31 @@ pub fn decide(problem: &Problem) -> Intervention {
         // per-gap signatures embedded in the brief make the in-flight guard dedup
         // a re-observed identical gap set to a SINGLE in-flight coverage launch.
         ProblemKind::WorkstreamCoverage => {
+            // An agentic issue-triage proposal (#4097): a Ready issue with no
+            // workstream. Launch a workstream that covers it (the same closing-edge
+            // philosophy as the gap-scan), keyed to the concrete issue ref.
+            if let Some((repo, issue, next_action)) =
+                problem.evidence.iter().find_map(|s| match s {
+                    Signal::IssueNeedsWorkstream {
+                        repo,
+                        issue,
+                        next_action,
+                    } => Some((repo.clone(), *issue, next_action.clone())),
+                    _ => None,
+                })
+            {
+                return Intervention::LaunchRecipe {
+                    brief: RecipeBrief {
+                        task_description: format!(
+                            "Cover the ready, uncovered issue {repo}#{issue} surfaced by the \
+                             Overseer's agentic merge-queue/issue triage: launch or track a \
+                             workstream that addresses it. Next action: {next_action}."
+                        ),
+                        target_repo: repo,
+                        sequence_group: Some(WORKSTREAM_COVERAGE_GROUP.to_string()),
+                    },
+                };
+            }
             let gaps = problem
                 .evidence
                 .iter()
@@ -3008,6 +3430,212 @@ mod tests {
             calls[0].1,
             vec!["issue:rysweet/Simard#42".to_string()],
             "Simard's in-flight OODA refs are flattened and forwarded for dedup"
+        );
+    }
+
+    // ── #4097 observe-merge-queue reasoning wiring ────────────────────────────
+
+    /// A scripted [`merge_queue_observe::MergeQueueReasoner`] that returns a fixed
+    /// outcome and records the requests it saw, so a test can assert the rail
+    /// forwarded the resolved scope + in-flight refs.
+    type MqCallLog = std::sync::Arc<std::sync::Mutex<Vec<(Vec<String>, Vec<String>)>>>;
+    struct FakeMergeQueueReasoner {
+        outcome: SimardResult<Option<String>>,
+        seen: MqCallLog,
+    }
+    impl FakeMergeQueueReasoner {
+        fn with_log(outcome: SimardResult<Option<String>>) -> (Self, MqCallLog) {
+            let seen: MqCallLog = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            (
+                Self {
+                    outcome,
+                    seen: std::sync::Arc::clone(&seen),
+                },
+                seen,
+            )
+        }
+    }
+    impl merge_queue_observe::MergeQueueReasoner for FakeMergeQueueReasoner {
+        fn observe(
+            &self,
+            request: merge_queue_observe::MergeQueueObserveRequest,
+        ) -> SimardResult<Option<String>> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((request.scope.clone(), request.inflight_refs.clone()));
+            match &self.outcome {
+                Ok(v) => Ok(v.clone()),
+                Err(_) => Err(crate::error::SimardError::AdapterInvocationFailed {
+                    base_type: "observe-merge-queue".to_string(),
+                    reason: "scripted failure".to_string(),
+                }),
+            }
+        }
+    }
+
+    /// A `PrOps` whose `project_reasoned_ready_prs` returns a scripted projection,
+    /// standing in for the deterministic rail that fetches authoritative `gh`
+    /// facts. Everything else is trivial.
+    struct ProjectingPrs {
+        projected: Vec<PrRef>,
+    }
+    impl PrOps for ProjectingPrs {
+        fn verify(&self, _repo: &str, _pr: u32) -> Result<VerifyReport, OverseerError> {
+            Ok(VerifyReport {
+                ready: true,
+                checks: vec![],
+            })
+        }
+        fn merge(&self, _repo: &str, _pr: u32) -> Result<(), OverseerError> {
+            Ok(())
+        }
+        fn resolve_conflict(&self, _repo: &str, _pr: u32) -> Result<(), OverseerError> {
+            Ok(())
+        }
+        fn project_reasoned_ready_prs(
+            &self,
+            _reasoned: &[capabilities::ReasonedPr],
+            _overseer_login: &str,
+        ) -> Vec<PrRef> {
+            self.projected.clone()
+        }
+    }
+
+    const MQ_BRIEF: &str = r#"{
+        "reasoned_prs": [
+            {"repo": "rysweet/Simard", "pr": 10, "disposition": "stale", "rationale": "no activity for 30 days"},
+            {"repo": "rysweet/Simard", "pr": 11, "disposition": "ready-for-merge", "rationale": "green + mergeable"}
+        ],
+        "triaged_issues": [
+            {"repo": "rysweet/Simard", "issue": 20, "priority": "high", "readiness": "ready", "next_action": "start a workstream"}
+        ]
+    }"#;
+
+    #[test]
+    fn merge_queue_reasoning_populates_observed_state_default_on_over_roster() {
+        // Unset SIMARD_MERGE_REASONING_SCOPE => default-ON over the governed
+        // roster. The agentic brief populates the new reasoned fields even though
+        // SIMARD_AUTOMERGE_* are unset — the dead-wire fix (#4097).
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(true)
+            .with_merge_queue_reasoner(
+                vec!["rysweet/Simard".to_string()],
+                Box::new(FakeMergeQueueReasoner::with_log(Ok(Some(MQ_BRIEF.to_string()))).0),
+                1,
+            );
+        let report = ov.run_cycle().expect("cycle");
+        assert_eq!(
+            report.observed.reasoned_prs.len(),
+            2,
+            "both reasoned PRs survive the roster trust boundary"
+        );
+        assert_eq!(report.observed.triaged_issues.len(), 1);
+        assert_eq!(
+            report.observed.merge_reasoning_status,
+            capabilities::MergeReasoningStatus::RosterWide,
+            "unset scope => reasoning ran default-ON over the governed roster"
+        );
+        // A stale-PR reasoning conclusion becomes a StalePrDetected signal…
+        assert!(
+            report
+                .signals
+                .iter()
+                .any(|s| matches!(s, Signal::StalePrDetected { pr, .. } if *pr == 10)),
+            "the stale reasoning conclusion drives a StalePrDetected signal"
+        );
+        // …but a ReadyForMerge conclusion NEVER fabricates a PrReadyToMerge (only
+        // the re-narrowed ready_prs projection may) — the core safety invariant.
+        assert!(
+            !report
+                .signals
+                .iter()
+                .any(|s| matches!(s, Signal::PrReadyToMerge { pr, .. } if *pr == 11)),
+            "ReadyForMerge reasoning alone must never authorize a merge"
+        );
+    }
+
+    #[test]
+    fn merge_queue_reasoning_forwards_scope_and_inflight_refs() {
+        let (reasoner, log) = FakeMergeQueueReasoner::with_log(Ok(None));
+        let in_flight = vec![InFlightItem {
+            id: "g1".to_string(),
+            source: "ooda".to_string(),
+            refs: vec!["pr:rysweet/Simard#10".to_string()],
+        }];
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, in_flight))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(true)
+            .with_merge_queue_reasoner(vec!["rysweet/Simard".to_string()], Box::new(reasoner), 1);
+        ov.run_cycle().expect("cycle");
+        let calls = log.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "the rail invokes the reasoner once per tick"
+        );
+        assert_eq!(calls[0].0, vec!["rysweet/Simard".to_string()]);
+        assert_eq!(calls[0].1, vec!["pr:rysweet/Simard#10".to_string()]);
+    }
+
+    #[test]
+    fn merge_queue_projection_derives_ready_prs_from_reasoning() {
+        // The deterministic rail re-narrows the agentic ReadyForMerge proposals
+        // into ready_prs. Here the projecting PrOps admits PR #11.
+        let projected = vec![PrRef {
+            repo: "rysweet/Simard".to_string(),
+            pr: 11,
+        }];
+        let mut ov = Overseer::new(Capabilities {
+            status: Box::new(FakeStatus(ObservedState::default())),
+            recipes: Box::new(FakeRecipes),
+            prs: Box::new(ProjectingPrs { projected }),
+            deployer: Box::new(FakeDeployer),
+            meetings: Box::new(FakeMeetings),
+            issues: Box::new(FakeIssues),
+            goals: Box::new(FakeGoals(vec![])),
+            auditor: Box::new(FakeAuditor),
+            memory: Box::new(capabilities::InertMemoryRecall),
+        })
+        .with_high_risk_autonomy(true)
+        .with_gap_scan_enabled(true)
+        .with_merge_queue_reasoner(
+            vec!["rysweet/Simard".to_string()],
+            Box::new(FakeMergeQueueReasoner::with_log(Ok(Some(MQ_BRIEF.to_string()))).0),
+            1,
+        );
+        let report = ov.run_cycle().expect("cycle");
+        assert!(
+            report
+                .observed
+                .ready_prs
+                .iter()
+                .any(|p| p.repo == "rysweet/Simard" && p.pr == 11),
+            "the ReadyForMerge proposal is projected into ready_prs via the rail"
+        );
+        // ready_prs drives PrReadyToMerge — now legitimately, from the projection.
+        assert!(
+            report
+                .signals
+                .iter()
+                .any(|s| matches!(s, Signal::PrReadyToMerge { pr, .. } if *pr == 11)),
+            "the projected ready PR is the ONLY path to PrReadyToMerge"
+        );
+    }
+
+    #[test]
+    fn merge_queue_reasoning_unwired_leaves_observation_untouched() {
+        // No reasoner wired => the pass is skipped and the new fields keep their
+        // additive defaults (Unknown status, empty reasoned/triaged).
+        let mut ov =
+            Overseer::new(caps(ObservedState::default(), true, vec![])).with_gap_scan_enabled(true);
+        let report = ov.run_cycle().expect("cycle");
+        assert!(report.observed.reasoned_prs.is_empty());
+        assert!(report.observed.triaged_issues.is_empty());
+        assert_eq!(
+            report.observed.merge_reasoning_status,
+            capabilities::MergeReasoningStatus::Unknown
         );
     }
 }

@@ -197,6 +197,19 @@ pub trait PrGhClient {
     ) -> SimardResult<Vec<MergedPrSummary>> {
         Ok(Vec::new())
     }
+
+    /// Run an arbitrary POSITIONAL `gh` argv (issue #4097 merge-queue hygiene:
+    /// `gh pr comment` / `gh pr close`). The caller builds the argv via the
+    /// audited builders in
+    /// [`crate::overseer::intervention`], which are structurally incapable of
+    /// carrying `--admin` / `--no-verify`. The default fails CLOSED so a fake or
+    /// an unwired client performs no mutation; [`RealPrGhClient`] overrides it to
+    /// shell out to the `gh` binary (argv-only, never shell-interpolated).
+    fn run_gh(&self, _argv: &[String]) -> SimardResult<()> {
+        Err(SimardError::MergeAuthorityGhCommandFailed {
+            reason: "run_gh not wired on this PrGhClient (fail-closed)".to_string(),
+        })
+    }
 }
 
 /// Max retry attempts for *transient* `gh` read failures (network blips,
@@ -440,6 +453,19 @@ impl PrGhClient for RealPrGhClient {
             )?;
             parse_merged_pr_list_json(&stdout)
         })
+    }
+
+    /// Shell out to `gh` with a POSITIONAL argv (never shell-interpolated). Used
+    /// for the #4097 merge-queue hygiene mutations (`gh pr comment` / `gh pr
+    /// close`), whose argv is built by the audited
+    /// [`crate::overseer::intervention`] builders that can never contain
+    /// `--admin` / `--no-verify`. Single attempt (a comment/close is a mutation,
+    /// like [`squash_merge`](Self::squash_merge)); fail-visible on a non-zero exit.
+    fn run_gh(&self, argv: &[String]) -> SimardResult<()> {
+        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let label = format!("gh {}", refs.join(" "));
+        run_gh_checked(&label, &refs)?;
+        Ok(())
     }
 }
 
