@@ -216,6 +216,9 @@ fn signal_kind_label(s: &Signal) -> &'static str {
         Signal::RecurringSignature { .. } => "RecurringSignature",
         Signal::WorkstreamGap { .. } => "WorkstreamGap",
         Signal::StepFailureDiagnosed { .. } => "StepFailureDiagnosed",
+        Signal::StalePrDetected { .. } => "StalePrDetected",
+        Signal::DuplicatePrDetected { .. } => "DuplicatePrDetected",
+        Signal::IssueNeedsWorkstream { .. } => "IssueNeedsWorkstream",
     }
 }
 

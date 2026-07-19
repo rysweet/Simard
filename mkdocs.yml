@@ -87,6 +87,7 @@ nav:
     - "Overseer — operator/observer co-process (spike)": design/overseer.md
     - "Creative Ideas background thread (spike)": design/creative-ideas-thread.md
     - "Eliminate deterministic fallbacks": design/eliminate-deterministic-fallbacks.md
+    - "Agentic observe/orient merge-queue + issue reasoning": design/agentic-observe-orient-merge-queue.md
   - Research:
     - "COIN benchmark — Phase 1 primer": research/coin-benchmark.md
     - "COIN benchmark — Phase 1 completion record": research/coin-benchmark-phase1.md
@@ -97,6 +98,7 @@ nav:
     - Operational Autonomy Model: concepts/operational-autonomy-model.md
     - Gap-Scan Dedup &amp; Backoff: concepts/gap-scan-backoff-dedup.md
     - Autonomous Self-Merge Sensor (ready_prs wire): concepts/autonomous-self-merge-sensor.md
+    - Agentic Merge-Queue + Issue Reasoning (observe/orient): concepts/agentic-merge-queue-reasoning.md
     - Autonomous-Merge Review Gate (agentic merge-judge): concepts/autonomous-merge-review-gate.md
     - Adaptive Scaling: concepts/adaptive-scaling.md
     - Pluggable Identity: concepts/pluggable-identity.md
@@ -257,6 +259,7 @@ nav:
     - Read Simard Status: howto/simard-status.md
     - Watch Overseer Activity: howto/watch-overseer-activity.md
     - Configure Overseer Goal-Board Health: howto/configure-overseer-goal-board-health.md
+    - Configure Agentic Merge-Queue Reasoning: howto/configure-agentic-merge-queue-reasoning.md
     - Configure Overseer Memory Recall: howto/configure-overseer-memory-recall.md
     - Configure Overseer Email Notifications: howto/configure-overseer-email-notifications.md
     - Configure Overseer Signal Notifications: howto/configure-overseer-signal-rpc-notifications.md
@@ -394,6 +397,7 @@ nav:
     - PR-Finalization Review Pipeline: reference/pr-finalization-pipeline.md
     - Cross-Repo Merge Authority: reference/cross-repo-merge-authority.md
     - ready_prs Sensor API: reference/ready-prs-sensor-api.md
+    - Agentic Merge-Queue Reasoning API: reference/agentic-merge-queue-reasoning-api.md
     - Autonomous-Merge Review Gate API: reference/autonomous-merge-review-gate.md
     - "No Point-in-Time Report Docs Scan (pr-verify #8)": reference/no-point-in-time-docs-scan.md
     - Completion-Evidence Gate API: reference/completion-evidence-gate-api.md

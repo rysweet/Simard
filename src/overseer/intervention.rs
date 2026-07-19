@@ -89,6 +89,60 @@ pub enum Intervention {
     /// Deduped per gap signature so a recurring gap notifies/files at most once.
     /// Capability: `notify::OperatorNotifier` + `IssueFiler::file`.
     FlagWorkstreamGaps { gaps: Vec<GapItem> },
+    /// FLAG an open PR the agentic merge-queue reasoner judged STALE (#4097): post
+    /// a `gh pr comment` noting the staleness — NEVER a merge or a close. Merge-
+    /// queue hygiene that only PROPOSES; opt-in under the SAME `MergeAuthority`
+    /// gate as `VerifyAndMergePr` (default OFF). Builds a positional-argv `gh`
+    /// invocation via [`flag_stale_pr_argv`] that can NEVER carry `--admin` or
+    /// `--no-verify`. Capability: `PrOps`/`gh` (comment).
+    FlagStalePr { repo: String, pr: u32, note: String },
+    /// CLOSE an open PR the agentic reasoner judged a DUPLICATE of `duplicate_of`
+    /// (#4097): `gh pr close` with a closing comment that references the original.
+    /// Never `--admin`, never `--no-verify` (see [`close_duplicate_pr_argv`]).
+    /// Opt-in under the SAME `MergeAuthority` gate as `VerifyAndMergePr` (default
+    /// OFF). Capability: `PrOps`/`gh` (close).
+    CloseDuplicatePr {
+        repo: String,
+        pr: u32,
+        duplicate_of: u32,
+    },
+}
+
+/// Build the positional `gh` argv for a [`Intervention::FlagStalePr`] comment
+/// (#4097). Shape: `pr comment <pr> --repo <slug> --body <note>`. The PR number
+/// and repo slug ride as POSITIONAL / `--repo` args (never shell-interpolated),
+/// and the argv can NEVER contain `--admin` or `--no-verify` (a comment has no
+/// such flags) — pinned by a test. Returned as owned `String`s so the caller
+/// spawns `gh` argv-only.
+pub fn flag_stale_pr_argv(repo: &str, pr: u32, note: &str) -> Vec<String> {
+    vec![
+        "pr".to_string(),
+        "comment".to_string(),
+        pr.to_string(),
+        "--repo".to_string(),
+        repo.to_string(),
+        "--body".to_string(),
+        note.to_string(),
+    ]
+}
+
+/// Build the positional `gh` argv for a [`Intervention::CloseDuplicatePr`]
+/// (#4097). Shape: `pr close <pr> --repo <slug> --comment "Closing as duplicate
+/// of #<original>. …"`. The closing comment references the original PR so the
+/// audit trail is explicit. NEVER `--admin`/`--no-verify` — pinned by a test.
+pub fn close_duplicate_pr_argv(repo: &str, pr: u32, duplicate_of: u32) -> Vec<String> {
+    vec![
+        "pr".to_string(),
+        "close".to_string(),
+        pr.to_string(),
+        "--repo".to_string(),
+        repo.to_string(),
+        "--comment".to_string(),
+        format!(
+            "Closing as duplicate of #{duplicate_of}. Superseded — the change is \
+             already covered there; please continue any discussion on #{duplicate_of}."
+        ),
+    ]
 }
 
 impl Intervention {
@@ -108,6 +162,8 @@ impl Intervention {
             Self::UnblockGoal { .. } => "unblock_goal",
             Self::EscalateBlockedGoal { .. } => "escalate_blocked_goal",
             Self::FlagWorkstreamGaps { .. } => "flag_workstream_gaps",
+            Self::FlagStalePr { .. } => "flag_stale_pr",
+            Self::CloseDuplicatePr { .. } => "close_duplicate_pr",
         }
     }
 }

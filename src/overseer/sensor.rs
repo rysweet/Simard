@@ -163,6 +163,14 @@ pub fn observed_from_snapshot(snap: &StatusSnapshot) -> ObservedState {
         // read-only status snapshot; left empty here so this projection stays
         // additive and side-effect free.
         recent_step_failures: Vec::new(),
+        // Agentic merge-queue reasoning (#4097: reasoned_prs / triaged_issues /
+        // merge_reasoning_status) is populated by the acting Overseer's Observe
+        // pass via the `observe-merge-queue` recipe rail, not from the read-only
+        // status snapshot; left empty / Unknown here so this projection stays
+        // additive and side-effect free.
+        reasoned_prs: Vec::new(),
+        triaged_issues: Vec::new(),
+        merge_reasoning_status: crate::overseer::capabilities::MergeReasoningStatus::Unknown,
     }
 }
 

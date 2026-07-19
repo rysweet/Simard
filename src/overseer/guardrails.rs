@@ -42,6 +42,14 @@ pub fn classify(iv: &Intervention) -> RiskClass {
         Intervention::Escalate { .. } => RiskClass::HighRisk,
         // Merge authority is opt-in until proven (crusty risk #1).
         Intervention::VerifyAndMergePr { .. } => RiskClass::MergeAuthority,
+        // The agentic merge-queue hygiene actions (#4097) touch the merge queue
+        // (comment on / close an open PR), so they share the SAME opt-in
+        // MergeAuthority class as VerifyAndMergePr — notify-only until the
+        // operator flips `allow_verify_merge`. Their argv can never carry
+        // `--admin`/`--no-verify` (see intervention.rs argv builders).
+        Intervention::FlagStalePr { .. } | Intervention::CloseDuplicatePr { .. } => {
+            RiskClass::MergeAuthority
+        }
         // A whisper takes NO action on Simard's behalf and spends no budget — it
         // is advisory context only. Routine; its own dedup/identity gates
         // ([`WhisperGate`] / [`RecursionGuard`]) apply in the act path.

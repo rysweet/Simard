@@ -560,6 +560,101 @@ pub fn is_engineer_branch(head: &str) -> bool {
         .any(|prefix| head.starts_with(prefix))
 }
 
+// ─── agentic merge-queue reasoning scope (issue #4097) ─────────────────────
+//
+// The reasoning-scope gate is DELIBERATELY DISTINCT from the automerge sensor
+// gates above. Those gate merge ACTION and fail CLOSED (unset ⇒ OFF). This one
+// gates merge REASONING and fails OPEN-TO-THE-ROSTER (unset ⇒ reason over the
+// governed roster), because the ROOT-CAUSE bug (#4097) was that an unset env
+// silently disabled ALL merge reasoning. Reasoning is broad and safe (it only
+// proposes); merge AUTHORIZATION stays narrow (the re-narrowing projection +
+// objective + agentic gates). So broadening the reasoning scope can NEVER widen
+// what is authorized to merge.
+
+/// Operator override for the agentic merge-queue REASONING scope (#4097).
+/// Three-way: UNSET/blank ⇒ reason over the governed roster (default-ON);
+/// an explicit comma-separated `owner/name` list ⇒ narrowed reasoning; an
+/// explicit `off`/falsey value ⇒ reasoning DISABLED (surfaced LOUD upstream,
+/// never a silent OFF). Distinct from `SIMARD_AUTOMERGE_REPOS` (which gates
+/// merge ACTION), so reasoning stays on even when autonomous merge is off.
+pub const SIMARD_MERGE_REASONING_SCOPE_ENV: &str = "SIMARD_MERGE_REASONING_SCOPE";
+
+/// The resolved merge-queue reasoning scope (#4097). See
+/// [`merge_reasoning_scope_from`]. `Roster` carries no list — the caller uses
+/// the governed roster it already loaded; `Explicit` carries the narrowed,
+/// roster-intersected list in operator order; `Disabled` is the ONLY value that
+/// turns reasoning off, and only on an explicit operator opt-out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MergeReasoningScope {
+    /// Unset / blank scope: reason over the full governed roster (default-ON).
+    Roster,
+    /// An operator-narrowed explicit list (already intersected with the roster so
+    /// a broadened reasoning scope can never name an off-roster repo). Empty when
+    /// the operator list is entirely off-roster (fail-closed: nothing to scan).
+    Explicit(Vec<String>),
+    /// The operator EXPLICITLY disabled reasoning. Surfaced LOUD upstream.
+    Disabled,
+}
+
+/// True iff `v` is an explicit REASONING-DISABLE value. Case-insensitive,
+/// trimmed. Distinct from the acting-Overseer [`is_falsey`] set: it additionally
+/// honors the plain word `disabled`. Only these exact values disable reasoning;
+/// unset/blank/garbage never do (that is the whole point of the #4097 fix).
+fn is_reasoning_disabled_value(v: &str) -> bool {
+    let norm = v.trim().to_ascii_lowercase();
+    matches!(norm.as_str(), "off" | "disabled" | "0" | "false" | "no")
+}
+
+/// Resolve the merge-queue reasoning scope from an env resolver and the governed
+/// `roster` (#4097).
+///
+/// - UNSET / blank / whitespace-only ⇒ [`MergeReasoningScope::Roster`]
+///   (DEFAULT-ON — the #4097 fix: an unset env must NOT silently disable
+///   reasoning as the retired automerge-allowlist gate did).
+/// - An explicit `off`/`disabled`/`0`/`false`/`no` ⇒ [`MergeReasoningScope::Disabled`]
+///   (the ONLY disable path, surfaced LOUD upstream).
+/// - Any other value is treated as an explicit comma-separated `owner/name`
+///   allowlist ⇒ [`MergeReasoningScope::Explicit`], trimmed and parsed in order,
+///   then INTERSECTED with `roster` so a broadened reasoning scope can never name
+///   an off-roster repo (reasoning can only narrow, never widen the roster).
+pub fn merge_reasoning_scope_from(
+    lookup: impl Fn(&str) -> Option<String>,
+    roster: &[String],
+) -> MergeReasoningScope {
+    let raw = lookup(SIMARD_MERGE_REASONING_SCOPE_ENV).unwrap_or_default();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return MergeReasoningScope::Roster;
+    }
+    if is_reasoning_disabled_value(trimmed) {
+        return MergeReasoningScope::Disabled;
+    }
+    let explicit: Vec<String> = trimmed
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter(|s| {
+            let on_roster = roster.iter().any(|r| r == s);
+            if !on_roster {
+                tracing::warn!(
+                    target: "overseer::merge",
+                    repo = %s,
+                    "SIMARD_MERGE_REASONING_SCOPE names an off-roster repo — dropping \
+                     (reasoning can only NARROW the governed roster, never widen it)"
+                );
+            }
+            on_roster
+        })
+        .map(str::to_string)
+        .collect();
+    MergeReasoningScope::Explicit(explicit)
+}
+
+/// Production entry point: read the real process environment (#4097).
+pub fn merge_reasoning_scope(roster: &[String]) -> MergeReasoningScope {
+    merge_reasoning_scope_from(|k| std::env::var(k).ok(), roster)
+}
+
 /// Resolve the daily budget from an env resolver, falling back to
 /// [`DEFAULT_DAILY_BUDGET_USD`] when the value is unset, empty, unparseable, or
 /// non-positive. This is the single source of truth the [`BudgetGate`] reads.

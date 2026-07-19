@@ -6,7 +6,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::overseer::capabilities::ObservedState;
+use crate::overseer::capabilities::{IssueReadiness, ObservedState, PrDisposition};
 use crate::overseer::diagnosis::FailureCause;
 
 /// A raw, low-level indicator derived from one Observe pass (StatusSnapshot +
@@ -89,6 +89,33 @@ pub enum Signal {
         cause: FailureCause,
         exit_code: Option<i32>,
         evidence: String,
+    },
+    /// The agentic merge-queue reasoner judged an open PR STALE (#4097) — no
+    /// activity for a long window. From an [`ObservedState::reasoned_prs`] entry
+    /// with [`PrDisposition::Stale`](crate::overseer::capabilities::PrDisposition).
+    /// Drives a gated `FlagStalePr` comment (never a merge or close). A REASONING
+    /// proposal, never an authorization.
+    StalePrDetected { repo: String, pr: u32 },
+    /// The agentic merge-queue reasoner judged an open PR a DUPLICATE of another
+    /// (#4097), carrying the ORIGINAL PR number. From an
+    /// [`ObservedState::reasoned_prs`] entry with
+    /// [`PrDisposition::Duplicate`](crate::overseer::capabilities::PrDisposition).
+    /// Drives a gated `CloseDuplicatePr` that closes the dup referencing the
+    /// original (never `--admin`/`--no-verify`).
+    DuplicatePrDetected {
+        repo: String,
+        pr: u32,
+        duplicate_of: u32,
+    },
+    /// The agentic reasoner triaged an open ISSUE as READY (actionable now) with
+    /// no active workstream (#4097). From an [`ObservedState::triaged_issues`]
+    /// entry with [`IssueReadiness::Ready`](crate::overseer::capabilities::IssueReadiness).
+    /// Carries the plain-English next action so Decide can propose a workstream.
+    /// A `Blocked`/`NeedsInfo` issue is NOT actionable-now and emits nothing.
+    IssueNeedsWorkstream {
+        repo: String,
+        issue: u32,
+        next_action: String,
     },
 }
 
@@ -490,6 +517,46 @@ pub fn signals_from(state: &ObservedState) -> Vec<Signal> {
         });
     }
 
+    // Agentic merge-queue reasoning (#4097): the reviewer's per-PR PROPOSALS.
+    // CRITICAL invariant — a `ReadyForMerge` REASONING never itself authorizes a
+    // merge: it emits NO `PrReadyToMerge` here. Merge authorization comes ONLY
+    // from the re-narrowed `ready_prs` projection above. Only the non-merge
+    // dispositions (`Stale`/`Duplicate`) turn into their own gated interventions.
+    for rp in &state.reasoned_prs {
+        match rp.disposition {
+            PrDisposition::Stale => out.push(Signal::StalePrDetected {
+                repo: rp.repo.clone(),
+                pr: rp.pr,
+            }),
+            PrDisposition::Duplicate => {
+                // Parse already guarantees `duplicate_of` is `Some` for a coherent
+                // `Duplicate`; guard anyway so a stray one is dropped, not merged
+                // with a fabricated original.
+                if let Some(original) = rp.duplicate_of {
+                    out.push(Signal::DuplicatePrDetected {
+                        repo: rp.repo.clone(),
+                        pr: rp.pr,
+                        duplicate_of: original,
+                    });
+                }
+            }
+            PrDisposition::ReadyForMerge | PrDisposition::NeedsWork => {}
+        }
+    }
+
+    // Agentic issue triage (#4097): a Ready (actionable-now) issue surfaces a
+    // workstream proposal. A Blocked/NeedsInfo issue is deliberately silent — it
+    // is not actionable this pass and must not spawn a workstream.
+    for issue in &state.triaged_issues {
+        if issue.readiness == IssueReadiness::Ready {
+            out.push(Signal::IssueNeedsWorkstream {
+                repo: issue.repo.clone(),
+                issue: issue.issue,
+                next_action: issue.next_action.clone(),
+            });
+        }
+    }
+
     out
 }
 
@@ -671,6 +738,19 @@ impl Signal {
                     cause.as_str()
                 )
             }
+            Signal::StalePrDetected { repo, pr } => {
+                format!("PR {repo}#{pr} judged stale (no recent activity)")
+            }
+            Signal::DuplicatePrDetected {
+                repo,
+                pr,
+                duplicate_of,
+            } => format!("PR {repo}#{pr} judged a duplicate of #{duplicate_of}"),
+            Signal::IssueNeedsWorkstream {
+                repo,
+                issue,
+                next_action,
+            } => format!("issue {repo}#{issue} ready with no workstream — next: {next_action}"),
         };
         sanitize_detail(&raw)
     }
