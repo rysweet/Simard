@@ -881,8 +881,24 @@ impl Overseer {
         // still keeps the counter monotonic.
         let tick = self.merge_queue_tick;
         self.merge_queue_tick = self.merge_queue_tick.wrapping_add(1);
-        if !ecosystem_observe::should_observe(self.gap_scan_enabled, self.merge_queue_every_n, tick)
-        {
+        // Resource opt-out (SIMARD_OVERSEER_GAP_SCAN): the shared throttle for ALL
+        // agentic overseer scans. Honor it, but make it VISIBLE — #4097 exists to
+        // kill silent hard-OFFs, so surface WHY reasoning stopped in the status
+        // rather than leaving it a silent `Unknown`. (No one-time NotifyOperator
+        // here — that is reserved for the R3 explicit scope-disable; the operator
+        // set this opt-out themselves, so the status breadcrumb is enough.)
+        if !self.gap_scan_enabled {
+            observed.merge_reasoning_status = MergeReasoningStatus::Disabled {
+                reason: format!(
+                    "{} opt-out disables all agentic overseer scans (incl. merge-queue reasoning)",
+                    config::SIMARD_OVERSEER_GAP_SCAN_ENV
+                ),
+            };
+            return;
+        }
+        // Cadence only: a non-due tick is NOT disabled — skip silently and leave
+        // the last due tick's status untouched.
+        if !ecosystem_observe::should_observe(true, self.merge_queue_every_n, tick) {
             return;
         }
 
@@ -3636,6 +3652,38 @@ mod tests {
         assert_eq!(
             report.observed.merge_reasoning_status,
             capabilities::MergeReasoningStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn merge_queue_reasoning_gap_scan_optout_is_visible_not_silent() {
+        // The gap-scan resource opt-out throttles ALL agentic overseer scans,
+        // including merge-queue reasoning. #4097 exists to kill SILENT hard-OFFs,
+        // so this path must surface WHY reasoning stopped (a loud Disabled status),
+        // never leave a silent `Unknown`. A reasoner IS wired; only the opt-out
+        // holds it — proving the visibility comes from the opt-out, not an absence.
+        let (reasoner, log) = FakeMergeQueueReasoner::with_log(Ok(Some(MQ_BRIEF.to_string())));
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(false) // resource opt-out
+            .with_merge_queue_reasoner(vec!["rysweet/Simard".to_string()], Box::new(reasoner), 1);
+        let report = ov.run_cycle().expect("cycle");
+        assert!(
+            matches!(
+                report.observed.merge_reasoning_status,
+                capabilities::MergeReasoningStatus::Disabled { .. }
+            ),
+            "the gap-scan opt-out must surface a loud Disabled status, not a silent Unknown; got {:?}",
+            report.observed.merge_reasoning_status
+        );
+        assert!(
+            report.observed.reasoned_prs.is_empty(),
+            "the opt-out still fabricates no reasoning"
+        );
+        assert_eq!(
+            log.lock().expect("log").len(),
+            0,
+            "the reasoner recipe is never spawned under the resource opt-out"
         );
     }
 }

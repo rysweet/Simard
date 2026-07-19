@@ -429,6 +429,26 @@ fn parse_drops_duplicate_without_duplicate_of() {
 }
 
 #[test]
+fn parse_drops_duplicate_pointing_at_itself() {
+    // A PR cannot be a duplicate of itself. A self-referential pointer (agent
+    // hallucination or an injected brief) must be dropped — otherwise it would
+    // drive a CloseDuplicatePr that closes a legitimate PR "as a duplicate of
+    // itself".
+    let brief = r#"
+    {
+      "reasoned_prs": [
+        {"repo":"rysweet/Simard","pr":10,"disposition":"duplicate","rationale":"self","duplicate_of":10}
+      ],
+      "triaged_issues": []
+    }"#;
+    let outcome = parse_merge_queue_brief(brief, &scope());
+    assert!(
+        outcome.reasoned_prs.is_empty(),
+        "a Duplicate pointing at itself is incoherent and must be dropped"
+    );
+}
+
+#[test]
 fn parse_whole_brief_garbage_yields_empty_never_panics() {
     for garbage in ["", "   ", "not json at all", "{", r#"{"reasoned_prs": 42}"#] {
         let outcome = parse_merge_queue_brief(garbage, &scope());

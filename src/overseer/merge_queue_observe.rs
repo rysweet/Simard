@@ -227,6 +227,13 @@ fn parse_reasoned_pr(entry: &Value, scope: &[String]) -> Option<ReasonedPr> {
     if disposition == PrDisposition::Duplicate && duplicate_of.is_none() {
         return None;
     }
+    // A PR cannot be a duplicate of ITSELF. A self-referential pointer (agent
+    // hallucination or an injected brief) would otherwise drive a
+    // `CloseDuplicatePr` that closes a legitimate PR "as a duplicate of itself".
+    // Fail closed: drop it.
+    if duplicate_of == Some(pr) {
+        return None;
+    }
     Some(ReasonedPr {
         repo,
         pr,
