@@ -1,0 +1,57 @@
+name: "Observe/Orient Merge-Queue + Issue Reasoning (#4097)"
+description: "Outside-in proof that the Overseer's observe/orient stage reasons AGENTICALLY over the open-PR merge queue + issue backlog behind a THIN deterministic rail, replacing the dead-wire imperative allowlist sensor that yielded ZERO merge reasoning when SIMARD_AUTOMERGE_REPOS/SIMARD_AUTOMERGE_AUTHOR were unset. Proves the deterministic recipe-runner seam forwards a merge-queue brief verbatim (no LLM), then validates the fix and every safety invariant via the in-tree contract + wiring tests: unset scope is default-ON over the governed roster (not OFF), explicit disable is loud, the roster is the trust boundary, a ReadyForMerge reasoning disposition alone never authorizes a merge, and the new interventions can never carry --admin/--no-verify."
+version: "1.0.0"
+
+config:
+  timeout: 600000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 600000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Observe-merge-queue reasoning: recipe-runner seam brief + in-tree fix/invariant tests"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/observe-merge-queue-reasoning.sh"
+    timeout: 600000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "overseer"
+    - "observe-orient"
+    - "merge-queue"
+    - "stewardship"
+    - "merge-authority"
+    - "issue-4097"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"
