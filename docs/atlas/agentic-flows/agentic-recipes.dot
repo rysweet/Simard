@@ -1,0 +1,46 @@
+// Simard Code Atlas — Agentic Flow: recipes (amplihack recipe-runner integration) (DOT rendering)
+// Code truth: src/ooda_brain/recipe_brain.rs, src/recipe_context_file.rs,
+// src/recipe_output/*, src/typed_ooda/route.rs, src/amplihack_freshness_gate/*
+digraph recipes {
+  rankdir=TB;
+  node [shape=box, fontname="Helvetica", fontsize=10, style=rounded];
+  edge [fontname="Helvetica", fontsize=8];
+
+  subgraph cluster_callers {
+    label="Rust call sites that invoke recipes"; style=rounded; color="#446688";
+    ob [label="ooda_brain::recipe_brain\ninvoke_orient_raw / invoke_decide_raw"];
+    tr [label="typed_ooda::route (goal-session-actor)"];
+    mj [label="stewardship::recipe_merge_judge"];
+    gp [label="goal_curation::recipe_progress_checker"];
+    jr [label="journal::recipe"];
+    ov [label="overseer::launch (smart-orchestrator)"];
+  }
+
+  fresh   [label="amplihack_freshness_gate\namplihack update (flock+TTL)"];
+  resolve [label="resolve_recipe_path\n~/.simard/... (hot-reload) then in-tree"];
+  ctx     [label="ContextFile::write\n/tmp/simard-*-ctx-*/{key}.ctx (avoid E2BIG)"];
+  spawn   [label="recipe-runner-rs {recipe}.yaml --output-format json\n-c key=value / -c key_path=/abs\nenv AMPLIHACK_AGENT_BINARY/AMPLIHACK_HOME"];
+  ob -> fresh; tr -> fresh; mj -> fresh; gp -> fresh; jr -> fresh; ov -> fresh;
+  fresh -> resolve -> ctx -> spawn;
+
+  runner [label="amplihack recipe runner\nsmart-orchestrator/default-workflow/investigation-workflow", style="rounded,filled", fillcolor="#ffeeee"];
+  agent  [label="semantic agent (LLM)", style="rounded,filled", fillcolor="#ffeeee"];
+  spawn -> runner; runner -> agent [label="drives agent binary"];
+
+  subgraph cluster_out {
+    label="recipe_output::extract"; style=rounded; color="#886644";
+    strip   [label="strip_ansi / extract_recipe_noise"];
+    json    [label="extract_json_payload (last balanced {...})"];
+    verdict [label="extract_verdict (keyword)"];
+    strip -> json -> verdict;
+  }
+  runner -> strip [label="result file / stdout envelope"];
+
+  ladder [label="escalation ladder (#2432)\nbase->schema-repair->high-effort->hard Err (#2580)"];
+  verdict -> ladder [label="parse miss"];
+  ladder -> spawn [label="retry", style=dashed];
+
+  metrics [label="metrics: recipe_parse_success/failure_total", shape=note];
+  back    [label="typed verdict to caller\n(priority/action kind/merge verdict/sub-goals)"];
+  verdict -> metrics; verdict -> back;
+}

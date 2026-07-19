@@ -1,0 +1,44 @@
+// Simard Code Atlas — Agentic Flow: cognitive-memory recall path (DOT rendering)
+// Code truth: src/ooda_loop/cycle.rs, src/memory_consolidation/mod.rs,
+// src/cognitive_memory/{mod.rs,library_adapter.rs,open_guard.rs}, amplihack-memory-lib (lbug)
+digraph cognitive_recall {
+  rankdir=TB;
+  node [shape=box, fontname="Helvetica", fontsize=10, style=rounded];
+  edge [fontname="Helvetica", fontsize=8];
+
+  probe [label="build_objective_probe(active_goals)\nfree-text + goal slug-phrases (= trigger_condition)"];
+  recon [label="reconcile_board_prospectives\nmemory.store_prospective per goal"];
+  prep  [label="preparation_memory_operations_with_active_slugs_phased\n-> PreparedContext"];
+  probe -> prep; recon -> prep;
+
+  subgraph cluster_fanout {
+    label="ranked recall fan-out"; style=rounded; color="#446688";
+    facts [label="recall_facts_ranked(fragment,10,min_conf,weights)"];
+    goalf [label="search_facts(GOAL_STORE_FACT_CONCEPT)\ngoal facts (dedup latest)"];
+    trig  [label="check_triggers(objective)\nprospective match"];
+    proc  [label="recall_procedures_for_objective_with_tokens\nbootstrap + distilled (lesson:)"];
+    epi   [label="recall_episodes_ranked(tokens,5,weights)"];
+  }
+  prep -> facts; prep -> goalf; prep -> trig; prep -> proc; prep -> epi;
+
+  subgraph cluster_backend {
+    label="LibraryCognitiveMemory (library_adapter.rs)"; style=rounded; color="#886644";
+    weights [label="6-signal RecallWeights\ntext/confidence/importance/recency/usage/graph\nphase_weights bias (#2329)"];
+    gate    [label="word-boundary gate (#2270)\nwhole-word prefix, stem-tolerant"];
+    seq     [label="_simard_seq monotonic prefix (#2307)"];
+    flock   [label="CognitiveOpenGuard flock (#2420)"];
+    weights -> gate -> seq;
+  }
+  facts -> weights; epi -> weights;
+
+  store [label="lbug GraphStore\n<state_root>/cognitive\nembedded native-Rust graph (amplihack-memory-lib)", shape=cylinder, style=filled, fillcolor="#eeffee"];
+  gate -> store; trig -> store; proc -> store; goalf -> store;
+  flock -> store [label="guards open", style=dashed];
+
+  pc     [label="PreparedContext\nrelevant_facts/triggered_prospectives/\nrecalled_procedures/episodic_recall"];
+  facts -> pc; goalf -> pc; trig -> pc; proc -> pc; epi -> pc;
+
+  inject [label="injected into ORIENT/DECIDE/ACT brain contexts\n(recipe-runner prompts, advance_goal)"];
+  learn  [label="ACT success -> store_procedure\nCURATE -> store_fact(lessons)/distill"];
+  pc -> inject -> learn -> store;
+}

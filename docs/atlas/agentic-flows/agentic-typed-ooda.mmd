@@ -1,0 +1,53 @@
+%% Simard Code Atlas — Agentic Flow: the typed-OODA capability / effect model
+%% Code truth: src/typed_ooda/{mod.rs,route.rs,ledger.rs,executor.rs,types.rs,schema.rs}
+%% "Parser-free capability boundary": semantic agents choose; Rust authenticates,
+%% authorizes, applies deterministic rails, persists, and executes admitted effects.
+flowchart TD
+  act[["OODA Act / Overseer\nchooses a typed request"]]
+  route["typed_ooda::route::TypedGoalSessionRoute::execute\nvalidate assets == TRUSTED_RECIPE / TRUSTED_POLICY"]
+  act --> route
+
+  subgraph ledger["LEDGER — CapabilityHandler (ledger.rs, SQLite typed-ooda/outcomes.sqlite3)"]
+    open["CapabilityHandler::open\nload CapabilityPolicy (grants, caps, allowed repos)"]
+    session["register_actor_session\n-> ActorSessionLease (token + TTL)"]
+    authz["AuthenticatedToolContext.allows(grant)\nscoped_to_repository / bound_to_cycle_goal"]
+    admit["AdmissionSnapshot\nconcurrent_engineers, disk%, active_claims, policy_revision"]
+    open --> session --> authz --> admit
+  end
+  route --> open
+
+  subgraph terminals["TERMINAL OUTCOME — single per (session, cycle)"]
+    ra["record_action(SpawnEngineer|FileIssue|RequestMerge|RequestDeploy)"]
+    rn["record_no_action"]
+    rb["record_blocked"]
+    rc["record_completed"]
+    rp["record_progress"]
+  end
+  admit --> ra & rn & rb & rc & rp
+
+  outcome[("terminal_outcomes\nUNIQUE(session_id, cycle_id)\nidempotent replay by request_hash")]
+  ra & rn & rb & rc --> outcome
+
+  subgraph effects["EFFECT JOB LIFECYCLE — effect_jobs table"]
+    ej["EffectJob { effect_id, outcome_id, kind, state }"]
+    lease["lease: attempt / lease_generation / lease_owner / lease_expires_at"]
+    exec["EffectExecutor::execute(job) -> EffectResult\nReserved -> Running -> Completed|Failed"]
+    ej --> lease --> exec
+  end
+  outcome -->|action outcome enqueues effect| ej
+
+  claims[("engineer_claims\nsingle active claim per engineer/repo")]
+  ra -->|SpawnEngineer| claims
+  liveness["EngineerLiveness -> release_engineer_claim\n(delete claim on engineer exit)"]
+  claims -.-> liveness
+
+  recipe[["goal-session-actor recipe\nrecipe-runner-rs (see agentic-recipes)"]]
+  route -->|"ContextFile: task/reason/observe/orient/decide + auth_token"| recipe
+  recipe -->|"GoalSessionTools callbacks (executor.rs)"| terminals
+
+  exec -->|"SpawnEngineer effect"| eng[["engineer_loop / agent_supervisor\n(engineer-pr journey)"]]
+
+  classDef store fill:#efe,stroke:#484;
+  classDef ext fill:#fee,stroke:#844;
+  class outcome,claims store;
+  class recipe,eng,act ext;

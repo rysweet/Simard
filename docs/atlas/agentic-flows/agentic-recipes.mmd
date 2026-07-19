@@ -1,0 +1,50 @@
+%% Simard Code Atlas — Agentic Flow: recipes (amplihack recipe-runner integration)
+%% Code truth: src/ooda_brain/recipe_brain.rs, src/recipe_context_file.rs,
+%% src/recipe_output/{extract.rs,mod.rs}, src/typed_ooda/route.rs, src/journal/recipe.rs,
+%% src/stewardship/recipe_merge_judge.rs, src/goal_curation/recipe_progress_checker.rs,
+%% src/amplihack_freshness_gate/*, prompt_assets/simard/recipes/*.yaml
+flowchart TD
+  subgraph callers["Rust call sites that invoke recipes"]
+    ob["ooda_brain::recipe_brain::RecipeBrain\ninvoke_orient_raw / invoke_decide_raw"]
+    tr["typed_ooda::route (goal-session-actor)"]
+    mj["stewardship::recipe_merge_judge (merge-readiness-judge)"]
+    gp["goal_curation::recipe_progress_checker (progress-assessment)"]
+    jr["journal::recipe (journal-narrative / plain-language)"]
+    ov["overseer::launch (smart-orchestrator / escalation_triage / ecosystem-observe)"]
+  end
+
+  fresh["amplihack_freshness_gate\namplihack update (flock + TTL) before spawn\nSIMARD_REQUIRE_FRESH_AMPLIHACK"]
+  callers --> fresh
+
+  resolve["resolve_recipe_path(repo_root, name, home)\n1) ~/.simard/prompt_assets/simard/recipes/  (hot-reload)\n2) {repo_root}/prompt_assets/simard/recipes/  (in-tree)"]
+  fresh --> resolve
+
+  ctx["recipe_context_file::ContextFile::write(base_type, key, value)\nunbounded payload -> /tmp/simard-*-ctx-*/{key}.ctx\n(avoids E2BIG / ARG_MAX)"]
+  resolve --> ctx
+
+  spawn["subprocess: recipe-runner-rs {recipe}.yaml --output-format json\n-c key=value / -c key_path=/abs/file\nenv AMPLIHACK_AGENT_BINARY, AMPLIHACK_HOME"]
+  ctx --> spawn
+
+  runner[["amplihack recipe runner\nsmart-orchestrator / default-workflow / investigation-workflow"]]
+  spawn --> runner
+  runner -->|"drives agent binary (copilot/claude)"| agent[["semantic agent (LLM)"]]
+  runner -->|"result file / stdout envelope"| out
+
+  subgraph out["recipe_output::extract — parse the envelope"]
+    strip["strip_ansi / extract_recipe_noise\ndrop ANSI, logs, launcher preamble"]
+    json["extract_json_payload (last balanced {...})"]
+    verdict["extract_verdict (keyword: ready/advance_goal/...)"]
+    strip --> json --> verdict
+  end
+
+  ladder["escalation ladder (LadderRung, #2432)\nbase -> schema-repair -> high-effort -> hard Err\n(never silent default, #2580)"]
+  verdict -->|parse miss| ladder
+  ladder -.->|retry| spawn
+
+  metrics[/"metrics: recipe_parse_success_total / recipe_parse_failure_total"/]
+  verdict --> metrics
+
+  verdict --> back["typed verdict returned to caller\n(priority / action kind / merge verdict / sub-goals)"]
+
+  classDef ext fill:#fee,stroke:#844;
+  class runner,agent ext;

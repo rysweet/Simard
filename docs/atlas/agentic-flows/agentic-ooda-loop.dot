@@ -1,0 +1,44 @@
+// Simard Code Atlas — Agentic Flow: the outer OODA loop (DOT rendering)
+// Code truth: src/ooda_loop/*, src/ooda_brain/*, src/ooda_actions/*
+digraph ooda_loop {
+  rankdir=TB;
+  node [shape=box, fontname="Helvetica", fontsize=10, style=rounded];
+  edge [fontname="Helvetica", fontsize=8];
+
+  daemon [label="operator_commands_ooda::daemon\nreload board + refresh memory cache"];
+  cycle  [label="ooda_loop::cycle::run_ooda_cycle\n(with_brain_judgment_scope)"];
+  daemon -> cycle [label="run_ooda_cycle(state, memories, config)"];
+
+  subgraph cluster_phases {
+    label="one OODA cycle — run_ooda_cycle_inner";
+    style=rounded; color="#446688";
+    obs    [label="OBSERVE\nooda_loop::observe"];
+    probe  [label="build_objective_probe(active)\nfree-text + slug-phrase triggers"];
+    prep   [label="PREPARE (recall)\npreparation_memory_operations_with_active_slugs_phased\n-> PreparedContext"];
+    orient [label="ORIENT\norient_with_brain | orient"];
+    decide [label="DECIDE\ndecide_with_brain | decide"];
+    cover  [label="COVERAGE\ncoverage::ensure_goal_coverage"];
+    act    [label="ACT\nooda_actions::act -> dispatch_actions_bounded"];
+    review [label="REVIEW / NO-PROGRESS breaker\nreview + no_progress (deterministic)"];
+    curate [label="CURATE\ncurate: archive + promote + failure->lesson"];
+    obs -> probe -> prep -> orient -> decide -> cover -> act -> review -> curate;
+  }
+  cycle -> obs;
+
+  brain [label="ooda_brain reasoners\nRecipeBrain (LLM) / Deterministic*", style="rounded,filled", fillcolor="#eeeeff"];
+  orient -> brain [label="orient_with_brain", style=dashed];
+  decide -> brain [label="decide_with_brain", style=dashed];
+  recipes [label="Recipes flow\n(agentic-recipes)", style="rounded,filled", fillcolor="#ffeeee"];
+  brain -> recipes [label="recipe-runner-rs\nooda-orient / ooda-decide", style=dashed];
+
+  mem [label="cognitive memory (lbug)\nvia CognitiveMemoryOps", shape=cylinder, style=filled, fillcolor="#eeffee"];
+  prep -> mem [label="recall facts/procedures/episodes/triggers"];
+  act -> mem [label="execution + procedure store"];
+  curate -> mem [label="reflection + lessons"];
+
+  typed [label="typed_ooda capability boundary\n(agentic-typed-ooda)", style="rounded,filled", fillcolor="#ffeeee"];
+  act -> typed [label="AdvanceGoal / SpawnEngineer"];
+
+  commit [label="daemon: commit_cycle + overwrite_memory_cache"];
+  curate -> commit;
+}

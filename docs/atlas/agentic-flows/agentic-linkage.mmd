@@ -1,0 +1,56 @@
+%% Simard Code Atlas — Agentic Flow: cross-layer linkage (how the flows connect)
+%% This master map shows how the six agentic flows interlock and which atlas layers
+%% they cut across (runtime-topology, service-components, data-flow, user-journeys).
+flowchart LR
+  subgraph L4["runtime-topology + service-components (in-process, one native daemon)"]
+    daemon["operator_commands_ooda::daemon\n(tick scheduler)"]
+    ooda["OODA loop\nobserve/orient/decide/act/curate"]
+    overseer["Overseer tick\n(meta-OODA supervision)"]
+    memipc["memory-ipc / CognitiveMemoryOps"]
+  end
+
+  subgraph L6["data-flow (capability + effect + memory chains)"]
+    typed["typed-OODA\ncapability/effect ledger\n(outcomes.sqlite3)"]
+    recall["cognitive recall\nobjective probe -> PreparedContext"]
+  end
+
+  subgraph assets["prompt assets + recipes (agentic decision surface)"]
+    prompts["prompt_assets/simard/*\n(.md prompts, policies)"]
+    recipes["recipes -> recipe-runner-rs\nsmart-orchestrator / default-workflow / investigation-workflow"]
+    agent["semantic agent (LLM)"]
+  end
+
+  store[("lbug graph store\n<state_root>/cognitive")]
+  eng[["engineer_loop / agent_supervisor\n-> PR (engineer-pr journey)"]]
+
+  %% OODA loop wiring
+  daemon -->|run_ooda_cycle| ooda
+  daemon -->|overseer_tick| overseer
+  ooda -->|"prepare phase"| recall
+  recall <-->|recall / store| memipc
+  memipc <--> store
+  ooda -->|"orient/decide (brain)"| recipes
+  recipes -->|reads| prompts
+  recipes --> agent
+  recipes -->|verdict| ooda
+
+  %% ACT crosses the capability boundary
+  ooda -->|"Act: AdvanceGoal/SpawnEngineer"| typed
+  typed -->|"goal-session-actor recipe"| recipes
+  typed -->|"SpawnEngineer effect"| eng
+  typed -->|"terminal outcomes + engineer_claims"| store
+
+  %% Overseer wiring
+  overseer -->|"recall_pass"| recall
+  overseer -->|"LaunchRecipe / EscalateBlockedGoal"| recipes
+  overseer -->|"record_occurrence"| memipc
+  overseer -->|"reap_stale_engineer_claims"| typed
+
+  %% Engineer feeds back into the board and memory
+  eng -->|"PR + outcomes"| daemon
+  eng -->|"episodes/facts"| memipc
+
+  classDef store fill:#efe,stroke:#484;
+  classDef ext fill:#fee,stroke:#844;
+  class store store;
+  class agent,eng ext;

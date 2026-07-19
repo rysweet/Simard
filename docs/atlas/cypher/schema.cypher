@@ -18,17 +18,22 @@
 // ---------------------------------------------------------------------------
 // NODE LABELS (cross-layer)
 // ---------------------------------------------------------------------------
-//   (:Layer)      one per atlas layer (the 8 slugs)
+//   (:Layer)      one per atlas layer (the 9 slugs)
 //   (:Service)    a deployable/runnable unit (daemon, unit, standalone mode)
 //   (:Component)  an in-process subsystem / Rust module cluster
 //   (:Process)    an external spawned process (recipe-runner-rs, gh, git, ...)
 //   (:Port)       a network endpoint (host:port + protocol)
-//   (:DataStore)  a persistent store (lbug graph, dashkey file, sockets)
+//   (:DataStore)  a persistent store (lbug graph, sqlite ledger, dashkey file, sockets)
 //   (:Route)      an HTTP/WebSocket route (api-contracts layer)
 //   (:Symbol)     an exported Rust symbol of interest (ast-lsp-bindings)
 //   (:EnvVar)     an environment variable that gates behaviour
 //   (:Journey)    an end-to-end user journey (user-journeys layer)
 //   (:SourceRef)  a file:line anchor tying a node back to code truth
+//   (:Flow)       an agentic control plane (agentic-flows layer)
+//   (:Phase)      a step within an agentic flow (OODA phase, overseer stage)
+//   (:Recipe)     an amplihack recipe (recipe-runner-rs target)
+//   (:PromptAsset) a prompt_assets/simard/* file
+//   (:Capability) a typed-OODA capability grant / effect kind
 //
 // RELATIONSHIP TYPES (the cross-layer links)
 // ---------------------------------------------------------------------------
@@ -44,6 +49,13 @@
 //   (:node)-[:USES_ENV]->(:EnvVar)
 //   (:Journey)-[:TRAVERSES]->(node)      journey step through any layer
 //   (:node)-[:EVIDENCED_BY]->(:SourceRef)  file:line provenance
+//   (:Flow)-[:HAS_PHASE]->(:Phase)       agentic phase membership
+//   (:Phase)-[:NEXT]->(:Phase)           ordered agentic pipeline
+//   (:Flow)-[:USES_RECIPE]->(:Recipe)    recipe invocation
+//   (:Recipe)-[:EMBEDS]->(:PromptAsset)  recipe embeds prompt text
+//   (:Flow)-[:LOADS]->(:PromptAsset)     runtime/compile-time asset load
+//   (:Flow)-[:LINKS_TO]->(:Flow)         cross-flow seam
+//   (see cypher/atlas-agentic.cypher for the agentic-flows data + edges)
 //
 // ---------------------------------------------------------------------------
 // Uniqueness constraints (Neo4j/Memgraph syntax). Safe to skip on engines that
@@ -60,3 +72,8 @@ CREATE CONSTRAINT symbol_id IF NOT EXISTS FOR (n:Symbol) REQUIRE n.id IS UNIQUE;
 CREATE CONSTRAINT envvar_id IF NOT EXISTS FOR (n:EnvVar) REQUIRE n.id IS UNIQUE;
 CREATE CONSTRAINT journey_id IF NOT EXISTS FOR (n:Journey) REQUIRE n.id IS UNIQUE;
 CREATE CONSTRAINT sourceref_id IF NOT EXISTS FOR (n:SourceRef) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT flow_id IF NOT EXISTS FOR (n:Flow) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT phase_id IF NOT EXISTS FOR (n:Phase) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT recipe_id IF NOT EXISTS FOR (n:Recipe) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT promptasset_id IF NOT EXISTS FOR (n:PromptAsset) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT capability_id IF NOT EXISTS FOR (n:Capability) REQUIRE n.id IS UNIQUE;

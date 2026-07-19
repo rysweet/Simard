@@ -1,0 +1,45 @@
+%% Simard Code Atlas — Agentic Flow: prompt assets (runtime + compile-time resolution)
+%% Code truth: src/prompt_assets.rs, src/agent_roles.rs, src/ooda_actions/goal_session/input.rs,
+%% src/typed_ooda/route.rs, src/review_pipeline.rs, prompt_assets/simard/*
+flowchart TD
+  subgraph tree["prompt_assets/simard/ (source of truth, derived to ~/.simard on deploy)"]
+    md["*.md system/reasoning prompts\nengineer_system, ooda_brain, ooda_orient,\nooda_decide, merge_readiness_judge,\ngoal_decomposition, goal_session_objective, ..."]
+    recipesY["recipes/*.yaml\n(embed .md text with {{var}} slots)"]
+    overseer["overseer/*.md\nobserve, escalation_triage, self_diagnose, ..."]
+    policies["policies/goal-session-capabilities.toml"]
+    terminal["terminal_recipes/*.simard-terminal / *.json"]
+  end
+
+  subgraph runtime["RUNTIME loading — prompt_assets.rs"]
+    trait["trait PromptAssetStore"]
+    file["FilePromptAssetStore { root }\nreject abs paths + '..' traversal"]
+    hot["root resolution:\n~/.simard/prompt_assets/ (deployed/hot-reload)\nOR {repo_root}/prompt_assets/ (dev)"]
+    trait --> file --> hot
+  end
+
+  subgraph compile["COMPILE-TIME embeds — include_str!()"]
+    gsi["ooda_actions/goal_session/input.rs:126\ngoal_session_identity.md"]
+    troute["typed_ooda/route.rs:18,20\ngoal-session-actor.yaml + capabilities.toml (TRUSTED_*)"]
+    rev["review_pipeline.rs:98\nreview_pipeline.md"]
+    rc["base_type_rustyclawd/execution.rs:15\nrustyclawd_default_system.md"]
+  end
+
+  subgraph callsites["call sites resolving assets by role"]
+    roles["agent_roles::AgentRole::prompt_assets()\nEngineer->engineer_system, Reviewer->merge_readiness_judge,\nGymRunner->gym_system, Facilitator->meeting_system"]
+    idres["identity_precedence::resolver::resolve_prompt_assets()\nmerge across identities (higher precedence wins)"]
+  end
+
+  md --> file
+  overseer --> file
+  roles --> trait
+  idres --> trait
+  md -. embedded verbatim into .-> recipesY
+  recipesY --> recipeflow[["Recipes flow (recipe-runner-rs)"]]
+  policies --> troute
+  md --> compile
+
+  file --> consumers[["consumers: engineer sessions, brains,\noverseer decisions, goal-session actor"]]
+  compile --> consumers
+
+  classDef ext fill:#fee,stroke:#844;
+  class recipeflow ext;

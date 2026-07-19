@@ -1,0 +1,48 @@
+%% Simard Code Atlas — Agentic Flow: cognitive-memory recall path
+%% Code truth: src/ooda_loop/cycle.rs (build_objective_probe, preparation_*),
+%% src/memory_consolidation/mod.rs, src/cognitive_memory/{mod.rs,library_adapter.rs,open_guard.rs},
+%% amplihack-memory-lib (lbug embedded native-Rust graph store)
+flowchart TD
+  probe["build_objective_probe(active_goals)\nfree-text descriptions + goal slug-phrases\n(= written trigger_condition)"]
+  recon["reconcile_board_prospectives(board)\nmemory.store_prospective per active goal"]
+  probe --> prep
+  recon --> prep
+
+  prep["preparation_memory_operations_with_active_slugs_phased(objective, phase, active_slugs)\n-> PreparedContext"]
+
+  subgraph fanout["ranked recall fan-out (per fragment / token)"]
+    facts["recall_facts_ranked(fragment, 10, min_conf, weights)"]
+    goalf["search_facts(GOAL_STORE_FACT_CONCEPT)\ngoal facts always load (dedup latest revision)"]
+    trig["check_triggers(objective)\nprospective memory match on trigger_condition"]
+    proc["recall_procedures_for_objective_with_tokens(tokens)\nbootstrap + distilled (lesson:) procedures"]
+    epi["recall_episodes_ranked(tokens, 5, weights)\nfilter session-noise"]
+  end
+  prep --> facts & goalf & trig & proc & epi
+
+  subgraph backend["LibraryCognitiveMemory backend — cognitive_memory/library_adapter.rs"]
+    weights["6-signal RecallWeights\ntext / confidence / importance / recency / usage / graph\n(phase_weights biases per OODA phase, #2329)"]
+    gate["word-boundary relevance gate\nclean tokens match whole-word prefix (stem-tolerant)\nmarkers/colons keep substring semantics (#2270)"]
+    seq["_simard_seq monotonic prefix on node_id\ntime-ordered despite UUID-v4 ids (#2307)"]
+    flock["CognitiveOpenGuard (POSIX flock)\nserialize cross-process open (never wipe, #2420)"]
+    weights --> gate --> seq
+  end
+  facts --> weights
+  epi --> weights
+
+  store[("lbug GraphStore\n<state_root>/cognitive\nembedded native-Rust graph (amplihack-memory-lib)")]
+  gate --> store
+  trig --> store
+  proc --> store
+  goalf --> store
+  flock -.guards.-> store
+
+  pc["PreparedContext {\n  relevant_facts, triggered_prospectives,\n  recalled_procedures, episodic_recall }"]
+  facts & goalf & trig & proc & epi --> pc
+
+  pc --> inject["injected into ORIENT/DECIDE/ACT brain contexts\n(recipe-runner prompts, advance_goal reasoning)"]
+
+  learn["ACT success -> store_procedure(compose_procedure_name)\nCURATE -> store_fact(lessons) / distill episodes"]
+  inject --> learn --> store
+
+  classDef store fill:#efe,stroke:#484;
+  class store store;

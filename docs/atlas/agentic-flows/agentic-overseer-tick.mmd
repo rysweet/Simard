@@ -1,0 +1,61 @@
+%% Simard Code Atlas — Agentic Flow: the Overseer tick (meta-OODA supervision loop)
+%% Code truth: src/overseer/wiring.rs, mod.rs, sensor.rs, signal.rs, observer.rs,
+%% root_cause.rs, intervention.rs, guardrails.rs, ecosystem_observe.rs
+flowchart TD
+  entry["overseer::wiring::overseer_tick\n-> overseer_tick_detailed (panic-isolated)"]
+  entry --> recon
+
+  subgraph pre["pre-cycle reconciliation — Overseer::run_cycle preamble"]
+    recon["reconcile_inflight_investigations\nfree completed recipe-runner slots"]
+    reap["reap_stale_engineer_claims\nreclaim orphaned claims (fail-closed)"]
+    seq["sequencer.reset()\nper-cycle admission"]
+    recon --> reap --> seq
+  end
+
+  subgraph observe["OBSERVE — assemble multi-source ObservedState"]
+    st["caps.status.snapshot()\ndistill/restart/budget/live_engineers/anomalies"]
+    gb["caps.goals.observe_board()\nblocked goals + in-flight workstreams"]
+    gap["caps.goals.workstream_gaps()"]
+    prs["caps.prs.survey_ready_prs()\nSIMARD_AUTOMERGE_REPOS (off by default)"]
+    fail["failure_sink::drain_recent()\ncaught step failures"]
+    rec["recall_pass() -> MemorySnapshot\n(cognitive-memory recall, best-effort)"]
+    st --- gb --- gap --- prs --- fail --- rec
+  end
+  seq --> observe
+
+  sig["SIGNAL\nsignals_from(observed) -> Vec&lt;Signal&gt;"]
+  orient["ORIENT\nobserver::orient(signals, in_flight)\ndedup vs in-flight -> Vec&lt;Problem&gt;"]
+  why["ROOT-CAUSE (mandatory, #2635)\nroot_cause::analyze(problem, observed, recall)\nWHY: source + recurrence + confidence"]
+  decide["DECIDE\ndecide(problem) -> Intervention"]
+  gate["GATE (guardrails)\nAutonomy / Recursion / Budget / Conflict / Whisper / Backoff"]
+  observe --> sig --> orient --> why --> decide --> gate
+
+  eco["ecosystem_observe (on cadence)\nagentic gh cross-repo survey"]
+  observe -.-> eco -.-> decide
+
+  subgraph act["ACT — dispatch admitted Interventions (Overseer::act)"]
+    lr["LaunchRecipe -> RecipeLauncher (smart-orchestrator)"]
+    mp["VerifyAndMergePr -> PrOps.verify/merge"]
+    dp["Deploy -> GuardedDeployer (canary + self-deploy gate)"]
+    fi["FileIssue -> StewardshipIssueFiler"]
+    esc["Escalate / EscalateBlockedGoal -> OperatorNotifier + escalation_triage recipe"]
+    wh["Whisper -> WhisperSink"]
+    ub["UnblockGoal -> GoalCurator.unblock"]
+  end
+  gate --> act
+
+  rec2["record_occurrence(entry, outcome)\nroot-cause signature + action -> cognitive memory"]
+  act --> rec2
+  report["OverseerTickReport\nproblems/recipes_launched/prs_merged/escalations/..."]
+  rec2 --> report
+
+  mem[("cognitive memory (lbug)")]
+  rec --> mem
+  rec2 --> mem
+  lr --> recipes[["Recipes flow (smart-orchestrator)"]]
+  esc --> recipes
+
+  classDef store fill:#efe,stroke:#484;
+  classDef ext fill:#fee,stroke:#844;
+  class mem store;
+  class recipes ext;

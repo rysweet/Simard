@@ -6,6 +6,7 @@
 //   2. atlas-layers.cypher
 //   3. atlas-services.cypher
 //   4. atlas-relationships.cypher
+//   5. atlas-agentic.cypher      (agentic flows: flows, phases, recipes, prompt assets)
 // Then run any query below.
 
 // Q1. What does each layer contain?
@@ -51,3 +52,36 @@ RETURN collect(j.id) AS journeys_needing_signal_rpc;
 MATCH path = (s:Service {id:'simard-daemon'})-[:RUNS|SPAWNS|EXPOSES|READS_FROM|WRITES_TO*1..4]->(d:DataStore)
 RETURN d.id AS reachable_store, length(path) AS hops
 ORDER BY hops;
+
+// ---------------------------------------------------------------------------
+// Agentic-flows queries (require atlas-agentic.cypher loaded)
+// ---------------------------------------------------------------------------
+
+// Q11. Trace an agentic flow's ordered phases (change the flow id).
+MATCH (f:Flow {id:'ooda-loop'})-[:HAS_PHASE]->(p:Phase)
+OPTIONAL MATCH (p)-[:NEXT]->(next:Phase)
+RETURN f.id AS flow, p.id AS phase, p.name AS name, next.id AS next_phase, p.evidence AS source;
+
+// Q12. Which recipe embeds which prompt asset (agentic decision provenance)?
+MATCH (r:Recipe)-[:EMBEDS]->(a:PromptAsset)
+RETURN r.id AS recipe, r.file AS recipe_file, a.id AS prompt_asset, a.role AS role
+ORDER BY recipe;
+
+// Q13. Cross-flow seams: how do the agentic flows link together across layers?
+MATCH (a:Flow)-[l:LINKS_TO]->(b:Flow)
+RETURN a.id AS from_flow, b.id AS to_flow, l.via AS via
+ORDER BY from_flow;
+
+// Q14. Blast radius of the lbug cognitive store: which flows read/write it?
+MATCH (f:Flow)-[rel:READS_FROM|WRITES_TO]->(d:DataStore {id:'lbug-cognitive'})
+RETURN d.id AS store, collect(DISTINCT f.id + '(' + type(rel) + ')') AS flows;
+
+// Q15. Which flows spawn the amplihack recipe runner (agentic subprocess surface)?
+MATCH (f:Flow)-[:SPAWNS]->(p:Process)
+WHERE p.id IN ['recipe-runner-rs','amplihack']
+RETURN p.id AS process, collect(f.id) AS spawned_by;
+
+// Q16. Full agentic reachability: from the OODA loop to every flow it links to (any depth).
+MATCH path = (f:Flow {id:'ooda-loop'})-[:LINKS_TO*1..4]->(other:Flow)
+RETURN DISTINCT other.id AS reachable_flow, length(path) AS hops
+ORDER BY hops, reachable_flow;
