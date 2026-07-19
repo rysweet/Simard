@@ -100,6 +100,16 @@ cargo test --lib knowledge_client
 Out-of-scope `KGP-B*` criteria do **not** gate parity; they are tracked
 separately for the Phase 9+ pack-authoring work.
 
+### Machine-checkable finish signal (what the done-gate observes)
+
+The done-gate certifies completion only through an observable **issue CLOSED**
+or **PR MERGED**. This goal's finish condition is therefore bound to a single
+tracking issue: **rysweet/Simard#4321**. When the two commands above are green
+on `main` (i.e. KGP-Q4, KGP-T3, KGP-Q5 have shipped with their acceptance
+tests), close #4321; that CLOSED state is the automatically-verifiable signal
+that "full parity" is done. Until then, the ordered backlog below gives the
+next cycle a concrete step, so the goal is never stuck without an action.
+
 ## Ordered backlog (so the next cycle is never stuck)
 
 Work the OPEN criteria top-to-bottom; each is a self-contained, shippable unit
@@ -131,3 +141,10 @@ with its acceptance test already specified above:
   knowledge. The LIKE membership probes stay substring-based (recall breadth);
   ranking governs which candidates survive the cut. KGP-Q4 (parameterize the
   LIKE search) remains OPEN and orthogonal.
+- **2026-07-18** — **Done-gate made machine-checkable**: the goal had no
+  tracked PR/issue, so the completion check could never certify it and the goal
+  kept re-investigating without shipping. Bound the finish condition to tracking
+  issue **rysweet/Simard#4321** (CLOSED when KGP-Q4, KGP-T3, KGP-Q5 ship and
+  both spec commands are green). No parity work was claimed complete — the three
+  in-scope criteria remain OPEN; only the *definition of done* was made
+  automatically verifiable.
