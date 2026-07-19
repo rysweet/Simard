@@ -1,0 +1,43 @@
+%% Simard Code Atlas — Agentic Flow: the outer OODA loop (observe/orient/decide/act/curate)
+%% Code truth: src/ooda_loop/*, src/ooda_brain/*, src/ooda_actions/*, src/ooda_scheduler/*
+flowchart TD
+  daemon["operator_commands_ooda::daemon\nreload board + refresh memory cache"]
+  cycle["ooda_loop::cycle::run_ooda_cycle\n(with_brain_judgment_scope)"]
+  daemon -->|"run_ooda_cycle(state, memories, config)"| cycle
+
+  subgraph phases["one OODA cycle — ooda_loop::cycle::run_ooda_cycle_inner"]
+    direction TB
+    obs["OBSERVE\nooda_loop::observe\ngit / gym / status / board"]
+    probe["build_objective_probe(active)\nfree-text + slug-phrase triggers"]
+    prep["PREPARE (cognitive recall)\npreparation_memory_operations_with_active_slugs_phased\n-> PreparedContext"]
+    orient["ORIENT\norient_with_brain | orient (deterministic)\n-> Vec&lt;Priority&gt;"]
+    decide["DECIDE\ndecide_with_brain | decide (deterministic)\n-> Vec&lt;PlannedAction&gt;"]
+    cover["COVERAGE\nooda_loop::coverage::ensure_goal_coverage\nevery incomplete goal covered"]
+    act["ACT\nooda_actions::act -> dispatch_actions_bounded\n-> Vec&lt;ActionOutcome&gt;"]
+    review["REVIEW / NO-PROGRESS breaker\nooda_loop::review + no_progress (deterministic)"]
+    curate["CURATE\nooda_loop::curate\narchive + promote backlog + failure->lesson"]
+    obs --> probe --> prep --> orient --> decide --> cover --> act --> review --> curate
+  end
+
+  cycle --> phases
+
+  brain["ooda_brain reasoners\nRecipeBrain (LLM) / Deterministic*\nwith_brain_judgment_scope records judgments"]
+  orient -.->|"orient_with_brain"| brain
+  decide -.->|"decide_with_brain"| brain
+  brain -.->|"recipe-runner-rs (ooda-orient/ooda-decide)"| recipes[["Recipes flow\n(see agentic-recipes)"]]
+
+  mem[("cognitive memory (lbug)\nvia CognitiveMemoryOps")]
+  prep -->|recall facts/procedures/episodes/triggers| mem
+  act -->|execution + procedure store| mem
+  curate -->|reflection + lessons| mem
+
+  act -->|"AdvanceGoal / SpawnEngineer"| typed[["typed_ooda capability boundary\n(see agentic-typed-ooda)"]]
+
+  curate --> commit["operator_commands_ooda::daemon\ncommit_cycle + overwrite_memory_cache"]
+
+  classDef brainNode fill:#eef,stroke:#446;
+  classDef store fill:#efe,stroke:#484;
+  classDef ext fill:#fee,stroke:#844;
+  class brain brainNode;
+  class mem store;
+  class recipes,typed ext;

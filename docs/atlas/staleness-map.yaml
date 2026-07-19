@@ -59,6 +59,21 @@ layers:
       - "src/typed_ooda/**"
       - "src/overseer/**"
       - "src/self_deploy/**"
+  agentic-flows:
+    triggers:
+      - "src/ooda_loop/**"          # OODA loop phases
+      - "src/ooda_brain/**"         # brain reasoners + recipe_brain
+      - "src/ooda_actions/**"       # Act dispatch
+      - "src/ooda_scheduler/**"
+      - "src/overseer/**"           # overseer tick
+      - "src/typed_ooda/**"         # capability/effect model
+      - "src/recipe_output/**"      # recipe envelope parsing
+      - "src/recipe_context_file.rs"
+      - "src/prompt_assets.rs"      # prompt asset loading
+      - "src/agent_roles.rs"
+      - "src/cognitive_memory/**"   # recall path
+      - "src/memory_consolidation/**"
+      - "prompt_assets/simard/**"   # recipes + prompts (the agentic decision surface)
 
 # Cypher artifacts are regenerated whenever ANY layer above is rebuilt.
 cypher_regen_on_any_layer: true

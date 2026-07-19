@@ -29,21 +29,30 @@ Rust structure was derived from `cargo metadata` + ripgrep/rust-analyzer, not Py
 | 6 | Data Flow | [data-flow](./data-flow/README.md) | Mermaid + DOT (split ×5) |
 | 7 | Service Component Architecture | [service-components](./service-components/README.md) | Mermaid + DOT (split ×4) |
 | 8 | User Journey Scenarios | [user-journeys](./user-journeys/README.md) | Mermaid + DOT (×6 journeys) |
+| 9 | Agentic Flows | [agentic-flows](./agentic-flows/README.md) | Mermaid + DOT (×7 flows) |
 
 Every layer directory contains `.mmd` + `.dot` source and rendered `*-mermaid.svg` +
 `*-dot.svg`. Both formats are kept on purpose: they find different bugs (~15% overlap).
+
+Layer 9 (**Agentic Flows**) is the emphasis of this revision: it maps the autonomous
+decision machinery — the OODA loop, the overseer tick, the typed-OODA capability/effect
+model, recipes (amplihack `recipe-runner`: `smart-orchestrator` / `default-workflow` /
+`investigation-workflow`), prompt assets (`prompt_assets/simard/*`), and the
+cognitive-memory recall path — and how they link together across layers.
 
 ## Portable graph (cypher/)
 
 | File | Purpose |
 | ---- | ------- |
 | [`cypher/schema.cypher`](./cypher/schema.cypher) | Node labels, relationship types, optional uniqueness constraints |
-| [`cypher/atlas-layers.cypher`](./cypher/atlas-layers.cypher) | The 8 `:Layer` nodes |
+| [`cypher/atlas-layers.cypher`](./cypher/atlas-layers.cypher) | The 9 `:Layer` nodes |
 | [`cypher/atlas-services.cypher`](./cypher/atlas-services.cypher) | Services, components, processes, ports, stores, routes, journeys |
 | [`cypher/atlas-relationships.cypher`](./cypher/atlas-relationships.cypher) | Cross-layer links (the edges between layers) |
-| [`cypher/queries.cypher`](./cypher/queries.cypher) | Ready-to-run example queries (endpoints, blast radius, orphans, journey traces) |
+| [`cypher/atlas-agentic.cypher`](./cypher/atlas-agentic.cypher) | Agentic flows: flows, phases, recipes, prompt assets, capabilities + cross-flow seams |
+| [`cypher/queries.cypher`](./cypher/queries.cypher) | Ready-to-run example queries (endpoints, blast radius, orphans, journey traces, agentic-flow traces) |
 
-Load order: `schema` → `atlas-layers` → `atlas-services` → `atlas-relationships`, then any query.
+Load order: `schema` → `atlas-layers` → `atlas-services` → `atlas-relationships` →
+`atlas-agentic`, then any query.
 
 ## Bug hunt
 
