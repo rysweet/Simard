@@ -202,3 +202,41 @@ fn wildcard_and_empty_queries_bypass_gate() {
         "blank query returns all facts"
     );
 }
+
+/// Recall-precision regression: a lone sub-threshold (single-char) clean query
+/// token must recall NOTHING rather than prefix-match every fact containing a
+/// word starting with that character — and, crucially, must not fall through to
+/// the library's raw-substring `search_facts`, where a lone "s" would substring
+/// every fact holding an s-word. A genuine multi-char token still recalls.
+#[test]
+fn lone_sub_threshold_clean_token_recalls_nothing() {
+    let mem = test_mem();
+    mem.store_fact("bug-pattern", "the session state was lost", 0.9, &[], "s")
+        .expect("store session fact");
+    mem.store_fact("lesson-learned", "storage sync succeeded", 0.9, &[], "s")
+        .expect("store storage fact");
+
+    // A lone "s" matches every s-word (session, state, storage, sync, succeeded)
+    // under both the prefix gate and the raw substring path — it must be gated
+    // out entirely as recall noise.
+    assert!(
+        contents(&mem, "s").is_empty(),
+        "a lone 's' must recall no facts, got {:?}",
+        contents(&mem, "s")
+    );
+
+    // A real query token still recalls at a word boundary.
+    assert_eq!(
+        contents(&mem, "session"),
+        vec!["the session state was lost".to_string()],
+        "a multi-char token still recalls its whole-word fact"
+    );
+
+    // A mixed query drops the lone "s" but keeps the real token: it recalls the
+    // session fact only, not the unrelated storage/sync fact.
+    assert_eq!(
+        contents(&mem, "s session"),
+        vec!["the session state was lost".to_string()],
+        "the dropped lone 's' must not float the storage fact in"
+    );
+}

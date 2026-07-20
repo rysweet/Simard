@@ -497,6 +497,23 @@ fn tokenize_words(text: &str) -> HashSet<String> {
 /// does not fold to `"i"`, and the fold can never re-introduce broad matching.
 const MIN_FOLDED_STEM_LEN: usize = 2;
 
+/// Minimum length a CLEAN (all-alphanumeric) query token must clear before it is
+/// admitted to a recall needle set. Mirrors `knowledge_context`'s `MIN_TOKEN_LEN`
+/// (which drops sub-threshold objective tokens before pack matching), so the
+/// whole cognition stack applies the same cut.
+///
+/// A single-character clean token (`"s"` from a possessive like "Rust's", an
+/// initial, or a stray list separator) is recall NOISE on the word-boundary
+/// gate: `needle_matches_word` accepts it via `word.starts_with(needle)`, so it
+/// matches EVERY content word beginning with that character — floating unrelated
+/// episodes/facts into the capped turn/OODA working-context recall and dragging
+/// recall precision (and effective distillation fact-yield) down. Dropping such
+/// tokens closes that leak without touching the inflectional/plural recall a
+/// two-or-more-character token still drives. RAW tokens (markers, hyphenated
+/// concepts) are never length-cut — they keep the library's exact substring
+/// semantics their callers store and re-filter on.
+const MIN_CLEAN_NEEDLE_LEN: usize = 2;
+
 /// `true` iff query token `needle` is relevant to a single content `word` — the
 /// per-(needle, word) predicate [`shares_word_prefix`] applies across the query
 /// word set and the tokenized content.
@@ -616,7 +633,8 @@ struct FactQueryNeedles {
 
 /// Partition a `search_facts` query into [`FactQueryNeedles`], lowercasing every
 /// token. Empty tokens (from repeated separators) are dropped. A token is CLEAN
-/// iff every character is alphanumeric; otherwise it is RAW.
+/// iff every character is alphanumeric AND it clears [`MIN_CLEAN_NEEDLE_LEN`]
+/// (a sub-threshold clean token is dropped as recall noise); otherwise it is RAW.
 fn partition_fact_query(query: &str) -> FactQueryNeedles {
     let mut clean: HashSet<String> = HashSet::new();
     let mut raw: Vec<String> = Vec::new();
@@ -626,7 +644,13 @@ fn partition_fact_query(query: &str) -> FactQueryNeedles {
             continue;
         }
         if lowered.chars().all(char::is_alphanumeric) {
-            clean.insert(lowered);
+            // Drop a sub-threshold clean token: as a word-boundary PREFIX a lone
+            // character matches nearly every word, so it is recall noise — the
+            // same MIN_TOKEN_LEN cut `knowledge_context` applies to objective
+            // tokens. RAW tokens keep exact substring semantics and are never cut.
+            if lowered.len() >= MIN_CLEAN_NEEDLE_LEN {
+                clean.insert(lowered);
+            }
         } else {
             raw.push(lowered);
         }
@@ -978,7 +1002,16 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
             top
         } else {
             let needles = partition_fact_query(query);
-            if needles.clean.is_empty() {
+            if needles.clean.is_empty() && needles.raw.is_empty() {
+                // The query held ONLY sub-threshold clean tokens (e.g. a lone
+                // "s"/"a" from a possessive or initial); after the
+                // MIN_CLEAN_NEEDLE_LEN cut nothing survives to match on. Recall
+                // nothing rather than fall through to the library's raw-substring
+                // `search_facts`, which would match such a character as a
+                // substring of nearly every stored fact — a worse over-match than
+                // the word-boundary leak this cut removes.
+                Vec::new()
+            } else if needles.clean.is_empty() {
                 // Pure concept/marker query (every token carries a non-alphanumeric
                 // char — a hyphenated concept like `bug-pattern`, or a `journal:` /
                 // `goal-edge:` / `sub:` marker). Preserve the library's exact
@@ -1549,7 +1582,12 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
                 continue;
             }
             if lowered.chars().all(char::is_alphanumeric) {
-                clean_needles.insert(lowered);
+                // Drop a sub-threshold clean keyword (a lone character): as a
+                // word-boundary PREFIX it matches nearly every content word, so it
+                // is recall noise. RAW marker keywords are never length-cut.
+                if lowered.len() >= MIN_CLEAN_NEEDLE_LEN {
+                    clean_needles.insert(lowered);
+                }
             } else {
                 raw_needles.push(lowered);
             }
@@ -1617,8 +1655,14 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         // `memory_consolidation::classifier`, and `fact_reliability` (PR #4241
         // lineage). Tokenizing the query on non-alphanumeric runs (not only
         // whitespace) also folds any punctuation attached to a query token onto
-        // its bare word so it can still match.
-        let needles: HashSet<String> = tokenize_words(query);
+        // its bare word so it can still match. Sub-threshold (single-char) clean
+        // tokens are then dropped (MIN_CLEAN_NEEDLE_LEN) so a lone char like "s"
+        // from "Rust's" cannot prefix-match every s-word — the same cut
+        // `knowledge_context` applies to objective tokens.
+        let needles: HashSet<String> = tokenize_words(query)
+            .into_iter()
+            .filter(|t| t.len() >= MIN_CLEAN_NEEDLE_LEN)
+            .collect();
         if needles.is_empty() {
             return Ok(vec![]);
         }
@@ -2027,6 +2071,48 @@ mod fact_query_gate_tests {
         assert!(!fact_shares_query_relevance(
             "bug-pattern",
             "subreactor note",
+            &n
+        ));
+    }
+
+    #[test]
+    fn partition_drops_sub_threshold_clean_tokens() {
+        // Single-char clean tokens (a possessive fragment, an initial, a stray
+        // separator) are recall noise on the word-boundary prefix gate, so they
+        // are dropped; a two-or-more-char clean token is kept.
+        let n = partition_fact_query("s rust a session");
+        assert!(n.clean.contains("rust"));
+        assert!(n.clean.contains("session"));
+        assert_eq!(
+            n.clean.len(),
+            2,
+            "single-char clean tokens must be dropped, clean: {:?}",
+            n.clean
+        );
+        assert!(n.raw.is_empty(), "raw: {:?}", n.raw);
+    }
+
+    #[test]
+    fn partition_never_length_cuts_raw_tokens() {
+        // The cut applies only to CLEAN tokens — RAW tokens keep exact substring
+        // semantics regardless of length (a short colon/hyphen marker survives).
+        let n = partition_fact_query("x: y-z");
+        assert!(n.clean.is_empty(), "clean: {:?}", n.clean);
+        assert!(n.raw.contains(&"x:".to_string()), "raw: {:?}", n.raw);
+        assert!(n.raw.contains(&"y-z".to_string()), "raw: {:?}", n.raw);
+    }
+
+    #[test]
+    fn sub_threshold_only_query_matches_nothing() {
+        // A query of only sub-threshold clean tokens leaves both needle sets
+        // empty, so the gate matches nothing — the `search_facts` caller turns
+        // this into an empty recall rather than a raw-substring flood where the
+        // lone char matches every fact containing an s-word.
+        let n = partition_fact_query("s");
+        assert!(n.clean.is_empty() && n.raw.is_empty());
+        assert!(!fact_shares_query_relevance(
+            "session",
+            "the s3 storage layer synced",
             &n
         ));
     }

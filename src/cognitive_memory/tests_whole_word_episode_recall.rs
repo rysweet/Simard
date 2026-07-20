@@ -235,3 +235,35 @@ fn whole_word_recall_is_case_insensitive() {
     );
     assert!(hits[0].content.contains("AUTHENTICATION"));
 }
+
+/// Recall-precision regression: a lone sub-threshold (single-char) clean keyword
+/// is recall noise — as a word-boundary PREFIX it matches every episode holding
+/// a word that starts with that character. It must be dropped, while a genuine
+/// multi-char keyword still recalls at a word boundary.
+#[test]
+fn lone_sub_threshold_keyword_recalls_nothing() {
+    let mem = test_mem();
+    mem.store_episode("the sync service restarted", "engineer-loop", None)
+        .expect("store sync episode");
+    mem.store_episode("storage layer migrated", "engineer-loop", None)
+        .expect("store storage episode");
+
+    let noise = mem
+        .search_episodes_by_keywords(&["s".to_string()], 10)
+        .expect("search lone s");
+    assert!(
+        noise.is_empty(),
+        "a lone 's' keyword must not prefix-match every s-word episode, got {} hit(s)",
+        noise.len()
+    );
+
+    let real = mem
+        .search_episodes_by_keywords(&["sync".to_string()], 10)
+        .expect("search sync");
+    assert_eq!(
+        real.len(),
+        1,
+        "a multi-char keyword still recalls at a word boundary"
+    );
+    assert!(real[0].content.contains("sync"));
+}
