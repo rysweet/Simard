@@ -52,11 +52,13 @@ page specifies the resolver's finished behaviour.
 ## Resolution chain
 
 `ledger_path()` resolves the ledger's parent home directory from the first
-source that yields a **non-empty, absolute** path, in this order:
+source that yields a usable (**non-empty**) path, in this order:
 
-1. **`HOME` environment variable.** The unchanged, primary source on Unix. An
+1. **`HOME` environment variable.** The unchanged, primary source on Unix,
+   honored verbatim exactly as before #4363 (a non-empty value is used as-is,
+   without re-checking absoluteness, to keep the fix strictly non-breaking). An
    empty `HOME` is treated as *unset* (it must not resolve to the filesystem
-   root `/`).
+   root `/`). Sources 2 and 3 below always yield an absolute path.
 2. **`dirs::home_dir()`.** The platform home-directory API (crate
    `dirs = "=6.0.0"`, already pinned in `Cargo.toml`). On Unix this consults
    the OS user database when `HOME` is absent; on Windows it resolves the known
@@ -87,7 +89,7 @@ the pre-existing on-disk layout.
 /// `<home>/.simard/costs/ledger.jsonl`.
 ///
 /// The home directory is resolved portably:
-///   1. `HOME` (non-empty, absolute) — the unchanged primary source,
+///   1. `HOME` (non-empty) — the unchanged primary source,
 ///   2. `dirs::home_dir()` — the platform home-directory API,
 ///   3. a process-relative `.simard/costs/ledger.jsonl` fallback.
 ///
