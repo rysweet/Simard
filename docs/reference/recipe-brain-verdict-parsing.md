@@ -1,7 +1,7 @@
 ---
 title: Recipe-brain verdict/decision parsing
 description: Current recipe-backed brain parsing contract; OODA use becomes legacy only after verified typed-route cutover.
-last_updated: 2026-07-13
+last_updated: 2026-07-20
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -50,6 +50,7 @@ related:
 > | merge-judge JSON transport + ladder + fail-closed `Unclear` | **shipped** ([#2428](https://github.com/rysweet/Simard/issues/2428) / [#2430](https://github.com/rysweet/Simard/issues/2430) / [#2435](https://github.com/rysweet/Simard/issues/2435) / [#2462](https://github.com/rysweet/Simard/issues/2462) / [#2463](https://github.com/rysweet/Simard/issues/2463)) | `src/stewardship/recipe_merge_judge.rs` |
 > | class-level `brain_verdict_parsed_total` metric | **shipped** ([#2429](https://github.com/rysweet/Simard/issues/2429)) | `src/ooda_brain/recipe_brain.rs` |
 > | Copilot launch-log preamble stripped at the shared chokepoint + decide/orient termination-cause wiring | **shipped** ([#2496](https://github.com/rysweet/Simard/issues/2496), generalising the distill regression PR [#2500](https://github.com/rysweet/Simard/pull/2500)) | `src/recipe_output/extract.rs`, `src/ooda_brain/recipe_brain.rs` |
+> | Trailing-comma recovery wired into every reasoner parse site via the shared `extract_and_parse_json` chokepoint | **shipped** ([#2658](https://github.com/rysweet/Simard/issues/2658) lineage) | `src/recipe_output/extract.rs`, `src/ooda_brain/recipe_brain.rs` |
 >
 > Everything on this page describes code that exists today. A reader six months
 > from now should treat this as the current design, not a migration note.
@@ -507,6 +508,51 @@ poisoned capture as a durable decision.
 
 For the design rationale, see
 [Concept: Copilot launch-log preamble stripping § keeping a parse failure distinct from a real "no action"](../concepts/copilot-launcher-preamble-stripping.md#keeping-a-parse-failure-distinct-from-a-real-no-action).
+
+---
+
+## Trailing-comma recovery at the reasoner parse chokepoint (#2658 lineage)
+
+The shared extractor `recipe_output::extract_json_payload` strips banner / ANSI /
+log noise but returns the balanced `{…}` object body **verbatim**. A trailing
+comma before a closing `}`/`]` — the single most common real-world LLM JSON
+defect — therefore survives into the extracted payload and fails a strict
+`serde_json::from_str`. Every reasoner parse site used to parse that payload
+strictly (`extract_json_payload(text)?` → `serde_json::from_str(&payload).ok()?`),
+so one stray comma silently dropped the model's whole structured decision and the
+phase fell back to its deterministic default (a parse-failure default, per the
+section above — *not* a real model decision).
+
+The `strip_json_trailing_commas` recovery view already existed (issue #2658) but
+was not wired into these reasoner sites. All of them now route through one shared
+chokepoint:
+
+```rust
+pub fn extract_and_parse_json<T: serde::de::DeserializeOwned>(raw: &str) -> Option<T> {
+    let payload = extract_json_payload(raw)?;
+    match serde_json::from_str::<T>(&payload) {
+        Ok(value) => Some(value),
+        // Retry ONLY when a trailing comma was actually removed (the Owned arm);
+        // strip_json_trailing_commas is a provable no-op (Cow::Borrowed) on valid
+        // JSON, so any other malformed shape returns None unchanged.
+        Err(_) => match strip_json_trailing_commas(&payload) {
+            Cow::Owned(recovered) => serde_json::from_str::<T>(&recovered).ok(),
+            Cow::Borrowed(_) => None,
+        },
+    }
+}
+```
+
+Sites routed through it in `src/ooda_brain/recipe_brain.rs`:
+`parse_admission_decision`, `parse_resource_admission_decision`,
+`parse_idea_dedup_decision`, `parse_idea_consolidation`, `parse_outcome_decision`,
+`extract_decision_envelope` (the decide path), and `extract_orient_envelope`.
+
+Leniency never widens beyond the trailing-comma defect: an unquoted key, an
+elided array element, or a missing value still yields `None` (a loud parse
+miss + ladder escalation), exactly as before. This improves reasoner reliability
+— a genuine, well-formed-except-for-one-comma decision is now honored instead of
+discarded — without accepting any broken JSON.
 
 ---
 
