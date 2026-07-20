@@ -11,6 +11,24 @@ pub(crate) struct CommandOutput {
     pub(crate) stdout: String,
 }
 
+/// Spawn a thread that reads `pipe` to EOF and returns the captured bytes.
+///
+/// Draining stdout and stderr on their own threads is what keeps a child from
+/// blocking on a full OS pipe buffer while we poll for its exit (issue #4360).
+/// `ChildStdout` and `ChildStderr` both implement `Read`, so one generic helper
+/// serves both streams.
+fn drain_pipe<R: std::io::Read + Send + 'static>(
+    pipe: Option<R>,
+) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    })
+}
+
 pub(crate) fn timeout_for_command(argv: &[&str]) -> Duration {
     if argv.first().is_some_and(|cmd| *cmd == "cargo") {
         Duration::from_secs(CARGO_COMMAND_TIMEOUT_SECS)
@@ -76,30 +94,8 @@ fn run_command_inner(
     // real output (issue #4360). Each reader owns its pipe and runs
     // `read_to_end` to EOF, which arrives when the child closes the stream on
     // exit (or when we kill it on timeout), so the threads always join.
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
-    let drain = |pipe: Option<std::process::ChildStdout>| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(mut pipe) = pipe {
-                use std::io::Read;
-                let _ = pipe.read_to_end(&mut buf);
-            }
-            buf
-        })
-    };
-    let drain_err = |pipe: Option<std::process::ChildStderr>| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(mut pipe) = pipe {
-                use std::io::Read;
-                let _ = pipe.read_to_end(&mut buf);
-            }
-            buf
-        })
-    };
-    let stdout_reader = drain(stdout_pipe);
-    let stderr_reader = drain_err(stderr_pipe);
+    let stdout_reader = drain_pipe(child.stdout.take());
+    let stderr_reader = drain_pipe(child.stderr.take());
 
     let deadline = Instant::now() + timeout_for_command(argv);
     let status = loop {
