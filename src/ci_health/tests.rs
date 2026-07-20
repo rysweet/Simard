@@ -1464,6 +1464,28 @@ mod steward_issue_filing {
     }
 
     #[test]
+    fn an_unrecognized_bare_403_fails_loud_rather_than_being_assumed_a_permission_denial() {
+        // A 403 that carries NONE of the explicit permanent permission-denial
+        // phrasings (no "not accessible by" / "must have admin rights") is
+        // treated as unknown and fails loud — we never *assume* a bare 403 is an
+        // authorization denial, since transient/policy/proxy 403s also exist and
+        // masking them as skips would silently drop a real failure.
+        let f = af("rysweet/amplihack-rs", "CI", "failure", 6);
+        let gh = FakeGhClient::new();
+        gh.fail_create_for(
+            "rysweet/amplihack-rs",
+            "`gh issue create` exited 1 with stderr:\nHTTP 403: Forbidden",
+        );
+
+        let err = file_issues_for_report(&report(vec![f]), &gh, &FakeDiagnostics::new())
+            .expect_err("an unrecognized bare 403 must fail loud");
+        assert!(matches!(
+            err,
+            SimardError::StewardshipGhCommandFailed { .. }
+        ));
+    }
+
+    #[test]
     fn the_unauthorized_skip_type_is_constructible() {
         // Guard the public shape the CLI reporter depends on.
         let skip = UnauthorizedSkip {
@@ -1498,6 +1520,9 @@ mod steward_issue_resolution {
         issues: Mutex<HashMap<String, Vec<GhIssue>>>,
         list_error: Mutex<Option<String>>,
         close_error: Mutex<Option<String>>,
+        /// Per-issue close errors, keyed by issue number — lets a test fail the
+        /// close of *one* issue while others in the same repo succeed.
+        close_error_for: Mutex<HashMap<u64, String>>,
         list_calls: Mutex<Vec<String>>,
         close_calls: Mutex<Vec<(String, u64, String)>>,
     }
@@ -1523,6 +1548,14 @@ mod steward_issue_resolution {
         }
         fn fail_list(&self, reason: &str) {
             *self.list_error.lock().unwrap() = Some(reason.to_string());
+        }
+        /// Fail the close of one specific issue number, leaving other closes to
+        /// succeed — models a per-issue write denial in an otherwise readable repo.
+        fn fail_close_for(&self, number: u64, reason: &str) {
+            self.close_error_for
+                .lock()
+                .unwrap()
+                .insert(number, reason.to_string());
         }
         fn fail_close(reason: &str) -> Self {
             Self {
@@ -1558,6 +1591,9 @@ mod steward_issue_resolution {
                 .lock()
                 .unwrap()
                 .push((repo.to_string(), number, comment.to_string()));
+            if let Some(reason) = self.close_error_for.lock().unwrap().get(&number).cloned() {
+                return Err(SimardError::CiHealthGhCommandFailed { reason });
+            }
             if let Some(reason) = self.close_error.lock().unwrap().clone() {
                 return Err(SimardError::CiHealthGhCommandFailed { reason });
             }
@@ -1922,6 +1958,76 @@ mod steward_issue_resolution {
         );
         // Nothing was closed while the repo was unreadable.
         assert!(resolver.close_calls().is_empty());
+    }
+
+    #[test]
+    fn a_close_denial_on_one_issue_preserves_earlier_closes_in_the_same_repo() {
+        // A governed sibling whose issues are *listable* (read) but where one
+        // close is denied (write) must not discard a close that already
+        // succeeded: the successful close is reported, and the denied one is a
+        // per-workflow skip — not a repo-level skip and not a lost outcome.
+        let repo = "rysweet/amplihack-recipe-runner";
+        let ok_sig = ci_signature_for(repo, "Bot Detection");
+        let denied_sig = ci_signature_for(repo, "Coverage");
+        let resolver = FakeResolver::new();
+        resolver.seed_issue(repo, &ok_sig, 10);
+        resolver.seed_issue(repo, &denied_sig, 20);
+        resolver.fail_close_for(
+            20,
+            "`gh issue close 20 -R rysweet/amplihack-recipe-runner` exited 1: \
+             GraphQL: Resource not accessible by integration",
+        );
+
+        let resolution = resolve_issues_for_report(
+            &report(
+                repo,
+                vec![
+                    wf("Bot Detection", "green", Some(1)),
+                    wf("Coverage", "green", Some(2)),
+                ],
+            ),
+            &resolver,
+        )
+        .expect("a per-issue close denial must not fail the whole resolution");
+
+        // The writable issue was closed and reported.
+        assert_eq!(
+            resolution.closed.len(),
+            1,
+            "closed: {:?}",
+            resolution.closed
+        );
+        assert_eq!(resolution.closed[0].issue_number, 10);
+        assert_eq!(resolution.closed[0].workflow, "Bot Detection");
+        // The denied close is a per-workflow skip (workflow: Some), not per-repo.
+        assert_eq!(resolution.skipped_unauthorized.len(), 1);
+        let skip = &resolution.skipped_unauthorized[0];
+        assert_eq!(skip.repo, repo);
+        assert_eq!(skip.workflow.as_deref(), Some("Coverage"));
+        assert!(skip.reason.contains("not accessible by integration"));
+        // Both closes were attempted (the denial did not short-circuit the loop).
+        let attempted: Vec<u64> = resolver.close_calls().into_iter().map(|c| c.1).collect();
+        assert_eq!(attempted, vec![10, 20]);
+    }
+
+    #[test]
+    fn a_non_authorization_close_error_still_fails_loud() {
+        // A close failure that is NOT an authorization denial (e.g. a transient
+        // outage) must still abort the sweep — no silent degradation.
+        let repo = "rysweet/azlin";
+        let sig = ci_signature_for(repo, "CI");
+        let resolver = FakeResolver::new();
+        resolver.seed_issue(repo, &sig, 55);
+        resolver.fail_close_for(
+            55,
+            "`gh issue close` exited 1: error connecting to api.github.com",
+        );
+
+        let err =
+            resolve_issues_for_report(&report(repo, vec![wf("CI", "green", Some(2))]), &resolver)
+                .unwrap_err();
+
+        assert!(matches!(err, SimardError::CiHealthGhCommandFailed { .. }));
     }
 }
 
