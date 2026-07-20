@@ -11,7 +11,7 @@ digraph AgenticOverseerTick {
     snap  [label="StatusReader::snapshot -> ObservedState"];
     board [label="GoalCurator::observe_board (blocked + in-flight)"];
     gaps  [label="GoalCurator::workstream_gaps"];
-    prs   [label="PrOps::survey_ready_prs (SIMARD_AUTOMERGE_REPOS)"];
+    prs   [label="PrOps::survey_ready_prs (SIMARD_AUTOMERGE_REPOS)\ninline narrowing: engineer-branch + objective gates\n+ draft-exclusion #4339 (is_draft==Some(false), fail-closed).\nobserve_merge_queue reasons, then project_ready_prs re-applies\nthe same narrowing (observe-stage projection)"];
     mq    [label="observe_merge_queue -> observe-merge-queue.yaml\nagentic PR/issue reasoning  mod.rs:875", fillcolor="#fff6df"];
     fails [label="failure_sink::drain_recent"];
     recall[label="recall_pass(keys) -> MemorySnapshot  mod.rs:1026", fillcolor="#eaf6ff"];
@@ -27,7 +27,8 @@ digraph AgenticOverseerTick {
     notify [label="NotifierOps (email + Signal RPC :7583)"];
     issue  [label="IssueFiler -> gh (dedup failure_signature)"];
     launch [label="RecipeLauncher -> amplihack smart-orchestrator\nsrc/overseer/launch.rs", fillcolor="#fff6df"];
-    merge  [label="MergePrOps (poll-until-green)"];
+    merge  [label="MergePrOps  src/overseer/merge_ops.rs\nverify (review-free objective pre-filter) ->\npoll_until_green (never --admin/--no-verify) ->\nagentic MergeJudge 6-criteria gate -> gh pr merge --squash ->\nDualChannelNotifier (email + Signal): both channels attempted,\nNotifyReport dispatched (outcomes recorded; delivery != guaranteed)"];
+    mjudge [label="Agentic MergeJudge (build_merge_judge resolution order)\n1) recipe-backed: merge-readiness-judge.yaml via recipe-runner-rs\n2) direct LLM: merge_readiness_judge.md prompt\n3) fail-closed default: RefusingMergeJudge", fillcolor="#fff6df"];
     deploy [label="Deployer = RefuseDeployer (production)\nrefuses autonomous deploy  wiring.rs:1068"];
     goalcap[label="GoalCurator unblock/escalate; MeetingHost transfer_goal"];
   }
@@ -37,6 +38,7 @@ digraph AgenticOverseerTick {
   tick -> cycle -> snap -> board -> gaps -> prs -> mq -> fails -> recall;
   recall -> orient -> why -> decide -> gate -> eco -> notify;
   eco -> issue; eco -> launch; eco -> merge; eco -> deploy; eco -> goalcap;
+  merge -> mjudge [style=dashed];
   goalcap -> writeback;
   writeback -> store [label="write", style=dashed, color="#4a90d9"];
   recall -> store [label="read", style=dashed, color="#4a90d9"];

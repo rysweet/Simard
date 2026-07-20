@@ -4,10 +4,13 @@ flowchart TD
   trigger --> keys["RecallKeys::from_signals(signals, problems) -> query()\n(concepts + root-cause labels, deterministic probe)"]
   keys --> fanout{"4-way bounded recall"}
 
-  fanout --> sem["recall_semantic -> recall_facts_ranked\n-> RecalledFact[]"]
-  fanout --> epi["recall_episodic -> recall_episodes_ranked\n(word-boundary gate) -> RecalledEpisode[]"]
+  fanout --> sem["recall_semantic -> recall_facts_ranked\n(library-ranked pure read; NOT word-boundary gated) -> RecalledFact[]"]
+  fanout --> epi["recall_episodic -> recall_episodes_ranked\n(word-boundary + sub-threshold noise gate) -> RecalledEpisode[]"]
   fanout --> proc["recall_procedural -> recall_procedure / search_procedures\n(usage_count DESC) -> RecalledProcedure[]"]
   fanout --> pros["recall_prospective -> check_triggers\n(fires &lt;=1x, status->triggered) -> RecalledProspective[]"]
+
+  ngate["Recall precision gate (recall_episodes_ranked)\ntokenize_words on non-alphanumeric runs, then drop sub-threshold\nsingle-char tokens (MIN_CLEAN_NEEDLE_LEN=2); word-boundary prefix match\n(shares_word_prefix). Empty needle set => recall NOTHING (fail-closed).\nThe keyword/substring search APIs (search_facts / search_episodes_by_keywords)\napply the same CLEAN vs RAW sub-threshold cut (search_facts via partition_fact_query;\nsearch_episodes_by_keywords inline; RAW markers keep exact substring).\nsrc/cognitive_memory/library_adapter.rs"]
+  epi -.needles.-> ngate
 
   sem --> adapter["CognitiveMemoryOps (OODA) / MemoryRecallOps (overseer)\nArc&lt;dyn CognitiveMemoryOps&gt;, wrapped by memory_ipc::SharedMemory\nsrc/operator_commands_ooda/daemon/mod.rs:269"]
   epi --> adapter
