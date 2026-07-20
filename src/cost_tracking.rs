@@ -40,7 +40,17 @@ const DEFAULT_OUTPUT_COST_PER_TOKEN: f64 = 15.0 / 1_000_000.0;
 /// Rough character-to-token ratio (4 characters ≈ 1 token).
 const CHARS_PER_TOKEN: u64 = 4;
 
+/// Resolve the ledger file path.
+///
+/// A test-only override, `SIMARD_COST_LEDGER_PATH`, takes precedence when set,
+/// letting tests pin the ledger to a per-test temp file and avoid racing the
+/// process-global `HOME`. When the override is unset (the production case) the
+/// path is the unchanged `$HOME/.simard/costs/ledger.jsonl` default.
 fn ledger_path() -> PathBuf {
+    if let Some(override_path) = std::env::var_os("SIMARD_COST_LEDGER_PATH") {
+        tracing::debug!(target: "cost_tracking", "using SIMARD_COST_LEDGER_PATH override");
+        return PathBuf::from(override_path);
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
     PathBuf::from(home)
         .join(".simard")
@@ -195,6 +205,168 @@ pub fn weekly_summary() -> std::io::Result<CostSummary> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// Scoped RAII guard that sets an environment variable for the duration of a
+    /// test and restores (or removes) its prior value on drop. Env mutation is
+    /// process-global, so every test using this guard MUST also carry the
+    /// `#[serial_test::serial(cognitive_memory)]` attribute to avoid tearing a
+    /// concurrent env write in a parallel test.
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let prev = std::env::var_os(key);
+            // SAFETY: serialised via `#[serial(cognitive_memory)]` on the caller;
+            // no concurrent env mutation can tear this write.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, prev }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let prev = std::env::var_os(key);
+            // SAFETY: serialised via `#[serial(cognitive_memory)]` on the caller.
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: serialised via `#[serial(cognitive_memory)]` on the caller.
+            unsafe {
+                match self.prev.take() {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // ledger_path() — SIMARD_COST_LEDGER_PATH override (design: cost_tracking)
+    //
+    // These tests specify the test-only ledger-path override. They FAIL on the
+    // current code (ledger_path ignores SIMARD_COST_LEDGER_PATH and always
+    // joins HOME) and PASS once ledger_path resolves the env override ahead of
+    // the HOME fallback.
+    // -----------------------------------------------------------------------
+
+    /// When `SIMARD_COST_LEDGER_PATH` is set, `ledger_path()` returns that path
+    /// verbatim — no `.simard/costs/ledger.jsonl` join, no HOME involvement.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn ledger_path_honors_env_override_verbatim() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let override_path = tmp.path().join("pinned-ledger.jsonl");
+        let _guard = EnvVarGuard::set("SIMARD_COST_LEDGER_PATH", &override_path);
+
+        assert_eq!(
+            ledger_path(),
+            override_path,
+            "ledger_path() must return SIMARD_COST_LEDGER_PATH verbatim when set"
+        );
+    }
+
+    /// The override takes precedence over HOME: even with HOME pointing at a
+    /// temp dir, the override path (not `$HOME/.simard/costs/ledger.jsonl`) wins.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn ledger_path_override_takes_precedence_over_home() {
+        let home = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let override_path = tmp.path().join("elsewhere").join("ledger.jsonl");
+
+        let _home_guard = EnvVarGuard::set("HOME", home.path());
+        let _override_guard = EnvVarGuard::set("SIMARD_COST_LEDGER_PATH", &override_path);
+
+        let home_default = home
+            .path()
+            .join(".simard")
+            .join("costs")
+            .join("ledger.jsonl");
+
+        let resolved = ledger_path();
+        assert_eq!(
+            resolved, override_path,
+            "override must win over the HOME-based default"
+        );
+        assert_ne!(
+            resolved, home_default,
+            "override must NOT resolve to the HOME-based default path"
+        );
+    }
+
+    /// Production path is unchanged: with the override unset, `ledger_path()`
+    /// falls back to `$HOME/.simard/costs/ledger.jsonl`. This is a regression
+    /// guard proving the feature is production-inert.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn ledger_path_falls_back_to_home_when_override_unset() {
+        let home = tempfile::TempDir::new().unwrap();
+        let _override_guard = EnvVarGuard::unset("SIMARD_COST_LEDGER_PATH");
+        let _home_guard = EnvVarGuard::set("HOME", home.path());
+
+        let expected = home
+            .path()
+            .join(".simard")
+            .join("costs")
+            .join("ledger.jsonl");
+
+        assert_eq!(
+            ledger_path(),
+            expected,
+            "with no override, ledger_path() must use the HOME-based default"
+        );
+    }
+
+    /// End-to-end: with the override set, `record_cost` writes to the override
+    /// file and `daily_summary` reads it back — the whole write/read chain
+    /// honors the single `ledger_path()` chokepoint.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn record_cost_writes_and_reads_through_override_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Nested dir to prove write_entry creates parents at the override path.
+        let override_path = tmp.path().join("nested").join("ledger.jsonl");
+        let _guard = EnvVarGuard::set("SIMARD_COST_LEDGER_PATH", &override_path);
+
+        let entry = record_cost(
+            "sess-override-e2e",
+            "test-model",
+            4000,
+            2000,
+            "override e2e",
+        )
+        .expect("record_cost should write to the override path");
+
+        assert!(
+            override_path.exists(),
+            "record_cost must write the ledger at the override path, not HOME"
+        );
+
+        let contents = fs::read_to_string(&override_path).unwrap();
+        assert!(
+            contents.contains("sess-override-e2e"),
+            "override ledger must contain the recorded entry"
+        );
+
+        let summary = daily_summary().expect("daily_summary should read the override path");
+        assert!(
+            summary.entry_count >= 1,
+            "daily_summary must count the entry written via the override path"
+        );
+        assert!(
+            summary.total_prompt_tokens >= entry.prompt_tokens_est,
+            "daily_summary must aggregate tokens from the override ledger"
+        );
+    }
 
     #[test]
     fn estimate_tokens_basic() {

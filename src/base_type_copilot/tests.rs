@@ -928,23 +928,28 @@ fn run_fake_meeting_turn_with_session(
 /// exceed the bare objective's token count. This assertion FAILS on the buggy
 /// code (recorded == bare) and PASSES on the fix (recorded > bare).
 ///
-/// HOME is redirected to a per-test temp dir so the cost ledger
-/// (`$HOME/.simard/costs/ledger.jsonl`) is isolated; the entry is matched by a
-/// unique session id so a concurrent meeting test sharing the process-global
-/// temp HOME cannot substitute its own entry. Mutating HOME requires the
-/// `cognitive_memory` serial key (see
+/// HOME is redirected to a per-test temp dir AND the cost ledger is pinned to
+/// a per-test file via `SIMARD_COST_LEDGER_PATH`, so the ledger
+/// (`$HOME/.simard/costs/ledger.jsonl` by default) is isolated deterministically
+/// and cannot race a concurrent meeting test sharing the process-global temp
+/// HOME. The entry is additionally matched by a unique session id. Mutating
+/// these env vars requires the `cognitive_memory` serial key (see
 /// docs/testing/cognitive-memory-serial-isolation.md).
 #[cfg(unix)]
 #[test]
 #[serial_test::serial(cognitive_memory)]
 fn meeting_turn_records_full_enriched_prompt_tokens_not_bare_objective() {
     let home = tempfile::TempDir::new().unwrap();
+    let ledger_dir = tempfile::TempDir::new().unwrap();
+    let ledger_path = ledger_dir.path().join("ledger.jsonl");
     let prev_home = std::env::var_os("HOME");
+    let prev_ledger = std::env::var_os("SIMARD_COST_LEDGER_PATH");
     // SAFETY: serialised via #[serial(cognitive_memory)] — no concurrent env
     // mutation can tear this write (see the EnvBinding invariant in
     // test_support::hermetic).
     unsafe {
         std::env::set_var("HOME", home.path());
+        std::env::set_var("SIMARD_COST_LEDGER_PATH", &ledger_path);
     }
 
     let result = std::panic::catch_unwind(|| {
@@ -958,13 +963,8 @@ fn meeting_turn_records_full_enriched_prompt_tokens_not_bare_objective() {
             objective,
         );
 
-        let ledger = home
-            .path()
-            .join(".simard")
-            .join("costs")
-            .join("ledger.jsonl");
-        let contents = std::fs::read_to_string(&ledger)
-            .expect("meeting turn must write a cost ledger entry under the temp HOME");
+        let contents = std::fs::read_to_string(&ledger_path)
+            .expect("meeting turn must write a cost ledger entry at the pinned ledger path");
         let entry = contents
             .lines()
             .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
@@ -988,11 +988,15 @@ fn meeting_turn_records_full_enriched_prompt_tokens_not_bare_objective() {
         );
     });
 
-    // SAFETY: restore HOME before propagating any panic (same serial key).
+    // SAFETY: restore env before propagating any panic (same serial key).
     unsafe {
         match prev_home {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
+        }
+        match prev_ledger {
+            Some(v) => std::env::set_var("SIMARD_COST_LEDGER_PATH", v),
+            None => std::env::remove_var("SIMARD_COST_LEDGER_PATH"),
         }
     }
     if let Err(e) = result {
