@@ -100,6 +100,24 @@ cargo test --lib knowledge_client
 Out-of-scope `KGP-B*` criteria do **not** gate parity; they are tracked
 separately for the Phase 9+ pack-authoring work.
 
+**The done-gate is fully machine-checkable and needs no further redefinition.**
+Completion is certified solely by the two commands above going green on `main`
+(each OPEN row's named acceptance test is its definition of done). There is no
+subjective "proven against the original on a shared fixture" step: a retrieval
+row counts as DONE only when its named test asserts a concrete numeric threshold
+and passes. Do not re-open the finish condition for renegotiation; work the
+backlog until the two commands are green.
+
+**Scope resolutions (decided 2026-07-20, operator may override):** two surface
+areas that are *not* part of this runtime-parity goal, and therefore do **not**
+gate closing it, matching the OUT-OF-SCOPE stance already applied to pack
+authoring (`KGP-B*`):
+
+- **Web frontend / PWA / e2e UI** — this goal is the knowledge-query *runtime*
+  (retrieval + answer synthesis), not a user interface. OUT-OF-SCOPE.
+- **Embeddable pack "skills"** — an authoring/extension concern in the same
+  family as `KGP-B*`. OUT-OF-SCOPE.
+
 ## Ordered backlog (so the next cycle is never stuck)
 
 Work the OPEN criteria top-to-bottom; each is a self-contained, shippable unit
@@ -132,6 +150,16 @@ progress log below.)
   knowledge. The LIKE membership probes stay substring-based (recall breadth);
   ranking governs which candidates survive the cut. KGP-Q4 (parameterize the
   LIKE search) remains OPEN and orthogonal.
+- **2026-07-20 (triage / course-correction)** — This goal was being auto-flagged
+  as "stalled." Root cause on inspection: **not** a missing or unmeasurable
+  finish line — the done-gate is already machine-checkable (the two green
+  `cargo test` commands above). It is simply a large, still-incomplete effort:
+  KGP-Q4 shipped today (PR #4349 merged), leaving **KGP-T3** (connection reuse)
+  and **KGP-Q5** (GraphRAG multi-hop) OPEN. Course-correction applied: re-anchor
+  the finish condition to this spec's named-test definition (dropping an earlier
+  fuzzy "prove against the original on a shared fixture / ratify each row"
+  framing), and resolve the two open scope questions (web UI, pack "skills") as
+  OUT-OF-SCOPE so no operator decision blocks closure. No human input required.
 - **2026-07-20** — **KGP-Q4 closed** (correctness + injection-shape removal):
   `query_articles` no longer string-interpolates keywords into its `LIKE`
   clauses. Each distinct keyword is now bound as a parameter (`?n`) built by the
