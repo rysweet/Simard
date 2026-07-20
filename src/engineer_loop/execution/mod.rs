@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -67,14 +68,26 @@ fn run_command_inner(
             reason: error.to_string(),
         })?;
 
+    // Drain stdout/stderr on dedicated threads so a child that writes more than
+    // the OS pipe buffer (~64 KiB on Linux) never blocks on a full pipe while we
+    // poll for exit. Without concurrent draining the child would block on
+    // `write`, never exit, and the poll loop below would spin until the command
+    // timeout fired — a classic pipe deadlock (issue #4360). The try_wait /
+    // deadline poll is retained purely for timeout enforcement.
+    let stdout_reader = spawn_pipe_drainer(child.stdout.take());
+    let stderr_reader = spawn_pipe_drainer(child.stderr.take());
+
     let deadline = Instant::now() + timeout_for_command(argv);
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_status)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
+                    // The killed child's pipes close, so the drain threads finish.
+                    let _ = stdout_reader.join();
+                    let _ = stderr_reader.join();
                     return Err(SimardError::CommandTimeout {
                         action: argv.join(" "),
                         timeout_secs: timeout_for_command(argv).as_secs(),
@@ -83,34 +96,46 @@ fn run_command_inner(
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
                 return Err(SimardError::ActionExecutionFailed {
                     action: argv.join(" "),
                     reason: format!("failed to poll child process: {error}"),
                 });
             }
         }
-    }
+    };
 
-    let output = child
-        .wait_with_output()
-        .map_err(|error| SimardError::ActionExecutionFailed {
+    // Join the drain threads to collect the full output. They read to EOF
+    // concurrently with the poll loop, so this does not block on a live pipe.
+    let stdout_bytes = stdout_reader
+        .join()
+        .map_err(|_| SimardError::ActionExecutionFailed {
             action: argv.join(" "),
-            reason: format!("failed to collect child output: {error}"),
+            reason: "stdout drain thread panicked".to_string(),
+        })?;
+    let stderr_bytes = stderr_reader
+        .join()
+        .map_err(|_| SimardError::ActionExecutionFailed {
+            action: argv.join(" "),
+            reason: "stderr drain thread panicked".to_string(),
         })?;
 
-    if !output.status.success() && !allow_nonzero_exit {
-        let stderr = sanitize_terminal_text(&String::from_utf8_lossy(&output.stderr));
-        let stdout = sanitize_terminal_text(&String::from_utf8_lossy(&output.stdout));
+    if !status.success() && !allow_nonzero_exit {
+        let stderr = sanitize_terminal_text(&String::from_utf8_lossy(&stderr_bytes));
+        let stdout = sanitize_terminal_text(&String::from_utf8_lossy(&stdout_bytes));
         let reason = if stderr.trim().is_empty() {
             format!(
                 "command exited with status {} and stdout='{}'",
-                output.status,
+                status,
                 stdout.trim()
             )
         } else {
             format!(
                 "command exited with status {} and stderr='{}'",
-                output.status,
+                status,
                 stderr.trim()
             )
         };
@@ -129,7 +154,67 @@ fn run_command_inner(
     }
 
     Ok(CommandOutput {
-        stdout: sanitize_terminal_text(&String::from_utf8_lossy(&output.stdout)),
+        stdout: sanitize_terminal_text(&String::from_utf8_lossy(&stdout_bytes)),
+    })
+}
+
+/// Per-stream cap on retained captured bytes (16 MiB). A memory-safety
+/// backstop: normal `git`/`cargo` output is far below this. On reaching the cap
+/// the reader thread keeps draining (and discarding) the remaining bytes so the
+/// child never blocks on a full pipe — only the retained buffer is bounded, not
+/// the drain (issue #4360).
+const MAX_CAPTURED_BYTES: usize = 16 * 1024 * 1024;
+
+/// Marker appended to a captured stream that was clipped at [`MAX_CAPTURED_BYTES`]
+/// so callers and error messages can tell capture was truncated rather than
+/// silently losing the tail.
+const CAPTURE_TRUNCATED_MARKER: &str = "… [output truncated at 16 MiB]";
+
+/// Spawn a thread that drains a child pipe to EOF, returning the captured bytes.
+///
+/// Draining each pipe concurrently with the poll loop is what prevents a
+/// full-pipe deadlock for children that emit more than the OS pipe buffer
+/// (~64 KiB on Linux) on stdout and/or stderr (issue #4360). A `None` pipe
+/// (already taken or never piped) yields an empty buffer.
+///
+/// Retention is capped at [`MAX_CAPTURED_BYTES`] per stream: once the cap is
+/// reached the thread keeps reading and discarding so the child never blocks,
+/// and a [`CAPTURE_TRUNCATED_MARKER`] is appended to signal the clip.
+fn spawn_pipe_drainer<R>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>>
+where
+    R: Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut retained: Vec<u8> = Vec::new();
+        let Some(mut pipe) = pipe else {
+            return retained;
+        };
+        let mut chunk = [0u8; 8192];
+        let mut truncated = false;
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if retained.len() < MAX_CAPTURED_BYTES {
+                        let take = (MAX_CAPTURED_BYTES - retained.len()).min(n);
+                        retained.extend_from_slice(&chunk[..take]);
+                        if take < n {
+                            truncated = true;
+                        }
+                    } else {
+                        // At the cap: keep draining so the child never blocks,
+                        // but discard the bytes.
+                        truncated = true;
+                    }
+                }
+                Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        if truncated {
+            retained.extend_from_slice(CAPTURE_TRUNCATED_MARKER.as_bytes());
+        }
+        retained
     })
 }
 

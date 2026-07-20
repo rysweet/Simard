@@ -287,6 +287,8 @@ nav:
     - Subordinate Kill PID-Guard API: reference/subordinate-kill-pid-guard-api.md
     - Coverage Comment Resilience: reference/coverage-comment-resilience.md
     - Telemetry Metrics: reference/telemetry-metrics.md
+    - Cost-Ledger Path Resolution: reference/cost-ledger-path-resolution.md
+    - Subprocess Pipe-Drain Execution: reference/subprocess-pipe-drain.md
     - Recall-Precision Hybrid Measurement: reference/recall-precision-hybrid-api.md
     - Knowledge-Pack Article Relevance Ranking: reference/knowledge-pack-article-relevance-ranking.md
     - Enrichment Observability API: reference/enrichment-observability-api.md
@@ -475,6 +477,7 @@ nav:
     - Creative-Ideas Semantic-Dedup Kill Switch: operations/creative-ideas-semantic-dedup-kill-switch.md
     - Safe Self-Update: safe-self-update.md
     - Pre-Commit Setup: operations/pre-commit-setup.md
+    - Pre-Commit Gate Stabilization: operations/pre-commit-gate-stabilization.md
   - Operator Dashboard:
     - Azlin Tmux Sessions Panel: operator-dashboard/azlin-tmux-sessions.md
     - Event-Bus Stats in Cluster Topology: operator-dashboard/event-bus-stats.md

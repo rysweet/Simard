@@ -40,12 +40,57 @@ const DEFAULT_OUTPUT_COST_PER_TOKEN: f64 = 15.0 / 1_000_000.0;
 /// Rough character-to-token ratio (4 characters ≈ 1 token).
 const CHARS_PER_TOKEN: u64 = 4;
 
+/// Resolve the absolute path to the cost ledger,
+/// `<home>/.simard/costs/ledger.jsonl`.
+///
+/// The home directory is resolved portably (issue #4363):
+///   1. `HOME` (non-empty) — the unchanged, primary source on Unix,
+///   2. `dirs::home_dir()` — the platform home-directory API (portable across
+///      Unix and Windows),
+///   3. a process-relative `.simard/costs/ledger.jsonl` fallback.
+///
+/// This never panics and never returns the machine-specific `/home/azureuser`
+/// literal that the pre-fix implementation hardcoded. It emits a
+/// `tracing::warn!` only when it must fall back to the process-relative path.
+/// The signature and return type are unchanged from before #4363, so every
+/// existing caller keeps working.
 fn ledger_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
-    PathBuf::from(home)
+    ledger_home()
         .join(".simard")
         .join("costs")
         .join("ledger.jsonl")
+}
+
+/// Resolve the home directory that anchors the cost ledger. See [`ledger_path`]
+/// for the full resolution chain and degrade-safe contract.
+fn ledger_home() -> PathBuf {
+    // 1. Honor a non-empty HOME exactly as before (empty is treated as unset so
+    //    the ledger never resolves to the filesystem root `/`).
+    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+    {
+        return PathBuf::from(home);
+    }
+
+    // 2. Fall back to the platform home-directory API. On Unix this consults the
+    //    OS user database when HOME is absent; on Windows it resolves the
+    //    profile folder — this is what makes resolution portable rather than
+    //    machine-specific.
+    if let Some(home) = dirs::home_dir()
+        && !home.as_os_str().is_empty()
+    {
+        return home;
+    }
+
+    // 3. Last resort: a process-relative `.simard/costs` directory. Never a
+    //    hardcoded absolute path, never `/tmp`, and never the filesystem root.
+    tracing::warn!(
+        target: "cost_tracking",
+        "no home directory resolved (HOME unset/empty and dirs::home_dir() \
+         unavailable); writing the cost ledger to a process-relative \
+         .simard/costs directory"
+    );
+    PathBuf::from(".")
 }
 
 /// Estimate token count from a character count.
@@ -123,12 +168,40 @@ fn write_entry(entry: &CostEntry) -> std::io::Result<()> {
     let path = ledger_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
+        harden_ledger_dirs(parent);
     }
     let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    harden_ledger_file(&file);
     let line = serde_json::to_string(entry).map_err(|e| std::io::Error::other(e.to_string()))?;
     writeln!(file, "{}", line)?;
     Ok(())
 }
+
+/// Tighten the `.simard/costs` (and its parent `.simard`) directories to
+/// owner-only (`0700`) on Unix. The cost ledger holds session telemetry and is
+/// treated as private. Errors are ignored so a permission tweak never aborts a
+/// session turn; the directories still exist and are usable.
+#[cfg(unix)]
+fn harden_ledger_dirs(costs_dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    for dir in [Some(costs_dir), costs_dir.parent()].into_iter().flatten() {
+        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+    }
+}
+
+#[cfg(not(unix))]
+fn harden_ledger_dirs(_costs_dir: &std::path::Path) {}
+
+/// Tighten the ledger file to owner read/write only (`0600`) on Unix. Errors
+/// are ignored for the same degrade-safe reason as [`harden_ledger_dirs`].
+#[cfg(unix)]
+fn harden_ledger_file(file: &fs::File) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
+}
+
+#[cfg(not(unix))]
+fn harden_ledger_file(_file: &fs::File) {}
 
 fn read_entries() -> std::io::Result<Vec<CostEntry>> {
     let path = ledger_path();
@@ -300,5 +373,135 @@ mod tests {
         }
         assert_eq!(entries.len(), 2);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- Issue #4363 (P4): portable ledger_path() HOME resolution ----
+    //
+    // Pre-fix, `ledger_path()` hardcoded a "/home/azureuser" fallback when HOME
+    // was unset (and produced a *relative* ".simard/..." path when HOME was
+    // empty). These tests pin the portable contract from the design doc:
+    //   * HOME-set is honored unchanged (non-breaking).
+    //   * HOME-unset/empty resolves via the portable `dirs::home_dir()` API to
+    //     an ABSOLUTE ledger path — never the old hardcoded literal or a
+    //     relative path.
+    //
+    // NOTE on assertions: a bare `!contains("/home/azureuser")` check is
+    // environment-fragile — on a host whose real home genuinely *is*
+    // /home/azureuser, the correct portable resolution legitimately returns it.
+    // So instead we assert equality with the `dirs::home_dir()`-derived path
+    // (the portable API), which fails the old hardcoded code on any host where
+    // the real home differs (e.g. CI's /home/runner) while remaining correct
+    // everywhere.
+    //
+    // Env vars are process-global, so all env-mutating tests here serialize on
+    // a shared mutex to avoid cross-test flakiness. Edition 2024 makes
+    // set_var/remove_var `unsafe`, hence the explicit unsafe blocks.
+
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// The ledger path derived from the portable platform home-directory API,
+    /// used as the expected value for the HOME-unset/empty cases.
+    fn dirs_home_ledger() -> PathBuf {
+        dirs::home_dir()
+            .expect("dirs::home_dir() should resolve a home directory in the test environment")
+            .join(".simard")
+            .join("costs")
+            .join("ledger.jsonl")
+    }
+
+    /// RAII guard that restores the prior HOME value on drop.
+    struct HomeGuard {
+        prev: Option<String>,
+    }
+
+    impl HomeGuard {
+        fn set(value: Option<&str>) -> Self {
+            let prev = std::env::var("HOME").ok();
+            match value {
+                Some(v) => unsafe { std::env::set_var("HOME", v) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+            HomeGuard { prev }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => unsafe { std::env::set_var("HOME", v) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+        }
+    }
+
+    #[test]
+    fn ledger_path_home_unset_uses_portable_home_resolution() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _home = HomeGuard::set(None);
+
+        let path = ledger_path();
+        // Resolution goes through the portable `dirs::home_dir()` API rather
+        // than the old hardcoded "/home/azureuser" literal. On any host whose
+        // real home differs from that literal (e.g. CI), this equality fails
+        // the pre-fix implementation and passes the fixed one.
+        assert_eq!(
+            path,
+            dirs_home_ledger(),
+            "HOME-unset must resolve via the portable dirs::home_dir() API"
+        );
+        assert!(
+            path.is_absolute(),
+            "resolved ledger path must be absolute, got: {}",
+            path.display()
+        );
+        assert!(
+            path.to_string_lossy().ends_with("ledger.jsonl"),
+            "resolved path must still point at the ledger file, got: {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn ledger_path_honors_home_when_set() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _home = HomeGuard::set(Some("/tmp/simard-home-test"));
+
+        let path = ledger_path();
+        let expected = PathBuf::from("/tmp/simard-home-test")
+            .join(".simard")
+            .join("costs")
+            .join("ledger.jsonl");
+        assert_eq!(
+            path, expected,
+            "HOME-set behavior must be preserved exactly (non-breaking)"
+        );
+    }
+
+    #[test]
+    fn ledger_path_empty_home_resolves_to_absolute_portable_path() {
+        // An empty HOME is treated as unset: it must NOT yield the pre-fix
+        // *relative* ".simard/costs/ledger.jsonl" (empty-string join) nor the
+        // filesystem root "/.simard/...", but a portable, absolute path.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _home = HomeGuard::set(Some(""));
+
+        let path = ledger_path();
+        assert!(
+            path.is_absolute(),
+            "empty HOME must resolve to an absolute path, not a relative one, got: {}",
+            path.display()
+        );
+        assert!(
+            !path.to_string_lossy().starts_with("/.simard"),
+            "empty HOME must not resolve the ledger under the filesystem root, got: {}",
+            path.display()
+        );
+        assert_eq!(
+            path,
+            dirs_home_ledger(),
+            "empty HOME must resolve via the portable dirs::home_dir() API"
+        );
     }
 }
