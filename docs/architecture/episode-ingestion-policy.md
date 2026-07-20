@@ -99,14 +99,21 @@ first match:
    `importance = 0.9` — even if it also looks like noise. A failed "session
    complete" is still a failure worth keeping. The kind is `RecipeFailure`
    when the content/source mentions a recipe, `ActionFailure` otherwise.
-2. **Known-noise markers → Drop.** A small allowlist of substrings —
-   `started with objective`, `completed and persisted`, `flushing working
-   memory`, `continue_skipping`, `no decision keyword` — is dropped.
-3. **Meaningful content → Store.** Content/source matching a durable
+2. **Meaningful content → Store.** Content/source matching a durable
    episodic event — user decisions, goal-board promotions/archival,
    handoffs, durable completions (opened/merged PR), or any
    `goal-curator` board summary — stores the episode with the importance
-   from the table below.
+   from the table below. Evaluated **before** the known-noise drop rule so a
+   durable signal is retained even when the same episode also mentions a
+   bookkeeping noise phrase (a handoff log that ends `… flushing working
+   memory`) — the same precedence the failure override applies. Checking
+   noise first discarded these dual-signal episodes, losing the durable
+   signal to distillation (a fact-yield loss).
+3. **Known-noise markers → Drop.** A small allowlist of substrings —
+   `started with objective`, `completed and persisted`, `flushing working
+   memory`, `continue_skipping`, `no decision keyword` — is dropped. Only
+   reached once rules 1–2 find no higher-value signal, so a **pure-noise**
+   episode still drops.
 4. **Default → DownScope.** Anything unrecognised — including the
    cross-session hydration bookkeeping (`Hydrated N prior-session facts …`)
    — is **stored down-scoped**, never dropped. We never silently lose a

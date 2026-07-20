@@ -135,11 +135,7 @@ four rules in **strict priority order** and returns on the first match:
    is `RecipeFailure` when the content/source mentions a recipe and
    `ActionFailure` otherwise. Overrides every rule below — a noisy line that
    records a failure is still kept.
-2. **Known-noise markers → `Drop`.** Case-insensitive substring match on
-   any of:
-   `started with objective`, `completed and persisted`,
-   `flushing working memory`, `continue_skipping`, `no decision keyword`.
-3. **Meaningful content → `Store`.** Content/source matching a durable
+2. **Meaningful content → `Store`.** Content/source matching a durable
    episodic event, stored at the importance from the table below with
    `is_operational: false`:
    - user decisions (`user decided` / `user decision`, or the
@@ -151,6 +147,19 @@ four rules in **strict priority order** and returns on the first match:
    - durable completions (`opened pr` / `pull request` / `merged`) →
      `ActionCompleted`;
    - any `goal-curator`-sourced board summary → `GoalArchival`.
+
+   Evaluated **before** the known-noise drop rule (3): a durable signal is
+   retained even when the same episode also mentions a bookkeeping noise
+   phrase (a handoff log that ends `… flushing working memory`), the same
+   "higher-value signal beats the drop rule" precedence the failure override
+   applies. Running the drop rule first discarded these dual-signal episodes
+   and lost the durable signal to distillation (a fact-yield regression).
+3. **Known-noise markers → `Drop`.** Case-insensitive substring match on
+   any of:
+   `started with objective`, `completed and persisted`,
+   `flushing working memory`, `continue_skipping`, `no decision keyword`.
+   Only reached once rules 1–2 have found no higher-value signal, so a
+   **pure-noise** episode still drops.
 4. **Default → `DownScope`.** Anything unmatched — including cross-session
    hydration bookkeeping (`Hydrated N prior-session facts …` from the
    `consolidation-intake` site) — is **stored down-scoped**:
@@ -332,6 +341,26 @@ let ctx = IntakeContext::default();
 match classify("Session s1 completed and persisted — error: disk full", "session-persistence", &ctx) {
     IntakeDecision::Store(m) => {
         assert_eq!(m.importance, 0.9);          // failure override beats the drop marker
+        assert_eq!(m.is_operational, false);
+    }
+    other => panic!("expected Store, got {other:?}"),
+}
+```
+
+### A meaningful signal beats a co-mentioned noise marker
+
+```rust
+let ctx = IntakeContext::default();
+// A handoff whose free text also carries the `flushing working memory` noise
+// phrase is retained as a handoff — the meaningful rule is evaluated before the
+// drop rule, so the durable signal is not lost to distillation.
+match classify(
+    "handoff: transferred goal ship-x to wt-7; flushing working memory to episodes",
+    "consolidation-persistence",
+    &ctx,
+) {
+    IntakeDecision::Store(m) => {
+        assert_eq!(m.event_kind, EventKind::Handoff);
         assert_eq!(m.is_operational, false);
     }
     other => panic!("expected Store, got {other:?}"),
