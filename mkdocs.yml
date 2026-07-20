@@ -99,6 +99,7 @@ nav:
     - Gap-Scan Dedup &amp; Backoff: concepts/gap-scan-backoff-dedup.md
     - Autonomous Self-Merge Sensor (ready_prs wire): concepts/autonomous-self-merge-sensor.md
     - Agentic Merge-Queue + Issue Reasoning (observe/orient): concepts/agentic-merge-queue-reasoning.md
+    - Overseer Agentic Health-Review (self-heal crash-loops): concepts/overseer-agentic-health-review.md
     - Autonomous-Merge Review Gate (agentic merge-judge): concepts/autonomous-merge-review-gate.md
     - Adaptive Scaling: concepts/adaptive-scaling.md
     - Pluggable Identity: concepts/pluggable-identity.md
