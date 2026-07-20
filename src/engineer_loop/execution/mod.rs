@@ -72,7 +72,8 @@ fn run_command_inner(
             reason: error.to_string(),
         })?;
 
-    let deadline = Instant::now() + timeout_for_command(argv);
+    let timeout = timeout_for_command(argv);
+    let deadline = Instant::now() + timeout;
     loop {
         let child = guard
             .child_mut()
@@ -86,7 +87,7 @@ fn run_command_inner(
                     // descendant of the timed-out command is orphaned.
                     return Err(SimardError::CommandTimeout {
                         action: argv.join(" "),
-                        timeout_secs: timeout_for_command(argv).as_secs(),
+                        timeout_secs: timeout.as_secs(),
                     });
                 }
                 std::thread::sleep(Duration::from_millis(50));
