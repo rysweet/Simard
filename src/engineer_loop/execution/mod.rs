@@ -92,8 +92,11 @@ fn run_command_inner(
     // exits, `try_wait()` never reports completion, and we spin until the
     // timeout kills it — surfacing a spurious `CommandTimeout` instead of the
     // real output (issue #4360). Each reader owns its pipe and runs
-    // `read_to_end` to EOF, which arrives when the child closes the stream on
-    // exit (or when we kill it on timeout), so the threads always join.
+    // `read_to_end` to EOF. On a clean exit the child closes both streams, the
+    // readers hit EOF, and we join them below to recover the captured bytes. On
+    // the timeout and poll-error paths we deliberately do NOT join (see those
+    // branches): killing only the direct child cannot guarantee EOF, so joining
+    // there could block indefinitely.
     let stdout_reader = drain_pipe(child.stdout.take());
     let stderr_reader = drain_pipe(child.stderr.take());
 
@@ -112,10 +115,14 @@ fn run_command_inner(
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    // Killing the child closes its pipes, so the reader threads
-                    // hit EOF and finish; join them to avoid leaking threads.
-                    let _ = stdout_reader.join();
-                    let _ = stderr_reader.join();
+                    // Do NOT join the reader threads here. A SIGKILL to the
+                    // direct child does not reap its descendants, and a
+                    // multi-process command (e.g. `cargo` spawning `rustc` or
+                    // build scripts) can leave grandchildren holding the pipe
+                    // write-ends open. Their `read_to_end` would then never hit
+                    // EOF, so joining would block past the very deadline we are
+                    // enforcing. Detach the readers instead and return promptly;
+                    // each thread exits on its own once its pipe finally closes.
                     return Err(SimardError::CommandTimeout {
                         action: argv.join(" "),
                         timeout_secs: timeout.as_secs(),
@@ -127,8 +134,10 @@ fn run_command_inner(
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
+                // Detach the reader threads rather than joining, for the same
+                // reason as the timeout branch above: a killed child's
+                // grandchildren may keep the pipes open, and a failed poll must
+                // not block the caller.
                 return Err(SimardError::ActionExecutionFailed {
                     action: argv.join(" "),
                     reason: format!("failed to poll child process: {error}"),
