@@ -2673,14 +2673,34 @@ pub fn decide(problem: &Problem) -> Intervention {
                 .map(|g| format!("{}: {}", g.category.label(), g.signature))
                 .collect::<Vec<_>>()
                 .join("; ");
+            // WRITE half of the cross-process coverage-dedup loop (#4128): the
+            // launched workstream MUST stamp every issue it opens with one
+            // `stewardship-signature: workstream-gap:<signature>` line per gap it
+            // covers. A daemon restart's cold gate then reads those stamps back
+            // via `sensor::extract_gap_coverage_signatures` and declines to
+            // relaunch coverage for an already-covered gap. `gap_coverage_stamp_line`
+            // is the SHARED formatter both this writer and that reader route
+            // through, so the stamp format can never drift out of sync. Emit one
+            // line PER gap base-signature (not the composite `key`) so each stamp
+            // matches exactly one detector signature.
+            let stamps = gaps
+                .iter()
+                .map(|g| sensor::gap_coverage_stamp_line(&g.signature))
+                .collect::<Vec<_>>()
+                .join("\n");
             Intervention::LaunchRecipe {
                 brief: RecipeBrief {
                     task_description: format!(
                         "Cover uncovered backlog workstream(s) surfaced by the Overseer \
                          gap-scan so they stop recurring: launch or track a workstream that \
-                         closes each gap. {n} gap(s): {details}. ({key})",
+                         closes each gap. {n} gap(s): {details}. For EACH gap you cover, copy \
+                         the matching stamp line below VERBATIM into the body of the issue you \
+                         open (or the covering PR/issue you track) so a daemon restart can \
+                         dedup it — this is what stops the gap re-surfacing every window \
+                         (cross-process coverage dedup, #4128):\n{stamps}\n({key})",
                         n = gaps.len(),
                         details = details,
+                        stamps = stamps,
                         key = workstream_gap_key(&gaps),
                     ),
                     target_repo: "rysweet/Simard".to_string(),

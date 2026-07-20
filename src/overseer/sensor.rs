@@ -432,7 +432,20 @@ fn truncate_field(s: &str) -> String {
 /// `stewardship-signature: workstream-gap:<sig>` where `<sig>` is the base gap
 /// signature the detector compares against (`goal:<id>` / `issue:<repo>#<n>` /
 /// `anomaly:<slug>`).
-const GAP_COVERAGE_STAMP_PREFIX: &str = "workstream-gap:";
+pub(crate) const GAP_COVERAGE_STAMP_PREFIX: &str = "workstream-gap:";
+
+/// Render the full `stewardship-signature:` line a covering workstream must copy
+/// into the body of every issue it opens, for base gap signature `sig`.
+///
+/// This is the SINGLE source of truth for the cross-process coverage-dedup
+/// contract (#4128): the [`decide`](crate::overseer::decide) `WorkstreamCoverage`
+/// brief embeds one of these lines per covered gap (the write half), and
+/// [`extract_gap_coverage_signatures`] parses the very same format back (the read
+/// half). Both halves route through this one formatter so the stamp string can
+/// never drift out of sync between the writer and the reader.
+pub(crate) fn gap_coverage_stamp_line(sig: &str) -> String {
+    format!("stewardship-signature: {GAP_COVERAGE_STAMP_PREFIX}{sig}")
+}
 
 /// Extract the base gap signatures covered by an existing set of open GitHub
 /// issues, so a cold [`detect_workstream_gaps`] pass — one whose in-memory
@@ -446,7 +459,10 @@ const GAP_COVERAGE_STAMP_PREFIX: &str = "workstream-gap:";
 /// Seeding `detect_workstream_gaps`' `coverage` slice from the open, stamped
 /// issues closes that gap.
 ///
-/// Contract:
+/// Contract (the READ half of the cross-process coverage-dedup loop; the WRITE
+/// half is the [`decide`](crate::overseer::decide) `WorkstreamCoverage` brief,
+/// which instructs the launched workstream to stamp each issue it opens — both
+/// halves share [`gap_coverage_stamp_line`] so the format cannot drift):
 ///   * Scans each issue body for `stewardship-signature: workstream-gap:<sig>`
 ///     stamps (the existing stewardship dedup convention, extended with the
 ///     `workstream-gap:` namespace).

@@ -1317,3 +1317,69 @@ fn simulated_restart_stamped_issue_suppresses_duplicate_gap_launch() {
         "a gap already covered by an open stamped issue must not re-launch after a restart: {second:?}"
     );
 }
+
+/// CONTRACT (write↔read): the `WorkstreamCoverage` decision (WRITE half) emits a
+/// brief whose stamp lines are the EXACT strings `extract_gap_coverage_signatures`
+/// (READ half) parses back into the covered gaps' base signatures. This closes
+/// the cross-process coverage-dedup loop end-to-end WITHOUT a synthetic fixture:
+/// the stamps under test come straight out of `decide`, not hand-built in the
+/// test, so a writer/reader drift (e.g. the brief dropping the stamp instruction,
+/// or emitting the composite `workstream_gap_key` instead of per-gap signatures)
+/// fails here.
+#[test]
+fn coverage_brief_stamps_round_trip_through_the_extractor() {
+    let goal = sample_goal_gap();
+    let anomaly = sample_anomaly_gap();
+    let gaps = vec![goal.clone(), anomaly.clone()];
+
+    let problem = Problem {
+        kind: ProblemKind::WorkstreamCoverage,
+        priority: Priority::High,
+        dedup_key: "workstream-gap:multi".to_string(),
+        summary: "2 uncovered workstreams".to_string(),
+        evidence: vec![Signal::WorkstreamGap { gaps: gaps.clone() }],
+        why: None,
+    };
+
+    let brief = match decide(&problem) {
+        Intervention::LaunchRecipe { brief } => brief,
+        other => panic!("a coverage gap must decide to a LaunchRecipe: {other:?}"),
+    };
+
+    // WRITE half: the brief must instruct ONE verbatim stamp line per covered
+    // gap base-signature (not the composite key, not a title).
+    for gap in &gaps {
+        let expected = format!("stewardship-signature: workstream-gap:{}", gap.signature);
+        assert!(
+            brief.task_description.contains(&expected),
+            "the coverage brief must carry a verbatim per-gap stamp line for {}: {}",
+            gap.signature,
+            brief.task_description
+        );
+    }
+
+    // READ half: harvest exactly the stamp lines the brief emitted, drop them
+    // into an issue body the way a covering workstream would, and confirm the
+    // extractor recovers precisely the covered gaps' base signatures.
+    let stamped_body = brief
+        .task_description
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("stewardship-signature:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let issue = GhIssue {
+        number: 9001,
+        url: "https://github.com/rysweet/Simard/issues/9001".to_string(),
+        title: "Cover uncovered backlog workstream(s)".to_string(),
+        body: format!("Covering workstream for the uncovered gaps.\n\n{stamped_body}\n"),
+    };
+
+    let coverage = extract_gap_coverage_signatures(&[issue]);
+    assert_eq!(
+        coverage,
+        vec![goal.signature.clone(), anomaly.signature.clone()],
+        "the extractor must recover exactly the covered gaps' base signatures from the \
+         brief's own stamp lines (write↔read contract): {coverage:?}"
+    );
+}
