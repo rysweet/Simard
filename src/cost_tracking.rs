@@ -167,14 +167,49 @@ pub fn record_cost(
 fn write_entry(entry: &CostEntry) -> std::io::Result<()> {
     let path = ledger_path();
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        create_ledger_dirs(parent)?;
         harden_ledger_dirs(parent);
     }
-    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    let mut file = open_ledger_file(&path)?;
     harden_ledger_file(&file);
     let line = serde_json::to_string(entry).map_err(|e| std::io::Error::other(e.to_string()))?;
     writeln!(file, "{}", line)?;
     Ok(())
+}
+
+/// Create the ledger directory chain, applying the owner-only (`0700`) mode
+/// *at creation time* on Unix so there is no window where the freshly created
+/// `.simard`/`.simard/costs` directories are world-traversable under a lax
+/// umask. [`harden_ledger_dirs`] still runs afterwards to guarantee the exact
+/// mode on directories that already existed.
+#[cfg(unix)]
+fn create_ledger_dirs(parent: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)
+}
+
+#[cfg(not(unix))]
+fn create_ledger_dirs(parent: &std::path::Path) -> std::io::Result<()> {
+    fs::create_dir_all(parent)
+}
+
+/// Open (creating if needed) the append-only ledger file. On Unix the file is
+/// created with mode `0600` *atomically* so a newly created ledger is never
+/// briefly world-readable before [`harden_ledger_file`] tightens it. The mode
+/// only applies to files this call creates; the post-open chmod still enforces
+/// `0600` on pre-existing ledgers.
+fn open_ledger_file(path: &std::path::Path) -> std::io::Result<fs::File> {
+    let mut opts = OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)
 }
 
 /// Tighten the `.simard/costs` (and its parent `.simard`) directories to
