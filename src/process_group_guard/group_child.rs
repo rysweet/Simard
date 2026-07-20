@@ -153,21 +153,12 @@ impl GroupChild {
     }
 }
 
-impl Drop for GroupChild {
-    fn drop(&mut self) {
-        // Ownership / REQ-V2: a disarmed guard handed its child to the caller,
-        // and a reaped guard's pgid may already be recycled onto an unrelated
-        // group. Either way, tear nothing down.
-        if self.disarmed || self.reaped {
-            return;
-        }
-        // REQ-V1 (fail-closed): never signal a non-positive pgid. `-0` targets
-        // the caller's own group and `-1` broadcasts to every process; a real
-        // child pgid is always > 1.
-        if self.pgid <= 1 {
-            return;
-        }
-
+impl GroupChild {
+    /// Tear the whole group down with the SIGTERM → bounded grace → SIGKILL
+    /// escalation. Signals only `-pgid`; it never `wait()`s the leader child
+    /// (that reaping is the caller's responsibility in [`Drop`], so it happens
+    /// on every armed exit path regardless of which branch this method takes).
+    fn tear_down_group(&self) {
         // Graceful first: SIGTERM the whole group. If the group is already gone
         // (ESRCH surfaces as an error), there is nothing to escalate.
         if self
@@ -203,5 +194,35 @@ impl Drop for GroupChild {
             "process group survived SIGTERM; escalating to SIGKILL to avoid orphaned subprocesses"
         );
         let _ = self.signaller.signal_group(self.pgid, libc::SIGKILL);
+    }
+}
+
+impl Drop for GroupChild {
+    fn drop(&mut self) {
+        // Ownership / REQ-V2: a disarmed guard handed its child to the caller,
+        // and a reaped guard's pgid may already be recycled onto an unrelated
+        // group. Either way, tear nothing down and reap nothing.
+        if self.disarmed || self.reaped {
+            return;
+        }
+
+        // REQ-V1 (fail-closed): only tear the group down for a real child pgid.
+        // `-0` targets the caller's own group and `-1` broadcasts to every
+        // process; a real child pgid is always > 1. A non-positive pgid skips
+        // group signalling but still reaps any owned child below.
+        if self.pgid > 1 {
+            self.tear_down_group();
+        }
+
+        // Reap the immediate leader child so its PID is not leaked as a zombie.
+        // `std::process::Child`'s own `Drop` does NOT `wait()`, so without this
+        // every armed teardown (timeout / `?`-propagation / panic-unwind) would
+        // leak one zombie per run — exactly the PID/handle-exhaustion class this
+        // guard exists to prevent. The group teardown above has already
+        // signalled the leader, so this `wait()` collects a process that is
+        // exiting (or already exited), not one that runs indefinitely.
+        if let Some(mut child) = self.child.take() {
+            let _ = child.wait();
+        }
     }
 }
