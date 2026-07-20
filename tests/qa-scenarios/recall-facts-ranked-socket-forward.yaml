@@ -1,0 +1,61 @@
+name: recall-facts-ranked-socket-forward
+app_type: cli
+description: |
+  Verify that six-signal phase-weighted ranked FACT recall (`recall_facts_ranked`,
+  issue #2329) survives the memory-IPC socket on the production daemon path
+  (perpetual-cognition goal: protect recall quality). In the primary topology OODA
+  owns the `LibraryCognitiveMemory` store and every other process reaches it via a
+  `RemoteCognitiveMemory` IPC client. The client previously had NO
+  `recall_facts_ranked` override, so it inherited the `CognitiveMemoryOps` trait
+  default that delegates to `search_facts` — sending a `SearchFacts` RPC whose
+  word-boundary-GATED, confidence-sorted keyword answer silently discarded the
+  library's ranking AND its `recall_precision_at_k` metric. On the daemon-backed
+  path the flagship ranked recall was inert (a hollow success).
+
+  The fix (mirroring the `list_all_episodes` #2627 additive-socket-forward)
+  overrides the client to forward a `MemoryRequest::RecallFactsRanked` — carrying
+  the `RecallWeightSet` across the wire — which the server dispatches to the real
+  `LibraryCognitiveMemory::recall_facts_ranked` ranker.
+
+  Behavior is proven by the hermetic in-crate transport round-trip tests this
+  scenario drives (real server thread + real socket + real in-memory store, no
+  network, no env). The CLI runner rejects any non-zero exit, so a failing test
+  fails the scenario.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+steps:
+  # Forward proof: a fact `search_facts` GATES OUT (no shared query word) must
+  # still be PRESENT in the socket client's `recall_facts_ranked` result — only
+  # genuine forwarding to the library ranker can satisfy that. First invocation
+  # may compile the test binary; subsequent filters reuse it.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_ipc::tests_transport_roundtrip::recall_facts_ranked_forwards_ranked_recall_over_socket"
+      timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+      timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+      timeout: 5000
+
+  # Error-encoding coverage: the new `RecallFactsRanked` server dispatch arm and
+  # client decode arm must surface a backend failure as a typed `RpcCallFailed`
+  # attributed to `recall_facts_ranked` (not silently succeed, not mis-attribute
+  # to `search_facts`).
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_ipc::tests_transport_roundtrip::every_op_encodes_backend_errors_as_rpc_call_failed"
+      timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+      timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+      timeout: 5000
