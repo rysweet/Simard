@@ -1,0 +1,70 @@
+name: kgpacks-rs-query-parameterized-like-search
+app_type: cli
+description: |
+  Outside-in proof for parity criterion **KGP-Q4** of the kgpacks-rs port
+  (`Specs/agent-kgpacks-rs-parity.md`): the native knowledge query
+  (`native_knowledge::query_articles`) binds each question keyword as a SQL
+  parameter instead of string-interpolating it into the `LIKE` clauses.
+
+  Before this fix, keywords were hand-escaped for single quotes and interpolated
+  as `'%keyword%'`. Two defects followed:
+    - a question word containing a `LIKE` metacharacter (`%` "any run", `_` "any
+      single char") silently widened the match into a wildcard scan instead of
+      searching for the literal token the user asked about, degrading retrieval
+      precision for tokens like `100%` or `a_b`;
+    - the interpolation was injection-shaped: only quotes were escaped, and any
+      slip would let keyword text reach the SQL body.
+
+  The corrected contract binds each keyword via `like_contains_pattern` as
+  `LIKE ?n ESCAPE '\'`, escaping the keyword's own `%`/`_`/escape characters so
+  the probe stays a literal substring match, and reuses the same `?n` in both
+  the `WHERE` membership clause and the `ORDER BY` coverage score.
+
+  This scenario drives the hermetic, in-process `native_knowledge` unit tests
+  that pin the corrected contract:
+    - `like_contains_pattern_escapes_metacharacters` — the bound pattern escapes
+      `%`, `_`, and the escape char (quotes are left to parameter binding);
+    - `query_articles_treats_like_wildcards_as_literal` — `%` and `_` in a
+      keyword match literally, not as wildcards;
+    - `query_articles_binds_keywords_and_resists_injection` — a quoted keyword
+      still matches its literal row, and an injection payload
+      (`'; DROP TABLE articles; --`) matches nothing and leaves the table
+      intact.
+  The same run also re-asserts the pre-existing KGP-Q1/Q8 ranking + citation
+  behaviour is unregressed. No network, no live host mutation. The CLI runner
+  rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # The native knowledge query contract, including the new KGP-Q4 parameterized
+  # LIKE tests and the pre-existing ranking / citation behaviours.
+  - action: run
+    params:
+      command: "cargo test --locked --lib native_knowledge"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Transport-level knowledge client suite proves the parameterized query path
+  # is exercised end-to-end through the native RPC surface without regression.
+  - action: run
+    params:
+      command: "cargo test --locked --lib knowledge_client"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
