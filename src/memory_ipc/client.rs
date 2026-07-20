@@ -277,6 +277,30 @@ impl CognitiveMemoryOps for RemoteCognitiveMemory {
         }
     }
 
+    fn recall_facts_ranked(
+        &self,
+        query: &str,
+        limit: u32,
+        min_confidence: f64,
+        weights: crate::cognitive_memory::RecallWeightSet,
+    ) -> SimardResult<Vec<CognitiveFact>> {
+        // Additive socket forward (issue #2329, mirroring #2627): forward the
+        // library's six-signal ranked recall over the wire instead of inheriting
+        // the trait default, which would degrade to gated `search_facts` and
+        // silently strip phase-weighted ranking + `recall_precision_at_k` on the
+        // production daemon path. The server dispatches this to
+        // `LibraryCognitiveMemory::recall_facts_ranked`.
+        match self.call(MemoryRequest::RecallFactsRanked {
+            query: query.into(),
+            limit,
+            min_confidence,
+            weights,
+        })? {
+            MemoryResponse::Facts(v) => Ok(v),
+            other => Err(Self::unexpected("recall_facts_ranked", other)),
+        }
+    }
+
     fn store_procedure(
         &self,
         name: &str,

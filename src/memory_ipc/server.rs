@@ -223,6 +223,15 @@ fn dispatch(memory: &dyn CognitiveMemoryOps, req: MemoryRequest) -> MemoryRespon
             Ok(v) => MemoryResponse::Facts(v),
             Err(e) => MemoryResponse::Error(e.to_string()),
         },
+        MemoryRequest::RecallFactsRanked {
+            query,
+            limit,
+            min_confidence,
+            weights,
+        } => match memory.recall_facts_ranked(&query, limit, min_confidence, weights) {
+            Ok(v) => MemoryResponse::Facts(v),
+            Err(e) => MemoryResponse::Error(e.to_string()),
+        },
         MemoryRequest::StoreProcedure {
             name,
             steps,
