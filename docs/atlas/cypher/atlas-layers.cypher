@@ -1,4 +1,4 @@
-// Simard Code Atlas — Layer nodes (the 8 slugs)
+// Simard Code Atlas — Layer nodes (the 9 slugs)
 // Portable OpenCypher. Idempotent (MERGE on id). graph_backend: portable-cypher-only.
 
 MERGE (l:Layer {id: 'repo-surface'})
@@ -34,3 +34,7 @@ MERGE (l:Layer {id: 'user-journeys'})
   SET l.name = 'User Journey Scenarios',
       l.description = 'OODA cycle, memory recall, signal reply, blocked-goal, engineer-PR, self-deploy',
       l.diagram = 'docs/atlas/user-journeys/';
+MERGE (l:Layer {id: 'agentic-flows'})
+  SET l.name = 'Agentic Flows',
+      l.description = 'OODA loop, overseer tick, recipes, prompt assets, typed-OODA capability/effect, cognitive-memory recall',
+      l.diagram = 'docs/atlas/agentic-flows/';

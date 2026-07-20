@@ -1,0 +1,35 @@
+digraph AgenticPromptAssets {
+  rankdir=TB;
+  node [shape=box, style="rounded,filled", fillcolor="#f8fbff", fontname="Arial"];
+  edge [fontname="Arial"];
+
+  subgraph cluster_repo {
+    label="prompt_assets/simard/ (version-controlled truth)"; style="rounded,dashed"; color="#d9a441";
+    recipes  [label="recipes/*.yaml (22)", fillcolor="#fff6df"];
+    overseer [label="overseer/*.md (7)\nobserve, problem_to_brief, escalation_triage,\ndeploy_gate, pr_verify, self_diagnose", fillcolor="#fff6df"];
+    policies [label="policies/goal-session-capabilities.toml", fillcolor="#fff6df"];
+    terminals[label="terminal_recipes/*.simard-terminal + copilot-submit.json", fillcolor="#fff6df"];
+  }
+  freshgate[label="amplihack_freshness_gate ('amplihack update' pre-spawn)\nsrc/amplihack_freshness_gate/"];
+  deploy   [label="runtime copy ~/.simard/prompt_assets/simard/ (hot-reload)"];
+  direct   [label="DIRECT reads (most common):\nrecipes via resolve_recipe_path (recipe-runner-rs reads .yaml)\npolicy via TypedGoalSessionRoute::load_policy"];
+  store    [label="GENERIC loader (in-process prompt payloads):\nFilePromptAssetStore::load\ncanonicalize + validate_prompt_asset_path\nsrc/prompt_assets.rs"];
+  ref      [label="PromptAssetRef -> PromptAsset {contents}"];
+  delivery [label="prompt_delivery size-gated transport\ninline<=8KiB / stdin 8-100KiB / tempfile<=16MiB\nsrc/prompt_delivery/"];
+  agent    [label="agent subprocess (recipe-runner / engineer)"];
+
+  c1 [label="OODA RecipeBrain / stewardship / journal / disk / typed-OODA"];
+  c2 [label="src/overseer/* (diagnosis, intervention, observe)"];
+  c3 [label="TypedGoalSessionRoute::load_policy  src/typed_ooda/route.rs"];
+  c4 [label="terminal_session / copilot_task_submit"];
+
+  recipes -> freshgate [style=invis];
+  freshgate -> deploy;
+  deploy -> direct -> agent;
+  deploy -> store -> ref -> delivery -> agent;
+  recipes -> deploy; overseer -> deploy; policies -> deploy; terminals -> deploy;
+  recipes -> c1 [label="consumed by", style=dashed];
+  overseer -> c2 [label="consumed by", style=dashed];
+  policies -> c3 [label="loaded by", style=dashed];
+  terminals -> c4 [label="consumed by", style=dashed];
+}

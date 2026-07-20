@@ -1,0 +1,32 @@
+digraph AgenticMemoryRecall {
+  rankdir=TB;
+  node [shape=box, style="rounded,filled", fillcolor="#f8fbff", fontname="Arial"];
+  edge [fontname="Arial"];
+
+  trigger [label="Callers (in-process): OODA prepare  src/ooda_loop/cycle.rs\nOverseer recall_pass  src/overseer/mod.rs:1026"];
+  keys    [label="RecallKeys::from_signals -> query()\n(concepts + root-cause labels)"];
+  fanout  [label="4-way bounded recall", shape=diamond, fillcolor="#f0f0f0"];
+  sem     [label="recall_semantic -> recall_facts_ranked -> RecalledFact[]"];
+  epi     [label="recall_episodic -> recall_episodes_ranked (word-boundary) -> RecalledEpisode[]"];
+  proc    [label="recall_procedural -> search_procedures (usage_count DESC) -> RecalledProcedure[]"];
+  pros    [label="recall_prospective -> check_triggers (fires <=1x) -> RecalledProspective[]"];
+  adapter [label="CognitiveMemoryOps / MemoryRecallOps\nArc<dyn CognitiveMemoryOps> wrapped by memory_ipc::SharedMemory\nsrc/operator_commands_ooda/daemon/mod.rs:269"];
+  lib     [label="LibraryCognitiveMemory::open (agent scope 'simard')\nin-process, NOT UDS  src/cognitive_memory/"];
+  store   [label="embedded lbug graph store\n<state_root>/cognitive (amplihack-memory-lib)", fillcolor="#eaf6ff"];
+  snapshot[label="MemorySnapshot / PreparedContext\n{facts, episodes, procedures, prospectives}", fillcolor="#eaf6ff"];
+  use     [label="OODA prompt context / overseer signals_from\n(RecurringSignature -> root_cause recurrence)"];
+  wb      [label="write-back: store_episode('overseer') /\nstore_procedure + store_fact (OODA)", fillcolor="#eaf6ff"];
+  ext     [label="memory_ipc UDS server (RemoteCognitiveMemory)\nexposes SAME store to EXTERNAL clients only\nsrc/memory_ipc/server.rs"];
+  note    [label="Policy: native Rust + lbug only. NO kuzu, NO Python.", shape=note, fillcolor="#fff6df"];
+
+  trigger -> keys -> fanout;
+  fanout -> sem; fanout -> epi; fanout -> proc; fanout -> pros;
+  sem -> adapter; epi -> adapter; proc -> adapter; pros -> adapter;
+  adapter -> lib -> store;
+  sem -> snapshot; epi -> snapshot; proc -> snapshot; pros -> snapshot;
+  snapshot -> use;
+  use -> wb [label="after act", style=dashed];
+  wb -> store;
+  ext -> store [label="same store", style=dashed];
+  store -> note [style=dotted];
+}

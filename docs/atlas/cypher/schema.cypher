@@ -28,6 +28,12 @@
 //   (:Symbol)     an exported Rust symbol of interest (ast-lsp-bindings)
 //   (:EnvVar)     an environment variable that gates behaviour
 //   (:Journey)    an end-to-end user journey (user-journeys layer)
+//   (:Flow)       an agentic flow (agentic-flows layer)
+//   (:Phase)      one step/phase inside an agentic flow
+//   (:Recipe)     a prompt_assets/simard/recipes/*.yaml agentic reasoning step
+//   (:PromptAsset)a prompt_assets/simard/* asset (recipe/overseer md/policy)
+//   (:Capability) a typed-OODA capability grant (RecordAction(kind))
+//   (:Effect)     a typed-OODA durable effect (SpawnEngineer/FileIssue/...)
 //   (:SourceRef)  a file:line anchor tying a node back to code truth
 //
 // RELATIONSHIP TYPES (the cross-layer links)
@@ -43,6 +49,16 @@
 //   (:Component)-[:CALLS]->(:Symbol)
 //   (:node)-[:USES_ENV]->(:EnvVar)
 //   (:Journey)-[:TRAVERSES]->(node)      journey step through any layer
+//   (:Flow)-[:HAS_PHASE]->(:Phase)       agentic flow decomposition (ordered by :Phase.seq)
+//   (:Phase)-[:NEXT]->(:Phase)           phase ordering within a flow
+//   (:Phase)-[:INVOKES]->(:Recipe)       a phase runs an agentic recipe
+//   (:Recipe)-[:DEFINED_IN]->(:PromptAsset) recipe backed by a prompt asset
+//   (:Flow)-[:DRIVES]->(:Flow)           one agentic flow triggers another
+//   (:Flow)-[:READS_FROM|WRITES_TO]->(:DataStore)  memory/ledger access
+//   (:Flow)-[:USES]->(:PromptAsset)      flow reads a prompt asset (policy/md)
+//   (:Capability)-[:AUTHORIZES]->(:Effect)  capability gates an effect
+//   (:Flow)-[:PRODUCES]->(:Effect)       typed-OODA effect emission
+//   (:Flow)-[:TOUCHES]->(node)           cross-layer link to any atlas node
 //   (:node)-[:EVIDENCED_BY]->(:SourceRef)  file:line provenance
 //
 // ---------------------------------------------------------------------------
@@ -59,4 +75,10 @@ CREATE CONSTRAINT route_id IF NOT EXISTS FOR (n:Route) REQUIRE n.id IS UNIQUE;
 CREATE CONSTRAINT symbol_id IF NOT EXISTS FOR (n:Symbol) REQUIRE n.id IS UNIQUE;
 CREATE CONSTRAINT envvar_id IF NOT EXISTS FOR (n:EnvVar) REQUIRE n.id IS UNIQUE;
 CREATE CONSTRAINT journey_id IF NOT EXISTS FOR (n:Journey) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT flow_id IF NOT EXISTS FOR (n:Flow) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT phase_id IF NOT EXISTS FOR (n:Phase) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT recipe_id IF NOT EXISTS FOR (n:Recipe) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT promptasset_id IF NOT EXISTS FOR (n:PromptAsset) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT capability_id IF NOT EXISTS FOR (n:Capability) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT effect_id IF NOT EXISTS FOR (n:Effect) REQUIRE n.id IS UNIQUE;
 CREATE CONSTRAINT sourceref_id IF NOT EXISTS FOR (n:SourceRef) REQUIRE n.id IS UNIQUE;

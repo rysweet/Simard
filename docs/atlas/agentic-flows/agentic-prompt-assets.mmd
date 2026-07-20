@@ -1,0 +1,30 @@
+flowchart TD
+  %% Layer 9 - Agentic flow: prompt assets (prompt_assets/simard/*)
+  subgraph Repo["prompt_assets/simard/ (version-controlled truth)"]
+    recipes["recipes/*.yaml (22)\nOODA + goal + merge + journal + disk + observe recipes"]
+    overseer["overseer/*.md (7)\nobserve, problem_to_brief, escalation_triage,\ndeploy_gate, pr_verify, self_diagnose"]
+    policies["policies/goal-session-capabilities.toml\n(typed-OODA capability grants)"]
+    terminals["terminal_recipes/*.simard-terminal + copilot-submit.json"]
+  end
+
+  Repo --> deploy["deployment to runtime\n~/.simard/prompt_assets/simard/ (hot-reload copy)\nvia operator/CI + amplihack update"]
+  deploy --> direct["DIRECT reads (most common):\nrecipes via resolve_recipe_path (recipe-runner-rs reads the .yaml)\npolicy via TypedGoalSessionRoute::load_policy\noverseer .md referenced in briefs"]
+  deploy --> store["GENERIC loader (when a prompt payload is loaded in-process):\nFilePromptAssetStore::load -> canonicalize + validate_prompt_asset_path\nsrc/prompt_assets.rs"]
+  direct --> agent
+  store --> ref["PromptAssetRef {id, relative_path} -> PromptAsset {contents}"]
+
+  ref --> delivery["prompt_delivery: size-gated transport\ninline &le;8KiB / stdin 8-100KiB / tempfile &le;16MiB\nAMPLIHACK_PROMPT_DELIVERY override  src/prompt_delivery/"]
+  delivery --> agent["agent subprocess (recipe-runner / engineer)"]
+
+  %% freshness path
+  Repo --> freshgate["amplihack_freshness_gate\nruns 'amplihack update' pre-spawn (TTL, lock, strict mode)\nsrc/amplihack_freshness_gate/"]
+  freshgate --> deploy
+
+  %% consumers (cross-layer links)
+  recipes -.consumed by.-> c1["OODA RecipeBrain / stewardship / journal / disk / typed-OODA"]
+  overseer -.consumed by.-> c2["src/overseer/* (diagnosis, intervention, observe)"]
+  policies -.loaded by.-> c3["TypedGoalSessionRoute::load_policy  src/typed_ooda/route.rs"]
+  terminals -.consumed by.-> c4["terminal_session / copilot_task_submit"]
+
+  classDef recipe fill:#fff6df,stroke:#d9a441;
+  class recipes,overseer,policies,terminals recipe;
