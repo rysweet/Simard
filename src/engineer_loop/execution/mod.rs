@@ -219,7 +219,11 @@ where
                     }
                 }
                 Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
+                Err(error) => {
+                    tracing::warn!(%error, "pipe drainer read error; capture may be truncated");
+                    truncated = true;
+                    break;
+                }
             }
         }
         if truncated {
