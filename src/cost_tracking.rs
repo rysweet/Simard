@@ -449,13 +449,16 @@ mod tests {
         assert_eq!(summary.period, "test-period");
     }
 
+    /// The streaming summary path (`summarize_filtered`, exercised via
+    /// `daily_summary`) must skip blank and malformed JSONL lines and count only
+    /// the valid entries — testing the real production code, not a re-implemented
+    /// copy of the skip logic.
     #[test]
-    fn read_entries_handles_empty_lines() {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("test-cost-tracking");
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("test-empty-lines.jsonl");
+    #[serial_test::serial(cognitive_memory)]
+    fn summarize_filtered_skips_empty_and_malformed_lines() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("empty-lines.jsonl");
+        let _guard = EnvVarGuard::set("SIMARD_COST_LEDGER_PATH", &path);
 
         let entry = CostEntry {
             timestamp: Utc::now(),
@@ -474,20 +477,14 @@ mod tests {
         writeln!(f, "{json_line}").unwrap();
         drop(f);
 
-        let file = fs::File::open(&path).unwrap();
-        let reader = BufReader::new(file);
-        let mut entries = Vec::new();
-        for line in reader.lines() {
-            let line = line.unwrap();
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            if let Ok(e) = serde_json::from_str::<CostEntry>(trimmed) {
-                entries.push(e);
-            }
-        }
-        assert_eq!(entries.len(), 2);
-        fs::remove_dir_all(&dir).ok();
+        // daily_summary streams the ledger via summarize_filtered; both entries
+        // carry today's timestamp, so only the two valid rows are counted.
+        let summary = daily_summary().expect("daily_summary should stream the override ledger");
+        assert_eq!(
+            summary.entry_count, 2,
+            "blank and malformed lines must be skipped, valid entries counted"
+        );
+        assert_eq!(summary.total_prompt_tokens, 20);
+        assert_eq!(summary.total_completion_tokens, 10);
     }
 }
