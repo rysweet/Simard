@@ -46,8 +46,9 @@ pub use gh::{
 };
 pub use report::render_human;
 pub use steward::{
-    CiIssueResolver, RealCiIssueResolver, ResolutionOutcome, ci_failure_signature,
-    ci_signature_for, file_issues_for_report, resolve_issues_for_report,
+    CiIssueResolver, IssueFilingReport, IssueResolutionReport, RealCiIssueResolver,
+    ResolutionOutcome, UnauthorizedSkip, ci_failure_signature, ci_signature_for,
+    file_issues_for_report, resolve_issues_for_report,
 };
 pub use types::{
     FleetSnapshot, RepoSnapshot, RunConclusion, WorkflowRun, WorkflowSnapshot, WorkflowState,
