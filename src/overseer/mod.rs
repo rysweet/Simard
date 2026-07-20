@@ -56,6 +56,7 @@ pub mod diagnosis;
 pub mod ecosystem_observe;
 pub mod failure_sink;
 pub mod guardrails;
+pub mod health_review;
 pub mod intervention;
 pub mod launch;
 pub mod meeting_ops;
@@ -106,7 +107,8 @@ pub use capabilities::{
 };
 pub use config::{
     daily_budget_usd, gap_scan_enabled, gap_scan_every_n, goal_health_enabled,
-    memory_recall_enabled, overseer_acting_enabled, overseer_author_login, overseer_enabled,
+    health_review_enabled, health_review_service_unit, memory_recall_enabled,
+    overseer_acting_enabled, overseer_author_login, overseer_enabled,
 };
 pub use diagnosis::{FailureCause, FailureDiagnosis, classify_terminal_failure};
 pub use guardrails::{
@@ -304,6 +306,29 @@ pub struct Overseer {
     /// status field + a single dual-channel NotifyOperator), never re-sent every
     /// tick while it stays disabled.
     merge_reasoning_disabled_notified: bool,
+    /// The agentic **health-review** rail ([standing]): the thin
+    /// [`health_review::HealthReviewer`] seam that invokes the
+    /// `overseer-health-review` recipe on the Overseer cadence — an AGENT reads
+    /// the OODA journal + `simard status` + `simard goal list`, detects
+    /// crash-loops / shared failure signatures, and reasons to typed remediation
+    /// DECISIONS — and routes each into the SAME gated `LaunchRecipe` /
+    /// `EscalateBlockedGoal` path every other action uses. `None` until wired by
+    /// `build_overseer`; when absent (bare constructor / tests) the pass is
+    /// skipped and the Overseer behaves exactly as before. Rust never reads the
+    /// journal, counts a failure, or encodes a threshold — the observation and
+    /// the remediation judgment live entirely in the agent's reasoning.
+    health_reviewer: Option<Box<dyn health_review::HealthReviewer>>,
+    /// Whether the agentic health-review rail is enabled (dedicated config
+    /// opt-out `SIMARD_OVERSEER_HEALTH_REVIEW`, on top of the shared
+    /// `SIMARD_OVERSEER_GAP_SCAN` scan throttle). Off in the bare constructor;
+    /// `build_overseer` sets it from [`config::health_review_enabled`].
+    health_review_enabled: bool,
+    /// Every-N cadence for the health-review pass (reuses the gap-scan cadence
+    /// knob, like the ecosystem/merge-queue passes). Clamped to a floor of 1 by
+    /// [`ecosystem_observe::should_observe`].
+    health_review_every_n: u64,
+    /// Monotonic tick counter driving the health-review every-N cadence.
+    health_review_tick: u64,
 }
 
 /// The reaper's injected dependencies, bundled so the `Overseer` carries one
@@ -453,6 +478,10 @@ impl Overseer {
             merge_queue_every_n: 1,
             merge_queue_tick: 0,
             merge_reasoning_disabled_notified: false,
+            health_reviewer: None,
+            health_review_enabled: false,
+            health_review_every_n: 1,
+            health_review_tick: 0,
         }
     }
 
@@ -537,6 +566,31 @@ impl Overseer {
     /// sets this from [`config::whisper_enabled`].
     pub fn with_whisper_enabled(mut self, enabled: bool) -> Self {
         self.whisper_enabled = enabled;
+        self
+    }
+
+    /// Wire the live agentic health-review rail ([standing]): the thin
+    /// [`health_review::HealthReviewer`] seam that invokes the
+    /// `overseer-health-review` recipe and the every-N cadence. Absent by
+    /// default; `build_overseer` wires it with a production recipe-runner. Gated
+    /// by both the dedicated [`Self::with_health_review_enabled`] opt-out and the
+    /// shared [`Self::with_gap_scan_enabled`] scan throttle.
+    pub fn with_health_reviewer(
+        mut self,
+        reviewer: Box<dyn health_review::HealthReviewer>,
+        every_n: u64,
+    ) -> Self {
+        self.health_reviewer = Some(reviewer);
+        self.health_review_every_n = every_n;
+        self
+    }
+
+    /// Enable/disable the agentic health-review rail (dedicated config opt-out
+    /// `SIMARD_OVERSEER_HEALTH_REVIEW`). Off by default; the daemon sets this from
+    /// [`config::health_review_enabled`]. When off, the pass is skipped even while
+    /// the shared gap-scan throttle is on.
+    pub fn with_health_review_enabled(mut self, enabled: bool) -> Self {
+        self.health_review_enabled = enabled;
         self
     }
 
@@ -766,6 +820,16 @@ impl Overseer {
         // gap-scan survey as the cross-repo observation SOURCE.
         self.observe_ecosystem(&observed, &in_flight, &mut launches, &mut plan);
 
+        // Live agentic health-review ([standing]): on the Overseer cadence, the
+        // thin rail invokes the `overseer-health-review` recipe — an AGENT reads
+        // the OODA journal + `simard status` + `simard goal list`, detects
+        // crash-loops / shared failure signatures (systemic-vs-per-goal root
+        // cause), and REASONS to typed remediation DECISIONS. Rust never reads the
+        // journal, counts a failure, or encodes a threshold; it only schedules the
+        // recipe and routes each parsed `LaunchRecipe` / `EscalateBlockedGoal`
+        // through the SAME gate every other action uses.
+        self.health_review(&observed, &mut launches, &mut plan);
+
         Ok(CycleReport {
             observed,
             signals,
@@ -850,7 +914,73 @@ impl Overseer {
         plan.push(planned);
     }
 
-    /// One agentic observe/orient merge-queue + issue reasoning pass (#4097),
+    /// One live agentic health-review pass ([standing]), appended to the cycle
+    /// plan when the rail is wired and due on the cadence.
+    ///
+    /// The observation AND the remediation judgment are entirely agentic: the
+    /// thin rail invokes the `overseer-health-review` recipe, whose agent reads
+    /// the OODA journal (`journalctl --user -u <unit>`), `simard status`, and
+    /// `simard goal list`, detects crash-loops and clusters a shared failure
+    /// signature across goals into a systemic-vs-per-goal root cause, and REASONS
+    /// to typed remediation DECISIONS — `LaunchRecipe` for a fix it can drive, or
+    /// `EscalateBlockedGoal` to notify the operator in plain English. Rust never
+    /// reads the journal, counts a failure, or encodes an N-identical-failure
+    /// threshold; it only schedules the recipe and routes each parsed
+    /// [`Intervention`] through the SAME gate (budget / launch-cap / sequencer /
+    /// in-flight-dedup / recursion guard) every other action uses.
+    ///
+    /// Fail-closed: an unwired reviewer, a disabled rail, an off cadence, a
+    /// `HEALTHY` verdict, or a degraded/failed recipe run all leave the plan
+    /// unchanged — never a fabricated launch or escalation.
+    fn health_review(
+        &mut self,
+        observed: &ObservedState,
+        launches: &mut usize,
+        plan: &mut Vec<PlannedIntervention>,
+    ) {
+        if self.health_reviewer.is_none() || !self.health_review_enabled {
+            return;
+        }
+        // Cadence: reuse the shared gap-scan enable throttle + the dedicated
+        // every-N knob (same family as the ecosystem/merge-queue passes). Advance
+        // the tick FIRST so a disabled/held pass still keeps the counter monotonic.
+        let tick = self.health_review_tick;
+        self.health_review_tick = self.health_review_tick.wrapping_add(1);
+        if !ecosystem_observe::should_observe(
+            self.gap_scan_enabled,
+            self.health_review_every_n,
+            tick,
+        ) {
+            return;
+        }
+        // Borrow the reviewer only for the call; the returned Vec is owned, so the
+        // immutable borrow of `self` ends before the mutable `gate` below.
+        let outcome = {
+            let reviewer = self
+                .health_reviewer
+                .as_ref()
+                .expect("health_reviewer presence checked above");
+            reviewer.review()
+        };
+        let interventions = match outcome {
+            Ok(ivs) => ivs,
+            Err(e) => {
+                tracing::warn!(
+                    target: "overseer::health_review",
+                    error = %e,
+                    "health-review pass failed — degrading to no review (no interventions fabricated)"
+                );
+                return;
+            }
+        };
+        // Route each parsed DECISION (LaunchRecipe / EscalateBlockedGoal) through
+        // the SAME gate every other action uses. A `HEALTHY` verdict parses to an
+        // empty Vec, so this loop simply adds nothing.
+        for iv in interventions {
+            let planned = self.gate(&iv, observed, launches);
+            plan.push(planned);
+        }
+    }
     /// enriching `observed` with `reasoned_prs` / `triaged_issues` /
     /// `merge_reasoning_status` and a re-narrowed `ready_prs` projection when the
     /// rail is wired and due on the cadence.
@@ -3458,6 +3588,248 @@ mod tests {
             calls[0].1,
             vec!["issue:rysweet/Simard#42".to_string()],
             "Simard's in-flight OODA refs are flattened and forwarded for dedup"
+        );
+    }
+
+    // ── [standing] agentic health-review wiring ───────────────────────────────
+
+    /// A scripted [`health_review::HealthReviewer`] returning a fixed outcome and
+    /// counting the reviews it saw, so a test can assert cadence + routing.
+    struct FakeHealthReviewer {
+        outcome: SimardResult<Vec<Intervention>>,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl FakeHealthReviewer {
+        fn returning(outcome: SimardResult<Vec<Intervention>>) -> Self {
+            Self {
+                outcome,
+                calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+        fn with_counter(
+            outcome: SimardResult<Vec<Intervention>>,
+        ) -> (Self, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+            let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            (
+                Self {
+                    outcome,
+                    calls: std::sync::Arc::clone(&calls),
+                },
+                calls,
+            )
+        }
+    }
+    impl health_review::HealthReviewer for FakeHealthReviewer {
+        fn review(&self) -> SimardResult<Vec<Intervention>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match &self.outcome {
+                Ok(ivs) => Ok(ivs.clone()),
+                Err(_) => Err(crate::error::SimardError::AdapterInvocationFailed {
+                    base_type: "overseer-health-review".to_string(),
+                    reason: "scripted failure".to_string(),
+                }),
+            }
+        }
+    }
+
+    fn launch_iv(desc: &str) -> Intervention {
+        Intervention::LaunchRecipe {
+            brief: RecipeBrief {
+                task_description: desc.to_string(),
+                target_repo: "rysweet/Simard".to_string(),
+                sequence_group: None,
+            },
+        }
+    }
+    fn escalate_iv(goal_id: &str) -> Intervention {
+        Intervention::EscalateBlockedGoal {
+            goal_id: goal_id.to_string(),
+            reason: "crash_loop".to_string(),
+            why: "shared failure signature across goals".to_string(),
+            problem: "The daemon is stuck retrying the same broken step over and over.".to_string(),
+            next_step: "A human should inspect the failing step and unblock it.".to_string(),
+            link: None,
+        }
+    }
+
+    fn overseer_with_health(outcome: SimardResult<Vec<Intervention>>, every_n: u64) -> Overseer {
+        // No process-health signal, so any intervention in the plan comes solely
+        // from the health-review rail.
+        Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(true)
+            .with_goal_health_enabled(true)
+            .with_health_reviewer(Box::new(FakeHealthReviewer::returning(outcome)), every_n)
+            .with_health_review_enabled(true)
+    }
+
+    #[test]
+    fn health_review_routes_launch_and_escalate_into_gated_plan() {
+        let outcome = Ok(vec![
+            launch_iv("fix the crash-looping provisioning step"),
+            escalate_iv("g-42"),
+        ]);
+        let mut ov = overseer_with_health(outcome, 1);
+        let report = ov.run_cycle().expect("cycle");
+        let launches: Vec<_> = report
+            .plan
+            .iter()
+            .filter(|p| p.intervention.label() == "launch_recipe")
+            .collect();
+        assert_eq!(launches.len(), 1, "the rail adds exactly one launch");
+        assert!(launches[0].admitted, "the launch is gated-admitted");
+        let escalations: Vec<_> = report
+            .plan
+            .iter()
+            .filter(|p| matches!(p.intervention, Intervention::EscalateBlockedGoal { .. }))
+            .collect();
+        assert_eq!(escalations.len(), 1, "the rail adds exactly one escalation");
+        assert!(
+            escalations[0].admitted,
+            "the escalation is gated-admitted with goal-health on"
+        );
+    }
+
+    #[test]
+    fn health_review_healthy_verdict_adds_nothing() {
+        // A HEALTHY verdict parses to an empty Vec at the rail; the pass adds
+        // nothing to the plan.
+        let mut ov = overseer_with_health(Ok(vec![]), 1);
+        let report = ov.run_cycle().expect("cycle");
+        assert!(
+            report.plan.iter().all(|p| {
+                p.intervention.label() != "launch_recipe"
+                    && !matches!(p.intervention, Intervention::EscalateBlockedGoal { .. })
+            }),
+            "a HEALTHY review fabricates no intervention"
+        );
+    }
+
+    #[test]
+    fn health_review_failure_degrades_without_intervention() {
+        let mut ov = overseer_with_health(
+            Err(crate::error::SimardError::AdapterInvocationFailed {
+                base_type: "overseer-health-review".to_string(),
+                reason: "boom".to_string(),
+            }),
+            1,
+        );
+        let report = ov
+            .run_cycle()
+            .expect("cycle must not error when the rail fails");
+        assert!(
+            report.plan.iter().all(|p| {
+                p.intervention.label() != "launch_recipe"
+                    && !matches!(p.intervention, Intervention::EscalateBlockedGoal { .. })
+            }),
+            "a rail failure degrades safely and fabricates nothing"
+        );
+    }
+
+    #[test]
+    fn health_review_skipped_when_gap_scan_disabled() {
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(false) // shared throttle disables the rail
+            .with_goal_health_enabled(true)
+            .with_health_reviewer(
+                Box::new(FakeHealthReviewer::returning(Ok(vec![launch_iv("fix")]))),
+                1,
+            )
+            .with_health_review_enabled(true);
+        let report = ov.run_cycle().expect("cycle");
+        assert!(
+            report
+                .plan
+                .iter()
+                .all(|p| p.intervention.label() != "launch_recipe"),
+            "the gap-scan opt-out also disables the health-review rail"
+        );
+    }
+
+    #[test]
+    fn health_review_skipped_when_dedicated_flag_disabled() {
+        // Reviewer wired, gap-scan on, but the dedicated opt-out is off.
+        let (reviewer, calls) = FakeHealthReviewer::with_counter(Ok(vec![launch_iv("fix")]));
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(true)
+            .with_goal_health_enabled(true)
+            .with_health_reviewer(Box::new(reviewer), 1)
+            .with_health_review_enabled(false);
+        let report = ov.run_cycle().expect("cycle");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a disabled rail never invokes the reviewer"
+        );
+        assert!(
+            report
+                .plan
+                .iter()
+                .all(|p| p.intervention.label() != "launch_recipe"),
+            "a disabled rail contributes nothing"
+        );
+    }
+
+    #[test]
+    fn health_review_respects_every_n_cadence() {
+        // every_n = 2 → review on ticks 0, 2; skip 1, 3.
+        let mut ov = overseer_with_health(Ok(vec![launch_iv("fix")]), 2);
+        let launched = |r: &CycleReport| {
+            r.plan
+                .iter()
+                .any(|p| p.intervention.label() == "launch_recipe")
+        };
+        assert!(launched(&ov.run_cycle().unwrap()), "tick 0 reviews");
+        assert!(!launched(&ov.run_cycle().unwrap()), "tick 1 skipped");
+        assert!(launched(&ov.run_cycle().unwrap()), "tick 2 reviews");
+        assert!(!launched(&ov.run_cycle().unwrap()), "tick 3 skipped");
+    }
+
+    #[test]
+    fn health_review_unwired_is_a_noop() {
+        // No `.with_health_reviewer(...)` → the pass is skipped entirely.
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(true);
+        let report = ov.run_cycle().expect("cycle");
+        assert!(
+            report.plan.iter().all(|p| {
+                p.intervention.label() != "launch_recipe"
+                    && !matches!(p.intervention, Intervention::EscalateBlockedGoal { .. })
+            }),
+            "an unwired rail never contributes anything"
+        );
+    }
+
+    #[test]
+    fn health_review_escalation_held_when_goal_health_disabled() {
+        // Reviewer emits an escalation, but goal-board health is opted out: the
+        // gate HOLDS it (present, not admitted) rather than acting.
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(true)
+            .with_goal_health_enabled(false)
+            .with_health_reviewer(
+                Box::new(FakeHealthReviewer::returning(Ok(vec![escalate_iv("g-7")]))),
+                1,
+            )
+            .with_health_review_enabled(true);
+        let report = ov.run_cycle().expect("cycle");
+        let escalations: Vec<_> = report
+            .plan
+            .iter()
+            .filter(|p| matches!(p.intervention, Intervention::EscalateBlockedGoal { .. }))
+            .collect();
+        assert_eq!(
+            escalations.len(),
+            1,
+            "the escalation is present in the plan"
+        );
+        assert!(
+            !escalations[0].admitted,
+            "goal-health opt-out holds the escalation (not admitted)"
         );
     }
 
