@@ -160,6 +160,23 @@ progress log below.)
   fuzzy "prove against the original on a shared fixture / ratify each row"
   framing), and resolve the two open scope questions (web UI, pack "skills") as
   OUT-OF-SCOPE so no operator decision blocks closure. No human input required.
+- **2026-07-20 (triage / root-cause reconciliation + Signal record)** — Closing
+  the loop on the course-correction above. The escalation seed hypothesis was
+  "the finish line can't be measured automatically." Inspection reconciles this
+  to a **false 'unclear-criteria' read**: the done-gate is *already*
+  machine-checkable (the two green `cargo test` commands); it only *looked*
+  criteria-less because it is a large, still-open effort and one leftover fuzzy
+  phrase made an objective gate read as subjective. So the right correction is
+  re-affirm-and-sharpen (done above), not rewrite an unmeasurable gate. This
+  also confirms the no-progress safeguard will **not** re-flag the goal: the
+  ordered backlog gives every cycle a concrete next step (so no `NO ACTION`
+  stall), the finish condition is objective and drift-free, and the two side
+  questions are resolved OUT-OF-SCOPE (so no dangling operator decision). The
+  goal stays OPEN by design (`KGP-T3`, `KGP-Q5` remain) and closes automatically
+  when the two commands are green on `main`. The plain-English Signal transcript
+  sent to the operator (one message per triage step, jargon-free) and the full
+  reconciliation are recorded in
+  [`docs/investigation/kgpacks-rs-escalation-triage-2026-07-20.md`](../docs/investigation/kgpacks-rs-escalation-triage-2026-07-20.md).
 - **2026-07-20** — **KGP-Q4 closed** (correctness + injection-shape removal):
   `query_articles` no longer string-interpolates keywords into its `LIKE`
   clauses. Each distinct keyword is now bound as a parameter (`?n`) built by the
