@@ -214,25 +214,38 @@ fn open_ledger_file(path: &std::path::Path) -> std::io::Result<fs::File> {
 
 /// Tighten the `.simard/costs` (and its parent `.simard`) directories to
 /// owner-only (`0700`) on Unix. The cost ledger holds session telemetry and is
-/// treated as private. Errors are ignored so a permission tweak never aborts a
-/// session turn; the directories still exist and are usable.
+/// treated as private. A failure never aborts a session turn (the directories
+/// still exist and are usable), but it is surfaced via `tracing::warn!` so a
+/// degraded-permissions state is observable rather than silent.
 #[cfg(unix)]
 fn harden_ledger_dirs(costs_dir: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
     for dir in [Some(costs_dir), costs_dir.parent()].into_iter().flatten() {
-        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+        if let Err(e) = fs::set_permissions(dir, fs::Permissions::from_mode(0o700)) {
+            tracing::warn!(
+                dir = %dir.display(),
+                error = %e,
+                "failed to restrict cost-ledger directory to 0700; continuing with existing permissions"
+            );
+        }
     }
 }
 
 #[cfg(not(unix))]
 fn harden_ledger_dirs(_costs_dir: &std::path::Path) {}
 
-/// Tighten the ledger file to owner read/write only (`0600`) on Unix. Errors
-/// are ignored for the same degrade-safe reason as [`harden_ledger_dirs`].
+/// Tighten the ledger file to owner read/write only (`0600`) on Unix. A failure
+/// is degrade-safe like [`harden_ledger_dirs`] and surfaced via `tracing::warn!`
+/// so a weakened file mode is observable rather than silent.
 #[cfg(unix)]
 fn harden_ledger_file(file: &fs::File) {
     use std::os::unix::fs::PermissionsExt;
-    let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
+    if let Err(e) = file.set_permissions(fs::Permissions::from_mode(0o600)) {
+        tracing::warn!(
+            error = %e,
+            "failed to restrict cost-ledger file to 0600; continuing with existing permissions"
+        );
+    }
 }
 
 #[cfg(not(unix))]
