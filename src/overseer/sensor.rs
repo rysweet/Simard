@@ -18,6 +18,7 @@
 //! - File deduped issues: `stewardship::process_orchestrator_run` (via
 //!   [`StewardshipIssueFiler`](crate::overseer::observer::StewardshipIssueFiler)).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -310,7 +311,11 @@ pub fn detect_workstream_gaps(
     anomalies: &[String],
     coverage: &[String],
 ) -> Vec<GapItem> {
-    let is_covered = |sig: &str| coverage.iter().any(|c| c == sig);
+    // O(1) coverage membership: build the lookup set once instead of a linear
+    // scan of `coverage` per goal/issue/anomaly candidate (was O(candidates ×
+    // coverage)).
+    let covered: HashSet<&str> = coverage.iter().map(String::as_str).collect();
+    let is_covered = |sig: &str| covered.contains(sig);
     let mut gaps: Vec<GapItem> = Vec::new();
 
     // 1. Goal board — uncovered high-priority goals.
@@ -453,6 +458,11 @@ const GAP_COVERAGE_STAMP_PREFIX: &str = "workstream-gap:";
 ///     exactly the `coverage` slice [`detect_workstream_gaps`] consumes.
 pub fn extract_gap_coverage_signatures(issues: &[GhIssue]) -> Vec<String> {
     let mut coverage: Vec<String> = Vec::new();
+    // First-seen-order dedup with O(1) membership: `seen` borrows each stamp
+    // straight from the issue bodies, so duplicates are dropped without the
+    // O(n²) `coverage.contains` scan and without allocating a `String` per
+    // repeat.
+    let mut seen: HashSet<&str> = HashSet::new();
     for issue in issues {
         for line in issue.body.lines() {
             let line = line.trim();
@@ -468,9 +478,8 @@ pub fn extract_gap_coverage_signatures(issues: &[GhIssue]) -> Vec<String> {
             if !is_valid_gap_signature(sig) {
                 continue;
             }
-            let sig = sig.to_string();
-            if !coverage.contains(&sig) {
-                coverage.push(sig);
+            if seen.insert(sig) {
+                coverage.push(sig.to_string());
             }
         }
     }
