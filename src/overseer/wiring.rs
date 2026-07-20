@@ -2386,4 +2386,173 @@ mod tests {
             "the final capped entry must summarise the overflow (e.g. '(+N more)'): {last:?}"
         );
     }
+
+    // ── gap-scan cross-process coverage seeding (BoardGoalCurator, #4344 P4) ──
+    //
+    // These pin the wiring GLUE the pure-detector tests (`tests_gap_scan.rs`)
+    // cannot reach: `BoardGoalCurator::open_gap_coverage_signatures` →
+    // `GhClient::search_issues(repo, "workstream-gap:")` →
+    // `extract_gap_coverage_signatures` → `detect_workstream_gaps`, plus the
+    // fail-safe degrade path when the `gh` query errors. Everything runs against
+    // a REAL in-memory cognitive board and a recording `gh` fake — no network.
+
+    use crate::goal_curation::ActiveGoal;
+    use crate::stewardship::gh_client::{GhClient, GhIssue};
+
+    /// The seeded uncovered p1 goal's id; its gap signature is `goal:<id>`.
+    const GAP_GOAL_ID: &str = "harden-amplihack-rs-recipes-tool";
+
+    /// Records every `search_issues(repo, signature)` call and replays a
+    /// preloaded result, so the coverage-seeding glue is observable end-to-end
+    /// with zero network. The `Ok` variant seeds coverage from stamped issues;
+    /// the `Err` variant exercises the fail-safe degrade path.
+    struct RecordingGh {
+        issues: Vec<GhIssue>,
+        fail: bool,
+        calls: Mutex<Vec<(String, String)>>,
+    }
+    impl RecordingGh {
+        fn returning(issues: Vec<GhIssue>) -> Self {
+            Self {
+                issues,
+                fail: false,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+        fn failing() -> Self {
+            Self {
+                issues: Vec::new(),
+                fail: true,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+        fn calls(&self) -> Vec<(String, String)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+    impl GhClient for RecordingGh {
+        fn search_issues(
+            &self,
+            repo: &str,
+            signature: &str,
+        ) -> crate::error::SimardResult<Vec<GhIssue>> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((repo.to_string(), signature.to_string()));
+            if self.fail {
+                return Err(crate::error::SimardError::StewardshipGhCommandFailed {
+                    reason: "boom: gh issue list failed".to_string(),
+                });
+            }
+            Ok(self.issues.clone())
+        }
+        fn create_issue(
+            &self,
+            _repo: &str,
+            _title: &str,
+            _body: &str,
+        ) -> crate::error::SimardResult<GhIssue> {
+            unreachable!("gap-scan coverage seeding never creates issues")
+        }
+    }
+
+    /// A real in-memory cognitive board seeded with a single uncovered p1 goal
+    /// whose gap signature is `goal:GAP_GOAL_ID`.
+    fn seeded_board_memory() -> Arc<dyn CognitiveMemoryOps> {
+        let mem: Arc<dyn CognitiveMemoryOps> = Arc::new(
+            crate::cognitive_memory::LibraryCognitiveMemory::in_memory()
+                .expect("in-memory cognitive store"),
+        );
+        let mut board = GoalBoard::new();
+        board.active = vec![ActiveGoal::new(
+            GAP_GOAL_ID,
+            "Cover uncovered backlog: harden amplihack-rs recipes tool",
+            1,
+        )];
+        save_goal_board(&board, mem.as_ref()).expect("seed goal board");
+        mem
+    }
+
+    /// An open issue stamped with the covering `workstream-gap:` signature for
+    /// the seeded gap (the EXISTING `stewardship-signature:` dedup contract).
+    fn covering_issue() -> GhIssue {
+        GhIssue {
+            number: 4337,
+            url: "https://github.com/rysweet/Simard/issues/4337".to_string(),
+            title: "Cover uncovered backlog workstream(s)".to_string(),
+            body: format!(
+                "Covering workstream for an uncovered gap.\n\n\
+                 stewardship-signature: workstream-gap:goal:{GAP_GOAL_ID}\n"
+            ),
+        }
+    }
+
+    #[test]
+    fn board_curator_without_gh_surfaces_the_uncovered_gap() {
+        // Baseline: no `gh` client ⇒ coverage degrades to empty and the real,
+        // uncovered p1 goal IS reported as a gap. This proves the gap is genuine
+        // so the suppression asserted below is caused by coverage, not by an
+        // empty board.
+        let curator = BoardGoalCurator::new(seeded_board_memory());
+        let gaps = curator.workstream_gaps(&[]).expect("workstream_gaps");
+        assert_eq!(
+            gaps.iter().map(|g| g.signature.clone()).collect::<Vec<_>>(),
+            vec![format!("goal:{GAP_GOAL_ID}")],
+            "the uncovered p1 goal must surface as exactly one gap: {gaps:?}"
+        );
+    }
+
+    #[test]
+    fn board_curator_seeds_coverage_from_open_gap_stamped_issues() {
+        // An open issue already covers the gap ⇒ the wiring seeds `coverage`
+        // from its `workstream-gap:` stamp and the detector suppresses the gap
+        // (the cross-process dedup that survives a daemon restart).
+        let gh = Arc::new(RecordingGh::returning(vec![covering_issue()]));
+        let curator = BoardGoalCurator::with_issue_coverage(
+            seeded_board_memory(),
+            gh.clone(),
+            "rysweet/Simard",
+        );
+
+        let gaps = curator.workstream_gaps(&[]).expect("workstream_gaps");
+        assert!(
+            gaps.is_empty(),
+            "an open workstream-gap-stamped issue must suppress the gap: {gaps:?}"
+        );
+
+        // The glue must query the coverage repo with the `workstream-gap:`
+        // signature namespace — exactly once — the contract the extractor
+        // validates against.
+        assert_eq!(
+            gh.calls(),
+            vec![("rysweet/Simard".to_string(), "workstream-gap:".to_string())],
+            "coverage seeding must issue exactly one search for the gap namespace"
+        );
+    }
+
+    #[test]
+    fn board_curator_degrades_to_the_gap_when_the_coverage_query_fails() {
+        // A `gh`/parse failure must NOT drop the gap: coverage degrades to empty
+        // (logged), the scan falls back to the in-memory gate, and the gap is
+        // surfaced once — ambiguity resolves toward surfacing it.
+        let gh = Arc::new(RecordingGh::failing());
+        let curator = BoardGoalCurator::with_issue_coverage(
+            seeded_board_memory(),
+            gh.clone(),
+            "rysweet/Simard",
+        );
+
+        let gaps = curator.workstream_gaps(&[]).expect("workstream_gaps");
+        assert_eq!(
+            gaps.iter().map(|g| g.signature.clone()).collect::<Vec<_>>(),
+            vec![format!("goal:{GAP_GOAL_ID}")],
+            "a failed coverage query must degrade to the gap, never drop it: {gaps:?}"
+        );
+        assert_eq!(
+            gh.calls().len(),
+            1,
+            "the failing coverage query is still attempted exactly once"
+        );
+    }
 }
