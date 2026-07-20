@@ -8,7 +8,7 @@ Named after [Suzanne Simard](https://en.wikipedia.org/wiki/Suzanne_Simard), the 
 
 Simard is a focused engineering runtime, written in Rust, that operates like a disciplined software engineer. She inspects local repositories, forms bounded plans with explicit verification, executes through terminal actions, records evidence, and improves through reviewable loops.
 
-Simard is **not** a wrapper around any single agent framework. She is a terminal-native identity with her own runtime, prompt assets, memory layers, and benchmark gym, and she composes work over a pluggable set of agent **base types** — backend execution substrates that include local harnesses, the GitHub Copilot SDK, Claude Code SDK, Microsoft Agent Framework, and the amplihack / amplihack-rs goal-seeking agent. Each substrate is one option among several; none of them define what Simard is.
+Simard is **not** a wrapper around any single agent framework. She is an agentic engineering director with her own runtime, prompt assets, memory layers, and benchmark gym, and she composes work over a pluggable set of agent **base types** — backend execution substrates that include local harnesses, the GitHub Copilot SDK, Claude Code SDK, Microsoft Agent Framework, and the rustyclawd/amplihack-rs goal-seeking agents. Each substrate is one option among several; The engineering director is one implementation - but the plat form can be used to build other types of continuously running autonomous agents.
 
 For the full design contract, see [Specs/ProductArchitecture.md](Specs/ProductArchitecture.md).
 
@@ -18,7 +18,7 @@ Simard exposes five user-visible operating modes, each with its own success crit
 
 | Mode | Purpose | v1 status |
 |------|---------|-----------|
-| **Engineer** | Accept a concrete task, inspect the repo, form a bounded plan, execute through terminal actions, and report outcomes with evidence. | v1 shipped — read-only repo inspection plus one narrow structured edit on a clean repo; bounded `engineer terminal*` session surfaces and the separate repo-grounded `engineer run` / `engineer read` audit companion are operator-visible. |
+| **Engineer** | Accept a concrete task, inspect the repo, form a bounded plan, execute through coding agent actions, and report outcomes with evidence. | v1 shipped — read-only repo inspection plus one narrow structured edit on a clean repo; bounded `engineer terminal*` session surfaces and the separate repo-grounded `engineer run` / `engineer read` audit companion are operator-visible. |
 | **Meeting** | Help humans think, decide, and record architecture or planning outcomes without silently drifting into implementation. | v1 shipped — CLI REPL and durable meeting record readback; explicit handoff into engineer mode through a shared `state-root`. |
 | **Goal-curation** | Curate a durable backlog and an explicit active top-5 goal list without pretending implementation work happened. | v1 shipped — durable goal register with active/backlog separation and read-only inspection. |
 | **Improvement-curation** | Consume persisted review findings, require explicit operator approval or deferral, and promote accepted improvements into durable priorities without mutating code. | v1 shipped — approve / defer / promote workflow with read-only state inspection. |
