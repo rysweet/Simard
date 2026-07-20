@@ -6,9 +6,17 @@ OODA daemon (graph store = embedded **lbug**; **NO kuzu, NO Python**).
 > Diagramming is investigation, not just documentation. This atlas exists to make the
 > whole system traceable from code truth and to surface structural contradictions.
 
-This refresh adds **Layer 9 — [Agentic Flows](./agentic-flows/README.md)**, mapping the six
-agentic control-plane flows (OODA loop, overseer tick, recipes, prompt assets, typed-OODA
-capability/effect model, cognitive-memory recall) and how they link across the other layers.
+This refresh re-runs the atlas against current code truth and updates
+**Layer 9 — [Agentic Flows](./agentic-flows/README.md)** where the source drifted
+since the last build: the **overseer verify+merge sub-pipeline** now maps the
+observe-stage draft-exclusion narrowing (#4339) and the act-stage `merge_ops` M2
+path (verify → poll-until-green → agentic `MergeJudge` → squash-merge →
+dual-channel notify), and the **cognitive-memory recall path** now maps the
+`recall_episodes_ranked` recall precision gate (`MIN_CLEAN_NEEDLE_LEN`) that
+drops sub-threshold recall noise fail-closed. Layer 9 maps the six agentic
+control-plane flows (OODA loop,
+overseer tick, recipes, prompt assets, typed-OODA capability/effect model,
+cognitive-memory recall) and how they link across the other layers.
 
 ## Graph backend
 
