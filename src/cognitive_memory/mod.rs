@@ -31,7 +31,7 @@ use crate::memory_cognitive::{
 ///
 /// Each field scales one scoring term; weights are un-normalized (only relative
 /// magnitudes matter). [`Default`] is the library-balanced baseline.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RecallWeightSet {
     /// Weight on keyword overlap between the query and the fact text.
     pub text_relevance: f64,
