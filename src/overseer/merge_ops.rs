@@ -564,6 +564,23 @@ impl PrOps for MergePrOps {
                 if !is_engineer_pr {
                     continue;
                 }
+                // Draft gate (#4339). A draft PR can NEVER be merged — `gh pr
+                // merge` fails server-side with "Pull Request is still a draft",
+                // wasting the merge-queue's per-tick attempt and pinning
+                // `prs_merged` at 0. Exclude it deterministically: admit ONLY a
+                // PR whose draft state is KNOWN-FALSE (`Some(false)`). A draft
+                // (`Some(true)`) OR unknown/absent draft state (`None`, field
+                // missing from the listing) is treated as NOT-ready and dropped,
+                // mirroring the fail-closed posture above. Pure NARROWING — it
+                // can only remove candidates, never broaden eligibility.
+                if pr.is_draft != Some(false) {
+                    eprintln!(
+                        "[simard] merge-queue: skipping draft PR #{} in {repo} \
+                         (drafts can never be merged)",
+                        pr.number
+                    );
+                    continue;
+                }
                 // Cheap objective pre-filter from the ALREADY-FETCHED listing
                 // fields — no extra `gh` read. The full MergeJudge runs later.
                 if evaluate_objective_gates(&pr.to_snapshot(), &self.base_allowlist).is_ok() {
@@ -665,6 +682,7 @@ impl PrOps for MergePrOps {
                 reasoned: (*r).clone(),
                 author_login: summary.author.clone(),
                 head_ref: summary.head_ref_name.clone(),
+                is_draft: summary.is_draft,
                 snapshot: summary.to_snapshot(),
             });
         }
@@ -1376,6 +1394,7 @@ new file mode 100644
             url: format!("https://github.com/rysweet/Simard/pull/{number}"),
             author: author.to_string(),
             labels: labels.iter().map(|s| s.to_string()).collect(),
+            is_draft: Some(false),
         }
     }
 
