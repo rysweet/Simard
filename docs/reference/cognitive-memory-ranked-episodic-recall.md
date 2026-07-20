@@ -404,6 +404,37 @@ Notes:
   once the recalled context is surfaced into the prompt). Per-action attribution
   (only the memory that drove the committed action) is a future refinement.
 
+### Ranked fact recall over the IPC socket (production daemon path)
+
+The per-phase ranked **fact** recall (`recall_facts_ranked`, issue #2329) crosses
+a socket in the primary production topology: the long-lived OODA daemon owns the
+`LibraryCognitiveMemory` store, and every other process (recipe steps, the
+meeting REPL, the engineer subprocess, the dashboard) reaches it through a
+`RemoteCognitiveMemory` **IPC client** (`connect_memory` prefers the live socket
+over a direct `LibraryCognitiveMemory::open`).
+
+The `CognitiveMemoryOps` trait default for `recall_facts_ranked` delegates to
+`search_facts`. That default is correct for a *terminal* non-library backend, but
+the IPC client is not terminal — it is a transport to a `LibraryCognitiveMemory`
+backend. If the client inherited the default it would send a `SearchFacts` RPC,
+and the server's word-boundary-**gated**, confidence-sorted keyword search would
+answer — silently discarding the six-signal, phase-weighted ranking **and** its
+`recall_precision_at_k` metric (both live only inside
+`LibraryCognitiveMemory::recall_facts_ranked`). On the daemon-backed path — the
+one that actually runs in production — the flagship ranked recall would be inert.
+
+To prevent that hollow success, `RemoteCognitiveMemory` **overrides**
+`recall_facts_ranked` to forward a dedicated `MemoryRequest::RecallFactsRanked`
+(carrying the `RecallWeightSet` across the wire), which the server dispatches to
+`memory.recall_facts_ranked(..)` — the genuine library ranker. This is the same
+additive-socket-forward pattern as `list_all_episodes` (#2627): mirror the
+library override on the socket tier instead of collapsing to the trait default.
+A behaviour-verifying transport round-trip test
+(`recall_facts_ranked_forwards_ranked_recall_over_socket`) pins it: a fact that
+`search_facts` gates out (no shared query word) must still be **present** in the
+socket client's `recall_facts_ranked` result — only true forwarding to the
+library ranker can satisfy that.
+
 ### Preparation wiring
 
 OODA preparation swaps the episode gather from the flat keyword scan to ranked
