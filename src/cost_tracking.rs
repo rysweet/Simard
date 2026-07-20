@@ -140,65 +140,82 @@ fn write_entry(entry: &CostEntry) -> std::io::Result<()> {
     Ok(())
 }
 
-fn read_entries() -> std::io::Result<Vec<CostEntry>> {
+impl CostSummary {
+    /// A zeroed summary for `period`, ready to accumulate entries into.
+    fn empty(period: String) -> Self {
+        Self {
+            period,
+            total_prompt_tokens: 0,
+            total_completion_tokens: 0,
+            total_cost_usd: 0.0,
+            entry_count: 0,
+        }
+    }
+
+    /// Fold a single entry's totals into this summary.
+    fn add(&mut self, entry: &CostEntry) {
+        self.total_prompt_tokens += entry.prompt_tokens_est;
+        self.total_completion_tokens += entry.completion_tokens_est;
+        self.total_cost_usd += entry.cost_usd_est;
+        self.entry_count += 1;
+    }
+}
+
+/// Stream the ledger once and fold entries matching `keep` into a summary.
+///
+/// Reads the JSONL file line-by-line and accumulates directly into the
+/// `CostSummary`, so peak memory is O(1) in the ledger size rather than
+/// materializing (then re-filtering) the full entry list. This matters because
+/// `daily_summary`/`weekly_summary` run on the OODA/overseer hot path.
+fn summarize_filtered<F>(period: String, keep: F) -> std::io::Result<CostSummary>
+where
+    F: Fn(&CostEntry) -> bool,
+{
+    let mut summary = CostSummary::empty(period);
     let path = ledger_path();
     if !path.exists() {
-        return Ok(Vec::new());
+        return Ok(summary);
     }
     let file = fs::File::open(&path)?;
-    let reader = BufReader::new(file);
-    let mut entries = Vec::new();
-    for line in reader.lines() {
+    for line in BufReader::new(file).lines() {
         let line = line?;
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        if let Ok(entry) = serde_json::from_str::<CostEntry>(trimmed) {
-            entries.push(entry);
+        if let Ok(entry) = serde_json::from_str::<CostEntry>(trimmed)
+            && keep(&entry)
+        {
+            summary.add(&entry);
         }
     }
-    Ok(entries)
+    Ok(summary)
 }
 
+/// Aggregate a slice of entries under `period` (test-only helper).
+#[cfg(test)]
 fn summarize(entries: &[CostEntry], period: &str) -> CostSummary {
-    let mut total_prompt = 0u64;
-    let mut total_completion = 0u64;
-    let mut total_cost = 0.0f64;
-    for e in entries {
-        total_prompt += e.prompt_tokens_est;
-        total_completion += e.completion_tokens_est;
-        total_cost += e.cost_usd_est;
+    let mut summary = CostSummary::empty(period.to_string());
+    for entry in entries {
+        summary.add(entry);
     }
-    CostSummary {
-        period: period.to_string(),
-        total_prompt_tokens: total_prompt,
-        total_completion_tokens: total_completion,
-        total_cost_usd: total_cost,
-        entry_count: entries.len() as u64,
-    }
+    summary
 }
 
 /// Return a cost summary for today (UTC).
 pub fn daily_summary() -> std::io::Result<CostSummary> {
-    let entries = read_entries()?;
     let today = Utc::now().date_naive();
-    let filtered: Vec<_> = entries
-        .into_iter()
-        .filter(|e| e.timestamp.date_naive() == today)
-        .collect();
-    Ok(summarize(&filtered, &format!("daily:{today}")))
+    summarize_filtered(format!("daily:{today}"), move |e| {
+        e.timestamp.date_naive() == today
+    })
 }
 
 /// Return a cost summary for the past 7 days (UTC).
 pub fn weekly_summary() -> std::io::Result<CostSummary> {
-    let entries = read_entries()?;
     let cutoff = Utc::now() - Duration::days(7);
-    let filtered: Vec<_> = entries
-        .into_iter()
-        .filter(|e| e.timestamp > cutoff)
-        .collect();
-    Ok(summarize(&filtered, "weekly:last-7-days"))
+    summarize_filtered("weekly:last-7-days".to_string(), move |e| {
+        e.timestamp > cutoff
+    })
 }
 
 #[cfg(test)]
