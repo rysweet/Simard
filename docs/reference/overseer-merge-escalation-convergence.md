@@ -153,9 +153,10 @@ enum MergeBlocker {
 
 The detail is sourced from the objective pre-filter (the failing check names) or
 the merge-judge result (e.g. `"the merge-readiness judge did not approve"`). It
-is trimmed, control-char-stripped, whitespace-collapsed, and length-bounded (200
-chars) by `sanitize_blocker_detail` before rendering — never a raw PR body, never
-a token. The classified **class** (`"not_ready"` / `"judge_refused"`) is what the
+is hardened through the shared `signal::sanitize_detail` before rendering —
+ANSI-stripped, control-char/whitespace-collapsed, token-shaped-secret redacted,
+and length-bounded — never a raw PR body, never a token. The classified **class**
+(`"not_ready"` / `"judge_refused"`) is what the
 convergence gate compares to detect a genuine state change.
 
 ## The convergence contract
@@ -256,8 +257,9 @@ class), and a sanitised `reason`:
 Logging discipline (same as every Overseer path): structured `tracing` / OTel
 only — **no `print!` / `println!`** (enforced by `deny.toml`). Only the classified
 `MergeBlocker` class and the `repo#pr` are rendered; no tokens, no verbatim PR
-bodies, and every interpolated detail is control-char-stripped and length-bounded
-by `sanitize_blocker_detail` against log injection.
+bodies, and every interpolated detail is ANSI-stripped, control-char-collapsed,
+secret-redacted, and length-bounded by the shared `signal::sanitize_detail`
+against log injection.
 
 ## Behavior contract (worked examples)
 

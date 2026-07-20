@@ -448,38 +448,23 @@ impl MergeBlocker {
         }
     }
 
-    /// A concise, sanitised operator-facing reason (no token, no raw PR body,
-    /// newline-stripped, length-bounded) naming the class and its detail.
+    /// A concise, operator-facing reason naming the class and its detail. The
+    /// detail is hardened through the shared [`signal::sanitize_detail`] (ANSI
+    /// strip, control/whitespace collapse, token-shaped-secret redaction, length
+    /// bound) so no token or raw PR body can reach a structured log or the
+    /// persisted activity feed.
     fn reason(&self) -> String {
-        match self {
-            MergeBlocker::NotReady { detail } => {
-                format!("not ready: {}", sanitize_blocker_detail(detail))
-            }
-            MergeBlocker::JudgeRefused { detail } => {
-                format!("judge refused: {}", sanitize_blocker_detail(detail))
-            }
-        }
-    }
-}
-
-/// Strip control characters (log-injection defence) and bound the length of a
-/// classified [`MergeBlocker`] detail before it reaches a structured log or the
-/// persisted activity feed — never a raw PR body, never a newline-carrying token.
-fn sanitize_blocker_detail(detail: &str) -> String {
-    const MAX: usize = 200;
-    let cleaned: String = detail
-        .trim()
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-    if cleaned.chars().count() > MAX {
-        let truncated: String = cleaned.chars().take(MAX).collect();
-        format!("{truncated}…")
-    } else if cleaned.is_empty() {
-        "no detail".to_string()
-    } else {
-        cleaned
+        let (label, detail) = match self {
+            MergeBlocker::NotReady { detail } => ("not ready", detail),
+            MergeBlocker::JudgeRefused { detail } => ("judge refused", detail),
+        };
+        let clean = signal::sanitize_detail(detail);
+        let clean = if clean.is_empty() {
+            "no detail".to_string()
+        } else {
+            clean
+        };
+        format!("{label}: {clean}")
     }
 }
 
