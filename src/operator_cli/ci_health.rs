@@ -32,8 +32,12 @@ Usage: simard ci-health [--json] [--no-cache] [--file-issues] [--exit-zero] [--f
                        open tracking issue whose workflow is GREEN again this
                        sweep is closed with a green-evidence comment, keeping
                        one open issue per *still-broken* workflow. Read-only by
-                       default; this flag opts in to the writes. Rejected with
-                       --from-json.
+                       default; this flag opts in to the writes. A failing repo
+                       the run's token cannot write (a governed sibling when the
+                       STEWARD_GH_TOKEN secret is absent) is reported as an
+                       unauthorized skip and does NOT abort the sweep — every
+                       writable repo is still reconciled and the scheduled run
+                       stays green. Rejected with --from-json.
   --exit-zero          Exit 0 even when the fleet has actionable failures, as
                        long as the sweep (and any --file-issues stewardship)
                        itself completed without an operational error. This is
@@ -215,21 +219,26 @@ pub(super) fn dispatch_ci_health_command(
 /// workflow must get a tracking issue), then resolution, so a resolution error
 /// can never starve filing. Resolution runs even when the fleet is green — a
 /// green fleet can still carry stale tracking issues from a since-recovered
-/// failure. Any `gh` failure propagates so the caller sees a non-zero exit
-/// (never a silent partial reconciliation).
+/// failure. A genuine `gh` failure (a transient outage, a parse error)
+/// propagates so the caller sees a non-zero exit (never a silent partial
+/// reconciliation). A cross-repo **authorization** denial — the token cannot
+/// write a governed sibling repo (no `STEWARD_GH_TOKEN`) — is instead reported
+/// loudly as a skip and does not abort the sweep, so one unwritable repo never
+/// starves reconciliation for the rest of the fleet nor turns the scheduled run
+/// red (the self-referential failure the `--exit-zero` contract avoids).
 fn steward_issues(
     report: &crate::ci_health::FleetReport,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if report.green {
         eprintln!("ci-health: fleet green; no actionable failures to file.");
     } else {
-        let outcomes =
+        let filing =
             file_issues_for_report(report, &RealGhClient::new(), &RealGhRunDiagnostics::new())?;
         eprintln!(
             "ci-health: filed/matched {} deduplicated tracking issue(s):",
-            outcomes.len()
+            filing.outcomes.len()
         );
-        for outcome in &outcomes {
+        for outcome in &filing.outcomes {
             match outcome {
                 StewardshipOutcome::FiledNew {
                     repo,
@@ -245,19 +254,23 @@ fn steward_issues(
                 } => eprintln!("  matched {repo}#{issue_number} [{signature}] {url}"),
             }
         }
+        report_unauthorized_skips(
+            &filing.skipped_unauthorized,
+            "could not file tracking issue(s) — token lacks write access to the failing repo",
+        );
     }
 
     // Resolution runs after filing so a resolution `gh` error can never starve
     // the correctness-critical filing path above.
-    let resolved = resolve_issues_for_report(report, &RealCiIssueResolver::new())?;
-    if resolved.is_empty() {
+    let resolution = resolve_issues_for_report(report, &RealCiIssueResolver::new())?;
+    if resolution.closed.is_empty() {
         eprintln!("ci-health: no recovered workflows with an open tracking issue to close.");
     } else {
         eprintln!(
             "ci-health: closed {} tracking issue(s) for now-green workflow(s):",
-            resolved.len()
+            resolution.closed.len()
         );
-        for outcome in &resolved {
+        for outcome in &resolution.closed {
             eprintln!(
                 "  closed  {repo}#{num} [{workflow}] {url}",
                 repo = outcome.repo,
@@ -267,7 +280,44 @@ fn steward_issues(
             );
         }
     }
+    report_unauthorized_skips(
+        &resolution.skipped_unauthorized,
+        "could not resolve tracking issue(s) — token lacks access to the repo",
+    );
     Ok(())
+}
+
+/// Print any cross-repo authorization skips loudly to stderr. A skip means the
+/// sweep detected a repo it could not reconcile (an unwritable governed sibling
+/// when `STEWARD_GH_TOKEN` is absent); surfacing it here keeps the failure
+/// visible — fail-safe, not fail-open — even though it no longer crashes the
+/// scheduled run. The failing repo/workflow is *also* present in the printed
+/// FleetReport, so the underlying red CI is never hidden.
+fn report_unauthorized_skips(skips: &[crate::ci_health::UnauthorizedSkip], headline: &str) {
+    if skips.is_empty() {
+        return;
+    }
+    eprintln!("ci-health: {} {headline}:", skips.len());
+    for skip in skips {
+        match &skip.workflow {
+            Some(workflow) => {
+                eprintln!(
+                    "  skipped {repo} [{workflow}]: {reason}",
+                    repo = skip.repo,
+                    reason = skip.reason
+                )
+            }
+            None => eprintln!(
+                "  skipped {repo}: {reason}",
+                repo = skip.repo,
+                reason = skip.reason
+            ),
+        }
+    }
+    eprintln!(
+        "  hint: configure the STEWARD_GH_TOKEN secret with fleet-wide issues:write \
+         to file/close these cross-repo tracking issues."
+    );
 }
 
 #[cfg(test)]
