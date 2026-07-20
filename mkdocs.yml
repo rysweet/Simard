@@ -164,6 +164,7 @@ nav:
     - Engineer-Claim Liveness Lease: concepts/engineer-claim-liveness-lease.md
     - Stale-Engineer-Claim Reaper: concepts/stale-engineer-claim-reaper.md
     - Tombstoned-Goal Engineer Reaper: concepts/tombstoned-goal-engineer-reaper.md
+    - Nested-Subprocess Orphan Guard (GroupChild): concepts/nested-subprocess-orphan-guard.md
   - Tutorials:
     - Complete a Typed OODA Cycle: tutorials/complete-a-typed-ooda-cycle.md
     - First Local Session: tutorials/run-your-first-local-session.md
@@ -198,6 +199,7 @@ nav:
     - Diagnose Journal E2BIG Spawn Failures: howto/diagnose-journal-e2big-spawn-failures.md
     - Diagnose Signal-Meeting E2BIG Spawn Failures: howto/diagnose-signal-meeting-e2big.md
     - Add a Safe Agent/Recipe Spawn Site: howto/add-a-safe-agent-spawn-site.md
+    - Add a Process-Group-Guarded Spawn: howto/add-a-process-group-guarded-spawn.md
     - Interpret Brain Confidence and Verify Completion: howto/interpret-brain-confidence-and-verify-completion.md
     - Configure Brain Introspection: howto/configure-brain-introspection.md
     - Start a Meeting: howto/start-a-meeting.md
@@ -279,6 +281,7 @@ nav:
     - OODA Capability API: reference/ooda-capability-api.md
     - Engineer-Claim Release & Reclaim API: reference/engineer-claim-release-api.md
     - Stale-Engineer-Claim Reaper API: reference/claim-reaper-api.md
+    - Process-Group Guard API (GroupChild): reference/process-group-guard-api.md
     - Tombstoned-Goal Engineer Reaper API: reference/tombstoned-goal-engineer-reaper-api.md
     - Typed OODA Goal-Session Deterministic Rails: reference/typed-ooda-goal-session-rails.md
     - Stable Goal-Session Identity API: reference/stable-goal-session-identity-api.md

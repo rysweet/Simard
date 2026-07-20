@@ -180,6 +180,19 @@ rather than firing `simard rollback` directly.
 | `phase=rolled_back`                                | Rollback succeeded.                                      | Look at `reason` for the trigger. Investigate.           |
 | `RollbackBackupCorrupt`                            | sha256 mismatch between `last-binary.json` and the most-recent `simard.bak.*` file. | Restore from your own backup; this is a refusal to silently overwrite a (possibly still-good) install with an unverified backup. |
 
+## Exec-handover and the process-group guard
+
+Simard ships a [`GroupChild` process-group guard](reference/process-group-guard-api.md)
+whose `Drop` group-kills a child's entire subtree on any failure exit path, so a
+failed or aborted nested run leaves no orphans. The safe-update **exec-handover**
+is the canonical *intentional exception* to that teardown: the incoming binary
+**must** outlive the parent it is replacing. When the handover spawn adopts the
+guard it does so with `GroupChild::disarm()`, which relinquishes ownership so
+`Drop` performs no teardown and the new process survives the swap — the textbook
+`disarm()` use case. (The guard is currently wired at the engineer-loop
+command-timeout path; the handover is a documented adoption candidate — see
+[How to add a process-group-guarded spawn](howto/add-a-process-group-guarded-spawn.md#step-5--disarm-only-for-an-intentional-survivor).)
+
 ## Engineer dispatch interlock
 
 `spawn_agent_for_goal` (the engineer-dispatch entry point in
