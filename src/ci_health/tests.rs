@@ -952,7 +952,7 @@ mod steward_issue_filing {
 
     use super::super::classify::{ActionableFailure, FleetReport};
     use super::super::diagnose::{FailedJob, RunDiagnosis, RunDiagnostics};
-    use super::super::steward::{ci_failure_signature, file_issues_for_report};
+    use super::super::steward::{UnauthorizedSkip, ci_failure_signature, file_issues_for_report};
     use crate::error::SimardError;
     use crate::stewardship::{GhClient, GhIssue, StewardshipOutcome};
 
@@ -962,6 +962,9 @@ mod steward_issue_filing {
         search: Mutex<HashMap<(String, String), Vec<GhIssue>>>,
         /// When set, every `search_issues` call returns this error.
         search_error: Mutex<Option<String>>,
+        /// Repos whose `create_issue` returns the given error (e.g. a cross-repo
+        /// authorization denial), keyed by repo slug.
+        create_error_for: Mutex<HashMap<String, String>>,
         search_calls: Mutex<Vec<(String, String)>>,
         create_calls: Mutex<Vec<(String, String, String)>>,
         /// Monotonic issue-number source for created issues.
@@ -983,6 +986,14 @@ mod steward_issue_filing {
         }
         fn fail_search(&self, reason: &str) {
             *self.search_error.lock().unwrap() = Some(reason.to_string());
+        }
+        /// Make `create_issue` fail for exactly `repo` with `reason` (used to
+        /// simulate a cross-repo `issues:write` denial on one sibling).
+        fn fail_create_for(&self, repo: &str, reason: &str) {
+            self.create_error_for
+                .lock()
+                .unwrap()
+                .insert(repo.to_string(), reason.to_string());
         }
         fn search_calls(&self) -> Vec<(String, String)> {
             self.search_calls.lock().unwrap().clone()
@@ -1021,6 +1032,9 @@ mod steward_issue_filing {
                 title.to_string(),
                 body.to_string(),
             ));
+            if let Some(reason) = self.create_error_for.lock().unwrap().get(repo).cloned() {
+                return Err(SimardError::StewardshipGhCommandFailed { reason });
+            }
             let mut n = self.next_number.lock().unwrap();
             let number = *n;
             *n += 1;
@@ -1124,7 +1138,8 @@ mod steward_issue_filing {
             &gh,
             &FakeDiagnostics::new(),
         )
-        .unwrap();
+        .unwrap()
+        .outcomes;
 
         assert_eq!(outcomes.len(), 2);
         // Every distinct failure is searched (in its own repo, by its signature)
@@ -1158,7 +1173,9 @@ mod steward_issue_filing {
         );
 
         let diag = FakeDiagnostics::new();
-        let outcomes = file_issues_for_report(&report(vec![f]), &gh, &diag).unwrap();
+        let outcomes = file_issues_for_report(&report(vec![f]), &gh, &diag)
+            .unwrap()
+            .outcomes;
 
         assert_eq!(outcomes.len(), 1);
         match &outcomes[0] {
@@ -1190,8 +1207,9 @@ mod steward_issue_filing {
         assert_eq!(ci_failure_signature(&f1), ci_failure_signature(&f2));
         let gh = FakeGhClient::new();
 
-        let outcomes =
-            file_issues_for_report(&report(vec![f1, f2]), &gh, &FakeDiagnostics::new()).unwrap();
+        let outcomes = file_issues_for_report(&report(vec![f1, f2]), &gh, &FakeDiagnostics::new())
+            .unwrap()
+            .outcomes;
 
         assert_eq!(outcomes.len(), 1);
         assert_eq!(gh.create_calls().len(), 1);
@@ -1201,7 +1219,9 @@ mod steward_issue_filing {
     fn green_report_files_nothing_and_touches_no_gh() {
         let gh = FakeGhClient::new();
         let diag = FakeDiagnostics::new();
-        let outcomes = file_issues_for_report(&report(vec![]), &gh, &diag).unwrap();
+        let outcomes = file_issues_for_report(&report(vec![]), &gh, &diag)
+            .unwrap()
+            .outcomes;
         assert!(outcomes.is_empty());
         assert!(gh.search_calls().is_empty());
         assert!(gh.create_calls().is_empty());
@@ -1284,7 +1304,9 @@ mod steward_issue_filing {
         let gh = FakeGhClient::new();
         let diag = FakeDiagnostics::failing("`gh run view` exited 1");
 
-        let outcomes = file_issues_for_report(&report(vec![f]), &gh, &diag).unwrap();
+        let outcomes = file_issues_for_report(&report(vec![f]), &gh, &diag)
+            .unwrap()
+            .outcomes;
 
         assert!(matches!(
             outcomes.as_slice(),
@@ -1326,6 +1348,131 @@ mod steward_issue_filing {
         // The same workflow in a different repo is a distinct failure.
         let d = af("rysweet/Simard", "CI", "failure", 1);
         assert_ne!(ci_failure_signature(&a), ci_failure_signature(&d));
+    }
+
+    #[test]
+    fn a_cross_repo_write_denial_is_skipped_not_fatal_and_other_repos_still_file() {
+        // The production failure mode: a governed *sibling* repo is red, but the
+        // scheduled sweep's token (the repo-scoped default `GITHUB_TOKEN`, when
+        // `STEWARD_GH_TOKEN` is absent) cannot create issues there — GitHub
+        // returns "Resource not accessible by integration". This must NOT abort
+        // the sweep: the sibling is recorded as an unauthorized skip and every
+        // *writable* repo (Simard's own failure included) still gets its issue.
+        let writable = af("rysweet/Simard", "verify", "failure", 1);
+        let sibling = af(
+            "rysweet/amplihack-recipe-runner",
+            "Bot Detection",
+            "failure",
+            2,
+        );
+        let gh = FakeGhClient::new();
+        gh.fail_create_for(
+            "rysweet/amplihack-recipe-runner",
+            "`gh issue create -R rysweet/amplihack-recipe-runner` exited exit status: 1 \
+             with stderr:\nGraphQL: Resource not accessible by integration (createIssue)",
+        );
+
+        let filing = file_issues_for_report(
+            &report(vec![writable, sibling]),
+            &gh,
+            &FakeDiagnostics::new(),
+        )
+        .expect("a cross-repo write denial must not fail the sweep");
+
+        // Simard's own failure is filed; the unwritable sibling is skipped.
+        assert_eq!(filing.outcomes.len(), 1, "the writable repo is still filed");
+        match &filing.outcomes[0] {
+            StewardshipOutcome::FiledNew { repo, .. } => assert_eq!(repo, "rysweet/Simard"),
+            other => panic!("expected FiledNew for rysweet/Simard, got {other:?}"),
+        }
+        assert_eq!(filing.skipped_unauthorized.len(), 1);
+        let skip = &filing.skipped_unauthorized[0];
+        assert_eq!(skip.repo, "rysweet/amplihack-recipe-runner");
+        assert_eq!(skip.workflow.as_deref(), Some("Bot Detection"));
+        assert!(
+            skip.reason.contains("not accessible by integration"),
+            "skip names the underlying gh error: {}",
+            skip.reason
+        );
+        // Both repos' creates were attempted; the sibling's was denied (not
+        // silently skipped before the call), the writable one succeeded.
+        let created: Vec<String> = gh.create_calls().into_iter().map(|c| c.0).collect();
+        assert_eq!(created.len(), 2);
+        assert!(created.contains(&"rysweet/Simard".to_string()));
+        assert!(created.contains(&"rysweet/amplihack-recipe-runner".to_string()));
+    }
+
+    #[test]
+    fn a_forbidden_403_write_denial_is_also_treated_as_an_authorization_skip() {
+        // A PAT/App variant returns an HTTP 403 rather than the integration
+        // phrasing; it is the same "token can't write here" condition and must
+        // likewise be a reported skip, not a fatal error.
+        let f = af("rysweet/amplihack-rs", "CI", "failure", 3);
+        let gh = FakeGhClient::new();
+        gh.fail_create_for(
+            "rysweet/amplihack-rs",
+            "`gh issue create` exited 1 with stderr:\nHTTP 403: Must have admin rights to Repository.",
+        );
+
+        let filing = file_issues_for_report(&report(vec![f]), &gh, &FakeDiagnostics::new())
+            .expect("a 403 write denial must not fail the sweep");
+
+        assert!(filing.outcomes.is_empty());
+        assert_eq!(filing.skipped_unauthorized.len(), 1);
+        assert_eq!(filing.skipped_unauthorized[0].repo, "rysweet/amplihack-rs");
+    }
+
+    #[test]
+    fn a_non_authorization_gh_error_still_fails_loud() {
+        // A genuine/transient `gh` failure (not a permission denial) must still
+        // propagate — no silent degradation of an unexpected error.
+        let f = af("rysweet/amplihack-rs", "CI", "failure", 4);
+        let gh = FakeGhClient::new();
+        gh.fail_create_for(
+            "rysweet/amplihack-rs",
+            "`gh issue create` exited 1 with stderr:\nerror connecting to api.github.com",
+        );
+
+        let err = file_issues_for_report(&report(vec![f]), &gh, &FakeDiagnostics::new())
+            .expect_err("a non-authorization gh error must fail loud");
+        assert!(matches!(
+            err,
+            SimardError::StewardshipGhCommandFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn a_403_secondary_rate_limit_fails_loud_and_is_not_masked_as_an_auth_skip() {
+        // GitHub returns secondary/abuse rate limits as HTTP 403 too, but those
+        // are transient — NOT a permanent permission denial. A fleet sweep firing
+        // bursts of writes is exactly what trips them, so they must fail loud (or
+        // be retried), never be downgraded to a skip that leaves the run green
+        // with a real failure untracked.
+        let f = af("rysweet/amplihack-rs", "CI", "failure", 5);
+        let gh = FakeGhClient::new();
+        gh.fail_create_for(
+            "rysweet/amplihack-rs",
+            "`gh issue create` exited 1 with stderr:\nHTTP 403: You have exceeded a secondary rate limit. Please wait a few minutes before you try again.",
+        );
+
+        let err = file_issues_for_report(&report(vec![f]), &gh, &FakeDiagnostics::new())
+            .expect_err("a 403 rate-limit must fail loud, not be masked as an auth skip");
+        assert!(matches!(
+            err,
+            SimardError::StewardshipGhCommandFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn the_unauthorized_skip_type_is_constructible() {
+        // Guard the public shape the CLI reporter depends on.
+        let skip = UnauthorizedSkip {
+            repo: "rysweet/x".to_string(),
+            workflow: Some("CI".to_string()),
+            reason: "Resource not accessible by integration".to_string(),
+        };
+        assert_eq!(skip.repo, "rysweet/x");
+        assert_eq!(skip.workflow.as_deref(), Some("CI"));
     }
 }
 
@@ -1456,7 +1603,8 @@ mod steward_issue_resolution {
             &report(repo, vec![wf("Code Atlas", "green", Some(42))]),
             &resolver,
         )
-        .unwrap();
+        .unwrap()
+        .closed;
 
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].repo, repo);
@@ -1510,7 +1658,8 @@ mod steward_issue_resolution {
             &report(repo, vec![wf("verify", "green", Some(9))]),
             &resolver,
         )
-        .unwrap();
+        .unwrap()
+        .closed;
 
         assert!(outcomes.is_empty());
         assert!(resolver.close_calls().is_empty());
@@ -1536,7 +1685,8 @@ mod steward_issue_resolution {
             ),
             &resolver,
         )
-        .unwrap();
+        .unwrap()
+        .closed;
 
         assert!(outcomes.is_empty());
         assert!(resolver.list_calls().is_empty());
@@ -1565,7 +1715,8 @@ mod steward_issue_resolution {
             ),
             &resolver,
         )
-        .unwrap();
+        .unwrap()
+        .closed;
 
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].issue_number, 940);
@@ -1583,7 +1734,7 @@ mod steward_issue_resolution {
         r.repos[0].green_from_cache = true;
         r.repos_from_cache = 1;
 
-        let outcomes = resolve_issues_for_report(&r, &resolver).unwrap();
+        let outcomes = resolve_issues_for_report(&r, &resolver).unwrap().closed;
 
         assert!(outcomes.is_empty());
         assert!(resolver.list_calls().is_empty());
@@ -1663,7 +1814,8 @@ mod steward_issue_resolution {
             ),
             &resolver,
         )
-        .unwrap();
+        .unwrap()
+        .closed;
 
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].issue_number, 500);
@@ -1703,7 +1855,7 @@ mod steward_issue_resolution {
         }];
         r.green = false;
 
-        let outcomes = resolve_issues_for_report(&r, &resolver).unwrap();
+        let outcomes = resolve_issues_for_report(&r, &resolver).unwrap().closed;
 
         // Nothing closed: the shared issue is still tracking the failing sibling.
         assert!(outcomes.is_empty(), "outcomes: {outcomes:?}");
@@ -1734,6 +1886,42 @@ mod steward_issue_resolution {
 
         // The bare hyphenated word without the trailing `:` field is not a match.
         assert!(!is_ci_health_tracking_issue("see ci-health-workflow docs"));
+    }
+
+    #[test]
+    fn a_cross_repo_read_denial_during_resolution_is_skipped_not_fatal() {
+        // Symmetric to filing: if the token cannot list/close a governed
+        // sibling's issues, resolution records an unauthorized skip and moves on
+        // rather than aborting the whole sweep (which would turn the scheduled
+        // run red on an unwritable sibling).
+        let resolver = FakeResolver::new();
+        resolver.fail_list(
+            "`gh issue list -R rysweet/amplihack-recipe-runner` exited 1: \
+             GraphQL: Resource not accessible by integration",
+        );
+
+        let resolution = resolve_issues_for_report(
+            &report(
+                "rysweet/amplihack-recipe-runner",
+                vec![wf("CI", "green", Some(1))],
+            ),
+            &resolver,
+        )
+        .expect("a cross-repo read denial must not fail resolution");
+
+        assert!(resolution.closed.is_empty());
+        assert_eq!(resolution.skipped_unauthorized.len(), 1);
+        let skip = &resolution.skipped_unauthorized[0];
+        assert_eq!(skip.repo, "rysweet/amplihack-recipe-runner");
+        // A repo-level resolution skip carries no single workflow.
+        assert!(skip.workflow.is_none());
+        assert!(
+            skip.reason.contains("not accessible by integration"),
+            "skip names the underlying gh error: {}",
+            skip.reason
+        );
+        // Nothing was closed while the repo was unreadable.
+        assert!(resolver.close_calls().is_empty());
     }
 }
 

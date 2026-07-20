@@ -30,6 +30,7 @@ use std::process::Command;
 use crate::error::{SimardError, SimardResult};
 use crate::stewardship::{GhClient, GhIssue, StewardshipOutcome, failure_signature, find_existing};
 
+use super::classify::RepoReport;
 use super::diagnose::RunDiagnostics;
 use super::{ActionableFailure, FleetReport};
 
@@ -126,6 +127,110 @@ fn diagnose_block(failure: &ActionableFailure, diag: &dyn RunDiagnostics) -> Str
     }
 }
 
+/// A distinct actionable failure (or a whole repo, during resolution) that the
+/// sweep could **not** reconcile because its token lacks write access to that
+/// repo — a cross-repo `issues:write` denial, as when a governed *sibling*
+/// repo is red but `STEWARD_GH_TOKEN` is absent so the sweep falls back to the
+/// repo-scoped default `GITHUB_TOKEN`.
+///
+/// Recorded and reported — never silently dropped (the sibling's red CI still
+/// appears in the sweep report and this skip is printed loudly) — so a single
+/// unwritable repo no longer aborts the entire sweep. Aborting used to turn
+/// Simard's own scheduled `ci-health` run red on *any* sibling failure, which
+/// the next sweep then re-detected as a fresh actionable failure: the exact
+/// self-referential loop the `--exit-zero` scheduled-sweep contract exists to
+/// avoid. Fail-*safe*, not fail-open: the failure is surfaced, just not by
+/// crashing the steward.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnauthorizedSkip {
+    pub repo: String,
+    /// The failing workflow whose tracking issue could not be filed, or `None`
+    /// for a repo-level resolution skip (listing/closing that repo's issues).
+    pub workflow: Option<String>,
+    /// The underlying `gh` error text, so the skip names *why* it was skipped.
+    pub reason: String,
+}
+
+/// Result of a `--file-issues` filing pass: one [`StewardshipOutcome`] per
+/// distinct actionable failure that could be reconciled, plus any failures
+/// skipped because the failing repo was not writable (see [`UnauthorizedSkip`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IssueFilingReport {
+    pub outcomes: Vec<StewardshipOutcome>,
+    pub skipped_unauthorized: Vec<UnauthorizedSkip>,
+}
+
+/// Whether `err` is a GitHub **authorization** failure — the token lacks the
+/// scope required for the *target repo*. This is the well-known, expected
+/// outcome of the sweep touching a governed sibling repo with only the
+/// repo-scoped default `GITHUB_TOKEN` (no `STEWARD_GH_TOKEN`); it is treated as
+/// a reported skip rather than a sweep-aborting operational error. Any *other*
+/// `gh` failure (a transient outage, a parse error, a missing binary) is NOT an
+/// authorization error and still fails loud, preserving no-silent-degradation
+/// for genuinely unexpected failures. Matched case-insensitively against the
+/// captured `gh` stderr embedded in the error's `reason`.
+///
+/// Note the deliberate carve-out for **rate limiting**: GitHub returns its
+/// secondary/abuse rate-limit responses as `HTTP 403` too, but those are
+/// *transient* — not a permanent lack of permission. A fleet sweep firing bursts
+/// of `gh issue create`/`list`/`close` is exactly the workload that trips a
+/// secondary rate limit, so a bare `403`/`forbidden` substring match would
+/// silently downgrade a rate-limit failure to a skip (leaving a real failure
+/// untracked while the run stays green). We therefore treat any 403 whose body
+/// mentions a rate limit / abuse detection as NON-authorization so it fails loud.
+fn is_authorization_error(err: &SimardError) -> bool {
+    let reason = match err {
+        SimardError::StewardshipGhCommandFailed { reason }
+        | SimardError::CiHealthGhCommandFailed { reason } => reason.as_str(),
+        _ => return false,
+    };
+    let lower = reason.to_ascii_lowercase();
+    // Transient rate-limit / abuse-detection 403s are NOT authorization denials:
+    // they must fail loud (or be retried), never be masked as a permission skip.
+    if lower.contains("rate limit") || lower.contains("abuse detection") {
+        return false;
+    }
+    // GitHub's canonical phrasings for "this token cannot do that here":
+    //   - GITHUB_TOKEN / GitHub App: "Resource not accessible by integration"
+    //   - under-scoped PAT:          "Resource not accessible by personal access token"
+    //   - REST 403 fallbacks:        "HTTP 403" / "403 Forbidden" / "must have admin rights"
+    lower.contains("not accessible by")
+        || lower.contains("http 403")
+        || lower.contains("403 forbidden")
+        || lower.contains("must have admin rights")
+}
+
+/// File (or match) the deduplicated tracking issue for a single distinct
+/// failure. Split out of [`file_issues_for_report`] so its per-failure `gh`
+/// errors can be classified ([`is_authorization_error`]) without unwinding the
+/// whole sweep.
+fn file_one_failure(
+    signature: &str,
+    failure: &ActionableFailure,
+    gh: &dyn GhClient,
+    diag: &dyn RunDiagnostics,
+) -> SimardResult<StewardshipOutcome> {
+    let existing = gh.search_issues(&failure.repo, signature)?;
+    if let Some(issue) = find_existing(&existing, signature) {
+        return Ok(StewardshipOutcome::MatchedExisting {
+            repo: failure.repo.clone(),
+            issue_number: issue.number,
+            url: issue.url.clone(),
+            signature: signature.to_string(),
+        });
+    }
+    let title = issue_title(failure);
+    let root_cause = diagnose_block(failure, diag);
+    let body = issue_body(failure, signature, &root_cause);
+    let new = gh.create_issue(&failure.repo, &title, &body)?;
+    Ok(StewardshipOutcome::FiledNew {
+        repo: failure.repo.clone(),
+        issue_number: new.number,
+        url: new.url,
+        signature: signature.to_string(),
+    })
+}
+
 /// File a deduplicated tracking issue for each **distinct** actionable failure
 /// in `report`, in the failing repo itself.
 ///
@@ -133,20 +238,26 @@ fn diagnose_block(failure: &ActionableFailure, diag: &dyn RunDiagnostics) -> Str
 /// each, search the repo for an open issue already carrying that signature; if
 /// found → [`StewardshipOutcome::MatchedExisting`], else diagnose the failing
 /// run's root cause (best-effort, via `diag`) and file a new issue embedding it
-/// → [`StewardshipOutcome::FiledNew`]. A `gh` error on the search propagates and
-/// **no** issue is filed for that signature — the same fail-loud rule as
-/// orchestrator stewardship (never file while a search is degraded). A
-/// diagnosis error, by contrast, never aborts filing: the issue is still filed,
-/// recording that the root cause was unavailable (see [`diagnose_block`]).
+/// → [`StewardshipOutcome::FiledNew`]. A diagnosis error never aborts filing:
+/// the issue is still filed, recording that the root cause was unavailable (see
+/// [`diagnose_block`]).
 ///
-/// Returns one outcome per distinct signature, in stable signature order. A
-/// green report (no actionable failures) yields an empty vector without
-/// touching `gh` or `diag`.
+/// Per-failure `gh` errors are classified: an **authorization** denial (the
+/// token cannot write the failing repo — a governed sibling without
+/// `STEWARD_GH_TOKEN`) is recorded as an [`UnauthorizedSkip`] and the sweep
+/// continues to the next distinct failure, so one unwritable repo never starves
+/// filing for the rest of the fleet (Simard's own issues included) nor aborts
+/// the scheduled run. Any other `gh` error still propagates (fail-loud — never
+/// file, or claim green, while the search/create path is genuinely degraded).
+///
+/// Returns one outcome per reconciled distinct signature (in stable signature
+/// order) plus any skips. A green report (no actionable failures) yields an
+/// empty report without touching `gh` or `diag`.
 pub fn file_issues_for_report(
     report: &FleetReport,
     gh: &dyn GhClient,
     diag: &dyn RunDiagnostics,
-) -> SimardResult<Vec<StewardshipOutcome>> {
+) -> SimardResult<IssueFilingReport> {
     // Collapse to one representative failure per distinct signature so two
     // workflows that hash identically (e.g. two workflow files sharing a
     // `name:`) or a repeated signature never file two issues in one sweep.
@@ -157,30 +268,21 @@ pub fn file_issues_for_report(
             .or_insert(failure);
     }
 
-    let mut outcomes = Vec::with_capacity(distinct.len());
+    let mut result = IssueFilingReport::default();
     for (signature, failure) in distinct {
-        let existing = gh.search_issues(&failure.repo, &signature)?;
-        if let Some(issue) = find_existing(&existing, &signature) {
-            outcomes.push(StewardshipOutcome::MatchedExisting {
-                repo: failure.repo.clone(),
-                issue_number: issue.number,
-                url: issue.url.clone(),
-                signature,
-            });
-            continue;
+        match file_one_failure(&signature, failure, gh, diag) {
+            Ok(outcome) => result.outcomes.push(outcome),
+            Err(e) if is_authorization_error(&e) => {
+                result.skipped_unauthorized.push(UnauthorizedSkip {
+                    repo: failure.repo.clone(),
+                    workflow: Some(failure.workflow.clone()),
+                    reason: e.to_string(),
+                });
+            }
+            Err(e) => return Err(e),
         }
-        let title = issue_title(failure);
-        let root_cause = diagnose_block(failure, diag);
-        let body = issue_body(failure, &signature, &root_cause);
-        let new = gh.create_issue(&failure.repo, &title, &body)?;
-        outcomes.push(StewardshipOutcome::FiledNew {
-            repo: failure.repo.clone(),
-            issue_number: new.number,
-            url: new.url,
-            signature,
-        });
     }
-    Ok(outcomes)
+    Ok(result)
 }
 
 // ── Resolution: close a tracking issue once its workflow is green again ──────
@@ -375,6 +477,67 @@ fn parse_tracking_issue_list(stdout: &[u8]) -> SimardResult<Vec<GhIssue>> {
         .collect())
 }
 
+/// Result of a `--file-issues` resolution pass: the tracking issues actually
+/// closed because their workflow went green, plus any repos skipped because the
+/// token could not read/close their issues (see [`UnauthorizedSkip`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IssueResolutionReport {
+    pub closed: Vec<ResolutionOutcome>,
+    pub skipped_unauthorized: Vec<UnauthorizedSkip>,
+}
+
+/// Close every open `[ci-health]` tracking issue in `repo` whose workflow is now
+/// **green**. Split out of [`resolve_issues_for_report`] so a per-repo
+/// authorization denial (an unwritable governed sibling) can be classified and
+/// recorded as a skip without unwinding resolution for the rest of the fleet.
+/// `failing_signatures` are the signatures still carrying a live actionable
+/// failure this sweep (they must never be closed off a same-signature green
+/// sibling).
+fn resolve_one_repo(
+    repo: &RepoReport,
+    failing_signatures: &HashSet<String>,
+    resolver: &dyn CiIssueResolver,
+) -> SimardResult<Vec<ResolutionOutcome>> {
+    let open_issues = resolver.list_open_tracking_issues(&repo.slug)?;
+    if open_issues.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Two green workflow files can share a `name:` and so hash to one
+    // signature/issue (filing collapses them identically); track which issue
+    // numbers were already closed this repo so such a pair closes the shared
+    // issue exactly once rather than double-closing it.
+    let mut closed_this_repo: HashSet<u64> = HashSet::new();
+    let mut outcomes = Vec::new();
+    for wf in &repo.workflows {
+        if wf.verdict != "green" {
+            continue;
+        }
+        let signature = ci_signature_for(&repo.slug, &wf.name);
+        // A green workflow whose signature still carries a live failure this
+        // sweep (a same-signature sibling is broken) must not close the
+        // shared tracking issue — it is still tracking a real failure.
+        if failing_signatures.contains(&signature) {
+            continue;
+        }
+        let Some(issue) = find_existing(&open_issues, &signature) else {
+            continue;
+        };
+        if !closed_this_repo.insert(issue.number) {
+            continue;
+        }
+        let comment = resolution_comment(&repo.slug, &wf.name, &repo.default_branch, wf.run_id);
+        resolver.close_issue(&repo.slug, issue.number, &comment)?;
+        outcomes.push(ResolutionOutcome {
+            repo: repo.slug.clone(),
+            workflow: wf.name.clone(),
+            issue_number: issue.number,
+            url: issue.url.clone(),
+            signature,
+        });
+    }
+    Ok(outcomes)
+}
+
 /// Close every open `[ci-health]` tracking issue whose workflow is now **green**
 /// — the "until its default-branch CI is green again" half of the tracking
 /// contract that [`file_issues_for_report`] opens.
@@ -398,14 +561,17 @@ fn parse_tracking_issue_list(stdout: &[u8]) -> SimardResult<Vec<GhIssue>> {
 /// that is still tracking a real failure — matching filing's "file if any is
 /// broken" rule.
 ///
-/// Fail-loud: a `gh` list or close error propagates (never a silent partial
-/// resolution). Returns one [`ResolutionOutcome`] per issue actually closed, in
-/// repo-then-workflow order; a fleet with no now-green tracked workflows yields
-/// an empty vector without any close call.
+/// Per-repo authorization denials (the token cannot read/close that repo's
+/// issues — an unwritable governed sibling) are recorded as an
+/// [`UnauthorizedSkip`] and resolution continues, mirroring filing so one
+/// unwritable repo never starves resolution for the rest of the fleet nor aborts
+/// the scheduled run. Any other `gh` error still propagates (fail-loud — never a
+/// silent partial resolution). Returns one [`ResolutionOutcome`] per issue
+/// actually closed, in repo-then-workflow order, plus any skips.
 pub fn resolve_issues_for_report(
     report: &FleetReport,
     resolver: &dyn CiIssueResolver,
-) -> SimardResult<Vec<ResolutionOutcome>> {
+) -> SimardResult<IssueResolutionReport> {
     // Signatures that still have a live actionable failure this sweep. Filing
     // keys a tracking issue on `ci_failure_signature` and files whenever *any*
     // workflow with that signature is broken; resolution must therefore refuse
@@ -422,7 +588,7 @@ pub fn resolve_issues_for_report(
         .map(ci_failure_signature)
         .collect();
 
-    let mut outcomes = Vec::new();
+    let mut result = IssueResolutionReport::default();
     for repo in &report.repos {
         if repo.green_from_cache {
             continue;
@@ -432,42 +598,17 @@ pub fn resolve_issues_for_report(
         if !repo.workflows.iter().any(|wf| wf.verdict == "green") {
             continue;
         }
-        let open_issues = resolver.list_open_tracking_issues(&repo.slug)?;
-        if open_issues.is_empty() {
-            continue;
-        }
-        // Two green workflow files can share a `name:` and so hash to one
-        // signature/issue (filing collapses them identically); track which issue
-        // numbers were already closed this repo so such a pair closes the shared
-        // issue exactly once rather than double-closing it.
-        let mut closed_this_repo: HashSet<u64> = HashSet::new();
-        for wf in &repo.workflows {
-            if wf.verdict != "green" {
-                continue;
+        match resolve_one_repo(repo, &failing_signatures, resolver) {
+            Ok(mut closed) => result.closed.append(&mut closed),
+            Err(e) if is_authorization_error(&e) => {
+                result.skipped_unauthorized.push(UnauthorizedSkip {
+                    repo: repo.slug.clone(),
+                    workflow: None,
+                    reason: e.to_string(),
+                });
             }
-            let signature = ci_signature_for(&repo.slug, &wf.name);
-            // A green workflow whose signature still carries a live failure this
-            // sweep (a same-signature sibling is broken) must not close the
-            // shared tracking issue — it is still tracking a real failure.
-            if failing_signatures.contains(&signature) {
-                continue;
-            }
-            let Some(issue) = find_existing(&open_issues, &signature) else {
-                continue;
-            };
-            if !closed_this_repo.insert(issue.number) {
-                continue;
-            }
-            let comment = resolution_comment(&repo.slug, &wf.name, &repo.default_branch, wf.run_id);
-            resolver.close_issue(&repo.slug, issue.number, &comment)?;
-            outcomes.push(ResolutionOutcome {
-                repo: repo.slug.clone(),
-                workflow: wf.name.clone(),
-                issue_number: issue.number,
-                url: issue.url.clone(),
-                signature,
-            });
+            Err(e) => return Err(e),
         }
     }
-    Ok(outcomes)
+    Ok(result)
 }

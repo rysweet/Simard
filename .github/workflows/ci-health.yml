@@ -83,9 +83,19 @@ jobs:
           # GITHUB_TOKEN is scoped to this repo only. Prefer the dedicated bot
           # token, falling back to the default so the green path (and Simard's
           # own issues) still works. When a sibling is red and the bot token is
-          # absent, the cross-repo `gh issue create` fails loud (a visible red
-          # run) rather than silently skipping the failure — fail-safe, not
-          # fail-open, matching advisory-scan.yml.
+          # absent, the cross-repo `gh issue create` is denied
+          # ("Resource not accessible by integration"); the sweep now records
+          # that as a *reported unauthorized skip* (loud stderr line + the
+          # sibling still appears in the printed FleetReport) and continues —
+          # rather than aborting, which used to fail the whole run. That abort
+          # turned Simard's own scheduled ci-health run red on ANY sibling
+          # failure, which the next sweep re-detected as a fresh actionable
+          # failure: the exact self-referential loop --exit-zero exists to
+          # avoid. Fail-safe (the failure is surfaced), not fail-open (it is not
+          # silently dropped) and not self-defeating (it no longer reddens this
+          # run). Configure STEWARD_GH_TOKEN to actually FILE those cross-repo
+          # issues; absent it, they are reported-and-skipped. A genuine gh/parse
+          # error (not an authorization denial) still fails the run loud.
           GH_TOKEN: ${{ secrets.STEWARD_GH_TOKEN || github.token }}
         # --no-cache: a scheduled sweep always re-audits every repo (no green-SHA
         #             skips), so a regression is caught the same day it lands.
