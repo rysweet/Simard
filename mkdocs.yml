@@ -112,6 +112,7 @@ nav:
     - Prompt-Driven Brain Iteration: concepts/prompt-driven-brain-iteration.md
     - Text-Based Brain Protocol: concepts/text-based-brain-protocol.md
     - Prompt-Driven TDD Discipline: concepts/prompt-driven-tdd-discipline.md
+    - Agentic-Recipes-First Reasoning Principle: concepts/agentic-recipes-first-principle.md
     - Truthful Runtime Metadata: concepts/truthful-runtime-metadata.md
     - Trustworthy Confidence + External Completion: concepts/trustworthy-confidence-and-external-completion.md
     - Progress-Evidence Gating: concepts/progress-evidence-gating.md
