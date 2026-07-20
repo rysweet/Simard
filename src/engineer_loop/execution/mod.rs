@@ -97,7 +97,14 @@ fn run_command_inner(
     let stdout_reader = drain_pipe(child.stdout.take());
     let stderr_reader = drain_pipe(child.stderr.take());
 
-    let deadline = Instant::now() + timeout_for_command(argv);
+    let timeout = timeout_for_command(argv);
+    let deadline = Instant::now() + timeout;
+    // Poll with adaptive backoff: most git invocations finish within a few
+    // milliseconds, so start with a 1 ms interval to return promptly, then
+    // double up to a 50 ms cap so long-running commands (e.g. cargo builds)
+    // keep the same cheap wakeup cadence as before.
+    const MAX_POLL_INTERVAL: Duration = Duration::from_millis(50);
+    let mut poll_interval = Duration::from_millis(1);
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -111,10 +118,11 @@ fn run_command_inner(
                     let _ = stderr_reader.join();
                     return Err(SimardError::CommandTimeout {
                         action: argv.join(" "),
-                        timeout_secs: timeout_for_command(argv).as_secs(),
+                        timeout_secs: timeout.as_secs(),
                     });
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(poll_interval);
+                poll_interval = (poll_interval * 2).min(MAX_POLL_INTERVAL);
             }
             Err(error) => {
                 let _ = child.kill();
