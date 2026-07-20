@@ -625,6 +625,9 @@ fn candidate(
         author_login: author.to_string(),
         head_ref: head.to_string(),
         snapshot,
+        // Default fixtures are non-draft so the pre-existing green projection
+        // cases stay green; the #4339 draft tests below override this per-case.
+        is_draft: Some(false),
     }
 }
 
@@ -763,6 +766,85 @@ fn projection_admits_via_engineer_branch_when_label_is_absent() {
         ready.len(),
         1,
         "an engineer-exclusive branch namespace admits the PR even without the label"
+    );
+}
+
+// ───────────────────── draft-PR exclusion (#4339) ────────────────────────────
+
+/// #4339 draft guardrail (projection side): a DRAFT PR (`isDraft=true`) that
+/// passes EVERY other gate — `ReadyForMerge` disposition, non-overseer author,
+/// engineer branch/label, and all objective gates — must still be EXCLUDED. A
+/// draft can never be merged, so the invariant must hold in BOTH producers, not
+/// only in `survey_ready_prs`. Pure narrowing.
+#[test]
+fn projection_excludes_a_draft_pr_even_when_every_other_gate_passes() {
+    let cands = vec![ProjectionCandidate {
+        is_draft: Some(true),
+        ..candidate(
+            "rysweet/Simard",
+            4336,
+            PrDisposition::ReadyForMerge,
+            "rysweet",
+            "engineer/4336-draft",
+            green_engineer_snapshot(),
+        )
+    }];
+    let ready = project_ready_prs(&cands, &base_allowlist(), &overseer_login());
+    assert!(
+        ready.is_empty(),
+        "a draft PR must never be projected, even when disposition + author + \
+         engineer-PR + objective gates all pass"
+    );
+}
+
+/// #4339 counterpart: the SAME PR as non-draft (`isDraft=false`) IS projected —
+/// the draft gate is a pure NARROWING that only removes drafts and must never
+/// broaden merge authorization.
+#[test]
+fn projection_admits_identical_non_draft_pr() {
+    let cands = vec![ProjectionCandidate {
+        is_draft: Some(false),
+        ..candidate(
+            "rysweet/Simard",
+            4336,
+            PrDisposition::ReadyForMerge,
+            "rysweet",
+            "engineer/4336-draft",
+            green_engineer_snapshot(),
+        )
+    }];
+    let ready = project_ready_prs(&cands, &base_allowlist(), &overseer_login());
+    assert_eq!(
+        ready,
+        vec![PrRef {
+            repo: "rysweet/Simard".to_string(),
+            pr: 4336,
+        }],
+        "the same PR that is NOT a draft is authorized — the draft gate only \
+         removes drafts, it never broadens authorization"
+    );
+}
+
+/// #4339 fail-closed: when draft state is missing/unknown (`isDraft` ⇒ `None`),
+/// the projection treats the PR as NOT ready and EXCLUDES it — mirroring the
+/// projection's existing fail-closed posture. Admit ONLY `Some(false)`.
+#[test]
+fn projection_excludes_pr_with_unknown_draft_state_fail_closed() {
+    let cands = vec![ProjectionCandidate {
+        is_draft: None,
+        ..candidate(
+            "rysweet/Simard",
+            4336,
+            PrDisposition::ReadyForMerge,
+            "rysweet",
+            "engineer/4336-unknown",
+            green_engineer_snapshot(),
+        )
+    }];
+    let ready = project_ready_prs(&cands, &base_allowlist(), &overseer_login());
+    assert!(
+        ready.is_empty(),
+        "unknown draft state must fail closed to exclusion (admit only isDraft==Some(false))"
     );
 }
 

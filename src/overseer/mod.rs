@@ -2409,6 +2409,11 @@ pub struct ProjectionCandidate {
     pub author_login: String,
     /// `headRefName` from `gh` — the engineer-branch narrowing's input.
     pub head_ref: String,
+    /// `isDraft` from `gh` — the draft-exclusion rail's input (#4339). A draft
+    /// PR can never be merged server-side, so the projection admits ONLY
+    /// `Some(false)`; `Some(true)` and `None` (unknown/absent) are excluded
+    /// fail-closed.
+    pub is_draft: Option<bool>,
     /// The objective-gate snapshot (`mergeable`, checks, base, labels) from `gh`.
     pub snapshot: PrSnapshot,
 }
@@ -2429,7 +2434,10 @@ pub struct ProjectionCandidate {
 ///    [`merge_ops`](crate::overseer::merge_ops) applies), so an operator's own
 ///    review PR sharing the author login is never merged;
 /// 4. it passes the objective gates ([`evaluate_objective_gates`]: base-allowlist
-///    + `MERGEABLE` + all checks green).
+///    + `MERGEABLE` + all checks green);
+/// 5. it is NOT a draft (#4339) — `is_draft == Some(false)`. A draft can never be
+///    merged server-side, so `Some(true)` and an unknown/absent draft state
+///    (`None`) are both excluded fail-closed.
 ///
 /// This is a pure NARROWING — it can only ever remove candidates. The
 /// authoritative six-criteria merge-authority gate (with the agentic MergeJudge)
@@ -2452,6 +2460,10 @@ pub fn project_ready_prs(
                 .any(|l| config::is_engineer_pr_label(l))
                 || config::is_engineer_branch(&c.head_ref)
         })
+        // Draft gate (#4339): a draft can never be merged. Admit ONLY a
+        // known-non-draft PR; `Some(true)` and `None` (unknown/absent) are
+        // excluded fail-closed. Pure narrowing — mirrors `survey_ready_prs`.
+        .filter(|c| c.is_draft == Some(false))
         // Objective gates: base-allowlist + MERGEABLE + all checks green.
         .filter(|c| evaluate_objective_gates(&c.snapshot, base_allowlist).is_ok())
         .map(|c| PrRef {

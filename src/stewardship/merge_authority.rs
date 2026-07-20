@@ -108,6 +108,13 @@ pub struct OpenPrSummary {
     ///
     /// [`SIMARD_ENGINEER_PR_LABEL`]: crate::overseer::config::SIMARD_ENGINEER_PR_LABEL
     pub labels: Vec<String>,
+    /// `isDraft` from `gh pr list --json ...,isDraft`. A draft PR can NEVER be
+    /// merged server-side (`gh pr merge` returns "Pull Request is still a
+    /// draft"), so the autonomous-self-merge sensor (#4097) excludes it from the
+    /// ready-PR candidate set. Fail-closed: `None` (field absent/unknown from the
+    /// listing) is treated as NOT-ready — the sensor admits ONLY `Some(false)`.
+    /// Not read by the dashboard panel.
+    pub is_draft: Option<bool>,
 }
 
 /// One merged-PR summary for the journal's day-scoped "landed changes" table.
@@ -343,7 +350,7 @@ impl PrGhClient for RealPrGhClient {
                     "--repo",
                     repo,
                     "--json",
-                    "body,statusCheckRollup,mergeable,reviewDecision,baseRefName,labels",
+                    "body,statusCheckRollup,mergeable,reviewDecision,baseRefName,labels,isDraft",
                 ],
             )?;
             parse_pr_view_json(&stdout)
@@ -385,7 +392,7 @@ impl PrGhClient for RealPrGhClient {
                     "--state",
                     "open",
                     "--json",
-                    "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url,author,labels",
+                    "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url,author,labels,isDraft",
                     "--limit",
                     &limit_s,
                 ],
@@ -414,7 +421,7 @@ impl PrGhClient for RealPrGhClient {
                     "--author",
                     author,
                     "--json",
-                    "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url,author,labels",
+                    "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url,author,labels,isDraft",
                     "--limit",
                     &limit_s,
                 ],
@@ -574,6 +581,8 @@ pub fn parse_pr_list_json(stdout: &[u8]) -> SimardResult<Vec<OpenPrSummary>> {
         author: Option<RawAuthor>,
         #[serde(default)]
         labels: Vec<RawLabel>,
+        #[serde(default, rename = "isDraft")]
+        is_draft: Option<bool>,
     }
     #[derive(serde::Deserialize)]
     struct RawAuthor {
@@ -638,6 +647,7 @@ pub fn parse_pr_list_json(stdout: &[u8]) -> SimardResult<Vec<OpenPrSummary>> {
                     .map(|l| l.name)
                     .filter(|n| !n.is_empty())
                     .collect(),
+                is_draft: r.is_draft,
             }
         })
         .collect())

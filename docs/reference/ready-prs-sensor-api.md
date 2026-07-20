@@ -14,7 +14,9 @@ doc_type: reference
 status: reference
 related:
   - ../concepts/autonomous-self-merge-sensor.md
+  - ../concepts/draft-pr-merge-exclusion.md
   - ./cross-repo-merge-authority.md
+  - ./draft-pr-exclusion-gate.md
   - ./enrichment-observability-api.md
   - ./overseer-tick-details.md
   - ../howto/enable-autonomous-self-merge-canary.md
