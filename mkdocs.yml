@@ -477,7 +477,6 @@ nav:
     - Creative-Ideas Semantic-Dedup Kill Switch: operations/creative-ideas-semantic-dedup-kill-switch.md
     - Safe Self-Update: safe-self-update.md
     - Pre-Commit Setup: operations/pre-commit-setup.md
-    - Pre-Commit Gate Stabilization: operations/pre-commit-gate-stabilization.md
   - Operator Dashboard:
     - Azlin Tmux Sessions Panel: operator-dashboard/azlin-tmux-sessions.md
     - Event-Bus Stats in Cluster Topology: operator-dashboard/event-bus-stats.md
