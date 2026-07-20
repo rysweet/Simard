@@ -441,13 +441,16 @@ mod tests {
     // the real home differs (e.g. CI's /home/runner) while remaining correct
     // everywhere.
     //
-    // Env vars are process-global, so all env-mutating tests here serialize on
-    // a shared mutex to avoid cross-test flakiness. Edition 2024 makes
-    // set_var/remove_var `unsafe`, hence the explicit unsafe blocks.
-
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // HOME is process-global and is mutated by env-mutating tests across the
+    // whole crate (e.g. base_type_copilot's meeting tests, which anchor the
+    // cost ledger at `$HOME/.simard/costs/ledger.jsonl`). A module-local mutex
+    // would only serialize the tests *in this module* and could still race a
+    // meeting test mid-write, dropping its ledger entry (issue #4164 regression
+    // flake). Serializing on the crate-wide `cognitive_memory` key — the same
+    // key every other HOME-mutating test uses (see
+    // docs/testing/cognitive-memory-serial-isolation.md) — makes all HOME
+    // writers mutually exclusive. Edition 2024 makes set_var/remove_var
+    // `unsafe`, hence the explicit unsafe blocks in `HomeGuard`.
 
     /// The ledger path derived from the portable platform home-directory API,
     /// used as the expected value for the HOME-unset/empty cases.
@@ -485,8 +488,8 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn ledger_path_home_unset_uses_portable_home_resolution() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _home = HomeGuard::set(None);
 
         let path = ledger_path();
@@ -512,8 +515,8 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn ledger_path_honors_home_when_set() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _home = HomeGuard::set(Some("/tmp/simard-home-test"));
 
         let path = ledger_path();
@@ -535,10 +538,10 @@ mod tests {
     // the established convention in `raw_capture`/`telemetry_facade`.
     #[cfg(unix)]
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn write_entry_creates_dir_0700_and_file_0600() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let _home = HomeGuard::set(Some(tmp.path().to_str().unwrap()));
 
@@ -572,11 +575,11 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn ledger_path_empty_home_resolves_to_absolute_portable_path() {
         // An empty HOME is treated as unset: it must NOT yield the pre-fix
         // *relative* ".simard/costs/ledger.jsonl" (empty-string join) nor the
         // filesystem root "/.simard/...", but a portable, absolute path.
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _home = HomeGuard::set(Some(""));
 
         let path = ledger_path();
