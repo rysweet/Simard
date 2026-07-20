@@ -1,12 +1,13 @@
 # Simard
 
-A terminal-native engineering agent who drives and curates agentic coding systems.
+A continuously running engineering agent who drives and curates an ecosystem of related repositories. 
+Also: a pltform for building any type of continuously running agentic system. 
 
 Named after [Suzanne Simard](https://en.wikipedia.org/wiki/Suzanne_Simard), the scientist who discovered how trees communicate through underground fungal networks.
 
 ## What is Simard?
 
-Simard is a focused engineering runtime, written in Rust, that operates like a disciplined software engineer. She inspects local repositories, forms bounded plans with explicit verification, executes through terminal actions, records evidence, and improves through reviewable loops.
+Simard is a continuously running agentic platform that operates like a disciplined software engineer. She inspects the repositories under management, forms bounded plans with explicit verification, executes through terminal actions, records evidence, and improves through reviewable loops, all driven by durable goals and long term memory.
 
 Simard is **not** a wrapper around any single agent framework. She is an agentic engineering director with her own runtime, prompt assets, memory layers, and benchmark gym, and she composes work over a pluggable set of agent **base types** — backend execution substrates that include local harnesses, the GitHub Copilot SDK, Claude Code SDK, Microsoft Agent Framework, and the rustyclawd/amplihack-rs goal-seeking agents. Each substrate is one option among several; The engineering director is one implementation - but the plat form can be used to build other types of continuously running autonomous agents.
 
