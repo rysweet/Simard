@@ -105,8 +105,8 @@ Gate 2    every statusCheckRollup passing (unchanged)
 // mergeable status. Fail closed with a single actionable, PR-agnostic reason.
 if snapshot.is_draft {
     return Err(
-        "PR is still a draft (isDraft == true). Mark it ready for review \
-         (`gh pr ready <PR>`) before it can be merged."
+        "PR is still a draft and cannot be merged. Mark it ready first: \
+         `gh pr ready <PR>`, then retry."
             .to_string(),
     );
 }
