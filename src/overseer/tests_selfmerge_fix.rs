@@ -166,6 +166,7 @@ fn snapshot(mergeable: &str, checks: Vec<CheckRollupEntry>, labels: Vec<String>)
         checks,
         base_ref_name: "main".to_string(),
         labels,
+        is_draft: false,
     }
 }
 
@@ -559,6 +560,7 @@ fn open_pr(number: u32, author: &str, head: &str, labels: &[&str]) -> OpenPrSumm
         url: format!("https://github.com/rysweet/Simard/pull/{number}"),
         author: author.to_string(),
         labels: labels.iter().map(|s| s.to_string()).collect(),
+        is_draft: false,
     }
 }
 

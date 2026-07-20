@@ -10,6 +10,8 @@ related:
   - ./pr-finalization-pipeline.md
   - ./simard-cli.md
   - ../concepts/stewardship-mode.md
+  - ../concepts/draft-pr-merge-exclusion.md
+  - ./draft-pr-merge-gate.md
   - ../howto/edit-the-engineer-system-prompt.md
 ---
 
@@ -38,12 +40,16 @@ without waiting on a human approver — see the
 For a given `(pr_number, repo)` the authority runs, in order:
 
 1. **Snapshot** — `gh pr view <PR> --repo <owner/repo> --json
-   body,statusCheckRollup,mergeable,reviewDecision,baseRefName`.
+   body,statusCheckRollup,mergeable,reviewDecision,baseRefName,labels,isDraft`.
 2. **Objective gates** (deterministic, never agentic):
    - **Base-branch allowlist** — `baseRefName` must be in the configured
      allowlist (default `["main"]`, overridable via `SIMARD_MERGE_BASE_ALLOWLIST`).
      This is the **first** gate, so a PR targeting a stale or wrong base branch is
      refused before anything else runs.
+   - **Not a draft** — `isDraft == false`. A GitHub draft PR is never merge-ready
+     even when `MERGEABLE` with all checks green, because `mergePullRequest`
+     refuses a draft outright. See the
+     [draft-PR merge gate reference](./draft-pr-merge-gate.md).
    - **Mergeable** — `mergeable == "MERGEABLE"`.
    - **CI green** — every `statusCheckRollup` entry is `SUCCESS`, `NEUTRAL`, or
      `SKIPPED`. Any `FAILURE`, `CANCELLED`, `TIMED_OUT`, `STARTUP_FAILURE`,

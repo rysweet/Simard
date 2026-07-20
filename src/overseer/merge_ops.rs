@@ -812,6 +812,7 @@ mod tests {
             checks,
             base_ref_name: "main".to_string(),
             labels: Vec::new(),
+            is_draft: false,
         }
     }
 
@@ -1375,6 +1376,7 @@ new file mode 100644
             url: format!("https://github.com/rysweet/Simard/pull/{number}"),
             author: author.to_string(),
             labels: labels.iter().map(|s| s.to_string()).collect(),
+            is_draft: false,
         }
     }
 

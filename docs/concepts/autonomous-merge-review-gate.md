@@ -14,6 +14,7 @@ doc_type: concept
 status: implemented
 related:
   - ./autonomous-self-merge-sensor.md
+  - ./draft-pr-merge-exclusion.md
   - ./operational-autonomy-model.md
   - ../reference/autonomous-merge-review-gate.md
   - ../reference/cross-repo-merge-authority.md
@@ -134,8 +135,10 @@ with the real, agentic one.
   Overseer's own PR and still requires the author to match the configured
   autonomous-merge identity (whole-login, case-insensitive). Unchanged.
 - **Objective gates + poll-until-green.** Base-branch allowlist (default `main`),
-  `MERGEABLE`, every CI check `SUCCESS`/`NEUTRAL`/`SKIPPED`, and the poll loop that
-  waits for required checks to go green before merge. Unchanged.
+  not-a-draft (`isDraft == false` — see
+  [draft-PR merge exclusion](./draft-pr-merge-exclusion.md)), `MERGEABLE`, every CI
+  check `SUCCESS`/`NEUTRAL`/`SKIPPED`, and the poll loop that waits for required
+  checks to go green before merge. Unchanged.
 - **Creative-idea-label exclusion** stays in the merge authority. Unchanged.
 - **Squash + delete-branch only.** The merge command is
   `gh pr merge <PR> --squash --delete-branch` — **never** `--admin`, **never**

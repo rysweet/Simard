@@ -20,6 +20,7 @@ related:
   - ./enrichment-observability.md
   - ./stewardship-mode.md
   - ./autonomous-merge-review-gate.md
+  - ./draft-pr-merge-exclusion.md
   - ../reference/ready-prs-sensor-api.md
   - ../reference/cross-repo-merge-authority.md
   - ../howto/enable-autonomous-self-merge-canary.md
@@ -107,10 +108,12 @@ plausible merge targets:
    particular, an operator review PR on a shared `feat/…` or `fix/…` branch with no
    `simard-autonomous` label is excluded. This is what keeps the operator's own
    review PRs out of the autonomous loop.
-4. **Cheap pre-filter** to green + `MERGEABLE` using the already-fetched
-   `statusCheckRollup` + `mergeable` fields (the same deterministic
-   `evaluate_objective_gates` the authoritative gate uses for its objective
-   pass). No merge-judge runs here.
+4. **Cheap pre-filter** to green + `MERGEABLE` + **not-draft** using the
+   already-fetched `statusCheckRollup` + `mergeable` + `isDraft` fields (the same
+   deterministic `evaluate_objective_gates` the authoritative gate uses for its
+   objective pass). A GitHub draft PR (`isDraft=true`) is excluded here — see the
+   [draft-PR merge exclusion](./draft-pr-merge-exclusion.md) — so the tick-loop
+   never surfaces a draft as a candidate. No merge-judge runs here.
 5. **Populate** `ObservedState.ready_prs` with the survivors.
 
 The surviving candidates flow into the existing signal → orient → decide → act

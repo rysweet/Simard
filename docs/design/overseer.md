@@ -304,7 +304,7 @@ in `PrOps::merge` (see
 | # | Check | Status |
 |---|-------|--------|
 | 1 | CI green (all required checks SUCCESS/NEUTRAL/SKIPPED) | reuse `evaluate_objective_gates` |
-| 2 | Mergeable + base-branch allowlist | reuse `evaluate_objective_gates` |
+| 2 | Mergeable + base-branch allowlist + not-a-draft (`isDraft == false`) | reuse `evaluate_objective_gates` |
 | 3 | No `Bridge` naming in added lines | **new** diff-scan |
 | 4 | No stray `print!`/`println!`/`eprintln!` in added `src/**` | **new** diff-scan |
 | 5 | Additive / non-breaking (no removed `pub` items) | **new** diff-scan |
