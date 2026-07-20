@@ -29,15 +29,27 @@ reimplementation of the Python `agent-kgpacks`. **Issue #4321 ("advance
 agent-kgpacks-rs to full parity") targets THIS repo.** Its done-gate is the
 [full feature-parity matrix](#full-feature-parity-matrix-component-1-original-features--rust-port)
 below: *every* enumerated original feature must be functionally equivalent — or
-better — or explicitly operator-ratified out-of-scope. Nothing may be silently
-dropped.
+explicitly operator-ratified out-of-scope. Nothing may be silently dropped.
+
+**Operator directive (2026-07-20): retrieval must be _the same_, not merely
+"good enough."** Keyword / substring / FTS-only search is **not** an acceptable
+substitute for the original's retrieval. The original answers queries with real
+**GraphRAG**: embedding-based vector semantic search + multi-hop graph traversal
++ hybrid ranking. The port's retrieval (R1/R3/R4, and the Component-2 query path)
+is at parity only when it uses the *same retrieval method* and produces
+same-or-better results on a shared fixture. A green test over a keyword LIKE scan
+does **not** close a retrieval row — it must be the same.
 
 **Component 2 — Simard's in-tree read-only knowledge client.**
 `src/native_knowledge.rs` + `src/knowledge_client.rs`: a deliberately **thin**
 consumer that answers Simard's `knowledge.*` RPC (read-only queries against
 already-installed packs) with no Python subprocess. It does **not** need the
-original's web UI, HTTP server, ingestion pipeline, or embedding-model stack —
-Simard's reasoner only reads packs. Its narrower gate is the `KGP-*` criteria in
+original's web UI, HTTP server, or ingestion/pack-build pipeline — Simard's
+reasoner only *reads* packs. **It does, however, need the same _retrieval_ as the
+original**: reading a pack still means answering a question, and per the operator
+directive a read-only client must retrieve with real embedding-based semantic
+search + multi-hop graph traversal + hybrid ranking, not a keyword LIKE scan.
+Its narrower gate is the `KGP-*` criteria in
 [§ Component-2 gate](#component-2-gate-simard-in-tree-read-only-client).
 
 | Layer (Component 2) | Rust | Python reference (agent-kgpacks) |
@@ -60,15 +72,22 @@ across 11 dimensions from `mcp_server.py`, `wikigr/agent/*`, `bootstrap/*`,
 `backend/*`, `frontend/*`) and records the status of each in the standalone Rust
 port `rysweet/agent-kgpacks-rs` (workspace @ 2026-07-15).
 
-**Status legend:** ✅ PARITY (equivalent-or-better, with a test) · 🟡 PARTIAL
+**Status legend:** ✅ PARITY (same behavior, verified by a test; "or better" only
+if it matches/exceeds on a shared fixture — never via a weaker keyword path for
+retrieval) · 🟡 PARTIAL
 (present but simplified, gated behind an optional feature, or limited) · ❌ MISSING
 (not implemented) · ⚠️ OOS? (**proposed** out-of-scope — requires explicit
 operator ratification; default is in-scope, nothing is silently dropped).
 
 **The gate is closed only when every row is ✅ or ⚠️→ratified-OOS.** A 🟡 or ❌
-row means the port is not yet at parity. The "or better" clause is bounded: an
-alternative counts only if it *demonstrably matches or exceeds* the original on a
-shared fixture, encoded as the acceptance test — "simpler but weaker" fails.
+row means the port is not yet at parity. Equivalence means the **same behavior**,
+verified on a shared fixture encoded as the acceptance test. A rare "or better"
+alternative is allowed only when it *demonstrably matches or exceeds* the original
+on that fixture — "simpler but weaker" fails. **For the retrieval rows (R1, R3,
+R4) there is no keyword-search shortcut:** substring / LIKE / FTS-only retrieval
+never satisfies these rows, because the original retrieves via embedding-based
+vector semantic search, multi-hop graph traversal, and hybrid ranking. Parity
+requires the same retrieval method, not just a green test on a weaker one.
 
 ### D1 — Retrieval & query
 
@@ -228,6 +247,14 @@ implemented; acceptance test is the definition of done) · **OUT-OF-SCOPE**.
 
 ### Query & retrieval
 
+> **Retrieval-parity rule (operator directive 2026-07-20):** the DONE keyword-tier
+> items (KGP-Q4, KGP-Q8) are *hardening of the interim keyword path* — they do
+> **not** count as retrieval parity. Gate B's retrieval is at parity only when the
+> three REQUIRED rows (KGP-Q5 graph, KGP-Q9 semantic vector, KGP-Q10 hybrid) are
+> DONE against shared fixtures. Keyword search is not good enough; it must be the
+> same GraphRAG retrieval the original performs.
+
+
 | ID | Criterion | Acceptance check | Status | Evidence |
 |----|-----------|------------------|--------|----------|
 | KGP-Q1 | Query answers carry **source citations with URLs** (the traceability guarantee) | `query_pack_db_returns_source_urls_when_present`, `query_pack_db_treats_empty_url_as_no_citation`, `native_knowledge_transport_query_surfaces_source_url` green; urlless packs still work (`query_pack_db_omits_urls_when_column_absent`) | DONE | `native_knowledge.rs::query_articles` (url column projection), `table_has_column` |
@@ -235,9 +262,11 @@ implemented; acceptance test is the definition of done) · **OUT-OF-SCOPE**.
 | KGP-Q3 | Empty / too-short questions degrade to a graceful low-confidence answer | `native_knowledge_transport_empty_question`, `query_pack_db_handles_empty_question_keywords` green | DONE | `native_knowledge.rs::query_pack_db` keyword filter |
 | KGP-Q6 | Answer synthesis truncates snippets on a UTF-8 char boundary | `query_pack_db_finds_matching_articles` green + no panic on multibyte content | DONE | `native_knowledge.rs::build_answer` + `util::string_truncate` |
 | KGP-Q7 | Each source surfaces its `section` | asserted within KGP-M/query tests | DONE | `native_knowledge.rs::SourceInfo.section` |
-| KGP-Q8 | Retrieval **ranks candidates by keyword coverage** (a title hit weighted above a content-only mention) so the `limit` cut keeps the most on-topic article instead of returning matches in arbitrary storage (rowid) order | `query_articles_ranks_most_relevant_first`, `query_articles_limit_keeps_most_relevant`, `query_articles_prefers_title_over_content_match` green | DONE | `native_knowledge.rs::query_articles` (`ORDER BY <coverage score> DESC`), `TITLE_MATCH_WEIGHT` / `CONTENT_MATCH_WEIGHT` |
-| KGP-Q4 | Keyword search binds parameters instead of string-interpolating LIKE clauses | `like_contains_pattern_escapes_metacharacters`, `query_articles_treats_like_wildcards_as_literal`, `query_articles_binds_keywords_and_resists_injection` green | DONE | `native_knowledge.rs::query_articles` binds each keyword as `?n` via `like_contains_pattern` (`LIKE ?n ESCAPE '\'`) |
-| KGP-Q5 | GraphRAG retrieval: traverse entity + relationship tables (multi-hop), not only a single-table LIKE scan | NEW test: a pack fixture with `relationships` yields a graph-grounded answer joining linked entities | OPEN | `native_knowledge.rs::query_articles` comment: "simplified version of the Python `KnowledgeGraphAgent.query()`" |
+| KGP-Q8 | *(keyword-tier hardening — NOT retrieval parity)* Ranks candidates by keyword coverage (a title hit weighted above a content-only mention) so the `limit` cut keeps the most on-topic article instead of arbitrary rowid order | `query_articles_ranks_most_relevant_first`, `query_articles_limit_keeps_most_relevant`, `query_articles_prefers_title_over_content_match` green | DONE (sub-step) | `native_knowledge.rs::query_articles` (`ORDER BY <coverage score> DESC`), `TITLE_MATCH_WEIGHT` / `CONTENT_MATCH_WEIGHT` |
+| KGP-Q4 | *(keyword-tier hardening — NOT retrieval parity)* Keyword search binds parameters instead of string-interpolating LIKE clauses | `like_contains_pattern_escapes_metacharacters`, `query_articles_treats_like_wildcards_as_literal`, `query_articles_binds_keywords_and_resists_injection` green | DONE (sub-step) | `native_knowledge.rs::query_articles` binds each keyword as `?n` via `like_contains_pattern` (`LIKE ?n ESCAPE '\'`) |
+| KGP-Q5 | **[RETRIEVAL PARITY — REQUIRED]** GraphRAG retrieval: traverse entity + relationship tables (multi-hop), not only a single-table LIKE scan | NEW test: a pack fixture with `relationships` yields a graph-grounded answer joining linked entities, matching the original on a shared fixture | OPEN | `native_knowledge.rs::query_articles` comment: "simplified version of the Python `KnowledgeGraphAgent.query()`" |
+| KGP-Q9 | **[RETRIEVAL PARITY — REQUIRED]** Vector **semantic** search: embedding-cosine retrieval over section/article embeddings, so a question retrieves semantically-related articles that share no literal keyword. Keyword/LIKE search does **not** satisfy this | NEW test: a shared fixture where the on-topic article uses different wording than the question is retrieved by semantic similarity (a keyword scan would miss it), matching the original's recall | OPEN | no embedding index in `native_knowledge.rs`; current path is keyword LIKE only |
+| KGP-Q10 | **[RETRIEVAL PARITY — REQUIRED]** Hybrid ranking that blends vector-semantic + graph + keyword signals (the original's ranker), not keyword coverage alone | NEW test: on a shared fixture, ranking matches the original's ordering where semantic/graph signal outweighs literal keyword overlap | OPEN | `native_knowledge.rs` ranks by keyword coverage only (see KGP-Q8) |
 
 ### Transport, health & lifecycle
 
@@ -275,7 +304,12 @@ it. This gate is what closes #4321. Per the 2026-07-20 inventory it is **NOT met
 **Gate B — Simard's in-tree read-only client (Component 2).**
 `native_knowledge.rs` is at parity for Simard's needs when every in-scope `KGP-*`
 criterion (`KGP-M*`, `KGP-Q*`, `KGP-T*`, `KGP-P*`) is **DONE** with its named
-acceptance test green:
+acceptance test green — **including the three REQUIRED retrieval-parity rows
+(KGP-Q5 multi-hop graph, KGP-Q9 semantic vector, KGP-Q10 hybrid)**. Per the
+operator directive, a keyword-only query path (even with KGP-Q4/Q8 green) does
+**not** satisfy Gate B: the read-only client must retrieve with the same GraphRAG
+method as the original. Gate B is **NOT met** today (retrieval is keyword LIKE
+only; KGP-Q5/Q9/Q10 OPEN).
 
 ```
 cargo test --lib native_knowledge
@@ -302,14 +336,19 @@ incomplete full port.
 
 **Component-2 (`native_knowledge.rs`) OPEN criteria:**
 
-1. **KGP-T3** — reuse an open `Connection` in `conn_cache` (or document the
+1. **KGP-Q9** — vector **semantic** retrieval (embedding-cosine), so questions
+   retrieve semantically-related articles that share no literal keyword. This is
+   the operator's "it needs to be the same" requirement: keyword search is
+   insufficient. Needs an embedding index in the read path.
+2. **KGP-Q10** — hybrid ranking blending semantic + graph + keyword, replacing the
+   keyword-coverage-only ordering.
+3. **KGP-Q5** — GraphRAG multi-hop retrieval over entities + relationships.
+   Consider splitting into a fixture step and a traversal step.
+4. **KGP-T3** — reuse an open `Connection` in `conn_cache` (or document the
    path-cache decision and add the reuse test).
-2. **KGP-Q5** — GraphRAG multi-hop retrieval over entities + relationships.
-   Largest; do last and consider splitting into a fixture step and a traversal
-   step.
 
-(KGP-Q4 — parameterize the keyword LIKE search — is now **DONE**; see the
-progress log below.)
+The three retrieval-parity rows (KGP-Q5/Q9/Q10) are REQUIRED for Gate B —
+keyword-tier hardening (KGP-Q4/Q8, DONE) does not substitute for them.
 
 ## Progress log
 
@@ -361,3 +400,17 @@ progress log below.)
   ENHANCEMENTS layer (rerankers/few-shot/Cypher-RAG), the real MCP stdio server,
   and the HTTP surface. The done-gate (Gate A) is now: every matrix row ✅ or
   operator-ratified OOS, retrieval rows proven on a shared fixture.
+- **2026-07-20** — **Retrieval parity tightened to "same, not good enough"**
+  (operator directive, meeting: *"No keyword search is not good enough. It needs
+  to be the same."*). Removed the blanket "or better" hatch from the done-gate
+  and made retrieval sameness mandatory: keyword / substring / LIKE / FTS-only
+  search never satisfies R1/R3/R4 or Gate B. The port's retrieval must use the
+  same GraphRAG method as the original — embedding-based vector semantic search
+  (KGP-Q9 / R1), multi-hop graph traversal (KGP-Q5 / R3), and hybrid ranking
+  (KGP-Q10 / R4) — verified on shared fixtures. Reframed Component 2: it still
+  skips the UI/HTTP/pack-build surface, but it does **need** the original's
+  retrieval, so the "does not need the embedding-model stack" carve-out was
+  removed. KGP-Q4/Q8 relabeled DONE (sub-step) keyword-tier hardening — they no
+  longer count as retrieval parity. Added KGP-Q9 (semantic vector) and KGP-Q10
+  (hybrid) as REQUIRED/OPEN. Net effect: neither gate can go green on a keyword
+  scan.
