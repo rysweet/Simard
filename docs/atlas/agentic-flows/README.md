@@ -56,6 +56,27 @@ and goal transfer is delegated to `MeetingHost::transfer_goal`. It writes back a
 observation episode. Note `observe_ecosystem` runs **after** the per-problem
 decide/gate loop, appending gated `LaunchRecipe` interventions.
 
+The autonomous **verify+merge** path (`src/overseer/merge_ops.rs`) is a fixed
+sub-pipeline. Candidate narrowing happens **earlier, in the observe stage**:
+`survey_ready_prs` applies inline narrowing (engineer-branch + objective gates +
+a **draft-exclusion rail** — #4339, admitting only `is_draft == Some(false)` and
+excluding `Some(true)`/`None` fail-closed), and `observe_merge_queue` reasons
+before `project_ready_prs` re-applies the same narrowing. The act-stage merge
+pipeline itself is: `verify` (a review-free objective pre-filter) →
+`poll_until_green` (waits for required checks; **never `--admin`/`--no-verify`**)
+→ the agentic **MergeJudge** six-criteria gate → `gh pr merge --squash` → a
+`DualChannelNotifier` (email + Signal). `build_merge_judge`
+(`src/stewardship/merge_judge.rs`) resolves the judge in order: (1) a
+recipe-backed `RecipeMergeJudge` (`merge-readiness-judge.yaml` via
+recipe-runner-rs) when available, else (2) a direct `LlmMergeJudge`
+(`merge_readiness_judge.md` prompt), else (3) the fail-closed default
+`RefusingMergeJudge`. After the squash-merge both notify channels are
+*attempted* and their outcomes recorded: `NotifyReport::dispatched()` means at
+least one per-channel entry exists (recorded, **not** guaranteed delivered —
+`all_sent()` is the true-delivery check), and `merge_ops` records it via a
+`debug_assert!`, so the merge still returns `Ok` even if a channel was not
+delivered.
+
 ![Overseer tick Mermaid](agentic-overseer-tick-mermaid.svg)
 
 ![Overseer tick DOT](agentic-overseer-tick-dot.svg)
@@ -105,6 +126,20 @@ the other three variants are defined but ungranted.
 A deterministic probe fans out to four bounded ranked recalls (semantic facts,
 episodes, procedures, prospective triggers) through the memory adapter into the
 embedded **lbug** graph store, assembling a `MemorySnapshot`/`PreparedContext`.
+The **ranked episode recall** (`recall_episodes_ranked`,
+`src/cognitive_memory/library_adapter.rs`) passes its query through a **recall
+precision gate**: `tokenize_words` splits on non-alphanumeric runs, sub-threshold
+single-character tokens are dropped (`MIN_CLEAN_NEEDLE_LEN = 2`) because as a
+word-boundary prefix (`shares_word_prefix`) a lone character matches nearly every
+content word — pure recall noise — and an empty needle set recalls **nothing**
+(fail-closed). Ranked **fact** recall (`recall_facts_ranked`) is a library-ranked
+pure read and is **not** word-boundary gated. The same sub-threshold cut is
+applied by the separate keyword/substring **search** APIs (`search_facts` /
+`search_episodes_by_keywords`) — `search_facts` via `partition_fact_query` and
+`search_episodes_by_keywords` inline — which partition CLEAN vs RAW tokens (RAW
+markers keep exact-substring semantics; an all-sub-threshold query recalls
+nothing) — those are distinct from the daemon's
+ranked-recall path above.
 In the daemon this recall is **in-process**: `shared_mem` is a
 `LibraryCognitiveMemory` wrapped by `memory_ipc::SharedMemory`, so the daemon
 reads lbug directly — it does **not** go over the `memory_ipc` UDS server, which

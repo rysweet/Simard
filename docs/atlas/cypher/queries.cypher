@@ -78,3 +78,16 @@ RETURN f.id AS flow, collect(DISTINCT g.id) AS drives, collect(DISTINCT d.id) AS
 // Q15. Flow-to-journey linkage (how Layer 9 flows surface as Layer 8 journeys).
 MATCH (f:Flow)-[:TOUCHES]->(j:Journey)
 RETURN f.id AS flow, collect(j.id) AS journeys;
+
+// Q16. Trace the overseer autonomous verify+merge sub-pipeline in order (merge_ops
+// M2): verify -> poll-until-green -> agentic MergeJudge -> squash-merge ->
+// dual-channel notify. (PR draft-exclusion narrowing #4339 is an observe-stage
+// projection — see ovr.observe — not part of this act sub-pipeline.)
+MATCH (p:Phase) WHERE p.id STARTS WITH 'ovr.act.merge.'
+RETURN p.seq AS step, p.id AS phase, p.detail AS detail, p.evidence AS source
+ORDER BY p.seq;
+
+// Q17. The cognitive-memory recall precision gate (MIN_CLEAN_NEEDLE_LEN) as a
+// phase of the memory-recall flow.
+MATCH (f:Flow {id:'memory-recall'})-[:HAS_PHASE]->(p:Phase)
+RETURN f.id AS flow, p.id AS phase, p.detail AS detail, p.evidence AS source;
