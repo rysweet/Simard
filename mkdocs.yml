@@ -100,6 +100,7 @@ nav:
     - Cross-Process Gap-Scan Dedup (open-issue coverage): concepts/cross-process-gap-scan-dedup.md
     - Autonomous Self-Merge Sensor (ready_prs wire): concepts/autonomous-self-merge-sensor.md
     - Agentic Merge-Queue + Issue Reasoning (observe/orient): concepts/agentic-merge-queue-reasoning.md
+    - Overseer Agentic Health-Review (self-heal crash-loops): concepts/overseer-agentic-health-review.md
     - Autonomous-Merge Review Gate (agentic merge-judge): concepts/autonomous-merge-review-gate.md
     - Merge Draft-State Re-Validation: concepts/merge-draft-state-revalidation.md
     - Adaptive Scaling: concepts/adaptive-scaling.md

@@ -45,8 +45,8 @@ use crate::overseer::capabilities::{
 };
 use crate::overseer::config::{
     claim_reap_enabled, claim_reap_stale_secs, gap_scan_enabled, gap_scan_every_n,
-    goal_health_enabled, memory_recall_enabled, overseer_author_login, overseer_interval_secs,
-    whisper_enabled,
+    goal_health_enabled, health_review_enabled, health_review_service_unit, memory_recall_enabled,
+    overseer_author_login, overseer_interval_secs, whisper_enabled,
 };
 use crate::overseer::deploy::GuardedDeployer;
 use crate::overseer::guardrails::RecursionGuard;
@@ -1278,6 +1278,23 @@ pub fn build_overseer(
         None => overseer,
     };
 
+    // Live agentic health-review rail ([standing]): on the Overseer cadence the
+    // thin rail invokes the `overseer-health-review` recipe — an AGENT reads the
+    // OODA journal + `simard status` + `simard goal list`, detects crash-loops /
+    // clustered failure signatures, and REASONS to typed remediation DECISIONS —
+    // and routes each parsed `LaunchRecipe` / `EscalateBlockedGoal` through the
+    // SAME gated action path. Rust never reads the journal or encodes a failure
+    // threshold. Enabled by default (opt-out via SIMARD_OVERSEER_HEALTH_REVIEW);
+    // the shared gap-scan throttle applies on top. Wiring is fail-visible: if
+    // `recipe-runner-rs`/the recipe is unavailable the rail is simply not wired
+    // this build (the pass is skipped) rather than aborting the tick.
+    let overseer = match build_health_reviewer(&repo_root_for_ecosystem, &state_root) {
+        Some(reviewer) => overseer
+            .with_health_reviewer(reviewer, gap_scan_every_n())
+            .with_health_review_enabled(health_review_enabled()),
+        None => overseer,
+    };
+
     // Periodic stale-engineer-claim reaper (issue #4099): sweep + reclaim the
     // `engineer_claims` leak independent of per-goal polling. Wire the shared
     // ledger chokepoint, the worktree liveness probe, and the orphan cleanup —
@@ -1452,7 +1469,39 @@ fn build_merge_queue_reasoner(
     Some((roster, Box::new(RecipeMergeQueueReasoner::new(runner))))
 }
 
-/// Resolve the acting Overseer's tick cadence (seconds), clamped to the config
+/// Build the production agentic health-review rail ([standing]). Returns `None`
+/// (fail-visible log) if `recipe-runner-rs`/the `overseer-health-review` recipe
+/// is unavailable, so the build proceeds without the rail rather than panicking.
+///
+/// Unlike the ecosystem/merge-queue rails there is NO roster to load — the agent
+/// reads the LOCAL daemon's own observable state (`journalctl --user -u <unit>`,
+/// `simard status`, `simard goal list`). The service unit comes from
+/// [`health_review_service_unit`] (default `simard-ooda.service`), the state root
+/// and repo path are threaded from the daemon so the recipe reads the SAME roots
+/// the engineers spawn under.
+fn build_health_reviewer(
+    repo_root: &std::path::Path,
+    state_root: &std::path::Path,
+) -> Option<Box<dyn crate::overseer::health_review::HealthReviewer>> {
+    use crate::overseer::health_review::{RecipeHealthReviewer, SpawnHealthReviewRecipeRunner};
+
+    let runner = match SpawnHealthReviewRecipeRunner::new(repo_root) {
+        Some(runner) => runner,
+        None => {
+            tracing::warn!(
+                target: "simard::health_review",
+                "[simard] overseer-health-review NOT wired: recipe-runner-rs or overseer-health-review.yaml unavailable",
+            );
+            return None;
+        }
+    };
+    Some(Box::new(RecipeHealthReviewer::new(
+        runner,
+        health_review_service_unit(),
+        state_root.to_string_lossy().into_owned(),
+        repo_root.to_string_lossy().into_owned(),
+    )))
+}
 /// floor so self-tuning can never drive a hot loop.
 pub fn overseer_tick_interval_secs() -> u64 {
     overseer_interval_secs()

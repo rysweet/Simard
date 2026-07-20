@@ -61,6 +61,21 @@ pub const SIMARD_OVERSEER_GAP_SCAN_ENV: &str = "SIMARD_OVERSEER_GAP_SCAN";
 /// disables the scan by stealth nor divides by zero.
 pub const SIMARD_OVERSEER_GAP_SCAN_EVERY_N_ENV: &str = "SIMARD_OVERSEER_GAP_SCAN_EVERY_N";
 
+/// Opt-out flag for the agentic **Overseer health-review** rail: each due tick a
+/// reasoning step reads the OODA journal + `simard status` + `simard goal list`,
+/// detects crash-loops / shared failure signatures, and drives remediation
+/// through `LaunchRecipe` / `EscalateBlockedGoal`. ON by default whenever the
+/// acting Overseer runs; an explicit falsey value (`0`/`false`/`no`/`off`)
+/// disables it. Health-review only makes sense while the Overseer runs, so a
+/// disabled Overseer forces it off regardless of this flag.
+pub const SIMARD_OVERSEER_HEALTH_REVIEW_ENV: &str = "SIMARD_OVERSEER_HEALTH_REVIEW";
+
+/// Override for the systemd `--user` unit whose journal the health-review recipe
+/// reads. Defaults to the OODA daemon unit (`simard-ooda.service`); an operator
+/// may point it at a differently-named unit. Unset/empty falls back to the
+/// default — a blank value never yields an empty `-u` argument.
+pub const SIMARD_OVERSEER_HEALTH_REVIEW_UNIT_ENV: &str = "SIMARD_OVERSEER_HEALTH_REVIEW_UNIT";
+
 /// Opt-out switch for the periodic stale-engineer-claim reaper (issue #4099).
 /// The reaper is ENABLED by default; only an explicit falsey value here disables
 /// it. Distinct from the acting-Overseer gate: the reaper is a safety mechanism
@@ -289,6 +304,47 @@ pub fn gap_scan_every_n_from(lookup: impl Fn(&str) -> Option<String>) -> u64 {
 /// Production entry point: read the real process environment.
 pub fn gap_scan_every_n() -> u64 {
     gap_scan_every_n_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve whether the agentic **Overseer health-review** rail is enabled, with
+/// **default ON** opt-out semantics consistent with the acting Overseer. Enabled
+/// UNLESS [`SIMARD_OVERSEER_HEALTH_REVIEW_ENV`] is an explicit falsey value — AND
+/// only while the acting Overseer itself is enabled (an explicitly-disabled
+/// Overseer forces health-review off).
+pub fn health_review_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    // No Overseer ⇒ no health-review.
+    if !overseer_acting_enabled_from(&lookup) {
+        return false;
+    }
+    // Opt-out: enabled unless an explicit falsey value is set.
+    !matches!(
+        lookup(SIMARD_OVERSEER_HEALTH_REVIEW_ENV).as_deref().map(str::trim),
+        Some(v) if is_falsey(v)
+    )
+}
+
+/// Production entry point: read the real process environment.
+pub fn health_review_enabled() -> bool {
+    health_review_enabled_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the systemd `--user` unit the health-review recipe reads the journal
+/// from. Returns the [`SIMARD_OVERSEER_HEALTH_REVIEW_UNIT_ENV`] override when set
+/// to a non-empty value, else the OODA daemon unit ([`crate::install::paths::OODA_UNIT`]).
+/// A blank override never yields an empty unit.
+pub fn health_review_service_unit_from(lookup: impl Fn(&str) -> Option<String>) -> String {
+    match lookup(SIMARD_OVERSEER_HEALTH_REVIEW_UNIT_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => crate::install::paths::OODA_UNIT.to_string(),
+    }
+}
+
+/// Production entry point: read the real process environment.
+pub fn health_review_service_unit() -> String {
+    health_review_service_unit_from(|k| std::env::var(k).ok())
 }
 
 /// Resolve the consecutive-transient self-heal ceiling `N` (#893) from an env
@@ -1170,6 +1226,67 @@ mod tests {
         const _: () = assert!(
             DEFAULT_OVERSEER_BACKOFF_MULTIPLIER > 1,
             "the multiplier must grow the window"
+        );
+    }
+
+    // ─── [standing] agentic health-review opt-out + service unit ───────────
+
+    #[test]
+    fn health_review_enabled_by_default_with_the_acting_overseer() {
+        // Opt-OUT semantics: unset (acting Overseer default-on) ⇒ enabled.
+        assert!(health_review_enabled_from(env(&[])));
+    }
+
+    #[test]
+    fn health_review_disabled_on_explicit_falsey_values() {
+        for falsey in ["0", "false", "FALSE", "no", "off", "  off  "] {
+            assert!(
+                !health_review_enabled_from(env(&[(SIMARD_OVERSEER_HEALTH_REVIEW_ENV, falsey)])),
+                "{falsey:?} should DISABLE the health-review rail"
+            );
+        }
+    }
+
+    #[test]
+    fn health_review_stays_on_for_truthy_empty_or_garbage_values() {
+        for on in ["1", "true", "yes", "on", "", "  ", "maybe", "2"] {
+            assert!(
+                health_review_enabled_from(env(&[(SIMARD_OVERSEER_HEALTH_REVIEW_ENV, on)])),
+                "{on:?} must leave the health-review rail ON (default)"
+            );
+        }
+    }
+
+    #[test]
+    fn health_review_forced_off_when_the_acting_overseer_is_disabled() {
+        // A disabled acting Overseer forces the rail off regardless of the flag.
+        assert!(!health_review_enabled_from(env(&[
+            (OVERSEER_ENABLED_ENV, "false"),
+            (SIMARD_OVERSEER_HEALTH_REVIEW_ENV, "true"),
+        ])));
+    }
+
+    #[test]
+    fn health_review_service_unit_defaults_to_the_ooda_unit() {
+        assert_eq!(
+            health_review_service_unit_from(env(&[])),
+            crate::install::paths::OODA_UNIT
+        );
+        // A blank override never yields an empty unit.
+        assert_eq!(
+            health_review_service_unit_from(env(&[(SIMARD_OVERSEER_HEALTH_REVIEW_UNIT_ENV, "  ")])),
+            crate::install::paths::OODA_UNIT
+        );
+    }
+
+    #[test]
+    fn health_review_service_unit_reads_explicit_override() {
+        assert_eq!(
+            health_review_service_unit_from(env(&[(
+                SIMARD_OVERSEER_HEALTH_REVIEW_UNIT_ENV,
+                " simard-custom.service "
+            )])),
+            "simard-custom.service"
         );
     }
 }
