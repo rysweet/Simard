@@ -32,9 +32,12 @@ fn streaming_summaries_filter_and_aggregate_from_ledger() {
 
     // Two entries "today", one within the week (2 days ago), one outside the
     // week (10 days ago), interleaved with blank and malformed lines that the
-    // streaming reader must silently skip.
+    // streaming reader must silently skip. Both "today" entries are pinned to
+    // `now` (offset zero) rather than a few minutes back so the daily
+    // `date_naive() == today` filter cannot straddle a UTC-midnight boundary
+    // and flakily drop one; they stay distinguishable by their token counts.
     let today_a = entry(Duration::zero(), 100, 200, 1.0);
-    let today_b = entry(Duration::minutes(-5), 50, 25, 0.5);
+    let today_b = entry(Duration::zero(), 50, 25, 0.5);
     let this_week = entry(Duration::days(-2), 30, 10, 0.25);
     let last_month = entry(Duration::days(-10), 999, 999, 99.0);
 

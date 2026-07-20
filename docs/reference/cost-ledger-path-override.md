@@ -58,8 +58,8 @@ The override lives entirely inside `cost_tracking::ledger_path()`. That single
 private helper gains an `env::var("SIMARD_COST_LEDGER_PATH")` check ahead of its
 existing `HOME`-based join; every other caller is unchanged. Because
 `write_entry` and `summarize_filtered` (and thus `daily_summary` /
-`weekly_summary`) all already funnel through `ledger_path()`, redirecting that
-one function redirects the whole write/read path in lockstep. The summary
+`weekly_summary`) all already funnel through `ledger_path()`, so redirecting
+that one function redirects the whole write/read path in lockstep. The summary
 readers stream the ledger line-by-line through `summarize_filtered` rather than
 materializing the full entry list, so the override redirects that streaming
 read path too. The behavior is additive: when the
