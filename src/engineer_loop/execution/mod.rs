@@ -67,14 +67,52 @@ fn run_command_inner(
             reason: error.to_string(),
         })?;
 
+    // Drain stdout and stderr concurrently on dedicated reader threads so the
+    // child can never block on a full OS pipe buffer (~64 KiB on Linux) while
+    // our poll loop waits for it to exit. Without this, a child emitting more
+    // than one pipe buffer of output deadlocks: it blocks on `write(2)`, never
+    // exits, `try_wait()` never reports completion, and we spin until the
+    // timeout kills it — surfacing a spurious `CommandTimeout` instead of the
+    // real output (issue #4360). Each reader owns its pipe and runs
+    // `read_to_end` to EOF, which arrives when the child closes the stream on
+    // exit (or when we kill it on timeout), so the threads always join.
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let drain = |pipe: Option<std::process::ChildStdout>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = pipe {
+                use std::io::Read;
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let drain_err = |pipe: Option<std::process::ChildStderr>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = pipe {
+                use std::io::Read;
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let stdout_reader = drain(stdout_pipe);
+    let stderr_reader = drain_err(stderr_pipe);
+
     let deadline = Instant::now() + timeout_for_command(argv);
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_status)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
+                    // Killing the child closes its pipes, so the reader threads
+                    // hit EOF and finish; join them to avoid leaking threads.
+                    let _ = stdout_reader.join();
+                    let _ = stderr_reader.join();
                     return Err(SimardError::CommandTimeout {
                         action: argv.join(" "),
                         timeout_secs: timeout_for_command(argv).as_secs(),
@@ -83,34 +121,44 @@ fn run_command_inner(
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
                 return Err(SimardError::ActionExecutionFailed {
                     action: argv.join(" "),
                     reason: format!("failed to poll child process: {error}"),
                 });
             }
         }
-    }
+    };
 
-    let output = child
-        .wait_with_output()
-        .map_err(|error| SimardError::ActionExecutionFailed {
+    let stdout_bytes = stdout_reader
+        .join()
+        .map_err(|_| SimardError::ActionExecutionFailed {
             action: argv.join(" "),
-            reason: format!("failed to collect child output: {error}"),
+            reason: "stdout reader thread panicked".to_string(),
+        })?;
+    let stderr_bytes = stderr_reader
+        .join()
+        .map_err(|_| SimardError::ActionExecutionFailed {
+            action: argv.join(" "),
+            reason: "stderr reader thread panicked".to_string(),
         })?;
 
-    if !output.status.success() && !allow_nonzero_exit {
-        let stderr = sanitize_terminal_text(&String::from_utf8_lossy(&output.stderr));
-        let stdout = sanitize_terminal_text(&String::from_utf8_lossy(&output.stdout));
+    if !status.success() && !allow_nonzero_exit {
+        let stderr = sanitize_terminal_text(&String::from_utf8_lossy(&stderr_bytes));
+        let stdout = sanitize_terminal_text(&String::from_utf8_lossy(&stdout_bytes));
         let reason = if stderr.trim().is_empty() {
             format!(
                 "command exited with status {} and stdout='{}'",
-                output.status,
+                status,
                 stdout.trim()
             )
         } else {
             format!(
                 "command exited with status {} and stderr='{}'",
-                output.status,
+                status,
                 stderr.trim()
             )
         };
@@ -129,7 +177,7 @@ fn run_command_inner(
     }
 
     Ok(CommandOutput {
-        stdout: sanitize_terminal_text(&String::from_utf8_lossy(&output.stdout)),
+        stdout: sanitize_terminal_text(&String::from_utf8_lossy(&stdout_bytes)),
     })
 }
 
@@ -161,4 +209,115 @@ pub(crate) fn parse_status_paths(stdout: &str) -> Vec<String> {
             }
         })
         .collect()
+}
+
+#[cfg(all(test, unix))]
+mod pipe_drain_tests {
+    //! TDD regression tests for issue #4360: `run_command_inner`'s poll loop can
+    //! stall on more than ~64 KiB of child output because it only calls
+    //! [`std::process::Child::wait_with_output`] *after* the child has exited.
+    //!
+    //! While the loop spins on `try_wait()` + `sleep`, nothing drains the
+    //! child's stdout/stderr pipes. Once the child fills the OS pipe buffer
+    //! (~64 KiB on Linux) its next `write(2)` blocks forever, the child never
+    //! exits, `try_wait()` never reports completion, and the two processes
+    //! deadlock until the command timeout kills the child. The caller then sees
+    //! a spurious [`SimardError::CommandTimeout`] instead of the real output.
+    //!
+    //! The contract these tests pin down: a child emitting ~1 MiB (far beyond
+    //! any pipe buffer) to stdout and/or stderr must complete promptly with the
+    //! full stdout captured. Both streams must be drained *concurrently* while
+    //! the child runs.
+    //!
+    //! Against the current implementation these tests hang until the git
+    //! command timeout (60s) and then fail with `CommandTimeout`. Once
+    //! `run_command_inner` drains both pipes concurrently they pass quickly.
+
+    use std::time::{Duration, Instant};
+
+    use super::{run_command, run_command_allow_failure};
+
+    /// 1 MiB — an order of magnitude past the ~64 KiB Linux pipe buffer, so it
+    /// cannot be buffered and forces the child to block unless we drain.
+    const PAYLOAD_BYTES: usize = 1_048_576;
+
+    /// A generous bound: real draining finishes in milliseconds. Anything near
+    /// the 60s git timeout is the deadlock symptom, not slowness.
+    const FAST_ENOUGH: Duration = Duration::from_secs(30);
+
+    /// >64 KiB of stdout must be captured in full without deadlocking.
+    #[test]
+    fn run_command_captures_large_stdout_without_deadlock() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // `yes` streams "y\n" forever; `head -c` caps at 1 MiB then closes the
+        // pipe (SIGPIPE ends `yes`), so the pipeline exits 0.
+        let script = format!("yes | head -c {PAYLOAD_BYTES}");
+        let argv = ["sh", "-c", script.as_str()];
+
+        let start = Instant::now();
+        let output = run_command(dir.path(), &argv)
+            .expect("large stdout must be drained and captured, not deadlock into a timeout");
+        let elapsed = start.elapsed();
+
+        assert!(
+            output.stdout.len() >= PAYLOAD_BYTES / 2,
+            "expected the full ~1 MiB stdout to be captured; got {} bytes",
+            output.stdout.len()
+        );
+        assert!(
+            elapsed < FAST_ENOUGH,
+            "draining ~1 MiB stdout should finish quickly; took {elapsed:?} (deadlock symptom)"
+        );
+    }
+
+    /// A child flooding stderr must not wedge the loop even though the caller
+    /// only consumes stdout. Exit is 0, so `run_command` succeeds and the small
+    /// stdout marker is returned.
+    #[test]
+    fn run_command_does_not_deadlock_on_large_stderr() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let script = format!("yes | head -c {PAYLOAD_BYTES} 1>&2; printf DONE");
+        let argv = ["sh", "-c", script.as_str()];
+
+        let start = Instant::now();
+        let output = run_command(dir.path(), &argv)
+            .expect("large stderr must be drained concurrently, not deadlock into a timeout");
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            output.stdout.trim(),
+            "DONE",
+            "stdout marker must survive a concurrent stderr flood"
+        );
+        assert!(
+            elapsed < FAST_ENOUGH,
+            "draining ~1 MiB stderr should finish quickly; took {elapsed:?} (deadlock symptom)"
+        );
+    }
+
+    /// The classic deadlock shape: both pipes flooded simultaneously. The
+    /// non-zero exit routes through `run_command_allow_failure`, whose captured
+    /// stdout must still be the full payload.
+    #[test]
+    fn run_command_allow_failure_drains_both_streams_concurrently() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let script =
+            format!("yes | head -c {PAYLOAD_BYTES}; yes | head -c {PAYLOAD_BYTES} 1>&2; exit 3");
+        let argv = ["sh", "-c", script.as_str()];
+
+        let start = Instant::now();
+        let output = run_command_allow_failure(dir.path(), &argv)
+            .expect("allow_failure must return captured stdout even on non-zero exit");
+        let elapsed = start.elapsed();
+
+        assert!(
+            output.stdout.len() >= PAYLOAD_BYTES / 2,
+            "expected full stdout despite a concurrent stderr flood; got {} bytes",
+            output.stdout.len()
+        );
+        assert!(
+            elapsed < FAST_ENOUGH,
+            "draining both streams should finish quickly; took {elapsed:?} (deadlock symptom)"
+        );
+    }
 }

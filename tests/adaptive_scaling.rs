@@ -315,6 +315,11 @@ fn scaler_current_max_can_override_config() {
     // Use scaler's current_max as the config limit.
     let config = OodaConfig {
         max_concurrent_actions: scaler.current_max(),
+        // Pin the scaler off so an ambient `SIMARD_SCALING=auto` (set by a
+        // concurrent test) cannot leak a default 24-wide scaler in via
+        // `default()` and defeat the explicit cap. That non-hermeticity is what
+        // flaked this test RED and turned main RED after PR #4361 (#4361).
+        scaler: None,
         ..OodaConfig::default()
     };
 
@@ -327,6 +332,77 @@ fn scaler_current_max_can_override_config() {
 }
 
 // ── Constants validation ──
+
+// ── Hermeticity regression (P1 / RED main, issue #4361 follow-up) ──
+//
+// `scaler_current_max_can_override_config` (above) used to build its config
+// with a bare `..OodaConfig::default()`, and `OodaConfig::default()` reads
+// `SIMARD_SCALING` from the *process* environment. When any concurrent test in
+// the run set `SIMARD_SCALING=auto`, `default()` populated the `scaler` field,
+// and `decide` prefers the scaler's adjusted limit over the explicit
+// `max_concurrent_actions`. The override cap of 2 was silently defeated and the
+// assertion flaked RED — the scheduling-dependent break that turned main RED
+// after PR #4361.
+//
+// This test locks in the fix *deterministically*: it sets `SIMARD_SCALING=auto`
+// for the duration of the config build (serialised via the `cognitive_memory`
+// key so no other env writer can interleave) and then exercises the override
+// path. The construction pins `scaler: None`, so an ambient `SIMARD_SCALING`
+// cannot leak a 24-wide scaler in; the cap holds at 2. If a future change drops
+// the `scaler: None` pin and reverts to a bare `..default()`, this guard flips
+// RED again under the injected `SIMARD_SCALING=auto`.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn scaler_override_config_is_hermetic_against_ambient_scaling() {
+    use simard::ooda_loop::{OodaConfig, Priority, decide};
+
+    let scaler = AdaptiveScaler::new(2, 1, 8);
+    let priorities: Vec<Priority> = (1..=5)
+        .map(|i| Priority {
+            goal_id: format!("g{i}"),
+            urgency: 1.0 - (i as f64 * 0.1),
+            reason: format!("priority {i}"),
+        })
+        .collect();
+
+    let prev = std::env::var_os("SIMARD_SCALING");
+    // SAFETY: serialised via #[serial(cognitive_memory)]; no concurrent env
+    // mutation can tear this write.
+    unsafe {
+        std::env::set_var("SIMARD_SCALING", "auto");
+    }
+
+    let result = std::panic::catch_unwind(|| {
+        // The override path MUST NOT inherit an ambient scaler. Pinning
+        // `scaler: None` keeps the explicit `max_concurrent_actions` cap in
+        // force even though `SIMARD_SCALING=auto` is set in the environment; a
+        // bare `..OodaConfig::default()` here would leak that ambient scaler and
+        // break the cap.
+        let config = OodaConfig {
+            max_concurrent_actions: scaler.current_max(),
+            scaler: None,
+            ..OodaConfig::default()
+        };
+        let actions = decide(&priorities, &config).unwrap();
+        assert!(
+            actions.len() <= 2,
+            "override config must cap at scaler.current_max()=2 regardless of ambient \
+             SIMARD_SCALING; got {} actions (ambient scaler leaked in)",
+            actions.len()
+        );
+    });
+
+    // SAFETY: restore before propagating any panic (same serial key).
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("SIMARD_SCALING", v),
+            None => std::env::remove_var("SIMARD_SCALING"),
+        }
+    }
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
 
 #[test]
 fn aimd_constants_are_sensible() {

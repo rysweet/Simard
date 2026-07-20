@@ -16,6 +16,7 @@ related:
   - ./hermetic-tests.md
   - ./ci-resilient-test-patterns.md
   - ./deflaking-known-flaky-tests.md
+  - ./scaling-and-cost-ledger-flake-fixes.md
   - ./COVERAGE_BASELINE.md
   - ../reference/goal-board-api.md
   - ../reference/cognitive-memory-client-helpers.md
