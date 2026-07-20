@@ -117,8 +117,8 @@ pub fn evaluate_objective_gates(
     // Gate 1: not a draft
     if snapshot.is_draft {
         return Err(
-            "PR is a draft (isDraft=true). Draft PRs are never auto-merged. \
-             Mark it ready for review before merging: `gh pr ready <PR>`."
+            "PR is a draft (isDraft=true) — GitHub refuses to merge a draft. \
+             Mark it ready for review before retrying: `gh pr ready <PR>`."
                 .to_string(),
         );
     }

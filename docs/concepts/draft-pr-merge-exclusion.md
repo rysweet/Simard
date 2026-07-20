@@ -99,7 +99,7 @@ receives only a `PrSnapshot` (which has no `number` field), so it uses the liter
 `<PR>` placeholder exactly as the base-branch gate does (`gh pr edit <PR> …`):
 
 ```text
-PR is a draft (isDraft=true). Draft PRs are never auto-merged. Mark it ready for review before merging: `gh pr ready <PR>`.
+PR is a draft (isDraft=true) — GitHub refuses to merge a draft. Mark it ready for review before retrying: `gh pr ready <PR>`.
 ```
 
 ## Where `isDraft` comes from
