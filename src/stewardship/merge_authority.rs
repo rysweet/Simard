@@ -350,6 +350,11 @@ impl PrGhClient for RealPrGhClient {
                     "--repo",
                     repo,
                     "--json",
+                    // `isDraft` is requested for snapshot-completeness parity
+                    // with the `gh pr list` field sets (#4339). The operative
+                    // draft-exclusion gate keys on the LIST path
+                    // (`OpenPrSummary.is_draft`), not this per-PR view — so
+                    // `parse_pr_view_json` intentionally does NOT deserialize it.
                     "body,statusCheckRollup,mergeable,reviewDecision,baseRefName,labels,isDraft",
                 ],
             )?;
