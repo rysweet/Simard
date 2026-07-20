@@ -14,6 +14,7 @@
 | [`problem_to_brief.md`](./problem_to_brief.md) | Decide | one `Problem` → a `smart-orchestrator` `task_description` |
 | [`pr_verify.md`](./pr_verify.md) | Act (verify) | PR body + CI + diff → merge-ready verdict + checklist |
 | [`deploy_gate.md`](./deploy_gate.md) | Act (deploy, HIGH-RISK) | target/deployed commit + canary → deploy/propose/hold |
+| [`health_review.md`](./health_review.md) | Observe→Decide→Act (self-heal) | journal + status + goal list → `LaunchRecipe`/`EscalateBlockedGoal` decisions |
 
 ## Reuse the existing recipes — do not reinvent
 
