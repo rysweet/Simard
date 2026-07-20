@@ -1,20 +1,20 @@
 ---
 title: Agentic-recipes-first reasoning principle
 description: >
-  Why Simard's REASONING prompt assets will carry one canonical, byte-identical
+  Simard's REASONING prompt assets carry one canonical, byte-identical
   design principle — when a problem requires intelligence or judgment, solve it
   by composing, reusing, or inventing deterministic recipes of agentic steps run
   via the recipe runner, never by writing brittle imperative code or one-off
   heuristics. Imperative code is confined to the thin deterministic rails
   (dispatch, I/O, storage, scheduling ticks); the reasoning itself lives in
-  agentic recipe steps. The block will be embedded in all nine OODA / Overseer /
+  agentic recipe steps. The block is embedded in all nine OODA / Overseer /
   planning reasoners, references (does not duplicate) engineer_system.md's G3,
   and is pinned in place by a drift-guard test.
 last_updated: 2026-07-20
 review_schedule: as-needed
 owner: simard
 doc_type: concept
-status: specified
+status: implemented
 related:
   - ./unified-recipe-brain.md
   - ./prompt-driven-ooda-brain.md
@@ -26,15 +26,13 @@ related:
 
 # Agentic-recipes-first reasoning principle
 
-> **Status: specified — implementation spec.** This page is the source-of-truth
-> specification for the principle. It defines, in one place, the exact canonical
-> block to embed, the nine assets that must carry it, and the drift-guard test
-> that will pin the copies byte-identical. Until the implementation lands, the
-> block is **not yet present** in the assets and
-> `tests/prompt_agentic_recipes_principle.rs` **does not yet exist** — that test
-> fails closed against unmodified assets, which is the intended safety behavior
-> that forces the insertions to actually ship. Sections below use the normative
-> "must / will" voice: they describe the target state to build against.
+> **Status: implemented.** This page is the source-of-truth description of the
+> principle. It defines, in one place, the canonical block that is embedded in
+> the reasoning assets, the nine assets that carry it, and the drift-guard test
+> that pins the copies byte-identical. The block is present in all nine assets
+> and `tests/prompt_agentic_recipes_principle.rs` enforces it — that test fails
+> closed if any copy is missing, altered, or mis-ordered. Sections below describe
+> the enforced target state.
 
 ## The principle
 
@@ -125,7 +123,7 @@ is enforced by code.
 ## Drift-guard test
 
 `tests/prompt_agentic_recipes_principle.rs` is a thin verification rail. It
-must assert that:
+asserts that:
 
 1. the pinned canonical sentence — "When a problem requires intelligence or
    judgment, solve it by composing, reusing, or inventing deterministic recipes
@@ -141,11 +139,8 @@ must assert that:
    contract without failing the test — a positional invariant, not just a
    presence check.
 
-The test must fail **closed**: if any copy is missing, edited, partially
-updated, mis-ordered, deleted, or tampered with, the assertion breaks. Because
-the target assets are unmodified today, this test **starts red** and only goes
-green once the nine insertions land — that is the mechanism that forces the
-implementation to actually ship rather than stop at documentation. It checks
+The test fails **closed**: if any copy is missing, edited, partially
+updated, mis-ordered, deleted, or tampered with, the assertion breaks. It checks
 keyword invariants and ordering, not full snapshots, so additive prose in any
 host prompt stays safe.
 

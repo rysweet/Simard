@@ -19,11 +19,10 @@
 //! prompt's output-contract section so it can never silently drift below the
 //! output contract.
 //!
-//! Design note: this is a spec-first (TDD) test. Because the nine target assets
-//! are unmodified today, this suite **starts red** and only goes green once the
-//! nine insertions land. That is the intended mechanism forcing the
-//! implementation to actually ship. It checks keyword invariants and ordering,
-//! not full snapshots, so additive prose in any host prompt stays safe.
+//! Design note: this is a drift-guard rail. It checks keyword invariants and
+//! ordering, not full snapshots, so additive prose in any host prompt stays
+//! safe, while any missing, altered, partial, or mis-ordered copy fails the
+//! suite closed.
 
 use std::fs;
 use std::path::PathBuf;
