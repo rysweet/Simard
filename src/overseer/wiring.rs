@@ -57,11 +57,14 @@ use crate::overseer::merge_ops::MergePrOps;
 use crate::overseer::notify::DualChannelNotifier;
 use crate::overseer::observer::StewardshipIssueFiler;
 use crate::overseer::sensor::{
-    SnapshotStatusReader, blocked_goals_from_board, detect_workstream_gaps,
-    extract_gap_coverage_signatures, in_flight_from_board,
+    GAP_COVERAGE_FILED_BY, GAP_COVERAGE_ISSUE_TITLE, GAP_COVERAGE_STAMP_PREFIX,
+    SnapshotStatusReader, blocked_goals_from_board, body_has_filed_by,
+    build_gap_coverage_issue_body, detect_workstream_gaps, extract_gap_coverage_signatures,
+    in_flight_from_board,
 };
 use crate::overseer::signal::{DETAIL_CAP, GapItem, Signal, sanitize_detail};
 use crate::overseer::{ActOutcome, Capabilities, CycleReport, Overseer};
+use crate::stewardship::gh_client::GhIssue;
 
 // ─────────────────────────── cadence scheduler ─────────────────────────────
 
@@ -352,6 +355,38 @@ pub fn overseer_tick_detailed(
                             && let Some(entry) = cycle.entries.get(i)
                         {
                             overseer.record_occurrence(entry, &outcome);
+                        }
+                        // WRITE half of the cross-process gap-coverage dedup
+                        // (issue #4353, F2): the moment a coverage workstream is
+                        // actually launched, deterministically stamp an anchor
+                        // issue for each covered gap so a post-restart cold gate
+                        // reads it back and never re-launches — independent of
+                        // whether the launched model copies the stamp. Coverage
+                        // problems carry a `Signal::WorkstreamGap`; the plan and
+                        // problem lists share the leading index (the ecosystem
+                        // pass only APPENDS entries), so `problems[i]` is the
+                        // originating problem. Idempotent + best-effort inside the
+                        // curator; a no-op for every non-coverage action.
+                        if matches!(outcome, ActOutcome::Launched(_))
+                            && let Some(problem) = cycle.problems.get(i)
+                        {
+                            let gaps: Vec<GapItem> = problem
+                                .evidence
+                                .iter()
+                                .find_map(|s| match s {
+                                    Signal::WorkstreamGap { gaps } => Some(gaps.clone()),
+                                    _ => None,
+                                })
+                                .unwrap_or_default();
+                            if !gaps.is_empty()
+                                && let Err(e) = overseer.ensure_coverage_stamp(&gaps)
+                            {
+                                tracing::warn!(
+                                    target: "overseer::gap_scan",
+                                    error = %e,
+                                    "gap-scan: deterministic coverage-anchor write returned an error — isolated, continuing"
+                                );
+                            }
                         }
                     }
                     Err(e) => {
@@ -784,6 +819,13 @@ pub struct BoardGoalCurator {
     coverage_gh: Option<Arc<dyn crate::stewardship::gh_client::GhClient + Send + Sync>>,
     /// Repo whose open issues carry the coverage stamps (Simard's own repo).
     coverage_repo: String,
+    /// When `Some(marker)`, the read half seeds cross-process coverage ONLY from
+    /// open issues whose body carries a trusted `filed-by: <marker>` provenance
+    /// line (issue #4353, F4). This closes the dedup-poisoning vector: a
+    /// non-trusted actor cannot open an issue bearing a crafted
+    /// `workstream-gap:<sig>` stamp to SUPPRESS a real gap. `None` ⇒ no author
+    /// scoping (any stamped issue seeds coverage — the pre-#4353 behaviour).
+    coverage_trusted_filed_by: Option<String>,
 }
 
 impl BoardGoalCurator {
@@ -792,6 +834,7 @@ impl BoardGoalCurator {
             mem,
             coverage_gh: None,
             coverage_repo: SELF_REPO.to_string(),
+            coverage_trusted_filed_by: None,
         }
     }
 
@@ -807,7 +850,20 @@ impl BoardGoalCurator {
             mem,
             coverage_gh: Some(gh),
             coverage_repo: repo.into(),
+            coverage_trusted_filed_by: None,
         }
+    }
+
+    /// Scope cross-process coverage seeding to issues carrying a trusted
+    /// `filed-by: <marker>` provenance line (issue #4353, F4). Chainable onto
+    /// [`with_issue_coverage`](Self::with_issue_coverage); a no-op without a
+    /// coverage `gh` client. The production curator trusts
+    /// [`GAP_COVERAGE_FILED_BY`], the exact marker its own deterministic write
+    /// half ([`ensure_coverage_stamp`](GoalCurator::ensure_coverage_stamp))
+    /// stamps — so only Overseer-filed anchors can seed dedup.
+    pub fn trusting_filed_by(mut self, marker: impl Into<String>) -> Self {
+        self.coverage_trusted_filed_by = Some(marker.into());
+        self
     }
 
     fn load(&self) -> Result<GoalBoard, OverseerError> {
@@ -837,8 +893,25 @@ impl BoardGoalCurator {
         // The `workstream-gap:` signature namespace is matched by the same
         // `stewardship-signature:` search/scan path every stewardship dedup uses;
         // the extractor then validates and strips each stamp.
-        match gh.search_issues(&self.coverage_repo, "workstream-gap:") {
-            Ok(issues) => extract_gap_coverage_signatures(&issues),
+        match gh.search_issues(&self.coverage_repo, GAP_COVERAGE_STAMP_PREFIX) {
+            Ok(issues) => {
+                // F4 (issue #4353) trust gate: when a trusted provenance marker is
+                // configured, only issues carrying a `filed-by: <marker>` line may
+                // seed coverage, so a non-trusted actor cannot suppress a real gap
+                // with a crafted stamp (dedup poisoning). Post-filter (not the
+                // `gh` query) so the trust rule lives in one testable place and
+                // does not depend on `GhIssue` carrying an author field.
+                match self.coverage_trusted_filed_by.as_deref() {
+                    Some(marker) => {
+                        let trusted: Vec<GhIssue> = issues
+                            .into_iter()
+                            .filter(|i| body_has_filed_by(&i.body, marker))
+                            .collect();
+                        extract_gap_coverage_signatures(&trusted)
+                    }
+                    None => extract_gap_coverage_signatures(&issues),
+                }
+            }
             Err(e) => {
                 tracing::warn!(
                     target: "overseer::gap_scan",
@@ -950,6 +1023,65 @@ impl GoalCurator for BoardGoalCurator {
         // dropping a gap. Anomalies flow through from the Observe pass.
         let coverage = self.open_gap_coverage_signatures();
         Ok(detect_workstream_gaps(&board, &[], anomalies, &coverage))
+    }
+
+    /// WRITE half of the cross-process gap-coverage dedup (issue #4353, F2),
+    /// enforced deterministically in code. When a `gh` coverage client is wired,
+    /// idempotently guarantees an open, trusted-provenance anchor issue carries a
+    /// `stewardship-signature: workstream-gap:<sig>` stamp for each covered gap —
+    /// the exact grammar [`open_gap_coverage_signatures`](Self::open_gap_coverage_signatures)
+    /// reads back — so a later gap-scan (even a post-restart cold gate) declines
+    /// to re-flag / re-launch coverage for the gap. Unlike the prior brief-only
+    /// instruction, the stamp is guaranteed present and well-formed independent of
+    /// any launched model's output; this is what stops the duplicate
+    /// "Cover uncovered backlog workstream(s)" issues (#4297/#4301/#4304/#4306/
+    /// #4316/#4337/#4338) from re-accreting.
+    ///
+    /// Idempotent: gaps already covered by an open trusted anchor are skipped, so
+    /// a repeat tick files nothing. Best-effort: no `gh` client, or a `gh`
+    /// failure, degrades to the in-memory coverage backoff gate (logged, never
+    /// fatal) — a gap is never silently dropped.
+    fn ensure_coverage_stamp(&self, gaps: &[GapItem]) -> Result<(), OverseerError> {
+        let Some(gh) = self.coverage_gh.as_ref() else {
+            return Ok(());
+        };
+        if gaps.is_empty() {
+            return Ok(());
+        }
+        // Only stamp gaps NOT already anchored by an open, trusted issue — the
+        // same read the detector dedups against, so the write half converges to
+        // exactly one anchor per gap and can never re-file a duplicate.
+        let already = self.open_gap_coverage_signatures();
+        let missing: Vec<GapItem> = gaps
+            .iter()
+            .filter(|g| !already.iter().any(|c| c == &g.signature))
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let body = build_gap_coverage_issue_body(&missing);
+        match gh.create_issue(&self.coverage_repo, GAP_COVERAGE_ISSUE_TITLE, &body) {
+            Ok(issue) => {
+                tracing::info!(
+                    target: "overseer::gap_scan",
+                    repo = %self.coverage_repo,
+                    issue = issue.number,
+                    gaps = missing.len(),
+                    "gap-scan: filed deterministic coverage anchor (write half, #4353 F2)"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "overseer::gap_scan",
+                    repo = %self.coverage_repo,
+                    error = %e,
+                    "gap-scan: coverage-anchor write failed; relying on the in-memory backoff gate"
+                );
+                Ok(())
+            }
+        }
     }
 }
 
@@ -1180,12 +1312,17 @@ pub fn assemble_capabilities(
         // The curator ALSO gets a `gh` client so the gap-scan seeds its coverage
         // set from open, `workstream-gap:`-stamped issues — the cross-process
         // dedup that stops a post-restart cold gate re-opening a duplicate
-        // coverage issue (#4340/#4341, #4337/#4338).
-        goals: Box::new(BoardGoalCurator::with_issue_coverage(
-            Arc::clone(&mem),
-            Arc::new(crate::stewardship::RealGhClient),
-            SELF_REPO,
-        )),
+        // coverage issue (#4340/#4341, #4337/#4338). It is scoped (#4353, F4) to
+        // trust ONLY the Overseer's own `filed-by: simard-overseer` anchors, so a
+        // non-trusted actor cannot suppress a real gap with a crafted stamp.
+        goals: Box::new(
+            BoardGoalCurator::with_issue_coverage(
+                Arc::clone(&mem),
+                Arc::new(crate::stewardship::RealGhClient),
+                SELF_REPO,
+            )
+            .trusting_filed_by(GAP_COVERAGE_FILED_BY),
+        ),
         auditor: Box::new(SelfQualityAuditor::from_env(repo_root, state_root)),
         memory: Box::new(MemoryRecallOps::new(mem)),
     }
@@ -2553,6 +2690,224 @@ mod tests {
             gh.calls().len(),
             1,
             "the failing coverage query is still attempted exactly once"
+        );
+    }
+
+    // ── gap-scan dedup hardening: F2 write half + F4 author scope (#4353) ──
+
+    use crate::overseer::sensor::{
+        GAP_COVERAGE_FILED_BY, GAP_COVERAGE_ISSUE_TITLE, build_gap_coverage_issue_body,
+    };
+    use crate::overseer::signal::{GapCategory, GapItem};
+
+    /// A goal-uncovered `GapItem` whose base signature is `goal:<id>`.
+    fn goal_gap(id: &str) -> GapItem {
+        GapItem {
+            category: GapCategory::GoalUncovered,
+            ref_id: id.to_string(),
+            title: format!("cover {id}"),
+            why_it_matters: "p1 goal with no active engineer and no open PR".to_string(),
+            signature: format!("goal:{id}"),
+        }
+    }
+
+    /// A stateful `gh` fake that persists `create_issue` and returns matching
+    /// issues from `search_issues` (body contains `stewardship-signature:<sig>`)
+    /// — so the F2 write→read dedup loop is observable end-to-end, no network.
+    struct StatefulCoverageGh {
+        issues: Mutex<Vec<GhIssue>>,
+        next: Mutex<u64>,
+        creates: Mutex<usize>,
+    }
+    impl StatefulCoverageGh {
+        fn new() -> Self {
+            Self {
+                issues: Mutex::new(Vec::new()),
+                next: Mutex::new(4400),
+                creates: Mutex::new(0),
+            }
+        }
+        fn create_calls(&self) -> usize {
+            *self.creates.lock().unwrap()
+        }
+        fn issues(&self) -> Vec<GhIssue> {
+            self.issues.lock().unwrap().clone()
+        }
+    }
+    impl GhClient for StatefulCoverageGh {
+        fn search_issues(
+            &self,
+            _repo: &str,
+            signature: &str,
+        ) -> crate::error::SimardResult<Vec<GhIssue>> {
+            let needle = format!("stewardship-signature: {signature}");
+            Ok(self
+                .issues
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|i| i.body.contains(&needle))
+                .cloned()
+                .collect())
+        }
+        fn create_issue(
+            &self,
+            repo: &str,
+            title: &str,
+            body: &str,
+        ) -> crate::error::SimardResult<GhIssue> {
+            *self.creates.lock().unwrap() += 1;
+            let number = {
+                let mut n = self.next.lock().unwrap();
+                let cur = *n;
+                *n += 1;
+                cur
+            };
+            let issue = GhIssue {
+                number,
+                url: format!("https://github.com/{repo}/issues/{number}"),
+                title: title.to_string(),
+                body: body.to_string(),
+            };
+            self.issues.lock().unwrap().push(issue.clone());
+            Ok(issue)
+        }
+    }
+
+    #[test]
+    fn f2_ensure_coverage_stamp_files_a_deterministic_anchor_then_is_idempotent() {
+        // F2: the WRITE half is enforced in code — filing a stamped anchor whose
+        // grammar matches the reader — and a repeat call files nothing.
+        let gh = Arc::new(StatefulCoverageGh::new());
+        let curator = BoardGoalCurator::with_issue_coverage(
+            seeded_board_memory(),
+            gh.clone(),
+            "rysweet/Simard",
+        )
+        .trusting_filed_by(GAP_COVERAGE_FILED_BY);
+        let gap = goal_gap(GAP_GOAL_ID);
+
+        curator
+            .ensure_coverage_stamp(std::slice::from_ref(&gap))
+            .expect("ensure_coverage_stamp");
+        assert_eq!(
+            gh.create_calls(),
+            1,
+            "the first tick files exactly one anchor"
+        );
+
+        let anchor = &gh.issues()[0];
+        assert_eq!(anchor.title, GAP_COVERAGE_ISSUE_TITLE);
+        assert!(
+            anchor.body.contains(&format!(
+                "stewardship-signature: workstream-gap:{}",
+                gap.signature
+            )),
+            "the anchor must carry the deterministic per-gap stamp: {}",
+            anchor.body
+        );
+        assert!(
+            anchor.body.contains("filed-by: simard-overseer"),
+            "the anchor must carry the trusted provenance marker (F4): {}",
+            anchor.body
+        );
+
+        // Idempotent: the gap is now anchored, so a repeat tick files nothing.
+        curator
+            .ensure_coverage_stamp(std::slice::from_ref(&gap))
+            .expect("ensure_coverage_stamp (repeat)");
+        assert_eq!(
+            gh.create_calls(),
+            1,
+            "a repeat tick must NOT file a second anchor (idempotent write half)"
+        );
+    }
+
+    #[test]
+    fn f2_a_repeat_tick_does_not_re_emit_after_the_deterministic_write_half() {
+        // The end-to-end success criterion: a gap is detected once, Simard stamps
+        // a deterministic anchor (F2), and the very same gap is suppressed on the
+        // next tick — no re-emit, no duplicate coverage issue.
+        let gh = Arc::new(StatefulCoverageGh::new());
+        let curator = BoardGoalCurator::with_issue_coverage(
+            seeded_board_memory(),
+            gh.clone(),
+            "rysweet/Simard",
+        )
+        .trusting_filed_by(GAP_COVERAGE_FILED_BY);
+
+        let first = curator.workstream_gaps(&[]).expect("first tick");
+        assert_eq!(
+            first
+                .iter()
+                .map(|g| g.signature.clone())
+                .collect::<Vec<_>>(),
+            vec![format!("goal:{GAP_GOAL_ID}")],
+            "the uncovered p1 goal must surface on the cold first tick: {first:?}"
+        );
+
+        curator
+            .ensure_coverage_stamp(&first)
+            .expect("ensure_coverage_stamp");
+        assert_eq!(gh.create_calls(), 1);
+
+        let second = curator.workstream_gaps(&[]).expect("second tick");
+        assert!(
+            second.is_empty(),
+            "the deterministic stamped anchor must suppress the gap on the next tick: {second:?}"
+        );
+    }
+
+    #[test]
+    fn f4_an_untrusted_author_stamp_does_not_seed_coverage() {
+        // F4: an issue carrying a crafted `workstream-gap:` stamp but NO trusted
+        // `filed-by:` provenance must NOT suppress the gap (dedup poisoning is
+        // neutralised) — the gap is still surfaced.
+        let poisoned = GhIssue {
+            number: 9999,
+            url: "https://github.com/rysweet/Simard/issues/9999".to_string(),
+            title: "looks legit".to_string(),
+            body: format!("stewardship-signature: workstream-gap:goal:{GAP_GOAL_ID}\n"),
+        };
+        let gh = Arc::new(RecordingGh::returning(vec![poisoned]));
+        let curator = BoardGoalCurator::with_issue_coverage(
+            seeded_board_memory(),
+            gh.clone(),
+            "rysweet/Simard",
+        )
+        .trusting_filed_by(GAP_COVERAGE_FILED_BY);
+
+        let gaps = curator.workstream_gaps(&[]).expect("workstream_gaps");
+        assert_eq!(
+            gaps.iter().map(|g| g.signature.clone()).collect::<Vec<_>>(),
+            vec![format!("goal:{GAP_GOAL_ID}")],
+            "an untrusted-author stamp must not suppress the gap under F4 scoping: {gaps:?}"
+        );
+    }
+
+    #[test]
+    fn f4_a_trusted_author_anchor_seeds_coverage() {
+        // Control for F4: a trusted anchor (carrying `filed-by: simard-overseer`,
+        // exactly what the F2 write half produces) DOES seed coverage and
+        // suppress the gap.
+        let anchor = GhIssue {
+            number: 4400,
+            url: "https://github.com/rysweet/Simard/issues/4400".to_string(),
+            title: GAP_COVERAGE_ISSUE_TITLE.to_string(),
+            body: build_gap_coverage_issue_body(&[goal_gap(GAP_GOAL_ID)]),
+        };
+        let gh = Arc::new(RecordingGh::returning(vec![anchor]));
+        let curator = BoardGoalCurator::with_issue_coverage(
+            seeded_board_memory(),
+            gh.clone(),
+            "rysweet/Simard",
+        )
+        .trusting_filed_by(GAP_COVERAGE_FILED_BY);
+
+        let gaps = curator.workstream_gaps(&[]).expect("workstream_gaps");
+        assert!(
+            gaps.is_empty(),
+            "a trusted, stamped anchor must suppress the gap: {gaps:?}"
         );
     }
 }

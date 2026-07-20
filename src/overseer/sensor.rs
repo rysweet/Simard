@@ -527,6 +527,65 @@ fn is_valid_gap_signature(sig: &str) -> bool {
     false
 }
 
+/// The trusted provenance marker every Overseer-filed gap-coverage anchor issue
+/// carries (issue #4353, F4). The read half only ever seeds cross-process
+/// coverage from issues whose body carries this `filed-by:` line, so a
+/// non-trusted actor cannot open an issue bearing a crafted
+/// `workstream-gap:<sig>` stamp to SUPPRESS a gap (dedup poisoning). Mirrors the
+/// established `filed-by: simard-stewardship` convention the CI-health / supply
+/// -chain stewards already stamp their deduped issues with.
+pub(crate) const GAP_COVERAGE_FILED_BY: &str = "simard-overseer";
+
+/// The stable title of the deterministic gap-coverage anchor issue the Overseer
+/// files (issue #4353, F2). A fixed title keeps the anchor visually distinct
+/// from the workstream tracking issues a launched recipe opens.
+pub(crate) const GAP_COVERAGE_ISSUE_TITLE: &str =
+    "[Overseer] gap-scan coverage anchor (cross-process dedup)";
+
+/// Render the `filed-by:` provenance line the deterministic write half stamps
+/// into every coverage anchor it files, for trusted author `filed_by`.
+pub(crate) fn gap_coverage_filed_by_line(filed_by: &str) -> String {
+    format!("filed-by: {filed_by}")
+}
+
+/// True when `body` carries a trusted `filed-by: <filed_by>` provenance line —
+/// the F4 (issue #4353) trust gate the read half applies before it will seed
+/// cross-process coverage from an issue. Line-exact (trimmed) so a substring in
+/// prose can never spoof the marker.
+pub(crate) fn body_has_filed_by(body: &str, filed_by: &str) -> bool {
+    let expected = gap_coverage_filed_by_line(filed_by);
+    body.lines().any(|line| line.trim() == expected)
+}
+
+/// Build the deterministic body of a gap-coverage anchor issue for `gaps` — the
+/// WRITE half of the cross-process coverage-dedup loop (issue #4353, F2),
+/// enforced in CODE rather than left to a launched model's brief instruction.
+///
+/// The body is assembled entirely from trusted, bounded inputs: a fixed human
+/// sentence, the [`gap_coverage_filed_by_line`] provenance marker the read half
+/// trusts (F4), and exactly one [`gap_coverage_stamp_line`] per gap base
+/// signature. Because both the writer here and
+/// [`extract_gap_coverage_signatures`] route through the SAME formatters, the
+/// stamp grammar can never drift out of sync — and, unlike the prior brief-only
+/// instruction, the stamp is GUARANTEED present and well-formed independent of
+/// any model output.
+pub(crate) fn build_gap_coverage_issue_body(gaps: &[GapItem]) -> String {
+    let stamps = gaps
+        .iter()
+        .map(|g| gap_coverage_stamp_line(&g.signature))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "{filed_by}\n\nAutomated cross-process gap-scan coverage anchor filed by the Overseer \
+         so an already-covered backlog gap is not re-flagged (and a duplicate coverage \
+         workstream is not launched) after a daemon restart. The `stewardship-signature: \
+         workstream-gap:<sig>` line(s) below are the durable dedup stamps the gap-scan reads \
+         back (issue #4128 write half; hardened deterministically in #4353):\n\n{stamps}\n",
+        filed_by = gap_coverage_filed_by_line(GAP_COVERAGE_FILED_BY),
+        stamps = stamps,
+    )
+}
+
 /// Slugify a `owner/name` repo into the restricted signature alphabet, preserving
 /// `/`, `_`, and `-` and mapping anything else to `_`. Trusted input; this only
 /// guarantees the built signature stays a restricted slug even for exotic slugs.
@@ -1096,5 +1155,64 @@ mod tests {
     #[test]
     fn in_flight_from_empty_board_is_empty() {
         assert!(in_flight_from_board(&GoalBoard::new()).is_empty());
+    }
+
+    // ── gap-scan dedup hardening: F2 write half + F4 provenance (#4353) ──
+
+    fn goal_gap_item(id: &str) -> GapItem {
+        GapItem {
+            category: GapCategory::GoalUncovered,
+            ref_id: id.to_string(),
+            title: format!("cover {id}"),
+            why_it_matters: "uncovered".to_string(),
+            signature: format!("goal:{id}"),
+        }
+    }
+
+    #[test]
+    fn build_gap_coverage_issue_body_round_trips_through_the_extractor() {
+        // The deterministic write half (F2) and the read half share formatters, so
+        // the body a coverage anchor carries must parse back to EXACTLY the covered
+        // gaps' base signatures — the write↔read contract, without a model.
+        let gaps = vec![goal_gap_item("alpha"), goal_gap_item("beta")];
+        let body = build_gap_coverage_issue_body(&gaps);
+
+        // The trusted provenance marker (F4) is present and line-exact.
+        assert!(body_has_filed_by(&body, GAP_COVERAGE_FILED_BY));
+
+        let issue = GhIssue {
+            number: 1,
+            url: "https://github.com/rysweet/Simard/issues/1".to_string(),
+            title: GAP_COVERAGE_ISSUE_TITLE.to_string(),
+            body,
+        };
+        assert_eq!(
+            extract_gap_coverage_signatures(&[issue]),
+            vec!["goal:alpha".to_string(), "goal:beta".to_string()],
+            "the anchor body must round-trip to exactly the covered gap signatures"
+        );
+    }
+
+    #[test]
+    fn body_has_filed_by_is_line_exact_not_a_substring_match() {
+        // A prose mention of the marker must NOT count as trusted provenance —
+        // only a standalone `filed-by: <marker>` line does (F4 trust gate).
+        assert!(body_has_filed_by(
+            "prefix\nfiled-by: simard-overseer\nsuffix",
+            "simard-overseer"
+        ));
+        assert!(body_has_filed_by(
+            "  filed-by: simard-overseer  ",
+            "simard-overseer"
+        ));
+        assert!(!body_has_filed_by(
+            "see filed-by: simard-overseer in the docs",
+            "simard-overseer"
+        ));
+        assert!(!body_has_filed_by(
+            "filed-by: someone-else",
+            "simard-overseer"
+        ));
+        assert!(!body_has_filed_by("no marker here", "simard-overseer"));
     }
 }

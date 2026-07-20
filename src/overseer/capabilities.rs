@@ -612,6 +612,21 @@ pub trait GoalCurator {
     fn unblock(&self, _goal_id: &str) -> Result<(), OverseerError> {
         Ok(())
     }
+
+    /// Deterministically ENFORCE the write half of the cross-process gap-coverage
+    /// dedup (issue #4353, F2): ensure an open, trusted-provenance issue carries a
+    /// `stewardship-signature: workstream-gap:<sig>` stamp for each covered gap, so
+    /// a later gap-scan (even a post-restart cold gate) reads the stamp back and
+    /// declines to re-flag / re-launch coverage for an already-covered gap —
+    /// independent of any launched model actually copying the stamp.
+    ///
+    /// Idempotent and best-effort: adapters that already track coverage via an
+    /// open, stamped issue file nothing; a `gh` failure degrades to the in-memory
+    /// coverage backoff gate (logged, never fatal). The default is a no-op for
+    /// fakes that do not model an issue tracker (real adapters override it).
+    fn ensure_coverage_stamp(&self, _gaps: &[GapItem]) -> Result<(), OverseerError> {
+        Ok(())
+    }
 }
 
 /// Run a quality-audit loop (crusty-old-engineer-gated).

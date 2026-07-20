@@ -7,7 +7,7 @@ description: >
   `stewardship::dedup` helpers in `src/stewardship/dedup.rs`, how the covering
   issue is stamped, the fail-safe degrade to the in-memory coverage BackoffGate,
   and the signature grammar it validates.
-last_updated: 2026-07-20
+last_updated: 2026-07-21
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -108,8 +108,8 @@ a direct issue write: `act` launches a coverage workstream (see
 `ProblemKind::WorkstreamCoverage` in
 [`src/overseer/mod.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/mod.rs)),
 and that launched workstream opens the *"Cover uncovered backlog workstream(s)"*
-issue. For the next pass to recognise that coverage, the covering issue must embed
-the gap signature in its body:
+issue. For the next pass to recognise that coverage, a coverage stamp must exist in
+an open issue body:
 
 ```text
 stewardship-signature: workstream-gap:<sig>
@@ -126,9 +126,53 @@ pub fn find_existing<'a>(issues: &'a [GhIssue], signature: &str) -> Option<&'a G
 }
 ```
 
-The recipe brief already carries each gap as `category: signature` (built in
-`ProblemKind::WorkstreamCoverage`), so the launched workstream has the exact
-`<sig>` to stamp. On the next pass, `open_gap_coverage_signatures` reads that stamp
+### Deterministic write half (#4353 F2)
+
+Originally the stamp was expected to be copied into the covering issue by the
+*launched* coverage workstream (from the `category: signature` line in its recipe
+brief). Because that write depended on a model faithfully copying a line, a run
+could open the coverage issue **unstamped**, and the next pass would not read it
+back — re-emitting the gap. F2 removes that dependency: when the Overseer launches
+a coverage workstream, it *also* files a small, code-owned **coverage anchor**
+issue itself, so the stamp is guaranteed regardless of the launched agent:
+
+- **Title:** `[Overseer] gap-scan coverage anchor (cross-process dedup)`
+  (`GAP_COVERAGE_ISSUE_TITLE`).
+- **Body:** built by `build_gap_coverage_issue_body` in
+  [`src/overseer/sensor.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/sensor.rs),
+  carrying one `stewardship-signature: workstream-gap:<sig>` line per covered gap —
+  produced by the **same** `gap_coverage_stamp_line` formatter the reader
+  (`extract_gap_coverage_signatures`) parses, so the write↔read grammar cannot
+  drift.
+- **Idempotent:** `BoardGoalCurator::ensure_coverage_stamp` first reads the open
+  coverage set and files anchors only for gaps not already stamped, so a repeat
+  tick over an already-covered gap files **nothing**. It is invoked from the tick
+  executor (`overseer_tick_detailed`) only when a `WorkstreamGap`-backed problem
+  produces a launch (`ActOutcome::Launched`), and is best-effort: a `gh` write
+  error is logged on the `overseer::gap_scan` target and the run continues on the
+  in-memory backoff gate.
+
+### Trusted-author scope (#4353 F4)
+
+The read half accepts a coverage stamp only when the carrying issue *also* bears a
+trusted provenance marker on its own line:
+
+```text
+filed-by: simard-overseer
+```
+
+`open_gap_coverage_signatures` post-filters the queried issues with
+`body_has_filed_by` (a line-exact, not substring, match) before extracting
+signatures, so a crafted issue that embeds a valid-looking `workstream-gap:<sig>`
+stamp but is **not** filed by the stewardship bot cannot seed coverage — dedup
+poisoning is neutralised. The Overseer's own F2 anchors carry the marker
+deterministically (`build_gap_coverage_issue_body` prepends
+`gap_coverage_filed_by_line(GAP_COVERAGE_FILED_BY)`), so legitimate coverage still
+suppresses. The trusted marker is opt-in per curator via
+`BoardGoalCurator::trusting_filed_by`; production wiring
+(`assemble_capabilities`) enables it with `GAP_COVERAGE_FILED_BY`.
+
+On the next pass, `open_gap_coverage_signatures` reads the trusted anchor's stamp
 back into `coverage`, `detect_workstream_gaps` treats the gap as covered, and the
 coverage launch is suppressed **at detection** — so no duplicate workstream is
 launched and no duplicate issue is opened. No parallel dedup key is introduced:
@@ -143,8 +187,12 @@ The open-issue query is **best-effort**:
   degrades to empty and the scan relies on the in-memory coverage
   [`BackoffGate`](./overseer-backoff-gate-api.md). A gap is **never silently
   dropped**; ambiguity resolves toward surfacing it once.
+- **`gh` anchor-write fails** → the F2 write logs and returns `Ok`, relying on the
+  in-memory backoff gate for this tick; the anchor is re-attempted next tick.
 - **Malformed/forged signature** → ignored (advisory dedup only), so a crafted
   issue body cannot suppress a legitimate gap.
+- **Untrusted author** → an issue lacking the `filed-by: simard-overseer` marker is
+  dropped before signature extraction (F4), so it cannot seed coverage.
 - **Issue flood** → the ingested open-issue count is bounded/paginated, so the
   coverage set cannot grow without limit.
 
@@ -153,13 +201,23 @@ All failures are surfaced through structured `tracing` on the
 
 ## Testing
 
-`src/overseer/tests_gap_scan.rs` pins the cross-process contract:
+`src/overseer/tests_gap_scan.rs` and the `src/overseer/wiring.rs` /
+`src/overseer/sensor.rs` unit tests pin the cross-process contract:
 
 - **Two-pass single-launch** — running the gap-scan twice across a **simulated
   restart** (fresh in-memory state, but the first pass's stamped issue present in
   the open-issue set) detects the gap **only once**: the second pass sees the
   `workstream-gap:<sig>` stamp in `coverage`, emits no `WorkstreamGap` signal, and
   launches no second coverage workstream — so exactly one covering issue exists.
+- **Deterministic idempotent write (#4353 F2)** — `ensure_coverage_stamp` files
+  exactly one stamped, `filed-by`-marked anchor for an uncovered gap, and a repeat
+  call over the now-covered gap files nothing.
+- **Repeat tick does not re-emit (#4353 F2)** — a gap detected on the first tick,
+  once stamped by the deterministic write half, is suppressed on the next
+  `workstream_gaps` call.
+- **Untrusted-author exclusion (#4353 F4)** — an issue carrying a valid
+  `workstream-gap:<sig>` stamp but no trusted `filed-by:` marker does **not**
+  suppress the gap; a trusted anchor does.
 - **Degrade-on-error** — a failing open-issue query falls back to the in-memory
   coverage gate and still surfaces an uncovered gap (never drops it).
 - **Malformed-signature rejection** — an issue with a bad `workstream-gap:` stamp
@@ -171,6 +229,12 @@ All failures are surfaced through structured `tracing` on the
   `coverage` slice, not `&[]`.
 - **One open covering issue per distinct gap, across restarts.** A stamped open
   issue covers its signature on subsequent passes and processes.
+- **Deterministic, idempotent write half (#4353 F2).** The Overseer stamps the
+  coverage anchor in code with the reader's own formatter — not via a launched
+  agent — and a repeat tick files nothing.
+- **Trusted-author scope (#4353 F4).** Only issues carrying the
+  `filed-by: simard-overseer` marker seed coverage, so a forged stamp cannot poison
+  the dedup set.
 - **Reuse the stewardship-signature contract.** `workstream-gap:<sig>` +
   `stewardship::dedup::find_existing` — no new key or grammar.
 - **Fail toward surfacing.** A query failure degrades to the in-memory coverage

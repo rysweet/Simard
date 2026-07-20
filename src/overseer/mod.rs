@@ -1268,6 +1268,16 @@ impl Overseer {
         admitted_plan(iv)
     }
 
+    /// Deterministically enforce the WRITE half of the cross-process gap-coverage
+    /// dedup for `gaps` (issue #4353, F2) by delegating to the goal curator's
+    /// [`ensure_coverage_stamp`](crate::overseer::capabilities::GoalCurator::ensure_coverage_stamp).
+    /// Idempotent and best-effort; the tick executor invokes it right after a
+    /// coverage workstream is actually launched so an already-covered gap is not
+    /// re-flagged after a restart, independent of the launched model.
+    pub fn ensure_coverage_stamp(&self, gaps: &[GapItem]) -> Result<(), OverseerError> {
+        self.caps.goals.ensure_coverage_stamp(gaps)
+    }
+
     /// Execute one admitted intervention by dispatching to its reused capability.
     /// This is the M2+ Act seam. Anti-recursion is applied per-subject before any
     /// PR/deploy action.

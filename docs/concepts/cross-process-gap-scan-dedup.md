@@ -10,7 +10,7 @@ description: >
   survive a restart, how reusing the existing `stewardship-signature` dedup
   contract closes the cross-process seam, and why the change is fail-safe toward
   surfacing.
-last_updated: 2026-07-20
+last_updated: 2026-07-21
 review_schedule: as-needed
 owner: simard
 doc_type: concept
@@ -106,6 +106,42 @@ Because the signature is **stable and process-independent**, this closes the gap
 the in-memory gate could not: two identical gap-scan passes across a restart now
 produce **exactly one** covering workstream and **exactly one** covering issue.
 
+## Hardening the write and read halves (#4353)
+
+The design above pinned **one** implementation contract on a component the
+Overseer does not control in code: step 1 asked the *launched* coverage workstream
+to stamp the issue it opens. In practice that write half was carried only by the
+model brief, so a run that opened the *"Cover uncovered backlog workstream(s)"*
+issue **without** copying the `stewardship-signature: workstream-gap:<sig>` line
+produced an unstamped issue the next scan could not read back — and the gap
+re-emitted (the #4297/#4301/#4304/#4306/#4316/#4337/#4338 cluster). Two
+deterministic guarantees close that residual seam:
+
+- **F2 — deterministic write half.** When the Overseer launches a coverage
+  workstream for a `WorkstreamGap`, it *also* files a small, code-owned **coverage
+  anchor** issue itself — title
+  `[Overseer] gap-scan coverage anchor (cross-process dedup)` — whose body is built
+  in code by `build_gap_coverage_issue_body` and carries one
+  `stewardship-signature: workstream-gap:<sig>` line per covered gap. The write is
+  produced by the *same* formatter the reader parses (`gap_coverage_stamp_line` ↔
+  `extract_gap_coverage_signatures`), so the write↔read grammar cannot drift, and
+  it is **idempotent**: `ensure_coverage_stamp` first reads the open coverage set
+  and only files anchors for gaps that are not already stamped, so a repeat tick
+  files nothing. The stamp no longer depends on a launched agent remembering to
+  copy a line.
+- **F4 — trusted-author scope.** The read half now accepts a coverage stamp only
+  when the carrying issue also bears a trusted provenance marker —
+  `filed-by: simard-overseer`, matched line-exact by `body_has_filed_by`. A crafted
+  issue that carries a valid-looking `workstream-gap:<sig>` stamp but is **not**
+  filed by the stewardship bot cannot seed coverage and therefore cannot suppress a
+  real gap (dedup poisoning is neutralised). The Overseer's own anchors carry the
+  marker deterministically via the F2 formatter, so legitimate coverage still
+  suppresses as before.
+
+Together, F2 makes the dedup stamp appear **without** relying on a model, and F4
+ensures only the Overseer's own stamps are trusted to suppress a gap — so a repeat
+tick over an already-covered gap re-emits **nothing**.
+
 > **Where the boundary sits.** `detect_workstream_gaps` is a pure detector that
 > reads only Simard's in-memory board and **never calls `gh`**. The open-issue
 > query therefore runs in the Observe/wiring layer, which already holds a `gh`
@@ -158,6 +194,14 @@ open covering issue per distinct gap, across restarts.**
 - **One open covering issue per distinct gap, across restarts.** Coverage is
   seeded from open signature-stamped issues, so a cold gate cannot relaunch
   coverage for a tracked gap.
+- **Deterministic, idempotent write half (#4353 F2).** The coverage stamp is
+  filed by the Overseer in code (`ensure_coverage_stamp` /
+  `build_gap_coverage_issue_body`) using the reader's own formatter — never left
+  to a launched agent — and a repeat tick over an already-stamped gap files
+  nothing.
+- **Trusted-author scope (#4353 F4).** A coverage stamp suppresses a gap only when
+  its issue also carries the `filed-by: simard-overseer` provenance marker, so a
+  forged stamp from an untrusted author cannot poison the dedup set.
 - **Reuse the stewardship-signature contract.** Dedup uses the existing
   `workstream-gap:<sig>` stamp and `stewardship::dedup` helpers — no parallel key.
 - **Fail toward surfacing.** A `gh` query failure degrades to the in-memory
