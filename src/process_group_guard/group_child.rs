@@ -155,10 +155,18 @@ impl GroupChild {
 
 impl GroupChild {
     /// Tear the whole group down with the SIGTERM → bounded grace → SIGKILL
-    /// escalation. Signals only `-pgid`; it never `wait()`s the leader child
-    /// (that reaping is the caller's responsibility in [`Drop`], so it happens
-    /// on every armed exit path regardless of which branch this method takes).
-    fn tear_down_group(&self) {
+    /// escalation. Signals only `-pgid`.
+    ///
+    /// The grace loop reaps the immediate leader child (non-blocking) as soon as
+    /// it exits: `std::process::Child` does not reap on its own, and an
+    /// un-reaped leader lingers as a **zombie** that `kill(-pgid, 0)` still
+    /// counts as a live group member. Without reaping it here the liveness probe
+    /// would stay positive for the whole grace window on *every* teardown — even
+    /// one whose group died instantly on SIGTERM — needlessly waiting the full
+    /// grace and then escalating to a redundant SIGKILL (with a misleading
+    /// "survived SIGTERM" warning). Reaping the leader in-loop lets the graceful
+    /// path be detected as soon as the real subtree is gone.
+    fn tear_down_group(&mut self) {
         // Graceful first: SIGTERM the whole group. If the group is already gone
         // (ESRCH surfaces as an error), there is nothing to escalate.
         if self
@@ -174,6 +182,9 @@ impl GroupChild {
         // sleeps. Never lead with SIGKILL.
         let deadline = Instant::now() + self.grace;
         loop {
+            // Reap the leader if it has exited, so its zombie does not keep the
+            // group-liveness probe positive and force a spurious escalation.
+            self.try_reap_leader();
             if !self.signaller.group_alive(self.pgid) {
                 // Exited on the graceful signal — do not escalate.
                 return;
@@ -195,6 +206,21 @@ impl GroupChild {
         );
         let _ = self.signaller.signal_group(self.pgid, libc::SIGKILL);
     }
+
+    /// Non-blocking reap of the immediate leader child. If it has exited, drop
+    /// the handle so it is neither waited on twice nor seen as a lingering
+    /// zombie by later group-liveness probes. A leader that is still running
+    /// (e.g. it trapped SIGTERM) is left owned for the escalation path and the
+    /// final blocking reap in [`Drop`].
+    fn try_reap_leader(&mut self) {
+        let exited = matches!(
+            self.child.as_mut().map(|child| child.try_wait()),
+            Some(Ok(Some(_status)))
+        );
+        if exited {
+            self.child = None;
+        }
+    }
 }
 
 impl Drop for GroupChild {
@@ -215,12 +241,13 @@ impl Drop for GroupChild {
         }
 
         // Reap the immediate leader child so its PID is not leaked as a zombie.
-        // `std::process::Child`'s own `Drop` does NOT `wait()`, so without this
-        // every armed teardown (timeout / `?`-propagation / panic-unwind) would
-        // leak one zombie per run — exactly the PID/handle-exhaustion class this
-        // guard exists to prevent. The group teardown above has already
-        // signalled the leader, so this `wait()` collects a process that is
-        // exiting (or already exited), not one that runs indefinitely.
+        // The graceful path already reaped it inside `tear_down_group` (leaving
+        // `child` as `None` here); this final blocking `wait()` covers the
+        // escalation path, where the leader trapped SIGTERM and was only just
+        // SIGKILLed, plus the `pgid <= 1` path that skips group teardown. Either
+        // way `std::process::Child`'s own `Drop` does NOT `wait()`, so without
+        // this the leader would linger as a zombie — one leaked PID/handle per
+        // armed teardown, exactly the exhaustion class this guard prevents.
         if let Some(mut child) = self.child.take() {
             let _ = child.wait();
         }

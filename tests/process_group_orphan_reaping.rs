@@ -172,3 +172,79 @@ fn armed_drop_reaps_the_immediate_leader_child_no_zombie() {
         "armed drop must wait() the leader child; leader {leader_pid} leaked as a zombie"
     );
 }
+
+/// A probe that really delivers signals and really checks liveness (wrapping the
+/// production [`LibcSignaller`]) while recording every `signal_group` call, so a
+/// real subtree can be torn down *and* the exact escalation sequence asserted.
+struct RecordingLibcProbe {
+    inner: LibcSignaller,
+    signals: std::sync::Mutex<Vec<i32>>,
+}
+
+impl RecordingLibcProbe {
+    fn new() -> Self {
+        Self {
+            inner: LibcSignaller,
+            signals: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn recorded_signals(&self) -> Vec<i32> {
+        self.signals.lock().unwrap().clone()
+    }
+}
+
+impl simard::process_group_guard::ProcessGroupProbe for RecordingLibcProbe {
+    fn signal_group(&self, pgid: i32, signal: i32) -> std::io::Result<()> {
+        self.signals.lock().unwrap().push(signal);
+        self.inner.signal_group(pgid, signal)
+    }
+
+    fn group_alive(&self, pgid: i32) -> bool {
+        self.inner.group_alive(pgid)
+    }
+}
+
+/// Regression: a real subtree that exits on the graceful SIGTERM must be torn
+/// down with **SIGTERM only** — no SIGKILL escalation and no full-grace stall.
+///
+/// The hazard: `std::process::Child` does not reap on drop, so the leader
+/// lingers as a zombie that `kill(-pgid, 0)` still counts as a live group
+/// member. If the guard checks group liveness *without* first reaping the exited
+/// leader, every teardown — even one whose subtree died instantly on SIGTERM —
+/// waits the entire grace window and then escalates to a redundant SIGKILL. A
+/// generous 30s grace makes that failure mode unmistakable: with the bug this
+/// records `[SIGTERM, SIGKILL]` (after a 30s stall); fixed, it records
+/// `[SIGTERM]` and returns promptly once the leader is reaped in-loop.
+#[test]
+fn graceful_group_is_reaped_without_sigkill_escalation() {
+    // `sleep` does not trap SIGTERM, so the whole group dies on the graceful
+    // signal. A long grace guarantees any spurious escalation is not merely a
+    // race we happened to win.
+    let mut cmd = Command::new("sleep");
+    cmd.arg("300");
+
+    let probe = Arc::new(RecordingLibcProbe::new());
+    let guard = GroupChild::spawn_with(&mut cmd, probe.clone(), Duration::from_secs(30))
+        .expect("spawn a real child in its own process group");
+    let leader_pid = guard.pgid();
+    assert!(leader_pid > 1, "a real child pgid must be > 1");
+
+    let start = Instant::now();
+    drop(guard); // graceful teardown of a group that dies on SIGTERM
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        probe.recorded_signals(),
+        vec![libc::SIGTERM],
+        "a group that exits on SIGTERM must NOT be escalated to SIGKILL"
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "graceful teardown must not stall for the full grace window (took {elapsed:?})"
+    );
+    assert!(
+        wait_until_reaped(leader_pid, Duration::from_secs(10)),
+        "leader {leader_pid} must be reaped, not leaked as a zombie"
+    );
+}
