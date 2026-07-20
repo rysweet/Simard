@@ -62,7 +62,7 @@ implemented; acceptance test is the definition of done) · **OUT-OF-SCOPE**.
 | KGP-Q6 | Answer synthesis truncates snippets on a UTF-8 char boundary | `query_pack_db_finds_matching_articles` green + no panic on multibyte content | DONE | `native_knowledge.rs::build_answer` + `util::string_truncate` |
 | KGP-Q7 | Each source surfaces its `section` | asserted within KGP-M/query tests | DONE | `native_knowledge.rs::SourceInfo.section` |
 | KGP-Q8 | Retrieval **ranks candidates by keyword coverage** (a title hit weighted above a content-only mention) so the `limit` cut keeps the most on-topic article instead of returning matches in arbitrary storage (rowid) order | `query_articles_ranks_most_relevant_first`, `query_articles_limit_keeps_most_relevant`, `query_articles_prefers_title_over_content_match` green | DONE | `native_knowledge.rs::query_articles` (`ORDER BY <coverage score> DESC`), `TITLE_MATCH_WEIGHT` / `CONTENT_MATCH_WEIGHT` |
-| KGP-Q4 | Keyword search binds parameters instead of string-interpolating LIKE clauses | NEW test: a question keyword containing `%`, `_`, and `'` returns correct rows and cannot alter the SQL | OPEN | `native_knowledge.rs::query_articles` currently interpolates escaped keywords |
+| KGP-Q4 | Keyword search binds parameters instead of string-interpolating LIKE clauses | `like_contains_pattern_escapes_metacharacters`, `query_articles_treats_like_wildcards_as_literal`, `query_articles_binds_keywords_and_resists_injection` green | DONE | `native_knowledge.rs::query_articles` binds each keyword as `?n` via `like_contains_pattern` (`LIKE ?n ESCAPE '\'`) |
 | KGP-Q5 | GraphRAG retrieval: traverse entity + relationship tables (multi-hop), not only a single-table LIKE scan | NEW test: a pack fixture with `relationships` yields a graph-grounded answer joining linked entities | OPEN | `native_knowledge.rs::query_articles` comment: "simplified version of the Python `KnowledgeGraphAgent.query()`" |
 
 ### Transport, health & lifecycle
@@ -105,13 +105,14 @@ separately for the Phase 9+ pack-authoring work.
 Work the OPEN criteria top-to-bottom; each is a self-contained, shippable unit
 with its acceptance test already specified above:
 
-1. **KGP-Q4** — parameterize the keyword LIKE search (correctness + removes the
-   injection-shaped interpolation). Smallest, highest-confidence next step.
-2. **KGP-T3** — reuse an open `Connection` in `conn_cache` (or document the
+1. **KGP-T3** — reuse an open `Connection` in `conn_cache` (or document the
    path-cache decision and add the reuse test).
-3. **KGP-Q5** — GraphRAG multi-hop retrieval over entities + relationships.
+2. **KGP-Q5** — GraphRAG multi-hop retrieval over entities + relationships.
    Largest; do last and consider splitting into a fixture step and a traversal
    step.
+
+(KGP-Q4 — parameterize the keyword LIKE search — is now **DONE**; see the
+progress log below.)
 
 ## Progress log
 
@@ -131,3 +132,19 @@ with its acceptance test already specified above:
   knowledge. The LIKE membership probes stay substring-based (recall breadth);
   ranking governs which candidates survive the cut. KGP-Q4 (parameterize the
   LIKE search) remains OPEN and orthogonal.
+- **2026-07-20** — **KGP-Q4 closed** (correctness + injection-shape removal):
+  `query_articles` no longer string-interpolates keywords into its `LIKE`
+  clauses. Each distinct keyword is now bound as a parameter (`?n`) built by the
+  new `like_contains_pattern` helper, which wraps the keyword as `%keyword%` and
+  escapes the keyword's own `LIKE` metacharacters (`%`, `_`, and the escape
+  char) so the search stays a literal-substring probe (`LIKE ?n ESCAPE '\'`).
+  The same `?n` is reused by both the `WHERE` membership clause and the
+  `ORDER BY` coverage score, so each keyword is bound exactly once. Previously a
+  question word containing `%` or `_` silently widened the match (wildcards) and
+  single quotes were hand-escaped by interpolation; now such tokens are matched
+  literally and an injection-shaped keyword (e.g. `'; DROP TABLE articles; --`)
+  is inert. Acceptance tests:
+  `like_contains_pattern_escapes_metacharacters`,
+  `query_articles_treats_like_wildcards_as_literal`, and
+  `query_articles_binds_keywords_and_resists_injection`. Remaining OPEN parity
+  criteria: KGP-T3 (connection reuse) and KGP-Q5 (GraphRAG multi-hop).
