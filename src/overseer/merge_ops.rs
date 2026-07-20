@@ -812,6 +812,7 @@ mod tests {
             checks,
             base_ref_name: "main".to_string(),
             labels: Vec::new(),
+            is_draft: false,
         }
     }
 
