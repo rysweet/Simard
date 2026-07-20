@@ -25,12 +25,10 @@ fn entry(ts_offset: Duration, prompt: u64, completion: u64, cost: f64) -> CostEn
 
 #[test]
 fn streaming_summaries_filter_and_aggregate_from_ledger() {
-    // Unique per-process ledger so parallel test binaries never collide.
-    let ledger = std::env::temp_dir().join(format!(
-        "simard-cost-ledger-outside-in-{}.jsonl",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&ledger);
+    // Private per-test temp dir (0700) so the ledger path is unpredictable and
+    // immune to TOCTOU/symlink races in the world-writable system temp dir.
+    let dir = tempfile::TempDir::new().expect("create temp dir");
+    let ledger = dir.path().join("cost-ledger.jsonl");
 
     // Two entries "today", one within the week (2 days ago), one outside the
     // week (10 days ago), interleaved with blank and malformed lines that the
@@ -64,7 +62,7 @@ fn streaming_summaries_filter_and_aggregate_from_ledger() {
     unsafe {
         std::env::remove_var("SIMARD_COST_LEDGER_PATH");
     }
-    let _ = std::fs::remove_file(&ledger);
+    // `dir` (a TempDir) removes the ledger and its parent on drop.
 
     // Daily: only the two "today" entries survive the malformed/blank lines and
     // the date filter.

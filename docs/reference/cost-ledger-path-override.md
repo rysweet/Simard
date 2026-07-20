@@ -36,8 +36,9 @@ narrow override** that pins the ledger to an explicit file path, bypassing the
 
 `cost_tracking::ledger_path()` resolves the ledger file by the **first match**:
 
-1. `$SIMARD_COST_LEDGER_PATH`, if set — used **verbatim** as the ledger file
-   path (not a directory; the full path including filename).
+1. `$SIMARD_COST_LEDGER_PATH`, if set to a **non-empty** value — used
+   **verbatim** as the ledger file path (not a directory; the full path
+   including filename). An empty or whitespace-only value is treated as unset.
 2. `$HOME/.simard/costs/ledger.jsonl` — the default. When `HOME` is unset the
    helper falls back to a hardcoded home base (`/home/azureuser`).
 
@@ -217,9 +218,10 @@ ledger path — those counters are not redirected by
   `tempfile` directory with default restrictive permissions and are removed
   when the temp dir is dropped at test end — no writes to shared or
   world-readable locations.
-- **Diagnostics via structured tracing only.** Any path-related diagnostic is
-  emitted with `tracing::debug!` (path at debug level, to avoid leaking
-  home/username at higher levels), never with `print!`/`println!`.
+- **Diagnostics via structured tracing only.** When the override is active,
+  `ledger_path()` emits a single `tracing::debug!` line noting that the override
+  is in effect — it does **not** log the override path itself, so no
+  home/username is leaked. Diagnostics never use `print!`/`println!`.
 
 ---
 

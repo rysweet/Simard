@@ -42,12 +42,17 @@ const CHARS_PER_TOKEN: u64 = 4;
 
 /// Resolve the ledger file path.
 ///
-/// A test-only override, `SIMARD_COST_LEDGER_PATH`, takes precedence when set,
-/// letting tests pin the ledger to a per-test temp file and avoid racing the
-/// process-global `HOME`. When the override is unset (the production case) the
-/// path is the unchanged `$HOME/.simard/costs/ledger.jsonl` default.
+/// A test-only override, `SIMARD_COST_LEDGER_PATH`, takes precedence when set
+/// to a non-empty value, letting tests pin the ledger to a per-test temp file
+/// and avoid racing the process-global `HOME`. An empty or whitespace-only
+/// override (e.g. `SIMARD_COST_LEDGER_PATH=""`) is treated as unset so it
+/// cannot produce an invalid empty ledger path. When the override is unset (the
+/// production case) the path is the unchanged `$HOME/.simard/costs/ledger.jsonl`
+/// default.
 fn ledger_path() -> PathBuf {
-    if let Some(override_path) = std::env::var_os("SIMARD_COST_LEDGER_PATH") {
+    if let Some(override_path) = std::env::var_os("SIMARD_COST_LEDGER_PATH")
+        && !override_path.to_string_lossy().trim().is_empty()
+    {
         tracing::debug!(target: "cost_tracking", "using SIMARD_COST_LEDGER_PATH override");
         return PathBuf::from(override_path);
     }
@@ -341,6 +346,32 @@ mod tests {
             expected,
             "with no override, ledger_path() must use the HOME-based default"
         );
+    }
+
+    /// An empty or whitespace-only `SIMARD_COST_LEDGER_PATH` is treated as unset:
+    /// `ledger_path()` must fall back to `$HOME/.simard/costs/ledger.jsonl`
+    /// rather than returning an invalid empty path.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn ledger_path_ignores_empty_override_and_falls_back_to_home() {
+        let home = tempfile::TempDir::new().unwrap();
+        let _home_guard = EnvVarGuard::set("HOME", home.path());
+
+        let expected = home
+            .path()
+            .join(".simard")
+            .join("costs")
+            .join("ledger.jsonl");
+
+        for blank in ["", "   ", "\t"] {
+            let _override_guard =
+                EnvVarGuard::set("SIMARD_COST_LEDGER_PATH", std::path::Path::new(blank));
+            assert_eq!(
+                ledger_path(),
+                expected,
+                "empty/whitespace override {blank:?} must fall back to the HOME-based default"
+            );
+        }
     }
 
     /// End-to-end: with the override set, `record_cost` writes to the override
