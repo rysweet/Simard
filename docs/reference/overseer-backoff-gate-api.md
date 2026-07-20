@@ -72,13 +72,15 @@ which fails toward surfacing — a suppressed action is only ever *not taken*.
 | Layer | Scope | Fails toward | Source | Status |
 |-------|-------|--------------|--------|--------|
 | **1. `BackoffGate`** | In-process, per `dedup_key`, exponential window on an injected clock | **Surface** (a suppressed action is only ever *not taken*) | `guardrails.rs` | **Implemented (#4186)** |
-| **2. Open-issue equivalence check** | Cross-process, best-effort GitHub query for an already-open equivalent issue | **Surface** (API error ⇒ treat as "no duplicate", fall back to layer 1) | `stewardship::dedup` | **Future work** (not yet implemented) |
+| **2. Open-issue equivalence check** | Cross-process, best-effort GitHub query for an already-open equivalent issue | **Surface** (API error ⇒ treat as "no duplicate", fall back to layer 1) | `stewardship::dedup` + `WorkstreamCoverage` routing | **Implemented** — catches the cold-start / cross-process case layer 1 cannot |
 
 Layer 1 survives across ticks **within one daemon process**; it is reset by a
-daemon restart. A cross-process layer 2 (catching the cold-start case where an
-equivalent issue is already open on GitHub) is a planned enhancement and is
-**not** part of this change — the section below marked *future work* documents
-the intended shape only.
+daemon restart. Layer 2 is the **cross-process** guard that catches the
+cold-start case — an equivalent gap-cover issue is **already open on GitHub**
+when the in-memory `BackoffGate` is empty (fresh daemon, or a different
+process/host opened it) — which layer 1 alone cannot see. Together they close the
+duplicate-issue pile: layer 1 rate-limits within a process, layer 2 refuses to
+open a second issue when GitHub already carries an equivalent open one.
 
 ## `BackoffDecision`
 
@@ -184,8 +186,9 @@ always returns `Admit` on its first `peek`.
   in normal operation.
 - **State is in-memory only.** A daemon restart resets the gate. The cold-start
   case (an equivalent issue already open on GitHub when the in-memory gate is
-  empty) is the motivation for the *future* layer-2 open-issue equivalence check
-  described below; it is **not** implemented by this change.
+  empty) is caught by the **layer-2 open-issue equivalence check** described
+  below, which queries GitHub before creating and so does not depend on
+  in-memory state.
 
 ## Dedup key
 
@@ -195,7 +198,7 @@ already keys its `inflight_investigations` map on (see `mod.rs`,
 `recipe_dedup_key`, used at the `gate()` in-flight check and the `act()` insert).
 Standardising on this one function keeps the BackoffGate and the idempotency rail
 keyed off an **identical** signature, so a duplicate cannot slip through a key
-mismatch (and a future layer-2 equivalence check would reuse the same key).
+mismatch (and the layer-2 open-issue equivalence check reuses the same key).
 
 This is consistent by construction, not by coincidence: `recipe_dedup_key`
 extracts the stable `overseer-obs:` token from the brief's task description, and
@@ -214,19 +217,23 @@ the human-readable count string. This is deliberate: *"seen 3×"* and *"seen 4×
 collapse to **one** key, so an incrementing recurrence count does not defeat
 suppression.
 
-## Open-issue equivalence check (layer 2) — future work
+## Open-issue equivalence check (layer 2)
 
-> **Not implemented by #4186.** This section documents the intended shape of a
-> planned cross-process layer 2. The shipped change is layer 1 (`BackoffGate`)
-> only. No `search_issues`/`stewardship::dedup` call sits in the act path today.
+> **Implemented.** Layer 1 (`BackoffGate`) rate-limits within a process; layer 2
+> is the cross-process guard wired into the `WorkstreamCoverage` routing in
+> `src/overseer/mod.rs` / `src/overseer/sensor.rs`. Together they stop the
+> duplicate *"Cover uncovered backlog workstream(s)"* pile
+> ([#4190](https://github.com/rysweet/Simard/issues/4190)…[#4338](https://github.com/rysweet/Simard/issues/4338)).
 
-The planned enhancement: before launching a gap-cover recipe the act path would
-perform a **best-effort** GitHub query using the stewardship helpers:
+Before launching a gap-cover recipe (and before the `coverage_backoff` re-admit
+window is consulted), the act path performs a **best-effort** GitHub query using
+the stewardship helpers, keyed on the **canonical gap signature**, to see
+whether an equivalent gap-cover issue is **already open**:
 
 ```
 stewardship::dedup::failure_signature(kind, text) -> String  // stable signature
 gh_client.search_issues(repo, &signature) -> SimardResult<Vec<GhIssue>>  // open-issue query
-stewardship::dedup::find_existing(&issues, &signature) -> Option<&GhIssue>  // match
+stewardship::dedup::find_existing(&issues, &signature) -> Option<&GhIssue>  // match (by signature)
 ```
 
 Note `search_issues` is a method on the stewardship gh-client trait
@@ -234,15 +241,23 @@ Note `search_issues` is a method on the stewardship gh-client trait
 free function under `stewardship::dedup`. Only `failure_signature` and
 `find_existing` live in `stewardship::dedup`.
 
-Intended behaviour (when implemented):
+Behaviour:
 
 - **Equivalent open issue found** → **skip** the launch and emit a structured
-  trace referencing the existing issue number. The open issue would **not** be
-  mutated (skip-only, to avoid churn and stay non-breaking).
-- **No match** → proceed to launch.
+  trace referencing the existing issue number. The open issue is **not** mutated
+  (reuse/skip-only, to avoid churn and stay non-breaking) — the existing issue
+  *is* the coverage, so no duplicate is created.
+- **No match** → fall through to the layer-1 `coverage_backoff` re-admit check,
+  then proceed to launch if admitted.
 - **GitHub API error** → treat as "no duplicate" (fail toward surfacing) and fall
-  back to layer 1 alone. It would reuse the existing GitHub client/credentials
-  and introduce **no new token or scope**.
+  back to layer 1 alone. It reuses the existing GitHub client/credentials and
+  introduces **no new token or scope**.
+
+> **Out of scope: existing backlog cleanup.** Bulk-closing the ~13 duplicate
+> gap-scan issues that were opened before this guard existed is **operator**
+> work, not a code path here. Layer 2 is the *creation-side* guard — it stops new
+> duplicates, it does not close old ones. Their recurrence root cause (missing
+> issue-level dedup) is exactly what this layer removes going forward.
 
 ## Wiring into the gap-scan path
 
@@ -283,15 +298,15 @@ Suppression is surfaced through the tick's structured plan output — **never**
 
 This reuses the existing held-plan channel the Overseer already uses for other
 gates (e.g. the in-flight guard and cost gate), so no new trace target or metric
-is introduced by this change. A dedicated `overseer::gap_scan` trace/counter and
-the layer-2 / over-silence signals below are **future work**, aligned with the
-planned layer-2 enhancement:
+is introduced by the layer-1 suppression path. The **layer-2** skip emits a
+structured trace referencing the already-open issue number (below). A dedicated
+`overseer::gap_scan` counter and the over-silence signal remain **future work**:
 
 | Signal | Status |
 |--------|--------|
 | Held-plan reason in `action_details` on suppression | **Implemented** |
+| Open-issue equivalence skip trace (references the existing issue number) | **Implemented** (layer 2) |
 | `overseer::gap_scan` structured counter/trace per suppression | Future work |
-| Open-issue equivalence skip trace | Future work (layer 2) |
 | Over-silence alert (window saturated at cap and still suppressing) | Future work |
 
 **Log hygiene:** only opaque signature/dedup keys are surfaced; GitHub tokens,
@@ -338,6 +353,9 @@ each knob's fail-safe simple and predictable.
   gap-scan step this rail guards.
 - [Overseer recipe-launch idempotency](./overseer-recipe-launch-idempotency.md) —
   the sibling rail that dedups *in-flight* recipe processes (different seam).
+- [Overseer verify-and-merge escalation convergence](./overseer-merge-escalation-convergence.md) —
+  the sibling `BackoffGate`-based rail that converges the `VerifyAndMergePr`
+  escalation, keyed on `repo#pr`.
 - [Diagnose a recurring cognitive-memory signature](../howto/diagnose-recurring-cognitive-memory-signature.md)
   — the operator-facing symptom this rail resolves.
 - [Operational autonomy model](../concepts/operational-autonomy-model.md) — why a

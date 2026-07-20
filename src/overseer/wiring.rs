@@ -170,6 +170,12 @@ pub struct OverseerTickReport {
     /// Open PRs judged DUPLICATE by the agentic merge-queue reasoner (#4097) and
     /// closed with `gh pr close` this tick. A DEDICATED counter.
     pub duplicate_prs_closed: usize,
+    /// Verify-and-merge escalations SUPPRESSED this tick by the per-`repo#pr`
+    /// convergence gate (#4344 / #4145) — an already-escalated, unchanged
+    /// merge-ready-but-not-auto-mergeable PR held in its backoff window instead of
+    /// re-paging the operator. A DEDICATED counter, never folded into
+    /// `escalations`.
+    pub merge_escalations_suppressed: usize,
     /// Capability errors encountered while acting (isolated, never fatal).
     pub errors: usize,
     /// Completed whole cognitive-memory recall passes this tick (issue #2628):
@@ -428,6 +434,7 @@ pub fn overseer_tick_detailed(
         memory_errors = report.memory_errors,
         workstream_gaps_detected = report.workstream_gaps_detected,
         workstream_gaps_suppressed = report.workstream_gaps_suppressed,
+        merge_escalations_suppressed = report.merge_escalations_suppressed,
         errors = report.errors,
         panicked = report.panicked,
         cycle_failed = report.cycle_failed,
@@ -501,6 +508,7 @@ fn tally_outcome(report: &mut OverseerTickReport, outcome: &ActOutcome) {
         }
         ActOutcome::StalePrFlagged { .. } => report.stale_prs_flagged += 1,
         ActOutcome::DuplicatePrClosed { .. } => report.duplicate_prs_closed += 1,
+        ActOutcome::MergeEscalationSuppressed { .. } => report.merge_escalations_suppressed += 1,
         ActOutcome::ConflictResolved
         | ActOutcome::GoalTransferred
         | ActOutcome::Reported
@@ -672,6 +680,12 @@ fn describe_action(iv: &Intervention, outcome: &ActOutcome) -> String {
         } => {
             format!("closed duplicate PR {repo}#{pr} (dup of #{duplicate_of})")
         }
+        ActOutcome::MergeEscalationSuppressed { reason } => {
+            format!(
+                "held: verify-and-merge {} — already escalated, awaiting operator ({reason})",
+                pr_target(iv)
+            )
+        }
     };
     sanitize_detail(&format!("did: {body}"))
 }
@@ -740,7 +754,9 @@ fn outcome_records_occurrence(outcome: &ActOutcome) -> bool {
 fn outcome_takes_effect(outcome: &ActOutcome) -> bool {
     !matches!(
         outcome,
-        ActOutcome::WhisperSuppressed { .. } | ActOutcome::GoalHealthSuppressed { .. }
+        ActOutcome::WhisperSuppressed { .. }
+            | ActOutcome::GoalHealthSuppressed { .. }
+            | ActOutcome::MergeEscalationSuppressed { .. }
     )
 }
 

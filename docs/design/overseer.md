@@ -31,6 +31,7 @@ related:
   - ../reference/stewardship-api.md
   - ../reference/self-deploy-api.md
   - ../reference/cross-repo-merge-authority.md
+  - ../reference/overseer-merge-escalation-convergence.md
 ---
 
 # Overseer — an embedded operator/observer co-process (design spike)
@@ -320,6 +321,45 @@ in `PrOps::merge` (see
 
 See `prompt_assets/simard/overseer/pr_verify.md`,
 `prompt_assets/simard/merge_readiness_judge.md`, and `deploy_gate.md`.
+
+### Escalation lifecycle & convergence rails
+
+Every acting Overseer decision is emitted from a *rebuilt* Overseer on each
+meta-OODA tick, so any decision that reflects a **persistent** condition — a
+blocked goal, an uncovered workstream gap, a merge-ready-but-not-auto-mergeable
+PR — will be re-derived every tick for as long as that condition holds. Left
+unguarded, a persistent condition becomes a per-tick alarm: the same issue,
+whisper, or escalation re-fires forever without driving progress. The Overseer
+therefore runs a family of **convergence rails** — a decision is surfaced
+*once*, then rate-limited (never permanently silenced) until its state actually
+changes or a backoff window elapses.
+
+| Persistent condition | Convergence rail | Key | Primitive | Reference |
+|---|---|---|---|---|
+| In-flight recipe launch for the same signature | `AmplihackRecipeRunner` in-flight registry (regeneration guard, extends `inflight_investigations`) | `recipe_signature` (`target_repo` + `task_description`) | process-wide run map | [recipe-launch idempotency](../reference/overseer-recipe-launch-idempotency.md) |
+| Blocked goal re-escalation | `blocked_goal_gate` | goal signature (`escalate:{goal_id}`) | `WhisperGate` (`with_backoff`) | [WhisperGate backoff API](../reference/whisper-gate-backoff-api.md) |
+| Gap-scan duplicate issues | `coverage_backoff` | `recipe_dedup_key` (canonical gap key) | `BackoffGate` | [BackoffGate & gap-scan dedup](../reference/overseer-backoff-gate-api.md) |
+| Verify-and-merge re-escalation | `merge_escalation_gate` | `repo#pr` | `BackoffGate` | [verify-and-merge escalation convergence](../reference/overseer-merge-escalation-convergence.md) |
+
+All four rails share one discipline: **peek before acting; commit only the
+action that consumed the slot; fail toward surfacing** (a suppressed action is
+only ever *not taken*, never fabricated), and **never permanently silence** a
+genuinely recurring condition — the exponential window resets after a silence of
+`>= 2 × current_window`, and a real state change re-surfaces immediately.
+
+The **verify-and-merge** rail is the convergence case for the
+`VerifyAndMergePr` intervention: a merge-ready PR that cannot be merged
+autonomously (draft, judge-refused, or not opted in) is escalated to the
+operator **once** with a classified `MergeBlocker` reason, then held as an
+acknowledged-pending plan until the PR merges, the blocker class changes, or the
+backoff window elapses. This closes the #4344 / #4145 non-convergence defect
+where two green PRs were re-escalated on 14+ consecutive ticks. Crucially,
+suppressing a *repeat escalation* is a narrowing of **notifications only** — it
+never advances a PR toward merge and never downgrades the fail-closed merge
+authority. See the
+[verify-and-merge escalation convergence reference](../reference/overseer-merge-escalation-convergence.md)
+for the field, the `MergeBlocker` enum, the peek/commit wiring, and the
+authority invariants.
 
 ## Persisted state
 

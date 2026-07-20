@@ -300,6 +300,7 @@ nav:
     - Overseer Signal JSON-RPC Transport: reference/overseer-signal-jsonrpc-transport.md
     - Overseer Workstream Gap-Scan: reference/overseer-workstream-gap-scan.md
     - Overseer BackoffGate &amp; Gap-Scan Dedup: reference/overseer-backoff-gate-api.md
+    - Overseer Verify-and-Merge Escalation Convergence: reference/overseer-merge-escalation-convergence.md
     - Overseer Root-Cause (WHY) API: reference/overseer-root-cause-why-api.md
     - Overseer Self-Observation Stability: reference/overseer-self-observation-stability.md
     - simard-engineer-step CLI: reference/simard-engineer-step.md
