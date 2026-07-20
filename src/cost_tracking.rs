@@ -514,6 +514,50 @@ mod tests {
         );
     }
 
+    // Security regression (Step 10c): the ledger dir/file hardening
+    // (`create_ledger_dirs`/`open_ledger_file` + the post-hoc `harden_*`)
+    // introduced by #4363 must actually yield owner-only modes. Without this
+    // test the atomic-mode fix (commit closing the 0644 TOCTOU window) had no
+    // coverage, so a regression to a lax umask would pass unnoticed. Mirrors
+    // the established convention in `raw_capture`/`telemetry_facade`.
+    #[cfg(unix)]
+    #[test]
+    fn write_entry_creates_dir_0700_and_file_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(Some(tmp.path().to_str().unwrap()));
+
+        record_cost("sess-perm", "gpt-4", 40, 20, "perm-test")
+            .expect("record_cost must write the ledger under the temp HOME");
+
+        let costs_dir = tmp.path().join(".simard").join("costs");
+        let ledger = costs_dir.join("ledger.jsonl");
+
+        let dir_mode = fs::metadata(&costs_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "ledger costs dir must be owner-only (0o700), got {dir_mode:o}"
+        );
+
+        let dot_dir_mode = fs::metadata(tmp.path().join(".simard"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            dot_dir_mode, 0o700,
+            "ledger .simard dir must be owner-only (0o700), got {dot_dir_mode:o}"
+        );
+
+        let file_mode = fs::metadata(&ledger).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            file_mode, 0o600,
+            "ledger file must be owner rw-only (0o600), got {file_mode:o}"
+        );
+    }
+
     #[test]
     fn ledger_path_empty_home_resolves_to_absolute_portable_path() {
         // An empty HOME is treated as unset: it must NOT yield the pre-fix
