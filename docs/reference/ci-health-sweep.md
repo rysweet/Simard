@@ -262,11 +262,18 @@ the [Stewardship](./stewardship-api.md) dedup contract rather than forking it:
   and the sweep continues to the next distinct failure, so one unwritable repo
   never starves filing for the rest of the fleet (Simard's own issues included)
   nor aborts the scheduled run. The skip is printed loudly and the repo still
-  appears in the report, so it is surfaced — not silently dropped. Note this
-  exception is scoped to *permission* denials: a transient **rate-limit** 403
-  (GitHub returns secondary/abuse limits as HTTP 403 too) is deliberately *not*
-  treated as an auth skip and still fails loud, so a burst-throttled write is
-  never masked as "unauthorized" and left untracked.
+  appears in the report, so it is surfaced — not silently dropped. When running
+  under GitHub Actions the skip is *additionally* emitted as a `::warning::`
+  annotation, so a standing missing-token misconfiguration surfaces on the run
+  summary even though the sweep now stays green through the skip (rather than
+  being visible only in a successful run's raw logs). The exception is
+  deliberately narrow — **only** the explicit permanent permission-denial
+  phrasings count (`Resource not accessible by integration` /
+  `... by personal access token` / `must have admin rights`). An *unrecognized*
+  403 (a transient **rate-limit** 403 — GitHub returns secondary/abuse limits as
+  HTTP 403 too — or a proxy/policy 403) is **not** assumed to be a permission
+  denial and still fails loud, so a burst-throttled or otherwise-degraded write
+  is never masked as "unauthorized" and left untracked.
 
 #### Root-cause diagnosis in the issue body
 
