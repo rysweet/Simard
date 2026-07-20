@@ -170,14 +170,21 @@ pub struct IssueFilingReport {
 /// for genuinely unexpected failures. Matched case-insensitively against the
 /// captured `gh` stderr embedded in the error's `reason`.
 ///
-/// Note the deliberate carve-out for **rate limiting**: GitHub returns its
-/// secondary/abuse rate-limit responses as `HTTP 403` too, but those are
-/// *transient* — not a permanent lack of permission. A fleet sweep firing bursts
-/// of `gh issue create`/`list`/`close` is exactly the workload that trips a
-/// secondary rate limit, so a bare `403`/`forbidden` substring match would
-/// silently downgrade a rate-limit failure to a skip (leaving a real failure
-/// untracked while the run stays green). We therefore treat any 403 whose body
-/// mentions a rate limit / abuse detection as NON-authorization so it fails loud.
+/// **Deliberately conservative — only *explicit permanent permission-denial*
+/// phrasings count as authorization skips:**
+///   - GITHUB_TOKEN / GitHub App: `Resource not accessible by integration`
+///   - under-scoped PAT:          `Resource not accessible by personal access token`
+///   - admin-gated action:        `must have admin rights`
+///
+/// We intentionally do **not** treat a bare `HTTP 403` / `403 Forbidden` as an
+/// authorization denial. GitHub returns 403 for genuinely *transient* conditions
+/// too — most notably secondary/abuse **rate limits** (`HTTP 403: You have
+/// exceeded a secondary rate limit...`), which a fleet sweep firing bursts of
+/// `gh issue create`/`list`/`close` is exactly the workload to trip, as well as
+/// proxy/policy 403s. Masking those as a permission skip would silently downgrade
+/// a real failure to a skip and leave it untracked while the run stays green —
+/// the very silent degradation this steward forbids. So an *unrecognized* 403
+/// (anything not carrying one of the explicit phrasings above) fails loud.
 fn is_authorization_error(err: &SimardError) -> bool {
     let reason = match err {
         SimardError::StewardshipGhCommandFailed { reason }
@@ -185,19 +192,7 @@ fn is_authorization_error(err: &SimardError) -> bool {
         _ => return false,
     };
     let lower = reason.to_ascii_lowercase();
-    // Transient rate-limit / abuse-detection 403s are NOT authorization denials:
-    // they must fail loud (or be retried), never be masked as a permission skip.
-    if lower.contains("rate limit") || lower.contains("abuse detection") {
-        return false;
-    }
-    // GitHub's canonical phrasings for "this token cannot do that here":
-    //   - GITHUB_TOKEN / GitHub App: "Resource not accessible by integration"
-    //   - under-scoped PAT:          "Resource not accessible by personal access token"
-    //   - REST 403 fallbacks:        "HTTP 403" / "403 Forbidden" / "must have admin rights"
-    lower.contains("not accessible by")
-        || lower.contains("http 403")
-        || lower.contains("403 forbidden")
-        || lower.contains("must have admin rights")
+    lower.contains("not accessible by") || lower.contains("must have admin rights")
 }
 
 /// File (or match) the deduplicated tracking issue for a single distinct
@@ -486,6 +481,18 @@ pub struct IssueResolutionReport {
     pub skipped_unauthorized: Vec<UnauthorizedSkip>,
 }
 
+/// A single repo's resolution result: the tracking issues actually closed, plus
+/// any per-issue **close** authorization skips. Distinct from a repo-level *list*
+/// skip (recorded by the caller when the token cannot even read the repo's
+/// issues): here the repo *was* listed and some issues may have closed
+/// successfully before/after a per-issue write denial, so those closes must be
+/// preserved rather than discarded.
+#[derive(Default)]
+struct RepoResolution {
+    outcomes: Vec<ResolutionOutcome>,
+    skipped_unauthorized: Vec<UnauthorizedSkip>,
+}
+
 /// Close every open `[ci-health]` tracking issue in `repo` whose workflow is now
 /// **green**. Split out of [`resolve_issues_for_report`] so a per-repo
 /// authorization denial (an unwritable governed sibling) can be classified and
@@ -493,21 +500,29 @@ pub struct IssueResolutionReport {
 /// `failing_signatures` are the signatures still carrying a live actionable
 /// failure this sweep (they must never be closed off a same-signature green
 /// sibling).
+///
+/// The initial **list** call fails loud on error (propagated via `?`); the
+/// caller classifies a list-level authorization denial as a repo-level skip.
+/// Each per-issue **close**, however, is classified *in this loop*: an
+/// authorization denial on one close is recorded as a per-workflow skip and
+/// resolution continues to the repo's other green workflows, so an earlier
+/// successful close is never discarded because a *later* close in the same repo
+/// was denied. A non-authorization close error still fails loud.
 fn resolve_one_repo(
     repo: &RepoReport,
     failing_signatures: &HashSet<String>,
     resolver: &dyn CiIssueResolver,
-) -> SimardResult<Vec<ResolutionOutcome>> {
+) -> SimardResult<RepoResolution> {
     let open_issues = resolver.list_open_tracking_issues(&repo.slug)?;
     if open_issues.is_empty() {
-        return Ok(Vec::new());
+        return Ok(RepoResolution::default());
     }
     // Two green workflow files can share a `name:` and so hash to one
     // signature/issue (filing collapses them identically); track which issue
-    // numbers were already closed this repo so such a pair closes the shared
-    // issue exactly once rather than double-closing it.
-    let mut closed_this_repo: HashSet<u64> = HashSet::new();
-    let mut outcomes = Vec::new();
+    // numbers were already handled this repo so such a pair closes the shared
+    // issue exactly once rather than double-closing it (or double-skipping it).
+    let mut handled_this_repo: HashSet<u64> = HashSet::new();
+    let mut result = RepoResolution::default();
     for wf in &repo.workflows {
         if wf.verdict != "green" {
             continue;
@@ -522,20 +537,29 @@ fn resolve_one_repo(
         let Some(issue) = find_existing(&open_issues, &signature) else {
             continue;
         };
-        if !closed_this_repo.insert(issue.number) {
+        if !handled_this_repo.insert(issue.number) {
             continue;
         }
         let comment = resolution_comment(&repo.slug, &wf.name, &repo.default_branch, wf.run_id);
-        resolver.close_issue(&repo.slug, issue.number, &comment)?;
-        outcomes.push(ResolutionOutcome {
-            repo: repo.slug.clone(),
-            workflow: wf.name.clone(),
-            issue_number: issue.number,
-            url: issue.url.clone(),
-            signature,
-        });
+        match resolver.close_issue(&repo.slug, issue.number, &comment) {
+            Ok(()) => result.outcomes.push(ResolutionOutcome {
+                repo: repo.slug.clone(),
+                workflow: wf.name.clone(),
+                issue_number: issue.number,
+                url: issue.url.clone(),
+                signature,
+            }),
+            Err(e) if is_authorization_error(&e) => {
+                result.skipped_unauthorized.push(UnauthorizedSkip {
+                    repo: repo.slug.clone(),
+                    workflow: Some(wf.name.clone()),
+                    reason: e.to_string(),
+                });
+            }
+            Err(e) => return Err(e),
+        }
     }
-    Ok(outcomes)
+    Ok(result)
 }
 
 /// Close every open `[ci-health]` tracking issue whose workflow is now **green**
@@ -561,13 +585,15 @@ fn resolve_one_repo(
 /// that is still tracking a real failure — matching filing's "file if any is
 /// broken" rule.
 ///
-/// Per-repo authorization denials (the token cannot read/close that repo's
-/// issues — an unwritable governed sibling) are recorded as an
-/// [`UnauthorizedSkip`] and resolution continues, mirroring filing so one
-/// unwritable repo never starves resolution for the rest of the fleet nor aborts
-/// the scheduled run. Any other `gh` error still propagates (fail-loud — never a
-/// silent partial resolution). Returns one [`ResolutionOutcome`] per issue
-/// actually closed, in repo-then-workflow order, plus any skips.
+/// Authorization denials are recorded as [`UnauthorizedSkip`]s and resolution
+/// continues, mirroring filing so one unwritable repo never starves resolution
+/// for the rest of the fleet nor aborts the scheduled run. A repo-level **list**
+/// denial (the token cannot read the repo's issues) is recorded per-repo
+/// (`workflow: None`); a per-issue **close** denial is recorded per-workflow
+/// (`workflow: Some`) and does not discard closes that already succeeded in the
+/// same repo. Any other `gh` error still propagates (fail-loud — never a silent
+/// partial resolution). Returns one [`ResolutionOutcome`] per issue actually
+/// closed, in repo-then-workflow order, plus any skips.
 pub fn resolve_issues_for_report(
     report: &FleetReport,
     resolver: &dyn CiIssueResolver,
@@ -599,8 +625,19 @@ pub fn resolve_issues_for_report(
             continue;
         }
         match resolve_one_repo(repo, &failing_signatures, resolver) {
-            Ok(mut closed) => result.closed.append(&mut closed),
+            Ok(mut repo_res) => {
+                result.closed.append(&mut repo_res.outcomes);
+                // Per-issue close denials within this repo (some issues may still
+                // have closed successfully above — those are preserved).
+                result
+                    .skipped_unauthorized
+                    .append(&mut repo_res.skipped_unauthorized);
+            }
             Err(e) if is_authorization_error(&e) => {
+                // A repo-level *list* denial: the token cannot even read this
+                // repo's issues, so nothing could be resolved. Recorded per-repo
+                // (workflow: None) to distinguish it from a per-workflow close
+                // denial.
                 result.skipped_unauthorized.push(UnauthorizedSkip {
                     repo: repo.slug.clone(),
                     workflow: None,
