@@ -1,0 +1,39 @@
+digraph AgenticOodaLoop {
+  rankdir=TB;
+  node [shape=box, style="rounded,filled", fillcolor="#f8fbff", fontname="Arial"];
+  edge [fontname="Arial"];
+
+  tick   [label="daemon tick: load goal_board + heal stale/tombstoned\nsrc/operator_commands_ooda/daemon"];
+  cycle  [label="run_ooda_cycle -> run_ooda_cycle_inner\nsrc/ooda_loop/cycle.rs"];
+  observe[label="OBSERVE observe(state, memories)\nsrc/ooda_loop/observe.rs"];
+  prepare[label="PREPARE build_objective_probe +\npreparation_memory_operations_*_phased"];
+  mem    [label="cognitive-memory recall -> PreparedContext", fillcolor="#eaf6ff"];
+  orient [label="ORIENT orient_with_brain / orient\n-> Vec<Priority>  src/ooda_loop/orient.rs"];
+  roO    [label="ooda-orient.yaml (RecipeBrain)", fillcolor="#fff6df"];
+  detO   [label="DeterministicOrientBrain (brain unavailable)\nsrc/ooda_brain/orient.rs"];
+  decide [label="DECIDE decide_with_brain / decide\n-> Vec<PlannedAction>  src/ooda_loop/decide.rs"];
+  roD    [label="ooda-decide.yaml (RecipeBrain)", fillcolor="#fff6df"];
+  detD   [label="DeterministicDecideBrain (brain unavailable)\nsrc/ooda_brain/decide.rs"];
+  cover  [label="ensure_goal_coverage\nsrc/ooda_loop/coverage.rs"];
+  act    [label="ACT act (src/ooda_loop/mod.rs:109) ->\ndispatch_actions_bounded (src/ooda_actions/mod.rs)"];
+  advance[label="AdvanceGoal -> typed-OODA route/executor\nsrc/ooda_actions/advance_goal/"];
+  simple [label="LaunchSession / ConsolidateMemory / ResearchQuery\nsrc/ooda_actions/simple_actions.rs"];
+  consol [label="execution + review + reflection memory writes\nsrc/ooda_loop/cycle.rs"];
+  noprog [label="no-progress breaker (post-consolidation)\nsrc/ooda_loop/no_progress.rs"];
+  persist[label="persist_board (in-cycle)\nsrc/goal_curation.rs"];
+  commit [label="daemon: commit_cycle + overwrite_memory_cache\nsrc/operator_commands_ooda/daemon"];
+
+  tick -> cycle -> observe -> prepare;
+  prepare -> mem [label="recall", style=dashed, color="#4a90d9"];
+  prepare -> orient;
+  orient -> roO [label="recipe", color="#d9a441"];
+  roO -> detO [label="brain unavailable", style=dotted];
+  orient -> decide;
+  decide -> roD [label="recipe", color="#d9a441"];
+  roD -> detD [label="brain unavailable", style=dotted];
+  decide -> cover -> act;
+  act -> advance -> consol;
+  act -> simple -> consol;
+  consol -> mem [label="write", style=dashed, color="#4a90d9"];
+  consol -> noprog -> persist -> commit;
+}

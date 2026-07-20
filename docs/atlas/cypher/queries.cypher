@@ -6,6 +6,7 @@
 //   2. atlas-layers.cypher
 //   3. atlas-services.cypher
 //   4. atlas-relationships.cypher
+//   5. atlas-agentic.cypher   (Layer 9 agentic flows)
 // Then run any query below.
 
 // Q1. What does each layer contain?
@@ -51,3 +52,29 @@ RETURN collect(j.id) AS journeys_needing_signal_rpc;
 MATCH path = (s:Service {id:'simard-daemon'})-[:RUNS|SPAWNS|EXPOSES|READS_FROM|WRITES_TO*1..4]->(d:DataStore)
 RETURN d.id AS reachable_store, length(path) AS hops
 ORDER BY hops;
+
+// ---- Agentic flows (Layer 9) ----------------------------------------------
+
+// Q11. Trace an agentic flow's phases in order (change the id to any flow).
+MATCH (f:Flow {id:'ooda-loop'})-[:HAS_PHASE]->(p:Phase)
+RETURN f.id AS flow, p.seq AS step, p.id AS phase, p.detail AS detail, p.evidence AS source
+ORDER BY p.seq;
+
+// Q12. Which agentic phases invoke a recipe, and which prompt asset backs it?
+MATCH (p:Phase)-[:INVOKES]->(r:Recipe)
+OPTIONAL MATCH (r)-[:DEFINED_IN]->(a:PromptAsset)
+RETURN p.id AS phase, r.id AS recipe, r.file AS recipe_file, a.id AS backing_policy;
+
+// Q13. Capability -> effect authorization matrix (typed-OODA blast radius).
+MATCH (c:Capability)-[:AUTHORIZES]->(e:Effect)
+RETURN c.grant AS capability, e.id AS effect, e.detail AS does, e.evidence AS source
+ORDER BY effect;
+
+// Q14. Cross-flow orchestration graph: which flow drives which, plus stores touched.
+MATCH (f:Flow)-[:DRIVES]->(g:Flow)
+OPTIONAL MATCH (f)-[rel:READS_FROM|WRITES_TO]->(d:DataStore)
+RETURN f.id AS flow, collect(DISTINCT g.id) AS drives, collect(DISTINCT d.id) AS stores;
+
+// Q15. Flow-to-journey linkage (how Layer 9 flows surface as Layer 8 journeys).
+MATCH (f:Flow)-[:TOUCHES]->(j:Journey)
+RETURN f.id AS flow, collect(j.id) AS journeys;

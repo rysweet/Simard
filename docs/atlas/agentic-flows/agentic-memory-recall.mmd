@@ -1,0 +1,35 @@
+flowchart TD
+  %% Layer 9 - Agentic flow: cognitive-memory recall path (NO kuzu, NO python; embedded lbug)
+  trigger["Callers (in-process):\nOODA prepare (build_objective_probe)  src/ooda_loop/cycle.rs\nOverseer recall_pass  src/overseer/mod.rs:1026"]
+  trigger --> keys["RecallKeys::from_signals(signals, problems) -> query()\n(concepts + root-cause labels, deterministic probe)"]
+  keys --> fanout{"4-way bounded recall"}
+
+  fanout --> sem["recall_semantic -> recall_facts_ranked\n-> RecalledFact[]"]
+  fanout --> epi["recall_episodic -> recall_episodes_ranked\n(word-boundary gate) -> RecalledEpisode[]"]
+  fanout --> proc["recall_procedural -> recall_procedure / search_procedures\n(usage_count DESC) -> RecalledProcedure[]"]
+  fanout --> pros["recall_prospective -> check_triggers\n(fires &lt;=1x, status->triggered) -> RecalledProspective[]"]
+
+  sem --> adapter["CognitiveMemoryOps (OODA) / MemoryRecallOps (overseer)\nArc&lt;dyn CognitiveMemoryOps&gt;, wrapped by memory_ipc::SharedMemory\nsrc/operator_commands_ooda/daemon/mod.rs:269"]
+  epi --> adapter
+  proc --> adapter
+  pros --> adapter
+  adapter --> lib["LibraryCognitiveMemory::open (agent scope 'simard')\nin-process, NOT UDS  src/cognitive_memory/"]
+  lib --> store["embedded lbug graph store\n&lt;state_root&gt;/cognitive  (amplihack-memory-lib)"]
+
+  sem --> snapshot["MemorySnapshot / PreparedContext\n{facts, episodes, procedures, prospectives}"]
+  epi --> snapshot
+  proc --> snapshot
+  pros --> snapshot
+  snapshot --> use["OODA prompt context  /  overseer signals_from\n(RecurringSignature from episodes -> root_cause recurrence)"]
+
+  use -. after act .-> wb["record_observation -> store_episode('overseer')\nOR consolidation store_procedure/store_fact (OODA)"]
+  wb --> store
+
+  ext["memory_ipc UDS server (RemoteCognitiveMemory)\nexposes the SAME lbug store to EXTERNAL clients only\nsrc/memory_ipc/server.rs"]
+  ext -.same store.-> store
+
+  note["Policy: entire path is native Rust + lbug.\nNO kuzu DDL, NO Python AST anywhere."]
+  store -.-> note
+
+  classDef store fill:#eaf6ff,stroke:#4a90d9;
+  class store,snapshot,wb store;

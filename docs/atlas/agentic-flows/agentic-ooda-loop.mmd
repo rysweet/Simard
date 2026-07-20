@@ -1,0 +1,30 @@
+flowchart TD
+  %% Layer 9 - Agentic flow: the OODA loop (observe/orient/decide/act), recipes-first
+  subgraph Daemon["operator_commands_ooda::daemon (outer tick)"]
+    tick["daemon tick loads goal_board + heals stale/tombstoned"]
+  end
+  tick --> cycle["run_ooda_cycle -> run_ooda_cycle_inner\nsrc/ooda_loop/cycle.rs"]
+  cycle --> observe["OBSERVE observe(state, memories)\nsrc/ooda_loop/observe.rs"]
+  observe --> prepare["PREPARE build_objective_probe +\npreparation_memory_operations_*_phased\nsrc/ooda_loop/cycle.rs"]
+  prepare -->|recall| mem["(cognitive-memory recall path)\nPreparedContext"]
+  prepare --> orient["ORIENT orient_with_brain / orient\nsrc/ooda_loop/orient.rs -> Vec&lt;Priority&gt;"]
+  orient -->|recipe| roO["ooda-orient.yaml via RecipeBrain"]
+  orient --> decide["DECIDE decide_with_brain / decide\nsrc/ooda_loop/decide.rs -> Vec&lt;PlannedAction&gt;"]
+  decide -->|recipe| roD["ooda-decide.yaml via RecipeBrain"]
+  decide --> coverage["ensure_goal_coverage\nsrc/ooda_loop/coverage.rs"]
+  coverage --> act["ACT act (src/ooda_loop/mod.rs) ->\ndispatch_actions_bounded (src/ooda_actions/mod.rs)"]
+  act --> advance["AdvanceGoal -> typed-OODA route/executor\nsrc/ooda_actions/advance_goal/"]
+  act --> simple["LaunchSession / ConsolidateMemory / ResearchQuery\nsrc/ooda_actions/simple_actions.rs"]
+  advance --> consolidate
+  simple --> consolidate
+  act --> consolidate["execution + review + reflection memory writes\nsrc/ooda_loop/cycle.rs"]
+  consolidate -->|write| mem
+  consolidate --> noprog["no-progress breaker (evidence-driven, post-consolidation)\nsrc/ooda_loop/no_progress.rs"]
+  noprog --> persist["persist_board (in-cycle)\nsrc/goal_curation.rs"]
+  persist --> commit["daemon: commit_cycle + overwrite_memory_cache (next tick)\nsrc/operator_commands_ooda/daemon"]
+  roO -. brain unavailable .-> detO["DeterministicOrientBrain\nsrc/ooda_brain/orient.rs"]
+  roD -. brain unavailable .-> detD["DeterministicDecideBrain\nsrc/ooda_brain/decide.rs"]
+  classDef recipe fill:#fff6df,stroke:#d9a441;
+  classDef memory fill:#eaf6ff,stroke:#4a90d9;
+  class roO,roD recipe;
+  class mem memory;

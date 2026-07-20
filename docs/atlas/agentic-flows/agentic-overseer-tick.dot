@@ -1,0 +1,43 @@
+digraph AgenticOverseerTick {
+  rankdir=TB;
+  node [shape=box, style="rounded,filled", fillcolor="#f8fbff", fontname="Arial"];
+  edge [fontname="Arial"];
+
+  tick  [label="run_overseer_tick_isolated_detailed (panic-isolated)\nsrc/overseer/wiring.rs"];
+  cycle [label="run_cycle  src/overseer/mod.rs:609"];
+
+  subgraph cluster_observe {
+    label="OBSERVE"; style="rounded,dashed"; color="#4a90d9";
+    snap  [label="StatusReader::snapshot -> ObservedState"];
+    board [label="GoalCurator::observe_board (blocked + in-flight)"];
+    gaps  [label="GoalCurator::workstream_gaps"];
+    prs   [label="PrOps::survey_ready_prs (SIMARD_AUTOMERGE_REPOS)"];
+    mq    [label="observe_merge_queue -> observe-merge-queue.yaml\nagentic PR/issue reasoning  mod.rs:875", fillcolor="#fff6df"];
+    fails [label="failure_sink::drain_recent"];
+    recall[label="recall_pass(keys) -> MemorySnapshot  mod.rs:1026", fillcolor="#eaf6ff"];
+  }
+  orient[label="ORIENT signals_from -> orient -> Vec<Problem>\nsrc/overseer/mod.rs:2165"];
+  why   [label="ROOT-CAUSE root_cause::analyze + recurrence\nsrc/overseer/root_cause.rs"];
+  decide[label="DECIDE decide(problem) -> Intervention\nsrc/overseer/mod.rs:2467"];
+  gate  [label="GATE gate(iv, observed, launches)\nautonomy / budget / conflict / recursion  mod.rs:1156"];
+  eco   [label="observe_ecosystem (after decide/gate loop)\n-> ecosystem-observe.yaml -> gated LaunchRecipe\nsrc/overseer/ecosystem_observe.rs", fillcolor="#fff6df"];
+
+  subgraph cluster_act {
+    label="ACT (overseer capabilities  src/overseer/capabilities.rs)"; style="rounded,dashed"; color="#7a7a7a";
+    notify [label="NotifierOps (email + Signal RPC :7583)"];
+    issue  [label="IssueFiler -> gh (dedup failure_signature)"];
+    launch [label="RecipeLauncher -> amplihack smart-orchestrator\nsrc/overseer/launch.rs", fillcolor="#fff6df"];
+    merge  [label="MergePrOps (poll-until-green)"];
+    deploy [label="Deployer = RefuseDeployer (production)\nrefuses autonomous deploy  wiring.rs:1068"];
+    goalcap[label="GoalCurator unblock/escalate; MeetingHost transfer_goal"];
+  }
+  writeback[label="record_observation -> store_episode('overseer')", fillcolor="#eaf6ff"];
+  store [label="cognitive-memory / lbug (in-process)", fillcolor="#eaf6ff"];
+
+  tick -> cycle -> snap -> board -> gaps -> prs -> mq -> fails -> recall;
+  recall -> orient -> why -> decide -> gate -> eco -> notify;
+  eco -> issue; eco -> launch; eco -> merge; eco -> deploy; eco -> goalcap;
+  goalcap -> writeback;
+  writeback -> store [label="write", style=dashed, color="#4a90d9"];
+  recall -> store [label="read", style=dashed, color="#4a90d9"];
+}

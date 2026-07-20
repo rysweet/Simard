@@ -1,0 +1,32 @@
+flowchart TD
+  %% Layer 9 - Agentic flow: typed-OODA capability/effect model
+  entry["OODA ACT: AdvanceGoal -> spawn::dispatch_spawn_engineer\nsrc/ooda_actions/advance_goal/spawn.rs"]
+  entry --> route["TypedGoalSessionRoute::execute\nsrc/typed_ooda/route.rs"]
+  route --> policyload["load_policy: goal-session-capabilities.toml\n-> CapabilityPolicy (goal-session-policy-v1)\nPRODUCTION grants: record_action.spawn_engineer only\nsrc/typed_ooda/route.rs"]
+  route --> actor["recipe goal-session-actor.yaml via recipe-runner\ncontext: task, reason, observe/orient/decide outputs"]
+  actor --> outcome["TypedOutcomePayload (one terminal per session/cycle/goal):\nAction | NoAction | Blocked | Completed\nsrc/typed_ooda/types.rs"]
+
+  outcome --> tools["GoalSessionTools record_* (terminal guard)\nrecord_action / no_action / blocked / completed\nsrc/typed_ooda/executor.rs"]
+  tools --> ledgerw["ledger persist: terminal_outcomes, progress_records\n(SQLite typed-ooda/outcomes.sqlite3)  src/typed_ooda/schema.rs"]
+
+  outcome --> capcheck["capability check vs CapabilityGrant\nRecordAction(SpawnEngineer|FileIssue|RequestMerge|RequestDeploy)"]
+  capcheck -->|granted| dispatch["dispatch_outcome -> EffectJob\nlease acquire (lease_owner, lease_expires_at)\nsrc/typed_ooda/executor.rs / ledger.rs"]
+  capcheck -->|denied| deny["CapabilityError(Authorization) -> Blocked"]
+
+  dispatch --> effects{"Action kind"}
+  effects --> se["SpawnEngineer(SpawnEngineerAction) [GRANTED in production]\n-> engineer worktree + agent_supervisor"]
+  effects --> fi["FileIssue(FileIssueAction) [enum-only; NOT granted by goal-session-policy-v1]"]
+  effects --> rm["RequestMerge(RequestMergeAction) [enum-only; NOT granted]"]
+  effects --> rd["RequestDeploy(RequestDeployAction) [enum-only; deployment_environments=[]]"]
+
+  se --> evidence["Evidence: Commit | CheckRun | Issue | EngineerRun\nrecorded in effect_jobs.result"]
+  fi --> evidence
+  rm --> evidence
+  rd --> evidence
+
+  outcome -. Blocked .-> blocker["BlockerRef: Goal | Credential | Authorization |\nResource | Operator | External  + RetryPolicy\n(Never | AfterGoal | AfterSignal | AfterTime)"]
+
+  classDef recipe fill:#fff6df,stroke:#d9a441;
+  classDef store fill:#eaf6ff,stroke:#4a90d9;
+  class actor recipe;
+  class ledgerw,evidence store;
