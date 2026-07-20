@@ -1,6 +1,7 @@
 use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Child, Command};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::error::{SimardError, SimardResult};
@@ -77,29 +78,24 @@ fn run_command_inner(
     let stdout_reader = spawn_pipe_drainer(child.stdout.take());
     let stderr_reader = spawn_pipe_drainer(child.stderr.take());
 
-    let deadline = Instant::now() + timeout_for_command(argv);
+    let timeout = timeout_for_command(argv);
+    let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
                     // The killed child's pipes close, so the drain threads finish.
-                    let _ = stdout_reader.join();
-                    let _ = stderr_reader.join();
+                    reap_child(&mut child, stdout_reader, stderr_reader);
                     return Err(SimardError::CommandTimeout {
                         action: argv.join(" "),
-                        timeout_secs: timeout_for_command(argv).as_secs(),
+                        timeout_secs: timeout.as_secs(),
                     });
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
+                reap_child(&mut child, stdout_reader, stderr_reader);
                 return Err(SimardError::ActionExecutionFailed {
                     action: argv.join(" "),
                     reason: format!("failed to poll child process: {error}"),
@@ -169,6 +165,21 @@ const MAX_CAPTURED_BYTES: usize = 16 * 1024 * 1024;
 /// so callers and error messages can tell capture was truncated rather than
 /// silently losing the tail.
 const CAPTURE_TRUNCATED_MARKER: &str = "… [output truncated at 16 MiB]";
+
+/// Kill a still-running child and join its two drain threads, discarding any
+/// captured output. Used on the timeout and poll-error paths where the result
+/// is being abandoned: killing the child closes its pipes, which lets the
+/// drain threads reach EOF and finish so the joins do not block.
+fn reap_child(
+    child: &mut Child,
+    stdout_reader: JoinHandle<Vec<u8>>,
+    stderr_reader: JoinHandle<Vec<u8>>,
+) {
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = stdout_reader.join();
+    let _ = stderr_reader.join();
+}
 
 /// Spawn a thread that drains a child pipe to EOF, returning the captured bytes.
 ///
