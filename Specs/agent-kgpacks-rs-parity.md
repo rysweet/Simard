@@ -62,7 +62,7 @@ implemented; acceptance test is the definition of done) · **OUT-OF-SCOPE**.
 | KGP-Q6 | Answer synthesis truncates snippets on a UTF-8 char boundary | `query_pack_db_finds_matching_articles` green + no panic on multibyte content | DONE | `native_knowledge.rs::build_answer` + `util::string_truncate` |
 | KGP-Q7 | Each source surfaces its `section` | asserted within KGP-M/query tests | DONE | `native_knowledge.rs::SourceInfo.section` |
 | KGP-Q8 | Retrieval **ranks candidates by keyword coverage** (a title hit weighted above a content-only mention) so the `limit` cut keeps the most on-topic article instead of returning matches in arbitrary storage (rowid) order | `query_articles_ranks_most_relevant_first`, `query_articles_limit_keeps_most_relevant`, `query_articles_prefers_title_over_content_match` green | DONE | `native_knowledge.rs::query_articles` (`ORDER BY <coverage score> DESC`), `TITLE_MATCH_WEIGHT` / `CONTENT_MATCH_WEIGHT` |
-| KGP-Q4 | Keyword search binds parameters instead of string-interpolating LIKE clauses | NEW test: a question keyword containing `%`, `_`, and `'` returns correct rows and cannot alter the SQL | OPEN | `native_knowledge.rs::query_articles` currently interpolates escaped keywords |
+| KGP-Q4 | Keyword search binds parameters instead of string-interpolating LIKE clauses | `query_articles_matches_like_metacharacters_literally`, `query_articles_keyword_cannot_alter_sql` green | DONE | `native_knowledge.rs::query_articles` binds each keyword as a `LIKE ?N ESCAPE '\'` parameter (`like_pattern`); `%`, `_`, `'` match literally and cannot alter the SQL |
 | KGP-Q5 | GraphRAG retrieval: traverse entity + relationship tables (multi-hop), not only a single-table LIKE scan | NEW test: a pack fixture with `relationships` yields a graph-grounded answer joining linked entities | OPEN | `native_knowledge.rs::query_articles` comment: "simplified version of the Python `KnowledgeGraphAgent.query()`" |
 
 ### Transport, health & lifecycle
@@ -105,10 +105,10 @@ separately for the Phase 9+ pack-authoring work.
 Work the OPEN criteria top-to-bottom; each is a self-contained, shippable unit
 with its acceptance test already specified above:
 
-1. **KGP-Q4** — parameterize the keyword LIKE search (correctness + removes the
-   injection-shaped interpolation). Smallest, highest-confidence next step.
+1. ~~**KGP-Q4** — parameterize the keyword LIKE search.~~ **DONE (2026-07-20)** —
+   the smallest, highest-confidence step landed first, as planned.
 2. **KGP-T3** — reuse an open `Connection` in `conn_cache` (or document the
-   path-cache decision and add the reuse test).
+   path-cache decision and add the reuse test). **← next**
 3. **KGP-Q5** — GraphRAG multi-hop retrieval over entities + relationships.
    Largest; do last and consider splitting into a fixture step and a traversal
    step.
@@ -131,3 +131,16 @@ with its acceptance test already specified above:
   knowledge. The LIKE membership probes stay substring-based (recall breadth);
   ranking governs which candidates survive the cut. KGP-Q4 (parameterize the
   LIKE search) remains OPEN and orthogonal.
+- **2026-07-20** — **KGP-Q4 closed** (correctness + better-than-original
+  hardening, issue #4321 F9): `query_articles` no longer string-interpolates
+  keywords into `LIKE '%<kw>%'`. Each keyword is now bound as a numbered
+  parameter (`title LIKE ?N ESCAPE '\'`) whose pattern is built by `like_pattern`,
+  which wraps the keyword in `%…%` and escapes the LIKE metacharacters (`%`, `_`)
+  and the escape char itself. Consequences: (a) a keyword containing `%`/`_` now
+  matches **literally** instead of acting as a wildcard (fixes over-matching —
+  `query_articles_matches_like_metacharacters_literally`), and (b) a keyword
+  containing `'` or an injection-shaped payload is a harmless literal search that
+  cannot alter or execute SQL (`query_articles_keyword_cannot_alter_sql`). This
+  is the "better-than-original" hardening: the Python reference interpolated
+  escaped strings; the Rust port binds parameters. Ranking (KGP-Q8) and recall
+  breadth are unchanged. Next OPEN step per the backlog: **KGP-T3**.

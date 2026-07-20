@@ -1,0 +1,55 @@
+name: "kgpacks-rs query safety (KGP-Q4 parameterized LIKE)"
+description: "Outside-in coverage for the native Rust knowledge client's query-safety hardening (KGP-Q4, issue #4321 F9): native_knowledge::query_articles must bind each keyword as a `LIKE ?N ESCAPE '\\'` parameter instead of string-interpolating it, so a keyword containing LIKE metacharacters (%/_) matches LITERALLY and an injection-shaped keyword (', ; DROP ...) is a harmless literal search that cannot alter or execute SQL. This is the better-than-original hardening versus the Python reference, which interpolated escaped strings. See Specs/agent-kgpacks-rs-parity.md."
+version: "1.0.0"
+
+config:
+  timeout: 600000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 600000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "native knowledge query binds keywords so metacharacters match literally and injection cannot alter SQL"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/kgpacks-rs-query-safety.sh"
+    timeout: 600000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "kgpacks-rs"
+    - "knowledge"
+    - "query-safety"
+    - "security"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

@@ -188,6 +188,29 @@ const TITLE_MATCH_WEIGHT: i64 = 2;
 /// Relevance weight of a keyword found only in an article's **content** body.
 const CONTENT_MATCH_WEIGHT: i64 = 1;
 
+/// Escape character used with SQL `LIKE ... ESCAPE` so a keyword's own `%`, `_`,
+/// and backslash characters are matched literally rather than acting as LIKE
+/// wildcards. A single backslash in SQL, written here as an escaped Rust char.
+const LIKE_ESCAPE: char = '\\';
+
+/// Build a bound `LIKE` pattern (`%<keyword>%`) for a keyword, escaping the LIKE
+/// metacharacters (`%`, `_`) and the escape character itself so the keyword is
+/// matched **literally**. The returned string is passed to SQLite as a bound
+/// parameter (never string-interpolated), so a keyword such as `50%_'` searches
+/// for that literal substring and cannot alter the SQL (KGP-Q4).
+fn like_pattern(keyword: &str) -> String {
+    let mut pattern = String::with_capacity(keyword.len() + 2);
+    pattern.push('%');
+    for c in keyword.chars() {
+        if c == LIKE_ESCAPE || c == '%' || c == '_' {
+            pattern.push(LIKE_ESCAPE);
+        }
+        pattern.push(c);
+    }
+    pattern.push('%');
+    pattern
+}
+
 /// Query the articles table for matching content.
 ///
 /// Candidate articles are gathered by a LIKE-based keyword search (any keyword
@@ -216,19 +239,27 @@ const CONTENT_MATCH_WEIGHT: i64 = 1;
 /// specific source article — the agent-kgpacks citation guarantee. Packs whose
 /// schema has no `url` column degrade gracefully to `url: None` (unchanged
 /// behaviour).
+/// Keyword matching binds each keyword as a `LIKE` parameter with an `ESCAPE`
+/// clause (see [`like_pattern`]) rather than interpolating it into the SQL, so a
+/// keyword containing `%`, `_`, or `'` matches literally and cannot alter the
+/// query (KGP-Q4).
 fn query_articles(conn: &Connection, keywords: &[&str], limit: usize) -> Vec<SourceInfo> {
-    // Build a LIKE-based search (pack databases don't always have FTS). Escape
-    // each keyword's single quotes once and reuse the escaped form for both the
-    // WHERE membership clause and the ORDER BY relevance score below.
-    let escaped: Vec<String> = keywords.iter().map(|k| k.replace('\'', "''")).collect();
+    // Build a LIKE-based search (pack databases don't always have FTS). Each
+    // keyword becomes a bound `%<keyword>%` pattern (LIKE metacharacters
+    // escaped) reused — via a numbered placeholder `?N` — for both the WHERE
+    // membership clause and the ORDER BY relevance score below. Binding the
+    // patterns (instead of interpolating them) keeps user-supplied keywords out
+    // of the SQL text entirely.
+    let patterns: Vec<String> = keywords.iter().map(|k| like_pattern(k)).collect();
 
-    if escaped.is_empty() {
+    if patterns.is_empty() {
         return Vec::new();
     }
 
-    let where_clause = escaped
-        .iter()
-        .map(|kw| format!("(title LIKE '%{kw}%' OR content LIKE '%{kw}%')"))
+    // `?1 ESCAPE '\'` — keyword N is bound as placeholder ?N (1-based) and its
+    // LIKE metacharacters are treated literally via the escape character.
+    let where_clause = (1..=patterns.len())
+        .map(|i| format!("(title LIKE ?{i} ESCAPE '\\' OR content LIKE ?{i} ESCAPE '\\')"))
         .collect::<Vec<_>>()
         .join(" OR ");
 
@@ -239,12 +270,11 @@ fn query_articles(conn: &Connection, keywords: &[&str], limit: usize) -> Vec<Sou
     // deterministic `title ASC` tie-break (applied in the ORDER BY below) then
     // fixes the order of equal-score matches so recall is reproducible run to
     // run rather than falling back to SQLite's arbitrary storage order.
-    let score_expr = escaped
-        .iter()
-        .map(|kw| {
+    let score_expr = (1..=patterns.len())
+        .map(|i| {
             format!(
-                "(CASE WHEN title LIKE '%{kw}%' THEN {TITLE_MATCH_WEIGHT} ELSE 0 END) \
-                 + (CASE WHEN content LIKE '%{kw}%' THEN {CONTENT_MATCH_WEIGHT} ELSE 0 END)"
+                "(CASE WHEN title LIKE ?{i} ESCAPE '\\' THEN {TITLE_MATCH_WEIGHT} ELSE 0 END) \
+                 + (CASE WHEN content LIKE ?{i} ESCAPE '\\' THEN {CONTENT_MATCH_WEIGHT} ELSE 0 END)"
             )
         })
         .collect::<Vec<_>>()
@@ -270,7 +300,7 @@ fn query_articles(conn: &Connection, keywords: &[&str], limit: usize) -> Vec<Sou
 
         if let Ok(mut stmt) = conn.prepare(&sql) {
             let mut sources = Vec::new();
-            if let Ok(rows) = stmt.query_map([], |row| {
+            if let Ok(rows) = stmt.query_map(rusqlite::params_from_iter(patterns.iter()), |row| {
                 let url = row
                     .get::<_, Option<String>>(2)
                     .unwrap_or(None)
@@ -982,6 +1012,75 @@ mod tests {
                 "Zebra ownership".to_string(),
             ],
             "equal-score matches must order by title ASC deterministically"
+        );
+    }
+
+    #[test]
+    fn query_articles_matches_like_metacharacters_literally() {
+        // KGP-Q4: a keyword containing LIKE metacharacters (`%`, `_`) must match
+        // literally, not act as a wildcard. The prior interpolated
+        // `LIKE '%<kw>%'` treated these as wildcards and over-matched unrelated
+        // rows; binding the pattern with an `ESCAPE` clause fixes that.
+        let conn = ranking_conn(&[
+            ("Save 50% today", "seasonal sale"), // contains the literal "50%"
+            ("Save 500 today", "seasonal sale"), // has "50" but NOT "50%"
+        ]);
+        let titles: Vec<String> = query_articles(&conn, &["50%"], 5)
+            .into_iter()
+            .map(|s| s.title)
+            .collect();
+        assert_eq!(
+            titles,
+            vec!["Save 50% today".to_string()],
+            "the `%` in the keyword must match literally, not as a LIKE wildcard"
+        );
+
+        // The `_` single-char wildcard must likewise be literal.
+        let conn = ranking_conn(&[
+            ("config_value docs", "reference"), // literal "config_value"
+            ("configXvalue docs", "reference"), // `_` would wildcard-match the 'X'
+        ]);
+        let titles: Vec<String> = query_articles(&conn, &["config_value"], 5)
+            .into_iter()
+            .map(|s| s.title)
+            .collect();
+        assert_eq!(
+            titles,
+            vec!["config_value docs".to_string()],
+            "the `_` in the keyword must match literally, not as a single-char wildcard"
+        );
+    }
+
+    #[test]
+    fn query_articles_keyword_cannot_alter_sql() {
+        // KGP-Q4: keywords are bound parameters, so injection-shaped input is a
+        // harmless literal search — it cannot short-circuit the WHERE clause or
+        // execute embedded SQL.
+        let conn = ranking_conn(&[("Ownership Guide", "covers borrowing")]);
+
+        // A tautology-injection keyword: if interpolated unescaped it would read
+        // as SQL and make every row match. Bound, it is a literal substring no
+        // article contains, so it matches nothing.
+        let tautology = query_articles(&conn, &["x' OR '1'='1"], 5);
+        assert!(
+            tautology.is_empty(),
+            "an injection-shaped keyword must match literally (nothing), not \
+             short-circuit the WHERE clause; got: {:?}",
+            tautology.iter().map(|s| &s.title).collect::<Vec<_>>()
+        );
+
+        // A destructive payload must not execute: the table must survive and
+        // still serve a subsequent legitimate query.
+        let _ = query_articles(&conn, &["'); DROP TABLE articles; --"], 5);
+        let after: Vec<String> = query_articles(&conn, &["ownership"], 5)
+            .into_iter()
+            .map(|s| s.title)
+            .collect();
+        assert_eq!(
+            after,
+            vec!["Ownership Guide".to_string()],
+            "the articles table must survive a DROP-shaped keyword (the payload \
+             is never executed) and still answer real queries"
         );
     }
 
