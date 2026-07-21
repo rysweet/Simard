@@ -116,37 +116,6 @@ pub fn build_self_deploy_candidate(repo: &Path, target_dir: &Path) -> SimardResu
     )
 }
 
-/// Validate that a git ref/SHA handed to the self-deploy **convergence**
-/// re-trigger (the stuck red-canary fix) is a bare hex commit-ish (4–64 hex
-/// chars) BEFORE it is ever passed as a `Command` argument.
-///
-/// A convergence re-trigger builds and promotes the target commit, so an
-/// unvalidated ref could smuggle a flag (`--upload-pack=…`), shell, or path
-/// metacharacters into the build/checkout invocation. Argument-vector calls
-/// (`Command::arg`) already prevent shell interpretation; this is the
-/// defense-in-depth *shape* check the design mandates ("validate ref format;
-/// never shell strings"). Mirrors `overseer::deploy::is_hex_commitish`.
-///
-/// A valid build ref is a bare git commit-ish: 4–64 ASCII hex characters
-/// (short SHA-1 through full SHA-256). Anything else — symbolic refs (`HEAD`,
-/// `main`), remote refs (`origin/main`), flags (`--upload-pack=…`), whitespace,
-/// shell metacharacters, path traversal, or command substitution — is refused
-/// with a `VerificationFailed` error before it can reach a `Command` argument.
-#[allow(dead_code)]
-pub(crate) fn validate_build_ref(reff: &str) -> SimardResult<()> {
-    let len = reff.len();
-    if (4..=64).contains(&len) && reff.bytes().all(|c| c.is_ascii_hexdigit()) {
-        Ok(())
-    } else {
-        Err(SimardError::VerificationFailed {
-            reason: format!(
-                "self-deploy convergence build ref must be a bare hex commit-ish \
-                 (4-64 hex chars); refused: {reff:?}"
-            ),
-        })
-    }
-}
-
 /// Validate preconditions and hand over execution to the canary binary.
 ///
 /// On Unix, this uses `CommandExt::exec()` to replace the current process
@@ -311,11 +280,13 @@ mod tests {
     }
 
     // ────────────────────────────────────────────────────────────────────────
-    // TDD (Step 7) — P1 convergence & deploy-gate immutability
+    // P1 deploy-gate immutability & loud-build guards.
     //
-    // File under test: src/self_relaunch/canary.rs (convergence primitives) plus
-    // the FROZEN deploy gate in src/overseer/deploy.rs (imported here per the
-    // design's test-placement: canary.rs owns the gate-preservation guard).
+    // File under test: the FROZEN deploy gate in src/overseer/deploy.rs (imported
+    // here per the design's test-placement: canary.rs owns the gate-preservation
+    // guard) plus build_self_deploy_candidate's fail-loud contract. These pin the
+    // "convergence must never weaken the gate or silently promote an unbuilt
+    // binary" invariants.
     // ────────────────────────────────────────────────────────────────────────
 
     use crate::overseer::deploy::{
@@ -329,52 +300,6 @@ mod tests {
             target_is_ancestor_of_running: false,
             canary_passed: true,
             recent_restart_churn: 0,
-        }
-    }
-
-    /// RED (stub): the convergence re-trigger MUST reject any target ref that is
-    /// not a bare hex commit-ish before it reaches a `Command` argument, closing
-    /// the argument/command-injection class. The Step-7 stub accepts everything,
-    /// so every rejection assertion below fails until Step 8 implements it.
-    #[test]
-    fn validate_build_ref_rejects_injection_and_non_hex() {
-        for bad in [
-            "",                // empty
-            "abc",             // too short (<4)
-            &"a".repeat(65),   // too long (>64)
-            "HEAD",            // symbolic ref
-            "main",            // branch name
-            "origin/main",     // remote ref with slash
-            "--upload-pack=x", // flag smuggling
-            "dead beef",       // whitespace
-            "aaaa;rm -rf /",   // shell metacharacters
-            "../etc/passwd",   // path traversal
-            "cafe$(whoami)",   // command substitution
-        ] {
-            assert!(
-                validate_build_ref(bad).is_err(),
-                "convergence build ref must be refused: {bad:?}"
-            );
-        }
-    }
-
-    /// The complement of the RED test: a genuine bare hex commit-ish (short or
-    /// full SHA-1/SHA-256) is accepted so a valid convergence re-trigger is not
-    /// blocked. Passes against the stub too (it accepts all), and must keep
-    /// passing after Step 8 tightens the validation.
-    #[test]
-    fn validate_build_ref_accepts_bare_hex_commitish() {
-        for good in [
-            "dead",
-            "deadBEEF",
-            &"a".repeat(40),
-            &"f".repeat(64),
-            "da39a3ee5e6b4b0d3255bfef95601890afd80709",
-        ] {
-            assert!(
-                validate_build_ref(good).is_ok(),
-                "valid hex commit-ish must be accepted: {good:?}"
-            );
         }
     }
 
