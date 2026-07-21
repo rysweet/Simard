@@ -133,6 +133,10 @@ pub enum MergeJudgeKind {
     /// [`super::recipe_merge_judge::RecipeMergeJudge`] — production impl
     /// backed by recipe-runner-rs subprocess.
     Recipe,
+    /// [`super::objective_merge_judge::ObjectiveMergeJudge`] — the opt-in
+    /// last-resort tier that passes a green PR from a TRUSTED author when no
+    /// LLM/recipe provider is wired (P1 / #4389). Off by default.
+    Objective,
     /// [`RefusingMergeJudge`] — fallback when no LLM provider is configured.
     /// When this is the active variant, every merge will be refused; the
     /// dashboard surfaces this in red so the operator notices.
@@ -143,7 +147,31 @@ impl MergeJudgeKind {
     /// Whether the judge can issue a non-refusal verdict. Mirrors the
     /// `judge_configured` field in the dashboard JSON contract.
     pub fn is_configured(self) -> bool {
-        matches!(self, MergeJudgeKind::Llm | MergeJudgeKind::Recipe)
+        matches!(
+            self,
+            MergeJudgeKind::Llm | MergeJudgeKind::Recipe | MergeJudgeKind::Objective
+        )
+    }
+}
+
+/// Resolve which merge-judge tier is active, in strict preference order:
+/// Recipe > LLM > (Objective iff the operator opted in) > Refusing. A real
+/// reviewer (recipe/LLM) always wins; the objective tier is the LAST resort and
+/// only when `objective_fallback` is on; otherwise the fail-closed
+/// [`RefusingMergeJudge`] remains the default.
+pub fn resolve_merge_judge_kind(
+    recipe_available: bool,
+    llm_available: bool,
+    objective_fallback: bool,
+) -> MergeJudgeKind {
+    if recipe_available {
+        MergeJudgeKind::Recipe
+    } else if llm_available {
+        MergeJudgeKind::Llm
+    } else if objective_fallback {
+        MergeJudgeKind::Objective
+    } else {
+        MergeJudgeKind::Refusing
     }
 }
 
@@ -370,23 +398,40 @@ fn extract_balanced_objects(s: &str) -> Vec<&str> {
 
 // ─────────────────────────── Production constructor ─────────────────────────
 
-/// Build the production merge judge. Resolution order:
+/// Build the production merge judge. Resolution order (see
+/// [`resolve_merge_judge_kind`]):
 ///   1. Recipe-runner-rs (if binary and recipe YAML are both available)
 ///   2. Direct LLM (if an LLM provider is configured)
-///   3. [`RefusingMergeJudge`] (fallback)
+///   3. [`super::objective_merge_judge::ObjectiveMergeJudge`] — ONLY when the
+///      operator opted in via `SIMARD_MERGE_OBJECTIVE_FALLBACK` (P1 / #4389)
+///   4. [`RefusingMergeJudge`] (fail-closed default)
 pub fn build_merge_judge() -> Box<dyn MergeJudge> {
     let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     if let Some(recipe_judge) = super::recipe_merge_judge::RecipeMergeJudge::new(&repo_root) {
-        eprintln!("[simard] merge-judge: using recipe-runner-rs backed judge");
+        tracing::info!(
+            target: "stewardship::merge_judge",
+            "merge-judge: using recipe-runner-rs backed judge"
+        );
         return Box::new(recipe_judge);
     }
-    match LlmProvider::resolve() {
-        Ok(provider) => {
-            let submitter = SessionLlmSubmitter::new(provider);
-            Box::new(LlmMergeJudge::new(submitter))
-        }
-        Err(_) => Box::new(RefusingMergeJudge),
+    if let Ok(provider) = LlmProvider::resolve() {
+        return Box::new(LlmMergeJudge::new(SessionLlmSubmitter::new(provider)));
     }
+    // No recipe, no LLM: use the objective tier ONLY if explicitly opted in,
+    // else stay fail-closed on the refusing default.
+    if crate::overseer::config::merge_objective_fallback_enabled() {
+        let trusted = crate::overseer::config::merge_trusted_authors();
+        let bot_login = crate::overseer::config::overseer_author_login();
+        tracing::info!(
+            target: "stewardship::merge_judge",
+            trusted_authors = ?trusted,
+            "merge-judge: using OBJECTIVE fallback tier (no recipe/LLM; opt-in enabled)"
+        );
+        return Box::new(super::objective_merge_judge::ObjectiveMergeJudge::new(
+            trusted, bot_login,
+        ));
+    }
+    Box::new(RefusingMergeJudge)
 }
 
 // ─────────────────────────── Tests ──────────────────────────────────────────
@@ -403,6 +448,7 @@ mod tests {
             checks: vec![],
             base_ref_name: "main".into(),
             labels: vec![],
+            author_login: "rysweet".into(),
         }
     }
 

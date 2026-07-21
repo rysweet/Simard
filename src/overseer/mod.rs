@@ -75,6 +75,7 @@ pub mod wiring;
 
 #[cfg(test)]
 mod tests_deploy_drift;
+// TDD (Step 7): failing tests for the P1 project_ready_prs trusted-author gate.
 #[cfg(test)]
 mod tests_diagnosis;
 #[cfg(test)]
@@ -91,6 +92,8 @@ mod tests_m2;
 mod tests_memory_recall;
 #[cfg(test)]
 mod tests_merge_queue_reasoning;
+#[cfg(test)]
+mod tests_ready_prs_trusted_author;
 #[cfg(test)]
 mod tests_root_cause;
 #[cfg(test)]
@@ -2659,8 +2662,11 @@ pub struct ProjectionCandidate {
 ///    the Overseer never merges its own artifact;
 /// 3. the PR proves Simard-origin — it carries the engineer-PR label OR rides an
 ///    engineer-exclusive branch namespace (the same G3 narrowing
-///    [`merge_ops`](crate::overseer::merge_ops) applies), so an operator's own
-///    review PR sharing the author login is never merged;
+///    [`merge_ops`](crate::overseer::merge_ops) applies), OR its author is on the
+///    `trusted_authors` allowlist (P1 / #4389: a delivery-ready PR by a trusted
+///    author — e.g. `rysweet` — reaches the merge chain even without an engineer
+///    label/branch), so an operator's own review PR sharing the author login is
+///    never merged;
 /// 4. it passes the objective gates ([`evaluate_objective_gates`]: base-allowlist
 ///    + `MERGEABLE` + all checks green);
 /// 5. it is NOT a draft (#4339) — `is_draft == Some(false)`. A draft can never be
@@ -2670,23 +2676,33 @@ pub struct ProjectionCandidate {
 /// This is a pure NARROWING — it can only ever remove candidates. The
 /// authoritative six-criteria merge-authority gate (with the agentic MergeJudge)
 /// still runs downstream; this only decides which PRs are even proposed to it.
+///
+/// The `trusted_authors` widening at gate #3 NEVER bypasses the anti-recursion
+/// author guard (#2), the draft gate (#5), or the objective gates (#4): it only
+/// broadens the Simard-origin PROOF, not the objective safety rails. An empty
+/// `trusted_authors` reverts to the pre-P1 engineer-label/branch-only policy.
 pub fn project_ready_prs(
     candidates: &[ProjectionCandidate],
     base_allowlist: &[String],
     overseer_login: &str,
+    trusted_authors: &[String],
 ) -> Vec<PrRef> {
     candidates
         .iter()
         .filter(|c| c.reasoned.disposition == PrDisposition::ReadyForMerge)
         // Anti-recursion author guard: never the overseer bot's own PR.
         .filter(|c| !c.author_login.eq_ignore_ascii_case(overseer_login))
-        // Engineer-PR narrowing: prove Simard-origin (label OR engineer branch).
+        // Engineer-PR narrowing: prove Simard-origin (label OR engineer branch),
+        // OR admit a delivery-ready PR from a TRUSTED author (P1 / #4389).
         .filter(|c| {
             c.snapshot
                 .labels
                 .iter()
                 .any(|l| config::is_engineer_pr_label(l))
                 || config::is_engineer_branch(&c.head_ref)
+                || trusted_authors
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case(&c.author_login))
         })
         // Draft gate (#4339): a draft can never be merged. Admit ONLY a
         // known-non-draft PR; `Some(true)` and `None` (unknown/absent) are

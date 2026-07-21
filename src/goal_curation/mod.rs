@@ -49,12 +49,12 @@ pub use prioritize::{PrioritizationSignals, prioritize};
 
 pub use completion_gate::{
     COMPLETION_VERIFICATION_METRIC, CompletionEvidence, CompletionEvidenceGate, CompletionVerdict,
-    DependencyState, EvidenceSource, FALSE_COMPLETION_RATE_METRIC, GhCliEvidenceSource,
-    MissingEvidence, VerificationOutcome, archive_completed_evidence_aware,
+    DependencyState, DoneGatePr, EvidenceSource, FALSE_COMPLETION_RATE_METRIC, GhCliEvidenceSource,
+    MissingEvidence, SlugConvergence, VerificationOutcome, archive_completed_evidence_aware,
     archive_completed_with_evidence, classify_from_missing, classify_outcome,
-    completion_evidence_enabled, error_class_from_missing, false_completion_rate,
-    has_derivable_signal, is_self_affecting, record_completion_verification,
-    record_false_completion_rate,
+    completion_evidence_enabled, converge_done_gate_prs, error_class_from_missing,
+    false_completion_rate, has_derivable_signal, is_self_affecting, record_completion_verification,
+    record_false_completion_rate, sanitize_goal_slug,
 };
 
 pub use no_progress_breaker::{
@@ -105,6 +105,9 @@ mod tests_save_with_removals;
 // CallerKey dedup instead of accumulating live duplicates.
 #[cfg(test)]
 mod tests_snapshot_dedup;
+// TDD (Step 7): failing tests for the P3 done-gate slug convergence / dedup.
+#[cfg(test)]
+mod tests_done_gate_dedup;
 
 // Issue #2405: goal decomposition + the typed goal-graph edge model. These
 // tests pin the durable edge format, the parent-linkage data model,

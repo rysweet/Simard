@@ -66,6 +66,12 @@ pub struct PrSnapshot {
     /// human-review gate: a PR carrying
     /// [`crate::creative_ideas::CREATIVE_IDEA_PR_LABEL`] is never auto-merged.
     pub labels: Vec<String>,
+    /// `author.login` from `gh pr view --json ...,author`. The AUTHENTICATED
+    /// author, used by the objective merge-judge tier (P1 / #4389) to decide
+    /// whether a green PR is from a TRUSTED author. Fail-closed: an absent
+    /// author object hydrates to the empty string, which can never match a
+    /// configured trusted login.
+    pub author_login: String,
 }
 
 /// One row from `statusCheckRollup`. Both check runs and statuses get
@@ -142,6 +148,7 @@ impl OpenPrSummary {
             checks: self.checks.clone(),
             base_ref_name: self.base_ref_name.clone(),
             labels: Vec::new(),
+            author_login: self.author.clone(),
         }
     }
 }
@@ -494,6 +501,13 @@ pub fn parse_pr_view_json(stdout: &[u8]) -> SimardResult<PrSnapshot> {
         base_ref_name: String,
         #[serde(default)]
         labels: Vec<RawLabel>,
+        #[serde(default)]
+        author: Option<RawAuthor>,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawAuthor {
+        #[serde(default)]
+        login: String,
     }
     #[derive(serde::Deserialize)]
     struct RawLabel {
@@ -552,6 +566,7 @@ pub fn parse_pr_view_json(stdout: &[u8]) -> SimardResult<PrSnapshot> {
             .map(|l| l.name)
             .filter(|n| !n.is_empty())
             .collect(),
+        author_login: raw.author.map(|a| a.login).unwrap_or_default(),
     })
 }
 
@@ -929,6 +944,7 @@ mod tests {
             ],
             base_ref_name: "main".to_string(),
             labels: Vec::new(),
+            author_login: "rysweet".to_string(),
         }
     }
 
