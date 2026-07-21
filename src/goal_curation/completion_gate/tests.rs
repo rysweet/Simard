@@ -1251,6 +1251,61 @@ fn goal_with_no_pr_ref_still_blocks_fail_closed() {
     assert_eq!(board.active.len(), 1);
 }
 
+// --- issue_closed: argument-injection defense (parity with any_pr_merged) ----
+
+/// Build an "issue"-kind `WipRef` carrying a possibly-hostile `ref_id`.
+fn issue_ref(ref_id: &str) -> WipRef {
+    WipRef {
+        kind: "issue".to_string(),
+        ref_id: ref_id.to_string(),
+        label: "the issue".to_string(),
+        url: None,
+    }
+}
+
+#[test]
+fn issue_closed_fails_closed_on_flag_shaped_issue_number() {
+    // SECURITY: the issue number is an untrusted persisted `WipRef.ref_id`. A
+    // flag-shaped value (`--json`, `-X`, …) must never reach the `gh` argv as a
+    // number — it would be an argument-injection vector. Validation must reject
+    // it and fail **closed** (Ok(false) ⇒ issue treated as still open ⇒ blocks),
+    // WITHOUT spawning `gh` (the source is rooted at a nonexistent dir).
+    let source = GhCliEvidenceSource::new("/nonexistent/repo/dir");
+    for hostile in ["--json", "-X", "42; rm -rf /", "  ", "abc", ""] {
+        let mut g = simard_goal("g", GoalProgress::Completed);
+        g.wip_refs = vec![issue_ref(hostile)];
+        assert!(
+            !source.issue_closed(&g).unwrap(),
+            "non-digit issue ref_id {hostile:?} must fail closed, never reach `gh`"
+        );
+    }
+}
+
+#[test]
+fn issue_closed_fails_closed_on_unsafe_repo_slug() {
+    // SECURITY: `repo_slug` may echo an unvalidated `goal.repo`. A slug whose
+    // owner/repo begins with `-` would be read by `gh` as a flag. Even with a
+    // valid numeric issue ref, an unsafe slug must fail closed.
+    let source = GhCliEvidenceSource::new("/nonexistent/repo/dir");
+    for hostile_repo in ["-evil/repo", "owner/-evil", "ow ner/repo"] {
+        let mut g = simard_goal("g", GoalProgress::Completed);
+        g.repo = Some(hostile_repo.to_string());
+        g.wip_refs = vec![issue_ref("7")];
+        assert!(
+            !source.issue_closed(&g).unwrap(),
+            "unsafe repo slug {hostile_repo:?} must fail closed, never reach `gh`"
+        );
+    }
+}
+
+#[test]
+fn issue_closed_true_when_no_issue_ref() {
+    // Unchanged semantics: no tracked issue ⇒ the issue clause vacuously holds.
+    let source = GhCliEvidenceSource::new("/nonexistent/repo/dir");
+    let g = no_signal_goal("g");
+    assert!(source.issue_closed(&g).unwrap());
+}
+
 #[test]
 fn merged_cross_repo_goal_reconciles_deterministically_each_cycle() {
     // The systemic symptom was re-blocking every cycle (burning work indefinitely).

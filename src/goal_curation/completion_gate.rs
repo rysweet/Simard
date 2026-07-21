@@ -835,6 +835,21 @@ impl EvidenceSource for GhCliEvidenceSource {
             None => Ok(true),
             Some(num) => {
                 let repo = self.repo_slug(goal);
+                // Defense-in-depth: the issue number is an untrusted `WipRef.ref_id`
+                // and `repo_slug` may echo an unvalidated `goal.repo`. Never hand a
+                // non-digit number or an unsafe slug (e.g. a leading `-` that `gh`
+                // reads as a flag) to the subprocess. A validation failure fails
+                // **closed** (issue treated as still open → blocks archival),
+                // mirroring `any_pr_merged`.
+                if !is_safe_repo_slug(&repo) || !is_ascii_digits(num) {
+                    tracing::warn!(
+                        goal_id = %goal.id,
+                        repo,
+                        num,
+                        "issue target failed slug/number validation; failing closed"
+                    );
+                    return Ok(false);
+                }
                 Ok(self
                     .gh_state("issue", &repo, num)?
                     .eq_ignore_ascii_case("CLOSED"))
