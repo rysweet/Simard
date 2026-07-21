@@ -109,7 +109,7 @@ WARN deploy_throttle.stuck=true target_sha=56b10bef5057…
 | `reason` | Meaning | What to do |
 |----------|---------|------------|
 | `backing_off` | The commit failed recently and is inside its backoff window. | Expected. It will retry after `backoff_until`. Fix the underlying red canary if it keeps failing. |
-| `unreadable` | The ledger file is present but corrupt/torn. | Fail-closed for the candidate SHA. Inspect the file; see [recover](#recover-a-corrupt-ledger). (A *missing* file is not this — it loads empty and allows.) |
+| `unreadable` | The ledger file is present but untrusted: corrupt/torn, an unknown schema version, or larger than the 1 MiB safety cap. | Fail-closed for the candidate SHA. Inspect the file; see [recover](#recover-a-corrupt-ledger). (A *missing* file is not this — it loads empty and allows.) |
 | `ambiguous` | A record exists but its result is unset. | Fail-closed. Usually transient; resolves once a terminal result is recorded. |
 
 A single throttled warning per tick is the healthy signal — it replaces the old
@@ -138,9 +138,11 @@ layer-1 min-interval) re-attempt the deploy.
 
 ## Recover a corrupt ledger
 
-A `reason=unreadable` warning means the file failed to deserialize; the throttle
-is fail-closed for the drifting candidate SHA until it is readable again. The file
-is written atomically (tmp+rename), so corruption is rare, but to recover:
+A `reason=unreadable` warning means the file could not be trusted — it failed to
+deserialize, carried an unknown schema version, or exceeded the 1 MiB read cap;
+the throttle is fail-closed for the drifting candidate SHA until it is readable
+again. The file is written atomically (tmp+rename) and entry-capped, so this is
+rare, but to recover:
 
 ```bash
 # Stop the daemon, back up, and reset to an empty ledger.
