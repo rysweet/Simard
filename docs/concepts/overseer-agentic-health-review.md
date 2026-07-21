@@ -139,6 +139,12 @@ both leave the plan unchanged. The status only records WHAT the pass concluded,
 so a quiet-but-green Simard is distinguishable from one whose self-review never
 ran or silently degraded.
 
+The surface is the cycle's `ObservedState` — the same reasoning-cycle field
+`merge_reasoning_status` lives on, carried on the `CycleReport` and asserted by
+the wiring tests. Like that precedent, this closes the *silent-pass* gap at the
+reasoning boundary (the verdict is no longer parsed-and-discarded); it does not
+add a new TUI/feed widget beyond the parity that field already establishes.
+
 ### Systemic vs per-goal
 
 The core reasoning: when the SAME signature (same panic, same missing actor

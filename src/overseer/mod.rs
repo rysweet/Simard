@@ -3908,6 +3908,18 @@ mod tests {
         }
     }
 
+    /// A [`health_review::HealthReviewer`] that returns an `Ok` outcome carrying
+    /// NO verdict (`summary: None`) and no interventions — the exact fail-closed
+    /// shape the real [`health_review::RecipeHealthReviewer`] degrades to on an
+    /// infra fault (recipe-runner missing, parse-miss ladder exhausted). Distinct
+    /// from `FakeHealthReviewer`'s `Err`, which models a caller-visible fault.
+    struct FakeVerdictlessReviewer;
+    impl health_review::HealthReviewer for FakeVerdictlessReviewer {
+        fn review(&self) -> SimardResult<health_review::HealthReviewOutcome> {
+            Ok(health_review::HealthReviewOutcome::default())
+        }
+    }
+
     fn launch_iv(desc: &str) -> Intervention {
         Intervention::LaunchRecipe {
             brief: RecipeBrief {
@@ -4017,6 +4029,27 @@ mod tests {
             report.observed.health_review_status,
             HealthReviewStatus::Degraded,
             "a degraded pass is surfaced LOUD, never a silent OFF"
+        );
+    }
+
+    #[test]
+    fn health_review_ok_without_verdict_surfaces_degraded_status() {
+        // The real rail degrades to `Ok(HealthReviewOutcome::default())` (no
+        // verdict) on an infra fault — NOT `Err`. That fail-closed `Ok(None)`
+        // shape must still surface `Degraded`, never a silent healthy-looking
+        // `Reviewed`, because `summary` is present exactly when the pass produced
+        // an honest verdict.
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(true)
+            .with_goal_health_enabled(true)
+            .with_health_reviewer(Box::new(FakeVerdictlessReviewer), 1)
+            .with_health_review_enabled(true);
+        let report = ov.run_cycle().expect("cycle");
+        assert_eq!(
+            report.observed.health_review_status,
+            HealthReviewStatus::Degraded,
+            "an Ok pass with no verdict is surfaced Degraded, never a silent healthy Reviewed"
         );
     }
 

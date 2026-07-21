@@ -127,6 +127,7 @@ require_test 'health_review_routes_launch_and_escalate_into_gated_plan'
 # merge-queue reasoning (#4097).
 require_test 'health_review_healthy_verdict_surfaces_reviewed_with_zero_decisions'
 require_test 'health_review_failure_surfaces_degraded_status'
+require_test 'health_review_ok_without_verdict_surfaces_degraded_status'
 require_test 'health_review_unwired_leaves_status_not_run'
 require_test 'health_review_off_cadence_leaves_status_not_run'
 # The shared gap-scan throttle AND the dedicated opt-out each disable the rail.
