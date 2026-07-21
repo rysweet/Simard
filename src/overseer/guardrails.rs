@@ -519,6 +519,21 @@ impl BackoffGate {
     }
 }
 
+/// Stable, namespaced dedup key for one PR's verify-and-merge escalation
+/// (issue #4344). The [`BackoffGate`] on the `VerifyAndMergePr` Act path keys on
+/// this so a CLEAN + MERGEABLE + all-SUCCESS PR that keeps (correctly or
+/// spuriously) escalating pages the operator ONCE per bounded window instead of
+/// every ~15-minute tick (PRs #4344 / #4145).
+///
+/// The `verify_and_merge:` prefix is a fixed namespace that is DISJOINT from the
+/// coverage / recall backoff namespaces (`overseer-obs:`, recipe task
+/// descriptions), so the merge-escalation rail can never suppress — or be
+/// suppressed by — any other Overseer dedup gate. Deterministic per `(repo, pr)`
+/// and collision-free across distinct PRs and repos.
+pub fn verify_and_merge_dedup_key(repo: &str, pr: u32) -> String {
+    format!("verify_and_merge:{repo}#{pr}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,6 +677,69 @@ mod tests {
             })
             .is_err(),
             "merge opt-in must not leak into HIGH-RISK deploy authority"
+        );
+    }
+
+    // ── verify-and-merge escalation dedup KEY (issue #4344) ──────────────────
+    //
+    // TDD (RED): `verify_and_merge_dedup_key(repo, pr)` does not exist yet, so
+    // this block will FAIL TO COMPILE against the current tree — that is the red
+    // state. The key is the stable signature the `merge_escalation_backoff`
+    // `BackoffGate` dedups on so a CLEAN + MERGEABLE + all-SUCCESS PR that keeps
+    // (correctly or spuriously) escalating is paged to the operator ONCE per
+    // backoff window instead of every ~15-minute tick (PRs #4344 / #4145).
+
+    #[test]
+    fn verify_and_merge_dedup_key_has_the_stable_namespaced_shape() {
+        // Deterministic, human-greppable, and NAMESPACED under a fixed prefix so
+        // it can never collide with any other Overseer dedup signature.
+        let key = verify_and_merge_dedup_key("rysweet/Simard", 4344);
+        assert_eq!(
+            key, "verify_and_merge:rysweet/Simard#4344",
+            "the dedup key must be exactly 'verify_and_merge:{{repo}}#{{pr}}'"
+        );
+        assert!(
+            key.starts_with("verify_and_merge:"),
+            "the key must carry the fixed 'verify_and_merge:' namespace prefix"
+        );
+        assert!(
+            key.contains("#4344"),
+            "the key must encode the PR number after a '#' separator"
+        );
+    }
+
+    #[test]
+    fn verify_and_merge_dedup_key_is_deterministic() {
+        // The same (repo, pr) ALWAYS yields the same key — otherwise the backoff
+        // gate could never recognise a repeat escalation of the same PR.
+        assert_eq!(
+            verify_and_merge_dedup_key("rysweet/Simard", 4145),
+            verify_and_merge_dedup_key("rysweet/Simard", 4145),
+        );
+    }
+
+    #[test]
+    fn verify_and_merge_dedup_key_is_collision_free_across_prs_and_repos() {
+        let a = verify_and_merge_dedup_key("rysweet/Simard", 4344);
+        let b = verify_and_merge_dedup_key("rysweet/Simard", 4145);
+        let c = verify_and_merge_dedup_key("rysweet/Other", 4344);
+        assert_ne!(a, b, "distinct PR numbers must produce distinct keys");
+        assert_ne!(
+            a, c,
+            "the same PR number in a DIFFERENT repo must not collide"
+        );
+        assert_ne!(b, c, "distinct (repo, pr) pairs must never collide");
+    }
+
+    #[test]
+    fn verify_and_merge_dedup_key_namespace_is_disjoint_from_the_coverage_gate() {
+        // The coverage backoff keys off recipe task descriptions / the
+        // `overseer-obs:` recall prefix; the merge-escalation gate MUST live in
+        // its own namespace so the two rails can never suppress each other.
+        let key = verify_and_merge_dedup_key("rysweet/Simard", 4344);
+        assert!(
+            !key.starts_with("overseer-obs:"),
+            "the merge-escalation namespace must be disjoint from the recall/coverage namespace"
         );
     }
 }

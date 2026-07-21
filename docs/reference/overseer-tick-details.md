@@ -7,6 +7,7 @@ owner: simard
 doc_type: reference
 related:
   - ./overseer-activity-feed.md
+  - ./verify-and-merge-escalation-idempotency.md
   - ../howto/watch-overseer-activity.md
   - ./dashboard-action-detail-humanization.md
   - ./status-snapshot-api.md
