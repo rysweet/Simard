@@ -106,6 +106,16 @@ require_test 'parse_skips_escalation_missing_plain_english_fields'
 # The rail degrades safely on a runner error / a missing terminal marker.
 require_test 'review_degrades_to_empty_on_runner_error'
 require_test 'review_degrades_to_empty_on_missing_terminal_marker'
+# Degraded-pass recovery: the bounded escalation ladder (shared brain ladder
+# primitives) recovers a truncated pass, exhausts fail-closed, honors its
+# disable knob, stops on a rung fault, and never fires on a clean/base-fault pass.
+require_test 'review_recovers_on_the_schema_repair_rung'
+require_test 'review_recovers_on_the_high_effort_rung'
+require_test 'review_exhausts_ladder_and_takes_no_remediation'
+require_test 'review_disabled_ladder_makes_no_retry'
+require_test 'review_stops_ladder_when_a_rung_faults'
+require_test 'review_healthy_base_never_enters_the_ladder'
+require_test 'review_base_runner_error_never_enters_the_ladder'
 # The rail forwards ONLY bounded context vars to the recipe seam (no context files).
 require_test 'review_forwards_bounded_context_vars_to_the_seam'
 # END-TO-END wiring: both decisions flow through the SAME gate as every action.

@@ -67,8 +67,9 @@ ignored):
 - `ESCALATE_GOAL=<json>` — one per genuinely-blocked goal a human must decide on:
   `{"goal_id":"…","problem":"…plain English…","next_step":"…plain English…","why":"…internal one-line WHY…","reason":"health-review:…","link":null}`.
 - `HEALTH_REVIEW_COMPLETE=<summary>` — REQUIRED terminal marker, emitted once,
-  last, non-empty. Without it the rail treats the pass as degraded and acts on
-  nothing.
+  last, non-empty. Without it the rail treats the pass as degraded and drives a
+  bounded schema-repair/high-effort retry ladder (the recipe's `{{escalation_note}}`
+  context var carries the repair reminder on each rung) before taking no action.
 
 Rules: a `LAUNCH_RECIPE` `task_description` must reference the diagnosed root
 cause, be additive / non-breaking, CI-green, merge-ready — no `Bridge` naming, no
