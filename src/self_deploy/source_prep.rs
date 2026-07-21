@@ -317,6 +317,33 @@ impl GitSourcePreparer {
         }
         None
     }
+
+    /// Prepare only an already-existing canonical source repo for an autonomous
+    /// pre-swap canary: validate `target_commit`, resolve via
+    /// [`resolve_existing_repo`](Self::resolve_existing_repo), fetch `origin`,
+    /// and check out the target detached.
+    ///
+    /// Unlike [`SelfDeploySourcePreparer::prepare`], this never clones from the
+    /// current working directory. The autonomous deploy observer is responsible
+    /// for maintaining the canonical checkout before it raises a deploy signal;
+    /// if no checkout exists here, the caller fails safe instead of silently
+    /// canarying cwd or creating a fresh source from a possibly unrelated cwd.
+    pub(crate) fn prepare_existing_repo(
+        &self,
+        target_commit: &str,
+    ) -> Result<PathBuf, SafeUpdateError> {
+        validate_full_sha(target_commit)?;
+        let repo =
+            self.resolve_existing_repo()
+                .ok_or_else(|| SafeUpdateError::SourceResolveFailed {
+                    detail: "no existing canonical self-deploy source checkout found".to_string(),
+                })?;
+        self.fetch_origin(&repo)?;
+        git_capture(&repo, &["checkout", "--detach", target_commit])
+            .map(|_| ())
+            .map_err(|detail| SafeUpdateError::CheckoutFailed { detail })?;
+        Ok(repo)
+    }
 }
 
 /// Validate a `--check` source override, warning **loudly** (never silently
@@ -610,6 +637,54 @@ pub(crate) fn prepare_and_build(
     target_commit: &str,
     target_dir: &Path,
 ) -> Result<PathBuf, SafeUpdateError> {
+    with_self_deploy_build_lock(|| {
+        let repo = source.prepare(target_commit)?;
+        crate::self_relaunch::build_self_deploy_candidate(&repo, target_dir).map_err(|e| {
+            SafeUpdateError::BuildFailed {
+                detail: e.to_string(),
+            }
+        })
+    })
+}
+
+/// Compose source preparation with the warm-target build and relaunch canary
+/// gates: the production pre-swap canary used by the autonomous deploy rail.
+///
+/// This intentionally uses the same cwd-independent source preparer and shared
+/// [`crate::self_relaunch::build_self_deploy_candidate`] builder as the
+/// load-bearing self-deploy orchestrator, then runs the existing relaunch gates
+/// against that target artifact. The build lock covers prepare → build → verify
+/// so the shared persistent checkout cannot be rewritten between the target
+/// checkout and the gate suite.
+pub(crate) fn prepare_build_and_verify_canary(
+    source: &dyn SelfDeploySourcePreparer,
+    target_commit: &str,
+    target_dir: &Path,
+) -> Result<Vec<crate::self_relaunch::GateResult>, SafeUpdateError> {
+    with_self_deploy_build_lock(|| {
+        let repo = source.prepare(target_commit)?;
+        let candidate = crate::self_relaunch::build_self_deploy_candidate(&repo, target_dir)
+            .map_err(|e| SafeUpdateError::BuildFailed {
+                detail: e.to_string(),
+            })?;
+        let config = crate::self_relaunch::RelaunchConfig {
+            manifest_dir: repo,
+            canary_target_dir: target_dir.to_path_buf(),
+            ..Default::default()
+        };
+        let gates = crate::self_relaunch::default_gates();
+        crate::self_relaunch::verify_canary(&candidate, &gates, &config).map_err(|e| {
+            SafeUpdateError::GateFailed {
+                gate: "target-canary".to_string(),
+                detail: e.to_string(),
+            }
+        })
+    })
+}
+
+fn with_self_deploy_build_lock<R>(
+    f: impl FnOnce() -> Result<R, SafeUpdateError>,
+) -> Result<R, SafeUpdateError> {
     let _build_guard = BuildLock::new(&simard_state_root())
         .acquire(BUILD_LOCK_TIMEOUT)
         .map_err(|e| SafeUpdateError::BuildFailed {
@@ -618,11 +693,5 @@ pub(crate) fn prepare_and_build(
                  (another self-deploy build may be running): {e}"
             ),
         })?;
-
-    let repo = source.prepare(target_commit)?;
-    crate::self_relaunch::build_self_deploy_candidate(&repo, target_dir).map_err(|e| {
-        SafeUpdateError::BuildFailed {
-            detail: e.to_string(),
-        }
-    })
+    f()
 }

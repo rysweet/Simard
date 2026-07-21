@@ -41,7 +41,7 @@ use crate::overseer::audit::SelfQualityAuditor;
 use crate::overseer::capabilities::{
     BlockedGoal, DeployReport, Deployer, GoalBrief, GoalCurator, InFlightItem, IssueOutcome,
     MemoryRecall, ObservationEpisode, OverseerError, RecallKeys, RecalledEpisode, RecalledFact,
-    RecalledProcedure, RecalledProspective, RecordOutcome,
+    RecalledProcedure, RecalledProspective, RecordOutcome, StatusReader,
 };
 use crate::overseer::config::{
     claim_reap_enabled, claim_reap_stale_secs, gap_scan_enabled, gap_scan_every_n,
@@ -1058,12 +1058,14 @@ impl MemoryRecall for MemoryRecallOps {
 
 // ─────────────────────────── deployer (safe stub) ──────────────────────────
 
-/// A [`Deployer`] that REFUSES autonomous deploys. The deterministic Decide
-/// mapping the wired daemon uses never emits `Intervention::Deploy`, so a live
-/// deploy is never planned through this path; if one ever were, it escalates
-/// rather than blindly swapping the binary. Guarded self-deploy stays the
-/// operator's canary/self-deploy gates (unit-tested via `GuardedDeployer` and
-/// `evaluate_deploy_gate`), never a blind deploy from the acting loop.
+/// A [`Deployer`] that REFUSES every deploy. **No longer used in production
+/// assembly** (issue #2590): [`assemble_capabilities`] now injects the
+/// production guarded deployer, and the deterministic Decide mapping DOES emit
+/// `Intervention::Deploy` when the running binary drifts behind merged `main`.
+/// Retained only as a safe, self-contained stub for tests and for any operator
+/// build that deliberately pins the daemon by swapping this in — its `deploy()`
+/// escalates rather than swapping a binary, so it can never perform a blind
+/// deploy.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RefuseDeployer;
 
@@ -1093,11 +1095,36 @@ pub fn assemble_capabilities(
     repo_root: std::path::PathBuf,
     state_root: std::path::PathBuf,
 ) -> Capabilities {
+    // Read LIVE restart churn once so the guarded deployer's crash-loop refusal
+    // (`evaluate_deploy_gate`) sees CURRENT churn — the daemon rebuilds this
+    // Overseer every tick, so an assembly-time read is fresh each tick. A status
+    // read failure degrades to `0` (the process-global deploy throttle + the
+    // orchestrator's own health-check/rollback remain the anti-thrash / instability
+    // guards); it never blocks assembly.
+    let status = SnapshotStatusReader::from_env();
+    let recent_restart_churn = status
+        .snapshot()
+        .ok()
+        .and_then(|s| s.restart_churn)
+        .unwrap_or(0);
+    // Autonomous self-deploy ACT (#2590): the PRODUCTION guarded deployer replaces
+    // the `RefuseDeployer` stub. It composes the real self-relaunch canary, the
+    // `SelfDeployOrchestrator` swap (identical to `simard self-deploy`), a git
+    // ancestry oracle rooted at the daemon repo, and the mandatory dual-channel
+    // operator notifier — behind `evaluate_deploy_gate`'s no-op / rollback /
+    // red-canary / crash-loop refusals and the high-risk AutonomyGate. Honours the
+    // operator opt-out (`SIMARD_OVERSEER_AUTONOMOUS_DEPLOY=0`): a PINNED daemon
+    // gets the safe `RefuseDeployer` so NO production deploy machinery is built.
+    let deployer = assemble_deployer(
+        repo_root.clone(),
+        recent_restart_churn,
+        overseer_self_repo(),
+    );
     Capabilities {
-        status: Box::new(SnapshotStatusReader::from_env()),
+        status: Box::new(status),
         recipes: Box::new(SmartOrchestratorLauncher::from_env()),
         prs: Box::new(MergePrOps::from_env().with_recursion_guard(overseer_identity())),
-        deployer: Box::new(RefuseDeployer),
+        deployer,
         meetings: Box::new(MeetingGoalTransfer::from_env()),
         issues: Box::new(StewardshipIssueFiler::new(Arc::new(
             crate::stewardship::RealGhClient,
@@ -1107,6 +1134,40 @@ pub fn assemble_capabilities(
         goals: Box::new(BoardGoalCurator::new(Arc::clone(&mem))),
         auditor: Box::new(SelfQualityAuditor::from_env(repo_root, state_root)),
         memory: Box::new(MemoryRecallOps::new(mem)),
+    }
+}
+
+/// The daemon's OWN repo slug (`owner/name`), used to label self-deploy operator
+/// notifications and root the deploy ancestry oracle. Override with
+/// `SIMARD_SELF_REPO`; defaults to the canonical `rysweet/Simard`.
+fn overseer_self_repo() -> String {
+    std::env::var("SIMARD_SELF_REPO")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "rysweet/Simard".to_string())
+}
+
+/// Select the acting [`Deployer`] for THIS assembly (#2590). Honours the operator
+/// opt-out (`SIMARD_OVERSEER_AUTONOMOUS_DEPLOY=0`): when the daemon is PINNED,
+/// inject the safe [`RefuseDeployer`] so NO production deploy machinery — not even
+/// the ancestry-repo resolution — is built or exercised. Otherwise build the
+/// production guarded deployer. Enabled by default (consistent with the observe
+/// rail's own opt-out check), so the two opt-out gates stay in lock-step: a
+/// pinned daemon neither observes drift NOR carries a live deployer.
+fn assemble_deployer(
+    repo_root: std::path::PathBuf,
+    recent_restart_churn: u64,
+    repo: String,
+) -> Box<dyn Deployer> {
+    if crate::overseer::deploy_trigger::autonomous_deploy_enabled() {
+        Box::new(crate::overseer::deploy::production_guarded_deployer(
+            repo_root,
+            recent_restart_churn,
+            repo,
+        ))
+    } else {
+        Box::new(RefuseDeployer)
     }
 }
 
@@ -1213,6 +1274,17 @@ pub fn build_overseer(
             .with_health_review_enabled(health_review_enabled()),
         None => overseer,
     };
+
+    // Autonomous self-deploy OBSERVE rail (issue #2590): wire the production
+    // drift sensor so each tick can OBSERVE whether the running binary is behind
+    // merged `main` and, if so, drive a guarded self-deploy. Always wired here;
+    // the runtime opt-out (`SIMARD_OVERSEER_AUTONOMOUS_DEPLOY=0`), the
+    // process-global anti-thrash throttle, the live crash-loop guard, and the
+    // high-risk AutonomyGate govern whether a deploy actually fires. The sensor
+    // itself is fail-safe (a git/source error reports "no drift").
+    let overseer = overseer.with_deploy_drift_observer(Box::new(
+        crate::overseer::deploy_trigger::GitDeployDriftObserver::new(),
+    ));
 
     // Periodic stale-engineer-claim reaper (issue #4099): sweep + reclaim the
     // `engineer_claims` leak independent of per-goal polling. Wire the shared
@@ -1975,6 +2047,38 @@ mod tests {
         let d = RefuseDeployer;
         assert!(d.deploy("abc123").is_err(), "never a blind deploy");
         assert!(d.deployed_commit().is_ok());
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn assemble_deployer_honours_the_operator_opt_out() {
+        // #2590 A5: a PINNED daemon (`SIMARD_OVERSEER_AUTONOMOUS_DEPLOY=0`) gets
+        // the safe `RefuseDeployer` — no production deploy machinery (nor its
+        // per-tick ancestry-repo resolution) is built. Only the opt-out branch is
+        // exercised here: constructing the enabled branch is covered elsewhere,
+        // and its `deploy()` would run the real canary.
+        use crate::overseer::deploy_trigger::AUTONOMOUS_DEPLOY_ENV;
+        let prev = std::env::var(AUTONOMOUS_DEPLOY_ENV).ok();
+        // SAFETY: single-threaded, serialized test-local env toggle, restored below.
+        unsafe {
+            std::env::set_var(AUTONOMOUS_DEPLOY_ENV, "0");
+        }
+        let pinned = assemble_deployer(
+            std::path::PathBuf::from("."),
+            0,
+            "rysweet/Simard".to_string(),
+        );
+        let err = pinned.deploy("aaaaaaaaaaaa").unwrap_err();
+        assert!(
+            format!("{err}").contains("not wired"),
+            "a pinned daemon must get the RefuseDeployer stub, got: {err}"
+        );
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(AUTONOMOUS_DEPLOY_ENV, v),
+                None => std::env::remove_var(AUTONOMOUS_DEPLOY_ENV),
+            }
+        }
     }
 
     #[test]
