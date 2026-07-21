@@ -478,6 +478,46 @@ pub fn extract_json_payload(raw: &str) -> Option<String> {
     None
 }
 
+/// Extract a balanced JSON object from noisy recipe stdout (via
+/// [`extract_json_payload`]) and deserialize it into `T`, applying the
+/// **trailing-comma recovery view** on a strict-parse failure (issues #2484 /
+/// #2658).
+///
+/// This is the shared reasoner-side extract-and-parse chokepoint. Every
+/// recipe-backed reasoning phase (engineer/resource admission, idea dedup /
+/// consolidation, outcome, decide, orient) reads its structured decision by
+/// extracting the balanced `{…}` object and `serde_json`-deserializing it.
+/// [`extract_json_payload`] strips the banner / ANSI / log noise but returns
+/// the object body **verbatim**, so a `,` immediately before a closing `}`/`]`
+/// — the single most common real-world LLM JSON defect (issue #2658) — survives
+/// into the payload and fails a strict `serde_json::from_str`. Before this
+/// helper each phase parsed strictly and silently dropped its whole structured
+/// decision on that one stray byte, falling back to a permissive default and
+/// discarding the reasoner's actual judgment.
+///
+/// Recovery retries the strict parse on the [`strip_json_trailing_commas`]
+/// view. That stripper is a *provable no-op on valid JSON* — it returns
+/// [`Cow::Borrowed`] byte-for-byte unchanged unless an actual trailing comma is
+/// present — so recovery is attempted **only** when a trailing comma was
+/// removed (the [`Cow::Owned`] arm). Any other malformed shape (unquoted key,
+/// elided element, missing value) yields [`Cow::Borrowed`] and returns `None`
+/// unchanged: leniency never widens beyond the trailing-comma defect and a
+/// genuine parse error is never masked.
+pub fn extract_and_parse_json<T: serde::de::DeserializeOwned>(raw: &str) -> Option<T> {
+    let payload = extract_json_payload(raw)?;
+    match serde_json::from_str::<T>(&payload) {
+        Ok(value) => Some(value),
+        Err(_) => match strip_json_trailing_commas(&payload) {
+            // A trailing comma was actually removed — retry the strict parse on
+            // the recovered view.
+            Cow::Owned(recovered) => serde_json::from_str::<T>(&recovered).ok(),
+            // No trailing comma present: the payload is malformed for some other
+            // reason. Do not re-parse identical bytes; preserve the strict miss.
+            Cow::Borrowed(_) => None,
+        },
+    }
+}
+
 /// A verdict-keyword match against cleaned recipe output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerdictMatch<'k> {
@@ -744,6 +784,81 @@ mod tests {
             extract_json_payload(raw),
             Some("{\n  \"facts\": [\n]\n}".to_string())
         );
+    }
+
+    // ---- extract_and_parse_json ------------------------------------------
+
+    #[derive(Debug, serde::Deserialize, PartialEq)]
+    struct Env {
+        decision: String,
+        #[serde(default)]
+        items: Vec<String>,
+    }
+
+    #[test]
+    fn extract_and_parse_json_parses_clean_object() {
+        let raw = r#"{"decision": "admit", "items": ["a", "b"]}"#;
+        let env: Env = extract_and_parse_json(raw).expect("clean object parses");
+        assert_eq!(env.decision, "admit");
+        assert_eq!(env.items, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn extract_and_parse_json_recovers_trailing_comma_before_brace() {
+        // The strict `serde_json::from_str` on the extracted payload rejects
+        // this; the trailing-comma recovery view rescues it.
+        let raw = r#"{"decision": "admit", "items": ["a"],}"#;
+        let env: Env = extract_and_parse_json(raw).expect("trailing comma recovered");
+        assert_eq!(env.decision, "admit");
+        assert_eq!(env.items, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn extract_and_parse_json_recovers_trailing_comma_before_bracket() {
+        let raw = r#"{"decision": "defer", "items": ["a", "b",]}"#;
+        let env: Env = extract_and_parse_json(raw).expect("trailing comma in array recovered");
+        assert_eq!(env.items, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn extract_and_parse_json_recovers_trailing_comma_through_banner_noise() {
+        // Banner + interleaved log line AND a trailing comma: the extractor
+        // strips the noise, then recovery strips the comma — the two hardening
+        // passes compose.
+        let raw = "Recipe: ooda SUCCESS (3.0s)\n\
+                   \x1b[2m2026-07-20T00:00:00.000000Z\x1b[0m INFO decide\n\
+                   {\"decision\": \"admit\", \"items\": [\"a\",],}";
+        let env: Env = extract_and_parse_json(raw).expect("noise + trailing comma recovered");
+        assert_eq!(env.decision, "admit");
+        assert_eq!(env.items, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn extract_and_parse_json_none_for_non_comma_malformed() {
+        // Leniency never widens past the trailing-comma defect: an unquoted key
+        // or missing value is still a miss (returns None, not a wrong default).
+        assert_eq!(
+            extract_and_parse_json::<Env>(r#"{decision: "admit"}"#),
+            None
+        );
+        assert_eq!(extract_and_parse_json::<Env>(r#"{"decision":}"#), None);
+    }
+
+    #[test]
+    fn extract_and_parse_json_none_when_no_object_present() {
+        assert_eq!(
+            extract_and_parse_json::<Env>("2026-07-20 INFO no json here"),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_and_parse_json_preserves_comma_inside_string_content() {
+        // A comma inside a string value is a legitimate content byte and must
+        // survive both the strict parse and the recovery view unchanged.
+        let raw = r#"{"decision": "admit", "items": ["a, b, c"]}"#;
+        let env: Env = extract_and_parse_json(raw).expect("string-content comma preserved");
+        assert_eq!(env.items, vec!["a, b, c".to_string()]);
     }
 
     // ---- extract_verdict -------------------------------------------------
