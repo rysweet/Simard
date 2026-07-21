@@ -205,6 +205,19 @@ fn display_merge_authority_evaluation_failed() {
     assert!(msg.contains("statusCheckRollup"), "{msg}");
 }
 
+// --- Display: PrTriageGhCommandFailed ---
+
+#[test]
+fn display_pr_triage_gh_command_failed() {
+    let err = SimardError::PrTriageGhCommandFailed {
+        reason: "exit 1: 'gh' not found".to_string(),
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("pr-triage"), "{msg}");
+    assert!(msg.contains("gh command failed"), "{msg}");
+    assert!(msg.contains("'gh' not found"), "{msg}");
+}
+
 // --- Display: DirtyWorktree ---
 
 #[test]

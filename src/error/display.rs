@@ -311,6 +311,9 @@ impl Display for SimardError {
             Self::MergeAuthorityEvaluationFailed { reason } => {
                 write!(f, "merge-authority: evaluation failed: {reason}")
             }
+            Self::PrTriageGhCommandFailed { reason } => {
+                write!(f, "pr-triage: gh command failed: {reason}")
+            }
             Self::DirtyWorktree { changed_files } => {
                 write!(
                     f,

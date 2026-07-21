@@ -10,6 +10,8 @@ mod tests_bounded_memory;
 #[cfg(test)]
 mod tests_goal_records_migration;
 #[cfg(test)]
+mod tests_issue_4360_pipe_drain;
+#[cfg(test)]
 mod tests_mod;
 #[cfg(test)]
 mod tests_mod_more;

@@ -288,6 +288,8 @@ nav:
     - Subordinate Kill PID-Guard API: reference/subordinate-kill-pid-guard-api.md
     - Coverage Comment Resilience: reference/coverage-comment-resilience.md
     - Telemetry Metrics: reference/telemetry-metrics.md
+    - Cost-Ledger Path Resolution: reference/cost-ledger-path-resolution.md
+    - Subprocess Pipe-Drain Execution: reference/subprocess-pipe-drain.md
     - Recall-Precision Hybrid Measurement: reference/recall-precision-hybrid-api.md
     - Knowledge-Pack Article Relevance Ranking: reference/knowledge-pack-article-relevance-ranking.md
     - Enrichment Observability API: reference/enrichment-observability-api.md

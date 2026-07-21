@@ -281,6 +281,12 @@ pub enum SimardError {
     MergeAuthorityEvaluationFailed {
         reason: String,
     },
+    /// PR-triage: a `gh` subprocess invocation failed (non-zero exit, missing
+    /// binary, or malformed JSON) while polling live merge state or applying a
+    /// least-privilege merge/close mutation.
+    PrTriageGhCommandFailed {
+        reason: String,
+    },
     /// Pre-mutation guard: the working tree has uncommitted changes and the
     /// requested objective implies a mutating action. Per spec line 256 the
     /// mutating path requires a clean repo.
