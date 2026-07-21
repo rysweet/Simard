@@ -79,6 +79,12 @@ fn run_command_inner(
 
     let timeout = timeout_for_command(argv);
     let deadline = Instant::now() + timeout;
+    // Adaptively back off the poll interval: start tight so fast commands (the
+    // common case — most git invocations finish within a few ms) are detected
+    // with minimal latency, then grow to a cap so long-running commands don't
+    // burn CPU busy-polling.
+    const MAX_POLL_INTERVAL: Duration = Duration::from_millis(50);
+    let mut poll_interval = Duration::from_millis(1);
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -96,7 +102,8 @@ fn run_command_inner(
                         timeout_secs: timeout.as_secs(),
                     });
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(poll_interval);
+                poll_interval = (poll_interval * 2).min(MAX_POLL_INTERVAL);
             }
             Err(error) => {
                 return Err(SimardError::ActionExecutionFailed {
