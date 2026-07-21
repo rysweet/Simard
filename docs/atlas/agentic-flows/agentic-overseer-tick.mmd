@@ -1,25 +1,26 @@
 flowchart TD
   %% Layer 9 - Agentic flow: the Overseer meta-OODA tick (agentic merge-queue + issue reasoning)
   tick["run_overseer_tick_isolated_detailed (panic-isolated)\nsrc/overseer/wiring.rs"]
-  tick --> cycle["run_cycle  src/overseer/mod.rs:609"]
+  tick --> cycle["run_cycle  src/overseer/mod.rs:663"]
 
   subgraph OBSERVE
     snap["StatusReader::snapshot -> ObservedState\n(distill fail%, restart churn, LLM budget, anomalies)"]
     board["GoalCurator::observe_board (blocked goals + in-flight)"]
     gaps["GoalCurator::workstream_gaps (coverage gaps)"]
     prs["PrOps::survey_ready_prs (SIMARD_AUTOMERGE_REPOS)\ninline narrowing: engineer-branch + objective gates\n+ draft-exclusion #4339 (is_draft==Some(false), fail-closed).\nobserve_merge_queue reasons, then project_ready_prs re-applies\nthe same narrowing (observe-stage projection)  src/overseer/mod.rs"]
-    mq["observe_merge_queue -> observe-merge-queue.yaml\nagentic PR/issue reasoning  src/overseer/mod.rs:875"]
+    mq["observe_merge_queue -> observe-merge-queue.yaml\nagentic PR/issue reasoning  src/overseer/mod.rs:1005"]
     fails["failure_sink::drain_recent (step/engineer/terminal failures)"]
-    recall["recall_pass(keys) -> MemorySnapshot\n(cognitive-memory recall path)  src/overseer/mod.rs:1026"]
+    recall["recall_pass(keys) -> MemorySnapshot\n(cognitive-memory recall path)  src/overseer/mod.rs:1156"]
   end
   cycle --> snap --> board --> gaps --> prs --> mq --> fails --> recall
 
-  recall --> orient["ORIENT signals_from(observed) -> orient(signals,in_flight)\n-> Vec&lt;Problem&gt;  src/overseer/mod.rs:2165"]
+  recall --> orient["ORIENT signals_from(observed) -> orient(signals,in_flight)\n-> Vec&lt;Problem&gt;  src/overseer/mod.rs:2295"]
   orient --> why["ROOT-CAUSE root_cause::analyze(problem, observed, recall)\n+ recall_occurrences (recurrence)  src/overseer/root_cause.rs"]
-  why --> decide["DECIDE decide(problem) -> Intervention\nsrc/overseer/mod.rs:2467"]
-  decide --> gate["GATE gate(iv, observed, launches) -> PlannedIntervention\n(autonomy / budget / conflict / recursion)  src/overseer/mod.rs:1156"]
+  why --> decide["DECIDE decide(problem) -> Intervention\nsrc/overseer/mod.rs:2609"]
+  decide --> gate["GATE gate(iv, observed, launches) -> PlannedIntervention\n(autonomy / budget / conflict / recursion)  src/overseer/mod.rs:1286"]
   gate --> eco["observe_ecosystem (after decide/gate loop) ->\necosystem-observe.yaml -> gated Intervention::LaunchRecipe\nsrc/overseer/ecosystem_observe.rs"]
-  eco --> act["ACT execute plan via overseer capabilities  src/overseer/capabilities.rs"]
+  eco --> health["health_review (after observe_ecosystem, [standing]) ->\noverseer-health-review.yaml via recipe-runner-rs\nAGENT reads OODA journal (journalctl --user -u &lt;unit&gt;)\n+ simard status + simard goal list; detects crash-loops /\nshared failure signatures; reasons to gated LaunchRecipe /\nEscalateBlockedGoal (HEALTHY verdict = empty = no-op).\nFail-closed. Gated by health_review_enabled + gap_scan throttle\nsrc/overseer/mod.rs:935 (health_review.rs)"]
+  health --> act["ACT execute plan via overseer capabilities  src/overseer/capabilities.rs"]
 
   act --> notify["NotifierOps (email + Signal RPC :7583)"]
   act --> issue["IssueFiler -> gh (dedup by failure_signature)"]
@@ -35,5 +36,5 @@ flowchart TD
 
   classDef recipe fill:#fff6df,stroke:#d9a441;
   classDef memory fill:#eaf6ff,stroke:#4a90d9;
-  class mq,eco,launch,mjudge recipe;
+  class mq,eco,health,launch,mjudge recipe;
   class recall,writeback,store memory;

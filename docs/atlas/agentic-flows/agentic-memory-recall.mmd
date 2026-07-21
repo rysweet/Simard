@@ -1,6 +1,6 @@
 flowchart TD
   %% Layer 9 - Agentic flow: cognitive-memory recall path (NO kuzu, NO python; embedded lbug)
-  trigger["Callers (in-process):\nOODA prepare (build_objective_probe)  src/ooda_loop/cycle.rs\nOverseer recall_pass  src/overseer/mod.rs:1026"]
+  trigger["Callers (in-process):\nOODA prepare (build_objective_probe)  src/ooda_loop/cycle.rs\nOverseer recall_pass  src/overseer/mod.rs:1156"]
   trigger --> keys["RecallKeys::from_signals(signals, problems) -> query()\n(concepts + root-cause labels, deterministic probe)"]
   keys --> fanout{"4-way bounded recall"}
 

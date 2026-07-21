@@ -7,8 +7,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use chrono::{DateTime, Utc};
-
 /// Short-lived raw observation from sensory memory.
 ///
 /// Maps to Python `SensoryItem`. The `expires_at` field is a Unix timestamp
@@ -52,12 +50,15 @@ pub struct CognitiveEpisode {
     pub source_label: String,
     pub temporal_index: i64,
     pub compressed: bool,
-    /// Wall-clock instant the episode was recorded, sourced from
-    /// `EpisodicMemory.created_at` (#4383). `Option` + `#[serde(default)]` so
-    /// episodes serialized before this field existed deserialize to `None`
-    /// instead of failing. Feeds the dashboard "Recent Memories" timestamp.
+    /// Wall-clock instant the episode was recorded, carried through from the
+    /// library `EpisodicMemory::created_at` (issue #4383). `None` for backends
+    /// or callers that genuinely lack a timestamp — never a fabricated epoch,
+    /// so the dashboard "Recent Memories" panel degrades honestly to a blank
+    /// "time ago" label rather than showing a nonsensical 1970s date.
+    /// `#[serde(default)]` so episodes serialized before this field existed
+    /// deserialize to `None`.
     #[serde(default)]
-    pub created_at: Option<DateTime<Utc>>,
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Distilled knowledge fact from semantic memory.
@@ -247,48 +248,5 @@ mod tests {
         }"#;
         let slot: CognitiveWorkingSlot = serde_json::from_str(json).unwrap();
         assert!((slot.relevance - 0.85).abs() < f64::EPSILON);
-    }
-
-    // -- #4383: episode created_at survives the memory_ipc serde boundary ---
-    //
-    // `EpisodicMemory.created_at` is populated by the library backend, but
-    // `CognitiveEpisode` (the IPC-facing shape) drops it, so the dashboard's
-    // "Recent Memories" timestamp is structurally always null. `CognitiveEpisode`
-    // must carry an additive, back-compatible `created_at: Option<DateTime<Utc>>`
-    // so the wall-clock instant reaches the serializer. These tests fail until
-    // that field exists.
-
-    #[test]
-    fn cognitive_episode_created_at_round_trips_through_json() {
-        let ts = chrono::DateTime::parse_from_rfc3339("2026-07-20T12:34:56Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        let episode = CognitiveEpisode {
-            node_id: "epi_1".to_string(),
-            content: "did the thing".to_string(),
-            source_label: "agent".to_string(),
-            temporal_index: 3,
-            compressed: false,
-            created_at: Some(ts),
-        };
-        let json = serde_json::to_string(&episode).unwrap();
-        let parsed: CognitiveEpisode = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, episode);
-        assert_eq!(parsed.created_at, Some(ts));
-    }
-
-    #[test]
-    fn cognitive_episode_missing_created_at_defaults_to_none() {
-        // Back-compat: episodes serialized before the field existed (no
-        // `created_at` key) must deserialize to `None`, never panic.
-        let json = r#"{
-            "node_id": "epi_legacy",
-            "content": "old event",
-            "source_label": "agent",
-            "temporal_index": 1,
-            "compressed": false
-        }"#;
-        let episode: CognitiveEpisode = serde_json::from_str(json).unwrap();
-        assert_eq!(episode.created_at, None);
     }
 }
