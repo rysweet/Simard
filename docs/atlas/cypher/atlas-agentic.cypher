@@ -100,8 +100,12 @@ MATCH (f:Flow {id:'memory-recall'}), (p:Phase {id:'mem.needle-gate'}) MERGE (f)-
 MATCH (p:Phase {id:'ooda.orient'}), (r:Recipe {id:'ooda-orient'}) MERGE (p)-[:INVOKES]->(r);
 MATCH (p:Phase {id:'ooda.decide'}), (r:Recipe {id:'ooda-decide'}) MERGE (p)-[:INVOKES]->(r);
 MATCH (p:Phase {id:'ovr.observe'}), (r:Recipe {id:'observe-merge-queue'}) MERGE (p)-[:INVOKES]->(r);
-MATCH (p:Phase {id:'ovr.gate'}), (r:Recipe {id:'ecosystem-observe'})    MERGE (p)-[:INVOKES]->(r);
-MATCH (p:Phase {id:'ovr.gate'}), (r:Recipe {id:'overseer-health-review'}) MERGE (p)-[:INVOKES]->(r);
+// The ovr.gate INVOKES edges below cover the two post-decide-loop passes that run
+// at the gate stage (observe_ecosystem mod.rs:857, health_review mod.rs:935): each
+// pass invokes its recipe itself and then routes the returned interventions THROUGH
+// gate() — the gate() call does not invoke the recipe directly.
+MATCH (p:Phase {id:'ovr.gate'}), (r:Recipe {id:'ecosystem-observe'})    MERGE (p)-[i:INVOKES]->(r) SET i.via='observe_ecosystem pass (mod.rs:857); result routed through gate()';
+MATCH (p:Phase {id:'ovr.gate'}), (r:Recipe {id:'overseer-health-review'}) MERGE (p)-[i:INVOKES]->(r) SET i.via='health_review pass (mod.rs:935 -> reviewer.review() mod.rs:963); each parsed LaunchRecipe/EscalateBlockedGoal routed through gate() mod.rs:979-981';
 MATCH (p:Phase {id:'ovr.gate'}), (r:Recipe {id:'smart-orchestrator'})   MERGE (p)-[:INVOKES]->(r);
 // The merge judge phase MAY invoke the recipe-backed judge (resolution #1); it otherwise
 // falls back to a direct LLM judge (merge_readiness_judge.md) or the fail-closed RefusingMergeJudge.
