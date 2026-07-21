@@ -679,6 +679,10 @@ pub fn archive_stale_engineer_evidence(
     let archive_dir = archive_root.join(&dir_name);
     std::fs::create_dir_all(&archive_dir)
         .map_err(|e| format!("create archive dir {}: {e}", archive_dir.display()))?;
+    // Archived evidence routinely contains tokens / `AMPLIHACK_*` env / PATs
+    // harvested from worktree logs + journalctl. On a shared host these must NOT
+    // be world/group readable — lock the archive dir down to the overseer user.
+    restrict_to_owner(&archive_dir, true);
 
     // Correlate the claim to its worktree the SAME way the probe/cleanup do.
     let worktree = find_engineer_worktree(state_root, goal_id);
@@ -700,20 +704,45 @@ pub fn archive_stale_engineer_evidence(
     );
     std::fs::write(archive_dir.join("manifest.json"), manifest)
         .map_err(|e| format!("write manifest.json: {e}"))?;
+    restrict_to_owner(&archive_dir.join("manifest.json"), false);
 
     // evidence.txt — best-effort tails of the newest few worktree files. A read
     // error on any single file is skipped (never aborts the archive).
     if let Some(worktree) = worktree.as_ref() {
         let evidence = collect_worktree_evidence(worktree);
-        let _ = std::fs::write(archive_dir.join("evidence.txt"), evidence);
+        let evidence_path = archive_dir.join("evidence.txt");
+        if std::fs::write(&evidence_path, evidence).is_ok() {
+            restrict_to_owner(&evidence_path, false);
+        }
     }
 
     // journal.txt — a narrow journalctl slice for the goal's unit, best-effort.
     if let Some(slice) = capture_journal_slice(goal_id) {
-        let _ = std::fs::write(archive_dir.join("journal.txt"), slice);
+        let journal_path = archive_dir.join("journal.txt");
+        if std::fs::write(&journal_path, slice).is_ok() {
+            restrict_to_owner(&journal_path, false);
+        }
     }
 
     Ok(archive_dir)
+}
+
+/// Tighten an archive path to owner-only access — `0700` for the directory,
+/// `0600` for evidence files — so the tokens/env/PATs that logs routinely carry
+/// are never world/group readable at rest on a shared host. Best-effort and
+/// non-fatal: a chmod failure never aborts the archive (evidence preservation
+/// wins), and the call is a no-op on non-unix targets.
+fn restrict_to_owner(path: &std::path::Path, is_dir: bool) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if is_dir { 0o700 } else { 0o600 };
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, is_dir);
+    }
 }
 
 /// JSON-escape a string for the hand-written `manifest.json` (no serde dependency
@@ -776,6 +805,13 @@ fn collect_worktree_evidence(worktree: &std::path::Path) -> String {
             let Ok(meta) = std::fs::symlink_metadata(&path) else {
                 continue;
             };
+            // Never follow symlinks: a hostile worktree could plant
+            // `creds.log -> ~/.ssh/id_rsa` (or `-> /etc/passwd`) and the read
+            // below would copy the host file's tail into the archive. Skip any
+            // symlink outright — evidence is only ever a real file in the tree.
+            if meta.file_type().is_symlink() {
+                continue;
+            }
             if meta.is_dir() {
                 // Skip .git internals — noise, not diagnostic evidence.
                 if path.file_name().and_then(|n| n.to_str()) != Some(".git") {
@@ -2002,5 +2038,88 @@ mod tests {
                 "sanitized archive dir {joined:?} must stay under the archive root (from {raw:?})"
             );
         }
+    }
+
+    /// Secret hygiene at rest: an archived engineer's evidence carries tokens /
+    /// env / PATs, so the archive dir MUST be owner-only (`0700`) and every
+    /// evidence file `0600` — never world/group readable on a shared host.
+    #[cfg(unix)]
+    #[test]
+    fn archived_evidence_is_owner_only_on_disk() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = std::env::temp_dir().join(format!(
+            "reap-perms-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let archive_dir =
+            archive_stale_engineer_evidence(&tmp, "rysweet/Simard:goal-perm", 999).unwrap();
+
+        let dir_mode = std::fs::metadata(&archive_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "archive dir must be 0700, got {dir_mode:o}"
+        );
+
+        let manifest_mode = std::fs::metadata(archive_dir.join("manifest.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            manifest_mode, 0o600,
+            "manifest.json must be 0600, got {manifest_mode:o}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Symlink safety: a hostile worktree that plants `secret.log -> <target>`
+    /// must NOT have the symlink target's contents copied into the archive — the
+    /// evidence collector skips symlinks outright (no follow).
+    #[cfg(unix)]
+    #[test]
+    fn collect_worktree_evidence_never_follows_symlinks() {
+        let tmp = std::env::temp_dir().join(format!(
+            "reap-symlink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let worktree = tmp.join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        // A host file the engineer is not entitled to exfiltrate.
+        let secret = tmp.join("host-secret");
+        std::fs::write(&secret, "SUPER_SECRET_TOKEN=ghp_exfiltrate_me").unwrap();
+
+        // Planted symlink with an evidence-looking extension.
+        std::os::unix::fs::symlink(&secret, worktree.join("creds.log")).unwrap();
+        // A genuine evidence file, to prove real files are still collected.
+        std::fs::write(worktree.join("real.log"), "legit engineer log line").unwrap();
+
+        let evidence = collect_worktree_evidence(&worktree);
+        assert!(
+            !evidence.contains("SUPER_SECRET_TOKEN"),
+            "symlink target contents must never appear in the archive: {evidence}"
+        );
+        assert!(
+            evidence.contains("legit engineer log line"),
+            "real evidence files must still be collected: {evidence}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
