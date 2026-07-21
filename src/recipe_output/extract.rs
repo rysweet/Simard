@@ -137,7 +137,7 @@ fn starts_with_iso_timestamp(s: &str) -> bool {
 /// colour-coded launcher line still matches and a coloured payload line still
 /// survives. This is correctness-as-safety: the predicate consumes untrusted
 /// agent stdout, so it errs toward keeping a line rather than eating a payload.
-pub(crate) fn is_copilot_launcher_line(line: &str) -> bool {
+fn is_copilot_launcher_line(line: &str) -> bool {
     let t = line.trim_start();
 
     // A line that begins with a JSON structural token (`{`, `"`, `[`) is a JSON
@@ -184,6 +184,49 @@ pub(crate) fn is_copilot_launcher_line(line: &str) -> bool {
     // action keyword, an orient decimal, a verdict keyword, and a `{`-leading
     // JSON payload never begin with these level tokens, so this is safe.
     t.starts_with("INFO ") || t.starts_with("WARN ")
+}
+
+/// `true` when `line` is an **unambiguous** Copilot CLI launcher-preamble line —
+/// the narrow subset of [`is_copilot_launcher_line`] whose signature no
+/// human-authored *goal title* could plausibly carry. This is the predicate
+/// [`crate::goals::goal_slug`] uses to strip launcher noise before slugifying a
+/// captured title (#4376): a raw-stdout preamble must never leak env-var tokens
+/// or the host config path into a goal slug or `engineer/<slug>` branch, yet a
+/// legitimate title that merely *begins with* a bare `INFO`/`WARN` word, or that
+/// mentions `copilot update`, must survive intact.
+///
+/// Matches only the two prose-proof launcher shapes:
+///
+/// - the `ℹ … NODE_OPTIONS=… (saved preference)` saved-preference marker
+///   (leading U+2139 info marker **and** both anchor substrings), and
+/// - a `… launching copilot binary=… version="GitHub Copilot CLI …"` line
+///   (anchored on substrings no goal title contains).
+///
+/// It deliberately **excludes** the bare `INFO `/`WARN ` and
+/// `Run 'copilot update'` arms of [`is_copilot_launcher_line`]. Those arms are
+/// correct when classifying untrusted *stdout*, but on the title surface they
+/// false-positive on ordinary prose — collapsing a title such as
+/// `"INFO redesign the dashboard"` to an empty slug and colliding otherwise
+/// distinct goals. A `{`/`"`/`[`-leading JSON line is never a preamble line.
+pub(crate) fn is_copilot_launcher_preamble_signature(line: &str) -> bool {
+    let t = line.trim_start();
+
+    // A `{`/`"`/`[`-leading JSON payload line is never a launcher preamble (see
+    // the same guard in `is_copilot_launcher_line`).
+    if matches!(t.as_bytes().first(), Some(b'{') | Some(b'"') | Some(b'[')) {
+        return false;
+    }
+
+    // `… launching copilot binary=… version="GitHub Copilot CLI …"` — anchored
+    // on launcher-only substrings no goal title prose contains.
+    if t.contains("launching copilot binary=") || t.contains("version=\"GitHub Copilot CLI") {
+        return true;
+    }
+
+    // `ℹ … NODE_OPTIONS=… (saved preference)` — the #4376 saved-preference
+    // preamble. Require the leading info marker AND both anchor substrings so a
+    // title that merely mentions `NODE_OPTIONS` in prose is never stripped.
+    t.starts_with('\u{2139}') && t.contains("NODE_OPTIONS=") && t.contains("(saved preference)")
 }
 
 /// `true` when (after trimming) `line` is non-payload recipe-runner noise:
