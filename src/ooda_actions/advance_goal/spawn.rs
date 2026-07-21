@@ -379,10 +379,6 @@ pub fn dispatch_spawn_engineer(
                     prior_consecutive_failures = prior_failures,
                     "brain.decide_engineer_lifecycle FAILED — surfacing as cycle failure (NO silent continue_skipping fallback per issue #1711)",
                 );
-                eprintln!(
-                    "[simard] BRAIN FAILURE goal={} error={} prior_consecutive_failures={}",
-                    goal_id, e, prior_failures
-                );
 
                 // Deterministic safeguard: with this failure the count
                 // becomes prior_failures + 1. Trigger at >= 3.
