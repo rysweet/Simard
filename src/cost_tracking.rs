@@ -260,6 +260,98 @@ mod tests {
         assert_eq!(summary.period, "test-period");
     }
 
+    /// Regression for the cost-ledger append race behind the shared `pre-commit`
+    /// flake across 8 PRs and the `verify` flap (main HEAD `ff94362f`).
+    ///
+    /// The ledger is opened `O_APPEND` and every meeting/engineer turn appends a
+    /// JSON line concurrently (the lib test binary runs tests in one process,
+    /// many threads). `writeln!(file, "{line}")` is NOT a single `write(2)`: the
+    /// `Write::write_fmt` path can emit the payload and the trailing `\n` (and
+    /// large payloads) as separate syscalls, so two concurrent appenders can
+    /// interleave and produce a torn line that fails `serde_json::from_str` —
+    /// which is exactly why the target meeting test intermittently could not
+    /// find its `copilot-meeting` entry.
+    ///
+    /// The fix is a private `write_entry_to(path, entry)` that serialises the
+    /// entry to a `String`, appends the newline, and issues a SINGLE
+    /// `file.write_all(...)` (one `write(2)` for a sub-`PIPE_BUF`/regular-file
+    /// append, which the kernel appends atomically under `O_APPEND`).
+    /// `write_entry` delegates to it against the real `ledger_path()`; this test
+    /// drives it against an isolated temp path (no `HOME` mutation, so no
+    /// `cognitive_memory` serial key is required).
+    ///
+    /// Contract: after `THREADS * PER_THREAD` concurrent appends, EVERY non-empty
+    /// line must parse as a `CostEntry` and the count must equal the number of
+    /// writes — no interleaved/torn lines, no lost writes. FAILS on the current
+    /// `writeln!` implementation (and fails to compile until `write_entry_to`
+    /// exists); PASSES once the atomic single-`write_all` helper lands.
+    #[test]
+    fn concurrent_appends_are_atomic_and_never_tear_a_line() {
+        use std::sync::{Arc, Barrier};
+
+        const THREADS: usize = 16;
+        const PER_THREAD: usize = 64;
+
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-cost-tracking");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("concurrent-append-atomicity.jsonl");
+        // Start from a clean slate so the count assertion is exact.
+        fs::remove_file(&path).ok();
+
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let shared_path = Arc::new(path.clone());
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|t| {
+                let barrier = Arc::clone(&barrier);
+                let path = Arc::clone(&shared_path);
+                std::thread::spawn(move || {
+                    // Release all writers simultaneously to maximise contention.
+                    barrier.wait();
+                    for i in 0..PER_THREAD {
+                        let entry = CostEntry {
+                            timestamp: Utc::now(),
+                            session_id: format!("sess-{t:02}-{i:03}"),
+                            model: "copilot-meeting".to_string(),
+                            prompt_tokens_est: (t * 1000 + i) as u64,
+                            completion_tokens_est: i as u64,
+                            cost_usd_est: 0.0001 * i as f64,
+                            context: format!(
+                                "concurrent append writer thread {t} entry {i} \
+                                 padding-to-exercise-multi-syscall-writes"
+                            ),
+                        };
+                        write_entry_to(&path, &entry).expect("append must succeed");
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("writer thread must not panic");
+        }
+
+        let contents = fs::read_to_string(&path).unwrap();
+        let mut parsed = 0usize;
+        for line in contents.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            serde_json::from_str::<CostEntry>(line).unwrap_or_else(|e| {
+                panic!("torn/interleaved ledger line ({e}): {line:?}");
+            });
+            parsed += 1;
+        }
+        assert_eq!(
+            parsed,
+            THREADS * PER_THREAD,
+            "every concurrent append must yield exactly one intact, parseable line"
+        );
+
+        fs::remove_file(&path).ok();
+    }
+
     #[test]
     fn read_entries_handles_empty_lines() {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
