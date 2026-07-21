@@ -329,8 +329,10 @@ the existing agentic
 ### ACT — the guarded production deployer
 
 The Act stage dispatches `Intervention::Deploy` to the injected `Deployer`. In
-production assembly that is a **`GuardedDeployer`**, no longer the historical
-`RefuseDeployer` stub. The guarded deployer is a **composition of already-tested
+production assembly that is a **`GuardedDeployer`** when autonomous deploy is
+enabled (the default), no longer the historical `RefuseDeployer` stub — a pinned
+daemon (`SIMARD_OVERSEER_AUTONOMOUS_DEPLOY=0`) instead keeps the `RefuseDeployer`.
+The guarded deployer is a **composition of already-tested
 parts**, in this fixed order — no branch reaches a binary swap without passing
 **all** of them:
 

@@ -718,28 +718,38 @@ disabled Overseer never ticks, so it never deploys.
 
 ### `assemble_capabilities` deployer injection
 
-Production assembly always wires the guarded deployer in place of the historical
-`RefuseDeployer` stub; the opt-out is enforced upstream at the observe rail (a
-pinned daemon simply never raises a deploy-drift signal), so the ACT capability
-stays unconditional:
+Production assembly wires the guarded deployer in place of the historical
+`RefuseDeployer` stub **when autonomous deploy is enabled**. The opt-out is
+enforced at two layers that stay in lock-step: the observe rail (a pinned daemon
+never raises a deploy-drift signal) **and** assembly itself — when
+`SIMARD_OVERSEER_AUTONOMOUS_DEPLOY` is falsey, `assemble_deployer` injects the
+safe `RefuseDeployer` so no production deploy machinery (not even the
+ancestry-repo resolution) is built:
 
 ```rust
 // src/overseer/wiring.rs — assemble_capabilities()
 // Live per-tick restart churn feeds the crash-loop gate (the daemon rebuilds the
 // Overseer every tick, so this assembly-time read is fresh each tick).
 let recent_restart_churn = status.snapshot().ok().and_then(|s| s.restart_churn).unwrap_or(0);
-let deployer = production_guarded_deployer(
+let deployer = assemble_deployer(          // gated on autonomous_deploy_enabled()
     repo_root.clone(),
     recent_restart_churn,
-    overseer_self_repo(),          // owner/name for notification labels + ancestry
+    overseer_self_repo(),                  // owner/name for notification labels + ancestry
 );
-// … Capabilities { deployer: Box::new(deployer), … }
+// … Capabilities { deployer, … }
 ```
 
-`RefuseDeployer` is **no longer used in the production assembly**; it is retained
-only as a safe no-op stub (and in one wiring test). `recent_restart_churn` is read
-live at assembly time so the crash-loop gate reflects current churn (fail-closed:
-unknown/high churn never bypasses the gate).
+`production_guarded_deployer` resolves its ancestry repo with a **cheap,
+filesystem-only** probe — it does **not** `git fetch` at construction (that runs
+every tick via `build_overseer`; a hung fetch would stall the whole OODA loop).
+Freshness of the merged target object comes from `GitDeployDriftObserver::observe`,
+which fetches the same repo (throttled) earlier in the same cycle before any
+deploy is planned.
+
+`RefuseDeployer` is injected **only** on the pinned (opt-out) path (and used in
+one wiring test); the enabled default carries the guarded deployer.
+`recent_restart_churn` is read live at assembly time so the crash-loop gate
+reflects current churn (fail-closed: unknown/high churn never bypasses the gate).
 
 ## See also
 

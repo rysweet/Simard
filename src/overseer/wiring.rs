@@ -1112,8 +1112,10 @@ pub fn assemble_capabilities(
     // `SelfDeployOrchestrator` swap (identical to `simard self-deploy`), a git
     // ancestry oracle rooted at the daemon repo, and the mandatory dual-channel
     // operator notifier — behind `evaluate_deploy_gate`'s no-op / rollback /
-    // red-canary / crash-loop refusals and the high-risk AutonomyGate.
-    let deployer = crate::overseer::deploy::production_guarded_deployer(
+    // red-canary / crash-loop refusals and the high-risk AutonomyGate. Honours the
+    // operator opt-out (`SIMARD_OVERSEER_AUTONOMOUS_DEPLOY=0`): a PINNED daemon
+    // gets the safe `RefuseDeployer` so NO production deploy machinery is built.
+    let deployer = assemble_deployer(
         repo_root.clone(),
         recent_restart_churn,
         overseer_self_repo(),
@@ -1122,7 +1124,7 @@ pub fn assemble_capabilities(
         status: Box::new(status),
         recipes: Box::new(SmartOrchestratorLauncher::from_env()),
         prs: Box::new(MergePrOps::from_env().with_recursion_guard(overseer_identity())),
-        deployer: Box::new(deployer),
+        deployer,
         meetings: Box::new(MeetingGoalTransfer::from_env()),
         issues: Box::new(StewardshipIssueFiler::new(Arc::new(
             crate::stewardship::RealGhClient,
@@ -1144,6 +1146,29 @@ fn overseer_self_repo() -> String {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "rysweet/Simard".to_string())
+}
+
+/// Select the acting [`Deployer`] for THIS assembly (#2590). Honours the operator
+/// opt-out (`SIMARD_OVERSEER_AUTONOMOUS_DEPLOY=0`): when the daemon is PINNED,
+/// inject the safe [`RefuseDeployer`] so NO production deploy machinery — not even
+/// the ancestry-repo resolution — is built or exercised. Otherwise build the
+/// production guarded deployer. Enabled by default (consistent with the observe
+/// rail's own opt-out check), so the two opt-out gates stay in lock-step: a
+/// pinned daemon neither observes drift NOR carries a live deployer.
+fn assemble_deployer(
+    repo_root: std::path::PathBuf,
+    recent_restart_churn: u64,
+    repo: String,
+) -> Box<dyn Deployer> {
+    if crate::overseer::deploy_trigger::autonomous_deploy_enabled() {
+        Box::new(crate::overseer::deploy::production_guarded_deployer(
+            repo_root,
+            recent_restart_churn,
+            repo,
+        ))
+    } else {
+        Box::new(RefuseDeployer)
+    }
 }
 
 /// Build the production acting [`Overseer`]: the assembled capabilities, the
@@ -2022,6 +2047,38 @@ mod tests {
         let d = RefuseDeployer;
         assert!(d.deploy("abc123").is_err(), "never a blind deploy");
         assert!(d.deployed_commit().is_ok());
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn assemble_deployer_honours_the_operator_opt_out() {
+        // #2590 A5: a PINNED daemon (`SIMARD_OVERSEER_AUTONOMOUS_DEPLOY=0`) gets
+        // the safe `RefuseDeployer` — no production deploy machinery (nor its
+        // per-tick ancestry-repo resolution) is built. Only the opt-out branch is
+        // exercised here: constructing the enabled branch is covered elsewhere,
+        // and its `deploy()` would run the real canary.
+        use crate::overseer::deploy_trigger::AUTONOMOUS_DEPLOY_ENV;
+        let prev = std::env::var(AUTONOMOUS_DEPLOY_ENV).ok();
+        // SAFETY: single-threaded, serialized test-local env toggle, restored below.
+        unsafe {
+            std::env::set_var(AUTONOMOUS_DEPLOY_ENV, "0");
+        }
+        let pinned = assemble_deployer(
+            std::path::PathBuf::from("."),
+            0,
+            "rysweet/Simard".to_string(),
+        );
+        let err = pinned.deploy("aaaaaaaaaaaa").unwrap_err();
+        assert!(
+            format!("{err}").contains("not wired"),
+            "a pinned daemon must get the RefuseDeployer stub, got: {err}"
+        );
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(AUTONOMOUS_DEPLOY_ENV, v),
+                None => std::env::remove_var(AUTONOMOUS_DEPLOY_ENV),
+            }
+        }
     }
 
     #[test]

@@ -433,11 +433,13 @@ impl BinaryDeployer for OrchestratedBinaryDeployer {
 /// `git fetch`-ed by [`GitDeployDriftObserver`](crate::overseer::deploy_trigger)
 /// in the canonical self-deploy checkout (`SIMARD_SELF_DEPLOY_REPO` → persistent
 /// `~/.simard` checkout), NOT the daemon's launch `repo_dir`. Rooting the oracle
-/// at that same repo (and best-effort fetching it) guarantees the freshly-merged
-/// target commit object is present for the rollback (`is_ancestor`) check; a
-/// stale launch repo would exit 128 and (now) fire a `deploy-refused` notice
-/// rather than silently fail-closing. Falls back to `repo_dir` only when no
-/// self-deploy checkout exists yet (e.g. before the first deploy).
+/// at that same repo (resolved with a cheap filesystem-only probe — the observer,
+/// NOT this per-tick constructor, performs the throttled `git fetch`) guarantees
+/// the freshly-merged target commit object is present for the rollback
+/// (`is_ancestor`) check; a stale launch repo would exit 128 and (now) fire a
+/// `deploy-refused` notice rather than silently fail-closing. Falls back to
+/// `repo_dir` only when no self-deploy checkout exists yet (e.g. before the first
+/// deploy).
 pub fn production_guarded_deployer(
     repo_dir: std::path::PathBuf,
     recent_restart_churn: u64,
@@ -445,16 +447,17 @@ pub fn production_guarded_deployer(
 ) -> GuardedDeployer {
     let ancestry_repo = {
         let preparer = crate::self_deploy::GitSourcePreparer::new();
-        match preparer.resolve_existing_repo() {
-            Some(resolved) => {
-                // Best-effort refresh so the merged target commit is present for
-                // the ancestry check; a failed fetch (offline) degrades to the
-                // local objects rather than aborting.
-                let _ = preparer.fetch_origin(&resolved);
-                resolved
-            }
-            None => repo_dir,
-        }
+        // Resolve the canonical checkout with a CHEAP, filesystem-only probe. Do
+        // NOT `git fetch` here (#2590 audit): this constructor runs on EVERY
+        // overseer tick via `build_overseer`, so an eager network fetch would add
+        // blocking, timeout-less I/O to every tick — and a hung fetch would stall
+        // the whole OODA loop (the overlap guard then skips subsequent ticks),
+        // not just deploy. Freshness of the merged target object is already
+        // guaranteed by `GitDeployDriftObserver::observe`, which fetches this SAME
+        // repo earlier in the same cycle (throttled) before any deploy is planned;
+        // and if the object were still absent the ancestry check surfaces a
+        // `deploy-refused` operator notice rather than swapping.
+        preparer.resolve_existing_repo().unwrap_or(repo_dir)
     };
     GuardedDeployer::new(
         Box::new(ProdCanaryRunner),
