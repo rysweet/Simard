@@ -123,6 +123,14 @@ fn is_hex_commitish(s: &str) -> bool {
 pub struct CanaryResult {
     pub passed: bool,
     pub detail: String,
+    /// Name of the single gate that reddened the canary, when the canary is
+    /// RED. Threads per-gate evidence through to the operator refusal so the
+    /// root cause is NAMED, not just an `N/M gates` aggregate. `None` on a
+    /// green canary.
+    pub failing_gate: Option<String>,
+    /// Detail of the failing gate (e.g. `tests failed (exit 101): 2 failed`),
+    /// paired with [`Self::failing_gate`].
+    pub failing_detail: Option<String>,
 }
 
 /// Build + verify the canary binary for a target. Real impl reuses
@@ -285,16 +293,26 @@ impl Deployer for GuardedDeployer {
         // best-effort here (a refusal already surfaces as an Err); the mandatory
         // dispatch assertion below guards the swap path.
         if let Err(refusal) = evaluate_deploy_gate(&ctx) {
-            let notification = OperatorNotification::deploy_refused(
-                commit,
-                &running,
-                &self.repo,
-                &refusal.to_string(),
-            );
+            // For a RED canary, NAME the failing gate + detail so the operator
+            // refusal evidences the root cause instead of a bare aggregate.
+            // Every other refusal (no-op, rollback, crash-loop) keeps its own
+            // Display and must NOT be stamped with red-canary gate detail.
+            let reason = match &refusal {
+                DeployRefusal::RedCanary => match (&canary.failing_gate, &canary.failing_detail) {
+                    (Some(gate), Some(detail)) => {
+                        format!("{refusal}: gate '{gate}' — {detail} [{}]", canary.detail)
+                    }
+                    (Some(gate), None) => format!("{refusal}: gate '{gate}' [{}]", canary.detail),
+                    _ => format!("{refusal} ({})", canary.detail),
+                },
+                _ => refusal.to_string(),
+            };
+            let notification =
+                OperatorNotification::deploy_refused(commit, &running, &self.repo, &reason);
             let _ = self.notifier.notify(&notification);
             return Err(OverseerError::Capability {
                 what: "deploy_gate",
-                detail: refusal.to_string(),
+                detail: reason,
             });
         }
 
@@ -405,6 +423,13 @@ struct TargetCanaryReport {
     passed: bool,
     passed_gates: usize,
     total_gates: usize,
+    /// Name of the gate that reddened the canary, if any (per-gate evidence).
+    failing_gate: Option<String>,
+    /// Detail of the failing gate, paired with `failing_gate`.
+    failing_detail: Option<String>,
+    /// Gates skipped because their required endpoint is legitimately absent in
+    /// the isolated canary (surfaced for diagnosability; never reds the canary).
+    skipped_gates: Vec<String>,
 }
 
 trait TargetCanaryVerifier: Send + Sync {
@@ -441,10 +466,21 @@ impl TargetCanaryVerifier for SharedTargetCanaryVerifier {
         )?;
         let passed = crate::self_relaunch::all_gates_passed(&results);
         let passed_gates = results.iter().filter(|r| r.passed).count();
+        // Skips uphold `skipped ⇒ passed`, so isolate a GENUINE failure (a gate
+        // that neither passed nor skipped) as the named root cause.
+        let failing = results.iter().find(|r| !r.passed && !r.skipped);
+        let skipped_gates = results
+            .iter()
+            .filter(|r| r.skipped)
+            .map(|r| r.gate.to_string())
+            .collect();
         Ok(TargetCanaryReport {
             passed,
             passed_gates,
             total_gates: results.len(),
+            failing_gate: failing.map(|r| r.gate.to_string()),
+            failing_detail: failing.map(|r| r.detail.clone()),
+            skipped_gates,
         })
     }
 }
@@ -457,17 +493,29 @@ impl CanaryRunner for ProdCanaryRunner {
             .target_canary
             .build_and_verify(self.source.as_ref(), target_commit)
         {
-            Ok(report) => Ok(CanaryResult {
-                passed: report.passed,
-                detail: format!("{}/{} gates", report.passed_gates, report.total_gates),
-            }),
+            Ok(report) => {
+                let mut detail = format!("{}/{} gates", report.passed_gates, report.total_gates);
+                if !report.skipped_gates.is_empty() {
+                    detail.push_str(&format!(" (skipped: {})", report.skipped_gates.join(", ")));
+                }
+                Ok(CanaryResult {
+                    passed: report.passed,
+                    detail,
+                    failing_gate: report.failing_gate,
+                    failing_detail: report.failing_detail,
+                })
+            }
             Err(SafeUpdateError::BuildFailed { detail }) => Ok(CanaryResult {
                 passed: false,
                 detail: format!("target canary build failed: {detail}"),
+                failing_gate: Some("build".to_string()),
+                failing_detail: Some(detail),
             }),
             Err(SafeUpdateError::GateFailed { gate, detail }) => Ok(CanaryResult {
                 passed: false,
                 detail: format!("target canary gate {gate} failed: {detail}"),
+                failing_gate: Some(gate),
+                failing_detail: Some(detail),
             }),
             Err(e) => Err(OverseerError::Capability {
                 what: "target_canary",
@@ -670,6 +718,8 @@ mod tests {
             Ok(CanaryResult {
                 passed: self.0,
                 detail: "4/4 gates".to_string(),
+                failing_gate: None,
+                failing_detail: None,
             })
         }
     }
@@ -915,6 +965,9 @@ mod tests {
                     passed: true,
                     passed_gates: 4,
                     total_gates: 4,
+                    failing_gate: None,
+                    failing_detail: None,
+                    skipped_gates: vec![],
                 }),
                 VerifierOutcome::BuildFail => Err(SafeUpdateError::BuildFailed {
                     detail: "target build failed".to_string(),
@@ -1067,5 +1120,212 @@ mod tests {
             "rysweet/Simard".to_string(),
         );
         let _ = gd.deploy("bbbbbbbbbbbb");
+    }
+
+    // ── per-gate evidence + skip diagnosability (canary-gate #2590) ──────────
+    //
+    // TDD (Step 7): these specify the additive per-gate evidence threaded from
+    // `TargetCanaryReport` → `CanaryResult` → the operator `deploy-refused`
+    // notification, and that a skip stays green and is surfaced in the detail.
+    // They FAIL until `deploy.rs` gains `failing_gate` / `failing_detail` on
+    // `CanaryResult`, `failing_gate` / `failing_detail` / `skipped_gates` on
+    // `TargetCanaryReport`, and the wiring that composes a named red-canary
+    // refusal (expected RED state).
+
+    /// A canary that returns a RED result already carrying the named failing
+    /// gate + detail, exactly as the production `build_and_verify` now threads
+    /// it through. Exercises the operator-refusal composition.
+    struct NamedRedCanary {
+        gate: &'static str,
+        detail: &'static str,
+    }
+    impl CanaryRunner for NamedRedCanary {
+        fn run_canary(&self, _t: &str) -> Result<CanaryResult, OverseerError> {
+            Ok(CanaryResult {
+                passed: false,
+                detail: "3/4 gates".to_string(),
+                failing_gate: Some(self.gate.to_string()),
+                failing_detail: Some(self.detail.to_string()),
+            })
+        }
+    }
+
+    /// A target-canary verifier that returns a prebuilt report, letting us test
+    /// how `ProdCanaryRunner::run_canary` threads per-gate evidence + skips into
+    /// the `CanaryResult` without a real build.
+    struct ReportVerifier(TargetCanaryReport);
+    impl TargetCanaryVerifier for ReportVerifier {
+        fn build_and_verify(
+            &self,
+            source: &dyn crate::self_deploy::SelfDeploySourcePreparer,
+            target_commit: &str,
+        ) -> Result<TargetCanaryReport, SafeUpdateError> {
+            let _ = source.prepare(target_commit)?;
+            Ok(self.0.clone())
+        }
+    }
+
+    /// A verifier whose `build_and_verify` fails a NAMED gate (hard
+    /// `GateFailed`). The `run_canary` `GateFailed` arm must carry that gate
+    /// name downstream, not just a generic detail string.
+    struct GateFailVerifier;
+    impl TargetCanaryVerifier for GateFailVerifier {
+        fn build_and_verify(
+            &self,
+            source: &dyn crate::self_deploy::SelfDeploySourcePreparer,
+            target_commit: &str,
+        ) -> Result<TargetCanaryReport, SafeUpdateError> {
+            let _ = source.prepare(target_commit)?;
+            Err(SafeUpdateError::GateFailed {
+                gate: "rpc-health".to_string(),
+                detail: "rpc responded but reported degraded health".to_string(),
+            })
+        }
+    }
+
+    fn prod_runner_with(verifier: Box<dyn TargetCanaryVerifier>) -> ProdCanaryRunner {
+        ProdCanaryRunner::with_target_seams(
+            Box::new(RecordingSource {
+                seen_targets: Arc::new(Mutex::new(vec![])),
+                mode: SourceMode::Ok,
+            }),
+            verifier,
+        )
+    }
+
+    #[test]
+    fn run_canary_threads_named_failing_gate_from_red_report() {
+        let report = TargetCanaryReport {
+            passed: false,
+            passed_gates: 3,
+            total_gates: 4,
+            failing_gate: Some("unit-test".to_string()),
+            failing_detail: Some("tests failed (exit 101): 2 failed".to_string()),
+            skipped_gates: vec![],
+        };
+        let runner = prod_runner_with(Box::new(ReportVerifier(report)));
+        let result = runner.run_canary("bbbbbbbbbbbb").expect("canary");
+        assert!(!result.passed);
+        assert_eq!(result.failing_gate.as_deref(), Some("unit-test"));
+        assert!(
+            result
+                .failing_detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("2 failed"),
+            "failing_detail must survive into the CanaryResult: {:?}",
+            result.failing_detail
+        );
+    }
+
+    #[test]
+    fn run_canary_appends_skipped_gates_to_detail_and_stays_green() {
+        let report = TargetCanaryReport {
+            passed: true,
+            passed_gates: 3,
+            total_gates: 4,
+            failing_gate: None,
+            failing_detail: None,
+            skipped_gates: vec!["rpc-health".to_string()],
+        };
+        let runner = prod_runner_with(Box::new(ReportVerifier(report)));
+        let result = runner.run_canary("bbbbbbbbbbbb").expect("canary");
+        assert!(result.passed, "a skip must not red the canary");
+        assert!(result.failing_gate.is_none());
+        assert!(
+            result.detail.contains("skipped: rpc-health"),
+            "detail must surface the skipped gate, got: {}",
+            result.detail
+        );
+    }
+
+    #[test]
+    fn run_canary_green_report_has_no_skip_suffix() {
+        let report = TargetCanaryReport {
+            passed: true,
+            passed_gates: 4,
+            total_gates: 4,
+            failing_gate: None,
+            failing_detail: None,
+            skipped_gates: vec![],
+        };
+        let runner = prod_runner_with(Box::new(ReportVerifier(report)));
+        let result = runner.run_canary("bbbbbbbbbbbb").expect("canary");
+        assert!(result.passed);
+        assert_eq!(result.detail, "4/4 gates");
+        assert!(!result.detail.contains("skipped"), "{}", result.detail);
+        assert!(result.failing_gate.is_none());
+    }
+
+    #[test]
+    fn run_canary_gate_failed_hard_error_names_the_gate() {
+        // A `GateFailed` is a RED canary (`Ok(passed:false)`), not a hard error,
+        // and must carry the named gate downstream.
+        let runner = prod_runner_with(Box::new(GateFailVerifier));
+        let result = runner
+            .run_canary("bbbbbbbbbbbb")
+            .expect("a gate failure is a red canary, not a hard error");
+        assert!(!result.passed);
+        assert_eq!(
+            result.failing_gate.as_deref(),
+            Some("rpc-health"),
+            "the GateFailed arm must carry the named gate downstream"
+        );
+    }
+
+    #[test]
+    fn deploy_refused_names_failing_gate_for_red_canary() {
+        let deployed = Arc::new(Mutex::new(0));
+        let seen = Arc::new(Mutex::new(vec![]));
+        let notifier = DualChannelNotifier::new(vec![Box::new(Capture(seen.clone()))]);
+        let gd = GuardedDeployer::new(
+            Box::new(NamedRedCanary {
+                gate: "unit-test",
+                detail: "tests failed (exit 101): 2 failed",
+            }),
+            Box::new(FakeDeployerShared(deployed.clone())),
+            Box::new(FakeAncestry(false)),
+            notifier,
+            "aaaaaaaaaaaa".to_string(),
+            0,
+            "rysweet/Simard".to_string(),
+        );
+        let err = gd.deploy("bbbbbbbbbbbb").unwrap_err();
+        assert!(format!("{err}").contains("red canary"));
+        assert_eq!(*deployed.lock().unwrap(), 0, "red canary blocks swap");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].kind, "deploy-refused");
+        // The operator refusal must NAME the failing gate + detail — not just a
+        // bare aggregate — so the root cause is evidenced.
+        assert!(
+            seen[0].problem.contains("unit-test"),
+            "refusal must name the failing gate: {}",
+            seen[0].problem
+        );
+        assert!(
+            seen[0].problem.contains("2 failed"),
+            "refusal must carry the failing detail: {}",
+            seen[0].problem
+        );
+    }
+
+    #[test]
+    fn deploy_refused_for_non_red_refusal_is_not_mislabeled_as_red_canary() {
+        // A NoOp refusal (target == running) must keep its own Display and must
+        // NOT be stamped with red-canary named-gate detail, even though the
+        // canary result type now carries failing_gate fields.
+        let (gd, deployed, seen) = deployer(true, false, 0);
+        let err = gd.deploy("aaaaaaaaaaaa").unwrap_err(); // target == running → NoOp
+        assert!(format!("{err}").contains("no-op"));
+        assert_eq!(*deployed.lock().unwrap(), 0);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0].kind, "deploy-refused");
+        assert!(seen[0].problem.contains("no-op"), "{}", seen[0].problem);
+        assert!(
+            !seen[0].problem.contains("red canary"),
+            "a no-op refusal must not be mislabeled a red canary: {}",
+            seen[0].problem
+        );
     }
 }

@@ -8,6 +8,8 @@ doc_type: concept
 related:
   - ../safe-self-update.md
   - ../reference/self-deploy-api.md
+  - self-deploy-canary-gate-skip-and-diagnosability.md
+  - ../reference/self-deploy-canary-gate-outcomes-api.md
   - ../reference/self-deploy-source-prep.md
   - ../reference/overseer-operator-notifications.md
   - ../howto/verify-and-roll-back-a-self-deploy.md

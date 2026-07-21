@@ -9,6 +9,8 @@ status: implemented
 related:
   - ../concepts/reconcile-and-self-deploy.md
   - ../concepts/operational-autonomy-model.md
+  - ../concepts/self-deploy-canary-gate-skip-and-diagnosability.md
+  - ./self-deploy-canary-gate-outcomes-api.md
   - ./self-deploy-source-prep.md
   - ./overseer-operator-notifications.md
   - ./overseer-tick-details.md

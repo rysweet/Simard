@@ -247,21 +247,9 @@ fn default_gates_is_ordered() {
 #[test]
 fn all_gates_passed_with_mixed_results() {
     let results = vec![
-        GateResult {
-            gate: RelaunchGate::Smoke,
-            passed: true,
-            detail: "ok".to_string(),
-        },
-        GateResult {
-            gate: RelaunchGate::UnitTest,
-            passed: true,
-            detail: "ok".to_string(),
-        },
-        GateResult {
-            gate: RelaunchGate::GymBaseline,
-            passed: false,
-            detail: "gym failed".to_string(),
-        },
+        GateResult::pass(RelaunchGate::Smoke, "ok"),
+        GateResult::pass(RelaunchGate::UnitTest, "ok"),
+        GateResult::fail(RelaunchGate::GymBaseline, "gym failed"),
     ];
     assert!(!all_gates_passed(&results));
 }
