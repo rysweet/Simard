@@ -137,6 +137,10 @@ mod operator_commands_terminal;
 // nothing here is constructed at runtime. See docs/design/overseer.md.
 pub mod overseer;
 mod persistence;
+// Issue #1045 / Problem 6: PR backlog triage workflow (least-privilege,
+// poll-before-mutate) for the conflicting-PR backlog. See
+// `pr-triage-docs.md` and `tests/pr_triage.rs`.
+pub mod pr_triage;
 pub mod prompt_assets;
 pub mod prompt_delivery;
 pub mod read_only_guard;
