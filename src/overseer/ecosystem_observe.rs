@@ -158,7 +158,7 @@ note = "Azure VM provisioning CLI"
 
 [[repo]]
 slug = "rysweet/amplihack-memory-lib"
-note = "Graph-based 6-type cognitive memory (Kuzu-backed)"
+note = "Graph-based 6-type cognitive memory (LadybugDB/lbug-backed)"
 
 [[repo]]
 slug = "rysweet/amplihack-agent-eval"
@@ -1146,11 +1146,11 @@ slug = "rysweet/azlin"
     }
 
     #[test]
-    #[serial_test::serial(env_simard_identity)]
+    #[serial_test::serial(cognitive_memory)]
     fn daemon_roster_defaults_to_simard_seed_without_identity_env() {
         let dir = tempfile::tempdir().unwrap();
         let saved = std::env::var("SIMARD_IDENTITY").ok();
-        // SAFETY: guarded by the `env_simard_identity` serial key so no parallel
+        // SAFETY: guarded by the `cognitive_memory` serial key so no parallel
         // test races this env mutation; restored below.
         unsafe {
             std::env::remove_var("SIMARD_IDENTITY");
