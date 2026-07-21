@@ -168,7 +168,20 @@ fn query_open_pack(
         ));
     }
 
-    // Try to query articles table — pack databases may have varying schemas.
+    // GraphRAG path (KGP-Q5): when the pack exposes a knowledge graph
+    // (`entities` + `relationships` tables), traverse entities and their
+    // relationships (multi-hop) so the answer is grounded in linked entities,
+    // not just a single-table LIKE scan. `query_graph` returns `None` when the
+    // pack has no graph tables or no seed entity matches, in which case we fall
+    // back to the article scan below — preserving behaviour for article-only
+    // packs.
+    if let Some((answer, sources)) = query_graph(conn, &keywords, limit) {
+        let confidence = estimate_confidence(&answer, &sources);
+        return Ok((answer, sources, confidence));
+    }
+
+    // Fallback: single-table article LIKE scan (pack databases may have varying
+    // schemas).
     let sources = query_articles(conn, &keywords, limit);
     let answer = build_answer(conn, &keywords, &sources);
     let confidence = estimate_confidence(&answer, &sources);
@@ -418,6 +431,335 @@ fn estimate_confidence(answer: &str, sources: &[SourceInfo]) -> f64 {
     let length_score = (answer.len() as f64 / 200.0).min(1.0);
     let raw = 0.3 + 0.4 * source_score + 0.3 * length_score;
     (raw * 100.0).round() / 100.0
+}
+
+// ── GraphRAG multi-hop retrieval (KGP-Q5) ───────────────────────────────────
+
+/// Maximum number of relationship hops traversed out from the keyword-matched
+/// seed entities. One hop pulls in directly-linked entities; a second hop pulls
+/// in their neighbours, matching the multi-hop retrieval the Python
+/// `KnowledgeGraphAgent` performs over the entity/relationship graph. Kept small
+/// so a densely-connected pack cannot fan out unbounded.
+const MAX_GRAPH_HOPS: usize = 2;
+
+/// An entity node in a pack's knowledge graph (the SQLite port of the upstream
+/// agent-kgpacks `Entity` table: `entity_id`, `name`, `type`, `description`, and
+/// an optional `url` for source citation).
+#[derive(Clone)]
+struct GraphEntity {
+    id: String,
+    name: String,
+    etype: String,
+    description: String,
+    url: Option<String>,
+}
+
+/// A directed relationship edge between two entities (the SQLite port of the
+/// upstream `ENTITY_RELATION(FROM Entity TO Entity, relation, context)`): a
+/// `source_id`/`target_id` pair labelled by `relation`.
+#[derive(Clone)]
+struct GraphEdge {
+    source: String,
+    target: String,
+    relation: String,
+}
+
+/// Whether a table named `table` exists in the database (case-insensitive;
+/// best-effort — any error degrades to `false`). Parameter-bound, so `table` is
+/// never interpolated into SQL.
+fn table_exists(conn: &Connection, table: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND lower(name) = lower(?1) LIMIT 1",
+        [table],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+/// Find the keyword-matched **seed** entities, ranked by keyword coverage over
+/// the entity `name` (weighted like a title hit) and `description` (weighted
+/// like a content hit) — the same parameterized, injection-resistant LIKE search
+/// and coverage ranking used by [`query_articles`] (KGP-Q4/Q8). The entity's
+/// `url` column, when present, is projected so graph answers keep the
+/// source-citation guarantee (KGP-Q1); an empty url degrades to `None`.
+fn seed_entities(conn: &Connection, keywords: &[&str], limit: usize) -> Vec<GraphEntity> {
+    let patterns: Vec<String> = keywords.iter().map(|k| like_contains_pattern(k)).collect();
+    if patterns.is_empty() {
+        return Vec::new();
+    }
+
+    let where_clause = (1..=patterns.len())
+        .map(|i| {
+            format!(
+                "(name LIKE ?{i} ESCAPE '{LIKE_ESCAPE_CHAR}' OR description LIKE ?{i} ESCAPE '{LIKE_ESCAPE_CHAR}')"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
+
+    let score_expr = (1..=patterns.len())
+        .map(|i| {
+            format!(
+                "(CASE WHEN name LIKE ?{i} ESCAPE '{LIKE_ESCAPE_CHAR}' THEN {TITLE_MATCH_WEIGHT} ELSE 0 END) \
+                 + (CASE WHEN description LIKE ?{i} ESCAPE '{LIKE_ESCAPE_CHAR}' THEN {CONTENT_MATCH_WEIGHT} ELSE 0 END)"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" + ");
+
+    let url_col = if table_has_column(conn, "entities", "url") {
+        "url"
+    } else {
+        "NULL AS url"
+    };
+
+    let sql = format!(
+        "SELECT entity_id, name, COALESCE(type, '') AS type, COALESCE(description, '') AS description, {url_col} \
+         FROM entities WHERE {where_clause} ORDER BY ({score_expr}) DESC, name ASC LIMIT {limit}"
+    );
+
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map(rusqlite::params_from_iter(patterns.iter()), row_to_entity)
+    else {
+        return Vec::new();
+    };
+    rows.flatten().collect()
+}
+
+/// Read a `(entity_id, name, type, description, url)` row into a [`GraphEntity`].
+fn row_to_entity(row: &rusqlite::Row<'_>) -> rusqlite::Result<GraphEntity> {
+    let url = row
+        .get::<_, Option<String>>(4)
+        .unwrap_or(None)
+        .filter(|u| !u.is_empty());
+    Ok(GraphEntity {
+        id: row.get::<_, String>(0).unwrap_or_default(),
+        name: row.get::<_, String>(1).unwrap_or_default(),
+        etype: row.get::<_, String>(2).unwrap_or_default(),
+        description: row.get::<_, String>(3).unwrap_or_default(),
+        url,
+    })
+}
+
+/// Fetch every relationship edge incident to any entity id in `ids` (either as
+/// source or target). Ids are bound as parameters (`?n`) and the same numbered
+/// placeholders are reused in both `IN` lists, so no id is interpolated into SQL.
+fn fetch_edges(conn: &Connection, ids: &[String]) -> Vec<GraphEdge> {
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    let in_list = (1..=ids.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT source_id, target_id, COALESCE(relation, '') AS relation FROM relationships \
+         WHERE source_id IN ({in_list}) OR target_id IN ({in_list})"
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+        Ok(GraphEdge {
+            source: row.get::<_, String>(0).unwrap_or_default(),
+            target: row.get::<_, String>(1).unwrap_or_default(),
+            relation: row.get::<_, String>(2).unwrap_or_default(),
+        })
+    }) else {
+        return Vec::new();
+    };
+    rows.flatten().collect()
+}
+
+/// Fetch entities by id (for the neighbours discovered during traversal). Ids
+/// are bound as parameters.
+fn fetch_entities_by_id(conn: &Connection, ids: &[String]) -> Vec<GraphEntity> {
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    let in_list = (1..=ids.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let url_col = if table_has_column(conn, "entities", "url") {
+        "url"
+    } else {
+        "NULL AS url"
+    };
+    let sql = format!(
+        "SELECT entity_id, name, COALESCE(type, '') AS type, COALESCE(description, '') AS description, {url_col} \
+         FROM entities WHERE entity_id IN ({in_list})"
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map(rusqlite::params_from_iter(ids.iter()), row_to_entity) else {
+        return Vec::new();
+    };
+    rows.flatten().collect()
+}
+
+/// GraphRAG multi-hop retrieval over a pack's `entities` + `relationships`
+/// tables (KGP-Q5).
+///
+/// Returns `None` — so the caller falls back to the single-table article scan —
+/// when the pack has no graph (`entities` or `relationships` table missing) or
+/// when no seed entity matches the question. Otherwise it:
+///
+/// 1. selects keyword-matched **seed** entities (ranked by coverage, KGP-Q8),
+/// 2. traverses relationship edges outward up to [`MAX_GRAPH_HOPS`] hops,
+///    pulling in the **linked** entities (breadth-first, so nearer neighbours
+///    come first), and
+/// 3. builds a graph-grounded answer that names the linked entities and the
+///    relationships joining them, plus the [`SourceInfo`] citations (with the
+///    entity `url` when present, KGP-Q1).
+///
+/// This is the Rust port of the Python `KnowledgeGraphAgent.query()` graph
+/// traversal that the previous single-table LIKE scan only approximated.
+fn query_graph(
+    conn: &Connection,
+    keywords: &[&str],
+    limit: usize,
+) -> Option<(String, Vec<SourceInfo>)> {
+    if !table_exists(conn, "entities") || !table_exists(conn, "relationships") {
+        return None;
+    }
+
+    let seeds = seed_entities(conn, keywords, limit);
+    if seeds.is_empty() {
+        return None;
+    }
+
+    // Breadth-first traversal. `order` preserves discovery order (seeds first by
+    // relevance, then neighbours by hop) for deterministic, relevance-ordered
+    // output; `known` de-duplicates entities; `edges` collects the distinct
+    // relationships that ground the answer.
+    let mut known: HashMap<String, GraphEntity> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for e in &seeds {
+        if known.insert(e.id.clone(), e.clone()).is_none() {
+            order.push(e.id.clone());
+        }
+    }
+
+    let mut frontier: Vec<String> = order.clone();
+    let mut edges: Vec<GraphEdge> = Vec::new();
+    let mut seen_edges: std::collections::HashSet<(String, String, String)> =
+        std::collections::HashSet::new();
+
+    for _hop in 0..MAX_GRAPH_HOPS {
+        if frontier.is_empty() {
+            break;
+        }
+        let hop_edges = fetch_edges(conn, &frontier);
+        let mut new_ids: Vec<String> = Vec::new();
+        for edge in &hop_edges {
+            let key = (
+                edge.source.clone(),
+                edge.target.clone(),
+                edge.relation.clone(),
+            );
+            if seen_edges.insert(key) {
+                edges.push(edge.clone());
+            }
+            for nid in [&edge.source, &edge.target] {
+                if !known.contains_key(nid) && !new_ids.iter().any(|x| x == nid) {
+                    new_ids.push(nid.clone());
+                }
+            }
+        }
+
+        let mut next_frontier: Vec<String> = Vec::new();
+        for neighbour in fetch_entities_by_id(conn, &new_ids) {
+            if !known.contains_key(&neighbour.id) {
+                order.push(neighbour.id.clone());
+                next_frontier.push(neighbour.id.clone());
+                known.insert(neighbour.id.clone(), neighbour);
+            }
+        }
+        frontier = next_frontier;
+    }
+
+    let sources: Vec<SourceInfo> = order
+        .iter()
+        .take(limit)
+        .filter_map(|id| known.get(id))
+        .map(|e| SourceInfo {
+            title: e.name.clone(),
+            section: if e.etype.is_empty() {
+                "entity".to_string()
+            } else {
+                e.etype.clone()
+            },
+            url: e.url.clone(),
+        })
+        .collect();
+
+    let answer = build_graph_answer(&known, &order, &edges);
+    Some((answer, sources))
+}
+
+/// Compose a graph-grounded answer: the leading entities' descriptions followed
+/// by the relationships joining the retrieved entities (e.g.
+/// "Ownership enables Borrowing"). Descriptions are truncated on a UTF-8 char
+/// boundary (KGP-Q6) so multibyte content never panics.
+fn build_graph_answer(
+    known: &HashMap<String, GraphEntity>,
+    order: &[String],
+    edges: &[GraphEdge],
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    for id in order.iter().take(3) {
+        if let Some(entity) = known.get(id)
+            && !entity.description.is_empty()
+        {
+            let mut desc = entity.description.clone();
+            if desc.len() > 500 {
+                crate::util::string_truncate::truncate_to_char_boundary(&mut desc, 500);
+                desc.push_str("...");
+            }
+            parts.push(desc);
+        }
+    }
+
+    let mut rel_sentences: Vec<String> = Vec::new();
+    for edge in edges.iter().take(10) {
+        let source = known
+            .get(&edge.source)
+            .map(|e| e.name.as_str())
+            .unwrap_or(edge.source.as_str());
+        let target = known
+            .get(&edge.target)
+            .map(|e| e.name.as_str())
+            .unwrap_or(edge.target.as_str());
+        let relation = if edge.relation.is_empty() {
+            "is related to"
+        } else {
+            edge.relation.as_str()
+        };
+        rel_sentences.push(format!("{source} {relation} {target}"));
+    }
+    if !rel_sentences.is_empty() {
+        parts.push(format!("Related concepts: {}.", rel_sentences.join("; ")));
+    }
+
+    if parts.is_empty() {
+        // Seeds matched but carry no descriptions and no edges — still name them.
+        let names: Vec<&str> = order
+            .iter()
+            .filter_map(|id| known.get(id))
+            .map(|e| e.name.as_str())
+            .collect();
+        return format!(
+            "Found {} related entities: {}",
+            names.len(),
+            names.join(", ")
+        );
+    }
+    parts.join(" ")
 }
 
 /// Per-pack cache of a **live, reused** read-only SQLite connection (KGP-T3).
@@ -693,6 +1035,51 @@ mod tests {
             "CREATE TABLE articles (title TEXT, section TEXT, content TEXT, url TEXT);
              INSERT INTO articles VALUES ('Ownership in Rust', 'Basics', 'Ownership is a set of rules that govern how a Rust program manages memory.', 'https://doc.rust-lang.org/book/ch04-01-what-is-ownership.html');
              INSERT INTO articles VALUES ('Borrowing', 'References', 'References let you refer to a value without taking ownership.', '');",
+        )
+        .unwrap();
+
+        pack_dir
+    }
+
+    /// Build a pack that exposes a knowledge **graph** (`entities` +
+    /// `relationships` tables) modelling the upstream agent-kgpacks
+    /// `Entity`/`ENTITY_RELATION` schema. Three Rust concepts are linked:
+    ///
+    /// ```text
+    /// Ownership --enables--> Borrowing --constrained by--> Lifetimes
+    /// ```
+    ///
+    /// Only "Ownership" mentions the word "ownership", so a query for it must
+    /// traverse relationships to surface the linked "Borrowing" (hop 1) and
+    /// "Lifetimes" (hop 2) — proving multi-hop GraphRAG retrieval (KGP-Q5).
+    /// The `entities` table carries a `url` column so graph answers keep the
+    /// source-citation guarantee (KGP-Q1); "Ownership" cites a URL, "Borrowing"
+    /// has an empty (→ no citation) url, "Lifetimes" a NULL url.
+    fn create_test_graph_pack(packs_dir: &Path, name: &str) -> PathBuf {
+        let pack_dir = packs_dir.join(name);
+        fs::create_dir_all(&pack_dir).unwrap();
+
+        let manifest = serde_json::json!({
+            "name": name,
+            "description": format!("{name} knowledge pack"),
+            "graph_stats": { "articles": 0, "entities": 3, "relationships": 2, "size_mb": 0.1 }
+        });
+        fs::write(
+            pack_dir.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let db_path = pack_dir.join("pack.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE entities (entity_id TEXT, name TEXT, type TEXT, description TEXT, url TEXT);
+             INSERT INTO entities VALUES ('e_own', 'Ownership', 'concept', 'Ownership is a set of rules that govern how a Rust program manages memory.', 'https://doc.rust-lang.org/book/ch04-01-what-is-ownership.html');
+             INSERT INTO entities VALUES ('e_borrow', 'Borrowing', 'concept', 'Borrowing lets you refer to a value without taking ownership of it.', '');
+             INSERT INTO entities VALUES ('e_life', 'Lifetimes', 'concept', 'Lifetimes tell the compiler how long references remain valid.', NULL);
+             CREATE TABLE relationships (source_id TEXT, target_id TEXT, relation TEXT, context TEXT);
+             INSERT INTO relationships VALUES ('e_own', 'e_borrow', 'enables', 'ownership rules enable safe borrowing');
+             INSERT INTO relationships VALUES ('e_borrow', 'e_life', 'constrained by', 'borrows are constrained by lifetimes');",
         )
         .unwrap();
 
@@ -1326,5 +1713,178 @@ mod tests {
             assert!(!result["answer"].as_str().unwrap().is_empty());
             assert!(result["confidence"].as_f64().unwrap() > 0.0);
         }
+    }
+
+    // ── GraphRAG multi-hop retrieval (KGP-Q5) ───────────────────────────────
+
+    #[test]
+    fn query_graph_traverses_relationships_for_linked_entities() {
+        // KGP-Q5 primary: a query that only matches "Ownership" by keyword must
+        // traverse the relationship graph to surface the linked "Borrowing"
+        // entity (hop 1) that the keyword never matched — proving the answer is
+        // grounded in a graph join, not a single-table LIKE scan.
+        let tmp = TempDir::new().unwrap();
+        let pack_dir = create_test_graph_pack(tmp.path(), "graph-pack");
+        let db_path = pack_dir.join("pack.db");
+
+        let (answer, sources, confidence) =
+            query_pack_db(&db_path, "What is ownership in Rust?", 5).unwrap();
+
+        assert!(confidence > 0.0);
+        assert!(
+            sources.iter().any(|s| s.title == "Ownership"),
+            "the keyword-matched seed entity must be cited; got: {sources:?}"
+        );
+        assert!(
+            sources.iter().any(|s| s.title == "Borrowing"),
+            "a linked entity NOT matched by the keyword must be reached via the \
+             relationship graph; got: {sources:?}"
+        );
+        assert!(
+            answer.contains("Borrowing") && answer.contains("enables"),
+            "the answer must name the linked entity and the relationship joining \
+             it; got: {answer:?}"
+        );
+        // KGP-Q1: the seed entity's citation URL propagates through the graph path.
+        let ownership = sources
+            .iter()
+            .find(|s| s.title == "Ownership")
+            .expect("Ownership source");
+        assert_eq!(
+            ownership.url.as_deref(),
+            Some("https://doc.rust-lang.org/book/ch04-01-what-is-ownership.html"),
+            "graph answers must keep the source-citation guarantee"
+        );
+    }
+
+    #[test]
+    fn query_graph_reaches_two_hop_neighbor() {
+        // Multi-hop: "Lifetimes" is two relationship hops from the "Ownership"
+        // seed (Ownership -> Borrowing -> Lifetimes) and shares no keyword with
+        // the query, so reaching it requires MAX_GRAPH_HOPS traversal.
+        let tmp = TempDir::new().unwrap();
+        let pack_dir = create_test_graph_pack(tmp.path(), "graph-pack");
+        let db_path = pack_dir.join("pack.db");
+
+        let (answer, sources, _confidence) =
+            query_pack_db(&db_path, "Tell me about ownership", 5).unwrap();
+
+        assert!(
+            sources.iter().any(|s| s.title == "Lifetimes"),
+            "the two-hop neighbour must be retrieved; got: {sources:?}"
+        );
+        assert!(
+            answer.contains("Lifetimes") && answer.contains("constrained by"),
+            "the answer must include the second-hop relationship; got: {answer:?}"
+        );
+    }
+
+    #[test]
+    fn query_graph_empty_url_and_null_url_yield_no_citation() {
+        // A present-but-empty url ("Borrowing") and a NULL url ("Lifetimes")
+        // must both degrade to no citation (None), never Some("").
+        let tmp = TempDir::new().unwrap();
+        let pack_dir = create_test_graph_pack(tmp.path(), "graph-pack");
+        let db_path = pack_dir.join("pack.db");
+
+        let (_answer, sources, _confidence) =
+            query_pack_db(&db_path, "What is ownership in Rust?", 5).unwrap();
+
+        for title in ["Borrowing", "Lifetimes"] {
+            let s = sources
+                .iter()
+                .find(|s| s.title == title)
+                .unwrap_or_else(|| panic!("{title} must be reached via the graph"));
+            assert_eq!(s.url, None, "{title} must have no citation url");
+        }
+    }
+
+    #[test]
+    fn query_graph_returns_none_without_graph_tables() {
+        // A pack with only an `articles` table (no entities/relationships) must
+        // fall back to the single-table scan — query_graph returns None.
+        let tmp = TempDir::new().unwrap();
+        let pack_dir = create_test_pack(tmp.path(), "article-pack");
+        let db_path = pack_dir.join("pack.db");
+        let conn = Connection::open(&db_path).unwrap();
+
+        assert!(
+            query_graph(&conn, &["ownership"], 5).is_none(),
+            "a pack without graph tables must not use the graph path"
+        );
+
+        // And the overall query still succeeds via the article fallback.
+        let (_answer, sources, _confidence) =
+            query_pack_db(&db_path, "What is ownership in Rust?", 5).unwrap();
+        assert!(
+            sources.iter().any(|s| s.title.contains("Ownership")),
+            "the article fallback must still answer; got: {sources:?}"
+        );
+    }
+
+    #[test]
+    fn query_graph_ignores_pack_with_entities_but_no_relationships() {
+        // Half a graph (entities but no relationships table) is not a traversable
+        // graph — query_graph must return None so the caller falls back.
+        let tmp = TempDir::new().unwrap();
+        let pack_dir = tmp.path().join("half-graph");
+        fs::create_dir_all(&pack_dir).unwrap();
+        let db_path = pack_dir.join("pack.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE entities (entity_id TEXT, name TEXT, type TEXT, description TEXT);
+             INSERT INTO entities VALUES ('e1', 'Ownership', 'concept', 'Ownership rules.');",
+        )
+        .unwrap();
+
+        assert!(
+            query_graph(&conn, &["ownership"], 5).is_none(),
+            "a pack missing the relationships table must not use the graph path"
+        );
+    }
+
+    #[test]
+    fn query_graph_returns_none_when_no_seed_entity_matches() {
+        // Graph tables exist but no entity matches the keywords — no seed, so no
+        // traversal; the caller falls back to the article scan.
+        let tmp = TempDir::new().unwrap();
+        let pack_dir = create_test_graph_pack(tmp.path(), "graph-pack");
+        let db_path = pack_dir.join("pack.db");
+        let conn = Connection::open(&db_path).unwrap();
+
+        assert!(
+            query_graph(&conn, &["kubernetes"], 5).is_none(),
+            "no matching seed entity must yield None (fall back), not an empty graph answer"
+        );
+    }
+
+    #[test]
+    fn native_knowledge_transport_query_graph_surfaces_linked_entity() {
+        // End-to-end KGP-Q5: the linked (non-keyword) entity reached via graph
+        // traversal appears in the wire response's sources.
+        let tmp = TempDir::new().unwrap();
+        create_test_graph_pack(tmp.path(), "graph-pack");
+
+        let mut transport = NativeRpcTransport::new("simard-knowledge");
+        register_knowledge_handlers(&mut transport, tmp.path().to_path_buf());
+
+        let request = crate::rpc::RpcRequest {
+            id: crate::rpc::new_request_id(),
+            method: "knowledge.query".to_string(),
+            params: serde_json::json!({
+                "pack_name": "graph-pack",
+                "question": "What is ownership in Rust?",
+                "limit": 5,
+            }),
+        };
+        let response = crate::rpc::RpcTransport::call(&transport, request).unwrap();
+        let result = response.result.expect("query must succeed");
+        let sources = result["sources"].as_array().expect("sources array");
+        assert!(
+            sources
+                .iter()
+                .any(|s| s["title"].as_str() == Some("Borrowing")),
+            "the wire response must include the graph-linked entity; got: {sources:?}"
+        );
     }
 }

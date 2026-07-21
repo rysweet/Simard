@@ -63,7 +63,7 @@ implemented; acceptance test is the definition of done) · **OUT-OF-SCOPE**.
 | KGP-Q7 | Each source surfaces its `section` | asserted within KGP-M/query tests | DONE | `native_knowledge.rs::SourceInfo.section` |
 | KGP-Q8 | Retrieval **ranks candidates by keyword coverage** (a title hit weighted above a content-only mention) so the `limit` cut keeps the most on-topic article instead of returning matches in arbitrary storage (rowid) order | `query_articles_ranks_most_relevant_first`, `query_articles_limit_keeps_most_relevant`, `query_articles_prefers_title_over_content_match` green | DONE | `native_knowledge.rs::query_articles` (`ORDER BY <coverage score> DESC`), `TITLE_MATCH_WEIGHT` / `CONTENT_MATCH_WEIGHT` |
 | KGP-Q4 | Keyword search binds parameters instead of string-interpolating LIKE clauses | `like_contains_pattern_escapes_metacharacters`, `query_articles_treats_like_wildcards_as_literal`, `query_articles_binds_keywords_and_resists_injection` green | DONE | `native_knowledge.rs::query_articles` binds each keyword as `?n` via `like_contains_pattern` (`LIKE ?n ESCAPE '\'`) |
-| KGP-Q5 | GraphRAG retrieval: traverse entity + relationship tables (multi-hop), not only a single-table LIKE scan | NEW test: a pack fixture with `relationships` yields a graph-grounded answer joining linked entities | OPEN | `native_knowledge.rs::query_articles` comment: "simplified version of the Python `KnowledgeGraphAgent.query()`" |
+| KGP-Q5 | GraphRAG retrieval: traverse entity + relationship tables (multi-hop), not only a single-table LIKE scan | NEW test: a pack fixture with `relationships` yields a graph-grounded answer joining linked entities | DONE | `native_knowledge.rs::query_graph` runs before the article fallback: it seeds keyword-matched `entities`, traverses `relationships` up to `MAX_GRAPH_HOPS` (2), and builds an answer naming the linked entities + relations. Tests: `query_graph_traverses_relationships_for_linked_entities`, `query_graph_reaches_two_hop_neighbor` |
 
 ### Transport, health & lifecycle
 
@@ -102,15 +102,13 @@ separately for the Phase 9+ pack-authoring work.
 
 ## Ordered backlog (so the next cycle is never stuck)
 
-Work the OPEN criteria top-to-bottom; each is a self-contained, shippable unit
-with its acceptance test already specified above:
+**All in-scope parity criteria are now DONE — kgpacks-rs is at full parity.**
+The done-gate below is green with every `KGP-M*`/`KGP-Q*`/`KGP-T*`/`KGP-P*` row
+marked DONE. No OPEN in-scope criteria remain.
 
-1. **KGP-Q5** — GraphRAG multi-hop retrieval over entities + relationships.
-   Largest; consider splitting into a fixture step and a traversal step.
-
-(KGP-T3 — reuse an open `Connection` in `conn_cache` — is now **DONE**; see the
-progress log below. KGP-Q4 — parameterize the keyword LIKE search — is likewise
-**DONE**.)
+(KGP-Q5 — GraphRAG multi-hop retrieval — closed on 2026-07-21; see the progress
+log below. KGP-T3 — reuse an open `Connection` in `conn_cache` — and KGP-Q4 —
+parameterize the keyword LIKE search — are likewise **DONE**.)
 
 ## Progress log
 
@@ -170,3 +168,32 @@ progress log below. KGP-Q4 — parameterize the keyword LIKE search — is likew
   to one pack both succeed against the reused connection). The prior
   "pack not found" / "no database" error contracts are preserved. Remaining OPEN
   parity criterion: KGP-Q5 (GraphRAG multi-hop).
+- **2026-07-21** — **KGP-Q5 closed** (GraphRAG multi-hop retrieval) — **full
+  parity achieved**. `knowledge.query` previously answered only from a single
+  `articles` LIKE scan, an approximation of the Python
+  `KnowledgeGraphAgent.query()` that never traversed the pack's knowledge graph.
+  A new `query_graph(conn, keywords, limit)` now runs **before** the article
+  fallback: when the pack exposes both an `entities` and a `relationships` table
+  (the SQLite port of upstream `Entity` / `ENTITY_RELATION`), it (1) selects
+  keyword-matched **seed** entities — reusing the same parameterized
+  `like_contains_pattern` LIKE search and `TITLE_MATCH_WEIGHT`/
+  `CONTENT_MATCH_WEIGHT` coverage ranking as `query_articles`, and projecting the
+  entity `url` for citations (KGP-Q1) — then (2) traverses `relationships` edges
+  breadth-first up to `MAX_GRAPH_HOPS` (2), pulling in **linked** entities the
+  keyword never matched, and (3) builds an answer that names those linked
+  entities and the relations joining them ("Ownership enables Borrowing; Borrowing
+  constrained by Lifetimes"). `query_graph` returns `None` — falling back to the
+  article scan, so article-only packs are unchanged — when either graph table is
+  absent or no seed entity matches. Edge/entity ids and keywords are all bound as
+  parameters (`?n`, reused across both `IN` lists), so the traversal carries no
+  injection surface. Descriptions are truncated on a UTF-8 char boundary (KGP-Q6).
+  Acceptance tests: `query_graph_traverses_relationships_for_linked_entities`
+  (hop-1 linked entity surfaced + cited), `query_graph_reaches_two_hop_neighbor`
+  (hop-2 neighbour), `query_graph_returns_none_without_graph_tables`,
+  `query_graph_ignores_pack_with_entities_but_no_relationships`,
+  `query_graph_returns_none_when_no_seed_entity_matches`,
+  `query_graph_empty_url_and_null_url_yield_no_citation`, and
+  `native_knowledge_transport_query_graph_surfaces_linked_entity` (end-to-end via
+  the RPC transport). With this, **every in-scope parity criterion is DONE** and
+  the done-gate (`cargo test --lib native_knowledge` + `cargo test --lib
+  knowledge_client`) is green.
