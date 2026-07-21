@@ -5,11 +5,11 @@
 
 // ---- Flows -----------------------------------------------------------------
 MERGE (f:Flow {id:'ooda-loop'})       SET f.name='OODA loop', f.entry='run_ooda_cycle', f.evidence='src/ooda_loop/cycle.rs';
-MERGE (f:Flow {id:'overseer-tick'})   SET f.name='Overseer meta-OODA tick', f.entry='run_cycle', f.evidence='src/overseer/mod.rs:609';
+MERGE (f:Flow {id:'overseer-tick'})   SET f.name='Overseer meta-OODA tick', f.entry='run_cycle', f.evidence='src/overseer/mod.rs:663';
 MERGE (f:Flow {id:'recipes'})         SET f.name='Recipe-runner invocation', f.entry='resolve_recipe_path', f.evidence='src/ooda_brain/recipe_brain.rs';
 MERGE (f:Flow {id:'prompt-assets'})   SET f.name='Prompt assets', f.entry='FilePromptAssetStore::load', f.evidence='src/prompt_assets.rs';
 MERGE (f:Flow {id:'typed-ooda'})      SET f.name='Typed-OODA capability/effect', f.entry='TypedGoalSessionRoute::execute', f.evidence='src/typed_ooda/route.rs';
-MERGE (f:Flow {id:'memory-recall'})   SET f.name='Cognitive-memory recall', f.entry='recall_pass', f.evidence='src/overseer/mod.rs:1026';
+MERGE (f:Flow {id:'memory-recall'})   SET f.name='Cognitive-memory recall', f.entry='recall_pass', f.evidence='src/overseer/mod.rs:1156';
 
 // ---- OODA loop phases ------------------------------------------------------
 MERGE (p:Phase {id:'ooda.observe'})     SET p.seq=1, p.detail='observe(state, memories)', p.evidence='src/ooda_loop/observe.rs';
@@ -21,12 +21,12 @@ MERGE (p:Phase {id:'ooda.act'})         SET p.seq=6, p.detail='act (ooda_loop/mo
 MERGE (p:Phase {id:'ooda.consolidate'}) SET p.seq=7, p.detail='execution + review + reflection memory writes; no-progress breaker; persist_board (commit_cycle is daemon-side)', p.evidence='src/ooda_loop/cycle.rs';
 
 // ---- Overseer tick phases --------------------------------------------------
-MERGE (p:Phase {id:'ovr.observe'})   SET p.seq=1, p.detail='snapshot + board + ready_prs (survey_ready_prs inline narrowing + draft-exclusion #4339) + merge-queue projection (project_ready_prs re-applies the same narrowing) + failures', p.evidence='src/overseer/mod.rs:636';
-MERGE (p:Phase {id:'ovr.recall'})    SET p.seq=2, p.detail='recall_pass(keys) -> MemorySnapshot', p.evidence='src/overseer/mod.rs:1026';
-MERGE (p:Phase {id:'ovr.orient'})    SET p.seq=3, p.detail='signals_from + orient -> Vec<Problem>', p.evidence='src/overseer/mod.rs:2165';
+MERGE (p:Phase {id:'ovr.observe'})   SET p.seq=1, p.detail='snapshot + board + ready_prs (survey_ready_prs inline narrowing + draft-exclusion #4339) + merge-queue projection (project_ready_prs re-applies the same narrowing) + failures', p.evidence='src/overseer/mod.rs:690';
+MERGE (p:Phase {id:'ovr.recall'})    SET p.seq=2, p.detail='recall_pass(keys) -> MemorySnapshot', p.evidence='src/overseer/mod.rs:1156';
+MERGE (p:Phase {id:'ovr.orient'})    SET p.seq=3, p.detail='signals_from + orient -> Vec<Problem>', p.evidence='src/overseer/mod.rs:2295';
 MERGE (p:Phase {id:'ovr.rootcause'}) SET p.seq=4, p.detail='root_cause::analyze + recurrence', p.evidence='src/overseer/root_cause.rs';
-MERGE (p:Phase {id:'ovr.decide'})    SET p.seq=5, p.detail='decide(problem) -> Intervention', p.evidence='src/overseer/mod.rs:2467';
-MERGE (p:Phase {id:'ovr.gate'})      SET p.seq=6, p.detail='gate(iv, observed, launches) -> PlannedIntervention; then observe_ecosystem appends gated LaunchRecipe', p.evidence='src/overseer/mod.rs:1156';
+MERGE (p:Phase {id:'ovr.decide'})    SET p.seq=5, p.detail='decide(problem) -> Intervention', p.evidence='src/overseer/mod.rs:2609';
+MERGE (p:Phase {id:'ovr.gate'})      SET p.seq=6, p.detail='gate(iv, observed, launches) -> PlannedIntervention; then observe_ecosystem (mod.rs:857) and health_review (mod.rs:935) each append gated interventions', p.evidence='src/overseer/mod.rs:1286';
 MERGE (p:Phase {id:'ovr.act'})       SET p.seq=7, p.detail='capabilities: notify/issue/launch/merge; RefuseDeployer; GoalCurator unblock+MeetingHost transfer', p.evidence='src/overseer/capabilities.rs';
 
 // ---- Overseer verify+merge sub-pipeline (sub-steps of ovr.act; merge_ops M2)
@@ -48,6 +48,7 @@ MERGE (r:Recipe {id:'ooda-engineer-lifecycle'}) SET r.file='prompt_assets/simard
 MERGE (r:Recipe {id:'goal-session-actor'})   SET r.file='prompt_assets/simard/recipes/goal-session-actor.yaml';
 MERGE (r:Recipe {id:'observe-merge-queue'})  SET r.file='prompt_assets/simard/recipes/observe-merge-queue.yaml';
 MERGE (r:Recipe {id:'ecosystem-observe'})    SET r.file='prompt_assets/simard/recipes/ecosystem-observe.yaml';
+MERGE (r:Recipe {id:'overseer-health-review'}) SET r.file='prompt_assets/simard/recipes/overseer-health-review.yaml';
 MERGE (r:Recipe {id:'merge-readiness-judge'}) SET r.file='prompt_assets/simard/recipes/merge-readiness-judge.yaml';
 MERGE (r:Recipe {id:'smart-orchestrator'})   SET r.file='amplifier-bundle (downstream, not in-repo)', r.external=true;
 
@@ -59,6 +60,7 @@ MERGE (a:PromptAsset {id:'overseer.problem_to_brief'}) SET a.file='prompt_assets
 MERGE (a:PromptAsset {id:'overseer.pr_verify'})        SET a.file='prompt_assets/simard/overseer/pr_verify.md';
 MERGE (a:PromptAsset {id:'overseer.deploy_gate'})      SET a.file='prompt_assets/simard/overseer/deploy_gate.md';
 MERGE (a:PromptAsset {id:'overseer.self_diagnose'})    SET a.file='prompt_assets/simard/overseer/self_diagnose.md';
+MERGE (a:PromptAsset {id:'overseer.health_review'})    SET a.file='prompt_assets/simard/overseer/health_review.md';
 
 // ---- Typed-OODA capabilities + effects -------------------------------------
 MERGE (c:Capability {id:'record_action.spawn_engineer'}) SET c.grant='RecordAction(SpawnEngineer)', c.evidence='src/typed_ooda/types.rs:694';
@@ -99,6 +101,7 @@ MATCH (p:Phase {id:'ooda.orient'}), (r:Recipe {id:'ooda-orient'}) MERGE (p)-[:IN
 MATCH (p:Phase {id:'ooda.decide'}), (r:Recipe {id:'ooda-decide'}) MERGE (p)-[:INVOKES]->(r);
 MATCH (p:Phase {id:'ovr.observe'}), (r:Recipe {id:'observe-merge-queue'}) MERGE (p)-[:INVOKES]->(r);
 MATCH (p:Phase {id:'ovr.gate'}), (r:Recipe {id:'ecosystem-observe'})    MERGE (p)-[:INVOKES]->(r);
+MATCH (p:Phase {id:'ovr.gate'}), (r:Recipe {id:'overseer-health-review'}) MERGE (p)-[:INVOKES]->(r);
 MATCH (p:Phase {id:'ovr.gate'}), (r:Recipe {id:'smart-orchestrator'})   MERGE (p)-[:INVOKES]->(r);
 // The merge judge phase MAY invoke the recipe-backed judge (resolution #1); it otherwise
 // falls back to a direct LLM judge (merge_readiness_judge.md) or the fail-closed RefusingMergeJudge.
