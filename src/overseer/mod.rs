@@ -1582,12 +1582,18 @@ impl Overseer {
                 // refusal) arm the per-PR escalation backoff (issue #4344) so a
                 // repeat escalation of this same still-open PR is HELD in `gate`
                 // within the window instead of paging every tick. A successful
-                // merge never arms the gate.
+                // merge never arms the gate — and, as a terminal state, EVICTS
+                // any entry an earlier escalation left behind so the per-PR
+                // `state` map stays bounded to currently-open, still-escalating
+                // PRs (review F2) instead of retaining one entry per PR ever
+                // surveyed. Eviction is fail-safe: dropping an entry can only
+                // make the gate re-surface sooner, never suppress a real page.
+                let dedup_key = guardrails::verify_and_merge_dedup_key(repo, *pr);
                 if outcome == ActOutcome::Escalated {
-                    self.merge_escalation_backoff.commit(
-                        &guardrails::verify_and_merge_dedup_key(repo, *pr),
-                        (self.clock)(),
-                    );
+                    self.merge_escalation_backoff
+                        .commit(&dedup_key, (self.clock)());
+                } else {
+                    self.merge_escalation_backoff.forget(&dedup_key);
                 }
                 Ok(outcome)
             }
@@ -4668,5 +4674,122 @@ mod tests {
             "a non-green PR must still escalate on its first survey"
         );
         assert_eq!(ov.act(&iv).expect("act"), ActOutcome::Escalated);
+    }
+
+    #[test]
+    fn not_merge_ready_refusal_escalation_resurfaces_after_the_window() {
+        // Review F1 — a fail-closed refusal is NEVER deduped into permanent
+        // silence. The `NotMergeReady` escalation sub-case (objective pre-filter
+        // passes but the authoritative merge step fails closed, e.g. no LLM
+        // provider) is held only WITHIN the bounded window; once it elapses the
+        // same still-refused PR must escalate AGAIN so the operator is always
+        // eventually paged. Confirms the dedup rail can only DELAY a page of a
+        // green-but-refused PR, never mask it (and never blind-merges it).
+        let merges = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (mut ov, now, merges) = overseer_for_merge_dedup(CountingPrs {
+            ready: true,
+            refuse: true,
+            merges,
+        });
+        let iv = verify_merge_iv(4145);
+        let observed = ObservedState::default();
+
+        // Tick 1: fail-closed refusal escalates + arms the window.
+        let mut l = 0usize;
+        assert!(ov.gate(&iv, &observed, &mut l).admitted);
+        assert_eq!(ov.act(&iv).expect("act"), ActOutcome::Escalated);
+
+        // Tick 2 (same instant, inside the window): held.
+        let mut l2 = 0usize;
+        assert!(
+            !ov.gate(&iv, &observed, &mut l2).admitted,
+            "a repeat refusal inside the window is deduped"
+        );
+
+        // After the window elapses the still-refused PR must re-page.
+        now.fetch_add(100 * 24 * 3600, std::sync::atomic::Ordering::SeqCst);
+        let mut l3 = 0usize;
+        assert!(
+            ov.gate(&iv, &observed, &mut l3).admitted,
+            "a still-refused (fail-closed) PR must re-escalate after the window — \
+             a green-but-refused PR is never deduped into permanent silence"
+        );
+        assert_eq!(
+            merges.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a fail-closed refusal never blind-merges, even across windows"
+        );
+    }
+
+    /// A `PrOps` whose `verify()` verdict is flipped at runtime via an atomic, so
+    /// a test can arm the escalation gate (not-ready) and then make the SAME PR
+    /// merge-ready — exercising the evict-on-merge path (review F2).
+    struct SwitchablePrs {
+        ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        merges: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl PrOps for SwitchablePrs {
+        fn verify(&self, _repo: &str, _pr: u32) -> Result<VerifyReport, OverseerError> {
+            Ok(VerifyReport {
+                ready: self.ready.load(std::sync::atomic::Ordering::SeqCst),
+                checks: vec![],
+            })
+        }
+        fn merge(&self, _repo: &str, _pr: u32) -> Result<(), OverseerError> {
+            self.merges
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        fn resolve_conflict(&self, _repo: &str, _pr: u32) -> Result<(), OverseerError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn merging_a_previously_escalated_pr_evicts_its_backoff_entry() {
+        // Review F2 — bound `merge_escalation_backoff` map growth. A PR that
+        // escalated (arming a per-PR entry) and later MERGES must have its entry
+        // EVICTED, so the map tracks only currently-open, still-escalating PRs
+        // rather than one permanent entry per PR ever surveyed.
+        let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let merges = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let now = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(1_000_000));
+        let clk = now.clone();
+        let mut ov = Overseer::new(caps_with_prs(Box::new(SwitchablePrs {
+            ready: ready.clone(),
+            merges: merges.clone(),
+        })))
+        .with_verify_merge_autonomy(true)
+        .with_clock(Box::new(move || {
+            clk.load(std::sync::atomic::Ordering::SeqCst)
+        }));
+        let iv = verify_merge_iv(4344);
+        let observed = ObservedState::default();
+
+        // Tick 1: not-ready → Escalated → arms exactly one per-PR entry.
+        let mut l = 0usize;
+        assert!(ov.gate(&iv, &observed, &mut l).admitted);
+        assert_eq!(ov.act(&iv).expect("act"), ActOutcome::Escalated);
+        assert_eq!(
+            ov.merge_escalation_backoff.tracked_keys(),
+            1,
+            "an escalation arms exactly one per-PR backoff entry"
+        );
+
+        // The window elapses and the PR is now green: it merges this tick.
+        now.fetch_add(100 * 24 * 3600, std::sync::atomic::Ordering::SeqCst);
+        ready.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut l2 = 0usize;
+        assert!(ov.gate(&iv, &observed, &mut l2).admitted);
+        assert_eq!(ov.act(&iv).expect("act"), ActOutcome::Merged);
+        assert_eq!(merges.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Eviction: the merged PR's entry is gone — the map is bounded to
+        // currently-open escalating PRs, not every PR ever handled.
+        assert_eq!(
+            ov.merge_escalation_backoff.tracked_keys(),
+            0,
+            "merging a previously-escalated PR must EVICT its backoff entry"
+        );
     }
 }

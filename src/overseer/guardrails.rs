@@ -517,6 +517,24 @@ impl BackoffGate {
         }
         decision
     }
+
+    /// Evict `key`'s suppression state entirely, so the next [`peek`] admits as
+    /// if the key had never been seen. The act path calls this when a subject
+    /// reaches a TERMINAL state (e.g. a PR merges or closes), so the per-key
+    /// `state` map is not kept growing one permanent entry per subject ever
+    /// surveyed — it is bounded to the set of CURRENTLY-open, still-recurring
+    /// subjects. A no-op for an unknown key, and always fail-safe: dropping an
+    /// entry can only make the gate MORE willing to surface, never less.
+    pub fn forget(&mut self, key: &str) {
+        self.state.remove(key);
+    }
+
+    /// Number of keys currently tracked. Test-only visibility into map growth so
+    /// the evict-on-terminal-state contract (bounded `state`) is provable.
+    #[cfg(test)]
+    pub fn tracked_keys(&self) -> usize {
+        self.state.len()
+    }
 }
 
 /// Stable, namespaced dedup key for one PR's verify-and-merge escalation
@@ -899,5 +917,38 @@ mod whisper_backoff_tests {
         }
         // Exactly one BASE window later it re-fires (peeks did not double it).
         assert_eq!(gate.peek(sig, 100), WhisperDecision::Deliver);
+    }
+
+    /// `BackoffGate::forget` evicts a key's armed state so the map stays bounded
+    /// to currently-open subjects (issue #4344 review F2). A forgotten key
+    /// readmits immediately (as if never seen), and forgetting an unknown key is
+    /// a harmless no-op.
+    #[test]
+    fn backoff_forget_evicts_a_key_and_readmits_immediately() {
+        let mut gate = BackoffGate::new(100, 2, 1000);
+        let key = "verify_and_merge:rysweet/Simard#4344";
+
+        // Arm the window, then confirm a same-instant repeat is suppressed.
+        assert_eq!(gate.admit(key, 0), BackoffDecision::Admit);
+        assert_eq!(gate.tracked_keys(), 1, "an admitted key is tracked");
+        assert_eq!(gate.peek(key, 1), BackoffDecision::Suppress);
+
+        // Eviction clears the armed state: the very next peek admits and the map
+        // no longer retains the key.
+        gate.forget(key);
+        assert_eq!(gate.tracked_keys(), 0, "forget evicts the entry");
+        assert_eq!(
+            gate.peek(key, 1),
+            BackoffDecision::Admit,
+            "a forgotten key must admit as if never seen"
+        );
+
+        // Forgetting an unknown key must not panic or add state.
+        gate.forget("never-seen");
+        assert_eq!(
+            gate.tracked_keys(),
+            0,
+            "forgetting an unknown key is a no-op"
+        );
     }
 }

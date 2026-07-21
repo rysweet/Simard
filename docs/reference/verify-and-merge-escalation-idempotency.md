@@ -182,7 +182,8 @@ merge_escalation_backoff: BackoffGate::new(
 ),
 ```
 
-The `BackoffGate` primitive is unchanged (`src/overseer/guardrails.rs`):
+The `BackoffGate` primitive is unchanged apart from an additive terminal-state
+evictor (`src/overseer/guardrails.rs`):
 
 - `peek(key, now_secs) -> BackoffDecision` — decide **without** recording. An
   unseen key, an elapsed window, or a backwards clock jump all `Admit`; only a
@@ -190,6 +191,10 @@ The `BackoffGate` primitive is unchanged (`src/overseer/guardrails.rs`):
 - `commit(key, now_secs)` — record an admitted occurrence, arming the base window
   on first sight and growing it `× multiplier` (capped) on each subsequent one,
   **resetting** to base after a silence `>= 2 ×` the current window.
+- `forget(key)` — evict a key's state entirely (a no-op for an unknown key). The
+  Act path calls this on a PR's terminal `Merged` outcome so the map stays bounded
+  to currently-open, still-escalating PRs (review F2). Fail-safe: eviction can
+  only let the gate re-surface sooner, never suppress a page.
 
 ### `gate()` — the `VerifyAndMergePr` branch
 
@@ -216,18 +221,23 @@ gate and escalates.
 
 ```rust
 Intervention::VerifyAndMergePr { repo, pr } => {
+    let key = verify_and_merge_dedup_key(repo, *pr);
     let report = self.caps.prs.verify(repo, *pr)?;
     if !report.ready {
         // Repeat escalation of the SAME still-open PR — arm the dedup window.
-        self.merge_escalation_backoff
-            .commit(&verify_and_merge_dedup_key(repo, *pr), (self.clock)());
+        self.merge_escalation_backoff.commit(&key, (self.clock)());
         return Ok(ActOutcome::Escalated);
     }
     match self.caps.prs.merge(repo, *pr) {
-        Ok(()) => Ok(ActOutcome::Merged), // never commits — the PR leaves the survey
+        Ok(()) => {
+            // Terminal state — evict any entry an earlier escalation armed so
+            // the per-PR `state` map stays bounded (never commits: the PR
+            // leaves the survey).
+            self.merge_escalation_backoff.forget(&key);
+            Ok(ActOutcome::Merged)
+        }
         Err(OverseerError::NotMergeReady { .. }) => {
-            self.merge_escalation_backoff
-                .commit(&verify_and_merge_dedup_key(repo, *pr), (self.clock)());
+            self.merge_escalation_backoff.commit(&key, (self.clock)());
             Ok(ActOutcome::Escalated)
         }
         Err(e) => Err(e), // hard error propagates un-deduped (fail-loud)
@@ -238,6 +248,11 @@ Intervention::VerifyAndMergePr { repo, pr } => {
 `commit()` fires **only** on `ActOutcome::Escalated` (both the `verify.ready ==
 false` and `NotMergeReady` paths). It never fires on `Merged` and never on a hard
 `Err` — a genuine capability error propagates **un-deduped** so it stays visible.
+On `Merged` — the PR's terminal state — `forget()` **evicts** any entry an earlier
+escalation left behind, so the per-PR `state` map is bounded to the set of
+currently-open, still-escalating PRs rather than growing one permanent entry per
+PR ever surveyed (review F2). Eviction is fail-safe: dropping an entry can only
+let the gate re-surface sooner, never suppress a real page.
 
 ---
 
@@ -245,7 +260,7 @@ false` and `NotMergeReady` paths). It never fires on `Merged` and never on a har
 
 | PR state | `verify().ready` | `merge()` | Act outcome | Dedup window | Operator sees |
 |---|---|---|---|---|---|
-| CLEAN + MERGEABLE + all-SUCCESS, provider present | `true` | `Ok(())` | `Merged` | not armed | one merge, no escalation |
+| CLEAN + MERGEABLE + all-SUCCESS, provider present | `true` | `Ok(())` | `Merged` | not armed / **evicted** | one merge, no escalation |
 | CLEAN + MERGEABLE + all-SUCCESS, **no** provider | `true` | `NotMergeReady` | `Escalated` | armed / grown | escalation (fail-closed: never merged without a judge), **deduped within window** |
 | Non-green (dirty / failing check) | `false` | — | `Escalated` | armed / grown | escalation this tick; **suppressed within window**, resurfaces at/after the cap |
 | Green pre-filter, judge **refuses** (genuine risk) | `true` | `NotMergeReady` | `Escalated` | armed / grown | escalation, deduped within window |
@@ -295,6 +310,22 @@ affects the coverage-launch backoff; the two rails share the tuning by design.
   authorizes a merge on its own.
 - **Process-restart-safe by design.** The in-memory backoff resets on restart;
   harmless — a clean PR simply re-surveys and merges once.
+- **Bounded memory.** The per-PR `state` map is evicted on a PR's terminal state
+  (`Merged` calls `forget()`); combined with the restart-reset above, the map is
+  bounded to currently-open, still-escalating PRs rather than growing one entry
+  per PR ever surveyed (review F2). A PR closed *outside* the Overseer is never
+  re-surveyed, so its (already window-bounded) entry simply ages out on restart.
+
+### Dedup-key collision (review F4, accepted — no code change)
+
+`verify_and_merge_dedup_key(repo, pr)` interpolates `verify_and_merge:{repo}#{pr}`.
+Because `{pr}` is a `u32` and `#` is the literal separator, a collision would
+require a `repo` slug literally containing `#<digits>`. GitHub / `gh` repo names
+(`owner/name`) can never contain `#`, so the namespaced key is collision-free in
+practice. Even in the impossible collision case the failure mode is benign: at
+worst one *repeat* operator page is suppressed for one window — never a wrongful
+merge (merge authority is unaffected) — and it resurfaces once the window
+elapses. Accepted as-is; no guarding code is warranted.
 
 ---
 
