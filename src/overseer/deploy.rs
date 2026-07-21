@@ -107,6 +107,13 @@ fn commits_equivalent(a: &str, b: &str) -> bool {
     a == b || a.starts_with(&b) || b.starts_with(&a)
 }
 
+/// A bare git commit-ish is 4–64 hex chars. Enforced before shelling `git` so a
+/// ref can never be mistaken for a flag or smuggle shell/path metacharacters.
+fn is_hex_commitish(s: &str) -> bool {
+    let n = s.len();
+    (4..=64).contains(&n) && s.bytes().all(|c| c.is_ascii_hexdigit())
+}
+
 // ─────────────────────────── injected seams ────────────────────────────────
 
 /// Result of building + verifying the canary.
@@ -142,10 +149,22 @@ pub struct GitAncestryOracle {
 
 impl AncestryOracle for GitAncestryOracle {
     fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool, OverseerError> {
+        // Defense-in-depth: only ever hand git bare hex commit-ish. A hex string
+        // can never be parsed as an option, closing the argument-injection class
+        // even if an upstream caller ever passes attacker-influenced input.
+        for arg in [ancestor, descendant] {
+            if !is_hex_commitish(arg) {
+                return Err(OverseerError::Capability {
+                    what: "git.merge-base",
+                    detail: format!("refusing non-hex commit-ish argument: {arg:?}"),
+                });
+            }
+        }
         let status = std::process::Command::new("git")
             .arg("-C")
             .arg(&self.repo_dir)
-            .args(["merge-base", "--is-ancestor", ancestor, descendant])
+            // `--` marks end-of-options so a ref can never be read as a flag.
+            .args(["merge-base", "--is-ancestor", "--", ancestor, descendant])
             .status()
             .map_err(|e| OverseerError::Capability {
                 what: "git.merge-base",
@@ -433,6 +452,41 @@ mod tests {
         let mut c = ctx();
         c.target_is_ancestor_of_running = true;
         assert_eq!(evaluate_deploy_gate(&c), Err(DeployRefusal::Rollback));
+    }
+
+    #[test]
+    fn hex_commitish_accepts_valid_and_rejects_injection() {
+        assert!(is_hex_commitish("aaaa"));
+        assert!(is_hex_commitish("deadBEEF"));
+        assert!(is_hex_commitish(&"a".repeat(40)));
+        assert!(is_hex_commitish(&"f".repeat(64)));
+        // Too short / too long.
+        assert!(!is_hex_commitish("abc"));
+        assert!(!is_hex_commitish(&"a".repeat(65)));
+        // Non-hex / injection shapes.
+        assert!(!is_hex_commitish(""));
+        assert!(!is_hex_commitish("--help"));
+        assert!(!is_hex_commitish("HEAD"));
+        assert!(!is_hex_commitish("main"));
+        assert!(!is_hex_commitish("dead beef"));
+        assert!(!is_hex_commitish("aaaa;rm -rf /"));
+        assert!(!is_hex_commitish("../etc/passwd"));
+    }
+
+    #[test]
+    fn real_ancestry_oracle_refuses_non_hex_without_shelling_git() {
+        let oracle = GitAncestryOracle {
+            repo_dir: std::path::PathBuf::from("."),
+        };
+        // A flag-shaped or otherwise non-hex arg is rejected before git runs.
+        let err = oracle
+            .is_ancestor("--upload-pack=touch pwned", &"a".repeat(40))
+            .unwrap_err();
+        match err {
+            OverseerError::Capability { what, .. } => assert_eq!(what, "git.merge-base"),
+            other => panic!("expected Capability error, got {other:?}"),
+        }
+        assert!(oracle.is_ancestor(&"a".repeat(40), "HEAD").is_err());
     }
 
     #[test]
