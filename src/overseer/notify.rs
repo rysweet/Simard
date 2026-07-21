@@ -152,6 +152,13 @@ impl OperatorNotification {
                 next = next,
             );
         }
+        // Generic "problem solved" template. Every `kind` without a dedicated
+        // arm above intentionally renders here — this includes the resolved
+        // action kinds such as `deploy`, `merge`, and `goal-update`, which are
+        // all "Problem solved:" reports rather than unresolved escalations.
+        // `goal-update` in particular has no special arm by design: it embeds
+        // its plain-English summary in `problem` and reads correctly through
+        // this template, so no separate heading is required.
         let who = if self.autonomous {
             "The Overseer autonomously"
         } else {
