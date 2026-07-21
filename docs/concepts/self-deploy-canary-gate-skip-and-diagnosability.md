@@ -136,6 +136,15 @@ safety core:
   canary fails closed; it is never blinded by a result the predicate does not
   positively recognize as absence.
 
+The positive signals are: the dedicated `EX_UNAVAILABLE` (69) exit code, an
+unambiguous connection phrase (`connection refused`, `no daemon`,
+`could not connect`, `connection reset`), or a bare `ENOENT`
+("no such file or directory") **only when it co-occurs with a socket-path
+marker** (`.sock` / `socket`). ENOENT alone is deliberately *not* an absence
+signal: it also fires for an unrelated missing config/dependency file, which is a
+genuine failure, so requiring a socket marker keeps a missing *socket* skippable
+while a missing *file* still reds the canary.
+
 Only `rpc-health` consults `endpoint_absent` today: its `probe rpc` subcommand is
 the one gate that requires a live daemon. `gym-baseline` currently runs
 `<binary> gym list` — a **local** listing that does not contact a daemon — so it

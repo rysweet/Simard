@@ -109,16 +109,29 @@ fn run_gym_baseline_gate(binary: &Path) -> GateResult {
 /// phrase on stderr — may permit a skip. Everything else (healthy, reachable-
 /// but-unhealthy, spawn error, or an unknown non-zero exit) returns `false` and
 /// reds the canary, so a genuine RPC regression can never be masked as "absent".
+///
+/// A bare ENOENT ("no such file or directory") is deliberately NOT a standalone
+/// absence signal (SR-3 / F-2 hardening): it fires both for a missing Unix
+/// socket (true endpoint absence) *and* for an unrelated missing
+/// config/dependency file (a genuine failure). It is only honored when it
+/// co-occurs with a socket-path marker, so a missing *socket* skips while a
+/// missing *file* still reds the canary.
 fn endpoint_absent(probe: &std::io::Result<std::process::Output>) -> bool {
     /// `sysexits.h` EX_UNAVAILABLE — the service/endpoint is unavailable.
     const EX_UNAVAILABLE: i32 = 69;
-    const ABSENCE_SIGNALS: [&str; 5] = [
+    /// Unambiguous "no listener" signals — each positively indicates that a
+    /// connection attempt reached no daemon, so it stands on its own.
+    const CONNECTION_SIGNALS: [&str; 4] = [
         "connection refused",
         "no daemon",
         "could not connect",
         "connection reset",
-        "no such file or directory",
     ];
+    /// Ambiguous on its own; only counts as absence alongside a socket marker.
+    const ENOENT: &str = "no such file or directory";
+    /// Markers that scope an ENOENT to a *socket* (endpoint) rather than an
+    /// arbitrary file. Simard's RPC socket is `<state_root>/memory.sock`.
+    const SOCKET_MARKERS: [&str; 2] = [".sock", "socket"];
 
     let output = match probe {
         Ok(output) => output,
@@ -133,7 +146,12 @@ fn endpoint_absent(probe: &std::io::Result<std::process::Output>) -> bool {
         return true;
     }
     let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
-    ABSENCE_SIGNALS.iter().any(|sig| stderr.contains(sig))
+    if CONNECTION_SIGNALS.iter().any(|sig| stderr.contains(sig)) {
+        return true;
+    }
+    // ENOENT alone is not enough: require a socket marker so a missing socket
+    // (endpoint absent) skips, but a missing file (real failure) fails closed.
+    stderr.contains(ENOENT) && SOCKET_MARKERS.iter().any(|m| stderr.contains(m))
 }
 
 fn run_rpc_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
@@ -384,6 +402,35 @@ mod tests {
         assert!(
             !endpoint_absent(&probe),
             "a healthy (exit 0) probe is a pass, not an absence signal"
+        );
+    }
+
+    #[test]
+    fn endpoint_absent_false_for_bare_enoent_without_socket_marker() {
+        // SECURITY CONTROL (F-2): a bare ENOENT from an unrelated missing file
+        // (config/dependency), with NO socket marker, is a genuine failure and
+        // must red the canary — never skip.
+        let probe = probe_output(
+            1,
+            "error: /etc/simard/config.toml: No such file or directory",
+        );
+        assert!(
+            !endpoint_absent(&probe),
+            "ENOENT without a socket marker must fail closed (red), never skip"
+        );
+    }
+
+    #[test]
+    fn endpoint_absent_true_for_enoent_on_socket_path() {
+        // A missing Unix socket is true endpoint absence: ENOENT co-occurring
+        // with a socket-path marker is skippable.
+        let probe = probe_output(
+            1,
+            "failed to connect to /run/simard/memory.sock: No such file or directory",
+        );
+        assert!(
+            endpoint_absent(&probe),
+            "ENOENT on a socket path is endpoint absence and may skip"
         );
     }
 
