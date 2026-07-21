@@ -8,6 +8,8 @@ doc_type: reference
 status: implemented
 related:
   - ../concepts/deploy-aware-done-gate.md
+  - ../concepts/cross-repo-completion-reconciliation.md
+  - ../reference/cross-repo-merged-pr-evidence.md
   - ../reference/progress-evidence-api.md
   - ../reference/self-deploy-api.md
   - ../howto/diagnose-a-rejected-goal-completion.md
@@ -136,6 +138,14 @@ uses, and resolves `is_deployed` through the
 [`ReconcileDetector`](../reference/self-deploy-api.md#reconciledetector). Tests
 inject a canned source.
 
+`any_pr_merged` is **repo-relative**: it resolves the merged-PR check against the
+goal's own target repository and reads the persisted PR linkage (a numeric
+`WipRef.ref_id` **or** a `WipRef.url`), so a PR merged in a non-Simard ecosystem
+repo satisfies clause 1 instead of re-blocking every cycle. See the
+[cross-repo merged-PR evidence API reference](../reference/cross-repo-merged-pr-evidence.md)
+([#4375](https://github.com/rysweet/Simard/issues/4375)). `issue_closed`,
+`is_deployed`, and the trait signature are unchanged.
+
 ## Self-affecting classification
 
 ```rust
@@ -210,6 +220,8 @@ mechanism used by
 ## See also
 
 - [deploy-aware-done-gate concept](../concepts/deploy-aware-done-gate.md)
+- [Cross-repo completion reconciliation](../concepts/cross-repo-completion-reconciliation.md) — repo-relative merged-PR resolution.
+- [Cross-repo merged-PR evidence API reference](../reference/cross-repo-merged-pr-evidence.md)
 - [How to diagnose a rejected goal completion](../howto/diagnose-a-rejected-goal-completion.md)
 - [Progress-evidence API](../reference/progress-evidence-api.md) — the sibling percent-increase gate.
 - [Self-deploy API reference](../reference/self-deploy-api.md) — the deploy evidence source.

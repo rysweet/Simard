@@ -121,6 +121,7 @@ nav:
     - Closing the Procedural-Learning Loop: concepts/procedural-learning-loop.md
     - Reconcile-and-Self-Deploy: concepts/reconcile-and-self-deploy.md
     - Deploy-Aware Done-Gate: concepts/deploy-aware-done-gate.md
+    - Cross-Repo Completion Reconciliation: concepts/cross-repo-completion-reconciliation.md
     - Closed-Loop Outcome Verification (live-verified done): concepts/closed-loop-outcome-verification.md
     - Dependency/Overlap-Aware Engineer Scheduling: concepts/dependency-overlap-aware-scheduling.md
     - Resource-Aware Engineer Admission: concepts/resource-aware-engineer-admission.md
@@ -404,6 +405,7 @@ nav:
     - Autonomous-Merge Review Gate API: reference/autonomous-merge-review-gate.md
     - "No Point-in-Time Report Docs Scan (pr-verify #8)": reference/no-point-in-time-docs-scan.md
     - Completion-Evidence Gate API: reference/completion-evidence-gate-api.md
+    - Cross-Repo Merged-PR Evidence API: reference/cross-repo-merged-pr-evidence.md
     - Outcome-Verification API: reference/outcome-verification-api.md
     - No-Progress Breaker API: reference/no-progress-breaker-api.md
     - No-Progress Root-Cause Resolution API: reference/no-progress-root-cause-resolution-api.md
