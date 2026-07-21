@@ -438,14 +438,13 @@ const RECENT_ITEMS_MAX: usize = 25;
 /// by [`GRAPH_NODE_CONTENT_MAX`] so a single large episode cannot bloat the
 /// payload.
 ///
-/// `timestamp` is always `null`: the library backend's only episode writer path
-/// (`LibraryCognitiveMemory::store_episode`) records episodes with
-/// `temporal_index: None`, so the library assigns a monotonic ordinal
-/// (1, 2, 3, …) — an ordering key, not a wall-clock instant — and does not
-/// surface the episode's `created_at` on [`CognitiveEpisode`]. Emitting the
-/// ordinal as an epoch would render a nonsensical 1970s date, so we omit it and
-/// let the frontend drop the "time ago" label. Newest-first ordering is still
-/// correct because it derives from the `temporal_index` sort, not this field.
+/// `timestamp` is the episode's wall-clock instant, sourced from
+/// [`CognitiveEpisode::created_at`] (#4383) and emitted as an RFC3339 string.
+/// When an episode genuinely carries no `created_at` (e.g. legacy data
+/// deserialized before the field existed) the timestamp is `null` and the
+/// frontend drops the "time ago" label. Newest-first ordering derives from the
+/// caller's `temporal_index` sort, not from this field, so it is preserved
+/// regardless of timestamp presence.
 fn build_recent_episode_items(
     episodes: &[crate::memory_cognitive::CognitiveEpisode],
 ) -> Vec<Value> {
@@ -455,7 +454,9 @@ fn build_recent_episode_items(
             json!({
                 "category": "Past event",
                 "summary": truncate_graph_content(&e.content),
-                "timestamp": Value::Null,
+                "timestamp": e
+                    .created_at
+                    .map_or(Value::Null, |t| Value::String(t.to_rfc3339())),
                 "source": e.source_label,
                 "node_id": e.node_id,
             })
@@ -2046,5 +2047,90 @@ mod tests_memory_graph {
                 );
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #4383: Recent-Memories timestamp threading
+// ---------------------------------------------------------------------------
+//
+// `build_recent_episode_items` hardcoded `"timestamp": null` because
+// `CognitiveEpisode` did not surface the episode's wall-clock instant. Once
+// `CognitiveEpisode.created_at: Option<DateTime<Utc>>` is threaded through, the
+// serializer must emit that instant as an RFC3339 string (or `null` when
+// genuinely absent), while preserving the existing newest-first ordering. These
+// tests fail until the serializer wiring lands.
+#[cfg(test)]
+mod tests_recent_episode_timestamp {
+    use super::*;
+    use crate::memory_cognitive::CognitiveEpisode;
+
+    fn episode_with(
+        node_id: &str,
+        temporal_index: i64,
+        created_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> CognitiveEpisode {
+        CognitiveEpisode {
+            node_id: node_id.to_string(),
+            content: format!("event {node_id}"),
+            source_label: "agent".to_string(),
+            temporal_index,
+            compressed: false,
+            created_at,
+        }
+    }
+
+    #[test]
+    fn populated_created_at_renders_non_null_rfc3339_timestamp() {
+        let ts = chrono::DateTime::parse_from_rfc3339("2026-07-20T12:34:56Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let items = build_recent_episode_items(&[episode_with("epi_1", 5, Some(ts))]);
+        assert_eq!(items.len(), 1);
+        let timestamp = items[0].get("timestamp").expect("timestamp key present");
+        assert!(
+            !timestamp.is_null(),
+            "populated created_at must not serialize to null: {timestamp:?}"
+        );
+        let rendered = timestamp.as_str().expect("timestamp must be a string");
+        // Round-trips as a valid RFC3339 instant equal to the source.
+        let parsed = chrono::DateTime::parse_from_rfc3339(rendered)
+            .expect("timestamp must be valid RFC3339")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(parsed, ts);
+    }
+
+    #[test]
+    fn absent_created_at_renders_null_timestamp() {
+        let items = build_recent_episode_items(&[episode_with("epi_1", 5, None)]);
+        assert_eq!(items.len(), 1);
+        assert!(
+            items[0]
+                .get("timestamp")
+                .expect("timestamp key present")
+                .is_null(),
+            "absent created_at must serialize to null"
+        );
+    }
+
+    #[test]
+    fn newest_first_ordering_is_preserved() {
+        // Ordering derives from the caller's episode slice order (temporal_index
+        // sort), not from the timestamp field. The serializer must be a pure map
+        // that preserves input order regardless of created_at presence.
+        let newer = chrono::DateTime::parse_from_rfc3339("2026-07-20T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let episodes = [
+            episode_with("epi_newest", 9, Some(newer)),
+            episode_with("epi_middle", 5, None),
+            episode_with("epi_oldest", 1, Some(newer - chrono::Duration::hours(3))),
+        ];
+        let items = build_recent_episode_items(&episodes);
+        let ids: Vec<&str> = items
+            .iter()
+            .map(|i| i.get("node_id").and_then(|v| v.as_str()).unwrap())
+            .collect();
+        assert_eq!(ids, ["epi_newest", "epi_middle", "epi_oldest"]);
     }
 }

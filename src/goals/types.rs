@@ -165,8 +165,39 @@ impl GoalRecord {
 /// name and a directory name.
 pub const GOAL_SLUG_MAX_LEN: usize = 56;
 
+/// Strip amplihack/Copilot launcher preamble lines from `title` before it is
+/// slugified.
+///
+/// The launcher emits a saved-preference startup notice on stdout ahead of the
+/// model's real goal text, e.g.
+///
+/// ```text
+/// ℹ NODE_OPTIONS=--max-old-space-size=32768 (saved preference). To change: /home/azureuser/.amplihack/config
+/// ```
+///
+/// If that raw stdout reaches [`goal_slug`], the env-var tokens and host config
+/// path leak into the derived slug and, downstream, into `engineer/<slug>`
+/// branch names and git refs (#4376). Any line the shared launcher recognizer
+/// ([`crate::recipe_output::extract::is_copilot_launcher_line`]) classifies as
+/// launcher noise is dropped; the remaining goal text is kept verbatim. Reusing
+/// that single chokepoint keeps slug/branch derivation in lock-step with the
+/// decision parser: legitimate goal prose that merely mentions `NODE_OPTIONS` is
+/// preserved because the recognizer requires the full launcher signature, not a
+/// bare substring.
+fn strip_launcher_preamble(title: &str) -> String {
+    title
+        .lines()
+        .filter(|line| !crate::recipe_output::extract::is_copilot_launcher_line(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Slugify `title` for use as a goal ID. Output is always
 /// `<= GOAL_SLUG_MAX_LEN` characters.
+///
+/// Any launcher saved-preference preamble (see [`strip_launcher_preamble`]) is
+/// removed before slugification so startup notices never leak into goal IDs or
+/// derived branch names (#4376).
 ///
 /// When the raw kebab-case slug would exceed the cap, the slug is truncated
 /// at a clean dash boundary and an 8-hex-character SHA-256 prefix of the
@@ -181,6 +212,7 @@ pub const GOAL_SLUG_MAX_LEN: usize = 56;
 /// Short titles are returned byte-identical to the pre-truncation behaviour,
 /// preserving stable IDs for all existing in-tree goals.
 pub fn goal_slug(title: &str) -> String {
+    let title = strip_launcher_preamble(title);
     let mut slug = String::new();
     let mut last_dash = false;
     for ch in title.chars().flat_map(char::to_lowercase) {
@@ -332,5 +364,92 @@ mod tests {
         }
         assert!(!slug.starts_with('-'));
         assert!(!slug.starts_with('.'));
+    }
+
+    // -- #4376: launcher-preamble sanitization -----------------------------
+    //
+    // The Copilot launcher emits a startup preamble line before the model's
+    // real goal text, e.g.
+    //
+    //   ℹ NODE_OPTIONS=--max-old-space-size=32768 (saved preference). \
+    //     To change: /home/azureuser/.amplihack/config
+    //
+    // When that raw stdout is fed into `goal_slug`, the host/config path and
+    // env-var tokens leak into the derived slug and, downstream, into
+    // `engineer/<slug>` branch names and git remotes. `goal_slug` must strip
+    // the preamble so only the intended goal text is slugified. These tests
+    // fail until that sanitization lands.
+
+    /// The exact launcher preamble line observed in production stdout.
+    const LAUNCHER_PREAMBLE: &str = "ℹ NODE_OPTIONS=--max-old-space-size=32768 \
+         (saved preference). To change: /home/azureuser/.amplihack/config";
+
+    #[test]
+    fn goal_slug_strips_leading_launcher_preamble() {
+        let title = format!("{LAUNCHER_PREAMBLE}\nFix the broken widget rendering");
+        assert_eq!(goal_slug(&title), "fix-the-broken-widget-rendering");
+    }
+
+    #[test]
+    fn goal_slug_preamble_does_not_leak_config_path_or_env_tokens() {
+        let title = format!("{LAUNCHER_PREAMBLE}\nRepair episodic memory timestamps");
+        let slug = goal_slug(&title);
+        for leaked in [
+            "node",
+            "options",
+            "max-old-space-size",
+            "32768",
+            "saved",
+            "preference",
+            "amplihack",
+            "config",
+            "azureuser",
+            "home",
+        ] {
+            assert!(
+                !slug.contains(leaked),
+                "slug {slug:?} leaked launcher-preamble token {leaked:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn goal_slug_derived_branch_is_ref_safe_after_preamble_strip() {
+        // Even before stripping, `goal_slug` normalises to `[A-Za-z0-9._-]`,
+        // but the preamble carries `/`, `..`-adjacent path segments, `~` and
+        // `=` that must never survive into an `engineer/<slug>` git ref.
+        let title = format!("{LAUNCHER_PREAMBLE}\n~/tmp/../etc goal: redact wss_url tokens");
+        let slug = goal_slug(&title);
+        assert!(!slug.contains('/'), "branch-unsafe '/': {slug:?}");
+        assert!(!slug.contains(".."), "branch-unsafe '..': {slug:?}");
+        assert!(!slug.contains('~'), "branch-unsafe '~': {slug:?}");
+        assert!(!slug.contains('='), "branch-unsafe '=': {slug:?}");
+        assert!(!slug.starts_with('-'), "leading dash: {slug:?}");
+        assert!(!slug.ends_with('-'), "trailing dash: {slug:?}");
+        assert!(!slug.is_empty(), "empty slug after strip: {slug:?}");
+    }
+
+    #[test]
+    fn goal_slug_preamble_only_input_falls_back_to_empty_not_config_path() {
+        // A title that is *only* the launcher preamble must not slugify into
+        // the host config path; after stripping there is no goal text, so the
+        // slug must be empty (caller-handled) rather than a path leak.
+        let slug = goal_slug(LAUNCHER_PREAMBLE);
+        assert!(
+            !slug.contains("amplihack") && !slug.contains("azureuser"),
+            "preamble-only slug leaked host path: {slug:?}"
+        );
+    }
+
+    #[test]
+    fn goal_slug_prose_mentioning_node_options_is_preserved() {
+        // Guard against over-stripping: a legitimate goal that merely mentions
+        // NODE_OPTIONS in prose (without the full launcher signature) must be
+        // slugified normally, not silently emptied.
+        let title = "Document the NODE_OPTIONS tuning guidance";
+        assert_eq!(
+            goal_slug(title),
+            "document-the-node-options-tuning-guidance"
+        );
     }
 }

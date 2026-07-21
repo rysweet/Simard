@@ -815,6 +815,7 @@ fn to_episode(e: EpisodicMemory) -> CognitiveEpisode {
         source_label: e.source_label,
         temporal_index: e.temporal_index,
         compressed: e.compressed,
+        created_at: Some(e.created_at),
     }
 }
 

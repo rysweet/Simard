@@ -370,16 +370,20 @@ async fn memory_recent_lists_recent_episodes_newest_first() {
             item.get("category").and_then(|c| c.as_str()) == Some("Past event"),
             "each item needs the 'Past event' category: {item}",
         );
-        // `timestamp` is always JSON `null` for library-backed episodes: the
-        // backend stores a monotonic ordinal, not a wall-clock instant, so the
-        // frontend omits the "time ago" label. The key must still be present.
+        // `timestamp` now carries the episode's wall-clock instant, sourced
+        // from `EpisodicMemory.created_at` and threaded through
+        // `CognitiveEpisode.created_at` (#4383). The key must be present and
+        // render as a valid RFC3339 string (no longer structurally null).
         assert!(
             item.get("timestamp").is_some(),
             "each item must carry a `timestamp` key: {item}",
         );
+        let ts = item["timestamp"]
+            .as_str()
+            .unwrap_or_else(|| panic!("timestamp must be a non-null RFC3339 string: {item}"));
         assert!(
-            item["timestamp"].is_null(),
-            "library-backed episodes have no wall-clock time, so `timestamp` is null: {item}",
+            chrono::DateTime::parse_from_rfc3339(ts).is_ok(),
+            "timestamp must be a valid RFC3339 instant: {item}",
         );
     }
 }

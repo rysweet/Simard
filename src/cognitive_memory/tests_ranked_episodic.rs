@@ -507,6 +507,7 @@ impl CognitiveMemoryOps for EchoKeywordsMock {
             source_label: "mock".into(),
             temporal_index: 0,
             compressed: false,
+            created_at: None,
         }])
     }
 }

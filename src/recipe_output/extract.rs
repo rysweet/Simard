@@ -137,7 +137,7 @@ fn starts_with_iso_timestamp(s: &str) -> bool {
 /// colour-coded launcher line still matches and a coloured payload line still
 /// survives. This is correctness-as-safety: the predicate consumes untrusted
 /// agent stdout, so it errs toward keeping a line rather than eating a payload.
-fn is_copilot_launcher_line(line: &str) -> bool {
+pub(crate) fn is_copilot_launcher_line(line: &str) -> bool {
     let t = line.trim_start();
 
     // A line that begins with a JSON structural token (`{`, `"`, `[`) is a JSON
