@@ -192,11 +192,6 @@ impl FreshPoll {
         FreshPoll(state)
     }
 
-    /// The freshly polled state.
-    pub fn state(&self) -> &PrState {
-        &self.0
-    }
-
     pub fn needs_rescue(&self) -> bool {
         self.0.needs_rescue()
     }
@@ -232,9 +227,12 @@ pub fn supersession_closures(group: &[PrRef]) -> Vec<(u64, u64)> {
         }
         // Newest by creation date wins; break ties on the higher PR number.
         prs.sort_by(|a, b| a.created.cmp(&b.created).then(a.number.cmp(&b.number)));
-        let newest = *prs.last().expect("group is non-empty");
-        for older in &prs[..prs.len() - 1] {
-            closures.push((older.number, newest.number));
+        // Guarded by `prs.len() < 2` above, so `split_last` always yields `Some`;
+        // pattern-matching keeps this panic-free per the module's zero-panic guarantee.
+        if let Some((newest, older_prs)) = prs.split_last() {
+            for older in older_prs {
+                closures.push((older.number, newest.number));
+            }
         }
     }
     closures.sort();
