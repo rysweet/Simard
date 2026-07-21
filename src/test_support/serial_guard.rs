@@ -562,6 +562,12 @@ impl<'a, 'ast> Visit<'ast> for BodyScan<'a> {
             // directly or through a same-file helper — must carry the
             // cognitive_memory key. This closes the sibling-meeting-test blind
             // spot behind the shared pre-commit flake.
+            // `segs.len() == 1` deliberately over-approximates: it flags ANY
+            // bare `record_cost(...)` call (not just `cost_tracking::record_cost`)
+            // so that same-file helper wrappers propagate the key. This can catch
+            // an unrelated local named `record_cost`, but that false positive is
+            // acceptable — do NOT "tighten" this to an exact path match, or the
+            // helper-propagation guard (and its self-test) will regress.
             if last == "record_cost" && (penult == "cost_tracking" || segs.len() == 1) {
                 self.reasons.push(Reason::WritesCostLedger);
             }

@@ -106,6 +106,14 @@ fn run_command_inner(
                 poll_interval = (poll_interval * 2).min(MAX_POLL_INTERVAL);
             }
             Err(error) => {
+                // Mirror the timeout path's cleanup: a poll failure must not
+                // leak the child or the reader threads. Kill the child (best
+                // effort) so its pipe write ends close, then join the readers
+                // so they observe EOF and terminate.
+                let _ = child.kill();
+                let _ = child.wait();
+                join_pipe_reader(stdout_reader);
+                join_pipe_reader(stderr_reader);
                 return Err(SimardError::ActionExecutionFailed {
                     action: argv.join(" "),
                     reason: format!("failed to poll child process: {error}"),
@@ -128,8 +136,13 @@ fn run_command_inner(
             None => Ok(Vec::new()),
         }
     };
-    let stdout_bytes = collect(stdout_reader)?;
-    let stderr_bytes = collect(stderr_reader)?;
+    // Join both readers before propagating any error so a panic in the first
+    // never leaves the second thread unjoined. The child has already exited,
+    // so both threads have hit EOF (or will imminently) and joining is bounded.
+    let stdout_result = collect(stdout_reader);
+    let stderr_result = collect(stderr_reader);
+    let stdout_bytes = stdout_result?;
+    let stderr_bytes = stderr_result?;
 
     if !status.success() && !allow_nonzero_exit {
         let stderr = sanitize_terminal_text(&String::from_utf8_lossy(&stderr_bytes));
