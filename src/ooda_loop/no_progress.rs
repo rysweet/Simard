@@ -432,13 +432,18 @@ fn apply_standing_idle(
         return false;
     };
 
+    // Every standing-idle path — benign OR research-fault — resets the no-action
+    // counter and keeps the goal active for the next cycle; only the reporting and
+    // re-orient differ. Hoisted so that "a standing idle never advances the breaker
+    // toward a firing" is a single, unmissable invariant.
+    tracker.record_progress(goal_id);
+
     match classification {
         StandingIdle::BenignExempt => {
             // Benign standing/perpetual exemption (issue #2589): a non-research
             // standing goal is inherently bursty — an idle no-action cycle is
-            // NORMAL, not the livelock the breaker guards against. Reset its
-            // counter and keep it active for the next cycle.
-            tracker.record_progress(goal_id);
+            // NORMAL, not the livelock the breaker guards against. Keep it active
+            // for the next cycle.
             report.perpetual_idled.push(goal_id.to_string());
             tracing::info!(
                 target: "simard::ooda",
@@ -449,12 +454,10 @@ fn apply_standing_idle(
         }
         StandingIdle::ResearchFault { fault } => {
             // Never-idle rail (issue #4399): a standing research goal that idles
-            // is a FAULT. Reset its counter, record the fault, and re-orient it
-            // (roll_to_new_cycle: NotStarted + stale WIP dropped) so the NEXT
-            // cycle re-enters work generation and yields a NEW source or a NEW
-            // experiment — while staying fail-closed (never block/kill/park,
-            // never a firing).
-            tracker.record_progress(goal_id);
+            // is a FAULT. Record the fault and re-orient it (roll_to_new_cycle:
+            // NotStarted + stale WIP dropped) so the NEXT cycle re-enters work
+            // generation and yields a NEW source or a NEW experiment — while
+            // staying fail-closed (never block/kill/park, never a firing).
             report.research_idle_faults.push(goal_id.to_string());
             tracing::warn!(
                 target: "simard::ooda",
