@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn unknown_target_is_error() {
-        let err = dispatch(&["bridge"]).unwrap_err();
+        let err = dispatch(&["nonsense"]).unwrap_err();
         assert!(
             err.to_string().contains("unsupported probe target"),
             "{err}"
