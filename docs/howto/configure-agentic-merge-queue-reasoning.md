@@ -39,9 +39,10 @@ Background: [the concept](../concepts/agentic-merge-queue-reasoning.md), the
 - The daemon binary includes the merge-queue reasoning pass (this feature).
 - **`gh`** authenticated so the read-only reasoning step can list/view PRs and
   issues (`gh auth status`).
-- The governed roster `prompt_assets/simard/ecosystem_repos.toml` is populated
-  (install-first on a deployed daemon:
-  `~/.simard/prompt_assets/simard/ecosystem_repos.toml`).
+- The governed roster (Simard's identity-curated stewarded state at
+  `<state_root>/identity/simard/curated/stewarded_repos.toml`) is populated —
+  seeded from her identity default on first use, or curated via `simard roster
+  add owner/name`.
 
 ## Key change from the old allowlist sensor
 
@@ -174,7 +175,7 @@ journalctl --user -u simard-ooda | grep -E 'NotifyOperator|merge notify'
 
 ```bash
 amplihack recipe run observe-merge-queue \
-  -c roster_path="$PWD/prompt_assets/simard/ecosystem_repos.toml" \
+  -c roster_path="/tmp/simard-roster.toml" \
   -c inflight_refs_path="/tmp/inflight.json" \
   -c merge_queue_brief_path="/tmp/merge_queue_brief.json"
 
@@ -185,7 +186,7 @@ cat /tmp/merge_queue_brief.json   # the bounded JSON brief the rail parses fail-
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `reasoned_prs=0` with open PRs on the roster | roster empty or `gh` not authed | populate `ecosystem_repos.toml`; `gh auth status` |
+| `reasoned_prs=0` with open PRs on the roster | roster empty or `gh` not authed | `simard roster add owner/name`; `gh auth status` |
 | `status=Disabled` unexpectedly | `SIMARD_MERGE_REASONING_SCOPE` set to a falsey value | `unset-environment`, restart |
 | reasoning ON but nothing merges | expected — action still gated by `SIMARD_AUTOMERGE_*` + objective/agentic gate | canary-enable per [self-merge runbook](./enable-autonomous-self-merge-canary.md) |
 | a `ready-for-merge` PR never merges | it failed the re-narrowing projection (author/engineer-PR/objective gate) | check the `reasoned->ready EXCLUDED` log line for the reason |

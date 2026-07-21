@@ -25,7 +25,6 @@ fn asset(rel: &str) -> String {
 const RECIPE: &str = "prompt_assets/simard/recipes/ecosystem-observe.yaml";
 const OBSERVE_PROMPT: &str = "prompt_assets/simard/overseer/observe.md";
 const BRIEF_PROMPT: &str = "prompt_assets/simard/overseer/problem_to_brief.md";
-const ROSTER: &str = "prompt_assets/simard/ecosystem_repos.toml";
 
 /// The recipe exposes exactly the context vars the thin rail renders (all `_path`
 /// values ride `ContextFile`), plus the rail-owned `escalation_note`.
@@ -145,11 +144,14 @@ fn observe_prompt_is_multi_repo_and_agentic() {
     }
 }
 
-/// The roster is the single source of truth: it lists the 10 stewarded slugs and
-/// deliberately excludes the deprecated Python `rysweet/amplihack`.
+/// The roster is the single source of truth, now Simard's **identity default
+/// seed** (baked in code, no longer a committed framework file): it lists the 10
+/// stewarded slugs and deliberately excludes the deprecated Python
+/// `rysweet/amplihack`. This seed is what initialises the mutable, deploy-durable
+/// identity-curated roster on first use.
 #[test]
 fn roster_is_the_single_source_of_truth() {
-    let body = asset(ROSTER);
+    let body = simard::overseer::ecosystem_observe::default_simard_roster_seed_toml();
     for slug in [
         "rysweet/Simard",
         "rysweet/RustyClawd",
@@ -164,11 +166,18 @@ fn roster_is_the_single_source_of_truth() {
     ] {
         assert!(
             body.contains(slug),
-            "roster must list stewarded repo {slug}"
+            "roster seed must list stewarded repo {slug}"
         );
     }
     assert!(
         !body.contains("slug = \"rysweet/amplihack\""),
-        "roster must NOT list the deprecated Python rysweet/amplihack"
+        "roster seed must NOT list the deprecated Python rysweet/amplihack"
+    );
+    // The baked seed must parse cleanly through the same validator the rails use.
+    let parsed = simard::overseer::ecosystem_observe::parse_ecosystem_roster(body)
+        .expect("identity default roster seed must parse via the Overseer validator");
+    assert!(
+        parsed.iter().any(|s| s == "rysweet/Simard"),
+        "parsed roster seed must include Simard herself"
     );
 }

@@ -264,8 +264,10 @@ pub struct Overseer {
     /// agent's reasoning and is handed forward as an opaque string.
     ecosystem_observer: Option<Box<dyn ecosystem_observe::EcosystemObserver>>,
     /// The stewarded roster (validated `owner/name` slugs) handed to the
-    /// ecosystem-observe recipe. Loaded once from `ecosystem_repos.toml` by
-    /// `build_overseer`; empty (and the pass skipped) until wired.
+    /// ecosystem-observe recipe. Resolved once from Simard's identity-curated
+    /// roster state by `build_overseer`
+    /// ([`ecosystem_observe::resolve_daemon_stewarded_roster`]); empty (and the
+    /// pass skipped) until wired.
     ecosystem_roster: Vec<String>,
     /// Every-N cadence for the ecosystem-observe pass (reuses the gap-scan
     /// cadence knob). Clamped to a floor of 1 by [`ecosystem_observe::should_observe`].
@@ -293,8 +295,9 @@ pub struct Overseer {
     /// narrow behind [`project_ready_prs`] + the downstream merge-authority gate.
     merge_queue_reasoner: Option<Box<dyn merge_queue_observe::MergeQueueReasoner>>,
     /// The governed reasoning roster (validated `owner/name` slugs) handed to the
-    /// `observe-merge-queue` recipe as the DEFAULT scope. Loaded once from
-    /// `ecosystem_repos.toml` by `build_overseer`; the resolved scope
+    /// `observe-merge-queue` recipe as the DEFAULT scope. Resolved once from
+    /// Simard's identity-curated roster state by `build_overseer`; the resolved
+    /// scope
     /// ([`config::merge_reasoning_scope`]) is default-ON over this roster and only
     /// an EXPLICIT operator disable turns it off (loud). Empty (pass skipped) until
     /// wired.

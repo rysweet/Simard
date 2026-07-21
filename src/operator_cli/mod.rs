@@ -13,6 +13,7 @@ mod memory;
 mod merge;
 mod ooda;
 mod review;
+mod roster;
 mod safe_update;
 mod self_deploy;
 mod self_health;
@@ -140,6 +141,13 @@ Product modes:
   ci-health [--json] [--no-cache] [--file-issues] [--exit-zero]
                          — sweep active default-branch CI across the governed fleet (green-SHA cached;
                            --file-issues dedupes tracking issues, --exit-zero for the scheduled sweep)
+  roster list            — print Simard's curated governed-fleet roster (identity-scoped,
+                           deploy-durable state, seeded from her identity default)
+  roster add <owner/name> [note...]
+                         — add a repo to the roster (idempotent; rejects malformed slugs)
+  roster remove <owner/name>
+                         — remove a repo from the roster (idempotent; refuses to
+                           empty the roster — an empty fleet would report green)
   self-deploy [--check]  — close the merged-but-not-running gap (operator-only)
   safe-update            — drain → snapshot → pre-test → swap → exec
   rollback               — restore the latest backup over the install path
@@ -245,6 +253,7 @@ where
         "improvement-curation" => curation::dispatch_improvement_curation_command(args),
         "creative-ideas" => creative_ideas::dispatch_creative_ideas_command(args),
         "review" => review::dispatch_review_command(args),
+        "roster" => roster::dispatch_roster_command(args),
         "gym" => gym::dispatch_gym_command(args),
         "ooda" => ooda::dispatch_ooda_command(args),
         "dashboard" => dashboard::dispatch_dashboard_command(args),

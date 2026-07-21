@@ -57,39 +57,47 @@ pub use types::{
 use crate::error::{SimardError, SimardResult};
 use tracing::warn;
 
-/// The governed-fleet roster, embedded from the ecosystem's **single source of
-/// truth**: `prompt_assets/simard/ecosystem_repos.toml`. That file documents
-/// itself as "the single source of truth for the ecosystem roster … adding
-/// stewardship for a new repo is a one-line edit here — no code change." The
-/// Overseer's `ecosystem-observe` sweep already reads it; embedding the *same*
-/// file here (at compile time) makes the CI-health sweep honor that contract too
-/// — a repo added to the roster is swept on the next build, with no second
-/// hardcoded list to silently drift out of sync (a drift that would let a
-/// newly-governed repo's red CI go unswept and the fleet be reported green).
-const ECOSYSTEM_ROSTER_TOML: &str = include_str!("../../prompt_assets/simard/ecosystem_repos.toml");
-
-/// The amplihack ecosystem fleet — Simard plus its governed sibling repos, by
-/// GitHub `owner/repo` slug — parsed from the embedded [`ECOSYSTEM_ROSTER_TOML`]
-/// (note `amplihack` → `amplihack-rs` on GitHub). Reuses the Overseer's roster
-/// parser/validator so both stewards resolve an identical roster from identical
-/// bytes.
+/// The governed-fleet roster, resolved from the ecosystem's **single source of
+/// truth**: Simard's identity-curated stewarded-roster state under
+/// `<state_root>/identity/simard/curated/stewarded_repos.toml`. The Overseer's
+/// `ecosystem-observe` sweep and the merge-queue reasoner resolve the *same*
+/// state through [`crate::overseer::ecosystem_observe::resolve_stewarded_roster`],
+/// so a repo Simard adds/removes via `simard roster` is swept on the next sweep,
+/// with no second hardcoded list to silently drift out of sync (a drift that
+/// would let a newly-governed repo's red CI go unswept and the fleet be reported
+/// green). The roster is seeded once from Simard's identity default and is
+/// mutable, deploy-durable state — never a committed framework file.
 ///
-/// Fail-loud: a corrupt or empty embedded roster is an `Err`, never a silently
-/// empty sweep — an empty repo list would classify as zero actionable failures
-/// and report the fleet **green**, the exact false-green this module exists to
-/// prevent. Because the roster is embedded at compile time from a committed,
-/// already-parsed data file, this error is unreachable in a well-formed build
-/// and is covered by a unit test; it is surfaced rather than `unwrap`-panicked
-/// so a steward never aborts mid-sweep.
+/// Returns the amplihack ecosystem fleet — Simard plus its governed sibling
+/// repos, by GitHub `owner/repo` slug (note `amplihack` → `amplihack-rs` on
+/// GitHub) — via [`governed_repos_at`], rooted at the resolved
+/// [`crate::state_root::simard_state_root`].
+///
+/// Fail-loud: a corrupt or empty roster is an `Err`, never a silently empty
+/// sweep — an empty repo list would classify as zero actionable failures and
+/// report the fleet **green**, the exact false-green this module exists to
+/// prevent. It is surfaced rather than `unwrap`-panicked so a steward never
+/// aborts mid-sweep.
 pub fn governed_repos() -> SimardResult<Vec<String>> {
-    crate::overseer::ecosystem_observe::parse_ecosystem_roster(ECOSYSTEM_ROSTER_TOML).map_err(
-        |reason| SimardError::CiHealthGhCommandFailed {
-            reason: format!(
-                "failed to load embedded ecosystem roster \
-                 (prompt_assets/simard/ecosystem_repos.toml): {reason}"
-            ),
-        },
+    governed_repos_at(&crate::state_root::simard_state_root())
+}
+
+/// Env-free core of [`governed_repos`]: resolve the governed fleet from Simard's
+/// identity-curated roster rooted at the explicit `state_root`, seeding it from
+/// the identity default on first use. Keeps the CI-health sweep on the SAME
+/// roster source of truth as the Overseer rails.
+pub(crate) fn governed_repos_at(state_root: &std::path::Path) -> SimardResult<Vec<String>> {
+    use crate::overseer::ecosystem_observe::{
+        DEFAULT_IDENTITY_SLUG, default_simard_roster_seed_toml, resolve_stewarded_roster,
+    };
+    resolve_stewarded_roster(
+        state_root,
+        DEFAULT_IDENTITY_SLUG,
+        default_simard_roster_seed_toml(),
     )
+    .map_err(|reason| SimardError::CiHealthGhCommandFailed {
+        reason: format!("failed to resolve the identity-curated governed roster: {reason}"),
+    })
 }
 
 /// Run a live sweep of the governed fleet ([`governed_repos`]), using and
