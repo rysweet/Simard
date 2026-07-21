@@ -193,6 +193,8 @@ Repository changes are expected to pass the same checks locally and in CI. Enrol
 
 The hooks are Python-free committed shell scripts under `hooks/` (see [Local Commit Gates](./operations/pre-commit-setup.md)). CI (`.github/workflows/verify.yml`) runs the identical `cargo` commands directly — no `pre-commit` framework, no `pip`, no `python3`. Those gates enforce `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, and `cargo test --all-features --locked`.
 
+For test reliability: reads of the process-global environment from tests are governed by [serial(cognitive_memory) test isolation](./testing/cognitive-memory-serial-isolation.md); the [scaling and cost-ledger flake fixes](./testing/scaling-and-cost-ledger-flake-fixes.md) restored `verify` to green after #4361. Subprocess capture in the OODA loop cannot deadlock on large output — see [`run_command_inner` concurrent pipe drain](./reference/run-command-pipe-drain.md).
+
 ## Reading paths
 
 If you are new to Simard, start with the [local session tutorial](./tutorials/run-your-first-local-session.md).
