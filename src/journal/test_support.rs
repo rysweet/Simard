@@ -99,6 +99,7 @@ impl CognitiveMemoryOps for FakeMemory {
                 source_label: source.to_string(),
                 temporal_index: id as i64,
                 compressed: false,
+                created_at: None,
             });
         Ok(node_id)
     }
@@ -255,6 +256,7 @@ pub(crate) fn episode(content: &str) -> CognitiveEpisode {
         source_label: "test".to_string(),
         temporal_index: 0,
         compressed: false,
+        created_at: None,
     }
 }
 
@@ -267,6 +269,7 @@ pub(crate) fn episode_at(content: &str, temporal_index: i64) -> CognitiveEpisode
         source_label: "test".to_string(),
         temporal_index,
         compressed: false,
+        created_at: None,
     }
 }
 

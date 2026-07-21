@@ -10,8 +10,10 @@ name: simard-dashboard-memory-recent-items
 description: >-
   Standalone dashboard's Memory tab "Recent Memories" panel
   (GET /api/memory/recent) lists the newest episodic memories newest-first with
-  available:true, instead of the retired always-empty stub that claimed per-item
-  recent listing was unavailable on the library backend.
+  available:true, and carries each item's real created_at as a non-null RFC3339
+  timestamp so the frontend can render a "time ago" label (issue #4383) —
+  instead of the retired always-empty stub, or the always-null timestamp that
+  dropped the episode's wall-clock instant.
 version: "1.0"
 config:
   timeout: 240000
