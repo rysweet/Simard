@@ -189,6 +189,13 @@ pub(crate) enum Reason {
     /// meeting-persistence resolver (`write_auto_save` / `write_transcript` /
     /// `write_meeting_bundle`).
     CallsEnvReadingHandler { handler: String },
+    /// Calls `cost_tracking::record_cost`, which resolves `$HOME` via
+    /// `ledger_path()` and appends to the process-global cost ledger. A
+    /// concurrent `HOME` mutation can tear that read (and redirect the append
+    /// into another test's temp ledger), so a `record_cost` writer must share
+    /// the `cognitive_memory` serial key. This is the sibling-meeting-test blind
+    /// spot behind the shared `pre-commit` flake.
+    WritesCostLedger,
     /// An allowlist entry was added without a justification.
     EmptyAllowlistJustification,
 }
@@ -212,6 +219,10 @@ impl Reason {
                     "calls env-reading handler `{handler}` (resolves the state-root / meetings surface)"
                 )
             }
+            Reason::WritesCostLedger => {
+                "calls cost_tracking::record_cost (reads $HOME via ledger_path() and appends the process-global cost ledger)"
+                    .to_string()
+            }
             Reason::EmptyAllowlistJustification => {
                 "allowlist entry has no justification".to_string()
             }
@@ -225,6 +236,7 @@ impl Reason {
             Reason::EmptyAllowlistJustification => 0,
             Reason::MutatesEnv { .. } => 1,
             Reason::ConstructsHermeticState => 2,
+            Reason::WritesCostLedger => 2,
             Reason::CallsEnvReadingHandler { .. } => 3,
             Reason::ReadsStateRootDefault => 4,
         }
@@ -232,14 +244,14 @@ impl Reason {
 
     /// Whether this reason is an env *mutation* (a race *cause*). Only mutation
     /// reasons propagate along the call graph: a test that reaches a `set_var`
-    /// / `HermeticState` through a same-file helper is a writer and must be
-    /// serialized. Reads (a race *victim*) are flagged only when they appear
-    /// *directly* in the test body, never propagated through branchy production
-    /// dispatchers (which read state root only in untaken code paths).
+    /// / `HermeticState` / `record_cost` through a same-file helper is a writer
+    /// and must be serialized. Reads (a race *victim*) are flagged only when
+    /// they appear *directly* in the test body, never propagated through branchy
+    /// production dispatchers (which read state root only in untaken code paths).
     fn is_mutation(&self) -> bool {
         matches!(
             self,
-            Reason::MutatesEnv { .. } | Reason::ConstructsHermeticState
+            Reason::MutatesEnv { .. } | Reason::ConstructsHermeticState | Reason::WritesCostLedger
         )
     }
 }
@@ -541,6 +553,17 @@ impl<'a, 'ast> Visit<'ast> for BodyScan<'a> {
                 && READ_WATCHED_VARS.contains(&var.as_str())
             {
                 self.reasons.push(Reason::ReadsStateRootDefault);
+            }
+
+            // (E) cost-ledger writer: `cost_tracking::record_cost` resolves $HOME
+            // via ledger_path() and appends the process-global cost ledger. A
+            // concurrent HOME mutation can tear that read (and redirect the
+            // append into another test's temp ledger), so record_cost writers —
+            // directly or through a same-file helper — must carry the
+            // cognitive_memory key. This closes the sibling-meeting-test blind
+            // spot behind the shared pre-commit flake.
+            if last == "record_cost" && (penult == "cost_tracking" || segs.len() == 1) {
+                self.reasons.push(Reason::WritesCostLedger);
             }
 
             // (D) env-reading async goal route handlers and meeting-persistence

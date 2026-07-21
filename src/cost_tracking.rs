@@ -8,7 +8,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A single cost entry written to the ledger.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -120,13 +120,29 @@ pub fn record_cost(
 }
 
 fn write_entry(entry: &CostEntry) -> std::io::Result<()> {
-    let path = ledger_path();
+    write_entry_to(&ledger_path(), entry)
+}
+
+/// Append one cost entry to `path` as a single JSON line.
+///
+/// The whole line (payload + trailing `\n`) is serialised first and issued in
+/// ONE `write_all`, so under `O_APPEND` the kernel appends it atomically and
+/// concurrent appenders (the many threads sharing the single `cargo test --lib`
+/// process) can never interleave a torn, unparseable line. The previous
+/// `writeln!(file, ...)` routed through `Write::write_fmt`, which can emit the
+/// payload and the trailing newline as separate `write(2)` calls, letting two
+/// meeting turns tear each other's ledger line — the cost-ledger append race
+/// behind the shared `pre-commit` flake (see
+/// `docs/testing/deflaking-cost-ledger-append-race.md`).
+fn write_entry_to(path: &Path, entry: &CostEntry) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
-    let line = serde_json::to_string(entry).map_err(|e| std::io::Error::other(e.to_string()))?;
-    writeln!(file, "{}", line)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut line =
+        serde_json::to_string(entry).map_err(|e| std::io::Error::other(e.to_string()))?;
+    line.push('\n');
+    file.write_all(line.as_bytes())?;
     Ok(())
 }
 

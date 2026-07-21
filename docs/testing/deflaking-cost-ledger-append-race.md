@@ -10,8 +10,9 @@ description: >
   failed to find its own `copilot-meeting` entry. The flake is closed by
   serializing every cost-recording test under the `cognitive_memory` serial
   key; the ledger `write_entry` is additionally hardened into a single atomic
-  append (via a `write_entry_to` helper) as defense-in-depth, with a planned
-  recurrence guard.
+  append (via a `write_entry_to` helper) as defense-in-depth, and a
+  machine-enforced recurrence guard flags any future cost-writer test that
+  omits the key.
 last_updated: 2026-07-20
 review_schedule: when a new test records LLM cost via cost_tracking::record_cost, or when serial_test is upgraded
 owner: simard
@@ -83,7 +84,7 @@ signature are unchanged.
 | - | ------ | ---- | ------- |
 | 1 | Serialize the cost-writer tests | `src/base_type_copilot/tests.rs` | The four sibling meeting tests carry `#[serial_test::serial(cognitive_memory)]`, so no concurrent turn appends into a HOME-redirected ledger — and no concurrent `setenv("HOME", ...)` tears a HOME read — while the target test reads it. **This is the correctness fix that closes the observed panic.** |
 | 2 | Atomic append (defense-in-depth) | `src/cost_tracking.rs` | A private `write_entry_to(path, entry)` serializes the entry to a `String`, pushes a single `\n`, and issues **one** `file.write_all(...)`; `write_entry` delegates to it via `ledger_path()`. For cost lines (well under the pipe/`PIPE_BUF`-scale sizes at which a single `write` may split), Linux regular-file `O_APPEND` lands each such `write(2)` atomically, so concurrent writers never interleave partial lines. This hardens the format against future concurrent writers; it was **not** the cause of the observed panic (readers already skip unparseable lines). |
-| 3 | Recurrence guard (planned extension) | `src/test_support/serial_guard.rs` | The AST meta-test today flags `#[test]`s that mutate `HOME`/env or read the state root without the `cognitive_memory` key. A **planned** extension adds `record_cost` reachers to that set, closing the HOME-derived-writer blind spot documented in [cognitive-memory-serial-isolation.md](./cognitive-memory-serial-isolation.md). Until that extension ships, the test-author rule below is enforced by review, not by the scanner. |
+| 3 | Recurrence guard (machine-enforced) | `src/test_support/serial_guard.rs` | The AST meta-test flags `#[test]`s that mutate `HOME`/env or read the state root without the `cognitive_memory` key, and now also flags any test that reaches `cost_tracking::record_cost` — directly or through a same-file helper — without the key (a new `WritesCostLedger` reason that propagates along the same-file call graph). This closes the HOME-derived-writer blind spot documented in [cognitive-memory-serial-isolation.md](./cognitive-memory-serial-isolation.md), making the test-author rule below machine-enforced rather than review-only. |
 
 Both shipping mechanisms preserve full suite parallelism — only the small set of
 cost-recording tests is serialized against each other, and only against tests
@@ -135,12 +136,14 @@ test that appends to (or reads through) that same redirected path, and a
 `cognitive_memory` race class). The single serial key covers both the env-tear
 and the shared-ledger hazards.
 
-Today this rule is enforced by **review**. The `serial_guard` meta-test already
-fails the build for a hand-written `#[test]` that mutates `HOME`/env or reads the
-state root without the key; a **planned extension** (fix #3) adds `record_cost`
-reachers to that scan so the rule becomes machine-enforced. The scanner is
-designed to never emit a false positive — an offender is reported only when a
-concrete trigger is observed without the key. See
+This rule is **machine-enforced**: the `serial_guard` meta-test fails the build
+for a hand-written `#[test]` that mutates `HOME`/env, reads the state root, or
+reaches `cost_tracking::record_cost` (directly or via a same-file helper)
+without the key. The scanner is designed to never emit a false positive — an
+offender is reported only when a concrete trigger is observed without the key.
+Cross-file helper chains (e.g. a test reaching `record_cost` only through
+production code in another module) remain a documented blind spot, so the
+review habit still matters. See
 [cognitive-memory-serial-isolation.md](./cognitive-memory-serial-isolation.md)
 for the allowlist mechanism if you have a legitimate exception (e.g. a test
 that stubs the ledger path and provably never touches `HOME`).

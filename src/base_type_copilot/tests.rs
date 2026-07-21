@@ -789,6 +789,7 @@ fn is_meeting_mode_returns_false_for_orchestrator() {
 /// meeting-mode dispatch in the plan (real behavior, not a plan-substring tautology).
 #[cfg(unix)]
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn meeting_turn_captures_copilot_output_and_records_meeting_dispatch() {
     let (_dir, bin) = fake_copilot("FAKE-COPILOT-OK: meeting reply body");
     let outcome = run_fake_meeting_turn("copilot-meeting-turn", &bin, "Hello from meeting test");
@@ -809,6 +810,7 @@ fn meeting_turn_captures_copilot_output_and_records_meeting_dispatch() {
 /// Meeting-mode evidence should include copilot-meeting-session-id.
 #[cfg(unix)]
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn meeting_turn_evidence_includes_session_id() {
     let (_dir, bin) = fake_copilot("ok");
     let outcome = run_fake_meeting_turn("copilot-meeting-evidence", &bin, "Evidence test");
@@ -826,6 +828,7 @@ fn meeting_turn_evidence_includes_session_id() {
 /// Meeting-mode evidence should NOT contain PTY artifacts.
 #[cfg(unix)]
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn meeting_turn_evidence_has_no_pty_artifacts() {
     let (_dir, bin) = fake_copilot("ok");
     let outcome = run_fake_meeting_turn("copilot-meeting-no-pty", &bin, "No PTY test");
@@ -850,6 +853,7 @@ fn meeting_turn_evidence_has_no_pty_artifacts() {
 /// Meeting-mode evidence should show `copilot` (direct), not `amplihack copilot`.
 #[cfg(unix)]
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn meeting_turn_evidence_shows_direct_copilot_command() {
     let (_dir, bin) = fake_copilot("ok");
     let outcome = run_fake_meeting_turn("copilot-meeting-cmd", &bin, "Command check");
