@@ -133,6 +133,28 @@ pub struct CanaryResult {
     pub failing_detail: Option<String>,
 }
 
+impl CanaryResult {
+    /// Compose the operator-facing refusal reason for a failed deploy gate.
+    ///
+    /// Only a [`DeployRefusal::RedCanary`] is enriched with this canary's
+    /// per-gate evidence (the NAMED failing gate + detail) so the root cause is
+    /// evidenced instead of a bare `N/M gates` aggregate. Every other refusal
+    /// (no-op, rollback, crash-loop) keeps its own `Display` and must NOT be
+    /// stamped with red-canary gate detail.
+    fn refusal_reason(&self, refusal: &DeployRefusal) -> String {
+        match (refusal, &self.failing_gate, &self.failing_detail) {
+            (DeployRefusal::RedCanary, Some(gate), Some(detail)) => {
+                format!("{refusal}: gate '{gate}' — {detail} [{}]", self.detail)
+            }
+            (DeployRefusal::RedCanary, Some(gate), None) => {
+                format!("{refusal}: gate '{gate}' [{}]", self.detail)
+            }
+            (DeployRefusal::RedCanary, None, _) => format!("{refusal} ({})", self.detail),
+            _ => refusal.to_string(),
+        }
+    }
+}
+
 /// Build + verify the canary binary for a target. Real impl reuses
 /// `self_relaunch::{build_canary, verify_canary, all_gates_passed}`; tests fake it.
 pub trait CanaryRunner {
@@ -293,20 +315,9 @@ impl Deployer for GuardedDeployer {
         // best-effort here (a refusal already surfaces as an Err); the mandatory
         // dispatch assertion below guards the swap path.
         if let Err(refusal) = evaluate_deploy_gate(&ctx) {
-            // For a RED canary, NAME the failing gate + detail so the operator
-            // refusal evidences the root cause instead of a bare aggregate.
-            // Every other refusal (no-op, rollback, crash-loop) keeps its own
-            // Display and must NOT be stamped with red-canary gate detail.
-            let reason = match &refusal {
-                DeployRefusal::RedCanary => match (&canary.failing_gate, &canary.failing_detail) {
-                    (Some(gate), Some(detail)) => {
-                        format!("{refusal}: gate '{gate}' — {detail} [{}]", canary.detail)
-                    }
-                    (Some(gate), None) => format!("{refusal}: gate '{gate}' [{}]", canary.detail),
-                    _ => format!("{refusal} ({})", canary.detail),
-                },
-                _ => refusal.to_string(),
-            };
+            // Enrich a RED canary refusal with its NAMED failing gate + detail;
+            // other refusals keep their own Display (see `refusal_reason`).
+            let reason = canary.refusal_reason(&refusal);
             let notification =
                 OperatorNotification::deploy_refused(commit, &running, &self.repo, &reason);
             let _ = self.notifier.notify(&notification);
@@ -1327,5 +1338,40 @@ mod tests {
             "a no-op refusal must not be mislabeled a red canary: {}",
             seen[0].problem
         );
+    }
+
+    #[test]
+    fn refusal_reason_names_gate_for_red_canary_and_leaves_others_intact() {
+        let red = CanaryResult {
+            passed: false,
+            detail: "3/4 gates".to_string(),
+            failing_gate: Some("unit-test".to_string()),
+            failing_detail: Some("tests failed (exit 101): 2 failed".to_string()),
+        };
+        // RED canary is enriched with the NAMED gate + detail + aggregate.
+        let reason = red.refusal_reason(&DeployRefusal::RedCanary);
+        assert!(reason.contains("unit-test"), "{reason}");
+        assert!(reason.contains("2 failed"), "{reason}");
+        assert!(reason.contains("3/4 gates"), "{reason}");
+
+        // A RED canary with a gate name but no detail still names the gate.
+        let no_detail = CanaryResult {
+            failing_detail: None,
+            ..red.clone()
+        };
+        let reason = no_detail.refusal_reason(&DeployRefusal::RedCanary);
+        assert!(reason.contains("unit-test"), "{reason}");
+        assert!(reason.contains("3/4 gates"), "{reason}");
+
+        // A non-red refusal keeps its own Display, never the gate detail.
+        for other in [
+            DeployRefusal::NoOp,
+            DeployRefusal::Rollback,
+            DeployRefusal::CrashLoop { churn: 5 },
+        ] {
+            let reason = red.refusal_reason(&other);
+            assert_eq!(reason, other.to_string());
+            assert!(!reason.contains("unit-test"), "{reason}");
+        }
     }
 }
