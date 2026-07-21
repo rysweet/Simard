@@ -116,6 +116,7 @@ fn validate_timeout(value: &str) -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use crate::test_support::HermeticState;
+    use serial_test::serial;
 
     fn dispatch(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
         dispatch_probe_command(args.iter().map(|s| s.to_string()))
@@ -155,6 +156,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(cognitive_memory)]
     fn rpc_health_check_passes_against_a_live_store() {
         // A hermetic state root with no running daemon: `open_reader_client`
         // falls back to a direct on-disk open (endpoint legitimately absent),

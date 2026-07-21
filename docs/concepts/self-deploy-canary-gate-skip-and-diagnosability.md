@@ -53,9 +53,18 @@ out:
 ```
 
 In the isolated canary context there is no running daemon to answer that probe.
-The freshly built binary has no server bound, so `probe rpc` returns a
-connection-refused / no-daemon error and the gate reports `passed: false`.
-`all_gates_passed()` then sees one failing gate and the canary is **red**.
+Worse, until this change the `probe` subcommand **did not exist at all**: the
+freshly built binary answered `<binary> probe rpc` with `unsupported command
+'probe'` on stderr and a generic exit `1` — which is neither a healthy exit `0`
+nor any recognized absence signal — so the gate reported `passed: false`.
+`all_gates_passed()` then saw one failing gate and the canary was **red**.
+
+The fix has two parts: (a) a real `probe rpc` subcommand (`src/operator_cli/probe.rs`)
+that opens the canonical reader client and exits `0` when the RPC / cognitive-memory
+endpoint answers — so a healthy candidate now **passes** the gate; and (b) the
+fail-closed `Skipped` outcome below, which lets a *positively-detected* absent
+endpoint skip (insurance for a future socket-only transport) without ever blinding
+a reachable-but-unhealthy endpoint.
 
 The daemon's deploy driver consumed that red verdict every tick:
 
@@ -155,9 +164,11 @@ the one gate that requires a live daemon. `gym-baseline` currently runs
 must **not** skip unless its subcommand is later verified to need one. The
 `smoke`, `unit-test`, and any build/regression gates **never skip** — they cannot
 produce a `Skipped` result. (See the reference's
-[Detection signal](../reference/self-deploy-canary-gate-outcomes-api.md#detection-signal-implementation-gap--must-be-resolved-in-the-build-step)
-note: `probe rpc` must expose a distinct absence signal before `rpc-health` can
-skip reliably and fail-closed.)
+[Detection signal (as shipped)](../reference/self-deploy-canary-gate-outcomes-api.md#detection-signal-as-shipped):
+`probe rpc` now ships in `src/operator_cli/probe.rs` and exits `0` when the
+RPC / cognitive-memory endpoint answers, so a healthy candidate passes the gate;
+`endpoint_absent`'s exit-code / stderr signals remain fail-closed insurance for a
+future socket-only transport that reports connection-refused.)
 
 ### 3. Per-gate evidence threaded to the operator refusal
 
