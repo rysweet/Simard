@@ -113,6 +113,19 @@ struct LedgerEntry {
     last_deploy_result: Option<DeployResult>,
 }
 
+impl LedgerEntry {
+    /// A fresh record for a SHA seen for the first time this tick: zero failures,
+    /// no backoff, and no terminal result yet (the caller sets the outcome).
+    fn new(now_secs: u64) -> Self {
+        Self {
+            failure_count: 0,
+            last_attempt_unix_secs: now_secs,
+            backoff_until_unix_secs: now_secs,
+            last_deploy_result: None,
+        }
+    }
+}
+
 /// The serialized ledger file shape.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct LedgerFile {
@@ -238,12 +251,7 @@ impl DeployAttemptLedger {
         let entry = self
             .entries
             .entry(target_sha.to_string())
-            .or_insert_with(|| LedgerEntry {
-                failure_count: 0,
-                last_attempt_unix_secs: now_secs,
-                backoff_until_unix_secs: now_secs,
-                last_deploy_result: None,
-            });
+            .or_insert_with(|| LedgerEntry::new(now_secs));
         entry.failure_count = entry.failure_count.saturating_add(1);
         entry.last_attempt_unix_secs = now_secs;
         entry.backoff_until_unix_secs = now_secs.saturating_add(backoff_secs(entry.failure_count));
@@ -261,12 +269,7 @@ impl DeployAttemptLedger {
         let entry = self
             .entries
             .entry(target_sha.to_string())
-            .or_insert_with(|| LedgerEntry {
-                failure_count: 0,
-                last_attempt_unix_secs: now_secs,
-                backoff_until_unix_secs: now_secs,
-                last_deploy_result: None,
-            });
+            .or_insert_with(|| LedgerEntry::new(now_secs));
         entry.failure_count = 0;
         entry.last_attempt_unix_secs = now_secs;
         entry.backoff_until_unix_secs = now_secs;
