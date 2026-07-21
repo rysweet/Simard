@@ -174,7 +174,7 @@ means the label-less retry may run later.
 /// Best-effort, idempotent `gh label create ooda-stuck`. Returns `Ok(())`
 /// when the label exists afterwards (created now, or already present per
 /// `label_already_exists`). A spawn error or a non-"already exists"
-/// failure is logged at `debug`/`warn` on the given `target` and returns
+/// failure is logged at `warn` on the given `target` and returns
 /// `Err`, but callers treat this as non-fatal and proceed to the create
 /// attempt regardless. Never panics.
 pub fn ensure_ooda_stuck_label(target: &'static str) -> SimardResult<()>;
@@ -250,20 +250,24 @@ Representative events for the label-absent path:
 ```text
 WARN  simard::ooda  stderr="could not add label: 'ooda-stuck' not found"
       no-progress breaker: gh issue create failed with missing label; retrying without --label
-WARN  simard::ooda  title="…" issue="4231"
-      no-progress breaker: tracking issue filed for stuck goal (label-less fallback)
+WARN  simard::ooda  title="…" issue="4231" labelled=false
+      no-progress breaker: tracking issue filed for stuck goal
 ```
 
-The two `spawn.rs` sites emit the equivalent fallback events on
-`simard::ooda_brain`:
+The two `spawn.rs` sites share one filing helper, so both emit the same
+fallback warn on `simard::ooda_brain`; the enclosing site then logs the
+`Filed` outcome with its `goal` id:
 
 ```text
-WARN  simard::ooda_brain  goal="…" stderr="could not add label: 'ooda-stuck' not found"
-      deterministic safeguard: gh issue create failed with missing label; retrying without --label
+WARN  simard::ooda_brain  stderr="could not add label: 'ooda-stuck' not found"
+      stuck-goal tracking issue: retrying gh issue create without --label (label absent)
+INFO  simard::ooda_brain  goal="…" labelled=false
+      deterministic safeguard: goal marked Blocked + tracking issue filed
 ```
 
-The first line proves the original error is never swallowed; the second
-proves the issue was still filed and linked.
+The `warn` retry line proves the original error is never swallowed; the
+final filed line proves the issue was still filed and linked
+(`labelled=false` records that the label-less fallback was used).
 
 ## Configuration
 

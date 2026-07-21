@@ -145,20 +145,27 @@ impl GhIssueFiler {
             }
             Ok(out) => {
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                // Always surface the real failure before any fallback so the
-                // error stays observable (no silent swallow).
+                if with_label && crate::ooda_stuck_label::is_missing_label_error(&stderr) {
+                    // Recoverable: the label is absent. Surface the original
+                    // stderr (no silent swallow) at warn — not error — because
+                    // the label-less retry below still files the issue, so an
+                    // operator alerting on error is not paged for a self-healed
+                    // event. Mirrors the spawn.rs brain sites.
+                    tracing::warn!(
+                        target: "simard::ooda",
+                        stderr = %stderr,
+                        "no-progress breaker: gh issue create failed with missing label; retrying without --label",
+                    );
+                    return self.file_issue_with_label(title, body, false);
+                }
+                // Genuine failure (auth, rate-limit, network, repo, or a
+                // label-less retry that still failed): surface at error. Never
+                // swallowed; the goal remains Blocked with no linked artifact.
                 tracing::error!(
                     target: "simard::ooda",
                     stderr = %stderr,
                     "no-progress breaker: gh issue create failed (goal still Blocked)",
                 );
-                if with_label && crate::ooda_stuck_label::is_missing_label_error(&stderr) {
-                    tracing::warn!(
-                        target: "simard::ooda",
-                        "no-progress breaker: retrying gh issue create without --label (label absent)",
-                    );
-                    return self.file_issue_with_label(title, body, false);
-                }
                 None
             }
             Err(e) => {
