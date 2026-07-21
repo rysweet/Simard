@@ -9,11 +9,14 @@ status: implemented
 related:
   - ./steerable-ooda-daemon.md
   - ./perpetual-goal-no-progress-exemption.md
+  - ./research-goal-never-idle.md
   - ./hybrid-cognition-measurement.md
   - ./authoritative-goal-board-store.md
   - ../reference/standing-research-goal-novelty-directive-api.md
+  - ../reference/research-goal-never-idle-rail-api.md
   - ../reference/no-progress-breaker-api.md
   - ../howto/steer-a-standing-research-goal-toward-novelty.md
+  - ../howto/keep-the-research-goal-never-idle.md
   - ../../prompt_assets/simard/goal_session_objective.md
   - ../../prompt_assets/simard/ooda_orient.md
   - ../../prompt_assets/simard/ooda_decide.md
@@ -34,6 +37,18 @@ related:
 > predicate. See the
 > [novelty-directive API reference](../reference/standing-research-goal-novelty-directive-api.md)
 > for the exact predicate and injection point.
+
+> **Extended by #4399 (never idle).** This page describes the novelty-first
+> *steer* — when the goal acts, prefer a novel benchmarked direction. It permitted
+> a **disclosed fallback to incremental maintenance** and, upstream, an outright
+> **idle** cycle. [#4399](./research-goal-never-idle.md) closes both gaps: the goal
+> must produce a NEW source or NEW experiment **every** cycle (dedup'd), the
+> incremental/idle fallback is replaced by a **local-experiment** floor, and an
+> idle cycle is now a **fault** the breaker re-orients out of (not the benign
+> `perpetual_idled` exemption). Where this page says "still exempt from the
+> hard-block" or "fall back to incremental only when no novel direction is viable",
+> read the [never-idle concept](./research-goal-never-idle.md) as the current
+> behaviour for the research goal.
 
 ## The defect this fixes (#4347)
 
@@ -142,11 +157,12 @@ is_standing_research_goal  ==  description_marks_standing  AND  description_mark
 - `description_marks_standing` — the **existing** standing-goal predicate
   (`is_perpetual()`), reused verbatim.
 - `description_marks_research` — a new sibling predicate that matches
-  cognition/research markers on a **word boundary**: `cognition`, `recall`,
-  `distillation`, `reasoner`, `consolidation`, `retrieval`, `embedding`. The
-  broad token `memory` is deliberately **excluded** to avoid falsely steering
-  unrelated standing goals (e.g. a perpetual "reduce memory usage" infra goal);
-  the motivating goal already matches via `recall`/`distillation`/`reasoner`.
+  cognition/research markers on a **leading word boundary**: `cognition`,
+  `recall`, `distillation`, `reasoner`, `memory`, `consolidation`, `retrieval`,
+  `embedding`. Leading-boundary matching keeps a description that merely contains
+  a marker as a non-leading substring from qualifying; the motivating goal's
+  charter ("graph memory, recall quality, …") matches via
+  `memory`/`recall`/`distillation`/`reasoner`.
 
 There is **no `70ab8541` slug branch**. Any standing goal whose description marks
 it as research/cognition gets the steer; ordinary goals never do. See the

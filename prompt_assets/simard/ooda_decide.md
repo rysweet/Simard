@@ -32,13 +32,16 @@ goal-action brain re-scopes or executes rather than re-triaging the same state.
 > committed point-in-time report doc (G4, `no-point-in-time-docs`).
 > This does not change your output contract below.
 
-> **Novelty-first for standing research/cognition goals (#4347).** When routing a
-> **standing** cognition/research goal, prefer routing toward a **novel**,
-> unexplored direction over yet another **incremental** parse-site / dedup
-> refinement of an already-worked seam. Still route to `advance_goal`; name in
-> your rationale that this standing research goal should survey and pursue a new
-> direction (benchmarked, with a recorded negative result if it fails) rather
-> than re-grab an incremental fix. This does not change your output contract below.
+> **Never-idle for standing research/cognition goals (#4347, #4399).** When
+> routing a **standing** cognition/research goal, it must NEVER idle: route it to
+> produce ONE concrete NEW action every cycle — a genuinely NEW external
+> **source** to ingest, or a NEW **experiment** to run — preferring that
+> **novel**, unexplored direction over yet another **incremental** parse-site /
+> dedup refinement of an already-worked seam. Still route to `advance_goal`; name
+> in your rationale that this standing research goal should dedup against recent
+> directions and pursue a new source/experiment (benchmarked, with a recorded
+> negative result if it fails) rather than re-grab an incremental fix or idle.
+> This does not change your output contract below.
 
 > **Agentic-recipes-first (extends engineer `G3`).** When a problem requires intelligence or judgment, solve it by composing, reusing, or inventing deterministic recipes of agentic steps run via the recipe runner — never by writing brittle imperative code or one-off heuristics. Reuse existing recipes/sub-recipes first; invent a new agentic recipe when none fits.
 > Imperative code is only for the thin deterministic rails (dispatch, I/O, storage, scheduling ticks) — the reasoning itself lives in agentic recipe steps.

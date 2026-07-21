@@ -11,7 +11,10 @@
 
 use std::cell::RefCell;
 
-use super::no_progress::{NoProgressIssueFiler, apply_no_progress_breaker_with_threshold};
+use super::no_progress::{
+    NoProgressBreakerReport, NoProgressIssueFiler, ResearchIdleFault, StandingIdle,
+    apply_no_progress_breaker_with_threshold, classify_standing_idle,
+};
 use crate::error::SimardResult;
 use crate::goal_curation::completion_gate::EvidenceSource;
 use crate::goal_curation::no_progress_breaker::{
@@ -354,35 +357,60 @@ fn stale_counter_is_pruned_when_goal_leaves_the_board() {
 
 // --- perpetual/standing-goal exemption (issue #2589) ------------------------
 
-/// A STANDING/PERPETUAL goal (issues #2580/#2589): its description carries the
-/// durable standing marker, so it is recognised by the *same* `is_perpetual()`
-/// flag the non-completability path keys on. Modeled on the live
-/// `continuously-research-and-improve-your-own-cogn-*` research goal, at 0%.
+/// A STANDING/PERPETUAL but **non-research** goal (issues #2580/#2589): a
+/// CI-stewardship charter whose bursty idling is genuinely benign. It carries
+/// the durable standing marker (so `is_perpetual()` holds) but NO cognition /
+/// research marker, so `is_standing_research_goal()` is false. This is the goal
+/// class that KEEPS the benign perpetual-idle exemption (issue #4399): for it an
+/// idle cycle is normal, not a fault. Deliberately kept distinct from
+/// [`standing_research_goal`] so the #4399 fixture split can never drift the two
+/// exemption paths back together.
 fn perpetual_goal(id: &str) -> ActiveGoal {
-    let g = ActiveGoal::new(
-        id,
-        "STANDING PERPETUAL goal — never mark complete; continuously research \
-         and improve your own cognition",
-        5,
-    );
+    let g = ActiveGoal::new(id, "Steward CI health. STANDING PERPETUAL goal.", 5);
     assert!(
         g.is_perpetual(),
         "fixture must be recognised as standing/perpetual by the shared #2580/#2589 flag"
+    );
+    assert!(
+        !g.is_standing_research_goal(),
+        "the benign-exemption fixture must NOT read as a standing research goal (#4399)"
+    );
+    g
+}
+
+/// A STANDING/PERPETUAL **research** goal (issue #4399): standing/perpetual AND
+/// marked cognition-research, i.e. `is_standing_research_goal()` holds. Modeled
+/// on the live `continuously-research-and-improve-your-own-cogn-70ab8541` goal.
+/// For this class an idle cycle is a FAULT — the never-idle rail records it in
+/// `research_idle_faults` (never `perpetual_idled`) and re-orients the goal so
+/// the next cycle generates a novel source/experiment.
+fn standing_research_goal(id: &str) -> ActiveGoal {
+    let g = ActiveGoal::new(
+        id,
+        "Continuously research and improve your own cognition: graph memory, \
+         recall quality, and reasoner reliability. STANDING PERPETUAL goal.",
+        5,
+    );
+    assert!(
+        g.is_standing_research_goal(),
+        "fixture must read as a standing research goal (#4399)"
     );
     g
 }
 
 #[test]
 fn perpetual_goal_idles_instead_of_blocking_past_threshold() {
-    // The production defect: a STANDING/PERPETUAL goal is inherently bursty — it
-    // ships durable improvements periodically and idles between. Idle cycles are
-    // NORMAL, not a livelock, so the no-progress SAFEGUARD must NEVER hard-block
-    // it. Driven N+1 consecutive no-action cycles (one past where a normal goal
-    // is parked), it must: stay ACTIVE (never Blocked), file NO tracking issue,
-    // set NO [OODA-SAFEGUARD] sentinel, never be escalated, be reported as a
-    // perpetual idle, and have its no-action counter reset every cycle.
+    // A STANDING/PERPETUAL but NON-research goal (CI stewardship) is inherently
+    // bursty — it ships durable improvements periodically and idles between. For
+    // this class idle cycles are NORMAL, not a livelock, so the no-progress
+    // SAFEGUARD must NEVER hard-block it. Driven N+1 consecutive no-action cycles
+    // (one past where a normal goal is parked), it must: stay ACTIVE (never
+    // Blocked), file NO tracking issue, set NO [OODA-SAFEGUARD] sentinel, never be
+    // escalated, be reported as a (benign) perpetual idle, and have its no-action
+    // counter reset every cycle. (Research goals take the fault path instead —
+    // see `research_goal_idle_is_a_fault_not_a_benign_perpetual_idle`.)
     let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
-    let id = "continuously-research-and-improve";
+    let id = "steward-ci-health";
     let mut goal = perpetual_goal(id);
     goal.wip_refs = vec![pr_ref("7")]; // an open, unmerged PR
     let mut state = state_with(goal);
@@ -509,5 +537,203 @@ fn non_perpetual_goal_still_escalates_and_is_never_reported_idled() {
             "the normal goal must still carry the no-progress sentinel: {reason}"
         ),
         other => panic!("expected Blocked, got {other:?}"),
+    }
+}
+
+// --- research goal never-idle: idle is a FAULT, not exempt (issue #4399) -----
+
+#[test]
+fn research_goal_idle_is_a_fault_not_a_benign_perpetual_idle() {
+    // The #4399 defect: the standing RESEARCH goal was silently swept into the
+    // benign perpetual-idle exemption ("standing/perpetual goal idled this cycle
+    // — normal, not a fault"), so over many cycles it produced nothing new. Under
+    // the never-idle rail an idle research cycle is a FAULT: it is recorded in
+    // `research_idle_faults` — NEVER `perpetual_idled` — while STILL staying
+    // fail-closed (never blocked, never escalated, never a firing). Driven N+1
+    // consecutive no-action cycles (past where a normal goal is parked).
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let id = "continuously-research-and-improve-your-own-cogn-70ab8541";
+    let mut goal = standing_research_goal(id);
+    goal.wip_refs = vec![pr_ref("7")]; // an open, unmerged PR
+    let mut state = state_with(goal);
+    let evidence = FakeEvidence {
+        pr_merged: false,
+        issue_closed: false,
+        deployed: false,
+    };
+    let filer = RecordingFiler::default();
+
+    for cycle in 1..=(threshold + 1) {
+        let report = apply_no_progress_breaker_with_threshold(
+            &mut state,
+            &[no_action_outcome(id)],
+            &evidence,
+            &filer,
+            threshold,
+        );
+        assert_eq!(
+            report.research_idle_faults,
+            vec![id.to_string()],
+            "cycle {cycle}: a research-goal idle must be recorded as a FAULT"
+        );
+        assert!(
+            report.perpetual_idled.is_empty(),
+            "cycle {cycle}: a research goal must NOT get the benign perpetual-idle exemption"
+        );
+        assert!(
+            !report.fired(),
+            "cycle {cycle}: an idle fault is a fail-closed re-orient, not a breaker firing"
+        );
+        assert!(
+            report.escalated.is_empty(),
+            "cycle {cycle}: a research idle must never escalate to a human"
+        );
+    }
+    assert!(
+        filer.calls.borrow().is_empty(),
+        "a research-goal idle must never file an [OODA-SAFEGUARD] tracking issue"
+    );
+}
+
+#[test]
+fn research_goal_idle_reorients_and_stays_active_never_blocked() {
+    // Fail-closed re-orient: on an idle fault the research goal must be driven back
+    // to a fresh, re-dispatchable cycle (`roll_to_new_cycle`: status NotStarted,
+    // stale WIP dropped) so the NEXT OODA cycle re-enters work generation — while
+    // NEVER being blocked/parked, and with its no-action counter reset each cycle.
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let id = "continuously-research-and-improve-your-own-cogn-70ab8541";
+    let mut goal = standing_research_goal(id);
+    goal.status = GoalProgress::InProgress { percent: 40 };
+    goal.wip_refs = vec![pr_ref("7")];
+    let mut state = state_with(goal);
+    let evidence = FakeEvidence {
+        pr_merged: false,
+        issue_closed: false,
+        deployed: false,
+    };
+    let filer = RecordingFiler::default();
+
+    for cycle in 1..=(threshold + 1) {
+        apply_no_progress_breaker_with_threshold(
+            &mut state,
+            &[no_action_outcome(id)],
+            &evidence,
+            &filer,
+            threshold,
+        );
+        let goal = &state.active_goals.active[0];
+        assert!(
+            matches!(goal.status, GoalProgress::NotStarted),
+            "cycle {cycle}: an idle research goal must be re-oriented to NotStarted, got {:?}",
+            goal.status
+        );
+        assert!(
+            goal.wip_refs.is_empty(),
+            "cycle {cycle}: re-orient must drop stale WIP so the next cycle starts fresh"
+        );
+        assert!(
+            !matches!(goal.status, GoalProgress::Blocked(_)),
+            "cycle {cycle}: a research goal must never be Blocked by the no-progress breaker"
+        );
+        assert!(
+            !state.active_goals.active.iter().any(|g| matches!(
+                &g.status,
+                GoalProgress::Blocked(r) if is_no_progress_marker(r)
+            )),
+            "cycle {cycle}: no [OODA-SAFEGUARD] sentinel may ever be set on a research goal"
+        );
+        assert_eq!(
+            state.no_progress_tracker.consecutive(id),
+            0,
+            "cycle {cycle}: the research goal's no-action counter must reset each idle cycle"
+        );
+    }
+    assert_eq!(
+        state.active_goals.active.len(),
+        1,
+        "the research goal must remain active and re-selectable"
+    );
+}
+
+#[test]
+fn research_idle_fault_is_not_a_firing_and_is_logged() {
+    // Contract on the report itself: `research_idle_faults` is a fail-closed
+    // re-orient signal, NOT a terminal breaker action, so it must never count as a
+    // `fired()`. It must still be surfaced in the one-line cycle log so an idle
+    // research fault is visible (never silent, unlike the old benign exemption).
+    let mut report = NoProgressBreakerReport::default();
+    report
+        .research_idle_faults
+        .push("continuously-research-and-improve-your-own-cogn-70ab8541".to_string());
+    assert!(
+        !report.fired(),
+        "a research idle fault is a re-orient, not a terminal breaker firing"
+    );
+    let line = report.log_line();
+    assert!(
+        line.contains("research_faults=1"),
+        "the cycle log must surface the research idle fault count: {line}"
+    );
+}
+
+// --- classify_standing_idle: the single, pure decision point (issue #4399) ---
+
+#[test]
+fn classify_standing_idle_flags_a_research_goal_as_a_fault() {
+    // A standing RESEARCH goal (perpetual AND cognition-research) idling is a
+    // FAULT — the classifier returns ResearchFault with a fixed-vocabulary
+    // category, never the benign exemption.
+    let g = standing_research_goal("continuously-research-and-improve-your-own-cogn-70ab8541");
+    assert_eq!(
+        classify_standing_idle(&g),
+        Some(StandingIdle::ResearchFault {
+            fault: ResearchIdleFault::NoNovelActionProduced
+        }),
+        "a standing research goal's idle must classify as a research fault"
+    );
+}
+
+#[test]
+fn classify_standing_idle_keeps_non_research_standing_goal_benign() {
+    // A standing NON-research goal (CI stewardship) idling is BENIGN — the
+    // classifier returns BenignExempt, preserving the #2589 exemption.
+    let g = perpetual_goal("steward-ci-health");
+    assert_eq!(
+        classify_standing_idle(&g),
+        Some(StandingIdle::BenignExempt),
+        "a non-research standing goal's idle must stay a benign exemption"
+    );
+}
+
+#[test]
+fn classify_standing_idle_is_none_for_an_ordinary_goal() {
+    // A bounded, non-standing goal is never classified here — it falls through to
+    // the normal escalation ladder.
+    let g = ActiveGoal::new("ship-feature-x", "Ship feature X and close the epic.", 5);
+    assert!(
+        !g.is_perpetual(),
+        "fixture must be an ordinary bounded goal"
+    );
+    assert_eq!(
+        classify_standing_idle(&g),
+        None,
+        "an ordinary goal must not be classified as a standing idle"
+    );
+}
+
+#[test]
+fn classify_standing_idle_is_total_over_pathological_descriptions() {
+    // Totality / panic-freedom (enforced under clippy -D warnings): the classifier
+    // is pure and must never panic on empty, very-long, Unicode, or control-char
+    // descriptions — only the structured predicates decide the branch.
+    for desc in [
+        String::new(),
+        "🧠".repeat(4096),
+        "STANDING PERPETUAL\u{0000}\u{202e}research cognition".to_string(),
+        "x".repeat(100_000),
+    ] {
+        let g = ActiveGoal::new("pathological-id", &desc, 5);
+        let _ = classify_standing_idle(&g); // must not panic
     }
 }

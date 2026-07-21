@@ -10,10 +10,13 @@ related:
   - ../concepts/novelty-first-standing-research-steering.md
   - ../concepts/steerable-ooda-daemon.md
   - ../concepts/perpetual-goal-no-progress-exemption.md
+  - ../concepts/research-goal-never-idle.md
   - ./no-progress-breaker-api.md
+  - ./research-goal-never-idle-rail-api.md
   - ./typed-ooda-goal-session-rails.md
   - ./goal-board-api.md
   - ../howto/steer-a-standing-research-goal-toward-novelty.md
+  - ../howto/keep-the-research-goal-never-idle.md
   - ../../src/goal_curation/types.rs
   - ../../src/ooda_actions/goal_session/input.rs
   - ../../prompt_assets/simard/goal_session_objective.md
@@ -33,6 +36,16 @@ related:
 This reference specifies the API added in issue #4347. For the rationale, see
 [Novelty-first steering for standing research/cognition goals](../concepts/novelty-first-standing-research-steering.md).
 
+> **Directive contract updated by #4399.** The `is_standing_research_goal()`
+> predicate and injection point on this page are unchanged and are **reused** by
+> #4399. The *directive text contract* below (step 3, "fall back to incremental
+> maintenance only when no novel direction is viable") is **superseded** for the
+> never-idle mandate: #4399 replaces that fallback with "design + run a NEW
+> measurable experiment; degrade to a LOCAL experiment when no external source is
+> reachable — never idle, never a repeat". See the
+> [never-idle rail API reference](./research-goal-never-idle-rail-api.md#lever-a-never-idle-directive-contract)
+> for the current directive contract.
+
 ## Contents
 
 - [Research-marker set](#research-marker-set)
@@ -49,25 +62,30 @@ The research/cognition markers are a small, code-owned constant slice, mirroring
 the shape of the existing `STANDING_DESCRIPTION_MARKERS`:
 
 ```rust
-/// Case-insensitive, word-boundary markers that flag a goal's description as a
-/// cognition/research goal. Matched via `contains_phrase_on_word_boundary`, so
-/// e.g. "recall" does not match inside "recalled" only on a word boundary.
+/// Whole-word, case-insensitive markers that flag a goal's description as a
+/// cognition/research goal. Matched with a LEADING word boundary (via
+/// `contains_phrase_on_word_boundary`), so ordinary words that merely *contain*
+/// one of these substrings (e.g. "scorecall", "preretrieval") never trigger a
+/// false positive.
 const RESEARCH_DESCRIPTION_MARKERS: &[&str] = &[
     "cognition",
     "recall",
     "distillation",
     "reasoner",
+    "memory",
     "consolidation",
     "retrieval",
     "embedding",
 ];
 ```
 
-The set is intentionally about *cognition-research subject matter*. It is not a
-slug list: the `70ab8541` goal id never appears in code. The broad token
-`memory` is deliberately **excluded** — it would falsely qualify unrelated
-standing goals (e.g. a perpetual "reduce memory usage" infra goal), and the
-motivating goal already matches via `recall`/`distillation`/`reasoner`.
+The set is intentionally about *cognition-research subject matter* — including
+`memory`, since the motivating goal's charter is "graph **memory**, recall
+quality, distillation fact-yield, and reasoner reliability". It is not a slug
+list: the `70ab8541` goal id never appears in code. Matching uses a **leading
+word boundary** (via `contains_phrase_on_word_boundary`), so a description that
+merely *contains* a marker as a non-leading substring (e.g. "scorecall",
+"preretrieval") does not falsely qualify.
 
 ## `description_marks_research`
 

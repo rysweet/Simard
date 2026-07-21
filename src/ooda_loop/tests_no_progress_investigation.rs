@@ -675,25 +675,49 @@ fn reasoner_error_takes_no_terminal_action_and_preserves_the_counter() {
 
 // === perpetual exemption is preserved by the investigated adapter ============
 
-/// A STANDING/PERPETUAL goal (issues #2580/#2589) — recognised by the shared
-/// `is_perpetual()` flag.
+/// A STANDING/PERPETUAL but **non-research** goal (issues #2580/#2589) — a
+/// CI-stewardship charter recognised by the shared `is_perpetual()` flag but NOT
+/// by `is_standing_research_goal()`. This is the class that KEEPS the benign
+/// perpetual-idle exemption under #4399 (idling is normal, not a fault). Kept
+/// distinct from [`standing_research_goal`] so the fixture split never drifts the
+/// two exemption paths together.
 fn perpetual_goal(id: &str) -> ActiveGoal {
+    let g = ActiveGoal::new(id, "Steward CI health. STANDING PERPETUAL goal.", 5);
+    assert!(g.is_perpetual(), "fixture must read as standing/perpetual");
+    assert!(
+        !g.is_standing_research_goal(),
+        "the benign-exemption fixture must NOT read as a standing research goal (#4399)"
+    );
+    g
+}
+
+/// A STANDING/PERPETUAL **research** goal (issue #4399) — standing/perpetual AND
+/// marked cognition-research (`is_standing_research_goal()` holds). For this class
+/// an idle cycle is a FAULT: the investigated adapter must record it in
+/// `research_idle_faults` (never `perpetual_idled`) and re-orient the goal, all
+/// BEFORE any root-cause investigation runs.
+fn standing_research_goal(id: &str) -> ActiveGoal {
     let g = ActiveGoal::new(
         id,
-        "STANDING PERPETUAL goal — never mark complete; continuously research \
-         and improve your own cognition",
+        "Continuously research and improve your own cognition: graph memory, \
+         recall quality, and reasoner reliability. STANDING PERPETUAL goal.",
         5,
     );
-    assert!(g.is_perpetual(), "fixture must read as standing/perpetual");
+    assert!(
+        g.is_standing_research_goal(),
+        "fixture must read as a standing research goal (#4399)"
+    );
     g
 }
 
 #[test]
 fn perpetual_goal_is_exempt_and_never_investigated_or_blocked() {
-    // A standing/perpetual goal idling is NORMAL, not the livelock the breaker
-    // guards. The exemption must run BEFORE investigation, so the reasoner is not
-    // even consulted and the goal is never blocked. A panicking reasoner proves
-    // it is never invoked for a perpetual idle.
+    // A standing/perpetual NON-research goal idling is NORMAL, not the livelock the
+    // breaker guards. The exemption must run BEFORE investigation, so the reasoner
+    // is not even consulted and the goal is never blocked. A panicking reasoner
+    // proves it is never invoked for a benign perpetual idle. (Research goals take
+    // the fault + re-orient path instead — see
+    // `research_goal_idle_is_a_fault_via_investigated_adapter`.)
     struct PanicReasoner;
     impl NoProgressWhyReasoner for PanicReasoner {
         fn investigate(&self, _goal: &ActiveGoal) -> SimardResult<NoProgressWhy> {
@@ -702,7 +726,7 @@ fn perpetual_goal_is_exempt_and_never_investigated_or_blocked() {
     }
 
     let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
-    let id = "continuously-research-and-improve";
+    let id = "steward-ci-health";
     let mut goal = perpetual_goal(id);
     goal.wip_refs = vec![pr_ref("7")];
     let mut state = state_with(goal);
@@ -744,6 +768,80 @@ fn perpetual_goal_is_exempt_and_never_investigated_or_blocked() {
     assert!(
         filer.calls.borrow().is_empty() && dispatcher.calls.borrow().is_empty(),
         "a perpetual goal must never file an issue or spawn an engineer"
+    );
+}
+
+#[test]
+fn research_goal_idle_is_a_fault_via_investigated_adapter() {
+    // The #4399 rail, enforced on the investigated adapter (site L610) too, so the
+    // two breaker sites cannot drift: a standing RESEARCH goal that idles is a
+    // FAULT, not the benign exemption. The classifier runs BEFORE investigation
+    // (a panicking reasoner proves it is never consulted), records the idle in
+    // `research_idle_faults` (NEVER `perpetual_idled`), re-orients the goal
+    // (`roll_to_new_cycle`: NotStarted + WIP dropped), and stays fail-closed
+    // (never fired, never blocked, never escalated, never a spawned engineer).
+    struct PanicReasoner;
+    impl NoProgressWhyReasoner for PanicReasoner {
+        fn investigate(&self, _goal: &ActiveGoal) -> SimardResult<NoProgressWhy> {
+            panic!("the reasoner must NOT run for a research-goal idle fault")
+        }
+    }
+
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let id = "continuously-research-and-improve-your-own-cogn-70ab8541";
+    let mut goal = standing_research_goal(id);
+    goal.status = GoalProgress::InProgress { percent: 40 };
+    goal.wip_refs = vec![pr_ref("7")];
+    let mut state = state_with(goal);
+
+    let evidence = FakeEvidence::stuck();
+    let reasoner = PanicReasoner;
+    let healer = RecordingHealer::ok();
+    let dispatcher = RecordingDispatcher::ok();
+    let filer = RecordingFiler::default();
+
+    for cycle in 1..=(threshold + 1) {
+        let report = drive(
+            &mut state,
+            id,
+            &evidence,
+            &reasoner,
+            &healer,
+            &dispatcher,
+            &filer,
+            threshold,
+        );
+        assert_eq!(
+            report.research_idle_faults,
+            vec![id.to_string()],
+            "cycle {cycle}: a research idle must be recorded as a FAULT"
+        );
+        assert!(
+            report.perpetual_idled.is_empty(),
+            "cycle {cycle}: a research goal must NOT get the benign perpetual-idle exemption"
+        );
+        assert!(
+            !report.fired(),
+            "cycle {cycle}: an idle fault is a fail-closed re-orient, not a firing"
+        );
+        assert!(
+            report.escalated.is_empty(),
+            "cycle {cycle}: a research idle must never escalate to a human"
+        );
+        let goal = &state.active_goals.active[0];
+        assert!(
+            matches!(goal.status, GoalProgress::NotStarted),
+            "cycle {cycle}: an idle research goal must be re-oriented to NotStarted, got {:?}",
+            goal.status
+        );
+        assert!(
+            goal.wip_refs.is_empty(),
+            "cycle {cycle}: re-orient must drop stale WIP so the next cycle starts fresh"
+        );
+    }
+    assert!(
+        filer.calls.borrow().is_empty() && dispatcher.calls.borrow().is_empty(),
+        "a research idle must never file an issue or spawn an engineer"
     );
 }
 
