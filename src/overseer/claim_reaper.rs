@@ -452,8 +452,10 @@ fn newest_mtime(root: &std::path::Path) -> Option<std::time::SystemTime> {
             continue;
         };
         for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            // `entry.metadata()` is an `fstatat` relative to the open dir fd with
+            // no symlink following — identical semantics to `symlink_metadata` on
+            // the absolute path, but avoids re-resolving the full path each call.
+            let Ok(meta) = entry.metadata() else {
                 continue;
             };
             if let Ok(mtime) = meta.modified() {
@@ -462,8 +464,10 @@ fn newest_mtime(root: &std::path::Path) -> Option<std::time::SystemTime> {
                     _ => mtime,
                 });
             }
+            // Only materialize a `PathBuf` for directories we actually recurse
+            // into; leaf files (the vast majority in a build tree) never allocate.
             if meta.is_dir() {
-                stack.push(path);
+                stack.push(entry.path());
             }
         }
     }

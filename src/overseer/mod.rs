@@ -1375,11 +1375,10 @@ impl Overseer {
         // Stage the investigations' self-improvement interventions (issue #4400)
         // for dispatch through the SAME gated Act path health-review uses; they
         // are drained into the plan after `health_review` this tick. A stale
-        // engineer's death becomes a signal, never a silent reclaim.
-        if !summary.pending_interventions.is_empty() {
-            self.pending_reaper_interventions
-                .extend(summary.pending_interventions);
-        }
+        // engineer's death becomes a signal, never a silent reclaim. `extend` is
+        // a no-op when the sweep surfaced nothing.
+        self.pending_reaper_interventions
+            .extend(summary.pending_interventions);
         if !summary.reclaimed.is_empty() || summary.errors > 0 {
             tracing::info!(
                 target: "simard::claim_reaper",

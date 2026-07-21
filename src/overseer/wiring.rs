@@ -1343,7 +1343,7 @@ fn build_claim_reaper_seams(
         Box::new(
             crate::overseer::claim_reaper::RecipeStaleEngineerInvestigator::new(
                 state_root.to_path_buf(),
-                "rysweet/Simard",
+                overseer_self_repo(),
             ),
         ),
     ))
