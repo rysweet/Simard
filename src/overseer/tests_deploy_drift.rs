@@ -26,6 +26,11 @@ use crate::overseer::signal::{Priority, Problem, ProblemKind, Signal};
 use crate::overseer::{decide, orient};
 use crate::self_deploy::{DeployDrift, GitDeploySource, ReconcileDetector};
 
+// #4390: the durable, restart-surviving, fail-closed anti-thrash ledger that the
+// OBSERVE gate consults per-target-SHA. RED until `deploy_throttle` exists.
+use crate::overseer::deploy_throttle::{DeployAttemptLedger, ThrottleDecision};
+use tempfile::TempDir;
+
 // ─────────────────────────── fakes ─────────────────────────────────────────
 
 struct FakeCanary(bool);
@@ -359,5 +364,111 @@ fn wired_daemon_behind_main_autonomously_emits_and_executes_a_guarded_deploy() {
         seen.lock().unwrap()[0].kind,
         "deploy-starting",
         "operator notified before the autonomous deploy swap"
+    );
+}
+
+// ───────────── #4390: durable anti-thrash gate, end-to-end ──────────────────
+//
+// These drive the SAME loop the Overseer's OBSERVE→DECIDE→guarded-ACT rail runs,
+// but insert the durable per-SHA ledger gate ahead of the guarded deploy. They
+// pin that a red-canary commit stops churning — even across an overseer restart —
+// which the process-global `global_deploy_throttle_allow` clock alone cannot do
+// (it is commit-agnostic and resets on restart).
+
+/// One simulated tick: consult the durable ledger for the drift's target SHA and
+/// only run the guarded deploy when the ledger `Allow`s it, recording the
+/// terminal result exactly as the wired ACT path does. Returns whether a guarded
+/// deploy was ATTEMPTED this tick.
+fn ledger_gated_tick(ledger: &mut DeployAttemptLedger, commit: &str, now: u64) -> bool {
+    match ledger.consult(commit, now) {
+        ThrottleDecision::Allow => {
+            let deployed = Arc::new(Mutex::new(0usize));
+            let seen = Arc::new(Mutex::new(vec![]));
+            let notifier = DualChannelNotifier::new(vec![Box::new(Capture(seen))]);
+            // A RED canary: the guarded executor refuses the swap and returns Err,
+            // which the ACT path records as a failure in the durable ledger.
+            let gd = GuardedDeployer::new(
+                Box::new(FakeCanary(false)),
+                Box::new(CountingDeployer(deployed)),
+                Box::new(FakeAncestry(false)),
+                notifier,
+                "runningOLD".to_string(),
+                0,
+                "rysweet/Simard".to_string(),
+            );
+            match gd.deploy(commit) {
+                Ok(_) => {
+                    let _ = ledger.record_success(commit, now);
+                }
+                Err(_) => {
+                    let _ = ledger.record_failure(commit, now);
+                }
+            }
+            true
+        }
+        // BackingOff / FailClosed: the OBSERVE gate suppresses the drift — no
+        // guarded deploy is attempted this tick.
+        _ => false,
+    }
+}
+
+#[test]
+fn red_canary_sha_is_not_reattempted_on_the_very_next_tick() {
+    // The observed #4390 symptom: a red-canary commit re-attempted every tick.
+    // With the durable ledger, tick 2 (well inside the backoff window) must be
+    // suppressed even though the drift is still observed.
+    let dir = TempDir::new().unwrap();
+    let commit = "56b10bef5057aabbccddeeff00112233445566aa";
+    let mut ledger = DeployAttemptLedger::load(dir.path());
+
+    let attempted_1 = ledger_gated_tick(&mut ledger, commit, 1_000);
+    let attempted_2 = ledger_gated_tick(&mut ledger, commit, 1_060);
+
+    assert!(attempted_1, "tick 1 attempts the deploy (no prior failure)");
+    assert!(
+        !attempted_2,
+        "tick 2 within the backoff window must be suppressed, not re-attempted"
+    );
+}
+
+#[test]
+fn red_canary_sha_stays_suppressed_after_a_simulated_overseer_restart() {
+    // The heart of #4390: the anti-thrash memory must be restart-durable. A
+    // fresh ledger `load`ed from the same state dir (modelling the daemon that a
+    // self-deploy attempt just restarted) must still refuse the known-bad SHA.
+    let dir = TempDir::new().unwrap();
+    let commit = "56b10bef5057aabbccddeeff00112233445566aa";
+
+    // Tick 1 on the pre-restart process records the red-canary failure durably.
+    {
+        let mut ledger = DeployAttemptLedger::load(dir.path());
+        assert!(ledger_gated_tick(&mut ledger, commit, 2_000));
+    }
+
+    // Restart: brand-new in-memory ledger, same on-disk state.
+    let mut restarted = DeployAttemptLedger::load(dir.path());
+    let attempted_after_restart = ledger_gated_tick(&mut restarted, commit, 2_090);
+    assert!(
+        !attempted_after_restart,
+        "a red-canary SHA must remain throttled across an overseer restart"
+    );
+}
+
+#[test]
+fn a_corrupt_ledger_refuses_the_deploy_rather_than_thrashing() {
+    // Fail-closed: if the durable state is torn/corrupt, the gate refuses the
+    // candidate SHA instead of falling back to "deploy" (the old fail-OPEN bug).
+    let dir = TempDir::new().unwrap();
+    let commit = "56b10bef5057aabbccddeeff00112233445566aa";
+    std::fs::write(
+        DeployAttemptLedger::ledger_path(dir.path()),
+        b"{ torn write",
+    )
+    .unwrap();
+
+    let mut ledger = DeployAttemptLedger::load(dir.path());
+    assert!(
+        !ledger_gated_tick(&mut ledger, commit, 3_000),
+        "a corrupt ledger must fail closed — no blind re-deploy"
     );
 }

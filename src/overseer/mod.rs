@@ -52,6 +52,7 @@ pub mod claim_reaper;
 pub mod config;
 pub mod conflict;
 pub mod deploy;
+pub mod deploy_throttle;
 pub mod deploy_trigger;
 pub mod diagnosis;
 pub mod ecosystem_observe;
@@ -75,6 +76,8 @@ pub mod wiring;
 
 #[cfg(test)]
 mod tests_deploy_drift;
+#[cfg(test)]
+mod tests_deploy_throttle;
 #[cfg(test)]
 mod tests_diagnosis;
 #[cfg(test)]
@@ -339,6 +342,16 @@ pub struct Overseer {
     /// admits this tick, `run_cycle` observes drift (fail-safe) and surfaces a
     /// `Signal::DeployDriftDetected` so Decide can emit a guarded deploy.
     deploy_drift_observer: Option<Box<dyn deploy_trigger::DeployDriftObserver>>,
+    /// Durable, restart-surviving, fail-closed per-SHA anti-thrash ledger
+    /// (issue #4390). Loaded once at construction (`build_overseer` points it at
+    /// the shared `state_root`; the bare constructor at the default state dir).
+    /// Consulted in `observe_deploy_drift` after the drift target SHA is resolved
+    /// — only an `Allow` sets `observed.deploy_drift` — and updated best-effort in
+    /// the `Intervention::Deploy` ACT path. Being on disk (not a process
+    /// `static`) is what lets it remember a red-canary SHA across the overseer
+    /// restart a self-deploy attempt can cause, so an identical failing deploy is
+    /// not re-attempted every tick.
+    deploy_ledger: deploy_throttle::DeployAttemptLedger,
 }
 
 /// The reaper's injected dependencies, bundled so the `Overseer` carries one
@@ -493,6 +506,14 @@ impl Overseer {
             health_review_every_n: 1,
             health_review_tick: 0,
             deploy_drift_observer: None,
+            // Durable anti-thrash ledger (#4390). The bare constructor points at
+            // the default state dir; `build_overseer` re-points it at the shared
+            // `state_root`. `load` is fail-safe: a missing file loads empty (so a
+            // first deploy is never deadlocked), a corrupt one loads poisoned
+            // (fail-closed per-SHA).
+            deploy_ledger: deploy_throttle::DeployAttemptLedger::load(
+                &crate::safe_update::state::default_state_dir(),
+            ),
         }
     }
 
@@ -682,6 +703,16 @@ impl Overseer {
         self
     }
 
+    /// Point the durable anti-thrash ledger (#4390) at `state_dir`, re-`load`ing
+    /// it from there. `build_overseer` calls this with the shared `state_root` so
+    /// the ledger persists under the same durable state contract as the rest of
+    /// the daemon; the bare constructor's default (the default state dir) is used
+    /// otherwise.
+    pub fn with_deploy_state_dir(mut self, state_dir: &std::path::Path) -> Self {
+        self.deploy_ledger = deploy_throttle::DeployAttemptLedger::load(state_dir);
+        self
+    }
+
     /// OBSERVE the autonomous self-deploy drift signal (issue #2590), enriching
     /// `observed.deploy_drift` when the running binary is behind merged `main`.
     ///
@@ -732,7 +763,42 @@ impl Overseer {
         }
         // Fail-safe drift probe: `None` on current / unresolved / any git error.
         if let Some(drift) = observer.observe() {
-            observed.deploy_drift = Some(drift);
+            // Layer-2 durable gate (#4390): consult the per-SHA anti-thrash ledger
+            // for the resolved target commit. Only `Allow` surfaces the drift; a
+            // red-canary SHA inside its backoff window (`BackingOff`) or a ledger
+            // we cannot trust for this SHA (`FailClosed`) suppresses the drift and
+            // surfaces the stuck state via structured tracing instead of looping.
+            match self.deploy_ledger.consult(&drift.target_commit, now) {
+                deploy_throttle::ThrottleDecision::Allow => {
+                    observed.deploy_drift = Some(drift);
+                }
+                deploy_throttle::ThrottleDecision::BackingOff {
+                    target_sha,
+                    failure_count,
+                    retry_after_unix_secs,
+                } => {
+                    tracing::warn!(
+                        deploy_throttle.stuck = true,
+                        target_sha = %target_sha,
+                        failure_count,
+                        backoff_until = retry_after_unix_secs,
+                        reason = "backing_off",
+                        "overseer self-deploy suppressed: red-canary commit inside its backoff window"
+                    );
+                }
+                deploy_throttle::ThrottleDecision::FailClosed { target_sha, reason } => {
+                    let reason_str = match reason {
+                        deploy_throttle::FailClosedReason::Unreadable => "unreadable",
+                        deploy_throttle::FailClosedReason::Ambiguous => "ambiguous",
+                    };
+                    tracing::warn!(
+                        deploy_throttle.stuck = true,
+                        target_sha = %target_sha,
+                        reason = reason_str,
+                        "overseer self-deploy refused (fail-closed): durable ledger cannot admit this commit"
+                    );
+                }
+            }
         }
     }
 
@@ -1545,7 +1611,35 @@ impl Overseer {
                 Ok(ActOutcome::ConflictResolved)
             }
             Intervention::Deploy { commit } => {
-                Ok(ActOutcome::Deployed(self.caps.deployer.deploy(commit)?))
+                let result = self.caps.deployer.deploy(commit);
+                // Best-effort durable record so the OBSERVE gate remembers this
+                // commit's terminal outcome next tick — even across an overseer
+                // restart (#4390). The `io::Result` is logged on failure but never
+                // propagated, so a persist failure can neither turn a successful
+                // deploy into an `Err` nor mask a real deploy error; the actual
+                // deploy outcome below is always the value returned.
+                let now = crate::self_quality_audit::now_epoch_secs();
+                match &result {
+                    Ok(_) => {
+                        if let Err(e) = self.deploy_ledger.record_success(commit, now) {
+                            tracing::warn!(
+                                target_sha = %commit,
+                                error = %e,
+                                "deploy_ledger.persist_failed record=success"
+                            );
+                        }
+                    }
+                    Err(_) => {
+                        if let Err(e) = self.deploy_ledger.record_failure(commit, now) {
+                            tracing::warn!(
+                                target_sha = %commit,
+                                error = %e,
+                                "deploy_ledger.persist_failed record=failure"
+                            );
+                        }
+                    }
+                }
+                Ok(ActOutcome::Deployed(result?))
             }
             Intervention::FileIssue { run } => {
                 Ok(ActOutcome::IssueFiled(self.caps.issues.file(run)?))

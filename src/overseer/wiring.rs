@@ -1191,6 +1191,11 @@ pub fn build_overseer(
     .with_verify_merge_autonomy(true)
     .with_high_risk_autonomy(true)
     .with_identity(overseer_identity())
+    // Durable self-deploy anti-thrash ledger (#4390): persist the per-SHA
+    // backoff/known-bad memory under the shared state root so a red-canary
+    // commit is not re-attempted every tick, even across the overseer restart a
+    // self-deploy attempt can cause.
+    .with_deploy_state_dir(&state_root)
     // The Simard Whisperer: advisory steering notes onto the SAME
     // meeting-handoff inbox the OODA observe step scans. Enabled by default
     // (opt-out via SIMARD_OVERSEER_WHISPER), consistent with the acting

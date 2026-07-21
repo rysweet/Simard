@@ -120,6 +120,7 @@ nav:
     - Improvement Context — Execution-Evidence Gap: concepts/improvement-context-execution-evidence-gap.md
     - Closing the Procedural-Learning Loop: concepts/procedural-learning-loop.md
     - Reconcile-and-Self-Deploy: concepts/reconcile-and-self-deploy.md
+    - Deploy Anti-Thrash Throttle: concepts/deploy-anti-thrash-throttle.md
     - Deploy-Aware Done-Gate: concepts/deploy-aware-done-gate.md
     - Closed-Loop Outcome Verification (live-verified done): concepts/closed-loop-outcome-verification.md
     - Dependency/Overlap-Aware Engineer Scheduling: concepts/dependency-overlap-aware-scheduling.md
@@ -229,6 +230,7 @@ nav:
     - Clean Fixture Leaks: howto/clean-fixture-leaks.md
     - Verify and Roll Back a Self-Deploy: howto/verify-and-roll-back-a-self-deploy.md
     - Run Self-Deploy from Any Directory: howto/run-self-deploy-from-any-directory.md
+    - Configure the Overseer Deploy Throttle: howto/configure-overseer-deploy-throttle.md
     - Check for Updates: howto/check-for-updates.md
     - Configure the amplihack Freshness Gate: howto/configure-amplihack-freshness-gate.md
     - Self-Maintain Dependency Pins: howto/self-maintain-dependency-pins.md
@@ -321,6 +323,7 @@ nav:
     - Multi-Binary Self-Update: reference/multi-binary-self-update.md
     - Self-Deploy API: reference/self-deploy-api.md
     - Self-Deploy Source Prep & Warm Target Dir: reference/self-deploy-source-prep.md
+    - Overseer Deploy Anti-Thrash Throttle API: reference/overseer-deploy-throttle-api.md
     - State-Root Resolution: reference/state-root-resolution.md
     - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
     - Runtime Contracts: reference/runtime-contracts.md
