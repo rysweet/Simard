@@ -71,7 +71,7 @@ implemented; acceptance test is the definition of done) · **OUT-OF-SCOPE**.
 |----|-----------|------------------|--------|----------|
 | KGP-T1 | Native in-process transport — no Python subprocess | `launch_knowledge_client_native` wired; `knowledge_client.rs` tests green | DONE | `rpc_subprocess_launcher.rs`, `native_knowledge.rs::register_knowledge_handlers` |
 | KGP-T2 | Health endpoint reports server liveness | `health_check_succeeds` green | DONE | `knowledge_client.rs::health`, `RpcHealth` |
-| KGP-T3 | Connection reuse across queries | NEW test: two queries to one pack reuse an open `Connection` (or document why path-caching suffices) | OPEN | `native_knowledge.rs` `conn_cache` currently caches the db *path*, not a live connection |
+| KGP-T3 | Connection reuse across queries | `conn_cache_reuses_open_connection_across_queries`, `native_knowledge_transport_repeated_query_reuses_connection` green | DONE | `native_knowledge.rs::ConnCache` caches a live read-only `Connection` per pack; the `knowledge.query` handler reuses it via `get_or_open` + `query_open_pack` |
 
 ### Cross-cutting guarantee
 
@@ -105,14 +105,12 @@ separately for the Phase 9+ pack-authoring work.
 Work the OPEN criteria top-to-bottom; each is a self-contained, shippable unit
 with its acceptance test already specified above:
 
-1. **KGP-T3** — reuse an open `Connection` in `conn_cache` (or document the
-   path-cache decision and add the reuse test).
-2. **KGP-Q5** — GraphRAG multi-hop retrieval over entities + relationships.
-   Largest; do last and consider splitting into a fixture step and a traversal
-   step.
+1. **KGP-Q5** — GraphRAG multi-hop retrieval over entities + relationships.
+   Largest; consider splitting into a fixture step and a traversal step.
 
-(KGP-Q4 — parameterize the keyword LIKE search — is now **DONE**; see the
-progress log below.)
+(KGP-T3 — reuse an open `Connection` in `conn_cache` — is now **DONE**; see the
+progress log below. KGP-Q4 — parameterize the keyword LIKE search — is likewise
+**DONE**.)
 
 ## Progress log
 
@@ -148,3 +146,27 @@ progress log below.)
   `query_articles_treats_like_wildcards_as_literal`, and
   `query_articles_binds_keywords_and_resists_injection`. Remaining OPEN parity
   criteria: KGP-T3 (connection reuse) and KGP-Q5 (GraphRAG multi-hop).
+- **2026-07-21** — **KGP-T3 closed** (connection reuse): the `knowledge.query`
+  handler previously cached only each pack's database *path* and re-opened a
+  fresh read-only `Connection` (re-parsing the schema, paying the file-open
+  cost) on every query. It now caches the **live connection** itself. A new
+  `ConnCache` newtype holds one `Arc<Mutex<Connection>>` per pack
+  (`Arc<Mutex<HashMap<String, Arc<Mutex<Connection>>>>>` internally); its
+  `get_or_open(pack_name, resolve_path)` returns the cached handle on a hit and
+  opens + caches on a miss, invoking `resolve_path` (which discovers the pack and
+  validates its database) **only on the miss** so the warm path avoids
+  re-scanning packs on disk. Because rusqlite's `Connection` is `Send` but not
+  `Sync`, each connection carries its own `Mutex`, so queries against one pack
+  serialize on that per-pack mutex while different packs proceed independently.
+  The retrieval logic was extracted from `query_pack_db` into
+  `query_open_pack(conn, question, limit)` so the reused connection and the
+  path-based unit tests share one query path (`query_pack_db` is now a
+  `#[cfg(test)]` helper). Acceptance tests:
+  `conn_cache_reuses_open_connection_across_queries` (proves reuse via
+  `Arc::ptr_eq` and that the resolver does not re-run on a hit),
+  `conn_cache_keeps_distinct_connections_per_pack`,
+  `conn_cache_propagates_resolve_error_without_caching`, and
+  `native_knowledge_transport_repeated_query_reuses_connection` (two RPC queries
+  to one pack both succeed against the reused connection). The prior
+  "pack not found" / "no database" error contracts are preserved. Remaining OPEN
+  parity criterion: KGP-Q5 (GraphRAG multi-hop).
