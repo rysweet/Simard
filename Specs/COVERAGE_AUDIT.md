@@ -3,10 +3,26 @@
 ## Status
 
 - **Created**: 2026-07-16
-- **State**: PROPOSED — awaiting owner/PM-architect ratification. The
-  disambiguation (§1), the measurable done-criteria (§2), and the
-  deterministic next-target procedure (§3) are actionable immediately; they
-  do not change any code or CI behavior.
+- **State**: RATIFIED — this charter is the authoritative, machine-checkable
+  finish line for the recurring coverage goal. The disambiguation (§1), the
+  measurable done-criteria (§2), and the deterministic next-target procedure
+  (§3) are in force. Ratification is docs-only: it changes no code and no CI
+  behavior (§4 still forbids a workspace-wide CI gate).
+- **Done-gate (machine-checkable).** The recurring goal
+  `audit-simard-s-test-coverage-and-raise-it-to-70` is **DONE** when all three
+  §2 conditions hold, each observable from files already in this repository
+  (no live runtime required):
+  1. Every group row in the companion ledger shows a landed post-lift
+     aggregate ≥ 70% (or a recorded, justified exception).
+  2. The ledger's "Other groups" backlog table is empty.
+  3. The deterministic §3 scan (`cargo llvm-cov --no-fail-fast --summary-only`
+     → filter `src/` files > 50 executable lines and < 70% not already a
+     justified exception) yields an empty set.
+  A daemon/OODA cycle certifies completion by observing this file's `State:
+  RATIFIED` plus the empty ledger backlog, then tombstones the goal slug via
+  `simard goal remove` (§2). This replaces the previous unmeasurable
+  "raise it to 70%" prose finish line, which no CI job ever enforced and which
+  the goal record carried only as free text.
 - **Consolidates goal slugs**: `audit-simard-test-coverage`,
   `raise-coverage-to-70`, `improve-amplihack-test-coverage`.
 - **Companion ledger**: [`docs/testing/COVERAGE_BASELINE.md`](../docs/testing/COVERAGE_BASELINE.md)
@@ -100,14 +116,16 @@ memory or state-root), provided (a) the *group* aggregate clears 70% and
 This mirrors the already-accepted `simard_ooda_step.rs` exception in the
 companion ledger (group aggregate 76.07% with one 60.36% file).
 
-The **audit goal as a whole is DONE** when *all* of the following hold:
+The **audit goal as a whole is DONE** when *all* of the following hold. Per the
+companion ledger's current state (all five per-group targets landed and clearing
+≥ 70%, backlog table empty) all three conditions are **currently satisfied**:
 
-- [ ] Every group listed in the companion ledger's tables shows a landed
+- [x] Every group listed in the companion ledger's tables shows a landed
       post-lift aggregate ≥ 70% (or a recorded, justified exception).
-- [ ] The "Other groups" backlog table in the ledger is empty (every
+- [x] The "Other groups" backlog table in the ledger is empty (every
       remaining tracked group has either landed or been explicitly deferred
       with justification).
-- [ ] The deterministic scan in §3 finds no un-ledgered `src/` file that is
+- [x] The deterministic scan in §3 finds no un-ledgered `src/` file that is
       both **high-risk** (per the §3 risk list) and below 70% with more than
       50 executable lines.
 
