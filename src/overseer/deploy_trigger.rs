@@ -298,6 +298,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn autonomous_deploy_enabled_default_and_optout() {
         // Serialise env mutation within this test only; default is enabled.
         let prev = std::env::var(AUTONOMOUS_DEPLOY_ENV).ok();
