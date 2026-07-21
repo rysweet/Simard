@@ -707,9 +707,11 @@ Governed by environment (read once per tick), consistent with the existing
 | --- | --- | --- |
 | `SIMARD_OVERSEER_AUTONOMOUS_DEPLOY` | **on** (opt-out) | Falsey (`0`, `false`, `off`, `no`, case-insensitive) **pins the daemon**: the observe rail returns early, so no deploy-drift signal is raised and no autonomous swap occurs. The read-only drift signal used elsewhere is unaffected. Fail-open: an unreadable/empty value stays enabled. |
 | `SIMARD_OVERSEER_DEPLOY_MIN_INTERVAL_SECS` | `900` | Minimum seconds between autonomous deploy **attempts**. Parse failure ⇒ safe default; a `MIN_DEPLOY_INTERVAL_FLOOR` (60s) floor is enforced. |
+| `SIMARD_SELF_REPO` | `rysweet/Simard` | The daemon's own `owner/name` slug, used only to **label** self-deploy operator notifications and to root the deploy ancestry oracle. A blank/whitespace value falls back to the default. Distinct from `SIMARD_SELF_DEPLOY_REPO`, which selects the on-disk source *checkout*. |
 
-Both are resolved in `overseer/deploy_trigger.rs` (`autonomous_deploy_enabled()` /
-`deploy_min_interval_secs()`). Deploy remains a HIGH-RISK action gated by the
+The first two are resolved in `overseer/deploy_trigger.rs`
+(`autonomous_deploy_enabled()` / `deploy_min_interval_secs()`); `SIMARD_SELF_REPO`
+is resolved in `overseer/wiring.rs` (`overseer_self_repo()`). Deploy remains a HIGH-RISK action gated by the
 AutonomyGate: the daemon opens it via
 `build_overseer().with_high_risk_autonomy(true)`; with high-risk autonomy off the
 intervention surfaces to the operator instead of executing. The opt-out is also
