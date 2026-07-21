@@ -20,9 +20,11 @@
 //!   churn). A refused deploy notifies the operator and surfaces an error — it
 //!   does not mutate the binary.
 //! - Every deploy ATTEMPT fires [`NotifyOperator`](crate::overseer::notify) on
-//!   both channels: a completed deploy sends a `deploy` notice; a gate refusal
-//!   or a failed binary swap sends a `deploy-refused` notice (#2590), so the
-//!   operator is never blind to an aborted autonomous deploy.
+//!   both channels: a gate-passing attempt sends a pre-swap `deploy-starting`
+//!   notice before invoking the process-replacing swap; a completed deploy sends
+//!   a `deploy` notice when the swap path returns; a gate refusal or a failed
+//!   binary swap sends a `deploy-refused` notice (#2590), so the operator is
+//!   never blind to an autonomous deploy.
 //! - The deployer never touches `~/.simard/worktrees`: it operates only on the
 //!   canary target dir and the install path.
 
@@ -296,8 +298,24 @@ impl Deployer for GuardedDeployer {
             });
         }
 
-        // Gate passed — perform the binary swap. A failed swap is also an
-        // operator-visible deploy attempt: notify before surfacing the error.
+        // Gate passed — announce BEFORE invoking the binary swap. In
+        // production the swap restarts/exec-replaces this process and may never
+        // return, so a post-swap success notice alone is unreachable on the
+        // happy path.
+        let starting = OperatorNotification::deploy_starting(
+            commit,
+            &running,
+            &self.repo,
+            &format!("canary {} ({})", pass_word(canary.passed), canary.detail),
+        );
+        let starting_report = self.notifier.notify(&starting);
+        debug_assert!(
+            starting_report.dispatched(),
+            "self-deploy started without a dispatched operator notification"
+        );
+
+        // Perform the binary swap. A failed swap is also an operator-visible
+        // deploy attempt: notify before surfacing the error.
         let deployed = match self.deployer.deploy_binary(commit) {
             Ok(deployed) => deployed,
             Err(e) => {
@@ -342,46 +360,120 @@ fn pass_word(passed: bool) -> &'static str {
 
 // ─────────────────────────── production seams (#2590) ──────────────────────
 
-/// Production [`CanaryRunner`]: build the candidate from merged source and run
-/// the full relaunch gate sequence (Smoke → UnitTest → GymBaseline → RpcHealth)
-/// via `self_relaunch::{build_canary, verify_canary, all_gates_passed}` — the
-/// SAME canary the operator relaunch path uses. A build or verify FAILURE is a
-/// RED canary (`passed: false`), NOT a hard error, so the deploy gate refuses it
-/// (`RedCanary`) and nothing is swapped — fail-closed: an unverifiable candidate
-/// never ships.
-pub struct ProdCanaryRunner;
+/// Production [`CanaryRunner`]: prepare the canonical self-deploy source at the
+/// resolved target commit, build it with the shared self-deploy builder, then
+/// run the full relaunch gate sequence (Smoke → UnitTest → GymBaseline →
+/// RpcHealth). A target build or gate FAILURE is a RED canary
+/// (`passed: false`), NOT a hard error, so the deploy gate refuses it
+/// (`RedCanary`) and nothing is swapped. Source-resolution/git failures surface
+/// as hard errors to stay fail-safe without falling back to the daemon cwd.
+pub struct ProdCanaryRunner {
+    source: Box<dyn crate::self_deploy::SelfDeploySourcePreparer>,
+    target_canary: Box<dyn TargetCanaryVerifier>,
+}
+
+impl ProdCanaryRunner {
+    pub fn new() -> Self {
+        Self {
+            source: Box::new(ExistingRepoSourcePreparer(
+                crate::self_deploy::GitSourcePreparer::new(),
+            )),
+            target_canary: Box::new(SharedTargetCanaryVerifier),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_target_seams(
+        source: Box<dyn crate::self_deploy::SelfDeploySourcePreparer>,
+        target_canary: Box<dyn TargetCanaryVerifier>,
+    ) -> Self {
+        Self {
+            source,
+            target_canary,
+        }
+    }
+}
+
+impl Default for ProdCanaryRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TargetCanaryReport {
+    passed: bool,
+    passed_gates: usize,
+    total_gates: usize,
+}
+
+trait TargetCanaryVerifier: Send + Sync {
+    fn build_and_verify(
+        &self,
+        source: &dyn crate::self_deploy::SelfDeploySourcePreparer,
+        target_commit: &str,
+    ) -> Result<TargetCanaryReport, crate::safe_update::SafeUpdateError>;
+}
+
+struct SharedTargetCanaryVerifier;
+
+struct ExistingRepoSourcePreparer(crate::self_deploy::GitSourcePreparer);
+
+impl crate::self_deploy::SelfDeploySourcePreparer for ExistingRepoSourcePreparer {
+    fn prepare(
+        &self,
+        target_commit: &str,
+    ) -> Result<std::path::PathBuf, crate::safe_update::SafeUpdateError> {
+        self.0.prepare_existing_repo(target_commit)
+    }
+}
+
+impl TargetCanaryVerifier for SharedTargetCanaryVerifier {
+    fn build_and_verify(
+        &self,
+        source: &dyn crate::self_deploy::SelfDeploySourcePreparer,
+        target_commit: &str,
+    ) -> Result<TargetCanaryReport, crate::safe_update::SafeUpdateError> {
+        let results = crate::self_deploy::source_prep::prepare_build_and_verify_canary(
+            source,
+            target_commit,
+            &crate::self_deploy::self_deploy_target_dir(),
+        )?;
+        let passed = crate::self_relaunch::all_gates_passed(&results);
+        let passed_gates = results.iter().filter(|r| r.passed).count();
+        Ok(TargetCanaryReport {
+            passed,
+            passed_gates,
+            total_gates: results.len(),
+        })
+    }
+}
 
 impl CanaryRunner for ProdCanaryRunner {
-    fn run_canary(&self, _target_commit: &str) -> Result<CanaryResult, OverseerError> {
-        use crate::self_relaunch::{
-            RelaunchConfig, all_gates_passed, build_canary, default_gates, verify_canary,
-        };
-        let config = RelaunchConfig::default();
-        let candidate = match build_canary(&config) {
-            Ok(path) => path,
-            Err(e) => {
-                return Ok(CanaryResult {
-                    passed: false,
-                    detail: format!("canary build failed: {e}"),
-                });
-            }
-        };
-        let gates = default_gates();
-        let results = match verify_canary(&candidate, &gates, &config) {
-            Ok(r) => r,
-            Err(e) => {
-                return Ok(CanaryResult {
-                    passed: false,
-                    detail: format!("canary verify failed: {e}"),
-                });
-            }
-        };
-        let passed = all_gates_passed(&results);
-        let ok = results.iter().filter(|r| r.passed).count();
-        Ok(CanaryResult {
-            passed,
-            detail: format!("{ok}/{} gates", results.len()),
-        })
+    fn run_canary(&self, target_commit: &str) -> Result<CanaryResult, OverseerError> {
+        use crate::safe_update::SafeUpdateError;
+
+        match self
+            .target_canary
+            .build_and_verify(self.source.as_ref(), target_commit)
+        {
+            Ok(report) => Ok(CanaryResult {
+                passed: report.passed,
+                detail: format!("{}/{} gates", report.passed_gates, report.total_gates),
+            }),
+            Err(SafeUpdateError::BuildFailed { detail }) => Ok(CanaryResult {
+                passed: false,
+                detail: format!("target canary build failed: {detail}"),
+            }),
+            Err(SafeUpdateError::GateFailed { gate, detail }) => Ok(CanaryResult {
+                passed: false,
+                detail: format!("target canary gate {gate} failed: {detail}"),
+            }),
+            Err(e) => Err(OverseerError::Capability {
+                what: "target_canary",
+                detail: e.to_string(),
+            }),
+        }
     }
 }
 
@@ -460,7 +552,7 @@ pub fn production_guarded_deployer(
         preparer.resolve_existing_repo().unwrap_or(repo_dir)
     };
     GuardedDeployer::new(
-        Box::new(ProdCanaryRunner),
+        Box::new(ProdCanaryRunner::new()),
         Box::new(OrchestratedBinaryDeployer),
         Box::new(GitAncestryOracle {
             repo_dir: ancestry_repo,
@@ -476,6 +568,8 @@ pub fn production_guarded_deployer(
 mod tests {
     use super::*;
     use crate::overseer::notify::{ChannelDelivery, NotifyChannel, OperatorNotification};
+    use crate::safe_update::SafeUpdateError;
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
     // ── pure gate ────────────────────────────────────────────────────────────
@@ -638,8 +732,10 @@ mod tests {
         assert!(report.gates_passed);
         assert_eq!(report.deployed_commit, "bbbbbbbbbbbb");
         assert_eq!(*deployed.lock().unwrap(), 1, "binary swapped once");
-        assert_eq!(seen.lock().unwrap().len(), 1, "operator notified on deploy");
-        assert_eq!(seen.lock().unwrap()[0].kind, "deploy");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "operator notified before and after deploy");
+        assert_eq!(seen[0].kind, "deploy-starting");
+        assert_eq!(seen[1].kind, "deploy");
     }
 
     #[test]
@@ -769,5 +865,207 @@ mod tests {
             "operator notified on a hard ancestry error"
         );
         assert_eq!(seen.lock().unwrap()[0].kind, "deploy-refused");
+    }
+
+    // ── target-aware production canary seams (issue #2590 crusty finding) ───
+
+    struct RecordingSource {
+        seen_targets: Arc<Mutex<Vec<String>>>,
+        mode: SourceMode,
+    }
+
+    enum SourceMode {
+        Ok,
+        ResolveErr,
+    }
+
+    impl crate::self_deploy::SelfDeploySourcePreparer for RecordingSource {
+        fn prepare(&self, target_commit: &str) -> Result<PathBuf, SafeUpdateError> {
+            self.seen_targets
+                .lock()
+                .unwrap()
+                .push(target_commit.to_string());
+            match self.mode {
+                SourceMode::Ok => Ok(PathBuf::from("/nonexistent/prepared-target")),
+                SourceMode::ResolveErr => Err(SafeUpdateError::SourceResolveFailed {
+                    detail: "canonical source unavailable".to_string(),
+                }),
+            }
+        }
+    }
+
+    struct RecordingTargetCanaryVerifier {
+        outcome: VerifierOutcome,
+    }
+
+    enum VerifierOutcome {
+        Pass,
+        BuildFail,
+    }
+
+    impl TargetCanaryVerifier for RecordingTargetCanaryVerifier {
+        fn build_and_verify(
+            &self,
+            source: &dyn crate::self_deploy::SelfDeploySourcePreparer,
+            target_commit: &str,
+        ) -> Result<TargetCanaryReport, SafeUpdateError> {
+            let _repo = source.prepare(target_commit)?;
+            match self.outcome {
+                VerifierOutcome::Pass => Ok(TargetCanaryReport {
+                    passed: true,
+                    passed_gates: 4,
+                    total_gates: 4,
+                }),
+                VerifierOutcome::BuildFail => Err(SafeUpdateError::BuildFailed {
+                    detail: "target build failed".to_string(),
+                }),
+            }
+        }
+    }
+
+    fn target_canary(
+        mode: SourceMode,
+        outcome: VerifierOutcome,
+    ) -> (ProdCanaryRunner, Arc<Mutex<Vec<String>>>) {
+        let seen_targets = Arc::new(Mutex::new(vec![]));
+        let runner = ProdCanaryRunner::with_target_seams(
+            Box::new(RecordingSource {
+                seen_targets: seen_targets.clone(),
+                mode,
+            }),
+            Box::new(RecordingTargetCanaryVerifier { outcome }),
+        );
+        (runner, seen_targets)
+    }
+
+    #[test]
+    fn prod_canary_runner_prepares_and_verifies_the_target_commit() {
+        let (runner, seen_targets) = target_canary(SourceMode::Ok, VerifierOutcome::Pass);
+        let result = runner.run_canary("bbbbbbbbbbbb").expect("target canary");
+        assert!(result.passed);
+        assert_eq!(result.detail, "4/4 gates");
+        assert_eq!(
+            seen_targets.lock().unwrap().as_slice(),
+            ["bbbbbbbbbbbb"],
+            "production canary must prepare/build the requested target, not cwd"
+        );
+    }
+
+    #[test]
+    fn target_canary_build_failure_is_red_canary_gate_refusal() {
+        let (runner, seen_targets) = target_canary(SourceMode::Ok, VerifierOutcome::BuildFail);
+        let (gd, deployed, seen) = deployer_with(Box::new(runner), Box::new(FakeAncestry(false)));
+        let err = gd.deploy("bbbbbbbbbbbb").unwrap_err();
+        assert!(format!("{err}").contains("red canary"));
+        assert_eq!(
+            seen_targets.lock().unwrap().as_slice(),
+            ["bbbbbbbbbbbb"],
+            "failed target build must still be for the target commit"
+        );
+        assert_eq!(*deployed.lock().unwrap(), 0, "red canary blocks swap");
+        assert_eq!(seen.lock().unwrap()[0].kind, "deploy-refused");
+    }
+
+    #[test]
+    fn target_canary_source_resolve_error_is_fail_safe_without_swap() {
+        let (runner, seen_targets) = target_canary(SourceMode::ResolveErr, VerifierOutcome::Pass);
+        let (gd, deployed, seen) = deployer_with(Box::new(runner), Box::new(FakeAncestry(false)));
+        let err = gd.deploy("bbbbbbbbbbbb").unwrap_err();
+        assert!(format!("{err}").contains("target_canary"));
+        assert_eq!(seen_targets.lock().unwrap().as_slice(), ["bbbbbbbbbbbb"]);
+        assert_eq!(*deployed.lock().unwrap(), 0, "resolve error blocks swap");
+        assert_eq!(seen.lock().unwrap()[0].kind, "deploy-refused");
+    }
+
+    // ── pre-swap notification must precede process replacement ──────────────
+
+    struct EventChannel {
+        name: &'static str,
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl NotifyChannel for EventChannel {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn deliver(&self, n: &OperatorNotification) -> ChannelDelivery {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("notify:{}:{}", self.name, n.kind));
+            ChannelDelivery::Sent
+        }
+    }
+
+    struct EventDeployer(Arc<Mutex<Vec<String>>>);
+
+    impl BinaryDeployer for EventDeployer {
+        fn deploy_binary(&self, target: &str) -> Result<String, OverseerError> {
+            self.0.lock().unwrap().push("swap".to_string());
+            Ok(target.to_string())
+        }
+    }
+
+    #[test]
+    fn deploy_notifies_both_channels_before_swap_on_success_path() {
+        let events = Arc::new(Mutex::new(vec![]));
+        let notifier = DualChannelNotifier::new(vec![
+            Box::new(EventChannel {
+                name: "email",
+                events: events.clone(),
+            }),
+            Box::new(EventChannel {
+                name: "signal",
+                events: events.clone(),
+            }),
+        ]);
+        let gd = GuardedDeployer::new(
+            Box::new(FakeCanary(true)),
+            Box::new(EventDeployer(events.clone())),
+            Box::new(FakeAncestry(false)),
+            notifier,
+            "aaaaaaaaaaaa".to_string(),
+            0,
+            "rysweet/Simard".to_string(),
+        );
+
+        gd.deploy("bbbbbbbbbbbb").expect("deploy");
+
+        let events = events.lock().unwrap().clone();
+        assert_eq!(
+            &events[..3],
+            [
+                "notify:email:deploy-starting",
+                "notify:signal:deploy-starting",
+                "swap"
+            ],
+            "starting notification must reach both channels before swap"
+        );
+        assert!(events.contains(&"notify:email:deploy".to_string()));
+        assert!(events.contains(&"notify:signal:deploy".to_string()));
+    }
+
+    struct PanicIfSwapped;
+
+    impl BinaryDeployer for PanicIfSwapped {
+        fn deploy_binary(&self, _target: &str) -> Result<String, OverseerError> {
+            panic!("swap must not run when mandatory pre-swap notification is undispatched")
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "self-deploy started without a dispatched operator notification")]
+    fn deploy_starting_notification_dispatch_is_mandatory() {
+        let gd = GuardedDeployer::new(
+            Box::new(FakeCanary(true)),
+            Box::new(PanicIfSwapped),
+            Box::new(FakeAncestry(false)),
+            DualChannelNotifier::new(vec![]),
+            "aaaaaaaaaaaa".to_string(),
+            0,
+            "rysweet/Simard".to_string(),
+        );
+        let _ = gd.deploy("bbbbbbbbbbbb");
     }
 }

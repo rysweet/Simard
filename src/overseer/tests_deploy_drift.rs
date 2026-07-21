@@ -218,12 +218,10 @@ fn guarded_deploy_happy_path_swaps_once_and_notifies_success() {
     assert!(report.gates_passed);
     assert_eq!(report.deployed_commit, "mergedNEW");
     assert_eq!(*deployed.lock().unwrap(), 1, "binary swapped exactly once");
-    assert_eq!(
-        seen.lock().unwrap().len(),
-        1,
-        "operator notified on success"
-    );
-    assert_eq!(seen.lock().unwrap()[0].kind, "deploy");
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2, "operator notified before and after success");
+    assert_eq!(seen[0].kind, "deploy-starting");
+    assert_eq!(seen[1].kind, "deploy");
 }
 
 #[test]
@@ -286,7 +284,9 @@ fn guarded_deploy_notifies_on_a_failed_binary_swap() {
     );
     let err = gd.deploy("mergedNEW").unwrap_err();
     assert!(format!("{err}").contains("swap boom"));
-    assert_eq!(seen.lock().unwrap()[0].kind, "deploy-refused");
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen[0].kind, "deploy-starting");
+    assert_eq!(seen[1].kind, "deploy-refused");
 }
 
 // ─────────────────────────── anti-thrash ────────────────────────────────────
@@ -357,7 +357,7 @@ fn wired_daemon_behind_main_autonomously_emits_and_executes_a_guarded_deploy() {
     assert_eq!(*deployed.lock().unwrap(), 1, "the (mocked) swap ran once");
     assert_eq!(
         seen.lock().unwrap()[0].kind,
-        "deploy",
-        "operator notified of the autonomous deploy"
+        "deploy-starting",
+        "operator notified before the autonomous deploy swap"
     );
 }

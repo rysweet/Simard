@@ -549,10 +549,12 @@ pub struct GuardedDeployer {
     repo: String,                          // owner/name, for notification labels
 }
 
-/// Wire a production deployer from live parts: `ProdCanaryRunner` (the real
-/// self-relaunch canary), `OrchestratedBinaryDeployer` (the same
-/// `SelfDeployOrchestrator` swap as `simard self-deploy`), a `GitAncestryOracle`
-/// rooted at the daemon repo, and a `DualChannelNotifier::from_env()`.
+/// Wire a production deployer from live parts: `ProdCanaryRunner` (target-aware:
+/// prepare canonical source at the requested commit, build with the shared
+/// self-deploy builder, then run the relaunch canary gates),
+/// `OrchestratedBinaryDeployer` (the same `SelfDeployOrchestrator` swap as
+/// `simard self-deploy`), a `GitAncestryOracle` rooted at the canonical
+/// self-deploy checkout when present, and a `DualChannelNotifier::from_env()`.
 ///
 /// The min-interval anti-thrash guard is **not** a field here — it is applied
 /// upstream at the Overseer's observe rail (see [Autonomous deploy
@@ -572,18 +574,24 @@ impl Deployer for GuardedDeployer {
 `deploy()` runs the gate in this fixed order — **no branch reaches a binary swap
 without passing all of them** — and notifies on **every** outcome:
 
-1. **Build + verify the canary** — `CanaryRunner::run_canary(commit)`; a build or
-   verify failure is a **red** canary (`passed: false`), not a hard error, and its
-   result feeds the gate. Must pass before any swap.
+1. **Build + verify the target canary** — `CanaryRunner::run_canary(commit)`
+   prepares the canonical self-deploy source checkout at `commit` and builds via
+   the shared `build_self_deploy_candidate` path; a target build or verify
+   failure is a **red** canary (`passed: false`), not a hard error, and its result
+   feeds the gate. Source-resolution/git errors are fail-safe hard errors: no cwd
+   fallback and no blind swap.
 2. **`evaluate_deploy_gate`** — refuse **no-op** (`commit == running_commit`),
    **rollback** (`commit` is an ancestor of `running_commit`, via
    `GitAncestryOracle`), **red canary**, and **crash-loop churn**
    (`recent_restart_churn`).
-3. **Swap** — delegate to `BinaryDeployer::deploy_binary(commit)` (the
+3. **Notify starting** — `DualChannelNotifier` emits a mandatory
+   `deploy-starting` notice before invoking the process-replacing swap.
+4. **Swap** — delegate to `BinaryDeployer::deploy_binary(commit)` (the
    orchestrator path); on failure the orchestrator rolls back to the preserved
    prior binary (`~/.simard/bin/simard.bak.<utc-iso8601>`) and no half-swap is
    left in place.
-4. **Notify** — `DualChannelNotifier` fires on success, refusal, and failure.
+5. **Notify terminal outcome** — `DualChannelNotifier` fires on success when the
+   swap path returns, and on refusal/failure.
 
 `evaluate_deploy_gate` returns `Ok(())` to proceed, or a typed `DeployRefusal`:
 
@@ -632,25 +640,34 @@ rollback are entirely the orchestrator's — the same tested code documented in
 
 ### Notify-on-every-outcome
 
-The guarded deployer notifies the operator on **every** terminal outcome —
-success, gate refusal, canary failure, and rollback — before returning. This is a
-hardening of the prior behavior, which could return `Err` on a gate refusal
-without notifying.
+The guarded deployer notifies the operator on **every** deploy attempt. A
+gate-passing attempt emits a mandatory `deploy-starting` notice **before** the
+swap, because the production `SelfDeployOrchestrator::run()` restart may
+exec-replace/systemd-restart the process and never return. Refusals and failures
+emit `deploy-refused`; a post-swap `deploy` success notice is still emitted when
+the swap path returns (for fake restarters/tests or non-replacing paths).
 
 ```rust
-// Every branch of GuardedDeployer::deploy() dispatches exactly one notification
-// before returning; the success path additionally debug-asserts dispatch:
+// The gate-passing branch dispatches before invoking the swap and debug-asserts
+// that the notification was attempted:
+let starting = OperatorNotification::deploy_starting(target, running, repo, reason);
+let starting_report = self.notifier.notify(&starting);
+debug_assert!(starting_report.dispatched(), "operator MUST be notified before self-deploy swap");
+
+// Terminal branches also notify before returning:
 let report = self.notifier.notify(&notification);
 debug_assert!(report.dispatched(), "operator MUST be notified on every deploy outcome");
 ```
 
-`OperatorNotification` provides one constructor for a completed deploy and one
-for a refused/failed attempt; all content is DP3-sanitized to the SHA,
+`OperatorNotification` provides constructors for a pre-swap attempt, a completed
+deploy, and a refused/failed attempt; all content is DP3-sanitized to the SHA,
 outcome, and a non-sensitive reason — never env values, tokens, secret paths,
 or raw git stderr:
 
 ```rust
 impl OperatorNotification {
+    /// A pre-swap attempt notice. Mandatory before invoking the process-replacing swap.
+    pub fn deploy_starting(target: &str, running: &str, repo: &str, reason: &str) -> Self;
     /// A completed swap (canary-verified) to `commit` from `previous`.
     pub fn deploy(commit: &str, previous: &str, repo: &str, gate_summary: &str) -> Self;
     /// A refused or failed attempt (gate refusal or binary-swap error).

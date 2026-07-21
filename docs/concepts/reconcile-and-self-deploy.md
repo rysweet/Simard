@@ -253,7 +253,8 @@ flowchart LR
     S --> D["DECIDE\ndecide() -> Intervention::Deploy\n{ commit: merged_head }"]
     D --> A["ACT\nGuardedDeployer.deploy(commit)"]
     A --> G["evaluate_deploy_gate\n(refuse no-op / rollback /\nred canary / crash-loop / throttle)"]
-    G -->|pass| X["SelfDeployOrchestrator.run()\n(canary -> swap -> restart -> reap)"]
+    G -->|pass| N0["notify operator (starting)"]
+    N0 --> X["SelfDeployOrchestrator.run()\n(target build/gate -> swap -> restart -> reap)"]
     G -->|refuse| N1["notify operator (refusal)"]
     X -->|ok| N2["notify operator (success)"]
     X -->|fail| RB["rollback + notify operator (failure)"]
@@ -347,17 +348,20 @@ parts**, in this fixed order — no branch reaches a binary swap without passing
    HIGH-RISK action. The gate is already opened for the daemon by
    `build_overseer().with_high_risk_autonomy(true)`; when high-risk autonomy is
    off, the intervention surfaces to the operator instead of executing.
-3. **The tested swap path.** On pass, the guarded deployer delegates the actual
-   build+swap to the **same `SelfDeployOrchestrator::run()` path the operator CLI
-   uses** — canary build+verify → atomic binary swap → restart → orphan reap,
-   with rollback to the preserved prior binary
+3. **The tested target path.** On pass, the guarded deployer first emits a
+   mandatory pre-swap "self-deploy starting" operator notice, then delegates the
+   actual build+swap to the **same `SelfDeployOrchestrator::run()` path the
+   operator CLI uses** — target build/gate → atomic binary swap → restart →
+   orphan reap, with rollback to the preserved prior binary
    (`~/.simard/bin/simard.bak.<utc-iso8601>`) on any canary/verify/restart
    failure. There is
    **one** deploy path, not a divergent second engine.
 4. **Mandatory operator notification on every outcome.** The
    [`DualChannelNotifier`](../reference/overseer-operator-notifications.md) fires
-   on **success, refusal, and failure** alike — Signal (primary) + email. Simard
-   never mutates (or declines to mutate) her own binary silently.
+   a pre-swap **starting** notice before the process-replacing restart, plus
+   refusal/failure notices and a post-swap success notice when that path returns.
+   Signal (primary) + email are both attempted. Simard never mutates (or declines
+   to mutate) her own binary silently.
 
 ### Safety rails (all must hold)
 
@@ -367,9 +371,9 @@ refuses, skips, or rolls back, and always fail-closed:
 | Rail | Guarantee |
 | --- | --- |
 | **Gate every deploy** | `evaluate_deploy_gate` refuses no-op, rollback-to-ancestor, red-canary, and crash-loop churn before any swap. |
-| **Canary before swap** | Canary build+verify must pass; on canary/verify/restart failure the orchestrator **rolls back** to the preserved prior binary — no half-swapped install is ever left in place. |
+| **Canary before swap** | Canary build+verify runs against the resolved target commit (not the daemon cwd) and must pass; on canary/verify/restart failure the orchestrator **rolls back** to the preserved prior binary — no half-swapped install is ever left in place. |
 | **Anti-thrash** | A **process-global** minimum-interval guard (applied at the observe rail so the per-tick-rebuilt Overseer cannot reset it) plus `recent_restart_churn` ensure a single new commit cannot make the daemon redeploy every tick. Two ticks inside the interval deploy **once**. |
-| **Notify always** | Operator is notified on every attempt — success **and** refusal/failure. |
+| **Notify always** | Operator is notified on every attempt — a mandatory pre-swap starting notice, plus success and refusal/failure notices where reachable. |
 | **Anti-recursion** | Deploy runs at a safe point in the cycle and reuses the existing drain → checkpoint/requeue → orphan-reap flow, so it never kills the Overseer's own in-flight critical act mid-write. |
 | **Fail-closed** | Any uncertainty (git error, unresolved head, unknown churn) ⇒ escalate or skip. Never a blind swap. |
 

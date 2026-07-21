@@ -73,8 +73,9 @@ impl MergeNotification {
 /// of operator event.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OperatorNotification {
-    /// Event kind for the subject/logs: `"merge"` | `"deploy"` | `"goal-blocked"`
-    /// | `"workstream-gap"` | `"whisper"`.
+    /// Event kind for the subject/logs: `"merge"` | `"deploy"` |
+    /// `"deploy-starting"` | `"goal-blocked"` | `"workstream-gap"` |
+    /// `"whisper"`.
     pub kind: &'static str,
     /// One-line headline (email subject core / Signal first line).
     pub headline: String,
@@ -152,6 +153,16 @@ impl OperatorNotification {
                 next = next,
             );
         }
+        // A STARTING self-deploy notice (#2590) is emitted before the
+        // process-replacing swap, so it is not yet "solved" work. Render it as
+        // an attempt notice rather than the merge/deploy completion template.
+        if self.kind == "deploy-starting" {
+            return format!(
+                "Notice — the Overseer is starting a self-deploy in {repo}.\n\nWhat is happening:\n  {problem}\n",
+                repo = self.repo,
+                problem = self.problem,
+            );
+        }
         // A REFUSED/failed self-deploy attempt (#2590) is NOT "solved" work — it
         // is an operator-visible notice that a guarded deploy did not proceed
         // (gate refusal or a failed swap). Render an accurate heading rather than
@@ -190,6 +201,24 @@ impl OperatorNotification {
             kind: "deploy",
             headline: format!("deployed {}", short_commit(commit)),
             problem: format!("Deployed {commit} (previous {previous}); {gate_summary}"),
+            next_step: String::new(),
+            link: None,
+            repo: repo.to_string(),
+            autonomous: true,
+        }
+    }
+
+    /// Build a pre-swap self-deploy notification (#2590). The guarded deployer
+    /// fires this after all refusal gates pass but BEFORE invoking the
+    /// process-replacing swap, so even a successful systemd/exec deploy that
+    /// never returns has notified the operator on both channels.
+    /// `target` is the merged head being deployed; `running` is the current
+    /// binary commit; `reason` summarizes the gate/canary state.
+    pub fn deploy_starting(target: &str, running: &str, repo: &str, reason: &str) -> Self {
+        Self {
+            kind: "deploy-starting",
+            headline: format!("self-deploy starting ({})", short_commit(target)),
+            problem: format!("Starting self-deploy to {target} (running {running}): {reason}"),
             next_step: String::new(),
             link: None,
             repo: repo.to_string(),
@@ -1363,6 +1392,23 @@ mod tests {
         assert!(body.contains("abcdef1234567890"));
         assert!(body.contains("0011223344556677"));
         assert!(body.contains("canary green"));
+    }
+
+    #[test]
+    fn deploy_starting_notification_is_an_attempt_notice_not_success() {
+        let n = OperatorNotification::deploy_starting(
+            "abcdef1234567890",
+            "0011223344556677",
+            "rysweet/Simard",
+            "canary green (4/4 gates)",
+        );
+        assert_eq!(n.kind, "deploy-starting");
+        assert!(n.subject().contains("self-deploy starting"));
+        let body = n.plain_text();
+        assert!(body.contains("starting a self-deploy"));
+        assert!(body.contains("abcdef1234567890"));
+        assert!(body.contains("0011223344556677"));
+        assert!(!body.contains("Problem solved"));
     }
 
     // ── security: email header / SMTP command injection (CWE-93) ─────────────
