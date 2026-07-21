@@ -210,8 +210,14 @@ impl DeployAttemptLedger {
     /// function of durable ledger state — records nothing and needs no live
     /// red-canary signal (the ledger record *is* that memory).
     pub fn consult(&self, target_sha: &str, now_secs: u64) -> ThrottleDecision {
-        // Poisoned durable state cannot be trusted for the in-flight SHA: refuse
-        // *this* candidate (per-SHA, never a global deadlock).
+        // A poisoned (corrupt / unreadable / unknown-version) file cannot be
+        // trusted for *any* candidate: we cannot even read which SHAs it recorded
+        // as red, so every candidate this tick is refused rather than risk
+        // re-admitting a known-bad commit (fail-closed — safety over liveness).
+        // This suppression is deliberately global while the file stays poisoned;
+        // it clears only when a fresh valid record is written (`record_*`, after a
+        // deploy the caller admits by other means) or an operator removes the
+        // file. The `deploy_throttle.stuck` warning surfaces the state for ops.
         if self.poisoned {
             return ThrottleDecision::FailClosed {
                 target_sha: target_sha.to_string(),
@@ -316,6 +322,10 @@ impl DeployAttemptLedger {
         refuse_symlink(&path)?;
 
         let tmp = self.state_dir.join(format!("{LEDGER_FILE_NAME}.tmp"));
+        // The durable write lands in `tmp` first, so a symlink planted at the tmp
+        // name is the real redirection surface — guard it as well as the final
+        // path (defence in depth alongside `O_NOFOLLOW` in `write_private`).
+        refuse_symlink(&tmp)?;
         let file = LedgerFileRef {
             version: SCHEMA_VERSION,
             entries: &self.entries,
@@ -325,6 +335,10 @@ impl DeployAttemptLedger {
 
         write_private(&tmp, &body)?;
         std::fs::rename(&tmp, &path)?;
+        // Make the rename itself crash-durable by fsync'ing the directory entry,
+        // so a power loss after `rename` cannot resurrect the old (or an empty)
+        // ledger. Best-effort: a failure only weakens durability.
+        fsync_dir(&self.state_dir);
         Ok(())
     }
 }
@@ -359,27 +373,50 @@ fn refuse_symlink(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Write `bytes` to `path`, owner-only (`0600`) on unix.
+/// Write `bytes` to `path`, owner-only (`0600`) on unix, and `fsync` the
+/// contents before returning so a crash between the write and the caller's
+/// `rename` cannot leave a torn or zero-length ledger (which would load
+/// poisoned and stall every self-deploy).
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
+        // `O_NOFOLLOW` refuses to open through a symlink at the final path
+        // component, so a link planted at the tmp name cannot redirect the write.
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(path)?;
         f.write_all(bytes)?;
         // Enforce 0600 even if the file pre-existed with looser perms.
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        f.sync_all()?;
         Ok(())
     }
     #[cfg(not(unix))]
     {
         std::fs::write(path, bytes)
+    }
+}
+
+/// Best-effort `fsync` of the state dir so a preceding `rename` survives a crash
+/// on POSIX filesystems. A failure here only weakens durability, so it is not
+/// propagated.
+fn fsync_dir(dir: &Path) {
+    #[cfg(unix)]
+    {
+        if let Ok(f) = std::fs::File::open(dir) {
+            let _ = f.sync_all();
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
     }
 }
 
