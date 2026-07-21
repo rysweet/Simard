@@ -37,13 +37,16 @@
 /// provenance or empty content does not.
 pub const RELIABILITY_THRESHOLD: f64 = 0.5;
 
-/// How many same-`concept` priors the identity-dedup step in
-/// [`commit_gated_fact`] inspects when deciding whether a new fact merely
-/// restates an equal-or-stronger existing fact. `search_facts` returns priors
-/// ranked strongest-first and filtered to `>= confidence`, so a genuine
-/// equal-or-stronger duplicate surfaces within the first few results; the
-/// window is kept intentionally small to bound the per-write query cost on the
-/// distillation hot path.
+/// How many priors each identity-dedup scan in [`commit_gated_fact`] inspects
+/// when deciding whether a new fact merely restates an equal-or-stronger
+/// existing fact. Two bounded scans — one keyed on the fact's `concept`, one on
+/// its `content` — each return up to this many priors, ranked strongest-first
+/// and filtered to `>= confidence`; their union is checked against the new
+/// fact's (canonical concept + content) identity. The window is kept
+/// intentionally small to bound the per-write query cost on the distillation
+/// hot path, and the two complementary scans keep a genuine duplicate from
+/// slipping past a single small window when either its concept OR its content
+/// neighborhood is crowded by higher-confidence facts.
 const DEDUP_PRIOR_SCAN_LIMIT: u32 = 5;
 
 /// The closed concept-label set the distillation recipe is constrained to. A
@@ -347,22 +350,50 @@ pub fn commit_gated_fact(
     }
 
     // Identity dedup: do not downgrade/duplicate an equal-or-stronger prior
-    // version of the *same* fact (concept + content). `search_facts` is queried
-    // with the new confidence as `min_confidence` so it returns only priors
-    // strong enough to block; the explicit `>=` is belt-and-suspenders against a
-    // backend that ignores the filter. Content is compared on the
-    // whitespace-normalized [`dedup_content_key`] so a restatement that differs
-    // only in interior/surrounding whitespace is recognized as the same fact
-    // (the survivor is still stored verbatim — only this comparison is
-    // normalized).
+    // version of the *same* fact (canonical `concept` + [`dedup_content_key`]
+    // content). Candidates are gathered from TWO bounded prior scans and unioned:
+    //
+    //   - a CONCEPT scan (`search_facts(concept, …)`), and
+    //   - a CONTENT scan (`search_facts(content, …)`).
+    //
+    // Either scan alone can miss a genuine duplicate. `search_facts` returns at
+    // most `DEDUP_PRIOR_SCAN_LIMIT` priors ranked confidence-descending, and the
+    // distillation concept vocabulary is a tiny CLOSED set ([`KNOWN_CONCEPTS`]),
+    // so many genuinely distinct facts pile up under one label. Once more than
+    // `DEDUP_PRIOR_SCAN_LIMIT` higher-confidence facts share a concept, a real
+    // content-duplicate is pushed out of the concept window and escapes dedup —
+    // the redundant fact is then promoted, inflating semantic memory and dragging
+    // recall precision down. The content scan narrows to priors that actually
+    // share this fact's words, so the exact restatement surfaces even when its
+    // concept is crowded; the concept scan conversely catches a duplicate whose
+    // content neighborhood is itself crowded by higher-confidence content-word
+    // matches. Unioning the two windows is a strict superset of either — it can
+    // only find MORE duplicates, never fewer — so no prior dedup is lost.
+    //
+    // Each scan is queried with the new confidence as `min_confidence` so only
+    // priors strong enough to block are returned; the explicit `>=` below is
+    // belt-and-suspenders against a backend that ignores the filter. Content is
+    // compared on the whitespace-normalized [`dedup_content_key`] so a restatement
+    // differing only in interior/surrounding whitespace is recognized as the same
+    // fact (the survivor is still stored verbatim — only this comparison is
+    // normalized). The explicit canonical-concept guard keys dedup on the FULL
+    // (concept, content) identity: because the content scan can return priors of a
+    // DIFFERENT concept that happen to share content words, identical content
+    // under a different concept is a distinct fact and must NOT be merged.
     let new_key = dedup_content_key(content);
-    let existing = memory
+    let mut candidates = memory
         .search_facts(concept, DEDUP_PRIOR_SCAN_LIMIT, confidence)
         .unwrap_or_default();
-    if existing
-        .iter()
-        .any(|f| dedup_content_key(&f.content) == new_key && f.confidence >= confidence)
-    {
+    candidates.extend(
+        memory
+            .search_facts(content, DEDUP_PRIOR_SCAN_LIMIT, confidence)
+            .unwrap_or_default(),
+    );
+    if candidates.iter().any(|f| {
+        canonical_concept(&f.concept).unwrap_or(f.concept.as_str()) == concept
+            && dedup_content_key(&f.content) == new_key
+            && f.confidence >= confidence
+    }) {
         return Ok(FactGateDecision::Quarantined { confidence });
     }
 

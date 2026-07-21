@@ -78,7 +78,18 @@ order:
    stored) so a low-reliability candidate can never corrupt past experience.
 5. **Identity dedup** — a weaker-or-equal new fact never clobbers a
    higher-confidence existing fact of the **same identity** (canonical concept +
-   content). Distinct lessons that merely share a label still accumulate.
+   whitespace-normalized content). Prior candidates are gathered from **two
+   bounded scans** — one keyed on the fact's `concept`, one on its `content` —
+   whose union is checked against the new fact's full `(concept, content)`
+   identity. Either scan alone can miss a real duplicate: `search_facts` returns
+   priors ranked confidence-descending and capped at `DEDUP_PRIOR_SCAN_LIMIT`,
+   and because the distillation vocabulary is a tiny closed set (`KNOWN_CONCEPTS`)
+   many distinct facts pile up under one label, so a content-duplicate can be
+   crowded out of a concept-only window and wrongly re-promoted. The content scan
+   surfaces the restatement even when its concept is crowded; an explicit
+   canonical-concept guard keeps the two-scan union from merging identical content
+   under a *different* concept. Distinct lessons that merely share a label still
+   accumulate.
 6. **Persist** — surviving facts are written with
    `store_fact_with_provenance` (computed confidence, **one `DERIVES_FROM` edge
    per supplied `source_episode_id`**, and a scalar `source_id` of
