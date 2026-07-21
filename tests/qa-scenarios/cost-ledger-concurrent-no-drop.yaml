@@ -1,0 +1,38 @@
+# Canonical agentic-test schema (name + agents[] + steps[] with params).
+#
+# Mirrors tests/qa-scenarios/cost-meeting-prompt-tokens.yaml: a single `cli`
+# agent runs a hermetic regression script; the runner treats the script's
+# non-zero exit as a step failure, so this is a real pass/fail gate.
+name: simard-cost-ledger-concurrent-no-drop
+description: >-
+  Concurrent appends to the cost-tracking JSONL ledger never interleave or drop
+  entries. `cost_tracking::write_entry` routes every append through an atomic
+  helper (process-wide lock + single-buffer write_all), so parallel
+  `record_cost` callers sharing a process-global ledger path cannot splice
+  their lines together. This closes the intermittent
+  `meeting_turn_records_full_enriched_prompt_tokens_not_bare_objective`
+  "a copilot-meeting cost entry ... must be recorded" verify flake.
+version: "1.0"
+config:
+  timeout: 300000
+environment:
+  requires: []
+agents:
+  - name: cli-agent
+    type: cli
+    config: {}
+metadata:
+  tags:
+    - cli
+    - cost
+    - concurrency
+  priority: high
+steps:
+  - name: Run the concurrent cost-ledger no-drop regression script
+    agent: cli-agent
+    action: run
+    params:
+      command: bash
+      args:
+        - scripts/qa-cost-ledger-concurrent-no-drop.sh
+    timeout: 300000
