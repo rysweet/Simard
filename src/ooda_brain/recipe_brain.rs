@@ -1762,8 +1762,7 @@ struct AdmissionEnvelope {
 /// present (the caller surfaces that as a fail-open `Err`). Routes through the
 /// shared sanitizing chokepoint so a banner-polluted envelope still parses.
 fn parse_admission_decision(text: &str) -> Option<EngineerAdmissionDecision> {
-    let payload = crate::recipe_output::extract_json_payload(text)?;
-    let env: AdmissionEnvelope = serde_json::from_str(&payload).ok()?;
+    let env: AdmissionEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
     if env.decision.trim().is_empty() {
         return None;
     }
@@ -1822,8 +1821,7 @@ struct ResourceAdmissionEnvelope {
 /// which the seam fails CLOSED to a benign `Defer`). Routes through the shared
 /// sanitizing chokepoint so a banner-polluted envelope still parses.
 fn parse_resource_admission_decision(text: &str) -> Option<ResourceAdmissionDecision> {
-    let payload = crate::recipe_output::extract_json_payload(text)?;
-    let env: ResourceAdmissionEnvelope = serde_json::from_str(&payload).ok()?;
+    let env: ResourceAdmissionEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
     if env.decision.trim().is_empty() {
         return None;
     }
@@ -1900,8 +1898,7 @@ struct IdeaDedupEnvelope {
 /// `Err`, which the seam fails CLOSED). Routes through the shared sanitising
 /// chokepoint so a banner-polluted envelope still parses — no stdout scraping.
 fn parse_idea_dedup_decision(text: &str) -> Option<IdeaDedupDecision> {
-    let payload = crate::recipe_output::extract_json_payload(text)?;
-    let env: IdeaDedupEnvelope = serde_json::from_str(&payload).ok()?;
+    let env: IdeaDedupEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
     let choice = env.choice.trim();
     if choice.is_empty() {
         return None;
@@ -1946,8 +1943,7 @@ struct IdeaConsolidationEnvelope {
 /// Clusters missing a `canonical_id` are dropped. `Some(vec![])` is a valid
 /// "nothing to consolidate" result and is distinct from an unparseable `None`.
 fn parse_idea_consolidation(text: &str) -> Option<Vec<IdeaCluster>> {
-    let payload = crate::recipe_output::extract_json_payload(text)?;
-    let env: IdeaConsolidationEnvelope = serde_json::from_str(&payload).ok()?;
+    let env: IdeaConsolidationEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
     Some(
         env.clusters
             .into_iter()
@@ -1997,8 +1993,7 @@ struct OutcomeEnvelope {
 /// present (the caller surfaces that as a NO-FALLBACK `Err`). Routes through the
 /// shared sanitizing chokepoint so a banner-polluted envelope still parses.
 fn parse_outcome_decision(text: &str) -> Option<GoalOutcomeDecision> {
-    let payload = crate::recipe_output::extract_json_payload(text)?;
-    let env: OutcomeEnvelope = serde_json::from_str(&payload).ok()?;
+    let env: OutcomeEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
     if env.decision.trim().is_empty() {
         return None;
     }
@@ -2065,13 +2060,13 @@ struct DecisionEnvelope {
 
 /// Extract the `{"decision": "...", "rationale": "..."}` envelope from recipe
 /// output, if present. Routes through the shared #2484 sanitizing chokepoint
-/// ([`crate::recipe_output::extract_json_payload`] strips the banner, ANSI, and
-/// interleaved log lines) so a banner-polluted envelope still parses. Returns
+/// ([`crate::recipe_output::extract_and_parse_json`] strips the banner, ANSI,
+/// and interleaved log lines, and recovers a trailing-comma-defective body) so
+/// a banner-polluted or trailing-comma envelope still parses. Returns
 /// `None` when no balanced JSON object with a non-empty string `decision` field
 /// is present — the caller then falls back to the legacy first-word scan.
 fn extract_decision_envelope(text: &str) -> Option<DecisionEnvelope> {
-    let payload = crate::recipe_output::extract_json_payload(text)?;
-    let env: DecisionEnvelope = serde_json::from_str(&payload).ok()?;
+    let env: DecisionEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
     if env.decision.trim().is_empty() {
         return None;
     }
@@ -2114,9 +2109,10 @@ pub fn parse_action_from_text(text: &str) -> DecideJudgment {
 pub fn parse_action_outcome(text: &str) -> (DecideJudgment, LifecycleParseOutcome) {
     // Structured JSON envelope FIRST (issue #2580): a well-formed
     // `{"decision":"<variant>","rationale":"..."}` block — extracted through the
-    // shared #2484 sanitizing chokepoint (`extract_json_payload` strips the
-    // banner + ANSI + log noise) — parses deterministically, so the daemon no
-    // longer *relies* on free-prose first-word sniffing to route a decision.
+    // shared #2484 sanitizing chokepoint (`extract_and_parse_json` strips the
+    // banner + ANSI + log noise and recovers a trailing-comma body) — parses
+    // deterministically, so the daemon no longer *relies* on free-prose
+    // first-word sniffing to route a decision.
     if let Some(env) = extract_decision_envelope(text)
         && let Some(judgment) =
             decide_judgment_from_variant(env.decision.trim(), envelope_rationale(&env))
@@ -2309,8 +2305,7 @@ struct OrientEnvelope {
 /// through the shared #2484 sanitizing chokepoint. `None` when no balanced JSON
 /// object with a numeric `adjusted_urgency` field is present.
 fn extract_orient_envelope(text: &str) -> Option<OrientEnvelope> {
-    let payload = crate::recipe_output::extract_json_payload(text)?;
-    serde_json::from_str::<OrientEnvelope>(&payload).ok()
+    crate::recipe_output::extract_and_parse_json(text)
 }
 
 /// Validate and project a parsed [`OrientEnvelope`] onto an [`OrientJudgment`].
@@ -3065,6 +3060,64 @@ mod tests {
         assert!(parse_admission_decision(r#"{"decision": "nope"}"#).is_none());
         assert!(parse_admission_decision("not json at all").is_none());
         assert!(parse_admission_decision(r#"{"decision": ""}"#).is_none());
+    }
+
+    // ---- trailing-comma recovery (reasoner reliability, issue #2658) -------
+
+    #[test]
+    fn parse_admission_recovers_trailing_comma_in_object() {
+        // A stray trailing comma before `}` is the most common LLM JSON defect.
+        // Before the shared `extract_and_parse_json` chokepoint applied the
+        // trailing-comma recovery view, this failed the strict parse and the
+        // reasoner silently dropped its whole admission decision (fail-open).
+        let d =
+            parse_admission_decision(r#"{"decision": "admit", "rationale": "independent files",}"#)
+                .expect("trailing comma before } must be recovered");
+        assert!(matches!(d, EngineerAdmissionDecision::Admit { .. }));
+        assert_eq!(d.rationale(), "independent files");
+    }
+
+    #[test]
+    fn parse_admission_recovers_trailing_comma_in_array_and_banner() {
+        // Trailing comma inside the `blocked_by` array AND a banner/log preamble
+        // the sanitizing extractor must strip first — the two defects compose.
+        let noisy = "Recipe: ooda-engineer-lifecycle SUCCESS (12.0s)\n2026-07-20T00:00:00.000000Z INFO decide\n{\"decision\": \"defer\", \"blocked_by\": [\"fix-goals-status\",], \"rationale\": \"shared file\",}";
+        let d =
+            parse_admission_decision(noisy).expect("banner + trailing commas must be recovered");
+        match d {
+            EngineerAdmissionDecision::Defer { blocked_by, .. } => {
+                assert_eq!(blocked_by, vec!["fix-goals-status".to_string()]);
+            }
+            other => panic!("expected Defer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_outcome_recovers_trailing_comma() {
+        // The outcome seam fails NO-FALLBACK on a parse miss, so recovering a
+        // trailing-comma body is what keeps a genuine reasoner verdict from
+        // being discarded.
+        let d = parse_outcome_decision(r#"{"decision": "mark_achieved", "rationale": "done",}"#);
+        assert!(
+            d.is_some(),
+            "a trailing-comma outcome envelope must still parse"
+        );
+    }
+
+    #[test]
+    fn extract_decision_envelope_recovers_trailing_comma() {
+        let env =
+            extract_decision_envelope(r#"{"decision": "advance_goal", "rationale": "next step",}"#)
+                .expect("trailing-comma decision envelope must parse");
+        assert_eq!(env.decision.trim(), "advance_goal");
+    }
+
+    #[test]
+    fn parse_admission_still_rejects_non_comma_malformed_json() {
+        // Leniency must NOT widen beyond the trailing-comma defect: an unquoted
+        // key / missing value stays a parse miss (returns None, not a default).
+        assert!(parse_admission_decision(r#"{decision: "admit"}"#).is_none());
+        assert!(parse_admission_decision(r#"{"decision": }"#).is_none());
     }
 
     #[test]
