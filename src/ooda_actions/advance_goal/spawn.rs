@@ -43,6 +43,64 @@ pub const BRAIN_FAILURE_BLOCKED_PREFIX: &str = "\u{1F512} [OODA-SAFEGUARD] OODA 
 /// Trailing portion of the deterministic brain-failure `Blocked` reason.
 pub const BRAIN_FAILURE_BLOCKED_SUFFIX: &str = " consecutive cycles; needs human review";
 
+/// Outcome of a stuck-goal `gh issue create` attempt at the brain sites.
+enum TrackingIssueOutcome {
+    /// Issue was created (`labelled` records whether `--label ooda-stuck`
+    /// survived, or the label-less fallback was used).
+    Filed { labelled: bool },
+    /// `gh issue create` ran but returned non-zero even after the fallback.
+    CreateFailed { stderr: String },
+    /// The `gh` process could not be spawned.
+    SpawnFailed { error: String },
+}
+
+/// File a stuck-goal tracking issue via `gh`, robust to a missing `ooda-stuck`
+/// label. Shared by the deterministic brain-failure safeguard and the
+/// engineer-lifecycle `OpenTrackingIssue` site so both stay consistent.
+///
+/// Best-effort ensures the label exists, then `gh issue create`; on a
+/// missing-label failure the original stderr has already been observed by the
+/// caller-facing outcome and the create is retried exactly once without
+/// `--label`. Behaviour is unchanged when the label already exists.
+fn file_stuck_tracking_issue(title: &str, body: &str) -> TrackingIssueOutcome {
+    // Best-effort label ensure; failures are traced inside the helper and are
+    // non-fatal — we still attempt to create the issue below.
+    let _ = crate::ooda_stuck_label::ensure_ooda_stuck_label(
+        crate::ooda_stuck_label::TARGET_OODA_BRAIN,
+    );
+    file_stuck_tracking_issue_with_label(title, body, true)
+}
+
+fn file_stuck_tracking_issue_with_label(
+    title: &str,
+    body: &str,
+    with_label: bool,
+) -> TrackingIssueOutcome {
+    let argv = crate::ooda_stuck_label::issue_create_argv(title, body, with_label);
+    match std::process::Command::new("gh").args(&argv).output() {
+        Ok(out) if out.status.success() => TrackingIssueOutcome::Filed {
+            labelled: with_label,
+        },
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            if with_label && crate::ooda_stuck_label::is_missing_label_error(&stderr) {
+                // Surface the original failure before the label-less retry so
+                // the real error is never swallowed.
+                tracing::warn!(
+                    target: "simard::ooda_brain",
+                    stderr = %stderr,
+                    "stuck-goal tracking issue: retrying gh issue create without --label (label absent)",
+                );
+                return file_stuck_tracking_issue_with_label(title, body, false);
+            }
+            TrackingIssueOutcome::CreateFailed { stderr }
+        }
+        Err(io_err) => TrackingIssueOutcome::SpawnFailed {
+            error: io_err.to_string(),
+        },
+    }
+}
+
 /// Derive a STABLE goal-session id from a goal id (issue #4197).
 ///
 /// The previous `format!("ooda-{}", Uuid::now_v7())` minted a FRESH session id
@@ -367,38 +425,28 @@ pub fn dispatch_spawn_engineer(
                     }
                     // File tracking issue. Failure to file is logged but
                     // does NOT swallow the original brain failure.
-                    match std::process::Command::new("gh")
-                        .args([
-                            "issue",
-                            "create",
-                            "--title",
-                            &title,
-                            "--body",
-                            &body,
-                            "--label",
-                            "ooda-stuck",
-                        ])
-                        .output()
-                    {
-                        Ok(out) if out.status.success() => {
-                            eprintln!(
-                                "[simard] DETERMINISTIC SAFEGUARD: goal '{}' marked Blocked + tracking issue filed",
-                                goal_id
+                    match file_stuck_tracking_issue(&title, &body) {
+                        TrackingIssueOutcome::Filed { labelled } => {
+                            tracing::info!(
+                                target: "simard::ooda_brain",
+                                goal = %goal_id,
+                                labelled,
+                                "deterministic safeguard: goal marked Blocked + tracking issue filed",
                             );
                         }
-                        Ok(out) => {
+                        TrackingIssueOutcome::CreateFailed { stderr } => {
                             tracing::error!(
                                 target: "simard::ooda_brain",
                                 goal = %goal_id,
-                                stderr = %String::from_utf8_lossy(&out.stderr),
+                                stderr = %stderr,
                                 "deterministic safeguard: gh issue create FAILED (goal still marked Blocked)",
                             );
                         }
-                        Err(io_err) => {
+                        TrackingIssueOutcome::SpawnFailed { error } => {
                             tracing::error!(
                                 target: "simard::ooda_brain",
                                 goal = %goal_id,
-                                error = %io_err,
+                                error = %error,
                                 "deterministic safeguard: gh process spawn FAILED (goal still marked Blocked)",
                             );
                         }
@@ -924,25 +972,31 @@ fn apply_lifecycle_decision(
     }
 
     if let EngineerLifecycleDecision::OpenTrackingIssue { title, body, .. } = &decision {
-        let result = std::process::Command::new("gh")
-            .args([
-                "issue",
-                "create",
-                "--title",
-                title,
-                "--body",
-                body,
-                "--label",
-                "ooda-stuck",
-            ])
-            .status();
-        if let Err(e) = result {
-            tracing::warn!(
-                target: "simard::ooda_brain",
-                goal = %goal_id,
-                error = %e,
-                "open_tracking_issue: gh issue create failed",
-            );
+        match file_stuck_tracking_issue(title, body) {
+            TrackingIssueOutcome::Filed { labelled } => {
+                tracing::info!(
+                    target: "simard::ooda_brain",
+                    goal = %goal_id,
+                    labelled,
+                    "open_tracking_issue: tracking issue filed",
+                );
+            }
+            TrackingIssueOutcome::CreateFailed { stderr } => {
+                tracing::warn!(
+                    target: "simard::ooda_brain",
+                    goal = %goal_id,
+                    stderr = %stderr,
+                    "open_tracking_issue: gh issue create failed",
+                );
+            }
+            TrackingIssueOutcome::SpawnFailed { error } => {
+                tracing::warn!(
+                    target: "simard::ooda_brain",
+                    goal = %goal_id,
+                    error = %error,
+                    "open_tracking_issue: gh issue create failed",
+                );
+            }
         }
     }
 

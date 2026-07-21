@@ -12,6 +12,7 @@ related:
   - ../concepts/steerable-ooda-daemon.md
   - ../reference/no-progress-root-cause-resolution-api.md
   - ../reference/ooda-no-progress-why-recipe.md
+  - ../reference/ooda-stuck-label-resilience-api.md
   - ../reference/completion-evidence-gate-api.md
   - ../reference/goal-board-api.md
   - ../howto/unblock-stuck-ooda-goals.md

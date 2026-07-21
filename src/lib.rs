@@ -123,6 +123,7 @@ pub mod ooda_actions;
 pub mod ooda_brain;
 pub mod ooda_loop;
 pub mod ooda_scheduler;
+pub mod ooda_stuck_label;
 pub mod operator_cli;
 pub mod operator_commands;
 mod operator_commands_dashboard;

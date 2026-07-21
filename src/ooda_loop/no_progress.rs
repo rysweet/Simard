@@ -103,19 +103,29 @@ pub(crate) struct GhIssueFiler;
 
 impl NoProgressIssueFiler for GhIssueFiler {
     fn file_issue(&self, title: &str, body: &str) -> Option<FiledIssue> {
-        match std::process::Command::new("gh")
-            .args([
-                "issue",
-                "create",
-                "--title",
-                title,
-                "--body",
-                body,
-                "--label",
-                "ooda-stuck",
-            ])
-            .output()
-        {
+        // Best-effort: make sure the `ooda-stuck` label exists so the created
+        // issue stays correctly tagged. Non-fatal — a failure here (label
+        // create denied, network) is already traced inside the helper and we
+        // still attempt to file the issue below.
+        let _ =
+            crate::ooda_stuck_label::ensure_ooda_stuck_label(crate::ooda_stuck_label::TARGET_OODA);
+        self.file_issue_with_label(title, body, true)
+    }
+}
+
+impl GhIssueFiler {
+    /// Run `gh issue create`, tagging with `ooda-stuck` when `with_label` is
+    /// true. On a missing-label failure (the observed production signature),
+    /// the original stderr is traced and the create is retried exactly once
+    /// without `--label` so the tracking issue is still filed.
+    fn file_issue_with_label(
+        &self,
+        title: &str,
+        body: &str,
+        with_label: bool,
+    ) -> Option<FiledIssue> {
+        let argv = crate::ooda_stuck_label::issue_create_argv(title, body, with_label);
+        match std::process::Command::new("gh").args(&argv).output() {
             Ok(out) if out.status.success() => {
                 // `gh issue create` prints the created issue's URL on success,
                 // e.g. `https://github.com/rysweet/Simard/issues/4231`.
@@ -125,6 +135,7 @@ impl NoProgressIssueFiler for GhIssueFiler {
                     target: "simard::ooda",
                     title = %title,
                     issue = number.as_deref().unwrap_or("?"),
+                    labelled = with_label,
                     "no-progress breaker: tracking issue filed for stuck goal",
                 );
                 number.map(|number| FiledIssue {
@@ -133,11 +144,21 @@ impl NoProgressIssueFiler for GhIssueFiler {
                 })
             }
             Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                // Always surface the real failure before any fallback so the
+                // error stays observable (no silent swallow).
                 tracing::error!(
                     target: "simard::ooda",
-                    stderr = %String::from_utf8_lossy(&out.stderr),
+                    stderr = %stderr,
                     "no-progress breaker: gh issue create failed (goal still Blocked)",
                 );
+                if with_label && crate::ooda_stuck_label::is_missing_label_error(&stderr) {
+                    tracing::warn!(
+                        target: "simard::ooda",
+                        "no-progress breaker: retrying gh issue create without --label (label absent)",
+                    );
+                    return self.file_issue_with_label(title, body, false);
+                }
                 None
             }
             Err(e) => {

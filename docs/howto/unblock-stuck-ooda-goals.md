@@ -231,3 +231,4 @@ under `~/.simard/agent_logs/`.
 - [Re-investigate bare-blocked OODA goals](./reinvestigate-bare-blocked-goals.md) — the daemon now auto-upgrades bare `[OODA-SAFEGUARD]` blocks to a concrete WHY every cycle (#17), so manual unblocking is rarely needed.
 - [Recover goal board](./recover-goal-board.md)
 - [Spawn engineers from OODA daemon](./spawn-engineers-from-ooda-daemon.md)
+- [OODA stuck-goal label resilience API](../reference/ooda-stuck-label-resilience-api.md) — how the breaker's `ooda-stuck` tracking issue is still filed when the GitHub label is missing.
