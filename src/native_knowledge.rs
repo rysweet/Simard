@@ -109,10 +109,13 @@ fn discover_packs(packs_dir: &Path) -> Vec<DiscoveredPack> {
     packs
 }
 
-/// Query a pack's SQLite database for entities matching the question.
+/// Open a pack database read-only and answer `question` against it.
 ///
-/// This is a simplified version of the Python KnowledgeGraphAgent.query().
-/// It searches across article titles and content for relevant matches.
+/// This is now a **test-only** convenience wrapper: production queries go
+/// through [`ConnCache`] + [`query_open_pack`] so the connection is reused
+/// (KGP-T3). The path-based unit tests keep exercising the full retrieval path
+/// via this helper.
+#[cfg(test)]
 fn query_pack_db(
     db_path: &Path,
     question: &str,
@@ -120,7 +123,25 @@ fn query_pack_db(
 ) -> Result<(String, Vec<SourceInfo>, f64), String> {
     let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| format!("cannot open pack database: {e}"))?;
+    query_open_pack(&conn, question, limit)
+}
 
+/// Query a pack's SQLite database for entities matching the question, against an
+/// **already-open** connection.
+///
+/// This is a simplified version of the Python KnowledgeGraphAgent.query().
+/// It searches across article titles and content for relevant matches.
+///
+/// Split out of [`query_pack_db`] (KGP-T3) so a cached, reused connection
+/// (see [`ConnCache`]) and a freshly-opened one share exactly one query path.
+/// `query_pack_db` owns opening the read-only connection; this function owns the
+/// keyword extraction + retrieval + answer synthesis so neither the reuse cache
+/// nor the path-based unit tests duplicate that logic.
+fn query_open_pack(
+    conn: &Connection,
+    question: &str,
+    limit: usize,
+) -> Result<(String, Vec<SourceInfo>, f64), String> {
     // Search for articles/sections matching keywords from the question.
     //
     // Keep only DISTINCT keywords (case-folded). The relevance ranking in
@@ -148,8 +169,8 @@ fn query_pack_db(
     }
 
     // Try to query articles table — pack databases may have varying schemas.
-    let sources = query_articles(&conn, &keywords, limit);
-    let answer = build_answer(&conn, &keywords, &sources);
+    let sources = query_articles(conn, &keywords, limit);
+    let answer = build_answer(conn, &keywords, &sources);
     let confidence = estimate_confidence(&answer, &sources);
 
     Ok((answer, sources, confidence))
@@ -399,14 +420,67 @@ fn estimate_confidence(answer: &str, sources: &[SourceInfo]) -> f64 {
     (raw * 100.0).round() / 100.0
 }
 
+/// Per-pack cache of a **live, reused** read-only SQLite connection (KGP-T3).
+///
+/// Previously the knowledge handler cached only each pack's database *path* and
+/// re-opened a fresh [`Connection`] on every `knowledge.query` — re-parsing the
+/// schema and paying the file-open cost per request. This caches the open
+/// connection itself so repeated queries against the same pack reuse one handle.
+///
+/// rusqlite's [`Connection`] is `Send` but **not** `Sync`, so each cached
+/// connection is wrapped in its own [`Mutex`]: queries against one pack serialize
+/// on that per-pack mutex (a read-only connection, so this is cheap), while
+/// queries against *different* packs proceed independently. The newtype also
+/// keeps the nested `Arc<Mutex<HashMap<_, Arc<Mutex<Connection>>>>>` off the
+/// call sites.
+#[derive(Default)]
+struct ConnCache {
+    inner: Arc<Mutex<HashMap<String, Arc<Mutex<Connection>>>>>,
+}
+
+impl ConnCache {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return the cached read-only connection for `pack_name`, opening a new one
+    /// on first use. `resolve_path` is invoked **only on a cache miss** to locate
+    /// (and validate) the pack's database, so the hot path (a warm cache) avoids
+    /// re-discovering packs on disk. Subsequent calls with the same `pack_name`
+    /// return the *same* [`Connection`] handle (proven by `Arc::ptr_eq` in the
+    /// reuse test), which is the observable meaning of connection reuse.
+    fn get_or_open<F>(
+        &self,
+        pack_name: &str,
+        resolve_path: F,
+    ) -> Result<Arc<Mutex<Connection>>, String>
+    where
+        F: FnOnce() -> Result<PathBuf, String>,
+    {
+        let mut cache = self.inner.lock().unwrap();
+        if let Some(conn) = cache.get(pack_name) {
+            return Ok(conn.clone());
+        }
+        let db_path = resolve_path()?;
+        let conn =
+            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|e| format!("cannot open pack database: {e}"))?;
+        let handle = Arc::new(Mutex::new(conn));
+        cache.insert(pack_name.to_string(), handle.clone());
+        Ok(handle)
+    }
+}
+
 /// Register all knowledge knowledge method handlers on a NativeRpcTransport.
 pub fn register_knowledge_handlers(transport: &mut NativeRpcTransport, packs_dir: PathBuf) {
     let packs_dir_list = packs_dir.clone();
     let packs_dir_info = packs_dir.clone();
     let packs_dir_query = packs_dir;
 
-    // Shared connection cache to avoid re-opening databases on every query.
-    let conn_cache: Arc<Mutex<HashMap<String, PathBuf>>> = Arc::new(Mutex::new(HashMap::new()));
+    // Shared cache of live read-only connections, one per pack, so repeated
+    // queries reuse an open connection instead of re-opening the database
+    // (KGP-T3).
+    let conn_cache = ConnCache::new();
 
     // knowledge.list_packs
     transport.register(
@@ -489,46 +563,41 @@ pub fn register_knowledge_handlers(transport: &mut NativeRpcTransport, packs_dir
                 }));
             }
 
-            // Find the pack's database path.
-            let db_path = {
-                let cache = conn_cache.lock().unwrap();
-                cache.get(pack_name).cloned()
-            };
-
-            let db_path = match db_path {
-                Some(p) => p,
-                None => {
-                    let packs = discover_packs(&packs_dir_query);
-                    let pack = packs.iter().find(|p| p.name == pack_name);
-                    match pack {
-                        Some(p) => {
-                            let path = p.db_path.clone();
-                            let mut cache = conn_cache.lock().unwrap();
-                            cache.insert(pack_name.to_string(), path.clone());
-                            path
-                        }
-                        None => {
-                            return Err(RpcErrorPayload {
-                                code: ERROR_INTERNAL,
-                                message: format!("pack '{pack_name}' not found"),
-                            });
-                        }
-                    }
+            // Resolve (on cache miss) and reuse a live read-only connection for
+            // this pack. `resolve_path` runs only when the pack is not yet
+            // cached: it discovers the pack on disk and validates its database
+            // exists, preserving the prior "not found" / "no database" errors.
+            let handle = conn_cache.get_or_open(pack_name, || {
+                let packs = discover_packs(&packs_dir_query);
+                let pack = packs
+                    .iter()
+                    .find(|p| p.name == pack_name)
+                    .ok_or_else(|| format!("pack '{pack_name}' not found"))?;
+                let db_path = pack.db_path.clone();
+                if !db_path.exists() {
+                    return Err(format!(
+                        "pack '{pack_name}' has no database at {}",
+                        db_path.display()
+                    ));
+                }
+                Ok(db_path)
+            });
+            let handle = match handle {
+                Ok(h) => h,
+                Err(message) => {
+                    return Err(RpcErrorPayload {
+                        code: ERROR_INTERNAL,
+                        message,
+                    });
                 }
             };
 
-            if !db_path.exists() {
-                return Err(RpcErrorPayload {
-                    code: ERROR_INTERNAL,
-                    message: format!(
-                        "pack '{pack_name}' has no database at {}",
-                        db_path.display()
-                    ),
-                });
-            }
-
             let limit = limit.min(100);
-            match query_pack_db(&db_path, question, limit) {
+            let result = {
+                let conn = handle.lock().unwrap();
+                query_open_pack(&conn, question, limit)
+            };
+            match result {
                 Ok((answer, sources, confidence)) => {
                     let source_values: Vec<Value> = sources
                         .iter()
@@ -1150,5 +1219,112 @@ mod tests {
              article above the higher-coverage one; got: {:?}",
             sources.iter().map(|s| &s.title).collect::<Vec<_>>()
         );
+    }
+
+    // ── KGP-T3: connection reuse ────────────────────────────────────────────
+
+    #[test]
+    fn conn_cache_reuses_open_connection_across_queries() {
+        // Parity criterion KGP-T3: a second query to the same pack must reuse
+        // the *same* open connection rather than re-opening the database. The
+        // observable proof is `Arc::ptr_eq` on the two returned handles, plus
+        // the resolver closure being invoked only on the first (miss) call.
+        let tmp = TempDir::new().unwrap();
+        let pack_dir = create_test_pack(tmp.path(), "reuse-pack");
+        let db_path = pack_dir.join("pack.db");
+
+        let cache = ConnCache::new();
+
+        let first = cache
+            .get_or_open("reuse-pack", || Ok(db_path.clone()))
+            .expect("first open must succeed");
+
+        // The second call must NOT invoke the resolver (warm-cache hot path).
+        let second = cache
+            .get_or_open("reuse-pack", || {
+                panic!("resolver must not run on a cache hit — the connection is reused")
+            })
+            .expect("second open must reuse the cached connection");
+
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "the second query to one pack must reuse the same open Connection"
+        );
+
+        // The reused connection still answers a real query.
+        let (_answer, sources, _confidence) = {
+            let conn = second.lock().unwrap();
+            query_open_pack(&conn, "What is ownership in Rust?", 5).unwrap()
+        };
+        assert!(
+            sources.iter().any(|s| s.title.contains("Ownership")),
+            "the reused connection must still return matching sources"
+        );
+    }
+
+    #[test]
+    fn conn_cache_keeps_distinct_connections_per_pack() {
+        // Different packs must get independent connections, not a shared handle.
+        let tmp = TempDir::new().unwrap();
+        let pack_a = create_test_pack(tmp.path(), "pack-a").join("pack.db");
+        let pack_b = create_test_pack(tmp.path(), "pack-b").join("pack.db");
+
+        let cache = ConnCache::new();
+        let a = cache.get_or_open("pack-a", || Ok(pack_a.clone())).unwrap();
+        let b = cache.get_or_open("pack-b", || Ok(pack_b.clone())).unwrap();
+
+        assert!(
+            !Arc::ptr_eq(&a, &b),
+            "two distinct packs must not share one connection handle"
+        );
+    }
+
+    #[test]
+    fn conn_cache_propagates_resolve_error_without_caching() {
+        // A failed path resolution must surface the error and leave nothing
+        // cached, so a later successful resolution can still open the pack.
+        let tmp = TempDir::new().unwrap();
+        let pack_dir = create_test_pack(tmp.path(), "later-pack");
+        let db_path = pack_dir.join("pack.db");
+
+        let cache = ConnCache::new();
+        let err = cache
+            .get_or_open("later-pack", || {
+                Err("pack 'later-pack' not found".to_string())
+            })
+            .unwrap_err();
+        assert!(err.contains("not found"));
+
+        // A subsequent successful resolve still opens and caches the pack.
+        let ok = cache.get_or_open("later-pack", || Ok(db_path.clone()));
+        assert!(ok.is_ok(), "a failed resolve must not poison the cache");
+    }
+
+    #[test]
+    fn native_knowledge_transport_repeated_query_reuses_connection() {
+        // End-to-end KGP-T3: two knowledge.query calls to one pack through the
+        // RPC transport both succeed against the reused cached connection.
+        let tmp = TempDir::new().unwrap();
+        create_test_pack(tmp.path(), "test-pack");
+
+        let mut transport = NativeRpcTransport::new("simard-knowledge");
+        register_knowledge_handlers(&mut transport, tmp.path().to_path_buf());
+
+        let make_request = || crate::rpc::RpcRequest {
+            id: crate::rpc::new_request_id(),
+            method: "knowledge.query".to_string(),
+            params: serde_json::json!({
+                "pack_name": "test-pack",
+                "question": "What is ownership?",
+                "limit": 5,
+            }),
+        };
+
+        for _ in 0..2 {
+            let response = crate::rpc::RpcTransport::call(&transport, make_request()).unwrap();
+            let result = response.result.expect("each repeated query must succeed");
+            assert!(!result["answer"].as_str().unwrap().is_empty());
+            assert!(result["confidence"].as_f64().unwrap() > 0.0);
+        }
     }
 }
