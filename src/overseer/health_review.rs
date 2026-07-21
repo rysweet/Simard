@@ -4,10 +4,13 @@
 //! STEPS + PROMPTS — not a Rust "failure counter." This module is the only new
 //! Rust the feature needs, and it is deliberately thin:
 //!
-//! 1. [`HealthReviewer`] is the rail seam: one call returns the typed
-//!    [`Intervention`]s the recipe reasoned to (a `LaunchRecipe` for a systemic
-//!    fix, an `EscalateBlockedGoal` for a per-goal escalation), which the acting
-//!    Overseer gates and dispatches through its EXISTING capabilities.
+//! 1. [`HealthReviewer`] is the rail seam: one call returns a
+//!    [`HealthReviewOutcome`] — the typed [`Intervention`]s the recipe reasoned
+//!    to (a `LaunchRecipe` for a systemic fix, an `EscalateBlockedGoal` for a
+//!    per-goal escalation), plus the pass's one-line verdict `summary` — which
+//!    the acting Overseer gates + dispatches through its EXISTING capabilities
+//!    and surfaces on `ObservedState.health_review_status` (so a HEALTHY pass is
+//!    an observable "reviewed, nothing to do", never a silent no-op).
 //! 2. [`parse_health_review_output`] parses the recipe's plain-text DECISION
 //!    markers into those interventions — a mechanical rail, not judgment.
 //! 3. [`RecipeHealthReviewer`] invokes the `overseer-health-review` recipe
@@ -93,18 +96,44 @@ pub trait HealthReviewRecipeRunner: Send + Sync {
     fn run(&self, request: &HealthReviewRequest) -> SimardResult<String>;
 }
 
+/// The observable OUTCOME of one health-review pass: the typed remediation
+/// [`Intervention`]s to gate + dispatch, PLUS the agent's one-line
+/// `HEALTH_REVIEW_COMPLETE=<summary>` verdict.
+///
+/// `summary` is `Some(_)` exactly when a pass produced an HONEST verdict — a
+/// clean base parse OR a rung the bounded escalation ladder recovered — so a
+/// HEALTHY pass (zero interventions) still leaves an OBSERVABLE trace instead of
+/// degrading to a silent no-op. It is `None` when the pass DEGRADED end to end
+/// (a base infra fault, a truncated report the ladder could not recover, a
+/// disabled ladder, or a rung fault), so the rail surfaces the weak pass LOUD
+/// and never fabricates a verdict. Mirrors how `merge_reasoning_status` surfaces
+/// WHY reasoning ran rather than leaving a silent gap (#4097).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HealthReviewOutcome {
+    /// Zero or more typed interventions to gate + dispatch. An empty vec with a
+    /// `Some` summary is a HEALTHY pass (nothing to do) — never fabricated work.
+    pub interventions: Vec<Intervention>,
+    /// The recipe's `HEALTH_REVIEW_COMPLETE=<summary>` verdict when the pass
+    /// parsed; `None` on a degraded pass (no honest verdict to surface).
+    pub summary: Option<String>,
+}
+
 /// The rail: run one health-review pass and return the typed remediation
-/// [`Intervention`]s the recipe reasoned to. Holds NO health state and reads no
-/// journal — the observation and the judgment both live inside the recipe.
+/// [`Intervention`]s the recipe reasoned to, plus its verdict summary. Holds NO
+/// health state and reads no journal — the observation and the judgment both
+/// live inside the recipe.
 pub trait HealthReviewer {
     /// Run one health-review pass.
     ///
-    /// - `Ok(vec)` — zero or more typed interventions (`LaunchRecipe` /
-    ///   `EscalateBlockedGoal`) to gate + dispatch. An empty vec is `HEALTHY`
-    ///   (nothing to do this tick) — never fabricate work.
+    /// - `Ok(outcome)` — the parsed interventions (`LaunchRecipe` /
+    ///   `EscalateBlockedGoal`) to gate + dispatch, plus the verdict `summary`.
+    ///   An empty `interventions` with `summary = Some(_)` is `HEALTHY` (nothing
+    ///   to do this tick) — never fabricated work; a `summary = None` marks a
+    ///   pass that degraded to no remediation.
     /// - `Err(_)` — reserved for a caller-visible fault; the default rail is
-    ///   fail-closed and prefers `Ok(vec![])` over fabricating a remediation.
-    fn review(&self) -> SimardResult<Vec<Intervention>>;
+    ///   fail-closed and prefers a degraded `Ok(_)` over fabricating a
+    ///   remediation.
+    fn review(&self) -> SimardResult<HealthReviewOutcome>;
 }
 
 // ─────────────────────────── decision markers ──────────────────────────────
@@ -352,14 +381,15 @@ impl<R: HealthReviewRecipeRunner> RecipeHealthReviewer<R> {
     /// pass missing the required terminal marker). Reuses the shared
     /// [`build_phase_escalation_note`] / [`EscalationConfig`] / [`LadderRung`]
     /// primitives — a schema-repair re-prompt, then a higher-effort tier — and
-    /// returns the recovered interventions, or an empty vec (fail-closed) when
+    /// returns the recovered [`HealthReviewOutcome`] (interventions + verdict
+    /// summary), or a DEGRADED outcome (`summary = None`, no interventions) when
     /// the ladder is disabled, a rung's own invocation faults, or every rung is
-    /// exhausted. Never fabricates work.
+    /// exhausted. Never fabricates work and never fabricates a verdict.
     fn escalate_after_parse_miss(
         &self,
         base_output: &str,
         base_reason: &str,
-    ) -> SimardResult<Vec<Intervention>> {
+    ) -> SimardResult<HealthReviewOutcome> {
         let max = self.escalation.max_escalations;
         if max == 0 {
             tracing::warn!(
@@ -367,7 +397,7 @@ impl<R: HealthReviewRecipeRunner> RecipeHealthReviewer<R> {
                 reason = %base_reason,
                 "health-review: degraded base pass and escalation ladder disabled; taking no remediation (fabricating nothing)"
             );
-            return Ok(Vec::new());
+            return Ok(HealthReviewOutcome::default());
         }
 
         // Feed each rung the latest malformed output so the schema-repair note
@@ -397,7 +427,7 @@ impl<R: HealthReviewRecipeRunner> RecipeHealthReviewer<R> {
                         error = %e,
                         "health-review: escalation rung failed to invoke; stopping ladder, taking no remediation"
                     );
-                    return Ok(Vec::new());
+                    return Ok(HealthReviewOutcome::default());
                 }
                 Ok(output) => match parse_health_review_output(&output) {
                     Ok(report) => {
@@ -409,7 +439,10 @@ impl<R: HealthReviewRecipeRunner> RecipeHealthReviewer<R> {
                             summary = %report.summary,
                             "health-review: RECOVERED a degraded pass via the escalation ladder"
                         );
-                        return Ok(report.interventions);
+                        return Ok(HealthReviewOutcome {
+                            interventions: report.interventions,
+                            summary: Some(report.summary),
+                        });
                     }
                     // Still degraded — carry the latest output into the next rung.
                     Err(_) => prior = output,
@@ -423,7 +456,7 @@ impl<R: HealthReviewRecipeRunner> RecipeHealthReviewer<R> {
             reason = %base_reason,
             "health-review: escalation ladder exhausted with no parseable pass; taking no remediation (fabricating nothing)"
         );
-        Ok(Vec::new())
+        Ok(HealthReviewOutcome::default())
     }
 }
 
@@ -445,7 +478,7 @@ fn build_health_review_escalation_note(rung: LadderRung, prior_output: &str) -> 
 }
 
 impl<R: HealthReviewRecipeRunner> HealthReviewer for RecipeHealthReviewer<R> {
-    fn review(&self) -> SimardResult<Vec<Intervention>> {
+    fn review(&self) -> SimardResult<HealthReviewOutcome> {
         // Base pass — empty escalation note (byte-identical to pre-ladder).
         let output = match self.run_pass("") {
             Ok(output) => output,
@@ -453,13 +486,15 @@ impl<R: HealthReviewRecipeRunner> HealthReviewer for RecipeHealthReviewer<R> {
                 // Fail-closed: a base recipe/infra fault degrades to "no
                 // remediation", logged. It never aborts the tick, never
                 // fabricates work, and does NOT enter the ladder — the base pass
-                // must succeed before it can be judged merely degraded.
+                // must succeed before it can be judged merely degraded. The
+                // outcome carries NO verdict summary so the rail surfaces the
+                // degraded pass LOUD instead of a silent no-op.
                 tracing::warn!(
                     target: "overseer::health_review",
                     error = %e,
                     "health-review: recipe run failed; degrading to no remediation (fabricating nothing)"
                 );
-                return Ok(Vec::new());
+                return Ok(HealthReviewOutcome::default());
             }
         };
 
@@ -471,7 +506,10 @@ impl<R: HealthReviewRecipeRunner> HealthReviewer for RecipeHealthReviewer<R> {
                     summary = %report.summary,
                     "health-review pass parsed"
                 );
-                Ok(report.interventions)
+                Ok(HealthReviewOutcome {
+                    interventions: report.interventions,
+                    summary: Some(report.summary),
+                })
             }
             Err(reason) => {
                 // A degraded base pass (missing terminal marker): spend extra
@@ -848,18 +886,33 @@ mod tests {
             "\nHEALTH_REVIEW_COMPLETE=1 launch\n"
         );
         let r = reviewer(FakeRunner::ok(out));
-        let ivs = r.review().expect("review ok");
-        assert_eq!(ivs.len(), 1);
-        assert!(matches!(ivs[0], Intervention::LaunchRecipe { .. }));
+        let out = r.review().expect("review ok");
+        assert_eq!(out.interventions.len(), 1);
+        assert!(matches!(
+            out.interventions[0],
+            Intervention::LaunchRecipe { .. }
+        ));
+        assert_eq!(
+            out.summary.as_deref(),
+            Some("1 launch"),
+            "a parsed pass surfaces the HEALTH_REVIEW_COMPLETE verdict"
+        );
     }
 
     #[test]
     fn review_degrades_to_empty_on_runner_error() {
         let r = reviewer(FakeRunner::err("boom"));
-        let ivs = r
+        let out = r
             .review()
             .expect("review must not surface the fault as Err");
-        assert!(ivs.is_empty(), "a runner fault fabricates no remediation");
+        assert!(
+            out.interventions.is_empty(),
+            "a runner fault fabricates no remediation"
+        );
+        assert!(
+            out.summary.is_none(),
+            "a base runner fault surfaces NO verdict (degraded, not a silent healthy)"
+        );
     }
 
     #[test]
@@ -870,10 +923,14 @@ mod tests {
         let r = reviewer(FakeRunner::ok(
             "LAUNCH_RECIPE={\"task_description\":\"x\"}\n",
         ));
-        let ivs = r.review().expect("review ok");
+        let out = r.review().expect("review ok");
         assert!(
-            ivs.is_empty(),
+            out.interventions.is_empty(),
             "a degraded pass (no terminal marker) takes no remediation"
+        );
+        assert!(
+            out.summary.is_none(),
+            "an exhausted degraded pass surfaces NO verdict"
         );
         // Base pass + 2 escalation rungs (the pinned max_escalations).
         assert_eq!(
@@ -953,9 +1010,21 @@ mod tests {
             ]),
             2,
         );
-        let ivs = r.review().expect("review ok");
-        assert_eq!(ivs.len(), 1, "the recovered rung's interventions are used");
-        assert!(matches!(ivs[0], Intervention::LaunchRecipe { .. }));
+        let out = r.review().expect("review ok");
+        assert_eq!(
+            out.interventions.len(),
+            1,
+            "the recovered rung's interventions are used"
+        );
+        assert!(matches!(
+            out.interventions[0],
+            Intervention::LaunchRecipe { .. }
+        ));
+        assert_eq!(
+            out.summary.as_deref(),
+            Some("1 launch"),
+            "a ladder-recovered rung surfaces its verdict summary"
+        );
         assert_eq!(r.runner().call_count(), 2, "base + one recovery rung");
         // The base pass carries no note; the repair rung carries a schema-repair
         // note that names the required terminal-marker contract.
@@ -978,8 +1047,12 @@ mod tests {
             ]),
             2,
         );
-        let ivs = r.review().expect("review ok");
-        assert_eq!(ivs.len(), 1);
+        let out = r.review().expect("review ok");
+        assert_eq!(out.interventions.len(), 1);
+        assert!(
+            out.summary.is_some(),
+            "the high-effort rung recovered a verdict"
+        );
         assert_eq!(r.runner().call_count(), 3, "base + two rungs");
         let high = r.runner().note_at(2);
         assert!(
@@ -999,8 +1072,15 @@ mod tests {
             ]),
             2,
         );
-        let ivs = r.review().expect("review ok");
-        assert!(ivs.is_empty(), "an exhausted ladder fabricates nothing");
+        let out = r.review().expect("review ok");
+        assert!(
+            out.interventions.is_empty(),
+            "an exhausted ladder fabricates nothing"
+        );
+        assert!(
+            out.summary.is_none(),
+            "an exhausted ladder surfaces no verdict"
+        );
         assert_eq!(r.runner().call_count(), 3, "base + two exhausted rungs");
     }
 
@@ -1009,8 +1089,12 @@ mod tests {
         // max_escalations == 0 disables the ladder: a degraded base pass degrades
         // immediately (byte-identical to the pre-ladder single-pass behaviour).
         let r = seq_reviewer(SeqRunner::new(vec![Scripted::Ok(DEGRADED.to_string())]), 0);
-        let ivs = r.review().expect("review ok");
-        assert!(ivs.is_empty());
+        let out = r.review().expect("review ok");
+        assert!(out.interventions.is_empty());
+        assert!(
+            out.summary.is_none(),
+            "a disabled ladder surfaces no verdict"
+        );
         assert_eq!(
             r.runner().call_count(),
             1,
@@ -1029,8 +1113,12 @@ mod tests {
             ]),
             2,
         );
-        let ivs = r.review().expect("review ok");
-        assert!(ivs.is_empty(), "a rung fault fabricates no remediation");
+        let out = r.review().expect("review ok");
+        assert!(
+            out.interventions.is_empty(),
+            "a rung fault fabricates no remediation"
+        );
+        assert!(out.summary.is_none(), "a rung fault surfaces no verdict");
         assert_eq!(
             r.runner().call_count(),
             2,
@@ -1047,8 +1135,13 @@ mod tests {
             )]),
             2,
         );
-        let ivs = r.review().expect("review ok");
-        assert!(ivs.is_empty());
+        let out = r.review().expect("review ok");
+        assert!(out.interventions.is_empty());
+        assert_eq!(
+            out.summary.as_deref(),
+            Some("healthy"),
+            "a clean HEALTHY base pass surfaces its verdict summary"
+        );
         assert_eq!(
             r.runner().call_count(),
             1,
@@ -1064,10 +1157,14 @@ mod tests {
             SeqRunner::new(vec![Scripted::Err("base spawn failed".to_string())]),
             2,
         );
-        let ivs = r
+        let out = r
             .review()
             .expect("review must not surface the fault as Err");
-        assert!(ivs.is_empty());
+        assert!(out.interventions.is_empty());
+        assert!(
+            out.summary.is_none(),
+            "a base runner fault surfaces no verdict (degraded, never a silent healthy)"
+        );
         assert_eq!(
             r.runner().call_count(),
             1,

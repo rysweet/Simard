@@ -176,6 +176,11 @@ pub fn observed_from_snapshot(snap: &StatusSnapshot) -> ObservedState {
         reasoned_prs: Vec::new(),
         triaged_issues: Vec::new(),
         merge_reasoning_status: crate::overseer::capabilities::MergeReasoningStatus::Unknown,
+        // The agentic health-review verdict ([standing]) is set by the acting
+        // Overseer's `health_review` pass, not from the read-only status
+        // snapshot; left NotRun here so this projection stays additive and
+        // side-effect free.
+        health_review_status: crate::overseer::capabilities::HealthReviewStatus::NotRun,
     }
 }
 
