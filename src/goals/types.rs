@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt::{self, Display, Formatter};
 
 use serde::{Deserialize, Serialize};
@@ -184,12 +185,22 @@ pub const GOAL_SLUG_MAX_LEN: usize = 56;
 /// decision parser: legitimate goal prose that merely mentions `NODE_OPTIONS` is
 /// preserved because the recognizer requires the full launcher signature, not a
 /// bare substring.
-fn strip_launcher_preamble(title: &str) -> String {
-    title
-        .lines()
-        .filter(|line| !crate::recipe_output::extract::is_copilot_launcher_line(line))
-        .collect::<Vec<_>>()
-        .join("\n")
+///
+/// The common case — a goal title with no launcher preamble — is borrowed back
+/// verbatim with zero allocation; a fresh `String` is built only when at least
+/// one launcher line must actually be dropped.
+fn strip_launcher_preamble(title: &str) -> Cow<'_, str> {
+    let is_launcher = |line: &str| crate::recipe_output::extract::is_copilot_launcher_line(line);
+    if !title.lines().any(is_launcher) {
+        return Cow::Borrowed(title);
+    }
+    Cow::Owned(
+        title
+            .lines()
+            .filter(|line| !is_launcher(line))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 /// Slugify `title` for use as a goal ID. Output is always
