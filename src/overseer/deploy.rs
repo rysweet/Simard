@@ -229,14 +229,45 @@ impl Deployer for GuardedDeployer {
     fn deploy(&self, commit: &str) -> Result<DeployReport, OverseerError> {
         let running = self.running_commit.clone();
 
-        // Build + verify the canary first (its result feeds the gate).
-        let canary = self.canary.run_canary(commit)?;
+        // Build + verify the canary first (its result feeds the gate). A HARD
+        // error here (as opposed to a red canary, which is `Ok(passed: false)`)
+        // is still a deploy ATTEMPT that leaves merged work undeployed, so it
+        // must fire the operator notice before surfacing — otherwise the
+        // "notify on every attempt" invariant (#2590) would silently break.
+        let canary = match self.canary.run_canary(commit) {
+            Ok(canary) => canary,
+            Err(e) => {
+                let notification = OperatorNotification::deploy_refused(
+                    commit,
+                    &running,
+                    &self.repo,
+                    &format!("canary run failed: {e}"),
+                );
+                let _ = self.notifier.notify(&notification);
+                return Err(e);
+            }
+        };
 
         // A rollback check only matters when the target differs from running.
+        // A hard error from the ancestry oracle (e.g. the target commit is not
+        // present in the oracle's repo → `git merge-base` exit 128) is likewise
+        // a notify-worthy failed attempt, not a silent fail-closed.
         let is_ancestor = if commits_equivalent(&running, commit) {
             false
         } else {
-            self.ancestry.is_ancestor(commit, &running)?
+            match self.ancestry.is_ancestor(commit, &running) {
+                Ok(is_ancestor) => is_ancestor,
+                Err(e) => {
+                    let notification = OperatorNotification::deploy_refused(
+                        commit,
+                        &running,
+                        &self.repo,
+                        &format!("ancestry check failed: {e}"),
+                    );
+                    let _ = self.notifier.notify(&notification);
+                    return Err(e);
+                }
+            }
         };
 
         let ctx = DeployContext {
@@ -391,20 +422,46 @@ impl BinaryDeployer for OrchestratedBinaryDeployer {
 }
 
 /// Assemble the PRODUCTION guarded deployer (#2590): the real canary + the
-/// orchestrator swap + a git ancestry oracle rooted at the daemon's repo + the
-/// mandatory dual-channel operator notifier. `running_commit` is the binary's
-/// embedded build hash; `recent_restart_churn` is read LIVE at assembly time (the
-/// daemon rebuilds the Overseer every tick) so the gate's crash-loop refusal sees
-/// current churn. `repo` labels the operator notification.
+/// orchestrator swap + a git ancestry oracle rooted at the SAME self-deploy
+/// checkout the drift observer resolves and fetches + the mandatory dual-channel
+/// operator notifier. `running_commit` is the binary's embedded build hash;
+/// `recent_restart_churn` is read LIVE at assembly time (the daemon rebuilds the
+/// Overseer every tick) so the gate's crash-loop refusal sees current churn.
+/// `repo` labels the operator notification.
+///
+/// **Ancestry repo (issue #2590):** the deploy TARGET commit is resolved and
+/// `git fetch`-ed by [`GitDeployDriftObserver`](crate::overseer::deploy_trigger)
+/// in the canonical self-deploy checkout (`SIMARD_SELF_DEPLOY_REPO` → persistent
+/// `~/.simard` checkout), NOT the daemon's launch `repo_dir`. Rooting the oracle
+/// at that same repo (and best-effort fetching it) guarantees the freshly-merged
+/// target commit object is present for the rollback (`is_ancestor`) check; a
+/// stale launch repo would exit 128 and (now) fire a `deploy-refused` notice
+/// rather than silently fail-closing. Falls back to `repo_dir` only when no
+/// self-deploy checkout exists yet (e.g. before the first deploy).
 pub fn production_guarded_deployer(
     repo_dir: std::path::PathBuf,
     recent_restart_churn: u64,
     repo: String,
 ) -> GuardedDeployer {
+    let ancestry_repo = {
+        let preparer = crate::self_deploy::GitSourcePreparer::new();
+        match preparer.resolve_existing_repo() {
+            Some(resolved) => {
+                // Best-effort refresh so the merged target commit is present for
+                // the ancestry check; a failed fetch (offline) degrades to the
+                // local objects rather than aborting.
+                let _ = preparer.fetch_origin(&resolved);
+                resolved
+            }
+            None => repo_dir,
+        }
+    };
     GuardedDeployer::new(
         Box::new(ProdCanaryRunner),
         Box::new(OrchestratedBinaryDeployer),
-        Box::new(GitAncestryOracle { repo_dir }),
+        Box::new(GitAncestryOracle {
+            repo_dir: ancestry_repo,
+        }),
         DualChannelNotifier::from_env(),
         GuardedDeployer::running_commit_marker().to_string(),
         recent_restart_churn,
@@ -624,5 +681,90 @@ mod tests {
     fn deployed_commit_reports_running() {
         let (gd, _, _) = deployer(true, false, 0);
         assert_eq!(gd.deployed_commit().unwrap(), "aaaaaaaaaaaa");
+    }
+
+    // ── hard-error paths notify (issue #2590 Finding 1b) ──────────────────────
+    //
+    // A red canary is `Ok(passed: false)` (tested above via `deployer(false,..)`).
+    // These cover the distinct HARD-error paths — `run_canary`/`is_ancestor`
+    // returning `Err` (e.g. the ancestry oracle's repo lacks the freshly-merged
+    // target commit → `git merge-base` exit 128). Both must fire a
+    // `deploy-refused` operator notice before surfacing the error, so a genuine
+    // deploy attempt can never fail silently.
+
+    struct ErrCanary;
+    impl CanaryRunner for ErrCanary {
+        fn run_canary(&self, _t: &str) -> Result<CanaryResult, OverseerError> {
+            Err(OverseerError::Capability {
+                what: "canary",
+                detail: "build spawn failed".to_string(),
+            })
+        }
+    }
+
+    struct ErrAncestry;
+    impl AncestryOracle for ErrAncestry {
+        fn is_ancestor(&self, _a: &str, _d: &str) -> Result<bool, OverseerError> {
+            Err(OverseerError::Capability {
+                what: "git.merge-base",
+                detail: "unexpected exit Some(128)".to_string(),
+            })
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn deployer_with(
+        canary: Box<dyn CanaryRunner>,
+        ancestry: Box<dyn AncestryOracle>,
+    ) -> (
+        GuardedDeployer,
+        Arc<Mutex<usize>>,
+        Arc<Mutex<Vec<OperatorNotification>>>,
+    ) {
+        let deployed = Arc::new(Mutex::new(0));
+        let seen = Arc::new(Mutex::new(vec![]));
+        let notifier = DualChannelNotifier::new(vec![Box::new(Capture(seen.clone()))]);
+        let gd = GuardedDeployer::new(
+            canary,
+            Box::new(FakeDeployerShared(deployed.clone())),
+            ancestry,
+            notifier,
+            "aaaaaaaaaaaa".to_string(),
+            0,
+            "rysweet/Simard".to_string(),
+        );
+        (gd, deployed, seen)
+    }
+
+    #[test]
+    fn deploy_notifies_when_canary_run_errors_hard() {
+        let (gd, deployed, seen) =
+            deployer_with(Box::new(ErrCanary), Box::new(FakeAncestry(false)));
+        let err = gd.deploy("bbbbbbbbbbbb").unwrap_err();
+        assert!(format!("{err}").contains("canary"));
+        assert_eq!(*deployed.lock().unwrap(), 0, "no binary swap on hard error");
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "operator notified on a hard canary error"
+        );
+        assert_eq!(seen.lock().unwrap()[0].kind, "deploy-refused");
+    }
+
+    #[test]
+    fn deploy_notifies_when_ancestry_oracle_errors_hard() {
+        // Mirrors the cross-repo mismatch: the target commit is absent in the
+        // oracle's repo so `git merge-base --is-ancestor` errors. The attempt
+        // must NOT fail-close silently — the operator is notified.
+        let (gd, deployed, seen) = deployer_with(Box::new(FakeCanary(true)), Box::new(ErrAncestry));
+        let err = gd.deploy("bbbbbbbbbbbb").unwrap_err();
+        assert!(format!("{err}").contains("merge-base"));
+        assert_eq!(*deployed.lock().unwrap(), 0, "no binary swap on hard error");
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "operator notified on a hard ancestry error"
+        );
+        assert_eq!(seen.lock().unwrap()[0].kind, "deploy-refused");
     }
 }

@@ -188,6 +188,13 @@ impl DeployDriftObserver for GitDeployDriftObserver {
         // Resolve the canonical source checkout cwd-independently. When none
         // exists yet (e.g. before the first deploy) fall back to the cwd — the
         // detector is fail-safe either way.
+        //
+        // `origin_strict` (issue #2590 SR-1): on this autonomous path the source
+        // NEVER falls back to local `HEAD`. An unresolved `origin/<default>` is
+        // treated as an error → `needs_deploy: false` → no drift → no signal,
+        // so the daemon can never autonomously deploy an unverified local `HEAD`
+        // that skipped branch protection / signed-merge (the sole documented
+        // root of trust). The operator/CLI path keeps the `HEAD` fallback.
         let preparer = GitSourcePreparer::new();
         let source = match preparer.resolve_existing_repo() {
             Some(repo) => {
@@ -195,9 +202,9 @@ impl DeployDriftObserver for GitDeployDriftObserver {
                 // fetch (e.g. offline) degrades to the local tracking refs
                 // rather than aborting — the detector still fails safe.
                 let _ = preparer.fetch_origin(&repo);
-                GitDeploySource::at(repo)
+                GitDeploySource::at(repo).origin_strict()
             }
-            None => GitDeploySource::new(),
+            None => GitDeploySource::new().origin_strict(),
         };
         // Fail-safe: `detect` maps any source error to `needs_deploy: false`.
         let drift = ReconcileDetector::new(source.clone()).detect();
@@ -210,11 +217,30 @@ impl DeployDriftObserver for GitDeployDriftObserver {
         if target.is_empty() {
             return None;
         }
+        // Defense-in-depth (issue #2590 SR-2): the documented trust model
+        // validates `target_commit` as a full 40/64-char lowercase hex SHA
+        // before it is ever handed to the build/checkout. Enforce it here, at
+        // the boundary, so a non-SHA target can never reach `run_canary` or the
+        // orchestrator checkout — an unexpected shape yields no signal.
+        if !is_full_hex_sha(target) {
+            return None;
+        }
         Some(DeployDriftObservation {
             target_commit: target.to_string(),
             behind_commits: drift.behind_commits,
         })
     }
+}
+
+/// Is `s` a full git object name — a 40-char (SHA-1) or 64-char (SHA-256)
+/// lowercase hex SHA? The documented trust-model shape for an autonomous deploy
+/// target (issue #2590 SR-2); stricter than `is_hex_commitish` (4–64, any case)
+/// so only a fully-resolved commit id — never an abbreviation or ref — is
+/// accepted on the unattended path.
+fn is_full_hex_sha(s: &str) -> bool {
+    matches!(s.len(), 40 | 64)
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 #[cfg(test)]
@@ -246,6 +272,25 @@ mod tests {
         // deploy with an empty target).
         let drift = DeployDrift::from_parts(2, Vec::new());
         assert!(deploy_drift_signal(&drift, "   ").is_none());
+    }
+
+    #[test]
+    fn full_hex_sha_accepts_40_and_64_lowercase_only() {
+        // SR-2 (#2590): only a full 40 (SHA-1) or 64 (SHA-256) lowercase hex id
+        // is accepted as an autonomous deploy target.
+        assert!(is_full_hex_sha(&"a".repeat(40)));
+        assert!(is_full_hex_sha(&"0".repeat(64)));
+        assert!(is_full_hex_sha("da39a3ee5e6b4b0d3255bfef95601890afd80709"));
+        // Wrong length (abbreviations / short hashes the gate must reject).
+        assert!(!is_full_hex_sha("deadbeef"));
+        assert!(!is_full_hex_sha(&"a".repeat(39)));
+        assert!(!is_full_hex_sha(&"a".repeat(41)));
+        assert!(!is_full_hex_sha(&"a".repeat(63)));
+        // Non-hex / uppercase / refs.
+        assert!(!is_full_hex_sha(&"A".repeat(40)));
+        assert!(!is_full_hex_sha("HEAD"));
+        assert!(!is_full_hex_sha(&format!("{}z", "a".repeat(39))));
+        assert!(!is_full_hex_sha(""));
     }
 
     #[test]
