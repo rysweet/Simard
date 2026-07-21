@@ -253,6 +253,13 @@ pub struct Overseer {
     /// worktree cleanup. `None` until wired by `build_overseer`; when absent the
     /// tick simply skips the sweep.
     claim_reaper: Option<ClaimReaperSeams>,
+    /// Self-improvement interventions the stale-engineer reaper's investigations
+    /// surfaced this tick (issue #4400), staged for dispatch through the SAME
+    /// gated Act path health-review uses. Populated by `reap_stale_engineer_claims`
+    /// at the top of the tick and drained into the plan after `health_review`, so
+    /// a stale engineer's investigation feeds self-improvement rather than a
+    /// silent reclaim. Empty between ticks.
+    pending_reaper_interventions: Vec<Intervention>,
     /// The live agentic ecosystem-observe rail (issue #2419): the thin
     /// [`ecosystem_observe::EcosystemObserver`] seam that invokes the
     /// `ecosystem-observe` recipe on the Overseer cadence and forwards its
@@ -348,6 +355,7 @@ struct ClaimReaperSeams {
     ledger: Box<dyn claim_reaper::ClaimLedger>,
     probe: Box<dyn claim_reaper::ClaimLivenessProbe>,
     cleanup: Box<dyn claim_reaper::OrphanWorktreeCleanup>,
+    investigator: Box<dyn claim_reaper::StaleEngineerInvestigator>,
 }
 
 /// The result of one meta-OODA turn. Side-effect free: it reports what was
@@ -473,6 +481,7 @@ impl Overseer {
             claim_reap_enabled: false,
             claim_reap_stale_secs: config::DEFAULT_CLAIM_REAP_STALE_SECS,
             claim_reaper: None,
+            pending_reaper_interventions: Vec::new(),
             ecosystem_observer: None,
             ecosystem_roster: Vec::new(),
             ecosystem_every_n: 1,
@@ -656,6 +665,7 @@ impl Overseer {
         ledger: Box<dyn claim_reaper::ClaimLedger>,
         probe: Box<dyn claim_reaper::ClaimLivenessProbe>,
         cleanup: Box<dyn claim_reaper::OrphanWorktreeCleanup>,
+        investigator: Box<dyn claim_reaper::StaleEngineerInvestigator>,
         enabled: bool,
         stale_secs: u64,
     ) -> Self {
@@ -665,6 +675,7 @@ impl Overseer {
             ledger,
             probe,
             cleanup,
+            investigator,
         });
         self
     }
@@ -915,6 +926,11 @@ impl Overseer {
         // recipe and routes each parsed `LaunchRecipe` / `EscalateBlockedGoal`
         // through the SAME gate every other action uses.
         self.health_review(&observed, &mut launches, &mut plan);
+
+        // Drain the stale-engineer reaper's staged investigation interventions
+        // (issue #4400) into the SAME gated plan — a stale engineer's death feeds
+        // self-improvement (issue/escalation/fix) instead of a silent reclaim.
+        self.dispatch_reaper_interventions(&observed, &mut launches, &mut plan);
 
         Ok(CycleReport {
             observed,
@@ -1352,9 +1368,18 @@ impl Overseer {
             reaper.ledger.as_ref(),
             reaper.probe.as_ref(),
             reaper.cleanup.as_ref(),
+            reaper.investigator.as_ref(),
             self.claim_reap_enabled,
             self.claim_reap_stale_secs,
         );
+        // Stage the investigations' self-improvement interventions (issue #4400)
+        // for dispatch through the SAME gated Act path health-review uses; they
+        // are drained into the plan after `health_review` this tick. A stale
+        // engineer's death becomes a signal, never a silent reclaim.
+        if !summary.pending_interventions.is_empty() {
+            self.pending_reaper_interventions
+                .extend(summary.pending_interventions);
+        }
         if !summary.reclaimed.is_empty() || summary.errors > 0 {
             tracing::info!(
                 target: "simard::claim_reaper",
@@ -1363,6 +1388,28 @@ impl Overseer {
                 errors = summary.errors,
                 "[simard] claim-reaper sweep complete",
             );
+        }
+    }
+
+    /// Drain the stale-engineer reaper's staged investigation interventions (issue
+    /// #4400) into the gated plan — through the SAME gate + push loop
+    /// [`Overseer::health_review`] uses (no parallel plumbing). Each surfaced
+    /// `LaunchRecipe` / `FileIssue` / `EscalateBlockedGoal` is gated and pushed so
+    /// a stale engineer's investigation feeds self-improvement. A no-op when the
+    /// sweep surfaced nothing.
+    fn dispatch_reaper_interventions(
+        &mut self,
+        observed: &ObservedState,
+        launches: &mut usize,
+        plan: &mut Vec<PlannedIntervention>,
+    ) {
+        if self.pending_reaper_interventions.is_empty() {
+            return;
+        }
+        let interventions = std::mem::take(&mut self.pending_reaper_interventions);
+        for iv in interventions {
+            let planned = self.gate(&iv, observed, launches);
+            plan.push(planned);
         }
     }
 
