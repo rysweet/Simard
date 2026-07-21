@@ -424,9 +424,12 @@ fn run_ooda_daemon_with_session_uses_session_for_advance_goal() {
     let mut state = OodaState::new(board);
     let config = OodaConfig {
         max_concurrent_actions: 2,
+        // `scaler: None`: `OodaConfig::default()` reads `SIMARD_SCALING`, so on a
+        // host with `SIMARD_SCALING=auto` the default scaler would override the
+        // explicit cap and make this cycle env-dependent (issue #2732).
+        scaler: None,
         ..Default::default()
     };
-
     // Run a cycle — after implementation, advance_goal actions should use the session
     let report = run_ooda_cycle(&mut state, &mut bridges, &config).unwrap();
 

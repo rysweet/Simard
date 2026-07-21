@@ -159,8 +159,14 @@ fn decide_selects_actions_within_concurrent_limit() {
     let mut state = OodaState::new(board.clone());
     let obs = observe(&mut state, &bridges).unwrap();
     let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
+    // `scaler: None` (not `..Default::default()` alone): `OodaConfig::default()`
+    // reads `SIMARD_SCALING`, so on a host with `SIMARD_SCALING=auto` the default
+    // scaler would override the explicit `max_concurrent_actions=2` under test and
+    // `decide` would honor the env's scaler cap instead. Setting it explicitly
+    // keeps the test hermetic and deterministic (issue #2732).
     let config = OodaConfig {
         max_concurrent_actions: 2,
+        scaler: None,
         ..Default::default()
     };
     let actions = decide(&priorities, &config).unwrap();
