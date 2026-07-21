@@ -180,6 +180,22 @@ fn query_open_pack(
         return Ok((answer, sources, confidence));
     }
 
+    // Vector semantic-search path (KGP-Q9): when the pack ships precomputed
+    // embeddings, retrieve by embedding cosine — the *same retrieval method* as
+    // the original agent-kgpacks (`Section.embedding` vector index) — rather than
+    // the keyword LIKE scan. The question is embedded with the deterministic
+    // default embedder (`embed_text`), so a pack whose stored embeddings came
+    // from that same default embedder is fully searchable end-to-end.
+    // `query_vector` returns `None` — falling back to the keyword scan below, so
+    // keyword-only packs are unchanged — when the pack exposes no `embedding`
+    // column or no stored vector shares the query embedding's dimension.
+    let query_embedding = embed_text(question, DEFAULT_EMBED_DIM);
+    if let Some(sources) = query_vector(conn, &query_embedding, limit) {
+        let answer = build_answer(conn, &keywords, &sources);
+        let confidence = estimate_confidence(&answer, &sources);
+        return Ok((answer, sources, confidence));
+    }
+
     // Fallback: single-table article LIKE scan (pack databases may have varying
     // schemas).
     let sources = query_articles(conn, &keywords, limit);
@@ -760,6 +776,222 @@ fn build_graph_answer(
         );
     }
     parts.join(" ")
+}
+
+// ── Vector semantic search (KGP-Q9) ─────────────────────────────────────────
+
+/// Dimensionality of the default text embedder ([`embed_text`]). Chosen small
+/// enough to keep query-time embedding cheap while large enough to keep hash
+/// collisions between distinct tokens rare. Packs whose stored embeddings were
+/// produced by this same default embedder share this dimension, so the query and
+/// stored vectors are directly comparable by cosine.
+const DEFAULT_EMBED_DIM: usize = 256;
+
+/// FNV-1a hash of `bytes` — a small, dependency-free, **stable** hash so the same
+/// token always maps to the same embedding bucket across a pack's build and every
+/// later query (unlike `std`'s `DefaultHasher`, whose output is not guaranteed
+/// stable across releases/process runs).
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// Deterministic **default** text embedder: a normalized feature-hashing
+/// bag-of-tokens vector.
+///
+/// This is the port of the original agent-kgpacks *default* embedder — a
+/// deterministic hash embedder, **not** a trained model (see the upstream R1
+/// note: "default embeddings are deterministic-hash, not a real model"). It lets
+/// the read-only client retrieve by embedding cosine (the same *method* as the
+/// original) for packs whose stored embeddings came from the same default
+/// embedder; real-model semantic quality is a pack-build-time concern (`KGP-B*`,
+/// out of scope) and would supply its own query embedder.
+///
+/// Each token (whitespace-split, lower-cased, stripped of surrounding
+/// non-alphanumerics, length > 2 to match the keyword filter) is hashed to a
+/// bucket in `[0, dim)`; a second hash bit picks the sign (signed feature
+/// hashing, which cancels rather than compounds the bias from colliding tokens).
+/// The vector is then L2-normalized so cosine similarity reduces to a dot
+/// product and answers of different token counts stay comparable. An empty /
+/// all-short question yields an all-zero vector (norm 0), which [`query_vector`]
+/// treats as "no query signal" and declines.
+fn embed_text(text: &str, dim: usize) -> Vec<f64> {
+    let mut v = vec![0.0f64; dim.max(1)];
+    for raw in text.split_whitespace() {
+        let lowered = raw.to_ascii_lowercase();
+        let token = lowered.trim_matches(|c: char| !c.is_alphanumeric());
+        if token.len() <= 2 {
+            continue;
+        }
+        let h = fnv1a(token.as_bytes());
+        let idx = (h % v.len() as u64) as usize;
+        let sign = if (h >> 63) & 1 == 1 { -1.0 } else { 1.0 };
+        v[idx] += sign;
+    }
+    l2_normalize(&mut v);
+    v
+}
+
+/// L2-normalize `v` in place. A zero vector (norm 0) is left untouched so callers
+/// can detect "no signal" via an all-zero result rather than dividing by zero.
+fn l2_normalize(v: &mut [f64]) {
+    let norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+    if norm > 0.0 {
+        for x in v.iter_mut() {
+            *x /= norm;
+        }
+    }
+}
+
+/// Cosine similarity of two equal-length vectors. Returns `0.0` when the lengths
+/// differ (embeddings from different embedders/dimensions are not comparable) or
+/// when either vector has zero magnitude, so a dimension mismatch degrades to
+/// "not similar" instead of a wrong or panicking comparison.
+fn cosine_similarity(a: &[f64], b: &[f64]) -> f64 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let mut dot = 0.0;
+    let mut na = 0.0;
+    let mut nb = 0.0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    if na <= 0.0 || nb <= 0.0 {
+        return 0.0;
+    }
+    dot / (na.sqrt() * nb.sqrt())
+}
+
+/// Parse a stored embedding cell into a float vector.
+///
+/// Simard's SQLite pack port stores each article/section embedding as a JSON
+/// array of numbers in an `embedding` TEXT column (the portable stand-in for the
+/// original LadybugDB `DOUBLE[768]` typed vector). A malformed or non-array cell
+/// degrades to `None` so one bad row cannot break retrieval for the rest.
+fn parse_embedding(raw: &str) -> Option<Vec<f64>> {
+    let parsed: Vec<f64> = serde_json::from_str(raw).ok()?;
+    if parsed.is_empty() {
+        return None;
+    }
+    Some(parsed)
+}
+
+/// Vector **semantic** retrieval (KGP-Q9): rank the pack's stored article/section
+/// embeddings by cosine similarity to `query_embedding` and return the top
+/// `limit` as [`SourceInfo`], projecting the `url` column for source citations
+/// (KGP-Q1).
+///
+/// This is the port of the original agent-kgpacks retrieval *method* — an
+/// embedding-cosine vector query over `Section.embedding` — which the previous
+/// keyword LIKE scan only approximated. Because it ranks by vector proximity
+/// rather than literal token overlap, it surfaces an on-topic article that
+/// shares **no** keyword with the question (which a LIKE scan misses) whenever
+/// that article's embedding is near the query's.
+///
+/// Returns `None` — so [`query_open_pack`] falls back to the keyword scan,
+/// leaving keyword-only packs unchanged — when:
+/// * `query_embedding` carries no signal (empty / all-zero), or
+/// * no scanned table (`articles`, `sections`, `nodes`, `entities`) has an
+///   `embedding` column, or
+/// * no stored embedding parses **and** shares the query embedding's dimension
+///   (an embedder/dimension mismatch is not silently mis-ranked).
+fn query_vector(
+    conn: &Connection,
+    query_embedding: &[f64],
+    limit: usize,
+) -> Option<Vec<SourceInfo>> {
+    if query_embedding.iter().all(|x| *x == 0.0) {
+        return None;
+    }
+
+    for table in &["articles", "sections", "nodes", "entities"] {
+        if !table_exists(conn, table) || !table_has_column(conn, table, "embedding") {
+            continue;
+        }
+        // Title column: articles/sections/nodes use `title`; the entity port
+        // uses `name`. Skip a table that has neither so the row shape is known.
+        let title_col = if table_has_column(conn, table, "title") {
+            "title"
+        } else if table_has_column(conn, table, "name") {
+            "name"
+        } else {
+            continue;
+        };
+        let section_expr = if table_has_column(conn, table, "section") {
+            "COALESCE(section, '')"
+        } else {
+            "''"
+        };
+        let url_col = if table_has_column(conn, table, "url") {
+            "url"
+        } else {
+            "NULL AS url"
+        };
+        let sql = format!(
+            "SELECT {title_col} AS title, {section_expr} AS section, {url_col}, embedding \
+             FROM {table} WHERE embedding IS NOT NULL"
+        );
+
+        let Ok(mut stmt) = conn.prepare(&sql) else {
+            continue;
+        };
+        let Ok(rows) = stmt.query_map([], |row| {
+            let url = row
+                .get::<_, Option<String>>(2)
+                .unwrap_or(None)
+                .filter(|u| !u.is_empty());
+            let embedding = row.get::<_, Option<String>>(3).unwrap_or(None);
+            Ok((
+                SourceInfo {
+                    title: row.get::<_, String>(0).unwrap_or_default(),
+                    section: row.get::<_, String>(1).unwrap_or_default(),
+                    url,
+                },
+                embedding,
+            ))
+        }) else {
+            continue;
+        };
+
+        let mut scored: Vec<(f64, SourceInfo)> = Vec::new();
+        for (source, embedding) in rows.flatten() {
+            let Some(raw) = embedding else { continue };
+            let Some(vec) = parse_embedding(&raw) else {
+                continue;
+            };
+            let score = cosine_similarity(query_embedding, &vec);
+            // Only positive similarity counts as a match; an orthogonal or
+            // dimension-mismatched vector scores 0 and is dropped so retrieval
+            // never returns an unrelated article as if it were relevant.
+            if score > 0.0 {
+                scored.push((score, source));
+            }
+        }
+
+        if scored.is_empty() {
+            // This table had an `embedding` column but nothing comparable
+            // matched; try the next candidate table before giving up.
+            continue;
+        }
+
+        // Highest cosine first; a deterministic `title ASC` tie-break keeps the
+        // order reproducible for equal-similarity rows (mirrors query_articles).
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.title.cmp(&b.1.title))
+        });
+        return Some(scored.into_iter().take(limit).map(|(_, s)| s).collect());
+    }
+
+    None
 }
 
 /// Per-pack cache of a **live, reused** read-only SQLite connection (KGP-T3).
@@ -1886,5 +2118,302 @@ mod tests {
                 .any(|s| s["title"].as_str() == Some("Borrowing")),
             "the wire response must include the graph-linked entity; got: {sources:?}"
         );
+    }
+
+    // ── KGP-Q9: vector semantic search ──────────────────────────────────────
+
+    /// Build a pack whose `articles` table carries an `embedding` column holding
+    /// explicit JSON vectors — the SQLite-port stand-in for the original
+    /// agent-kgpacks `Section.embedding DOUBLE[768]`. The vectors are chosen so
+    /// the two concurrency articles cluster near `[1, 0, 0, 0]` and the cooking
+    /// article sits on an orthogonal axis. Crucially, the concurrency articles'
+    /// title/content share **no literal token** with a semantic query such as
+    /// "asynchronous coroutines scheduling", so only an embedding-cosine query —
+    /// not a keyword LIKE scan — can retrieve them.
+    fn create_test_vector_pack(packs_dir: &Path, name: &str) -> PathBuf {
+        let pack_dir = packs_dir.join(name);
+        fs::create_dir_all(&pack_dir).unwrap();
+
+        let manifest = serde_json::json!({
+            "name": name,
+            "description": format!("{name} knowledge pack"),
+            "graph_stats": { "articles": 3, "entities": 0, "relationships": 0, "size_mb": 0.1 }
+        });
+        fs::write(
+            pack_dir.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let db_path = pack_dir.join("pack.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE articles (title TEXT, section TEXT, content TEXT, url TEXT, embedding TEXT);
+             INSERT INTO articles VALUES ('Concurrency Primitives', 'Core', 'threads mutexes locks', 'https://example.com/concurrency', '[1.0, 0.0, 0.0, 0.0]');
+             INSERT INTO articles VALUES ('Parallel Execution', 'Core', 'spawning workers simultaneously', '', '[0.6, 0.8, 0.0, 0.0]');
+             INSERT INTO articles VALUES ('Baking Sourdough', 'Food', 'flour water starter', 'https://example.com/bread', '[0.0, 0.0, 1.0, 0.0]');",
+        )
+        .unwrap();
+
+        pack_dir
+    }
+
+    #[test]
+    fn embed_text_is_deterministic_and_l2_normalized() {
+        // The default embedder must be deterministic (a token maps to the same
+        // bucket every run, so a pack's build-time embedding and a later query
+        // embedding live in the same space) and L2-normalized (so cosine reduces
+        // to a dot product and answers of different length stay comparable).
+        let a = embed_text("Rust ownership and borrowing", DEFAULT_EMBED_DIM);
+        let b = embed_text("Rust ownership and borrowing", DEFAULT_EMBED_DIM);
+        assert_eq!(a, b, "embedding must be deterministic for identical input");
+
+        let norm = a.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-9,
+            "a non-empty embedding must be L2-normalized (norm={norm})"
+        );
+
+        // An empty / all-short question carries no signal → the zero vector.
+        let empty = embed_text("a an to", DEFAULT_EMBED_DIM);
+        assert!(
+            empty.iter().all(|x| *x == 0.0),
+            "a question with no >2-char tokens must embed to the zero vector"
+        );
+    }
+
+    #[test]
+    fn cosine_similarity_handles_identity_orthogonal_and_mismatch() {
+        assert!((cosine_similarity(&[1.0, 0.0], &[2.0, 0.0]) - 1.0).abs() < 1e-9);
+        assert_eq!(cosine_similarity(&[1.0, 0.0], &[0.0, 1.0]), 0.0);
+        // Dimension mismatch is not comparable → 0.0, never a panic or a spurious
+        // match against a differently-sized (e.g. real-model 768-dim) vector.
+        assert_eq!(cosine_similarity(&[1.0, 0.0, 0.0], &[1.0, 0.0]), 0.0);
+        assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
+    }
+
+    #[test]
+    fn parse_embedding_reads_json_array_and_rejects_garbage() {
+        assert_eq!(
+            parse_embedding("[0.5, -0.25, 1.0]"),
+            Some(vec![0.5, -0.25, 1.0])
+        );
+        assert_eq!(parse_embedding("not json"), None);
+        assert_eq!(parse_embedding("[]"), None);
+        assert_eq!(parse_embedding("{\"x\":1}"), None);
+    }
+
+    #[test]
+    fn query_vector_retrieves_semantically_near_article_without_keyword_overlap() {
+        // Parity criterion KGP-Q9 (the decisive one): an embedding-cosine query
+        // retrieves the on-topic article even though it shares NO literal keyword
+        // with the question — exactly what the original agent-kgpacks vector
+        // retrieval does and what the keyword LIKE scan cannot.
+        let tmp = TempDir::new().unwrap();
+        let pack_dir = create_test_vector_pack(tmp.path(), "vec-pack");
+        let conn = Connection::open_with_flags(
+            pack_dir.join("pack.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+
+        // A semantic query vector near the concurrency cluster ([1,0,0,0]).
+        let query_embedding = vec![1.0, 0.1, 0.0, 0.0];
+        let vector_sources =
+            query_vector(&conn, &query_embedding, 5).expect("a pack with embeddings must retrieve");
+        assert_eq!(
+            vector_sources[0].title,
+            "Concurrency Primitives",
+            "cosine must rank the nearest-embedding article first; got: {:?}",
+            vector_sources.iter().map(|s| &s.title).collect::<Vec<_>>()
+        );
+        assert!(
+            vector_sources
+                .iter()
+                .position(|s| s.title == "Concurrency Primitives")
+                .unwrap()
+                < vector_sources
+                    .iter()
+                    .position(|s| s.title == "Parallel Execution")
+                    .unwrap(),
+            "the nearer concurrency article must outrank the farther one"
+        );
+        assert!(
+            !vector_sources.iter().any(|s| s.title == "Baking Sourdough"),
+            "the orthogonal (cooking) article must not be retrieved for a concurrency query"
+        );
+
+        // The SAME question's literal keywords appear in NONE of the concurrency
+        // articles, so a keyword LIKE scan retrieves nothing — proving the vector
+        // path surfaces knowledge the keyword scan misses.
+        let keyword_sources =
+            query_articles(&conn, &["asynchronous", "coroutines", "scheduling"], 5);
+        assert!(
+            !keyword_sources
+                .iter()
+                .any(|s| s.title == "Concurrency Primitives" || s.title == "Parallel Execution"),
+            "a keyword scan must NOT retrieve the concurrency articles for these words; got: {:?}",
+            keyword_sources.iter().map(|s| &s.title).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn query_vector_ranks_by_cosine_descending() {
+        let tmp = TempDir::new().unwrap();
+        let pack_dir = create_test_vector_pack(tmp.path(), "vec-pack");
+        let conn = Connection::open(pack_dir.join("pack.db")).unwrap();
+
+        // Query on the concurrency axis: Concurrency [1,0,0,0] > Parallel
+        // [0.6,0.8,0,0] > Baking [0,0,1,0] (orthogonal, dropped).
+        let sources = query_vector(&conn, &[1.0, 0.0, 0.0, 0.0], 5).unwrap();
+        let titles: Vec<&str> = sources.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec!["Concurrency Primitives", "Parallel Execution"],
+            "cosine ranking must be descending and drop the orthogonal article"
+        );
+    }
+
+    #[test]
+    fn query_vector_respects_limit() {
+        let tmp = TempDir::new().unwrap();
+        let pack_dir = create_test_vector_pack(tmp.path(), "vec-pack");
+        let conn = Connection::open(pack_dir.join("pack.db")).unwrap();
+
+        let sources = query_vector(&conn, &[1.0, 0.5, 0.0, 0.0], 1).unwrap();
+        assert_eq!(sources.len(), 1, "the limit must cap the returned sources");
+        assert_eq!(sources[0].title, "Concurrency Primitives");
+    }
+
+    #[test]
+    fn query_vector_projects_url_citation_and_empty_url_is_no_citation() {
+        // KGP-Q1 within the vector path: the nearest article's `url` is surfaced;
+        // an empty url degrades to no citation (None), never Some("").
+        let tmp = TempDir::new().unwrap();
+        let pack_dir = create_test_vector_pack(tmp.path(), "vec-pack");
+        let conn = Connection::open(pack_dir.join("pack.db")).unwrap();
+
+        let cited = query_vector(&conn, &[1.0, 0.0, 0.0, 0.0], 5).unwrap();
+        assert_eq!(
+            cited[0].url.as_deref(),
+            Some("https://example.com/concurrency"),
+            "the nearest article must surface its citation URL"
+        );
+
+        // "Parallel Execution" has an empty url → no citation.
+        let parallel = query_vector(&conn, &[0.6, 0.8, 0.0, 0.0], 5).unwrap();
+        let parallel = parallel
+            .iter()
+            .find(|s| s.title == "Parallel Execution")
+            .unwrap();
+        assert_eq!(
+            parallel.url, None,
+            "an empty url column must degrade to no citation"
+        );
+    }
+
+    #[test]
+    fn query_vector_returns_none_without_embedding_column() {
+        // A keyword-only pack (no `embedding` column) yields None so the query
+        // path falls back to the LIKE scan — keyword packs are unchanged.
+        let tmp = TempDir::new().unwrap();
+        let pack_dir = create_test_pack(tmp.path(), "plain-pack");
+        let conn = Connection::open(pack_dir.join("pack.db")).unwrap();
+
+        assert!(
+            query_vector(&conn, &[1.0, 0.0, 0.0, 0.0], 5).is_none(),
+            "a pack without an embedding column must fall back (None)"
+        );
+    }
+
+    #[test]
+    fn query_vector_returns_none_for_zero_query_and_dimension_mismatch() {
+        let tmp = TempDir::new().unwrap();
+        let pack_dir = create_test_vector_pack(tmp.path(), "vec-pack");
+        let conn = Connection::open(pack_dir.join("pack.db")).unwrap();
+
+        // No query signal → decline (fall back).
+        assert!(
+            query_vector(&conn, &[0.0, 0.0, 0.0, 0.0], 5).is_none(),
+            "an all-zero query embedding must yield None"
+        );
+        // Query embedding of a different dimension than the stored 4-vectors:
+        // nothing is comparable, so retrieval declines rather than mis-ranking.
+        assert!(
+            query_vector(&conn, &[1.0, 0.0], 5).is_none(),
+            "a dimension-mismatched query embedding must yield None"
+        );
+    }
+
+    #[test]
+    fn native_knowledge_transport_query_uses_vector_search_when_embeddings_present() {
+        // End-to-end KGP-Q9: a pack whose articles carry embeddings produced by
+        // the default embedder is retrieved by embedding cosine through the RPC
+        // transport. The pack has no graph tables, so the wired path is
+        // graph(None) → vector(Some) — the keyword fallback is never reached.
+        let tmp = TempDir::new().unwrap();
+        let pack_dir = tmp.path().join("embed-pack");
+        fs::create_dir_all(&pack_dir).unwrap();
+        fs::write(
+            pack_dir.join("manifest.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "name": "embed-pack",
+                "description": "embedded knowledge pack",
+                "graph_stats": { "articles": 2, "entities": 0, "relationships": 0, "size_mb": 0.1 }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        // Store each article's embedding = embed_text(content) so a question that
+        // is semantically about the same content lands nearest to it.
+        let conn = Connection::open(pack_dir.join("pack.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE articles (title TEXT, section TEXT, content TEXT, url TEXT, embedding TEXT);",
+        )
+        .unwrap();
+        let rows = [
+            (
+                "Garbage Collection",
+                "Automatic memory reclamation traces reachable objects at runtime",
+                "https://example.com/gc",
+            ),
+            (
+                "Manual Allocation",
+                "The programmer frees pointers explicitly with malloc",
+                "https://example.com/malloc",
+            ),
+        ];
+        for (title, content, url) in rows {
+            let emb = serde_json::to_string(&embed_text(content, DEFAULT_EMBED_DIM)).unwrap();
+            conn.execute(
+                "INSERT INTO articles (title, section, content, url, embedding) VALUES (?1, 'Core', ?2, ?3, ?4)",
+                rusqlite::params![title, content, url, emb],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let mut transport = NativeRpcTransport::new("simard-knowledge");
+        register_knowledge_handlers(&mut transport, tmp.path().to_path_buf());
+
+        let request = crate::rpc::RpcRequest {
+            id: crate::rpc::new_request_id(),
+            method: "knowledge.query".to_string(),
+            params: serde_json::json!({
+                "pack_name": "embed-pack",
+                "question": "How does automatic memory reclamation work at runtime?",
+                "limit": 5,
+            }),
+        };
+        let response = crate::rpc::RpcTransport::call(&transport, request).unwrap();
+        let result = response.result.expect("query must succeed");
+        let sources = result["sources"].as_array().expect("sources array");
+        assert_eq!(
+            sources.first().and_then(|s| s["title"].as_str()),
+            Some("Garbage Collection"),
+            "vector search must rank the semantically-closest article first; got: {sources:?}"
+        );
+        assert!(result["confidence"].as_f64().unwrap() > 0.0);
     }
 }

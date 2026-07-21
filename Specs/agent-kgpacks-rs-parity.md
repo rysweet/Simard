@@ -64,6 +64,8 @@ implemented; acceptance test is the definition of done) · **OUT-OF-SCOPE**.
 | KGP-Q8 | Retrieval **ranks candidates by keyword coverage** (a title hit weighted above a content-only mention) so the `limit` cut keeps the most on-topic article instead of returning matches in arbitrary storage (rowid) order | `query_articles_ranks_most_relevant_first`, `query_articles_limit_keeps_most_relevant`, `query_articles_prefers_title_over_content_match` green | DONE | `native_knowledge.rs::query_articles` (`ORDER BY <coverage score> DESC`), `TITLE_MATCH_WEIGHT` / `CONTENT_MATCH_WEIGHT` |
 | KGP-Q4 | Keyword search binds parameters instead of string-interpolating LIKE clauses | `like_contains_pattern_escapes_metacharacters`, `query_articles_treats_like_wildcards_as_literal`, `query_articles_binds_keywords_and_resists_injection` green | DONE | `native_knowledge.rs::query_articles` binds each keyword as `?n` via `like_contains_pattern` (`LIKE ?n ESCAPE '\'`) |
 | KGP-Q5 | GraphRAG retrieval: traverse entity + relationship tables (multi-hop), not only a single-table LIKE scan | NEW test: a pack fixture with `relationships` yields a graph-grounded answer joining linked entities | DONE | `native_knowledge.rs::query_graph` runs before the article fallback: it seeds keyword-matched `entities`, traverses `relationships` up to `MAX_GRAPH_HOPS` (2), and builds an answer naming the linked entities + relations. Tests: `query_graph_traverses_relationships_for_linked_entities`, `query_graph_reaches_two_hop_neighbor` |
+| KGP-Q9 | **[RETRIEVAL PARITY — REQUIRED]** Vector **semantic** search: embedding-cosine retrieval over stored article/section embeddings, so a question retrieves a semantically-related article that shares **no** literal keyword with it (a keyword LIKE scan would miss it) — the original's retrieval *method*, not just a substring probe | `query_vector_retrieves_semantically_near_article_without_keyword_overlap`, `query_vector_ranks_by_cosine_descending`, `native_knowledge_transport_query_uses_vector_search_when_embeddings_present` green | DONE (method) | `native_knowledge.rs::query_vector` runs before the keyword fallback: it ranks the pack's stored `embedding` vectors by `cosine_similarity` to the query embedding (the deterministic default `embed_text`), projecting the `url` citation (KGP-Q1). Returns `None` — keyword fallback, so keyword-only packs are unchanged — with no `embedding` column or a dimension mismatch. **Semantic-quality caveat:** the *method* (embedding cosine) is at parity; recall *quality* tracks the pack's embedder — a real-model embedder is pack-build-time (`KGP-B*`, out of scope), the same PARTIAL posture as upstream R1 |
+| KGP-Q10 | **[RETRIEVAL PARITY — REQUIRED]** Hybrid ranking that blends vector-semantic + graph + keyword signals (the original's ranker), not any single signal alone | NEW test: on a shared fixture, ranking matches where semantic/graph signal outweighs literal keyword overlap | OPEN | `native_knowledge.rs` currently selects one retrieval path (graph → vector → keyword) rather than blending their scores; hybrid fusion is the remaining retrieval-parity criterion |
 
 ### Transport, health & lifecycle
 
@@ -97,18 +99,35 @@ cargo test --lib native_knowledge
 cargo test --lib knowledge_client
 ```
 
+Per the operator directive (issue #4321, 2026-07-20), retrieval parity is **not**
+satisfied by a keyword/LIKE scan alone: the three REQUIRED retrieval-parity rows —
+**KGP-Q5** (multi-hop graph), **KGP-Q9** (vector semantic search), and
+**KGP-Q10** (hybrid ranking) — must use the same GraphRAG method the original
+performs. KGP-Q5 and KGP-Q9 are DONE; **KGP-Q10 remains the one OPEN in-scope
+criterion**, so the port is not yet at full parity.
+
 Out-of-scope `KGP-B*` criteria do **not** gate parity; they are tracked
 separately for the Phase 9+ pack-authoring work.
 
 ## Ordered backlog (so the next cycle is never stuck)
 
-**All in-scope parity criteria are now DONE — kgpacks-rs is at full parity.**
-The done-gate below is green with every `KGP-M*`/`KGP-Q*`/`KGP-T*`/`KGP-P*` row
-marked DONE. No OPEN in-scope criteria remain.
+**One in-scope retrieval-parity criterion remains OPEN: KGP-Q10 (hybrid
+ranking).** Per the operator directive (2026-07-20, issue #4321) — *"No keyword
+search is not good enough. It needs to be the same"* GraphRAG method — retrieval
+parity requires the three REQUIRED rows: multi-hop graph (KGP-Q5, **DONE**),
+vector semantic search (KGP-Q9, **DONE — method**), and hybrid ranking
+(KGP-Q10, **OPEN**). All other in-scope rows (`KGP-M*`, the remaining `KGP-Q*`,
+`KGP-T*`, `KGP-P*`) are DONE and both done-gate commands are green.
 
-(KGP-Q5 — GraphRAG multi-hop retrieval — closed on 2026-07-21; see the progress
-log below. KGP-T3 — reuse an open `Connection` in `conn_cache` — and KGP-Q4 —
-parameterize the keyword LIKE search — are likewise **DONE**.)
+**Next concrete step:** KGP-Q10 — blend the vector-cosine score (`query_vector`),
+the graph signal (`query_graph`), and the keyword-coverage score
+(`query_articles`) into one hybrid ranker, with a named acceptance test proving
+the fused order where semantic/graph signal outweighs literal keyword overlap.
+
+(KGP-Q9 — vector semantic search — closed on 2026-07-21; see the progress log
+below. KGP-Q5 — GraphRAG multi-hop retrieval — closed 2026-07-21. KGP-T3 —
+reuse an open `Connection` in `conn_cache` — and KGP-Q4 — parameterize the
+keyword LIKE search — are likewise **DONE**.)
 
 ## Progress log
 
@@ -197,3 +216,42 @@ parameterize the keyword LIKE search — are likewise **DONE**.)
   the RPC transport). With this, **every in-scope parity criterion is DONE** and
   the done-gate (`cargo test --lib native_knowledge` + `cargo test --lib
   knowledge_client`) is green.
+- **2026-07-21** — **KGP-Q9 closed (retrieval method)** — vector semantic
+  search. The operator directive (issue #4321, 2026-07-20) — *"No keyword search
+  is not good enough. It needs to be the same"* — superseded the earlier
+  "every criterion DONE = full parity" claim by adding two **REQUIRED**
+  retrieval-parity rows the original performs but the port lacked: KGP-Q9 (vector
+  semantic search) and KGP-Q10 (hybrid ranking). This entry closes **KGP-Q9**.
+  A new `query_vector(conn, query_embedding, limit)` now runs **before** the
+  keyword article fallback (order: graph → vector → keyword): it ranks the pack's
+  stored article/section `embedding` vectors by `cosine_similarity` to the query
+  embedding and returns the top `limit` as sources, projecting the entity/article
+  `url` for citations (KGP-Q1). The query is embedded by a new deterministic
+  default embedder `embed_text` — normalized feature-hashing over >2-char tokens
+  via a stable FNV-1a hash — the port of upstream's *default* (deterministic-hash)
+  embedder. Embeddings are stored as a JSON float array in an `embedding` column
+  (the SQLite-port stand-in for upstream `Section.embedding DOUBLE[768]`) and read
+  by `parse_embedding`. Because retrieval ranks by **vector proximity** rather
+  than literal token overlap, it surfaces an on-topic article that shares **no**
+  keyword with the question — which the LIKE scan misses. `query_vector` returns
+  `None` — falling back to the keyword scan, so keyword-only packs are unchanged —
+  when the query has no signal (all-zero embedding), no scanned table
+  (`articles`/`sections`/`nodes`/`entities`) has an `embedding` column, or no
+  stored vector shares the query embedding's dimension (a dimension mismatch is
+  dropped, never mis-ranked). **Scope of the claim:** the retrieval *method*
+  (embedding cosine) is at parity; recall *quality* tracks the pack's embedder —
+  wiring a real-model embedder is pack-build-time (`KGP-B*`, out of scope), the
+  same PARTIAL posture as upstream R1. Acceptance tests:
+  `query_vector_retrieves_semantically_near_article_without_keyword_overlap`
+  (the decisive one: a near-vector article with zero keyword overlap is retrieved
+  where `query_articles` returns nothing), `query_vector_ranks_by_cosine_descending`,
+  `query_vector_respects_limit`,
+  `query_vector_projects_url_citation_and_empty_url_is_no_citation`,
+  `query_vector_returns_none_without_embedding_column`,
+  `query_vector_returns_none_for_zero_query_and_dimension_mismatch`,
+  `embed_text_is_deterministic_and_l2_normalized`,
+  `cosine_similarity_handles_identity_orthogonal_and_mismatch`,
+  `parse_embedding_reads_json_array_and_rejects_garbage`, and
+  `native_knowledge_transport_query_uses_vector_search_when_embeddings_present`
+  (end-to-end via the RPC transport). **Remaining REQUIRED retrieval-parity
+  criterion: KGP-Q10 (hybrid ranking).**
