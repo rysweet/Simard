@@ -320,6 +320,7 @@ nav:
     - Self-Deploy Source Prep & Warm Target Dir: reference/self-deploy-source-prep.md
     - State-Root Resolution: reference/state-root-resolution.md
     - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
+    - Cost-Ledger Path Override: reference/cost-ledger-path-override.md
     - Runtime Contracts: reference/runtime-contracts.md
     - Subprocess Prompt Delivery: prompt-delivery.md
     - RPC Wire Protocol: reference/rpc-wire-protocol.md
