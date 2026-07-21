@@ -3,7 +3,7 @@ digraph AgenticMemoryRecall {
   node [shape=box, style="rounded,filled", fillcolor="#f8fbff", fontname="Arial"];
   edge [fontname="Arial"];
 
-  trigger [label="Callers (in-process): OODA prepare  src/ooda_loop/cycle.rs\nOverseer recall_pass  src/overseer/mod.rs:1026"];
+  trigger [label="Callers (in-process): OODA prepare  src/ooda_loop/cycle.rs\nOverseer recall_pass  src/overseer/mod.rs:1156"];
   keys    [label="RecallKeys::from_signals -> query()\n(concepts + root-cause labels)"];
   fanout  [label="4-way bounded recall", shape=diamond, fillcolor="#f0f0f0"];
   sem     [label="recall_semantic -> recall_facts_ranked (library-ranked pure read; NOT word-boundary gated) -> RecalledFact[]"];
