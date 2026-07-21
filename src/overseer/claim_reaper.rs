@@ -32,7 +32,10 @@
 //! the whole sweep is exercised hermetically with fakes — no real filesystem,
 //! process, or `gh`.
 
+use std::io::Read;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::typed_ooda::CapabilityHandler;
 
@@ -624,6 +627,50 @@ impl ClaimLedger for CapabilityHandler {
 /// never destroy the evidence Simard needs to fix the bug that killed it.
 pub const REAPED_ENGINEERS_SUBDIR: &str = "reaped-engineers";
 
+/// The STABLE cross-tick dedup token stamped into a stale-engineer investigation
+/// brief (issue #4400). Its value is the sanitized `claim_key` — stable across
+/// meta-OODA ticks for the SAME still-stale claim, distinct per genuinely-new
+/// claim. [`recipe_dedup_key`](crate::overseer::recipe_dedup_key) keys on this
+/// token so the Overseer's in-flight-investigation guard holds duplicate launches
+/// while one is outstanding, no matter how the surrounding VOLATILE prose (the
+/// timestamped evidence dir, the monotonically-growing idle age) drifts tick to
+/// tick.
+///
+/// DISTINCT from [`OVERSEER_OBS_PREFIX`](crate::overseer) `"overseer-obs:"` on
+/// purpose: that prefix carries separate self-referential-write-back semantics
+/// (issue #4128) and must NOT be reused as a dedup signature.
+pub const STALE_INVESTIGATION_DEDUP_PREFIX: &str = "stale-investigation:";
+
+/// How long a would-be-stale engineer's evidence archive epoch is REUSED in place
+/// before a genuinely-new recurrence is allowed a fresh epoch. An outstanding
+/// investigation can span many meta-OODA ticks; within this window every tick for
+/// the same claim reuses the SAME `reaped-engineers/<key>-<ts>/` dir (stable
+/// evidence path + stable dedup token ⇒ exactly one investigation) and does NOT
+/// re-archive. A recurrence AFTER the window lapses is a new claim epoch and
+/// legitimately mints a fresh dir (so the dedup never permanently wedges).
+const ARCHIVE_FRESHNESS_WINDOW: Duration = Duration::from_secs(3600);
+
+/// Wall-clock ceiling for the best-effort `journalctl` evidence-slice subprocess
+/// (Finding 2, issue #4400). The reaper runs SYNCHRONOUSLY on the meta-OODA tick
+/// ("adds no new thread"), so a slow/hung `journalctl` would block all Overseer
+/// supervision. [`run_with_deadline`] kills the child at this deadline and treats
+/// a timeout as an empty slice (a `tracing::warn!`, never a panic, never a block).
+/// This bound is ONLY for the journalctl subprocess — NO agentic/recipe step is
+/// wall-clock-killed.
+const JOURNAL_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Result of [`archive_stale_engineer_evidence`]: the durable evidence dir plus
+/// whether this call MINTED a fresh epoch (`true`) or REUSED an existing within-
+/// [`ARCHIVE_FRESHNESS_WINDOW`] epoch for the claim (`false`). `investigate` keys
+/// its dedup decision on `minted`: a reused epoch means an investigation is
+/// already outstanding, so it emits `Pending` with NO re-archive and NO re-launch.
+pub struct ArchiveOutcome {
+    /// The durable `reaped-engineers/<sanitized_key>-<ts>/` evidence dir.
+    pub dir: PathBuf,
+    /// `true` iff this call freshly minted the dir (no within-window epoch existed).
+    pub minted: bool,
+}
+
 /// The canonical prompt asset the agentic stale-engineer investigation follows.
 const INVESTIGATE_PROMPT_ASSET: &str =
     "prompt_assets/simard/overseer/investigate_stale_engineer.md";
@@ -661,21 +708,42 @@ pub fn sanitize_claim_key_for_archive(raw: &str) -> String {
 /// (tails of the newest worktree logs / transcript / recipe-runner output) and a
 /// `journal.txt` (a narrow `journalctl` slice for the goal's unit).
 ///
-/// Returns the archive directory path on success. FAIL-VISIBLE, never a panic: an
-/// IO error is logged and surfaced as `Err` so the caller keeps the claim (no
-/// reap without preserved evidence) rather than reaping blind.
+/// IDEMPOTENT PER CLAIM (Finding 1, issue #4400): if a recent evidence epoch for
+/// THIS claim already exists within [`ARCHIVE_FRESHNESS_WINDOW`], it is REUSED in
+/// place (returned with `minted = false`) rather than minting a sibling
+/// `<key>-<ts2>/` dir — so an outstanding investigation keeps a STABLE evidence
+/// path and no unbounded pile of timestamped dirs accrues. Only a freshly-minted
+/// epoch (`minted = true`) writes the manifest/evidence/journal (so the bounded
+/// `journalctl` capture runs at most once per epoch, not every tick).
+///
+/// Returns the [`ArchiveOutcome`] on success. FAIL-VISIBLE, never a panic: an IO
+/// error is logged and surfaced as `Err` so the caller keeps the claim (no reap
+/// without preserved evidence) rather than reaping blind.
 pub fn archive_stale_engineer_evidence(
     state_root: &std::path::Path,
     claim_key: &str,
     idle_age_secs: u64,
-) -> Result<PathBuf, String> {
+) -> Result<ArchiveOutcome, String> {
     let goal_id = goal_id_from_claim_key(claim_key);
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let archive_root = state_root.join(REAPED_ENGINEERS_SUBDIR);
-    let dir_name = format!("{}-{ts}", sanitize_claim_key_for_archive(claim_key));
+    let sanitized = sanitize_claim_key_for_archive(claim_key);
+
+    // Prong A — idempotent per claim: REUSE a within-window epoch in place. This
+    // keeps a stable `evidence_dir` while an investigation is outstanding (no
+    // `<key>-<ts>` pile) and — because it does NOT re-write the archive — the
+    // bounded journalctl capture runs at most once per epoch, not every tick.
+    if let Some(existing) = find_recent_archive_epoch(&archive_root, &sanitized, ts) {
+        return Ok(ArchiveOutcome {
+            dir: existing,
+            minted: false,
+        });
+    }
+
+    let dir_name = format!("{sanitized}-{ts}");
     let archive_dir = archive_root.join(&dir_name);
     std::fs::create_dir_all(&archive_dir)
         .map_err(|e| format!("create archive dir {}: {e}", archive_dir.display()))?;
@@ -724,7 +792,53 @@ pub fn archive_stale_engineer_evidence(
         }
     }
 
-    Ok(archive_dir)
+    Ok(ArchiveOutcome {
+        dir: archive_dir,
+        minted: true,
+    })
+}
+
+/// Find the MOST-RECENT `reaped-engineers/<sanitized>-<ts>/` evidence epoch for a
+/// claim that is still WITHIN [`ARCHIVE_FRESHNESS_WINDOW`] of `now_ts`, if any.
+/// The `<ts>` is parsed from the dir NAME (not its mtime) so the freshness window
+/// is derived from the archive epoch itself — robust to later in-place refreshes
+/// and directly controllable by tests. A missing archive root, an unparsable
+/// suffix, or a beyond-window newest epoch all yield `None` (⇒ mint fresh).
+fn find_recent_archive_epoch(
+    archive_root: &std::path::Path,
+    sanitized: &str,
+    now_ts: u64,
+) -> Option<PathBuf> {
+    let prefix = format!("{sanitized}-");
+    let entries = std::fs::read_dir(archive_root).ok()?;
+    let mut newest: Option<(u64, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // Only `<sanitized>-<pure_digits>` matches: a different claim whose
+        // sanitized key merely shares this prefix leaves a non-numeric tail that
+        // fails the parse, so it is never mistaken for this claim's epoch.
+        let Some(ts_str) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Ok(ts) = ts_str.parse::<u64>() else {
+            continue;
+        };
+        if newest.as_ref().map(|(best, _)| ts > *best).unwrap_or(true) {
+            newest = Some((ts, path));
+        }
+    }
+    let (ts, path) = newest?;
+    if now_ts.saturating_sub(ts) <= ARCHIVE_FRESHNESS_WINDOW.as_secs() {
+        Some(path)
+    } else {
+        None
+    }
 }
 
 /// Tighten an archive path to owner-only access — `0700` for the directory,
@@ -849,31 +963,27 @@ fn collect_worktree_evidence(worktree: &std::path::Path) -> String {
 }
 
 /// Capture a narrow `journalctl --user` slice for the goal's unit, best-effort.
-/// Returns `None` if `journalctl` is unavailable or the invocation fails — the
-/// archive proceeds without it (never a panic).
+/// Returns `None` if `journalctl` is unavailable, fails, exceeds
+/// [`JOURNAL_CAPTURE_TIMEOUT`], or yields no matching lines — the archive proceeds
+/// without it (never a panic, never a block on the meta-OODA tick).
 fn capture_journal_slice(goal_id: &str) -> Option<String> {
-    let output = std::process::Command::new("journalctl")
-        .args([
+    // BOUNDED subprocess (Finding 2, issue #4400): this runs synchronously on the
+    // Overseer tick, so a slow/hung journalctl is killed at the deadline and
+    // treated as an empty slice rather than stalling all supervision.
+    let raw = run_with_deadline(
+        "journalctl",
+        &[
             "--user",
             "-u",
             "simard-ooda.service",
             "--since",
             "-6 hours",
             "--no-pager",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        tracing::debug!(
-            target: "overseer::claim_reaper",
-            status = ?output.status,
-            "journalctl slice unavailable; omitting journal.txt from evidence archive"
-        );
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
+        ],
+        JOURNAL_CAPTURE_TIMEOUT,
+    )?;
     // Keep only lines mentioning the goal id (bounded), newest-biased tail.
-    let mut lines: Vec<&str> = text
+    let mut lines: Vec<&str> = raw
         .lines()
         .filter(|l| l.contains(goal_id))
         .collect::<Vec<_>>();
@@ -883,6 +993,93 @@ fn capture_journal_slice(goal_id: &str) -> Option<String> {
         None
     } else {
         Some(lines.join("\n"))
+    }
+}
+
+/// Run `cmd args` capturing stdout, but BOUNDED by `timeout` (Finding 2, issue
+/// #4400). Adapts the `safe_update::pretest` wait-with-deadline idiom: spawn,
+/// drain stdout on a reader thread, poll `try_wait` against the deadline, and
+/// `kill` the child if it overruns. Returns:
+///   * `Some(stdout)` — the child exited SUCCESSFULLY within the deadline;
+///   * `None` — the child overran the deadline (killed + `tracing::warn!`), exited
+///     non-zero, or could not be spawned.
+///
+/// FAIL-VISIBLE + best-effort: a timeout is a `warn` and an empty result, never a
+/// panic and never a block — the caller (an OODA-tick evidence capture) proceeds
+/// without the slice. This bound is ONLY for short diagnostic subprocesses; it is
+/// NOT a wall-clock kill for any long-running agentic step.
+fn run_with_deadline(cmd: &str, args: &[&str], timeout: Duration) -> Option<String> {
+    let started = Instant::now();
+    let mut child = match Command::new(cmd)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::debug!(
+                target: "overseer::claim_reaper",
+                cmd,
+                error = %error,
+                "bounded subprocess could not spawn; returning empty (best-effort)"
+            );
+            return None;
+        }
+    };
+
+    // Drain stdout on a reader thread so a child that fills the pipe buffer can
+    // never deadlock the wait loop.
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    if let Some(mut stdout) = child.stdout.take() {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = stdout.read_to_end(&mut buf);
+            let _ = tx.send(buf);
+        });
+    }
+
+    let deadline = started + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    tracing::debug!(
+                        target: "overseer::claim_reaper",
+                        cmd,
+                        status = ?status,
+                        "bounded subprocess exited non-zero; returning empty (best-effort)"
+                    );
+                    return None;
+                }
+                let buf = rx.recv_timeout(Duration::from_secs(1)).unwrap_or_default();
+                return Some(String::from_utf8_lossy(&buf).into_owned());
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    tracing::warn!(
+                        target: "overseer::claim_reaper",
+                        cmd,
+                        timeout_secs = timeout.as_secs(),
+                        "bounded subprocess exceeded its deadline — killed; returning empty \
+                         slice (the OODA tick is NOT blocked)"
+                    );
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "overseer::claim_reaper",
+                    cmd,
+                    error = %error,
+                    "bounded subprocess wait failed; returning empty (best-effort)"
+                );
+                return None;
+            }
+        }
     }
 }
 
@@ -897,7 +1094,12 @@ fn capture_journal_slice(goal_id: &str) -> Option<String> {
 ///      points a `smart-orchestrator` workstream at
 ///      [`INVESTIGATE_PROMPT_ASSET`] with the archived `evidence_dir` — routed
 ///      through the SAME gated Act path every other remediation uses (no parallel
-///      plumbing), deduped by the in-flight-investigation guard.
+///      plumbing), and deduped ACROSS TICKS by the stable
+///      [`STALE_INVESTIGATION_DEDUP_PREFIX`] signature the brief carries: two
+///      sweeps of the SAME still-stale claim map to one dedup key, so the
+///      Overseer's in-flight-investigation guard admits exactly ONE launch until
+///      it completes or the evidence epoch ages out of [`ARCHIVE_FRESHNESS_WINDOW`]
+///      (belt-and-suspenders to the disk-derived reuse guard in `investigate`).
 ///   3. Returns [`InvestigationVerdict::Pending`] — the reaper does NOT reap this
 ///      sweep. The claim + evidence persist; the investigation (a) files issues /
 ///      escalates via its own tools when a Simard bug is implicated and (b) tears
@@ -923,6 +1125,17 @@ impl RecipeStaleEngineerInvestigator {
 
     /// Build the agentic investigation brief pointing at the prompt asset with the
     /// archived evidence dir + the (untrusted) claim key carried as DATA.
+    ///
+    /// DEDUP CONTRACT (Finding 1, issue #4400): the brief embeds the STABLE
+    /// [`STALE_INVESTIGATION_DEDUP_PREFIX`]`<sanitized_claim_key>` token, and
+    /// [`recipe_dedup_key`](crate::overseer::recipe_dedup_key) keys on it. Two
+    /// ticks for the SAME still-stale claim therefore map to the SAME dedup key —
+    /// despite the VOLATILE `evidence_dir` timestamp and monotonically-growing
+    /// `idle_age_secs` prose drifting between them — so the Overseer's in-flight
+    /// guard holds the duplicate and exactly ONE investigation is admitted until it
+    /// completes or the evidence epoch ages out of [`ARCHIVE_FRESHNESS_WINDOW`].
+    /// Two DIFFERENT claims embed DIFFERENT tokens ⇒ distinct keys (neither
+    /// starved).
     fn investigation_brief(
         &self,
         claim_key: &str,
@@ -930,10 +1143,19 @@ impl RecipeStaleEngineerInvestigator {
         idle_age_secs: u64,
         evidence_dir: &std::path::Path,
     ) -> crate::overseer::capabilities::RecipeBrief {
+        // Stable per-claim dedup signature (issue #4400). Kept in a clearly-marked
+        // parenthetical so `recipe_dedup_key` can lift it verbatim while the human
+        // prose around it (volatile dir + idle age) stays readable but OUT of the
+        // deduped key.
+        let dedup_token = format!(
+            "{STALE_INVESTIGATION_DEDUP_PREFIX}{}",
+            sanitize_claim_key_for_archive(claim_key)
+        );
         crate::overseer::capabilities::RecipeBrief {
             task_description: format!(
                 "Investigate a quiet/idle engineer BEFORE Simard reaps it — ask WHY it went \
-                 quiet, preserve evidence, and only conclude it is dead if it genuinely is. \
+                 quiet, preserve evidence, and only conclude it is dead if it genuinely is \
+                 ({dedup_token}). \
                  Follow {INVESTIGATE_PROMPT_ASSET}. \
                  Its diagnostic evidence is ALREADY archived (durable, survives worktree \
                  cleanup) at: {evidence_dir}. Read manifest.json, evidence.txt, and journal.txt \
@@ -955,12 +1177,12 @@ impl RecipeStaleEngineerInvestigator {
 
 impl StaleEngineerInvestigator for RecipeStaleEngineerInvestigator {
     fn investigate(&self, claim_key: &str, idle_age_secs: u64) -> InvestigationOutcome {
-        // 1. PRESERVE EVIDENCE FIRST. If it cannot be archived, fail closed: keep
-        //    the claim (StillAlive) rather than reaping blind — the whole point is
-        //    to never destroy the evidence Simard needs.
-        let evidence_dir =
+        // 1. PRESERVE EVIDENCE FIRST (idempotent per claim). If it cannot be
+        //    archived, fail closed: keep the claim (StillAlive) rather than reaping
+        //    blind — the whole point is to never destroy the evidence Simard needs.
+        let archived =
             match archive_stale_engineer_evidence(&self.state_root, claim_key, idle_age_secs) {
-                Ok(dir) => dir,
+                Ok(outcome) => outcome,
                 Err(error) => {
                     tracing::warn!(
                         target: "simard::claim_reaper",
@@ -973,9 +1195,32 @@ impl StaleEngineerInvestigator for RecipeStaleEngineerInvestigator {
                 }
             };
 
-        // 2. Dispatch the agentic WHY through the EXISTING gated Act path. 3. The
-        //    verdict is Pending: the reaper keeps the claim this sweep; the
-        //    investigation resolves it (fix + teardown → later NoWorktree reclaim).
+        // 2. CROSS-TICK DEDUP (Finding 1, issue #4400). A REUSED (not freshly
+        //    minted) evidence epoch means an investigation for THIS claim is
+        //    already outstanding this freshness window. Do NOT re-archive and do
+        //    NOT re-dispatch — keep the claim, emit Pending with NO interventions
+        //    this sweep. This is disk-derived idempotency (belt-and-suspenders to
+        //    the Overseer's in-flight-investigation guard, which the stable
+        //    `stale-investigation:` dedup token also holds).
+        if !archived.minted {
+            tracing::debug!(
+                target: "simard::claim_reaper",
+                claim_key = %claim_key,
+                evidence_dir = %archived.dir.display(),
+                "[simard] claim-reaper: investigation already outstanding for this claim \
+                 (reusing evidence epoch) — Pending, no re-archive / no re-dispatch this sweep",
+            );
+            return InvestigationOutcome {
+                verdict: InvestigationVerdict::Pending,
+                interventions: Vec::new(),
+            };
+        }
+
+        // 3. Dispatch the agentic WHY through the EXISTING gated Act path exactly
+        //    ONCE per epoch. The verdict is Pending: the reaper keeps the claim
+        //    this sweep; the investigation resolves it (fix + teardown → later
+        //    NoWorktree reclaim).
+        let evidence_dir = archived.dir;
         let goal_id = goal_id_from_claim_key(claim_key);
         let brief = self.investigation_brief(claim_key, goal_id, idle_age_secs, &evidence_dir);
         tracing::info!(
@@ -2063,8 +2308,9 @@ mod tests {
         ));
         std::fs::create_dir_all(&tmp).unwrap();
 
-        let archive_dir =
-            archive_stale_engineer_evidence(&tmp, "rysweet/Simard:goal-perm", 999).unwrap();
+        let archive_dir = archive_stale_engineer_evidence(&tmp, "rysweet/Simard:goal-perm", 999)
+            .unwrap()
+            .dir;
 
         let dir_mode = std::fs::metadata(&archive_dir)
             .unwrap()
@@ -2126,5 +2372,298 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // =========================================================================
+    // CROSS-TICK DEDUP + BOUNDED JOURNAL (PR #4403 crusty findings, issue #4400)
+    //
+    // Finding 1 [CRITICAL] — every overseer tick re-archived evidence AND
+    // re-launched a fresh investigation for the SAME still-stale engineer
+    // (unbounded disk + duplicate agentic spawns racing over one claim). The
+    // dedup contract these tests pin: two ticks for the SAME still-stale claim
+    // map to the SAME dedup signature and produce EXACTLY ONE evidence dir + ONE
+    // investigation launch until it completes or the freshness window lapses.
+    //
+    // Finding 2 [MEDIUM] — `capture_journal_slice` ran `journalctl` synchronously
+    // on the OODA tick with no timeout; a slow/hung journalctl blocked all
+    // Overseer supervision. The bound these tests pin: the journalctl subprocess
+    // returns within a deadline (warn + best-effort empty/partial on expiry),
+    // NEVER blocking the tick — and ONLY the journalctl subprocess is bounded
+    // (no wall-clock kill on any agentic step).
+    // =========================================================================
+
+    // ----- shared helpers for the dedup tests --------------------------------
+
+    /// Count the direct child directories of `archive_root` whose name starts
+    /// with `prefix` (the `<sanitized_claim_key>-` archive-epoch prefix). Missing
+    /// root ⇒ 0.
+    fn count_archive_dirs(archive_root: &std::path::Path, prefix: &str) -> usize {
+        let Ok(entries) = std::fs::read_dir(archive_root) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(prefix))
+            .count()
+    }
+
+    /// How many of `interventions` are agentic-investigation launches.
+    fn launch_count(interventions: &[Intervention]) -> usize {
+        interventions
+            .iter()
+            .filter(|iv| matches!(iv, Intervention::LaunchRecipe { .. }))
+            .count()
+    }
+
+    /// Age the single outstanding `<prefix><ts>` evidence epoch OUT of the
+    /// freshness window by rewriting its name-timestamp suffix to ~70 min ago, so
+    /// a later tick sees no within-window dir and must mint a fresh investigation
+    /// (proving the dedup never permanently wedges a genuine recurrence).
+    fn age_newest_archive_epoch_out_of_window(archive_root: &std::path::Path, prefix: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let old_ts = now.saturating_sub(4200); // > the 3600s freshness window
+        let Ok(entries) = std::fs::read_dir(archive_root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if entry.path().is_dir() && name.starts_with(prefix) {
+                let aged = archive_root.join(format!("{prefix}{old_ts}"));
+                let _ = std::fs::rename(entry.path(), aged);
+                break;
+            }
+        }
+    }
+
+    // ----- T1: cross-tick dedup — one dir + one launch across N ticks ---------
+
+    /// FINDING 1 regression. Drive the reaper across THREE ticks for the SAME
+    /// still-stale/quiet claim with the PRODUCTION investigator (real archive on a
+    /// temp state root). The fix must yield EXACTLY ONE evidence dir (no
+    /// `<key>-<ts2>` sibling on later ticks) and EXACTLY ONE admitted investigation
+    /// launch — later ticks return `Pending` with NO new archive and NO new launch
+    /// — and the claim is NEVER reaped while the investigation is outstanding.
+    ///
+    /// Pre-fix this FAILS: every tick mints a fresh `<key>-<now_ts>` dir and emits
+    /// a fresh `LaunchRecipe`, so three ticks produce three launches.
+    #[test]
+    fn t1_same_stale_claim_dedups_across_ticks_one_dir_one_launch() {
+        let state = tempfile::tempdir().expect("tempdir");
+        let key = "rysweet/Simard:recurring-quiet-goal";
+        // The production investigator persists across ticks (as it does in the
+        // Overseer), so its disk-derived idempotency can suppress duplicates.
+        let investigator = RecipeStaleEngineerInvestigator::new(state.path(), "rysweet/Simard");
+
+        let mut launches = 0usize;
+        for tick in 0..3 {
+            // A fresh ledger each tick models the claim persisting because a
+            // Pending investigation keeps it (never reaped).
+            let ledger = FakeLedger::new(&[key]);
+            let probe = MapProbe::new(&[(key, dead(DeadReason::HeartbeatStale, Some(9000)))]);
+            let cleanup = FakeCleanup::new();
+
+            let summary =
+                reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+
+            assert!(
+                summary.reclaimed.is_empty(),
+                "tick {tick}: an outstanding (Pending) investigation must never reap"
+            );
+            assert_eq!(
+                ledger.list_engineer_claims(),
+                vec![key.to_string()],
+                "tick {tick}: the still-stale claim is kept each tick"
+            );
+            assert!(
+                cleanup.cleaned().is_empty(),
+                "tick {tick}: no worktree is destroyed while the investigation is pending"
+            );
+
+            launches += launch_count(&summary.pending_interventions);
+        }
+
+        assert_eq!(
+            launches, 1,
+            "cross-tick dedup: EXACTLY ONE investigation may launch across N ticks for the same \
+             still-stale claim (the in-flight guard suppresses the rest), got {launches}"
+        );
+
+        let archive_root = state.path().join(REAPED_ENGINEERS_SUBDIR);
+        let prefix = format!("{}-", sanitize_claim_key_for_archive(key));
+        let dirs = count_archive_dirs(&archive_root, &prefix);
+        assert_eq!(
+            dirs, 1,
+            "cross-tick dedup: EXACTLY ONE evidence dir must exist for the claim across all ticks \
+             (no unbounded `<key>-<ts>` pile), found {dirs}"
+        );
+    }
+
+    // ----- T2: no permanent wedge --------------------------------------------
+
+    /// FINDING 1 regression (the other side): the dedup must NOT permanently
+    /// suppress investigations. Three invariants:
+    ///   1. a `NoWorktree` engineer is still reaped IMMEDIATELY (no investigation);
+    ///   2. two ticks WITHIN the freshness window dedup to a SINGLE launch;
+    ///   3. once the evidence epoch ages OUT of the freshness window, a genuinely
+    ///      new recurrence is investigated AGAIN (fresh launch — no wedge).
+    ///
+    /// Pre-fix invariant (2) FAILS: every tick relaunches, so two ticks launch
+    /// twice.
+    #[test]
+    fn t2_no_worktree_reaped_and_recurrence_not_permanently_wedged() {
+        // (1) NoWorktree ⇒ reaped immediately, investigator never consulted.
+        let ghost = "rysweet/Simard:ghost-goal";
+        let ledger = FakeLedger::new(&[ghost]);
+        let probe = MapProbe::new(&[(ghost, dead(DeadReason::NoWorktree, None))]);
+        let cleanup = FakeCleanup::new();
+        let state = tempfile::tempdir().expect("tempdir");
+        let investigator = RecipeStaleEngineerInvestigator::new(state.path(), "rysweet/Simard");
+
+        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+        assert_eq!(
+            summary.reclaimed,
+            vec![ghost.to_string()],
+            "a NoWorktree claim has nothing to preserve and is reaped immediately"
+        );
+
+        // (2) within the freshness window: two ticks ⇒ exactly ONE launch total.
+        let stale_key = "rysweet/Simard:recurs-later";
+        let inv = RecipeStaleEngineerInvestigator::new(state.path(), "rysweet/Simard");
+        let a = inv.investigate(stale_key, 9000);
+        let b = inv.investigate(stale_key, 9100);
+        assert_eq!(a.verdict, InvestigationVerdict::Pending);
+        assert_eq!(b.verdict, InvestigationVerdict::Pending);
+        assert_eq!(
+            launch_count(&a.interventions) + launch_count(&b.interventions),
+            1,
+            "two ticks for the same still-stale claim WITHIN the freshness window must dedup to a \
+             single investigation launch"
+        );
+
+        // (3) no permanent wedge: age the epoch out of the window, then re-tick —
+        // a genuine recurrence must launch a fresh investigation.
+        let archive_root = state.path().join(REAPED_ENGINEERS_SUBDIR);
+        let prefix = format!("{}-", sanitize_claim_key_for_archive(stale_key));
+        age_newest_archive_epoch_out_of_window(&archive_root, &prefix);
+
+        let c = inv.investigate(stale_key, 12_000);
+        assert_eq!(c.verdict, InvestigationVerdict::Pending);
+        assert_eq!(
+            launch_count(&c.interventions),
+            1,
+            "a recurrence AFTER the freshness window lapses must be investigated again \
+             (the dedup must never permanently wedge a genuine recurrence)"
+        );
+    }
+
+    // ----- T3: the journalctl subprocess is bounded by a deadline ------------
+
+    /// A thread-local `tracing` capture so a test can assert a `warn` fired.
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<Mutex<Vec<u8>>>);
+
+    impl LogCapture {
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().expect("log capture mutex")).into_owned()
+        }
+    }
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log capture mutex")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = LogCapture;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// FINDING 2 regression. The bounded-subprocess helper the fixed
+    /// `capture_journal_slice` uses MUST return within its deadline when the child
+    /// does not complete promptly (kill + best-effort empty/partial + `warn`) —
+    /// NEVER blocking the OODA tick. A prompt, successful child still yields its
+    /// stdout.
+    ///
+    /// Pre-fix this does not even compile: `run_with_deadline` does not exist and
+    /// `capture_journal_slice` blocks unbounded on `journalctl`.
+    #[test]
+    fn t3_run_with_deadline_bounds_a_slow_subprocess_and_warns() {
+        // A child that sleeps far longer than the deadline must be bounded: the
+        // helper returns shortly after the deadline (NOT after the full sleep),
+        // yields no slice, and surfaces a warn.
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+
+        let started = std::time::Instant::now();
+        let slow = tracing::subscriber::with_default(subscriber, || {
+            run_with_deadline("sleep", &["10"], std::time::Duration::from_millis(300))
+        });
+        let elapsed = started.elapsed();
+
+        assert!(
+            slow.is_none(),
+            "a journalctl subprocess that exceeds the deadline must yield no slice (best-effort)"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "the deadline must bound the tick — returned in {elapsed:?}, not the full 10s sleep"
+        );
+        let logs = capture.contents();
+        assert!(
+            logs.to_ascii_lowercase().contains("warn"),
+            "a bounded-out journalctl subprocess must surface a tracing::warn (never silent): {logs}"
+        );
+    }
+
+    /// The bounded helper still returns a prompt child's stdout (the timeout is a
+    /// ceiling, not a floor) — proving the bound does not defeat normal capture.
+    #[test]
+    fn t3b_run_with_deadline_returns_a_prompt_childs_output() {
+        let out = run_with_deadline(
+            "printf",
+            &["overseer-journal-ok"],
+            std::time::Duration::from_secs(5),
+        );
+        assert!(
+            out.as_deref()
+                .map(|s| s.contains("overseer-journal-ok"))
+                .unwrap_or(false),
+            "a prompt, successful subprocess must return its stdout within the deadline, got {out:?}"
+        );
+    }
+
+    /// A child that exits non-zero (or cannot spawn) is best-effort `None` — never
+    /// a panic, never a block.
+    #[test]
+    fn t3c_run_with_deadline_is_best_effort_none_on_failure() {
+        let missing = run_with_deadline(
+            "definitely-not-a-real-binary-xyzzy",
+            &[],
+            std::time::Duration::from_secs(5),
+        );
+        assert!(
+            missing.is_none(),
+            "an un-spawnable subprocess must fold to None (best-effort), got {missing:?}"
+        );
     }
 }

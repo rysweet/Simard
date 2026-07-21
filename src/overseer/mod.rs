@@ -2218,19 +2218,32 @@ fn is_cost_bearing(iv: &Intervention) -> bool {
 /// the same key so the in-flight guard holds the duplicate; two DIFFERENT
 /// investigations must map to distinct keys so neither is starved.
 ///
-/// A recurring-signature launch embeds its `overseer-obs:…` signature token in
-/// the task description; keying on that token (when present) makes the guard
-/// robust to incidental prose drift around it. Absent the token, the trimmed
-/// task description is the key — deterministic for a given problem summary, which
-/// is itself derived deterministically from the signal.
+/// A launch embeds a STABLE signature token in its task description and this keys
+/// on that token (when present), making the guard robust to incidental prose
+/// drift around it:
+///   * [`STALE_INVESTIGATION_DEDUP_PREFIX`](crate::overseer::claim_reaper::STALE_INVESTIGATION_DEDUP_PREFIX)
+///     — a stale-engineer investigation's per-claim signature (issue #4400): two
+///     ticks for the SAME still-stale claim carry the same token but a VOLATILE
+///     timestamped evidence dir + growing idle age, so keying on the token holds
+///     the duplicate.
+///   * [`OVERSEER_OBS_PREFIX`] — a recurring-observation signature (issue #2628).
+///
+/// Absent any token, the trimmed task description is the key — deterministic for a
+/// given problem summary, which is itself derived deterministically from the
+/// signal.
 fn recipe_dedup_key(brief: &RecipeBrief) -> String {
     let desc = brief.task_description.trim();
-    if let Some(start) = desc.find("overseer-obs:") {
-        let tail = &desc[start..];
-        let end = tail
-            .find(|c: char| c == ')' || c.is_whitespace())
-            .unwrap_or(tail.len());
-        return tail[..end].to_string();
+    for token in [
+        crate::overseer::claim_reaper::STALE_INVESTIGATION_DEDUP_PREFIX,
+        OVERSEER_OBS_PREFIX,
+    ] {
+        if let Some(start) = desc.find(token) {
+            let tail = &desc[start..];
+            let end = tail
+                .find(|c: char| c == ')' || c.is_whitespace())
+                .unwrap_or(tail.len());
+            return tail[..end].to_string();
+        }
     }
     desc.to_string()
 }
@@ -3551,6 +3564,93 @@ mod tests {
         assert!(
             other_plan.admitted,
             "an investigation for a DIFFERENT signature must still be admitted"
+        );
+    }
+
+    /// FINDING 1 (issue #4400 / PR #4403) — the CROSS-TICK dedup contract at the
+    /// `recipe_dedup_key` seam. A stale-engineer investigation brief carries a
+    /// STABLE `stale-investigation:<sanitized_claim_key>` token (distinct from the
+    /// `overseer-obs:` write-back prefix, issue #4128). Two ticks for the SAME
+    /// still-stale claim embed the SAME token but DIFFERENT volatile prose
+    /// (timestamped evidence dir, growing idle age); the dedup key MUST key on the
+    /// stable token so the in-flight guard holds the duplicate. Two DIFFERENT
+    /// claims MUST map to distinct keys so neither is starved.
+    ///
+    /// Pre-fix this does not compile (`STALE_INVESTIGATION_DEDUP_PREFIX` does not
+    /// exist) and would fail (the key is the whole volatile task description, so
+    /// two ticks differ).
+    #[test]
+    fn stale_investigation_briefs_for_the_same_claim_share_a_stable_dedup_key() {
+        use crate::overseer::claim_reaper::{
+            STALE_INVESTIGATION_DEDUP_PREFIX, sanitize_claim_key_for_archive,
+        };
+
+        let claim_key = "rysweet/Simard:quiet-idle-goal";
+        let token = format!(
+            "{STALE_INVESTIGATION_DEDUP_PREFIX}{}",
+            sanitize_claim_key_for_archive(claim_key)
+        );
+
+        // Tick 1 and tick 2 for the SAME claim: identical stable token, DIFFERENT
+        // volatile prose (a fresh timestamped evidence dir + a larger idle age).
+        let tick1 = RecipeBrief {
+            task_description: format!(
+                "Investigate a quiet/idle engineer BEFORE Simard reaps it ({token}). \
+                 Evidence: /state/reaped-engineers/quiet-idle-goal-1000/. Idle age: 9000s."
+            ),
+            target_repo: "rysweet/Simard".to_string(),
+            sequence_group: None,
+        };
+        let tick2 = RecipeBrief {
+            task_description: format!(
+                "Investigate a quiet/idle engineer BEFORE Simard reaps it ({token}). \
+                 Evidence: /state/reaped-engineers/quiet-idle-goal-2500/. Idle age: 10500s."
+            ),
+            target_repo: "rysweet/Simard".to_string(),
+            sequence_group: None,
+        };
+
+        let k1 = recipe_dedup_key(&tick1);
+        let k2 = recipe_dedup_key(&tick2);
+        assert_eq!(
+            k1, k2,
+            "two ticks for the SAME still-stale claim must map to the SAME dedup key \
+             despite volatile prose drift; got {k1:?} vs {k2:?}"
+        );
+        assert_eq!(
+            k1, token,
+            "the dedup key must be the stable stale-investigation token, not the volatile \
+             task description; got {k1:?}"
+        );
+
+        // A DIFFERENT claim ⇒ a DIFFERENT key (no false dedup starving a distinct
+        // investigation).
+        let other_key = "rysweet/Simard:a-different-goal";
+        let other = RecipeBrief {
+            task_description: format!(
+                "Investigate a quiet/idle engineer BEFORE Simard reaps it ({}{}). \
+                 Evidence: /state/reaped-engineers/a-different-goal-1000/. Idle age: 9000s.",
+                STALE_INVESTIGATION_DEDUP_PREFIX,
+                sanitize_claim_key_for_archive(other_key),
+            ),
+            target_repo: "rysweet/Simard".to_string(),
+            sequence_group: None,
+        };
+        assert_ne!(
+            recipe_dedup_key(&other),
+            k1,
+            "two DIFFERENT claims must map to DISTINCT dedup keys"
+        );
+
+        // The stable token MUST NOT reuse the `overseer-obs:` write-back prefix,
+        // which carries separate self-referential-loop semantics (issue #4128).
+        assert_ne!(
+            STALE_INVESTIGATION_DEDUP_PREFIX, OVERSEER_OBS_PREFIX,
+            "the stale-investigation token must be distinct from the overseer-obs prefix"
+        );
+        assert!(
+            !k1.starts_with(OVERSEER_OBS_PREFIX),
+            "the stale-investigation dedup key must not be an overseer-obs key: {k1:?}"
         );
     }
 

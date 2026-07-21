@@ -1,16 +1,15 @@
 ---
-title: "Investigate-Before-Reap: never reclaim a quiet engineer without an investigation"
+title: "Investigate a Quiet/Idle Engineer Before Reaping It"
 description: >
-  Why Simard investigates a quiet/idle engineer BEFORE ever reaping it. A
-  stalled engineer may have hit a bug Simard needs to fix, and destroying its
-  worktree destroys the evidence. The stale-engineer-claim reaper no longer
-  releases + cleans a HeartbeatStale claim directly. Instead it PRESERVES the
-  engineer's diagnostic evidence to a durable reaped-engineers/ archive, drives
-  an agentic investigation (reusing diagnosis/root_cause/intervention/
-  capabilities) that asks WHY the engineer went quiet, feeds any Simard-bug
-  finding back into self-improvement (issue/escalation/recipe), and reclaims the
-  claim ONLY when the investigation concludes the engineer is genuinely
-  dead/unrecoverable — with the verdict named in the reclaim log line.
+  How the stale-engineer-claim reaper investigates a HeartbeatStale engineer
+  before reclaiming its claim, instead of reaping on idle-mtime alone. A
+  heartbeat-stale claim is never reaped until a completed investigation concludes
+  the engineer is Dead; the reaper fails closed on every other verdict. The
+  investigation is de-duplicated across Overseer ticks by a stable per-claim
+  signature so a still-stale claim maps to exactly one evidence dir and exactly
+  one investigation recipe until it concludes or its freshness window lapses, and
+  the journal capture it performs is bounded by a subprocess deadline so a slow
+  journalctl can never stall the meta-OODA tick.
 last_updated: 2026-07-21
 review_schedule: as-needed
 owner: simard
@@ -18,159 +17,216 @@ doc_type: explanation
 status: implemented
 related:
   - ./stale-engineer-claim-reaper.md
-  - ./overseer-agentic-health-review.md
-  - ./no-progress-terminal-investigation.md
-  - ./self-diagnose-on-step-error.md
+  - ./engineer-claim-liveness-lease.md
   - ../reference/investigate-stale-engineer-api.md
   - ../reference/claim-reaper-api.md
-  - ../reference/overseer-root-cause-why-api.md
-  - ../howto/investigate-a-stale-engineer-before-reap.md
+  - ../reference/overseer-recipe-launch-idempotency.md
+  - ../reference/engineer-worktree-sweep-safety.md
   - ../operations/claim-reaper-kill-switch.md
 ---
 
-# Investigate-Before-Reap
+# Investigate a Quiet/Idle Engineer Before Reaping It
 
 > **Status: implemented.** This page describes shipped behaviour in present
-> tense. The behaviour lives in
+> tense. The investigate-before-reap path lives in
 > [`src/overseer/claim_reaper.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/claim_reaper.rs)
-> (`reap_stale_claims` + the `StaleEngineerInvestigator` seam) and is wired on
-> the Overseer tick
-> ([`src/overseer/mod.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/mod.rs)
-> `reap_stale_engineer_claims`, beside `reconcile_inflight_investigations`).
+> and runs synchronously on the Overseer tick beside
+> `reconcile_inflight_investigations`
+> ([`src/overseer/mod.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/mod.rs)).
+> The dedup/idempotency and journal-timeout contracts described here are the
+> current, enforced behaviour. This is the concept companion of the
+> [Investigate-Before-Reap API](../reference/investigate-stale-engineer-api.md).
 
-## The defect this closes
+## What this adds on top of the reaper
 
-The [stale-engineer-claim reaper](./stale-engineer-claim-reaper.md) sweeps
-`engineer_claims` and reclaims rows whose engineer is provably dead. Its
-`NoWorktree` path is unambiguous — there is nothing to protect, so it reclaims
-immediately, and that stays. But its `HeartbeatStale` path used to do something
-**antithetical to Simard's self-improvement mission**: on a worktree whose
-newest-file mtime was older than the threshold it would _immediately_
+The [stale-engineer-claim reaper](./stale-engineer-claim-reaper.md) reclaims a
+claim when its engineer is **provably dead**. That base sweep treats a worktree
+whose newest-file mtime is older than the stale threshold as
+`Dead { HeartbeatStale }` and reclaims it directly.
 
-1. log the reclaim,
-2. `release_engineer_claim` (free the cap slot), and
-3. `cleanup.cleanup` — **destroy the worktree**.
+A quiet-but-alive engineer — one in a long compile, a slow test run, or simply
+thinking between file writes — has the *same* idle-mtime signature as a genuinely
+hung one. Reaping on idle-mtime **alone** risks killing live work. The
+investigate-before-reap path closes that gap: a `HeartbeatStale` verdict is **not
+sufficient** to reclaim. It is only a *trigger to investigate*. The claim is
+reclaimed only after a **completed investigation concludes the engineer is
+`Dead`**.
 
-No investigation. And a stalled engineer is exactly the case Simard most needs to
-learn from: it may have **hit a bug Simard should fix**. Destroying its worktree
-destroys the transcript, the recipe-runner output, the exit status — the evidence
-of _why_ it went quiet. A silent reclaim throws away a self-improvement signal.
+| Verdict from the base probe | Investigate-before-reap behaviour |
+|---|---|
+| `Dead { NoWorktree }` | **Reap immediately** — a concluded investigation already removed the worktree; there is nothing to protect (pre-existing [#4099](https://github.com/rysweet/Simard/issues/4099), unchanged). |
+| `Dead { HeartbeatStale }` | **Do not reap yet.** Run an investigation. Reap **iff** it concludes `Dead`. Otherwise keep the claim. |
+| `Live` | Keep the claim (unchanged). |
 
-## The new invariant
+The reaper **fails closed** on every non-`Dead` investigation verdict:
+`StillAlive`, `Blocked`, `Recoverable`, and `Pending` all keep the claim. Only an
+investigation that positively concludes `Dead` reaps a heartbeat-stale claim.
+Evidence is always preserved before any cleanup.
 
-> **NO REAP WITHOUT A COMPLETED INVESTIGATION AND PRESERVED EVIDENCE.**
+## The investigation, one sweep at a time
 
-Only the `Dead { HeartbeatStale, age > stale_secs }` branch changes. On that
-branch the reaper no longer releases + destroys directly. Instead it:
+When the reaper sees a `HeartbeatStale` claim it hands the claim to an
+`investigate()` seam that, on the **first** sweep for that stale claim:
 
-1. **Preserves evidence first.** Before any worktree removal, the engineer's
-   diagnostic evidence — the worktree's newest logs / transcript / recipe-runner
-   output / captured exit status, plus a narrow `journalctl` slice for its goal —
-   is archived into a durable, state-root directory that survives worktree
-   cleanup:
-   `<state_root>/reaped-engineers/<sanitized_claim_key>-<unix_ts>/`, guarded by
-   the same `assert_under_root` containment the worktree cleanup uses. The raw
-   `claim_key` is stored in a `manifest.json`; the directory name is sanitized.
-2. **Investigates agentically.** It drives a structured investigation behind an
-   injectable trait seam ([`StaleEngineerInvestigator`](../reference/investigate-stale-engineer-api.md)),
-   reusing the machinery Simard already has rather than inventing new plumbing:
-   the [`diagnosis`](./self-diagnose-on-step-error.md) classifier, the
-   [`root_cause`](../reference/overseer-root-cause-why-api.md) WHY-over-evidence
-   analysis with prior-same-signature recall, and the
-   [`investigate_stale_engineer.md`](https://github.com/rysweet/Simard/blob/main/prompt_assets/simard/overseer/investigate_stale_engineer.md)
-   prompt asset. The investigation classifies WHY the engineer went quiet. These
-   findings live at **two levels** that the reference reflects precisely: a
-   routing **verdict** (`still-alive` / `blocked` / `recoverable` / `dead`, which
-   alone decides reap) and — only when the verdict is `dead` — a **cause** that
-   explains the death for telemetry and self-improvement. In those terms the
-   categories are: *verdict-level* still-actually-alive (false positive) /
-   blocked-on-missing-precondition / recoverable-transient; and, under a `dead`
-   verdict, *cause-level* crashed-with-panic / hung-on-lock / OOM / E2BIG /
-   hit-a-simard-bug / genuinely-finished-but-didn't-report. Only the verdict
-   gates the reap; the cause never does (see the
-   [`{verdict, cause}` taxonomy](../reference/investigate-stale-engineer-api.md#verdict-types)).
-3. **Acts on the finding (feeds self-improvement).** Findings route through the
-   Overseer's **existing** gated `Intervention` → plan → `act()` path — the same
-   one [agentic health review](./overseer-agentic-health-review.md) uses — not a
-   parallel pipeline:
-   - **Still actually alive** → **DO NOT reap.** The claim is left in place and
-     the false positive is logged (an extension of the fail-closed contract).
-   - **Blocked / recoverable** → **DO NOT reap** this sweep. `EscalateBlockedGoal`
-     surfaces the block; `LaunchRecipe`/`Whisper` resumes recoverable work.
-   - **Simard bug / systemic failure** → **file a tracking issue** (`FileIssue`,
-     the same gh-issue capability the no-progress breaker uses) and/or dispatch a
-     `LaunchRecipe` fix / `EscalateBlockedGoal`, and record the root cause in
-     cognitive memory so recurrence is recognized. The engineer's death becomes a
-     self-improvement signal, not a silent reclaim.
-   - **Genuinely dead / unrecoverable** (evidence preserved) → perform the
-     existing `release_engineer_claim` + worktree cleanup. The reclaim log line
-     now **also names the investigation verdict**.
+1. **Archives evidence** — copies the engineer's worktree artifacts and a bounded
+   slice of the daemon journal into an owner-restricted evidence directory under
+   `reaped-engineers/` (mode `0700` dirs, `0600` files).
+2. **Dispatches one investigation recipe** — emits a single `LaunchRecipe`
+   intervention whose brief points an agentic reasoner at the preserved evidence,
+   and returns the verdict `Pending`.
 
-## Why a thin Rust rail over an agentic seam
+`Pending.should_reap() == false`, so the claim is **kept** this sweep. A later
+sweep observes the concluded investigation's outcome (the investigation removes
+the worktree when it concludes the engineer is dead, which the base probe then
+reports as `NoWorktree` → immediate reap).
 
-The reap **decision** in Rust is binary and mechanical: reclaim **iff**
-`verdict.should_reap()`. All the nuanced "WHY did it go quiet, and what should we
-do about it" reasoning lives behind the `StaleEngineerInvestigator` trait — a
-prompt asset dispatched as a gated `smart-orchestrator` workstream, exactly the
-[health-review](./overseer-agentic-health-review.md) pattern. This keeps two
-things true at once:
+## Why de-duplication matters
 
-- **Ruthless simplicity + hermetic tests.** The pure `reap_stale_claims`
-  orchestrator takes the investigator as an injected seam, so the whole sweep is
-  unit-tested with fakes — no real filesystem, process, or `gh`. No failure
-  heuristics are hard-coded in Rust beyond the mechanical classifier that ROUTES
-  to the agentic step.
-- **No parallel plumbing.** The investigation reuses `diagnosis`, `root_cause`,
-  `intervention`, and `capabilities`; there is exactly one evidence-archive path
-  and one Act path.
+The Overseer tick runs continuously. Without de-duplication, **every** tick that
+still sees the same heartbeat-stale claim would archive evidence *again* and
+launch *another* investigation. That is exactly the failure this feature is
+built to avoid:
 
-### Latency: the `Pending` verdict
+- **Unbounded disk growth** — a new timestamped `reaped-engineers/<key>-<ts>/`
+  directory minted on every tick.
+- **Unbounded / duplicate agentic spawn** — a fresh investigation recipe admitted
+  every cycle for a claim already under investigation.
+- **A TOCTOU race** — N concurrent duplicate investigations all racing to release
+  the same claim and remove the same worktree.
 
-Agentic investigation can be slow, but the reaper rail is thread-less and
-synchronous. The verdict enum therefore includes a non-terminal **`Pending`**
-variant (`should_reap() == false`). The production investigator archives the
-evidence, dispatches the agentic investigation as an `Intervention::LaunchRecipe`
-(surfaced through the SAME gated Act path every other remediation uses), and
-returns `Pending` — so staleness ALONE never reaps this sweep. It does **not**
-add a bespoke inflight map: the dispatched launch registers in the Overseer's
-existing `inflight_investigations` set, so re-sweeping the same still-stale claim
-produces the same `recipe_dedup_key` and the in-flight guard suppresses a second
-launch instead of re-investigating. The loop resolves through the existing
-plumbing: when the investigation concludes the engineer is genuinely dead it
-releases the claim and tears the worktree down via its gated tools, and the
-**next** sweep sees `Dead { NoWorktree }` and reclaims the leaked slot
-immediately (that branch needs no investigation). Fakes return terminal verdicts,
-so the pure-function tests exercise the `Dead`-reaps-now routing hermetically
-(see the [API reference](../reference/investigate-stale-engineer-api.md#pending-and-cross-tick-resolution)).
-The synchronous rail is never blocked on model latency.
+De-duplication is therefore a **correctness** property, not an optimisation.
 
-## Preserved invariants
+### The dedup contract
 
-Everything the [reaper](./stale-engineer-claim-reaper.md) already guaranteed
-still holds:
+> **Dedup contract.** Two Overseer ticks for the **same still-stale claim** map
+> to the **same dedup key** and together produce **exactly one** evidence
+> directory and **exactly one** admitted investigation recipe, until that
+> investigation completes or the evidence directory ages out of the freshness
+> window. Later ticks return `Pending` with **no** new archive and **no** new
+> launch, and the claim is **not** reaped.
 
-- **No wall-clock kill.** Staleness is still newest-file-mtime idle detection,
-  never a run-duration cap. A busy engineer that keeps writing is never a
-  candidate.
-- **Fail-closed.** `Live`, boundary `age == stale_secs`, unknown-age, and an
-  unreadable worktrees root all still resolve to "keep the claim". The new
-  `still-alive` verdict is a further fail-closed extension.
-- **`NoWorktree` still reclaims immediately.** There is no evidence to preserve
-  and nothing to investigate when no worktree backs the claim.
-- **One fail-visible `[simard]` line per reclaim**, now extended to name the
-  verdict. Reclaim still flows only through the `release_engineer_claim`
-  chokepoint + the guarded worktree cleanup. Per-entry errors are contained. The
-  off switch (`SIMARD_CLAIM_REAP_ENABLED=off`) is still a total no-op.
-- **No python, no kuzu, no new threads, no new SQL.**
+Two independent guards, either of which alone suppresses a duplicate, together
+make this hold under concurrency:
+
+1. **Disk-derived idempotency (primary).** `archive_stale_engineer_evidence()`
+   is idempotent *per claim*. Instead of always minting a fresh
+   `<sanitized_claim_key>-<ts>/` directory, it **reuses the most-recent existing
+   directory for that claim** when one exists within the
+   `ARCHIVE_FRESHNESS_WINDOW` (1 hour), returning it **as-is without re-writing**.
+   Only when no within-window directory exists is a new one minted (and its
+   evidence written). `investigate()` short-circuits to `Pending { interventions:
+   [] }` — no re-archive, no re-dispatch — whenever the archive step **reused**
+   (rather than minted) a directory. This makes the evidence path **stable per
+   claim** while an investigation is outstanding, so no pile of `<key>-<ts>/`
+   siblings accrues and the bounded journal capture runs at most once per epoch.
+
+2. **Stable dedup signature (belt-and-suspenders).** The investigation brief
+   carries a single-line, reserved dedup token
+   `stale-investigation:<sanitized_claim_key>`. `recipe_dedup_key()`
+   ([`src/overseer/mod.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/mod.rs))
+   keys on this token when present, so two ticks for the same claim produce the
+   **same** key even though the human-readable prose (evidence dir path, idle age)
+   differs. The Overseer's in-flight-investigation guard then suppresses a second
+   `LaunchRecipe` while one is outstanding. This is the guarantee that makes the
+   code comment "deduped by the in-flight-investigation guard" **true**.
+
+The stable token is a **distinct** reserved prefix. It deliberately does **not**
+reuse `OVERSEER_OBS_PREFIX` (`overseer-obs:`), which carries separate write-back /
+self-referential-loop semantics ([#4128](https://github.com/rysweet/Simard/issues/4128)).
+Volatile prose — the timestamped `evidence_dir` and the monotonically-growing
+`idle_age_secs` — is kept **out** of the portion `recipe_dedup_key` keys on, so it
+can never destabilise the signature.
+
+### Evidence-directory naming and the freshness window
+
+Evidence directories are named `<sanitized_claim_key>-<unix_ts>`:
+
+- `sanitized_claim_key` is the claim key passed through a strict allowlist
+  sanitizer (`[A-Za-z0-9_-]`, single line, no `..`, no `/`, `\`, NUL, CR/LF, and
+  no `:` collision with the dedup token — every other byte, including `.`, folds
+  to `_`). The **same** sanitizer builds both the directory name and the dedup
+  token, so the two can never diverge.
+- `<unix_ts>` is the mint time of the directory.
+
+On each investigation sweep, the reaper scans the direct children of
+`reaped-engineers/` for the most-recent `<sanitized_claim_key>-<ts>` directory
+(the `<ts>` is parsed from the **name**, so the freshness window is derived from
+the archive epoch itself):
+
+| Directory state | Action |
+|---|---|
+| A matching dir exists **within** `ARCHIVE_FRESHNESS_WINDOW` (1 h) | **Reuse it as-is** — no re-write, no re-archive; the dir keeps its `0700`/`0600` perms. `investigate()` short-circuits to `Pending` — no re-dispatch. |
+| No matching dir, or the newest is **older** than the window | **Mint** a new `<key>-<now_ts>/`, archive into it (`0700`/`0600`), dispatch one investigation. |
+
+The 1-hour window is a documented heuristic: it comfortably spans a single
+outstanding investigation across many meta-OODA ticks, while a genuinely-new
+recurrence hours later is a new claim epoch that legitimately earns fresh
+evidence. The window is the **disk-side backstop**; the stable dedup token is the
+**primary** correctness guarantee.
+
+## No permanent wedge
+
+De-duplication suppresses duplicates while an investigation is *outstanding* — it
+never permanently prevents future investigation of a recurring problem:
+
+- The in-flight token guard is **transient**: `reconcile_inflight_investigations`
+  clears it when the investigation handle finishes.
+- The evidence directory **ages out** of the freshness window.
+
+So a completed-then-recurring stale event for the **same** claim can be
+investigated again later (fresh dir + new launch). And a genuinely-dead engineer
+whose worktree the concluded investigation removed is reported as `NoWorktree` and
+reaped immediately. Nothing is permanently suppressed.
+
+## Bounded journal capture
+
+The investigation archives a slice of the daemon journal so the reasoner can see
+what the engineer was doing before it went quiet. That capture shells out to
+`journalctl`. Because the reaper runs **synchronously on the meta-OODA tick**
+(the module contract promises the sweep "adds no new thread"), an unbounded
+`journalctl` call would block **all** Overseer supervision if journalctl is slow
+or hung.
+
+`capture_journal_slice()` therefore runs `journalctl` through a bounded
+subprocess helper, `run_with_deadline`, with a `JOURNAL_CAPTURE_TIMEOUT` of **5
+seconds**:
+
+- The child is spawned, polled to a deadline, and **killed and reaped** on expiry
+  (no zombie, no leaked reader thread).
+- On timeout the helper emits a `tracing::warn!` and returns a best-effort
+  empty/partial slice — it **never panics and never blocks past the deadline**.
+- Output is capped to avoid unbounded memory growth.
+
+This bound is scoped to the **journalctl subprocess only**. It is **not** a
+wall-clock timeout on any agentic/recipe step — a healthy long-running
+investigation recipe is never killed by elapsed time, matching the operator rule
+that agentic steps must never be time-capped. The idempotent archive already
+ensures this capture runs at most once per claim rather than every tick; the
+deadline bounds the per-call block that remains.
+
+## Invariants at a glance
+
+| Situation | Behaviour |
+|---|---|
+| `HeartbeatStale` claim, first sweep | Archive once + dispatch one investigation; verdict `Pending`; claim **kept** |
+| Same still-stale claim, later sweeps within the window | **Reuse** dir; **no** re-archive/re-launch; verdict `Pending`; claim **kept** |
+| Investigation concludes `Dead` (worktree removed) | Next sweep sees `NoWorktree` → **reap immediately** |
+| Investigation concludes `StillAlive`/`Blocked`/`Recoverable`/`Pending` | Claim **kept** (fail-closed) |
+| Genuinely-new recurrence after window lapses / prior investigation completes | Fresh dir + new investigation (**no permanent wedge**) |
+| `journalctl` slow or hung | Bounded at 5 s: `warn` + partial/empty slice; tick **never stalls** |
+| Evidence directories | `0700` dirs / `0600` files, set on **mint**; a reused dir retains them (reuse re-writes nothing) |
 
 ## Related
 
-- [Stale-Engineer-Claim Reaper (concept)](./stale-engineer-claim-reaper.md) — the
-  sweep this behaviour extends.
-- [Investigate-Before-Reap API (reference)](../reference/investigate-stale-engineer-api.md)
-- [Overseer Agentic Health Review](./overseer-agentic-health-review.md) — the
-  Intervention → Act path reused here.
-- [No-Progress Terminal Investigation](./no-progress-terminal-investigation.md)
-- [Self-Diagnose on Step Error](./self-diagnose-on-step-error.md)
-- [How to investigate a stale engineer before reap](../howto/investigate-a-stale-engineer-before-reap.md)
+- [Stale-Engineer-Claim Reaper](./stale-engineer-claim-reaper.md) — the base
+  independent claim-reclaim sweep this path extends.
+- [Investigate-Before-Reap API](../reference/investigate-stale-engineer-api.md) —
+  the `investigate()` seam, `ArchiveOutcome`, the dedup token contract, the
+  freshness window, and the `run_with_deadline` bound.
+- [Claim-Reaper API](../reference/claim-reaper-api.md) — the base sweep,
+  liveness probe seam, cleanup seam, and config resolvers.
+- [Overseer Recipe-Launch Idempotency](../reference/overseer-recipe-launch-idempotency.md)
+  — how `recipe_dedup_key` and the in-flight guard suppress duplicate launches.
+- [Worktree Reaping Safety Guards](../reference/engineer-worktree-sweep-safety.md)
+- [Engineer-Claim Liveness Lease](./engineer-claim-liveness-lease.md)
 - [Claim-Reaper Kill Switch & Tuning](../operations/claim-reaper-kill-switch.md)
