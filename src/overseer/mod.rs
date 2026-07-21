@@ -715,7 +715,7 @@ impl Overseer {
         };
         // 3) Anti-thrash: at most one probe+attempt per min-interval, process
         //    -global so the per-tick-rebuilt Overseer cannot reset it.
-        let now = deploy_trigger::now_epoch_secs();
+        let now = crate::self_quality_audit::now_epoch_secs();
         if !deploy_trigger::global_deploy_throttle_allow(
             now,
             deploy_trigger::deploy_min_interval_secs(),

@@ -686,9 +686,9 @@ pub fn global_deploy_throttle_allow(now_secs: u64, min_interval_secs: u64) -> bo
 pub fn deploy_min_interval_secs() -> u64;
 ```
 
-An instance-scoped [`DeployThrottle`] with the same semantics backs unit tests
-and any single-instance caller. A successful deploy restarts the daemon at the
-new head anyway, so the clock need not persist across restarts.
+The process-global throttle is the single anti-thrash mechanism; a successful
+deploy restarts the daemon at the new head anyway, so the clock need not persist
+across restarts.
 
 Two ticks inside the interval therefore deploy **once**: the first records the
 timestamp and admits; the second is throttled (no signal, no attempt, no

@@ -14,7 +14,10 @@ use crate::overseer::deploy::{
     AncestryOracle, BinaryDeployer, CRASH_LOOP_CHURN_THRESHOLD, CanaryResult, CanaryRunner,
     GuardedDeployer,
 };
-use crate::overseer::deploy_trigger::{DeployThrottle, deploy_drift_signal};
+use crate::overseer::deploy_trigger::{
+    deploy_drift_signal, deploy_throttle_test_guard, global_deploy_throttle_allow,
+    reset_global_deploy_throttle,
+};
 use crate::overseer::intervention::Intervention;
 use crate::overseer::notify::{
     ChannelDelivery, DualChannelNotifier, NotifyChannel, OperatorNotification,
@@ -290,15 +293,16 @@ fn guarded_deploy_notifies_on_a_failed_binary_swap() {
 
 #[test]
 fn anti_thrash_two_ticks_within_min_interval_do_not_double_deploy() {
-    // Drift persists across ticks until the swap lands. The throttle must ensure
-    // two ticks inside the min-interval window produce at most ONE guarded
-    // deploy.
-    let mut throttle = DeployThrottle::new(900);
+    // Drift persists across ticks until the swap lands. The PROCESS-GLOBAL
+    // throttle production actually uses must ensure two ticks inside the
+    // min-interval window produce at most ONE guarded deploy.
+    let _guard = deploy_throttle_test_guard();
+    reset_global_deploy_throttle();
     let problem = drift_problem("mergedHEAD", 1);
     let deployed = Arc::new(Mutex::new(0usize));
 
     for now in [1_000u64, 1_300u64] {
-        if !throttle.allow(now) {
+        if !global_deploy_throttle_allow(now, 900) {
             continue; // in-window: the rail skips this tick.
         }
         if let Intervention::Deploy { commit } = decide(&problem) {
@@ -322,6 +326,7 @@ fn anti_thrash_two_ticks_within_min_interval_do_not_double_deploy() {
         1,
         "two ticks within the min-interval must deploy at most once"
     );
+    reset_global_deploy_throttle();
 }
 
 // ─────────────────────────── QA / gadugi scenario ───────────────────────────

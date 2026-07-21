@@ -13,9 +13,11 @@
 //!     (`SIMARD_OVERSEER_AUTONOMOUS_DEPLOY=0`) that lets an operator pin the
 //!     daemon. Enabled by default (consistent with `build_overseer` already
 //!     setting `high_risk_autonomy(true)`).
-//!   - [`DeployThrottle`] — the anti-thrash min-interval guard so a persisting
-//!     single-commit drift (re-observed every tick until the swap lands) can
-//!     never make the daemon redeploy every cycle.
+//!   - [`global_deploy_throttle_allow`] — the process-global anti-thrash
+//!     min-interval guard so a persisting single-commit drift (re-observed every
+//!     tick until the swap lands) can never make the daemon redeploy every
+//!     cycle. Process-global (a `static`) because the daemon rebuilds the acting
+//!     `Overseer` every tick, so per-instance state could never throttle.
 //!
 //! The guarded go/no-go SAFETY judgment (no-op / rollback / red-canary /
 //! crash-loop refusals, canary build+verify, rollback, operator notification)
@@ -93,68 +95,6 @@ pub fn deploy_min_interval_secs() -> u64 {
         .max(MIN_DEPLOY_INTERVAL_FLOOR)
 }
 
-/// Anti-thrash churn guard: enforces a minimum interval between autonomous
-/// deploy ATTEMPTS so a drift that persists across ticks (until the swap lands)
-/// cannot trigger a redeploy every cycle.
-///
-/// Time is injected as monotonic epoch-seconds so the guard is hermetically
-/// testable without a real clock. The production caller passes
-/// `SystemTime::now()`-derived seconds. Reuse this ALONGSIDE the
-/// `recent_restart_churn` crash-loop refusal already in `evaluate_deploy_gate` —
-/// this bounds *frequency*, that bounds *instability*.
-#[derive(Clone, Debug)]
-pub struct DeployThrottle {
-    min_interval_secs: u64,
-    last_attempt_secs: Option<u64>,
-}
-
-impl DeployThrottle {
-    /// A throttle with an explicit minimum interval (clamped to the floor).
-    pub fn new(min_interval_secs: u64) -> Self {
-        Self {
-            min_interval_secs: min_interval_secs.max(MIN_DEPLOY_INTERVAL_FLOOR),
-            last_attempt_secs: None,
-        }
-    }
-
-    /// A throttle configured from the environment ([`deploy_min_interval_secs`]).
-    pub fn from_env() -> Self {
-        Self::new(deploy_min_interval_secs())
-    }
-
-    /// The configured minimum interval (seconds).
-    pub fn min_interval_secs(&self) -> u64 {
-        self.min_interval_secs
-    }
-
-    /// May an autonomous deploy proceed at `now_secs`? Returns `true` and RECORDS
-    /// the attempt when the min-interval has elapsed since the last recorded
-    /// attempt (or none has occurred); returns `false` WITHOUT recording when a
-    /// prior attempt is still inside the window.
-    ///
-    /// Recording on allow (not on the caller's later success) is deliberate: a
-    /// deploy ATTEMPT — even one the guarded executor later refuses — resets the
-    /// window, so a red-canary drift cannot be retried every tick.
-    pub fn allow(&mut self, now_secs: u64) -> bool {
-        match self.last_attempt_secs {
-            Some(prev) if now_secs.saturating_sub(prev) < self.min_interval_secs => false,
-            _ => {
-                self.last_attempt_secs = Some(now_secs);
-                true
-            }
-        }
-    }
-}
-
-/// Current wall-clock time as epoch-seconds, or `0` if the clock is before the
-/// UNIX epoch (never panics). Used by the process-global throttle.
-pub fn now_epoch_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 /// Epoch-seconds of the last autonomous deploy ATTEMPT this process recorded.
 /// PROCESS-GLOBAL (not per-`Overseer`) deliberately: the daemon rebuilds the
 /// acting `Overseer` — and therefore any per-instance throttle — from scratch on
@@ -169,7 +109,7 @@ static LAST_DEPLOY_ATTEMPT_SECS: std::sync::atomic::AtomicU64 =
 /// `now_secs`? Returns `true` and RECORDS the attempt when at least
 /// `min_interval_secs` has elapsed since the last recorded attempt (or none has);
 /// returns `false` WITHOUT recording while a prior attempt is still inside the
-/// window. Recording on allow (not on later success) mirrors [`DeployThrottle`]:
+/// window. Recording on allow (not on later success) is deliberate:
 /// even an attempt the guarded executor later refuses resets the window, so a
 /// red-canary drift cannot be retried — nor its operator notice re-sent — every
 /// tick. Concurrency-safe via a CAS loop (the daemon runs one tick at a time, but
@@ -321,31 +261,6 @@ mod tests {
                 behind_commits: 0,
             }
         );
-    }
-
-    #[test]
-    fn throttle_blocks_a_second_attempt_within_the_window() {
-        let mut t = DeployThrottle::new(900);
-        assert!(t.allow(1_000), "first attempt allowed");
-        // A second tick 5 minutes later is still inside the 15-minute window.
-        assert!(!t.allow(1_300), "second attempt within window is throttled");
-        // Exactly at the boundary the window has NOT yet elapsed (< is the test).
-        assert!(!t.allow(1_899));
-        // One second past the window: allowed again.
-        assert!(t.allow(1_900), "attempt after the window is allowed");
-    }
-
-    #[test]
-    fn throttle_first_attempt_always_allowed() {
-        let mut t = DeployThrottle::new(900);
-        assert!(t.allow(0));
-    }
-
-    #[test]
-    fn throttle_min_interval_is_floored() {
-        // A mis-set tiny interval can never collapse the churn guard.
-        let t = DeployThrottle::new(1);
-        assert_eq!(t.min_interval_secs(), MIN_DEPLOY_INTERVAL_FLOOR);
     }
 
     #[test]
