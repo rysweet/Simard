@@ -77,7 +77,8 @@ fn run_command_inner(
     let stdout_reader = child.stdout.take().map(spawn_pipe_reader);
     let stderr_reader = child.stderr.take().map(spawn_pipe_reader);
 
-    let deadline = Instant::now() + timeout_for_command(argv);
+    let timeout = timeout_for_command(argv);
+    let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -92,7 +93,7 @@ fn run_command_inner(
                     join_pipe_reader(stderr_reader);
                     return Err(SimardError::CommandTimeout {
                         action: argv.join(" "),
-                        timeout_secs: timeout_for_command(argv).as_secs(),
+                        timeout_secs: timeout.as_secs(),
                     });
                 }
                 std::thread::sleep(Duration::from_millis(50));
