@@ -44,7 +44,7 @@ fn run_smoke_gate(binary: &Path) -> GateResult {
             format!(
                 "binary exited with {}: {}",
                 output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
+                truncate_output(&String::from_utf8_lossy(&output.stderr), 200)
             ),
         ),
         Err(e) => GateResult::fail(
@@ -92,7 +92,7 @@ fn run_gym_baseline_gate(binary: &Path) -> GateResult {
             format!(
                 "gym probe failed (exit {}): {}",
                 output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
+                truncate_output(&String::from_utf8_lossy(&output.stderr), 200)
             ),
         ),
         Err(e) => GateResult::fail(
@@ -159,7 +159,7 @@ fn run_rpc_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
             format!(
                 "rpc health failed (exit {}): {}",
                 output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
+                truncate_output(&String::from_utf8_lossy(&output.stderr), 200)
             ),
         ),
         Err(e) => GateResult::fail(
