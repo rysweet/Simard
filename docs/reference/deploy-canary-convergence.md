@@ -24,9 +24,11 @@ related:
 # Deploy-canary convergence reference
 
 > **Status: proposed (design spec).** The convergence driver in
-> [`src/self_relaunch/canary.rs`](https://github.com/rysweet/Simard/blob/main/src/self_relaunch/canary.rs),
-> the transient-failure classifier, and the gate-preservation regression test are
+> [`src/self_relaunch/canary.rs`](https://github.com/rysweet/Simard/blob/main/src/self_relaunch/canary.rs)
+> and the transient-failure classifier are
 > **not yet implemented** — this document is the specification they must satisfy.
+> The gate-preservation regression test **is** implemented and shipped by this
+> change (see [Gate-preservation regression test](#gate-preservation-regression-test) below).
 > The pieces they build on already exist and ship today: the fail-closed drift
 > read in
 > [`src/self_deploy/drift.rs`](https://github.com/rysweet/Simard/blob/main/src/self_deploy/drift.rs)
@@ -228,17 +230,21 @@ A regression test in
 invariant so no future convergence change can silently weaken the gate:
 
 ```text
-test gate_blocks_red_canary_even_when_drift_demands_deploy
-  GIVEN a DeployContext with canary_passed = false
-    AND needs_deploy = true (running binary is behind merged main)
-  WHEN evaluate_deploy_gate(&ctx) is called
-  THEN it returns Err(DeployRefusal::RedCanary)
+test deploy_gate_red_canary_is_immutable_for_forward_deploys
+  GIVEN a DeployContext for a genuine forward deploy
+        (target_commit != running_commit, not a rollback)
+    AND canary_passed = false
+  WHEN evaluate_deploy_gate(&ctx) is called for every churn level
+  THEN it returns Err(DeployRefusal::RedCanary) in every case
 ```
 
 The test asserts the gate returns `RedCanary` for *every* `canary_passed ==
-false` context regardless of drift pressure, and that convergence exposes no
-code path that promotes a binary while `canary_passed` is `false`. If a change
-makes the gate promote an un-passed canary, this test fails.
+false` forward-deploy context regardless of restart churn, and that convergence
+exposes no code path that promotes a binary while `canary_passed` is `false`. Its
+companions `deploy_gate_still_allows_clean_forward_deploy` (a passing canary is
+not over-tightened into a refusal) and `crash_loop_threshold_is_frozen` (the
+`CRASH_LOOP_CHURN_THRESHOLD` safety constant is pinned) round out the guard. If a
+change makes the gate promote an un-passed canary, this test fails.
 
 ## Tracing and observability
 
