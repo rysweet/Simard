@@ -137,6 +137,10 @@ mod operator_commands_terminal;
 // nothing here is constructed at runtime. See docs/design/overseer.md.
 pub mod overseer;
 mod persistence;
+// Cross-links amplihack-rs#964: RAII guard that tears down whole nested
+// subprocess groups on every exit path so failed/aborted/timed-out/panicking
+// orchestrator runs leave no orphaned children.
+pub mod process_group_guard;
 pub mod prompt_assets;
 pub mod prompt_delivery;
 pub mod read_only_guard;

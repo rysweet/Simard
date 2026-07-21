@@ -3,6 +3,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::error::{SimardError, SimardResult};
+use crate::process_group_guard::GroupChild;
 use crate::sanitization::sanitize_terminal_text;
 
 use super::{CARGO_COMMAND_TIMEOUT_SECS, CLEARED_GIT_ENV_VARS, GIT_COMMAND_TIMEOUT_SECS};
@@ -10,6 +11,15 @@ use super::{CARGO_COMMAND_TIMEOUT_SECS, CLEARED_GIT_ENV_VARS, GIT_COMMAND_TIMEOU
 pub(crate) struct CommandOutput {
     pub(crate) stdout: String,
 }
+
+/// Initial poll interval for the run-command wait loop. Kept small so quick
+/// git commands (the common case, often well under 20ms) return with minimal
+/// added latency instead of always paying a fixed coarse poll delay.
+const INITIAL_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+/// Upper bound the wait-loop poll interval backs off to, so a long-running
+/// `cargo` build polls infrequently and never busy-spins.
+const MAX_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 pub(crate) fn timeout_for_command(argv: &[&str]) -> Duration {
     if argv.first().is_some_and(|cmd| *cmd == "cargo") {
@@ -60,29 +70,47 @@ fn run_command_inner(
     for key in CLEARED_GIT_ENV_VARS {
         command.env_remove(key);
     }
-    let mut child = command
-        .spawn()
-        .map_err(|error| SimardError::ActionExecutionFailed {
+    // Spawn as the leader of its own process group so a timeout tears down the
+    // WHOLE subtree (e.g. `cargo` and every `rustc`/build-script grandchild it
+    // forked), not just the immediate child. Without this, killing only the
+    // immediate child on timeout orphans those descendants — the same
+    // leak-on-failure bug class as `rysweet/amplihack-rs#964`.
+    let mut guard =
+        GroupChild::spawn(&mut command).map_err(|error| SimardError::ActionExecutionFailed {
             action: argv.join(" "),
             reason: error.to_string(),
         })?;
 
-    let deadline = Instant::now() + timeout_for_command(argv);
+    let timeout = timeout_for_command(argv);
+    let deadline = Instant::now() + timeout;
+    // Poll with an exponential backoff (1ms -> 50ms cap): a fast git command
+    // returns after a ~1ms wait instead of a fixed coarse delay, while a long
+    // `cargo` build settles at the cap and never busy-spins.
+    let mut poll_interval = INITIAL_WAIT_POLL_INTERVAL;
     loop {
+        let child = guard
+            .child_mut()
+            .expect("armed guard owns its child until reaped/disarmed");
         match child.try_wait() {
             Ok(Some(_status)) => break,
             Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                let now = Instant::now();
+                if now >= deadline {
+                    // Returning here drops `guard`, whose `Drop` group-kills the
+                    // whole subtree (SIGTERM -> bounded grace -> SIGKILL), so no
+                    // descendant of the timed-out command is orphaned.
                     return Err(SimardError::CommandTimeout {
                         action: argv.join(" "),
-                        timeout_secs: timeout_for_command(argv).as_secs(),
+                        timeout_secs: timeout.as_secs(),
                     });
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                // Never sleep past the deadline, so the timeout stays tight.
+                let remaining = deadline.saturating_duration_since(now);
+                std::thread::sleep(poll_interval.min(remaining));
+                poll_interval = (poll_interval * 2).min(MAX_WAIT_POLL_INTERVAL);
             }
             Err(error) => {
+                // Drop tears down the group defensively on this error path too.
                 return Err(SimardError::ActionExecutionFailed {
                     action: argv.join(" "),
                     reason: format!("failed to poll child process: {error}"),
@@ -91,6 +119,12 @@ fn run_command_inner(
         }
     }
 
+    // The child has exited: its descendants are already reaped/reparented, so
+    // there is no subtree to tear down. Reclaim ownership (suppressing teardown)
+    // and collect output exactly as before.
+    let child = guard
+        .disarm()
+        .expect("armed guard owns its child before disarm");
     let output = child
         .wait_with_output()
         .map_err(|error| SimardError::ActionExecutionFailed {

@@ -16,6 +16,20 @@
 //! bounded extra compute; if it is exhausted with no parseable decision the
 //! phase surfaces an EXPLICIT `Err` + `brain_parse_error` metric — never a
 //! silent deterministic default (issue #2580 operator zero-fallback contract).
+//!
+//! # Why these `recipe-runner-rs` spawns are NOT `GroupChild`-guarded
+//!
+//! Every invocation below uses blocking [`Command::output`], which is
+//! spawn-and-wait **atomic**: there is no in-process early-return window between
+//! spawn and wait for an RAII guard's `Drop` to close, so wrapping them in
+//! `process_group_guard::GroupChild` would add nothing (see the guard's how-to
+//! and the "Adoption candidates (not yet wired)" note in
+//! `docs/reference/process-group-guard-api.md`). Orphans from a **whole-daemon
+//! abort** (OOM/SIGKILL, where no `Drop` can run) are instead covered by the
+//! OS-level reaper in `self_deploy::orphan`. The armed-teardown guard is wired
+//! only at the one manual-spawn-with-timeout site (`engineer_loop::execution`),
+//! where a `?` on timeout is exactly the early-return window `Drop` needs.
+//! Cross-links `rysweet/amplihack-rs#964`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
