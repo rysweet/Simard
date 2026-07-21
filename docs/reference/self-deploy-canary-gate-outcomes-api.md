@@ -152,13 +152,23 @@ spawn error). `endpoint_absent` therefore operates on that real surface:
 fn endpoint_absent(probe: &std::io::Result<std::process::Output>) -> bool {
     /// `sysexits.h` EX_UNAVAILABLE — the service/endpoint is unavailable.
     const EX_UNAVAILABLE: i32 = 69;
-    const ABSENCE_SIGNALS: [&str; 5] = [
-        "connection refused",
-        "no daemon",
-        "could not connect",
-        "connection reset",
-        "no such file or directory",
-    ];
+    /// Unambiguous "no listener" signals — each positively indicates that a
+    /// connection attempt reached no daemon, so it stands on its own.
+    ///
+    /// NOTE (SR-4 hardening): "connection reset" (ECONNRESET) is deliberately
+    /// EXCLUDED. A reset means the peer *was* reachable — it accepted the
+    /// connection and then aborted mid-exchange, the canonical symptom of a
+    /// daemon that is present-but-crashing while servicing the probe. That is
+    /// the reachable-but-unhealthy case the contract says must RED.
+    const CONNECTION_SIGNALS: [&str; 3] = ["connection refused", "no daemon", "could not connect"];
+    /// Ambiguous on its own; only counts as absence alongside a socket marker.
+    const ENOENT: &str = "no such file or directory";
+    /// Markers that scope an ENOENT to a *socket* (endpoint) rather than an
+    /// arbitrary file. Simard's RPC socket is `<state_root>/memory.sock`, so
+    /// only the precise `.sock` suffix qualifies (SR-4): the bare word "socket"
+    /// would misclassify unrelated missing files (e.g. a missing "websocket"
+    /// module/config) as endpoint absence.
+    const SOCKET_MARKERS: [&str; 1] = [".sock"];
 
     let output = match probe {
         Ok(output) => output,
@@ -176,7 +186,12 @@ fn endpoint_absent(probe: &std::io::Result<std::process::Output>) -> bool {
     }
     // Fallback: a bounded, allow-listed absence phrase on (lower-cased) stderr.
     let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
-    ABSENCE_SIGNALS.iter().any(|sig| stderr.contains(sig))
+    if CONNECTION_SIGNALS.iter().any(|sig| stderr.contains(sig)) {
+        return true;
+    }
+    // ENOENT alone is not enough: require a `.sock` marker so a missing socket
+    // (endpoint absent) skips, but a missing file (real failure) fails closed.
+    stderr.contains(ENOENT) && SOCKET_MARKERS.iter().any(|m| stderr.contains(m))
 }
 ```
 
@@ -196,23 +211,41 @@ the gate simply returning a nonzero exit code.
 ### Detection signal (as shipped)
 
 `run_rpc_health_gate` runs `<binary> probe rpc --timeout <n>` and inspects the
-process result through `endpoint_absent`, which recognizes absence via **two**
-fail-closed mechanisms, in preference order:
+process result through `endpoint_absent`.
+
+The `probe rpc` subcommand ships in `src/operator_cli/probe.rs`. It opens the
+canonical reader client (`memory_ipc::open_reader_client` — the daemon socket
+when one is up, else a direct on-disk open, fail-closed on a present-but-
+unconnectable socket) and confirms a `get_statistics()` round-trip. It exits `0`
+when the RPC / cognitive-memory endpoint answers — the normal canary path, so a
+healthy fresh-build candidate **passes** `rpc-health` instead of reddening the
+canary on a subcommand that used to not exist. A non-zero exit is then classified
+by `endpoint_absent` below. (Before this subcommand existed, the gate shelled out
+to a non-existent `probe` command, got `unsupported command 'probe'` on stderr,
+and — since that phrase matches no absence signal — reddened the canary every
+tick; that was the self-deploy false-red root cause.)
+
+`endpoint_absent` recognizes absence via **two** fail-closed mechanisms, in
+preference order:
 
 1. **Dedicated exit code (primary, fail-closed).** A `probe rpc` that positively
-   detects "no daemon listening / connection refused" is expected to exit with the
-   documented `69` (`EX_UNAVAILABLE`) code. `endpoint_absent` matches that single
-   code and nothing else, so a reachable-but-unhealthy probe (which exits with a
-   *different* non-zero code) is never mistaken for absence. If the `probe rpc`
-   subcommand does not yet emit `EX_UNAVAILABLE` on connection-refused, adding it
-   is the recommended follow-up to make absence detection exit-code-driven rather
-   than string-driven.
+   detects "no daemon listening / connection refused" exits with the documented
+   `69` (`EX_UNAVAILABLE`) code. `endpoint_absent` matches that single code and
+   nothing else, so a reachable-but-unhealthy probe (which exits with a
+   *different* non-zero code) is never mistaken for absence. The shipped
+   in-process `probe rpc` reports a healthy exit `0` rather than `69` because its
+   reader open legitimately falls back to a direct store when no daemon is up;
+   the `EX_UNAVAILABLE` path stays wired as fail-closed insurance for a future
+   socket-only transport that signals connection-refused.
 2. **Bounded, allow-listed stderr match (fallback).** When the exit code is not
    `EX_UNAVAILABLE`, `endpoint_absent` matches a fixed, enumerated set of absence
-   phrases (`connection refused`, `no daemon`, `could not connect`,
-   `connection reset`, `no such file or directory`) against a lower-cased stderr.
-   The list is closed: any stderr not on the allow-list ⇒ `false` (fail). This
-   keeps the control fail-closed even before option 1 is wired into `probe rpc`.
+   phrases (`connection refused`, `no daemon`, `could not connect`) against a
+   lower-cased stderr, plus a bare `ENOENT` (`no such file or directory`) **only**
+   when it co-occurs with a `.sock` socket-path marker. `connection reset` is
+   excluded (a reset proves the peer was reachable ⇒ reachable-but-unhealthy ⇒
+   red). The list is closed: any stderr not on the allow-list ⇒ `false` (fail).
+   This keeps the control fail-closed even before option 1 is wired into
+   `probe rpc`.
 
 Either way, the `Err(_)` spawn-error arm is **never** absence — a binary that
 cannot execute is a build defect and must red the canary — and a healthy exit `0`
@@ -409,6 +442,8 @@ These tests are load-bearing; weakening them is a security regression:
 | `gate_result_skip_upholds_skipped_implies_passed_for_all_gates` (`types.rs`) | No `GateResult` with `skipped == true` has `passed == false` (the `skipped ⇒ passed` invariant). |
 | `endpoint_absent_true_for_positively_absent_endpoint` (`gates.rs`) | A recognized connection-refused / no-daemon result (`EX_UNAVAILABLE` or an allow-listed phrase) → `true`. |
 | `endpoint_absent_false_for_reachable_but_unhealthy` (`gates.rs`) | A reachable-but-unhealthy probe → `false`, never `skip()`. |
+| `endpoint_absent_false_for_connection_reset` (`gates.rs`) | `ECONNRESET` (reachable-but-crashing) → `false`, never `skip()` (SR-4). |
+| `endpoint_absent_false_for_enoent_on_non_socket_file_mentioning_socket` (`gates.rs`) | ENOENT on a non-`.sock` file whose name merely contains "socket" → `false`, never `skip()` (SR-4). |
 | `endpoint_absent_false_for_spawn_error` (`gates.rs`) | A probe spawn `Err` (binary could not execute) → `false`, never `skip()`. |
 | `endpoint_absent_false_for_healthy_success` (`gates.rs`) | A healthy exit `0` probe → `false` (it is a pass, not an absence signal). |
 | `rpc_health_gate_spawn_error_fails_closed_not_skipped` (`gates.rs`) | The `RpcHealth` gate on a spawn error → `fail()` (RED), `skipped == false`. |

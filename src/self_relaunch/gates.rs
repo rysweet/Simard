@@ -121,17 +121,22 @@ fn endpoint_absent(probe: &std::io::Result<std::process::Output>) -> bool {
     const EX_UNAVAILABLE: i32 = 69;
     /// Unambiguous "no listener" signals — each positively indicates that a
     /// connection attempt reached no daemon, so it stands on its own.
-    const CONNECTION_SIGNALS: [&str; 4] = [
-        "connection refused",
-        "no daemon",
-        "could not connect",
-        "connection reset",
-    ];
+    ///
+    /// NOTE (SR-4 hardening): "connection reset" (ECONNRESET) is deliberately
+    /// EXCLUDED. A reset means the peer *was* reachable — it accepted the
+    /// connection and then aborted mid-exchange, the canonical symptom of a
+    /// daemon that is present-but-crashing while servicing the probe. That is
+    /// the reachable-but-unhealthy case the contract says must RED, so it must
+    /// never be treated as endpoint absence.
+    const CONNECTION_SIGNALS: [&str; 3] = ["connection refused", "no daemon", "could not connect"];
     /// Ambiguous on its own; only counts as absence alongside a socket marker.
     const ENOENT: &str = "no such file or directory";
     /// Markers that scope an ENOENT to a *socket* (endpoint) rather than an
     /// arbitrary file. Simard's RPC socket is `<state_root>/memory.sock`.
-    const SOCKET_MARKERS: [&str; 2] = [".sock", "socket"];
+    /// Only the precise `.sock` suffix qualifies (SR-4): the bare word
+    /// "socket" would misclassify unrelated missing files (e.g. a missing
+    /// "websocket" module/config) as endpoint absence.
+    const SOCKET_MARKERS: [&str; 1] = [".sock"];
 
     let output = match probe {
         Ok(output) => output,
@@ -358,6 +363,34 @@ mod tests {
             stdout: Vec::new(),
             stderr: stderr.as_bytes().to_vec(),
         })
+    }
+
+    #[test]
+    fn endpoint_absent_false_for_connection_reset() {
+        // SECURITY CONTROL (SR-4): ECONNRESET means the peer WAS reachable and
+        // then aborted the connection mid-exchange — the canonical symptom of a
+        // daemon that is present-but-crashing while servicing the probe. This is
+        // reachable-but-unhealthy and must RED, never be masked as absence.
+        let probe = probe_output(1, "error: connection reset by peer");
+        assert!(
+            !endpoint_absent(&probe),
+            "connection reset (reachable-but-crashing) must fail closed (red), never skip"
+        );
+    }
+
+    #[test]
+    fn endpoint_absent_false_for_enoent_on_non_socket_file_mentioning_socket() {
+        // SECURITY CONTROL (SR-4): a missing file whose name merely contains the
+        // word "socket" (e.g. a websocket module/config) is NOT a Unix-socket
+        // absence. Only the precise `.sock` suffix qualifies, so this must red.
+        let probe = probe_output(
+            1,
+            "error: /etc/simard/websocket_plugin.toml: No such file or directory",
+        );
+        assert!(
+            !endpoint_absent(&probe),
+            "ENOENT on a non-`.sock` file must fail closed (red), never skip"
+        );
     }
 
     #[test]

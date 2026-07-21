@@ -12,6 +12,7 @@ mod meeting;
 mod memory;
 mod merge;
 mod ooda;
+mod probe;
 mod review;
 mod safe_update;
 mod self_deploy;
@@ -137,6 +138,8 @@ Product modes:
   update
   self-test
   self-health            — post-deploy probes (version/memory/board/brains/quarantine)
+  probe rpc [--timeout <seconds>]
+                         — check the RPC/cognitive-memory endpoint answers (self-deploy canary gate)
   ci-health [--json] [--no-cache] [--file-issues] [--exit-zero]
                          — sweep active default-branch CI across the governed fleet (green-SHA cached;
                            --file-issues dedupes tracking issues, --exit-zero for the scheduled sweep)
@@ -251,6 +254,7 @@ where
         "signal" => signal::dispatch_signal_command(args),
         "memory" => memory::dispatch_memory_command(args),
         "status" => status::dispatch_status_command(args),
+        "probe" => probe::dispatch_probe_command(args),
         "spawn" => dispatch_spawn_command(args),
         "merge-pr" => merge::dispatch_merge_pr_command(args),
         "worktree-gc" => worktree_gc::dispatch_worktree_gc_command(args),

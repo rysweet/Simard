@@ -130,20 +130,24 @@ safety core:
 
 - **Absent endpoint** (connection refused, no daemon listening) → `skip()` →
   non-failing.
-- **Reachable but unhealthy** (endpoint answered, health check failed) →
-  `fail()` → **red canary**. A genuine RPC regression is never skipped.
+- **Reachable but unhealthy** (endpoint answered, health check failed —
+  including a `connection reset` / `ECONNRESET`, where the peer accepted the
+  connection and then aborted mid-exchange) → `fail()` → **red canary**. A
+  genuine RPC regression is never skipped.
 - **Unknown / indeterminate outcome, or spawn error** → `false` → `fail()`. The
   canary fails closed; it is never blinded by a result the predicate does not
   positively recognize as absence.
 
 The positive signals are: the dedicated `EX_UNAVAILABLE` (69) exit code, an
 unambiguous connection phrase (`connection refused`, `no daemon`,
-`could not connect`, `connection reset`), or a bare `ENOENT`
-("no such file or directory") **only when it co-occurs with a socket-path
-marker** (`.sock` / `socket`). ENOENT alone is deliberately *not* an absence
-signal: it also fires for an unrelated missing config/dependency file, which is a
-genuine failure, so requiring a socket marker keeps a missing *socket* skippable
-while a missing *file* still reds the canary.
+`could not connect`), or a bare `ENOENT` ("no such file or directory") **only
+when it co-occurs with a `.sock` socket-path marker**. ENOENT alone is
+deliberately *not* an absence signal: it also fires for an unrelated missing
+config/dependency file, which is a genuine failure, so requiring the precise
+`.sock` marker keeps a missing *socket* skippable while a missing *file* still
+reds the canary. `connection reset` (ECONNRESET) is deliberately **excluded**
+from the absence phrases (SR-4): a reset proves the peer was reachable, so it is
+treated as reachable-but-unhealthy and reds the canary.
 
 Only `rpc-health` consults `endpoint_absent` today: its `probe rpc` subcommand is
 the one gate that requires a live daemon. `gym-baseline` currently runs
