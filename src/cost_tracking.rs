@@ -8,7 +8,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A single cost entry written to the ledger.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -120,13 +120,29 @@ pub fn record_cost(
 }
 
 fn write_entry(entry: &CostEntry) -> std::io::Result<()> {
-    let path = ledger_path();
+    write_entry_to(&ledger_path(), entry)
+}
+
+/// Append one cost entry to `path` as a single JSON line.
+///
+/// The whole line (payload + trailing `\n`) is serialised first and issued in
+/// ONE `write_all`, so under `O_APPEND` the kernel appends it atomically and
+/// concurrent appenders (the many threads sharing the single `cargo test --lib`
+/// process) can never interleave a torn, unparseable line. The previous
+/// `writeln!(file, ...)` routed through `Write::write_fmt`, which can emit the
+/// payload and the trailing newline as separate `write(2)` calls, letting two
+/// meeting turns tear each other's ledger line — the cost-ledger append race
+/// behind the shared `pre-commit` flake (see
+/// `docs/testing/deflaking-cost-ledger-append-race.md`).
+fn write_entry_to(path: &Path, entry: &CostEntry) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
-    let line = serde_json::to_string(entry).map_err(|e| std::io::Error::other(e.to_string()))?;
-    writeln!(file, "{}", line)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut line =
+        serde_json::to_string(entry).map_err(|e| std::io::Error::other(e.to_string()))?;
+    line.push('\n');
+    file.write_all(line.as_bytes())?;
     Ok(())
 }
 
@@ -258,6 +274,98 @@ mod tests {
         assert!((summary.total_cost_usd - 1.5).abs() < 1e-12);
         assert_eq!(summary.entry_count, 2);
         assert_eq!(summary.period, "test-period");
+    }
+
+    /// Regression for the cost-ledger append race behind the shared `pre-commit`
+    /// flake across 8 PRs and the `verify` flap (main HEAD `ff94362f`).
+    ///
+    /// The ledger is opened `O_APPEND` and every meeting/engineer turn appends a
+    /// JSON line concurrently (the lib test binary runs tests in one process,
+    /// many threads). `writeln!(file, "{line}")` is NOT a single `write(2)`: the
+    /// `Write::write_fmt` path can emit the payload and the trailing `\n` (and
+    /// large payloads) as separate syscalls, so two concurrent appenders can
+    /// interleave and produce a torn line that fails `serde_json::from_str` —
+    /// which is exactly why the target meeting test intermittently could not
+    /// find its `copilot-meeting` entry.
+    ///
+    /// The fix is a private `write_entry_to(path, entry)` that serialises the
+    /// entry to a `String`, appends the newline, and issues a SINGLE
+    /// `file.write_all(...)` (one `write(2)` for a sub-`PIPE_BUF`/regular-file
+    /// append, which the kernel appends atomically under `O_APPEND`).
+    /// `write_entry` delegates to it against the real `ledger_path()`; this test
+    /// drives it against an isolated temp path (no `HOME` mutation, so no
+    /// `cognitive_memory` serial key is required).
+    ///
+    /// Contract: after `THREADS * PER_THREAD` concurrent appends, EVERY non-empty
+    /// line must parse as a `CostEntry` and the count must equal the number of
+    /// writes — no interleaved/torn lines, no lost writes. FAILS on the current
+    /// `writeln!` implementation (and fails to compile until `write_entry_to`
+    /// exists); PASSES once the atomic single-`write_all` helper lands.
+    #[test]
+    fn concurrent_appends_are_atomic_and_never_tear_a_line() {
+        use std::sync::{Arc, Barrier};
+
+        const THREADS: usize = 16;
+        const PER_THREAD: usize = 64;
+
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-cost-tracking");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("concurrent-append-atomicity.jsonl");
+        // Start from a clean slate so the count assertion is exact.
+        fs::remove_file(&path).ok();
+
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let shared_path = Arc::new(path.clone());
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|t| {
+                let barrier = Arc::clone(&barrier);
+                let path = Arc::clone(&shared_path);
+                std::thread::spawn(move || {
+                    // Release all writers simultaneously to maximise contention.
+                    barrier.wait();
+                    for i in 0..PER_THREAD {
+                        let entry = CostEntry {
+                            timestamp: Utc::now(),
+                            session_id: format!("sess-{t:02}-{i:03}"),
+                            model: "copilot-meeting".to_string(),
+                            prompt_tokens_est: (t * 1000 + i) as u64,
+                            completion_tokens_est: i as u64,
+                            cost_usd_est: 0.0001 * i as f64,
+                            context: format!(
+                                "concurrent append writer thread {t} entry {i} \
+                                 padding-to-exercise-multi-syscall-writes"
+                            ),
+                        };
+                        write_entry_to(&path, &entry).expect("append must succeed");
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("writer thread must not panic");
+        }
+
+        let contents = fs::read_to_string(&path).unwrap();
+        let mut parsed = 0usize;
+        for line in contents.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            serde_json::from_str::<CostEntry>(line).unwrap_or_else(|e| {
+                panic!("torn/interleaved ledger line ({e}): {line:?}");
+            });
+            parsed += 1;
+        }
+        assert_eq!(
+            parsed,
+            THREADS * PER_THREAD,
+            "every concurrent append must yield exactly one intact, parseable line"
+        );
+
+        fs::remove_file(&path).ok();
     }
 
     #[test]

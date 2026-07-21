@@ -163,6 +163,11 @@ fn parity_decide_caps_at_max_concurrent_actions() {
         .collect();
     let config = OodaConfig {
         max_concurrent_actions: 2,
+        // `scaler: None` keeps the cap explicit: `OodaConfig::default()` reads
+        // `SIMARD_SCALING`, so on a host with `SIMARD_SCALING=auto` the default
+        // scaler would override `max_concurrent_actions=2` and break the
+        // `len() == 2` parity assertion below (issue #2732).
+        scaler: None,
         ..Default::default()
     };
 

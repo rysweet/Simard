@@ -189,6 +189,13 @@ pub(crate) enum Reason {
     /// meeting-persistence resolver (`write_auto_save` / `write_transcript` /
     /// `write_meeting_bundle`).
     CallsEnvReadingHandler { handler: String },
+    /// Calls `cost_tracking::record_cost`, which resolves `$HOME` via
+    /// `ledger_path()` and appends to the process-global cost ledger. A
+    /// concurrent `HOME` mutation can tear that read (and redirect the append
+    /// into another test's temp ledger), so a `record_cost` writer must share
+    /// the `cognitive_memory` serial key. This is the sibling-meeting-test blind
+    /// spot behind the shared `pre-commit` flake.
+    WritesCostLedger,
     /// An allowlist entry was added without a justification.
     EmptyAllowlistJustification,
 }
@@ -212,6 +219,10 @@ impl Reason {
                     "calls env-reading handler `{handler}` (resolves the state-root / meetings surface)"
                 )
             }
+            Reason::WritesCostLedger => {
+                "calls cost_tracking::record_cost (reads $HOME via ledger_path() and appends the process-global cost ledger)"
+                    .to_string()
+            }
             Reason::EmptyAllowlistJustification => {
                 "allowlist entry has no justification".to_string()
             }
@@ -225,6 +236,7 @@ impl Reason {
             Reason::EmptyAllowlistJustification => 0,
             Reason::MutatesEnv { .. } => 1,
             Reason::ConstructsHermeticState => 2,
+            Reason::WritesCostLedger => 2,
             Reason::CallsEnvReadingHandler { .. } => 3,
             Reason::ReadsStateRootDefault => 4,
         }
@@ -232,14 +244,14 @@ impl Reason {
 
     /// Whether this reason is an env *mutation* (a race *cause*). Only mutation
     /// reasons propagate along the call graph: a test that reaches a `set_var`
-    /// / `HermeticState` through a same-file helper is a writer and must be
-    /// serialized. Reads (a race *victim*) are flagged only when they appear
-    /// *directly* in the test body, never propagated through branchy production
-    /// dispatchers (which read state root only in untaken code paths).
+    /// / `HermeticState` / `record_cost` through a same-file helper is a writer
+    /// and must be serialized. Reads (a race *victim*) are flagged only when
+    /// they appear *directly* in the test body, never propagated through branchy
+    /// production dispatchers (which read state root only in untaken code paths).
     fn is_mutation(&self) -> bool {
         matches!(
             self,
-            Reason::MutatesEnv { .. } | Reason::ConstructsHermeticState
+            Reason::MutatesEnv { .. } | Reason::ConstructsHermeticState | Reason::WritesCostLedger
         )
     }
 }
@@ -541,6 +553,23 @@ impl<'a, 'ast> Visit<'ast> for BodyScan<'a> {
                 && READ_WATCHED_VARS.contains(&var.as_str())
             {
                 self.reasons.push(Reason::ReadsStateRootDefault);
+            }
+
+            // (E) cost-ledger writer: `cost_tracking::record_cost` resolves $HOME
+            // via ledger_path() and appends the process-global cost ledger. A
+            // concurrent HOME mutation can tear that read (and redirect the
+            // append into another test's temp ledger), so record_cost writers —
+            // directly or through a same-file helper — must carry the
+            // cognitive_memory key. This closes the sibling-meeting-test blind
+            // spot behind the shared pre-commit flake.
+            // `segs.len() == 1` deliberately over-approximates: it flags ANY
+            // bare `record_cost(...)` call (not just `cost_tracking::record_cost`)
+            // so that same-file helper wrappers propagate the key. This can catch
+            // an unrelated local named `record_cost`, but that false positive is
+            // acceptable — do NOT "tighten" this to an exact path match, or the
+            // helper-propagation guard (and its self-test) will regress.
+            if last == "record_cost" && (penult == "cost_tracking" || segs.len() == 1) {
+                self.reasons.push(Reason::WritesCostLedger);
             }
 
             // (D) env-reading async goal route handlers and meeting-persistence
@@ -846,5 +875,88 @@ fn skip_guard_helper_mutation_requires_the_key() {
     assert!(
         !flagged.contains("skip_guard_with_key"),
         "a SkipGuard writer sharing the cognitive_memory key must be accepted: {flagged:?}"
+    );
+}
+
+/// Regression guard for the cost-ledger `$HOME`-derived-writer blind spot that
+/// produced the shared `pre-commit` flake across 8 PRs and the `verify` flap
+/// (main HEAD `ff94362f`).
+///
+/// `cost_tracking::record_cost` resolves `$HOME` via `ledger_path()` and appends
+/// to `$HOME/.simard/costs/ledger.jsonl`. The regression test
+/// `meeting_turn_records_full_enriched_prompt_tokens_not_bare_objective`
+/// serialises its `HOME` mutation under `cognitive_memory`, but its sibling
+/// meeting tests (`meeting_turn_captures_copilot_output_and_records_meeting_dispatch`
+/// and friends) reach `record_cost` through the `run_fake_meeting_turn` helper
+/// WITHOUT the key. Running concurrently with the keyed test, those siblings
+/// (a) read `HOME` mid-`setenv` (the environ-realloc tear class) and (b) append
+/// their own `copilot-meeting` entries into the target's temp ledger, so the
+/// target's lookup intermittently failed to find its entry — the observed flake.
+///
+/// This self-test pins the recognizer extension (design fix #4): any lib-binary
+/// `#[test]` that *reaches* `record_cost` — directly or through a same-file
+/// helper — must carry the `cognitive_memory` serial key so its `HOME`
+/// read/write is never concurrent with the keyed test's `HOME` mutation. It
+/// FAILS on today's scanner (no `record_cost` recognizer) and PASSES once the
+/// recognizer + its call-graph propagation are added.
+///
+/// Reads in-memory source fixtures only; it mutates no env, so it carries no
+/// serial key (and the production meta-test does not flag it).
+#[test]
+fn record_cost_writer_requires_the_key() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("fixture.rs"),
+        // A same-file helper that reaches record_cost, plus three tests:
+        //   - direct writer without the key   -> must be flagged
+        //   - writer via the helper w/o key   -> must be flagged (propagation)
+        //   - writer with the key             -> must be accepted
+        "fn writes_cost() {\n\
+         crate::cost_tracking::record_cost(\"s\", \"m\", 1, 1, \"c\").unwrap();\n\
+         }\n\
+         #[test]\n\
+         #[serial]\n\
+         fn direct_cost_writer_without_key() {\n\
+         let _ = crate::cost_tracking::record_cost(\"s\", \"m\", 1, 1, \"c\");\n\
+         }\n\
+         #[test]\n\
+         #[serial]\n\
+         fn helper_cost_writer_without_key() {\n\
+         writes_cost();\n\
+         }\n\
+         #[test]\n\
+         #[serial_test::serial(cognitive_memory)]\n\
+         fn cost_writer_with_key() {\n\
+         let _ = crate::cost_tracking::record_cost(\"s\", \"m\", 1, 1, \"c\");\n\
+         }\n",
+    )
+    .unwrap();
+
+    let opts = AuditOptions {
+        roots: vec![dir.path().to_path_buf()],
+        excluded_prefixes: Vec::new(),
+        watched: EnvWatch::AnyVar,
+        allowlist: Vec::new(),
+    };
+    let flagged: BTreeSet<String> = audit_env_mutating_tests(&opts)
+        .into_iter()
+        .map(|o| o.test_name)
+        .collect();
+
+    assert!(
+        flagged.contains("direct_cost_writer_without_key"),
+        "a test calling cost_tracking::record_cost without the cognitive_memory \
+         key must be flagged (it reads/writes the $HOME-derived cost ledger): {flagged:?}"
+    );
+    assert!(
+        flagged.contains("helper_cost_writer_without_key"),
+        "a test reaching record_cost through a same-file helper without the key \
+         must be flagged (the record_cost reason must propagate along the call \
+         graph, like the sibling meeting tests reaching it via \
+         run_fake_meeting_turn): {flagged:?}"
+    );
+    assert!(
+        !flagged.contains("cost_writer_with_key"),
+        "a record_cost writer sharing the cognitive_memory key must be accepted: {flagged:?}"
     );
 }
