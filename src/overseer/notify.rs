@@ -152,6 +152,17 @@ impl OperatorNotification {
                 next = next,
             );
         }
+        // A REFUSED/failed self-deploy attempt (#2590) is NOT "solved" work — it
+        // is an operator-visible notice that a guarded deploy did not proceed
+        // (gate refusal or a failed swap). Render an accurate heading rather than
+        // the merge/deploy "Problem solved:" template.
+        if self.kind == "deploy-refused" {
+            return format!(
+                "Notice — the Overseer refused/aborted a self-deploy in {repo}.\n\nWhat happened:\n  {problem}\n",
+                repo = self.repo,
+                problem = self.problem,
+            );
+        }
         let who = if self.autonomous {
             "The Overseer autonomously"
         } else {
@@ -179,6 +190,26 @@ impl OperatorNotification {
             kind: "deploy",
             headline: format!("deployed {}", short_commit(commit)),
             problem: format!("Deployed {commit} (previous {previous}); {gate_summary}"),
+            next_step: String::new(),
+            link: None,
+            repo: repo.to_string(),
+            autonomous: true,
+        }
+    }
+
+    /// Build a REFUSED/failed self-deploy notification (#2590). The guarded
+    /// deployer fires this on EVERY deploy attempt that does not swap — a gate
+    /// refusal (no-op / rollback / red-canary / crash-loop) or a failed binary
+    /// swap — so the operator is never blind to an aborted autonomous deploy.
+    /// `target` is the merged head the deploy aimed at; `running` is the current
+    /// binary's commit; `reason` is the refusal/failure detail.
+    pub fn deploy_refused(target: &str, running: &str, repo: &str, reason: &str) -> Self {
+        Self {
+            kind: "deploy-refused",
+            headline: format!("self-deploy refused ({})", short_commit(target)),
+            problem: format!(
+                "Refused/aborted self-deploy of {target} (running {running}): {reason}"
+            ),
             next_step: String::new(),
             link: None,
             repo: repo.to_string(),

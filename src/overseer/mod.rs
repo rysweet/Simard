@@ -52,6 +52,7 @@ pub mod claim_reaper;
 pub mod config;
 pub mod conflict;
 pub mod deploy;
+pub mod deploy_trigger;
 pub mod diagnosis;
 pub mod ecosystem_observe;
 pub mod failure_sink;
@@ -72,6 +73,8 @@ pub mod tuning;
 pub mod whisper_ops;
 pub mod wiring;
 
+#[cfg(test)]
+mod tests_deploy_drift;
 #[cfg(test)]
 mod tests_diagnosis;
 #[cfg(test)]
@@ -329,6 +332,13 @@ pub struct Overseer {
     health_review_every_n: u64,
     /// Monotonic tick counter driving the health-review every-N cadence.
     health_review_tick: u64,
+    /// The autonomous self-deploy drift sensor (issue #2590). `None` in the bare
+    /// constructor and in tests that do not exercise the rail; `build_overseer`
+    /// wires the production [`deploy_trigger::GitDeployDriftObserver`]. When
+    /// present AND autonomous deploy is enabled AND the process-global throttle
+    /// admits this tick, `run_cycle` observes drift (fail-safe) and surfaces a
+    /// `Signal::DeployDriftDetected` so Decide can emit a guarded deploy.
+    deploy_drift_observer: Option<Box<dyn deploy_trigger::DeployDriftObserver>>,
 }
 
 /// The reaper's injected dependencies, bundled so the `Overseer` carries one
@@ -482,6 +492,7 @@ impl Overseer {
             health_review_enabled: false,
             health_review_every_n: 1,
             health_review_tick: 0,
+            deploy_drift_observer: None,
         }
     }
 
@@ -658,6 +669,73 @@ impl Overseer {
         self
     }
 
+    /// Wire the autonomous self-deploy drift sensor (issue #2590). `build_overseer`
+    /// injects the production [`deploy_trigger::GitDeployDriftObserver`]; tests
+    /// inject a fake so the OBSERVE→DECIDE→ACT rail can be exercised without a
+    /// live git checkout. Absent by default (the rail is inert, exactly as before
+    /// the wiring).
+    pub fn with_deploy_drift_observer(
+        mut self,
+        observer: Box<dyn deploy_trigger::DeployDriftObserver>,
+    ) -> Self {
+        self.deploy_drift_observer = Some(observer);
+        self
+    }
+
+    /// OBSERVE the autonomous self-deploy drift signal (issue #2590), enriching
+    /// `observed.deploy_drift` when the running binary is behind merged `main`.
+    ///
+    /// This is the thin deterministic OBSERVE rail that connects the already-built
+    /// drift detector to the already-built guarded deployer. It is layered with
+    /// four fail-closed guards, in order:
+    ///
+    ///   1. The documented opt-OUT env (`SIMARD_OVERSEER_AUTONOMOUS_DEPLOY=0`)
+    ///      lets an operator PIN the daemon.
+    ///   2. The rail is inert unless a [`DeployDriftObserver`] is wired.
+    ///   3. The PROCESS-GLOBAL anti-thrash throttle admits at most one deploy
+    ///      attempt per min-interval — essential because the daemon rebuilds this
+    ///      `Overseer` every tick, so a drift re-observed each tick (until the
+    ///      swap lands, or forever if the gate keeps refusing) can never redeploy
+    ///      or re-notify every cycle.
+    ///   4. A LIVE crash-loop guard: never deploy into a restart storm. Reuses the
+    ///      observed restart churn and the SAME threshold the deploy gate uses.
+    ///
+    /// Fail-SAFE throughout: the observer maps any git/source error to "no drift",
+    /// so an error surfaces no signal (never a panic, never a blind deploy).
+    ///
+    /// [`DeployDriftObserver`]: deploy_trigger::DeployDriftObserver
+    fn observe_deploy_drift(&mut self, observed: &mut ObservedState) {
+        // 1) Operator opt-out pins the daemon.
+        if !deploy_trigger::autonomous_deploy_enabled() {
+            return;
+        }
+        // 2) Inert until the sensor is wired.
+        let Some(observer) = self.deploy_drift_observer.as_ref() else {
+            return;
+        };
+        // 3) Anti-thrash: at most one probe+attempt per min-interval, process
+        //    -global so the per-tick-rebuilt Overseer cannot reset it.
+        let now = deploy_trigger::now_epoch_secs();
+        if !deploy_trigger::global_deploy_throttle_allow(
+            now,
+            deploy_trigger::deploy_min_interval_secs(),
+        ) {
+            return;
+        }
+        // 4) LIVE crash-loop guard: deploying into an unstable, churning process
+        //    makes it worse (Bainbridge's irony). Skip when restart churn is at or
+        //    above the deploy gate's crash-loop threshold.
+        if let Some(churn) = observed.restart_churn
+            && churn >= deploy::CRASH_LOOP_CHURN_THRESHOLD
+        {
+            return;
+        }
+        // Fail-safe drift probe: `None` on current / unresolved / any git error.
+        if let Some(drift) = observer.observe() {
+            observed.deploy_drift = Some(drift);
+        }
+    }
+
     /// Run one meta-OODA turn. Observe → Orient → Decide → plan+gate. Does NOT
     /// execute side effects; returns the plan for M2+ Act to run.
     pub fn run_cycle(&mut self) -> Result<CycleReport, OverseerError> {
@@ -743,6 +821,14 @@ impl Overseer {
         // `observed_from_snapshot` projection) keeps that projection side-effect
         // free; the sink is bounded so this is O(capacity).
         observed.recent_step_failures = failure_sink::drain_recent();
+
+        // Autonomous self-deploy OBSERVE rail (issue #2590): when the running
+        // binary is behind merged `main`, enrich `observed.deploy_drift` so
+        // `signals_from` raises a `Signal::DeployDriftDetected` that Decide maps
+        // to a guarded `Intervention::Deploy`. Opt-out, anti-thrash-throttled,
+        // crash-loop-guarded, and fail-safe (see `observe_deploy_drift`); inert
+        // until `build_overseer` wires the production drift sensor.
+        self.observe_deploy_drift(&mut observed);
 
         // Cognitive-memory recall (#2628) — the USE step. Key off the pre-recall
         // signals/problems (never a full-graph scan), then run ONE whole-pass,
@@ -2524,6 +2610,18 @@ fn classify_signal(s: &Signal) -> (ProblemKind, Priority, String, String) {
             format!("workstream:issue:{repo}#{issue}"),
             format!("issue {repo}#{issue} ready with no workstream — next: {next_action}"),
         ),
+        // The running binary is behind merged main (#2590): a HIGH-priority
+        // self-deploy problem. Dedup key is constant so a persisting drift
+        // (observed every tick until deployed) folds into a single problem.
+        Signal::DeployDriftDetected { behind_commits, .. } => (
+            ProblemKind::DeployDrift,
+            Priority::High,
+            "deploy:drift".to_string(),
+            format!(
+                "running binary is {behind_commits} commit(s) behind merged main — \
+                 self-deploy required"
+            ),
+        ),
     }
 }
 
@@ -2866,6 +2964,28 @@ pub fn decide(problem: &Problem) -> Intervention {
                 },
             }
         }
+        // Autonomous self-deploy rail (#2590): a deploy-drift problem yields a
+        // guarded Deploy to the merged head. This is the DETERMINISTIC trigger
+        // only — the go/no-go SAFETY judgment stays in the guarded executor
+        // (`evaluate_deploy_gate` refuses no-op / rollback / red-canary /
+        // crash-loop) and the high-risk AutonomyGate. Fail-CLOSED: with no
+        // resolved target commit in evidence it ESCALATES rather than deploying
+        // blind.
+        ProblemKind::DeployDrift => {
+            match problem.evidence.iter().find_map(|s| match s {
+                Signal::DeployDriftDetected { target_commit, .. } => Some(target_commit.clone()),
+                _ => None,
+            }) {
+                Some(commit) if !commit.trim().is_empty() => Intervention::Deploy { commit },
+                _ => Intervention::Escalate {
+                    reason: format!(
+                        "deploy drift detected but no target commit was resolved — escalating \
+                         rather than deploying blind ({})",
+                        problem.summary
+                    ),
+                },
+            }
+        }
     }
 }
 
@@ -3074,6 +3194,136 @@ mod tests {
             auditor: Box::new(FakeAuditor),
             memory: Box::new(capabilities::InertMemoryRecall),
         }
+    }
+
+    /// A fake drift sensor for the OBSERVE-rail tests: returns a fixed
+    /// observation (or `None`) so `run_cycle`'s drift wiring can be exercised
+    /// without a live git checkout.
+    struct FakeDriftObserver(Option<capabilities::DeployDriftObservation>);
+    impl deploy_trigger::DeployDriftObserver for FakeDriftObserver {
+        fn observe(&self) -> Option<capabilities::DeployDriftObservation> {
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn observe_rail_behind_main_emits_deploy_signal_and_admitted_plan() {
+        // A wired daemon whose running binary is behind merged main OBSERVEs the
+        // drift, raises `DeployDriftDetected`, and (high-risk autonomy on) plans
+        // an ADMITTED guarded Deploy to the merged head — no operator command.
+        let _guard = deploy_trigger::deploy_throttle_test_guard();
+        deploy_trigger::reset_global_deploy_throttle();
+        let mut ov = Overseer::new(caps(ObservedState::default(), false, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_deploy_drift_observer(Box::new(FakeDriftObserver(Some(
+                capabilities::DeployDriftObservation {
+                    target_commit: "mergedHEADabc".to_string(),
+                    behind_commits: 3,
+                },
+            ))));
+        let report = ov.run_cycle().expect("cycle");
+
+        assert!(
+            report.signals.iter().any(|s| matches!(
+                s,
+                Signal::DeployDriftDetected { target_commit, behind_commits }
+                    if target_commit == "mergedHEADabc" && *behind_commits == 3
+            )),
+            "the observe rail must raise DeployDriftDetected"
+        );
+        let deploy = report
+            .plan
+            .iter()
+            .find(|p| p.intervention.label() == "deploy")
+            .expect("a Deploy intervention is planned");
+        assert!(deploy.admitted, "high-risk autonomy admits the deploy");
+        assert!(
+            matches!(&deploy.intervention, Intervention::Deploy { commit } if commit == "mergedHEADabc"),
+            "Deploy targets the merged head"
+        );
+        deploy_trigger::reset_global_deploy_throttle();
+    }
+
+    #[test]
+    fn observe_rail_suppresses_deploy_during_a_crash_loop() {
+        // Live crash-loop guard (#2590): never deploy into a restart storm, even
+        // with drift present. Reuses the observed restart churn + the deploy
+        // gate's threshold.
+        let _guard = deploy_trigger::deploy_throttle_test_guard();
+        deploy_trigger::reset_global_deploy_throttle();
+        let churny = ObservedState {
+            restart_churn: Some(deploy::CRASH_LOOP_CHURN_THRESHOLD),
+            ..ObservedState::default()
+        };
+        let mut ov = Overseer::new(caps(churny, false, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_deploy_drift_observer(Box::new(FakeDriftObserver(Some(
+                capabilities::DeployDriftObservation {
+                    target_commit: "mergedHEADabc".to_string(),
+                    behind_commits: 1,
+                },
+            ))));
+        let report = ov.run_cycle().expect("cycle");
+        assert!(
+            !report
+                .signals
+                .iter()
+                .any(|s| matches!(s, Signal::DeployDriftDetected { .. })),
+            "a crash-loop must suppress the deploy signal"
+        );
+        deploy_trigger::reset_global_deploy_throttle();
+    }
+
+    #[test]
+    fn observe_rail_anti_thrash_second_tick_within_window_does_not_re_emit() {
+        // The process-global throttle admits at most one deploy attempt per
+        // min-interval, so a drift re-observed on the very next tick (the daemon
+        // rebuilds the Overseer each tick) does not re-emit a deploy signal.
+        let _guard = deploy_trigger::deploy_throttle_test_guard();
+        deploy_trigger::reset_global_deploy_throttle();
+        let obs = || capabilities::DeployDriftObservation {
+            target_commit: "mergedHEADabc".to_string(),
+            behind_commits: 1,
+        };
+        let mut first = Overseer::new(caps(ObservedState::default(), false, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_deploy_drift_observer(Box::new(FakeDriftObserver(Some(obs()))));
+        let r1 = first.run_cycle().expect("cycle 1");
+        assert!(
+            r1.signals
+                .iter()
+                .any(|s| matches!(s, Signal::DeployDriftDetected { .. })),
+            "first tick emits the drift signal"
+        );
+        // A fresh Overseer (as the daemon rebuilds each tick) re-observes the
+        // same drift, but the process-global throttle is still inside its window.
+        let mut second = Overseer::new(caps(ObservedState::default(), false, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_deploy_drift_observer(Box::new(FakeDriftObserver(Some(obs()))));
+        let r2 = second.run_cycle().expect("cycle 2");
+        assert!(
+            !r2.signals
+                .iter()
+                .any(|s| matches!(s, Signal::DeployDriftDetected { .. })),
+            "second tick within the min-interval must not re-emit a deploy"
+        );
+        deploy_trigger::reset_global_deploy_throttle();
+    }
+
+    #[test]
+    fn observe_rail_is_inert_without_a_wired_observer() {
+        // No sensor wired ⇒ the rail never touches the throttle and never emits a
+        // deploy signal (the pre-wiring behaviour is exactly preserved).
+        let mut ov = Overseer::new(caps(ObservedState::default(), false, vec![]))
+            .with_high_risk_autonomy(true);
+        let report = ov.run_cycle().expect("cycle");
+        assert!(
+            !report
+                .signals
+                .iter()
+                .any(|s| matches!(s, Signal::DeployDriftDetected { .. })),
+            "an unwired rail emits no deploy signal"
+        );
     }
 
     #[test]

@@ -17,9 +17,12 @@
 //! - The **deploy gate** ([`evaluate_deploy_gate`]) refuses a no-op deploy
 //!   (target == running), a **rollback** (target is an ancestor of running), a
 //!   **red canary** (gates failed), and a **crash-loop** (elevated restart
-//!   churn). A refused deploy escalates — it does not mutate the binary.
-//! - Every deploy fires [`NotifyOperator`](crate::overseer::notify) on both
-//!   channels.
+//!   churn). A refused deploy notifies the operator and surfaces an error — it
+//!   does not mutate the binary.
+//! - Every deploy ATTEMPT fires [`NotifyOperator`](crate::overseer::notify) on
+//!   both channels: a completed deploy sends a `deploy` notice; a gate refusal
+//!   or a failed binary swap sends a `deploy-refused` notice (#2590), so the
+//!   operator is never blind to an aborted autonomous deploy.
 //! - The deployer never touches `~/.simard/worktrees`: it operates only on the
 //!   canary target dir and the install path.
 
@@ -224,13 +227,40 @@ impl Deployer for GuardedDeployer {
             canary_passed: canary.passed,
             recent_restart_churn: self.recent_restart_churn,
         };
-        evaluate_deploy_gate(&ctx).map_err(|refusal| OverseerError::Capability {
-            what: "deploy_gate",
-            detail: refusal.to_string(),
-        })?;
+        // Safety rail (#2590): notify the operator on EVERY deploy attempt,
+        // including a gate REFUSAL — a refused deploy still leaves merged work
+        // undeployed, which the operator must see. The notification is
+        // best-effort here (a refusal already surfaces as an Err); the mandatory
+        // dispatch assertion below guards the swap path.
+        if let Err(refusal) = evaluate_deploy_gate(&ctx) {
+            let notification = OperatorNotification::deploy_refused(
+                commit,
+                &running,
+                &self.repo,
+                &refusal.to_string(),
+            );
+            let _ = self.notifier.notify(&notification);
+            return Err(OverseerError::Capability {
+                what: "deploy_gate",
+                detail: refusal.to_string(),
+            });
+        }
 
-        // Gate passed — perform the binary swap.
-        let deployed = self.deployer.deploy_binary(commit)?;
+        // Gate passed — perform the binary swap. A failed swap is also an
+        // operator-visible deploy attempt: notify before surfacing the error.
+        let deployed = match self.deployer.deploy_binary(commit) {
+            Ok(deployed) => deployed,
+            Err(e) => {
+                let notification = OperatorNotification::deploy_refused(
+                    commit,
+                    &running,
+                    &self.repo,
+                    &format!("binary swap failed: {e}"),
+                );
+                let _ = self.notifier.notify(&notification);
+                return Err(e);
+            }
+        };
 
         // Mandatory: notify the operator on both channels.
         let notification = OperatorNotification::deploy(
@@ -258,6 +288,109 @@ impl Deployer for GuardedDeployer {
 
 fn pass_word(passed: bool) -> &'static str {
     if passed { "green" } else { "red" }
+}
+
+// ─────────────────────────── production seams (#2590) ──────────────────────
+
+/// Production [`CanaryRunner`]: build the candidate from merged source and run
+/// the full relaunch gate sequence (Smoke → UnitTest → GymBaseline → RpcHealth)
+/// via `self_relaunch::{build_canary, verify_canary, all_gates_passed}` — the
+/// SAME canary the operator relaunch path uses. A build or verify FAILURE is a
+/// RED canary (`passed: false`), NOT a hard error, so the deploy gate refuses it
+/// (`RedCanary`) and nothing is swapped — fail-closed: an unverifiable candidate
+/// never ships.
+pub struct ProdCanaryRunner;
+
+impl CanaryRunner for ProdCanaryRunner {
+    fn run_canary(&self, _target_commit: &str) -> Result<CanaryResult, OverseerError> {
+        use crate::self_relaunch::{
+            RelaunchConfig, all_gates_passed, build_canary, default_gates, verify_canary,
+        };
+        let config = RelaunchConfig::default();
+        let candidate = match build_canary(&config) {
+            Ok(path) => path,
+            Err(e) => {
+                return Ok(CanaryResult {
+                    passed: false,
+                    detail: format!("canary build failed: {e}"),
+                });
+            }
+        };
+        let gates = default_gates();
+        let results = match verify_canary(&candidate, &gates, &config) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CanaryResult {
+                    passed: false,
+                    detail: format!("canary verify failed: {e}"),
+                });
+            }
+        };
+        let passed = all_gates_passed(&results);
+        let ok = results.iter().filter(|r| r.passed).count();
+        Ok(CanaryResult {
+            passed,
+            detail: format!("{ok}/{} gates", results.len()),
+        })
+    }
+}
+
+/// Production [`BinaryDeployer`]: the ACTUAL swap runs through
+/// [`SelfDeployOrchestrator`](crate::self_deploy::SelfDeployOrchestrator) — the
+/// EXACT build-from-source → gate → dual backup → drain → orphan-reap → atomic
+/// swap → restart → health-check → rollback path `simard self-deploy` uses.
+/// Reusing it verbatim keeps the autonomous deploy's swap/rollback/reap
+/// byte-for-byte identical to the operator path (no second, divergent deploy
+/// engine). A failed run surfaces as an error; on a restart/health failure the
+/// orchestrator has ALREADY rolled back to the preserved prior binary.
+pub struct OrchestratedBinaryDeployer;
+
+impl BinaryDeployer for OrchestratedBinaryDeployer {
+    fn deploy_binary(&self, target_commit: &str) -> Result<String, OverseerError> {
+        use crate::self_deploy::{
+            GitSourcePreparer, SelfDeployOrchestrator, SystemdOrExecRestarter,
+        };
+        let install_path = std::env::current_exe().map_err(|e| OverseerError::Capability {
+            what: "self_deploy.current_exe",
+            detail: e.to_string(),
+        })?;
+        let orchestrator = SelfDeployOrchestrator::with_source(
+            crate::safe_update::UpdateConfig::default(),
+            Box::new(SystemdOrExecRestarter::new()),
+            target_commit.to_string(),
+            install_path,
+            Box::new(GitSourcePreparer::new()),
+        );
+        orchestrator
+            .run()
+            .map(|_outcome| target_commit.to_string())
+            .map_err(|e| OverseerError::Capability {
+                what: "self_deploy",
+                detail: e.to_string(),
+            })
+    }
+}
+
+/// Assemble the PRODUCTION guarded deployer (#2590): the real canary + the
+/// orchestrator swap + a git ancestry oracle rooted at the daemon's repo + the
+/// mandatory dual-channel operator notifier. `running_commit` is the binary's
+/// embedded build hash; `recent_restart_churn` is read LIVE at assembly time (the
+/// daemon rebuilds the Overseer every tick) so the gate's crash-loop refusal sees
+/// current churn. `repo` labels the operator notification.
+pub fn production_guarded_deployer(
+    repo_dir: std::path::PathBuf,
+    recent_restart_churn: u64,
+    repo: String,
+) -> GuardedDeployer {
+    GuardedDeployer::new(
+        Box::new(ProdCanaryRunner),
+        Box::new(OrchestratedBinaryDeployer),
+        Box::new(GitAncestryOracle { repo_dir }),
+        DualChannelNotifier::from_env(),
+        GuardedDeployer::running_commit_marker().to_string(),
+        recent_restart_churn,
+        repo,
+    )
 }
 
 #[cfg(test)]
@@ -396,13 +529,20 @@ mod tests {
     }
 
     #[test]
-    fn deploy_refuses_no_op_without_swapping_or_notifying() {
+    fn deploy_refuses_no_op_notifies_without_swapping() {
         let (gd, deployed, seen) = deployer(true, false, 0);
         // Target == running → no-op.
         let err = gd.deploy("aaaaaaaaaaaa").unwrap_err();
         assert!(format!("{err}").contains("no-op"));
         assert_eq!(*deployed.lock().unwrap(), 0, "no binary swap on refusal");
-        assert!(seen.lock().unwrap().is_empty(), "no notify on refusal");
+        // Safety rail (#2590): a refusal still notifies the operator so merged
+        // work left undeployed is never silent.
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "operator notified on refusal"
+        );
+        assert_eq!(seen.lock().unwrap()[0].kind, "deploy-refused");
     }
 
     #[test]

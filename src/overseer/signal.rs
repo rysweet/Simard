@@ -117,6 +117,21 @@ pub enum Signal {
         issue: u32,
         next_action: String,
     },
+    /// The running daemon binary is behind merged `origin/main` — the
+    /// authoritative "running daemon is stale" signal (issue #2590). Derived at
+    /// the Observe/sensor stage from
+    /// [`crate::self_deploy::ReconcileDetector::detect`] (production
+    /// `GitDeploySource`) whenever `DeployDrift.needs_deploy` holds. Carries the
+    /// merged-head `target_commit` a guarded self-deploy should converge on and
+    /// the `behind_commits` count. Fail-safe: a git/source error reports "no
+    /// drift", so this signal is simply absent rather than spuriously raised.
+    /// Routed to [`ProblemKind::DeployDrift`]; Decide emits a guarded
+    /// `Intervention::Deploy { commit: target_commit }` (the go/no-go SAFETY
+    /// judgment stays in the guarded executor + the high-risk AutonomyGate).
+    DeployDriftDetected {
+        target_commit: String,
+        behind_commits: usize,
+    },
 }
 
 /// Which backlog source a [`GapItem`] came from — so the renderer can label the
@@ -202,6 +217,10 @@ pub enum ProblemKind {
     /// (issue #2640, PART 2). Routed to a CORRECTIVE workstream that diagnoses
     /// the WHY and applies the remedy — never a silent log.
     StepFailure,
+    /// The running daemon is behind merged `origin/main` and must self-deploy
+    /// (issue #2590). Decide emits a guarded `Intervention::Deploy` to the merged
+    /// head; the deploy gate + high-risk AutonomyGate own the go/no-go decision.
+    DeployDrift,
 }
 
 /// How likely a single candidate cause is, relative to the others in the same
@@ -517,6 +536,17 @@ pub fn signals_from(state: &ObservedState) -> Vec<Signal> {
         });
     }
 
+    // Autonomous self-deploy drift (issue #2590): the running binary is behind
+    // merged main. The effectful, fail-safe git probe already ran in the observe
+    // rail (which leaves `deploy_drift = None` on any error / current daemon), so
+    // this lift is pure — no drift observed ⇒ no signal ⇒ no deploy.
+    if let Some(drift) = &state.deploy_drift {
+        out.push(Signal::DeployDriftDetected {
+            target_commit: drift.target_commit.clone(),
+            behind_commits: drift.behind_commits,
+        });
+    }
+
     // Agentic merge-queue reasoning (#4097): the reviewer's per-PR PROPOSALS.
     // CRITICAL invariant — a `ReadyForMerge` REASONING never itself authorizes a
     // merge: it emits NO `PrReadyToMerge` here. Merge authorization comes ONLY
@@ -751,6 +781,13 @@ impl Signal {
                 issue,
                 next_action,
             } => format!("issue {repo}#{issue} ready with no workstream — next: {next_action}"),
+            Signal::DeployDriftDetected {
+                target_commit,
+                behind_commits,
+            } => format!(
+                "running binary {behind_commits} commit(s) behind merged main \
+                 (deploy target {target_commit})"
+            ),
         };
         sanitize_detail(&raw)
     }

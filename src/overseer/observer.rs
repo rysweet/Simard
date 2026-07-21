@@ -117,7 +117,11 @@ pub fn decide_read_only(problem: &Problem) -> Intervention {
         // Backlog-coverage gaps are acted on by the acting Overseer (notify +
         // deduped file). The read-only M1 sensor never surveys gaps, so this is
         // unreachable in M1 — surface it in the Report if it ever appears.
-        | ProblemKind::WorkstreamCoverage => Intervention::Report,
+        | ProblemKind::WorkstreamCoverage
+        // Deploy drift is a HIGH-RISK acting-Overseer concern (guarded
+        // self-deploy). The read-only M1 sensor never deploys — surface it in
+        // the Report if it ever appears here.
+        | ProblemKind::DeployDrift => Intervention::Report,
     }
 }
 
@@ -164,6 +168,7 @@ fn kind_step_label(kind: ProblemKind) -> &'static str {
         ProblemKind::DriftCorrection => "drift_correction",
         ProblemKind::WorkstreamCoverage => "workstream_coverage",
         ProblemKind::StepFailure => "step_failure",
+        ProblemKind::DeployDrift => "deploy_drift",
     }
 }
 
@@ -219,6 +224,7 @@ fn signal_kind_label(s: &Signal) -> &'static str {
         Signal::StalePrDetected { .. } => "StalePrDetected",
         Signal::DuplicatePrDetected { .. } => "DuplicatePrDetected",
         Signal::IssueNeedsWorkstream { .. } => "IssueNeedsWorkstream",
+        Signal::DeployDriftDetected { .. } => "DeployDriftDetected",
     }
 }
 

@@ -41,7 +41,7 @@ use crate::overseer::audit::SelfQualityAuditor;
 use crate::overseer::capabilities::{
     BlockedGoal, DeployReport, Deployer, GoalBrief, GoalCurator, InFlightItem, IssueOutcome,
     MemoryRecall, ObservationEpisode, OverseerError, RecallKeys, RecalledEpisode, RecalledFact,
-    RecalledProcedure, RecalledProspective, RecordOutcome,
+    RecalledProcedure, RecalledProspective, RecordOutcome, StatusReader,
 };
 use crate::overseer::config::{
     claim_reap_enabled, claim_reap_stale_secs, gap_scan_enabled, gap_scan_every_n,
@@ -1058,12 +1058,14 @@ impl MemoryRecall for MemoryRecallOps {
 
 // ─────────────────────────── deployer (safe stub) ──────────────────────────
 
-/// A [`Deployer`] that REFUSES autonomous deploys. The deterministic Decide
-/// mapping the wired daemon uses never emits `Intervention::Deploy`, so a live
-/// deploy is never planned through this path; if one ever were, it escalates
-/// rather than blindly swapping the binary. Guarded self-deploy stays the
-/// operator's canary/self-deploy gates (unit-tested via `GuardedDeployer` and
-/// `evaluate_deploy_gate`), never a blind deploy from the acting loop.
+/// A [`Deployer`] that REFUSES every deploy. **No longer used in production
+/// assembly** (issue #2590): [`assemble_capabilities`] now injects the
+/// production guarded deployer, and the deterministic Decide mapping DOES emit
+/// `Intervention::Deploy` when the running binary drifts behind merged `main`.
+/// Retained only as a safe, self-contained stub for tests and for any operator
+/// build that deliberately pins the daemon by swapping this in — its `deploy()`
+/// escalates rather than swapping a binary, so it can never perform a blind
+/// deploy.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RefuseDeployer;
 
@@ -1093,11 +1095,34 @@ pub fn assemble_capabilities(
     repo_root: std::path::PathBuf,
     state_root: std::path::PathBuf,
 ) -> Capabilities {
+    // Read LIVE restart churn once so the guarded deployer's crash-loop refusal
+    // (`evaluate_deploy_gate`) sees CURRENT churn — the daemon rebuilds this
+    // Overseer every tick, so an assembly-time read is fresh each tick. A status
+    // read failure degrades to `0` (the process-global deploy throttle + the
+    // orchestrator's own health-check/rollback remain the anti-thrash / instability
+    // guards); it never blocks assembly.
+    let status = SnapshotStatusReader::from_env();
+    let recent_restart_churn = status
+        .snapshot()
+        .ok()
+        .and_then(|s| s.restart_churn)
+        .unwrap_or(0);
+    // Autonomous self-deploy ACT (#2590): the PRODUCTION guarded deployer replaces
+    // the `RefuseDeployer` stub. It composes the real self-relaunch canary, the
+    // `SelfDeployOrchestrator` swap (identical to `simard self-deploy`), a git
+    // ancestry oracle rooted at the daemon repo, and the mandatory dual-channel
+    // operator notifier — behind `evaluate_deploy_gate`'s no-op / rollback /
+    // red-canary / crash-loop refusals and the high-risk AutonomyGate.
+    let deployer = crate::overseer::deploy::production_guarded_deployer(
+        repo_root.clone(),
+        recent_restart_churn,
+        overseer_self_repo(),
+    );
     Capabilities {
-        status: Box::new(SnapshotStatusReader::from_env()),
+        status: Box::new(status),
         recipes: Box::new(SmartOrchestratorLauncher::from_env()),
         prs: Box::new(MergePrOps::from_env().with_recursion_guard(overseer_identity())),
-        deployer: Box::new(RefuseDeployer),
+        deployer: Box::new(deployer),
         meetings: Box::new(MeetingGoalTransfer::from_env()),
         issues: Box::new(StewardshipIssueFiler::new(Arc::new(
             crate::stewardship::RealGhClient,
@@ -1108,6 +1133,17 @@ pub fn assemble_capabilities(
         auditor: Box::new(SelfQualityAuditor::from_env(repo_root, state_root)),
         memory: Box::new(MemoryRecallOps::new(mem)),
     }
+}
+
+/// The daemon's OWN repo slug (`owner/name`), used to label self-deploy operator
+/// notifications and root the deploy ancestry oracle. Override with
+/// `SIMARD_SELF_REPO`; defaults to the canonical `rysweet/Simard`.
+fn overseer_self_repo() -> String {
+    std::env::var("SIMARD_SELF_REPO")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "rysweet/Simard".to_string())
 }
 
 /// Build the production acting [`Overseer`]: the assembled capabilities, the
@@ -1213,6 +1249,17 @@ pub fn build_overseer(
             .with_health_review_enabled(health_review_enabled()),
         None => overseer,
     };
+
+    // Autonomous self-deploy OBSERVE rail (issue #2590): wire the production
+    // drift sensor so each tick can OBSERVE whether the running binary is behind
+    // merged `main` and, if so, drive a guarded self-deploy. Always wired here;
+    // the runtime opt-out (`SIMARD_OVERSEER_AUTONOMOUS_DEPLOY=0`), the
+    // process-global anti-thrash throttle, the live crash-loop guard, and the
+    // high-risk AutonomyGate govern whether a deploy actually fires. The sensor
+    // itself is fail-safe (a git/source error reports "no drift").
+    let overseer = overseer.with_deploy_drift_observer(Box::new(
+        crate::overseer::deploy_trigger::GitDeployDriftObserver::new(),
+    ));
 
     // Periodic stale-engineer-claim reaper (issue #4099): sweep + reclaim the
     // `engineer_claims` leak independent of per-goal polling. Wire the shared
