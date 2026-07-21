@@ -375,4 +375,5 @@ escalated goal:
 - [`prompt_assets/simard/overseer/escalation_triage.md`](../../../prompt_assets/simard/overseer/escalation_triage.md) — the agentic brain.
 - [`prompt_assets/simard/overseer/self_diagnose.md`](../../../prompt_assets/simard/overseer/self_diagnose.md) — the StepFailure precedent this mirrors.
 - [`prompt_assets/simard/overseer/README.md`](../../../prompt_assets/simard/overseer/README.md) — overseer prompt-surface map.
+- [Verify-and-merge escalation idempotency reference](../../reference/verify-and-merge-escalation-idempotency.md) — the sibling rail that stops CLEAN + MERGEABLE + all-SUCCESS PRs from re-escalating every tick (#4344).
 - Issue [#4276](https://github.com/rysweet/Simard/issues/4276).

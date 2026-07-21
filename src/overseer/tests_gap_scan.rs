@@ -1170,3 +1170,216 @@ fn a_distinct_gap_signature_is_not_suppressed_by_another_keys_backoff() {
     );
     assert_eq!(*launched.lock().unwrap(), 2);
 }
+
+// ─── Cross-process gap-scan dedup (#4340/#4341, #4337/#4338 duplicates) ──────
+//
+// The in-memory coverage BackoffGate suppresses duplicate gap-cover launches
+// WITHIN one running daemon, but a restart forgets it and a cold gate re-files a
+// duplicate "Cover uncovered backlog workstream(s)" issue for a gap that is
+// already tracked by an open issue. The fix seeds `detect_workstream_gaps`'
+// `coverage` slice from currently-open, signature-stamped GitHub issues so a
+// cold gate still declines to relaunch coverage for an already-covered gap.
+//
+// The covering workstream stamps its issue with the EXISTING stewardship dedup
+// contract — `stewardship-signature: workstream-gap:<sig>` — and the wiring
+// reads those stamps back into `coverage` via a pure extractor. These tests pin
+// that extractor and its composition with the detector across a simulated
+// restart.
+//
+// Contract (see docs/reference/gap-scan-open-issue-coverage.md):
+//   * `extract_gap_coverage_signatures(&[GhIssue]) -> Vec<String>` scans each
+//     issue body for `stewardship-signature: workstream-gap:<sig>` stamps,
+//     strips the `workstream-gap:` prefix, validates `<sig>` against the gap
+//     grammar (`goal:<id>` / `issue:<repo>#<n>` / `anomaly:<slug>`), and returns
+//     the deduplicated set of valid `<sig>` — exactly the `coverage` slice the
+//     detector consumes.
+//   * Malformed / forged stamps are ignored (advisory dedup only); a
+//     non-`workstream-gap` stewardship-signature is not gap coverage.
+//   * Feeding the extracted coverage back into `detect_workstream_gaps`
+//     suppresses the already-covered gap, so two passes across a simulated
+//     restart produce exactly ONE detection (one covering issue).
+//
+// RED until `extract_gap_coverage_signatures` exists.
+
+use crate::overseer::sensor::extract_gap_coverage_signatures;
+use crate::stewardship::gh_client::GhIssue;
+
+/// Build an open issue whose body embeds the given raw `stewardship-signature`
+/// value (already prefixed, e.g. `workstream-gap:goal:x`).
+fn stamped_issue(number: u64, signature_value: &str) -> GhIssue {
+    GhIssue {
+        number,
+        url: format!("https://github.com/rysweet/Simard/issues/{number}"),
+        title: "Cover uncovered backlog workstream(s)".to_string(),
+        body: format!(
+            "Covering workstream for an uncovered gap.\n\n\
+             stewardship-signature: {signature_value}\n"
+        ),
+    }
+}
+
+#[test]
+fn extract_gap_coverage_signatures_reads_workstream_gap_stamps() {
+    let issues = vec![
+        stamped_issue(4337, "workstream-gap:goal:harden-amplihack-rs-recipes-tool"),
+        stamped_issue(4316, "workstream-gap:issue:rysweet/Simard#4316"),
+        stamped_issue(50, "workstream-gap:anomaly:coverage-comment-timeout"),
+    ];
+    let coverage = extract_gap_coverage_signatures(&issues);
+
+    // The extractor strips the `workstream-gap:` prefix and returns the BASE
+    // signatures the detector compares against `GapItem.signature`.
+    assert!(
+        coverage.contains(&"goal:harden-amplihack-rs-recipes-tool".to_string()),
+        "goal stamp must extract to its base signature: {coverage:?}"
+    );
+    assert!(
+        coverage.contains(&"issue:rysweet/Simard#4316".to_string()),
+        "issue stamp must extract to its base signature: {coverage:?}"
+    );
+    assert!(
+        coverage.contains(&"anomaly:coverage-comment-timeout".to_string()),
+        "anomaly stamp must extract to its base signature: {coverage:?}"
+    );
+}
+
+#[test]
+fn extract_gap_coverage_signatures_ignores_malformed_or_forged_stamps() {
+    let issues = vec![
+        // Legitimate — must survive.
+        stamped_issue(1, "workstream-gap:goal:harden-amplihack-rs-recipes-tool"),
+        // Empty signature after the prefix.
+        stamped_issue(2, "workstream-gap:"),
+        // Unknown category.
+        stamped_issue(3, "workstream-gap:garbage"),
+        // Known category but empty id.
+        stamped_issue(4, "workstream-gap:goal:"),
+        // Issue signature with a non-numeric number.
+        stamped_issue(5, "workstream-gap:issue:rysweet/Simard#notanumber"),
+        // A DIFFERENT stewardship-signature family (a failure dedup key) is not
+        // gap coverage and must never be mistaken for one.
+        stamped_issue(6, "failure:abcd1234ef567890"),
+    ];
+    let coverage = extract_gap_coverage_signatures(&issues);
+
+    assert_eq!(
+        coverage,
+        vec!["goal:harden-amplihack-rs-recipes-tool".to_string()],
+        "only the single well-formed workstream-gap signature must be extracted: {coverage:?}"
+    );
+}
+
+#[test]
+fn extract_gap_coverage_signatures_deduplicates_repeated_signatures() {
+    // The same gap covered by two open issues (e.g. an accidental duplicate that
+    // predates this fix) must collapse to a single coverage entry.
+    let issues = vec![
+        stamped_issue(4337, "workstream-gap:goal:harden-amplihack-rs-recipes-tool"),
+        stamped_issue(4338, "workstream-gap:goal:harden-amplihack-rs-recipes-tool"),
+    ];
+    let coverage = extract_gap_coverage_signatures(&issues);
+    assert_eq!(
+        coverage,
+        vec!["goal:harden-amplihack-rs-recipes-tool".to_string()],
+        "a repeated coverage signature must be deduplicated: {coverage:?}"
+    );
+}
+
+#[test]
+fn simulated_restart_stamped_issue_suppresses_duplicate_gap_launch() {
+    // A single uncovered p1 goal.
+    let gap_goal_id = "harden-amplihack-rs-recipes-tool";
+    let mut board = GoalBoard::new();
+    board.active = vec![ActiveGoal::new(
+        gap_goal_id,
+        "Cover uncovered backlog: harden amplihack-rs recipes tool",
+        1,
+    )];
+
+    // Pass 1 — cold start, no open covering issue yet ⇒ the gap is detected once,
+    // and the covering workstream that pass launches opens a stamped issue.
+    let first = detect_workstream_gaps(&board, &[], &[], &[]);
+    assert_eq!(
+        first.len(),
+        1,
+        "the uncovered gap must be detected on the cold first pass: {first:?}"
+    );
+    let stamped = stamped_issue(4337, &format!("workstream-gap:{}", first[0].signature));
+
+    // Pass 2 — SIMULATED RESTART: fresh in-memory state (cold BackoffGate), same
+    // still-open gap, but the first pass's stamped issue is now present in the
+    // open-issue set. Seeding coverage from that issue must suppress the gap so
+    // no SECOND covering workstream (and no duplicate issue) is launched.
+    let coverage = extract_gap_coverage_signatures(&[stamped]);
+    let second = detect_workstream_gaps(&board, &[], &[], &coverage);
+    assert!(
+        second.is_empty(),
+        "a gap already covered by an open stamped issue must not re-launch after a restart: {second:?}"
+    );
+}
+
+/// CONTRACT (write↔read): the `WorkstreamCoverage` decision (WRITE half) emits a
+/// brief whose stamp lines are the EXACT strings `extract_gap_coverage_signatures`
+/// (READ half) parses back into the covered gaps' base signatures. This closes
+/// the cross-process coverage-dedup loop end-to-end WITHOUT a synthetic fixture:
+/// the stamps under test come straight out of `decide`, not hand-built in the
+/// test, so a writer/reader drift (e.g. the brief dropping the stamp instruction,
+/// or emitting the composite `workstream_gap_key` instead of per-gap signatures)
+/// fails here.
+#[test]
+fn coverage_brief_stamps_round_trip_through_the_extractor() {
+    let goal = sample_goal_gap();
+    let anomaly = sample_anomaly_gap();
+    let gaps = vec![goal.clone(), anomaly.clone()];
+
+    let problem = Problem {
+        kind: ProblemKind::WorkstreamCoverage,
+        priority: Priority::High,
+        dedup_key: "workstream-gap:multi".to_string(),
+        summary: "2 uncovered workstreams".to_string(),
+        evidence: vec![Signal::WorkstreamGap { gaps: gaps.clone() }],
+        why: None,
+    };
+
+    let brief = match decide(&problem) {
+        Intervention::LaunchRecipe { brief } => brief,
+        other => panic!("a coverage gap must decide to a LaunchRecipe: {other:?}"),
+    };
+
+    // WRITE half: the brief must instruct ONE verbatim stamp line per covered
+    // gap base-signature (not the composite key, not a title).
+    for gap in &gaps {
+        let expected = format!("stewardship-signature: workstream-gap:{}", gap.signature);
+        assert!(
+            brief.task_description.contains(&expected),
+            "the coverage brief must carry a verbatim per-gap stamp line for {}: {}",
+            gap.signature,
+            brief.task_description
+        );
+    }
+
+    // READ half: harvest exactly the stamp lines the brief emitted, drop them
+    // into an issue body the way a covering workstream would, and confirm the
+    // extractor recovers precisely the covered gaps' base signatures.
+    let stamped_body = brief
+        .task_description
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("stewardship-signature:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let issue = GhIssue {
+        number: 9001,
+        url: "https://github.com/rysweet/Simard/issues/9001".to_string(),
+        title: "Cover uncovered backlog workstream(s)".to_string(),
+        body: format!("Covering workstream for the uncovered gaps.\n\n{stamped_body}\n"),
+    };
+
+    let coverage = extract_gap_coverage_signatures(&[issue]);
+    assert_eq!(
+        coverage,
+        vec![goal.signature.clone(), anomaly.signature.clone()],
+        "the extractor must recover exactly the covered gaps' base signatures from the \
+         brief's own stamp lines (write↔read contract): {coverage:?}"
+    );
+}

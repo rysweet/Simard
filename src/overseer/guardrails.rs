@@ -517,6 +517,39 @@ impl BackoffGate {
         }
         decision
     }
+
+    /// Evict `key`'s suppression state entirely, so the next [`peek`] admits as
+    /// if the key had never been seen. The act path calls this when a subject
+    /// reaches a TERMINAL state (e.g. a PR merges or closes), so the per-key
+    /// `state` map is not kept growing one permanent entry per subject ever
+    /// surveyed — it is bounded to the set of CURRENTLY-open, still-recurring
+    /// subjects. A no-op for an unknown key, and always fail-safe: dropping an
+    /// entry can only make the gate MORE willing to surface, never less.
+    pub fn forget(&mut self, key: &str) {
+        self.state.remove(key);
+    }
+
+    /// Number of keys currently tracked. Test-only visibility into map growth so
+    /// the evict-on-terminal-state contract (bounded `state`) is provable.
+    #[cfg(test)]
+    pub fn tracked_keys(&self) -> usize {
+        self.state.len()
+    }
+}
+
+/// Stable, namespaced dedup key for one PR's verify-and-merge escalation
+/// (issue #4344). The [`BackoffGate`] on the `VerifyAndMergePr` Act path keys on
+/// this so a CLEAN + MERGEABLE + all-SUCCESS PR that keeps (correctly or
+/// spuriously) escalating pages the operator ONCE per bounded window instead of
+/// every ~15-minute tick (PRs #4344 / #4145).
+///
+/// The `verify_and_merge:` prefix is a fixed namespace that is DISJOINT from the
+/// coverage / recall backoff namespaces (`overseer-obs:`, recipe task
+/// descriptions), so the merge-escalation rail can never suppress — or be
+/// suppressed by — any other Overseer dedup gate. Deterministic per `(repo, pr)`
+/// and collision-free across distinct PRs and repos.
+pub fn verify_and_merge_dedup_key(repo: &str, pr: u32) -> String {
+    format!("verify_and_merge:{repo}#{pr}")
 }
 
 #[cfg(test)]
@@ -662,6 +695,69 @@ mod tests {
             })
             .is_err(),
             "merge opt-in must not leak into HIGH-RISK deploy authority"
+        );
+    }
+
+    // ── verify-and-merge escalation dedup KEY (issue #4344) ──────────────────
+    //
+    // TDD (RED): `verify_and_merge_dedup_key(repo, pr)` does not exist yet, so
+    // this block will FAIL TO COMPILE against the current tree — that is the red
+    // state. The key is the stable signature the `merge_escalation_backoff`
+    // `BackoffGate` dedups on so a CLEAN + MERGEABLE + all-SUCCESS PR that keeps
+    // (correctly or spuriously) escalating is paged to the operator ONCE per
+    // backoff window instead of every ~15-minute tick (PRs #4344 / #4145).
+
+    #[test]
+    fn verify_and_merge_dedup_key_has_the_stable_namespaced_shape() {
+        // Deterministic, human-greppable, and NAMESPACED under a fixed prefix so
+        // it can never collide with any other Overseer dedup signature.
+        let key = verify_and_merge_dedup_key("rysweet/Simard", 4344);
+        assert_eq!(
+            key, "verify_and_merge:rysweet/Simard#4344",
+            "the dedup key must be exactly 'verify_and_merge:{{repo}}#{{pr}}'"
+        );
+        assert!(
+            key.starts_with("verify_and_merge:"),
+            "the key must carry the fixed 'verify_and_merge:' namespace prefix"
+        );
+        assert!(
+            key.contains("#4344"),
+            "the key must encode the PR number after a '#' separator"
+        );
+    }
+
+    #[test]
+    fn verify_and_merge_dedup_key_is_deterministic() {
+        // The same (repo, pr) ALWAYS yields the same key — otherwise the backoff
+        // gate could never recognise a repeat escalation of the same PR.
+        assert_eq!(
+            verify_and_merge_dedup_key("rysweet/Simard", 4145),
+            verify_and_merge_dedup_key("rysweet/Simard", 4145),
+        );
+    }
+
+    #[test]
+    fn verify_and_merge_dedup_key_is_collision_free_across_prs_and_repos() {
+        let a = verify_and_merge_dedup_key("rysweet/Simard", 4344);
+        let b = verify_and_merge_dedup_key("rysweet/Simard", 4145);
+        let c = verify_and_merge_dedup_key("rysweet/Other", 4344);
+        assert_ne!(a, b, "distinct PR numbers must produce distinct keys");
+        assert_ne!(
+            a, c,
+            "the same PR number in a DIFFERENT repo must not collide"
+        );
+        assert_ne!(b, c, "distinct (repo, pr) pairs must never collide");
+    }
+
+    #[test]
+    fn verify_and_merge_dedup_key_namespace_is_disjoint_from_the_coverage_gate() {
+        // The coverage backoff keys off recipe task descriptions / the
+        // `overseer-obs:` recall prefix; the merge-escalation gate MUST live in
+        // its own namespace so the two rails can never suppress each other.
+        let key = verify_and_merge_dedup_key("rysweet/Simard", 4344);
+        assert!(
+            !key.starts_with("overseer-obs:"),
+            "the merge-escalation namespace must be disjoint from the recall/coverage namespace"
         );
     }
 }
@@ -821,5 +917,38 @@ mod whisper_backoff_tests {
         }
         // Exactly one BASE window later it re-fires (peeks did not double it).
         assert_eq!(gate.peek(sig, 100), WhisperDecision::Deliver);
+    }
+
+    /// `BackoffGate::forget` evicts a key's armed state so the map stays bounded
+    /// to currently-open subjects (issue #4344 review F2). A forgotten key
+    /// readmits immediately (as if never seen), and forgetting an unknown key is
+    /// a harmless no-op.
+    #[test]
+    fn backoff_forget_evicts_a_key_and_readmits_immediately() {
+        let mut gate = BackoffGate::new(100, 2, 1000);
+        let key = "verify_and_merge:rysweet/Simard#4344";
+
+        // Arm the window, then confirm a same-instant repeat is suppressed.
+        assert_eq!(gate.admit(key, 0), BackoffDecision::Admit);
+        assert_eq!(gate.tracked_keys(), 1, "an admitted key is tracked");
+        assert_eq!(gate.peek(key, 1), BackoffDecision::Suppress);
+
+        // Eviction clears the armed state: the very next peek admits and the map
+        // no longer retains the key.
+        gate.forget(key);
+        assert_eq!(gate.tracked_keys(), 0, "forget evicts the entry");
+        assert_eq!(
+            gate.peek(key, 1),
+            BackoffDecision::Admit,
+            "a forgotten key must admit as if never seen"
+        );
+
+        // Forgetting an unknown key must not panic or add state.
+        gate.forget("never-seen");
+        assert_eq!(
+            gate.tracked_keys(),
+            0,
+            "forgetting an unknown key is a no-op"
+        );
     }
 }

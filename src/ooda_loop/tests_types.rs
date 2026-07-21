@@ -244,8 +244,20 @@ fn action_kind_equality() {
 
 // --- OodaConfig ---
 
+// Serialized on the crate-wide `cognitive_memory` key: `OodaConfig::default()`
+// reads process-global env vars (SIMARD_OODA_MAX_CONCURRENT et al.), so this
+// test must not run concurrently with the env-mutating tests in
+// `types::tests_ooda_config` or it would observe a leaked override (e.g. 64).
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn ooda_config_default_values() {
+    // Clear the concurrency env vars so we read the true compiled-in default,
+    // independent of the ambient environment or any prior test's leftovers.
+    unsafe {
+        std::env::remove_var("SIMARD_OODA_MAX_CONCURRENT");
+        std::env::remove_var("SIMARD_MAX_CONCURRENT_ACTIONS");
+        std::env::remove_var("SIMARD_SCALING");
+    }
     let config = OodaConfig::default();
     // Issue #2935: the per-OODA-cycle goal-coverage parallelism ceiling was
     // raised from the arbitrary low default of 5 to 24 (env-configurable via

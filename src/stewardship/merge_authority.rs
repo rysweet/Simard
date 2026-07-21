@@ -66,6 +66,15 @@ pub struct PrSnapshot {
     /// human-review gate: a PR carrying
     /// [`crate::creative_ideas::CREATIVE_IDEA_PR_LABEL`] is never auto-merged.
     pub labels: Vec<String>,
+    /// `isDraft` from `gh pr view` — `true` when the PR is still a draft and
+    /// therefore ineligible for merge. Parsed as a first-class fact (Gate 0.5
+    /// in [`evaluate_objective_gates`]) so a genuinely-draft PR is refused
+    /// *quietly* against the single pre-merge snapshot, rather than surfacing
+    /// as an un-actionable `gh pr merge` "Pull Request is still a draft" error
+    /// that re-escalated GREEN, non-draft, MERGEABLE PRs to the operator on
+    /// 13 consecutive Overseer ticks (the #4344 / #4145 self-merge stall).
+    /// Absent/malformed ⇒ `false`.
+    pub is_draft: bool,
 }
 
 /// One row from `statusCheckRollup`. Both check runs and statuses get
@@ -142,6 +151,7 @@ impl OpenPrSummary {
             checks: self.checks.clone(),
             base_ref_name: self.base_ref_name.clone(),
             labels: Vec::new(),
+            is_draft: false,
         }
     }
 }
@@ -494,6 +504,8 @@ pub fn parse_pr_view_json(stdout: &[u8]) -> SimardResult<PrSnapshot> {
         base_ref_name: String,
         #[serde(default)]
         labels: Vec<RawLabel>,
+        #[serde(default, rename = "isDraft")]
+        is_draft: bool,
     }
     #[derive(serde::Deserialize)]
     struct RawLabel {
@@ -552,6 +564,7 @@ pub fn parse_pr_view_json(stdout: &[u8]) -> SimardResult<PrSnapshot> {
             .map(|l| l.name)
             .filter(|n| !n.is_empty())
             .collect(),
+        is_draft: raw.is_draft,
     })
 }
 
@@ -749,6 +762,25 @@ pub fn evaluate_objective_gates(
         ));
     }
 
+    // Gate 0.5: draft state.
+    //
+    // A draft PR is ineligible for merge. Historically `isDraft` was never a
+    // parsed fact, so a genuinely-draft PR slipped past the objective gates and
+    // into `gh pr merge`, which aborted with "Pull Request is still a draft".
+    // That error surfaced as an un-actionable `Err` and re-escalated the same
+    // GREEN, non-draft, MERGEABLE PRs to the operator on 13 consecutive Overseer
+    // ticks (#4344 / #4145). Refusing here — after the base-allowlist gate and
+    // before the mergeable/CI gates — turns that race into a single actionable
+    // refusal evaluated against the one pre-merge snapshot, and keeps a
+    // genuinely-draft PR from ever reaching the merge call.
+    if snapshot.is_draft {
+        return Err(
+            "PR is still a draft and cannot be merged. Mark it ready first: \
+             `gh pr ready <PR>`, then retry."
+                .to_string(),
+        );
+    }
+
     // Gate 1: mergeable
     if snapshot.mergeable != "MERGEABLE" {
         return Err(format!(
@@ -929,6 +961,7 @@ mod tests {
             ],
             base_ref_name: "main".to_string(),
             labels: Vec::new(),
+            is_draft: false,
         }
     }
 
@@ -2046,5 +2079,173 @@ mod tests {
         });
         assert_eq!(result.unwrap(), 7);
         assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    // ─── Draft-state gate (#4344 / #4145 self-merge stall) ────────────────
+    //
+    // These tests pin the fix for the "Pull Request is still a draft"
+    // false-positive that re-escalated GREEN, non-draft, MERGEABLE PRs to the
+    // operator on 13 consecutive Overseer ticks. The seam: `isDraft` was never a
+    // parsed fact nor an objective gate, so a stale-draft race inside
+    // `gh pr merge` surfaced as an un-actionable `Err` and looped. The fix makes
+    // draft a first-class `PrSnapshot.is_draft` fact and a fail-closed gate
+    // evaluated against the existing single pre-merge snapshot.
+    //
+    // Contract (see docs/reference/merge-draft-gate-api.md):
+    //   * `parse_pr_view_json` reads `isDraft` with serde(default) — present ⇒
+    //     the parsed bool; absent/malformed ⇒ `false`, never an Err/panic.
+    //   * `evaluate_objective_gates` refuses a draft snapshot (Gate 0.5) with a
+    //     single actionable reason, ordered AFTER the base-allowlist and BEFORE
+    //     the mergeable/CI gates; it can only ever ADD a refusal.
+    //   * A genuinely-draft PR is `Refused` (quiet — no operator escalation) and
+    //     is never `squash_merge`d; the objective gate short-circuits the judge.
+    //   * A non-draft, mergeable, green PR still MERGES — the false-positive is
+    //     gone.
+    //
+    // RED until `PrSnapshot.is_draft` and the draft gate exist.
+
+    #[test]
+    fn parse_pr_view_json_reads_is_draft_true() {
+        // `gh pr view --json ...,isDraft` reports a draft PR as `"isDraft": true`.
+        let json = br#"{
+            "body": "wip",
+            "mergeable": "MERGEABLE",
+            "reviewDecision": "REVIEW_REQUIRED",
+            "baseRefName": "main",
+            "isDraft": true,
+            "statusCheckRollup": []
+        }"#;
+        let snap = parse_pr_view_json(json).unwrap();
+        assert!(
+            snap.is_draft,
+            "an `isDraft: true` payload must parse to is_draft == true"
+        );
+    }
+
+    #[test]
+    fn parse_pr_view_json_missing_is_draft_defaults_false() {
+        // Older `gh` versions or unusual payloads may omit `isDraft`. It must
+        // degrade to `false` (serde default) WITHOUT erroring or panicking — the
+        // mergeable gate still independently guards readiness, so a not-draft
+        // assumption is safe.
+        let json = br#"{
+            "body": "hi",
+            "mergeable": "MERGEABLE",
+            "reviewDecision": "APPROVED",
+            "baseRefName": "main",
+            "statusCheckRollup": []
+        }"#;
+        let snap = parse_pr_view_json(json).expect("missing isDraft must not error");
+        assert!(
+            !snap.is_draft,
+            "a payload omitting isDraft must default to is_draft == false"
+        );
+    }
+
+    #[test]
+    fn evaluate_objective_gates_refuses_a_draft_snapshot() {
+        let allow = default_allowlist();
+
+        // An otherwise-ready snapshot that is a draft must be refused.
+        let mut draft = good_snapshot();
+        draft.is_draft = true;
+        let err = evaluate_objective_gates(&draft, &allow)
+            .expect_err("a draft PR must fail the objective gates");
+        assert!(
+            err.to_lowercase().contains("draft"),
+            "the draft refusal must name the draft state: {err}"
+        );
+        assert!(
+            err.contains("gh pr ready"),
+            "the draft refusal must give the actionable clear-command: {err}"
+        );
+
+        // The same snapshot, non-draft, passes — proving the gate ONLY removes a
+        // draft merge and never blocks an otherwise-ready non-draft PR.
+        let mut ready = good_snapshot();
+        ready.is_draft = false;
+        assert!(
+            evaluate_objective_gates(&ready, &allow).is_ok(),
+            "a non-draft, mergeable, green PR must still pass every objective gate"
+        );
+    }
+
+    #[test]
+    fn draft_gate_ordered_after_base_allowlist() {
+        // A draft PR that ALSO targets a disallowed base must be refused for the
+        // base-branch reason first (Gate 0 out-prioritises Gate 0.5), preserving
+        // the PR #1549 footgun guard's priority.
+        let mut snap = good_snapshot();
+        snap.is_draft = true;
+        snap.base_ref_name = "feat/stale-parent".to_string();
+        let err = evaluate_objective_gates(&snap, &default_allowlist())
+            .expect_err("a draft PR on a wrong base must still be refused");
+        assert!(
+            err.contains("feat/stale-parent"),
+            "the base-allowlist gate must win over the draft gate: {err}"
+        );
+    }
+
+    #[test]
+    fn refuses_and_does_not_merge_a_genuine_draft_pr() {
+        // Full pipeline: a genuinely-draft PR is a quiet `Refused` (not an Err,
+        // so the Overseer does NOT escalate to the operator), is never
+        // squash-merged, and short-circuits the (expensive) judge because the
+        // draft gate is an objective gate.
+        let gh = FakePrGhClient::new();
+        let mut snap = good_snapshot();
+        snap.is_draft = true;
+        gh.seed_view(Ok(snap));
+        gh.seed_merge(Ok(()));
+        let judge = FakeMergeJudge::ready();
+
+        let outcome = run(4336, "rysweet/Simard", &gh, &default_allowlist(), &judge).unwrap();
+        match outcome {
+            MergeOutcome::Refused { pr_number, reason } => {
+                assert_eq!(pr_number, 4336);
+                assert!(
+                    reason.to_lowercase().contains("draft"),
+                    "the refusal must name the draft state: {reason}"
+                );
+            }
+            other => panic!("expected a quiet Refused for a draft PR, got {other:?}"),
+        }
+        assert_eq!(
+            gh.merge_call_count(),
+            0,
+            "a draft PR must never be squash-merged"
+        );
+        assert_eq!(
+            judge.call_count(),
+            0,
+            "the objective draft gate must short-circuit before the judge"
+        );
+    }
+
+    #[test]
+    fn merges_non_draft_mergeable_green_pr_without_false_still_a_draft() {
+        // Regression for the 13-tick stall: a GREEN, non-draft, MERGEABLE PR must
+        // MERGE — never be re-refused/escalated by a spurious "still a draft".
+        let gh = FakePrGhClient::new();
+        let mut snap = good_snapshot();
+        snap.is_draft = false;
+        gh.seed_view(Ok(snap));
+        gh.seed_merge(Ok(()));
+        let judge = FakeMergeJudge::ready();
+
+        let outcome = run(4344, "rysweet/Simard", &gh, &default_allowlist(), &judge).unwrap();
+        assert_eq!(
+            outcome,
+            MergeOutcome::Merged {
+                pr_number: 4344,
+                repo: "rysweet/Simard".to_string(),
+            },
+            "a non-draft, mergeable, green PR must merge (no false still-a-draft refusal)"
+        );
+        assert_eq!(
+            gh.merge_call_count(),
+            1,
+            "the PR must be squash-merged once"
+        );
     }
 }

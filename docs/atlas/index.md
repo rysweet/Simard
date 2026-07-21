@@ -8,17 +8,20 @@ OODA daemon (graph store = embedded **lbug**; **NO kuzu, NO Python**).
 
 This refresh re-runs the atlas against current code truth and updates
 **Layer 9 — [Agentic Flows](./agentic-flows/README.md)** where the source drifted
-since the last build: the **overseer tick** now maps the agentic **health-review**
-rail (`health_review`, `src/overseer/mod.rs:935` → `src/overseer/health_review.rs`,
-recipe `overseer-health-review.yaml`) that runs after `observe_ecosystem` — an
-agent reads the OODA journal + `simard status` + `simard goal list`, detects
+since the last build: the **overseer verify+merge sub-pipeline** now maps the
+observe-stage draft-exclusion narrowing (#4339) and the act-stage `merge_ops` M2
+path (verify → poll-until-green → agentic `MergeJudge` → squash-merge →
+dual-channel notify), and the **cognitive-memory recall path** now maps the
+`recall_episodes_ranked` recall precision gate (`MIN_CLEAN_NEEDLE_LEN`) that
+drops sub-threshold recall noise fail-closed. The **overseer tick** also now maps
+the agentic **health-review** rail (`health_review`,
+`src/overseer/mod.rs` → `src/overseer/health_review.rs`, recipe
+`overseer-health-review.yaml`) that runs after `observe_ecosystem` — an agent
+reads the OODA journal + `simard status` + `simard goal list`, detects
 crash-loops / shared failure signatures, and routes gated `LaunchRecipe` /
-`EscalateBlockedGoal` interventions through the same gate. The overseer-tick and
-memory-recall entry-point line references were also re-synced to current source
-(`run_cycle` → `mod.rs:663`, `observe_merge_queue` → `mod.rs:1005`, `recall_pass`
-→ `mod.rs:1156`, `orient` → `mod.rs:2295`, `decide` → `mod.rs:2609`, `gate` →
-`mod.rs:1286`), and the recipe inventory count corrected to 23 YAML. Layer 9 maps
-the six agentic control-plane flows (OODA loop,
+`EscalateBlockedGoal` interventions through the same gate. Entry-point line
+references were re-synced to current source and the recipe inventory count
+corrected. Layer 9 maps the six agentic control-plane flows (OODA loop,
 overseer tick, recipes, prompt assets, typed-OODA capability/effect model,
 cognitive-memory recall) and how they link across the other layers.
 

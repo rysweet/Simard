@@ -4,8 +4,17 @@ use crate::{CognitiveStatistics, GoalProgress};
 
 // --- OodaConfig defaults ---
 
+// Serialized on the crate-wide `cognitive_memory` key because
+// `OodaConfig::default()` reads process-global concurrency env vars; without
+// this it can race an env-mutating test and observe a leaked override.
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn ooda_config_default_values() {
+    unsafe {
+        std::env::remove_var("SIMARD_OODA_MAX_CONCURRENT");
+        std::env::remove_var("SIMARD_MAX_CONCURRENT_ACTIONS");
+        std::env::remove_var("SIMARD_SCALING");
+    }
     let config = OodaConfig::default();
     // Issue #2935: raised from 5 to 24 (env-configurable via SIMARD_OODA_MAX_CONCURRENT).
     assert_eq!(config.max_concurrent_actions, 24);
@@ -163,8 +172,14 @@ fn ooda_config_gym_suite_id_is_progressive() {
     assert_eq!(config.gym_suite_id, "progressive");
 }
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn ooda_config_max_concurrent_defaults_to_24() {
+    unsafe {
+        std::env::remove_var("SIMARD_OODA_MAX_CONCURRENT");
+        std::env::remove_var("SIMARD_MAX_CONCURRENT_ACTIONS");
+        std::env::remove_var("SIMARD_SCALING");
+    }
     let config = OodaConfig::default();
     // Issue #2935: raised from 5 to 24 (env-configurable via SIMARD_OODA_MAX_CONCURRENT).
     assert_eq!(config.max_concurrent_actions, 24);

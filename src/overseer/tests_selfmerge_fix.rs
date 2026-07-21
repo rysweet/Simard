@@ -166,6 +166,7 @@ fn snapshot(mergeable: &str, checks: Vec<CheckRollupEntry>, labels: Vec<String>)
         checks,
         base_ref_name: "main".to_string(),
         labels,
+        is_draft: false,
     }
 }
 

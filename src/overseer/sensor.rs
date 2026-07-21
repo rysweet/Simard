@@ -18,6 +18,7 @@
 //! - File deduped issues: `stewardship::process_orchestrator_run` (via
 //!   [`StewardshipIssueFiler`](crate::overseer::observer::StewardshipIssueFiler)).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -36,6 +37,7 @@ use crate::ooda_actions::advance_goal::spawn::{
 };
 use crate::status::{AssembleOptions, StatusSnapshot, assemble};
 use crate::stewardship::RealGhClient;
+use crate::stewardship::gh_client::GhIssue;
 
 use crate::overseer::capabilities::{
     BlockedGoal, InFlightItem, IssueFiler, IssueOutcome, ObservedState, OverseerError, StatusReader,
@@ -314,7 +316,11 @@ pub fn detect_workstream_gaps(
     anomalies: &[String],
     coverage: &[String],
 ) -> Vec<GapItem> {
-    let is_covered = |sig: &str| coverage.iter().any(|c| c == sig);
+    // O(1) coverage membership: build the lookup set once instead of a linear
+    // scan of `coverage` per goal/issue/anomaly candidate (was O(candidates ×
+    // coverage)).
+    let covered: HashSet<&str> = coverage.iter().map(String::as_str).collect();
+    let is_covered = |sig: &str| covered.contains(sig);
     let mut gaps: Vec<GapItem> = Vec::new();
 
     // 1. Goal board — uncovered high-priority goals.
@@ -424,6 +430,106 @@ fn truncate_field(s: &str) -> String {
     } else {
         s.chars().take(MAX_GAP_FIELD_LEN).collect()
     }
+}
+
+/// The `stewardship-signature:` stamp prefix that marks a gap-coverage issue.
+/// A covering workstream stamps the issue it opens with
+/// `stewardship-signature: workstream-gap:<sig>` where `<sig>` is the base gap
+/// signature the detector compares against (`goal:<id>` / `issue:<repo>#<n>` /
+/// `anomaly:<slug>`).
+pub(crate) const GAP_COVERAGE_STAMP_PREFIX: &str = "workstream-gap:";
+
+/// Render the full `stewardship-signature:` line a covering workstream must copy
+/// into the body of every issue it opens, for base gap signature `sig`.
+///
+/// This is the SINGLE source of truth for the cross-process coverage-dedup
+/// contract (#4128): the [`decide`](crate::overseer::decide) `WorkstreamCoverage`
+/// brief embeds one of these lines per covered gap (the write half), and
+/// [`extract_gap_coverage_signatures`] parses the very same format back (the read
+/// half). Both halves route through this one formatter so the stamp string can
+/// never drift out of sync between the writer and the reader.
+pub(crate) fn gap_coverage_stamp_line(sig: &str) -> String {
+    format!("stewardship-signature: {GAP_COVERAGE_STAMP_PREFIX}{sig}")
+}
+
+/// Extract the base gap signatures covered by an existing set of open GitHub
+/// issues, so a cold [`detect_workstream_gaps`] pass — one whose in-memory
+/// coverage BackoffGate was reset by a daemon restart — still declines to
+/// relaunch coverage for a gap that is already tracked by an open issue.
+///
+/// This is the cross-process half of the coverage dedup (#4340/#4341,
+/// #4337/#4338 duplicate gap-cover issues): the in-memory gate suppresses
+/// duplicates *within* one running daemon, but a restart forgets it and a cold
+/// gate re-files a duplicate "Cover uncovered backlog workstream(s)" issue.
+/// Seeding `detect_workstream_gaps`' `coverage` slice from the open, stamped
+/// issues closes that gap.
+///
+/// Contract (the READ half of the cross-process coverage-dedup loop; the WRITE
+/// half is the [`decide`](crate::overseer::decide) `WorkstreamCoverage` brief,
+/// which instructs the launched workstream to stamp each issue it opens — both
+/// halves share [`gap_coverage_stamp_line`] so the format cannot drift):
+///   * Scans each issue body for `stewardship-signature: workstream-gap:<sig>`
+///     stamps (the existing stewardship dedup convention, extended with the
+///     `workstream-gap:` namespace).
+///   * Strips the `workstream-gap:` prefix and validates `<sig>` against the gap
+///     grammar via [`is_valid_gap_signature`]; malformed / forged / foreign
+///     stamps (e.g. a `failure:<hex>` dedup key) are ignored — this is advisory
+///     dedup only and never a trust boundary.
+///   * Returns the deduplicated set of valid base `<sig>` in first-seen order —
+///     exactly the `coverage` slice [`detect_workstream_gaps`] consumes.
+pub fn extract_gap_coverage_signatures(issues: &[GhIssue]) -> Vec<String> {
+    let mut coverage: Vec<String> = Vec::new();
+    // First-seen-order dedup with O(1) membership: `seen` borrows each stamp
+    // straight from the issue bodies, so duplicates are dropped without the
+    // O(n²) `coverage.contains` scan and without allocating a `String` per
+    // repeat.
+    let mut seen: HashSet<&str> = HashSet::new();
+    for issue in issues {
+        for line in issue.body.lines() {
+            let line = line.trim();
+            let Some(value) = line.strip_prefix("stewardship-signature:") else {
+                continue;
+            };
+            let value = value.trim();
+            let Some(sig) = value.strip_prefix(GAP_COVERAGE_STAMP_PREFIX) else {
+                // A non-`workstream-gap` stewardship-signature (e.g. a failure
+                // dedup key) is not gap coverage.
+                continue;
+            };
+            if !is_valid_gap_signature(sig) {
+                continue;
+            }
+            if seen.insert(sig) {
+                coverage.push(sig.to_string());
+            }
+        }
+    }
+    coverage
+}
+
+/// True when `sig` is a well-formed base gap signature — one of `goal:<id>`,
+/// `issue:<repo>#<n>` (numeric `<n>`), or `anomaly:<slug>`, each with a
+/// non-empty payload. Mirrors the signatures [`detect_workstream_gaps`] builds
+/// so a stamped-issue coverage entry can only ever match a real detector
+/// signature; anything else is dropped as malformed/forged.
+fn is_valid_gap_signature(sig: &str) -> bool {
+    if let Some(id) = sig.strip_prefix("goal:") {
+        return !id.is_empty();
+    }
+    if let Some(reference) = sig.strip_prefix("issue:") {
+        // `<repo>#<n>`: split at the LAST `#` so a repo can't hide the delimiter,
+        // require a non-empty repo and an all-digit, non-empty issue number.
+        return match reference.rsplit_once('#') {
+            Some((repo, number)) => {
+                !repo.is_empty() && !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
+            }
+            None => false,
+        };
+    }
+    if let Some(slug) = sig.strip_prefix("anomaly:") {
+        return !slug.is_empty();
+    }
+    false
 }
 
 /// Slugify a `owner/name` repo into the restricted signature alphabet, preserving

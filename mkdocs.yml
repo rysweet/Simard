@@ -97,10 +97,12 @@ nav:
   - Concepts:
     - Operational Autonomy Model: concepts/operational-autonomy-model.md
     - Gap-Scan Dedup &amp; Backoff: concepts/gap-scan-backoff-dedup.md
+    - Cross-Process Gap-Scan Dedup (open-issue coverage): concepts/cross-process-gap-scan-dedup.md
     - Autonomous Self-Merge Sensor (ready_prs wire): concepts/autonomous-self-merge-sensor.md
     - Agentic Merge-Queue + Issue Reasoning (observe/orient): concepts/agentic-merge-queue-reasoning.md
     - Overseer Agentic Health-Review (self-heal crash-loops): concepts/overseer-agentic-health-review.md
     - Autonomous-Merge Review Gate (agentic merge-judge): concepts/autonomous-merge-review-gate.md
+    - Merge Draft-State Re-Validation: concepts/merge-draft-state-revalidation.md
     - Adaptive Scaling: concepts/adaptive-scaling.md
     - Pluggable Identity: concepts/pluggable-identity.md
     - Concierge Identity (Hospitality Design + Ops Software): concepts/concierge-identity.md
@@ -251,6 +253,8 @@ nav:
     - Triage Stale Pull Requests: howto/triage-stale-pull-requests.md
     - Enable Autonomous Self-Merge (canary one repo): howto/enable-autonomous-self-merge-canary.md
     - Diagnose merge-pr Verdict-Parse Failures: howto/diagnose-merge-pr-verdict-parse-failures.md
+    - Diagnose a &quot;Still a Draft&quot; Merge Refusal: howto/diagnose-a-still-a-draft-merge-refusal.md
+    - Diagnose Duplicate Gap-Scan Issues: howto/diagnose-duplicate-gap-scan-issues.md
     - Monitor Simard with the TUI: howto/monitor-simard-with-tui.md
     - Browse the Simard Journal: howto/browse-the-simard-journal.md
     - View Agent Terminal Logs: howto/view-agent-terminal-logs.md
@@ -298,6 +302,7 @@ nav:
     - Daily-Budget Display Guard: reference/daily-budget-display-guard.md
     - Overseer Activity Feed: reference/overseer-activity-feed.md
     - Overseer Tick Details: reference/overseer-tick-details.md
+    - Verify-and-Merge Escalation Idempotency: reference/verify-and-merge-escalation-idempotency.md
     - Overseer Goal-Board Health API: reference/overseer-goal-board-health-api.md
     - Overseer Memory-Recall API: reference/overseer-memory-recall-api.md
     - Overseer Operator Notifications: reference/overseer-operator-notifications.md
@@ -402,6 +407,8 @@ nav:
     - Agent-Log WebSocket API: reference/agent-log-websocket.md
     - PR-Finalization Review Pipeline: reference/pr-finalization-pipeline.md
     - Cross-Repo Merge Authority: reference/cross-repo-merge-authority.md
+    - Merge Draft-Gate API: reference/merge-draft-gate-api.md
+    - Gap-Scan Open-Issue Coverage: reference/gap-scan-open-issue-coverage.md
     - ready_prs Sensor API: reference/ready-prs-sensor-api.md
     - Agentic Merge-Queue Reasoning API: reference/agentic-merge-queue-reasoning-api.md
     - Autonomous-Merge Review Gate API: reference/autonomous-merge-review-gate.md
