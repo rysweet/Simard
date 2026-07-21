@@ -1,7 +1,7 @@
 ---
 title: Knowledge-pack article relevance ranking
 description: How the native knowledge reader ranks matching articles within a knowledge pack by keyword coverage — weighting title hits above body hits, de-duplicating query keywords, and truncating by the LIMIT only after a deterministic ordering — so a knowledge.query answer cites the most relevant sources reproducibly.
-last_updated: 2026-07-17
+last_updated: 2026-07-21
 owner: simard
 doc_type: reference
 related:
@@ -68,3 +68,36 @@ matches.
   selection ranking in `src/knowledge_context.rs` (whole-word, distinct-token
   overlap), which chooses *which packs* to consult; this page covers ranking
   *within* a chosen pack.
+
+## Retrieval strategy order (graph → vector → keyword)
+
+The keyword-coverage ranking above governs the **keyword** retrieval path
+(`query_articles`). It is the *fallback* tier: `knowledge.query` first tries two
+richer strategies that mirror the original agent-kgpacks GraphRAG method, and
+only falls through to the keyword `LIKE` scan when neither applies.
+
+1. **Graph (KGP-Q5).** When the pack exposes `entities` + `relationships`
+   tables, `query_graph` seeds keyword-matched entities and traverses
+   relationship edges multi-hop, surfacing linked entities the keyword never
+   matched. See `Specs/agent-kgpacks-rs-parity.md`.
+2. **Vector semantic search (KGP-Q9).** When the pack ships precomputed
+   embeddings — a JSON float array in an `embedding` column (the SQLite-port
+   stand-in for the upstream `Section.embedding DOUBLE[768]` vector) —
+   `query_vector` ranks articles by **cosine similarity** between the query
+   embedding and each stored embedding, returning the top `limit` as cited
+   sources. Because it ranks by *vector proximity* rather than literal token
+   overlap, it can retrieve an on-topic article that shares **no keyword** with
+   the question — which the keyword scan misses. The query is embedded by the
+   deterministic default embedder `embed_text` (a normalized FNV-1a
+   feature-hash), the port of upstream's default deterministic-hash embedder.
+   Semantic recall *quality* tracks the pack's embedder; wiring a real-model
+   embedder is pack-build-time (out of scope here). `query_vector` declines
+   (falling back) when the pack has no `embedding` column, the query carries no
+   signal, or a stored vector's dimension does not match the query embedding.
+3. **Keyword (KGP-Q4/Q8).** The `LIKE`-based coverage-ranked scan documented
+   above — the tier that runs when a pack has neither a knowledge graph nor
+   stored embeddings, so keyword-only packs behave exactly as before.
+
+The `knowledge.query` wire response shape is identical across all three tiers,
+so callers are unaffected by which strategy answered.
+
