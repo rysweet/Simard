@@ -22,12 +22,32 @@
 //! observation and the remediation JUDGMENT live entirely in the recipe's agent
 //! step; the rail only schedules the tick and dispatches the typed decisions.
 //! See `docs/concepts/overseer-agentic-health-review.md`.
+//!
+//! ## Degraded-pass recovery: the shared escalation ladder
+//!
+//! A single agent pass can occasionally emit a truncated/malformed report that
+//! lacks the REQUIRED `HEALTH_REVIEW_COMPLETE` terminal marker. Rather than
+//! silently degrade that weak case to "no remediation" on the FIRST miss, the
+//! rail spends EXTRA compute only there: on a base parse-miss it drives a
+//! bounded escalation ladder — a schema-repair re-prompt, then a higher-effort
+//! tier — reusing the SAME composable primitives every other recipe-backed brain
+//! phase uses ([`build_phase_escalation_note`](crate::ooda_brain::build_phase_escalation_note),
+//! [`EscalationConfig`](crate::ooda_brain::EscalationConfig) with its shared
+//! `SIMARD_BRAIN_ESCALATION_MAX_ATTEMPTS` knob + hard cap, and
+//! [`LadderRung`](crate::ooda_brain::LadderRung)). The ladder is a bounded RETRY
+//! on a degraded parse — NOT a failure counter and NOT an N-identical-failure
+//! threshold; the health JUDGMENT still lives entirely in the recipe. It is
+//! fail-closed end to end: a base runner/infra fault still degrades with NO
+//! ladder (the base pass must succeed before it can be judged degraded), a
+//! rung's own invocation fault stops the ladder, and an exhausted ladder takes
+//! no remediation — never a fabricated launch or escalation.
 
 use std::path::Path;
 
 use serde::Deserialize;
 
 use crate::error::{SimardError, SimardResult};
+use crate::ooda_brain::{EscalationConfig, LadderRung, build_phase_escalation_note};
 use crate::overseer::capabilities::RecipeBrief;
 use crate::overseer::intervention::Intervention;
 
@@ -280,40 +300,160 @@ pub struct RecipeHealthReviewer<R: HealthReviewRecipeRunner> {
     service_unit: String,
     state_root: String,
     repo_path: String,
+    /// Bound on the degraded-pass escalation ladder. Reuses the SHARED brain
+    /// ladder config (`SIMARD_BRAIN_ESCALATION_MAX_ATTEMPTS`, hard-capped);
+    /// `max_escalations == 0` disables the ladder (byte-identical to a single
+    /// base pass).
+    escalation: EscalationConfig,
 }
 
 impl<R: HealthReviewRecipeRunner> RecipeHealthReviewer<R> {
     /// Build the rail over a concrete [`HealthReviewRecipeRunner`], pinning the
-    /// bounded context vars the recipe substitutes.
+    /// bounded context vars the recipe substitutes. The degraded-pass escalation
+    /// ladder is bounded by the shared [`EscalationConfig::from_env`] (the same
+    /// `SIMARD_BRAIN_ESCALATION_MAX_ATTEMPTS` knob every brain phase reads).
     pub fn new(runner: R, service_unit: String, state_root: String, repo_path: String) -> Self {
         Self {
             runner,
             service_unit,
             state_root,
             repo_path,
+            escalation: EscalationConfig::from_env(),
         }
+    }
+
+    /// Override the escalation-ladder bound (used by tests to drive the ladder
+    /// deterministically without env mutation).
+    #[cfg(test)]
+    pub fn with_escalation_config(mut self, escalation: EscalationConfig) -> Self {
+        self.escalation = escalation;
+        self
     }
 
     /// Borrow the underlying runner (used by tests to inspect the seam).
     pub fn runner(&self) -> &R {
         &self.runner
     }
-}
 
-impl<R: HealthReviewRecipeRunner> HealthReviewer for RecipeHealthReviewer<R> {
-    fn review(&self) -> SimardResult<Vec<Intervention>> {
+    /// Invoke the recipe once for a ladder rung with the given `escalation_note`
+    /// (empty on the base pass). All context vars stay bounded — the recipe reads
+    /// the unbounded journal/status/goal-list ITSELF.
+    fn run_pass(&self, escalation_note: &str) -> SimardResult<String> {
         let request = HealthReviewRequest {
             service_unit: self.service_unit.clone(),
             state_root: self.state_root.clone(),
             repo_path: self.repo_path.clone(),
-            escalation_note: String::new(),
+            escalation_note: escalation_note.to_string(),
         };
+        self.runner.run(&request)
+    }
 
-        let output = match self.runner.run(&request) {
+    /// Drive the bounded escalation ladder after a BASE parse-miss (a degraded
+    /// pass missing the required terminal marker). Reuses the shared
+    /// [`build_phase_escalation_note`] / [`EscalationConfig`] / [`LadderRung`]
+    /// primitives — a schema-repair re-prompt, then a higher-effort tier — and
+    /// returns the recovered interventions, or an empty vec (fail-closed) when
+    /// the ladder is disabled, a rung's own invocation faults, or every rung is
+    /// exhausted. Never fabricates work.
+    fn escalate_after_parse_miss(
+        &self,
+        base_output: &str,
+        base_reason: &str,
+    ) -> SimardResult<Vec<Intervention>> {
+        let max = self.escalation.max_escalations;
+        if max == 0 {
+            tracing::warn!(
+                target: "overseer::health_review",
+                reason = %base_reason,
+                "health-review: degraded base pass and escalation ladder disabled; taking no remediation (fabricating nothing)"
+            );
+            return Ok(Vec::new());
+        }
+
+        // Feed each rung the latest malformed output so the schema-repair note
+        // quotes what actually came back.
+        let mut prior = base_output.to_string();
+        for rung_idx in 1..=max {
+            let rung = if rung_idx == 1 {
+                LadderRung::SchemaRepair
+            } else {
+                LadderRung::Escalate
+            };
+            let note = build_health_review_escalation_note(rung, &prior);
+            tracing::warn!(
+                target: "overseer::health_review",
+                rung = ?rung,
+                attempt = rung_idx + 1,
+                reason = %base_reason,
+                "health-review: degraded pass → escalating (bounded retry ladder)"
+            );
+            match self.run_pass(&note) {
+                Err(e) => {
+                    // A rung's own invocation faulted — stop the ladder and
+                    // degrade to no remediation (never fabricate on a fault).
+                    tracing::warn!(
+                        target: "overseer::health_review",
+                        rung = ?rung,
+                        error = %e,
+                        "health-review: escalation rung failed to invoke; stopping ladder, taking no remediation"
+                    );
+                    return Ok(Vec::new());
+                }
+                Ok(output) => match parse_health_review_output(&output) {
+                    Ok(report) => {
+                        tracing::info!(
+                            target: "overseer::health_review",
+                            rung = ?rung,
+                            attempt = rung_idx + 1,
+                            decisions = report.interventions.len(),
+                            summary = %report.summary,
+                            "health-review: RECOVERED a degraded pass via the escalation ladder"
+                        );
+                        return Ok(report.interventions);
+                    }
+                    // Still degraded — carry the latest output into the next rung.
+                    Err(_) => prior = output,
+                },
+            }
+        }
+
+        tracing::warn!(
+            target: "overseer::health_review",
+            attempts = max + 1,
+            reason = %base_reason,
+            "health-review: escalation ladder exhausted with no parseable pass; taking no remediation (fabricating nothing)"
+        );
+        Ok(Vec::new())
+    }
+}
+
+/// Build the health-review `escalation_note` for a ladder rung, reminding the
+/// agent of the REQUIRED terminal-marker contract (the reason a pass degrades).
+/// Empty on [`LadderRung::Base`] so the base pass is byte-identical to a plain
+/// single invocation.
+fn build_health_review_escalation_note(rung: LadderRung, prior_output: &str) -> String {
+    build_phase_escalation_note(
+        rung,
+        prior_output,
+        "Re-run the health review and emit the typed DECISION markers as PLAIN TEXT \
+         (no code fences), then END with EXACTLY one non-empty terminal line \
+         `HEALTH_REVIEW_COMPLETE=<one-line summary>`. If nothing is wrong, emit `HEALTHY` \
+         then that terminal marker.",
+        "Re-read the journal / `simard status` / `simard goal list` carefully BEFORE deciding, \
+         then emit the decision markers followed by the required HEALTH_REVIEW_COMPLETE terminal line.",
+    )
+}
+
+impl<R: HealthReviewRecipeRunner> HealthReviewer for RecipeHealthReviewer<R> {
+    fn review(&self) -> SimardResult<Vec<Intervention>> {
+        // Base pass — empty escalation note (byte-identical to pre-ladder).
+        let output = match self.run_pass("") {
             Ok(output) => output,
             Err(e) => {
-                // Fail-closed: a recipe/infra fault degrades to "no remediation",
-                // logged. It never aborts the tick and never fabricates work.
+                // Fail-closed: a base recipe/infra fault degrades to "no
+                // remediation", logged. It never aborts the tick, never
+                // fabricates work, and does NOT enter the ladder — the base pass
+                // must succeed before it can be judged merely degraded.
                 tracing::warn!(
                     target: "overseer::health_review",
                     error = %e,
@@ -334,13 +474,10 @@ impl<R: HealthReviewRecipeRunner> HealthReviewer for RecipeHealthReviewer<R> {
                 Ok(report.interventions)
             }
             Err(reason) => {
-                // A pass missing its terminal marker is degraded, not actionable.
-                tracing::warn!(
-                    target: "overseer::health_review",
-                    reason = %reason,
-                    "health-review: degraded recipe output; taking no remediation (fabricating nothing)"
-                );
-                Ok(Vec::new())
+                // A degraded base pass (missing terminal marker): spend extra
+                // compute ONLY on this weak case via the bounded escalation
+                // ladder before giving up — never a silent degrade-on-first-miss.
+                self.escalate_after_parse_miss(&output, &reason)
             }
         }
     }
@@ -687,6 +824,9 @@ mod tests {
             "/tmp/state".to_string(),
             "/tmp/repo".to_string(),
         )
+        // Pin the ladder bound so tests are hermetic against the ambient
+        // SIMARD_BRAIN_ESCALATION_MAX_ATTEMPTS env var.
+        .with_escalation_config(EscalationConfig { max_escalations: 2 })
     }
 
     #[test]
@@ -724,7 +864,9 @@ mod tests {
 
     #[test]
     fn review_degrades_to_empty_on_missing_terminal_marker() {
-        // Recipe output without the terminal marker => degraded => no action.
+        // Recipe output without the terminal marker => degraded. The rail now
+        // drives the bounded escalation ladder; when every rung stays degraded
+        // (FakeRunner replays the same output) it exhausts and takes no action.
         let r = reviewer(FakeRunner::ok(
             "LAUNCH_RECIPE={\"task_description\":\"x\"}\n",
         ));
@@ -732,6 +874,221 @@ mod tests {
         assert!(
             ivs.is_empty(),
             "a degraded pass (no terminal marker) takes no remediation"
+        );
+        // Base pass + 2 escalation rungs (the pinned max_escalations).
+        assert_eq!(
+            r.runner().call_count(),
+            3,
+            "a degraded base pass drives the bounded escalation ladder"
+        );
+    }
+
+    // ── escalation ladder over a sequence-aware seam ──────────────────────
+
+    /// A [`HealthReviewRecipeRunner`] that replays a fixed SEQUENCE of scripted
+    /// outcomes (one per invocation) and records every request, so the bounded
+    /// escalation ladder can be exercised rung by rung.
+    struct SeqRunner {
+        scripted: Mutex<std::collections::VecDeque<Scripted>>,
+        calls: Mutex<Vec<HealthReviewRequest>>,
+    }
+
+    impl SeqRunner {
+        fn new(scripted: Vec<Scripted>) -> Self {
+            Self {
+                scripted: Mutex::new(scripted.into_iter().collect()),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+        fn call_count(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+        fn note_at(&self, idx: usize) -> String {
+            self.calls.lock().unwrap()[idx].escalation_note.clone()
+        }
+    }
+
+    impl HealthReviewRecipeRunner for SeqRunner {
+        fn run(&self, request: &HealthReviewRequest) -> SimardResult<String> {
+            self.calls.lock().unwrap().push(request.clone());
+            match self
+                .scripted
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("SeqRunner: more invocations than scripted outcomes")
+            {
+                Scripted::Ok(o) => Ok(o),
+                Scripted::Err(r) => Err(SimardError::AdapterInvocationFailed {
+                    base_type: HEALTH_REVIEW_ADAPTER_TAG.to_string(),
+                    reason: r,
+                }),
+            }
+        }
+    }
+
+    fn seq_reviewer(runner: SeqRunner, max_escalations: u32) -> RecipeHealthReviewer<SeqRunner> {
+        RecipeHealthReviewer::new(
+            runner,
+            "simard-ooda.service".to_string(),
+            "/tmp/state".to_string(),
+            "/tmp/repo".to_string(),
+        )
+        .with_escalation_config(EscalationConfig { max_escalations })
+    }
+
+    const DEGRADED: &str = "LAUNCH_RECIPE={\"task_description\":\"x\"}\n"; // no terminal marker
+    const RECOVERED: &str = concat!(
+        r#"LAUNCH_RECIPE={"task_description":"fix systemic crash-loop"}"#,
+        "\nHEALTH_REVIEW_COMPLETE=1 launch\n"
+    );
+
+    #[test]
+    fn review_recovers_on_the_schema_repair_rung() {
+        // Base degraded, first (schema-repair) rung recovers a valid pass.
+        let r = seq_reviewer(
+            SeqRunner::new(vec![
+                Scripted::Ok(DEGRADED.to_string()),
+                Scripted::Ok(RECOVERED.to_string()),
+            ]),
+            2,
+        );
+        let ivs = r.review().expect("review ok");
+        assert_eq!(ivs.len(), 1, "the recovered rung's interventions are used");
+        assert!(matches!(ivs[0], Intervention::LaunchRecipe { .. }));
+        assert_eq!(r.runner().call_count(), 2, "base + one recovery rung");
+        // The base pass carries no note; the repair rung carries a schema-repair
+        // note that names the required terminal-marker contract.
+        assert_eq!(r.runner().note_at(0), "");
+        let repair = r.runner().note_at(1);
+        assert!(
+            repair.contains("SCHEMA REPAIR") && repair.contains("HEALTH_REVIEW_COMPLETE"),
+            "the repair note reminds the agent of the terminal-marker contract: {repair}"
+        );
+    }
+
+    #[test]
+    fn review_recovers_on_the_high_effort_rung() {
+        // Base + schema-repair both degraded; the final high-effort rung recovers.
+        let r = seq_reviewer(
+            SeqRunner::new(vec![
+                Scripted::Ok(DEGRADED.to_string()),
+                Scripted::Ok(DEGRADED.to_string()),
+                Scripted::Ok(RECOVERED.to_string()),
+            ]),
+            2,
+        );
+        let ivs = r.review().expect("review ok");
+        assert_eq!(ivs.len(), 1);
+        assert_eq!(r.runner().call_count(), 3, "base + two rungs");
+        let high = r.runner().note_at(2);
+        assert!(
+            high.contains("HIGH-EFFORT"),
+            "the final rung escalates to the higher-effort tier: {high}"
+        );
+    }
+
+    #[test]
+    fn review_exhausts_ladder_and_takes_no_remediation() {
+        // Every rung stays degraded → exhausted → no remediation, no fabrication.
+        let r = seq_reviewer(
+            SeqRunner::new(vec![
+                Scripted::Ok(DEGRADED.to_string()),
+                Scripted::Ok(DEGRADED.to_string()),
+                Scripted::Ok(DEGRADED.to_string()),
+            ]),
+            2,
+        );
+        let ivs = r.review().expect("review ok");
+        assert!(ivs.is_empty(), "an exhausted ladder fabricates nothing");
+        assert_eq!(r.runner().call_count(), 3, "base + two exhausted rungs");
+    }
+
+    #[test]
+    fn review_disabled_ladder_makes_no_retry() {
+        // max_escalations == 0 disables the ladder: a degraded base pass degrades
+        // immediately (byte-identical to the pre-ladder single-pass behaviour).
+        let r = seq_reviewer(SeqRunner::new(vec![Scripted::Ok(DEGRADED.to_string())]), 0);
+        let ivs = r.review().expect("review ok");
+        assert!(ivs.is_empty());
+        assert_eq!(
+            r.runner().call_count(),
+            1,
+            "a disabled ladder never retries"
+        );
+    }
+
+    #[test]
+    fn review_stops_ladder_when_a_rung_faults() {
+        // Base degraded, then the schema-repair rung's OWN invocation faults:
+        // stop the ladder fail-closed (never fabricate on a fault), no further rung.
+        let r = seq_reviewer(
+            SeqRunner::new(vec![
+                Scripted::Ok(DEGRADED.to_string()),
+                Scripted::Err("rung spawn failed".to_string()),
+            ]),
+            2,
+        );
+        let ivs = r.review().expect("review ok");
+        assert!(ivs.is_empty(), "a rung fault fabricates no remediation");
+        assert_eq!(
+            r.runner().call_count(),
+            2,
+            "the ladder stops at the faulting rung (no high-effort rung)"
+        );
+    }
+
+    #[test]
+    fn review_healthy_base_never_enters_the_ladder() {
+        // A clean base pass returns immediately — no escalation invocation.
+        let r = seq_reviewer(
+            SeqRunner::new(vec![Scripted::Ok(
+                "HEALTHY\nHEALTH_REVIEW_COMPLETE=healthy\n".to_string(),
+            )]),
+            2,
+        );
+        let ivs = r.review().expect("review ok");
+        assert!(ivs.is_empty());
+        assert_eq!(
+            r.runner().call_count(),
+            1,
+            "a healthy base pass never retries"
+        );
+    }
+
+    #[test]
+    fn review_base_runner_error_never_enters_the_ladder() {
+        // A BASE infra/runner fault degrades with NO ladder — the base pass must
+        // succeed before it can be judged merely degraded.
+        let r = seq_reviewer(
+            SeqRunner::new(vec![Scripted::Err("base spawn failed".to_string())]),
+            2,
+        );
+        let ivs = r
+            .review()
+            .expect("review must not surface the fault as Err");
+        assert!(ivs.is_empty());
+        assert_eq!(
+            r.runner().call_count(),
+            1,
+            "a base runner fault does not enter the ladder"
+        );
+    }
+
+    #[test]
+    fn review_base_pass_carries_no_escalation_note() {
+        // Regression guard: the base pass note stays empty (byte-identical base).
+        let r = seq_reviewer(SeqRunner::new(vec![Scripted::Ok(RECOVERED.to_string())]), 2);
+        r.review().expect("review ok");
+        assert_eq!(r.runner().note_at(0), "");
+    }
+
+    #[test]
+    fn build_health_review_escalation_note_is_empty_on_base() {
+        // The Base rung allocates no note so the base pass is unchanged.
+        assert_eq!(
+            build_health_review_escalation_note(LadderRung::Base, "prior"),
+            ""
         );
     }
 

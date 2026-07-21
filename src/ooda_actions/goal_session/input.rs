@@ -67,6 +67,31 @@ pub(crate) fn build_goal_advance_input(
         }
     }
 
+    if goal.is_standing_research_goal() {
+        objective.push_str(
+            "\n\n## Novelty-first directive [novelty-first: standing research goal]\n\
+             This is a STANDING cognition-research goal. Each cycle, your PRIMARY \
+             directive is to seek a GENUINELY NEW research direction — do NOT default \
+             to another incremental parse-site / dedup refinement of an already-worked \
+             seam.\n\
+             1. FIRST survey the space of NOVEL, unexplored cognition-research \
+             directions you have not yet tried (new graph-memory retrieval strategies, \
+             memory-consolidation techniques, reasoner-reliability approaches, \
+             ranking/embedding ideas). Draw on your own memory and recent PRs to avoid \
+             repeating work already done.\n\
+             2. PREFER pursuing a novel direction: prototype it and benchmark against \
+             the current recall-precision / fact-yield baseline, producing EITHER a \
+             durable PR implementing the technique OR a memory-recorded, reasoned \
+             NEGATIVE result explaining why it does not beat the baseline. Prefer this \
+             over an incremental refinement of a seam already worked.\n\
+             3. Only FALL BACK to incremental maintenance when no novel direction is \
+             currently viable — and SAY SO explicitly, naming what you surveyed and why \
+             nothing novel was actionable this cycle.\n\
+             Preserve STANDING PERPETUAL semantics: never mark this goal complete; \
+             durable improvements only.",
+        );
+    }
+
     if observe_only {
         objective.push_str(
             "\n\n## Read-only observer contract\n\

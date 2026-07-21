@@ -165,6 +165,11 @@ pub fn observed_from_snapshot(snap: &StatusSnapshot) -> ObservedState {
         // read-only status snapshot; left empty here so this projection stays
         // additive and side-effect free.
         recent_step_failures: Vec::new(),
+        // Deploy-drift (#2590) is surfaced by the ACTING Overseer's Observe pass
+        // (the `observe_deploy_drift` rail runs the fail-safe ReconcileDetector),
+        // not from the read-only status snapshot; left `None` here so this
+        // projection stays additive and side-effect free.
+        deploy_drift: None,
         // Agentic merge-queue reasoning (#4097: reasoned_prs / triaged_issues /
         // merge_reasoning_status) is populated by the acting Overseer's Observe
         // pass via the `observe-merge-queue` recipe rail, not from the read-only

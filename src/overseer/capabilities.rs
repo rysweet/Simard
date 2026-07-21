@@ -168,6 +168,29 @@ pub struct ObservedState {
     /// so a caught failure drives a fix instead of a silent log. Empty when no
     /// step failed this window.
     pub recent_step_failures: Vec<FailureDiagnosis>,
+    /// Autonomous self-deploy drift observed this pass (issue #2590): the running
+    /// daemon binary is behind merged `origin/main` and a target commit resolved.
+    /// Populated by the acting Overseer's drift-observe rail (fail-safe: a git or
+    /// source error, a current daemon, or an unresolved head all leave this
+    /// `None`). `signals_from` lifts it into a `Signal::DeployDriftDetected` that
+    /// Decide maps to a guarded `Intervention::Deploy`. `None` when there is
+    /// nothing to deploy or the rail is disabled/unwired.
+    pub deploy_drift: Option<DeployDriftObservation>,
+}
+
+/// The self-deploy drift the Overseer observed this pass (issue #2590): the
+/// running binary is behind merged `main`, and `target_commit` is the resolved
+/// merged head a guarded deploy should converge on. Carried on
+/// [`ObservedState::deploy_drift`] so `signals_from` can lift it into a
+/// [`Signal::DeployDriftDetected`] purely (the effectful git probe stays in the
+/// observe rail).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeployDriftObservation {
+    /// Merged-head commit the daemon should deploy to (a non-empty git rev).
+    pub target_commit: String,
+    /// Commits the running binary is behind `origin/main` (`0` when only pins
+    /// drifted).
+    pub behind_commits: usize,
 }
 
 /// A `(repo, pr)` pair. `repo` is an `owner/name` slug.
@@ -763,6 +786,7 @@ fn signal_keyword(s: &Signal) -> Option<String> {
         Signal::StalePrDetected { repo, pr } => format!("stale-pr:{repo}#{pr}"),
         Signal::DuplicatePrDetected { repo, pr, .. } => format!("dup-pr:{repo}#{pr}"),
         Signal::IssueNeedsWorkstream { repo, issue, .. } => format!("issue-ws:{repo}#{issue}"),
+        Signal::DeployDriftDetected { .. } => "deploy-drift".to_string(),
     };
     if kw.is_empty() { None } else { Some(kw) }
 }

@@ -370,16 +370,26 @@ async fn memory_recent_lists_recent_episodes_newest_first() {
             item.get("category").and_then(|c| c.as_str()) == Some("Past event"),
             "each item needs the 'Past event' category: {item}",
         );
-        // `timestamp` is always JSON `null` for library-backed episodes: the
-        // backend stores a monotonic ordinal, not a wall-clock instant, so the
-        // frontend omits the "time ago" label. The key must still be present.
+        // `timestamp` now carries the episode's real `created_at` as an RFC3339
+        // instant (issue #4383): the library backend records a wall-clock time,
+        // so the frontend can render a "time ago" label. The key must be present
+        // and hold a parseable RFC3339 timestamp at or near "now".
         assert!(
             item.get("timestamp").is_some(),
             "each item must carry a `timestamp` key: {item}",
         );
+        let ts = item["timestamp"]
+            .as_str()
+            .unwrap_or_else(|| panic!("library-backed episodes carry a real timestamp: {item}"));
+        let parsed = chrono::DateTime::parse_from_rfc3339(ts)
+            .unwrap_or_else(|e| panic!("`timestamp` must be RFC3339 ({e}): {item}"))
+            .with_timezone(&chrono::Utc);
+        let age = chrono::Utc::now()
+            .signed_duration_since(parsed)
+            .num_seconds();
         assert!(
-            item["timestamp"].is_null(),
-            "library-backed episodes have no wall-clock time, so `timestamp` is null: {item}",
+            (-5..3600).contains(&age),
+            "episode `timestamp` must be a recent wall-clock instant (age={age}s): {item}",
         );
     }
 }

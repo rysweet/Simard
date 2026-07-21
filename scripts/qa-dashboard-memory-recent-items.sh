@@ -19,9 +19,14 @@
 #   * reports `available: true`,
 #   * lists exactly the three seeded episodes,
 #   * orders them newest-first (the last-imported episode is item 0),
-#   * tags each item with the frontend's "Past event" category.
-# Any regression back to the empty-stub behaviour makes this script `exit 1`,
-# which the `gadugi-test` cli agent treats as a hard step failure.
+#   * tags each item with the frontend's "Past event" category,
+#   * carries a non-null, parseable RFC3339 `timestamp` for each item so the
+#     frontend's `timeAgo()` can render a "time ago" label (issue #4383 — the
+#     timestamp used to be structurally `null` for every item even though the
+#     library records a real `created_at`).
+# Any regression back to the empty-stub behaviour, or back to the always-null
+# timestamp, makes this script `exit 1`, which the `gadugi-test` cli agent
+# treats as a hard step failure.
 set -uo pipefail
 
 PORT="${QA_DASHBOARD_PORT:-18844}"
@@ -101,6 +106,7 @@ resp="$(curl -fsS "${AUTH[@]}" "http://127.0.0.1:$PORT/api/memory/recent")" \
 # stdin (so it cannot also be piped in).
 QA_RESP="$resp" python3 <<'PY' || exit 1
 import json, os, sys
+from datetime import datetime, timezone
 
 raw = os.environ["QA_RESP"]
 d = json.loads(raw)
@@ -127,7 +133,24 @@ for i in items:
         bail(f"each item must use the 'Past event' category; got {i.get('category')}")
     if "timestamp" not in i:
         bail("each item must carry a `timestamp` key (string or null)")
+    # Issue #4383: the timestamp must now be the episode's real created_at,
+    # surfaced as a parseable RFC3339 string at or near "now" — never the old
+    # structural null, and never a fabricated 1970s epoch.
+    ts = i.get("timestamp")
+    if not isinstance(ts, str) or not ts:
+        bail(f"each item must carry a non-null RFC3339 `timestamp` (issue #4383); got {ts!r}")
+    norm = ts.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(norm)
+    except ValueError:
+        bail(f"`timestamp` must be parseable RFC3339; got {ts!r}")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - parsed).total_seconds()
+    if not (-5 <= age <= 3600):
+        bail(f"`timestamp` must be a recent wall-clock instant (age={age:.0f}s); got {ts!r}")
 
 print("QA-DASHBOARD-RECENT: PASS - /api/memory/recent lists the 3 seeded "
-      "episodes newest-first with available:true and 'Past event' category")
+      "episodes newest-first with available:true, 'Past event' category, and a "
+      "non-null RFC3339 timestamp per item (issue #4383)")
 PY

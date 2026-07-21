@@ -50,6 +50,15 @@ pub struct CognitiveEpisode {
     pub source_label: String,
     pub temporal_index: i64,
     pub compressed: bool,
+    /// Wall-clock instant the episode was recorded, carried through from the
+    /// library `EpisodicMemory::created_at` (issue #4383). `None` for backends
+    /// or callers that genuinely lack a timestamp — never a fabricated epoch,
+    /// so the dashboard "Recent Memories" panel degrades honestly to a blank
+    /// "time ago" label rather than showing a nonsensical 1970s date.
+    /// `#[serde(default)]` so episodes serialized before this field existed
+    /// deserialize to `None`.
+    #[serde(default)]
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Distilled knowledge fact from semantic memory.

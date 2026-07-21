@@ -16,11 +16,11 @@ and a matching DOT representation; both are rendered to SVG.
 | Flow | Entry point | Key modules | What it does |
 |---|---|---|---|
 | OODA loop | `run_ooda_cycle` (`src/ooda_loop/cycle.rs`) | `ooda_loop::{observe,orient,decide,coverage,no_progress}`, `ooda_brain`, `ooda_actions` | Observe → Orient → Decide → Act over the goal board each tick; orient/decide route through recipes with deterministic rails |
-| Overseer tick | `run_overseer_tick_isolated_detailed` (`src/overseer/wiring.rs`) → `run_cycle` (`src/overseer/mod.rs:609`) | `overseer::{merge_queue_observe,ecosystem_observe,root_cause,capabilities,launch}` | Meta-OODA supervision: observes board + merge-queue + ecosystem (agentic), root-causes problems, decides interventions, acts via capabilities |
+| Overseer tick | `run_overseer_tick_isolated_detailed` (`src/overseer/wiring.rs`) → `run_cycle` (`src/overseer/mod.rs:663`) | `overseer::{merge_queue_observe,ecosystem_observe,health_review,root_cause,capabilities,launch}` | Meta-OODA supervision: observes board + merge-queue + ecosystem + health-review (all agentic), root-causes problems, decides interventions, acts via capabilities |
 | Recipes | `resolve_recipe_path` + `RecipeBrain` (`src/ooda_brain/recipe_brain.rs`) | `recipe_context_file`, `recipe_output`, `overseer::launch`, `stewardship::recipe_merge_judge` | Uniform recipe-runner invocation: resolve → context-file → spawn → parse envelope → typed decision |
 | Prompt assets | `FilePromptAssetStore::load` (`src/prompt_assets.rs`) | `prompt_delivery`, `amplihack_freshness_gate` | Locate/validate/deliver `prompt_assets/simard/*` to agents; freshness gate keeps recipes/SDK LATEST |
 | Typed-OODA | `TypedGoalSessionRoute::execute` (`src/typed_ooda/route.rs`) | `typed_ooda::{types,schema,route,executor,ledger}` | Capability/effect model: recipe emits a terminal outcome, capability-checked, dispatched as a durable, leased `EffectJob` |
-| Cognitive-memory recall | `recall_pass` (`src/overseer/mod.rs:1026`) / OODA prepare (`src/ooda_loop/cycle.rs`) | `cognitive_memory`, `memory_ipc`, `LibraryCognitiveMemory` | 4-way ranked recall (facts/episodes/procedures/prospectives) from the embedded lbug store into prompt context |
+| Cognitive-memory recall | `recall_pass` (`src/overseer/mod.rs:1156`) / OODA prepare (`src/ooda_loop/cycle.rs`) | `cognitive_memory`, `memory_ipc`, `LibraryCognitiveMemory` | 4-way ranked recall (facts/episodes/procedures/prospectives) from the embedded lbug store into prompt context |
 
 ## Overview: how the flows link
 
@@ -55,6 +55,25 @@ unblock/escalate goals). In production the deployer is **`RefuseDeployer`**
 and goal transfer is delegated to `MeetingHost::transfer_goal`. It writes back an
 observation episode. Note `observe_ecosystem` runs **after** the per-problem
 decide/gate loop, appending gated `LaunchRecipe` interventions.
+
+Immediately after `observe_ecosystem`, `run_cycle` runs the agentic
+**health-review** rail (`health_review`, `src/overseer/mod.rs:935` →
+`src/overseer/health_review.rs`, wired by `build_health_reviewer` in
+`src/overseer/wiring.rs`, [standing]). When wired and due on the cadence
+(`health_review_enabled` opt-out + the shared `gap_scan` throttle +
+`health_review_every_n`), the thin rail invokes the `overseer-health-review`
+recipe via `recipe-runner-rs`. The **agent** reads the OODA journal
+(`journalctl --user -u <unit>`, default `simard-ooda.service`), `simard status`,
+and `simard goal list`, detects crash-loops / shared failure signatures
+(systemic-vs-per-goal root cause), and reasons to typed remediation
+DECISIONS parsed from `LAUNCH_RECIPE=` / `ESCALATE_GOAL=` markers into
+`Intervention::LaunchRecipe` / `Intervention::EscalateBlockedGoal`. Rust never
+reads the journal, counts a failure, or encodes a threshold — it only schedules
+the recipe and routes each parsed intervention through the **same** `gate`
+(budget / launch-cap / sequencer / in-flight-dedup / recursion) every other
+action uses. Fail-closed: an unwired reviewer, a disabled rail, an off cadence,
+a `HEALTHY` verdict (empty vec), or a degraded recipe run all leave the plan
+unchanged — never a fabricated launch or escalation.
 
 The autonomous **verify+merge** path (`src/overseer/merge_ops.rs`) is a fixed
 sub-pipeline. Candidate narrowing happens **earlier, in the observe stage**:
@@ -97,7 +116,7 @@ downstream in `amplifier-bundle`, not in this repo.
 
 ## Prompt assets (prompt_assets/simard/*)
 
-`recipes/` (22 YAML), `overseer/` (7 MD), `policies/` (capability TOML), and
+`recipes/` (23 YAML), `overseer/` (7 MD), `policies/` (capability TOML), and
 `terminal_recipes/` are version-controlled truth. They are deployed to the
 runtime hot-reload copy, loaded via a path-traversal-guarded store, and delivered
 to agents through a size-gated transport (inline/stdin/tempfile).

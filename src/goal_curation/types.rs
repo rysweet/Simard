@@ -102,6 +102,39 @@ pub fn description_marks_standing(description: &str) -> bool {
         .any(|phrase| contains_phrase_on_word_boundary(&lower, phrase))
 }
 
+/// Whole-word, case-insensitive markers in a goal description that make it a
+/// *cognition-research* goal — one whose durable subject is Simard's own
+/// cognition (graph memory, recall, distillation, reasoning). Matched with a
+/// leading word boundary (via [`contains_phrase_on_word_boundary`]) so ordinary
+/// words that merely *contain* one of these substrings (e.g. "scorecall",
+/// "preretrieval") never trigger a false positive.
+const RESEARCH_DESCRIPTION_MARKERS: &[&str] = &[
+    "cognition",
+    "recall",
+    "distillation",
+    "reasoner",
+    "memory",
+    "consolidation",
+    "retrieval",
+    "embedding",
+];
+
+/// True when `description` marks the goal as a cognition-research goal — its
+/// durable subject is improving Simard's own cognition (graph memory, recall
+/// quality, distillation fact-yield, reasoner reliability, and related
+/// retrieval/embedding/consolidation techniques).
+///
+/// This is orthogonal to [`description_marks_standing`]: a one-off recall fix
+/// is research but not standing, and a CI-stewardship goal is standing but not
+/// research. The novelty-first steering (issue #4347) applies only where *both*
+/// hold — see [`ActiveGoal::is_standing_research_goal`].
+pub fn description_marks_research(description: &str) -> bool {
+    let lower = description.to_ascii_lowercase();
+    RESEARCH_DESCRIPTION_MARKERS
+        .iter()
+        .any(|phrase| contains_phrase_on_word_boundary(&lower, phrase))
+}
+
 /// `haystack_lower.contains(phrase)` but only where the match begins on a word
 /// boundary (start-of-string or a non-alphanumeric char before it). Both
 /// arguments must already be lowercase. Keeps "understanding goal" from
@@ -291,6 +324,22 @@ impl ActiveGoal {
     /// curation or the completion gate, and must never be tombstoned.
     pub fn is_perpetual(&self) -> bool {
         description_marks_standing(&self.description)
+    }
+
+    /// True when this is a **standing cognition-research goal** — both
+    /// standing/perpetual ([`is_perpetual`]) and marked as cognition research
+    /// ([`description_marks_research`]).
+    ///
+    /// This is the durable predicate that gates novelty-first steering (issue
+    /// #4347): when such a goal is worked, each cycle must FIRST survey
+    /// genuinely new cognition-research directions and PREFER a novel one over
+    /// yet another incremental parse-site / dedup refinement. It is deliberately
+    /// general (a standing *research* goal seeks novelty) rather than pinned to
+    /// any single goal id, and never regresses standing-perpetual semantics.
+    ///
+    /// [`is_perpetual`]: ActiveGoal::is_perpetual
+    pub fn is_standing_research_goal(&self) -> bool {
+        self.is_perpetual() && description_marks_research(&self.description)
     }
 
     /// Builder: durably mark this goal as standing/perpetual by prepending the
@@ -763,6 +812,104 @@ mod tests {
             g.is_perpetual(),
             "must remain a standing goal after rolling to a new cycle"
         );
+    }
+
+    // ── Standing research/cognition goals — novelty-first steering ──
+    //
+    // TDD (issue #4347): a standing *research/cognition* goal must be steered
+    // to seek genuinely NEW cognition-research directions each cycle rather
+    // than repeatedly grabbing narrow incremental parse-site / dedup fixes.
+    // The durable predicate `description_marks_research` and the combined
+    // `ActiveGoal::is_standing_research_goal` gate that steering. These tests
+    // pin the contract: standing AND research markers → true; anything missing
+    // one half → false; matching is whole-word and panic-free on any input.
+
+    #[test]
+    fn description_marks_research_recognizes_cognition_markers() {
+        // Each canonical cognition-research marker (whole word) must match.
+        assert!(description_marks_research(
+            "continuously research cognition"
+        ));
+        assert!(description_marks_research("improve recall quality"));
+        assert!(description_marks_research("distillation fact-yield"));
+        assert!(description_marks_research("reasoner reliability"));
+        assert!(description_marks_research(
+            "memory consolidation techniques"
+        ));
+        assert!(description_marks_research(
+            "graph retrieval and embedding strategies"
+        ));
+        // The live standing goal's description must be recognised as research.
+        assert!(description_marks_research(
+            "Continuously research and improve your own cognition: graph memory, \
+             recall quality, distillation fact-yield, and reasoner reliability. \
+             STANDING PERPETUAL goal — durable improvements only"
+        ));
+    }
+
+    #[test]
+    fn description_marks_research_rejects_non_research_and_word_boundary_false_positives() {
+        // Ordinary, non-cognition goals must not read as research.
+        assert!(!description_marks_research("Ship the MVP release"));
+        assert!(!description_marks_research(
+            "Fix trailing-comma JSON recovery at parse sites"
+        ));
+        assert!(!description_marks_research(""));
+        // A marker substring that does not begin on a word boundary must not
+        // trigger a match ("recall" inside "scorecall").
+        assert!(!description_marks_research("scorecall dashboard tidy-up"));
+        // "retrieval" embedded mid-word must not match.
+        assert!(!description_marks_research("preretrieval buffer resize"));
+    }
+
+    #[test]
+    fn is_standing_research_goal_requires_both_standing_and_research() {
+        // Standing AND research → true (the live 70ab8541 goal).
+        let standing_research = ActiveGoal::new(
+            "continuously-research-and-improve-your-own-cogn-70ab8541",
+            "Continuously research and improve your own cognition: graph memory, \
+             recall quality, distillation fact-yield, and reasoner reliability. \
+             STANDING PERPETUAL goal — durable improvements only",
+            1,
+        );
+        assert!(standing_research.is_standing_research_goal());
+
+        // Standing but NOT research → false (must not be novelty-steered).
+        let standing_only =
+            ActiveGoal::new("g-ci", "Steward CI health. STANDING PERPETUAL goal.", 1);
+        assert!(standing_only.is_perpetual());
+        assert!(!standing_only.is_standing_research_goal());
+
+        // Research but NOT standing → false (ordinary one-off cognition task).
+        let research_only =
+            ActiveGoal::new("g-recall", "Improve recall precision at parse sites", 1);
+        assert!(!research_only.is_perpetual());
+        assert!(!research_only.is_standing_research_goal());
+
+        // Neither → false.
+        let neither = ActiveGoal::new("g-mvp", "Ship the MVP release", 1);
+        assert!(!neither.is_standing_research_goal());
+    }
+
+    #[test]
+    fn is_standing_research_goal_is_total_and_panic_free_on_pathological_input() {
+        // Pathological descriptions must never panic and must return a bool.
+        let very_long = "recall ".repeat(50_000);
+        let g_long = ActiveGoal::new("g", very_long, 1);
+        let _ = g_long.is_standing_research_goal();
+
+        let unicode = ActiveGoal::new(
+            "g",
+            "认知 research — cognition 🧠 STANDING PERPETUAL goal",
+            1,
+        );
+        let _ = unicode.is_standing_research_goal();
+
+        let control = ActiveGoal::new("g", "cognition\0\t\r\nstanding goal", 1);
+        let _ = control.is_standing_research_goal();
+
+        // Free predicate must also tolerate arbitrary input.
+        assert!(!description_marks_research("\0\0\0"));
     }
 
     // ── BacklogItem ─────────────────────────────────────────────────

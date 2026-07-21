@@ -83,6 +83,27 @@ markers from a recipe run). Health-review blends both:
   into the SAME gate every other Overseer action uses. Rust never reads the
   journal, counts a failure, or encodes a threshold.
 
+### Recovering a degraded pass: the shared escalation ladder
+
+One agent pass occasionally emits a truncated or malformed report that lacks the
+REQUIRED `HEALTH_REVIEW_COMPLETE` terminal marker. Rather than silently degrade
+that weak case to "no remediation" on the FIRST miss, the rail spends extra
+compute ONLY there: on a base parse-miss it drives a **bounded escalation
+ladder** — a schema-repair re-prompt, then a higher-effort tier — reusing the
+exact same primitives every other recipe-backed brain phase (decide / orient /
+merge-judge / engineer-lifecycle) uses: `build_phase_escalation_note`,
+`EscalationConfig` (bounded by the shared `SIMARD_BRAIN_ESCALATION_MAX_ATTEMPTS`
+knob and a hard cap), and the three-rung `LadderRung`. Each rung re-injects the
+recipe's `{{escalation_note}}` context var, quoting the prior malformed output
+and re-stating the terminal-marker contract.
+
+This is a bounded RETRY on a degraded *parse* — **not** a failure counter and
+**not** an N-identical-failure threshold; the health judgment still lives
+entirely in the recipe. It stays fail-closed end to end: a base runner/infra
+fault degrades with NO ladder (the base pass must succeed before it can be judged
+degraded), a rung's own invocation fault stops the ladder, and an exhausted
+ladder takes no remediation — never a fabricated launch or escalation.
+
 ### The typed decisions
 
 The agent emits plain-text marker lines; the rail parses them:
@@ -120,9 +141,11 @@ DO. Every parsed decision flows through the UNCHANGED gate and act loop:
   steward identity to dispatch — exactly like every other escalation.
 
 The rail is **fail-closed** end to end: an unwired reviewer, a disabled rail, an
-off cadence, a `HEALTHY` verdict, a malformed/missing-field decision, a missing
-terminal marker, or a failed recipe run all leave the plan unchanged — never a
-fabricated launch or escalation.
+off cadence, a `HEALTHY` verdict, a malformed/missing-field decision, or a failed
+recipe run all leave the plan unchanged — never a fabricated launch or
+escalation. A missing terminal marker first drives the bounded escalation ladder
+(above); only when that ladder is disabled, faults, or is exhausted does the pass
+leave the plan unchanged.
 
 ## Configuration
 
@@ -132,6 +155,7 @@ fabricated launch or escalation.
 | `SIMARD_OVERSEER_GAP_SCAN` | shared throttle for ALL agentic Overseer scans | ON; also disables health-review when off |
 | `SIMARD_OVERSEER_GAP_SCAN_EVERY_N` | cadence divisor (run once every N ticks) | `1` (every tick), floored at `1` |
 | `SIMARD_OVERSEER_HEALTH_REVIEW_UNIT` | systemd `--user` unit whose journal to read | `simard-ooda.service` |
+| `SIMARD_BRAIN_ESCALATION_MAX_ATTEMPTS` | rungs the degraded-pass escalation ladder climbs after a base parse-miss (shared with the OODA brains); `0` disables the ladder | `2`, hard-capped at `3` |
 
 A disabled acting Overseer forces the rail off regardless of the flag — the
 review only makes sense while the Overseer runs.
