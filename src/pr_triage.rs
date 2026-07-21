@@ -653,10 +653,13 @@ impl TriageGhClient for RealTriageGh {
             }
         }
         // Least-privilege guard: never allow branch-protection bypass or force.
-        if argv
-            .iter()
-            .any(|a| a == "--admin" || a == "-f" || a == "--force")
-        {
+        // Normalise each arg to its flag name (before any `=value`) so the
+        // `--admin=true` / `--force=true` forms cannot slip past exact-match.
+        const DENIED_FLAGS: [&str; 3] = ["--admin", "-f", "--force"];
+        if argv.iter().any(|a| {
+            let flag = a.split('=').next().unwrap_or(a.as_str());
+            DENIED_FLAGS.contains(&flag)
+        }) {
             return Err(SimardError::PrTriageGhCommandFailed {
                 reason: format!("refusing privileged/forced mutation: {argv:?}"),
             });
@@ -904,6 +907,18 @@ mod external_integration_tests {
         assert!(
             real.run_mutation(&not_gh).is_err(),
             "non-gh must be refused"
+        );
+        // The `--admin=true` flag form must not slip past the guard.
+        let forced_kv = vec![
+            "gh".to_string(),
+            "pr".to_string(),
+            "merge".to_string(),
+            "1".to_string(),
+            "--admin=true".to_string(),
+        ];
+        assert!(
+            real.run_mutation(&forced_kv).is_err(),
+            "--admin=true must be refused"
         );
     }
 }
