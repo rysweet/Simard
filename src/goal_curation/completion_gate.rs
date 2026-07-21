@@ -639,17 +639,21 @@ impl GhCliEvidenceSource {
     /// reference at all — the caller treats that as "no merge evidence" and
     /// blocks without a network call (fail-closed).
     ///
-    /// The `(repo, number)` pair is kept **atomic** so a number is never paired
-    /// with a repo it did not come from:
+    /// How the `(repo, number)` pair is sourced depends on where the number
+    /// comes from:
     ///
     /// * **Number** — the numeric `WipRef.ref_id` when present; otherwise the
     ///   number recovered from the PR `WipRef.url` (`.../pull/<digits>`).
-    /// * **Repo** — when the number came from a numeric `ref_id`, an
-    ///   already-qualified `goal.repo` wins, else the repo recovered from the PR
-    ///   URL, else the bare/`None` `goal.repo` resolved via [`repo_slug`]
-    ///   (default `rysweet/Simard`). When the number came from the URL, the repo
-    ///   is taken from that same URL to keep the pair atomic — a qualified
-    ///   `goal.repo` does **not** override a URL-derived number.
+    /// * **Repo** — when the number came from a numeric `ref_id`, the repo is
+    ///   resolved independently: an already-qualified `goal.repo` wins, else the
+    ///   repo recovered from the PR URL, else the bare/`None` `goal.repo`
+    ///   resolved via [`repo_slug`] (default `rysweet/Simard`). This is the one
+    ///   *mixed-source* case — number from `ref_id`, repo possibly from the URL
+    ///   or `goal.repo` — and it still fails closed: if the two disagree, the
+    ///   subsequent `gh` query finds no matching merged PR and archival is
+    ///   blocked. When instead the number came from the URL, the repo is taken
+    ///   from that **same** URL so the pair is strictly single-source — a
+    ///   qualified `goal.repo` does **not** override a URL-derived number.
     ///
     /// Pure and network-free: this never spawns a subprocess and never touches
     /// the filesystem, so a goal reconciles deterministically every OODA cycle.
