@@ -283,6 +283,26 @@ pub(crate) async fn memory_history() -> Json<Value> {
 ///   3. Empty history has no baseline (`None`); the caller then diffs the live
 ///      total against itself, yielding an honest `0`.
 pub(crate) fn select_last_hour_baseline(history: &[MemorySnapshot], now_secs: f64) -> Option<u64> {
+    select_last_hour_baseline_snapshot(history, now_secs).map(|s| s.long_term_total)
+}
+
+/// Select the SNAPSHOT that best represents "one hour ago" for the trailing-hour
+/// delta (#2679 / #4318), returning the whole snapshot so the caller can read
+/// both its `long_term_total` (the baseline count) AND its `epoch_secs` (to
+/// compute the *actual* window the count covers).
+///
+/// The selection rule is identical to [`select_last_hour_baseline`] — the
+/// scalar helper delegates here — but exposing the snapshot lets
+/// [`memory_recent_at`] surface `last_hour_window_secs = now − baseline.epoch`.
+/// That window can legitimately exceed one hour when `memory_history.json` has a
+/// gap wider than an hour straddling the 1 h mark: the most-recent snapshot
+/// at-or-before `now − 3600` is then arbitrarily older than 1 h, so the count is
+/// net growth over that *longer* span. Surfacing the true window lets the
+/// caption stay honest instead of hardcoding "in the last hour" (#4318).
+pub(crate) fn select_last_hour_baseline_snapshot(
+    history: &[MemorySnapshot],
+    now_secs: f64,
+) -> Option<&MemorySnapshot> {
     if history.is_empty() {
         return None;
     }
@@ -297,7 +317,6 @@ pub(crate) fn select_last_hour_baseline(history: &[MemorySnapshot], now_secs: f6
         .filter(|s| s.epoch_secs <= cutoff)
         .max_by(cmp_epoch)
         .or_else(|| history.iter().min_by(cmp_epoch))
-        .map(|s| s.long_term_total)
 }
 
 /// `GET /api/memory/recent` — recent-memory listing.
@@ -342,6 +361,13 @@ pub(crate) async fn memory_recent() -> Json<Value> {
 /// (see [`select_last_hour_baseline`]). The read fails closed: on a live-read
 /// error it returns an `error` payload with `last_hour_count: null` — never a
 /// misleading `0`.
+///
+/// `last_hour_window_secs` (#4318): the ACTUAL span the count covers,
+/// `now − baseline.epoch_secs`. It is ~3600 in steady state but can be larger
+/// when `memory_history.json` has a gap wider than an hour straddling the 1 h
+/// mark (the baseline is then older than 1 h, so the count is net growth over
+/// that longer span). The frontend labels the true window instead of hardcoding
+/// "in the last hour". `null` when there is no baseline snapshot at all.
 pub(crate) async fn memory_recent_at(state_root: &std::path::Path) -> Json<Value> {
     let note = "Recent items are the newest episodic memories (events Simard \
                 recorded), newest-first; `total` is the live aggregate stored \
@@ -362,6 +388,7 @@ pub(crate) async fn memory_recent_at(state_root: &std::path::Path) -> Json<Value
                 "items": [],
                 "total": Value::Null,
                 "last_hour_count": Value::Null,
+                "last_hour_window_secs": Value::Null,
                 "available": false,
                 "note": note,
                 "error": format!("Cannot read cognitive memory: {e}"),
@@ -378,6 +405,7 @@ pub(crate) async fn memory_recent_at(state_root: &std::path::Path) -> Json<Value
                 "items": [],
                 "total": Value::Null,
                 "last_hour_count": Value::Null,
+                "last_hour_window_secs": Value::Null,
                 "available": false,
                 "note": note,
                 "error": format!("Cannot read cognitive memory: {e}"),
@@ -404,8 +432,16 @@ pub(crate) async fn memory_recent_at(state_root: &std::path::Path) -> Json<Value
     // Absent a one-hour-ago baseline (empty history), diff the live total
     // against itself → honest 0. `saturating_sub` clamps a pruning-dominated
     // (net-negative) interval to 0 without underflowing.
+    let baseline_snapshot = select_last_hour_baseline_snapshot(&history, now_secs);
     let baseline = select_last_hour_baseline(&history, now_secs).unwrap_or(live_long_term);
     let last_hour_count = live_long_term.saturating_sub(baseline);
+    // The ACTUAL window the count covers (#4318): `now − baseline.epoch`. When
+    // history has a gap wider than an hour, the chosen baseline is older than
+    // 1 h and this exceeds 3600 s — the count is net growth over that longer
+    // span, NOT one hour. Surfacing it lets the caption tell the truth instead
+    // of hardcoding "in the last hour". `null` when there is no baseline
+    // snapshot at all (empty history → count is an honest 0 over no window).
+    let last_hour_window_secs = baseline_snapshot.map(|s| (now_secs - s.epoch_secs).max(0.0));
 
     // Per-item recent feed: the newest episodes (newest-first by temporal_index),
     // capped. Episodes are the only memory type carrying a wall-clock timestamp,
@@ -421,6 +457,7 @@ pub(crate) async fn memory_recent_at(state_root: &std::path::Path) -> Json<Value
         "items": items,
         "total": total,
         "last_hour_count": last_hour_count,
+        "last_hour_window_secs": last_hour_window_secs,
         "available": items_available,
         "note": note,
         "server_time": chrono::Utc::now().to_rfc3339(),

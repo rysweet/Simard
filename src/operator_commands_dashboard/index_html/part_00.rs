@@ -350,7 +350,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       <div style="display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap">
         <div style="text-align:center;min-width:120px">
           <div id="mem-recent-count" style="font-size:2.5rem;font-weight:700;color:#3fb950;line-height:1">—</div>
-          <div style="font-size:.85rem;color:#8b949e;margin-top:.25rem">items remembered<br>in the last hour</div>
+          <div style="font-size:.85rem;color:#8b949e;margin-top:.25rem">items remembered<br><span id="mem-recent-window">in the last hour</span></div>
         </div>
         <div style="flex:1;min-width:200px">
           <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:.5rem">
