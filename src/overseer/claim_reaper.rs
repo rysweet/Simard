@@ -32,6 +32,7 @@
 //! the whole sweep is exercised hermetically with fakes — no real filesystem,
 //! process, or `gh`.
 
+use std::fmt::Write as _;
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -952,7 +953,8 @@ fn collect_worktree_evidence(worktree: &std::path::Path) -> String {
         };
         let start = bytes.len().saturating_sub(TAIL_BYTES);
         let tail = String::from_utf8_lossy(&bytes[start..]);
-        out.push_str(&format!("===== {} (tail) =====\n", path.display()));
+        // Format the header straight into `out` (no throwaway `format!` String).
+        let _ = writeln!(out, "===== {} (tail) =====", path.display());
         out.push_str(&tail);
         out.push('\n');
     }
@@ -982,14 +984,16 @@ fn capture_journal_slice(goal_id: &str) -> Option<String> {
         ],
         JOURNAL_CAPTURE_TIMEOUT,
     )?;
-    // Keep only lines mentioning the goal id (bounded), newest-biased tail.
-    let mut lines: Vec<&str> = raw.lines().filter(|l| l.contains(goal_id)).collect();
-    let keep = lines.len().saturating_sub(500);
-    lines.drain(..keep);
-    if lines.is_empty() {
+    // Keep only lines mentioning the goal id (bounded), newest-biased tail. Slice
+    // the trailing 500 in place rather than `drain`-ing the head — same result,
+    // no O(n) vector shift.
+    let lines: Vec<&str> = raw.lines().filter(|l| l.contains(goal_id)).collect();
+    let start = lines.len().saturating_sub(500);
+    let tail = &lines[start..];
+    if tail.is_empty() {
         None
     } else {
-        Some(lines.join("\n"))
+        Some(tail.join("\n"))
     }
 }
 
