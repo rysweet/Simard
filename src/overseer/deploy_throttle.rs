@@ -126,12 +126,21 @@ impl LedgerEntry {
     }
 }
 
-/// The serialized ledger file shape.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// The serialized ledger file shape (owned; used on the deserialize/load path).
+#[derive(Clone, Debug, Deserialize)]
 struct LedgerFile {
     version: u32,
     #[serde(default)]
     entries: BTreeMap<String, LedgerEntry>,
+}
+
+/// Borrowing serialize view of the ledger. Lets [`DeployAttemptLedger::persist`]
+/// write the live entry map by reference instead of cloning the whole
+/// `BTreeMap` on every atomic write.
+#[derive(Serialize)]
+struct LedgerFileRef<'a> {
+    version: u32,
+    entries: &'a BTreeMap<String, LedgerEntry>,
 }
 
 /// Durable, per-target-SHA anti-thrash ledger for the autonomous self-deploy rail
@@ -307,9 +316,9 @@ impl DeployAttemptLedger {
         refuse_symlink(&path)?;
 
         let tmp = self.state_dir.join(format!("{LEDGER_FILE_NAME}.tmp"));
-        let file = LedgerFile {
+        let file = LedgerFileRef {
             version: SCHEMA_VERSION,
-            entries: self.entries.clone(),
+            entries: &self.entries,
         };
         let body = serde_json::to_vec_pretty(&file)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
