@@ -3,4 +3,4 @@ pub mod native;
 
 // Re-export all public items so `crate::rpc_transport::X` still works.
 pub use in_memory::InMemoryRpcTransport;
-pub use native::NativeRpcTransport;
+pub use native::{NativeRpcTransport, self_check_rpc_health};

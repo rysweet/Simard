@@ -13,7 +13,9 @@ mod types;
 // Re-export all public items so `crate::self_relaunch::X` still works.
 pub use canary::{build_canary, build_self_deploy_candidate, coordinated_relaunch, handover};
 pub use gates::{all_gates_passed, verify_canary};
-pub use types::{GateResult, RelaunchConfig, RelaunchGate, default_gates};
+pub use types::{
+    GateResult, RedCanaryDetail, RelaunchConfig, RelaunchGate, default_gates, first_failure,
+};
 
 #[cfg(test)]
 mod tests {

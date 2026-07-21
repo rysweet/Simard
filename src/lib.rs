@@ -441,8 +441,8 @@ pub use self_metrics::{
     record_metric,
 };
 pub use self_relaunch::{
-    GateResult, RelaunchConfig, RelaunchGate, all_gates_passed, build_canary, coordinated_relaunch,
-    default_gates, handover, verify_canary,
+    GateResult, RedCanaryDetail, RelaunchConfig, RelaunchGate, all_gates_passed, build_canary,
+    coordinated_relaunch, default_gates, first_failure, handover, verify_canary,
 };
 pub use self_relaunch_semaphore::{
     HandoffConfig, HandoffResult, LeaderSemaphore, LeaderState, coordinated_handoff, signal_ready,

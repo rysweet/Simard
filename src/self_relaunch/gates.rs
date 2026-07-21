@@ -25,12 +25,24 @@ pub fn all_gates_passed(results: &[GateResult]) -> bool {
 }
 
 fn run_gate(binary: &Path, gate: RelaunchGate, config: &RelaunchConfig) -> GateResult {
-    match gate {
+    let result = match gate {
         RelaunchGate::Smoke => run_smoke_gate(binary),
         RelaunchGate::UnitTest => run_unit_test_gate(config),
         RelaunchGate::GymBaseline => run_gym_baseline_gate(binary),
         RelaunchGate::RpcHealth => run_rpc_health_gate(binary, config),
-    }
+    };
+
+    // Structured tracing only (OTel-exported): the outcome is recorded as field
+    // values, never format-string-interpolated, so untrusted candidate stderr
+    // cannot inject log lines. `detail` is sanitized + length-bounded here.
+    tracing::info!(
+        canary.gate = %result.gate,
+        canary.passed = result.passed,
+        canary.detail = %truncate_output(&result.detail, 512),
+        "canary gate evaluated"
+    );
+
+    result
 }
 
 fn run_smoke_gate(binary: &Path) -> GateResult {
@@ -118,8 +130,13 @@ fn run_gym_baseline_gate(binary: &Path) -> GateResult {
 
 fn run_rpc_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
     let timeout_secs = config.health_timeout.as_secs().to_string();
+    // Probe the CANDIDATE's own RPC health, not the shared daemon socket: the
+    // `--self-check` mode has the candidate answer `bridge.health` on its own
+    // in-process endpoint (see `rpc_transport::native::self_check_rpc_health`).
+    // A drifted live daemon can therefore no longer redden a healthy candidate.
+    // Fail-closed: a spawn error, non-zero exit, or timeout scores the gate red.
     match Command::new(binary)
-        .args(["probe", "rpc", "--timeout", &timeout_secs])
+        .args(["probe", "rpc", "--self-check", "--timeout", &timeout_secs])
         .output()
     {
         Ok(output) if output.status.success() => GateResult {
@@ -144,18 +161,24 @@ fn run_rpc_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
     }
 }
 
-fn truncate_output(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.trim().to_string()
-    } else {
-        // Use char-boundary-safe truncation to avoid panic on multi-byte UTF-8.
-        let boundary = s
-            .char_indices()
-            .take_while(|(i, _)| *i < max_len)
-            .last()
-            .map_or(0, |(i, c)| i + c.len_utf8());
-        format!("{}...", s[..boundary].trim())
+/// Trim and length-bound an untrusted output string for safe surfacing.
+///
+/// The returned string is guaranteed `len() <= max_len` (the ellipsis is
+/// counted against the budget) and is truncated on a UTF-8 char boundary so it
+/// never panics on multi-byte input. Shared by the gate emitters, the
+/// `RedCanaryDetail` diagnostic, and the structured tracing fields.
+pub(crate) fn truncate_output(s: &str, max_len: usize) -> String {
+    let trimmed = s.trim();
+    if trimmed.len() <= max_len {
+        return trimmed.to_string();
     }
+    // Reserve room for the "..." so the RESULT never exceeds max_len.
+    let budget = max_len.saturating_sub(3);
+    let mut end = budget.min(trimmed.len());
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &trimmed[..end])
 }
 
 #[cfg(test)]

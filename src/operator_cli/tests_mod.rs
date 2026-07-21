@@ -484,3 +484,98 @@ fn test_all_subcommands_accept_help_flag() {
         }
     }
 }
+
+// ── probe dispatch (self-deploy canary rpc-health gate) ──
+
+#[test]
+fn test_probe_rpc_self_check_succeeds_in_process() {
+    // The candidate validates its OWN rpc health in-process — no socket, no
+    // child, no shared-daemon dial — so this must exit Ok on a healthy binary.
+    let result = dispatch_operator_cli(vec![
+        "probe".to_string(),
+        "rpc".to_string(),
+        "--self-check".to_string(),
+    ]);
+    assert!(
+        result.is_ok(),
+        "probe rpc --self-check must succeed: {result:?}"
+    );
+}
+
+#[test]
+fn test_probe_rpc_self_check_accepts_timeout() {
+    for arg in [
+        vec!["--self-check", "--timeout", "30"],
+        vec!["--self-check", "--timeout=30"],
+    ] {
+        let mut argv = vec!["probe".to_string(), "rpc".to_string()];
+        argv.extend(arg.iter().map(|s| s.to_string()));
+        assert!(dispatch_operator_cli(argv).is_ok());
+    }
+}
+
+#[test]
+fn test_probe_rpc_requires_self_check() {
+    let result = dispatch_operator_cli(vec!["probe".to_string(), "rpc".to_string()]);
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("requires --self-check"),
+        "plain `probe rpc` must fail-closed"
+    );
+}
+
+#[test]
+fn test_probe_rpc_invalid_timeout_is_error() {
+    let result = dispatch_operator_cli(vec![
+        "probe".to_string(),
+        "rpc".to_string(),
+        "--self-check".to_string(),
+        "--timeout=abc".to_string(),
+    ]);
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid --timeout")
+    );
+}
+
+#[test]
+fn test_probe_missing_target() {
+    let result = dispatch_operator_cli(vec!["probe".to_string()]);
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("expected probe target")
+    );
+}
+
+#[test]
+fn test_probe_unknown_target() {
+    let result = dispatch_operator_cli(vec!["probe".to_string(), "bogus".to_string()]);
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported command 'probe bogus'")
+    );
+}
+
+#[test]
+fn test_probe_help_variants() {
+    for flag in &["--help", "-h", "help"] {
+        assert!(dispatch_operator_cli(vec!["probe".to_string(), flag.to_string()]).is_ok());
+    }
+}
+
+#[test]
+fn test_help_text_mentions_probe() {
+    assert!(operator_cli_help().contains("probe rpc"));
+}

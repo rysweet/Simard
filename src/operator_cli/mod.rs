@@ -141,6 +141,10 @@ Product modes:
                          — sweep active default-branch CI across the governed fleet (green-SHA cached;
                            --file-issues dedupes tracking issues, --exit-zero for the scheduled sweep)
   self-deploy [--check]  — close the merged-but-not-running gap (operator-only)
+  probe rpc --self-check [--timeout=SECS]
+                         — validate the candidate binary's own RPC health
+                           in-process (used by the self-deploy canary's
+                           rpc-health gate); fail-closed, no shared-socket dial
   safe-update            — drain → snapshot → pre-test → swap → exec
   rollback               — restore the latest backup over the install path
   rollback-watchdog [--once] [--interval=SECS] [--max-iterations=N]
@@ -174,6 +178,18 @@ Simard bootstrap subcommand
 Usage: simard bootstrap run <identity> <base-type> <topology> <objective> [state-root]
 
 Run the bootstrap probe with the given identity.
+";
+
+const PROBE_HELP: &str = "\
+Simard probe subcommand
+
+Usage: simard probe rpc --self-check [--timeout=SECS]
+
+Validate the candidate binary's own RPC health in-process. `--self-check` drives
+the `bridge.health` method against a fresh in-process native transport (the same
+dispatch the daemon uses), so it exercises THIS binary's rpc health path rather
+than dialing the shared daemon socket. Used by the self-deploy canary's
+rpc-health gate. Fail-closed: any error or an unhealthy result exits non-zero.
 ";
 
 const HANDOVER_HELP: &str = "\
@@ -308,6 +324,14 @@ where
             }
             self_deploy::dispatch_self_deploy_command(args)
         }
+        "probe" => {
+            let mut args = args.peekable();
+            if let Some(help) = check_help_flag(&mut args, PROBE_HELP) {
+                print!("{help}");
+                return Ok(());
+            }
+            dispatch_probe_command(args)
+        }
         "safe-update" => {
             let mut args = args.peekable();
             if let Some(help) = check_help_flag(&mut args, safe_update::SAFE_UPDATE_HELP) {
@@ -392,6 +416,80 @@ fn dispatch_bootstrap_command(
         }
         other => Err(format!("unsupported command 'bootstrap {other}'").into()),
     }
+}
+
+/// Dispatch `simard probe <target> ...`. Currently supports `probe rpc
+/// --self-check`, used by the self-deploy canary's rpc-health gate to validate
+/// the candidate binary's OWN rpc health in-process (never the shared daemon
+/// socket). Fail-closed: any error or an unhealthy result returns `Err`, which
+/// `main` maps to a non-zero exit so the gate scores red.
+fn dispatch_probe_command(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let target = next_required(&mut args, "probe target (e.g. 'rpc')")?;
+    match target.as_str() {
+        "--help" | "-h" | "help" => {
+            print!("{PROBE_HELP}");
+            Ok(())
+        }
+        "rpc" => run_rpc_probe(args),
+        other => Err(format!("unsupported command 'probe {other}'").into()),
+    }
+}
+
+/// Handle `simard probe rpc --self-check [--timeout=SECS | --timeout SECS]`.
+fn run_rpc_probe(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut self_check = false;
+    // Parsed for interface stability with the canary gate's invocation. The
+    // self-check is in-process and cannot hang, so the value is an upper bound
+    // that is never reached; it is validated but not otherwise enforced.
+    let mut _timeout_secs: Option<u64> = None;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--self-check" => self_check = true,
+            "--timeout" => {
+                let value = next_required(&mut args, "--timeout value")?;
+                _timeout_secs = Some(parse_timeout(&value)?);
+            }
+            flag if flag.starts_with("--timeout=") => {
+                let value = flag.trim_start_matches("--timeout=");
+                _timeout_secs = Some(parse_timeout(value)?);
+            }
+            other => return Err(format!("unexpected argument '{other}'").into()),
+        }
+    }
+
+    if !self_check {
+        return Err("probe rpc requires --self-check".into());
+    }
+
+    let health = crate::rpc_transport::self_check_rpc_health()?;
+    if health.healthy {
+        tracing::info!(
+            rpc.server = %health.server_name,
+            rpc.healthy = health.healthy,
+            "candidate rpc self-check healthy"
+        );
+        Ok(())
+    } else {
+        tracing::warn!(
+            rpc.server = %health.server_name,
+            rpc.healthy = health.healthy,
+            "candidate rpc self-check reported unhealthy"
+        );
+        Err(format!(
+            "candidate rpc self-check reported unhealthy (server '{}')",
+            health.server_name
+        )
+        .into())
+    }
+}
+
+fn parse_timeout(value: &str) -> Result<u64, Box<dyn std::error::Error>> {
+    value
+        .parse::<u64>()
+        .map_err(|_| format!("invalid --timeout value '{value}' (expected whole seconds)").into())
 }
 
 fn dispatch_spawn_command(

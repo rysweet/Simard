@@ -25,6 +25,7 @@
 
 use crate::overseer::capabilities::{DeployReport, Deployer, OverseerError};
 use crate::overseer::notify::{DualChannelNotifier, OperatorNotification};
+use crate::self_relaunch::RedCanaryDetail;
 
 /// Restart churn at/above which a deploy is refused as a suspected crash-loop
 /// (deploying into an unstable process makes it worse — Bainbridge's irony).
@@ -43,6 +44,13 @@ pub struct DeployContext {
     pub canary_passed: bool,
     /// Observed daemon restart churn over the recent window.
     pub recent_restart_churn: u64,
+    /// Diagnostic naming the first failing canary gate (side-channel).
+    ///
+    /// Additive and `Default`-able: an all-passing canary leaves it empty and the
+    /// boolean verdict (`canary_passed`) is unchanged. Populated from
+    /// [`RedCanaryDetail::from_results`] at the call site that owns the
+    /// `GateResult`s, so `evaluate_deploy_gate` can name the culprit on refusal.
+    pub red_canary_detail: RedCanaryDetail,
 }
 
 /// Why a deploy was refused. Each variant is a dangerous shape the operator's
@@ -53,8 +61,9 @@ pub enum DeployRefusal {
     NoOp,
     /// Target is older than (an ancestor of) the running commit.
     Rollback,
-    /// The canary gates did not all pass.
-    RedCanary,
+    /// The canary gates did not all pass. Carries the first-failing-gate
+    /// diagnostic; a `Default` payload is the legacy, detail-free refusal.
+    RedCanary(RedCanaryDetail),
     /// Restart churn suggests a crash-loop; deploying would worsen it.
     CrashLoop { churn: u64 },
 }
@@ -64,7 +73,7 @@ impl std::fmt::Display for DeployRefusal {
         match self {
             Self::NoOp => write!(f, "no-op deploy (target == running commit)"),
             Self::Rollback => write!(f, "rollback refused (target is older than running)"),
-            Self::RedCanary => write!(f, "red canary (one or more gates failed)"),
+            Self::RedCanary(detail) => write!(f, "red canary ({})", detail.summary()),
             Self::CrashLoop { churn } => {
                 write!(
                     f,
@@ -84,7 +93,7 @@ pub fn evaluate_deploy_gate(ctx: &DeployContext) -> Result<(), DeployRefusal> {
         return Err(DeployRefusal::Rollback);
     }
     if !ctx.canary_passed {
-        return Err(DeployRefusal::RedCanary);
+        return Err(DeployRefusal::RedCanary(ctx.red_canary_detail.clone()));
     }
     if ctx.recent_restart_churn >= CRASH_LOOP_CHURN_THRESHOLD {
         return Err(DeployRefusal::CrashLoop {
@@ -107,10 +116,15 @@ fn commits_equivalent(a: &str, b: &str) -> bool {
 // ─────────────────────────── injected seams ────────────────────────────────
 
 /// Result of building + verifying the canary.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CanaryResult {
     pub passed: bool,
     pub detail: String,
+    /// First-failing-gate diagnostic (side-channel). Additive and `Default`-able:
+    /// a passing canary leaves it empty. A real [`CanaryRunner`] populates it from
+    /// [`RedCanaryDetail::from_results`] over the `verify_canary` gate results so
+    /// the deploy refusal can name the culprit gate.
+    pub red_canary_detail: RedCanaryDetail,
 }
 
 /// Build + verify the canary binary for a target. Real impl reuses
@@ -223,6 +237,7 @@ impl Deployer for GuardedDeployer {
             target_is_ancestor_of_running: is_ancestor,
             canary_passed: canary.passed,
             recent_restart_churn: self.recent_restart_churn,
+            red_canary_detail: canary.red_canary_detail.clone(),
         };
         evaluate_deploy_gate(&ctx).map_err(|refusal| OverseerError::Capability {
             what: "deploy_gate",
@@ -275,6 +290,7 @@ mod tests {
             target_is_ancestor_of_running: false,
             canary_passed: true,
             recent_restart_churn: 0,
+            red_canary_detail: RedCanaryDetail::default(),
         }
     }
 
@@ -306,7 +322,29 @@ mod tests {
     fn gate_refuses_red_canary() {
         let mut c = ctx();
         c.canary_passed = false;
-        assert_eq!(evaluate_deploy_gate(&c), Err(DeployRefusal::RedCanary));
+        assert!(matches!(
+            evaluate_deploy_gate(&c),
+            Err(DeployRefusal::RedCanary(_))
+        ));
+    }
+
+    #[test]
+    fn gate_red_canary_carries_and_displays_the_failing_gate() {
+        let mut c = ctx();
+        c.canary_passed = false;
+        c.red_canary_detail = RedCanaryDetail {
+            failed_gate: "rpc-health".to_string(),
+            detail: "connection refused".to_string(),
+        };
+        match evaluate_deploy_gate(&c) {
+            Err(DeployRefusal::RedCanary(detail)) => {
+                assert_eq!(detail.failed_gate, "rpc-health");
+                let shown = DeployRefusal::RedCanary(detail).to_string();
+                assert!(shown.contains("red canary"), "{shown}");
+                assert!(shown.contains("rpc-health"), "{shown}");
+            }
+            other => panic!("expected RedCanary(detail), got {other:?}"),
+        }
     }
 
     #[test]
@@ -326,9 +364,18 @@ mod tests {
     struct FakeCanary(bool);
     impl CanaryRunner for FakeCanary {
         fn run_canary(&self, _t: &str) -> Result<CanaryResult, OverseerError> {
+            let red_canary_detail = if self.0 {
+                RedCanaryDetail::default()
+            } else {
+                RedCanaryDetail {
+                    failed_gate: "rpc-health".to_string(),
+                    detail: "candidate rpc self-check reported unhealthy".to_string(),
+                }
+            };
             Ok(CanaryResult {
                 passed: self.0,
                 detail: "4/4 gates".to_string(),
+                red_canary_detail,
             })
         }
     }

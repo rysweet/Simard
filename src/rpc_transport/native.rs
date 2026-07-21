@@ -12,7 +12,7 @@ use serde_json::Value;
 use crate::error::SimardResult;
 use crate::metadata::{BackendDescriptor, Freshness};
 use crate::rpc::{
-    RPC_ERROR_METHOD_NOT_FOUND, RpcErrorPayload, RpcRequest, RpcResponse, RpcTransport,
+    RPC_ERROR_METHOD_NOT_FOUND, RpcErrorPayload, RpcHealth, RpcRequest, RpcResponse, RpcTransport,
 };
 
 /// A method handler receives JSON params and returns a JSON result or error.
@@ -100,6 +100,21 @@ impl RpcTransport for NativeRpcTransport {
     }
 }
 
+/// Validate the *candidate's own* RPC health in-process, without touching the
+/// shared daemon socket.
+///
+/// This drives the pre-existing `bridge.health` method against a fresh
+/// [`NativeRpcTransport`] — the same dispatch the daemon uses — so it exercises
+/// the candidate binary's own RPC health path. It is deliberately in-process:
+/// no loopback port is bound and no child process is spawned, so there is
+/// nothing to leak on the error path (self-cleaning by construction). Any
+/// transport error, or a `healthy == false` payload, is surfaced to the caller,
+/// which treats it as a red gate (fail-closed — there is no default-pass).
+pub fn self_check_rpc_health() -> SimardResult<RpcHealth> {
+    let transport = NativeRpcTransport::new("simard-self-check");
+    transport.health()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +189,13 @@ mod tests {
         let transport = NativeRpcTransport::new("test");
         let health: RpcHealth = transport.health().unwrap();
         assert!(health.healthy);
+    }
+
+    #[test]
+    fn self_check_rpc_health_reports_healthy_in_process() {
+        // The candidate probes its OWN rpc health in-process — no socket, no child.
+        let health = self_check_rpc_health().expect("in-process health check must succeed");
+        assert!(health.healthy, "candidate self-check must report healthy");
+        assert_eq!(health.server_name, "simard-self-check");
     }
 }

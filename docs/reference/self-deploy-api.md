@@ -395,6 +395,7 @@ cycle report; none is swallowed.
 ## See also
 
 - [reconcile-and-self-deploy concept](../concepts/reconcile-and-self-deploy.md)
+- [Canary-gate diagnostics API reference](./canary-gate-diagnostics-api.md)
 - [Self-deploy source-prep reference](./self-deploy-source-prep.md)
 - [How to run self-deploy from any directory](../howto/run-self-deploy-from-any-directory.md)
 - [How to verify and roll back a self-deploy](../howto/verify-and-roll-back-a-self-deploy.md)

@@ -63,6 +63,62 @@ pub fn default_gates() -> Vec<RelaunchGate> {
     ]
 }
 
+/// The first failing gate in gate order, or `None` when every gate passed.
+///
+/// Pure, read-only accessor over the existing results: it does not re-run gates
+/// and does not change `all_gates_passed`'s verdict. Deterministic — identical
+/// result sets always name the same (first, in slice order) failing gate.
+pub fn first_failure(results: &[GateResult]) -> Option<&GateResult> {
+    results.iter().find(|r| !r.passed)
+}
+
+/// Upper bound (chars) on a surfaced gate `detail`, per the telemetry-hygiene
+/// contract. Candidate output is untrusted; the surfaced form is length-bounded.
+const MAX_DETAIL_CHARS: usize = 512;
+
+/// Diagnostic payload attached to a red-canary deploy refusal.
+///
+/// Additive and `Default`-able: a `Default` value (no failing gate named) is
+/// equivalent to the prior, detail-free red-canary refusal, so existing
+/// constructors and tests compile and behave unchanged. It is a pure side
+/// channel — it never influences the deploy-gate verdict.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RedCanaryDetail {
+    /// Slug of the first failing gate in gate order (e.g. `"rpc-health"`).
+    /// Empty when no specific gate is known.
+    pub failed_gate: String,
+    /// Sanitized, length-bounded detail from that gate's `GateResult`.
+    pub detail: String,
+}
+
+impl RedCanaryDetail {
+    /// Build from the first failing `GateResult` in an ordered slice. Returns
+    /// `Default` (empty) when every gate passed. The gate `detail` is treated as
+    /// untrusted candidate output: it is trimmed and length-bounded (char-boundary
+    /// safe) before it is retained for surfacing.
+    pub fn from_results(results: &[GateResult]) -> Self {
+        match first_failure(results) {
+            None => Self::default(),
+            Some(failed) => Self {
+                failed_gate: failed.gate.to_string(),
+                detail: super::gates::truncate_output(&failed.detail, MAX_DETAIL_CHARS),
+            },
+        }
+    }
+
+    /// One-line summary for the deploy notification / refusal `Display`.
+    ///
+    /// Names the failing gate and its reason (e.g. `` gate `rpc-health` failed:
+    /// … ``). A `Default` (empty) value falls back to the legacy
+    /// `"one or more gates failed"` wording the operator already knows.
+    pub fn summary(&self) -> String {
+        if self.failed_gate.is_empty() {
+            return "one or more gates failed".to_string();
+        }
+        format!("gate `{}` failed: {}", self.failed_gate, self.detail)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
