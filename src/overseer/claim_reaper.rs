@@ -864,6 +864,11 @@ fn capture_journal_slice(goal_id: &str) -> Option<String> {
         .output()
         .ok()?;
     if !output.status.success() {
+        tracing::debug!(
+            target: "overseer::claim_reaper",
+            status = ?output.status,
+            "journalctl slice unavailable; omitting journal.txt from evidence archive"
+        );
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout);

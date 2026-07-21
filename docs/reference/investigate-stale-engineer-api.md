@@ -247,6 +247,9 @@ durable.
   verdict when known). Copies are size-capped, symlink-safe (never follow a link
   out of the worktree/state_root), and secret-scrubbed (`ghp_`, `github_pat_`,
   AWS keys, `Authorization:`, `*_TOKEN=`). Dirs are `0700`, files `0600`.
+  The `journalctl` slice is best-effort: when `journalctl` is unavailable or
+  exits non-zero, `journal.txt` is omitted and the reason is emitted at `debug`
+  level (`target = "overseer::claim_reaper"`); archiving otherwise proceeds.
 
 ## Production investigator: `RecipeStaleEngineerInvestigator`
 
