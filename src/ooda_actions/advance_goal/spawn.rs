@@ -59,9 +59,9 @@ enum TrackingIssueOutcome {
 /// engineer-lifecycle `OpenTrackingIssue` site so both stay consistent.
 ///
 /// Best-effort ensures the label exists, then `gh issue create`; on a
-/// missing-label failure the original stderr has already been observed by the
-/// caller-facing outcome and the create is retried exactly once without
-/// `--label`. Behaviour is unchanged when the label already exists.
+/// missing-label failure the original stderr is surfaced via `tracing::warn!`
+/// (never swallowed) and the create is retried exactly once without `--label`.
+/// Behaviour is unchanged when the label already exists.
 fn file_stuck_tracking_issue(title: &str, body: &str) -> TrackingIssueOutcome {
     // Best-effort label ensure; failures are traced inside the helper and are
     // non-fatal — we still attempt to create the issue below.
@@ -1417,5 +1417,193 @@ mod tests {
             .is_none(),
             "Simard (no identity) must never take the observe-only branch"
         );
+    }
+}
+
+/// Outside-in tests that drive the REAL brain-site filer
+/// ([`file_stuck_tracking_issue`]) through its actual consumer boundary — the
+/// `gh` subprocess — via a fake `gh` on `PATH`. This closes the coverage gap
+/// flagged in review (FIX-2 names both spawn.rs brain sites, but only the
+/// no_progress path had a direct subprocess test): here we prove the brain
+/// site's ensure→create→label-less-retry wiring end-to-end, not just the pure
+/// decision logic in `ooda_stuck_label`.
+///
+/// Every test mutates process-global env (`PATH`, `GH_FAKE_MISSING_LABEL`) and
+/// therefore carries the `cognitive_memory` serial key (issue #2360 / #2375):
+/// the key serializes it against all other env readers/writers so a concurrent
+/// `getenv` is never torn by these `setenv`s. Mirrors
+/// `no_progress::tests_gh_filer_missing_label`.
+#[cfg(test)]
+mod tests_brain_site_missing_label {
+    use super::{TrackingIssueOutcome, file_stuck_tracking_issue};
+    use std::ffi::OsString;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    /// Write a fake `gh` that logs every invocation's argv (space-joined) to
+    /// `log` and simulates the production repo state: `gh label create` reports
+    /// the label already exists (idempotent path), and `gh issue create
+    /// --label ooda-stuck` fails with the exact observed missing-label stderr
+    /// when `GH_FAKE_MISSING_LABEL=1`; a label-less create always succeeds.
+    fn write_fake_gh(dir: &Path, log: &Path) {
+        let script = format!(
+            r#"#!/usr/bin/env bash
+echo "$*" >> "{log}"
+if [ "$1" = "label" ] && [ "$2" = "create" ]; then
+  echo 'GraphQL: Label "ooda-stuck" already exists (createLabel)' >&2
+  exit 1
+fi
+if [ "$1" = "issue" ] && [ "$2" = "create" ]; then
+  has_label=0
+  for a in "$@"; do if [ "$a" = "--label" ]; then has_label=1; fi; done
+  if [ "$has_label" = "1" ] && [ "$GH_FAKE_MISSING_LABEL" = "1" ]; then
+    echo "could not add label: 'ooda-stuck' not found" >&2
+    exit 1
+  fi
+  echo "https://github.com/rysweet/Simard/issues/4231"
+  exit 0
+fi
+exit 0
+"#,
+            log = log.display()
+        );
+        let gh = dir.join("gh");
+        fs::write(&gh, script).unwrap();
+        let mut perms = fs::metadata(&gh).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&gh, perms).unwrap();
+    }
+
+    /// Prepends `dir` to `PATH` for the guard's lifetime and restores the
+    /// original `PATH` on drop, so a failed assertion never leaks the fake
+    /// `gh` into a later test.
+    struct PathGuard {
+        original: Option<OsString>,
+    }
+
+    impl PathGuard {
+        fn prepend(dir: &Path) -> Self {
+            let original = std::env::var_os("PATH");
+            let mut new = dir.as_os_str().to_owned();
+            if let Some(orig) = &original {
+                new.push(":");
+                new.push(orig);
+            }
+            // SAFETY: serialized by the `cognitive_memory` key; no concurrent
+            // env access in the lib-test binary while this runs.
+            unsafe { std::env::set_var("PATH", &new) };
+            Self { original }
+        }
+    }
+
+    impl Drop for PathGuard {
+        fn drop(&mut self) {
+            // SAFETY: see PathGuard::prepend.
+            unsafe {
+                match &self.original {
+                    Some(v) => std::env::set_var("PATH", v),
+                    None => std::env::remove_var("PATH"),
+                }
+            }
+        }
+    }
+
+    fn labelless_issue_creates(log: &str) -> usize {
+        log.lines()
+            .filter(|l| l.starts_with("issue create") && !l.contains("--label"))
+            .count()
+    }
+
+    /// PRODUCTION-SIGNATURE PATH: when `gh issue create --label ooda-stuck`
+    /// fails with `could not add label: 'ooda-stuck' not found`, the brain-site
+    /// filer must retry without `--label` and STILL file the tracking issue,
+    /// returning `Filed { labelled: false }`.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn files_issue_via_labelless_retry_when_label_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("gh.log");
+        write_fake_gh(tmp.path(), &log);
+
+        let outcome = {
+            let _guard = PathGuard::prepend(tmp.path());
+            // SAFETY: serialized by the `cognitive_memory` key.
+            unsafe { std::env::set_var("GH_FAKE_MISSING_LABEL", "1") };
+            let o = file_stuck_tracking_issue("stuck goal", "body");
+            // SAFETY: see above.
+            unsafe { std::env::remove_var("GH_FAKE_MISSING_LABEL") };
+            o
+        };
+
+        match outcome {
+            TrackingIssueOutcome::Filed { labelled } => assert!(
+                !labelled,
+                "the missing-label retry must file the issue via the label-less fallback"
+            ),
+            other => panic!(
+                "brain-site filer must still file the tracking issue via the label-less retry, got {}",
+                outcome_kind(&other)
+            ),
+        }
+
+        let log_contents = fs::read_to_string(&log).unwrap();
+        assert!(
+            log_contents.contains("issue create --title stuck goal --body body --label ooda-stuck"),
+            "the first attempt must carry --label ooda-stuck, log=\n{log_contents}",
+        );
+        assert_eq!(
+            labelless_issue_creates(&log_contents),
+            1,
+            "exactly one label-less retry after the missing-label failure, log=\n{log_contents}",
+        );
+    }
+
+    /// UNCHANGED-BEHAVIOUR PATH: when the label works, the brain-site filer
+    /// files the issue WITH `--label ooda-stuck`, returns `Filed { labelled:
+    /// true }`, and performs NO label-less retry — byte-for-byte the pre-fix
+    /// command.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn files_issue_with_label_and_no_retry_when_label_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("gh.log");
+        write_fake_gh(tmp.path(), &log);
+
+        let outcome = {
+            let _guard = PathGuard::prepend(tmp.path());
+            // GH_FAKE_MISSING_LABEL unset → the labelled create succeeds.
+            file_stuck_tracking_issue("stuck goal", "body")
+        };
+
+        match outcome {
+            TrackingIssueOutcome::Filed { labelled } => assert!(
+                labelled,
+                "the issue must be filed with the label intact when the label works"
+            ),
+            other => panic!(
+                "labelled create must succeed with the label intact, got {}",
+                outcome_kind(&other)
+            ),
+        }
+
+        let log_contents = fs::read_to_string(&log).unwrap();
+        assert!(
+            log_contents.contains("issue create --title stuck goal --body body --label ooda-stuck"),
+            "the labelled create must be used verbatim, log=\n{log_contents}",
+        );
+        assert_eq!(
+            labelless_issue_creates(&log_contents),
+            0,
+            "no label-less retry when the label works, log=\n{log_contents}",
+        );
+    }
+
+    fn outcome_kind(outcome: &TrackingIssueOutcome) -> String {
+        match outcome {
+            TrackingIssueOutcome::Filed { labelled } => format!("Filed {{ labelled: {labelled} }}"),
+            TrackingIssueOutcome::CreateFailed { stderr } => format!("CreateFailed({stderr})"),
+            TrackingIssueOutcome::SpawnFailed { error } => format!("SpawnFailed({error})"),
+        }
     }
 }
