@@ -91,7 +91,7 @@ no placeholder on the normal path.
     {
       "category": "Past event",          // the frontend category the panel color-codes
       "summary": "OODA cycle #1857: 5 actions (4/5 succeeded)…",  // episode content (bounded)
-      "timestamp": null,                 // always null: library episodes carry no wall-clock time (see below)
+      "timestamp": "2026-07-21T08:41:57Z", // episode created_at as RFC3339 (issue #4383); null only if the episode genuinely lacks one
       "source": "ooda-cycle",            // the episode's source label
       "node_id": "epi_…"                 // stable episode node id
     }
@@ -110,7 +110,7 @@ no placeholder on the normal path.
 |-------|------|---------|
 | `last_hour_count` | `integer` (`u64`) on the normal path; `null` on the error path | Net growth of **long-term** memory (episodic + semantic + procedural + prospective) over the trailing hour, clamped to ≥ 0. This is the value bound to `#mem-recent-count`. |
 | `total` | `integer` (`u64`); **omitted on the error path** | Live aggregate stored count across **all six** memory types (`CognitiveStatistics::total()`); rendered beside the headline as `<total> total`. Present with the same value on the normal path (unchanged by this fix); on the error path the payload omits it, mirroring `GET /api/memory/history`. |
-| `items` | array of objects | The newest **episodic** memories, newest-first (by `temporal_index`), capped at 25. Each item carries `category` (always `"Past event"`), `summary` (bounded episode content), `timestamp` (always JSON `null` — the library backend records episodes with a monotonic ordinal, not a wall-clock instant, and does not surface the episode's `created_at`, so the frontend omits the "time ago" label), `source`, and `node_id`. Populated through the same shared reader (`open_reader_client` → `list_all_episodes`) that backs `/api/memory/graph`. Empty `[]` when the store holds no episodes or the episode read fails. |
+| `items` | array of objects | The newest **episodic** memories, newest-first (by `temporal_index`), capped at 25. Each item carries `category` (always `"Past event"`), `summary` (bounded episode content), `timestamp` (the episode's `created_at` as an RFC3339 string so the frontend can render a "time ago" label — issue #4383; `null` only for episodes that genuinely lack a wall-clock instant, never a fabricated epoch), `source`, and `node_id`. Populated through the same shared reader (`open_reader_client` → `list_all_episodes`) that backs `/api/memory/graph`. Empty `[]` when the store holds no episodes or the episode read fails. |
 | `available` | `bool` | Whether per-item recent listing succeeded (`true` when the reader enumerated episodes; `false` on the error path or when the episode read failed). |
 | `note` | `string` | Human-readable, path-free explanation of what `items`/`total` show and where the per-type graph and deltas live. |
 | `server_time` | `string` (RFC 3339) | Server timestamp of the read. |

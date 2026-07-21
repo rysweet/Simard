@@ -438,14 +438,13 @@ const RECENT_ITEMS_MAX: usize = 25;
 /// by [`GRAPH_NODE_CONTENT_MAX`] so a single large episode cannot bloat the
 /// payload.
 ///
-/// `timestamp` is always `null`: the library backend's only episode writer path
-/// (`LibraryCognitiveMemory::store_episode`) records episodes with
-/// `temporal_index: None`, so the library assigns a monotonic ordinal
-/// (1, 2, 3, …) — an ordering key, not a wall-clock instant — and does not
-/// surface the episode's `created_at` on [`CognitiveEpisode`]. Emitting the
-/// ordinal as an epoch would render a nonsensical 1970s date, so we omit it and
-/// let the frontend drop the "time ago" label. Newest-first ordering is still
-/// correct because it derives from the `temporal_index` sort, not this field.
+/// `timestamp` carries the episode's real `created_at` as an RFC3339 instant
+/// (issue #4383) so the frontend's `timeAgo()` can render a "time ago" label.
+/// It falls back to `null` — never a fabricated epoch — for episodes that
+/// genuinely lack a timestamp (e.g. mock backends or records serialized before
+/// the field existed), so the panel degrades honestly to a blank label rather
+/// than a nonsensical 1970s date. Newest-first ordering still derives from the
+/// `temporal_index` sort, not this field.
 fn build_recent_episode_items(
     episodes: &[crate::memory_cognitive::CognitiveEpisode],
 ) -> Vec<Value> {
@@ -455,7 +454,10 @@ fn build_recent_episode_items(
             json!({
                 "category": "Past event",
                 "summary": truncate_graph_content(&e.content),
-                "timestamp": Value::Null,
+                "timestamp": e
+                    .created_at
+                    .map(|t| json!(t.to_rfc3339()))
+                    .unwrap_or(Value::Null),
                 "source": e.source_label,
                 "node_id": e.node_id,
             })
@@ -2046,5 +2048,77 @@ mod tests_memory_graph {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests_recent_episode_timestamp {
+    //! Issue #4383: `/api/memory/recent` must surface the episode's real
+    //! `created_at` so the "Recent Memories" panel can render a "time ago"
+    //! label, and degrade to JSON `null` (never a fabricated epoch) when the
+    //! episode genuinely lacks a timestamp.
+    use super::build_recent_episode_items;
+    use crate::memory_cognitive::CognitiveEpisode;
+
+    fn episode(
+        node_id: &str,
+        created_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> CognitiveEpisode {
+        CognitiveEpisode {
+            node_id: node_id.to_string(),
+            content: format!("content for {node_id}"),
+            source_label: "unit".to_string(),
+            temporal_index: 0,
+            compressed: false,
+            created_at,
+        }
+    }
+
+    #[test]
+    fn surfaces_created_at_as_rfc3339() {
+        let ts = chrono::DateTime::parse_from_rfc3339("2026-07-21T08:30:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let items = build_recent_episode_items(&[episode("epi-1", Some(ts))]);
+        assert_eq!(items.len(), 1);
+        let got = items[0]["timestamp"]
+            .as_str()
+            .expect("a supplied created_at must render as a JSON string, not null");
+        let parsed = chrono::DateTime::parse_from_rfc3339(got)
+            .expect("timestamp must be valid RFC3339")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            parsed, ts,
+            "the exact instant must round-trip: {}",
+            items[0]
+        );
+    }
+
+    #[test]
+    fn degrades_missing_created_at_to_null() {
+        let items = build_recent_episode_items(&[episode("epi-2", None)]);
+        assert_eq!(items.len(), 1);
+        assert!(
+            items[0]["timestamp"].is_null(),
+            "an absent created_at must degrade to JSON null, never a fabricated \
+             epoch: {}",
+            items[0],
+        );
+        // The key must still be present so the frontend shape is stable.
+        assert!(
+            items[0].get("timestamp").is_some(),
+            "the `timestamp` key must always be present: {}",
+            items[0],
+        );
+    }
+
+    #[test]
+    fn preserves_frontend_item_shape() {
+        let items = build_recent_episode_items(&[episode("epi-3", None)]);
+        let item = &items[0];
+        assert_eq!(item["category"].as_str(), Some("Past event"));
+        assert_eq!(item["source"].as_str(), Some("unit"));
+        assert_eq!(item["node_id"].as_str(), Some("epi-3"));
+        assert!(item["summary"].is_string());
     }
 }

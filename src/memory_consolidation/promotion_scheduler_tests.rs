@@ -245,6 +245,7 @@ impl CognitiveMemoryOps for EpisodeMock {
                 source_label: r.source_label,
                 temporal_index: r.temporal_index,
                 compressed: r.compressed,
+                created_at: None,
             })
             .collect())
     }

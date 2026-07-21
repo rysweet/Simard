@@ -270,14 +270,18 @@ let mem = LibraryCognitiveMemory::in_memory()?;
 
 Thin converters translate library records into Simard DTOs
 (`src/memory_cognitive.rs`). Each converter maps the fields Simard models
-(`content`, `source_label`, `temporal_index`, `node_id`, …), drops fields the
-flat DTOs do not carry (e.g. `created_at` — which
-`search_episodes_starting_with` instead reads directly to build its
-`(content, recorded_at)` return), and casts widths (`priority` i32 → i64):
+(`content`, `source_label`, `temporal_index`, `node_id`, …) and casts widths
+(`priority` i32 → i64). `to_episode` additionally carries the library
+`EpisodicMemory::created_at` through as `CognitiveEpisode::created_at:
+Option<DateTime<Utc>>` (issue #4383) so the dashboard "Recent Memories" panel
+(`GET /api/memory/recent`) can render a "time ago" label; it is `None` only for
+callers/backends that genuinely lack a timestamp (never a fabricated epoch).
+`search_episodes_starting_with` still reads `created_at` directly to build its
+`(content, recorded_at)` return:
 
 | Library type | Simard DTO |
 |---|---|
-| `EpisodicMemory` | `CognitiveEpisode` (`compressed` ← `compressed`) |
+| `EpisodicMemory` | `CognitiveEpisode` (`compressed` ← `compressed`, `created_at` ← `Some(created_at)`) |
 | `SemanticFact` | `CognitiveFact` |
 | `ProceduralMemory` | `CognitiveProcedure` |
 | `ProspectiveMemory` | `CognitiveProspective` (`priority` i32 → i64) |
