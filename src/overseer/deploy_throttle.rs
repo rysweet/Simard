@@ -44,6 +44,16 @@ pub const DEPLOY_BACKOFF_CAP_SECS: u64 = 6 * 60 * 60;
 /// records are evicted first so the ledger cannot grow without bound.
 const MAX_ENTRIES: usize = 256;
 
+/// Defensive upper bound on the on-disk ledger size read into memory at `load`.
+/// A well-formed ledger holds at most [`MAX_ENTRIES`] small records (a 40-char
+/// SHA key plus a handful of integer fields, pretty-printed), which stays well
+/// under 128 KiB; 1 MiB leaves generous headroom while capping how much an
+/// unexpectedly large or hostile file can allocate. A file exceeding this cap is
+/// untrusted and loads poisoned (fail-closed), same as a corrupt file. The
+/// single-writer `0600` contract makes this unreachable in practice — it is pure
+/// defense-in-depth against a torn/oversized file.
+const MAX_LEDGER_BYTES: u64 = 1024 * 1024;
+
 /// The [`DeployAttemptLedger`]'s verdict for one candidate target SHA. A pure
 /// function of durable ledger state and `now` — it needs no live "is-the-canary-
 /// red" signal because the ledger *is* the durable memory of a past red canary.
@@ -162,9 +172,9 @@ pub struct DeployAttemptLedger {
 impl DeployAttemptLedger {
     /// Load the ledger from `state_dir`. A **missing** file loads an empty ledger
     /// (a first-ever run is not an error, and yields `Allow`). A present-but-
-    /// corrupt or unknown-schema-version file loads a `poisoned` ledger that
-    /// returns `FailClosed(Unreadable)` for the candidate SHA. Never panics on IO
-    /// or deserialize.
+    /// corrupt, unknown-schema-version, or over-[`MAX_LEDGER_BYTES`] file loads a
+    /// `poisoned` ledger that returns `FailClosed(Unreadable)` for the candidate
+    /// SHA. Never panics on IO or deserialize.
     pub fn load(state_dir: &Path) -> Self {
         let path = Self::ledger_path(state_dir);
         let mut ledger = Self {
@@ -173,8 +183,34 @@ impl DeployAttemptLedger {
             poisoned: false,
         };
 
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
+        let bytes = match std::fs::File::open(&path) {
+            Ok(mut file) => {
+                // Bound the read defensively: read at most MAX_LEDGER_BYTES + 1
+                // so an oversized file trips the cap instead of allocating its
+                // full length. Reading through the handle (not a fresh
+                // `fs::read`) also closes the metadata/read TOCTOU window.
+                use io::Read;
+                let mut buf = Vec::new();
+                match file
+                    .by_ref()
+                    .take(MAX_LEDGER_BYTES.saturating_add(1))
+                    .read_to_end(&mut buf)
+                {
+                    Ok(_) => {}
+                    // Any read IO error is a present-but-untrusted file: fail closed.
+                    Err(_) => {
+                        ledger.poisoned = true;
+                        return ledger;
+                    }
+                }
+                // Larger than the cap ⇒ untrusted (a well-formed ledger cannot
+                // reach this size). Fail closed rather than parse it.
+                if buf.len() as u64 > MAX_LEDGER_BYTES {
+                    ledger.poisoned = true;
+                    return ledger;
+                }
+                buf
+            }
             // A missing file is the first-ever run: stay empty (⇒ Allow).
             Err(e) if e.kind() == io::ErrorKind::NotFound => return ledger,
             // Any other IO error (unreadable perms, etc.) is a present-but-

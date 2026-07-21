@@ -744,8 +744,17 @@ impl Overseer {
         let Some(observer) = self.deploy_drift_observer.as_ref() else {
             return;
         };
-        // 3) Anti-thrash: at most one probe+attempt per min-interval, process
-        //    -global so the per-tick-rebuilt Overseer cannot reset it.
+        // 3) Layer-1 anti-thrash: at most one probe+attempt per min-interval,
+        //    process-global so the per-tick-rebuilt Overseer cannot reset it.
+        //    NOTE the deliberate ordering with the layer-2 ledger below: this
+        //    layer records (spends) its slot on `Allow` and returns EARLY on
+        //    suppress, so it runs BEFORE the layer-2 `consult`. Consequently the
+        //    slot is spent for this window even when layer-2 later suppresses the
+        //    tick (BackingOff/FailClosed). That is intentional: a known-bad SHA
+        //    must not cause the process to re-probe git and re-consult the ledger
+        //    every single tick — one attempt per min-interval is the coarse rate
+        //    limit; layer-2 is the per-SHA durable memory layered on top of it,
+        //    not a reason to keep spending layer-1 slots faster.
         let now = crate::self_quality_audit::now_epoch_secs();
         if !deploy_trigger::global_deploy_throttle_allow(
             now,

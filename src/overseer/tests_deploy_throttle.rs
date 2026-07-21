@@ -272,6 +272,28 @@ fn consecutive_failures_persist_across_restarts_and_keep_widening() {
 // ─────────────────────────── fail-closed ───────────────────────────────────
 
 #[test]
+fn an_oversized_ledger_file_fails_closed() {
+    // A file larger than the defensive read cap is untrusted (a well-formed
+    // ledger cannot reach that size). It must load poisoned and refuse the
+    // candidate SHA rather than allocating and parsing an unbounded file.
+    let dir = TempDir::new().unwrap();
+    // 1 MiB + 1 byte of valid-looking JSON padding: exceeds MAX_LEDGER_BYTES.
+    let mut blob = Vec::with_capacity(1024 * 1024 + 64);
+    blob.extend_from_slice(br#"{"version":1,"entries":{},"pad":""#);
+    blob.resize(1024 * 1024 + 1, b'a');
+    std::fs::write(DeployAttemptLedger::ledger_path(dir.path()), &blob).unwrap();
+
+    let ledger = load(dir.path());
+    match ledger.consult(SHA_A, 10_000) {
+        ThrottleDecision::FailClosed { target_sha, reason } => {
+            assert_eq!(target_sha, SHA_A);
+            assert_eq!(reason, FailClosedReason::Unreadable);
+        }
+        other => panic!("an oversized ledger must fail closed, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_corrupt_ledger_file_fails_closed_for_the_candidate_sha() {
     // A torn / non-JSON file must NOT silently re-admit a commit that had already
     // been persisted as bad. It loads poisoned and refuses the candidate SHA.

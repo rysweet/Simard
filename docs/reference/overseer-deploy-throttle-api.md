@@ -170,7 +170,8 @@ pub struct DeployAttemptLedger { /* ... */ }
 impl DeployAttemptLedger {
     /// Load the ledger from `state_dir`. A **missing** file loads an empty
     /// ledger (`Ok`) — a first-ever run is not an error, and yields `Allow`. A
-    /// present-but-corrupt file loads a ledger in a `poisoned` mode that returns
+    /// present-but-corrupt, unknown-schema-version, or oversized (over the
+    /// defensive read cap) file loads a ledger in a `poisoned` mode that returns
     /// `FailClosed(Unreadable)` for the candidate SHA, so a torn write never
     /// silently re-admits a commit that had already been persisted as bad.
     /// Called **once at Overseer construction**; see [Wiring](#wiring).
