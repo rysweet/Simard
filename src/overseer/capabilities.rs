@@ -160,6 +160,20 @@ pub struct ObservedState {
     /// (`SIMARD_MERGE_REASONING_SCOPE=off`), so a disable is LOUD (WARN log +
     /// surfaced status), never a silent OFF. Unset env is NOT disabled.
     pub merge_reasoning_status: MergeReasoningStatus,
+    /// WHAT the agentic health-review pass concluded this tick ([standing]).
+    /// Default [`HealthReviewStatus::NotRun`] (additive — existing constructors
+    /// compile unchanged), left unchanged when the rail is unwired, the
+    /// dedicated opt-out disabled it, or the pass is off-cadence this tick. A
+    /// pass that RAN and parsed a verdict sets [`HealthReviewStatus::Reviewed`]
+    /// with the agent's one-line `HEALTH_REVIEW_COMPLETE` summary + the count of
+    /// typed decisions it drove — so a HEALTHY pass (zero interventions) still
+    /// leaves an OBSERVABLE trace instead of a silent no-op, exactly as
+    /// [`merge_reasoning_status`](Self::merge_reasoning_status) surfaces WHY
+    /// reasoning ran. A pass that RAN but DEGRADED (a truncated report the
+    /// bounded escalation ladder could not recover, or a base infra fault) sets
+    /// [`HealthReviewStatus::Degraded`] so the weak pass is LOUD, never a silent
+    /// OFF. Set by the acting Overseer's `health_review` pass; never fabricated.
+    pub health_review_status: HealthReviewStatus,
     /// Structured diagnoses of decision-cycle / engineer / terminal-shell steps
     /// that failed since the last Observe pass (issue #2640, PART 2). The acting
     /// Overseer drains these from the process-global failure sink
@@ -285,6 +299,33 @@ pub enum MergeReasoningStatus {
     /// An operator EXPLICITLY disabled reasoning. `reason` carries the raw signal
     /// (e.g. `SIMARD_MERGE_REASONING_SCOPE=off`) so the disable is loud.
     Disabled { reason: String },
+}
+
+/// WHAT the agentic Overseer health-review pass concluded this tick ([standing]).
+///
+/// Mirrors [`MergeReasoningStatus`]: the distinction the observability hinges on
+/// is that a pass that RAN and found nothing wrong is NOT the same as a pass
+/// that never ran. Default [`Self::NotRun`] (the additive default) covers an
+/// unwired / disabled / off-cadence tick; a pass that produced an honest verdict
+/// sets [`Self::Reviewed`] (so a HEALTHY pass leaves an observable trace, never a
+/// silent no-op); and a pass that degraded to no remediation sets
+/// [`Self::Degraded`] so the weak pass is LOUD in status rather than a silent OFF.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum HealthReviewStatus {
+    /// No pass ran this tick: the rail is unwired, the dedicated opt-out disabled
+    /// it, or it is off-cadence (the additive default so existing constructors
+    /// compile unchanged).
+    #[default]
+    NotRun,
+    /// A pass RAN and parsed an honest verdict. `summary` is the recipe's
+    /// one-line `HEALTH_REVIEW_COMPLETE` text; `decisions` is the count of typed
+    /// remediation interventions it drove (`0` on a HEALTHY pass — an observable
+    /// "reviewed, nothing to do", never a fabricated action).
+    Reviewed { summary: String, decisions: usize },
+    /// A pass RAN but DEGRADED end to end (a truncated report the bounded
+    /// escalation ladder could not recover, or a base infra fault) and took no
+    /// remediation. Surfaced so the weak pass is LOUD, never a silent OFF.
+    Degraded,
 }
 
 /// A cluster of failing checks for one repo over the observation window.

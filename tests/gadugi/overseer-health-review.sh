@@ -120,6 +120,15 @@ require_test 'review_base_runner_error_never_enters_the_ladder'
 require_test 'review_forwards_bounded_context_vars_to_the_seam'
 # END-TO-END wiring: both decisions flow through the SAME gate as every action.
 require_test 'health_review_routes_launch_and_escalate_into_gated_plan'
+# OBSERVABILITY: the pass's HEALTH_REVIEW_COMPLETE verdict is SURFACED on the
+# observed state (never discarded) — a HEALTHY pass is an observable
+# `Reviewed { 0 }` (not a silent no-op), a fault is a LOUD `Degraded`, and an
+# unwired/off-cadence tick stays `NotRun`. Same "no silent OFF" discipline as
+# merge-queue reasoning (#4097).
+require_test 'health_review_healthy_verdict_surfaces_reviewed_with_zero_decisions'
+require_test 'health_review_failure_surfaces_degraded_status'
+require_test 'health_review_unwired_leaves_status_not_run'
+require_test 'health_review_off_cadence_leaves_status_not_run'
 # The shared gap-scan throttle AND the dedicated opt-out each disable the rail.
 require_test 'health_review_skipped_when_gap_scan_disabled'
 require_test 'health_review_skipped_when_dedicated_flag_disabled'

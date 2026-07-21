@@ -11,7 +11,7 @@ description: >
   plain-English operator notification on both channels). Deliberately WITHOUT
   record_step_failure plumbing or an N-identical-failure threshold counter: the
   journal already contains every failure, and an agent reading it sees them all.
-last_updated: 2026-07-20
+last_updated: 2026-07-21
 review_schedule: as-needed
 owner: simard
 doc_type: concept
@@ -118,6 +118,26 @@ The agent emits plain-text marker lines; the rail parses them:
 `ESCALATE_GOAL` carries the same operator-facing split the goal-board health path
 uses: `problem` and `next_step` are **plain English** for the human, while
 `reason`/`why` are internal jargon for telemetry.
+
+### The verdict is observable, never a silent pass
+
+The `HEALTH_REVIEW_COMPLETE=<summary>` marker is not just a gate — its one-line
+verdict is **surfaced** on the cycle's `ObservedState.health_review_status`
+rather than parsed-and-discarded, so a review that runs and finds nothing wrong
+still leaves an observable trace. This applies the same "no silent OFF"
+discipline that [agentic merge-queue reasoning](./agentic-merge-queue-reasoning.md)
+gives `merge_reasoning_status`: an operator can always tell the three cases apart.
+
+| `health_review_status` | Meaning |
+| --- | --- |
+| `NotRun` | no pass ran this tick — the rail is unwired, opted out, or off-cadence (the additive default) |
+| `Reviewed { summary, decisions }` | a pass produced an honest verdict; `decisions` is the count of typed remediations it drove (`0` on a HEALTHY pass — an observable "reviewed, nothing to do", **not** a silent no-op) |
+| `Degraded` | a pass ran but degraded to no remediation (a base infra fault, or a truncated report the escalation ladder could not recover) — surfaced LOUD, never a silent OFF |
+
+The rail still fabricates nothing: `Reviewed { decisions: 0 }` and `Degraded`
+both leave the plan unchanged. The status only records WHAT the pass concluded,
+so a quiet-but-green Simard is distinguishable from one whose self-review never
+ran or silently degraded.
 
 ### Systemic vs per-goal
 

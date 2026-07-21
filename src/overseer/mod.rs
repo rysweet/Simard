@@ -101,10 +101,10 @@ mod tests_selfmerge_fix;
 mod tests_whisper;
 
 pub use capabilities::{
-    Auditor, BlockedGoal, Deployer, GoalCurator, IssueFiler, IssuePriority, IssueReadiness,
-    MeetingHost, MemoryRecall, MemorySnapshot, MergeReasoningStatus, ObservationEpisode,
-    ObservedState, OrchestratorRunBrief, OverseerError, PrDisposition, PrOps, PrRef, ReasonedPr,
-    RecallBudget, RecallKeys, RecalledEpisode, RecalledFact, RecalledProcedure,
+    Auditor, BlockedGoal, Deployer, GoalCurator, HealthReviewStatus, IssueFiler, IssuePriority,
+    IssueReadiness, MeetingHost, MemoryRecall, MemorySnapshot, MergeReasoningStatus,
+    ObservationEpisode, ObservedState, OrchestratorRunBrief, OverseerError, PrDisposition, PrOps,
+    PrRef, ReasonedPr, RecallBudget, RecallKeys, RecalledEpisode, RecalledFact, RecalledProcedure,
     RecalledProspective, RecipeBrief, RecipeLauncher, RecordOutcome, StatusReader, TriagedIssue,
     sanitize_recalled,
 };
@@ -914,7 +914,7 @@ impl Overseer {
         // journal, counts a failure, or encodes a threshold; it only schedules the
         // recipe and routes each parsed `LaunchRecipe` / `EscalateBlockedGoal`
         // through the SAME gate every other action uses.
-        self.health_review(&observed, &mut launches, &mut plan);
+        self.health_review(&mut observed, &mut launches, &mut plan);
 
         Ok(CycleReport {
             observed,
@@ -1018,9 +1018,16 @@ impl Overseer {
     /// Fail-closed: an unwired reviewer, a disabled rail, an off cadence, a
     /// `HEALTHY` verdict, or a degraded/failed recipe run all leave the plan
     /// unchanged — never a fabricated launch or escalation.
+    ///
+    /// The pass's verdict is also SURFACED on `observed.health_review_status`
+    /// (never discarded): a pass that ran sets `Reviewed { summary, decisions }`
+    /// (so a HEALTHY pass is an observable `Reviewed { decisions: 0 }`, not a
+    /// silent no-op), a degraded/faulted pass sets `Degraded`, and an
+    /// unwired/disabled/off-cadence tick leaves the additive `NotRun` default —
+    /// the same "no silent OFF" discipline `merge_reasoning_status` applies.
     fn health_review(
         &mut self,
-        observed: &ObservedState,
+        observed: &mut ObservedState,
         launches: &mut usize,
         plan: &mut Vec<PlannedIntervention>,
     ) {
@@ -1039,8 +1046,8 @@ impl Overseer {
         ) {
             return;
         }
-        // Borrow the reviewer only for the call; the returned Vec is owned, so the
-        // immutable borrow of `self` ends before the mutable `gate` below.
+        // Borrow the reviewer only for the call; the returned outcome is owned, so
+        // the immutable borrow of `self` ends before the mutable `gate` below.
         let outcome = {
             let reviewer = self
                 .health_reviewer
@@ -1048,24 +1055,38 @@ impl Overseer {
                 .expect("health_reviewer presence checked above");
             reviewer.review()
         };
-        let interventions = match outcome {
-            Ok(ivs) => ivs,
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
             Err(e) => {
+                // A caller-visible fault (the fail-closed rail normally degrades
+                // to an `Ok` outcome with no verdict, so this is rare). Surface it
+                // LOUD via `Degraded` rather than leaving the pass a silent gap.
                 tracing::warn!(
                     target: "overseer::health_review",
                     error = %e,
                     "health-review pass failed — degrading to no review (no interventions fabricated)"
                 );
+                observed.health_review_status = HealthReviewStatus::Degraded;
                 return;
             }
         };
         // Route each parsed DECISION (LaunchRecipe / EscalateBlockedGoal) through
         // the SAME gate every other action uses. A `HEALTHY` verdict parses to an
         // empty Vec, so this loop simply adds nothing.
-        for iv in interventions {
+        let decisions = outcome.interventions.len();
+        for iv in outcome.interventions {
             let planned = self.gate(&iv, observed, launches);
             plan.push(planned);
         }
+        // Surface the pass's verdict so an operator can tell "reviewed, healthy"
+        // (`Reviewed { decisions: 0 }`) from "never ran" (`NotRun`) and from a
+        // weak pass (`Degraded`) — the same "no silent OFF" discipline
+        // `merge_reasoning_status` applies to merge-queue reasoning. `summary`
+        // is present exactly when the pass produced an honest verdict.
+        observed.health_review_status = match outcome.summary {
+            Some(summary) => HealthReviewStatus::Reviewed { summary, decisions },
+            None => HealthReviewStatus::Degraded,
+        };
     }
     /// enriching `observed` with `reasoned_prs` / `triaged_issues` /
     /// `merge_reasoning_status` and a re-narrowed `ready_prs` projection when the
@@ -3870,10 +3891,15 @@ mod tests {
         }
     }
     impl health_review::HealthReviewer for FakeHealthReviewer {
-        fn review(&self) -> SimardResult<Vec<Intervention>> {
+        fn review(&self) -> SimardResult<health_review::HealthReviewOutcome> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             match &self.outcome {
-                Ok(ivs) => Ok(ivs.clone()),
+                Ok(ivs) => Ok(health_review::HealthReviewOutcome {
+                    interventions: ivs.clone(),
+                    // A scripted pass always carries an honest verdict, so the
+                    // wiring can assert the surfaced `Reviewed { .. }` status.
+                    summary: Some("fake health-review verdict".to_string()),
+                }),
                 Err(_) => Err(crate::error::SimardError::AdapterInvocationFailed {
                     base_type: "overseer-health-review".to_string(),
                     reason: "scripted failure".to_string(),
@@ -3937,6 +3963,96 @@ mod tests {
         assert!(
             escalations[0].admitted,
             "the escalation is gated-admitted with goal-health on"
+        );
+        // The pass's verdict is SURFACED on the observed state (never discarded):
+        // both typed decisions are counted, so an operator sees "reviewed, acted".
+        match report.observed.health_review_status {
+            HealthReviewStatus::Reviewed {
+                decisions,
+                ref summary,
+            } => {
+                assert_eq!(decisions, 2, "both decisions are counted in the verdict");
+                assert!(
+                    !summary.is_empty(),
+                    "the verdict carries a non-empty summary"
+                );
+            }
+            other => panic!("expected a surfaced Reviewed verdict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn health_review_healthy_verdict_surfaces_reviewed_with_zero_decisions() {
+        // The whole point of surfacing the verdict: a HEALTHY pass (zero
+        // interventions) must leave an OBSERVABLE trace — `Reviewed { 0 }` — so
+        // an operator can tell "reviewed, nothing to do" from "never ran"
+        // (`NotRun`). No silent no-op.
+        let mut ov = overseer_with_health(Ok(vec![]), 1);
+        let report = ov.run_cycle().expect("cycle");
+        assert_eq!(
+            report.observed.health_review_status,
+            HealthReviewStatus::Reviewed {
+                summary: "fake health-review verdict".to_string(),
+                decisions: 0,
+            },
+            "a HEALTHY pass surfaces a Reviewed verdict with zero decisions"
+        );
+    }
+
+    #[test]
+    fn health_review_failure_surfaces_degraded_status() {
+        // A caller-visible rail fault takes no action AND is LOUD: the observed
+        // status is `Degraded`, never a silent `NotRun`/healthy.
+        let mut ov = overseer_with_health(
+            Err(crate::error::SimardError::AdapterInvocationFailed {
+                base_type: "overseer-health-review".to_string(),
+                reason: "boom".to_string(),
+            }),
+            1,
+        );
+        let report = ov
+            .run_cycle()
+            .expect("cycle must not error on a rail fault");
+        assert_eq!(
+            report.observed.health_review_status,
+            HealthReviewStatus::Degraded,
+            "a degraded pass is surfaced LOUD, never a silent OFF"
+        );
+    }
+
+    #[test]
+    fn health_review_unwired_leaves_status_not_run() {
+        // No reviewer wired → no pass ran → the verdict stays the additive
+        // `NotRun` default (distinct from a HEALTHY `Reviewed { 0 }`).
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(true);
+        let report = ov.run_cycle().expect("cycle");
+        assert_eq!(
+            report.observed.health_review_status,
+            HealthReviewStatus::NotRun,
+            "an unwired rail leaves the verdict NotRun (never ran)"
+        );
+    }
+
+    #[test]
+    fn health_review_off_cadence_leaves_status_not_run() {
+        // every_n = 2 → tick 1 is off-cadence: no pass runs, so the verdict stays
+        // NotRun on the skipped tick even though tick 0 reviewed.
+        let mut ov = overseer_with_health(Ok(vec![launch_iv("fix")]), 2);
+        let r0 = ov.run_cycle().expect("cycle");
+        assert!(
+            matches!(
+                r0.observed.health_review_status,
+                HealthReviewStatus::Reviewed { .. }
+            ),
+            "tick 0 reviews and surfaces a verdict"
+        );
+        let r1 = ov.run_cycle().expect("cycle");
+        assert_eq!(
+            r1.observed.health_review_status,
+            HealthReviewStatus::NotRun,
+            "an off-cadence tick runs no pass and leaves the verdict NotRun"
         );
     }
 
