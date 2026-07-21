@@ -1478,36 +1478,32 @@ impl Overseer {
                 Ok(ActOutcome::Launched(handle))
             }
             Intervention::VerifyAndMergePr { repo, pr } => {
-                let report = self.caps.prs.verify(repo, *pr)?;
-                if !report.ready {
-                    // Arm the per-PR escalation backoff (issue #4344) so a repeat
-                    // escalation of this same still-open PR is HELD in `gate`
-                    // within the window instead of paging every tick.
-                    self.merge_escalation_backoff.commit(
-                        &guardrails::verify_and_merge_dedup_key(repo, *pr),
-                        (self.clock)(),
-                    );
-                    return Ok(ActOutcome::Escalated);
-                }
                 // `verify()` is only the objective pre-filter. The authoritative
                 // agentic review runs inside `merge()` (step 3); when it refuses
                 // — or the LLM provider is unavailable and the judge fails closed
                 // — `merge()` returns `NotMergeReady`, which is an ESCALATION, not
                 // an error (never a blind merge).
-                match self.caps.prs.merge(repo, *pr) {
-                    Ok(()) => Ok(ActOutcome::Merged),
-                    Err(OverseerError::NotMergeReady { .. }) => {
-                        // Same escalation sub-case: arm the backoff so the
-                        // fail-closed refusal is deduped across ticks (never a
-                        // blind merge, never a per-tick page).
-                        self.merge_escalation_backoff.commit(
-                            &guardrails::verify_and_merge_dedup_key(repo, *pr),
-                            (self.clock)(),
-                        );
-                        Ok(ActOutcome::Escalated)
+                let outcome = if self.caps.prs.verify(repo, *pr)?.ready {
+                    match self.caps.prs.merge(repo, *pr) {
+                        Ok(()) => ActOutcome::Merged,
+                        Err(OverseerError::NotMergeReady { .. }) => ActOutcome::Escalated,
+                        Err(e) => return Err(e),
                     }
-                    Err(e) => Err(e),
+                } else {
+                    ActOutcome::Escalated
+                };
+                // On any ESCALATION (not-ready pre-filter OR fail-closed judge
+                // refusal) arm the per-PR escalation backoff (issue #4344) so a
+                // repeat escalation of this same still-open PR is HELD in `gate`
+                // within the window instead of paging every tick. A successful
+                // merge never arms the gate.
+                if outcome == ActOutcome::Escalated {
+                    self.merge_escalation_backoff.commit(
+                        &guardrails::verify_and_merge_dedup_key(repo, *pr),
+                        (self.clock)(),
+                    );
                 }
+                Ok(outcome)
             }
             Intervention::ResolveConflict { repo, pr } => {
                 self.caps.prs.resolve_conflict(repo, *pr)?;
