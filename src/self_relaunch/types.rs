@@ -44,12 +44,58 @@ impl Display for RelaunchGate {
 pub struct GateResult {
     pub gate: RelaunchGate,
     pub passed: bool,
+    /// True iff the gate was skipped because a required live endpoint is
+    /// legitimately absent in the isolated canary context (e.g. no running
+    /// daemon for the RPC health probe). INVARIANT: `skipped ⇒ passed`, so
+    /// every existing `.passed` read-site treats a skip as non-failing while
+    /// the skip itself stays visible for diagnostics.
+    pub skipped: bool,
     pub detail: String,
+}
+
+impl GateResult {
+    /// A gate that ran and passed.
+    pub fn pass(gate: RelaunchGate, detail: impl Into<String>) -> Self {
+        Self {
+            gate,
+            passed: true,
+            skipped: false,
+            detail: detail.into(),
+        }
+    }
+
+    /// A gate that ran and genuinely failed — this reds the canary.
+    pub fn fail(gate: RelaunchGate, detail: impl Into<String>) -> Self {
+        Self {
+            gate,
+            passed: false,
+            skipped: false,
+            detail: detail.into(),
+        }
+    }
+
+    /// A gate skipped because its required endpoint is legitimately absent in
+    /// the isolated canary. Upholds the `skipped ⇒ passed` invariant so the
+    /// skip never reds the canary, yet remains surfaced for diagnostics.
+    pub fn skip(gate: RelaunchGate, detail: impl Into<String>) -> Self {
+        Self {
+            gate,
+            passed: true,
+            skipped: true,
+            detail: detail.into(),
+        }
+    }
 }
 
 impl Display for GateResult {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let status = if self.passed { "PASS" } else { "FAIL" };
+        let status = if self.skipped {
+            "SKIP"
+        } else if self.passed {
+            "PASS"
+        } else {
+            "FAIL"
+        };
         write!(f, "[{}] {}: {}", status, self.gate, self.detail)
     }
 }
@@ -125,6 +171,7 @@ mod tests {
         let result = GateResult {
             gate: RelaunchGate::Smoke,
             passed: true,
+            skipped: false,
             detail: "version: 1.0.0".to_string(),
         };
         let display = result.to_string();
@@ -138,6 +185,7 @@ mod tests {
         let result = GateResult {
             gate: RelaunchGate::UnitTest,
             passed: false,
+            skipped: false,
             detail: "3 tests failed".to_string(),
         };
         let display = result.to_string();
@@ -157,6 +205,7 @@ mod tests {
         let result = GateResult {
             gate: RelaunchGate::Smoke,
             passed: true,
+            skipped: false,
             detail: "ok".to_string(),
         };
         let cloned = result.clone();
@@ -170,9 +219,80 @@ mod tests {
         let result = GateResult {
             gate: RelaunchGate::RpcHealth,
             passed: false,
+            skipped: false,
             detail: "err".to_string(),
         };
         let debug = format!("{result:?}");
         assert!(debug.contains("RpcHealth"), "{debug}");
+    }
+
+    // ── Skipped outcome + pass/fail/skip constructors (canary-gate #2590) ────
+    //
+    // TDD (Step 7): these specify the additive `skipped` field and the three
+    // intent-encoding constructors. They FAIL until `types.rs` gains the field
+    // and `GateResult::{pass,fail,skip}` — that is the expected RED state.
+
+    #[test]
+    fn gate_result_pass_constructor_runs_and_passes() {
+        let r = GateResult::pass(RelaunchGate::Smoke, "version: 1.4.2");
+        assert!(r.passed);
+        assert!(!r.skipped);
+        assert_eq!(r.gate, RelaunchGate::Smoke);
+        assert_eq!(r.detail, "version: 1.4.2");
+    }
+
+    #[test]
+    fn gate_result_fail_constructor_is_red_not_skip() {
+        let r = GateResult::fail(RelaunchGate::UnitTest, "2 tests failed");
+        assert!(!r.passed);
+        assert!(!r.skipped, "a failing gate is never a skip");
+        assert_eq!(r.gate, RelaunchGate::UnitTest);
+        assert_eq!(r.detail, "2 tests failed");
+    }
+
+    #[test]
+    fn gate_result_skip_constructor_is_non_failing() {
+        let r = GateResult::skip(
+            RelaunchGate::RpcHealth,
+            "endpoint absent in isolated canary (no daemon) — skipped",
+        );
+        assert!(r.skipped);
+        // INVARIANT: skipped ⇒ passed. A skip must never count as a failure so
+        // every existing `.passed` read-site treats it as non-failing.
+        assert!(r.passed, "skipped ⇒ passed invariant");
+    }
+
+    #[test]
+    fn gate_result_skip_upholds_skipped_implies_passed_for_all_gates() {
+        for gate in default_gates() {
+            let r = GateResult::skip(gate, "absent");
+            assert!(
+                !r.skipped || r.passed,
+                "skipped must imply passed for {gate}"
+            );
+        }
+    }
+
+    #[test]
+    fn gate_result_display_skip_renders_skip_tag() {
+        let r = GateResult::skip(RelaunchGate::RpcHealth, "no daemon — skipped");
+        let s = r.to_string();
+        assert!(s.contains("[SKIP]"), "{s}");
+        assert!(s.contains("rpc-health"), "{s}");
+        assert!(s.contains("no daemon"), "{s}");
+    }
+
+    #[test]
+    fn gate_result_pass_and_fail_display_unchanged() {
+        assert!(
+            GateResult::pass(RelaunchGate::Smoke, "ok")
+                .to_string()
+                .contains("[PASS]")
+        );
+        assert!(
+            GateResult::fail(RelaunchGate::Smoke, "boom")
+                .to_string()
+                .contains("[FAIL]")
+        );
     }
 }

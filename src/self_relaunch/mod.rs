@@ -36,11 +36,13 @@ mod tests {
             GateResult {
                 gate: RelaunchGate::Smoke,
                 passed: true,
+                skipped: false,
                 detail: "ok".into(),
             },
             GateResult {
                 gate: RelaunchGate::UnitTest,
                 passed: true,
+                skipped: false,
                 detail: "ok".into(),
             },
         ];
@@ -53,11 +55,13 @@ mod tests {
             GateResult {
                 gate: RelaunchGate::Smoke,
                 passed: true,
+                skipped: false,
                 detail: "ok".into(),
             },
             GateResult {
                 gate: RelaunchGate::UnitTest,
                 passed: false,
+                skipped: false,
                 detail: "fail".into(),
             },
         ];
