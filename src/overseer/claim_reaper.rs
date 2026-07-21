@@ -983,10 +983,7 @@ fn capture_journal_slice(goal_id: &str) -> Option<String> {
         JOURNAL_CAPTURE_TIMEOUT,
     )?;
     // Keep only lines mentioning the goal id (bounded), newest-biased tail.
-    let mut lines: Vec<&str> = raw
-        .lines()
-        .filter(|l| l.contains(goal_id))
-        .collect::<Vec<_>>();
+    let mut lines: Vec<&str> = raw.lines().filter(|l| l.contains(goal_id)).collect();
     let keep = lines.len().saturating_sub(500);
     lines.drain(..keep);
     if lines.is_empty() {
