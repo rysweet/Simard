@@ -780,6 +780,10 @@ pub fn archive_completed_evidence_aware(
 // KEEP and which duplicates to SUPERSEDE, so the caller can close/supersede the
 // extras via the gated PR-ops path (never a blind hand-close). It NEVER selects
 // a human-authored PR or a PR belonging to a different goal slug.
+//
+// NOTE: this decision helper is not yet wired into the live stewardship loop;
+// the effectful close/supersede caller lands as follow-up (#4326/#4329/#4332)
+// in a separate, integration-testable change.
 
 /// Sanitise a goal slug down to the `[a-z0-9-]` alphabet before it is used in a
 /// branch name, an argv value, or a path. Lowercases, drops every other byte

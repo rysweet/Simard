@@ -20,9 +20,12 @@
 //!   `systemctl is-enabled` result into a "unit not loaded → reconcile"
 //!   decision (mirrors [`crate::self_deploy::restart`]'s present-unit heuristic).
 //!
-//! All logic here is pure and hermetically unit-tested; the effectful callers
-//! (`git rev-parse`, the atomic swap, `systemctl`) live in the orchestrator and
-//! restart modules and consume these decisions.
+//! All logic here is pure and hermetically unit-tested. It exposes DECISIONS
+//! only — the effectful callers (`git rev-parse`, the atomic swap, `systemctl`)
+//! in the orchestrator and restart modules are the intended consumers and must
+//! invoke these helpers before acting. NOTE: this module is not yet wired into
+//! the live self-deploy loop; the runtime integration is tracked as follow-up
+//! (#4305 / #4387 / #4390) and lands in a separate, integration-testable change.
 
 use serde::{Deserialize, Serialize};
 

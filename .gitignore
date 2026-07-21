@@ -38,3 +38,4 @@ scripts/dashboard-audit/out/
 pr*-worktree/
 *-worktree/
 .simard/
+gym_history.db
