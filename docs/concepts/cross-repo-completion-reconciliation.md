@@ -125,11 +125,14 @@ number, and `gh pr view <num> --repo <owner/repo>` returns `MERGED`.
 
 ### Scope: only the merged-PR clause
 
-The URL/repo recovery applies **only** to `any_pr_merged`. The other clauses —
-`issue_closed`, `is_deployed`, and the `is_self_affecting` classifier — are
+The URL/repo recovery — the **repo-relative resolution** — applies **only** to
+`any_pr_merged`. `is_deployed` and the `is_self_affecting` classifier are
 unchanged. In particular, self-affecting classification still treats
 `repo == None` as routing to Simard; this change does not alter which goals are
-considered self-affecting.
+considered self-affecting. `issue_closed`'s resolution is likewise unchanged, but
+it does gain the **same fail-closed slug/number validation** as `any_pr_merged`
+(a non-digit issue number or unsafe `owner/repo` slug now blocks without reaching
+`gh`) — a defense-in-depth parity fix, not a change to its clause semantics.
 
 ## Still fail-closed — no silent always-pass
 

@@ -143,8 +143,9 @@ goal's own target repository and reads the persisted PR linkage (a numeric
 `WipRef.ref_id` **or** a `WipRef.url`), so a PR merged in a non-Simard ecosystem
 repo satisfies clause 1 instead of re-blocking every cycle. See the
 [cross-repo merged-PR evidence API reference](../reference/cross-repo-merged-pr-evidence.md)
-([#4375](https://github.com/rysweet/Simard/issues/4375)). `issue_closed`,
-`is_deployed`, and the trait signature are unchanged.
+([#4375](https://github.com/rysweet/Simard/issues/4375)). `is_deployed` and the
+trait signature are unchanged; `issue_closed`'s resolution is unchanged but gains
+the same fail-closed slug/number validation (defense-in-depth parity).
 
 ## Self-affecting classification
 

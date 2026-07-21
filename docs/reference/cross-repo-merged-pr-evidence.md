@@ -129,7 +129,8 @@ impl EvidenceSource for GhCliEvidenceSource {
     /// is absent, then runs `gh pr view <num> --repo <owner/repo> --json state
     /// --jq .state` and returns `state == "MERGED"`.
     fn any_pr_merged(&self, goal: &ActiveGoal) -> SimardResult<bool>;
-    // issue_closed / is_deployed: unchanged.
+    // is_deployed: unchanged. issue_closed: resolution unchanged, but it gains
+    // the same fail-closed slug/number validation (see below).
 }
 ```
 
@@ -183,6 +184,12 @@ The command is invoked with `Command::args` (no shell, no `sh -c`, no string
 interpolation), and only the read-only `gh pr view` verb is used. `gh` stderr is
 surfaced at `debug`/`warn`; auth tokens are never logged.
 
+The **same validation is applied to `issue_closed`** (whose issue number is an
+untrusted `WipRef.ref_id` and whose slug may echo an unvalidated `goal.repo`): a
+non-digit number or unsafe slug fails closed — the issue is treated as still open
+(blocks archival) and `gh` is never invoked. This is a defense-in-depth parity
+fix; `issue_closed`'s resolution logic is otherwise unchanged.
+
 ## Unchanged surface
 
 To keep the change additive and non-breaking, the following are **not** modified:
@@ -195,9 +202,19 @@ To keep the change additive and non-breaking, the following are **not** modified
   [`types.rs`](https://github.com/rysweet/Simard/blob/main/src/goal_curation/types.rs)
   (`kind`, `ref_id`, `label`, `url`) — the fix reads the existing `url` field; no
   new field is added.
-- `issue_closed`, `is_deployed`, and `is_self_affecting` — only the merged-PR
-  clause is touched.
+- The **repo-relative URL/number resolution** itself — it is scoped to the
+  merged-PR clause; `is_deployed` and the `is_self_affecting` classifier are not
+  modified, and `issue_closed`'s success semantics (a closed linked issue ⇒
+  `true`) are preserved.
 - The `SIMARD_COMPLETION_EVIDENCE` kill-switch semantics.
+
+> **Note — `issue_closed` hardening.** `issue_closed` is *not* left byte-for-byte
+> unchanged: it gains the **same fail-closed argument-injection validation** as
+> `any_pr_merged` (a non-digit issue number or an unsafe `owner/repo` slug now
+> fails closed — blocks — without reaching `gh`). This is a defense-in-depth
+> parity fix, not a change to the clause's resolution logic; see
+> [Argument-injection validation](#argument-injection-validation) and the
+> `issue_closed_fails_closed_*` regression tests.
 
 Existing tests continue to pass unchanged, including
 `gh_source_repo_slug_resolves_all_four_forms` and
