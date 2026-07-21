@@ -137,6 +137,7 @@ nav:
     - Goal-Board Persistence: concepts/goal-board-persistence.md
     - Keeping the OODA Daemon Steerable: concepts/steerable-ooda-daemon.md
     - Perpetual Goals Exempt from No-Progress Hard-Block: concepts/perpetual-goal-no-progress-exemption.md
+    - Novelty-First Steering for Standing Research Goals: concepts/novelty-first-standing-research-steering.md
     - No-Progress Breaker Explains WHY and Self-Resolves: concepts/no-progress-root-cause-resolution.md
     - Terminal No-Progress Stall Never Parks Empty Evidence: concepts/no-progress-terminal-investigation.md
     - Overseer Goal-Board Health: concepts/overseer-goal-board-health.md
@@ -192,6 +193,7 @@ nav:
     - Re-Investigate Bare-Blocked OODA Goals: howto/reinvestigate-bare-blocked-goals.md
     - Add a New Recipe-Brain Phase: howto/add-a-new-recipe-brain-phase.md
     - Edit the OODA Brain Prompt: howto/edit-the-ooda-brain-prompt.md
+    - Steer a Standing Research Goal Toward Novelty: howto/steer-a-standing-research-goal-toward-novelty.md
     - "Parser-route diagnostics (legacy after typed cutover)":
       - Brain Decision Parse Failures: howto/diagnose-brain-decision-parse-failures.md
       - Decide/Orient Parse Failures: howto/diagnose-decide-orient-parse-failures.md
@@ -283,6 +285,7 @@ nav:
     - Tombstoned-Goal Engineer Reaper API: reference/tombstoned-goal-engineer-reaper-api.md
     - Typed OODA Goal-Session Deterministic Rails: reference/typed-ooda-goal-session-rails.md
     - Stable Goal-Session Identity API: reference/stable-goal-session-identity-api.md
+    - Standing-Research Novelty-Directive API: reference/standing-research-goal-novelty-directive-api.md
     - Actor-Session Scope-Key API: reference/actor-session-scope-key-api.md
     - WhisperGate Exponential-Backoff API: reference/whisper-gate-backoff-api.md
     - Subordinate Kill PID-Guard API: reference/subordinate-kill-pid-guard-api.md

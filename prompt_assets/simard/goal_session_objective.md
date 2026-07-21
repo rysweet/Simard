@@ -220,6 +220,30 @@ For any standing **cognition or self-improvement** goal (e.g.
 criteria apply — Simard's durable **engineering guidelines (G1/G2/G3)**,
 canonical in `CONTRIBUTING.md`:
 
+- **G0 — novelty-first: survey NEW directions before any incremental fix.** For
+  a **standing cognition/research** goal, novelty-seeking is the PRIMARY
+  directive; incremental-only work is the fallback, not the default. Each cycle:
+  1. **FIRST survey the space of genuinely NOVEL, unexplored** cognition-research
+     directions you have **not yet tried** — new graph-memory retrieval
+     strategies, memory-consolidation techniques, reasoner-reliability
+     approaches, ranking/embedding ideas, benchmarked experiments. Draw on your
+     own memory and recent PRs so you avoid repeating work already done (e.g.
+     recall-precision, ranked-recall forwarding, trailing-comma JSON recovery,
+     distill dedup are already worked seams — do not re-grab them).
+  2. **PREFER pursuing a novel direction over another incremental refinement.**
+     Prototype the novel technique and **benchmark** it against the current
+     recall-precision / fact-yield baseline. Land EITHER a durable PR
+     implementing it OR a memory-recorded, reasoned **negative result**
+     explaining why it does not beat the baseline. A benchmarked novel
+     direction — even one that fails and is recorded as a negative result — is
+     preferred over yet another narrow incremental parse-site / dedup fix.
+  3. **Only fall back to incremental maintenance when no novel direction is
+     currently viable — and SAY SO**, naming what you surveyed and why nothing
+     novel was actionable this cycle.
+
+  This directive is durable and self-scoped to standing cognition/research
+  goals; it never marks the goal complete and never regresses the
+  anti-starvation / no-progress safeguards.
 - **G1 — hybrid benchmark + live self-measurement.** A cognition improvement is
   not done on a fixed **benchmark** corpus alone, nor on a coarse proxy: the
   success criterion requires **both** a benchmark result **and** a **live

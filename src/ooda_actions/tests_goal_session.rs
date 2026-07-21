@@ -589,3 +589,127 @@ fn observe_only_objective_forbids_engineer_dispatch_and_requires_evidence_protoc
     );
     assert!(input.objective.contains("modest positive progress"));
 }
+
+// ── Novelty-first steering for standing research/cognition goals (#4347) ──
+//
+// TDD: `build_goal_advance_input` must durably inject a novelty-first directive
+// into the goal-session objective ONLY when the goal is a standing
+// research/cognition goal (`ActiveGoal::is_standing_research_goal`), so the
+// standing cognition-research goal seeks GENUINELY NEW directions each cycle
+// instead of another incremental parse-site / dedup fix. This lives in the
+// daemon (code hook + prompt asset), so it survives goal-board re-persist —
+// it is NOT a runtime CLI priority tweak.
+//
+// The code-owned hook emits this exact sentinel; the always-embedded prompt
+// asset must NOT contain it, so the positive/negative split is meaningful.
+const NOVELTY_FIRST_SENTINEL: &str = "[novelty-first: standing research goal]";
+
+fn research_goal() -> crate::goal_curation::ActiveGoal {
+    crate::goal_curation::ActiveGoal::new(
+        "continuously-research-and-improve-your-own-cogn-70ab8541",
+        "Continuously research and improve your own cognition: graph memory, \
+         recall quality, distillation fact-yield, and reasoner reliability. \
+         STANDING PERPETUAL goal — durable improvements only",
+        1,
+    )
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn advance_input_injects_novelty_directive_for_standing_research_goal() {
+    let _guard = lock_env_for_test();
+    let _env = set_observe_only_for_test(None);
+
+    let mem = crate::ooda_actions::test_helpers::mock_memory();
+    let goal = research_goal();
+    let input =
+        crate::ooda_actions::goal_session::build_goal_advance_input(&*mem, None, &goal, false);
+
+    let obj = &input.objective;
+    let obj_lc = obj.to_lowercase();
+    assert!(
+        obj.contains(NOVELTY_FIRST_SENTINEL),
+        "standing research goal must get the code-owned novelty-first directive sentinel"
+    );
+    // The directive must steer toward surveying NOVEL directions and preferring
+    // them over incremental refinement, with benchmark / negative-result rigor.
+    assert!(
+        obj_lc.contains("novel"),
+        "directive must mention novel directions"
+    );
+    assert!(
+        obj_lc.contains("survey") || obj_lc.contains("unexplored"),
+        "directive must instruct surveying unexplored directions"
+    );
+    assert!(
+        obj_lc.contains("incremental"),
+        "directive must contrast novel work against incremental refinement"
+    );
+    assert!(
+        obj_lc.contains("benchmark"),
+        "directive must require benchmarking a novel direction against the baseline"
+    );
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn advance_input_omits_novelty_directive_for_ordinary_goal() {
+    let _guard = lock_env_for_test();
+    let _env = set_observe_only_for_test(None);
+
+    let mem = crate::ooda_actions::test_helpers::mock_memory();
+    let goal = crate::goal_curation::ActiveGoal::new("g-mvp", "Ship the MVP release.", 1);
+    let input =
+        crate::ooda_actions::goal_session::build_goal_advance_input(&*mem, None, &goal, false);
+
+    assert!(
+        !input.objective.contains(NOVELTY_FIRST_SENTINEL),
+        "an ordinary (non-standing, non-research) goal must NOT get the novelty-first sentinel"
+    );
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn advance_input_omits_novelty_directive_for_standing_non_research_goal() {
+    let _guard = lock_env_for_test();
+    let _env = set_observe_only_for_test(None);
+
+    let mem = crate::ooda_actions::test_helpers::mock_memory();
+    // Standing/perpetual, but NOT a research/cognition goal.
+    let goal = crate::goal_curation::ActiveGoal::new(
+        "g-ci",
+        "Steward CI health and keep the pipeline green. STANDING PERPETUAL goal.",
+        1,
+    );
+    assert!(goal.is_perpetual());
+    let input =
+        crate::ooda_actions::goal_session::build_goal_advance_input(&*mem, None, &goal, false);
+
+    assert!(
+        !input.objective.contains(NOVELTY_FIRST_SENTINEL),
+        "a standing NON-research goal must NOT get the novelty-first sentinel"
+    );
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn advance_input_omits_novelty_directive_for_research_non_standing_goal() {
+    let _guard = lock_env_for_test();
+    let _env = set_observe_only_for_test(None);
+
+    let mem = crate::ooda_actions::test_helpers::mock_memory();
+    // Research/cognition wording, but a one-off (non-standing) goal.
+    let goal = crate::goal_curation::ActiveGoal::new(
+        "g-recall",
+        "Improve recall precision at parse sites",
+        1,
+    );
+    assert!(!goal.is_perpetual());
+    let input =
+        crate::ooda_actions::goal_session::build_goal_advance_input(&*mem, None, &goal, false);
+
+    assert!(
+        !input.objective.contains(NOVELTY_FIRST_SENTINEL),
+        "a non-standing research goal must NOT get the novelty-first sentinel"
+    );
+}
