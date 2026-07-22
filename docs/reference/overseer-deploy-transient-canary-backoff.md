@@ -154,13 +154,20 @@ export RELAUNCH_GATE_TIMEOUT_SECS=banana   # -> falls back to 600 s
 
 Each gate subprocess in
 [`src/self_relaunch/gates.rs`](https://github.com/rysweet/Simard/blob/main/src/self_relaunch/gates.rs)
-is run with the configured `gate_timeout`. Today `run_gate` blocks on
+is run with the configured `gate_timeout`. `run_gate` previously blocked on
 `Command::…output()` with **no** wall-clock bound; the enforcement wraps that
 call so that on expiry the gate:
 
-1. **kills** the child process, and
-2. **reaps** it (waits on it) so no zombie or runaway `cargo` survives the tick,
-   then
+1. **kills the whole process group**, not just the direct child. The gate leads
+   its own process group (`process_group(0)` on Unix), so a timeout SIGKILLs the
+   negated group id and reaches every descendant. This is load-bearing for the
+   UnitTest gate: `cargo test` spawns `rustc`/test-binary descendants that
+   inherit the stdout/stderr pipe write-ends, so killing only the direct child
+   would leave them alive holding the pipes open — the drain threads would never
+   see EOF and the reaping `join()` would block *past* the timeout, defeating the
+   bound for the very gate it exists to protect. Group-killing reaps the whole
+   subtree so no zombie or runaway `cargo` survives the tick, and
+2. **reaps** the group leader (waits on it), then
 3. records a **failing** `GateResult` with a new **structured** `timed_out: true`
    flag (see below), plus a human-readable `detail` (e.g.
    `unit-test gate timed out after 600s`).
@@ -397,7 +404,9 @@ new subprocess-output dumping beyond the existing bounded `failing_detail`
   parse / default / clamp (floor, ceiling, unparseable).
 - `src/self_relaunch/gates.rs` — inline tests that a fast-expiring timeout
   kills+reaps a sleeping fake gate command and sets `GateResult.timed_out ==
-  true` (a normal assertion failure leaves it `false`).
+  true` (a normal assertion failure leaves it `false`), and a regression test
+  that a timeout is **not wedged by a pipe-holding grandchild** (the group-kill
+  reaps the whole subtree so the drain-thread `join()` returns promptly).
 - `src/overseer/deploy.rs` — tests that `evaluate_deploy_gate` decision logic is
   unchanged; that `ProdCanaryRunner` maps a `report.timed_out` red, a
   `BuildFailed`, and a `PretestSpawn`/`PretestTimeout` error to
@@ -410,6 +419,10 @@ new subprocess-output dumping beyond the existing bounded `failing_detail`
   distinguished from a real regression by the `transient` flag; convergence
   tests that a transient red backs off and eventually retries, a deterministic
   red refuses and does not self-clear, and a green canary resets the backoff.
+  The **production atomic path** is covered directly (not only the pure
+  `TransientRedBackoff` model): `record_canary_outcome` widening / resetting the
+  process-global streak that `effective_deploy_min_interval_secs` reads, so a
+  refactor of the globals that diverges from the model cannot pass unnoticed.
 
 ## Source layout
 

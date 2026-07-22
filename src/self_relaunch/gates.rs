@@ -13,13 +13,59 @@ pub enum GateExec {
     TimedOut,
 }
 
-/// Run `cmd` with a wall-clock `timeout`. On expiry the child is killed AND
-/// reaped (waited on) so no zombie or runaway build survives the tick; its
-/// stdout/stderr are drained on helper threads so a chatty child can never
-/// deadlock on a full pipe. Returns `Err` only if the child could not be
-/// spawned (an infrastructural spawn fault), never on a timeout.
+/// SIGKILL the gate subprocess's ENTIRE process group (leader + every
+/// descendant), then fall back to a direct-child kill on non-Unix. The child is
+/// spawned as the leader of its own group via [`process_group(0)`] (see
+/// `run_with_timeout`), so its PGID equals its PID and signalling the negated
+/// PID reaches the whole subtree — never the daemon's own group. This is the
+/// established repo pattern (see `meeting_backend::agent_proxy::kill_process_group`,
+/// #2549).
+fn kill_gate_process_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let pid = child.id() as i32;
+        // Guard pathological ids: `-0` targets the caller's own group and `-1`
+        // broadcasts to every process. Real child PIDs are always > 1.
+        if pid > 1 {
+            // SAFETY: `libc::kill` is FFI but well-defined for any (pid, signal).
+            // The negated group-leader PID targets exactly the child's own
+            // process group, created via `process_group(0)`; it cannot reach
+            // this process.
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+            return;
+        }
+    }
+    let _ = child.kill();
+}
+
+/// Run `cmd` with a wall-clock `timeout`. On expiry the child's ENTIRE process
+/// group is killed AND the leader reaped (waited on) so no zombie or runaway
+/// build survives the tick; its stdout/stderr are drained on helper threads so a
+/// chatty child can never deadlock on a full pipe. Returns `Err` only if the
+/// child could not be spawned (an infrastructural spawn fault), never on a
+/// timeout.
+///
+/// The child runs as the LEADER of its own process group (`process_group(0)` on
+/// Unix). This is load-bearing for the UnitTest gate: `cargo test` spawns
+/// `rustc`/test-binary descendants that inherit the stdout/stderr pipe
+/// write-ends. Killing only the direct child would leave those descendants
+/// alive holding the pipes open, so the drain-thread `join()` below would never
+/// see EOF and would block PAST the timeout — defeating the bound for the very
+/// gate it exists to protect (the recurring hung canary, #4415). Group-killing
+/// reaps the whole subtree so every descendant releases the pipes and the drain
+/// threads finish promptly.
 pub fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> std::io::Result<GateExec> {
     use std::io::Read;
+
+    // Lead our own process group so a timeout can reap the WHOLE subtree (see
+    // the fn doc: descendants inherit the pipe write-ends).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
 
     let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
 
@@ -49,8 +95,11 @@ pub fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> std::io::Result
             break status;
         }
         if start.elapsed() >= timeout {
-            // Kill and reap so no zombie / runaway cargo survives the tick.
-            let _ = child.kill();
+            // Kill the whole group (not just the leader) and reap the leader so
+            // no zombie / runaway cargo survives the tick AND every descendant
+            // releases the stdout/stderr pipes, letting the drain threads below
+            // finish promptly instead of blocking past the timeout (#4415).
+            kill_gate_process_group(&mut child);
             let _ = child.wait();
             let _ = out_handle.join();
             let _ = err_handle.join();
@@ -426,6 +475,33 @@ mod tests {
         assert!(
             start.elapsed() < std::time::Duration::from_secs(10),
             "must kill+reap the child promptly, not block for its full 30s runtime"
+        );
+    }
+
+    #[test]
+    fn run_with_timeout_is_not_wedged_by_a_pipe_holding_grandchild() {
+        // Regression (#4415): the UnitTest gate is `cargo test`, which spawns
+        // `rustc`/test-binary DESCENDANTS that inherit the stdout/stderr pipe
+        // write-ends. If a timeout kills only the direct child, those
+        // descendants stay alive holding the pipes open, so the drain-thread
+        // `join()` never sees EOF and blocks PAST the timeout — wedging the very
+        // gate the bound exists to protect. `sh -c "sleep 30; echo done"` keeps
+        // `sh` as the parent (a trailing command forces a fork, not an exec) with
+        // a `sleep` GRANDCHILD holding fd1/fd2. The group-kill must reap the
+        // whole subtree so we still return promptly.
+        let start = std::time::Instant::now();
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("sleep 30; echo done");
+        let exec = run_with_timeout(&mut cmd, std::time::Duration::from_millis(200))
+            .expect("spawning `sh` must succeed");
+        assert!(
+            matches!(exec, GateExec::TimedOut),
+            "the parent outlives the timeout, so this must report TimedOut"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "must not block on a pipe-holding grandchild: the whole group is \
+             killed so the drain threads see EOF and join() returns promptly"
         );
     }
 

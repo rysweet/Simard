@@ -275,7 +275,12 @@ pub fn record_canary_outcome(passed: bool, transient: bool) {
     let prev = CONSECUTIVE_TRANSIENT_REDS.load(Ordering::Acquire);
     let next = prev.saturating_add(1);
     CONSECUTIVE_TRANSIENT_REDS.store(next, Ordering::Release);
-    let backoff_secs = transient_backoff_secs(next, transient_backoff_base_secs());
+    // Log the SAME base the OBSERVE rail actually enforces
+    // (`deploy_min_interval_secs`, floored at `MIN_DEPLOY_INTERVAL_FLOOR`), not
+    // the more permissive `transient_backoff_base_secs` floor, so the diagnosed
+    // `backoff_secs` never understates the interval `effective_deploy_min_interval_secs`
+    // will impose.
+    let backoff_secs = transient_backoff_secs(next, deploy_min_interval_secs());
     tracing::warn!(
         target: "overseer::deploy_trigger",
         consecutive_transient = next,
