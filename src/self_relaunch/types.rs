@@ -7,6 +7,12 @@ pub struct RelaunchConfig {
     pub canary_target_dir: PathBuf,
     pub health_timeout: Duration,
     pub manifest_dir: PathBuf,
+    /// Names (not values) of the env vars a candidate-binary gate subprocess may
+    /// receive from the live environment. Populated from
+    /// [`canary_gate_env_allowlist`](super::gates::canary_gate_env_allowlist).
+    /// Values are resolved live in `scrub_gate_env` and never stored, logged, or
+    /// serialized here (names-only carrier; SEC-D1).
+    pub canary_env: Vec<String>,
 }
 
 impl Default for RelaunchConfig {
@@ -16,6 +22,7 @@ impl Default for RelaunchConfig {
                 .join(format!("simard-canary-{}", std::process::id())),
             health_timeout: Duration::from_secs(30),
             manifest_dir: PathBuf::from("."),
+            canary_env: super::gates::canary_gate_env_allowlist(),
         }
     }
 }
