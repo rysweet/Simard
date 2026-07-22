@@ -970,3 +970,49 @@ fn attaching_a_tracked_issue_makes_the_done_gate_machine_checkable() {
     let verdict = CompletionEvidenceGate::new(FakeEvidence::ok(false, false, true)).evaluate(&g);
     assert_eq!(classify_outcome(&g, &verdict), VerificationOutcome::Refuted);
 }
+
+// `done_gate_is_machine_checkable` is intentionally a named, intent-revealing
+// alias of `has_derivable_signal` (same rule). Pin that equivalence so the two
+// can never silently drift apart: if the underlying rule is ever changed, this
+// test forces the alias to be re-examined rather than quietly diverging.
+#[test]
+fn done_gate_is_machine_checkable_is_an_exact_alias_of_has_derivable_signal() {
+    let self_affecting = simard_goal("self-affecting", GoalProgress::Completed);
+
+    let with_pr = {
+        let mut g = coverage_goal_no_refs();
+        g.wip_refs = vec![WipRef {
+            kind: "pr".to_string(),
+            ref_id: "4435".to_string(),
+            label: "pr #4435".to_string(),
+            url: None,
+        }];
+        g
+    };
+
+    let with_issue = {
+        let mut g = coverage_goal_no_refs();
+        g.wip_refs = vec![WipRef {
+            kind: "issue".to_string(),
+            ref_id: "4420".to_string(),
+            label: "issue #4420".to_string(),
+            url: None,
+        }];
+        g
+    };
+
+    for goal in [
+        &self_affecting,          // self-affecting => true
+        &with_pr,                 // tracked PR => true
+        &with_issue,              // tracked issue => true
+        &coverage_goal_no_refs(), // cross-repo, no refs => false
+        &no_signal_goal("g"),     // cross-repo, no refs => false
+    ] {
+        assert_eq!(
+            super::done_gate_is_machine_checkable(goal),
+            has_derivable_signal(goal),
+            "alias must stay identical to has_derivable_signal for goal {:?}",
+            goal.id
+        );
+    }
+}
