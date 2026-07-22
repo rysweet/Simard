@@ -318,35 +318,33 @@ impl Deployer for GuardedDeployer {
                     .unwrap_or_else(|| sanitize_gate_detail(&canary.detail));
                 let passed_gates = canary.passed_gates as u64;
                 let total_gates = canary.total_gates as u64;
-                match &canary.failing_gate {
-                    // A concrete relaunch gate reddened on the candidate.
+                // Closed root-cause vocabulary + the concrete gate label the
+                // refusal is attributed to. A build failure predates every gate
+                // (`total_gates == 0`) so it carries NO `gate` field; a pre-gate
+                // harness fault reserves the `target-canary` label; a concrete
+                // gate red names the gate itself.
+                let (root_cause, gate_label): (&str, Option<String>) = match &canary.failing_gate {
+                    Some(gate) => ("canary_gate_failed", Some(gate.to_string())),
+                    None if canary.total_gates == 0 => ("canary_build_failed", None),
+                    None => ("canary_infra_error", Some("target-canary".to_string())),
+                };
+                // One event, two shapes: the shared fields are spelled once; only
+                // the presence of `gate` distinguishes a build failure (absent)
+                // from a gate/infra attribution (present).
+                match &gate_label {
                     Some(gate) => tracing::warn!(
                         target: "overseer::deploy",
-                        root_cause = "canary_gate_failed",
-                        gate = %gate,
+                        root_cause,
+                        gate = gate.as_str(),
                         detail = attributed_detail.as_str(),
                         passed_gates,
                         total_gates,
                         target_commit = short_sha.as_str(),
                         "canary refused deploy",
                     ),
-                    // No gate ran and none was attempted ⇒ the candidate build
-                    // failed. Attribution is to the build, so no `gate` field.
-                    None if canary.total_gates == 0 => tracing::warn!(
-                        target: "overseer::deploy",
-                        root_cause = "canary_build_failed",
-                        detail = attributed_detail.as_str(),
-                        passed_gates,
-                        total_gates,
-                        target_commit = short_sha.as_str(),
-                        "canary refused deploy",
-                    ),
-                    // No concrete gate but the sequence was attempted ⇒ a pre-gate
-                    // harness/infra fault. Reserved `target-canary` label.
                     None => tracing::warn!(
                         target: "overseer::deploy",
-                        root_cause = "canary_infra_error",
-                        gate = "target-canary",
+                        root_cause,
                         detail = attributed_detail.as_str(),
                         passed_gates,
                         total_gates,
