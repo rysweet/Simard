@@ -58,8 +58,25 @@ impl LabelEnsure {
     /// True when the label is present (freshly created or pre-existing), so the
     /// caller may safely include `--label`. False for [`LabelEnsure::Unavailable`],
     /// signalling the degraded unlabeled-but-still-filed path.
-    pub(crate) fn label_present(&self) -> bool {
+    fn label_present(&self) -> bool {
         matches!(self, LabelEnsure::Created | LabelEnsure::AlreadyExists)
+    }
+
+    /// Build the `gh issue create` argv for a tracking issue, appending
+    /// `--label ooda-stuck` only when the label is present. In the degraded
+    /// ([`LabelEnsure::Unavailable`]) path the issue is still filed — just
+    /// without the label — so a stuck goal is never hidden from the operator.
+    ///
+    /// This is the single source of truth for the labeled/unlabeled decision
+    /// shared by all three tracking-issue filing sites (issue #4472 arose from
+    /// that decision being duplicated and fixed inconsistently across sites).
+    pub(crate) fn issue_create_args<'a>(&self, title: &'a str, body: &'a str) -> Vec<&'a str> {
+        let mut args = vec!["issue", "create", "--title", title, "--body", body];
+        if self.label_present() {
+            args.push("--label");
+            args.push(OODA_STUCK_LABEL);
+        }
+        args
     }
 }
 
@@ -111,7 +128,6 @@ fn classify_label_create(success: bool, stderr: &str) -> LabelEnsure {
 #[cfg(test)]
 mod tests {
     use super::{LabelEnsure, OODA_STUCK_LABEL, classify_label_create};
-
     #[test]
     fn label_constant_is_the_compile_time_ooda_stuck_literal() {
         // Security/DRY: the label is a fixed &'static str shared by all three
@@ -186,22 +202,38 @@ mod tests {
     }
 
     #[test]
-    fn label_present_is_true_when_the_label_exists() {
-        assert!(
-            LabelEnsure::Created.label_present(),
-            "Created means the caller may pass --label",
-        );
-        assert!(
-            LabelEnsure::AlreadyExists.label_present(),
-            "AlreadyExists means the caller may pass --label",
-        );
+    fn issue_create_args_include_label_when_present() {
+        // When the label is ensured, `--label ooda-stuck` is appended so the
+        // tracking issue is filed with its operator-facing label.
+        for ensured in [LabelEnsure::Created, LabelEnsure::AlreadyExists] {
+            let args = ensured.issue_create_args("t", "b");
+            assert_eq!(
+                args,
+                vec![
+                    "issue",
+                    "create",
+                    "--title",
+                    "t",
+                    "--body",
+                    "b",
+                    "--label",
+                    OODA_STUCK_LABEL
+                ],
+                "a present label must append `--label {OODA_STUCK_LABEL}`",
+            );
+        }
     }
 
     #[test]
-    fn label_present_is_false_when_unavailable_so_caller_degrades_to_unlabeled() {
-        assert!(
-            !LabelEnsure::Unavailable("boom".to_string()).label_present(),
-            "Unavailable must signal the degraded unlabeled-but-filed path",
+    fn issue_create_args_omit_label_but_still_file_when_unavailable() {
+        // Degraded path: the label could not be ensured, so the issue is filed
+        // WITHOUT `--label` — never silently dropped. This is the core fix for
+        // the silent broken-escalation bug (issue #4472).
+        let args = LabelEnsure::Unavailable("boom".to_string()).issue_create_args("t", "b");
+        assert_eq!(
+            args,
+            vec!["issue", "create", "--title", "t", "--body", "b"],
+            "an unavailable label must still file the issue, just without `--label`",
         );
     }
 }

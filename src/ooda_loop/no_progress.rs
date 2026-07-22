@@ -125,11 +125,7 @@ impl NoProgressIssueFiler for GhIssueFiler {
                 "no-progress breaker: could not ensure tracking-issue label; filing issue WITHOUT label (degraded)",
             ),
         }
-        let mut gh_args: Vec<&str> = vec!["issue", "create", "--title", title, "--body", body];
-        if label.label_present() {
-            gh_args.push("--label");
-            gh_args.push(OODA_STUCK_LABEL);
-        }
+        let gh_args = label.issue_create_args(title, body);
         match std::process::Command::new("gh").args(&gh_args).output() {
             Ok(out) if out.status.success() => {
                 // `gh issue create` prints the created issue's URL on success,
