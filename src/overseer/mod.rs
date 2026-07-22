@@ -744,8 +744,14 @@ impl Overseer {
         // grow silently (1 → 6 commits behind main). Below the threshold, drift
         // still signals normally (no over-suppression of legitimate self-deploy).
         let streak = deploy_trigger::red_canary_streak_for(&drift.target_commit);
-        if streak >= deploy_trigger::red_canary_halt_threshold() {
-            self.escalate_deploy_stuck_once(&drift.target_commit, drift.behind_commits, streak);
+        let threshold = deploy_trigger::red_canary_halt_threshold();
+        if streak >= threshold {
+            self.escalate_deploy_stuck_once(
+                &drift.target_commit,
+                drift.behind_commits,
+                streak,
+                threshold,
+            );
             return;
         }
 
@@ -757,9 +763,10 @@ impl Overseer {
     /// `Overseer` every tick) so a stuck loop cannot flood the operator with
     /// alerts. Always surfaces via structured tracing (≥ WARN) even when no
     /// notifier is wired — a silently-stuck self-deploy is the exact fault this
-    /// closes, so the halt is never itself silent.
-    fn escalate_deploy_stuck_once(&self, target: &str, behind: usize, streak: u32) {
-        let threshold = deploy_trigger::red_canary_halt_threshold();
+    /// closes, so the halt is never itself silent. `threshold` is the halt count
+    /// the caller already resolved (passed in so it is not re-read from the
+    /// environment and always matches the check that triggered this escalation).
+    fn escalate_deploy_stuck_once(&self, target: &str, behind: usize, streak: u32, threshold: u32) {
         tracing::warn!(
             target: "deploy_drift.stuck",
             sha = %target,

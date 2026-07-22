@@ -150,9 +150,7 @@ pub(crate) static DEPLOY_THROTTLE_TEST_LOCK: std::sync::Mutex<()> = std::sync::M
 /// sibling test.
 #[cfg(test)]
 pub(crate) fn deploy_throttle_test_guard() -> std::sync::MutexGuard<'static, ()> {
-    DEPLOY_THROTTLE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    lock_poisoned(&DEPLOY_THROTTLE_TEST_LOCK)
 }
 
 /// Observe deploy drift for the acting Overseer's OBSERVE stage (issue #2590).
@@ -287,14 +285,19 @@ static RED_CANARY_STREAK: std::sync::Mutex<Option<(String, u32)>> = std::sync::M
 /// entry: a new stuck SHA replaces it.
 static DEPLOY_STUCK_ESCALATED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
+/// Acquire a process-global mutex, tolerating poisoning from a panicking
+/// sibling (these guards only ORDER access — they protect no invariant of their
+/// own, so an inner value left by a panicked holder is safe to reuse).
+fn lock_poisoned<T>(m: &'static std::sync::Mutex<T>) -> std::sync::MutexGuard<'static, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn lock_streak() -> std::sync::MutexGuard<'static, Option<(String, u32)>> {
-    RED_CANARY_STREAK.lock().unwrap_or_else(|e| e.into_inner())
+    lock_poisoned(&RED_CANARY_STREAK)
 }
 
 fn lock_escalated() -> std::sync::MutexGuard<'static, Option<String>> {
-    DEPLOY_STUCK_ESCALATED
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    lock_poisoned(&DEPLOY_STUCK_ESCALATED)
 }
 
 /// Record one canary OUTCOME for `sha` at the ACT/canary site. `is_red == true`
