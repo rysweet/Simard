@@ -271,7 +271,8 @@ pub struct Overseer {
     /// agent's reasoning and is handed forward as an opaque string.
     ecosystem_observer: Option<Box<dyn ecosystem_observe::EcosystemObserver>>,
     /// The stewarded roster (validated `owner/name` slugs) handed to the
-    /// ecosystem-observe recipe. Loaded once from `ecosystem_repos.toml` by
+    /// ecosystem-observe recipe. Resolved once from Simard's durable,
+    /// identity-scoped curated state (see [`crate::identity_curated_state`]) by
     /// `build_overseer`; empty (and the pass skipped) until wired.
     ecosystem_roster: Vec<String>,
     /// Every-N cadence for the ecosystem-observe pass (reuses the gap-scan
@@ -300,11 +301,11 @@ pub struct Overseer {
     /// narrow behind [`project_ready_prs`] + the downstream merge-authority gate.
     merge_queue_reasoner: Option<Box<dyn merge_queue_observe::MergeQueueReasoner>>,
     /// The governed reasoning roster (validated `owner/name` slugs) handed to the
-    /// `observe-merge-queue` recipe as the DEFAULT scope. Loaded once from
-    /// `ecosystem_repos.toml` by `build_overseer`; the resolved scope
-    /// ([`config::merge_reasoning_scope`]) is default-ON over this roster and only
-    /// an EXPLICIT operator disable turns it off (loud). Empty (pass skipped) until
-    /// wired.
+    /// `observe-merge-queue` recipe as the DEFAULT scope. Resolved once from
+    /// Simard's durable, identity-scoped curated roster by `build_overseer`; the
+    /// resolved scope ([`config::merge_reasoning_scope`]) is default-ON over this
+    /// roster and only an EXPLICIT operator disable turns it off (loud). Empty
+    /// (pass skipped) until wired.
     merge_queue_roster: Vec<String>,
     /// Every-N cadence for the merge-queue observe pass (reuses the gap-scan
     /// cadence knob, like the ecosystem pass). Clamped to a floor of 1.
@@ -544,7 +545,7 @@ impl Overseer {
     /// Wire the live agentic ecosystem-observe rail (issue #2419): the stewarded
     /// `roster` the OBSERVE agent scans, the [`ecosystem_observe::EcosystemObserver`]
     /// seam that invokes the recipe, and the every-N cadence. Absent by default;
-    /// `build_overseer` wires it with the committed roster + a production
+    /// `build_overseer` wires it with the identity-curated roster + a production
     /// recipe-runner. Gated by [`Self::with_gap_scan_enabled`] — it REPLACES the
     /// retired single-repo gap-scan survey as the observation source, so the same
     /// `SIMARD_OVERSEER_GAP_SCAN` opt-out disables it and the same
@@ -565,7 +566,7 @@ impl Overseer {
     /// the governed `roster` the reasoning agent surveys, the
     /// [`merge_queue_observe::MergeQueueReasoner`] seam that invokes the
     /// `observe-merge-queue` recipe, and the every-N cadence. Absent by default;
-    /// `build_overseer` wires it with the committed roster + a production
+    /// `build_overseer` wires it with the identity-curated roster + a production
     /// recipe-runner. Gated by [`Self::with_gap_scan_enabled`] (the same opt-out
     /// family as the ecosystem pass); the resolved reasoning SCOPE is default-ON
     /// over the roster and only an EXPLICIT `SIMARD_MERGE_REASONING_SCOPE` disable

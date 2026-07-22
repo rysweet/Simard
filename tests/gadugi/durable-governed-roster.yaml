@@ -1,0 +1,53 @@
+name: "Governed roster as identity-curated durable state"
+description: "Outside-in coverage that the governed-repo roster is Simard's identity-scoped, mutable, deploy-durable curated state rather than a git-tracked framework file. Drives the shipping `simard ci-health` binary (which resolves the governed roster via `governed_repos()` before any network call) against an isolated SIMARD_STATE_ROOT with a fast-failing fake `gh`, and asserts the full contract: (1) SEEDED FROM IDENTITY — first use seeds the durable `governed_repos` dataset for the `simard` identity from Simard's 10-repo default roster, which includes rysweet/Simard and rysweet/amplihack-rs and deliberately EXCLUDES the deprecated Python rysweet/amplihack; (2) NO FRAMEWORK FILE — the retired committed prompt_assets/simard/ecosystem_repos.toml is gone and is never read; (3) DURABLE + MUTABLE — an agentic curation (remove one stewarded repo, add another) survives a simulated redeploy because `install` never overwrites the state root, so a later resolve returns the CURATED copy, never re-seeding over the edit; (4) SINGLE SOURCE OF TRUTH — the CI-health sweep resolves the same durable dataset, so no second hardcoded roster can drift. Deterministic and fully offline (tempdir state root + fake gh that fails fast after the roster has already been seeded)."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "governed roster seeds from identity, excludes deprecated amplihack, and survives a simulated redeploy after curation"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/durable-governed-roster.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "identity"
+    - "governed-roster"
+    - "curated-state"
+    - "outside-in"
+  priority: "high"
+  author: "simard-engineer"
+  test_type: "outside-in"

@@ -1181,6 +1181,8 @@ pub fn build_overseer(
     mem: Arc<dyn CognitiveMemoryOps>,
     repo_root: std::path::PathBuf,
     state_root: std::path::PathBuf,
+    identity_name: Option<String>,
+    target_repos: Vec<String>,
 ) -> Overseer {
     let repo_root_for_ecosystem = repo_root.clone();
     let overseer = Overseer::new(assemble_capabilities(
@@ -1225,20 +1227,35 @@ pub fn build_overseer(
     // instead of re-patching.
     .with_memory(mem);
 
+    // The governed roster is Simard's identity-scoped, mutable, deploy-DURABLE
+    // curated state (see `crate::identity_curated_state`), NOT the retired
+    // committed framework file `ecosystem_repos.toml`. Resolve it ONCE here —
+    // seeded from the ACTIVE identity's cognition (its `target_repos`, else
+    // Simard's default seed) — and hand the SAME `Vec<String>` to every rail so
+    // the observe rail, the merge-queue reasoner, and the CI-health sweep share
+    // exactly one source of truth. Resolution is fail-visible: if the durable
+    // roster cannot be resolved or is empty/all-invalid, the roster-bound rails
+    // are simply not wired this build (their passes are skipped) rather than
+    // aborting the tick.
+    let governed_roster = resolve_governed_roster_for_build(&identity_name, &target_repos);
+
     // Live agentic ecosystem-observe rail (issue #2419): REPLACES the retired
     // single-repo Rust gap-scan survey as the cross-repo observation SOURCE. On
     // the Overseer cadence the thin rail invokes the `ecosystem-observe` recipe —
     // an AGENT runs `gh` across the stewarded roster and REASONS to a deduped
     // Problem list, then briefs each into a `smart-orchestrator` run — and routes
     // the agent's OPAQUE brief into the SAME gated launch path. Rust never queries
-    // or parses a repo. Wiring is fail-visible: if the committed roster fails to
-    // load, or `recipe-runner-rs`/the recipe is unavailable, the rail is simply
+    // or parses a repo. Wiring is fail-visible: if the durable roster failed to
+    // resolve, or `recipe-runner-rs`/the recipe is unavailable, the rail is simply
     // not wired this build (the pass is skipped) rather than aborting the tick.
-    let overseer = match build_ecosystem_observer(&repo_root_for_ecosystem) {
-        Some((roster, observer)) => {
-            overseer.with_ecosystem_observer(roster, observer, gap_scan_every_n())
+    let overseer = match (
+        governed_roster.as_ref(),
+        build_ecosystem_observer(&repo_root_for_ecosystem),
+    ) {
+        (Some(roster), Some(observer)) => {
+            overseer.with_ecosystem_observer(roster.clone(), observer, gap_scan_every_n())
         }
-        None => overseer,
+        _ => overseer,
     };
 
     // Live agentic observe-merge-queue reasoner rail (issue #4097): the FIX for
@@ -1248,14 +1265,17 @@ pub fn build_overseer(
     // and the rail parses it FAIL-CLOSED into `reasoned_prs` / `triaged_issues` +
     // a re-narrowed `ready_prs` projection. Reasoning is default-ON over the
     // governed roster; merge AUTHORIZATION stays narrow behind the objective +
-    // agentic gate. Wiring is fail-visible: if the roster fails to load, or
+    // agentic gate. Wiring is fail-visible: if the roster failed to resolve, or
     // `recipe-runner-rs`/the recipe is unavailable, the rail is simply not wired
     // this build (the pass is skipped) rather than aborting the tick.
-    let overseer = match build_merge_queue_reasoner(&repo_root_for_ecosystem) {
-        Some((roster, reasoner)) => {
-            overseer.with_merge_queue_reasoner(roster, reasoner, gap_scan_every_n())
+    let overseer = match (
+        governed_roster.as_ref(),
+        build_merge_queue_reasoner(&repo_root_for_ecosystem),
+    ) {
+        (Some(roster), Some(reasoner)) => {
+            overseer.with_merge_queue_reasoner(roster.clone(), reasoner, gap_scan_every_n())
         }
-        None => overseer,
+        _ => overseer,
     };
 
     // Live agentic health-review rail ([standing]): on the Overseer cadence the
@@ -1349,57 +1369,48 @@ fn build_claim_reaper_seams(
     ))
 }
 
-/// Load the committed stewarded roster and build the production ecosystem-observe
-/// rail. Returns `None` (fail-visible log) if the roster cannot be loaded or
-/// `recipe-runner-rs`/the recipe is unavailable, so the build proceeds without
-/// the rail rather than panicking. The `owner/name` roster lives in
-/// `prompt_assets/simard/ecosystem_repos.toml` as pure DATA.
-fn build_ecosystem_observer(
-    repo_root: &std::path::Path,
-) -> Option<(
-    Vec<String>,
-    Box<dyn crate::overseer::ecosystem_observe::EcosystemObserver>,
-)> {
-    use crate::overseer::ecosystem_observe::{
-        ECOSYSTEM_ROSTER_FILENAME, RecipeEcosystemObserver, SpawnEcosystemRecipeRunner,
-        load_ecosystem_roster, resolve_ecosystem_roster_path,
-    };
+/// Resolve the governed roster for the Overseer build from Simard's durable,
+/// identity-scoped curated state (see [`crate::identity_curated_state`]). Seeded
+/// from the ACTIVE identity's cognition — a named identity with declared
+/// `target_repos` owns its own roster; otherwise it is Simard's default seed.
+///
+/// Returns `None` (fail-visible log) if the durable roster cannot be resolved or
+/// is empty/all-invalid, so the roster-bound rails are skipped this build rather
+/// than the tick aborting. This is the ONE resolution the observe rail, the
+/// merge-queue reasoner, and the CI-health sweep all share.
+fn resolve_governed_roster_for_build(
+    identity_name: &Option<String>,
+    target_repos: &[String],
+) -> Option<Vec<String>> {
+    use crate::identity_curated_state::CuratedDataStore;
+    use crate::overseer::ecosystem_observe::{governed_roster_seed_for, resolve_governed_roster};
 
-    // Install-first resolution (issue #2419): the deployed daemon's `repo_root`
-    // is a stale source checkout that lacks the roster, while the roster is
-    // installed under `~/.simard`. Resolve it there first, then in-tree.
-    let roster_path = match resolve_ecosystem_roster_path(repo_root, None) {
-        Some(path) => path,
-        None => {
-            let installed_candidate = dirs::home_dir().map(|home| {
-                home.join(".simard")
-                    .join("prompt_assets/simard")
-                    .join(ECOSYSTEM_ROSTER_FILENAME)
-            });
-            let in_tree_candidate = repo_root
-                .join("prompt_assets/simard")
-                .join(ECOSYSTEM_ROSTER_FILENAME);
-            tracing::warn!(
-                target: "simard::ecosystem_observe",
-                installed_candidate = ?installed_candidate.as_ref().map(|p| p.display().to_string()),
-                in_tree_candidate = %in_tree_candidate.display(),
-                "[simard] ecosystem-observe NOT wired: failed to load stewarded roster (no roster at the installed or in-tree location)",
-            );
-            return None;
-        }
-    };
-    let roster = match load_ecosystem_roster(&roster_path) {
-        Ok(roster) => roster,
+    let store = CuratedDataStore::resolve();
+    let (identity, seed) = governed_roster_seed_for(identity_name.as_deref(), target_repos);
+    match resolve_governed_roster(&store, &identity, &seed) {
+        Ok(roster) => Some(roster),
         Err(error) => {
             tracing::warn!(
                 target: "simard::ecosystem_observe",
                 error = %error,
-                roster_path = %roster_path.display(),
-                "[simard] ecosystem-observe NOT wired: failed to load stewarded roster",
+                identity = %identity,
+                "[simard] governed roster NOT resolved: the roster-bound rails are skipped this build",
             );
-            return None;
+            None
         }
-    };
+    }
+}
+
+/// Build the production ecosystem-observe rail (issue #2419). Returns `None`
+/// (fail-visible log) if `recipe-runner-rs`/the recipe is unavailable, so the
+/// build proceeds without the rail rather than panicking. The governed roster is
+/// resolved separately from durable identity state (see
+/// [`resolve_governed_roster_for_build`]) and handed to the rail by the caller.
+fn build_ecosystem_observer(
+    repo_root: &std::path::Path,
+) -> Option<Box<dyn crate::overseer::ecosystem_observe::EcosystemObserver>> {
+    use crate::overseer::ecosystem_observe::{RecipeEcosystemObserver, SpawnEcosystemRecipeRunner};
+
     let runner = match SpawnEcosystemRecipeRunner::new(repo_root) {
         Some(runner) => runner,
         None => {
@@ -1410,55 +1421,23 @@ fn build_ecosystem_observer(
             return None;
         }
     };
-    Some((roster, Box::new(RecipeEcosystemObserver::new(runner))))
+    Some(Box::new(RecipeEcosystemObserver::new(runner)))
 }
 
-/// Load the governed roster and build the production observe-merge-queue reasoner
-/// rail (#4097). Returns `None` (fail-visible log) if the roster cannot be loaded
-/// or `recipe-runner-rs`/the recipe is unavailable, so the build proceeds without
-/// the rail rather than panicking. Reuses the SAME committed roster
-/// (`ecosystem_repos.toml`, pure DATA) as the governed reasoning scope, per the
-/// design (Simard's governed repos are default-in-scope for merge REASONING while
-/// the merge ACTION stays behind the objective + agentic gate).
+/// Build the production observe-merge-queue reasoner rail (#4097). Returns `None`
+/// (fail-visible log) if `recipe-runner-rs`/the recipe is unavailable, so the
+/// build proceeds without the rail rather than panicking. The governed roster is
+/// resolved separately from durable identity state (see
+/// [`resolve_governed_roster_for_build`]) and handed to the rail by the caller;
+/// Simard's governed repos are default-in-scope for merge REASONING while the
+/// merge ACTION stays behind the objective + agentic gate.
 fn build_merge_queue_reasoner(
     repo_root: &std::path::Path,
-) -> Option<(
-    Vec<String>,
-    Box<dyn crate::overseer::merge_queue_observe::MergeQueueReasoner>,
-)> {
-    use crate::overseer::ecosystem_observe::{
-        ECOSYSTEM_ROSTER_FILENAME, load_ecosystem_roster, resolve_ecosystem_roster_path,
-    };
+) -> Option<Box<dyn crate::overseer::merge_queue_observe::MergeQueueReasoner>> {
     use crate::overseer::merge_queue_observe::{
         RecipeMergeQueueReasoner, SpawnMergeQueueRecipeRunner,
     };
 
-    let roster_path = match resolve_ecosystem_roster_path(repo_root, None) {
-        Some(path) => path,
-        None => {
-            let in_tree_candidate = repo_root
-                .join("prompt_assets/simard")
-                .join(ECOSYSTEM_ROSTER_FILENAME);
-            tracing::warn!(
-                target: "simard::merge_queue_observe",
-                in_tree_candidate = %in_tree_candidate.display(),
-                "[simard] observe-merge-queue NOT wired: failed to resolve governed roster (no roster at the installed or in-tree location)",
-            );
-            return None;
-        }
-    };
-    let roster = match load_ecosystem_roster(&roster_path) {
-        Ok(roster) => roster,
-        Err(error) => {
-            tracing::warn!(
-                target: "simard::merge_queue_observe",
-                error = %error,
-                roster_path = %roster_path.display(),
-                "[simard] observe-merge-queue NOT wired: failed to load governed roster",
-            );
-            return None;
-        }
-    };
     let runner = match SpawnMergeQueueRecipeRunner::new(repo_root) {
         Some(runner) => runner,
         None => {
@@ -1469,7 +1448,7 @@ fn build_merge_queue_reasoner(
             return None;
         }
     };
-    Some((roster, Box::new(RecipeMergeQueueReasoner::new(runner))))
+    Some(Box::new(RecipeMergeQueueReasoner::new(runner)))
 }
 
 /// Build the production agentic health-review rail ([standing]). Returns `None`

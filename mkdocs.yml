@@ -325,6 +325,8 @@ nav:
     - Self-Deploy API: reference/self-deploy-api.md
     - Self-Deploy Source Prep & Warm Target Dir: reference/self-deploy-source-prep.md
     - State-Root Resolution: reference/state-root-resolution.md
+    - Identity-Curated State: reference/identity-curated-state.md
+    - Governed-Roster Resolution: reference/ecosystem-roster-resolution.md
     - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
     - Runtime Contracts: reference/runtime-contracts.md
     - Subprocess Prompt Delivery: prompt-delivery.md

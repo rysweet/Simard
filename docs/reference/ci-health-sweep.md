@@ -402,14 +402,15 @@ tracking issue of every workflow that is **green again**:
 
 ### Governed fleet
 
-The swept slugs come from [`ci_health::governed_repos`], which parses the
-ecosystem's **single source of truth** — `prompt_assets/simard/ecosystem_repos.toml`
-— embedded at compile time (`include_str!`) and validated by the same parser the
-Overseer's `ecosystem-observe` sweep uses (note `amplihack` → `amplihack-rs` on
-GitHub). There is no second hardcoded roster to drift: adding a repo to that TOML
-(its documented "one-line edit, no code change" contract) extends this sweep on
-the next build. An empty or corrupt embedded roster is a fail-loud error, never a
-silently empty sweep that would report the fleet green.
+The swept slugs come from [`ci_health::governed_repos`], which resolves the
+ecosystem's **single source of truth** — Simard's identity-curated `governed_repos`
+roster (see [Governed-roster resolution](./ecosystem-roster-resolution.md)) — via
+the same `resolve_governed_roster` the Overseer's `ecosystem-observe` rail uses
+(note `amplihack` → `amplihack-rs` on GitHub). There is no second hardcoded roster
+to drift: adding a repo to Simard's durable roster (a one-line data edit, or an
+agentic curation, that survives self-deploys) extends this sweep on the next run.
+An empty or all-invalid roster is a fail-loud error, never a silently empty sweep
+that would report the fleet green.
 
 ## Scheduled recurring sweep
 

@@ -1688,6 +1688,11 @@ pub fn run_ooda_daemon(
                 let mem_for_tick = Arc::clone(&shared_mem);
                 let repo_root_for_tick = overseer_repo_root.clone();
                 let state_root_for_tick = state_root.clone();
+                // Seed the governed roster from the ACTIVE identity's cognition
+                // (issue: governed roster is now identity-scoped durable state).
+                // Captured on the main loop thread before the tick spawns.
+                let overseer_identity_name = state.identity_cognition.identity_name.clone();
+                let overseer_target_repos = state.identity_cognition.target_repos.clone();
                 // Gap-scan every-N cadence: the first tick (idx 0) always runs the
                 // scan, then it runs once every N ticks. Disabled entirely when the
                 // gap-scan is off. Computed on the main loop thread so the index
@@ -1720,6 +1725,8 @@ pub fn run_ooda_daemon(
                             mem_for_tick,
                             repo_root_for_tick,
                             state_root_for_tick.clone(),
+                            overseer_identity_name,
+                            overseer_target_repos,
                         );
                         let mut overseer = overseer.with_gap_scan_enabled(gap_scan_due);
                         let (report, problem_entries) =

@@ -76,8 +76,8 @@ flowchart LR
     O["Step OBSERVE\nagent runs `simard status` + `gh`\nacross roster, reasons to\ndeduped Problems (observe.md)"]
     B["Step BRIEF\nagent → smart-orchestrator\ntask_description (problem_to_brief.md)"]
   end
-  subgraph Roster["Data"]
-    T["ecosystem_repos.toml\n(10 stewarded slugs)"]
+  subgraph Roster["Data (identity-curated state)"]
+    T["identity_state/simard/\ngoverned_repos.toml\n(10 stewarded slugs)"]
   end
   C --> L --> Recipe
   T --> O
@@ -86,86 +86,95 @@ flowchart LR
   R --> SO["smart-orchestrator → default-workflow →\ncrusty / merge-ready / CI → gated simard merge-pr"]
 ```
 
-The three moving parts are: the **roster data file**, the **recipe + prompts** (the
-substance), and the **thin rail** (the only new Rust).
+The three moving parts are: the **governed roster** (Simard's identity-curated
+state), the **recipe + prompts** (the substance), and the **thin rail** (the only
+new Rust).
 
 ## 1. Roster — the single source of truth
 
-The stewarded-repo list lives in one committed data file. The recipe reads it and
-the prose docs point at it, so the roster is defined once instead of duplicated
-across prompt and doc prose.
+The stewarded-repo list is Simard's **identity-scoped, mutable, deploy-durable
+curated state** — not a committed framework file. It is resolved once per Overseer
+build and handed to every consumer (this rail, the merge-queue reasoner, the
+CI-health sweep), so the roster is defined once instead of duplicated across
+prompt and doc prose.
 
-**File:** `prompt_assets/simard/ecosystem_repos.toml`
+**Dataset:** identity `simard`, dataset `governed_repos`, stored at
+`<state_root>/state/identity_state/simard/governed_repos.toml`.
 
-The rail resolves this file **install-first** — `~/.simard/prompt_assets/simard/ecosystem_repos.toml`
-(the deployed install location) is preferred over the in-tree
-`<repo_root>/prompt_assets/simard/ecosystem_repos.toml`, mirroring how the recipe
-resolves (§3). See [Ecosystem-roster path resolution](../reference/ecosystem-roster-resolution.md)
-for the resolution ladder and the fail-visible/fail-open wiring contract.
+The roster is **seeded from Simard's identity** on first use — her default roster
+(`default_simard_roster_seed`, the 10 repos below) — then curated agentically. The
+durable copy is authoritative thereafter; because `install` never overwrites the
+state root, Simard's add/remove edits survive every self-deploy. A named non-Simard
+identity instead owns its own `governed_repos` dataset seeded from its declared
+`target_repos`. See
+[Governed-roster resolution](../reference/ecosystem-roster-resolution.md) for the
+resolution contract and [Identity-curated state](../reference/identity-curated-state.md)
+for the generic storage mechanism.
 
 ```toml
-# The repositories Simard's Overseer stewards. This is the single source of truth
-# for the ecosystem roster: the ecosystem-observe recipe reads it, and the prose
-# in engineer_system.md / ecosystem-map.md points at it. Pure DATA — a list of
-# owner/name slugs plus notes. No Rust logic is bound to it beyond reading strings.
+# <state_root>/state/identity_state/simard/governed_repos.toml
+# Simard's governed roster — the single source of truth for the ecosystem.
+# Seeded from her identity's default roster, then curated agentically. Pure DATA —
+# a value-deduped list of owner/name slugs plus notes.
 schema_version = 1
 
-[[repo]]
-slug = "rysweet/Simard"
+[[item]]
+value = "rysweet/Simard"
 note = "Orchestrator / self-improving engineering identity (steward of this roster)"
 
-[[repo]]
-slug = "rysweet/RustyClawd"
+[[item]]
+value = "rysweet/RustyClawd"
 note = "Rust-native LLM agent SDK (base type)"
 
-[[repo]]
-slug = "rysweet/amplihack-rs"
+[[item]]
+value = "rysweet/amplihack-rs"
 note = "Core framework — skills, workflows, recipes, hooks, CLI, fleet"
 
-[[repo]]
-slug = "rysweet/azlin"
+[[item]]
+value = "rysweet/azlin"
 note = "Azure VM provisioning CLI"
 
-[[repo]]
-slug = "rysweet/amplihack-memory-lib"
+[[item]]
+value = "rysweet/amplihack-memory-lib"
 note = "Graph-based 6-type cognitive memory (Kuzu-backed)"
 
-[[repo]]
-slug = "rysweet/amplihack-agent-eval"
+[[item]]
+value = "rysweet/amplihack-agent-eval"
 note = "Agent evaluation harness — L1–L12 benchmarks"
 
-[[repo]]
-slug = "rysweet/agent-kgpacks"
+[[item]]
+value = "rysweet/agent-kgpacks"
 note = "Knowledge graph packages — GraphRAG grounding"
 
-[[repo]]
-slug = "rysweet/amplihack-recipe-runner"
+[[item]]
+value = "rysweet/amplihack-recipe-runner"
 note = "Code-enforced YAML workflow execution engine"
 
-[[repo]]
-slug = "rysweet/amplihack-xpia-defender"
+[[item]]
+value = "rysweet/amplihack-xpia-defender"
 note = "Cross-Prompt Injection Attack detection library"
 
-[[repo]]
-slug = "rysweet/gadugi-agentic-test"
+[[item]]
+value = "rysweet/gadugi-agentic-test"
 note = "Multi-agent outside-in testing (Electron/CLI/web/TUI)"
 ```
 
 ### Roster rules
 
-- **Format.** `schema_version` (integer) plus a `[[repo]]` array. Each entry has a
-  `slug` (`owner/name`) and a human-readable `note`. Anything beyond these strings
-  is ignored — the file is data, not configuration for behavior.
+- **Format.** `schema_version` (integer) plus an `[[item]]` array. Each entry has a
+  `value` (`owner/name` slug) and a human-readable `note`. Anything beyond these
+  strings is ignored — the dataset is data, not configuration for behavior.
 - **`amplihack` means `rysweet/amplihack-rs`.** The Python `rysweet/amplihack` is
   deprecated and is not on the roster.
-- **Validation (loader).** Slugs are validated as `owner/name` before use. Malformed
-  slugs (whitespace, `..`, a leading `-`, shell metacharacters, missing `/`) are
+- **Validation.** Slugs are validated as `owner/name` before use. Malformed slugs
+  (whitespace, `..`, a leading `-`, shell metacharacters, missing `/`) are
   **skipped with a logged warning** — they never reach `gh`. An empty roster (no
   valid slugs) is an **error**, never a silent empty pass: the observation tick is
   skipped and warns, and no Problems are fabricated.
 - **Roster as an allowlist.** The agent scans exactly the repos on the roster. It
   does not discover or expand to other repositories. Adding stewardship for a new
-  repo is a one-line edit to this file — no code change.
+  repo is a one-line data edit to the durable dataset (or an agentic curation) —
+  no code change, and it survives redeploys.
 
 ## 2. Prompts — the substance
 
@@ -283,7 +292,7 @@ steps:
 
   | Var | Meaning |
   |-----|---------|
-  | `roster_path` | Path to the roster the OBSERVE agent scans (the rail writes the validated `ecosystem_repos.toml` slugs to a `ContextFile`; see §4). |
+  | `roster_path` | Path to the roster the OBSERVE agent scans (the rail writes the resolved, validated governed-roster slugs to a `ContextFile`; see §4). |
   | `inflight_refs_path` | Path to Simard's in-flight OODA refs, for dedup. |
   | `observed_problems_path` | Shared handoff file: OBSERVE writes the deduped Problem list here, BRIEF reads it. |
   | `escalation_note` | Empty on the base attempt; carries a higher-effort / repair instruction on escalation-ladder retries (renders to nothing when empty). **Set by the rail, not by the `observe()` caller** — mirrors `ooda-orient.yaml` / `recipe_brain.rs`. |
@@ -367,23 +376,24 @@ The feature reuses the existing Overseer cadence knobs — no new env vars.
 | `SIMARD_OVERSEER_GAP_SCAN` | on (opt-out) | Set to a falsey value (`0`, `false`, `no`) to disable ecosystem observation. |
 | `SIMARD_OVERSEER_GAP_SCAN_EVERY_N` | `1` | Run the observation pass once every N Overseer ticks. Unset/empty/`0`/negative clamp to `1`. |
 
-The stewarded roster itself is configured by editing
-`ecosystem_repos.toml` (data, not env). On a deployed daemon edit the installed
-copy at `~/.simard/prompt_assets/simard/ecosystem_repos.toml`; in a source
-checkout edit the in-tree `<repo_root>/prompt_assets/simard/ecosystem_repos.toml`.
-The rail resolves it install-first — see
-[Ecosystem-roster path resolution](../reference/ecosystem-roster-resolution.md).
+The stewarded roster itself is Simard's identity-curated state (data, not env).
+Curate it agentically, or on a deployed daemon edit the durable dataset at
+`~/.simard/state/identity_state/simard/governed_repos.toml`; the edit survives
+self-deploys because `install` never overwrites the state root. See
+[Governed-roster resolution](../reference/ecosystem-roster-resolution.md).
 
 ## Examples
 
 ### Run the observation chain by hand
 
 ```bash
-# Point the recipe at the committed roster and Simard's in-flight refs, plus a
+# Point the recipe at a roster context file, Simard's in-flight refs, and a
 # writable handoff path for the OBSERVE→BRIEF semantic handoff. On the live
-# cadence the rail creates these via ContextFile; by hand you pass real files.
+# cadence the rail writes the resolved roster slugs and creates these via
+# ContextFile; by hand you pass real files. (Export the durable roster's slugs
+# to a temp file for `roster_path`.)
 amplihack recipe run prompt_assets/simard/recipes/ecosystem-observe.yaml \
-  -c roster_path=prompt_assets/simard/ecosystem_repos.toml \
+  -c roster_path=/tmp/simard-roster.txt \
   -c inflight_refs_path=/tmp/simard-inflight-refs.json \
   -c observed_problems_path=/tmp/simard-observed-problems.txt \
   -c escalation_note=""
@@ -397,9 +407,11 @@ this for you on its cadence.
 ### Add a repo to stewardship
 
 ```toml
-# Append to prompt_assets/simard/ecosystem_repos.toml — no code change needed.
-[[repo]]
-slug = "rysweet/new-tool"
+# Append an [[item]] to the durable dataset
+# (~/.simard/state/identity_state/simard/governed_repos.toml) — no code change,
+# and it survives self-deploys. Simard can also do this agentically.
+[[item]]
+value = "rysweet/new-tool"
 note = "Reason this repo is now stewarded"
 ```
 
@@ -466,17 +478,20 @@ point-in-time report docs are committed.
   interpolated. The roster acts as an allowlist — no repo discovery or expansion.
 - **Fail-closed.** Any fault yields "nothing actionable," so a failure never invents
   a brief or triggers an unintended launch.
-- **Data.** `ecosystem_repos.toml` holds only public slugs (safe to commit — no
+- **Data.** The `governed_repos` dataset holds only public slugs (safe — no
   secrets/PII). In-flight refs pass via a per-invocation context file, not argv.
 
 ## See also
 
 - [`docs/design/overseer.md`](./overseer.md) — the Overseer's meta-OODA loop and
   capability map.
-- [Ecosystem-roster path resolution](../reference/ecosystem-roster-resolution.md) —
-  how the rail resolves `ecosystem_repos.toml` install-first and its wiring contract.
+- [Governed-roster resolution](../reference/ecosystem-roster-resolution.md) —
+  how the rail resolves the roster from identity-curated state and its wiring
+  contract.
+- [Identity-curated state](../reference/identity-curated-state.md) — the generic
+  identity-scoped mutable-data mechanism the roster is built on.
 - [`docs/ecosystem-map.md`](../ecosystem-map.md) — the human-readable repository
-  inventory (points at `ecosystem_repos.toml` for the stewarded roster).
+  inventory (points at the governed roster).
 - `prompt_assets/simard/overseer/observe.md` — the OBSERVE prompt.
 - `prompt_assets/simard/overseer/problem_to_brief.md` — the BRIEF prompt.
 - `prompt_assets/simard/recipes/ecosystem-observe.yaml` — the recipe.
