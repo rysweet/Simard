@@ -218,8 +218,43 @@ self-resolved (e.g. `healed=1`, `escalated=0`) rather than reached a human. Only
 `engineer_spawned` count as a firing; `auto_cleared`, `investigation_errors`, and
 `perpetual_idled` are normal operation.
 
-## Related
+## Troubleshoot: the `ooda-stuck` label crash loop
 
+If the same goal stays `Blocked` across many cycles and the journal repeats:
+
+```text
+ERROR run_ooda_cycle: simard::ooda: no-progress breaker: gh issue create failed
+  (goal still Blocked) stderr=could not add label: 'ooda-stuck' not found
+```
+
+the breaker was trying to file its tracking issue with the `ooda-stuck` label
+but that label does not exist in the repository, so issue creation failed and
+the goal could never leave the loop.
+
+**This is now self-healing (#4394).** `GhIssueFiler` detects the missing-label
+signature and retries `gh issue create` **once without** `--label`, so the
+tracking issue is always filed. In current builds you will instead see a single
+WARN fallback followed by a successful file:
+
+```text
+WARN … simard::ooda: no-progress breaker: 'ooda-stuck' label absent —
+  refiling tracking issue without label stderr=could not add label: 'ooda-stuck' not found
+WARN … simard::ooda: no-progress breaker: tracking issue filed for stuck goal issue=4231
+```
+
+No operator action is required — the goal is recorded and unblocked
+automatically. If you *prefer* labeled tracking issues, create the label once so
+the primary path succeeds and no fallback is needed:
+
+```bash
+gh label create ooda-stuck --description "OODA no-progress breaker tracking issue" --color BFD4F2
+```
+
+See the [missing-label fallback in the breaker API
+reference](../reference/no-progress-breaker-api.md#tracking-issue-filer-noprogressissuefiler-and-the-missing-label-fallback)
+for the exact detection rule and guarantees.
+
+## Related
 - [Concept: the breaker explains WHY and self-resolves before escalating](../concepts/no-progress-root-cause-resolution.md)
 - [Root-cause resolution API reference](../reference/no-progress-root-cause-resolution-api.md)
 - [No-progress breaker API reference](../reference/no-progress-breaker-api.md)

@@ -100,57 +100,166 @@ pub(crate) trait NoProgressIssueFiler {
 
 /// Production filer: `gh issue create --label ooda-stuck`, mirroring the
 /// brain-failure safeguard in `ooda_actions::advance_goal::spawn`.
+///
+/// Resilient to a missing `ooda-stuck` label: [`file_issue_with_runner`] retries
+/// without `--label` when the labeled create fails because the label does not
+/// exist, so a missing repo label never blocks recording the stuck goal.
 pub(crate) struct GhIssueFiler;
 
 impl NoProgressIssueFiler for GhIssueFiler {
     fn file_issue(&self, title: &str, body: &str) -> Option<FiledIssue> {
-        match std::process::Command::new("gh")
-            .args([
-                "issue",
-                "create",
-                "--title",
-                title,
-                "--body",
-                body,
-                "--label",
-                "ooda-stuck",
-            ])
-            .output()
-        {
-            Ok(out) if out.status.success() => {
-                // `gh issue create` prints the created issue's URL on success,
-                // e.g. `https://github.com/rysweet/Simard/issues/4231`.
-                let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                let number = parse_issue_number(&url);
-                tracing::warn!(
-                    target: "simard::ooda",
-                    title = %title,
-                    issue = number.as_deref().unwrap_or("?"),
-                    "no-progress breaker: tracking issue filed for stuck goal",
-                );
-                number.map(|number| FiledIssue {
-                    url: (!url.is_empty()).then(|| url.clone()),
-                    number,
-                })
-            }
-            Ok(out) => {
-                tracing::error!(
-                    target: "simard::ooda",
-                    stderr = %String::from_utf8_lossy(&out.stderr),
-                    "no-progress breaker: gh issue create failed (goal still Blocked)",
-                );
-                None
-            }
-            Err(e) => {
-                tracing::error!(
-                    target: "simard::ooda",
-                    error = %e,
-                    "no-progress breaker: gh spawn failed (goal still Blocked)",
-                );
-                None
-            }
+        file_issue_with_runner(|with_label| run_gh_issue_create(title, body, with_label))
+    }
+}
+
+/// The result of a single `gh issue create` invocation, reduced to the fields
+/// the fallback seam needs. A testable stand-in so [`file_issue_with_runner`]'s
+/// control flow is exercised without shelling out to `gh`.
+struct GhOutcome {
+    /// Whether the process exited successfully.
+    success: bool,
+    /// Captured stdout (on success, the created issue's URL).
+    stdout: String,
+    /// Captured stderr (on failure, the `gh` error, e.g. the missing-label line).
+    stderr: String,
+}
+
+/// True when `stderr` is the "label does not exist" failure: lowercased, it must
+/// contain BOTH `"not found"` AND `"label"` (matching the observed incident line
+/// `could not add label: 'ooda-stuck' not found`).
+///
+/// Requiring *both* tokens keeps the detector narrow: a bare `"not found"` (a
+/// 404 on the repo/issue) or a bare `"label"` (a permission message) must never
+/// be misread as a missing label, which would swallow a genuine error.
+fn is_missing_label(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("not found") && lower.contains("label")
+}
+
+/// Run `gh issue create`, optionally adding `--label ooda-stuck`. Returns `None`
+/// on a spawn failure — the `io::Error` is logged here at ERROR and never crosses
+/// the seam boundary into [`file_issue_with_runner`]. Otherwise returns the
+/// reduced [`GhOutcome`] for the seam to interpret.
+fn run_gh_issue_create(title: &str, body: &str, with_label: bool) -> Option<GhOutcome> {
+    let mut args = vec!["issue", "create", "--title", title, "--body", body];
+    if with_label {
+        args.push("--label");
+        args.push("ooda-stuck");
+    }
+    match std::process::Command::new("gh").args(&args).output() {
+        Ok(out) => Some(GhOutcome {
+            success: out.status.success(),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }),
+        Err(e) => {
+            tracing::error!(
+                target: "simard::ooda",
+                error = %e,
+                "no-progress breaker: gh spawn failed (goal still Blocked)",
+            );
+            None
         }
     }
+}
+
+/// Parse a successful `gh issue create` `stdout` (the created issue's URL) into a
+/// [`FiledIssue`]. Returns `None` when the trailing path segment is not a bare
+/// number so a malformed / unexpected output never fabricates a bogus link.
+fn filed_issue_from_stdout(stdout: &str) -> Option<FiledIssue> {
+    let url = stdout.trim().to_string();
+    let number = parse_issue_number(&url)?;
+    Some(FiledIssue {
+        url: (!url.is_empty()).then_some(url),
+        number,
+    })
+}
+
+/// The pure control-flow seam behind [`GhIssueFiler::file_issue`], injected so
+/// tests exercise the missing-label fallback without shelling out to `gh`.
+///
+/// `runner(with_label)` performs one `gh issue create` attempt (`with_label`
+/// toggles `--label ooda-stuck`) and returns `None` for a spawn error it has
+/// already logged. Flow:
+///
+/// 1. Labeled attempt. Success → [`FiledIssue`] (WARN). Spawn error (`None`) →
+///    `None` (already logged; never double-logged here).
+/// 2. On a *missing-label* failure only, retry exactly once WITHOUT the label
+///    (WARN — the fallback is never silent). Any other failure → `None` at ERROR.
+/// 3. The unlabeled retry's outcome is final: success → [`FiledIssue`],
+///    otherwise `None` at ERROR. There is no recursion and at most one retry.
+fn file_issue_with_runner<R>(runner: R) -> Option<FiledIssue>
+where
+    R: Fn(bool) -> Option<GhOutcome>,
+{
+    // Spawn error (`None`) is terminal and already logged by the runner.
+    let labeled = runner(true)?;
+    if labeled.success {
+        return match filed_issue_from_stdout(&labeled.stdout) {
+            Some(filed) => {
+                tracing::warn!(
+                    target: "simard::ooda",
+                    issue = %filed.number,
+                    "no-progress breaker: tracking issue filed for stuck goal",
+                );
+                Some(filed)
+            }
+            None => {
+                tracing::error!(
+                    target: "simard::ooda",
+                    stdout = %labeled.stdout,
+                    "no-progress breaker: gh issue create succeeded but issue number was unresolvable (goal still Blocked)",
+                );
+                None
+            }
+        };
+    }
+
+    if !is_missing_label(&labeled.stderr) {
+        tracing::error!(
+            target: "simard::ooda",
+            stderr = %labeled.stderr,
+            "no-progress breaker: gh issue create failed (goal still Blocked)",
+        );
+        return None;
+    }
+
+    // Missing-label failure: file the tracking issue WITHOUT the label so the
+    // breaker still records the stuck goal. WARN so the fallback is never silent.
+    tracing::warn!(
+        target: "simard::ooda",
+        stderr = %labeled.stderr,
+        "no-progress breaker: 'ooda-stuck' label missing; retrying gh issue create without --label",
+    );
+
+    let unlabeled = runner(false)?;
+    if unlabeled.success {
+        return match filed_issue_from_stdout(&unlabeled.stdout) {
+            Some(filed) => {
+                tracing::warn!(
+                    target: "simard::ooda",
+                    issue = %filed.number,
+                    "no-progress breaker: tracking issue filed for stuck goal (without label)",
+                );
+                Some(filed)
+            }
+            None => {
+                tracing::error!(
+                    target: "simard::ooda",
+                    stdout = %unlabeled.stdout,
+                    "no-progress breaker: unlabeled gh issue create succeeded but issue number was unresolvable (goal still Blocked)",
+                );
+                None
+            }
+        };
+    }
+
+    tracing::error!(
+        target: "simard::ooda",
+        stderr = %unlabeled.stderr,
+        "no-progress breaker: unlabeled gh issue create retry failed (goal still Blocked)",
+    );
+    None
 }
 
 /// Parse the issue number from a `gh issue create` success line, which prints
@@ -1832,5 +1941,211 @@ mod tests_tracking_issue_link {
             1,
             "no duplicate ref for an issue number the goal already carries",
         );
+    }
+}
+
+/// TDD (Step 7): specify the missing-label fallback seam BEFORE it exists.
+///
+/// Incident: the no-progress breaker files a stuck-goal tracking issue with
+/// `gh issue create --label ooda-stuck`, but the `ooda-stuck` label does not
+/// exist in `rysweet/Simard`, so every invocation fails with
+/// `could not add label: 'ooda-stuck' not found` and the goal stays Blocked.
+///
+/// These tests define the contract for the additive, non-breaking fix:
+///   * `GhOutcome { success, stdout, stderr }` — a testable stand-in for a `gh`
+///     invocation result, so the fallback logic is exercised without shelling
+///     out.
+///   * `is_missing_label(stderr)` — the narrow detector: lowercased stderr must
+///     contain BOTH `"not found"` AND `"label"` (never over-match real errors).
+///   * `file_issue_with_runner(runner)` — the pure seam driving the control
+///     flow: labeled attempt → on missing-label, retry WITHOUT the label →
+///     otherwise `None`. The `runner: Fn(bool) -> Option<GhOutcome>` takes a
+///     `with_label` flag and returns `None` for a spawn error (already logged).
+///
+/// All three symbols are unimplemented at Step 7, so this module MUST fail to
+/// compile until Step 8 lands the implementation.
+#[cfg(test)]
+mod tests_missing_label_fallback {
+    use super::{FiledIssue, GhOutcome, file_issue_with_runner, is_missing_label};
+    use std::cell::RefCell;
+
+    /// The exact stderr observed in the incident journal.
+    const OBSERVED_STDERR: &str = "could not add label: 'ooda-stuck' not found";
+
+    fn ok(stdout: &str) -> GhOutcome {
+        GhOutcome {
+            success: true,
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+        }
+    }
+
+    fn fail(stderr: &str) -> GhOutcome {
+        GhOutcome {
+            success: false,
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+        }
+    }
+
+    // ---- is_missing_label: the narrow, dual-token detector -----------------
+
+    #[test]
+    fn is_missing_label_matches_the_observed_incident_stderr() {
+        assert!(
+            is_missing_label(OBSERVED_STDERR),
+            "the exact incident signature must trigger the fallback",
+        );
+    }
+
+    #[test]
+    fn is_missing_label_is_case_insensitive() {
+        assert!(is_missing_label(
+            "COULD NOT ADD LABEL: 'ooda-stuck' NOT FOUND"
+        ));
+        assert!(is_missing_label("Label 'x' Not Found"));
+    }
+
+    #[test]
+    fn is_missing_label_requires_both_tokens() {
+        // "not found" alone (e.g. a missing repo/issue) must NOT be treated as
+        // a missing-label failure — that would swallow a genuine error.
+        assert!(
+            !is_missing_label("HTTP 404: Not Found (https://api.github.com/...)"),
+            "'not found' without 'label' must not match",
+        );
+        // "label" alone (some unrelated label-adjacent message) must NOT match.
+        assert!(
+            !is_missing_label("could not add label: permission denied"),
+            "'label' without 'not found' must not match",
+        );
+        // A totally unrelated error must NOT match.
+        assert!(!is_missing_label("error: server misbehaving (503)"));
+        assert!(!is_missing_label(""));
+    }
+
+    // ---- file_issue_with_runner: the control-flow seam ---------------------
+
+    #[test]
+    fn success_with_label_returns_filed_issue_without_falling_back() {
+        let calls = RefCell::new(Vec::<bool>::new());
+        let runner = |with_label: bool| {
+            calls.borrow_mut().push(with_label);
+            Some(ok("https://github.com/rysweet/Simard/issues/4231"))
+        };
+
+        let filed = file_issue_with_runner(runner);
+
+        assert_eq!(
+            filed,
+            Some(FiledIssue {
+                number: "4231".to_string(),
+                url: Some("https://github.com/rysweet/Simard/issues/4231".to_string()),
+            }),
+        );
+        assert_eq!(
+            *calls.borrow(),
+            vec![true],
+            "a labeled success must NOT trigger the unlabeled retry",
+        );
+    }
+
+    #[test]
+    fn missing_label_failure_retries_without_label_and_succeeds() {
+        let calls = RefCell::new(Vec::<bool>::new());
+        let runner = |with_label: bool| {
+            calls.borrow_mut().push(with_label);
+            if with_label {
+                Some(fail(OBSERVED_STDERR))
+            } else {
+                Some(ok("https://github.com/rysweet/Simard/issues/4242"))
+            }
+        };
+
+        let filed = file_issue_with_runner(runner);
+
+        assert_eq!(
+            filed,
+            Some(FiledIssue {
+                number: "4242".to_string(),
+                url: Some("https://github.com/rysweet/Simard/issues/4242".to_string()),
+            }),
+            "the breaker must still record the stuck goal via the unlabeled retry",
+        );
+        assert_eq!(
+            *calls.borrow(),
+            vec![true, false],
+            "exactly one labeled attempt, then exactly one unlabeled retry",
+        );
+    }
+
+    #[test]
+    fn missing_label_then_unlabeled_failure_returns_none_without_recursion() {
+        let calls = RefCell::new(Vec::<bool>::new());
+        let runner = |with_label: bool| {
+            calls.borrow_mut().push(with_label);
+            if with_label {
+                Some(fail(OBSERVED_STDERR))
+            } else {
+                // The retry itself fails for an unrelated reason.
+                Some(fail("error: server misbehaving (503)"))
+            }
+        };
+
+        let filed = file_issue_with_runner(runner);
+
+        assert_eq!(filed, None);
+        assert_eq!(
+            *calls.borrow(),
+            vec![true, false],
+            "at most one retry — the fallback must never loop",
+        );
+    }
+
+    #[test]
+    fn other_failure_returns_none_and_does_not_retry() {
+        let calls = RefCell::new(Vec::<bool>::new());
+        let runner = |with_label: bool| {
+            calls.borrow_mut().push(with_label);
+            Some(fail("error: repository not accessible (403)"))
+        };
+
+        let filed = file_issue_with_runner(runner);
+
+        assert_eq!(
+            filed, None,
+            "a non-missing-label failure must not fabricate a linked issue",
+        );
+        assert_eq!(
+            *calls.borrow(),
+            vec![true],
+            "a non-missing-label failure must NOT trigger the unlabeled retry",
+        );
+    }
+
+    #[test]
+    fn spawn_error_none_from_runner_returns_none_without_retry() {
+        let calls = RefCell::new(Vec::<bool>::new());
+        // `None` models a spawn failure the runner already logged at ERROR.
+        let runner = |with_label: bool| -> Option<GhOutcome> {
+            calls.borrow_mut().push(with_label);
+            None
+        };
+
+        let filed = file_issue_with_runner(runner);
+
+        assert_eq!(filed, None);
+        assert_eq!(
+            *calls.borrow(),
+            vec![true],
+            "a spawn error is terminal — no unlabeled retry",
+        );
+    }
+
+    #[test]
+    fn labeled_success_with_unparseable_url_returns_none() {
+        // Success but the stdout is not a resolvable issue URL: no bogus link.
+        let runner = |_with_label: bool| Some(ok("not-a-url"));
+        assert_eq!(file_issue_with_runner(runner), None);
     }
 }
