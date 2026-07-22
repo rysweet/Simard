@@ -10,6 +10,10 @@
 // (CLI bulk-unblock scoping) and from cross-module test modules.
 pub(crate) mod advance_goal;
 mod concurrent;
+// Idempotent `gh label` ensurer shared by the three tracking-issue filing
+// sites (issue #4472: the no-progress breaker could not file its operator-
+// facing tracking issue because `--label ooda-stuck` did not exist).
+pub(crate) mod gh_label;
 mod goal_session;
 mod session;
 mod simple_actions;

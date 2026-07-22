@@ -104,19 +104,33 @@ pub(crate) struct GhIssueFiler;
 
 impl NoProgressIssueFiler for GhIssueFiler {
     fn file_issue(&self, title: &str, body: &str) -> Option<FiledIssue> {
-        match std::process::Command::new("gh")
-            .args([
-                "issue",
-                "create",
-                "--title",
-                title,
-                "--body",
-                body,
-                "--label",
-                "ooda-stuck",
-            ])
-            .output()
-        {
+        // Issue #4472: `gh issue create --label ooda-stuck` failed every cycle
+        // because the label did not exist in the repo, so the breaker recorded
+        // `escalated=1` while no issue was ever filed (silent broken escalation,
+        // journal signature `could not add label: 'ooda-stuck' not found`).
+        // Idempotently ensure the label first, degrading to an unlabeled-but-
+        // still-filed issue if it cannot be ensured.
+        use crate::ooda_actions::gh_label::{LabelEnsure, OODA_STUCK_LABEL, ensure_gh_label};
+        let label = ensure_gh_label(OODA_STUCK_LABEL);
+        match &label {
+            LabelEnsure::Created => tracing::info!(
+                target: "simard::ooda",
+                label = OODA_STUCK_LABEL,
+                "no-progress breaker: auto-created missing tracking-issue label",
+            ),
+            LabelEnsure::AlreadyExists => {}
+            LabelEnsure::Unavailable(reason) => tracing::warn!(
+                target: "simard::ooda",
+                reason = %reason,
+                "no-progress breaker: could not ensure tracking-issue label; filing issue WITHOUT label (degraded)",
+            ),
+        }
+        let mut gh_args: Vec<&str> = vec!["issue", "create", "--title", title, "--body", body];
+        if label.label_present() {
+            gh_args.push("--label");
+            gh_args.push(OODA_STUCK_LABEL);
+        }
+        match std::process::Command::new("gh").args(&gh_args).output() {
             Ok(out) if out.status.success() => {
                 // `gh issue create` prints the created issue's URL on success,
                 // e.g. `https://github.com/rysweet/Simard/issues/4231`.
