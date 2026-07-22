@@ -874,6 +874,77 @@ fn owner_rejects_empty_and_log_injection_payloads() {
 }
 
 #[test]
+fn tracking_ref_rejects_empty_control_chars_and_smuggled_standing_markers() {
+    // A well-formed tracking ref (all fields present, single-line, no marker)
+    // validates and reaches the board.
+    assert!(validate_tracking_ref(&issue_ref("4420")).is_ok());
+
+    // Each field is guarded: an empty or control-char/newline-bearing kind,
+    // ref_id, or label is rejected before it can be persisted or logged.
+    let bad_field = |field: &str, value: &str| WipRef {
+        kind: if field == "kind" {
+            value.to_string()
+        } else {
+            "issue".to_string()
+        },
+        ref_id: if field == "ref_id" {
+            value.to_string()
+        } else {
+            "4420".to_string()
+        },
+        label: if field == "label" {
+            value.to_string()
+        } else {
+            "issue #4420".to_string()
+        },
+        url: None,
+    };
+    for field in ["kind", "ref_id", "label"] {
+        for bad in ["", "   ", "a\nb", "a\tb", "x\r\ny"] {
+            assert!(
+                matches!(
+                    validate_tracking_ref(&bad_field(field, bad)),
+                    Err(CorrectionRejected::InvalidTrackingRef { field: f, .. }) if f == field
+                ),
+                "tracking-ref {field} {bad:?} must be rejected (empty / control chars / newlines)"
+            );
+        }
+    }
+
+    // An over-length field is rejected even when it is otherwise control-free.
+    let long = "x".repeat(MAX_TRACKING_REF_FIELD_LEN + 1);
+    assert!(matches!(
+        validate_tracking_ref(&bad_field("label", &long)),
+        Err(CorrectionRejected::InvalidTrackingRef { field: "label", .. })
+    ));
+
+    // The security-critical case: a label that reads as a standing marker would,
+    // once spliced into the persisted `goal.description`, silently reclassify this
+    // one-off coverage slice as a perpetual standing goal that never completes.
+    // It must be rejected — routing the triage brain to ask the operator instead.
+    for smuggled in [
+        "[standing] PR #7",
+        "makes this a standing goal",
+        "PERPETUAL GOAL",
+    ] {
+        assert!(
+            matches!(
+                validate_tracking_ref(&bad_field("label", smuggled)),
+                Err(CorrectionRejected::InvalidTrackingRef { field: "label", .. })
+            ),
+            "a label carrying a standing marker ({smuggled:?}) must be rejected"
+        );
+    }
+
+    // And the guard is enforced end-to-end through the constructor: a malformed
+    // tracking ref makes the whole target construction fail, so nothing persists.
+    assert!(matches!(
+        FirstSliceTarget::new("src/lib.rs", 70, "alice", bad_field("label", "a\nb")),
+        Err(CorrectionRejected::InvalidTrackingRef { field: "label", .. })
+    ));
+}
+
+#[test]
 fn cycle_count_survives_simulated_restart_and_continues() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();

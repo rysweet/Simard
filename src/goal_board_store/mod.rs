@@ -47,7 +47,7 @@ use crate::goal_curation::completion_gate::{
 };
 use crate::goal_curation::{
     ActiveGoal, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS, NoProgressTracker, WipRef,
-    is_no_progress_marker,
+    description_marks_standing, is_no_progress_marker,
 };
 
 #[cfg(test)]
@@ -283,10 +283,10 @@ pub struct FirstSliceTarget {
 
 impl FirstSliceTarget {
     /// Build a validated first-slice target. Fields are checked in a fixed order
-    /// — threshold, then module path, then owner — so the first malformed input
-    /// determines the [`CorrectionRejected`] returned. A rejected construction
-    /// never persists anything and routes the triage brain to the ask-operator
-    /// path.
+    /// — threshold, then module path, then owner, then tracking ref — so the first
+    /// malformed input determines the [`CorrectionRejected`] returned. A rejected
+    /// construction never persists anything and routes the triage brain to the
+    /// ask-operator path.
     pub fn new(
         module_path: impl Into<String>,
         threshold_percent: u32,
@@ -298,6 +298,7 @@ impl FirstSliceTarget {
         validate_threshold(threshold_percent)?;
         validate_module_path(&module_path)?;
         validate_owner(&owner)?;
+        validate_tracking_ref(&tracking_ref)?;
         Ok(Self {
             module_path,
             threshold_percent,
@@ -342,6 +343,18 @@ pub enum CorrectionRejected {
     InvalidOwner {
         /// The rejected owner string.
         owner: String,
+    },
+    /// A tracking-ref field (`kind`, `ref_id`, or `label`) is empty, over-length,
+    /// carries a control character / newline (log-injection guard), or — for the
+    /// `label`, which is interpolated verbatim into the persisted `goal.description`
+    /// — would smuggle a durable standing marker in and silently reclassify the
+    /// course-corrected goal as a perpetual one that never completes.
+    InvalidTrackingRef {
+        /// Which tracking-ref field was rejected (`"kind"`, `"ref_id"`, or
+        /// `"label"`).
+        field: &'static str,
+        /// The rejected value.
+        value: String,
     },
 }
 
@@ -419,7 +432,50 @@ pub(crate) fn validate_owner(owner: &str) -> Result<(), CorrectionRejected> {
     Ok(())
 }
 
-/// Course-correct a blocked goal's unmeasurable done-gate into a machine-
+/// Maximum length of any single tracking-ref field — bounds `kind`, `ref_id`,
+/// and `label` so a pathological payload can't be smuggled through even if it
+/// were control-free.
+const MAX_TRACKING_REF_FIELD_LEN: usize = 256;
+
+/// A tracking ref becomes part of durable state: its `ref_id` is matched by the
+/// completion gate and emitted under structured `tracing`, and its `label` is
+/// interpolated **verbatim** into the persisted `goal.description` by
+/// [`rewrite_blocked_goal_done_gate`]. Every field (`kind`, `ref_id`, `label`)
+/// must therefore be a non-empty, control-character-free, newline-free token
+/// within [`MAX_TRACKING_REF_FIELD_LEN`] (a log-injection / marker-smuggling
+/// guard), and the `label` must not itself read as a standing marker — otherwise
+/// an LLM-sourced tracking ref could silently reclassify the course-corrected
+/// goal as a perpetual standing goal that never completes. Internal
+/// field-validator behind [`FirstSliceTarget::new`].
+pub(crate) fn validate_tracking_ref(tracking_ref: &WipRef) -> Result<(), CorrectionRejected> {
+    for (field, value) in [
+        ("kind", tracking_ref.kind.as_str()),
+        ("ref_id", tracking_ref.ref_id.as_str()),
+        ("label", tracking_ref.label.as_str()),
+    ] {
+        let reject = || CorrectionRejected::InvalidTrackingRef {
+            field,
+            value: value.to_string(),
+        };
+        if value.trim().is_empty() || value.len() > MAX_TRACKING_REF_FIELD_LEN {
+            return Err(reject());
+        }
+        if value.chars().any(char::is_control) {
+            return Err(reject());
+        }
+    }
+    // The `label` is the only field spliced into the persisted description, so
+    // guard it against the exact classifier that reads that description: a label
+    // that reads as a standing marker would durably convert this one-off coverage
+    // slice into a perpetual goal with no terminal done-state.
+    if description_marks_standing(&tracking_ref.label) {
+        return Err(CorrectionRejected::InvalidTrackingRef {
+            field: "label",
+            value: tracking_ref.label.clone(),
+        });
+    }
+    Ok(())
+}
 /// checkable first slice, atomically under the store `flock` (issue #4419).
 ///
 /// The entire read-modify-write runs inside one [`mutate`] window (no TOCTOU):
