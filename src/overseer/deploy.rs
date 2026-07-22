@@ -80,6 +80,44 @@ impl std::fmt::Display for DeployRefusal {
     }
 }
 
+/// Cap (bytes) on the canary `detail` spliced into a refusal reason, so a
+/// runaway gate log line can never bloat the operator notice / OTel telemetry.
+/// Truncated on a UTF-8 char boundary (never mid-codepoint).
+pub const REASON_DETAIL_CAP: usize = 512;
+
+/// Build the operator-facing refusal reason. For a [`DeployRefusal::RedCanary`]
+/// refusal, splice the NAMED failing gate + its detail (carried by
+/// [`CanaryResult::detail`]) onto the aggregate refusal so a canary-red is
+/// DIAGNOSABLE (issue #4420) instead of the opaque "one or more gates failed".
+/// Every OTHER refusal is byte-for-byte its [`Display`](std::fmt::Display), so a
+/// passing canary's detail is never leaked into a non-red reason.
+pub fn enrich_refusal(refusal: &DeployRefusal, canary: &CanaryResult) -> String {
+    match refusal {
+        DeployRefusal::RedCanary => {
+            let detail = truncate_on_char_boundary(canary.detail.trim(), REASON_DETAIL_CAP);
+            if detail.is_empty() {
+                refusal.to_string()
+            } else {
+                format!("{refusal}: {detail}")
+            }
+        }
+        _ => refusal.to_string(),
+    }
+}
+
+/// Borrow the longest prefix of `s` that is at most `cap` bytes and ends on a
+/// UTF-8 char boundary (so slicing a multibyte codepoint can never panic).
+fn truncate_on_char_boundary(s: &str, cap: usize) -> &str {
+    if s.len() <= cap {
+        return s;
+    }
+    let mut end = cap;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// The deploy gate (pure). Refuses no-op, rollback, red-canary, and crash-loop.
 pub fn evaluate_deploy_gate(ctx: &DeployContext) -> Result<(), DeployRefusal> {
     if commits_equivalent(&ctx.running_commit, &ctx.target_commit) {
@@ -285,18 +323,36 @@ impl Deployer for GuardedDeployer {
         // best-effort here (a refusal already surfaces as an Err); the mandatory
         // dispatch assertion below guards the swap path.
         if let Err(refusal) = evaluate_deploy_gate(&ctx) {
-            let notification = OperatorNotification::deploy_refused(
-                commit,
-                &running,
-                &self.repo,
-                &refusal.to_string(),
+            let reason = enrich_refusal(&refusal, &canary);
+            // Rail A (#4420): surface the DIAGNOSABLE refusal reason — for a red
+            // canary this NAMES the failing gate + detail — as a structured
+            // tracing field (never spliced into the message template, since it is
+            // subprocess-derived) so it reaches OTel alongside the operator notice.
+            tracing::warn!(
+                target: "deploy",
+                sha = %commit,
+                running = %running,
+                reason = %reason,
+                "self-deploy refused",
             );
+            let notification =
+                OperatorNotification::deploy_refused(commit, &running, &self.repo, &reason);
             let _ = self.notifier.notify(&notification);
+            // Rail B (#4420): count a red canary at the ACT site so the OBSERVE
+            // rail can halt a persistently-red SHA instead of re-attempting it
+            // every tick while drift silently grows.
+            if matches!(refusal, DeployRefusal::RedCanary) {
+                crate::overseer::deploy_trigger::record_red_canary_result(commit, true);
+            }
             return Err(OverseerError::Capability {
                 what: "deploy_gate",
-                detail: refusal.to_string(),
+                detail: reason,
             });
         }
+
+        // Gate passed ⇒ the canary is GREEN for this SHA: clear any red-canary
+        // streak so a SHA that recovered re-arms the loop-halt guard from zero.
+        crate::overseer::deploy_trigger::record_red_canary_result(commit, false);
 
         // Gate passed — announce BEFORE invoking the binary swap. In
         // production the swap restarts/exec-replaces this process and may never
@@ -764,6 +820,7 @@ mod tests {
 
     #[test]
     fn deploy_refuses_red_canary() {
+        let _guard = crate::overseer::deploy_trigger::deploy_throttle_test_guard();
         let (gd, deployed, _) = deployer(false, false, 0);
         assert!(format!("{}", gd.deploy("bbbbbbbbbbbb").unwrap_err()).contains("red canary"));
         assert_eq!(*deployed.lock().unwrap(), 0);
@@ -953,6 +1010,7 @@ mod tests {
 
     #[test]
     fn target_canary_build_failure_is_red_canary_gate_refusal() {
+        let _guard = crate::overseer::deploy_trigger::deploy_throttle_test_guard();
         let (runner, seen_targets) = target_canary(SourceMode::Ok, VerifierOutcome::BuildFail);
         let (gd, deployed, seen) = deployer_with(Box::new(runner), Box::new(FakeAncestry(false)));
         let err = gd.deploy("bbbbbbbbbbbb").unwrap_err();
@@ -1067,5 +1125,175 @@ mod tests {
             "rysweet/Simard".to_string(),
         );
         let _ = gd.deploy("bbbbbbbbbbbb");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Seam A (issue #4420): DIAGNOSABLE canary-red.
+    //
+    // TDD (RED): these reference `enrich_refusal` + `REASON_DETAIL_CAP`, which do
+    // not exist yet, so the crate test build FAILS to compile until Seam A lands.
+    // That compile failure is the executable contract: a RedCanary refusal must
+    // surface the NAMED failing gate (from `CanaryResult::detail`) to the
+    // operator notice and the returned `Capability{detail}` error — not just the
+    // bare aggregate "red canary (one or more gates failed)".
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// A canary fake with an operator-supplied `detail` so a test can assert the
+    /// named failing gate flows through the refusal path.
+    struct FakeCanaryDetailed {
+        passed: bool,
+        detail: String,
+    }
+    impl CanaryRunner for FakeCanaryDetailed {
+        fn run_canary(&self, _t: &str) -> Result<CanaryResult, OverseerError> {
+            Ok(CanaryResult {
+                passed: self.passed,
+                detail: self.detail.clone(),
+            })
+        }
+    }
+
+    fn deployer_with_canary_detail(
+        passed: bool,
+        detail: &str,
+        is_ancestor: bool,
+        churn: u64,
+    ) -> (GuardedDeployer, Arc<Mutex<Vec<OperatorNotification>>>) {
+        let seen = Arc::new(Mutex::new(vec![]));
+        let notifier = DualChannelNotifier::new(vec![Box::new(Capture(seen.clone()))]);
+        let gd = GuardedDeployer::new(
+            Box::new(FakeCanaryDetailed {
+                passed,
+                detail: detail.to_string(),
+            }),
+            Box::new(FakeDeployerShared(Arc::new(Mutex::new(0)))),
+            Box::new(FakeAncestry(is_ancestor)),
+            notifier,
+            "aaaaaaaaaaaa".to_string(),
+            churn,
+            "rysweet/Simard".to_string(),
+        );
+        (gd, seen)
+    }
+
+    /// T1a — `enrich_refusal` on a RedCanary carries BOTH the aggregate refusal
+    /// and the named failing gate from the canary detail.
+    #[test]
+    fn enrich_refusal_names_failing_gate_for_red_canary() {
+        let canary = CanaryResult {
+            passed: false,
+            detail: "gate 'lbug-abi-proof' failed: exit status 1".to_string(),
+        };
+        let reason = enrich_refusal(&DeployRefusal::RedCanary, &canary);
+        assert!(
+            reason.contains("red canary"),
+            "keeps the aggregate refusal for continuity: {reason:?}"
+        );
+        assert!(
+            reason.contains("lbug-abi-proof"),
+            "surfaces the NAMED failing gate (the whole point of #4420): {reason:?}"
+        );
+        assert!(
+            reason.contains("gate 'lbug-abi-proof' failed"),
+            "carries the gate detail verbatim: {reason:?}"
+        );
+    }
+
+    /// T1b (non-regression) — only RedCanary is enriched; every other refusal's
+    /// reason string is byte-for-byte its `Display` (the canary detail is not
+    /// spliced into a no-op / rollback / crash-loop reason).
+    #[test]
+    fn enrich_refusal_leaves_non_red_canary_refusals_unchanged() {
+        let canary = CanaryResult {
+            passed: true,
+            detail: "4/4 gates".to_string(),
+        };
+        for refusal in [
+            DeployRefusal::NoOp,
+            DeployRefusal::Rollback,
+            DeployRefusal::CrashLoop { churn: 5 },
+        ] {
+            assert_eq!(
+                enrich_refusal(&refusal, &canary),
+                refusal.to_string(),
+                "non-RedCanary refusal must be unchanged"
+            );
+        }
+    }
+
+    /// T1c — an oversized (and multibyte) canary detail is truncated to
+    /// `REASON_DETAIL_CAP` on a char boundary (no panic, bounded telemetry).
+    #[test]
+    fn enrich_refusal_truncates_an_oversized_detail_on_a_char_boundary() {
+        // 'é' is 2 bytes; a naive byte-slice at the cap could split it and panic.
+        let huge: String = "é".repeat(REASON_DETAIL_CAP * 4);
+        let canary = CanaryResult {
+            passed: false,
+            detail: huge,
+        };
+        let reason = enrich_refusal(&DeployRefusal::RedCanary, &canary);
+        assert!(
+            reason.contains("red canary"),
+            "the aggregate prefix survives truncation: {}",
+            &reason[..reason.len().min(40)]
+        );
+        // Bounded: the cap plus a short refusal prefix, never the full 4×-cap blob.
+        assert!(
+            reason.len() <= REASON_DETAIL_CAP + 128,
+            "reason bounded near the cap, got {} bytes",
+            reason.len()
+        );
+    }
+
+    /// T1d (integration) — a red-canary refusal notifies the operator WITH the
+    /// named gate, and the returned `Capability` error also carries it.
+    #[test]
+    fn deploy_red_canary_refusal_surfaces_named_gate_to_operator() {
+        let _guard = crate::overseer::deploy_trigger::deploy_throttle_test_guard();
+        let (gd, seen) = deployer_with_canary_detail(
+            false,
+            "gate 'tla-model-check' failed: invariant violated",
+            false,
+            0,
+        );
+        let err = gd.deploy("bbbbbbbbbbbb").unwrap_err();
+        let err_text = format!("{err}");
+        assert!(
+            err_text.contains("tla-model-check"),
+            "the surfaced error names the failing gate: {err_text:?}"
+        );
+        assert!(
+            err_text.contains("red canary"),
+            "the surfaced error keeps the aggregate refusal: {err_text:?}"
+        );
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "one deploy-refused notice per attempt");
+        assert_eq!(seen[0].kind, "deploy-refused");
+        assert!(
+            seen[0].problem.contains("tla-model-check"),
+            "the operator sees the named gate in the notification: {:?}",
+            seen[0].problem
+        );
+    }
+
+    /// T1e (non-regression) — a NON-red refusal (no-op) still reports the bare
+    /// reason unchanged through the same enriched call site.
+    #[test]
+    fn deploy_no_op_refusal_reason_is_unchanged_by_enrichment() {
+        let (gd, seen) = deployer_with_canary_detail(true, "4/4 gates", false, 0);
+        // target == running ⇒ NoOp refusal (canary passes, so RedCanary is not hit).
+        let err = gd.deploy("aaaaaaaaaaaa").unwrap_err();
+        assert!(format!("{err}").contains("no-op"));
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0].kind, "deploy-refused");
+        assert!(
+            seen[0].problem.contains("no-op"),
+            "no-op reason preserved verbatim (no canary detail spliced in): {:?}",
+            seen[0].problem
+        );
+        assert!(
+            !seen[0].problem.contains("4/4 gates"),
+            "a passing canary's detail must NOT leak into a non-red refusal reason"
+        );
     }
 }

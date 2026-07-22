@@ -246,6 +246,36 @@ impl OperatorNotification {
         }
     }
 
+    /// Build a self-deploy STUCK escalation (#4420). Fired ONCE by the OBSERVE
+    /// rail when a target SHA has reddened the canary
+    /// [`red_canary_halt_threshold`](crate::overseer::deploy_trigger::red_canary_halt_threshold)
+    /// times in a row: the daemon has stopped re-attempting that SHA (so drift no
+    /// longer grows silently) and hands it to a human. `target` is the stuck
+    /// merged head; `behind` is how many commits behind main the daemon now runs;
+    /// `streak` is the consecutive red-canary count.
+    pub fn deploy_stuck(target: &str, repo: &str, behind: u64, streak: u32) -> Self {
+        Self {
+            kind: "deploy-stuck",
+            headline: format!(
+                "self-deploy STUCK on {} — halting retries",
+                short_commit(target)
+            ),
+            problem: format!(
+                "Self-deploy of {target} has failed the canary {streak} times in a row; \
+                 the daemon is now {behind} commit(s) behind merged main and has HALTED \
+                 re-attempting this commit to stop silent drift growth."
+            ),
+            next_step: format!(
+                "Investigate the red canary for {target} (see the deploy-refused notices for \
+                 the failing gate + detail). Once fixed and merged, the daemon resumes \
+                 self-deploy automatically on the new head."
+            ),
+            link: None,
+            repo: repo.to_string(),
+            autonomous: true,
+        }
+    }
+
     /// Build a whisper notification: surfaces an advisory steering note the
     /// Overseer injected into Simard's loop so whispers are TRANSPARENT to the
     /// operator (never a hidden side-channel). `trigger` is the observed problem

@@ -76,6 +76,8 @@ pub mod wiring;
 #[cfg(test)]
 mod tests_deploy_drift;
 #[cfg(test)]
+mod tests_deploy_stuck;
+#[cfg(test)]
 mod tests_diagnosis;
 #[cfg(test)]
 mod tests_escalation_triage;
@@ -731,8 +733,53 @@ impl Overseer {
             return;
         }
         // Fail-safe drift probe: `None` on current / unresolved / any git error.
-        if let Some(drift) = observer.observe() {
-            observed.deploy_drift = Some(drift);
+        let Some(drift) = observer.observe() else {
+            return;
+        };
+
+        // Seam B (#4420) — LOOP-HALT: if this target SHA has reddened the canary
+        // `red_canary_halt_threshold()` times in a row, STOP re-signalling it and
+        // escalate to the operator ONCE. This is the fix for the 8h+ crash-loop
+        // where every tick re-attempted the SAME failing SHA and let DeployDrift
+        // grow silently (1 → 6 commits behind main). Below the threshold, drift
+        // still signals normally (no over-suppression of legitimate self-deploy).
+        let streak = deploy_trigger::red_canary_streak_for(&drift.target_commit);
+        if streak >= deploy_trigger::red_canary_halt_threshold() {
+            self.escalate_deploy_stuck_once(&drift.target_commit, drift.behind_commits, streak);
+            return;
+        }
+
+        observed.deploy_drift = Some(drift);
+    }
+
+    /// Escalate a persistently-red self-deploy target to the operator EXACTLY
+    /// ONCE (issue #4420). Latched process-globally (the daemon rebuilds the
+    /// `Overseer` every tick) so a stuck loop cannot flood the operator with
+    /// alerts. Always surfaces via structured tracing (≥ WARN) even when no
+    /// notifier is wired — a silently-stuck self-deploy is the exact fault this
+    /// closes, so the halt is never itself silent.
+    fn escalate_deploy_stuck_once(&self, target: &str, behind: usize, streak: u32) {
+        let threshold = deploy_trigger::red_canary_halt_threshold();
+        tracing::warn!(
+            target: "deploy_drift.stuck",
+            sha = %target,
+            streak,
+            threshold,
+            behind_commits = behind,
+            "self-deploy halted: canary persistently red for the same SHA",
+        );
+        // One-shot: only the first tick for this stuck SHA notifies the operator.
+        if !deploy_trigger::mark_deploy_stuck_escalated(target) {
+            return;
+        }
+        if let Some(notifier) = self.notifier.as_ref() {
+            let notification = OperatorNotification::deploy_stuck(
+                target,
+                ECOSYSTEM_OBSERVE_TARGET,
+                behind as u64,
+                streak,
+            );
+            let _ = notifier.notify(&notification);
         }
     }
 

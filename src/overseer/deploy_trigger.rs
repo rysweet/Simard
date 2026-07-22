@@ -243,6 +243,118 @@ fn is_full_hex_sha(s: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+// ═══════════════════════════ red-canary loop-halt ═══════════════════════════
+//
+// Seam B (issue #4420): the self-deploy loop was crash-looping for 8h+ — every
+// tick re-attempted the SAME failing SHA, refused on a red canary, and silently
+// let DeployDrift grow (1 → 6 commits behind main). The anti-thrash throttle
+// above only spaces attempts in TIME; it never STOPS a persistently-red SHA. So
+// this counts CONSECUTIVE red canaries per target SHA and, past a threshold,
+// lets the OBSERVE rail HALT re-signalling that SHA and escalate ONCE to the
+// operator instead of looping blind.
+//
+// Composes with (does NOT duplicate) the anti-thrash throttle: the throttle
+// bounds attempt frequency; this bounds attempt COUNT for a stuck SHA.
+
+/// Env var overriding the consecutive-red-canary count at which a stuck SHA
+/// halts and escalates. In the `SIMARD_OVERSEER_DEPLOY_*` namespace. A missing
+/// or unparseable value uses [`DEFAULT_RED_CANARY_HALT`]; any value below
+/// [`RED_CANARY_HALT_FLOOR`] is clamped up so the guard can never be disabled.
+pub const RED_CANARY_HALT_ENV: &str = "SIMARD_OVERSEER_DEPLOY_RED_CANARY_HALT";
+
+/// Default consecutive red canaries before a SHA is treated as stuck. Three
+/// gives a genuinely-flaky gate two retries before escalating, while still
+/// catching a hard regression well before drift grows unbounded.
+pub const DEFAULT_RED_CANARY_HALT: u32 = 3;
+
+/// Hard floor for the halt threshold: a mis-set env can never disable the guard
+/// (availability hardening — a silently-looping self-deploy is the exact fault
+/// #4420 fixes).
+pub const RED_CANARY_HALT_FLOOR: u32 = 2;
+
+/// PROCESS-GLOBAL consecutive-red-canary streak for the single SHA currently
+/// stuck. `None` when no SHA is stuck; `Some((sha, count))` otherwise. Holds AT
+/// MOST ONE active entry (bounded memory): a red canary for a NEW target
+/// supersedes the prior one, since a fresh merged head is a fresh attempt. Must
+/// be a `static` for the same reason the throttle is — the daemon rebuilds the
+/// acting `Overseer` every tick, so per-instance state could never accumulate a
+/// streak across ticks.
+static RED_CANARY_STREAK: std::sync::Mutex<Option<(String, u32)>> = std::sync::Mutex::new(None);
+
+/// PROCESS-GLOBAL one-shot latch for the stuck-escalation: the SHA already
+/// escalated to the operator, so a persisting stuck loop escalates AT MOST ONCE
+/// (no alert flooding) even though the OBSERVE rail runs every tick. At most one
+/// entry: a new stuck SHA replaces it.
+static DEPLOY_STUCK_ESCALATED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn lock_streak() -> std::sync::MutexGuard<'static, Option<(String, u32)>> {
+    RED_CANARY_STREAK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn lock_escalated() -> std::sync::MutexGuard<'static, Option<String>> {
+    DEPLOY_STUCK_ESCALATED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Record one canary OUTCOME for `sha` at the ACT/canary site. `is_red == true`
+/// (the canary reddened) increments that SHA's consecutive streak; `false` (the
+/// canary went green) CLEARS it — the SHA is no longer stuck, so the loop-halt
+/// guard re-arms from zero. A red for a NEW target starts its own count and
+/// clears any superseded SHA (at most one active stuck entry).
+pub(crate) fn record_red_canary_result(sha: &str, is_red: bool) {
+    let mut streak = lock_streak();
+    if is_red {
+        match streak.as_mut() {
+            Some((s, count)) if s == sha => *count = count.saturating_add(1),
+            _ => *streak = Some((sha.to_string(), 1)),
+        }
+    } else if matches!(streak.as_ref(), Some((s, _)) if s == sha) {
+        *streak = None;
+    }
+}
+
+/// The current consecutive red-canary streak for `sha` (`0` when it is not the
+/// stuck SHA). READ by the OBSERVE rail to decide whether to halt.
+pub(crate) fn red_canary_streak_for(sha: &str) -> u32 {
+    match lock_streak().as_ref() {
+        Some((s, count)) if s == sha => *count,
+        _ => 0,
+    }
+}
+
+/// The consecutive-red-canary count at which a SHA halts, from
+/// [`RED_CANARY_HALT_ENV`] (default [`DEFAULT_RED_CANARY_HALT`]), clamped to at
+/// least [`RED_CANARY_HALT_FLOOR`] so the guard is never disabled.
+pub(crate) fn red_canary_halt_threshold() -> u32 {
+    std::env::var(RED_CANARY_HALT_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(DEFAULT_RED_CANARY_HALT)
+        .max(RED_CANARY_HALT_FLOOR)
+}
+
+/// Latch `sha` as escalated, returning `true` only the FIRST time (so the caller
+/// escalates once) and `false` on every subsequent tick for that same SHA. A new
+/// stuck SHA replaces the latched one.
+pub(crate) fn mark_deploy_stuck_escalated(sha: &str) -> bool {
+    let mut latch = lock_escalated();
+    if matches!(latch.as_ref(), Some(s) if s == sha) {
+        return false;
+    }
+    *latch = Some(sha.to_string());
+    true
+}
+
+/// Reset the process-global red-canary streak AND the stuck-escalation latch.
+/// TEST-ONLY: both are statics shared across the whole process, so a test that
+/// exercises them must clear them to stay independent of ordering.
+#[cfg(test)]
+pub(crate) fn reset_red_canary_streak() {
+    *lock_streak() = None;
+    *lock_escalated() = None;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,5 +481,142 @@ mod tests {
                 None => std::env::remove_var(AUTONOMOUS_DEPLOY_ENV),
             }
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Seam B (issue #4420): consecutive red-canary streak — the loop-halt STATE.
+    //
+    // TDD (RED): these reference `record_red_canary_result`,
+    // `red_canary_streak_for`, `red_canary_halt_threshold`,
+    // `reset_red_canary_streak`, `RED_CANARY_HALT_ENV`, and
+    // `DEFAULT_RED_CANARY_HALT`, none of which exist yet — the crate test build
+    // FAILS to compile until Seam B lands. The streak is a process-global
+    // (per-SHA) counter written at the ACT/canary site and READ by the OBSERVE
+    // rail; these unit tests pin the pure state machine (no Overseer wiring).
+    //
+    // NOTE (no-collision contract with sibling PR #4409): Seam B introduces NO
+    // `deploy_throttle.rs` and NO `DeployAttemptLedger` — it is an orthogonal,
+    // in-process escalation counter that composes with #4409's durable ledger.
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// T2 — each consecutive red canary for the same SHA increments its streak.
+    #[test]
+    fn red_canary_streak_increments_on_consecutive_reds() {
+        let _guard = deploy_throttle_test_guard();
+        reset_red_canary_streak();
+        let sha = "a".repeat(40);
+        assert_eq!(red_canary_streak_for(&sha), 0, "no reds recorded yet");
+        record_red_canary_result(&sha, true);
+        assert_eq!(red_canary_streak_for(&sha), 1);
+        record_red_canary_result(&sha, true);
+        record_red_canary_result(&sha, true);
+        assert_eq!(
+            red_canary_streak_for(&sha),
+            3,
+            "each consecutive red canary increments the streak"
+        );
+        reset_red_canary_streak();
+    }
+
+    /// T3 — a GREEN (passing) canary result clears the streak: the SHA is no
+    /// longer stuck, so the loop-halt guard must re-arm from zero.
+    #[test]
+    fn red_canary_streak_resets_on_green() {
+        let _guard = deploy_throttle_test_guard();
+        reset_red_canary_streak();
+        let sha = "b".repeat(40);
+        record_red_canary_result(&sha, true);
+        record_red_canary_result(&sha, true);
+        assert_eq!(red_canary_streak_for(&sha), 2);
+        record_red_canary_result(&sha, false);
+        assert_eq!(
+            red_canary_streak_for(&sha),
+            0,
+            "a passing canary resets the streak for that SHA"
+        );
+        reset_red_canary_streak();
+    }
+
+    /// T3b — the streak is per-SHA and holds AT MOST ONE active entry: recording
+    /// a red for a NEW target starts its own count and clears the superseded SHA
+    /// (bounded memory; a new target is a fresh attempt, design steady-state).
+    #[test]
+    fn red_canary_streak_is_per_sha_with_one_active_entry() {
+        let _guard = deploy_throttle_test_guard();
+        reset_red_canary_streak();
+        let a = "a".repeat(40);
+        let b = "b".repeat(40);
+        record_red_canary_result(&a, true);
+        record_red_canary_result(&a, true);
+        assert_eq!(red_canary_streak_for(&a), 2);
+        // A different target supersedes the prior one.
+        record_red_canary_result(&b, true);
+        assert_eq!(red_canary_streak_for(&b), 1, "a new target starts fresh");
+        assert_eq!(
+            red_canary_streak_for(&a),
+            0,
+            "the superseded SHA is cleared (at most one active stuck entry)"
+        );
+        reset_red_canary_streak();
+    }
+
+    /// T3c — the halt threshold: documented default when unset, garbage falls
+    /// back to the default, and a sub-floor value is clamped up so the guard can
+    /// never be disabled (availability hardening). Env-mutating, so serialised.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn red_canary_halt_threshold_default_garbage_and_floor() {
+        let prev = std::env::var(RED_CANARY_HALT_ENV).ok();
+        // SAFETY: single-threaded, test-local env toggles restored at the end.
+        unsafe {
+            std::env::remove_var(RED_CANARY_HALT_ENV);
+        }
+        assert_eq!(
+            red_canary_halt_threshold(),
+            DEFAULT_RED_CANARY_HALT,
+            "unset ⇒ documented default"
+        );
+        assert_eq!(DEFAULT_RED_CANARY_HALT, 3, "documented default is 3");
+        unsafe {
+            std::env::set_var(RED_CANARY_HALT_ENV, "not-a-number");
+        }
+        assert_eq!(
+            red_canary_halt_threshold(),
+            DEFAULT_RED_CANARY_HALT,
+            "garbage ⇒ default (defensive parse)"
+        );
+        for disabling in ["0", "1"] {
+            unsafe {
+                std::env::set_var(RED_CANARY_HALT_ENV, disabling);
+            }
+            assert!(
+                red_canary_halt_threshold() >= 2,
+                "a sub-floor value ({disabling:?}) is clamped up to keep the guard armed"
+            );
+        }
+        unsafe {
+            std::env::set_var(RED_CANARY_HALT_ENV, "5");
+        }
+        assert_eq!(
+            red_canary_halt_threshold(),
+            5,
+            "a sane explicit override is honoured"
+        );
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(RED_CANARY_HALT_ENV, v),
+                None => std::env::remove_var(RED_CANARY_HALT_ENV),
+            }
+        }
+    }
+
+    /// T3d — the env var name matches the `SIMARD_OVERSEER_DEPLOY_*` sibling
+    /// namespace (documentation/consistency contract from the doc review).
+    #[test]
+    fn red_canary_halt_env_var_is_in_the_overseer_deploy_namespace() {
+        assert_eq!(
+            RED_CANARY_HALT_ENV,
+            "SIMARD_OVERSEER_DEPLOY_RED_CANARY_HALT"
+        );
     }
 }
