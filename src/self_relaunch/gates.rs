@@ -2,7 +2,7 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use super::types::{GateResult, RelaunchConfig, RelaunchGate, resolve_gate_timeout};
+use super::types::{GateResult, RelaunchConfig, RelaunchGate};
 use crate::error::SimardResult;
 
 /// Outcome of running a gate subprocess under a wall-clock bound (Brick A, #4415).
@@ -129,15 +129,14 @@ pub fn all_gates_passed(results: &[GateResult]) -> bool {
 
 fn run_gate(binary: &Path, gate: RelaunchGate, config: &RelaunchConfig) -> GateResult {
     match gate {
-        RelaunchGate::Smoke => run_smoke_gate(binary),
+        RelaunchGate::Smoke => run_smoke_gate(binary, config.gate_timeout),
         RelaunchGate::UnitTest => run_unit_test_gate(config),
-        RelaunchGate::GymBaseline => run_gym_baseline_gate(binary),
+        RelaunchGate::GymBaseline => run_gym_baseline_gate(binary, config.gate_timeout),
         RelaunchGate::RpcHealth => run_rpc_health_gate(binary, config),
     }
 }
 
-fn run_smoke_gate(binary: &Path) -> GateResult {
-    let timeout = resolve_gate_timeout();
+fn run_smoke_gate(binary: &Path, timeout: Duration) -> GateResult {
     let mut cmd = Command::new(binary);
     cmd.arg("--version");
     finish_gate(
@@ -181,8 +180,7 @@ fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
     )
 }
 
-fn run_gym_baseline_gate(binary: &Path) -> GateResult {
-    let timeout = resolve_gate_timeout();
+fn run_gym_baseline_gate(binary: &Path, timeout: Duration) -> GateResult {
     let mut cmd = Command::new(binary);
     cmd.args(["gym", "list"]);
     finish_gate(
@@ -241,7 +239,10 @@ mod tests {
 
     #[test]
     fn smoke_gate_handles_missing_binary() {
-        let result = run_smoke_gate(Path::new("/tmp/no-such-binary-48291"));
+        let result = run_smoke_gate(
+            Path::new("/tmp/no-such-binary-48291"),
+            Duration::from_secs(600),
+        );
         assert!(!result.passed);
     }
 
@@ -449,7 +450,10 @@ mod tests {
         // A plain gate failure (missing binary) must set `passed = false` but
         // leave `timed_out = false` — only an actual timeout sets the flag, so a
         // genuine regression is never misclassified as a flaky/transient timeout.
-        let result = run_smoke_gate(Path::new("/tmp/no-such-binary-48291"));
+        let result = run_smoke_gate(
+            Path::new("/tmp/no-such-binary-48291"),
+            Duration::from_secs(600),
+        );
         assert!(!result.passed);
         assert!(
             !result.timed_out,
