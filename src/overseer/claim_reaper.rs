@@ -246,6 +246,14 @@ pub struct ReapSummary {
     pub reclaimed: Vec<String>,
     /// Claims left untouched (live/fresh/unknown/still-investigating), fail-closed.
     pub skipped: usize,
+    /// Claims exempted from the staleness sweep because their goal is
+    /// standing/perpetual (issue #4437). A standing/perpetual goal is inherently
+    /// bursty — its engineer worktree idles (or is torn down) between the
+    /// improvements it periodically ships — so an idle/absent worktree is NORMAL,
+    /// not death. These claims are NEVER assessed, investigated, or reaped by the
+    /// heuristic; their lifecycle is owned by the OODA goal loop. Counted here
+    /// (not in `skipped`) so the exemption is observable in tick telemetry.
+    pub perpetual_exempt: usize,
     /// Claims whose reclaim hit an error and were contained (not aborted).
     pub errors: usize,
     /// Self-improvement interventions the investigations returned this sweep,
@@ -261,6 +269,15 @@ pub struct ReapSummary {
 /// ever reaping it (issue #4400), independent of per-goal polling.
 ///
 /// Policy applied per claim (see module docs):
+///   * Goal is standing/perpetual (`goal_id ∈ perpetual_goal_ids`, issue #4437)
+///     ⇒ EXEMPT — never assessed, investigated, or reaped. A standing/perpetual
+///     goal is inherently bursty (it ships a durable improvement periodically and
+///     idles — or tears its worktree down — between), so an idle/absent worktree
+///     is NORMAL, not death. This mirrors the `is_perpetual()` benign-idle
+///     exemption the OODA no-progress breaker already applies
+///     (`src/ooda_loop/no_progress.rs`, issue #2589) so the reaper and the breaker
+///     can never disagree about a standing goal's liveness. The claim's lifecycle
+///     is owned by the OODA goal loop, not this heuristic.
 ///   * `enabled == false` ⇒ no-op (off switch; not even `NoWorktree` reclaimed;
 ///     no investigation launched).
 ///   * [`ClaimLiveness::Dead`] `{ NoWorktree, .. }` ⇒ reclaim IMMEDIATELY — there
@@ -286,6 +303,7 @@ pub fn reap_stale_claims(
     investigator: &dyn StaleEngineerInvestigator,
     enabled: bool,
     stale_secs: u64,
+    perpetual_goal_ids: &std::collections::HashSet<String>,
 ) -> ReapSummary {
     let mut summary = ReapSummary::default();
 
@@ -297,6 +315,26 @@ pub fn reap_stale_claims(
     }
 
     for claim_key in ledger.list_engineer_claims() {
+        // Standing/perpetual exemption (issue #4437). A standing/perpetual goal is
+        // bursty by design: its engineer worktree idles — or is torn down and
+        // re-created — between the improvements it periodically ships, so an
+        // idle/absent worktree is NORMAL, not death. Exempt it BEFORE any liveness
+        // assessment or investigation so the reaper can never reclaim a healthy
+        // standing goal's live claim (the false positive #4437 fixes) and can
+        // never disagree with the OODA no-progress breaker's `is_perpetual()`
+        // benign-idle exemption (`no_progress.rs`, issue #2589). The claim's
+        // lifecycle is owned by the OODA goal loop, not this heuristic.
+        if perpetual_goal_ids.contains(goal_id_from_claim_key(&claim_key)) {
+            summary.perpetual_exempt += 1;
+            tracing::info!(
+                target: "simard::claim_reaper",
+                claim_key = %claim_key,
+                "[simard] claim-reaper: standing/perpetual goal exempt from \
+                 staleness reap (normal, not a fault) — claim + worktree preserved",
+            );
+            continue;
+        }
+
         // Classify the claim's engineer. Fail-closed: anything short of a
         // CONFIDENT dead verdict (Live, or a `HeartbeatStale` age at/under the
         // threshold, or an unknown age) is skipped and never reclaimed.
@@ -1374,6 +1412,13 @@ mod tests {
 
     const STALE_SECS: u64 = 1800;
 
+    /// The empty standing/perpetual-goal exemption set (issue #4437): the common
+    /// case for tests that do not exercise a perpetual goal, so no claim is
+    /// exempted and the existing staleness policy applies unchanged.
+    fn no_perpetual() -> std::collections::HashSet<String> {
+        std::collections::HashSet::new()
+    }
+
     fn dead(reason: DeadReason, age: Option<u64>) -> ClaimLiveness {
         ClaimLiveness::Dead {
             reason,
@@ -1476,6 +1521,107 @@ mod tests {
         }
     }
 
+    /// Build a standing/perpetual-goal exemption set from goal ids (issue #4437).
+    fn perpetual_set(goal_ids: &[&str]) -> std::collections::HashSet<String> {
+        goal_ids.iter().map(|g| g.to_string()).collect()
+    }
+
+    // ----- #4437: standing/perpetual goals are EXEMPT from the staleness reap ---
+
+    #[test]
+    fn perpetual_goal_claim_is_exempt_even_when_heartbeat_stale_beyond_threshold() {
+        // A standing/perpetual goal's engineer worktree idled far past the
+        // staleness threshold — the exact false positive #4437 fixes. It MUST NOT
+        // be assessed-for-reap, investigated, or reclaimed.
+        let key = "rysweet/Simard:advance-parity-f29bb15c";
+        let ledger = FakeLedger::new(&[key]);
+        let probe = MapProbe::new(&[(key, dead(DeadReason::HeartbeatStale, Some(999_999)))]);
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown();
+
+        let summary = reap_stale_claims(
+            &ledger,
+            &probe,
+            &cleanup,
+            &investigator,
+            true,
+            STALE_SECS,
+            &perpetual_set(&["advance-parity-f29bb15c"]),
+        );
+
+        // Claim + worktree preserved; counted as a perpetual exemption, NOT a reap.
+        assert!(
+            summary.reclaimed.is_empty(),
+            "perpetual claim must not be reaped"
+        );
+        assert_eq!(summary.perpetual_exempt, 1);
+        assert_eq!(summary.skipped, 0);
+        assert!(
+            ledger.released.borrow().is_empty(),
+            "no release for a perpetual claim"
+        );
+        assert!(
+            cleanup.cleaned.lock().expect("cleaned mutex").is_empty(),
+            "no worktree cleanup for a perpetual claim",
+        );
+        // Exempted BEFORE the investigate-before-reap seam — evidence untouched.
+        assert!(
+            investigator.investigated().is_empty(),
+            "a perpetual goal is exempt before investigation runs",
+        );
+    }
+
+    #[test]
+    fn perpetual_goal_claim_is_exempt_even_with_no_worktree() {
+        // Even a `NoWorktree` classification (worktree torn down between bursts) is
+        // normal for a standing/perpetual goal — exempt, never an unconditional reap.
+        let key = "rysweet/Simard:advance-parity-f29bb15c";
+        let ledger = FakeLedger::new(&[key]);
+        let probe = MapProbe::new(&[(key, dead(DeadReason::NoWorktree, None))]);
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown();
+
+        let summary = reap_stale_claims(
+            &ledger,
+            &probe,
+            &cleanup,
+            &investigator,
+            true,
+            STALE_SECS,
+            &perpetual_set(&["advance-parity-f29bb15c"]),
+        );
+
+        assert!(summary.reclaimed.is_empty());
+        assert_eq!(summary.perpetual_exempt, 1);
+        assert!(ledger.released.borrow().is_empty());
+        assert!(investigator.investigated().is_empty());
+    }
+
+    #[test]
+    fn non_perpetual_stale_claim_still_reaps_when_exemption_set_is_disjoint() {
+        // The exemption is scoped to the named goal only: a DIFFERENT stale goal
+        // must still follow the normal investigate-then-reap path unchanged.
+        let key = "rysweet/Simard:some-terminal-goal";
+        let ledger = FakeLedger::new(&[key]);
+        let probe = MapProbe::new(&[(key, dead(DeadReason::HeartbeatStale, Some(3600)))]);
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown();
+
+        let summary = reap_stale_claims(
+            &ledger,
+            &probe,
+            &cleanup,
+            &investigator,
+            true,
+            STALE_SECS,
+            &perpetual_set(&["a-different-perpetual-goal"]),
+        );
+
+        assert_eq!(summary.reclaimed, vec![key.to_string()]);
+        assert_eq!(summary.perpetual_exempt, 0);
+        assert_eq!(investigator.investigated(), vec![key.to_string()]);
+    }
+
     // ----- T1: no-worktree ⇒ reaped immediately ------------------------------
 
     #[test]
@@ -1492,6 +1638,7 @@ mod tests {
             &FakeInvestigator::dead_unknown(),
             true,
             STALE_SECS,
+            &no_perpetual(),
         );
 
         assert_eq!(summary.reclaimed, vec![key.to_string()]);
@@ -1520,6 +1667,7 @@ mod tests {
             &FakeInvestigator::dead_unknown(),
             true,
             STALE_SECS,
+            &no_perpetual(),
         );
 
         assert!(
@@ -1548,6 +1696,7 @@ mod tests {
             &FakeInvestigator::dead_unknown(),
             true,
             STALE_SECS,
+            &no_perpetual(),
         );
 
         assert_eq!(summary.reclaimed, vec![key.to_string()]);
@@ -1572,6 +1721,7 @@ mod tests {
             &FakeInvestigator::dead_unknown(),
             true,
             STALE_SECS,
+            &no_perpetual(),
         );
 
         assert!(summary.reclaimed.is_empty());
@@ -1598,6 +1748,7 @@ mod tests {
             &FakeInvestigator::dead_unknown(),
             true,
             STALE_SECS,
+            &no_perpetual(),
         );
 
         // Exactly the dead claim reclaimed — via release_engineer_claim ONLY.
@@ -1625,6 +1776,7 @@ mod tests {
             &FakeInvestigator::dead_unknown(),
             false,
             STALE_SECS,
+            &no_perpetual(),
         );
 
         assert!(
@@ -1652,6 +1804,7 @@ mod tests {
             &FakeInvestigator::dead_unknown(),
             true,
             STALE_SECS,
+            &no_perpetual(),
         );
 
         assert!(summary.reclaimed.is_empty());
@@ -1674,6 +1827,7 @@ mod tests {
             &FakeInvestigator::dead_unknown(),
             true,
             STALE_SECS,
+            &no_perpetual(),
         );
 
         assert!(summary.reclaimed.is_empty());
@@ -1702,6 +1856,7 @@ mod tests {
             &FakeInvestigator::dead_unknown(),
             true,
             STALE_SECS,
+            &no_perpetual(),
         );
 
         let mut reclaimed = summary.reclaimed.clone();
@@ -1732,6 +1887,7 @@ mod tests {
             &FakeInvestigator::dead_unknown(),
             true,
             STALE_SECS,
+            &no_perpetual(),
         );
 
         // The good claim is still reclaimed despite the bad claim erroring.
@@ -1765,6 +1921,7 @@ mod tests {
             &FakeInvestigator::dead_unknown(),
             true,
             STALE_SECS,
+            &no_perpetual(),
         );
 
         assert!(summary.reclaimed.contains(&good.to_string()));
@@ -1948,7 +2105,15 @@ mod tests {
         let cleanup = FakeCleanup::new().with_order_log(Arc::clone(&log));
         let investigator = FakeInvestigator::dead_unknown().with_order_log(Arc::clone(&log));
 
-        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+        let summary = reap_stale_claims(
+            &ledger,
+            &probe,
+            &cleanup,
+            &investigator,
+            true,
+            STALE_SECS,
+            &no_perpetual(),
+        );
 
         assert_eq!(summary.reclaimed, vec![key.to_string()]);
         let events = log.lock().expect("order log").clone();
@@ -1976,7 +2141,15 @@ mod tests {
         let cleanup = FakeCleanup::new();
         let investigator = FakeInvestigator::dead_unknown();
 
-        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+        let summary = reap_stale_claims(
+            &ledger,
+            &probe,
+            &cleanup,
+            &investigator,
+            true,
+            STALE_SECS,
+            &no_perpetual(),
+        );
 
         assert_eq!(summary.reclaimed, vec![key.to_string()]);
         assert!(
@@ -1998,7 +2171,15 @@ mod tests {
         let investigator = FakeInvestigator::dead_unknown()
             .with_outcome(key, outcome(InvestigationVerdict::Pending, Vec::new()));
 
-        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+        let summary = reap_stale_claims(
+            &ledger,
+            &probe,
+            &cleanup,
+            &investigator,
+            true,
+            STALE_SECS,
+            &no_perpetual(),
+        );
 
         assert!(
             summary.reclaimed.is_empty(),
@@ -2033,7 +2214,15 @@ mod tests {
         let investigator = FakeInvestigator::dead_unknown()
             .with_outcome(key, outcome(InvestigationVerdict::StillAlive, Vec::new()));
 
-        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+        let summary = reap_stale_claims(
+            &ledger,
+            &probe,
+            &cleanup,
+            &investigator,
+            true,
+            STALE_SECS,
+            &no_perpetual(),
+        );
 
         assert!(summary.reclaimed.is_empty());
         assert!(ledger.released.borrow().is_empty());
@@ -2077,7 +2266,15 @@ mod tests {
                 ),
             );
 
-        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+        let summary = reap_stale_claims(
+            &ledger,
+            &probe,
+            &cleanup,
+            &investigator,
+            true,
+            STALE_SECS,
+            &no_perpetual(),
+        );
 
         assert!(
             summary.reclaimed.is_empty(),
@@ -2117,7 +2314,15 @@ mod tests {
             ),
         );
 
-        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+        let summary = reap_stale_claims(
+            &ledger,
+            &probe,
+            &cleanup,
+            &investigator,
+            true,
+            STALE_SECS,
+            &no_perpetual(),
+        );
 
         // Still reaped, via the shared release chokepoint + cleanup.
         assert_eq!(summary.reclaimed, vec![key.to_string()]);
@@ -2146,7 +2351,15 @@ mod tests {
             ),
         );
 
-        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+        let summary = reap_stale_claims(
+            &ledger,
+            &probe,
+            &cleanup,
+            &investigator,
+            true,
+            STALE_SECS,
+            &no_perpetual(),
+        );
 
         assert_eq!(summary.reclaimed, vec![key.to_string()]);
         assert_eq!(*ledger.released.borrow(), vec![key.to_string()]);
@@ -2174,7 +2387,15 @@ mod tests {
             outcome(InvestigationVerdict::StillAlive, vec![note.clone()]),
         );
 
-        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+        let summary = reap_stale_claims(
+            &ledger,
+            &probe,
+            &cleanup,
+            &investigator,
+            true,
+            STALE_SECS,
+            &no_perpetual(),
+        );
 
         assert!(summary.reclaimed.is_empty(), "StillAlive is never reaped");
         assert_eq!(
@@ -2199,7 +2420,15 @@ mod tests {
         let investigator =
             FakeInvestigator::dead_unknown().with_outcome(key, InvestigationOutcome::default());
 
-        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+        let summary = reap_stale_claims(
+            &ledger,
+            &probe,
+            &cleanup,
+            &investigator,
+            true,
+            STALE_SECS,
+            &no_perpetual(),
+        );
 
         assert!(
             summary.reclaimed.is_empty(),
@@ -2222,8 +2451,15 @@ mod tests {
         let cleanup = FakeCleanup::new();
         let investigator = FakeInvestigator::dead_unknown();
 
-        let summary =
-            reap_stale_claims(&ledger, &probe, &cleanup, &investigator, false, STALE_SECS);
+        let summary = reap_stale_claims(
+            &ledger,
+            &probe,
+            &cleanup,
+            &investigator,
+            false,
+            STALE_SECS,
+            &no_perpetual(),
+        );
 
         assert!(summary.reclaimed.is_empty());
         assert!(summary.pending_interventions.is_empty());
@@ -2467,8 +2703,15 @@ mod tests {
             let probe = MapProbe::new(&[(key, dead(DeadReason::HeartbeatStale, Some(9000)))]);
             let cleanup = FakeCleanup::new();
 
-            let summary =
-                reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+            let summary = reap_stale_claims(
+                &ledger,
+                &probe,
+                &cleanup,
+                &investigator,
+                true,
+                STALE_SECS,
+                &no_perpetual(),
+            );
 
             assert!(
                 summary.reclaimed.is_empty(),
@@ -2524,7 +2767,15 @@ mod tests {
         let state = tempfile::tempdir().expect("tempdir");
         let investigator = RecipeStaleEngineerInvestigator::new(state.path(), "rysweet/Simard");
 
-        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+        let summary = reap_stale_claims(
+            &ledger,
+            &probe,
+            &cleanup,
+            &investigator,
+            true,
+            STALE_SECS,
+            &no_perpetual(),
+        );
         assert_eq!(
             summary.reclaimed,
             vec![ghost.to_string()],

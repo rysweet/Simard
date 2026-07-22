@@ -58,6 +58,7 @@ use crate::overseer::notify::DualChannelNotifier;
 use crate::overseer::observer::StewardshipIssueFiler;
 use crate::overseer::sensor::{
     SnapshotStatusReader, blocked_goals_from_board, detect_workstream_gaps, in_flight_from_board,
+    perpetual_active_goal_ids_from_board,
 };
 use crate::overseer::signal::{DETAIL_CAP, GapItem, Signal, sanitize_detail};
 use crate::overseer::{ActOutcome, Capabilities, CycleReport, Overseer};
@@ -826,6 +827,10 @@ impl GoalCurator for BoardGoalCurator {
 
     fn blocked_goals(&self) -> Result<Vec<BlockedGoal>, OverseerError> {
         Ok(blocked_goals_from_board(&self.load()?))
+    }
+
+    fn perpetual_active_goal_ids(&self) -> Result<Vec<String>, OverseerError> {
+        Ok(perpetual_active_goal_ids_from_board(&self.load()?))
     }
 
     fn observe_board(&self) -> Result<(Vec<BlockedGoal>, Vec<InFlightItem>), OverseerError> {

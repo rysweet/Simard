@@ -230,6 +230,20 @@ pub fn blocked_goals_from_board(board: &GoalBoard) -> Vec<BlockedGoal> {
     board.active.iter().filter_map(blocked_goal_of).collect()
 }
 
+/// Project the ids of the active goals that are standing/perpetual
+/// ([`ActiveGoal::is_perpetual`], #2589/#2609) — the staleness-reap EXEMPTION set
+/// the claim reaper needs (issue #4437). Pure and read-only. Reuses the SAME
+/// `is_perpetual()` predicate `blocked_goals_from_board` and the OODA no-progress
+/// breaker key on, so there is exactly one notion of "standing/perpetual".
+pub fn perpetual_active_goal_ids_from_board(board: &GoalBoard) -> Vec<String> {
+    board
+        .active
+        .iter()
+        .filter(|g| g.is_perpetual())
+        .map(|g| g.id.clone())
+        .collect()
+}
+
 /// Project one active goal onto a [`BlockedGoal`] when it is `Blocked`.
 fn blocked_goal_of(goal: &ActiveGoal) -> Option<BlockedGoal> {
     let GoalProgress::Blocked(reason) = &goal.status else {
@@ -1000,5 +1014,37 @@ mod tests {
     #[test]
     fn in_flight_from_empty_board_is_empty() {
         assert!(in_flight_from_board(&GoalBoard::new()).is_empty());
+    }
+
+    #[test]
+    fn perpetual_active_goal_ids_returns_only_standing_goals() {
+        // Two standing/perpetual goals + one ordinary terminal goal on the board.
+        // Only the standing ids are the reaper's exemption set (issue #4437).
+        let mut board = GoalBoard::new();
+        board.active.push(
+            ActiveGoal::new("advance-parity-f29bb15c", "advance kgpacks parity", 1).mark_standing(),
+        );
+        board
+            .active
+            .push(ActiveGoal::new("terminal-goal", "ship one PR then done", 2));
+        board.active.push(
+            ActiveGoal::new("research-cognition", "continuously research cognition", 1)
+                .mark_standing(),
+        );
+
+        let ids = perpetual_active_goal_ids_from_board(&board);
+
+        assert_eq!(ids.len(), 2, "only the two standing goals are exempt");
+        assert!(ids.contains(&"advance-parity-f29bb15c".to_string()));
+        assert!(ids.contains(&"research-cognition".to_string()));
+        assert!(
+            !ids.contains(&"terminal-goal".to_string()),
+            "a terminal goal is never exempt from the staleness reap",
+        );
+    }
+
+    #[test]
+    fn perpetual_active_goal_ids_empty_board_is_empty() {
+        assert!(perpetual_active_goal_ids_from_board(&GoalBoard::new()).is_empty());
     }
 }

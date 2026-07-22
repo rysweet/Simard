@@ -1385,6 +1385,28 @@ impl Overseer {
         let Some(reaper) = self.claim_reaper.as_ref() else {
             return;
         };
+        // Standing/perpetual exemption set (issue #4437): the ids of the active
+        // goals that are standing/perpetual, so the reaper never reclaims a healthy
+        // standing goal's live engineer claim — mirroring the OODA no-progress
+        // breaker's `is_perpetual()` benign-idle exemption. A board-read failure
+        // degrades to an EMPTY set (logged): the reaper then exempts nothing and
+        // falls back to the existing investigate-before-reap policy (fail-closed
+        // toward the agentic verdict, never toward a spurious reclaim).
+        let perpetual_goal_ids: std::collections::HashSet<String> = self
+            .caps
+            .goals
+            .perpetual_active_goal_ids()
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    target: "simard::claim_reaper",
+                    error = %error,
+                    "[simard] claim-reaper: perpetual-goal exemption read failed \
+                     (degrading to empty set; investigate-before-reap still applies)",
+                );
+                Vec::new()
+            })
+            .into_iter()
+            .collect();
         let summary = claim_reaper::reap_stale_claims(
             reaper.ledger.as_ref(),
             reaper.probe.as_ref(),
@@ -1392,6 +1414,7 @@ impl Overseer {
             reaper.investigator.as_ref(),
             self.claim_reap_enabled,
             self.claim_reap_stale_secs,
+            &perpetual_goal_ids,
         );
         // Stage the investigations' self-improvement interventions (issue #4400)
         // for dispatch through the SAME gated Act path health-review uses; they

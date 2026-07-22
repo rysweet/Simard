@@ -676,6 +676,18 @@ pub trait GoalCurator {
     fn unblock(&self, _goal_id: &str) -> Result<(), OverseerError> {
         Ok(())
     }
+
+    /// The ids of the active goals that are standing/perpetual
+    /// ([`ActiveGoal::is_perpetual`], #2589/#2609) — the staleness-reap EXEMPTION
+    /// set the claim reaper consults so it never reclaims a healthy standing
+    /// goal's live engineer claim (issue #4437), mirroring the OODA no-progress
+    /// breaker's benign-idle exemption. Read-only; a board-read failure degrades
+    /// to an empty list (the reaper then exempts nothing — fail-closed toward the
+    /// existing investigate-before-reap policy, never toward a spurious reclaim).
+    /// The default returns an empty list for fakes that do not model a board.
+    fn perpetual_active_goal_ids(&self) -> Result<Vec<String>, OverseerError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Run a quality-audit loop (crusty-old-engineer-gated).
