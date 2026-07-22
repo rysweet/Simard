@@ -1,6 +1,6 @@
 ---
 title: Self-deploy API reference
-description: Reference for the reconciliation detector, build-from-source self-deploy orchestrator extensions, the DaemonRestarter abstraction, the dual protective backup, the engineer-orphan reaper, the simard self-health probe, the Overseer autonomous deploy wiring (its security prerequisites/trust model, Signal::DeployDriftDetected, ProblemKind::DeployDrift, Intervention::Deploy, GuardedDeployer, the OrchestratedBinaryDeployer adapter, notify-on-every-outcome, and the min-interval anti-thrash guard), and the UpdateConfig / environment fields that govern self-deploy.
+description: Reference for the reconciliation detector, build-from-source self-deploy orchestrator extensions, the DaemonRestarter abstraction, the dual protective backup, the engineer-orphan reaper, the simard self-health probe (including the entrypoint-parity probe that verifies the PATH-resolved `simard` matches the installed version), the Overseer autonomous deploy wiring (its security prerequisites/trust model, Signal::DeployDriftDetected, ProblemKind::DeployDrift, Intervention::Deploy, GuardedDeployer, the OrchestratedBinaryDeployer adapter, notify-on-every-outcome, and the min-interval anti-thrash guard), and the UpdateConfig / environment fields that govern self-deploy.
 last_updated: 2026-07-21
 review_schedule: as-needed
 owner: simard
@@ -329,7 +329,9 @@ model.
 
 A new top-level subcommand (sibling of `self-test`) that runs the post-deploy
 probes and prints a structured report. The orchestrator calls the same probe
-internally.
+internally. There are **six** probes: `version_advanced`, `memory_intact`,
+`goal_board_intact`, `brains_llm_backed`, `no_quarantine`, and
+[`entrypoint_parity`](#entrypointparityprobe).
 
 ```text
 simard self-health [--json] [--pre-deploy-facts=N]
@@ -352,13 +354,64 @@ Exit code: 0 when every probe is healthy; non-zero when any probe fails.
     "memory_intact":    { "healthy": false, "live_facts": 1180, "baseline_facts": 1206 },
     "goal_board_intact":{ "healthy": true,  "active_goals": 5 },
     "brains_llm_backed":{ "healthy": true,  "fallback_records": 0 },
-    "no_quarantine":    { "healthy": true,  "quarantined": false }
+    "no_quarantine":    { "healthy": true,  "quarantined": false },
+    "entrypoint_parity":{ "healthy": true,  "installed_version": "simard 0.35.0", "path_version": "simard 0.35.0", "resolved_path": "/home/you/.local/bin/simard", "canonical_path": "/home/you/.simard/bin/simard", "path_mismatch": false, "foreign_shadow": false }
   }
 }
 ```
 
 `healthy` is the logical AND of every probe's `healthy`. A `false` from any probe
 fails the health check and triggers rollback when invoked by the orchestrator.
+
+### `EntrypointParityProbe`
+
+The sixth probe verifies the [PATH-entrypoint ownership guarantee](./simard-installer.md#path-entrypoint-ownership-guarantee):
+the `simard` resolved on `PATH` must **be** the installed binary — asserted by
+path identity first, then version equality.
+
+```rust
+/// Probe: the PATH-resolved `simard` is the installed entrypoint (no stale
+/// entrypoint / no foreign shadow). Distinct from `VersionAdvancedProbe`,
+/// which compares git build commits; this asserts path identity against
+/// `$SIMARD_HOME/bin/simard` and compares the binary's own `--version` string.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntrypointParityProbe {
+    pub healthy: bool,
+    /// Installed binary's own `--version` string: `format!("simard {}", CARGO_PKG_VERSION)`.
+    pub installed_version: String,
+    /// `--version` reported by the `simard` resolved on `PATH`. Empty when
+    /// `simard` could not be resolved or executed.
+    pub path_version: String,
+    /// The PATH-resolved `simard` path, e.g. `~/.local/bin/simard`. Empty when unresolved.
+    pub resolved_path: String,
+    /// The canonicalized (`readlink -f`) target of `resolved_path`. Must equal
+    /// `$SIMARD_HOME/bin/simard` for the probe to be healthy. Empty when unresolved.
+    pub canonical_path: String,
+    /// `true` when `canonical_path` does not equal the installed
+    /// `$SIMARD_HOME/bin/simard` — a stale file or foreign shadow occupies PATH
+    /// even if the version strings happen to match. Always fails the probe.
+    pub path_mismatch: bool,
+    /// `true` when a foreign (non-installer-owned) `simard` occupies the
+    /// entrypoint path. Always fails the probe.
+    pub foreign_shadow: bool,
+}
+```
+
+The probe is fail-closed: it degrades to `healthy: false` on **any** of
+`simard` not resolvable on `PATH`, the `--version` exec failing or exiting
+non-zero, a **path mismatch** (`canonical_path` != `$SIMARD_HOME/bin/simard`), a
+version mismatch, or a foreign shadow. The path-identity check is what catches a
+same-version stale file that a version-string comparison alone would miss. It
+resolves and canonicalizes the PATH `simard` and executes `simard --version`
+exactly once (argv-only, no shell, bounded output) and never calls into the
+running daemon, so it adds no recursion or measurable cost to the health cycle.
+
+The probe is added to `SelfHealthProbes` as a new `entrypoint_parity` field and
+is included in `all_healthy()`; its table row is rendered by the `self-health`
+subcommand alongside the other five probes (see the `simard self-health`
+command wiring). The `SelfHealthReport` JSON field is additive and carries
+`#[serde(default)]` so an older orchestrator deserializing a newer report
+defaults it to a fail-closed value rather than erroring.
 
 ## `UpdateConfig` self-deploy fields
 

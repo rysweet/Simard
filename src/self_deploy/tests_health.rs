@@ -2,8 +2,8 @@
 //! and the durable `simard self-health --json` shape.
 
 use super::health::{
-    BrainsLlmBackedProbe, GoalBoardIntactProbe, MemoryIntactProbe, NoQuarantineProbe,
-    SelfHealthProbes, SelfHealthReport, VersionAdvancedProbe,
+    BrainsLlmBackedProbe, EntrypointParityProbe, GoalBoardIntactProbe, MemoryIntactProbe,
+    NoQuarantineProbe, SelfHealthProbes, SelfHealthReport, VersionAdvancedProbe,
 };
 
 fn all_healthy_probes() -> SelfHealthProbes {
@@ -29,6 +29,15 @@ fn all_healthy_probes() -> SelfHealthProbes {
         no_quarantine: NoQuarantineProbe {
             healthy: true,
             quarantined: false,
+        },
+        entrypoint_parity: EntrypointParityProbe {
+            healthy: true,
+            installed_version: "simard 0.35.0".to_string(),
+            path_version: "simard 0.35.0".to_string(),
+            resolved_path: "/home/you/.local/bin/simard".to_string(),
+            canonical_path: "/home/you/.simard/bin/simard".to_string(),
+            path_mismatch: false,
+            foreign_shadow: false,
         },
     }
 }
@@ -63,6 +72,10 @@ fn any_single_unhealthy_probe_fails_the_report() {
     let mut p = all_healthy_probes();
     p.no_quarantine.healthy = false;
     assert!(!SelfHealthReport::compute(p).healthy);
+
+    let mut p = all_healthy_probes();
+    p.entrypoint_parity.healthy = false;
+    assert!(!SelfHealthReport::compute(p).healthy);
 }
 
 #[test]
@@ -77,6 +90,7 @@ fn report_serializes_with_documented_top_level_keys() {
         "goal_board_intact",
         "brains_llm_backed",
         "no_quarantine",
+        "entrypoint_parity",
     ] {
         assert!(probes.get(key).is_some(), "probes.{key} must be present");
     }
