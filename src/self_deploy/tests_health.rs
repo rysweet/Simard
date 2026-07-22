@@ -129,3 +129,143 @@ fn memory_intact_baseline_is_optional() {
     assert_eq!(probe.baseline_facts, None);
     assert_eq!(probe.live_facts, 900);
 }
+
+// ── Root Cause A end-to-end: the `no_quarantine` probe scans the live-store
+//    directory (`<state_root>/state/`) and applies the window filter ──────────
+//
+// These exercise `run_self_health_probe` against a real on-disk state root so
+// they pin BOTH halves of Root Cause A:
+//   * the probe scans `resolve_subdir("state")` (where the live `cognitive`
+//     store and its quarantines actually live), NOT top-level `~/.simard`; and
+//   * it only FAILS on a quarantine whose mtime is at/after the window start,
+//     so retained historical snapshots let the probe clear.
+
+use crate::journal::test_support::FakeMemory;
+use crate::self_deploy::health::run_self_health_probe;
+use crate::state_root::STATE_ROOT_ENV;
+
+/// Scoped `SIMARD_STATE_ROOT` override that restores on drop. Env access is
+/// process-global, so the tests below run under `#[serial]`.
+struct StateRootGuard {
+    prev: Option<std::ffi::OsString>,
+}
+
+impl StateRootGuard {
+    fn set(value: &std::path::Path) -> Self {
+        let prev = std::env::var_os(STATE_ROOT_ENV);
+        // SAFETY: serialized via #[serial(simard_state_root_env, cognitive_memory)].
+        unsafe {
+            std::env::set_var(STATE_ROOT_ENV, value);
+        }
+        Self { prev }
+    }
+}
+
+impl Drop for StateRootGuard {
+    fn drop(&mut self) {
+        // SAFETY: serialized via #[serial(simard_state_root_env, cognitive_memory)].
+        unsafe {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(STATE_ROOT_ENV, v),
+                None => std::env::remove_var(STATE_ROOT_ENV),
+            }
+        }
+    }
+}
+
+fn set_mtime(path: &std::path::Path, when: std::time::SystemTime) {
+    let times = std::fs::FileTimes::new().set_modified(when);
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_times(times)
+        .unwrap();
+}
+
+/// Acceptance #2 + directory-targeting: a FRESH quarantine created under
+/// `<state_root>/state/` (mtime ≥ window start) fails the `no_quarantine` probe.
+#[test]
+#[serial_test::serial(simard_state_root_env, cognitive_memory)]
+fn no_quarantine_fails_on_fresh_quarantine_in_state_dir() {
+    let root = tempfile::tempdir().unwrap();
+    let _g = StateRootGuard::set(root.path());
+    let state = root.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+
+    // A fresh quarantine (mtime ≈ now) inside the window.
+    std::fs::write(state.join("cognitive.corrupt-20260722"), b"corrupt").unwrap();
+
+    let window = chrono::Utc::now() - chrono::Duration::seconds(120);
+    let mem = FakeMemory::new();
+    let report = run_self_health_probe(&mem, "deadbeef", None, 0, window).unwrap();
+
+    assert!(
+        report.probes.no_quarantine.quarantined,
+        "a fresh quarantine under <state_root>/state/ must be detected"
+    );
+    assert!(
+        !report.probes.no_quarantine.healthy,
+        "no_quarantine must FAIL on fresh corruption"
+    );
+}
+
+/// Acceptance #1: retained historical snapshots (mtime before the window) under
+/// `<state_root>/state/` do NOT fail the probe — it reports healthy and can
+/// finally clear.
+#[test]
+#[serial_test::serial(simard_state_root_env, cognitive_memory)]
+fn no_quarantine_passes_with_only_historical_quarantines_in_state_dir() {
+    let root = tempfile::tempdir().unwrap();
+    let _g = StateRootGuard::set(root.path());
+    let state = root.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+
+    // The window opens now; the retained snapshots below predate it.
+    let window = chrono::Utc::now();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 24 * 3600);
+    for i in 0..5 {
+        let p = state.join(format!("cognitive.corrupt-{i:04}"));
+        std::fs::write(&p, b"forensic").unwrap();
+        set_mtime(&p, old);
+    }
+    // The live store files coexist and must not be mistaken for corruption.
+    std::fs::write(state.join("cognitive"), b"live").unwrap();
+    std::fs::write(state.join("cognitive.wal"), b"wal").unwrap();
+
+    let mem = FakeMemory::new();
+    let report = run_self_health_probe(&mem, "deadbeef", None, 0, window).unwrap();
+
+    assert!(
+        !report.probes.no_quarantine.quarantined,
+        "historical retained snapshots must not be flagged as current corruption"
+    );
+    assert!(
+        report.probes.no_quarantine.healthy,
+        "no_quarantine must be HEALTHY when only historical snapshots exist"
+    );
+}
+
+/// Directory-targeting regression: a fresh quarantine at TOP-LEVEL
+/// `<state_root>/` (the pre-fix scan location) must NOT fail the probe, because
+/// the live store and its quarantines live under `<state_root>/state/`. This
+/// pins that probe and cleanup agree on the same live-store directory.
+#[test]
+#[serial_test::serial(simard_state_root_env, cognitive_memory)]
+fn no_quarantine_scans_state_dir_not_top_level() {
+    let root = tempfile::tempdir().unwrap();
+    let _g = StateRootGuard::set(root.path());
+    // Empty live-store dir; the only quarantine is at the wrong (top) level.
+    std::fs::create_dir_all(root.path().join("state")).unwrap();
+    std::fs::write(root.path().join("cognitive.corrupt-toplevel"), b"corrupt").unwrap();
+
+    let window = chrono::Utc::now() - chrono::Duration::seconds(120);
+    let mem = FakeMemory::new();
+    let report = run_self_health_probe(&mem, "deadbeef", None, 0, window).unwrap();
+
+    assert!(
+        !report.probes.no_quarantine.quarantined,
+        "the probe must scan <state_root>/state/, not top-level <state_root>"
+    );
+    assert!(report.probes.no_quarantine.healthy);
+}

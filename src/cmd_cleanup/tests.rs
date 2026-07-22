@@ -925,3 +925,103 @@ fn corrupt_db_keeps_young_library_quarantine() {
     assert!(young.exists(), "young library quarantine should survive");
     assert_eq!(report.bytes_freed, 0);
 }
+
+/// Root Cause B (issue #4469): the live cognitive store and its quarantines live
+/// under `<state_root>/state/` (e.g. `~/.simard/state/cognitive`), NOT top-level
+/// `~/.simard`. Before this fix `remove_old_corrupt_dbs` only scanned the
+/// top-level dir, so corrupt quarantines accumulated unbounded under `state/`
+/// (62 artifacts on the live host). Cleanup must now also reclaim the `state/`
+/// subdir with the SAME age + keep-last-N + largest-asset bounds, applied
+/// independently per directory, while never touching the live store.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn corrupt_db_reclaims_state_subdir_quarantines_bounded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = tmp.path().join(".simard").join("state");
+    std::fs::create_dir_all(&state).unwrap();
+
+    // Resolve the state root via HOME/.simard: ensure no leaked SIMARD_STATE_ROOT
+    // from another test redirects `resolve_subdir("state")` elsewhere.
+    let prev_state_root = std::env::var_os(crate::state_root::STATE_ROOT_ENV);
+    // SAFETY: serialized via #[serial(cognitive_memory)]; restored below.
+    unsafe { std::env::remove_var(crate::state_root::STATE_ROOT_ENV) };
+
+    // Aged quarantines under state/ — must be reclaimed (the accumulation bug).
+    let aged = [
+        "cognitive.corrupt-1700000000",
+        "cognitive.wal.corrupt-1700000000",
+    ];
+    for q in &aged {
+        let p = state.join(q);
+        std::fs::write(&p, b"aged-corrupt").unwrap();
+        backdate(&p, CORRUPT_DB_MAX_AGE_DAYS + 1);
+    }
+
+    // A burst of young trivial quarantines exceeding keep-last-N: only the
+    // newest CORRUPT_DB_KEEP survive (count cap applied to the state/ listing).
+    let burst = CORRUPT_DB_KEEP + 3;
+    let mut young = Vec::with_capacity(burst);
+    for i in 0..burst {
+        let p = state.join(format!("cognitive.wal.corrupt-young-{i:04}"));
+        std::fs::write(&p, b"tiny").unwrap();
+        let mtime =
+            std::time::SystemTime::now() - std::time::Duration::from_secs((i as u64 + 1) * 60);
+        let times = std::fs::FileTimes::new().set_modified(mtime);
+        std::fs::File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+        young.push(p);
+    }
+
+    // The largest *substantial* quarantine is the recovery asset — protected from
+    // BOTH caps even though aged and buried behind newer quarantines.
+    let asset = state.join("cognitive.corrupt-asset");
+    std::fs::write(
+        &asset,
+        vec![0u8; (CORRUPT_DB_PROTECT_MIN_BYTES + 512) as usize],
+    )
+    .unwrap();
+    backdate(&asset, CORRUPT_DB_MAX_AGE_DAYS + 5);
+
+    // The LIVE store under state/ must never be touched (no `.corrupt-` infix).
+    let live = state.join("cognitive");
+    let live_wal = state.join("cognitive.wal");
+    std::fs::write(&live, b"live-store").unwrap();
+    std::fs::write(&live_wal, b"wal").unwrap();
+
+    let report = run_corrupt_cleanup_with_home(tmp.path());
+
+    restore_env(crate::state_root::STATE_ROOT_ENV, prev_state_root);
+
+    // Aged state/ quarantines reclaimed.
+    for q in &aged {
+        assert!(
+            !state.join(q).exists(),
+            "aged state/ quarantine should be reclaimed: {q}"
+        );
+    }
+    // keep-last-N bounds the young burst (asset does not consume a keep slot).
+    let young_remaining = young.iter().filter(|p| p.exists()).count();
+    assert_eq!(
+        young_remaining, CORRUPT_DB_KEEP,
+        "young state/ quarantines must be bounded to keep-last-N"
+    );
+    // Recovery asset preserved despite age and rank.
+    assert!(
+        asset.exists(),
+        "largest substantial recovery asset under state/ must be preserved"
+    );
+    // Live store untouched.
+    assert!(
+        live.exists() && live_wal.exists(),
+        "live cognitive store under state/ must never be removed"
+    );
+    assert!(report.errors.is_empty(), "no errors expected: {report:?}");
+    assert!(
+        report.bytes_freed > 0,
+        "some bytes should have been reclaimed from state/"
+    );
+}

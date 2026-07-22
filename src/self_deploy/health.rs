@@ -147,16 +147,33 @@ fn is_corrupt_quarantine_name(name: &str) -> bool {
         && name.contains(".corrupt-")
 }
 
-/// Count quarantined corrupt cognitive-memory artifacts directly under
-/// `state_root`. Absent/unreadable dir ⇒ `0` (nothing to quarantine).
-fn count_quarantine_files(state_root: &std::path::Path) -> u64 {
-    let entries = match std::fs::read_dir(state_root) {
+/// Count *fresh* quarantined corrupt cognitive-memory artifacts directly under
+/// `dir` — those whose mtime is at/after `window_start`.
+///
+/// This mirrors the `brains_llm_backed` probe's `fallback_window_start`
+/// semantics (issue #4469): retained historical snapshots (the newest
+/// `CORRUPT_DB_KEEP` forensic assets that cleanup deliberately keeps) predate
+/// the deploy/observation window and must NOT be flagged as *current*
+/// corruption, or the probe fails forever. A quarantine created at/after the
+/// window is genuine post-deploy corruption and is still counted, so the probe
+/// is not neutered into always passing.
+///
+/// Absent/unreadable dir ⇒ `0` (nothing to quarantine). Entries whose mtime
+/// cannot be read are skipped (fail-safe: never counted fresh).
+fn count_fresh_quarantine_files(dir: &std::path::Path, window_start: DateTime<Utc>) -> u64 {
+    let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return 0,
     };
     entries
         .flatten()
         .filter(|e| is_corrupt_quarantine_name(&e.file_name().to_string_lossy()))
+        .filter(|e| {
+            e.metadata()
+                .and_then(|m| m.modified())
+                .map(|mtime| DateTime::<Utc>::from(mtime) >= window_start)
+                .unwrap_or(false)
+        })
         .count() as u64
 }
 
@@ -183,8 +200,6 @@ pub fn run_self_health_probe(
     memory_count_tolerance: u64,
     fallback_window_start: DateTime<Utc>,
 ) -> SimardResult<SelfHealthReport> {
-    let state_root = crate::state_root::simard_state_root();
-
     // Probe 1: version advanced to (>=) the target commit.
     let running = running_commit().to_string();
     let version_advanced = VersionAdvancedProbe {
@@ -236,8 +251,14 @@ pub fn run_self_health_probe(
         fallback_records,
     };
 
-    // Probe 5: no quarantined corrupt cognitive-memory store.
-    let quarantined = count_quarantine_files(&state_root) > 0;
+    // Probe 5: no *fresh* quarantined corrupt cognitive-memory store. Scans the
+    // live-store directory `<state_root>/state/` (where LadybugDB drops corrupt
+    // snapshots next to the live `cognitive` store) — the SAME directory
+    // `cmd_cleanup::disk` reclaims. Only quarantines at/after the window start
+    // count, so retained historical forensic snapshots don't fail the probe
+    // forever, but genuine post-deploy corruption still does (issue #4469).
+    let live_store_dir = crate::state_root::resolve_subdir("state");
+    let quarantined = count_fresh_quarantine_files(&live_store_dir, fallback_window_start) > 0;
     let no_quarantine = NoQuarantineProbe {
         healthy: !quarantined,
         quarantined,
@@ -396,22 +417,91 @@ mod probe_logic_tests {
         assert!(!commits_compatible("deadbeef", ""));
     }
 
+    /// Set a path's mtime to an absolute instant (test-only helper).
+    fn set_mtime(path: &std::path::Path, when: std::time::SystemTime) {
+        let times = std::fs::FileTimes::new().set_modified(when);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+    }
+
+    /// Root Cause A (issue #4469): only corrupt cognitive-memory artifacts whose
+    /// mtime is at/after the window start are "fresh". Corrupt-name detection is
+    /// unchanged from the old count; the window filter is the new behavior that
+    /// lets the probe distinguish current corruption from retained snapshots.
     #[test]
-    fn quarantine_scan_detects_only_corrupt_cognitive_files() {
+    fn fresh_quarantine_scan_counts_only_corrupt_cognitive_files_within_window() {
         let dir = tempdir().unwrap();
+        // A window that opened well in the past: files created "now" are fresh.
+        let window = Utc::now() - chrono::Duration::seconds(300);
+
         std::fs::write(dir.path().join("cognitive.db"), b"x").unwrap();
         std::fs::write(dir.path().join("unrelated.corrupt-123"), b"x").unwrap();
-        assert_eq!(count_quarantine_files(dir.path()), 0);
+        // Non-corrupt / non-cognitive names never count, even when fresh.
+        assert_eq!(count_fresh_quarantine_files(dir.path(), window), 0);
 
         std::fs::write(dir.path().join("cognitive.corrupt-20260101"), b"x").unwrap();
         std::fs::write(dir.path().join("cognitive_memory.corrupt-20260102"), b"x").unwrap();
-        assert_eq!(count_quarantine_files(dir.path()), 2);
+        assert_eq!(count_fresh_quarantine_files(dir.path(), window), 2);
+    }
+
+    /// Root Cause A, acceptance #1: retained *historical* snapshots (mtime before
+    /// the window) are forensic recovery assets, NOT evidence of current
+    /// corruption. The probe must ignore them — this is what lets the permanently
+    /// failing `no_quarantine` probe finally clear. Mirrors the
+    /// `brains_llm_backed` `fallback_window_start` semantics.
+    #[test]
+    fn fresh_quarantine_scan_ignores_historical_snapshots_before_window() {
+        let dir = tempdir().unwrap();
+        // The window opens "now"; every snapshot below predates it.
+        let window = Utc::now();
+
+        // Simulate the CORRUPT_DB_KEEP retained forensic snapshots that cleanup
+        // deliberately keeps, all aged well before the observation window.
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 24 * 3600);
+        for i in 0..5 {
+            let p = dir.path().join(format!("cognitive.corrupt-{i:04}"));
+            std::fs::write(&p, b"forensic").unwrap();
+            set_mtime(&p, old);
+        }
+        assert_eq!(
+            count_fresh_quarantine_files(dir.path(), window),
+            0,
+            "retained snapshots older than the window must not be counted fresh"
+        );
+    }
+
+    /// Root Cause A, acceptance #2: a genuinely fresh quarantine created within
+    /// the window still counts — the probe must not be neutered into always
+    /// passing. A post-deploy corruption event must still FAIL the probe.
+    #[test]
+    fn fresh_quarantine_scan_counts_new_corruption_within_window() {
+        let dir = tempdir().unwrap();
+        let window = Utc::now() - chrono::Duration::seconds(60);
+
+        // A historical retained snapshot (ignored) ...
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(10 * 24 * 3600);
+        let hist = dir.path().join("cognitive.corrupt-0000");
+        std::fs::write(&hist, b"old").unwrap();
+        set_mtime(&hist, old);
+
+        // ... plus a fresh post-window quarantine that must be caught.
+        std::fs::write(dir.path().join("cognitive.corrupt-9999"), b"fresh").unwrap();
+
+        assert_eq!(
+            count_fresh_quarantine_files(dir.path(), window),
+            1,
+            "a fresh quarantine inside the window must still be flagged"
+        );
     }
 
     #[test]
-    fn quarantine_scan_missing_dir_is_zero() {
+    fn fresh_quarantine_scan_missing_dir_is_zero() {
         assert_eq!(
-            count_quarantine_files(std::path::Path::new("/no-such-dir-xyz-123")),
+            count_fresh_quarantine_files(std::path::Path::new("/no-such-dir-xyz-123"), Utc::now()),
             0
         );
     }
