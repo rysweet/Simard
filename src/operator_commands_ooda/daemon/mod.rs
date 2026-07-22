@@ -1695,17 +1695,21 @@ pub fn run_ooda_daemon(
             // overlap guard so the next `due()` boundary re-arms the cadence. This
             // recovers a latched cadence a hung/never-returning tick would otherwise
             // wedge forever.
-            if let Some(spawned_at) = overseer_tick_spawned_at
+            // Read the in-flight tick's outstanding time ONCE so the value that
+            // trips the predicate is exactly the value we log (a second
+            // `elapsed()` would re-read the monotonic clock and could drift).
+            let overseer_tick_elapsed = overseer_tick_spawned_at.map(|at| at.elapsed());
+            if let Some(elapsed) = overseer_tick_elapsed
                 && watchdog_should_rearm(
                     overseer_tick_running.load(Ordering::SeqCst),
-                    spawned_at.elapsed(),
+                    elapsed,
                     overseer_interval_secs,
                     overseer_tick_watchdog_multiplier,
                 )
             {
                 overseer_tick_running.store(false, Ordering::SeqCst);
                 overseer_tick_spawned_at = None;
-                let overdue_secs = spawned_at.elapsed().as_secs();
+                let overdue_secs = elapsed.as_secs();
                 tracing::warn!(
                     target: "simard.overseer",
                     overdue_secs,
