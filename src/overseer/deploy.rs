@@ -30,6 +30,7 @@
 
 use crate::overseer::capabilities::{DeployReport, Deployer, OverseerError};
 use crate::overseer::notify::{DualChannelNotifier, OperatorNotification};
+use crate::self_deploy::source_prep::redact_credentials;
 
 /// Restart churn at/above which a deploy is refused as a suspected crash-loop
 /// (deploying into an unstable process makes it worse — Bainbridge's irony).
@@ -155,19 +156,28 @@ impl CanaryResult {
     /// undiagnosable. Every other refusal (`NoOp` / `Rollback` / `CrashLoop`) is
     /// unchanged: it falls back verbatim to [`DeployRefusal`]'s `Display`, so
     /// only the red-canary path is enriched (additive/non-breaking).
+    ///
+    /// A reddening gate's detail is its raw stderr, which can embed a
+    /// token-bearing remote URL (`scheme://x-access-token:<TOKEN>@host/…`). This
+    /// reason is surfaced into the returned [`OverseerError`], the operator
+    /// notification, and OTel — so any embedded credential is **redacted**
+    /// ([`redact_credentials`], SEC-D2) *before* it is bounded. Redact-then-bound
+    /// is deliberate: truncation must never split a `://<userinfo>@` span in a
+    /// way that leaves a live token visible.
     pub fn refusal_reason(&self, refusal: &DeployRefusal) -> String {
         if !matches!(refusal, DeployRefusal::RedCanary) {
             return refusal.to_string();
         }
+        let safe = |detail: &str| bound_detail(&redact_credentials(detail)).into_owned();
         match (&self.failing_gate, &self.failing_detail) {
             (Some(gate), Some(detail)) => {
-                format!("red canary (gate {gate}: {})", bound_detail(detail))
+                format!("red canary (gate {gate}: {})", safe(detail))
             }
             (Some(gate), None) => format!("red canary (gate {gate})"),
             // Defensive: a red canary lacking structured gate identity still
             // names a red canary and carries the aggregate gate tally — never
             // empty or misleading.
-            (None, _) => format!("red canary ({})", self.detail),
+            (None, _) => format!("red canary ({})", safe(&self.detail)),
         }
     }
 }

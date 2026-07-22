@@ -7,6 +7,20 @@ pub struct RelaunchConfig {
     pub canary_target_dir: PathBuf,
     pub health_timeout: Duration,
     pub manifest_dir: PathBuf,
+    /// Allow-list of environment variable NAMES that gate subprocesses may
+    /// inherit from the daemon's ambient environment, on top of the always
+    /// re-injected base set required for the gates to run at all (see
+    /// `scrub_gate_env` in `gates.rs`). Names only — the values are read from
+    /// the live environment at spawn time, never persisted here or logged. Empty
+    /// by default: gates then see only the deny-by-default base env floor.
+    ///
+    /// This is the additive knob (#4440) that lets an operator hand a gate the
+    /// one extra variable a healthy candidate legitimately needs — established
+    /// empirically from the #4420 `failing_gate`/`failing_detail` diagnostics —
+    /// without widening the base floor or inheriting the daemon's whole ambient
+    /// env (which could hijack a gate or drift the canary away from the deployed
+    /// systemd shape, the observed red-canary non-convergence).
+    pub canary_env: Vec<String>,
 }
 
 impl Default for RelaunchConfig {
@@ -16,6 +30,7 @@ impl Default for RelaunchConfig {
                 .join(format!("simard-canary-{}", std::process::id())),
             health_timeout: Duration::from_secs(30),
             manifest_dir: PathBuf::from("."),
+            canary_env: Vec::new(),
         }
     }
 }
