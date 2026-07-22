@@ -244,8 +244,31 @@ fn action_kind_equality() {
 
 // --- OodaConfig ---
 
+/// Remove every env var that influences `OodaConfig::default()` so the test
+/// starts from a known-unset baseline. `OodaConfig::default()` reads
+/// process-global env (SIMARD_OODA_MAX_CONCURRENT / SIMARD_MAX_CONCURRENT_ACTIONS
+/// / SIMARD_SCALING); without this clear a sibling env-mutating test running in
+/// parallel can leak a value and corrupt the "default" observed here.
+///
+/// # Safety
+/// `std::env::remove_var` is only sound with no concurrent env access. The
+/// `#[serial_test::serial(cognitive_memory)]` key on the caller serializes this
+/// test against every other env-mutating OODA-config test across the whole test
+/// binary (the sibling `tests_ooda_config` module uses the same literal key),
+/// so no other thread touches the environment during this call.
+fn clear_concurrency_env() {
+    unsafe { std::env::remove_var("SIMARD_OODA_MAX_CONCURRENT") };
+    unsafe { std::env::remove_var("SIMARD_MAX_CONCURRENT_ACTIONS") };
+    unsafe { std::env::remove_var("SIMARD_SCALING") };
+}
+
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn ooda_config_default_values() {
+    // Hermetic precondition: clear the concurrency env vars so the assertions
+    // below reflect the true built-in defaults, not values leaked from a
+    // parallel sibling test. Serialized via the shared `cognitive_memory` key.
+    clear_concurrency_env();
     let config = OodaConfig::default();
     // Issue #2935: the per-OODA-cycle goal-coverage parallelism ceiling was
     // raised from the arbitrary low default of 5 to 24 (env-configurable via
@@ -253,6 +276,30 @@ fn ooda_config_default_values() {
     assert_eq!(config.max_concurrent_actions, 24);
     assert!((config.improvement_threshold - 0.02).abs() < f64::EPSILON);
     assert_eq!(config.gym_suite_id, "progressive");
+}
+
+/// Regression guard (issue #4433): deterministically reproduces the flaky-test
+/// root cause. A sibling test leaks `SIMARD_OODA_MAX_CONCURRENT` into the
+/// process env; the hermetic clear inside `ooda_config_default_values` must
+/// neutralize that leak so `max_concurrent_actions` falls back to the built-in
+/// default of 24 regardless of prior test order.
+#[serial_test::serial(cognitive_memory)]
+#[test]
+fn ooda_config_default_values_is_hermetic_under_leaked_env() {
+    // Simulate a leaking sibling: a non-default concurrency value already set.
+    unsafe { std::env::set_var("SIMARD_OODA_MAX_CONCURRENT", "7") };
+
+    // The hermetic guard used by the default test must scrub the leak.
+    clear_concurrency_env();
+    let config = OodaConfig::default();
+    assert_eq!(
+        config.max_concurrent_actions, 24,
+        "hermetic clear must neutralize leaked SIMARD_OODA_MAX_CONCURRENT so \
+         the observed default is the built-in 24, not the leaked value"
+    );
+
+    // Leave the environment clean for any subsequent test.
+    clear_concurrency_env();
 }
 
 // --- Observation / PlannedAction / CycleReport: struct construction ---

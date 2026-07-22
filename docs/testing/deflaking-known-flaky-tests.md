@@ -15,6 +15,7 @@ doc_type: reference
 related:
   - ./hermetic-tests.md
   - ./cognitive-memory-serial-isolation.md
+  - ./deflaking-ooda-config-default.md
   - ./ci-resilient-test-patterns.md
   - ./COVERAGE_BASELINE.md
   - ../reference/goal-board-api.md
@@ -476,5 +477,8 @@ CI); any change to CI workflow definitions.
   patterns (lazy config resolution, serial env-var tests).
 - [Subprocess prompt delivery](../prompt-delivery.md) — the `prompt_delivery`
   module, `select_mode`, and `ENV_OVERRIDE`.
+- [De-flaking `ooda_config_default_values`](./deflaking-ooda-config-default.md)
+  — the sibling `OodaConfig` env-leak flake closed with the shared
+  `cognitive_memory` serial key.
 - [Goal-board API](../reference/goal-board-api.md) — the dashboard goal-CRUD
   endpoints these handlers back.
