@@ -791,7 +791,8 @@ fn research_goal_idle_is_a_fault_via_investigated_adapter() {
     let id = "continuously-research-and-improve-your-own-cogn-70ab8541";
     let mut goal = standing_research_goal(id);
     goal.status = GoalProgress::InProgress { percent: 40 };
-    goal.wip_refs = vec![pr_ref("7")];
+    goal.wip_refs.clear(); // genuinely idle: no live in-flight artifact -> a fault
+    assert!(!goal.has_live_in_flight_ref());
     let mut state = state_with(goal);
 
     let evidence = FakeEvidence::stuck();
@@ -842,6 +843,83 @@ fn research_goal_idle_is_a_fault_via_investigated_adapter() {
     assert!(
         filer.calls.borrow().is_empty() && dispatcher.calls.borrow().is_empty(),
         "a research idle must never file an issue or spawn an engineer"
+    );
+}
+
+#[test]
+fn research_goal_with_live_pr_is_in_flight_via_investigated_adapter() {
+    // Crusty finding 1 (HIGH), enforced on the investigated adapter (site L610)
+    // too so the two breaker sites cannot drift: a standing RESEARCH goal holding
+    // a LIVE in-flight artifact (open, unmerged PR) that produces a no-action
+    // cycle is PROGRESS (ResearchInFlight), NOT an idle fault. It must NOT be
+    // recorded in `research_idle_faults`, must NOT be re-oriented (wip_refs /
+    // status preserved so dedup/admission/merge-tracking survive), and — like the
+    // fault path — must run BEFORE investigation (a panicking reasoner proves it
+    // is never consulted) and stay fail-closed (never fired/blocked/escalated).
+    struct PanicReasoner;
+    impl NoProgressWhyReasoner for PanicReasoner {
+        fn investigate(&self, _goal: &ActiveGoal) -> SimardResult<NoProgressWhy> {
+            panic!("the reasoner must NOT run for an in-flight research goal")
+        }
+    }
+
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let id = "continuously-research-and-improve-your-own-cogn-70ab8541";
+    let mut goal = standing_research_goal(id);
+    goal.status = GoalProgress::InProgress { percent: 40 };
+    goal.assigned_to = Some("engineer-42".to_string());
+    goal.wip_refs = vec![pr_ref("7")]; // an open, unmerged PR — live in-flight work
+    assert!(goal.has_live_in_flight_ref());
+    let mut state = state_with(goal);
+
+    let evidence = FakeEvidence::stuck();
+    let reasoner = PanicReasoner;
+    let healer = RecordingHealer::ok();
+    let dispatcher = RecordingDispatcher::ok();
+    let filer = RecordingFiler::default();
+
+    for cycle in 1..=(threshold + 1) {
+        let report = drive(
+            &mut state,
+            id,
+            &evidence,
+            &reasoner,
+            &healer,
+            &dispatcher,
+            &filer,
+            threshold,
+        );
+        assert!(
+            report.research_idle_faults.is_empty(),
+            "cycle {cycle}: a research goal holding a live PR is in-flight progress, not a fault"
+        );
+        assert!(
+            report.perpetual_idled.is_empty(),
+            "cycle {cycle}: in-flight progress is neither a fault nor a benign perpetual idle"
+        );
+        assert!(
+            !report.fired(),
+            "cycle {cycle}: in-flight progress must never fire the breaker"
+        );
+        assert!(
+            report.escalated.is_empty(),
+            "cycle {cycle}: in-flight progress must never escalate to a human"
+        );
+        let goal = &state.active_goals.active[0];
+        assert_eq!(
+            goal.wip_refs,
+            vec![pr_ref("7")],
+            "cycle {cycle}: the open PR ref must be PRESERVED (dedup/admission/merge-tracking depend on it)"
+        );
+        assert!(
+            matches!(goal.status, GoalProgress::InProgress { percent: 40 }),
+            "cycle {cycle}: an in-flight research goal must NOT be reset to NotStarted, got {:?}",
+            goal.status
+        );
+    }
+    assert!(
+        filer.calls.borrow().is_empty() && dispatcher.calls.borrow().is_empty(),
+        "in-flight progress must never file an issue or spawn an engineer"
     );
 }
 

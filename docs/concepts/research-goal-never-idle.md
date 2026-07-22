@@ -25,21 +25,26 @@ related:
 
 # The standing research goal never idles — an idle cycle is a fault
 
-> **Status: implemented.** The standing cognition-research goal produces a concrete
-> **novel** action on **every** cycle: it either discovers and ingests a genuinely
-> **new external source**, or designs and runs a **new measurable experiment**
-> (hypothesis + metric + method), de-duplicated against its own recent directions.
-> An idle cycle for **this** goal is a **fault**, not the benign
+> **Status: implemented.** The standing cognition-research goal is **directed** to
+> produce a concrete **novel** action on **every** cycle: it should either discover
+> and ingest a genuinely **new external source**, or design and run a **new
+> measurable experiment** (hypothesis + metric + method), de-duplicated against its
+> own recent directions. That novelty and non-repetition are a **prompt directive**,
+> not a code-enforced guarantee — whether a given cycle's LLM output is genuinely
+> new (and not a re-tweak) is prompt-hoped, not verified in code; this is "arguably
+> the most code can do for LLM output". An idle cycle for **this** goal is a
+> **fault**, not the benign
 > [perpetual-idle exemption](./perpetual-goal-no-progress-exemption.md) granted to
 > other standing goals. The primary lever is the goal charter + directive prose in
 > [`prompt_assets/simard/goal_session_objective.md`](https://github.com/rysweet/Simard/blob/main/prompt_assets/simard/goal_session_objective.md),
 > [`prompt_assets/simard/ooda_orient.md`](https://github.com/rysweet/Simard/blob/main/prompt_assets/simard/ooda_orient.md),
 > and [`prompt_assets/simard/ooda_decide.md`](https://github.com/rysweet/Simard/blob/main/prompt_assets/simard/ooda_decide.md);
-> a thin fail-closed rail in
+> a thin, **reactive** fail-closed rail in
 > [`src/ooda_loop/no_progress.rs`](https://github.com/rysweet/Simard/blob/main/src/ooda_loop/no_progress.rs),
 > keyed on
 > [`ActiveGoal::is_standing_research_goal()`](https://github.com/rysweet/Simard/blob/main/src/goal_curation/types.rs),
-> catches a slipped idle and re-orients the goal instead of exempting it. See the
+> catches a *slipped* idle after the fact and re-orients the **next** cycle instead
+> of exempting it. See the
 > [never-idle rail API reference](../reference/research-goal-never-idle-rail-api.md)
 > for the exact types and injection points.
 
@@ -72,18 +77,23 @@ idle. Every cycle it must actively seek a new source or design a new experiment
 that improves Simard's metacognition, and it must not repeat a recent
 direction.**
 
-## The invariant
+## The mandate
 
-> **Every cycle, the standing research goal yields either a NEW external
-> source-ingestion OR a NEW measurable experiment — never idle, never a repeat.**
+> **Every cycle, the standing research goal should yield either a NEW external
+> source-ingestion OR a NEW measurable experiment — not idle, not a repeat.**
 
-"New" is enforced by de-duplication against the goal's own recent PRs and
+This is the **directive target**, not a property the code proves each cycle.
+"New" is **steered** by de-duplication against the goal's own recent PRs and
 experiments (reusing the existing
-[creative-idea dedup](./semantic-creative-ideas-dedup.md) semantics). "Measurable"
-inherits the [hybrid cognition measurement](./hybrid-cognition-measurement.md)
+[creative-idea dedup](./semantic-creative-ideas-dedup.md) semantics) — a
+prompt-level nudge, not a code-enforced check on the LLM's chosen action.
+"Measurable" inherits the [hybrid cognition measurement](./hybrid-cognition-measurement.md)
 discipline: an experiment carries a hypothesis, a metric, and a method, and a
 reasoned **negative result** is a first-class, memory-recorded outcome — an
-experiment that disproves a hypothesis is *progress*, not an idle.
+experiment that disproves a hypothesis is *progress*, not an idle. What the code
+**does** enforce is narrower and reactive: a research goal that *did* idle (and is
+not holding a live in-flight artifact) is recorded as a fault and re-oriented so
+the **next** cycle re-enters work generation.
 
 This is **not** a blanket removal of the perpetual-idle exemption. Other standing
 goals (e.g. a CI-stewardship perpetual goal) remain legitimately bursty and keep
@@ -94,8 +104,9 @@ hardcoded goal id, and not a global change.
 ## The fix: prompt-first, thin-rail-reinforced
 
 Per the house philosophy (accomplish via prompts/recipes/charter over code —
-engineer guideline `G3`), the guarantee lives in the **prompt and charter**; the
-Rust is a **thin fail-closed safety net**, not the mechanism.
+engineer guideline `G3`), the novelty expectation lives in the **prompt and
+charter** (it is an expectation of the LLM, not something the code can guarantee);
+the Rust is a **thin, reactive fail-closed safety net**, not the mechanism.
 
 ### Lever A — work generation (primary): close the "fall back to idle" loophole
 
@@ -140,12 +151,19 @@ The [no-progress breaker](../reference/no-progress-breaker-api.md) runs at two
 sites in the cycle driver. Before #4399, both sites granted **every** standing
 goal the benign `perpetual_idled` exemption. #4399 introduces a single shared
 classifier, `classify_standing_idle()`, consumed by **both** sites (so they can
-never drift), that splits the standing-idle case in two:
+never drift), that splits the standing-idle case three ways:
 
 - **Non-research standing goal idles** → unchanged: the benign
   `perpetual_idled` exemption. Counter reset, goal kept active, framed as *normal
   for a bursty goal*.
-- **Research goal idles** (`is_standing_research_goal()` holds) → a **fault**:
+- **Research goal holding a LIVE in-flight artifact** (an open, unmerged PR /
+  working branch / engineer session — `has_live_in_flight_ref()` holds) → **not a
+  fault, not idle**: it is genuine in-flight progress. The counter is reset and the
+  goal stays active, but it is recorded in **neither** `research_idle_faults` nor
+  `perpetual_idled`, and it is **not** re-oriented — so its load-bearing `wip_refs`
+  are preserved (see [In-flight progress is not idle](#in-flight-progress-is-not-idle-crusty-finding-1)).
+- **Research goal idles with NO live artifact** (`is_standing_research_goal()`
+  holds, `wip_refs` empty/dead) → a **fault**:
   1. record the goal id in the new report field
      **`research_idle_faults: Vec<String>`** (the fixed-vocabulary fault category
      is carried in the warn log, not folded into the entry),
@@ -161,9 +179,29 @@ never drift), that splits the standing-idle case in two:
 
 The research-idle fault **never** enters the hard-block / "needs human review"
 escalation path — it is **fail-closed**: the goal is kept active and
-re-dispatchable, never blocked, killed, or parked. Lever B exists only to catch
-the rare case where Lever A slipped; in steady state the goal never idles and Lever
-B never fires.
+re-dispatchable, never blocked, killed, or parked. Lever B is **reactive**: it
+observes an idle cycle *after the fact* and forces the **next** cycle back into
+work generation. It exists only to catch the case where Lever A slipped; when
+Lever A holds, Lever B does not fire.
+
+## In-flight progress is not idle (crusty finding 1)
+
+A research goal that opened a durable PR — a genuine novel action — and then
+produces a no-action cycle **while that PR is still open and unmerged** is NOT
+meaningfully idle. Its `wip_refs` are **load-bearing**, not cosmetic: the
+Overseer/Orient dedup set
+([`overseer::sensor::in_flight_from_board`](https://github.com/rysweet/Simard/blob/main/src/overseer/sensor.rs))
+"so the Overseer never fights an engineer already on a case", engineer-admission
+control
+([`ooda_brain::depended_on`](https://github.com/rysweet/Simard/blob/main/src/ooda_brain/mod.rs)),
+and the completion gate's merge/close-verification signal all read them.
+Classifying such a goal as a fault and calling `roll_to_new_cycle` would
+`wip_refs.clear()` those refs — dropping the open PR from dedup, losing merge
+tracking, and letting the next cycle spawn an **overlapping** engineer on the same
+seam. The classifier therefore treats a live-in-flight research goal as
+**progress** (`ResearchInFlight`): counter reset, goal active, but no fault and no
+re-orient, so the refs survive. Only a research goal with **no** live artifact is
+faulted and re-oriented.
 
 ## Why this is safe
 

@@ -15,13 +15,17 @@ related:
 
 # How-To: Keep the research goal never idle
 
-Simard's standing cognition-research goal is durably steered to **never idle**:
-every cycle it must produce one concrete **novel** action — a **new external
-source ingestion** or a **new measurable experiment** (deduplicated against its
-recent directions) — and an idle cycle for **this** goal is a **fault** the
-daemon re-orients out of, not the benign perpetual-idle rest granted to other
-standing goals (#4399). This guide shows how to read, verify, and revise that
-mandate — **without a runtime CLI tweak**, which the daemon would clobber.
+Simard's standing cognition-research goal is durably steered to **avoid idling**:
+every cycle it is **directed** to produce one concrete **novel** action — a **new
+external source ingestion** or a **new measurable experiment** (deduplicated
+against its recent directions). That novelty is a **prompt directive** the LLM is
+asked to satisfy, not something the code guarantees; the code contributes a thin,
+**reactive** rail — an idle cycle for **this** goal is a **fault** the daemon
+re-orients out of on the *next* cycle, not the benign perpetual-idle rest granted
+to other standing goals (#4399). (A goal still holding an open, unmerged PR is
+in-flight progress, not idle, and is left untouched.) This guide shows how to
+read, verify, and revise that mandate — **without a runtime CLI tweak**, which the
+daemon would clobber.
 
 For the rationale, see
 [The standing research goal never idles — an idle cycle is a fault](../concepts/research-goal-never-idle.md).
@@ -152,9 +156,14 @@ in `src/ooda_actions/tests_goal_session.rs`.
 
 The safety-net rail lives in `src/ooda_loop/no_progress.rs`:
 
-- `classify_standing_idle(goal)` — the single decision point (research → fault,
-  non-research standing → benign exempt, bounded → normal ladder). Both breaker
-  sites call it; do not re-implement the branch inline.
+- `classify_standing_idle(goal)` — the single decision point (research **with a
+  live in-flight ref** → in-flight progress, no fault, refs preserved; research
+  **with no live ref** → fault; non-research standing → benign exempt; bounded →
+  normal ladder). Both breaker sites call it; do not re-implement the branch inline.
+- `ActiveGoal::has_live_in_flight_ref()` — the pure guard that keeps a research
+  goal holding an open PR / branch / session from being faulted and re-oriented
+  (which would wipe the load-bearing `wip_refs` dedup / admission / merge-tracking
+  depend on). Deny-by-default: only `pr` / `branch` / `session` / `engineer` count.
 - `ResearchIdleFault` — the fixed fault vocabulary. Add a category here (never a
   free-text string) if you need to distinguish a new idle cause.
 - `research_idle_faults` on `NoProgressBreakerReport` — additive, excluded from
@@ -185,6 +194,12 @@ cargo clippy --all-targets --all-features -- -D warnings
   still land in `perpetual_idled` and stay active.
 - **Fail-closed.** A research-idle fault must only ever re-orient + keep the goal
   active. Never route it to block / kill / park / "needs human review".
+- **Live in-flight progress is not idle.** A research goal holding an open,
+  unmerged PR (or working branch / engineer session) must **not** be faulted or
+  re-oriented — re-orienting wipes the load-bearing `wip_refs` the Overseer dedup
+  set, engineer-admission control, and completion gate depend on, letting the next
+  cycle spawn an overlapping engineer on the same seam. Keep the
+  `has_live_in_flight_ref()` guard.
 - **Standing-perpetual semantics.** Never make the goal completable; #4399 changes
   *what the goal must do each cycle*, not its lifecycle. The completion-evidence
   gate stays untouched.

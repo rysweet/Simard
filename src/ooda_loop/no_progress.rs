@@ -325,6 +325,23 @@ impl NoProgressBreakerReport {
             self.research_idle_faults.len(),
         )
     }
+
+    /// True when this pass produced something worth surfacing in the aggregate
+    /// cycle log: a threshold [`fired`](Self::fired), an auto-clear, a
+    /// fail-closed investigation error, OR a research-idle fault (issue #4399,
+    /// crusty finding 2). A *pure* research-idle cycle is none of the first three
+    /// — the never-idle rail re-oriented a goal without firing/clearing/erroring
+    /// — so without the last term the `research_faults=N` metric would never
+    /// reach the cycle log even though a fault occurred. This is the single
+    /// source of truth for the root-cause breaker's log gate so the count is
+    /// surfaced consistently. (The per-goal `warn!` inside `apply_standing_idle`
+    /// still fires regardless; this makes the *aggregate count* observable too.)
+    pub fn is_noteworthy(&self) -> bool {
+        self.fired()
+            || !self.auto_cleared.is_empty()
+            || !self.investigation_errors.is_empty()
+            || !self.research_idle_faults.is_empty()
+    }
 }
 
 /// Fixed vocabulary of research-goal idle-fault categories (issue #4399).
@@ -360,6 +377,17 @@ pub(crate) enum StandingIdle {
     /// with the `fault` category, reset the counter, and re-orient via
     /// [`ActiveGoal::roll_to_new_cycle`]. Never block/kill/park.
     ResearchFault { fault: ResearchIdleFault },
+    /// Standing RESEARCH goal that still holds a LIVE in-flight artifact — an
+    /// open PR / working branch / engineer session
+    /// ([`ActiveGoal::has_live_in_flight_ref`]). It is NOT idle: a durable,
+    /// unmerged PR in review is genuine novel progress (issue #4399, crusty
+    /// finding 1). This is PROGRESS, not a fault — reset the no-action counter
+    /// and keep the goal active, but record NO fault and do NOT re-orient.
+    /// Re-orienting would call [`ActiveGoal::roll_to_new_cycle`], wiping the
+    /// load-bearing `wip_refs` the Overseer dedup set, engineer-admission
+    /// control, and completion gate depend on — which would lose merge tracking
+    /// and let the next cycle spawn an overlapping engineer on the same seam.
+    ResearchInFlight,
 }
 
 /// Classify a confirmed no-action cycle for a STANDING goal (issue #4399). Pure
@@ -369,19 +397,30 @@ pub(crate) enum StandingIdle {
 /// shared by both breaker sites via [`apply_standing_idle`] so their semantics
 /// can never drift apart.
 ///
-/// * standing AND research ([`ActiveGoal::is_standing_research_goal`]) →
+/// * standing AND research ([`ActiveGoal::is_standing_research_goal`]) with a
+///   LIVE in-flight ref ([`ActiveGoal::has_live_in_flight_ref`]) →
+///   [`StandingIdle::ResearchInFlight`] (progress — preserve refs, no fault)
+/// * standing AND research, NO live ref →
 ///   [`StandingIdle::ResearchFault`]
 /// * standing, non-research ([`ActiveGoal::is_perpetual`] only) →
 ///   [`StandingIdle::BenignExempt`]
 ///
 /// Research is checked first because a research goal is *also* perpetual; the
-/// conjunction predicate keeps the branches mutually exclusive. The decision is a
-/// pure function of the structured charter predicates — no hardcoded goal id.
+/// conjunction predicate keeps the branches mutually exclusive. Within the
+/// research branch the live-in-flight guard is checked first so a goal holding an
+/// open, unmerged PR is treated as progress and NEVER faulted or re-oriented
+/// (issue #4399, crusty finding 1) — wiping its load-bearing `wip_refs` would
+/// drop dedup / admission / merge-tracking state. The decision is a pure function
+/// of the structured charter predicates — no hardcoded goal id.
 pub(crate) fn classify_standing_idle(goal: &ActiveGoal) -> Option<StandingIdle> {
     if goal.is_standing_research_goal() {
-        Some(StandingIdle::ResearchFault {
-            fault: ResearchIdleFault::NoNovelActionProduced,
-        })
+        if goal.has_live_in_flight_ref() {
+            Some(StandingIdle::ResearchInFlight)
+        } else {
+            Some(StandingIdle::ResearchFault {
+                fault: ResearchIdleFault::NoNovelActionProduced,
+            })
+        }
     } else if goal.is_perpetual() {
         Some(StandingIdle::BenignExempt)
     } else {
@@ -468,6 +507,26 @@ fn apply_standing_idle(
                  (counter reset, goal stays active, never blocked)",
             );
             reorient_research_goal(board, goal_id);
+        }
+        StandingIdle::ResearchInFlight => {
+            // Live in-flight progress (issue #4399, crusty finding 1): the
+            // research goal still holds an open, unmerged PR (or a working branch
+            // / engineer session) — genuine novel progress, NOT an idle. The
+            // hoisted counter reset above already keeps it active for the next
+            // cycle; we deliberately record NO fault and do NOT re-orient, because
+            // roll_to_new_cycle would wipe the load-bearing wip_refs the Overseer
+            // dedup set, engineer-admission control, and completion gate depend on
+            // — losing merge tracking and letting the next cycle spawn an
+            // overlapping engineer on the same seam. wip_refs / assigned_to /
+            // status are left untouched. Neither `research_idle_faults` nor
+            // `perpetual_idled`: it was not idle.
+            tracing::info!(
+                target: "simard::ooda",
+                goal = %goal_id,
+                "no-progress breaker: research goal holds a live in-flight artifact \
+                 (open PR/branch/session) — progress, not idle: counter reset, refs \
+                 preserved, goal stays active (not faulted, not re-oriented)",
+            );
         }
     }
     true

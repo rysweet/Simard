@@ -610,10 +610,7 @@ fn run_ooda_cycle_inner(
                 &crate::ooda_loop::no_progress::GhIssueFiler,
                 crate::ooda_loop::no_progress::INVESTIGATED_BREAKER_THRESHOLD,
             );
-            if report.fired()
-                || !report.auto_cleared.is_empty()
-                || !report.investigation_errors.is_empty()
-            {
+            if report.is_noteworthy() {
                 tracing::info!(
                     target: "simard::ooda",
                     summary = %report.log_line(),

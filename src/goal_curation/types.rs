@@ -362,6 +362,19 @@ impl ActiveGoal {
     /// standing-goal description marker (and thus [`is_perpetual`]) is
     /// preserved.
     ///
+    /// **`wip_refs.clear()` is load-bearing, not cosmetic** — and therefore this
+    /// must only be called once the goal's current unit of work is genuinely
+    /// finished. Those refs feed the Overseer/Orient dedup set
+    /// (`overseer::sensor::in_flight_from_board`, "so the Overseer never fights
+    /// an engineer already on a case"), engineer-admission control
+    /// (`ooda_brain::depended_on`), and the no-progress completion gate's
+    /// merge/close-verification signal. Dropping them while an artifact is still
+    /// live loses merge tracking and lets the next cycle spawn an overlapping
+    /// engineer on the same seam. The never-idle rail therefore guards this call
+    /// with [`has_live_in_flight_ref`](ActiveGoal::has_live_in_flight_ref): a
+    /// research goal still holding a live PR/branch/session is treated as
+    /// in-flight progress and is NOT rolled (issue #4399, crusty finding 1).
+    ///
     /// [`is_perpetual`]: ActiveGoal::is_perpetual
     pub fn roll_to_new_cycle(&mut self) {
         self.status = GoalProgress::NotStarted;
@@ -369,6 +382,32 @@ impl ActiveGoal {
         self.wip_refs.clear();
         self.current_activity =
             Some("standing goal — finished a unit of work; rolled to a fresh cycle".to_string());
+    }
+
+    /// True when this goal still holds a LIVE in-flight engineering artifact — an
+    /// open PR, a working branch, or an engineer session/claim — in its
+    /// [`wip_refs`](ActiveGoal::wip_refs).
+    ///
+    /// This is the pure/total/panic-free predicate the never-idle no-progress
+    /// breaker uses to tell a standing research goal that is *still making
+    /// progress* (holding a live artifact — e.g. an open, unmerged PR in review)
+    /// from one that is *genuinely idle* (empty or dead refs). A goal holding a
+    /// live artifact must NOT be counted as a research-idle fault or re-oriented,
+    /// because [`roll_to_new_cycle`](ActiveGoal::roll_to_new_cycle) would wipe the
+    /// load-bearing `wip_refs` the Overseer dedup set, engineer-admission control,
+    /// and completion gate all depend on (issue #4399, crusty finding 1).
+    ///
+    /// Matching is case-insensitive and whitespace-trimmed. Kinds are
+    /// deny-by-default: only `pr` / `branch` / `session` / `engineer` count as
+    /// live. An `issue` ref is a durable record, not open engineering work, and
+    /// any unknown/garbage kind is treated as not-live — so a goal tracking only
+    /// those still faults toward re-orient. Reads only in-memory state; performs
+    /// no IO and never panics.
+    pub fn has_live_in_flight_ref(&self) -> bool {
+        const LIVE_KINDS: [&str; 4] = ["pr", "branch", "session", "engineer"];
+        self.wip_refs
+            .iter()
+            .any(|wip| LIVE_KINDS.contains(&wip.kind.trim().to_ascii_lowercase().as_str()))
     }
 }
 
@@ -812,6 +851,93 @@ mod tests {
             g.is_perpetual(),
             "must remain a standing goal after rolling to a new cycle"
         );
+    }
+
+    // ── has_live_in_flight_ref: the never-idle preservation guard (#4399) ──
+    //
+    // `wip_refs` is load-bearing — the Overseer dedup set (sensor.rs),
+    // engineer-admission control (ooda_brain), and the completion-gate's
+    // merge/close signal all read it. `has_live_in_flight_ref()` is the
+    // pure/total/panic-free predicate the never-idle breaker uses to tell
+    // "holding a live artifact" (progress — preserve refs, do NOT fault) from
+    // "genuinely idle" (empty/dead refs — fault, reset, re-orient). Live kinds
+    // are the artifacts an engineer holds open: pr / branch / session / engineer.
+    // `issue` and unknown kinds are deny-by-default, so a goal tracking only an
+    // issue still faults toward re-orient.
+
+    fn wip(kind: &str) -> WipRef {
+        WipRef {
+            kind: kind.to_string(),
+            ref_id: "1".to_string(),
+            label: "x".to_string(),
+            url: None,
+        }
+    }
+
+    #[test]
+    fn has_live_in_flight_ref_true_for_open_engineering_artifacts() {
+        for kind in ["pr", "branch", "session", "engineer"] {
+            let mut g = ActiveGoal::new("g", "improve recall quality", 1).mark_standing();
+            g.wip_refs = vec![wip(kind)];
+            assert!(
+                g.has_live_in_flight_ref(),
+                "kind '{kind}' must count as a live in-flight ref"
+            );
+        }
+    }
+
+    #[test]
+    fn has_live_in_flight_ref_is_case_insensitive_and_trims() {
+        let mut g = ActiveGoal::new("g", "improve recall quality", 1).mark_standing();
+        g.wip_refs = vec![wip("  PR  ")];
+        assert!(
+            g.has_live_in_flight_ref(),
+            "kind matching must be case-insensitive and whitespace-tolerant"
+        );
+        g.wip_refs = vec![wip("Branch")];
+        assert!(g.has_live_in_flight_ref());
+    }
+
+    #[test]
+    fn has_live_in_flight_ref_false_for_empty_issue_only_or_unknown() {
+        // No refs at all → genuinely idle.
+        let mut g = ActiveGoal::new("g", "improve recall quality", 1).mark_standing();
+        assert!(g.wip_refs.is_empty());
+        assert!(!g.has_live_in_flight_ref());
+
+        // An issue ref is NOT a live engineering artifact (deny-by-default).
+        g.wip_refs = vec![wip("issue")];
+        assert!(
+            !g.has_live_in_flight_ref(),
+            "a filed issue is not a live in-flight engineering artifact"
+        );
+
+        // Unknown/garbage kinds are deny-by-default (fail toward faulting).
+        g.wip_refs = vec![wip("mystery-kind")];
+        assert!(!g.has_live_in_flight_ref());
+    }
+
+    #[test]
+    fn has_live_in_flight_ref_true_when_any_ref_is_live() {
+        // A mix of a dead issue ref and a live PR ref is still "in flight".
+        let mut g = ActiveGoal::new("g", "improve recall quality", 1).mark_standing();
+        g.wip_refs = vec![wip("issue"), wip("pr")];
+        assert!(g.has_live_in_flight_ref());
+    }
+
+    #[test]
+    fn has_live_in_flight_ref_is_total_and_panic_free_on_pathological_kinds() {
+        // Pure predicate: no IO, never panics on empty/unicode/control kinds.
+        let mut g = ActiveGoal::new("g", "improve recall quality", 1).mark_standing();
+        g.wip_refs = vec![
+            wip(""),
+            wip("   "),
+            wip("认知"),
+            wip("pr\0\t"),
+            wip(&"x".repeat(10_000)),
+        ];
+        // Must return a bool without panicking; none of these are live.
+        assert!(!g.has_live_in_flight_ref());
     }
 
     // ── Standing research/cognition goals — novelty-first steering ──

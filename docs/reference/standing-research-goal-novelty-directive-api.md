@@ -45,6 +45,17 @@ This reference specifies the API added in issue #4347. For the rationale, see
 > reachable — never idle, never a repeat". See the
 > [never-idle rail API reference](./research-goal-never-idle-rail-api.md#lever-a-never-idle-directive-contract)
 > for the current directive contract.
+>
+> **What is enforced vs. expected.** This directive is a **prompt-level
+> expectation** injected into the goal's reasoning context — it asks the LLM to
+> produce a novel, non-repeated action each cycle; it does **not** prove that it
+> does (dedup / "materially distinct" is prompt-hoped, not code-verified). What the
+> #4399 code enforces is the narrower, reactive rail: a research goal that *did*
+> idle **and holds no live in-flight artifact** is recorded as a fault and
+> re-oriented the next cycle. A goal still holding an open, unmerged PR (a live
+> in-flight artifact) is treated as progress and left untouched — its `wip_refs`
+> are preserved. See
+> [In-flight progress is not idle](./research-goal-never-idle-rail-api.md#in-flight-progress-is-not-idle-crusty-finding-1).
 
 ## Contents
 
