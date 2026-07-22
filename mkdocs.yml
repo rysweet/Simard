@@ -100,6 +100,7 @@ nav:
     - Autonomous Self-Merge Sensor (ready_prs wire): concepts/autonomous-self-merge-sensor.md
     - Agentic Merge-Queue + Issue Reasoning (observe/orient): concepts/agentic-merge-queue-reasoning.md
     - Overseer Agentic Health-Review (self-heal crash-loops): concepts/overseer-agentic-health-review.md
+    - Overseer Escalation-Triage &amp; Course-Correction (before a human): concepts/overseer-escalation-triage-course-correction.md
     - Autonomous-Merge Review Gate (agentic merge-judge): concepts/autonomous-merge-review-gate.md
     - Adaptive Scaling: concepts/adaptive-scaling.md
     - Pluggable Identity: concepts/pluggable-identity.md
@@ -191,6 +192,7 @@ nav:
     - Unblock Stuck OODA Goals: howto/unblock-stuck-ooda-goals.md
     - Diagnose a No-Progress Block and Read Its WHY: howto/diagnose-a-no-progress-block.md
     - Re-Investigate Bare-Blocked OODA Goals: howto/reinvestigate-bare-blocked-goals.md
+    - Triage &amp; Course-Correct a Blocked Goal (before a human): howto/triage-and-course-correct-a-blocked-goal.md
     - Add a New Recipe-Brain Phase: howto/add-a-new-recipe-brain-phase.md
     - Edit the OODA Brain Prompt: howto/edit-the-ooda-brain-prompt.md
     - Steer a Standing Research Goal Toward Novelty: howto/steer-a-standing-research-goal-toward-novelty.md
@@ -305,6 +307,7 @@ nav:
     - Overseer Workstream Gap-Scan: reference/overseer-workstream-gap-scan.md
     - Overseer BackoffGate &amp; Gap-Scan Dedup: reference/overseer-backoff-gate-api.md
     - Overseer Root-Cause (WHY) API: reference/overseer-root-cause-why-api.md
+    - Escalation-Triage Recipe (blocked-goal course-correction): reference/escalation-triage-api.md
     - Overseer Self-Observation Stability: reference/overseer-self-observation-stability.md
     - simard-engineer-step CLI: reference/simard-engineer-step.md
     - simard-tui Dashboard: reference/simard-tui.md

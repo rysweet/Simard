@@ -1409,4 +1409,136 @@ mod tests {
         assert!(!line.contains('\n'));
         assert!(!line.contains('\t'));
     }
+
+    // ---- `simard goal complete` (escalation-triage complete-delivered-goal) ----
+    //
+    // TDD contract for the CLI verb the escalation-triage docs prescribe for the
+    // `complete-delivered-goal` course-correction (issue #17 worked example):
+    // marking a goal whose work a merged PR already delivered must remove it from
+    // the board AND write a durable tombstone so the daemon's cycle reconcile can
+    // never resurrect it. Standing/perpetual goals are the exception — they have
+    // no terminal done-state, so `complete` reopens rather than terminates them.
+    //
+    // These are hermetic: each pins a private SIMARD_STATE_ROOT (serialised on
+    // the `cognitive_memory` key, matching the goal_curation store tests) so the
+    // authoritative board + tombstone file live in a throwaway temp dir.
+
+    /// Pin `SIMARD_STATE_ROOT` at a fresh temp dir for the duration of a test.
+    /// Returns the `TempDir` (keep it alive) and its path.
+    fn hermetic_state_root() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        // SAFETY: serialised across modules by the `cognitive_memory` serial key,
+        // so no other test reads SIMARD_STATE_ROOT while it is pinned here.
+        unsafe { std::env::set_var(crate::state_root::STATE_ROOT_ENV, &root) };
+        (tmp, root)
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn complete_removes_delivered_goal_and_writes_tombstone() {
+        let (_tmp, root) = hermetic_state_root();
+        let goal_id = "fix-agent-kgpacks-rs-issue-17-ws2-int8-pq-embed-7f5afcca";
+
+        with_board(|board| {
+            board.active.push(crate::goal_curation::ActiveGoal::new(
+                goal_id,
+                "int8/PQ embedding quantization spike (delivered by merged PR #40)",
+                3,
+            ));
+            Ok(())
+        })
+        .expect("seed the delivered goal");
+
+        handle_complete(goal_id).expect("completing a delivered goal must succeed");
+
+        let board = load_board().expect("reload the authoritative board");
+        assert!(
+            !board.active.iter().any(|g| g.id == goal_id),
+            "a completed goal must be gone from the active board"
+        );
+        assert!(
+            !board.backlog.iter().any(|b| b.id == goal_id),
+            "a completed goal must be gone from the backlog"
+        );
+
+        let tombstones = crate::ooda_loop::load_tombstones(&root);
+        assert!(
+            tombstones.contains(goal_id),
+            "completing a goal must write a durable tombstone so it cannot re-stick"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn complete_is_idempotent_for_an_absent_goal() {
+        let (_tmp, root) = hermetic_state_root();
+        let goal_id = "never-on-the-board";
+
+        // No seeding: the goal is not on the board. Completion must still
+        // succeed and still record the tombstone (idempotent contract).
+        handle_complete(goal_id).expect("completing an absent goal is a no-op success");
+        assert!(
+            crate::ooda_loop::load_tombstones(&root).contains(goal_id),
+            "an absent completion must still record a durable tombstone"
+        );
+
+        // A second call must also be a clean success.
+        handle_complete(goal_id).expect("a repeated completion must remain idempotent");
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn complete_refuses_a_standing_goal_and_reopens_it_without_tombstone() {
+        let (_tmp, root) = hermetic_state_root();
+        let goal_id = "steward-ci-health";
+
+        with_board(|board| {
+            board.active.push(
+                crate::goal_curation::ActiveGoal::new(goal_id, "steward CI health", 2)
+                    .mark_standing(),
+            );
+            Ok(())
+        })
+        .expect("seed the standing goal");
+
+        handle_complete(goal_id).expect("completing a standing goal must succeed (by reopening)");
+
+        let board = load_board().expect("reload the authoritative board");
+        assert!(
+            board.active.iter().any(|g| g.id == goal_id),
+            "a standing goal has no terminal done-state: it must be reopened, never removed"
+        );
+        assert!(
+            !crate::ooda_loop::load_tombstones(&root).contains(goal_id),
+            "a reopened standing goal must NOT be tombstoned"
+        );
+    }
+
+    #[test]
+    fn dispatch_complete_requires_goal_id() {
+        // `complete` must be a recognized verb that requires a goal id — not
+        // fall through to the `unsupported command` arm. Reaching the missing-id
+        // error proves the verb is wired without touching any state root.
+        let args = vec!["complete".to_string()];
+        let result = dispatch_goal_command(args.into_iter());
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("goal id"),
+            "expected a missing-'goal id' error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("unsupported command"),
+            "`complete` must be a recognized verb, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn goal_help_documents_complete() {
+        assert!(
+            GOAL_HELP.contains("complete"),
+            "the goal help text must document the `complete` verb the docs prescribe"
+        );
+    }
 }
