@@ -7,6 +7,7 @@ owner: simard
 doc_type: reference
 status: implemented
 related:
+  - ./wip-ref-liveness-reconcile-hardening-api.md
   - ../concepts/research-goal-never-idle.md
   - ./research-goal-never-idle-rail-api.md
   - ./standing-research-goal-novelty-directive-api.md
@@ -38,6 +39,16 @@ It builds directly on the never-idle rail documented in the
 [research-goal never-idle rail API reference](./research-goal-never-idle-rail-api.md):
 that rail's `ResearchInFlight` exemption is only sound because the prongs below
 make `has_live_in_flight_ref()` reflect true liveness.
+
+> **Hardened in round 3 (PR superseding #4439).** Two follow-up fixes make the
+> prongs below **total**: Prong 1 now prunes dead `session`/`branch`/`engineer`
+> refs for **every** active goal (not only goals with a stale assignment), and
+> Prong 2 scopes the open-PR fetch to **each goal's own repository** instead of
+> a hardcoded `rysweet/Simard`. The signatures shown below reflect that
+> hardened state (`reconcile_merged_prs` no longer takes a `repo` argument).
+> See the
+> [hardening API reference](./wip-ref-liveness-reconcile-hardening-api.md) for
+> the full delta, rationale, and tests.
 
 ## Contents
 
@@ -102,6 +113,13 @@ impl ActiveGoal {
 ```
 
 ## Prong 1 — dead-session ref drop
+
+> **Hardened (round 3):** the drop below is no longer nested in the `if is_stale`
+> block — it runs for **every** active goal and is keyed on whether the goal's
+> **owning session** is live (a live `assigned_to`, or a `session`/`engineer`
+> ref naming a live session), so an **unassigned** goal carrying a dead-session
+> ref is reconciled too. See
+> [FIX-1](./wip-ref-liveness-reconcile-hardening-api.md#fix-1-dead-ref-prune-is-unconditional-and-live-session-keyed).
 
 **Site:**
 [`sweep_stale_assignments_with_sessions`](https://github.com/rysweet/Simard/blob/main/src/ooda_loop/cycle.rs)
@@ -211,6 +229,13 @@ pub(crate) fn prune_merged_pr_refs(
 - **Scope:** ACTIVE (non-terminal) goals only; backlog/archived are not touched.
 
 ### Prod wrapper — fetch the open set once per cycle
+
+> **Hardened (round 3):** the wrapper below no longer takes a `repo` argument or
+> hardcodes `rysweet/Simard`. It fetches the open-PR set **per distinct goal
+> repo** (deduped, `ActiveGoal::repo`, `None → rysweet/Simard`) and prunes each
+> goal's `pr` refs only against **its own** repo's open set via
+> `prune_merged_pr_refs_scoped`. See
+> [FIX-2](./wip-ref-liveness-reconcile-hardening-api.md#fix-2-the-merged-pr-reconcile-is-scoped-to-each-goals-own-repo).
 
 ```rust
 /// Prod-only. Fetch the open-PR set once via the existing PrGhClient path and
@@ -366,6 +391,8 @@ cases extend the inline `mod tests` in
 
 ## See also
 
+- [wip-ref liveness reconcile — hardening API reference](./wip-ref-liveness-reconcile-hardening-api.md)
+  — the round-3 fixes that make both prongs total (all goals; per-repo scope).
 - [Concept: the standing research goal never idles](../concepts/research-goal-never-idle.md)
   — the liveness precondition section motivating these prongs.
 - [Research-goal never-idle rail API reference](./research-goal-never-idle-rail-api.md)

@@ -14,6 +14,7 @@ related:
   - ./semantic-creative-ideas-dedup.md
   - ../reference/research-goal-never-idle-rail-api.md
   - ../reference/wip-ref-liveness-reconcile-api.md
+  - ../reference/wip-ref-liveness-reconcile-hardening-api.md
   - ../reference/standing-research-goal-novelty-directive-api.md
   - ../reference/no-progress-breaker-api.md
   - ../howto/keep-the-research-goal-never-idle.md
@@ -226,8 +227,8 @@ carry this out:
 
 | Prong | Where | Drops |
 | --- | --- | --- |
-| **1 — dead-session sweep** | [`sweep_stale_assignments_with_sessions`](../reference/wip-ref-liveness-reconcile-api.md#prong-1-dead-session-ref-drop) (cycle **start**, before the breaker) | When a goal's assignment is cleared because its tmux session is not in the live-session set, ALSO drop that goal's `session` / `branch` / `engineer` refs (the dead engineer's working artifacts). `pr` and `issue` refs are **kept** — a PR outlives the session and is Prong 2's job; an issue is a durable record. |
-| **2 — merged/closed PR prune** | [per-cycle open-PR reconcile](../reference/wip-ref-liveness-reconcile-api.md#prong-2-mergedclosed-pr-ref-prune) (after Act, **before** the breaker classifies) | For each active goal, drop any `pr` ref whose number is **not** in the current open-PR set. The open set is read once per cycle via the existing [`PrGhClient::list_open_prs`](https://github.com/rysweet/Simard/blob/main/src/stewardship/merge_authority.rs) path — **no new git/gh shell parse**. The prune core is a pure function over an in-memory `HashSet<u32>`. |
+| **1 — dead-session sweep** | [`sweep_stale_assignments_with_sessions`](../reference/wip-ref-liveness-reconcile-api.md#prong-1-dead-session-ref-drop) (cycle **start**, before the breaker) | For **every** active goal (assigned or not), drop each `session` / `branch` / `engineer` ref whose session is **not** in the live-session set — the dead engineer's working artifacts. `pr` and `issue` refs are **kept** — a PR outlives the session and is Prong 2's job; an issue is a durable record. *(Round-3 hardening — [FIX-1](../reference/wip-ref-liveness-reconcile-hardening-api.md#fix-1-dead-ref-prune-is-unconditional-and-live-session-keyed) — made this run for all goals, not just goals with a stale assignment.)* |
+| **2 — merged/closed PR prune** | [per-cycle open-PR reconcile](../reference/wip-ref-liveness-reconcile-api.md#prong-2-mergedclosed-pr-ref-prune) (after Act, **before** the breaker classifies) | For each active goal, drop any `pr` ref whose number is **not** in **its own repo's** current open-PR set. The open set is read once per distinct goal repo via the existing [`PrGhClient::list_open_prs`](https://github.com/rysweet/Simard/blob/main/src/stewardship/merge_authority.rs) path — **no new git/gh shell parse**. The prune core is a pure function over an in-memory `HashSet<u32>`. *(Round-3 hardening — [FIX-2](../reference/wip-ref-liveness-reconcile-hardening-api.md#fix-2-the-merged-pr-reconcile-is-scoped-to-each-goals-own-repo) — scoped the fetch to each goal's own repo instead of a hardcoded `rysweet/Simard`.)* |
 
 After both prongs run, a goal whose only in-flight ref was a merged PR or a dead
 session has **no live ref left**, so `classify_standing_idle` correctly returns
@@ -337,6 +338,9 @@ To read, verify, or revise the mandate, see
 - [wip-ref liveness reconcile API reference](../reference/wip-ref-liveness-reconcile-api.md)
   — the two per-cycle pruning prongs (dead-session sweep + merged-PR reconcile)
   that make the `has_live_in_flight_ref()` precondition true (#4428).
+- [wip-ref liveness reconcile — hardening API reference](../reference/wip-ref-liveness-reconcile-hardening-api.md)
+  — the round-3 fixes making both prongs total: dead-ref prune for **all** goals
+  (FIX-1) and per-repo-scoped merged-PR reconcile (FIX-2).
 - [Standing-research novelty-directive API reference](../reference/standing-research-goal-novelty-directive-api.md)
   — the `is_standing_research_goal()` predicate and the directive injection point.
 - [How to keep the research goal never idle](../howto/keep-the-research-goal-never-idle.md).

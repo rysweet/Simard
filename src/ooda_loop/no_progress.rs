@@ -14,6 +14,7 @@
 //! See `docs/concepts/steerable-ooda-daemon.md` ("The no-progress breaker
 //! (Fix 3)").
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 use crate::error::SimardResult;
@@ -456,6 +457,11 @@ pub(crate) fn classify_standing_idle(goal: &ActiveGoal) -> Option<StandingIdle> 
 ///
 /// Returns the pruned `(goal_id, ref_id)` pairs so the caller can log exactly
 /// what was dropped (used by the prod wrapper's per-ref `tracing::info!`).
+/// Single-repo pure prune contract exercised directly by the NEW-1 unit tests
+/// (`tests_no_progress`). Production reconciles per-repo through
+/// [`prune_merged_pr_refs_scoped`]; this single-set form is retained as the
+/// IO-free contract those tests drive, so it is compiled only under `cfg(test)`.
+#[cfg(test)]
 pub(crate) fn prune_merged_pr_refs(
     board: &mut GoalBoard,
     open_prs: &HashSet<u32>,
@@ -465,32 +471,83 @@ pub(crate) fn prune_merged_pr_refs(
         // Disjoint field borrows: `id` (read) and `wip_refs` (mutated) so the
         // common no-prune case allocates nothing — this runs every cycle over
         // every active goal (cf. the per-ref alloc trimmed in #4399).
-        let goal_id = &goal.id;
-        goal.wip_refs.retain(|wip| {
-            if !wip.kind.trim().eq_ignore_ascii_case("pr") {
-                return true;
-            }
-            match wip.ref_id.trim_start_matches('#').parse::<u32>() {
-                Ok(num) => {
-                    let live = open_prs.contains(&num);
-                    if !live {
-                        pruned.push((goal_id.clone(), wip.ref_id.clone()));
-                    }
-                    live
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        target: "simard::ooda",
-                        goal = %goal_id,
-                        ref_id = %wip.ref_id,
-                        "pr wip_ref id did not parse as u32 — keeping ref (not pruning, fail-open)"
-                    );
-                    true
-                }
-            }
-        });
+        retain_open_pr_refs(&goal.id, &mut goal.wip_refs, open_prs, &mut pruned);
     }
     pruned
+}
+
+/// Repo-scoped variant of [`prune_merged_pr_refs`] (FIX-2, OBSERVATION 2). Each
+/// active goal's `pr` refs are reconciled against the open-PR set of ITS OWN
+/// repo — not one shared set — so a goal tracking a PR in a repo other than
+/// Simard can never have its (possibly still-OPEN) PR pruned against the wrong
+/// repo's open set (a latent F1-style false prune).
+///
+/// * `repo_of` maps a goal to its canonical `owner/repo` slug (the caller owns
+///   the `goal.repo` → slug policy).
+/// * `open_by_repo` holds the open-PR set for each slug that was successfully
+///   fetched this cycle. **Fail-open per repo**: a goal whose slug is ABSENT
+///   from the map (its fetch errored, or was skipped) is left entirely
+///   untouched — never pruned — so a `gh` blip on one repo can never wipe a
+///   possibly-live ref. A slug PRESENT with an empty set means "genuinely
+///   nothing open" and all its `pr` refs prune (correct).
+///
+/// Shares the exact per-goal `pr`-retain logic with [`prune_merged_pr_refs`]
+/// via [`retain_open_pr_refs`], so the parse / fail-open-on-unparseable-id
+/// behaviour can never drift between the two.
+pub(crate) fn prune_merged_pr_refs_scoped(
+    board: &mut GoalBoard,
+    repo_of: impl Fn(&ActiveGoal) -> String,
+    open_by_repo: &HashMap<String, HashSet<u32>>,
+) -> Vec<(String, String)> {
+    let mut pruned = Vec::new();
+    for goal in board.active.iter_mut() {
+        let slug = repo_of(goal);
+        // Fail-open: no open set for this goal's repo → prune nothing for it.
+        let Some(open_prs) = open_by_repo.get(&slug) else {
+            continue;
+        };
+        retain_open_pr_refs(&goal.id, &mut goal.wip_refs, open_prs, &mut pruned);
+    }
+    pruned
+}
+
+/// Shared per-goal `pr`-ref retain used by both [`prune_merged_pr_refs`] and
+/// [`prune_merged_pr_refs_scoped`]. Keeps every non-`pr` ref untouched; keeps a
+/// `pr` ref whose number is in `open_prs`; prunes a `pr` ref whose number is
+/// absent; and KEEPS (fail-open, with a warning) a `pr` ref whose id does not
+/// parse as a `u32` — a malformed id may still be a live PR, and dropping it
+/// could reintroduce the round-1 finding-#1 regression. Each pruned
+/// `(goal_id, ref_id)` pair is pushed onto `pruned`; the `goal_id` clone happens
+/// only on the (rare) prune path so the common no-prune case allocates nothing.
+fn retain_open_pr_refs(
+    goal_id: &str,
+    wip_refs: &mut Vec<WipRef>,
+    open_prs: &HashSet<u32>,
+    pruned: &mut Vec<(String, String)>,
+) {
+    wip_refs.retain(|wip| {
+        if !wip.kind.trim().eq_ignore_ascii_case("pr") {
+            return true;
+        }
+        match wip.ref_id.trim_start_matches('#').parse::<u32>() {
+            Ok(num) => {
+                let live = open_prs.contains(&num);
+                if !live {
+                    pruned.push((goal_id.to_string(), wip.ref_id.clone()));
+                }
+                live
+            }
+            Err(_) => {
+                tracing::warn!(
+                    target: "simard::ooda",
+                    goal = %goal_id,
+                    ref_id = %wip.ref_id,
+                    "pr wip_ref id did not parse as u32 — keeping ref (not pruning, fail-open)"
+                );
+                true
+            }
+        }
+    });
 }
 
 /// effects. Returns `true` when `goal_id` names a standing goal that was fully
