@@ -2667,7 +2667,7 @@ fn is_busy_locked(error: &rusqlite::Error) -> bool {
 /// many `CapabilityResult`-returning helpers a write transaction calls.
 fn capability_error_is_busy(error: &CapabilityError) -> bool {
     error.code() == CapabilityErrorCode::PersistenceFailed
-        && error.to_string().contains(BUSY_PERSISTENCE_MARKER)
+        && error.message().contains(BUSY_PERSISTENCE_MARKER)
 }
 
 /// Run `op` under bounded retry-with-backoff on SQLite busy/locked contention
@@ -2690,7 +2690,7 @@ fn retry_on_busy<T>(mut op: impl FnMut() -> CapabilityResult<T>) -> CapabilityRe
     loop {
         match op() {
             Ok(value) => return Ok(value),
-            Err(error) if capability_error_is_busy(&error) && attempt + 1 < MAX_ATTEMPTS => {
+            Err(error) if attempt + 1 < MAX_ATTEMPTS && capability_error_is_busy(&error) => {
                 let backoff = (Duration::from_millis(10) * (1u32 << attempt)).min(MAX_BACKOFF);
                 tracing::warn!(
                     target: "typed_ooda.outbox_write",

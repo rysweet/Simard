@@ -549,6 +549,13 @@ impl CapabilityError {
     pub fn code(&self) -> CapabilityErrorCode {
         self.code
     }
+
+    /// Borrow the error message without allocating. Used by the busy/locked
+    /// retry classifier to scan for the typed contention marker on the hot
+    /// contention path instead of formatting a throwaway `String` per attempt.
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 impl Display for CapabilityError {
