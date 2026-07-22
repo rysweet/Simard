@@ -397,7 +397,7 @@ Added to `SafeUpdateError`:
 | `SourceResolveFailed { detail }` | (autonomous path) The cwd-independent source repo could not be resolved — invalid `SIMARD_SELF_DEPLOY_REPO`, undiscoverable origin, or a failed first-time clone. Pre-sequence abort; install path untouched. |
 | `FetchFailed { detail }` | (autonomous path) `git fetch origin` failed and the merged object is not cached locally. Pre-sequence abort. |
 | `CheckoutFailed { detail }` | (autonomous path) SHA validation or `git checkout --detach`/clean of the merged head failed. Pre-sequence abort. |
-| `GateFailed { gate, detail }` | A relaunch gate or the candidate `self-test` failed. |
+| `GateFailed { gate, detail }` | A relaunch gate or the candidate `self-test` failed. `gate` carries the reserved label `target-canary` for a pre-gate infra fault where the verify harness could not run the sequence; a *concrete* gate red (`smoke` / `unit-test` / `gym-baseline` / `rpc-health`) is **not** funnelled through this variant — it stays on the `Ok(results)` path and is attributed via the structured [canary gate attribution](./canary-gate-attribution.md) `canary_gate_failed` event instead. |
 | `BackupFailed { which, detail }` | The memory **or** binary protective backup failed. No swap performed. |
 | `OrphanReapTimeout { pid }` | An engineer orphan survived SIGTERM + SIGKILL within the grace window. |
 | `HealthCheckFailed { report }` | One or more post-deploy probes failed. Triggers rollback. |
@@ -773,6 +773,7 @@ reflects current churn (fail-closed: unknown/high churn never bypasses the gate)
 ## See also
 
 - [reconcile-and-self-deploy concept](../concepts/reconcile-and-self-deploy.md)
+- [Canary gate attribution](./canary-gate-attribution.md) — the per-gate `root_cause` tags a red canary emits so drift is attributable to a concrete gate
 - [Operational autonomy model](../concepts/operational-autonomy-model.md) — the HIGH-RISK boundary governing autonomous deploy
 - [Overseer operator-notification reliability](./overseer-operator-notifications.md) — the Signal+email contract fired on every deploy outcome
 - [Overseer tick details](./overseer-tick-details.md) — the OODA tick the drift observe/decide/act rail rides on

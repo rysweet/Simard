@@ -34,6 +34,10 @@ impl CanaryRunner for FakeCanary {
         Ok(CanaryResult {
             passed: self.0,
             detail: "4/4 gates".to_string(),
+            failing_gate: None,
+            failing_detail: None,
+            passed_gates: if self.0 { 4 } else { 3 },
+            total_gates: 4,
         })
     }
 }
@@ -360,4 +364,311 @@ fn wired_daemon_behind_main_autonomously_emits_and_executes_a_guarded_deploy() {
         "deploy-starting",
         "operator notified before the autonomous deploy swap"
     );
+}
+
+// ───────────── structured canary-gate attribution at refusal (#4422) ─────────
+//
+// The recurring production signature was `capability deploy_gate failed: red
+// canary (one or more gates failed)` with NO concrete gate — so DeployDrift
+// climbed with no attributable cause. These tests pin the fix's end-to-end
+// contract at the RedCanary refusal site in `GuardedDeployer::deploy`:
+//
+//   1. `DeployRefusal::RedCanary` Display stays byte-for-byte identical
+//      (existing `.contains("red canary")` call-sites must not break).
+//   2. Every RedCanary refusal emits EXACTLY ONE attributed structured event at
+//      `target: "overseer::deploy"`, level WARN, carrying
+//      `root_cause="canary_gate_failed"` plus a CONCRETE `gate`, a `detail`,
+//      `target_commit`, and `passed_gates`/`total_gates` — so a future tick can
+//      attribute drift to a named gate. No bare "red canary" without a gate.
+//   3. A NON-canary refusal (crash-loop) must NOT be mis-attributed as a
+//      canary gate failure.
+//
+// Written test-first; FAILS until `CanaryResult` grows the additive attribution
+// fields and the refusal path emits the structured event.
+mod canary_attribution {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::{Layer, Registry};
+
+    use crate::overseer::capabilities::{Deployer, OverseerError};
+    use crate::overseer::deploy::{
+        AncestryOracle, BinaryDeployer, CRASH_LOOP_CHURN_THRESHOLD, CanaryResult, CanaryRunner,
+        DeployRefusal, GuardedDeployer,
+    };
+    use crate::overseer::notify::{
+        ChannelDelivery, DualChannelNotifier, NotifyChannel, OperatorNotification,
+    };
+    use crate::self_relaunch::RelaunchGate;
+
+    // ── tracing capture ─────────────────────────────────────────────────────
+
+    #[derive(Clone, Debug)]
+    struct Captured {
+        target: String,
+        level: String,
+        fields: BTreeMap<String, String>,
+    }
+
+    #[derive(Clone, Default)]
+    struct Sink(Arc<Mutex<Vec<Captured>>>);
+
+    struct Grab<'a>(&'a mut BTreeMap<String, String>);
+    impl Visit for Grab<'_> {
+        fn record_debug(&mut self, f: &Field, v: &dyn std::fmt::Debug) {
+            self.0.insert(f.name().to_string(), format!("{v:?}"));
+        }
+        fn record_str(&mut self, f: &Field, v: &str) {
+            self.0.insert(f.name().to_string(), v.to_string());
+        }
+        fn record_u64(&mut self, f: &Field, v: u64) {
+            self.0.insert(f.name().to_string(), v.to_string());
+        }
+        fn record_i64(&mut self, f: &Field, v: i64) {
+            self.0.insert(f.name().to_string(), v.to_string());
+        }
+        fn record_bool(&mut self, f: &Field, v: bool) {
+            self.0.insert(f.name().to_string(), v.to_string());
+        }
+    }
+
+    impl<S: tracing::Subscriber> Layer<S> for Sink {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            let mut fields = BTreeMap::new();
+            event.record(&mut Grab(&mut fields));
+            self.0.lock().unwrap().push(Captured {
+                target: event.metadata().target().to_string(),
+                level: event.metadata().level().to_string(),
+                fields,
+            });
+        }
+    }
+
+    // ── fakes ───────────────────────────────────────────────────────────────
+
+    struct Discard;
+    impl NotifyChannel for Discard {
+        fn name(&self) -> &str {
+            "discard"
+        }
+        fn deliver(&self, _n: &OperatorNotification) -> ChannelDelivery {
+            ChannelDelivery::Sent
+        }
+    }
+
+    /// A canary that reds on a CONCRETE gate, carrying counts + a detail reason.
+    struct FakeRedCanary {
+        gate: RelaunchGate,
+    }
+    impl CanaryRunner for FakeRedCanary {
+        fn run_canary(&self, _t: &str) -> Result<CanaryResult, OverseerError> {
+            Ok(CanaryResult {
+                passed: false,
+                detail: "3/4 gates".to_string(),
+                failing_gate: Some(self.gate),
+                failing_detail: Some("tests failed: assertion left != right".to_string()),
+                passed_gates: 3,
+                total_gates: 4,
+            })
+        }
+    }
+
+    struct FakeGreenCanary;
+    impl CanaryRunner for FakeGreenCanary {
+        fn run_canary(&self, _t: &str) -> Result<CanaryResult, OverseerError> {
+            Ok(CanaryResult {
+                passed: true,
+                detail: "4/4 gates".to_string(),
+                failing_gate: None,
+                failing_detail: None,
+                passed_gates: 4,
+                total_gates: 4,
+            })
+        }
+    }
+
+    struct OkAncestry;
+    impl AncestryOracle for OkAncestry {
+        fn is_ancestor(&self, _a: &str, _d: &str) -> Result<bool, OverseerError> {
+            Ok(false)
+        }
+    }
+
+    struct NoopDeployer;
+    impl BinaryDeployer for NoopDeployer {
+        fn deploy_binary(&self, t: &str) -> Result<String, OverseerError> {
+            Ok(t.to_string())
+        }
+    }
+
+    fn deployer(canary: Box<dyn CanaryRunner>, churn: u64) -> GuardedDeployer {
+        let notifier = DualChannelNotifier::new(vec![Box::new(Discard)]);
+        GuardedDeployer::new(
+            canary,
+            Box::new(NoopDeployer),
+            Box::new(OkAncestry),
+            notifier,
+            "runningOLD".to_string(),
+            churn,
+            "rysweet/Simard".to_string(),
+        )
+    }
+
+    // ── tests ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn red_canary_display_is_byte_for_byte_unchanged() {
+        // The human string is a hard compatibility constraint; the structured
+        // tag AUGMENTS it, never replaces it.
+        assert_eq!(
+            DeployRefusal::RedCanary.to_string(),
+            "red canary (one or more gates failed)"
+        );
+    }
+
+    #[test]
+    fn red_canary_refusal_emits_single_attributed_root_cause_warn() {
+        let sink = Sink::default();
+        let subscriber = Registry::default().with(sink.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            let gd = deployer(
+                Box::new(FakeRedCanary {
+                    gate: RelaunchGate::UnitTest,
+                }),
+                0,
+            );
+            let err = gd.deploy("mergedNEWc0ffee").unwrap_err();
+            assert!(
+                format!("{err}").contains("red canary"),
+                "the surfaced error still reads 'red canary': {err}"
+            );
+        });
+
+        let events = sink.0.lock().unwrap().clone();
+        let attributed: Vec<&Captured> = events
+            .iter()
+            .filter(|e| {
+                e.fields
+                    .get("root_cause")
+                    .map(|s| s == "canary_gate_failed")
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        assert_eq!(
+            attributed.len(),
+            1,
+            "a RedCanary refusal must emit EXACTLY ONE attributed root-cause \
+             event (no dupes across per-gate and summary layers): {events:?}"
+        );
+        let e = attributed[0];
+        assert_eq!(
+            e.target, "overseer::deploy",
+            "the summary root-cause event must be scoped to target \"overseer::deploy\": {e:?}"
+        );
+        assert_eq!(e.level, "WARN", "a red canary is a WARN-level event: {e:?}");
+
+        let gate = e
+            .fields
+            .get("gate")
+            .expect("the attributed event MUST carry a concrete `gate` field");
+        assert!(
+            gate.to_lowercase().contains("unit"),
+            "`gate` must name the concrete red gate (UnitTest), got {gate:?}"
+        );
+        let detail = e
+            .fields
+            .get("detail")
+            .expect("the attributed event MUST carry a `detail` field");
+        assert!(
+            detail.contains("assertion"),
+            "`detail` must carry the gate's failure reason: {detail:?}"
+        );
+        let target_commit = e
+            .fields
+            .get("target_commit")
+            .expect("the attributed event MUST carry a `target_commit` field");
+        assert!(
+            target_commit.contains("mergedNEW"),
+            "`target_commit` must identify the candidate build: {target_commit:?}"
+        );
+        assert_eq!(
+            e.fields.get("passed_gates").map(String::as_str),
+            Some("3"),
+            "`passed_gates` count must be attached: {e:?}"
+        );
+        assert_eq!(
+            e.fields.get("total_gates").map(String::as_str),
+            Some("4"),
+            "`total_gates` count must be attached: {e:?}"
+        );
+    }
+
+    #[test]
+    fn no_bare_red_canary_without_a_concrete_gate_field() {
+        // The core of #4422: a RedCanary WARN must never stand as the terminal
+        // diagnostic without an attached, non-empty concrete `gate`.
+        let sink = Sink::default();
+        let subscriber = Registry::default().with(sink.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            let gd = deployer(
+                Box::new(FakeRedCanary {
+                    gate: RelaunchGate::Smoke,
+                }),
+                0,
+            );
+            let _ = gd.deploy("candidateSHA123456");
+        });
+
+        let events = sink.0.lock().unwrap().clone();
+        let canary_warns: Vec<&Captured> = events
+            .iter()
+            .filter(|e| {
+                e.fields
+                    .get("root_cause")
+                    .map(|s| s == "canary_gate_failed")
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(
+            !canary_warns.is_empty(),
+            "a red canary must produce at least one attributed event: {events:?}"
+        );
+        for e in canary_warns {
+            let gate = e.fields.get("gate");
+            assert!(
+                gate.map(|g| !g.is_empty()).unwrap_or(false),
+                "a canary_gate_failed event with no concrete gate is exactly the \
+                 bug #4422 forbids: {e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_canary_refusal_is_not_mis_attributed_to_a_gate() {
+        // A crash-loop refusal (green canary, elevated churn) must NOT emit a
+        // canary_gate_failed root cause — attribution must be precise.
+        let sink = Sink::default();
+        let subscriber = Registry::default().with(sink.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            let gd = deployer(Box::new(FakeGreenCanary), CRASH_LOOP_CHURN_THRESHOLD);
+            let err = gd.deploy("mergedNEWc0ffee").unwrap_err();
+            assert!(
+                format!("{err}").contains("crash-loop"),
+                "expected a crash-loop refusal: {err}"
+            );
+        });
+
+        let events = sink.0.lock().unwrap().clone();
+        assert!(
+            events.iter().all(|e| e
+                .fields
+                .get("root_cause")
+                .map(|s| s != "canary_gate_failed")
+                .unwrap_or(true)),
+            "a non-canary refusal must never emit canary_gate_failed: {events:?}"
+        );
+    }
 }

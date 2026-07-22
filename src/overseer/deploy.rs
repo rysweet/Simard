@@ -30,6 +30,7 @@
 
 use crate::overseer::capabilities::{DeployReport, Deployer, OverseerError};
 use crate::overseer::notify::{DualChannelNotifier, OperatorNotification};
+use crate::self_relaunch::{GateResult, RelaunchGate, sanitize_gate_detail};
 
 /// Restart churn at/above which a deploy is refused as a suspected crash-loop
 /// (deploying into an unstable process makes it worse — Bainbridge's irony).
@@ -119,10 +120,24 @@ fn is_hex_commitish(s: &str) -> bool {
 // ─────────────────────────── injected seams ────────────────────────────────
 
 /// Result of building + verifying the canary.
+///
+/// The additive `failing_gate`/`failing_detail`/`passed_gates`/`total_gates`
+/// fields (#4422) carry the CONCRETE first-failing gate and gate counts from the
+/// canary run all the way to the `RedCanary` refusal site, so a future tick can
+/// attribute DeployDrift to a named gate instead of a bare "red canary".
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanaryResult {
     pub passed: bool,
     pub detail: String,
+    /// The first gate that failed, if any (`None` when green or on a pre-gate
+    /// build/infra failure that never reached a concrete gate).
+    pub failing_gate: Option<RelaunchGate>,
+    /// Sanitized failure reason for `failing_gate` (or the build/infra error).
+    pub failing_detail: Option<String>,
+    /// Count of gates that passed.
+    pub passed_gates: usize,
+    /// Total gates evaluated.
+    pub total_gates: usize,
 }
 
 /// Build + verify the canary binary for a target. Real impl reuses
@@ -285,6 +300,61 @@ impl Deployer for GuardedDeployer {
         // best-effort here (a refusal already surfaces as an Err); the mandatory
         // dispatch assertion below guards the swap path.
         if let Err(refusal) = evaluate_deploy_gate(&ctx) {
+            // #4422: a RedCanary refusal must carry a CONCRETE root-cause tag so a
+            // future tick can attribute DeployDrift to a named gate — never a bare
+            // "red canary". Emit exactly ONE structured event here (the per-gate
+            // WARNs in `self_relaunch::gates` are attribution breadcrumbs and do
+            // NOT set `root_cause`, so this stays the single summary tag). Only
+            // RedCanary is a gate matter — a crash-loop/rollback/no-op refusal is
+            // never mis-attributed to a gate.
+            if matches!(refusal, DeployRefusal::RedCanary) {
+                // Short SHA only (≤12 hex) — never a branch/remote/URL, so
+                // telemetry cannot leak infra topology. Char-boundary safe.
+                let short_sha: String = commit.chars().take(12).collect();
+                let attributed_detail = canary
+                    .failing_detail
+                    .as_deref()
+                    .map(sanitize_gate_detail)
+                    .unwrap_or_else(|| sanitize_gate_detail(&canary.detail));
+                let passed_gates = canary.passed_gates as u64;
+                let total_gates = canary.total_gates as u64;
+                match &canary.failing_gate {
+                    // A concrete relaunch gate reddened on the candidate.
+                    Some(gate) => tracing::warn!(
+                        target: "overseer::deploy",
+                        root_cause = "canary_gate_failed",
+                        gate = %gate,
+                        detail = attributed_detail.as_str(),
+                        passed_gates,
+                        total_gates,
+                        target_commit = short_sha.as_str(),
+                        "canary refused deploy",
+                    ),
+                    // No gate ran and none was attempted ⇒ the candidate build
+                    // failed. Attribution is to the build, so no `gate` field.
+                    None if canary.total_gates == 0 => tracing::warn!(
+                        target: "overseer::deploy",
+                        root_cause = "canary_build_failed",
+                        detail = attributed_detail.as_str(),
+                        passed_gates,
+                        total_gates,
+                        target_commit = short_sha.as_str(),
+                        "canary refused deploy",
+                    ),
+                    // No concrete gate but the sequence was attempted ⇒ a pre-gate
+                    // harness/infra fault. Reserved `target-canary` label.
+                    None => tracing::warn!(
+                        target: "overseer::deploy",
+                        root_cause = "canary_infra_error",
+                        gate = "target-canary",
+                        detail = attributed_detail.as_str(),
+                        passed_gates,
+                        total_gates,
+                        target_commit = short_sha.as_str(),
+                        "canary refused deploy",
+                    ),
+                }
+            }
             let notification = OperatorNotification::deploy_refused(
                 commit,
                 &running,
@@ -405,6 +475,22 @@ struct TargetCanaryReport {
     passed: bool,
     passed_gates: usize,
     total_gates: usize,
+    /// The first gate that failed (`None` when green), preserved instead of
+    /// being collapsed to bare counts (#4422).
+    failing_gate: Option<RelaunchGate>,
+    /// Sanitized failure reason for `failing_gate`.
+    failing_detail: Option<String>,
+}
+
+/// Pick the FIRST failing gate from a gate-result set and return its typed gate
+/// plus a *sanitized* failure detail (#4422). Returns `None` for a fully-green
+/// set. Keeping this pure makes the "which gate reddened the canary" attribution
+/// testable without executing any gate.
+fn first_failing_gate(results: &[GateResult]) -> Option<(RelaunchGate, String)> {
+    results
+        .iter()
+        .find(|r| !r.passed)
+        .map(|r| (r.gate, sanitize_gate_detail(&r.detail)))
 }
 
 trait TargetCanaryVerifier: Send + Sync {
@@ -441,10 +527,16 @@ impl TargetCanaryVerifier for SharedTargetCanaryVerifier {
         )?;
         let passed = crate::self_relaunch::all_gates_passed(&results);
         let passed_gates = results.iter().filter(|r| r.passed).count();
+        let (failing_gate, failing_detail) = match first_failing_gate(&results) {
+            Some((gate, detail)) => (Some(gate), Some(detail)),
+            None => (None, None),
+        };
         Ok(TargetCanaryReport {
             passed,
             passed_gates,
             total_gates: results.len(),
+            failing_gate,
+            failing_detail,
         })
     }
 }
@@ -460,15 +552,44 @@ impl CanaryRunner for ProdCanaryRunner {
             Ok(report) => Ok(CanaryResult {
                 passed: report.passed,
                 detail: format!("{}/{} gates", report.passed_gates, report.total_gates),
+                failing_gate: report.failing_gate,
+                failing_detail: report.failing_detail,
+                passed_gates: report.passed_gates,
+                total_gates: report.total_gates,
             }),
-            Err(SafeUpdateError::BuildFailed { detail }) => Ok(CanaryResult {
-                passed: false,
-                detail: format!("target canary build failed: {detail}"),
-            }),
-            Err(SafeUpdateError::GateFailed { gate, detail }) => Ok(CanaryResult {
-                passed: false,
-                detail: format!("target canary gate {gate} failed: {detail}"),
-            }),
+            Err(SafeUpdateError::BuildFailed { detail }) => {
+                let detail = sanitize_gate_detail(&detail);
+                Ok(CanaryResult {
+                    passed: false,
+                    detail: format!("target canary build failed: {detail}"),
+                    // A build failure predates any gate — no concrete gate to
+                    // name. `total_gates == 0` is the load-bearing discriminator
+                    // the refusal site reads to attribute this as
+                    // `canary_build_failed` (no gate ran) rather than an infra
+                    // fault: the candidate never produced a testable binary.
+                    failing_gate: None,
+                    failing_detail: Some(detail),
+                    passed_gates: 0,
+                    total_gates: 0,
+                })
+            }
+            Err(SafeUpdateError::GateFailed { gate, detail }) => {
+                let detail = sanitize_gate_detail(&detail);
+                Ok(CanaryResult {
+                    passed: false,
+                    detail: format!("target canary gate {gate} failed: {detail}"),
+                    // `GateFailed` here is a pre-gate harness/infra error (the
+                    // verify harness itself errored), not a concrete gate red —
+                    // concrete gate reds flow through the `Ok(report)` arm above.
+                    // Report the *attempted* gate total (non-zero) so the refusal
+                    // site attributes this as `canary_infra_error`, distinct from
+                    // a `canary_build_failed` (total_gates == 0).
+                    failing_gate: None,
+                    failing_detail: Some(detail),
+                    passed_gates: 0,
+                    total_gates: crate::self_relaunch::default_gates().len(),
+                })
+            }
             Err(e) => Err(OverseerError::Capability {
                 what: "target_canary",
                 detail: e.to_string(),
@@ -670,6 +791,10 @@ mod tests {
             Ok(CanaryResult {
                 passed: self.0,
                 detail: "4/4 gates".to_string(),
+                failing_gate: None,
+                failing_detail: None,
+                passed_gates: if self.0 { 4 } else { 3 },
+                total_gates: 4,
             })
         }
     }
@@ -915,6 +1040,8 @@ mod tests {
                     passed: true,
                     passed_gates: 4,
                     total_gates: 4,
+                    failing_gate: None,
+                    failing_detail: None,
                 }),
                 VerifierOutcome::BuildFail => Err(SafeUpdateError::BuildFailed {
                     detail: "target build failed".to_string(),
@@ -1067,5 +1194,206 @@ mod tests {
             "rysweet/Simard".to_string(),
         );
         let _ = gd.deploy("bbbbbbbbbbbb");
+    }
+}
+
+// ───────────────── structured canary-gate attribution (#4422) ───────────────
+//
+// TDD contract for the canary-gate attribution fix. These tests specify the
+// ADDITIVE surface that lets a future tick attribute DeployDrift to a CONCRETE
+// gate instead of a bare "red canary":
+//   * `sanitize_gate_detail`  — untrusted candidate stdout/stderr is truncated,
+//     stripped of CR/LF + ANSI, and secret-redacted before it enters any struct
+//     or tracing event (log-injection / OTel-payload defense).
+//   * `first_failing_gate`    — pure helper that picks the FIRST `!passed`
+//     `GateResult` and returns its typed gate + a *sanitized* detail, so the
+//     concrete gate identity survives instead of being collapsed to "N/M gates".
+//   * `CanaryResult` / `TargetCanaryReport` grow additive `failing_gate`,
+//     `failing_detail`, `passed_gates`, `total_gates` so the concrete gate and
+//     counts reach the RedCanary refusal site without data loss.
+//   * `run_canary` PROPAGATES those fields (no collapse to bare counts).
+//
+// They are written test-first and FAIL until the implementation lands.
+#[cfg(test)]
+mod canary_attribution_tests {
+    use super::*;
+    use crate::self_relaunch::{GateResult, RelaunchGate};
+
+    // ── sanitize_gate_detail ────────────────────────────────────────────────
+
+    #[test]
+    fn sanitize_detail_passes_short_clean_input_through() {
+        assert_eq!(sanitize_gate_detail("all good"), "all good");
+    }
+
+    #[test]
+    fn sanitize_detail_truncates_oversized_input_with_marker_and_byte_cap() {
+        let big = "x".repeat(5000);
+        let out = sanitize_gate_detail(&big);
+        assert!(
+            out.len() <= 1024,
+            "detail must be hard-capped at <= 1024 bytes to bound OTel payload, got {}",
+            out.len()
+        );
+        assert!(
+            out.contains("[truncated]"),
+            "truncation must be explicitly marked, not silent: {out}"
+        );
+    }
+
+    #[test]
+    fn sanitize_detail_strips_cr_lf_and_ansi_control() {
+        let out = sanitize_gate_detail("red\r\n\u{1b}[31mERR\u{1b}[0m\tdetail");
+        assert!(
+            !out.contains('\r') && !out.contains('\n'),
+            "CR/LF must be stripped to prevent forged log lines: {out:?}"
+        );
+        assert!(
+            !out.contains('\u{1b}'),
+            "ANSI ESC control bytes must be stripped: {out:?}"
+        );
+        assert!(
+            out.contains("ERR") && out.contains("detail"),
+            "human-readable content must survive sanitization: {out:?}"
+        );
+    }
+
+    #[test]
+    fn sanitize_detail_redacts_secrets_best_effort() {
+        let out = sanitize_gate_detail(
+            "leaked AKIAIOSFODNN7EXAMPLE and token=deadbeefcafe0000 and \
+             -----BEGIN RSA PRIVATE KEY-----MIIhiddenkeymaterial-----END RSA PRIVATE KEY-----",
+        );
+        assert!(
+            !out.contains("AKIAIOSFODNN7EXAMPLE"),
+            "AWS-access-key-shaped secrets must be redacted: {out}"
+        );
+        assert!(
+            !out.contains("deadbeefcafe0000"),
+            "token=<value> secrets must be redacted: {out}"
+        );
+        assert!(
+            !out.contains("MIIhiddenkeymaterial"),
+            "PEM private-key material must be redacted: {out}"
+        );
+    }
+
+    // ── first_failing_gate ──────────────────────────────────────────────────
+
+    #[test]
+    fn first_failing_gate_returns_none_when_all_pass() {
+        let results = vec![
+            GateResult {
+                gate: RelaunchGate::Smoke,
+                passed: true,
+                detail: "ok".to_string(),
+            },
+            GateResult {
+                gate: RelaunchGate::UnitTest,
+                passed: true,
+                detail: "ok".to_string(),
+            },
+        ];
+        assert!(
+            first_failing_gate(&results).is_none(),
+            "a fully-green gate set has no attributable failing gate"
+        );
+    }
+
+    #[test]
+    fn first_failing_gate_returns_first_red_with_sanitized_detail() {
+        let results = vec![
+            GateResult {
+                gate: RelaunchGate::Smoke,
+                passed: true,
+                detail: "ok".to_string(),
+            },
+            GateResult {
+                gate: RelaunchGate::UnitTest,
+                passed: false,
+                detail: "line1\r\nline2".to_string(),
+            },
+            GateResult {
+                gate: RelaunchGate::GymBaseline,
+                passed: false,
+                detail: "second failure".to_string(),
+            },
+        ];
+        let (gate, detail) =
+            first_failing_gate(&results).expect("a red gate is present in the results");
+        assert_eq!(
+            gate,
+            RelaunchGate::UnitTest,
+            "must attribute to the FIRST failing gate, not a later one"
+        );
+        assert!(
+            !detail.contains('\n') && !detail.contains('\r'),
+            "returned detail must already be sanitized (no CR/LF): {detail:?}"
+        );
+        assert!(
+            detail.contains("line1") && detail.contains("line2"),
+            "sanitized detail must preserve the human reason: {detail:?}"
+        );
+    }
+
+    // ── run_canary propagation ──────────────────────────────────────────────
+
+    struct OkSource;
+    impl crate::self_deploy::SelfDeploySourcePreparer for OkSource {
+        fn prepare(
+            &self,
+            _target_commit: &str,
+        ) -> Result<std::path::PathBuf, crate::safe_update::SafeUpdateError> {
+            Ok(std::path::PathBuf::from("/nonexistent/prepared-target"))
+        }
+    }
+
+    /// A verifier whose canary reds on a CONCRETE gate, carrying counts + detail.
+    struct RedGateVerifier;
+    impl TargetCanaryVerifier for RedGateVerifier {
+        fn build_and_verify(
+            &self,
+            source: &dyn crate::self_deploy::SelfDeploySourcePreparer,
+            target_commit: &str,
+        ) -> Result<TargetCanaryReport, crate::safe_update::SafeUpdateError> {
+            let _repo = source.prepare(target_commit)?;
+            Ok(TargetCanaryReport {
+                passed: false,
+                passed_gates: 3,
+                total_gates: 4,
+                failing_gate: Some(RelaunchGate::UnitTest),
+                failing_detail: Some("tests failed: boom".to_string()),
+            })
+        }
+    }
+
+    #[test]
+    fn run_canary_propagates_concrete_failing_gate_and_counts() {
+        let runner =
+            ProdCanaryRunner::with_target_seams(Box::new(OkSource), Box::new(RedGateVerifier));
+        let result = runner
+            .run_canary("abc123def456")
+            .expect("a red gate is NOT a hard error — it is a red CanaryResult");
+        assert!(!result.passed, "a red gate must not report passed");
+        assert_eq!(
+            result.failing_gate,
+            Some(RelaunchGate::UnitTest),
+            "the concrete first-failing gate must survive to CanaryResult, not be collapsed"
+        );
+        let detail = result
+            .failing_detail
+            .expect("failing_detail must be populated for a red canary");
+        assert!(
+            detail.contains("boom"),
+            "failing_detail must carry the gate's reason: {detail}"
+        );
+        assert_eq!(
+            result.passed_gates, 3,
+            "gate counts must be threaded through"
+        );
+        assert_eq!(
+            result.total_gates, 4,
+            "gate counts must be threaded through"
+        );
     }
 }
