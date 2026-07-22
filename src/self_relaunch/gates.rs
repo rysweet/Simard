@@ -473,7 +473,7 @@ mod tests {
 //   * Bidirectional gate verdict: a healthy candidate goes GREEN *because* the
 //     ambient hijack was stripped; an unhealthy candidate stays fail-closed RED.
 //
-// Constraints honoured: additive, fail-closed preserved, no `Bridge` naming,
+// Constraints honoured: additive, fail-closed preserved, intent-revealing names only,
 // `tracing`/OTel only (no `print!`/`println!`).
 #[cfg(all(test, unix))]
 mod convergence_tests {

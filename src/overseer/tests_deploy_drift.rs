@@ -372,7 +372,7 @@ fn wired_daemon_behind_main_autonomously_emits_and_executes_a_guarded_deploy() {
 // the loop must CONVERGE (advance past the stuck SHA) instead of re-refusing the
 // identical deploy every tick (the observed pathology on deploy 928cd7da).
 //
-// Constraints: additive, no `Bridge` naming, `tracing`/OTel only.
+// Constraints: additive, intent-revealing names only, `tracing`/OTel only.
 use crate::overseer::deploy::DeployRefusal;
 use crate::overseer::wiring::is_transient;
 
