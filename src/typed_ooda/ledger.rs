@@ -3797,4 +3797,150 @@ mod outbox_serialization_tests {
             }
         }
     }
+
+    // ---------------------------------------------------------------------
+    // Direct unit coverage for the SQLite busy/locked retry mechanism
+    // (issue #4468). `retry_on_busy` takes an injectable closure, so its
+    // control flow — retry on contention, bounded exhaustion, and immediate
+    // passthrough for non-contention errors — is unit-testable deterministically
+    // without provoking real cross-thread lock contention. The concurrency
+    // test above exercises the stack under load; these pin the decision logic.
+    // ---------------------------------------------------------------------
+
+    fn busy_sqlite_error() -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::DatabaseBusy,
+                extended_code: 5,
+            },
+            Some("database is locked".to_string()),
+        )
+    }
+
+    fn locked_sqlite_error() -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::DatabaseLocked,
+                extended_code: 6,
+            },
+            Some("database table is locked".to_string()),
+        )
+    }
+
+    fn constraint_sqlite_error() -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::ConstraintViolation,
+                extended_code: 19,
+            },
+            Some("UNIQUE constraint failed".to_string()),
+        )
+    }
+
+    #[test]
+    fn is_busy_locked_matches_only_typed_contention_codes() {
+        assert!(is_busy_locked(&busy_sqlite_error()));
+        assert!(is_busy_locked(&locked_sqlite_error()));
+        assert!(
+            !is_busy_locked(&constraint_sqlite_error()),
+            "constraint violations must never be treated as retryable contention"
+        );
+        assert!(!is_busy_locked(&rusqlite::Error::QueryReturnedNoRows));
+    }
+
+    #[test]
+    fn capability_error_is_busy_keys_on_typed_marker_not_free_text() {
+        // A persistence error mapped from a typed busy/locked rusqlite error is
+        // classified as retryable contention...
+        assert!(capability_error_is_busy(&persistence(busy_sqlite_error())));
+        assert!(capability_error_is_busy(
+            &persistence(locked_sqlite_error())
+        ));
+
+        // ...but a persistence error from a non-contention cause is NOT, even
+        // though it shares the PersistenceFailed code.
+        assert!(!capability_error_is_busy(&persistence(
+            constraint_sqlite_error()
+        )));
+
+        // Free text that merely mentions locking cannot steer retries: only the
+        // marker stamped from the typed error code counts.
+        let steered = persistence_message("database is locked, please retry");
+        assert!(
+            !capability_error_is_busy(&steered),
+            "message text alone must never classify an error as retryable"
+        );
+
+        // The marker on a non-PersistenceFailed code is likewise ignored.
+        let wrong_code = CapabilityError::new(
+            CapabilityErrorCode::InvalidArgument,
+            format!("{BUSY_PERSISTENCE_MARKER}spoofed"),
+        );
+        assert!(!capability_error_is_busy(&wrong_code));
+    }
+
+    #[test]
+    fn retry_on_busy_returns_immediately_on_success() {
+        let mut calls = 0u32;
+        let result: CapabilityResult<u32> = retry_on_busy(|| {
+            calls += 1;
+            Ok(7)
+        });
+        assert_eq!(result.expect("ok"), 7);
+        assert_eq!(calls, 1, "a successful op must not be retried");
+    }
+
+    #[test]
+    fn retry_on_busy_retries_transient_contention_then_succeeds() {
+        let mut calls = 0u32;
+        let result: CapabilityResult<&str> = retry_on_busy(|| {
+            calls += 1;
+            if calls < 3 {
+                Err(persistence(busy_sqlite_error()))
+            } else {
+                Ok("committed")
+            }
+        });
+        assert_eq!(result.expect("eventually succeeds"), "committed");
+        assert_eq!(
+            calls, 3,
+            "must retry through transient busy errors then commit"
+        );
+    }
+
+    #[test]
+    fn retry_on_busy_bounds_attempts_and_surfaces_the_contention_error() {
+        let mut calls = 0u32;
+        let result: CapabilityResult<()> = retry_on_busy(|| {
+            calls += 1;
+            Err(persistence(busy_sqlite_error()))
+        });
+        let error = result.expect_err("a wedged writer must surface, never loop forever");
+        assert_eq!(error.code(), CapabilityErrorCode::PersistenceFailed);
+        assert!(
+            capability_error_is_busy(&error),
+            "the exhausted error is still the original busy/locked failure"
+        );
+        assert_eq!(
+            calls, 6,
+            "attempts are hard-capped at MAX_ATTEMPTS (anti-DoS on the shared connection)"
+        );
+    }
+
+    #[test]
+    fn retry_on_busy_does_not_retry_non_contention_errors() {
+        let mut calls = 0u32;
+        let result: CapabilityResult<()> = retry_on_busy(|| {
+            calls += 1;
+            Err(persistence(constraint_sqlite_error()))
+        });
+        assert_eq!(
+            result.expect_err("non-busy error surfaces").code(),
+            CapabilityErrorCode::PersistenceFailed
+        );
+        assert_eq!(
+            calls, 1,
+            "a non-busy error must surface immediately, never retry"
+        );
+    }
 }
