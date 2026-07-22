@@ -87,7 +87,7 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
   echo "ERROR: not inside a git repository" >&2
   exit 2
 }
-cd "$REPO_ROOT"
+cd "$REPO_ROOT" || exit 2
 
 GOAL_ID="${GOAL_ID:-move-the-governed-repo-roster-out-of-framework-a8f57a50}"
 ISSUE_NUMBER="${ISSUE_NUMBER:-4455}"
@@ -286,13 +286,11 @@ else
     'ecosystem_repos\.toml'
     'merged[- ]PR|PR[[:space:]]*#?[0-9].*MERGED|exactly one merged|one merged PR'
   )
-  missing=0
   for i in "${!CRIT_PAT[@]}"; do
     if printf '%s' "$block" | grep -qiE "${CRIT_PAT[$i]}"; then
       pass "C2.$((i+1)) criterion present: ${CRIT_LABEL[$i]}"
     else
       fail "C2.$((i+1)) criterion MISSING: ${CRIT_LABEL[$i]}"
-      missing=$((missing + 1))
     fi
   done
 
