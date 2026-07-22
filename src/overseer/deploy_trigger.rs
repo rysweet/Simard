@@ -236,9 +236,11 @@ impl DeployDriftObserver for GitDeployDriftObserver {
 /// so only a fully-resolved commit id — never an abbreviation or ref — is
 /// accepted on the unattended path.
 fn is_full_hex_sha(s: &str) -> bool {
-    matches!(s.len(), 40 | 64)
-        && s.bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    // One uniform pattern per byte (lowercase hex only — deliberately NOT
+    // `is_ascii_hexdigit`, which also accepts `A`–`F`). A `matches!` range
+    // pattern lowers to direct bounded comparisons, avoiding the extra work
+    // `RangeInclusive::contains` does per element.
+    matches!(s.len(), 40 | 64) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 // ═══════════════════════════ red-canary loop-halt ═══════════════════════════
