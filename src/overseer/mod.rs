@@ -84,6 +84,8 @@ mod tests_gap_scan;
 #[cfg(test)]
 mod tests_goal_health;
 #[cfg(test)]
+mod tests_governed_repo_roster_triage;
+#[cfg(test)]
 mod tests_m1;
 #[cfg(test)]
 mod tests_m2;
