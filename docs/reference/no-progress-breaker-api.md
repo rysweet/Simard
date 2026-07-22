@@ -396,6 +396,7 @@ status is persisted by the next `commit_cycle`.
 
 ## See also
 
+- [OODA escalation issue-filing API](../reference/ooda-escalation-issue-filing-api.md) — the shared `spawn_tracking_issue` helper that reliably files the `Escalate` resolution's `issue_title` / `issue_body` and surfaces every failure (#4472).
 - [Concept: the breaker explains WHY and self-resolves before escalating](../concepts/no-progress-root-cause-resolution.md) — the root-cause classification and resolution ladder layered on this base breaker.
 - [Root-cause resolution API reference](../reference/no-progress-root-cause-resolution-api.md) — `NoProgressClass`, the WHY types, the reasoner, and the extended resolution ladder.
 - [The `ooda-no-progress-why` recipe reference](../reference/ooda-no-progress-why-recipe.md) — the optional agentic WHY narrator.

@@ -149,6 +149,11 @@ fn is_corrupt_quarantine_name(name: &str) -> bool {
 
 /// Count quarantined corrupt cognitive-memory artifacts directly under
 /// `state_root`. Absent/unreadable dir ⇒ `0` (nothing to quarantine).
+///
+/// Superseded at the probe site by [`count_active_quarantine_files`] (#4471),
+/// which excludes aged forensic recovery artifacts; retained here as the
+/// name-only primitive still exercised by the lower-level unit tests.
+#[allow(dead_code)]
 fn count_quarantine_files(state_root: &std::path::Path) -> u64 {
     let entries = match std::fs::read_dir(state_root) {
         Ok(e) => e,
@@ -158,6 +163,68 @@ fn count_quarantine_files(state_root: &std::path::Path) -> u64 {
         .flatten()
         .filter(|e| is_corrupt_quarantine_name(&e.file_name().to_string_lossy()))
         .count() as u64
+}
+
+/// Classification of a `cognitive*.corrupt-<ts>` artifact by file age (#4471).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QuarantineClass {
+    /// Freshly quarantined store (age < [`ACTIVE_QUARANTINE_MAX_AGE`]): a live
+    /// corruption fault that MUST fail the probe and block self-deploy.
+    Active,
+    /// Aged forensic recovery artifact (age ≥ [`ACTIVE_QUARANTINE_MAX_AGE`]),
+    /// retained by policy (#2420 / #2550). NOT a live fault; must NOT fail the
+    /// probe and must NOT be deleted early.
+    RetainedRecovery,
+}
+
+/// Age boundary between active corruption and a retained forensic artifact.
+/// Strictly shorter than `disk::CORRUPT_DB_MAX_AGE_DAYS` (30d) so the two never
+/// latch on the same boundary.
+const ACTIVE_QUARANTINE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Classify one quarantine artifact by the age of its file metadata (#4471).
+///
+/// Fail-CLOSED: if the modified-time cannot be read, is in the future, or the
+/// metadata errors, the artifact is treated as [`QuarantineClass::Active`] — the
+/// safe verdict that blocks self-deploy rather than masking a live corruption.
+/// Reads metadata ONLY; never opens, moves, or deletes the file.
+fn classify_quarantine(path: &std::path::Path, now: std::time::SystemTime) -> QuarantineClass {
+    let mtime = match std::fs::metadata(path).and_then(|m| m.modified()) {
+        Ok(t) => t,
+        // Missing/unreadable metadata ⇒ fail closed to Active.
+        Err(_) => return QuarantineClass::Active,
+    };
+    match now.duration_since(mtime) {
+        // A future mtime (mtime after `now`) yields Err ⇒ fail closed to Active.
+        Err(_) => QuarantineClass::Active,
+        Ok(age) if age >= ACTIVE_QUARANTINE_MAX_AGE => QuarantineClass::RetainedRecovery,
+        Ok(_) => QuarantineClass::Active,
+    }
+}
+
+/// Count ONLY [`QuarantineClass::Active`] artifacts under `state_root`, using
+/// the injected `now` as the age reference (hermetic seam). Retained forensic
+/// artifacts are excluded. Absent/unreadable dir ⇒ `0`. Directory-confined; does
+/// not follow symlinks (SR-V4).
+fn count_active_quarantine_files_at(
+    state_root: &std::path::Path,
+    now: std::time::SystemTime,
+) -> u64 {
+    let entries = match std::fs::read_dir(state_root) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+    entries
+        .flatten()
+        .filter(|e| is_corrupt_quarantine_name(&e.file_name().to_string_lossy()))
+        .filter(|e| classify_quarantine(&e.path(), now) == QuarantineClass::Active)
+        .count() as u64
+}
+
+/// Count active-corruption quarantine artifacts under `state_root` as of now.
+/// Thin wrapper over [`count_active_quarantine_files_at`] with the wall clock.
+fn count_active_quarantine_files(state_root: &std::path::Path) -> u64 {
+    count_active_quarantine_files_at(state_root, std::time::SystemTime::now())
 }
 
 /// Run the post-deploy probes against the live daemon and assemble a report.
@@ -236,8 +303,10 @@ pub fn run_self_health_probe(
         fallback_records,
     };
 
-    // Probe 5: no quarantined corrupt cognitive-memory store.
-    let quarantined = count_quarantine_files(&state_root) > 0;
+    // Probe 5: no ACTIVE quarantined corrupt cognitive-memory store. Retained
+    // forensic recovery artifacts (#2420/#2550, aged ≥ 24h) are NOT active
+    // faults and must not freeze self-deploy (#4469/#4471).
+    let quarantined = count_active_quarantine_files(&state_root) > 0;
     let no_quarantine = NoQuarantineProbe {
         healthy: !quarantined,
         quarantined,
@@ -493,5 +562,212 @@ mod probe_logic_tests {
     #[test]
     fn entrypoint_parity_default_is_fail_closed() {
         assert!(!EntrypointParityProbe::default().healthy);
+    }
+
+    // ── quarantine classification (#4469 / #4471) ──────────────────────────
+    // The old probe failed on ANY `cognitive*.corrupt-*` artifact, so retained
+    // forensic recovery snapshots (#2420 / #2550, kept 30 days) held
+    // `NoQuarantineProbe.healthy == false` for up to a month even on a fully
+    // healthy build — freezing self-deploy and letting DeployDrift climb. The
+    // classifier distinguishes ACTIVE corruption (<24h) from RETAINED forensic
+    // artifacts (≥24h). Age logic is tested through an injected `now` so the
+    // tests are hermetic (no mtime backdating, no clock coupling).
+
+    use std::time::{Duration, SystemTime};
+
+    /// A quarantine artifact created "now"; `classify_quarantine` is then probed
+    /// with an injected reference time to place it in an age band deterministically.
+    fn write_quarantine_file(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, b"corrupt-store-bytes").unwrap();
+        path
+    }
+
+    #[test]
+    fn classify_quarantine_recent_is_active() {
+        let dir = tempdir().unwrap();
+        let path = write_quarantine_file(dir.path(), "cognitive.corrupt-20260722");
+        // Reference time == roughly the file's own mtime ⇒ age ≈ 0 < 24h.
+        assert_eq!(
+            classify_quarantine(&path, SystemTime::now()),
+            QuarantineClass::Active,
+            "a freshly created quarantine artifact is ACTIVE corruption"
+        );
+    }
+
+    #[test]
+    fn classify_quarantine_aged_is_retained_recovery() {
+        let dir = tempdir().unwrap();
+        let path = write_quarantine_file(dir.path(), "cognitive_memory.corrupt-20260601");
+        // Look at the file from 48h in the future ⇒ age ≥ 24h ⇒ retained.
+        let now = SystemTime::now() + Duration::from_secs(48 * 3600);
+        assert_eq!(
+            classify_quarantine(&path, now),
+            QuarantineClass::RetainedRecovery,
+            "an artifact older than ACTIVE_QUARANTINE_MAX_AGE is a retained forensic asset"
+        );
+    }
+
+    #[test]
+    fn classify_quarantine_boundary_uses_24h_threshold() {
+        // Sanity-check the threshold constant is exactly 24h so the Active /
+        // Retained boundary never overlaps the 30-day disk-retention window.
+        assert_eq!(ACTIVE_QUARANTINE_MAX_AGE, Duration::from_secs(24 * 3600));
+
+        let dir = tempdir().unwrap();
+        let path = write_quarantine_file(dir.path(), "cognitive.corrupt-boundary");
+        // Just under the threshold ⇒ Active; just over ⇒ Retained.
+        let just_under = SystemTime::now() + (ACTIVE_QUARANTINE_MAX_AGE - Duration::from_secs(60));
+        let just_over = SystemTime::now() + (ACTIVE_QUARANTINE_MAX_AGE + Duration::from_secs(60));
+        assert_eq!(
+            classify_quarantine(&path, just_under),
+            QuarantineClass::Active
+        );
+        assert_eq!(
+            classify_quarantine(&path, just_over),
+            QuarantineClass::RetainedRecovery
+        );
+    }
+
+    #[test]
+    fn classify_quarantine_future_mtime_fails_closed_active() {
+        let dir = tempdir().unwrap();
+        let path = write_quarantine_file(dir.path(), "cognitive.corrupt-future");
+        // Reference time BEFORE the file's mtime ⇒ negative age / duration error
+        // ⇒ fail-closed to Active (block self-deploy, never mask live corruption).
+        let now = SystemTime::now() - Duration::from_secs(2 * 3600);
+        assert_eq!(
+            classify_quarantine(&path, now),
+            QuarantineClass::Active,
+            "an unreadable/future/erroring mtime must classify as Active (fail-closed)"
+        );
+    }
+
+    #[test]
+    fn classify_quarantine_missing_file_fails_closed_active() {
+        // A metadata error (missing file) fails closed to Active.
+        assert_eq!(
+            classify_quarantine(
+                std::path::Path::new("/no-such-quarantine-file-xyz-123"),
+                SystemTime::now()
+            ),
+            QuarantineClass::Active,
+        );
+    }
+
+    #[test]
+    fn count_active_excludes_retained_only_directory() {
+        let dir = tempdir().unwrap();
+        write_quarantine_file(dir.path(), "cognitive.corrupt-20260601");
+        write_quarantine_file(dir.path(), "cognitive_memory.corrupt-20260515");
+        // Viewed from 48h in the future, every artifact is aged (retained).
+        let now = SystemTime::now() + Duration::from_secs(48 * 3600);
+        assert_eq!(
+            count_active_quarantine_files_at(dir.path(), now),
+            0,
+            "retained-only directory must have ZERO active artifacts (probe stays healthy)"
+        );
+    }
+
+    #[test]
+    fn count_active_counts_recent_corruption() {
+        let dir = tempdir().unwrap();
+        write_quarantine_file(dir.path(), "cognitive.corrupt-now-a");
+        write_quarantine_file(dir.path(), "cognitive_memory.corrupt-now-b");
+        // Non-quarantine files must never be counted.
+        std::fs::write(dir.path().join("cognitive.db"), b"live").unwrap();
+        std::fs::write(dir.path().join("unrelated.corrupt-1"), b"x").unwrap();
+        assert_eq!(
+            count_active_quarantine_files_at(dir.path(), SystemTime::now()),
+            2,
+            "two fresh quarantine artifacts are both ACTIVE"
+        );
+    }
+
+    #[test]
+    fn count_active_missing_dir_is_zero() {
+        assert_eq!(
+            count_active_quarantine_files_at(
+                std::path::Path::new("/no-such-dir-active-xyz"),
+                SystemTime::now()
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn no_quarantine_verdict_healthy_when_only_retained() {
+        // The probe wiring keys `quarantined` off the ACTIVE count. With only
+        // retained artifacts, the verdict is healthy so DeployDrift can drain.
+        let dir = tempdir().unwrap();
+        write_quarantine_file(dir.path(), "cognitive.corrupt-old");
+        let now = SystemTime::now() + Duration::from_secs(48 * 3600);
+        let quarantined = count_active_quarantine_files_at(dir.path(), now) > 0;
+        assert!(
+            !quarantined,
+            "retained-only ⇒ not quarantined ⇒ NoQuarantineProbe.healthy == true"
+        );
+    }
+
+    #[test]
+    fn public_count_active_is_zero_for_empty_dir() {
+        // The public (now-injecting) wrapper agrees with the seam on an empty dir.
+        let dir = tempdir().unwrap();
+        assert_eq!(count_active_quarantine_files(dir.path()), 0);
+    }
+
+    #[test]
+    fn filename_parity_health_vs_disk() {
+        // The `is_corrupt_quarantine_name` predicate is mirrored in health.rs and
+        // cmd_cleanup::disk — the two must agree byte-for-byte so the disk-cleanup
+        // retention contract is never diverged by this fix.
+        let fixtures = [
+            "cognitive.corrupt-20260101",
+            "cognitive_memory.corrupt-20260102",
+            "cognitive.corrupt-",
+            "cognitive.db",
+            "cognitive_memory.wal",
+            "unrelated.corrupt-1",
+            "cognitive",
+            "prefix-cognitive.corrupt-1",
+            "",
+        ];
+        for name in fixtures {
+            assert_eq!(
+                is_corrupt_quarantine_name(name),
+                crate::cmd_cleanup::disk::is_corrupt_quarantine_name(name),
+                "health.rs and disk.rs must classify {name:?} identically"
+            );
+        }
+    }
+
+    #[test]
+    fn classifier_never_mutates_files() {
+        // SR-D1: the classifier reads metadata only. It must never delete, move,
+        // or rewrite a `*.corrupt-*` forensic recovery artifact (#2420 / #2550).
+        let dir = tempdir().unwrap();
+        let a = write_quarantine_file(dir.path(), "cognitive.corrupt-keep-a");
+        let b = write_quarantine_file(dir.path(), "cognitive_memory.corrupt-keep-b");
+        let before_a = std::fs::read(&a).unwrap();
+        let before_b = std::fs::read(&b).unwrap();
+
+        // Exercise both age bands over the same directory.
+        let _ = count_active_quarantine_files_at(dir.path(), SystemTime::now());
+        let _ = count_active_quarantine_files_at(
+            dir.path(),
+            SystemTime::now() + Duration::from_secs(72 * 3600),
+        );
+
+        assert!(a.exists() && b.exists(), "no artifact may be deleted");
+        assert_eq!(
+            std::fs::read(&a).unwrap(),
+            before_a,
+            "artifact bytes must be untouched"
+        );
+        assert_eq!(
+            std::fs::read(&b).unwrap(),
+            before_b,
+            "artifact bytes must be untouched"
+        );
     }
 }

@@ -63,6 +63,22 @@ pub fn default_gates() -> Vec<RelaunchGate> {
     ]
 }
 
+/// The curated, recursion-free deploy-canary gate list (#4469/#4470).
+///
+/// Returns `[Smoke, GymBaseline, RpcHealth]` — deliberately **excluding**
+/// `UnitTest`. The `UnitTest` gate shells `cargo test`; run inside a deploy
+/// canary that the overseer itself spawned, it recurses into the test suite and
+/// returns a deterministic exit 101, which was the root cause of the red-canary
+/// self-deploy crash-loop. The exhaustive [`default_gates`] suite (which still
+/// includes `UnitTest`) remains the list used by CI / manual verification.
+pub fn canary_gates() -> Vec<RelaunchGate> {
+    vec![
+        RelaunchGate::Smoke,
+        RelaunchGate::GymBaseline,
+        RelaunchGate::RpcHealth,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,6 +95,62 @@ mod tests {
         assert_eq!(gates.len(), 4);
         assert_eq!(gates[0], RelaunchGate::Smoke);
         assert_eq!(gates[3], RelaunchGate::RpcHealth);
+    }
+
+    // ── canary_gates() — curated, recursion-free deploy-canary list ─────────
+    // Root cause of the red-canary exit-101 crash-loop (#4469 / #4470): the
+    // deploy canary ran `default_gates()`, which includes `UnitTest`; that
+    // gate shells `cargo test` and, run inside a canary already spawned by the
+    // overseer, recurses into the test suite and returns a deterministic
+    // exit 101. `canary_gates()` is the curated list that omits `UnitTest`.
+
+    #[test]
+    fn canary_gates_excludes_unit_test() {
+        // INVARIANT: adding `UnitTest` back is a regression that re-opens the
+        // recursion crash-loop — this assertion must fail if that ever happens.
+        let gates = canary_gates();
+        assert!(
+            !gates.contains(&RelaunchGate::UnitTest),
+            "canary_gates() must NEVER contain UnitTest (recursion → exit 101, #4469/#4470); got {gates:?}"
+        );
+    }
+
+    #[test]
+    fn canary_gates_order_is_stable() {
+        // Stable order keeps `failing_gate` attribution deterministic in the
+        // #4420 red-canary diagnostics.
+        assert_eq!(
+            canary_gates(),
+            vec![
+                RelaunchGate::Smoke,
+                RelaunchGate::GymBaseline,
+                RelaunchGate::RpcHealth,
+            ],
+            "canary_gates() must be exactly [Smoke, GymBaseline, RpcHealth] in order"
+        );
+    }
+
+    #[test]
+    fn canary_gates_every_member_is_a_default_gate() {
+        // The curated list is a subset of the exhaustive suite — it removes a
+        // gate, it never invents a new one.
+        let full = default_gates();
+        for gate in canary_gates() {
+            assert!(
+                full.contains(&gate),
+                "canary gate {gate:?} must also be a member of default_gates()"
+            );
+        }
+    }
+
+    #[test]
+    fn default_gates_still_includes_unit_test() {
+        // The exhaustive suite (used by CI / manual verification) is UNCHANGED
+        // and still exercises the unit-test gate.
+        assert!(
+            default_gates().contains(&RelaunchGate::UnitTest),
+            "default_gates() must remain the exhaustive suite including UnitTest"
+        );
     }
 
     #[test]

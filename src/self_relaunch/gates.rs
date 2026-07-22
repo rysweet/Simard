@@ -61,6 +61,15 @@ fn run_smoke_gate(binary: &Path) -> GateResult {
 }
 
 fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
+    // Fail-closed recursion sentinel (#4470): refuse to shell `cargo test` when
+    // running inside the deploy canary, so the gate can never recurse into the
+    // test suite (deterministic exit 101). Pure decision in
+    // `unit_test_recursion_refusal` for hermetic testability.
+    if let Some(refusal) =
+        unit_test_recursion_refusal(std::env::var_os("SIMARD_IN_DEPLOY_CANARY").is_some())
+    {
+        return refusal;
+    }
     match Command::new("cargo")
         .arg("test")
         .arg("--manifest-path")
@@ -156,6 +165,28 @@ fn truncate_output(s: &str, max_len: usize) -> String {
             .map_or(0, |(i, c)| i + c.len_utf8());
         format!("{}...", s[..boundary].trim())
     }
+}
+
+/// Fail-closed recursion sentinel decision for the `UnitTest` gate (#4470).
+///
+/// Pure and injectable so the deploy-canary refusal path can be tested without
+/// mutating process-global env or spawning `cargo test`. Returns:
+/// * `Some(failed GateResult)` when `in_deploy_canary` is true — the gate MUST
+///   refuse to shell `cargo test` (fail closed, never silently green);
+/// * `None` otherwise — the gate proceeds normally.
+///
+fn unit_test_recursion_refusal(in_deploy_canary: bool) -> Option<GateResult> {
+    if !in_deploy_canary {
+        return None;
+    }
+    Some(GateResult {
+        gate: RelaunchGate::UnitTest,
+        passed: false,
+        detail: "recursion guard: refusing to shell `cargo test` inside the \
+                 deploy canary (would recurse into the test suite → exit 101, \
+                 #4470); the curated canary_gates() list excludes UnitTest"
+            .to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -315,5 +346,82 @@ mod tests {
         let config = RelaunchConfig::default();
         let results = verify_canary(Path::new("/no-such-binary"), &[], &config).unwrap();
         assert!(results.is_empty());
+    }
+
+    // ── deploy-canary curation (#4469 / #4470) ─────────────────────────────
+    // The deploy canary must run the curated `canary_gates()` list, which
+    // excludes `UnitTest`. Running the curated list against a MISSING binary
+    // exercises every selected gate's failure path WITHOUT ever shelling
+    // `cargo test` — proving the list is recursion-free (no exit-101 hang).
+
+    #[test]
+    fn deploy_canary_runs_curated_gates_without_unit_test() {
+        let config = RelaunchConfig::default();
+        let gates = crate::self_relaunch::canary_gates();
+
+        // The curated list itself must never carry the recursive gate.
+        assert!(
+            !gates.contains(&super::RelaunchGate::UnitTest),
+            "canary_gates() must exclude UnitTest so the deploy canary never recurses"
+        );
+
+        // verify_canary runs each selected gate; with a missing binary every
+        // gate fails fast (no `cargo test` subprocess is ever spawned).
+        let results =
+            verify_canary(Path::new("/no-such-binary-canary-99999"), &gates, &config).unwrap();
+        assert_eq!(
+            results.len(),
+            gates.len(),
+            "the canary must run exactly the curated gate list"
+        );
+        assert_eq!(
+            results.len(),
+            3,
+            "curated canary list is [Smoke, GymBaseline, RpcHealth]"
+        );
+        assert!(
+            results
+                .iter()
+                .all(|r| r.gate != super::RelaunchGate::UnitTest),
+            "no result may come from the UnitTest gate"
+        );
+        assert!(
+            results.iter().all(|r| !r.passed),
+            "a missing binary reddens every curated gate"
+        );
+    }
+
+    // ── fail-closed recursion sentinel (#4470) ─────────────────────────────
+    // Defense-in-depth: even if a future caller runs the canary with a list
+    // that still contains `UnitTest`, the gate runner must REFUSE to shell
+    // `cargo test` when the deploy-canary marker is active, returning a
+    // *failed* GateResult (fail-closed) rather than recursing. The decision is
+    // a pure, injectable seam so the test stays hermetic (no env mutation, no
+    // `cargo test` subprocess).
+
+    #[test]
+    fn unit_test_gate_refuses_inside_deploy_canary() {
+        let refusal = super::unit_test_recursion_refusal(true)
+            .expect("inside the deploy canary the unit-test gate must refuse (Some)");
+        assert_eq!(refusal.gate, super::RelaunchGate::UnitTest);
+        assert!(
+            !refusal.passed,
+            "the recursion sentinel must FAIL CLOSED — never silently green"
+        );
+        assert!(
+            refusal.detail.to_lowercase().contains("recursion"),
+            "the refusal detail must explain the recursion guard, got: {}",
+            refusal.detail
+        );
+    }
+
+    #[test]
+    fn unit_test_gate_runs_normally_outside_deploy_canary() {
+        // Outside the deploy canary there is no refusal — the gate proceeds to
+        // its normal `cargo test` path (None means "no sentinel short-circuit").
+        assert!(
+            super::unit_test_recursion_refusal(false).is_none(),
+            "outside the deploy canary the unit-test gate must NOT be short-circuited"
+        );
     }
 }

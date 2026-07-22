@@ -329,6 +329,8 @@ nav:
     - amplihack Freshness Gate: reference/amplihack-freshness-gate.md
     - Multi-Binary Self-Update: reference/multi-binary-self-update.md
     - Self-Deploy API: reference/self-deploy-api.md
+    - Deploy Canary Gate Curation API: reference/deploy-canary-gate-curation-api.md
+    - Self-Health Quarantine Classification API: reference/self-health-quarantine-classification-api.md
     - Self-Deploy Source Prep & Warm Target Dir: reference/self-deploy-source-prep.md
     - State-Root Resolution: reference/state-root-resolution.md
     - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
@@ -418,6 +420,7 @@ nav:
     - Completion-Evidence Gate API: reference/completion-evidence-gate-api.md
     - Outcome-Verification API: reference/outcome-verification-api.md
     - No-Progress Breaker API: reference/no-progress-breaker-api.md
+    - OODA Escalation Issue-Filing API: reference/ooda-escalation-issue-filing-api.md
     - No-Progress Root-Cause Resolution API: reference/no-progress-root-cause-resolution-api.md
     - OODA No-Progress WHY Recipe: reference/ooda-no-progress-why-recipe.md
     - Durable OODA Cycle Counter API: reference/durable-ooda-cycle-counter.md

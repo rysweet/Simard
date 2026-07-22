@@ -365,43 +365,26 @@ pub fn dispatch_spawn_engineer(
                             ));
                         }
                     }
-                    // File tracking issue. Failure to file is logged but
-                    // does NOT swallow the original brain failure.
-                    match std::process::Command::new("gh")
-                        .args([
-                            "issue",
-                            "create",
-                            "--title",
-                            &title,
-                            "--body",
-                            &body,
-                            "--label",
-                            "ooda-stuck",
-                        ])
-                        .output()
-                    {
-                        Ok(out) if out.status.success() => {
-                            eprintln!(
-                                "[simard] DETERMINISTIC SAFEGUARD: goal '{}' marked Blocked + tracking issue filed",
-                                goal_id
-                            );
-                        }
-                        Ok(out) => {
-                            tracing::error!(
-                                target: "simard::ooda_brain",
-                                goal = %goal_id,
-                                stderr = %String::from_utf8_lossy(&out.stderr),
-                                "deterministic safeguard: gh issue create FAILED (goal still marked Blocked)",
-                            );
-                        }
-                        Err(io_err) => {
-                            tracing::error!(
-                                target: "simard::ooda_brain",
-                                goal = %goal_id,
-                                error = %io_err,
-                                "deterministic safeguard: gh process spawn FAILED (goal still marked Blocked)",
-                            );
-                        }
+                    // File tracking issue via the hardened shared helper
+                    // (#4472): mandatory validated --repo, ooda-stuck label, and
+                    // every outcome surfaced via tracing. Failure to file does
+                    // NOT swallow the original brain failure.
+                    let repo = resolve_self_repo();
+                    let outcome = spawn_tracking_issue(&repo, &title, &body);
+                    if outcome.succeeded() {
+                        tracing::info!(
+                            target: "simard::ooda_brain",
+                            goal = %goal_id,
+                            "deterministic safeguard: goal marked Blocked + tracking issue filed",
+                        );
+                    } else {
+                        // spawn_tracking_issue already surfaced the specific
+                        // failure (Rejected/SpawnError/InvalidRepo) at ERROR.
+                        tracing::error!(
+                            target: "simard::ooda_brain",
+                            goal = %goal_id,
+                            "deterministic safeguard: tracking issue NOT filed (goal still marked Blocked)",
+                        );
                     }
                 }
 
@@ -875,6 +858,181 @@ fn truncate_for_log(s: &str) -> String {
     }
 }
 
+// ── OODA escalation issue-filing helper (#4472) ─────────────────────────────
+// Shared, hardened `gh issue create` wrapper for the two escalation sites in
+// this file. Centralizes: a mandatory validated `--repo`, the `ooda-stuck`
+// label, value-bound `--title`/`--body` (SR-V1 argument-injection hardening),
+// C0-stripping + length clamps (SR-V2), and full tracing+OTel surfacing of
+// EVERY outcome so a stuck goal's escalation is never silently dropped.
+
+/// Maximum sanitized `--title` length in bytes (SR-V2 clamp).
+pub const TITLE_MAX: usize = 256;
+/// Maximum sanitized `--body` length in bytes (SR-V2 clamp).
+pub const BODY_MAX: usize = 60_000;
+
+/// Result of an escalation `gh issue create`. Every variant is surfaced by
+/// [`spawn_tracking_issue`] before it returns — no arm is silently dropped
+/// (#4472).
+#[derive(Debug)]
+#[allow(dead_code)] // `InvalidRepo.repo` is read only in tests; keep the field for diagnostics.
+pub enum TrackingIssueOutcome {
+    /// `gh` exited 0. Carries the created issue URL/number when parseable.
+    Filed { reference: Option<String> },
+    /// `gh` spawned but exited non-zero (auth, bad repo, rate limit, bad
+    /// label…). Carries the exit code and captured stderr (bounded).
+    Rejected { code: Option<i32>, stderr: String },
+    /// Input rejected BEFORE spawning `gh` — an invalid `repo`. Fail-closed:
+    /// `gh` is never invoked.
+    InvalidRepo { repo: String },
+    /// `gh` failed to spawn at all (binary missing, `E2BIG`, …).
+    SpawnError { error: String },
+}
+
+impl TrackingIssueOutcome {
+    /// `true` only for [`TrackingIssueOutcome::Filed`].
+    pub fn succeeded(&self) -> bool {
+        matches!(self, TrackingIssueOutcome::Filed { .. })
+    }
+}
+
+/// `true` iff `repo` is a well-formed `owner/name` slug (SR-V3 authz).
+///
+/// Accepts exactly two non-empty `/`-separated segments whose characters are all
+/// `[A-Za-z0-9._-]`, and — as argument-injection hardening (SR-V1) — rejects any
+/// segment that starts with `-` so a crafted value like `--repo/evil` can never
+/// masquerade as a `gh` flag.
+fn is_valid_repo(repo: &str) -> bool {
+    let mut segments = repo.split('/');
+    let (Some(owner), Some(name), None) = (segments.next(), segments.next(), segments.next())
+    else {
+        return false;
+    };
+    [owner, name].iter().all(|seg| {
+        !seg.is_empty()
+            && !seg.starts_with('-')
+            && seg
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    })
+}
+
+/// Strip C0 control characters (except `\t`, `\n`, `\r`, which stay so a body's
+/// Markdown survives) and clamp to `max` bytes on a UTF-8 boundary (SR-V2).
+fn sanitize_issue_field(field: &str, max: usize) -> String {
+    let cleaned: String = field
+        .chars()
+        .filter(|&c| matches!(c, '\t' | '\n' | '\r') || !c.is_control())
+        .collect();
+    if cleaned.len() <= max {
+        return cleaned;
+    }
+    let mut end = max;
+    while end > 0 && !cleaned.is_char_boundary(end) {
+        end -= 1;
+    }
+    cleaned[..end].to_string()
+}
+
+/// Map a `gh issue create` invocation result to a [`TrackingIssueOutcome`]
+/// (pure; the surfacing/logging happens in [`spawn_tracking_issue`]).
+fn classify_gh_output(result: std::io::Result<std::process::Output>) -> TrackingIssueOutcome {
+    match result {
+        Ok(output) if output.status.success() => {
+            // `gh issue create` prints the new issue URL on stdout.
+            let reference = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(str::to_string);
+            TrackingIssueOutcome::Filed { reference }
+        }
+        Ok(output) => TrackingIssueOutcome::Rejected {
+            code: output.status.code(),
+            stderr: truncate_for_log(&String::from_utf8_lossy(&output.stderr)),
+        },
+        Err(error) => TrackingIssueOutcome::SpawnError {
+            error: error.to_string(),
+        },
+    }
+}
+
+/// Resolve the operator-facing repo slug for OODA escalation issues: an explicit
+/// `SIMARD_SELF_REPO` / `GH_REPO` override, falling back to the Simard repo.
+fn resolve_self_repo() -> String {
+    for key in ["SIMARD_SELF_REPO", "GH_REPO"] {
+        if let Ok(v) = std::env::var(key) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return v.to_string();
+            }
+        }
+    }
+    "rysweet/Simard".to_string()
+}
+
+/// File an operator-facing OODA escalation issue against `repo`. Validates
+/// `repo` (fail-closed), sanitizes `title`/`body`, applies `--label ooda-stuck`,
+/// and surfaces every outcome via tracing+OTel. Never panics; never exits.
+pub fn spawn_tracking_issue(repo: &str, title: &str, body: &str) -> TrackingIssueOutcome {
+    if !is_valid_repo(repo) {
+        tracing::error!(
+            target: "simard::ooda_brain",
+            repo = %repo,
+            "OODA escalation: refusing to file tracking issue — invalid --repo (fail-closed)",
+        );
+        return TrackingIssueOutcome::InvalidRepo {
+            repo: repo.to_string(),
+        };
+    }
+
+    let title = sanitize_issue_field(title, TITLE_MAX);
+    let body = sanitize_issue_field(body, BODY_MAX);
+
+    let outcome = classify_gh_output(
+        std::process::Command::new("gh")
+            .args([
+                "issue",
+                "create",
+                "--repo",
+                repo,
+                "--label",
+                "ooda-stuck",
+                "--title",
+                &title,
+                "--body",
+                &body,
+            ])
+            .output(),
+    );
+
+    // Surface EVERY outcome — a stuck goal's escalation is never silently dropped.
+    match &outcome {
+        TrackingIssueOutcome::Filed { reference } => tracing::info!(
+            target: "simard::ooda_brain",
+            repo = %repo,
+            issue = reference.as_deref().unwrap_or("<unparsed>"),
+            "OODA escalation: tracking issue filed",
+        ),
+        TrackingIssueOutcome::Rejected { code, stderr } => tracing::error!(
+            target: "simard::ooda_brain",
+            repo = %repo,
+            exit_code = code.unwrap_or(-1),
+            stderr = %stderr,
+            "OODA escalation: gh issue create REJECTED (non-zero exit — escalation not filed)",
+        ),
+        TrackingIssueOutcome::SpawnError { error } => tracing::error!(
+            target: "simard::ooda_brain",
+            repo = %repo,
+            error = %error,
+            "OODA escalation: gh process spawn FAILED (escalation not filed)",
+        ),
+        // `is_valid_repo` fails closed above, so this arm cannot arise here.
+        TrackingIssueOutcome::InvalidRepo { .. } => {}
+    }
+
+    outcome
+}
+
 /// Apply a brain decision at the engineer-lifecycle skip site (issue #1266).
 ///
 /// Wraps the pure state mutation in `apply_decision_to_state` with the IO
@@ -924,26 +1082,11 @@ fn apply_lifecycle_decision(
     }
 
     if let EngineerLifecycleDecision::OpenTrackingIssue { title, body, .. } = &decision {
-        let result = std::process::Command::new("gh")
-            .args([
-                "issue",
-                "create",
-                "--title",
-                title,
-                "--body",
-                body,
-                "--label",
-                "ooda-stuck",
-            ])
-            .status();
-        if let Err(e) = result {
-            tracing::warn!(
-                target: "simard::ooda_brain",
-                goal = %goal_id,
-                error = %e,
-                "open_tracking_issue: gh issue create failed",
-            );
-        }
+        // #4472: previously used `.status()` and SILENTLY DROPPED a non-zero
+        // exit. Route through the hardened helper so a rejected/failed filing is
+        // surfaced (never dropped) and a validated --repo is always supplied.
+        let repo = resolve_self_repo();
+        let _ = spawn_tracking_issue(&repo, title, body);
     }
 
     if let EngineerLifecycleDecision::ConsiderSelfUpdate { rationale } = &decision {
@@ -1366,6 +1509,173 @@ mod tests {
             )
             .is_none(),
             "Simard (no identity) must never take the observe-only branch"
+        );
+    }
+
+    // ── OODA escalation issue-filing helper (#4472) ─────────────────────────
+    // Both `gh issue create` sites in this file were unreliable: Site A filed
+    // with NO `--repo` (wrong/unresolved target from a daemon) and emitted a
+    // stray `eprintln!`; Site B used `.status()` and SILENTLY DROPPED a non-zero
+    // exit (auth/rate-limit/bad-repo) — a stuck goal missed escalation with zero
+    // signal. `spawn_tracking_issue` centralizes filing: a mandatory validated
+    // `--repo`, the `ooda-stuck` label, value-bound `--title`/`--body` (SR-V1),
+    // and EVERY outcome surfaced via tracing+OTel. These tests are hermetic —
+    // pure string/mapping logic, no live `gh`, no network.
+
+    #[test]
+    fn valid_repo_regex_accepts_owner_name() {
+        // SR-V3 authz boundary: only a well-formed `owner/name` is accepted.
+        assert!(is_valid_repo("rysweet/Simard"));
+        assert!(is_valid_repo("owner-1.x/repo_2.y"));
+        // Rejections: no slash, extra path segments, spaces, injection.
+        assert!(!is_valid_repo("Simard"));
+        assert!(!is_valid_repo("a/b/c"));
+        assert!(!is_valid_repo("a b/c"));
+        assert!(!is_valid_repo(""));
+        assert!(!is_valid_repo("/repo"));
+        assert!(!is_valid_repo("owner/"));
+        assert!(!is_valid_repo("--repo/evil"));
+    }
+
+    #[test]
+    fn invalid_repo_returns_invalidrepo_without_spawn() {
+        // An invalid `--repo` must FAIL CLOSED: `gh` is never invoked (the
+        // invalid string could never have spawned a process, so this stays
+        // hermetic) and the caller gets a distinct `InvalidRepo` outcome.
+        let outcome = spawn_tracking_issue("not a repo!", "title", "body");
+        match outcome {
+            TrackingIssueOutcome::InvalidRepo { repo } => {
+                assert_eq!(repo, "not a repo!");
+            }
+            other => panic!("invalid repo must yield InvalidRepo, got {other:?}"),
+        }
+        assert!(
+            !outcome_succeeded(&spawn_tracking_issue("bad repo", "t", "b")),
+            "an invalid-repo outcome must not report success"
+        );
+    }
+
+    fn outcome_succeeded(o: &TrackingIssueOutcome) -> bool {
+        o.succeeded()
+    }
+
+    #[test]
+    fn title_body_injection_sanitized() {
+        // SR-V1 / SR-V2: a leading `--force` is preserved as a LITERAL (it is
+        // value-bound to its flag, never re-parsed), and C0 control characters
+        // are stripped before `gh` sees the field.
+        let dirty_title = "--force\u{0000}delete\u{0007}now";
+        let clean = sanitize_issue_field(dirty_title, TITLE_MAX);
+        assert!(
+            clean.starts_with("--force"),
+            "a leading --force must survive as a literal value, got: {clean:?}"
+        );
+        assert!(
+            !clean.contains('\u{0000}') && !clean.contains('\u{0007}'),
+            "C0 control characters must be stripped, got: {clean:?}"
+        );
+
+        // SR-V2 length clamp: over-long fields are bounded.
+        let long = "x".repeat(TITLE_MAX + 500);
+        assert!(
+            sanitize_issue_field(&long, TITLE_MAX).len() <= TITLE_MAX,
+            "title must be clamped to <= TITLE_MAX bytes"
+        );
+        let long_body = "y".repeat(BODY_MAX + 5000);
+        assert!(
+            sanitize_issue_field(&long_body, BODY_MAX).len() <= BODY_MAX,
+            "body must be clamped to <= BODY_MAX bytes"
+        );
+    }
+
+    #[cfg(unix)]
+    fn output_with(code: i32, stdout: &str, stderr: &str) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            // On Unix the wait status encodes the exit code in bits 8-15.
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn success_maps_to_filed() {
+        // `gh issue create` prints the new issue URL on stdout on exit 0.
+        let out = output_with(0, "https://github.com/rysweet/Simard/issues/4472\n", "");
+        match classify_gh_output(Ok(out)) {
+            TrackingIssueOutcome::Filed { reference } => {
+                assert_eq!(
+                    reference.as_deref(),
+                    Some("https://github.com/rysweet/Simard/issues/4472"),
+                    "the created issue reference must be captured from stdout"
+                );
+            }
+            other => panic!("exit 0 must map to Filed, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nonzero_exit_surfaces_rejected() {
+        // THE #4472 REGRESSION GUARD: a `gh` that spawns fine but exits non-zero
+        // must NOT be silently dropped — it maps to `Rejected` carrying the code
+        // and bounded stderr (surfaced at ERROR by the helper).
+        let out = output_with(1, "", "HTTP 401: Bad credentials");
+        match classify_gh_output(Ok(out)) {
+            TrackingIssueOutcome::Rejected { code, stderr } => {
+                assert_eq!(code, Some(1));
+                assert!(
+                    stderr.contains("Bad credentials"),
+                    "the gh stderr must be surfaced, got: {stderr:?}"
+                );
+            }
+            other => panic!("a non-zero exit must map to Rejected (never dropped), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spawn_error_surfaces_spawnerror() {
+        // A `gh` that fails to spawn at all (missing binary, E2BIG) maps to
+        // `SpawnError` — the arm both original sites already logged, preserved.
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "gh: not found");
+        match classify_gh_output(Err(io_err)) {
+            TrackingIssueOutcome::SpawnError { error } => {
+                assert!(
+                    error.contains("not found"),
+                    "the spawn error must be surfaced, got: {error:?}"
+                );
+            }
+            other => panic!("a spawn failure must map to SpawnError, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn succeeded_is_true_only_for_filed() {
+        assert!(
+            TrackingIssueOutcome::Filed { reference: None }.succeeded(),
+            "Filed is the only successful outcome"
+        );
+        assert!(
+            !TrackingIssueOutcome::Rejected {
+                code: Some(1),
+                stderr: String::new()
+            }
+            .succeeded()
+        );
+        assert!(
+            !TrackingIssueOutcome::InvalidRepo {
+                repo: "x".to_string()
+            }
+            .succeeded()
+        );
+        assert!(
+            !TrackingIssueOutcome::SpawnError {
+                error: "x".to_string()
+            }
+            .succeeded()
         );
     }
 }

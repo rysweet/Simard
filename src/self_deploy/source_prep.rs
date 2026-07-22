@@ -672,7 +672,10 @@ pub(crate) fn prepare_build_and_verify_canary(
             canary_target_dir: target_dir.to_path_buf(),
             ..Default::default()
         };
-        let gates = crate::self_relaunch::default_gates();
+        // Use the curated, recursion-free canary gate list (#4469/#4470): the
+        // deploy canary must NOT run the `UnitTest` gate, which shells
+        // `cargo test` and recurses into the suite (deterministic exit 101).
+        let gates = crate::self_relaunch::canary_gates();
         crate::self_relaunch::verify_canary(&candidate, &gates, &config).map_err(|e| {
             SafeUpdateError::GateFailed {
                 gate: "target-canary".to_string(),

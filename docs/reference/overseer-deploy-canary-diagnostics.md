@@ -377,6 +377,9 @@ weakened or disabled to mask a real regression.
 
 ## See also
 
+- [Deploy canary gate curation API](./deploy-canary-gate-curation-api.md) — the
+  curated `canary_gates()` list that fixes the deterministic red-canary exit-101
+  recursion (#4469 / #4470) this diagnostics surface was built to expose.
 - [Self-deploy API reference](./self-deploy-api.md) — the `GuardedDeployer`,
   `DeployRefusal`, `evaluate_deploy_gate`, and the `OrchestratedBinaryDeployer`
   swap path.
