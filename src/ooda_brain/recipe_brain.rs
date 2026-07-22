@@ -2058,15 +2058,58 @@ struct DecisionEnvelope {
     rationale: String,
 }
 
+/// Parse an optional JSON envelope for a phase that has an **accepted non-JSON
+/// alternate format** (orient's bare decimal, decide's first action word).
+///
+/// This is the probe entry point: the caller tries the structured JSON envelope
+/// first and, on `None`, falls back to its alternate-format scanner. Because a
+/// missing JSON object is the *expected* signal that the model chose the
+/// accepted alternate format, a [`JsonExtractError::NoBalancedObject`] must stay
+/// a **quiet `None`** — routing it through the #969 `tracing::error!` visibility
+/// channel (as the ergonomic [`crate::recipe_output::extract_and_parse_json`]
+/// wrapper does) would emit a spurious error on every valid bare-decimal /
+/// action-word response, flooding the `simard::recipe_output` error target and
+/// burying the genuine finalization drops #969 exists to surface.
+///
+/// A *malformed* JSON object — the model attempted JSON and produced broken
+/// JSON ([`JsonExtractError::Unrecoverable`] / [`JsonExtractError::RecoveredParseFailed`])
+/// — is a genuine drop and IS surfaced through the same structured channel.
+fn parse_optional_json_envelope<T: serde::de::DeserializeOwned>(
+    text: &str,
+    phase: &'static str,
+) -> Option<T> {
+    use crate::recipe_output::JsonExtractError;
+    match crate::recipe_output::extract_and_parse_json_result::<T>(text) {
+        Ok(env) => Some(env),
+        // Expected: the model used this phase's accepted non-JSON alternate
+        // format (bare decimal / action word). The caller's alternate-format
+        // scanner handles it — this is a routing signal, not a dropped result.
+        Err(JsonExtractError::NoBalancedObject { .. }) => None,
+        // A JSON object WAS present but could not be parsed — a genuine drop
+        // worth the #969 visibility channel.
+        Err(err) => {
+            tracing::error!(
+                target: "simard::recipe_output",
+                phase,
+                failure_kind = err.kind(),
+                error = %err,
+                "recipe brain: JSON envelope present but unparseable (#969)"
+            );
+            None
+        }
+    }
+}
+
 /// Extract the `{"decision": "...", "rationale": "..."}` envelope from recipe
 /// output, if present. Routes through the shared #2484 sanitizing chokepoint
-/// ([`crate::recipe_output::extract_and_parse_json`] strips the banner, ANSI,
-/// and interleaved log lines, and recovers a trailing-comma-defective body) so
-/// a banner-polluted or trailing-comma envelope still parses. Returns
-/// `None` when no balanced JSON object with a non-empty string `decision` field
-/// is present — the caller then falls back to the legacy first-word scan.
+/// (strips the banner, ANSI, and interleaved log lines, and recovers a
+/// trailing-comma-defective body) so a banner-polluted or trailing-comma
+/// envelope still parses. Returns `None` when no balanced JSON object with a
+/// non-empty string `decision` field is present — the caller then falls back to
+/// the legacy first-word scan (an accepted alternate format, so a missing object
+/// stays a quiet `None`; see [`parse_optional_json_envelope`]).
 fn extract_decision_envelope(text: &str) -> Option<DecisionEnvelope> {
-    let env: DecisionEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
+    let env: DecisionEnvelope = parse_optional_json_envelope(text, "decide")?;
     if env.decision.trim().is_empty() {
         return None;
     }
@@ -2305,7 +2348,10 @@ struct OrientEnvelope {
 /// through the shared #2484 sanitizing chokepoint. `None` when no balanced JSON
 /// object with a numeric `adjusted_urgency` field is present.
 fn extract_orient_envelope(text: &str) -> Option<OrientEnvelope> {
-    crate::recipe_output::extract_and_parse_json(text)
+    // Orient's accepted alternate format is a bare decimal, so a missing JSON
+    // object stays a quiet `None` (the bare-decimal scanner handles it) rather
+    // than firing the #969 error channel; see [`parse_optional_json_envelope`].
+    parse_optional_json_envelope(text, "orient")
 }
 
 /// Validate and project a parsed [`OrientEnvelope`] onto an [`OrientJudgment`].
@@ -6061,6 +6107,93 @@ mod zero_fallback_2580_tests {
         assert!(
             miss.is_parse_failure(),
             "unparseable output is a parse-failure, distinct from a real continue_skipping"
+        );
+    }
+}
+
+#[cfg(test)]
+mod issue_969_probe_envelope_trace_tests {
+    //! Regression guard for the #969 quality-audit finding: the orient and decide
+    //! probe parsers ([`extract_orient_envelope`] / [`extract_decision_envelope`])
+    //! accept a *non-JSON alternate format* (a bare decimal / an action word).
+    //! A missing JSON object is the expected "model used the alternate format"
+    //! signal and must NOT be surfaced through the #969 `tracing::error!`
+    //! visibility channel — doing so floods `simard::recipe_output` with a
+    //! spurious error on every valid fallback-format response and buries the
+    //! genuine finalization drops the channel exists to surface. A *malformed*
+    //! JSON object (the model tried JSON and produced broken JSON) is still a
+    //! genuine drop and MUST be surfaced.
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+
+    #[derive(Clone)]
+    struct Rec {
+        level: tracing::Level,
+        target: String,
+    }
+
+    struct CollectLayer(Arc<Mutex<Vec<Rec>>>);
+    impl<S: tracing::Subscriber> Layer<S> for CollectLayer {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            let m = event.metadata();
+            self.0.lock().unwrap().push(Rec {
+                level: *m.level(),
+                target: m.target().to_string(),
+            });
+        }
+    }
+
+    /// Count `ERROR`-level events emitted under the `simard::recipe_output`
+    /// target while `body` runs.
+    fn recipe_output_errors<F: FnOnce()>(body: F) -> usize {
+        let recs = Arc::new(Mutex::new(Vec::new()));
+        let layer = CollectLayer(Arc::clone(&recs));
+        let subscriber = tracing_subscriber::registry::Registry::default().with(layer);
+        tracing::subscriber::with_default(subscriber, body);
+        let recs = recs.lock().unwrap();
+        recs.iter()
+            .filter(|r| r.target == "simard::recipe_output" && r.level == tracing::Level::ERROR)
+            .count()
+    }
+
+    #[test]
+    fn bare_decimal_orient_response_emits_no_recipe_output_error() {
+        // The accepted bare-decimal fallback format has no JSON object; the probe
+        // must fall through to the decimal scanner WITHOUT logging an error.
+        let errors = recipe_output_errors(|| {
+            let j = parse_orient_from_text("0.42 transient failure, moderate demotion", 0.8, 1);
+            assert!((j.adjusted_urgency - 0.42).abs() < 1e-9);
+        });
+        assert_eq!(
+            errors, 0,
+            "a valid bare-decimal orient response must not emit a recipe_output ERROR (#969)"
+        );
+    }
+
+    #[test]
+    fn action_word_decide_response_emits_no_recipe_output_error() {
+        // The accepted first-word action format has no JSON object; the decide
+        // probe must fall through to the first-word scan without an error log.
+        let errors = recipe_output_errors(|| {
+            let _ = parse_action_from_text("advance_goal because the plan is on track");
+        });
+        assert_eq!(
+            errors, 0,
+            "a valid action-word decide response must not emit a recipe_output ERROR (#969)"
+        );
+    }
+
+    #[test]
+    fn malformed_orient_json_object_is_still_surfaced() {
+        // A JSON object WAS present but is broken (missing value) — this is a
+        // genuine drop and MUST reach the #969 error channel.
+        let errors = recipe_output_errors(|| {
+            let _ = parse_orient_from_text(r#"{"adjusted_urgency":}"#, 0.8, 1);
+        });
+        assert!(
+            errors >= 1,
+            "a malformed orient JSON object must still surface a recipe_output ERROR (#969)"
         );
     }
 }
