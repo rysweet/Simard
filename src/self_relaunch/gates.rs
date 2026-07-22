@@ -481,10 +481,6 @@ mod convergence_tests {
     use std::fs;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::Mutex;
-
-    // Env-mutating tests here must not interleave (process-global env).
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn write_exe(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
         let path = dir.join(name);
@@ -516,8 +512,8 @@ mod convergence_tests {
     // full ambient env (no scrub) → the probe leaks → gate FAILS (RED). After the
     // fix wires `scrub_gate_env` into the gate spawn → probe stripped → PASS.
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn healthy_candidate_passes_only_in_a_scrubbed_gate_env() {
-        let _guard = ENV_LOCK.lock().unwrap();
         let dir = unique_tmp("healthy");
         let bin = write_exe(
             &dir,
@@ -529,7 +525,8 @@ mod convergence_tests {
         );
         let config = RelaunchConfig::default();
 
-        // SAFETY: serialized by ENV_LOCK; no other thread reads this var.
+        // SAFETY: serialized by the cognitive_memory serial key (whole-binary);
+        // no concurrent test reads this var.
         unsafe { std::env::set_var("SIMARD_GATE_HIJACK_PROBE", "leak") };
         let results = verify_canary(&bin, &[RelaunchGate::Smoke], &config).unwrap();
         unsafe { std::env::remove_var("SIMARD_GATE_HIJACK_PROBE") };
@@ -564,8 +561,8 @@ mod convergence_tests {
     // candidate that legitimately REQUIRES that signal goes GREEN — without
     // widening the base floor or inheriting the daemon's whole ambient env.
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn canary_env_allowlist_reinjects_a_required_signal() {
-        let _guard = ENV_LOCK.lock().unwrap();
         let dir = unique_tmp("allowlist");
         // Candidate is healthy ONLY when it can see the allow-listed signal.
         let bin = write_exe(
@@ -576,7 +573,8 @@ mod convergence_tests {
              echo 'required signal missing' >&2; exit 4\n",
         );
 
-        // SAFETY: serialized by ENV_LOCK; no other thread reads this var.
+        // SAFETY: serialized by the cognitive_memory serial key (whole-binary);
+        // no concurrent test reads this var.
         unsafe { std::env::set_var("SIMARD_CANARY_ALLOWLISTED", "present") };
 
         // Not allow-listed → stripped by the floor → candidate reddens.
