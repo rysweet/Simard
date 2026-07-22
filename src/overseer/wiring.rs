@@ -239,9 +239,18 @@ pub struct OverseerTickReport {
 /// `"erroring"`, so the allowlist is explicit and the wildcard arm returns
 /// `false`.
 pub fn is_transient(err: &OverseerError) -> bool {
-    let OverseerError::Capability { detail, .. } = err else {
+    let OverseerError::Capability { what, detail } = err else {
         return false;
     };
+    // #4420 fail-closed guard: a deploy-gate refusal (a red canary) or a
+    // target-canary failure is a DECISION — a gate said no — never a retryable
+    // upstream blip, even when the reddening gate's now-surfaced detail happens
+    // to mention a "timeout" or "503". Short-circuit `false` BEFORE the substring
+    // allowlist so a genuine regression always latches "erroring" (fail-closed)
+    // and is never silently retried away.
+    if matches!(*what, "deploy_gate" | "target_canary") {
+        return false;
+    }
     let d = detail.to_ascii_lowercase();
     // Explicit allowlist of known-retryable upstream signals. Matching any one
     // routes to self-healing; nothing else does.
@@ -2468,6 +2477,55 @@ mod tests {
         assert!(
             last.to_lowercase().contains("more"),
             "the final capped entry must summarise the overflow (e.g. '(+N more)'): {last:?}"
+        );
+    }
+
+    // ── #4420: a red canary must NEVER be misclassified as transient ────────
+    //
+    // The reddening-gate detail STEP 1 now threads into `OverseerError::Capability`
+    // can contain transient-looking words (a gate whose failure text mentions a
+    // "timeout" or "503"). `is_transient`'s substring allowlist would then falsely
+    // route a genuine deploy-gate refusal to self-healing/retry, silently masking
+    // a real regression. The fix short-circuits `false` for the deploy-gate and
+    // target-canary `what` discriminants BEFORE the allowlist, so a red canary
+    // always latches "erroring" (fail-closed).
+
+    #[test]
+    fn a_red_deploy_gate_is_never_transient_even_with_timeout_wording() {
+        let err = OverseerError::Capability {
+            what: "deploy_gate",
+            detail: "red canary (gate rpc-health: request timed out waiting for health probe)"
+                .to_string(),
+        };
+        assert!(
+            !is_transient(&err),
+            "a red canary deploy-gate refusal must be fatal, not retried away (#4420)"
+        );
+    }
+
+    #[test]
+    fn a_target_canary_failure_is_never_transient_even_with_503_wording() {
+        let err = OverseerError::Capability {
+            what: "target_canary",
+            detail: "gate probe returned 503 service unavailable".to_string(),
+        };
+        assert!(
+            !is_transient(&err),
+            "a target-canary failure must be fatal, not transient (fail-closed, #4420)"
+        );
+    }
+
+    #[test]
+    fn genuinely_transient_upstream_faults_remain_transient() {
+        // The guard must be narrow: non-canary capability faults that are truly
+        // retryable upstream blips still classify transient (unchanged behaviour).
+        let err = OverseerError::Capability {
+            what: "status",
+            detail: "upstream returned HTTP 503 Service Unavailable".to_string(),
+        };
+        assert!(
+            is_transient(&err),
+            "a real upstream 503 on a non-canary capability stays transient"
         );
     }
 }

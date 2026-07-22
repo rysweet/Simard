@@ -775,6 +775,7 @@ reflects current churn (fail-closed: unknown/high churn never bypasses the gate)
 - [reconcile-and-self-deploy concept](../concepts/reconcile-and-self-deploy.md)
 - [Operational autonomy model](../concepts/operational-autonomy-model.md) — the HIGH-RISK boundary governing autonomous deploy
 - [Overseer operator-notification reliability](./overseer-operator-notifications.md) — the Signal+email contract fired on every deploy outcome
+- [Overseer deploy red-canary diagnostics](./overseer-deploy-canary-diagnostics.md) — the additive `failing_gate` / `failing_detail` surfacing that makes a red-canary deploy refusal diagnosable from the tick log and OTel attributes, plus the fail-closed `is_transient` deploy-gate guard
 - [Overseer tick details](./overseer-tick-details.md) — the OODA tick the drift observe/decide/act rail rides on
 - [Self-deploy source-prep reference](./self-deploy-source-prep.md)
 - [How to run self-deploy from any directory](../howto/run-self-deploy-from-any-directory.md)

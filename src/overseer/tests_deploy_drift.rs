@@ -34,6 +34,8 @@ impl CanaryRunner for FakeCanary {
         Ok(CanaryResult {
             passed: self.0,
             detail: "4/4 gates".to_string(),
+            failing_gate: None,
+            failing_detail: None,
         })
     }
 }
