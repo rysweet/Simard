@@ -1293,10 +1293,11 @@ pub fn build_overseer(
     // ledger is fail-visible: if it fails the reaper is simply not wired this
     // tick (the sweep is skipped), never a panic that would abort the tick.
     match build_claim_reaper_seams(&state_root) {
-        Some((ledger, probe, cleanup)) => overseer.with_claim_reaper(
+        Some((ledger, probe, cleanup, investigator)) => overseer.with_claim_reaper(
             ledger,
             probe,
             cleanup,
+            investigator,
             claim_reap_enabled(),
             claim_reap_stale_secs(),
         ),
@@ -1334,6 +1335,17 @@ fn build_claim_reaper_seams(
         Box::new(crate::overseer::claim_reaper::WorktreeDirCleanup::new(
             state_root.to_path_buf(),
         )),
+        // Investigate-before-reap (issue #4400): the thin agentic rail that
+        // archives a would-be-stale engineer's evidence to `reaped-engineers/`
+        // and dispatches the `investigate_stale_engineer` recipe through the SAME
+        // gated Act path — so staleness ALONE never reaps and a genuinely-dead
+        // engineer's death becomes a self-improvement signal.
+        Box::new(
+            crate::overseer::claim_reaper::RecipeStaleEngineerInvestigator::new(
+                state_root.to_path_buf(),
+                overseer_self_repo(),
+            ),
+        ),
     ))
 }
 

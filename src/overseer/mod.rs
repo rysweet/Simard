@@ -253,6 +253,13 @@ pub struct Overseer {
     /// worktree cleanup. `None` until wired by `build_overseer`; when absent the
     /// tick simply skips the sweep.
     claim_reaper: Option<ClaimReaperSeams>,
+    /// Self-improvement interventions the stale-engineer reaper's investigations
+    /// surfaced this tick (issue #4400), staged for dispatch through the SAME
+    /// gated Act path health-review uses. Populated by `reap_stale_engineer_claims`
+    /// at the top of the tick and drained into the plan after `health_review`, so
+    /// a stale engineer's investigation feeds self-improvement rather than a
+    /// silent reclaim. Empty between ticks.
+    pending_reaper_interventions: Vec<Intervention>,
     /// The live agentic ecosystem-observe rail (issue #2419): the thin
     /// [`ecosystem_observe::EcosystemObserver`] seam that invokes the
     /// `ecosystem-observe` recipe on the Overseer cadence and forwards its
@@ -348,6 +355,7 @@ struct ClaimReaperSeams {
     ledger: Box<dyn claim_reaper::ClaimLedger>,
     probe: Box<dyn claim_reaper::ClaimLivenessProbe>,
     cleanup: Box<dyn claim_reaper::OrphanWorktreeCleanup>,
+    investigator: Box<dyn claim_reaper::StaleEngineerInvestigator>,
 }
 
 /// The result of one meta-OODA turn. Side-effect free: it reports what was
@@ -473,6 +481,7 @@ impl Overseer {
             claim_reap_enabled: false,
             claim_reap_stale_secs: config::DEFAULT_CLAIM_REAP_STALE_SECS,
             claim_reaper: None,
+            pending_reaper_interventions: Vec::new(),
             ecosystem_observer: None,
             ecosystem_roster: Vec::new(),
             ecosystem_every_n: 1,
@@ -656,6 +665,7 @@ impl Overseer {
         ledger: Box<dyn claim_reaper::ClaimLedger>,
         probe: Box<dyn claim_reaper::ClaimLivenessProbe>,
         cleanup: Box<dyn claim_reaper::OrphanWorktreeCleanup>,
+        investigator: Box<dyn claim_reaper::StaleEngineerInvestigator>,
         enabled: bool,
         stale_secs: u64,
     ) -> Self {
@@ -665,6 +675,7 @@ impl Overseer {
             ledger,
             probe,
             cleanup,
+            investigator,
         });
         self
     }
@@ -915,6 +926,11 @@ impl Overseer {
         // recipe and routes each parsed `LaunchRecipe` / `EscalateBlockedGoal`
         // through the SAME gate every other action uses.
         self.health_review(&mut observed, &mut launches, &mut plan);
+
+        // Drain the stale-engineer reaper's staged investigation interventions
+        // (issue #4400) into the SAME gated plan — a stale engineer's death feeds
+        // self-improvement (issue/escalation/fix) instead of a silent reclaim.
+        self.dispatch_reaper_interventions(&observed, &mut launches, &mut plan);
 
         Ok(CycleReport {
             observed,
@@ -1373,9 +1389,17 @@ impl Overseer {
             reaper.ledger.as_ref(),
             reaper.probe.as_ref(),
             reaper.cleanup.as_ref(),
+            reaper.investigator.as_ref(),
             self.claim_reap_enabled,
             self.claim_reap_stale_secs,
         );
+        // Stage the investigations' self-improvement interventions (issue #4400)
+        // for dispatch through the SAME gated Act path health-review uses; they
+        // are drained into the plan after `health_review` this tick. A stale
+        // engineer's death becomes a signal, never a silent reclaim. `extend` is
+        // a no-op when the sweep surfaced nothing.
+        self.pending_reaper_interventions
+            .extend(summary.pending_interventions);
         if !summary.reclaimed.is_empty() || summary.errors > 0 {
             tracing::info!(
                 target: "simard::claim_reaper",
@@ -1384,6 +1408,28 @@ impl Overseer {
                 errors = summary.errors,
                 "[simard] claim-reaper sweep complete",
             );
+        }
+    }
+
+    /// Drain the stale-engineer reaper's staged investigation interventions (issue
+    /// #4400) into the gated plan — through the SAME gate + push loop
+    /// [`Overseer::health_review`] uses (no parallel plumbing). Each surfaced
+    /// `LaunchRecipe` / `FileIssue` / `EscalateBlockedGoal` is gated and pushed so
+    /// a stale engineer's investigation feeds self-improvement. A no-op when the
+    /// sweep surfaced nothing.
+    fn dispatch_reaper_interventions(
+        &mut self,
+        observed: &ObservedState,
+        launches: &mut usize,
+        plan: &mut Vec<PlannedIntervention>,
+    ) {
+        if self.pending_reaper_interventions.is_empty() {
+            return;
+        }
+        let interventions = std::mem::take(&mut self.pending_reaper_interventions);
+        for iv in interventions {
+            let planned = self.gate(&iv, observed, launches);
+            plan.push(planned);
         }
     }
 
@@ -2172,19 +2218,32 @@ fn is_cost_bearing(iv: &Intervention) -> bool {
 /// the same key so the in-flight guard holds the duplicate; two DIFFERENT
 /// investigations must map to distinct keys so neither is starved.
 ///
-/// A recurring-signature launch embeds its `overseer-obs:…` signature token in
-/// the task description; keying on that token (when present) makes the guard
-/// robust to incidental prose drift around it. Absent the token, the trimmed
-/// task description is the key — deterministic for a given problem summary, which
-/// is itself derived deterministically from the signal.
+/// A launch embeds a STABLE signature token in its task description and this keys
+/// on that token (when present), making the guard robust to incidental prose
+/// drift around it:
+///   * [`STALE_INVESTIGATION_DEDUP_PREFIX`](crate::overseer::claim_reaper::STALE_INVESTIGATION_DEDUP_PREFIX)
+///     — a stale-engineer investigation's per-claim signature (issue #4400): two
+///     ticks for the SAME still-stale claim carry the same token but a VOLATILE
+///     timestamped evidence dir + growing idle age, so keying on the token holds
+///     the duplicate.
+///   * [`OVERSEER_OBS_PREFIX`] — a recurring-observation signature (issue #2628).
+///
+/// Absent any token, the trimmed task description is the key — deterministic for a
+/// given problem summary, which is itself derived deterministically from the
+/// signal.
 fn recipe_dedup_key(brief: &RecipeBrief) -> String {
     let desc = brief.task_description.trim();
-    if let Some(start) = desc.find("overseer-obs:") {
-        let tail = &desc[start..];
-        let end = tail
-            .find(|c: char| c == ')' || c.is_whitespace())
-            .unwrap_or(tail.len());
-        return tail[..end].to_string();
+    for token in [
+        crate::overseer::claim_reaper::STALE_INVESTIGATION_DEDUP_PREFIX,
+        OVERSEER_OBS_PREFIX,
+    ] {
+        if let Some(start) = desc.find(token) {
+            let tail = &desc[start..];
+            let end = tail
+                .find(|c: char| c == ')' || c.is_whitespace())
+                .unwrap_or(tail.len());
+            return tail[..end].to_string();
+        }
     }
     desc.to_string()
 }
@@ -3505,6 +3564,93 @@ mod tests {
         assert!(
             other_plan.admitted,
             "an investigation for a DIFFERENT signature must still be admitted"
+        );
+    }
+
+    /// FINDING 1 (issue #4400 / PR #4403) — the CROSS-TICK dedup contract at the
+    /// `recipe_dedup_key` seam. A stale-engineer investigation brief carries a
+    /// STABLE `stale-investigation:<sanitized_claim_key>` token (distinct from the
+    /// `overseer-obs:` write-back prefix, issue #4128). Two ticks for the SAME
+    /// still-stale claim embed the SAME token but DIFFERENT volatile prose
+    /// (timestamped evidence dir, growing idle age); the dedup key MUST key on the
+    /// stable token so the in-flight guard holds the duplicate. Two DIFFERENT
+    /// claims MUST map to distinct keys so neither is starved.
+    ///
+    /// Pre-fix this does not compile (`STALE_INVESTIGATION_DEDUP_PREFIX` does not
+    /// exist) and would fail (the key is the whole volatile task description, so
+    /// two ticks differ).
+    #[test]
+    fn stale_investigation_briefs_for_the_same_claim_share_a_stable_dedup_key() {
+        use crate::overseer::claim_reaper::{
+            STALE_INVESTIGATION_DEDUP_PREFIX, sanitize_claim_key_for_archive,
+        };
+
+        let claim_key = "rysweet/Simard:quiet-idle-goal";
+        let token = format!(
+            "{STALE_INVESTIGATION_DEDUP_PREFIX}{}",
+            sanitize_claim_key_for_archive(claim_key)
+        );
+
+        // Tick 1 and tick 2 for the SAME claim: identical stable token, DIFFERENT
+        // volatile prose (a fresh timestamped evidence dir + a larger idle age).
+        let tick1 = RecipeBrief {
+            task_description: format!(
+                "Investigate a quiet/idle engineer BEFORE Simard reaps it ({token}). \
+                 Evidence: /state/reaped-engineers/quiet-idle-goal-1000/. Idle age: 9000s."
+            ),
+            target_repo: "rysweet/Simard".to_string(),
+            sequence_group: None,
+        };
+        let tick2 = RecipeBrief {
+            task_description: format!(
+                "Investigate a quiet/idle engineer BEFORE Simard reaps it ({token}). \
+                 Evidence: /state/reaped-engineers/quiet-idle-goal-2500/. Idle age: 10500s."
+            ),
+            target_repo: "rysweet/Simard".to_string(),
+            sequence_group: None,
+        };
+
+        let k1 = recipe_dedup_key(&tick1);
+        let k2 = recipe_dedup_key(&tick2);
+        assert_eq!(
+            k1, k2,
+            "two ticks for the SAME still-stale claim must map to the SAME dedup key \
+             despite volatile prose drift; got {k1:?} vs {k2:?}"
+        );
+        assert_eq!(
+            k1, token,
+            "the dedup key must be the stable stale-investigation token, not the volatile \
+             task description; got {k1:?}"
+        );
+
+        // A DIFFERENT claim ⇒ a DIFFERENT key (no false dedup starving a distinct
+        // investigation).
+        let other_key = "rysweet/Simard:a-different-goal";
+        let other = RecipeBrief {
+            task_description: format!(
+                "Investigate a quiet/idle engineer BEFORE Simard reaps it ({}{}). \
+                 Evidence: /state/reaped-engineers/a-different-goal-1000/. Idle age: 9000s.",
+                STALE_INVESTIGATION_DEDUP_PREFIX,
+                sanitize_claim_key_for_archive(other_key),
+            ),
+            target_repo: "rysweet/Simard".to_string(),
+            sequence_group: None,
+        };
+        assert_ne!(
+            recipe_dedup_key(&other),
+            k1,
+            "two DIFFERENT claims must map to DISTINCT dedup keys"
+        );
+
+        // The stable token MUST NOT reuse the `overseer-obs:` write-back prefix,
+        // which carries separate self-referential-loop semantics (issue #4128).
+        assert_ne!(
+            STALE_INVESTIGATION_DEDUP_PREFIX, OVERSEER_OBS_PREFIX,
+            "the stale-investigation token must be distinct from the overseer-obs prefix"
+        );
+        assert!(
+            !k1.starts_with(OVERSEER_OBS_PREFIX),
+            "the stale-investigation dedup key must not be an overseer-obs key: {k1:?}"
         );
     }
 

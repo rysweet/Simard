@@ -15,6 +15,7 @@
 | [`pr_verify.md`](./pr_verify.md) | Act (verify) | PR body + CI + diff → merge-ready verdict + checklist |
 | [`deploy_gate.md`](./deploy_gate.md) | Act (deploy, HIGH-RISK) | target/deployed commit + canary → deploy/propose/hold |
 | [`health_review.md`](./health_review.md) | Observe→Decide→Act (self-heal) | journal + status + goal list → `LaunchRecipe`/`EscalateBlockedGoal` decisions |
+| [`investigate_stale_engineer.md`](./investigate_stale_engineer.md) | Observe→Decide (investigate-before-reap) | archived evidence for a quiet/idle engineer claim → `verdict` (still-alive/blocked/recoverable/pending/dead) + `interventions`, so the reaper reaps only a genuinely-dead engineer |
 
 ## Reuse the existing recipes — do not reinvent
 
