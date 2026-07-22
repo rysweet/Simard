@@ -35,8 +35,9 @@ pub use drift::{
     DeployDrift, DeploySource, GitDeploySource, ReconcileDetector, production_reconcile_detector,
 };
 pub use health::{
-    BrainsLlmBackedProbe, GoalBoardIntactProbe, MemoryIntactProbe, NoQuarantineProbe,
-    SelfHealthProbes, SelfHealthReport, VersionAdvancedProbe, run_self_health_probe,
+    BrainsLlmBackedProbe, EntrypointParityProbe, GoalBoardIntactProbe, MemoryIntactProbe,
+    NoQuarantineProbe, SelfHealthProbes, SelfHealthReport, VersionAdvancedProbe,
+    run_self_health_probe,
 };
 pub use orchestrator::{DeploySourceKind, SelfDeployOrchestrator, SelfDeployOutcome};
 pub use orphan::{

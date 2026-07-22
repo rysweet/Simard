@@ -232,6 +232,7 @@ nav:
     - Diagnose and Recover Lost Creative-Ideas Goals: howto/diagnose-lost-creative-ideas-goals.md
     - Clean Fixture Leaks: howto/clean-fixture-leaks.md
     - Verify and Roll Back a Self-Deploy: howto/verify-and-roll-back-a-self-deploy.md
+    - Verify and Repair PATH-Entrypoint Parity: howto/verify-path-entrypoint-parity.md
     - Run Self-Deploy from Any Directory: howto/run-self-deploy-from-any-directory.md
     - Check for Updates: howto/check-for-updates.md
     - Configure the amplihack Freshness Gate: howto/configure-amplihack-freshness-gate.md
