@@ -120,6 +120,10 @@ FORBIDDEN_MARKERS=(
   '2407|2410|2417|2420'                            # the exact cycle numbers
 )
 
+# Join all markers into ONE alternation so a scan is a single grep pass instead
+# of one subprocess per pattern. OR-of-alternatives is identical to "any hit".
+FORBIDDEN_RE="$(IFS='|'; printf '%s' "${FORBIDDEN_MARKERS[*]}")"
+
 # --- result tracking ---------------------------------------------------------
 FAILURES=0
 PASSES=0
@@ -132,13 +136,10 @@ have_jq() { command -v jq >/dev/null 2>&1; }
 
 # Assert a blob of text is free of every forbidden operator-facing marker.
 assert_no_markers() { # $1 text  $2 context
-  local text="$1" ctx="$2" hit="" m
-  for m in "${FORBIDDEN_MARKERS[@]}"; do
-    if printf '%s' "$text" | grep -qiE "$m"; then
-      hit="$m"
-      break
-    fi
-  done
+  local text="$1" ctx="$2" hit
+  # Single grep pass over the combined alternation; -o reports the actual leaked
+  # text (better diagnostic than echoing the pattern), -m1 stops at first hit.
+  hit="$(printf '%s' "$text" | grep -m1 -oiE "$FORBIDDEN_RE")"
   if [ -z "$hit" ]; then
     pass "$ctx is free of raw diagnostic markers"
   else
