@@ -1,11 +1,23 @@
-# The repositories Simard's Overseer stewards. This is the single source of truth
-# for the ecosystem roster: the `ecosystem-observe` recipe reads it, and the prose
-# in engineer_system.md / ecosystem-map.md points at it. Pure DATA — a list of
-# owner/name slugs plus notes. No Rust logic is bound to it beyond reading strings.
+# Simard's DEFAULT governed-repo roster — the set of repositories she stewards.
+#
+# This file is the identity SEED, not the live source of truth. It is embedded
+# into the binary at build time (via `include_str!`) as part of *who Simard is*
+# — the default identity's curated data, analogous to how an example Gastronome
+# identity would carry menus. It is NOT a deployed prompt-asset, so `install`
+# never re-installs or clobbers the operator/agent's live curation.
+#
+# On first use the seed is written once into durable, install-safe,
+# identity-scoped mutable state under the state root
+# (`<state_root>/identity_state/simard/governed_repos.toml`). From then on THAT
+# file is the single source of truth: Simard curates it agentically (add/remove a
+# stewarded repo through her own reasoning) and re-deploys never overwrite it.
+#
+# Pure DATA — a list of owner/name slugs plus notes. No Rust logic is bound to
+# this file's location beyond reading strings; the framework's identity-scoped
+# curated-data mechanism is generic and carries no "roster" concept.
 #
 # `amplihack` means `rysweet/amplihack-rs`; the Python `rysweet/amplihack` is
-# deprecated and is NOT on the roster. Adding stewardship for a new repo is a
-# one-line edit here — no code change.
+# deprecated and is NOT on the roster.
 schema_version = 1
 
 [[repo]]

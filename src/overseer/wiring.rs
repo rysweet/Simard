@@ -1231,10 +1231,11 @@ pub fn build_overseer(
     // an AGENT runs `gh` across the stewarded roster and REASONS to a deduped
     // Problem list, then briefs each into a `smart-orchestrator` run — and routes
     // the agent's OPAQUE brief into the SAME gated launch path. Rust never queries
-    // or parses a repo. Wiring is fail-visible: if the committed roster fails to
-    // load, or `recipe-runner-rs`/the recipe is unavailable, the rail is simply
-    // not wired this build (the pass is skipped) rather than aborting the tick.
-    let overseer = match build_ecosystem_observer(&repo_root_for_ecosystem) {
+    // or parses a repo. Wiring is fail-visible: if the roster fails to resolve
+    // from identity-scoped state, or `recipe-runner-rs`/the recipe is unavailable,
+    // the rail is simply not wired this build (the pass is skipped) rather than
+    // aborting the tick.
+    let overseer = match build_ecosystem_observer(&repo_root_for_ecosystem, &state_root) {
         Some((roster, observer)) => {
             overseer.with_ecosystem_observer(roster, observer, gap_scan_every_n())
         }
@@ -1251,7 +1252,7 @@ pub fn build_overseer(
     // agentic gate. Wiring is fail-visible: if the roster fails to load, or
     // `recipe-runner-rs`/the recipe is unavailable, the rail is simply not wired
     // this build (the pass is skipped) rather than aborting the tick.
-    let overseer = match build_merge_queue_reasoner(&repo_root_for_ecosystem) {
+    let overseer = match build_merge_queue_reasoner(&repo_root_for_ecosystem, &state_root) {
         Some((roster, reasoner)) => {
             overseer.with_merge_queue_reasoner(roster, reasoner, gap_scan_every_n())
         }
@@ -1349,53 +1350,35 @@ fn build_claim_reaper_seams(
     ))
 }
 
-/// Load the committed stewarded roster and build the production ecosystem-observe
-/// rail. Returns `None` (fail-visible log) if the roster cannot be loaded or
-/// `recipe-runner-rs`/the recipe is unavailable, so the build proceeds without
-/// the rail rather than panicking. The `owner/name` roster lives in
-/// `prompt_assets/simard/ecosystem_repos.toml` as pure DATA.
+/// Resolve the governed roster from Simard's identity-scoped state and build the
+/// production ecosystem-observe rail. Returns `None` (fail-visible log) if the
+/// roster cannot be resolved or `recipe-runner-rs`/the recipe is unavailable, so
+/// the build proceeds without the rail rather than panicking. The roster is
+/// Simard's durable, agentically-curated identity state (seeded from her identity
+/// default), resolved via
+/// [`load_governed_roster`](crate::overseer::ecosystem_observe::load_governed_roster).
 fn build_ecosystem_observer(
     repo_root: &std::path::Path,
+    state_root: &std::path::Path,
 ) -> Option<(
     Vec<String>,
     Box<dyn crate::overseer::ecosystem_observe::EcosystemObserver>,
 )> {
     use crate::overseer::ecosystem_observe::{
-        ECOSYSTEM_ROSTER_FILENAME, RecipeEcosystemObserver, SpawnEcosystemRecipeRunner,
-        load_ecosystem_roster, resolve_ecosystem_roster_path,
+        RecipeEcosystemObserver, SpawnEcosystemRecipeRunner, load_governed_roster,
     };
 
-    // Install-first resolution (issue #2419): the deployed daemon's `repo_root`
-    // is a stale source checkout that lacks the roster, while the roster is
-    // installed under `~/.simard`. Resolve it there first, then in-tree.
-    let roster_path = match resolve_ecosystem_roster_path(repo_root, None) {
-        Some(path) => path,
-        None => {
-            let installed_candidate = dirs::home_dir().map(|home| {
-                home.join(".simard")
-                    .join("prompt_assets/simard")
-                    .join(ECOSYSTEM_ROSTER_FILENAME)
-            });
-            let in_tree_candidate = repo_root
-                .join("prompt_assets/simard")
-                .join(ECOSYSTEM_ROSTER_FILENAME);
-            tracing::warn!(
-                target: "simard::ecosystem_observe",
-                installed_candidate = ?installed_candidate.as_ref().map(|p| p.display().to_string()),
-                in_tree_candidate = %in_tree_candidate.display(),
-                "[simard] ecosystem-observe NOT wired: failed to load stewarded roster (no roster at the installed or in-tree location)",
-            );
-            return None;
-        }
-    };
-    let roster = match load_ecosystem_roster(&roster_path) {
+    // Single source of truth: Simard's governed roster lives in durable,
+    // install-safe, identity-scoped state under the state root (seeded once from
+    // her identity default). A self-deploy never clobbers her curation.
+    let roster = match load_governed_roster(state_root) {
         Ok(roster) => roster,
         Err(error) => {
             tracing::warn!(
                 target: "simard::ecosystem_observe",
                 error = %error,
-                roster_path = %roster_path.display(),
-                "[simard] ecosystem-observe NOT wired: failed to load stewarded roster",
+                state_root = %state_root.display(),
+                "[simard] ecosystem-observe NOT wired: failed to resolve the governed roster from identity-scoped state",
             );
             return None;
         }
@@ -1413,48 +1396,35 @@ fn build_ecosystem_observer(
     Some((roster, Box::new(RecipeEcosystemObserver::new(runner))))
 }
 
-/// Load the governed roster and build the production observe-merge-queue reasoner
-/// rail (#4097). Returns `None` (fail-visible log) if the roster cannot be loaded
-/// or `recipe-runner-rs`/the recipe is unavailable, so the build proceeds without
-/// the rail rather than panicking. Reuses the SAME committed roster
-/// (`ecosystem_repos.toml`, pure DATA) as the governed reasoning scope, per the
-/// design (Simard's governed repos are default-in-scope for merge REASONING while
-/// the merge ACTION stays behind the objective + agentic gate).
+/// Resolve the governed roster and build the production observe-merge-queue
+/// reasoner rail (#4097). Returns `None` (fail-visible log) if the roster cannot
+/// be resolved or `recipe-runner-rs`/the recipe is unavailable, so the build
+/// proceeds without the rail rather than panicking. Reuses the SAME identity-
+/// scoped roster (via
+/// [`load_governed_roster`](crate::overseer::ecosystem_observe::load_governed_roster))
+/// as the governed reasoning scope, per the design (Simard's governed repos are
+/// default-in-scope for merge REASONING while the merge ACTION stays behind the
+/// objective + agentic gate).
 fn build_merge_queue_reasoner(
     repo_root: &std::path::Path,
+    state_root: &std::path::Path,
 ) -> Option<(
     Vec<String>,
     Box<dyn crate::overseer::merge_queue_observe::MergeQueueReasoner>,
 )> {
-    use crate::overseer::ecosystem_observe::{
-        ECOSYSTEM_ROSTER_FILENAME, load_ecosystem_roster, resolve_ecosystem_roster_path,
-    };
+    use crate::overseer::ecosystem_observe::load_governed_roster;
     use crate::overseer::merge_queue_observe::{
         RecipeMergeQueueReasoner, SpawnMergeQueueRecipeRunner,
     };
 
-    let roster_path = match resolve_ecosystem_roster_path(repo_root, None) {
-        Some(path) => path,
-        None => {
-            let in_tree_candidate = repo_root
-                .join("prompt_assets/simard")
-                .join(ECOSYSTEM_ROSTER_FILENAME);
-            tracing::warn!(
-                target: "simard::merge_queue_observe",
-                in_tree_candidate = %in_tree_candidate.display(),
-                "[simard] observe-merge-queue NOT wired: failed to resolve governed roster (no roster at the installed or in-tree location)",
-            );
-            return None;
-        }
-    };
-    let roster = match load_ecosystem_roster(&roster_path) {
+    let roster = match load_governed_roster(state_root) {
         Ok(roster) => roster,
         Err(error) => {
             tracing::warn!(
                 target: "simard::merge_queue_observe",
                 error = %error,
-                roster_path = %roster_path.display(),
-                "[simard] observe-merge-queue NOT wired: failed to load governed roster",
+                state_root = %state_root.display(),
+                "[simard] observe-merge-queue NOT wired: failed to resolve the governed roster from identity-scoped state",
             );
             return None;
         }

@@ -98,6 +98,7 @@ pub mod identity;
 pub mod identity_auth;
 pub mod identity_composition;
 pub mod identity_precedence;
+pub mod identity_state;
 pub mod improvements;
 pub mod install;
 pub mod journal;

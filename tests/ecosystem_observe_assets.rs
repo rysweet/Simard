@@ -7,8 +7,8 @@
 //! WITHOUT running the agent: the recipe exists and is valid runner YAML, its
 //! two agent steps carry the OBSERVE→BRIEF semantic handoff through the
 //! `{{observed_problems_path}}` context-file var (NOT a `{{step_output}}`
-//! interpolation), the roster is the single source of truth, and the prompts no
-//! longer carry the "#2419 not wired live" banner.
+//! interpolation), the identity seed is the origin of the governed roster, and
+//! the prompts no longer carry the "#2419 not wired live" banner.
 //!
 //! Mirrors `tests/creative_ideas_dedup_assets.rs`.
 
@@ -25,7 +25,7 @@ fn asset(rel: &str) -> String {
 const RECIPE: &str = "prompt_assets/simard/recipes/ecosystem-observe.yaml";
 const OBSERVE_PROMPT: &str = "prompt_assets/simard/overseer/observe.md";
 const BRIEF_PROMPT: &str = "prompt_assets/simard/overseer/problem_to_brief.md";
-const ROSTER: &str = "prompt_assets/simard/ecosystem_repos.toml";
+const ROSTER_SEED: &str = "src/identity/seeds/simard_governed_repos.toml";
 
 /// The recipe exposes exactly the context vars the thin rail renders (all `_path`
 /// values ride `ContextFile`), plus the rail-owned `escalation_note`.
@@ -145,11 +145,14 @@ fn observe_prompt_is_multi_repo_and_agentic() {
     }
 }
 
-/// The roster is the single source of truth: it lists the 10 stewarded slugs and
-/// deliberately excludes the deprecated Python `rysweet/amplihack`.
+/// The identity seed is the origin of Simard's governed roster: it lists the 10
+/// stewarded slugs and deliberately excludes the deprecated Python
+/// `rysweet/amplihack`. At runtime this seed is copied ONCE into durable,
+/// install-safe, identity-scoped state and then agentically curated; this test
+/// pins the seed content (the fleet Simard starts from).
 #[test]
-fn roster_is_the_single_source_of_truth() {
-    let body = asset(ROSTER);
+fn identity_seed_is_the_governed_roster_origin() {
+    let body = asset(ROSTER_SEED);
     for slug in [
         "rysweet/Simard",
         "rysweet/RustyClawd",
@@ -164,11 +167,11 @@ fn roster_is_the_single_source_of_truth() {
     ] {
         assert!(
             body.contains(slug),
-            "roster must list stewarded repo {slug}"
+            "identity seed must list stewarded repo {slug}"
         );
     }
     assert!(
         !body.contains("slug = \"rysweet/amplihack\""),
-        "roster must NOT list the deprecated Python rysweet/amplihack"
+        "identity seed must NOT list the deprecated Python rysweet/amplihack"
     );
 }

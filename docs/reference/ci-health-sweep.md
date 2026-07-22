@@ -100,7 +100,7 @@ workflow recovers](#closing-tracking-issues-when-a-workflow-recovers---file-issu
 
 ```
 src/ci_health/
-├── mod.rs        public entrypoint, governed_repos() (embedded ecosystem roster), sweep_live/sweep_fixture/report_to_json, run_sweep
+├── mod.rs        public entrypoint, governed_repos()/governed_repos_at() (identity-scoped ecosystem roster), sweep_live/sweep_fixture/report_to_json, run_sweep
 ├── types.rs      WorkflowState, RunConclusion, WorkflowRun/Snapshot, RepoSnapshot (head_sha, green_from_cache), FleetSnapshot
 ├── classify.rs   WorkflowVerdict, IgnoreReason, build_report, repo_cacheable, update_cache_from_report, FleetReport (serializable DTOs)
 ├── cache.rs      GreenShaCache — persisted {repo -> last-known-green head SHA}
@@ -402,14 +402,19 @@ tracking issue of every workflow that is **green again**:
 
 ### Governed fleet
 
-The swept slugs come from [`ci_health::governed_repos`], which parses the
-ecosystem's **single source of truth** — `prompt_assets/simard/ecosystem_repos.toml`
-— embedded at compile time (`include_str!`) and validated by the same parser the
-Overseer's `ecosystem-observe` sweep uses (note `amplihack` → `amplihack-rs` on
-GitHub). There is no second hardcoded roster to drift: adding a repo to that TOML
-(its documented "one-line edit, no code change" contract) extends this sweep on
-the next build. An empty or corrupt embedded roster is a fail-loud error, never a
-silently empty sweep that would report the fleet green.
+The swept slugs come from [`ci_health::governed_repos`], which resolves the
+ecosystem's **single source of truth** — Simard's identity-scoped, agentically-
+curated governed roster at `<state_root>/identity_state/simard/governed_repos.toml`
+— through the single loader `load_governed_roster` (the same loader the Overseer's
+`ecosystem-observe` sweep and merge-queue reasoner use), seeded once from her
+identity default in `src/identity/seeds/simard_governed_repos.toml` (note
+`amplihack` → `amplihack-rs` on GitHub). There is no second hardcoded roster to
+drift: a repo Simard curates into her roster extends this sweep with no code
+change. An empty or corrupt roster is a fail-loud error, never a silently empty
+sweep that would report the fleet green. See
+[Governed-roster resolution](./ecosystem-roster-resolution.md). The hermetic-test
+seam `governed_repos_at(state_root)` resolves the same roster against an explicit
+state root.
 
 ## Scheduled recurring sweep
 

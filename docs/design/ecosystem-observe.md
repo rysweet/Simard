@@ -76,8 +76,8 @@ flowchart LR
     O["Step OBSERVE\nagent runs `simard status` + `gh`\nacross roster, reasons to\ndeduped Problems (observe.md)"]
     B["Step BRIEF\nagent → smart-orchestrator\ntask_description (problem_to_brief.md)"]
   end
-  subgraph Roster["Data"]
-    T["ecosystem_repos.toml\n(10 stewarded slugs)"]
+  subgraph Roster["Identity state"]
+    T["identity_state/simard/governed_repos.toml\n(seeded from identity default;\n10 stewarded slugs)"]
   end
   C --> L --> Recipe
   T --> O
@@ -86,28 +86,35 @@ flowchart LR
   R --> SO["smart-orchestrator → default-workflow →\ncrusty / merge-ready / CI → gated simard merge-pr"]
 ```
 
-The three moving parts are: the **roster data file**, the **recipe + prompts** (the
-substance), and the **thin rail** (the only new Rust).
+The three moving parts are: the **governed roster (identity state)**, the
+**recipe + prompts** (the substance), and the **thin rail** (the only new Rust).
 
-## 1. Roster — the single source of truth
+## 1. Roster — the single source of truth (identity-scoped state)
 
-The stewarded-repo list lives in one committed data file. The recipe reads it and
-the prose docs point at it, so the roster is defined once instead of duplicated
-across prompt and doc prose.
+The stewarded-repo list is Simard's **identity-scoped, mutable, deploy-durable
+state**, resolved once through the single loader `load_governed_roster` that both
+this rail and the CI-health sweep call, so the roster is defined once instead of
+duplicated across consumers, prompt, and doc prose.
 
-**File:** `prompt_assets/simard/ecosystem_repos.toml`
+**Live roster:** `<state_root>/identity_state/simard/governed_repos.toml`
+(default `~/.simard/identity_state/simard/governed_repos.toml`).
 
-The rail resolves this file **install-first** — `~/.simard/prompt_assets/simard/ecosystem_repos.toml`
-(the deployed install location) is preferred over the in-tree
-`<repo_root>/prompt_assets/simard/ecosystem_repos.toml`, mirroring how the recipe
-resolves (§3). See [Ecosystem-roster path resolution](../reference/ecosystem-roster-resolution.md)
-for the resolution ladder and the fail-visible/fail-open wiring contract.
+The roster is **seeded once** from Simard's built-in identity default —
+`src/identity/seeds/simard_governed_repos.toml`, embedded in the binary via
+`include_str!` — into durable state the installer never clobbers. Thereafter the
+on-disk copy is authoritative and Simard curates it agentically. See
+[Governed-roster resolution](../reference/ecosystem-roster-resolution.md) for the
+seed-on-first-use resolution and the fail-visible/fail-open wiring contract, and
+[Identity-scoped state](../reference/identity-scoped-state.md) for the generic
+mechanism.
 
 ```toml
-# The repositories Simard's Overseer stewards. This is the single source of truth
-# for the ecosystem roster: the ecosystem-observe recipe reads it, and the prose
-# in engineer_system.md / ecosystem-map.md points at it. Pure DATA — a list of
-# owner/name slugs plus notes. No Rust logic is bound to it beyond reading strings.
+# Simard's governed-repos SEED — the fleet she starts from, embedded at build time
+# and copied once into durable identity-scoped state on first use. The live roster
+# lives at <state_root>/identity_state/simard/governed_repos.toml and is what
+# ecosystem-observe + the CI-health sweep read (via load_governed_roster). Pure
+# DATA — owner/name slugs plus notes; no Rust logic is bound to it beyond reading
+# strings.
 schema_version = 1
 
 [[repo]]
@@ -283,7 +290,7 @@ steps:
 
   | Var | Meaning |
   |-----|---------|
-  | `roster_path` | Path to the roster the OBSERVE agent scans (the rail writes the validated `ecosystem_repos.toml` slugs to a `ContextFile`; see §4). |
+  | `roster_path` | Path to the roster the OBSERVE agent scans (the rail resolves Simard's governed roster via `load_governed_roster` and writes the validated slugs to a `ContextFile`; see §4). |
   | `inflight_refs_path` | Path to Simard's in-flight OODA refs, for dedup. |
   | `observed_problems_path` | Shared handoff file: OBSERVE writes the deduped Problem list here, BRIEF reads it. |
   | `escalation_note` | Empty on the base attempt; carries a higher-effort / repair instruction on escalation-ladder retries (renders to nothing when empty). **Set by the rail, not by the `observe()` caller** — mirrors `ooda-orient.yaml` / `recipe_brain.rs`. |
@@ -367,23 +374,24 @@ The feature reuses the existing Overseer cadence knobs — no new env vars.
 | `SIMARD_OVERSEER_GAP_SCAN` | on (opt-out) | Set to a falsey value (`0`, `false`, `no`) to disable ecosystem observation. |
 | `SIMARD_OVERSEER_GAP_SCAN_EVERY_N` | `1` | Run the observation pass once every N Overseer ticks. Unset/empty/`0`/negative clamp to `1`. |
 
-The stewarded roster itself is configured by editing
-`ecosystem_repos.toml` (data, not env). On a deployed daemon edit the installed
-copy at `~/.simard/prompt_assets/simard/ecosystem_repos.toml`; in a source
-checkout edit the in-tree `<repo_root>/prompt_assets/simard/ecosystem_repos.toml`.
-The rail resolves it install-first — see
-[Ecosystem-roster path resolution](../reference/ecosystem-roster-resolution.md).
+The stewarded roster itself is Simard's identity-scoped state (data, not env),
+curated agentically and persisted at
+`<state_root>/identity_state/simard/governed_repos.toml` (default
+`~/.simard/identity_state/simard/governed_repos.toml`). It is seeded once from
+`src/identity/seeds/simard_governed_repos.toml`. The rail resolves it via
+`load_governed_roster` — see
+[Governed-roster resolution](../reference/ecosystem-roster-resolution.md).
 
 ## Examples
 
 ### Run the observation chain by hand
 
 ```bash
-# Point the recipe at the committed roster and Simard's in-flight refs, plus a
+# Point the recipe at Simard's live governed roster and her in-flight refs, plus a
 # writable handoff path for the OBSERVE→BRIEF semantic handoff. On the live
 # cadence the rail creates these via ContextFile; by hand you pass real files.
 amplihack recipe run prompt_assets/simard/recipes/ecosystem-observe.yaml \
-  -c roster_path=prompt_assets/simard/ecosystem_repos.toml \
+  -c roster_path="$HOME/.simard/identity_state/simard/governed_repos.toml" \
   -c inflight_refs_path=/tmp/simard-inflight-refs.json \
   -c observed_problems_path=/tmp/simard-observed-problems.txt \
   -c escalation_note=""
@@ -397,7 +405,8 @@ this for you on its cadence.
 ### Add a repo to stewardship
 
 ```toml
-# Append to prompt_assets/simard/ecosystem_repos.toml — no code change needed.
+# Curate Simard's governed roster — a data edit to her identity-scoped state at
+# <state_root>/identity_state/simard/governed_repos.toml (no code change needed).
 [[repo]]
 slug = "rysweet/new-tool"
 note = "Reason this repo is now stewarded"
@@ -466,17 +475,20 @@ point-in-time report docs are committed.
   interpolated. The roster acts as an allowlist — no repo discovery or expansion.
 - **Fail-closed.** Any fault yields "nothing actionable," so a failure never invents
   a brief or triggers an unintended launch.
-- **Data.** `ecosystem_repos.toml` holds only public slugs (safe to commit — no
-  secrets/PII). In-flight refs pass via a per-invocation context file, not argv.
+- **Data.** The governed roster holds only public slugs (safe to embed/commit as
+  a seed — no secrets/PII). In-flight refs pass via a per-invocation context file,
+  not argv.
 
 ## See also
 
 - [`docs/design/overseer.md`](./overseer.md) — the Overseer's meta-OODA loop and
   capability map.
-- [Ecosystem-roster path resolution](../reference/ecosystem-roster-resolution.md) —
-  how the rail resolves `ecosystem_repos.toml` install-first and its wiring contract.
+- [Governed-roster resolution](../reference/ecosystem-roster-resolution.md) —
+  how the rail resolves Simard's identity-scoped roster and its wiring contract.
+- [Identity-scoped state](../reference/identity-scoped-state.md) — the generic
+  durable, install-safe mechanism the roster is the first consumer of.
 - [`docs/ecosystem-map.md`](../ecosystem-map.md) — the human-readable repository
-  inventory (points at `ecosystem_repos.toml` for the stewarded roster).
+  inventory (points at the governed roster / its seed).
 - `prompt_assets/simard/overseer/observe.md` — the OBSERVE prompt.
 - `prompt_assets/simard/overseer/problem_to_brief.md` — the BRIEF prompt.
 - `prompt_assets/simard/recipes/ecosystem-observe.yaml` — the recipe.
