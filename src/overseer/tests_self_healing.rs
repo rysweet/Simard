@@ -370,3 +370,100 @@ fn transient_backoff_ceiling_is_fail_safe_for_garbage_or_empty() {
         );
     }
 }
+
+// ── 5. cadence watchdog: fail-safe multiplier resolution (issue #3) ───────────
+//
+// RED-phase spec for the config half of the P3 cadence self-heal. The daemon's
+// loop-side watchdog re-arms a hung Overseer tick guard after
+// `multiplier x cadence`; this resolver supplies `multiplier` from the
+// environment with the same fail-safe discipline as the sibling
+// `SIMARD_OVERSEER_*` knobs: a bad value can only TUNE the watchdog, never
+// disable it (there is no value that turns the self-heal off).
+
+use crate::overseer::config::{
+    DEFAULT_OVERSEER_TICK_WATCHDOG_MULTIPLIER, OVERSEER_TICK_WATCHDOG_MULTIPLIER_FLOOR,
+    SIMARD_OVERSEER_TICK_WATCHDOG_MULTIPLIER_ENV, overseer_tick_watchdog_multiplier_from,
+};
+
+#[test]
+fn watchdog_multiplier_defaults_when_unset() {
+    assert_eq!(
+        overseer_tick_watchdog_multiplier_from(env(&[])),
+        DEFAULT_OVERSEER_TICK_WATCHDOG_MULTIPLIER,
+        "an unset multiplier must resolve to the built-in default (3)"
+    );
+    const {
+        assert!(
+            DEFAULT_OVERSEER_TICK_WATCHDOG_MULTIPLIER >= OVERSEER_TICK_WATCHDOG_MULTIPLIER_FLOOR,
+            "the default multiplier must never sit below the floor"
+        );
+        assert!(
+            OVERSEER_TICK_WATCHDOG_MULTIPLIER_FLOOR == 2,
+            "the floor guarantees a slow-but-healthy tick (<2x) is never re-armed"
+        );
+    }
+}
+
+#[test]
+fn watchdog_multiplier_parses_explicit_in_range_values() {
+    assert_eq!(
+        overseer_tick_watchdog_multiplier_from(env(&[(
+            SIMARD_OVERSEER_TICK_WATCHDOG_MULTIPLIER_ENV,
+            "5"
+        )])),
+        5
+    );
+    // Surrounding whitespace is trimmed, matching the sibling `*_from` resolvers.
+    assert_eq!(
+        overseer_tick_watchdog_multiplier_from(env(&[(
+            SIMARD_OVERSEER_TICK_WATCHDOG_MULTIPLIER_ENV,
+            "  4  "
+        )])),
+        4
+    );
+}
+
+#[test]
+fn watchdog_multiplier_clamps_below_floor_up_to_two() {
+    // A configured multiplier under the floor (0 or 1) would let the watchdog
+    // race a healthy-slow tick — it must clamp UP to 2, never below.
+    for below in ["0", "1"] {
+        assert_eq!(
+            overseer_tick_watchdog_multiplier_from(env(&[(
+                SIMARD_OVERSEER_TICK_WATCHDOG_MULTIPLIER_ENV,
+                below
+            )])),
+            OVERSEER_TICK_WATCHDOG_MULTIPLIER_FLOOR,
+            "a sub-floor multiplier {below:?} must clamp up to 2, never disable the watchdog"
+        );
+    }
+}
+
+#[test]
+fn watchdog_multiplier_is_fail_safe_for_garbage_or_empty() {
+    for bad in ["", "  ", "abc", "-1", "3.5", "not-a-number"] {
+        let resolved = overseer_tick_watchdog_multiplier_from(env(&[(
+            SIMARD_OVERSEER_TICK_WATCHDOG_MULTIPLIER_ENV,
+            bad,
+        )]));
+        assert_eq!(
+            resolved, DEFAULT_OVERSEER_TICK_WATCHDOG_MULTIPLIER,
+            "a garbage multiplier {bad:?} must fall back to the default (3)"
+        );
+        assert!(
+            resolved >= OVERSEER_TICK_WATCHDOG_MULTIPLIER_FLOOR,
+            "no resolved multiplier may ever drop below the floor"
+        );
+    }
+}
+
+#[test]
+fn watchdog_rearm_metric_name_is_the_dotted_otel_house_style() {
+    // The re-arm counter follows the `simard.<subsystem>.<event>` convention used
+    // throughout names.rs (e.g. simard.daemon.cycle). The `_total` suffix is only
+    // the Prometheus exporter's rendering, not the internal constant value.
+    assert_eq!(
+        crate::telemetry::names::OVERSEER_TICK_WATCHDOG_REARM,
+        "simard.overseer.tick_watchdog_rearm"
+    );
+}

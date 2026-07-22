@@ -166,6 +166,8 @@ nav:
     - Engineer-Claim Liveness Lease: concepts/engineer-claim-liveness-lease.md
     - Stale-Engineer-Claim Reaper: concepts/stale-engineer-claim-reaper.md
     - Tombstoned-Goal Engineer Reaper: concepts/tombstoned-goal-engineer-reaper.md
+    - Overseer Cadence Watchdog: concepts/overseer-cadence-watchdog.md
+    - Overseer PR-Reaper Policy: concepts/overseer-pr-reaper-policy.md
   - Tutorials:
     - Complete a Typed OODA Cycle: tutorials/complete-a-typed-ooda-cycle.md
     - First Local Session: tutorials/run-your-first-local-session.md
@@ -271,6 +273,7 @@ nav:
     - Diagnose Recurring Cognitive-Memory Signature: howto/diagnose-recurring-cognitive-memory-signature.md
     - Configure Overseer Gap-Scan Backoff: howto/configure-overseer-gap-scan-backoff.md
     - Configure Overseer Root-Cause Principle: howto/configure-overseer-root-cause-why.md
+    - Configure the Overseer PR Reaper: howto/configure-overseer-pr-reaper.md
     - Configure Cognitive-Thread Scheduling: howto/configure-cognitive-thread-scheduling.md
     - Add a New Cognitive Thread: howto/add-a-new-cognitive-thread.md
     - Configure the Creative Ideas Thread: howto/configure-creative-ideas-thread.md
@@ -306,6 +309,8 @@ nav:
     - Overseer BackoffGate &amp; Gap-Scan Dedup: reference/overseer-backoff-gate-api.md
     - Overseer Root-Cause (WHY) API: reference/overseer-root-cause-why-api.md
     - Overseer Self-Observation Stability: reference/overseer-self-observation-stability.md
+    - Overseer Cadence Watchdog API: reference/overseer-cadence-watchdog-api.md
+    - Overseer PR-Reaper Policy API: reference/overseer-pr-reaper-policy-api.md
     - simard-engineer-step CLI: reference/simard-engineer-step.md
     - simard-tui Dashboard: reference/simard-tui.md
     - Dashboard Memory Tab: reference/dashboard-memory-tab.md
@@ -475,6 +480,7 @@ nav:
     - Outcome-Verification Kill Switch: operations/outcome-verification-kill-switch.md
     - Engineer-Admission Kill Switch: operations/engineer-admission-kill-switch.md
     - Claim-Reaper Kill Switch & Tuning: operations/claim-reaper-kill-switch.md
+    - Overseer Cadence-Watchdog Tuning: operations/overseer-cadence-watchdog-kill-switch.md
     - Resource-Admission Kill Switch: operations/resource-admission-kill-switch.md
     - Creative-Ideas Semantic-Dedup Kill Switch: operations/creative-ideas-semantic-dedup-kill-switch.md
     - Safe Self-Update: safe-self-update.md

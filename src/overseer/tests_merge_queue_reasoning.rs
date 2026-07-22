@@ -1014,3 +1014,537 @@ fn lookup(key: &str, want: &str, value: &str) -> Option<String> {
         None
     }
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// 8. PR reaper policy (issue #4) — pure, fail-closed, tighten-only validator
+// ════════════════════════════════════════════════════════════════════════════
+//
+// RED-phase TDD spec for the `reaper_policy` layer that does not yet exist.
+// ROOT CAUSE (issue #4): a large stale/CONFLICTING/near-duplicate open-PR
+// backlog accumulates with no OODA reaper cleaning it up. The fix adds a PURE,
+// deterministic, fail-closed post-parse layer that can only TIGHTEN an
+// agent-proposed disposition before it reaches `AutonomyGate::admit`:
+//
+//   evaluate(proposed, facts, peers, thresholds, now, destructive_allowed)
+//       -> ReaperDecision
+//
+// It performs no I/O and issues no `gh` command. Destructive `CloseDuplicate`
+// stays behind `allow_verify_merge` (default dry-run/notify-only). Survivor
+// selection is griefing-resistant: the lowest-numbered (earliest) PR survives.
+
+use crate::overseer::config::{
+    DEFAULT_REAPER_CONFLICTING_DAYS, DEFAULT_REAPER_SIMILARITY, DEFAULT_REAPER_STALE_DAYS,
+    SIMARD_OVERSEER_REAPER_CONFLICTING_DAYS_ENV, SIMARD_OVERSEER_REAPER_SIMILARITY_ENV,
+    SIMARD_OVERSEER_REAPER_STALE_DAYS_ENV, reaper_thresholds_from,
+};
+use crate::overseer::reaper_policy::{
+    DuplicateReason, FlagStaleReason, MergeableState, PrFacts, ReaperDecision, ReaperThresholds,
+    evaluate,
+};
+use std::collections::BTreeSet;
+
+/// Default (shipped) thresholds: stale 14d, CONFLICTING 7d, similarity 0.85.
+fn default_thresholds() -> ReaperThresholds {
+    reaper_thresholds_from(|_| None)
+}
+
+fn files(paths: &[&str]) -> BTreeSet<String> {
+    paths.iter().map(|p| (*p).to_string()).collect()
+}
+
+/// Build a `PrFacts` with an update time `days_ago` before `now`.
+fn facts_updated_days_ago(
+    number: u32,
+    title: &str,
+    changed: &[&str],
+    days_ago: i64,
+    mergeable: MergeableState,
+    now: chrono::DateTime<chrono::Utc>,
+) -> PrFacts {
+    PrFacts {
+        repo: "rysweet/Simard".to_string(),
+        number,
+        updated_at: Some(now - chrono::Duration::days(days_ago)),
+        mergeable,
+        normalized_title: title.to_string(),
+        changed_files: files(changed),
+        duplicate_of: None,
+    }
+}
+
+// ── tighten-only contract ────────────────────────────────────────────────────
+
+#[test]
+fn evaluate_tightens_never_upgrades() {
+    let now = chrono::Utc::now();
+    let thresholds = default_thresholds();
+
+    // A `Stale` proposal, even over duplicate-shaped facts with the destructive
+    // gate OPEN, must NEVER escalate to a close — at most a flag (T1).
+    let stale_like_dup = PrFacts {
+        duplicate_of: Some(1),
+        ..facts_updated_days_ago(
+            9,
+            "dropstopwords relevance",
+            &["a.rs"],
+            30,
+            MergeableState::Mergeable,
+            now,
+        )
+    };
+    let survivor = facts_updated_days_ago(
+        1,
+        "dropstopwords relevance",
+        &["a.rs"],
+        40,
+        MergeableState::Mergeable,
+        now,
+    );
+    let decision = evaluate(
+        PrDisposition::Stale,
+        &stale_like_dup,
+        &[survivor],
+        &thresholds,
+        now,
+        true, // destructive allowed — still must not close a Stale proposal
+    );
+    assert!(
+        !matches!(decision, ReaperDecision::CloseDuplicate { .. }),
+        "a Stale proposal must never be upgraded to CloseDuplicate: {decision:?}"
+    );
+
+    // Non-reapable dispositions collapse to NoAction.
+    for d in [PrDisposition::ReadyForMerge, PrDisposition::NeedsWork] {
+        let f = facts_updated_days_ago(5, "t", &["a.rs"], 30, MergeableState::Mergeable, now);
+        assert!(
+            matches!(
+                evaluate(d, &f, &[], &thresholds, now, true),
+                ReaperDecision::NoAction
+            ),
+            "{d:?} is not a reaper disposition and must yield NoAction"
+        );
+    }
+}
+
+// ── stale flagging ───────────────────────────────────────────────────────────
+
+#[test]
+fn stale_flagged_only_past_threshold() {
+    let now = chrono::Utc::now();
+    let thresholds = default_thresholds(); // stale 14d
+
+    // 30 days stale (> 14) ⇒ flag.
+    let old = facts_updated_days_ago(10, "t", &["a.rs"], 30, MergeableState::Mergeable, now);
+    assert!(
+        matches!(
+            evaluate(PrDisposition::Stale, &old, &[], &thresholds, now, false),
+            ReaperDecision::Flag(FlagStaleReason::StaleNoUpdate)
+        ),
+        "a PR untouched for 30d (> 14d) must be flagged StaleNoUpdate"
+    );
+
+    // 3 days (< 14) ⇒ no action.
+    let fresh = facts_updated_days_ago(11, "t", &["a.rs"], 3, MergeableState::Mergeable, now);
+    assert!(
+        matches!(
+            evaluate(PrDisposition::Stale, &fresh, &[], &thresholds, now, false),
+            ReaperDecision::NoAction
+        ),
+        "a PR updated 3d ago is within the stale window ⇒ NoAction"
+    );
+}
+
+#[test]
+fn long_conflicting_flagged() {
+    let now = chrono::Utc::now();
+    let thresholds = default_thresholds(); // stale 14d, conflicting 7d
+
+    // CONFLICTING for 10 days: past the 7d conflicting bar but INSIDE the 14d
+    // stale bar — so the flag reason must be LongConflicting, not StaleNoUpdate.
+    let conflicting =
+        facts_updated_days_ago(12, "t", &["a.rs"], 10, MergeableState::Conflicting, now);
+    assert!(
+        matches!(
+            evaluate(
+                PrDisposition::Stale,
+                &conflicting,
+                &[],
+                &thresholds,
+                now,
+                false
+            ),
+            ReaperDecision::Flag(FlagStaleReason::LongConflicting)
+        ),
+        "a PR CONFLICTING for 10d (> 7d, < 14d) must be flagged LongConflicting"
+    );
+}
+
+// ── duplicate handling ───────────────────────────────────────────────────────
+
+#[test]
+fn no_close_on_title_similarity_alone() {
+    let now = chrono::Utc::now();
+    let thresholds = default_thresholds();
+
+    // Identical normalized titles (similarity 1.0 >= 0.85) but DISJOINT changed
+    // files ⇒ never a close (R3 griefing: title alone is not evidence). T3.
+    let candidate = PrFacts {
+        duplicate_of: Some(20),
+        ..facts_updated_days_ago(
+            21,
+            "same normalized title",
+            &["b.rs"],
+            1,
+            MergeableState::Mergeable,
+            now,
+        )
+    };
+    let survivor = facts_updated_days_ago(
+        20,
+        "same normalized title",
+        &["a.rs"],
+        1,
+        MergeableState::Mergeable,
+        now,
+    );
+    assert!(
+        matches!(
+            evaluate(
+                PrDisposition::Duplicate,
+                &candidate,
+                &[survivor],
+                &thresholds,
+                now,
+                true
+            ),
+            ReaperDecision::NoAction
+        ),
+        "matching titles with no changed-file overlap must never close a PR"
+    );
+}
+
+#[test]
+fn duplicate_close_requires_overlap_and_optin() {
+    let now = chrono::Utc::now();
+    let thresholds = default_thresholds();
+
+    let candidate = PrFacts {
+        duplicate_of: Some(30),
+        ..facts_updated_days_ago(
+            31,
+            "dup title",
+            &["a.rs", "b.rs"],
+            1,
+            MergeableState::Mergeable,
+            now,
+        )
+    };
+    let survivor = facts_updated_days_ago(
+        30,
+        "dup title",
+        &["a.rs", "b.rs"],
+        2,
+        MergeableState::Mergeable,
+        now,
+    );
+
+    // Overlap + destructive gate OPEN ⇒ propose a close of the later PR (31)
+    // as a duplicate of the survivor (30).
+    match evaluate(
+        PrDisposition::Duplicate,
+        &candidate,
+        std::slice::from_ref(&survivor),
+        &thresholds,
+        now,
+        true,
+    ) {
+        ReaperDecision::CloseDuplicate {
+            number,
+            survivor: s,
+            reason,
+        } => {
+            assert_eq!(
+                number, 31,
+                "the close candidate is the later (higher-numbered) PR"
+            );
+            assert_eq!(s, 30, "the survivor is the earlier (lower-numbered) PR");
+            assert!(matches!(reason, DuplicateReason::TitleAndFileOverlap));
+        }
+        other => panic!("overlap + opt-in must propose a CloseDuplicate, got {other:?}"),
+    }
+
+    // Overlap but destructive gate CLOSED ⇒ downgrade to a non-destructive flag
+    // that names the REAL reason (DuplicateNotClosable), never a stray close (T4).
+    assert!(
+        matches!(
+            evaluate(
+                PrDisposition::Duplicate,
+                &candidate,
+                &[survivor],
+                &thresholds,
+                now,
+                false
+            ),
+            ReaperDecision::Flag(FlagStaleReason::DuplicateNotClosable)
+        ),
+        "with the destructive gate closed, a duplicate downgrades to a flag, not a close"
+    );
+}
+
+#[test]
+fn fail_closed_on_unknown_mergeable_or_timestamp() {
+    let now = chrono::Utc::now();
+    let thresholds = default_thresholds();
+
+    // Unknown mergeable ⇒ never eligible for a duplicate close (T5).
+    let unknown_mergeable = PrFacts {
+        duplicate_of: Some(40),
+        ..facts_updated_days_ago(41, "dup", &["a.rs"], 1, MergeableState::Unknown, now)
+    };
+    let survivor = facts_updated_days_ago(40, "dup", &["a.rs"], 1, MergeableState::Unknown, now);
+    assert!(
+        !matches!(
+            evaluate(
+                PrDisposition::Duplicate,
+                &unknown_mergeable,
+                &[survivor],
+                &thresholds,
+                now,
+                true
+            ),
+            ReaperDecision::CloseDuplicate { .. }
+        ),
+        "an Unknown mergeable state must never produce a destructive close"
+    );
+
+    // Missing (unparseable) timestamp ⇒ a Stale proposal cannot be flagged.
+    let no_ts = PrFacts {
+        updated_at: None,
+        ..facts_updated_days_ago(42, "t", &["a.rs"], 99, MergeableState::Mergeable, now)
+    };
+    assert!(
+        matches!(
+            evaluate(PrDisposition::Stale, &no_ts, &[], &thresholds, now, false),
+            ReaperDecision::NoAction
+        ),
+        "a None timestamp is fail-closed: no stale flag without an age"
+    );
+}
+
+#[test]
+fn survivor_is_lowest_numbered_pr() {
+    // Griefing resistance: an attacker who opens a near-duplicate AFTER a
+    // legitimate PR must not be able to close the legitimate (earlier) one. The
+    // survivor is deterministically the lowest-numbered PR; the later PR is the
+    // close candidate.
+    let now = chrono::Utc::now();
+    let thresholds = default_thresholds();
+
+    let legit = facts_updated_days_ago(
+        100,
+        "shared title",
+        &["x.rs"],
+        5,
+        MergeableState::Mergeable,
+        now,
+    );
+    let attacker = PrFacts {
+        duplicate_of: Some(100),
+        ..facts_updated_days_ago(
+            205,
+            "shared title",
+            &["x.rs"],
+            1,
+            MergeableState::Mergeable,
+            now,
+        )
+    };
+
+    // Evaluating the LATER PR (205) ⇒ it is the close candidate, 100 survives.
+    match evaluate(
+        PrDisposition::Duplicate,
+        &attacker,
+        std::slice::from_ref(&legit),
+        &thresholds,
+        now,
+        true,
+    ) {
+        ReaperDecision::CloseDuplicate {
+            number, survivor, ..
+        } => {
+            assert_eq!(number, 205);
+            assert_eq!(survivor, 100, "the earlier PR must survive");
+        }
+        other => panic!("expected the later PR to be the close candidate, got {other:?}"),
+    }
+
+    // Evaluating the EARLIER PR (100) with the later peer ⇒ 100 is the survivor,
+    // so it is NEVER the close candidate (no self-close of the legitimate PR).
+    let legit_as_candidate = PrFacts {
+        duplicate_of: Some(205),
+        ..legit.clone()
+    };
+    assert!(
+        !matches!(
+            evaluate(
+                PrDisposition::Duplicate,
+                &legit_as_candidate,
+                &[attacker],
+                &thresholds,
+                now,
+                true
+            ),
+            ReaperDecision::CloseDuplicate { .. }
+        ),
+        "the lowest-numbered (earliest) PR must never be closed as the duplicate"
+    );
+}
+
+// ── dry-run gate + argv safety (end-to-end intent) ───────────────────────────
+
+#[test]
+fn dry_run_gate_default_is_notify_only() {
+    let now = chrono::Utc::now();
+    let thresholds = default_thresholds();
+
+    let candidate = PrFacts {
+        duplicate_of: Some(50),
+        ..facts_updated_days_ago(51, "dup", &["a.rs"], 1, MergeableState::Mergeable, now)
+    };
+    let survivor = facts_updated_days_ago(50, "dup", &["a.rs"], 1, MergeableState::Mergeable, now);
+
+    // With the default (dry-run) gate closed, evaluate() itself never yields a
+    // destructive close ...
+    let decision = evaluate(
+        PrDisposition::Duplicate,
+        &candidate,
+        &[survivor],
+        &thresholds,
+        now,
+        false,
+    );
+    assert!(
+        !matches!(decision, ReaperDecision::CloseDuplicate { .. }),
+        "default dry-run: reaper_policy must not emit a CloseDuplicate"
+    );
+
+    // ... and even a (hypothetical) CloseDuplicatePr intervention stays gated by
+    // the SAME notify-only MergeAuthority switch, so nothing is closed unattended.
+    let close = Intervention::CloseDuplicatePr {
+        repo: "rysweet/Simard".to_string(),
+        pr: 51,
+        duplicate_of: 50,
+    };
+    assert!(
+        AutonomyGate::default().admit(&close).is_err(),
+        "CloseDuplicatePr stays MergeAuthority-gated under the default (dry-run) autonomy gate"
+    );
+}
+
+#[test]
+fn reaper_close_argv_never_contains_admin_or_no_verify() {
+    let now = chrono::Utc::now();
+    let thresholds = default_thresholds();
+
+    let candidate = PrFacts {
+        duplicate_of: Some(60),
+        ..facts_updated_days_ago(61, "dup", &["a.rs"], 1, MergeableState::Mergeable, now)
+    };
+    let survivor = facts_updated_days_ago(60, "dup", &["a.rs"], 1, MergeableState::Mergeable, now);
+
+    // Whatever close the reaper proposes must build a positional argv that can
+    // NEVER carry a force-flag — no PR-controlled text reaches the command line.
+    if let ReaperDecision::CloseDuplicate {
+        number,
+        survivor: s,
+        ..
+    } = evaluate(
+        PrDisposition::Duplicate,
+        &candidate,
+        &[survivor],
+        &thresholds,
+        now,
+        true,
+    ) {
+        let argv = close_duplicate_pr_argv("rysweet/Simard", number, s);
+        assert!(
+            !argv.iter().any(|a| a == "--admin"),
+            "reaper close argv must not contain --admin: {argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|a| a == "--no-verify"),
+            "reaper close argv must not contain --no-verify: {argv:?}"
+        );
+    } else {
+        panic!("expected a CloseDuplicate to build a close argv for the safety assertion");
+    }
+}
+
+// ── config resolver: conservative defaults + clamps ──────────────────────────
+
+#[test]
+fn thresholds_resolver_defaults_and_clamps() {
+    // Unset ⇒ shipped defaults.
+    let d = reaper_thresholds_from(|_| None);
+    assert_eq!(d.stale_days, DEFAULT_REAPER_STALE_DAYS);
+    assert_eq!(d.stale_days, 14);
+    assert_eq!(d.conflicting_days, DEFAULT_REAPER_CONFLICTING_DAYS);
+    assert_eq!(d.conflicting_days, 7);
+    assert!((d.similarity - DEFAULT_REAPER_SIMILARITY).abs() < f64::EPSILON);
+    assert!((d.similarity - 0.85).abs() < f64::EPSILON);
+
+    // Day thresholds clamp UP to a floor of 1 (a 0-day threshold is unsafe).
+    let zero_days = reaper_thresholds_from(|k| match k {
+        _ if k == SIMARD_OVERSEER_REAPER_STALE_DAYS_ENV => Some("0".to_string()),
+        _ if k == SIMARD_OVERSEER_REAPER_CONFLICTING_DAYS_ENV => Some("0".to_string()),
+        _ => None,
+    });
+    assert!(
+        zero_days.stale_days >= 1,
+        "stale_days must clamp to a floor of 1"
+    );
+    assert!(
+        zero_days.conflicting_days >= 1,
+        "conflicting_days must clamp to a floor of 1"
+    );
+
+    // Similarity clamps into [0.0, 1.0].
+    let hi = reaper_thresholds_from(|k| {
+        (k == SIMARD_OVERSEER_REAPER_SIMILARITY_ENV).then(|| "2.0".to_string())
+    });
+    assert!(
+        hi.similarity <= 1.0,
+        "similarity above 1.0 must clamp to 1.0"
+    );
+    let lo = reaper_thresholds_from(|k| {
+        (k == SIMARD_OVERSEER_REAPER_SIMILARITY_ENV).then(|| "-1".to_string())
+    });
+    assert!(
+        lo.similarity >= 0.0,
+        "negative similarity must clamp to 0.0"
+    );
+
+    // Garbage ⇒ conservative defaults, never a permissive value.
+    let garbage = reaper_thresholds_from(|k| match k {
+        _ if k == SIMARD_OVERSEER_REAPER_STALE_DAYS_ENV => Some("abc".to_string()),
+        _ if k == SIMARD_OVERSEER_REAPER_SIMILARITY_ENV => Some("not-a-float".to_string()),
+        _ => None,
+    });
+    assert_eq!(garbage.stale_days, DEFAULT_REAPER_STALE_DAYS);
+    assert!((garbage.similarity - DEFAULT_REAPER_SIMILARITY).abs() < f64::EPSILON);
+}
+
+#[test]
+fn reaper_telemetry_names_follow_the_dotted_otel_house_style() {
+    // Decision + downgrade counters and the decision attribute key follow the
+    // house `simard.<subsystem>.<event>` / short-attr convention (names.rs).
+    assert_eq!(
+        crate::telemetry::names::OVERSEER_REAPER_DECISION,
+        "simard.overseer.reaper_decision"
+    );
+    assert_eq!(
+        crate::telemetry::names::OVERSEER_REAPER_DOWNGRADED,
+        "simard.overseer.reaper_downgraded"
+    );
+    assert_eq!(crate::telemetry::names::ATTR_DECISION, "decision");
+}

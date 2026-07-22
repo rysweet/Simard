@@ -122,6 +122,23 @@ pub const DISK_RECLAIM_USED_PCT_BEFORE: &str = "simard.disk.reclaim.used_pct_bef
 /// Home-partition `%-used` after the run (gauge, 0–100).
 pub const DISK_RECLAIM_USED_PCT_AFTER: &str = "simard.disk.reclaim.used_pct_after";
 
+// ── Overseer — simard.overseer.* ────────────────────────────────────────────
+
+/// The cadence watchdog (issue #3) force-cleared a hung Overseer tick's overlap
+/// guard and re-armed the cadence (counter). Every increment is a recovered
+/// stall — a non-zero rate means a tick hung long enough to trip the self-heal.
+pub const OVERSEER_TICK_WATCHDOG_REARM: &str = "simard.overseer.tick_watchdog_rearm";
+
+/// One PR-reaper (issue #4) decision (counter). Attribute [`ATTR_OUTCOME`] =
+/// `no_action` | `flag` | `close_duplicate`.
+pub const OVERSEER_REAPER_DECISION: &str = "simard.overseer.reaper_decision";
+
+/// A PR-reaper duplicate close was DOWNGRADED to a non-destructive flag because
+/// the destructive gate was closed (counter). The dry-run/notify-only safety
+/// signal: a non-zero rate means real duplicates are being surfaced but not
+/// closed unattended.
+pub const OVERSEER_REAPER_DOWNGRADED: &str = "simard.overseer.reaper_downgraded";
+
 // ── Attribute keys ──────────────────────────────────────────────────────────
 
 /// Attribute key: outcome/result discriminator (`ok`/`parse_fail`, parse
@@ -148,6 +165,10 @@ pub const ATTR_KIND: &str = "kind";
 /// (`memory_ipc` | `knowledge_launch`) or reclamation reject reason
 /// (mirrors `RejectReason`).
 pub const ATTR_REASON: &str = "reason";
+
+/// Attribute key: PR-reaper decision discriminator (`no_action` | `flag` |
+/// `close_duplicate`).
+pub const ATTR_DECISION: &str = "decision";
 
 /// Sentinel bucket an out-of-catalog attribute value is folded into.
 pub const OTHER_BUCKET: &str = "other";

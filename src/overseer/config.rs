@@ -746,6 +746,136 @@ pub fn overseer_interval_secs() -> u64 {
     resolve_interval_secs(|k| std::env::var(k).ok())
 }
 
+// ── Cadence watchdog (issue #3) ─────────────────────────────────────────────
+
+/// Tuning knob for the Overseer cadence **watchdog** (issue #3): the multiple of
+/// the tick cadence a single in-flight tick may run before the daemon's loop-side
+/// self-heal force-clears the overlap guard and re-arms the cadence. A bad value
+/// can only TUNE the window — there is no value that disables the watchdog.
+pub const SIMARD_OVERSEER_TICK_WATCHDOG_MULTIPLIER_ENV: &str =
+    "SIMARD_OVERSEER_TICK_WATCHDOG_MULTIPLIER";
+
+/// Default watchdog multiplier: a tick outstanding for more than `3 x cadence`
+/// (45 min at the 900s default) is treated as hung and its guard re-armed. Chosen
+/// generously so a genuinely-slow-but-healthy tick is never mistaken for hung.
+pub const DEFAULT_OVERSEER_TICK_WATCHDOG_MULTIPLIER: u32 = 3;
+
+/// Hard floor for the watchdog multiplier. Even a caller/operator-supplied `0`
+/// or `1` clamps UP to `2`, guaranteeing the re-arm window is always at least
+/// `2 x cadence` so a slow-but-healthy tick (under `2x`) can never be re-armed
+/// into a double-fire race.
+pub const OVERSEER_TICK_WATCHDOG_MULTIPLIER_FLOOR: u32 = 2;
+
+/// Resolve the cadence-watchdog multiplier from an env resolver (issue #3).
+///
+/// Fail-safe with the same discipline as the sibling `SIMARD_OVERSEER_*` knobs:
+/// unset / empty / whitespace / unparseable / garbage all fall back to
+/// [`DEFAULT_OVERSEER_TICK_WATCHDOG_MULTIPLIER`]; a valid but sub-floor value
+/// (`0`/`1`) clamps UP to [`OVERSEER_TICK_WATCHDOG_MULTIPLIER_FLOOR`]. No value
+/// can ever disable the watchdog or shrink the window below `2 x cadence`.
+pub fn overseer_tick_watchdog_multiplier_from(lookup: impl Fn(&str) -> Option<String>) -> u32 {
+    match lookup(SIMARD_OVERSEER_TICK_WATCHDOG_MULTIPLIER_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => match s.parse::<u32>() {
+            Ok(n) => n.max(OVERSEER_TICK_WATCHDOG_MULTIPLIER_FLOOR),
+            Err(_) => DEFAULT_OVERSEER_TICK_WATCHDOG_MULTIPLIER,
+        },
+        _ => DEFAULT_OVERSEER_TICK_WATCHDOG_MULTIPLIER,
+    }
+}
+
+/// Production entry point: read the real process environment.
+pub fn overseer_tick_watchdog_multiplier() -> u32 {
+    overseer_tick_watchdog_multiplier_from(|k| std::env::var(k).ok())
+}
+
+// ── PR reaper policy (issue #4) ─────────────────────────────────────────────
+
+/// Env override for the reaper's **stale** window in days: an open PR untouched
+/// for longer than this is eligible to be flagged `StaleNoUpdate`.
+pub const SIMARD_OVERSEER_REAPER_STALE_DAYS_ENV: &str = "SIMARD_OVERSEER_REAPER_STALE_DAYS";
+
+/// Env override for the reaper's **long-CONFLICTING** window in days: a PR whose
+/// last update is older than this AND is `mergeable=CONFLICTING` is eligible to
+/// be flagged `LongConflicting`.
+pub const SIMARD_OVERSEER_REAPER_CONFLICTING_DAYS_ENV: &str =
+    "SIMARD_OVERSEER_REAPER_CONFLICTING_DAYS";
+
+/// Env override for the reaper's near-duplicate **title-similarity** threshold
+/// (`0.0..=1.0`). A close is only ever proposed at or above this similarity AND
+/// with real changed-file overlap.
+pub const SIMARD_OVERSEER_REAPER_SIMILARITY_ENV: &str = "SIMARD_OVERSEER_REAPER_SIMILARITY";
+
+/// Conservative shipped default: 14 days with no update ⇒ stale.
+pub const DEFAULT_REAPER_STALE_DAYS: i64 = 14;
+
+/// Conservative shipped default: 7 days `CONFLICTING` ⇒ long-conflicting.
+pub const DEFAULT_REAPER_CONFLICTING_DAYS: i64 = 7;
+
+/// Conservative shipped default: normalized-title similarity ≥ 0.85 (with file
+/// overlap) is required before a duplicate close is even proposed.
+pub const DEFAULT_REAPER_SIMILARITY: f64 = 0.85;
+
+/// Resolve the reaper's [`ReaperThresholds`](crate::overseer::reaper_policy::ReaperThresholds)
+/// from an env resolver (issue #4).
+///
+/// Fail-**closed** toward conservatism: unset / empty / unparseable / garbage all
+/// fall back to the shipped defaults. Day windows clamp UP to a floor of `1` (a
+/// `0`-day window would be an unsafe mass-reaper); similarity clamps into
+/// `[0.0, 1.0]`. No value can widen the reaper into an aggressive configuration.
+pub fn reaper_thresholds_from(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> crate::overseer::reaper_policy::ReaperThresholds {
+    let stale_days = parse_reaper_days(
+        lookup(SIMARD_OVERSEER_REAPER_STALE_DAYS_ENV),
+        DEFAULT_REAPER_STALE_DAYS,
+    );
+    let conflicting_days = parse_reaper_days(
+        lookup(SIMARD_OVERSEER_REAPER_CONFLICTING_DAYS_ENV),
+        DEFAULT_REAPER_CONFLICTING_DAYS,
+    );
+    let similarity = parse_reaper_similarity(
+        lookup(SIMARD_OVERSEER_REAPER_SIMILARITY_ENV),
+        DEFAULT_REAPER_SIMILARITY,
+    );
+    crate::overseer::reaper_policy::ReaperThresholds {
+        stale_days,
+        conflicting_days,
+        similarity,
+    }
+}
+
+/// Production entry point: read the real process environment.
+pub fn reaper_thresholds() -> crate::overseer::reaper_policy::ReaperThresholds {
+    reaper_thresholds_from(|k| std::env::var(k).ok())
+}
+
+/// Parse a reaper day-window: unset/empty/garbage ⇒ `default`; a parsed value
+/// clamps UP to a floor of `1` so a `0`-day window can never mass-reap.
+fn parse_reaper_days(raw: Option<String>, default: i64) -> i64 {
+    match raw.as_deref().map(str::trim) {
+        Some(s) if !s.is_empty() => match s.parse::<i64>() {
+            Ok(n) => n.max(1),
+            Err(_) => default,
+        },
+        _ => default,
+    }
+}
+
+/// Parse a reaper similarity: unset/empty/garbage ⇒ `default`; a parsed value
+/// clamps into `[0.0, 1.0]`.
+fn parse_reaper_similarity(raw: Option<String>, default: f64) -> f64 {
+    match raw.as_deref().map(str::trim) {
+        Some(s) if !s.is_empty() => match s.parse::<f64>() {
+            Ok(n) if n.is_finite() => n.clamp(0.0, 1.0),
+            _ => default,
+        },
+        _ => default,
+    }
+}
+
 /// Recognise an explicit truthy env value. Case-insensitive; trims surrounding
 /// whitespace. Anything else (including `0`/`false`/empty) is falsey.
 fn is_truthy(v: &str) -> bool {

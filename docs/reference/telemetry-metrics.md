@@ -98,6 +98,8 @@ fact from a more authoritative place:
 | `simard.llm.cost_usd` / `.credits` | ⏳ reserved | integral counters lose fractional cents; status reads $ + AI-credits from the cost ledger (authoritative) |
 | `simard.goal.active` | ✅ `daemon/mod.rs` | per cycle |
 | `simard.goal.completed` / `.progress` | ⏳ reserved | goal transitions are a follow-up; the board itself is read directly |
+| `simard.overseer.tick_watchdog_rearm` | ✅ `daemon/mod.rs` | cadence-watchdog re-arm of a hung Overseer tick (issue #3) |
+| `simard.overseer.reaper_decision` / `.reaper_downgraded` | ⏳ reserved | name + semantics fixed by the pure [`reaper_policy`](../reference/overseer-pr-reaper-policy-api.md) layer (issue #4); emission lands when the reaper is wired into the OODA act stage |
 
 ## Metric catalog
 
@@ -227,6 +229,20 @@ dedicated [disk reclaim telemetry reference](./disk-reclaim-telemetry.md).
 The agent's free-text candidate `reason` is **never** used as an attribute; only
 the enum `RejectReason` (`reason=`) is. See
 [Agentic disk reclamation](../concepts/agentic-disk-reclamation.md).
+
+### Overseer — `simard.overseer.*`
+
+The cadence self-heal ([cadence watchdog](../concepts/overseer-cadence-watchdog.md),
+issue #3) emits its re-arm counter from the daemon loop today. The
+[PR-reaper policy](../concepts/overseer-pr-reaper-policy.md) (issue #4) fixes the
+name + semantics of its decision counters in the pure `reaper_policy` layer;
+emission lands when the reaper is wired into the OODA act stage.
+
+| Metric | Type | Attributes | Meaning |
+|---|---|---|---|
+| `simard.overseer.tick_watchdog_rearm` | counter | — | the loop-side watchdog force-cleared a hung Overseer tick's overlap guard and re-armed the cadence. Every increment is a recovered stall; a non-zero rate means a tick hung past `multiplier × cadence`. |
+| `simard.overseer.reaper_decision` | counter (⏳ reserved) | `decision` = `no_action` \| `flag` \| `close_duplicate` | one PR-reaper disposition after the pure, tighten-only [`evaluate`](../reference/overseer-pr-reaper-policy-api.md). |
+| `simard.overseer.reaper_downgraded` | counter (⏳ reserved) | — | a duplicate close was downgraded to a non-destructive flag because the destructive gate was closed (the dry-run/notify-only safety signal). |
 
 ## In-process registry and the on-disk snapshot
 

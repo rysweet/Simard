@@ -66,6 +66,7 @@ pub mod merge_queue_observe;
 pub mod notify;
 pub mod observer;
 pub mod pr_verify;
+pub mod reaper_policy;
 pub mod root_cause;
 pub mod sensor;
 pub mod signal;
