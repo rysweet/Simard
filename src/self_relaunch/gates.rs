@@ -56,7 +56,10 @@ pub fn canary_gate_env_allowlist() -> Vec<String> {
 /// Simard deploy-shape signals (`SIMARD_HOME`, …) are **not** in this floor; they
 /// arrive as the explicit [`canary_gate_env_allowlist`] via `config.canary_env`.
 /// Anything outside this base set and `config.canary_env` is dropped
-/// (deny-by-default); `LD_PRELOAD`-class variables are never allow-listable.
+/// (deny-by-default); `LD_PRELOAD`-class variables are never allow-listable —
+/// [`is_hijack_class_env`] enforces this in code (SEC-D3 defense-in-depth), so
+/// the guarantee holds even if a future caller populates `config.canary_env`
+/// from a less-trusted source than [`canary_gate_env_allowlist`].
 /// Names absent from the environment are skipped. Nothing is logged here.
 fn scrub_gate_env(cmd: &mut Command, config: &RelaunchConfig) {
     cmd.env_clear();
@@ -86,11 +89,34 @@ fn scrub_gate_env(cmd: &mut Command, config: &RelaunchConfig) {
         }
     }
     // Operator/canary-build allow-list: names only, values read live at spawn.
+    // A hijack-class name (`LD_*`, `DYLD_*`, `GIT_SSH*`, `BASH_ENV`, …) is
+    // refused even if it appears here (SEC-D3): re-injecting one would reopen
+    // exactly the ambient-env hijack this scrub exists to close.
     for name in &config.canary_env {
+        if is_hijack_class_env(name) {
+            continue;
+        }
         if let Ok(val) = std::env::var(name) {
             cmd.env(name, val);
         }
     }
+}
+
+/// True when `name` is an execution-hijack environment variable that must never
+/// be re-injected into a canary gate subprocess, regardless of whether an
+/// operator or build step listed it in [`RelaunchConfig::canary_env`]. These
+/// steer a dynamic loader, shell, or git transport into running attacker code
+/// (`LD_PRELOAD` / `LD_LIBRARY_PATH`, macOS `DYLD_*`, `GIT_SSH_COMMAND`,
+/// `BASH_ENV` / `ENV`, `SHELLOPTS` / `BASHOPTS`, `IFS`). Matching is
+/// case-insensitive so a lower/mixed-case spelling cannot slip a variant past
+/// the floor. This is the code-enforced counterpart to the docstring guarantee
+/// on [`scrub_gate_env`] — the deny-by-default floor already omits them; this
+/// prevents the allow-list re-injection loop from restoring one.
+fn is_hijack_class_env(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    const HIJACK_PREFIXES: &[&str] = &["LD_", "DYLD_", "GIT_SSH"];
+    const HIJACK_EXACT: &[&str] = &["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "IFS"];
+    HIJACK_PREFIXES.iter().any(|p| upper.starts_with(p)) || HIJACK_EXACT.iter().any(|n| upper == *n)
 }
 
 /// Construct a [`Command`] for `program` already scrubbed to the canary gate
@@ -306,6 +332,43 @@ mod tests {
         // Never an injection vector: an `LD_PRELOAD`-class var is not allow-listed.
         assert!(!allow.iter().any(|n| n == "LD_PRELOAD"));
         assert!(!allow.iter().any(|n| n == "GIT_SSH_COMMAND"));
+    }
+
+    #[test]
+    fn is_hijack_class_env_flags_execution_hijack_vars() {
+        // Loader / shell / git-transport steering vars — refused regardless of case.
+        for name in [
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "ld_preload",
+            "DYLD_INSERT_LIBRARIES",
+            "GIT_SSH",
+            "GIT_SSH_COMMAND",
+            "BASH_ENV",
+            "ENV",
+            "SHELLOPTS",
+            "BASHOPTS",
+            "IFS",
+        ] {
+            assert!(
+                is_hijack_class_env(name),
+                "must refuse hijack-class var: {name}"
+            );
+        }
+        // Legitimate deploy-shape / toolchain names are never treated as hijacks.
+        for name in [
+            "SIMARD_HOME",
+            "SIMARD_PROMPT_ASSETS_DIR",
+            "SIMARD_STATE_ROOT",
+            "PATH",
+            "CARGO_HOME",
+            "ENVOY", // superstring of ENV must not false-positive
+        ] {
+            assert!(
+                !is_hijack_class_env(name),
+                "must not refuse a legitimate name: {name}"
+            );
+        }
     }
 
     // --- truncate_output ---
@@ -597,6 +660,46 @@ mod convergence_tests {
             allowed[0].passed,
             "an allow-listed var must be re-injected so a healthy candidate passes; got: {}",
             allowed[0].detail
+        );
+    }
+
+    // SEC-D3 (defense-in-depth): a hijack-class NAME placed in `canary_env` must
+    // NOT be re-injected — the code-enforced denylist keeps the docstring's
+    // "`LD_PRELOAD`-class variables are never allow-listable" guarantee true even
+    // when a less-trusted source populates the allow-list. Uses `GIT_SSH_COMMAND`
+    // (matches the `GIT_SSH` prefix) because it is inert for `/bin/sh` yet is a
+    // real ambient-hijack vector for any git the candidate shells out to.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn hijack_class_name_in_canary_env_is_never_reinjected() {
+        let dir = unique_tmp("hijackdeny");
+        // Candidate is healthy ONLY when the hijack var is absent from its env.
+        let bin = write_exe(
+            &dir,
+            "candidate",
+            "#!/bin/sh\n\
+             if [ -n \"$GIT_SSH_COMMAND\" ]; then\n\
+             echo 'hijack var leaked into gate' >&2; exit 5; fi\n\
+             exit 0\n",
+        );
+
+        // SAFETY: serialized by the cognitive_memory serial key (whole-binary);
+        // no concurrent test reads this var.
+        unsafe { std::env::set_var("GIT_SSH_COMMAND", "malicious --oProxyCommand") };
+
+        // Even though the operator allow-listed the NAME, the denylist refuses it.
+        let config = RelaunchConfig {
+            canary_env: vec!["GIT_SSH_COMMAND".to_string()],
+            ..RelaunchConfig::default()
+        };
+        let results = verify_canary(&bin, &[RelaunchGate::Smoke], &config).unwrap();
+        unsafe { std::env::remove_var("GIT_SSH_COMMAND") };
+
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].passed,
+            "a hijack-class name must be refused re-injection (stripped); got: {}",
+            results[0].detail
         );
     }
 }
