@@ -147,24 +147,6 @@ fn is_corrupt_quarantine_name(name: &str) -> bool {
         && name.contains(".corrupt-")
 }
 
-/// Count quarantined corrupt cognitive-memory artifacts directly under
-/// `state_root`. Absent/unreadable dir ⇒ `0` (nothing to quarantine).
-///
-/// Superseded at the probe site by [`count_active_quarantine_files`] (#4471),
-/// which excludes aged forensic recovery artifacts; retained here as the
-/// name-only primitive still exercised by the lower-level unit tests.
-#[allow(dead_code)]
-fn count_quarantine_files(state_root: &std::path::Path) -> u64 {
-    let entries = match std::fs::read_dir(state_root) {
-        Ok(e) => e,
-        Err(_) => return 0,
-    };
-    entries
-        .flatten()
-        .filter(|e| is_corrupt_quarantine_name(&e.file_name().to_string_lossy()))
-        .count() as u64
-}
-
 /// Classification of a `cognitive*.corrupt-<ts>` artifact by file age (#4471).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum QuarantineClass {
@@ -463,26 +445,6 @@ mod probe_logic_tests {
         assert!(!commits_compatible("unknown", "deadbeef"));
         assert!(!commits_compatible("", "deadbeef"));
         assert!(!commits_compatible("deadbeef", ""));
-    }
-
-    #[test]
-    fn quarantine_scan_detects_only_corrupt_cognitive_files() {
-        let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("cognitive.db"), b"x").unwrap();
-        std::fs::write(dir.path().join("unrelated.corrupt-123"), b"x").unwrap();
-        assert_eq!(count_quarantine_files(dir.path()), 0);
-
-        std::fs::write(dir.path().join("cognitive.corrupt-20260101"), b"x").unwrap();
-        std::fs::write(dir.path().join("cognitive_memory.corrupt-20260102"), b"x").unwrap();
-        assert_eq!(count_quarantine_files(dir.path()), 2);
-    }
-
-    #[test]
-    fn quarantine_scan_missing_dir_is_zero() {
-        assert_eq!(
-            count_quarantine_files(std::path::Path::new("/no-such-dir-xyz-123")),
-            0
-        );
     }
 
     #[test]

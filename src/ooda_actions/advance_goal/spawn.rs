@@ -1550,13 +1550,9 @@ mod tests {
             other => panic!("invalid repo must yield InvalidRepo, got {other:?}"),
         }
         assert!(
-            !outcome_succeeded(&spawn_tracking_issue("bad repo", "t", "b")),
+            !spawn_tracking_issue("bad repo", "t", "b").succeeded(),
             "an invalid-repo outcome must not report success"
         );
-    }
-
-    fn outcome_succeeded(o: &TrackingIssueOutcome) -> bool {
-        o.succeeded()
     }
 
     #[test]
