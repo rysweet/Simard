@@ -662,3 +662,100 @@ fn escalation_flow_atlas_has_both_mermaid_diagrams() {
         "the atlas documents the recipe-vs-code overseer-tick boundary"
     );
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Section G — #4419 course-correction contract: the escalate-vs-correct DECISION
+// invariant, and the operator-facing forbidden-marker denylist (TRANSLATE, don't
+// pass through). The triage brain self-corrects a blocked goal before escalating;
+// these are the two machine-checkable invariants that keep that safe.
+//
+// RED: `crate::overseer::triage::*` and
+// `crate::signal_conversation::operator_safe::*` do not exist yet — the crate
+// test build fails to compile until the #4419 feature lands.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// The triage schema's `escalate` field must be populated IFF the decision is to
+/// ask the operator a question — a self-correcting decision (rewrite the done-gate
+/// or complete an already-delivered goal) never escalates, and an ask-operator
+/// decision must always carry a plain-English human-decision reason.
+#[test]
+fn triage_escalate_is_null_unless_the_decision_asks_the_operator() {
+    use crate::overseer::triage::{
+        CourseCorrection, TriageInvariantError, validate_triage_escalation,
+    };
+
+    // Self-corrected decisions must NOT escalate to a human.
+    assert!(validate_triage_escalation(CourseCorrection::RewriteDoneGate, None).is_ok());
+    assert!(validate_triage_escalation(CourseCorrection::CompleteDeliveredGoal, None).is_ok());
+
+    // The ask-operator decision REQUIRES a plain-English human-decision reason.
+    assert!(
+        validate_triage_escalation(
+            CourseCorrection::AskOperatorOneQuestion,
+            Some("Is the 70% coverage target still wanted and reachable now?"),
+        )
+        .is_ok()
+    );
+
+    // Both violations of the mutual-exclusion invariant are rejected.
+    assert!(matches!(
+        validate_triage_escalation(CourseCorrection::RewriteDoneGate, Some("a human reason")),
+        Err(TriageInvariantError { .. })
+    ));
+    assert!(matches!(
+        validate_triage_escalation(CourseCorrection::AskOperatorOneQuestion, None),
+        Err(TriageInvariantError { .. })
+    ));
+
+    // Only the ask-operator path requires a human decision.
+    assert!(!CourseCorrection::RewriteDoneGate.requires_human_escalation());
+    assert!(!CourseCorrection::CompleteDeliveredGoal.requires_human_escalation());
+    assert!(CourseCorrection::AskOperatorOneQuestion.requires_human_escalation());
+}
+
+/// Every operator-facing Signal message must be a jargon-free, single-line plain-
+/// English update. The denylist fails CLOSED: any raw machine marker (the internal
+/// diagnostic tokens or the `health-review:blocked-goal` reason marker) or any
+/// newline/control char is rejected before the message can be sent.
+#[test]
+fn operator_messages_must_be_free_of_raw_machine_markers() {
+    use crate::signal_conversation::operator_safe::{
+        OPERATOR_FORBIDDEN_MARKERS, OperatorMessageRejected, ensure_operator_safe,
+    };
+
+    // A jargon-free, single-line plain-English update passes.
+    let plain = "Simard can't automatically tell when this goal is finished, so it \
+                 keeps re-checking without shipping. I gave it a concrete first step.";
+    assert_eq!(ensure_operator_safe(plain), Ok(()));
+
+    // Every internal marker the operator must never see is rejected (fail-closed).
+    for &marker in OPERATOR_FORBIDDEN_MARKERS {
+        let leaked = format!("here is the raw diagnosis: {marker} — do not surface");
+        assert!(
+            matches!(
+                ensure_operator_safe(&leaked),
+                Err(OperatorMessageRejected { .. })
+            ),
+            "a message carrying the raw marker {marker:?} must be rejected before send"
+        );
+    }
+
+    // The specific tokens from the triage translation table are all covered ...
+    for must_deny in [
+        "OODA-SAFEGUARD",
+        "UNCLEAR-CRITERIA",
+        "GENUINELY-STUCK",
+        "why=UNCLEAR-CRITERIA",
+        "evidence=[coverage]",
+        "\u{1F512}", // the 🔒 lock token
+        "health-review:blocked-goal",
+    ] {
+        assert!(
+            ensure_operator_safe(must_deny).is_err(),
+            "{must_deny:?} is an internal marker and must never reach the operator"
+        );
+    }
+
+    // ... and a multi-line payload is rejected (Signal messages are single-line).
+    assert!(ensure_operator_safe("line one\nline two").is_err());
+}

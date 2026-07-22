@@ -649,6 +649,230 @@ fn fresh_brain_starts_at_zero_then_first_cycle_is_one() {
     );
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// #4419 — course-correct a blocked goal by REWRITING its unmeasurable done-gate
+// into a machine-checkable first slice, atomically under the store `flock`.
+//
+// A goal like "raise Simard test coverage to 70%" churns because "70% coverage"
+// is not a finish line the completion gate can read: with no tracked PR/issue it
+// can never certify done, so after repeated no-progress cycles it is demoted to a
+// Blocked cooldown with no engineer assigned. The self-correction: rewrite the
+// done-criteria to ONE concrete under-tested module with a bounded threshold,
+// attach an observable tracking ref the gate CAN read, assign an owner, and
+// transition Blocked(..) -> NotStarted so the goal re-enters the active list.
+//
+// RED: every `super::` symbol below (`FirstSliceTarget`,
+// `rewrite_blocked_goal_done_gate`, `CorrectionOutcome`, `CorrectionRejected`,
+// `validate_threshold` / `validate_module_path` / `validate_owner`) is the
+// executable contract the #4419 implementation must satisfy — none exist yet, so
+// the crate test build fails to compile until the feature lands. That compile
+// failure IS the red state of red→green→refactor.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// The real blocked goal from the triage task: raise Simard test coverage to 70%.
+const COVERAGE_GOAL_ID: &str = "audit-simard-s-test-coverage-and-raise-it-to-70-4d27c91a";
+
+/// An observable tracking issue whose CLOSED state the completion gate can read —
+/// this is what makes the rewritten done-gate machine-checkable.
+fn issue_ref(num: &str) -> WipRef {
+    WipRef {
+        kind: "issue".to_string(),
+        ref_id: num.to_string(),
+        label: format!("issue #{num}"),
+        url: Some(format!("https://github.com/rysweet/Simard/issues/{num}")),
+    }
+}
+
+/// Seed one blocked coverage goal — demoted after 5 consecutive no-progress
+/// cycles, with no engineer assigned — into the isolated store at `root`.
+fn seed_blocked_coverage_goal(root: &std::path::Path) {
+    use crate::goal_curation::no_progress_breaker::no_progress_blocked_reason;
+    let mut g = ActiveGoal::new(
+        COVERAGE_GOAL_ID,
+        "Audit Simard's test coverage and raise it to 70%",
+        1,
+    );
+    g.status = GoalProgress::Blocked(no_progress_blocked_reason(5));
+    g.assigned_to = None; // no engineer assigned — part of the diagnostic WHY
+    mutate(root, |s| s.board = board(vec![g])).unwrap();
+}
+
+/// A well-formed first-slice target: one named under-tested module, a bounded
+/// coverage threshold, an owner, and an observable tracking issue.
+fn valid_target() -> FirstSliceTarget {
+    FirstSliceTarget::new(
+        "src/signal_conversation/channel.rs",
+        70,
+        "alice",
+        issue_ref("4420"),
+    )
+    .expect("a well-formed first-slice target validates")
+}
+
+#[test]
+fn rewrite_transitions_blocked_goal_to_a_machine_checkable_first_slice() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    seed_blocked_coverage_goal(root);
+
+    let outcome = rewrite_blocked_goal_done_gate(root, COVERAGE_GOAL_ID, &valid_target())
+        .expect("the store mutate succeeds");
+    let corrected = match outcome {
+        CorrectionOutcome::Corrected(g) => g,
+        CorrectionOutcome::Rejected(r) => panic!("expected a correction, got {r:?}"),
+    };
+
+    // The correction leaves the Blocked cooldown and re-enters the active list.
+    assert_eq!(
+        corrected.status,
+        GoalProgress::NotStarted,
+        "a corrected goal transitions Blocked(..) -> NotStarted so it is re-dispatchable"
+    );
+    assert_eq!(
+        corrected.assigned_to.as_deref(),
+        Some("alice"),
+        "an owner is assigned so someone is responsible for moving it"
+    );
+
+    // The finish line is rewritten to a concrete, bounded, per-module slice ...
+    assert!(
+        corrected
+            .description
+            .contains("src/signal_conversation/channel.rs"),
+        "the done-criteria names one concrete under-tested module: {:?}",
+        corrected.description
+    );
+    assert!(
+        corrected.description.contains("70"),
+        "the done-criteria carries the bounded coverage threshold: {:?}",
+        corrected.description
+    );
+
+    // ... and it becomes machine-checkable by attaching an observable tracking ref.
+    assert!(
+        corrected
+            .wip_refs
+            .iter()
+            .any(|r| r.kind.eq_ignore_ascii_case("issue") && r.ref_id == "4420"),
+        "an observable tracking ref is attached so the completion gate can certify done"
+    );
+
+    // The whole read-modify-write persisted atomically inside one `mutate` window
+    // (no TOCTOU): the reloaded goal equals the returned correction verbatim.
+    let reloaded = load(root);
+    assert_eq!(reloaded.board.active.len(), 1);
+    assert_eq!(
+        reloaded.board.active[0], corrected,
+        "the corrected goal is persisted verbatim (single flock window, read-your-writes)"
+    );
+}
+
+#[test]
+fn rewrite_rejects_an_unknown_goal_without_touching_the_board() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    seed_blocked_coverage_goal(root);
+    let before = load(root).board.active;
+
+    let outcome = rewrite_blocked_goal_done_gate(root, "no-such-goal", &valid_target())
+        .expect("the store mutate succeeds");
+    assert_eq!(
+        outcome,
+        CorrectionOutcome::Rejected(CorrectionRejected::GoalNotFound {
+            goal_id: "no-such-goal".to_string(),
+        }),
+        "an unknown goal id is rejected, never fabricated"
+    );
+    assert_eq!(
+        load(root).board.active,
+        before,
+        "a rejected correction leaves every active goal untouched"
+    );
+}
+
+#[test]
+fn rewrite_rejects_a_goal_that_is_not_blocked() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    // The same goal, but active (NotStarted) — there is no block to course-correct.
+    let g = ActiveGoal::new(
+        COVERAGE_GOAL_ID,
+        "Audit Simard's test coverage and raise it to 70%",
+        1,
+    );
+    mutate(root, |s| s.board = board(vec![g])).unwrap();
+
+    let outcome = rewrite_blocked_goal_done_gate(root, COVERAGE_GOAL_ID, &valid_target())
+        .expect("the store mutate succeeds");
+    match outcome {
+        CorrectionOutcome::Rejected(CorrectionRejected::NotBlocked { goal_id, .. }) => {
+            assert_eq!(goal_id, COVERAGE_GOAL_ID);
+        }
+        other => panic!("a non-blocked goal must be rejected as NotBlocked, got {other:?}"),
+    }
+    assert_eq!(
+        load(root).board.active[0].status,
+        GoalProgress::NotStarted,
+        "a rejected correction must not mutate the goal"
+    );
+}
+
+#[test]
+fn threshold_must_be_a_percentage_between_0_and_100() {
+    assert!(validate_threshold(0).is_ok());
+    assert!(validate_threshold(70).is_ok());
+    assert!(validate_threshold(100).is_ok());
+    assert_eq!(
+        validate_threshold(101),
+        Err(CorrectionRejected::ThresholdOutOfRange { got: 101 }),
+        "a threshold above 100% is not a reachable coverage target"
+    );
+    // A bad threshold makes the whole target construction fail — it is never
+    // persisted; a malformed input routes the triage brain to the ask-operator path.
+    assert!(matches!(
+        FirstSliceTarget::new("src/lib.rs", 250, "alice", issue_ref("1")),
+        Err(CorrectionRejected::ThresholdOutOfRange { got: 250 })
+    ));
+}
+
+#[test]
+fn module_path_rejects_traversal_absolute_and_shell_metacharacters() {
+    assert!(validate_module_path("src/goal_curation/completion_gate.rs").is_ok());
+
+    for bad in [
+        "",                     // empty
+        "../etc/passwd",        // parent-dir traversal
+        "src/../../secrets",    // traversal mid-path
+        "/etc/passwd",          // absolute path
+        "src/mod.rs; rm -rf /", // shell command separator
+        "src/$(whoami).rs",     // command substitution
+        "src/a|b.rs",           // pipe
+        "src/a\nb.rs",          // embedded newline
+    ] {
+        assert!(
+            matches!(
+                validate_module_path(bad),
+                Err(CorrectionRejected::UnsafeModulePath { .. })
+            ),
+            "module path {bad:?} must be rejected as unsafe"
+        );
+    }
+}
+
+#[test]
+fn owner_rejects_empty_and_log_injection_payloads() {
+    assert!(validate_owner("alice").is_ok());
+    for bad in ["", "alice\nBcc: evil", "a\tb", "x\r\ny"] {
+        assert!(
+            matches!(
+                validate_owner(bad),
+                Err(CorrectionRejected::InvalidOwner { .. })
+            ),
+            "owner {bad:?} must be rejected (control chars / newlines / empty)"
+        );
+    }
+}
+
 #[test]
 fn cycle_count_survives_simulated_restart_and_continues() {
     let tmp = TempDir::new().unwrap();

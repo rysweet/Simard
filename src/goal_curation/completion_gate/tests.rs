@@ -906,3 +906,67 @@ fn gh_source_first_ref_of_kind_matches_case_insensitively() {
     assert_eq!(super::first_ref_of_kind(&goal, "ISSUE"), Some("202"));
     assert_eq!(super::first_ref_of_kind(&goal, "commit"), None);
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// #4419 — an unmeasurable coverage done-gate vs. a machine-checkable rewrite
+//
+// The blocked coverage goal churns because "raise coverage to 70%" is not a
+// signal the completion gate can read: with no tracked PR/issue there is nothing
+// to certify, so the goal is held as *unverified* forever (the "no measurable
+// done-gate" root cause). The #4419 course-correction attaches an observable
+// tracking ref, which the gate CAN read — turning the finish line machine-checkable.
+//
+// RED: `super::done_gate_is_machine_checkable` is the new predicate the triage
+// correction relies on to prove a rewrite is evaluable before persisting it; it
+// does not exist yet, so the crate test build fails to compile until it lands.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// A cross-repo coverage goal (so `is_self_affecting` is false and the pr/issue
+/// signal is isolated), with NO tracked refs — the unmeasurable done-gate.
+fn coverage_goal_no_refs() -> ActiveGoal {
+    let mut g = simard_goal(
+        "audit-coverage-70",
+        GoalProgress::Blocked("stuck 5 cycles".into()),
+    );
+    g.repo = Some("amplihack-rs".to_string());
+    g.description = "raise test coverage to 70%".to_string();
+    g.wip_refs = vec![];
+    g
+}
+
+#[test]
+fn coverage_goal_without_a_tracked_ref_has_no_machine_checkable_done_gate() {
+    let g = coverage_goal_no_refs();
+    assert!(
+        !super::done_gate_is_machine_checkable(&g),
+        "a bare coverage-% goal exposes no signal the completion gate can certify"
+    );
+    // The gate holds it as *unverified* (nothing to check), not refuted — exactly
+    // the "no measurable done-gate" root cause the triage must course-correct.
+    let verdict = CompletionEvidenceGate::new(FakeEvidence::ok(false, true, true)).evaluate(&g);
+    assert_eq!(
+        classify_outcome(&g, &verdict),
+        VerificationOutcome::UnverifiedNoSignal
+    );
+}
+
+#[test]
+fn attaching_a_tracked_issue_makes_the_done_gate_machine_checkable() {
+    let mut g = coverage_goal_no_refs();
+    // The #4419 rewrite attaches an observable tracking issue as the new done-gate.
+    g.wip_refs = vec![WipRef {
+        kind: "issue".to_string(),
+        ref_id: "4420".to_string(),
+        label: "issue #4420".to_string(),
+        url: None,
+    }];
+
+    assert!(
+        super::done_gate_is_machine_checkable(&g),
+        "an attached tracked issue gives the completion gate a signal it can read"
+    );
+    // A blocked verdict is now a *refutation* (a real signal said "not done yet"),
+    // i.e. the finish line is machine-checkable rather than unverifiable.
+    let verdict = CompletionEvidenceGate::new(FakeEvidence::ok(false, false, true)).evaluate(&g);
+    assert_eq!(classify_outcome(&g, &verdict), VerificationOutcome::Refuted);
+}

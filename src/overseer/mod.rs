@@ -69,6 +69,7 @@ pub mod pr_verify;
 pub mod root_cause;
 pub mod sensor;
 pub mod signal;
+pub mod triage;
 pub mod tuning;
 pub mod whisper_ops;
 pub mod wiring;

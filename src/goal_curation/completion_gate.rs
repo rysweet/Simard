@@ -163,6 +163,26 @@ pub fn has_derivable_signal(goal: &ActiveGoal) -> bool {
     has_ref_of("pr") || has_ref_of("issue") || is_self_affecting(goal)
 }
 
+/// Whether this goal's finish line is *machine-checkable*: the completion gate
+/// can read at least one external signal (a tracked PR, a tracked issue, or a
+/// self-affecting deploy state) and therefore certify — or refute — done
+/// automatically (issue #4419).
+///
+/// This is the predicate the escalation-triage course-correction relies on to
+/// prove a rewritten done-gate is actually evaluable *before* it persists the
+/// rewrite: a bare goal like "raise coverage to 70%" with no tracked ref exposes
+/// nothing the gate can read, so it is held `UnverifiedNoSignal` forever (the
+/// "no measurable done-gate" root cause). Attaching an observable tracking ref
+/// makes this return `true`, turning the finish line machine-checkable.
+///
+/// It is the named, intent-revealing counterpart to [`has_derivable_signal`]
+/// (same rule) so callers reasoning about *done-gate measurability* read a
+/// predicate that says what they mean rather than the internal "derivable
+/// signal" phrasing.
+pub fn done_gate_is_machine_checkable(goal: &ActiveGoal) -> bool {
+    has_derivable_signal(goal)
+}
+
 /// Classify a gate verdict into a [`VerificationOutcome`] for one goal.
 pub fn classify_outcome(goal: &ActiveGoal, verdict: &CompletionVerdict) -> VerificationOutcome {
     match verdict {
