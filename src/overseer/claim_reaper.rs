@@ -901,15 +901,60 @@ fn find_engineer_worktree(state_root: &std::path::Path, goal_id: &str) -> Option
     None
 }
 
+/// A checked-in repo artifact is NOT engineer output — it is a tracked file
+/// stamped with the worktree's git-checkout mtime. Issue #4449: because a
+/// checkout gives every tracked file the SAME mtime, the "newest file" heuristic
+/// would otherwise surface arbitrary repo fixtures (e.g. `tests/**/fixtures/**`,
+/// `package.json`) as "evidence", giving a stale-engineer investigation zero real
+/// signal and risking a fabricated `dead:<cause>` verdict read off fixture bytes.
+///
+/// `rel` is the candidate's path RELATIVE to the worktree root. Excludes:
+///   * any `**/fixtures/**` tree (test + `src` fixture corpora),
+///   * `prompt_assets/**` (checked-in terminal recipes / payloads),
+///   * `package.json` / `package-lock.json` anywhere (npm manifests),
+///   * dependency/build output trees (`node_modules/**`, `target/**`) — these are
+///     also skipped at directory level, this is belt-and-suspenders.
+fn is_checked_in_repo_artifact(rel: &std::path::Path) -> bool {
+    use std::path::Component;
+    let mut first = true;
+    for comp in rel.components() {
+        let Component::Normal(os) = comp else {
+            continue;
+        };
+        let Some(part) = os.to_str() else { continue };
+        if matches!(part, "fixtures" | "node_modules" | "target") {
+            return true;
+        }
+        if first && part == "prompt_assets" {
+            return true;
+        }
+        first = false;
+    }
+    matches!(
+        rel.file_name().and_then(|n| n.to_str()),
+        Some("package.json") | Some("package-lock.json")
+    )
+}
+
 /// Collect a bounded, best-effort evidence blob from a worktree: the tails of its
-/// newest log / transcript / recipe-runner files. Bounded so a huge worktree can
-/// never balloon the archive; a read error on any file is skipped.
+/// newest genuine engineer-output files (log / transcript / recipe-runner tail /
+/// captured stdout+stderr). Bounded so a huge worktree can never balloon the
+/// archive; a read error on any file is skipped.
+///
+/// Issue #4449: checked-in repo artifacts (test fixtures, `package.json`, tracked
+/// `prompt_assets/**`) are EXCLUDED — they carry only the git-checkout mtime and
+/// are diagnostically useless. When the worktree holds no genuine engineer
+/// transcript, this emits an explicit `(no engineer transcript/exit-status
+/// captured …)` sentinel rather than SILENTLY substituting fixture bytes, so a
+/// downstream investigation cannot be misled into fabricating a death cause.
 fn collect_worktree_evidence(worktree: &std::path::Path) -> String {
     const MAX_FILES: usize = 8;
     const TAIL_BYTES: usize = 16 * 1024;
 
-    // Gather candidate files (logs/transcripts/output), newest first.
+    // Gather candidate files (logs/transcripts/output), newest first. Checked-in
+    // repo artifacts are excluded so only genuine engineer output can qualify.
     let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    let mut excluded_artifacts = 0usize;
     let mut stack = vec![worktree.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -928,8 +973,13 @@ fn collect_worktree_evidence(worktree: &std::path::Path) -> String {
                 continue;
             }
             if meta.is_dir() {
-                // Skip .git internals — noise, not diagnostic evidence.
-                if path.file_name().and_then(|n| n.to_str()) != Some(".git") {
+                // Skip `.git` internals + dependency/build trees — noise, never
+                // diagnostic evidence (and huge). #4449.
+                let skip_dir = matches!(
+                    path.file_name().and_then(|n| n.to_str()),
+                    Some(".git") | Some("node_modules") | Some("target")
+                );
+                if !skip_dir {
                     stack.push(path);
                 }
                 continue;
@@ -939,7 +989,17 @@ fn collect_worktree_evidence(worktree: &std::path::Path) -> String {
                 .and_then(|e| e.to_str())
                 .map(|e| matches!(e, "log" | "txt" | "json" | "out" | "err" | "jsonl"))
                 .unwrap_or(false);
-            if is_evidence && let Ok(mtime) = meta.modified() {
+            if !is_evidence {
+                continue;
+            }
+            // #4449: a checked-in repo artifact is not engineer output — drop it
+            // (but count it, so the sentinel can report why nothing qualified).
+            let rel = path.strip_prefix(worktree).unwrap_or(&path);
+            if is_checked_in_repo_artifact(rel) {
+                excluded_artifacts += 1;
+                continue;
+            }
+            if let Ok(mtime) = meta.modified() {
                 candidates.push((mtime, path));
             }
         }
@@ -959,7 +1019,15 @@ fn collect_worktree_evidence(worktree: &std::path::Path) -> String {
         out.push('\n');
     }
     if out.is_empty() {
-        out.push_str("(no log/transcript/output files found in worktree)\n");
+        // #4449: FAIL LOUD, not silent. Naming the absence of a transcript is
+        // itself the diagnostic signal — it tells the investigation the engineer
+        // wrote no output (⇒ fail-closed, do NOT infer a death cause), instead of
+        // handing it fixture bytes to hallucinate over.
+        let _ = writeln!(
+            out,
+            "(no engineer transcript/exit-status captured; {excluded_artifacts} checked-in \
+             repo artifact(s) skipped — engineer wrote no genuine output to this worktree)"
+        );
     }
     out
 }
@@ -2370,6 +2438,65 @@ mod tests {
         assert!(
             evidence.contains("legit engineer log line"),
             "real evidence files must still be collected: {evidence}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Issue #4449: checked-in repo fixtures (test/`src` fixtures, `package.json`,
+    /// tracked `prompt_assets/**`) must NOT be surfaced as engineer evidence —
+    /// they carry only the git-checkout mtime. When the worktree holds no genuine
+    /// transcript, the collector must EXCLUDE them and emit the explicit
+    /// no-transcript sentinel rather than silently substituting fixture bytes.
+    #[test]
+    fn collect_worktree_evidence_excludes_checked_in_fixtures_and_flags_no_transcript() {
+        let tmp = std::env::temp_dir().join(format!(
+            "reap-fixtures-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let worktree = tmp.join("worktree");
+        // Reproduce the exact fixture layout from the f29bb15c archive (#4449).
+        for rel in [
+            "tests/gadugi/fixtures/ci-health-green.json",
+            "src/coin_gym/fixtures/sample_snapshot.json",
+            "prompt_assets/simard/terminal_recipes/copilot-submit.json",
+            "scripts/dashboard-audit/package.json",
+            "package.json",
+        ] {
+            let p = worktree.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "CHECKED_IN_FIXTURE_BYTES_MUST_NOT_APPEAR").unwrap();
+        }
+
+        let evidence = collect_worktree_evidence(&worktree);
+        assert!(
+            !evidence.contains("CHECKED_IN_FIXTURE_BYTES_MUST_NOT_APPEAR"),
+            "checked-in fixture contents must never be surfaced as evidence: {evidence}"
+        );
+        assert!(
+            evidence.contains("no engineer transcript"),
+            "must emit the explicit no-transcript sentinel, not fixture bytes: {evidence}"
+        );
+
+        // A genuine engineer-output file at the worktree root IS still collected,
+        // even alongside the excluded fixtures.
+        std::fs::write(
+            worktree.join("recipe-runner.log"),
+            "GENUINE_ENGINEER_OUTPUT_LINE",
+        )
+        .unwrap();
+        let evidence2 = collect_worktree_evidence(&worktree);
+        assert!(
+            evidence2.contains("GENUINE_ENGINEER_OUTPUT_LINE"),
+            "genuine engineer output must still be collected: {evidence2}"
+        );
+        assert!(
+            !evidence2.contains("CHECKED_IN_FIXTURE_BYTES_MUST_NOT_APPEAR"),
+            "fixtures stay excluded even when a real transcript exists: {evidence2}"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
