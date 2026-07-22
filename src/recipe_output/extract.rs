@@ -457,6 +457,149 @@ fn next_nonspace_is_close(bytes: &[u8], mut i: usize) -> bool {
     false
 }
 
+/// Lowercase hex digits for `\u00XX` escape synthesis in
+/// [`escape_json_string_control_chars`].
+const HEX_LOWER: &[u8; 16] = b"0123456789abcdef";
+
+/// Escape **unescaped ASCII control characters that appear INSIDE a JSON string
+/// literal** — a raw newline/tab/CR (and any other byte `< 0x20`) sitting in a
+/// string value — as a last-resort recovery view for otherwise-well-formed LLM
+/// JSON.
+///
+/// After the trailing comma, an unescaped control character inside a string is
+/// the most common real-world LLM JSON defect: a model emitting a multi-line
+/// `content`/`rationale` value routinely writes a *literal* newline (or tab)
+/// instead of the `\n`/`\t` escape the JSON grammar requires. `serde_json` is
+/// spec-strict and rejects it (`control character (\u0000-\u001F) found while
+/// parsing a string`), so the model's WHOLE structured decision is dropped on a
+/// single stray byte — a parse-failure default, not a real model decision.
+///
+/// Like [`strip_json_trailing_commas`] this is a **provable no-op on valid
+/// JSON**: valid JSON strings never contain a raw control character (the grammar
+/// forbids `U+0000`–`U+001F` unescaped), so [`has_unescaped_string_control`]
+/// returns `false` and the input borrows back byte-for-byte unchanged (the
+/// zero-allocation clean path). A caller therefore retries a strict-parse
+/// failure on this view without any risk of altering behaviour on well-formed
+/// output.
+///
+/// String-literal aware in exactly the same way as the rest of this module: the
+/// scan tracks `in_string` (respecting `\"` escapes), so a control character is
+/// escaped **only** inside a string value. A raw newline/tab BETWEEN tokens is
+/// legitimate JSON whitespace and is left untouched, and a `\`-escaped byte is
+/// copied verbatim (so an already-`\n` stays `\n`, never `\\n`). Control bytes
+/// are mapped to their short escapes (`\b \t \n \f \r`) or a `\u00XX` sequence;
+/// only ASCII bytes are ever emitted, so the result is always valid UTF-8 and
+/// every multibyte UTF-8 body byte (all `>= 0x80`) is copied through unchanged.
+///
+/// Leniency never widens beyond this one defect: a control character is the only
+/// shape rewritten, so a genuinely malformed object (unquoted key, elided
+/// element, missing value) is left still-malformed and the caller's strict parse
+/// still rejects it.
+pub fn escape_json_string_control_chars(s: &str) -> Cow<'_, str> {
+    let bytes = s.as_bytes();
+    // Cheap detection pass first so clean JSON borrows unchanged (zero-alloc).
+    if !has_unescaped_string_control(bytes) {
+        return Cow::Borrowed(s);
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len() + 8);
+    let mut in_string = false;
+    let mut escaped = false;
+    for &c in bytes {
+        if in_string {
+            if escaped {
+                out.push(c);
+                escaped = false;
+            } else if c == b'\\' {
+                out.push(c);
+                escaped = true;
+            } else if c == b'"' {
+                out.push(c);
+                in_string = false;
+            } else if c < 0x20 {
+                // Unescaped control char inside a string literal — escape it.
+                match c {
+                    0x08 => out.extend_from_slice(b"\\b"),
+                    0x09 => out.extend_from_slice(b"\\t"),
+                    0x0a => out.extend_from_slice(b"\\n"),
+                    0x0c => out.extend_from_slice(b"\\f"),
+                    0x0d => out.extend_from_slice(b"\\r"),
+                    other => {
+                        out.extend_from_slice(b"\\u00");
+                        out.push(HEX_LOWER[(other >> 4) as usize]);
+                        out.push(HEX_LOWER[(other & 0x0f) as usize]);
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        } else if c == b'"' {
+            in_string = true;
+            out.push(c);
+        } else {
+            out.push(c);
+        }
+    }
+    match String::from_utf8(out) {
+        Ok(escaped) => Cow::Owned(escaped),
+        // Unreachable in practice (only ASCII escape bytes are inserted and
+        // every original byte is preserved), but never panic on recovery input.
+        Err(_) => Cow::Borrowed(s),
+    }
+}
+
+/// Does `bytes` contain at least one unescaped ASCII control character inside a
+/// JSON string literal?
+///
+/// Mirrors the string-aware scan in [`escape_json_string_control_chars`] but
+/// only detects, so the common clean case can borrow the input without
+/// allocating. A control byte OUTSIDE a string (valid JSON whitespace) does not
+/// count; a `\`-escaped byte is consumed as an escape target and never counts.
+fn has_unescaped_string_control(bytes: &[u8]) -> bool {
+    let mut in_string = false;
+    let mut escaped = false;
+    for &c in bytes {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_string = false;
+            } else if c < 0x20 {
+                return true;
+            }
+        } else if c == b'"' {
+            in_string = true;
+        }
+    }
+    false
+}
+
+/// Compose every JSON **recovery view** this module applies to an
+/// otherwise-well-formed LLM JSON payload that failed a strict parse — currently
+/// unescaped-control-character escaping ([`escape_json_string_control_chars`])
+/// followed by trailing-comma stripping ([`strip_json_trailing_commas`]).
+///
+/// Returns [`Cow::Borrowed`] byte-for-byte unchanged when NEITHER defect is
+/// present (each sub-view is a provable no-op on valid JSON), and
+/// [`Cow::Owned`] only when at least one recovery actually rewrote the input.
+/// A caller retries a strict-parse failure **only** on the `Cow::Owned` arm, so
+/// identical bytes are never re-parsed and a payload malformed for any OTHER
+/// reason (unquoted key, elided element, missing value) preserves the strict
+/// miss unchanged. The two recoveries are independent — escaping only touches
+/// bytes inside string literals, trailing-comma stripping only touches structural
+/// commas outside string literals — so composing them cannot interfere.
+pub fn recover_json_view(s: &str) -> Cow<'_, str> {
+    match escape_json_string_control_chars(s) {
+        // No control-char defect: run the trailing-comma view directly on the
+        // borrowed input so its own borrow/owned distinction flows through.
+        Cow::Borrowed(borrowed) => strip_json_trailing_commas(borrowed),
+        // Control chars were escaped: also strip any trailing comma from the
+        // recovered (owned) buffer and return the combined owned result.
+        Cow::Owned(escaped) => Cow::Owned(strip_json_trailing_commas(&escaped).into_owned()),
+    }
+}
+
 /// Extract a JSON object from noisy recipe stdout as an owned `String`.
 ///
 /// Tries two cleaned views and returns the last balanced `{…}` from the first
@@ -479,39 +622,44 @@ pub fn extract_json_payload(raw: &str) -> Option<String> {
 }
 
 /// Extract a balanced JSON object from noisy recipe stdout (via
-/// [`extract_json_payload`]) and deserialize it into `T`, applying the
-/// **trailing-comma recovery view** on a strict-parse failure (issues #2484 /
-/// #2658).
+/// [`extract_json_payload`]) and deserialize it into `T`, applying the shared
+/// **recovery views** on a strict-parse failure (issues #2484 / #2658).
 ///
 /// This is the shared reasoner-side extract-and-parse chokepoint. Every
 /// recipe-backed reasoning phase (engineer/resource admission, idea dedup /
 /// consolidation, outcome, decide, orient) reads its structured decision by
 /// extracting the balanced `{…}` object and `serde_json`-deserializing it.
 /// [`extract_json_payload`] strips the banner / ANSI / log noise but returns
-/// the object body **verbatim**, so a `,` immediately before a closing `}`/`]`
-/// — the single most common real-world LLM JSON defect (issue #2658) — survives
-/// into the payload and fails a strict `serde_json::from_str`. Before this
-/// helper each phase parsed strictly and silently dropped its whole structured
-/// decision on that one stray byte, falling back to a permissive default and
-/// discarding the reasoner's actual judgment.
+/// the object body **verbatim**, so two common real-world LLM JSON defects
+/// survive into the payload and fail a strict `serde_json::from_str`:
 ///
-/// Recovery retries the strict parse on the [`strip_json_trailing_commas`]
-/// view. That stripper is a *provable no-op on valid JSON* — it returns
-/// [`Cow::Borrowed`] byte-for-byte unchanged unless an actual trailing comma is
-/// present — so recovery is attempted **only** when a trailing comma was
-/// removed (the [`Cow::Owned`] arm). Any other malformed shape (unquoted key,
-/// elided element, missing value) yields [`Cow::Borrowed`] and returns `None`
-/// unchanged: leniency never widens beyond the trailing-comma defect and a
-/// genuine parse error is never masked.
+///  1. a `,` immediately before a closing `}`/`]` (the trailing comma,
+///     issue #2658), and
+///  2. an UNescaped ASCII control character (a raw newline/tab/CR) inside a
+///     string value — the shape a model emits for a multi-line
+///     `content`/`rationale` field.
+///
+/// Before this helper each phase parsed strictly and silently dropped its whole
+/// structured decision on either stray byte, falling back to a permissive
+/// default and discarding the reasoner's actual judgment.
+///
+/// Recovery retries the strict parse on the composed [`recover_json_view`]
+/// (control-character escaping + trailing-comma stripping). Each sub-view is a
+/// *provable no-op on valid JSON* — it returns [`Cow::Borrowed`] byte-for-byte
+/// unchanged unless its specific defect is present — so recovery is attempted
+/// **only** when a view actually rewrote the payload (the [`Cow::Owned`] arm).
+/// Any other malformed shape (unquoted key, elided element, missing value)
+/// yields [`Cow::Borrowed`] and returns `None` unchanged: leniency never widens
+/// beyond the two named defects and a genuine parse error is never masked.
 pub fn extract_and_parse_json<T: serde::de::DeserializeOwned>(raw: &str) -> Option<T> {
     let payload = extract_json_payload(raw)?;
     match serde_json::from_str::<T>(&payload) {
         Ok(value) => Some(value),
-        Err(_) => match strip_json_trailing_commas(&payload) {
-            // A trailing comma was actually removed — retry the strict parse on
-            // the recovered view.
+        Err(_) => match recover_json_view(&payload) {
+            // A recovery view actually rewrote the payload — retry the strict
+            // parse on the recovered view.
             Cow::Owned(recovered) => serde_json::from_str::<T>(&recovered).ok(),
-            // No trailing comma present: the payload is malformed for some other
+            // Nothing was recovered: the payload is malformed for some other
             // reason. Do not re-parse identical bytes; preserve the strict miss.
             Cow::Borrowed(_) => None,
         },
@@ -859,6 +1007,148 @@ mod tests {
         let raw = r#"{"decision": "admit", "items": ["a, b, c"]}"#;
         let env: Env = extract_and_parse_json(raw).expect("string-content comma preserved");
         assert_eq!(env.items, vec!["a, b, c".to_string()]);
+    }
+
+    // ---- escape_json_string_control_chars --------------------------------
+
+    #[test]
+    fn escape_control_chars_valid_json_is_borrowed_zero_copy() {
+        // Valid JSON (no raw control char inside any string) borrows unchanged.
+        for s in [
+            r#"{"a": "b"}"#,
+            r#"{"a": "line1\nline2"}"#, // already-escaped \n must NOT double-escape
+            r#"{"items": ["x", "y"], "n": 3}"#,
+            "{\n  \"a\": \"b\"\n}", // raw newlines are OUTSIDE strings (whitespace)
+        ] {
+            assert!(
+                matches!(escape_json_string_control_chars(s), Cow::Borrowed(_)),
+                "expected borrow for {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn escape_control_chars_escapes_raw_newline_and_tab_inside_string() {
+        let raw = "{\"content\": \"line one\nline two\ttabbed\"}";
+        let fixed = escape_json_string_control_chars(raw);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        assert_eq!(
+            fixed.as_ref(),
+            r#"{"content": "line one\nline two\ttabbed"}"#
+        );
+        // And the recovered view is now strict-parseable.
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["content"], "line one\nline two\ttabbed");
+    }
+
+    #[test]
+    fn escape_control_chars_escapes_carriage_return_and_other_controls() {
+        // CR -> \r, and a NUL (0x00) -> \u0000 via the generic arm.
+        let raw = "{\"a\": \"x\ry\u{0}z\"}";
+        let fixed = escape_json_string_control_chars(raw);
+        assert_eq!(fixed.as_ref(), r#"{"a": "x\ry\u0000z"}"#);
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["a"], "x\ry\u{0}z");
+    }
+
+    #[test]
+    fn escape_control_chars_leaves_control_bytes_outside_strings_untouched() {
+        // A raw newline/tab BETWEEN tokens is valid JSON whitespace, not a
+        // string-interior defect: it must be left exactly as-is (borrow).
+        let raw = "{\"a\":\t\"b\",\n\"c\":\t1}";
+        assert!(matches!(
+            escape_json_string_control_chars(raw),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn escape_control_chars_respects_escaped_quote_in_string() {
+        // The `\"` must not end the string, so the raw newline that follows it
+        // is still inside the string and gets escaped.
+        let raw = "{\"a\": \"he said \\\"hi\\\"\nbye\"}";
+        let fixed = escape_json_string_control_chars(raw);
+        assert_eq!(fixed.as_ref(), r#"{"a": "he said \"hi\"\nbye"}"#);
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["a"], "he said \"hi\"\nbye");
+    }
+
+    #[test]
+    fn escape_control_chars_preserves_multibyte_utf8() {
+        // A multibyte body char (é, 日) plus a raw newline: the newline is
+        // escaped, the multibyte bytes pass through intact.
+        let raw = "{\"a\": \"café\n日本\"}";
+        let fixed = escape_json_string_control_chars(raw);
+        assert_eq!(fixed.as_ref(), r#"{"a": "café\n日本"}"#);
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["a"], "café\n日本");
+    }
+
+    // ---- recover_json_view (composed) ------------------------------------
+
+    #[test]
+    fn recover_json_view_valid_json_is_borrowed() {
+        assert!(matches!(
+            recover_json_view(r#"{"a": "b", "c": [1, 2]}"#),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn recover_json_view_composes_control_char_and_trailing_comma() {
+        // BOTH defects at once: raw newline inside a string AND a trailing comma.
+        let raw = "{\"a\": \"one\ntwo\", \"b\": [1, 2,],}";
+        let fixed = recover_json_view(raw);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["a"], "one\ntwo");
+        assert_eq!(v["b"], serde_json::json!([1, 2]));
+    }
+
+    #[test]
+    fn recover_json_view_trailing_comma_only_still_owned() {
+        assert!(matches!(
+            recover_json_view(r#"{"a": [1,],}"#),
+            Cow::Owned(_)
+        ));
+    }
+
+    #[test]
+    fn recover_json_view_other_malformed_stays_borrowed() {
+        // Neither target defect present (unquoted key) => borrow => caller's
+        // strict miss is preserved.
+        assert!(matches!(recover_json_view(r#"{a: "b"}"#), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn extract_and_parse_json_recovers_control_char_in_string() {
+        // End-to-end: a multi-line string value with a raw newline (the shape a
+        // model emits for a `rationale`) is recovered through the shared
+        // chokepoint instead of dropping the whole decision.
+        let raw = "{\"decision\": \"admit\", \"items\": [\"first line\nsecond line\"]}";
+        let env: Env = extract_and_parse_json(raw).expect("control char recovered");
+        assert_eq!(env.decision, "admit");
+        assert_eq!(env.items, vec!["first line\nsecond line".to_string()]);
+    }
+
+    #[test]
+    fn extract_and_parse_json_recovers_control_char_through_banner_noise() {
+        // Banner + interleaved ANSI log line AND a raw newline inside a string:
+        // extractor strips the noise, then recovery escapes the control char.
+        let raw = "Recipe: ooda SUCCESS (3.0s)\n\
+                   \x1b[2m2026-07-20T00:00:00.000000Z\x1b[0m INFO decide\n\
+                   {\"decision\": \"defer\", \"items\": [\"a\tb\"]}";
+        let env: Env = extract_and_parse_json(raw).expect("noise + control char recovered");
+        assert_eq!(env.decision, "defer");
+        assert_eq!(env.items, vec!["a\tb".to_string()]);
+    }
+
+    #[test]
+    fn extract_and_parse_json_recovers_control_char_and_trailing_comma_together() {
+        let raw = "{\"decision\": \"admit\", \"items\": [\"x\ny\",],}";
+        let env: Env = extract_and_parse_json(raw).expect("both defects recovered");
+        assert_eq!(env.decision, "admit");
+        assert_eq!(env.items, vec!["x\ny".to_string()]);
     }
 
     // ---- extract_verdict -------------------------------------------------
