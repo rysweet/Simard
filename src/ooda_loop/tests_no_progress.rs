@@ -511,3 +511,198 @@ fn non_perpetual_goal_still_escalates_and_is_never_reported_idled() {
         other => panic!("expected Blocked, got {other:?}"),
     }
 }
+
+// ===========================================================================
+// #4441 — awaiting-merge wiring (TEST-FIRST / failing until implemented).
+//
+// End-to-end through `apply_no_progress_breaker_with_threshold`: a stuck goal
+// whose PR is OPEN + non-draft + MERGEABLE must be IDLED (recorded in
+// `report.awaiting_merge`) rather than reaped/escalated — the exact behaviour
+// that stops the duplicate-PR generation described in issue #4441. When the PR
+// later degrades the goal falls back to the existing escalate path on the very
+// next cycle (counter preserved). See
+// docs/reference/no-progress-awaiting-merge-api.md.
+// ===========================================================================
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Evidence double that reports a goal as blocked-but-awaiting-merge. The
+/// `open_mergeable` signal is interior-mutable so a test can degrade the PR
+/// between cycles and assert the fall-back.
+struct AwaitingMergeEvidence {
+    open_mergeable: AtomicBool,
+}
+
+impl AwaitingMergeEvidence {
+    fn mergeable() -> Self {
+        Self {
+            open_mergeable: AtomicBool::new(true),
+        }
+    }
+    fn degrade(&self) {
+        self.open_mergeable.store(false, Ordering::SeqCst);
+    }
+}
+
+impl EvidenceSource for AwaitingMergeEvidence {
+    fn any_pr_merged(&self, _goal: &ActiveGoal) -> SimardResult<bool> {
+        Ok(false) // not merged ⇒ done-gate is Blocked
+    }
+    fn issue_closed(&self, _goal: &ActiveGoal) -> SimardResult<bool> {
+        Ok(true)
+    }
+    fn is_deployed(&self, _goal: &ActiveGoal) -> SimardResult<bool> {
+        Ok(false)
+    }
+    fn open_mergeable_pr(&self, _goal: &ActiveGoal) -> SimardResult<bool> {
+        Ok(self.open_mergeable.load(Ordering::SeqCst))
+    }
+}
+
+#[test]
+fn open_mergeable_pr_goal_is_idled_as_awaiting_merge_never_reaped() {
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let id = "ladybug-awaiting-merge";
+    let mut goal = stuck_goal(id);
+    goal.wip_refs = vec![pr_ref("4440")]; // an open, mergeable, unmerged PR
+    let mut state = state_with(goal);
+    let evidence = AwaitingMergeEvidence::mergeable();
+    let filer = RecordingFiler::default();
+
+    // Below threshold: nothing fires.
+    for cycle in 1..threshold {
+        let report = apply_no_progress_breaker_with_threshold(
+            &mut state,
+            &[no_action_outcome(id)],
+            &evidence,
+            &filer,
+            threshold,
+        );
+        assert!(!report.fired(), "cycle {cycle} must not fire");
+        assert!(report.awaiting_merge.is_empty());
+    }
+
+    // Threshold cycle: IDLE as awaiting-merge — no reap, no escalate, no spawn.
+    let report = apply_no_progress_breaker_with_threshold(
+        &mut state,
+        &[no_action_outcome(id)],
+        &evidence,
+        &filer,
+        threshold,
+    );
+    assert_eq!(
+        report.awaiting_merge,
+        vec![id.to_string()],
+        "the goal must be recorded as awaiting-merge"
+    );
+    assert!(
+        !report.fired(),
+        "an awaiting-merge idle must NOT count as a breaker firing"
+    );
+    assert!(report.escalated.is_empty(), "must not escalate");
+    assert!(report.marked_done.is_empty(), "must not mark done");
+    assert!(report.dropped.is_empty(), "must not drop");
+    assert!(
+        report.engineer_spawned.is_empty(),
+        "must not spawn an engineer (the source of the duplicate PR)"
+    );
+    assert!(
+        filer.calls.borrow().is_empty(),
+        "must not file a tracking issue"
+    );
+    assert!(
+        matches!(
+            state.active_goals.active[0].status,
+            GoalProgress::NotStarted
+        ),
+        "the goal's status must be left untouched (not Blocked, not Completed)"
+    );
+
+    // A further idle cycle stays awaiting-merge and still never fires or files.
+    let report = apply_no_progress_breaker_with_threshold(
+        &mut state,
+        &[no_action_outcome(id)],
+        &evidence,
+        &filer,
+        threshold,
+    );
+    assert_eq!(report.awaiting_merge, vec![id.to_string()]);
+    assert!(!report.fired());
+    assert!(filer.calls.borrow().is_empty(), "no duplicate anything");
+}
+
+#[test]
+fn awaiting_merge_falls_back_to_escalate_when_pr_degrades() {
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let id = "ladybug-degrading-pr";
+    let mut goal = stuck_goal(id);
+    goal.wip_refs = vec![pr_ref("4398")];
+    let mut state = state_with(goal);
+    let evidence = AwaitingMergeEvidence::mergeable();
+    let filer = RecordingFiler::default();
+
+    // Reach the threshold and idle as awaiting-merge (counter preserved).
+    for _ in 0..threshold {
+        let report = apply_no_progress_breaker_with_threshold(
+            &mut state,
+            &[no_action_outcome(id)],
+            &evidence,
+            &filer,
+            threshold,
+        );
+        assert!(report.escalated.is_empty());
+    }
+    assert!(
+        filer.calls.borrow().is_empty(),
+        "idle must not file an issue"
+    );
+
+    // PR degrades (goes draft / conflicting / closed). The VERY NEXT cycle must
+    // escalate — proving the awaiting-merge idle preserved the counter rather
+    // than resetting it (a reset would delay firing by another full threshold).
+    evidence.degrade();
+    let report = apply_no_progress_breaker_with_threshold(
+        &mut state,
+        &[no_action_outcome(id)],
+        &evidence,
+        &filer,
+        threshold,
+    );
+    assert_eq!(
+        report.escalated,
+        vec![id.to_string()],
+        "a degraded PR must escalate on the next cycle (counter was preserved)"
+    );
+    assert_eq!(filer.calls.borrow().len(), 1, "exactly one issue filed");
+    match &state.active_goals.active[0].status {
+        GoalProgress::Blocked(reason) => assert!(is_no_progress_marker(reason)),
+        other => panic!("expected Blocked after fall-back, got {other:?}"),
+    }
+}
+
+#[test]
+fn log_line_reports_the_awaiting_merge_count() {
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let id = "ladybug-log-line";
+    let mut goal = stuck_goal(id);
+    goal.wip_refs = vec![pr_ref("4440")];
+    let mut state = state_with(goal);
+    let evidence = AwaitingMergeEvidence::mergeable();
+    let filer = RecordingFiler::default();
+
+    let mut last = String::new();
+    for _ in 0..threshold {
+        last = apply_no_progress_breaker_with_threshold(
+            &mut state,
+            &[no_action_outcome(id)],
+            &evidence,
+            &filer,
+            threshold,
+        )
+        .log_line();
+    }
+    assert!(
+        last.contains("awaiting_merge=1"),
+        "log_line must surface the awaiting-merge count: {last}"
+    );
+}

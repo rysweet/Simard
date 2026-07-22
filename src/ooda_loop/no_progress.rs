@@ -278,6 +278,15 @@ pub(crate) struct NoProgressBreakerReport {
     /// standing goal is normal, not a fault. Never contributes to
     /// [`fired`](Self::fired).
     pub perpetual_idled: Vec<String>,
+    /// Goals idled this cycle because their workstream has an OPEN, non-draft,
+    /// MERGEABLE PR awaiting an external merge action (issue #4441). Such a goal
+    /// is **completed-awaiting-merge**, not stalled: reaping/re-dispatching it
+    /// is exactly what produced the duplicate PRs in the live incident. The
+    /// breaker idles it (no reap, no escalate, no engineer spawn, counter
+    /// preserved) and records it here. Informational only — an awaiting-merge
+    /// idle is NORMAL, not a fault, so it never contributes to
+    /// [`fired`](Self::fired).
+    pub awaiting_merge: Vec<String>,
 }
 
 impl NoProgressBreakerReport {
@@ -298,7 +307,7 @@ impl NoProgressBreakerReport {
     pub fn log_line(&self) -> String {
         format!(
             "done={} dropped={} escalated={} healed={} deferred={} engineer={} \
-             auto_cleared={} reinvestigated={} errors={} perpetual_idled={}",
+             auto_cleared={} reinvestigated={} errors={} perpetual_idled={} awaiting_merge={}",
             self.marked_done.len(),
             self.dropped.len(),
             self.escalated.len(),
@@ -309,6 +318,7 @@ impl NoProgressBreakerReport {
             self.reinvestigated.len(),
             self.investigation_errors.len(),
             self.perpetual_idled.len(),
+            self.awaiting_merge.len(),
         )
     }
 }
@@ -490,6 +500,38 @@ pub(crate) fn apply_no_progress_breaker_with_threshold(
                     target: "simard::ooda",
                     goal = %goal_id,
                     "no-progress breaker: unresolved after threshold — BLOCKED + tracking issue filed and linked",
+                );
+            }
+            NoProgressResolution::AwaitMerge => {
+                // Completed-awaiting-merge (issue #4441): the goal's workstream
+                // already has an OPEN, non-draft, MERGEABLE PR, so it is awaiting
+                // an external merge, not stalled. Idle only — NO reap, NO
+                // escalate, NO engineer spawn (the source of the duplicate PR),
+                // NO board mutation, and NO counter reset (preserved by the
+                // non-terminal resolution) so a degraded PR falls back to the
+                // ladder on the very next cycle.
+                report.awaiting_merge.push(goal_id.to_string());
+                let pr_number = state
+                    .active_goals
+                    .active
+                    .iter()
+                    .find(|g| g.id == goal_id)
+                    .and_then(|g| {
+                        g.wip_refs
+                            .iter()
+                            .find(|r| r.kind.eq_ignore_ascii_case("pr"))
+                            .map(|r| r.ref_id.clone())
+                    })
+                    .unwrap_or_else(|| "?".to_string());
+                tracing::info!(
+                    target: "simard::ooda",
+                    goal = %goal_id,
+                    pr = %pr_number,
+                    pr_open = true,
+                    pr_draft = false,
+                    pr_mergeable = true,
+                    "no-progress breaker: goal has an open, mergeable PR — awaiting external \
+                     merge; suppressing reap/re-dispatch (no duplicate PR created)",
                 );
             }
             // The base breaker's ladder ([`resolve_no_progress`]) only yields the
@@ -747,6 +789,35 @@ fn apply_resolution_side_effects(
                 goal = %goal_id,
                 reason = %reason,
                 "no-progress breaker: OBSOLETE — DROPPING from the board (no block)",
+            );
+        }
+        NoProgressResolution::AwaitMerge => {
+            // Completed-awaiting-merge (issue #4441): idle only — no spawn, no
+            // reap, no block, no counter reset. Mirrors the base-path arm so
+            // the investigated / root-cause path never reaps an engineer that
+            // already delivered an open, mergeable PR.
+            report.awaiting_merge.push(goal_id.to_string());
+            let pr_number = state
+                .active_goals
+                .active
+                .iter()
+                .find(|g| g.id == goal_id)
+                .and_then(|g| {
+                    g.wip_refs
+                        .iter()
+                        .find(|r| r.kind.eq_ignore_ascii_case("pr"))
+                        .map(|r| r.ref_id.clone())
+                })
+                .unwrap_or_else(|| "?".to_string());
+            tracing::info!(
+                target: "simard::ooda",
+                goal = %goal_id,
+                pr = %pr_number,
+                pr_open = true,
+                pr_draft = false,
+                pr_mergeable = true,
+                "no-progress breaker: goal has an open, mergeable PR — awaiting external \
+                 merge; suppressing reap/re-dispatch (no duplicate PR created)",
             );
         }
         NoProgressResolution::Heal { why } => {

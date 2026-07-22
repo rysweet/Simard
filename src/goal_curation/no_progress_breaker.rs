@@ -226,6 +226,11 @@ pub enum StuckGoalDisposition {
     /// The goal is obsolete: its work is tracked elsewhere / out of scope, so it
     /// should leave the active board without a completion claim.
     Obsolete { reason: String },
+    /// The goal's workstream has already delivered an OPEN, non-draft,
+    /// MERGEABLE PR: it is awaiting an external merge, not stalled (issue
+    /// #4441). Reaping/re-dispatching it is what produced the duplicate PRs in
+    /// the live incident, so the breaker idles it instead.
+    AwaitingMerge,
     /// Neither done nor obsolete — a derivable signal refutes completion (or the
     /// state is unverifiable), and a human must resolve it.
     Unresolved,
@@ -244,6 +249,14 @@ pub enum NoProgressResolution {
     /// Threshold reached and the goal is obsolete — DROP it from the active
     /// board (the caller removes it), carrying the human-readable reason.
     Drop { reason: String },
+    /// Threshold reached but the goal's workstream has an OPEN, non-draft,
+    /// MERGEABLE PR awaiting an external merge action (issue #4441).
+    /// **NON-TERMINAL**: the breaker idles the goal — it does NOT reap,
+    /// escalate, or spawn an engineer, so no duplicate PR is created. The goal
+    /// stays tracked and its no-action counter is preserved, so the instant the
+    /// PR closes, goes draft, or degrades below MERGEABLE the very next cycle
+    /// falls back to the reap/escalate ladder.
+    AwaitMerge,
     /// `MISSING-PRECONDITION` (issue #16) — a machine-establishable precondition
     /// is absent (e.g. a governed repo was never cloned). The caller establishes
     /// it (clones the repo, or spawns an engineer to), resets the no-action
@@ -321,14 +334,16 @@ pub const SURFACED_INVESTIGATION_FAILURE_LIMIT: u32 = 3;
 
 impl NoProgressResolution {
     /// `true` for every resolution that removes the goal from the no-action loop
-    /// with a definitive action. [`Continue`](Self::Continue) (below threshold)
-    /// and [`SurfaceInvestigationFailure`](Self::SurfaceInvestigationFailure) (an
+    /// with a definitive action. [`Continue`](Self::Continue) (below threshold),
+    /// [`SurfaceInvestigationFailure`](Self::SurfaceInvestigationFailure) (an
     /// evidence-less terminal outcome that is surfaced and retried, taking NO
-    /// terminal action) are the two non-terminal resolutions.
+    /// terminal action), and [`AwaitMerge`](Self::AwaitMerge) (an
+    /// awaiting-merge idle that preserves the counter) are the non-terminal
+    /// resolutions.
     pub fn is_terminal(&self) -> bool {
         !matches!(
             self,
-            Self::Continue | Self::SurfaceInvestigationFailure { .. }
+            Self::Continue | Self::SurfaceInvestigationFailure { .. } | Self::AwaitMerge
         )
     }
 }
@@ -381,6 +396,7 @@ pub fn obsolescence_reason(goal: &ActiveGoal) -> Option<String> {
 ///
 /// - gate says `Complete`                    → [`StuckGoalDisposition::Done`]
 /// - gate `Blocked` and the goal is obsolete → [`StuckGoalDisposition::Obsolete`]
+/// - gate `Blocked`, not obsolete, open+mergeable PR → [`StuckGoalDisposition::AwaitingMerge`]
 /// - gate `Blocked` otherwise                → [`StuckGoalDisposition::Unresolved`]
 ///
 /// This is the concrete "verify, don't just say you'll verify" step at the
@@ -391,10 +407,20 @@ pub fn verify_stuck_goal<E: EvidenceSource>(
 ) -> StuckGoalDisposition {
     match gate.evaluate(goal) {
         CompletionVerdict::Complete(_) => StuckGoalDisposition::Done,
-        CompletionVerdict::Blocked { .. } => match obsolescence_reason(goal) {
-            Some(reason) => StuckGoalDisposition::Obsolete { reason },
-            None => StuckGoalDisposition::Unresolved,
-        },
+        CompletionVerdict::Blocked { .. } => {
+            if let Some(reason) = obsolescence_reason(goal) {
+                // Obsolete wins over awaiting-merge: an out-of-scope goal is
+                // dropped even if it happens to have an open mergeable PR.
+                StuckGoalDisposition::Obsolete { reason }
+            } else if gate.awaiting_merge(goal) {
+                // Not merged yet, not obsolete, but an OPEN + non-draft +
+                // MERGEABLE PR exists — the work is delivered and awaiting an
+                // external merge, not stalled (issue #4441).
+                StuckGoalDisposition::AwaitingMerge
+            } else {
+                StuckGoalDisposition::Unresolved
+            }
+        }
     }
 }
 
@@ -442,6 +468,7 @@ pub fn resolve_no_progress(
     match disposition() {
         StuckGoalDisposition::Done => NoProgressResolution::MarkDone,
         StuckGoalDisposition::Obsolete { reason } => NoProgressResolution::Drop { reason },
+        StuckGoalDisposition::AwaitingMerge => NoProgressResolution::AwaitMerge,
         StuckGoalDisposition::Unresolved => {
             let (issue_title, issue_body) = escalation_issue(goal_id, consecutive_no_progress);
             NoProgressResolution::Escalate {

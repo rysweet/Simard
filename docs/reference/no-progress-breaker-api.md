@@ -382,6 +382,8 @@ status is persisted by the next `commit_cycle`.
 
 ## See also
 
+- [Concept: a goal with an open, mergeable PR is awaiting merge — never reaped](../concepts/no-progress-awaiting-merge-exemption.md) — the #4441 awaiting-merge branch that idles a completed-but-unmerged goal instead of reaping it.
+- [No-progress awaiting-merge API reference](../reference/no-progress-awaiting-merge-api.md) — `EvidenceSource::open_mergeable_pr`, `StuckGoalDisposition::AwaitingMerge`, the non-terminal `NoProgressResolution::AwaitMerge`, and the `awaiting_merge` report field.
 - [Concept: the breaker explains WHY and self-resolves before escalating](../concepts/no-progress-root-cause-resolution.md) — the root-cause classification and resolution ladder layered on this base breaker.
 - [Root-cause resolution API reference](../reference/no-progress-root-cause-resolution-api.md) — `NoProgressClass`, the WHY types, the reasoner, and the extended resolution ladder.
 - [The `ooda-no-progress-why` recipe reference](../reference/ooda-no-progress-why-recipe.md) — the optional agentic WHY narrator.

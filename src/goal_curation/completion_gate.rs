@@ -354,6 +354,18 @@ pub trait EvidenceSource: Send + Sync {
         let _ = goal;
         Ok(DependencyState::None)
     }
+
+    /// Does the goal's tracked PR satisfy `state == OPEN` ∧ `!isDraft`
+    /// ∧ `mergeable == MERGEABLE`? Backs the `AWAITING-MERGE` branch of the
+    /// no-progress breaker (issue #4441): a goal whose workstream already
+    /// delivered an open, landable PR is awaiting an external merge, not
+    /// stalled, so it must not be reaped/re-dispatched into a duplicate PR.
+    /// Default `Ok(false)`: a source that cannot tell must never suppress a
+    /// legitimate reap.
+    fn open_mergeable_pr(&self, goal: &ActiveGoal) -> SimardResult<bool> {
+        let _ = goal;
+        Ok(false)
+    }
 }
 
 /// Blanket impl so an `&dyn EvidenceSource` (e.g. `Arc::as_ref()`) satisfies the
@@ -375,6 +387,9 @@ impl<T: EvidenceSource + ?Sized> EvidenceSource for &T {
     }
     fn dependency_goal_state(&self, goal: &ActiveGoal) -> SimardResult<DependencyState> {
         (**self).dependency_goal_state(goal)
+    }
+    fn open_mergeable_pr(&self, goal: &ActiveGoal) -> SimardResult<bool> {
+        (**self).open_mergeable_pr(goal)
     }
 }
 
@@ -436,6 +451,17 @@ impl<E: EvidenceSource> CompletionEvidenceGate<E> {
         } else {
             CompletionVerdict::Blocked { evidence, missing }
         }
+    }
+
+    /// Pass-through to [`EvidenceSource::open_mergeable_pr`]. Used by
+    /// [`verify_stuck_goal`](crate::goal_curation::verify_stuck_goal) to tell a
+    /// completed-awaiting-merge goal apart from a genuinely-stuck one (issue
+    /// #4441). This is a **separate** query — it neither adds a
+    /// [`CompletionVerdict`] variant nor flips a `Blocked` verdict to
+    /// `Complete`. Fail-closed: a source error resolves to `false`, so an
+    /// unverifiable PR never suppresses a legitimate reap.
+    pub fn awaiting_merge(&self, goal: &ActiveGoal) -> bool {
+        self.source.open_mergeable_pr(goal).unwrap_or(false)
     }
 }
 
@@ -666,6 +692,27 @@ fn first_ref_of_kind<'a>(goal: &'a ActiveGoal, want: &str) -> Option<&'a str> {
         .map(|r| r.ref_id.as_str())
 }
 
+/// Fail-closed validator for an `owner/repo` slug before it is passed to a live
+/// `gh` spawn (issue #4441 security requirement). Accepts exactly one `/`
+/// separating two non-empty halves, each composed only of ASCII word
+/// characters (`[A-Za-z0-9_]`), `.`, or `-` — i.e. `^[\w.-]+/[\w.-]+$` without
+/// pulling in a regex dependency. Any shell metacharacter, space, empty half,
+/// or extra `/` is rejected, so a malformed goal `repo` can never inject
+/// arguments into `gh pr view`.
+fn is_valid_repo_slug(slug: &str) -> bool {
+    fn is_slug_byte(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-'
+    }
+    let mut halves = slug.split('/');
+    let (Some(owner), Some(repo), None) = (halves.next(), halves.next(), halves.next()) else {
+        return false;
+    };
+    !owner.is_empty()
+        && !repo.is_empty()
+        && owner.bytes().all(is_slug_byte)
+        && repo.bytes().all(is_slug_byte)
+}
+
 impl EvidenceSource for GhCliEvidenceSource {
     fn any_pr_merged(&self, goal: &ActiveGoal) -> SimardResult<bool> {
         match first_ref_of_kind(goal, "pr") {
@@ -701,6 +748,63 @@ impl EvidenceSource for GhCliEvidenceSource {
             crate::self_deploy::GitDeploySource::at(&self.repo_dir),
         );
         Ok(!detector.detect().needs_deploy)
+    }
+
+    fn open_mergeable_pr(&self, goal: &ActiveGoal) -> SimardResult<bool> {
+        // No tracked PR ⇒ nothing awaiting merge (cheap, no network).
+        let Some(num) = first_ref_of_kind(goal, "pr") else {
+            return Ok(false);
+        };
+        let repo = self.repo_slug(goal);
+
+        // Fail-closed argument validation BEFORE the spawn (security, #4441):
+        // a non-numeric PR number or a malformed repo slug can never reach the
+        // `gh` arg-vector.
+        if num.is_empty() || !num.bytes().all(|b| b.is_ascii_digit()) {
+            return Ok(false);
+        }
+        if !is_valid_repo_slug(&repo) {
+            return Ok(false);
+        }
+
+        // Read-only, arg-vector spawn — never a shell string. Any spawn / exit
+        // / parse failure resolves to `Ok(false)` (fail-closed: an unverifiable
+        // PR never suppresses a reap) rather than an `Err` that would block the
+        // whole cycle.
+        let out = std::process::Command::new("gh")
+            .args([
+                "pr",
+                "view",
+                num,
+                "--repo",
+                &repo,
+                "--json",
+                "state,isDraft,mergeable",
+            ])
+            .output();
+        let out = match out {
+            Ok(o) if o.status.success() => o,
+            _ => return Ok(false),
+        };
+
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct PrView {
+            state: String,
+            is_draft: bool,
+            mergeable: String,
+        }
+        let pr: PrView = match serde_json::from_slice(&out.stdout) {
+            Ok(pr) => pr,
+            Err(_) => return Ok(false),
+        };
+
+        // `mergeable` is GitHub's GraphQL `MergeableState` (MERGEABLE /
+        // CONFLICTING / UNKNOWN); only MERGEABLE is landable. A draft or
+        // non-OPEN PR is never awaiting merge.
+        Ok(pr.state.eq_ignore_ascii_case("OPEN")
+            && !pr.is_draft
+            && pr.mergeable.eq_ignore_ascii_case("MERGEABLE"))
     }
 
     fn repo_present(&self, goal: &ActiveGoal) -> SimardResult<bool> {
