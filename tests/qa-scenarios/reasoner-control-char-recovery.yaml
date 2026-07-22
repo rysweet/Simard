@@ -1,0 +1,107 @@
+name: reasoner-control-char-recovery
+app_type: cli
+description: |
+  Outside-in proof that every recipe-backed REASONER parse site now recovers a
+  JSON envelope carrying an UNESCAPED control character (a raw newline/tab/CR
+  inside a string value) instead of silently discarding the model's whole
+  structured decision — a reasoner-reliability axis of the standing
+  cognition-improvement goal (extends the trailing-comma recovery,
+  #2658 lineage).
+
+  The shared extractor `recipe_output::extract_json_payload` strips banner / ANSI
+  / interleaved-log noise but returns the balanced `{…}` object body VERBATIM. A
+  model emitting a multi-line `content`/`rationale` value routinely writes a
+  LITERAL newline (or tab) instead of the `\n`/`\t` escape the JSON grammar
+  requires. `serde_json` is spec-strict and rejects it
+  (`control character (\u0000-\u001F) found while parsing a string`), so the raw
+  control byte survives into the extracted payload and fails a strict parse.
+  Before this change every reasoner site parsed strictly
+  (`extract_json_payload(text)?` -> `serde_json::from_str(..).ok()?`), so one
+  literal newline dropped the entire decision and the phase fell back to its
+  deterministic default — a PARSE-FAILURE default, not a real model decision.
+
+  Recovery is composed by `recover_json_view`, which escapes any control byte
+  sitting INSIDE a string literal (`\b \t \n \f \r`, else `\u00XX`) and then
+  strips trailing commas. All reasoner sites route through the one shared
+  chokepoint `recipe_output::extract_and_parse_json`, which retries the strict
+  parse on the recovered view — but ONLY when a view actually rewrote the payload
+  (the `Cow::Owned` arm). Each sub-view is a provable no-op (`Cow::Borrowed`) on
+  valid JSON, so any OTHER malformed shape (unquoted key, elided element, missing
+  value) still returns `None`: leniency never widens beyond the two named defects
+  and a genuine parse error is never masked. The two views cannot interfere —
+  escaping only touches bytes inside string literals, comma-stripping only
+  touches structural commas outside them.
+
+  Sites routed through the chokepoint in `src/ooda_brain/recipe_brain.rs`:
+  `parse_admission_decision`, `parse_resource_admission_decision`,
+  `parse_idea_dedup_decision`, `parse_idea_consolidation`, `parse_outcome_decision`,
+  `extract_decision_envelope` (decide), and `extract_orient_envelope`.
+
+  This scenario drives the hermetic, in-process tests that pin the corrected
+  contract:
+    - the `escape_json_string_control_chars` view: borrows valid / already-escaped
+      JSON unchanged; escapes a raw newline/tab/CR and a generic control byte to
+      `\u00XX` INSIDE a string; leaves control bytes OUTSIDE strings (JSON
+      whitespace) untouched; preserves an escaped quote and multibyte UTF-8;
+    - the composed `recover_json_view`: borrows valid JSON, is owned on either a
+      control-char or a trailing-comma defect (and both together), and stays
+      borrowed for any other malformed shape;
+    - the shared `extract_and_parse_json` helper end-to-end: recovers a
+      control-char defect alone, through banner + ANSI + log noise, and together
+      with a trailing comma, while a genuinely malformed (non-target) envelope
+      stays a loud parse miss.
+  No network, no live host mutation. The CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # Recovery views: control-char escaping (borrow on valid; newline/tab/CR/generic
+  # escaped inside strings; control bytes outside strings untouched; escaped-quote
+  # and multibyte preserved) and the composed recover_json_view (borrow on valid;
+  # owned on either defect; other-malformed stays borrowed).
+  - action: run
+    params:
+      command: "cargo test --locked --lib -- recipe_output::extract::tests::escape_control recipe_output::extract::tests::recover_json_view"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Shared chokepoint end-to-end: a control-char envelope now parses to the correct
+  # typed decision (alone, through banner+ANSI+log noise, and composed with a
+  # trailing comma); a non-target-malformed body / no-object still returns None.
+  - action: run
+    params:
+      command: "cargo test --locked --lib recipe_output::extract::tests::extract_and_parse_json"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Whole recipe_output module and full recipe_brain test module stay green — the
+  # shared extractor and every pre-existing banner/ANSI/verdict/trailing-comma
+  # behaviour is unregressed by composing the control-char recovery view.
+  - action: run
+    params:
+      command: "cargo test --locked --lib -- recipe_output:: ooda_brain::recipe_brain::tests"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
