@@ -1170,26 +1170,6 @@ pub(crate) fn sweep_stale_assignments_with_sessions(
 /// the guarantee. `1000` is far above any realistic open-PR count for this repo.
 const OPEN_PR_RECONCILE_LIMIT: u32 = 1000;
 
-/// Fetch the open-PR set ONCE per cycle and prune every merged/closed `pr`
-/// [`crate::goal_curation::WipRef`] from the active board via the pure
-/// [`crate::ooda_loop::no_progress::prune_merged_pr_refs`], BEFORE the never-idle
-/// breaker classifies (NEW-1 Prong 2, PR #4428).
-///
-/// Reuses the existing `gh pr list` path
-/// ([`crate::stewardship::PrGhClient::list_open_prs`]) — NO new brittle shell/gh
-/// parse. **Fail-open**: if the fetch errors, surface it and prune NOTHING this
-/// cycle, so a `gh` blip can never wipe a live PR ref (which would reintroduce
-/// the round-1 finding-#1 regression). A merged-PR fault is merely delayed a
-/// cycle, never suppressed forever. On a genuine empty open set (`Ok([])`) all
-/// `pr` refs prune (correct — nothing is open).
-///
-/// The `client` is injected so production wires the concrete
-/// [`crate::stewardship::RealPrGhClient`] while the pure core is unit-tested
-/// directly with an in-memory set (IO-free).
-///
-/// Fast path: when no active goal carries a `pr` wip_ref the open-PR fetch is
-/// skipped entirely (the pure prune would be a no-op), avoiding the `gh pr
-/// list` subprocess on the common cycle.
 /// Conservative validation of a single `owner` or `repo` path segment for the
 /// `gh pr list --repo` slug (FIX-2). Mirrors the shape of `repo_resolver`'s
 /// `validate_repo_slug`: ASCII alphanumeric plus `.`/`_`/`-`, 1..=64 chars, no
