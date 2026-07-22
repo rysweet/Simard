@@ -1250,32 +1250,38 @@ impl CapabilityHandler {
         let now = system_time_millis(now)?;
         let actor = AuthenticatedToolContext::new("effect-recovery", "system", std::iter::empty());
         let fingerprint = fingerprint(&actor, &self.policy.revision, &("recover_effects_v1", now))?;
-        let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(persistence)?;
-        if let Some(existing) =
-            replay_request(&transaction, request_id, "effect_recovery", &fingerprint)?
-        {
-            return Ok(existing);
-        }
-        let recovered = transaction
-            .execute(
-                "UPDATE effect_jobs
-                 SET state='indeterminate', error='effect lease expired; execution outcome is unknown'
-                 WHERE state='running' AND lease_expires_at <= ?1",
-                [now],
-            )
-            .map_err(persistence)?;
-        record_request(
-            &transaction,
-            request_id,
-            "effect_recovery",
-            &fingerprint,
-            &recovered,
-        )?;
-        transaction.commit().map_err(persistence)?;
-        Ok(recovered)
+        // Serialized under bounded busy/locked retry (issue #4468): startup
+        // recovery is the dominant source of "database is locked" collisions
+        // with live cycles. The lock is acquired *inside* the closure so the
+        // guard is released across each backoff sleep.
+        retry_on_busy(|| {
+            let mut connection = self.lock()?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(persistence)?;
+            if let Some(existing) =
+                replay_request(&transaction, request_id, "effect_recovery", &fingerprint)?
+            {
+                return Ok(existing);
+            }
+            let recovered = transaction
+                .execute(
+                    "UPDATE effect_jobs
+                     SET state='indeterminate', error='effect lease expired; execution outcome is unknown'
+                     WHERE state='running' AND lease_expires_at <= ?1",
+                    [now],
+                )
+                .map_err(persistence)?;
+            record_request(
+                &transaction,
+                request_id,
+                "effect_recovery",
+                &fingerprint,
+                &recovered,
+            )?;
+            transaction.commit().map_err(persistence)?;
+            Ok(recovered)
+        })
     }
 
     pub fn renew_effect(
@@ -1466,40 +1472,44 @@ impl CapabilityHandler {
                 error,
             ),
         )?;
-        let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(persistence)?;
-        if replay_request::<serde_json::Value>(
-            &transaction,
-            request_id,
-            "effect_retry",
-            &fingerprint,
-        )?
-        .is_some()
-        {
-            return Ok(());
-        }
-        let changed = transaction
-            .execute(
-                "UPDATE effect_jobs
-                 SET state='pending', error=?2, lease_owner=NULL, lease_expires_at=NULL
-                 WHERE effect_id=?1 AND state='running' AND lease_owner=?3
-                   AND lease_generation=?4 AND lease_expires_at>?5",
-                params![lease.effect_id, error, owner, lease.lease_generation, now],
-            )
-            .map_err(persistence)?;
-        if changed != 1 {
-            return Err(stale_lease(&lease.effect_id));
-        }
-        record_request(
-            &transaction,
-            request_id,
-            "effect_retry",
-            &fingerprint,
-            &serde_json::Value::Null,
-        )?;
-        transaction.commit().map_err(persistence)
+        // Serialized under bounded busy/locked retry (issue #4468). Lock is
+        // acquired inside the closure so the guard is released across backoff.
+        retry_on_busy(|| {
+            let mut connection = self.lock()?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(persistence)?;
+            if replay_request::<serde_json::Value>(
+                &transaction,
+                request_id,
+                "effect_retry",
+                &fingerprint,
+            )?
+            .is_some()
+            {
+                return Ok(());
+            }
+            let changed = transaction
+                .execute(
+                    "UPDATE effect_jobs
+                     SET state='pending', error=?2, lease_owner=NULL, lease_expires_at=NULL
+                     WHERE effect_id=?1 AND state='running' AND lease_owner=?3
+                       AND lease_generation=?4 AND lease_expires_at>?5",
+                    params![lease.effect_id, error, owner, lease.lease_generation, now],
+                )
+                .map_err(persistence)?;
+            if changed != 1 {
+                return Err(stale_lease(&lease.effect_id));
+            }
+            record_request(
+                &transaction,
+                request_id,
+                "effect_retry",
+                &fingerprint,
+                &serde_json::Value::Null,
+            )?;
+            transaction.commit().map_err(persistence)
+        })
     }
 
     pub fn finish_effect(
@@ -1528,43 +1538,52 @@ impl CapabilityHandler {
             EffectResult::Failed { error } => ("failed", Some(error.as_str())),
         };
         let result_json = serde_json::to_vec(result).map_err(serialization)?;
-        let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(persistence)?;
-        if replay_request::<EffectResult>(&transaction, request_id, "effect_finish", &fingerprint)?
+        // Serialized under bounded busy/locked retry (issue #4468). Lock is
+        // acquired inside the closure so the guard is released across backoff.
+        retry_on_busy(|| {
+            let mut connection = self.lock()?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(persistence)?;
+            if replay_request::<EffectResult>(
+                &transaction,
+                request_id,
+                "effect_finish",
+                &fingerprint,
+            )?
             .is_some()
-        {
-            return Ok(());
-        }
-        let changed = transaction
-            .execute(
-                "UPDATE effect_jobs
-                 SET state=?2, error=?3, result_json=?4, lease_owner=NULL, lease_expires_at=NULL
-                 WHERE effect_id=?1 AND state='running' AND lease_owner=?5
-                   AND lease_generation=?6 AND lease_expires_at>?7",
-                params![
-                    lease.effect_id,
-                    state,
-                    error,
-                    result_json,
-                    owner,
-                    lease.lease_generation,
-                    now
-                ],
-            )
-            .map_err(persistence)?;
-        if changed != 1 {
-            return Err(stale_lease(&lease.effect_id));
-        }
-        record_request(
-            &transaction,
-            request_id,
-            "effect_finish",
-            &fingerprint,
-            result,
-        )?;
-        transaction.commit().map_err(persistence)
+            {
+                return Ok(());
+            }
+            let changed = transaction
+                .execute(
+                    "UPDATE effect_jobs
+                     SET state=?2, error=?3, result_json=?4, lease_owner=NULL, lease_expires_at=NULL
+                     WHERE effect_id=?1 AND state='running' AND lease_owner=?5
+                       AND lease_generation=?6 AND lease_expires_at>?7",
+                    params![
+                        lease.effect_id,
+                        state,
+                        error,
+                        result_json,
+                        owner,
+                        lease.lease_generation,
+                        now
+                    ],
+                )
+                .map_err(persistence)?;
+            if changed != 1 {
+                return Err(stale_lease(&lease.effect_id));
+            }
+            record_request(
+                &transaction,
+                request_id,
+                "effect_finish",
+                &fingerprint,
+                result,
+            )?;
+            transaction.commit().map_err(persistence)
+        })
     }
 
     fn commit_terminal(
@@ -2618,10 +2637,92 @@ fn system_time_millis(time: SystemTime) -> CapabilityResult<i64> {
     })
 }
 
+/// Stable marker that [`persistence`] stamps onto a `CapabilityError` whose
+/// underlying `rusqlite::Error` was a *typed* SQLITE_BUSY / SQLITE_LOCKED
+/// contention error. [`retry_on_busy`] keys its retry decision on this marker,
+/// which is set **solely** from the typed error code — never from arbitrary or
+/// caller-supplied message text — so no log line or injected payload string can
+/// steer retry behaviour.
+const BUSY_PERSISTENCE_MARKER: &str = "[sqlite-busy] ";
+
+/// True iff `error` is a transient SQLite lock-contention error
+/// (SQLITE_BUSY / SQLITE_LOCKED) that is safe to retry. Mirrors the existing
+/// `is_constraint` classifier: detected on the typed `rusqlite::ErrorCode`,
+/// never on message text, so it is robust across locales and immune to
+/// error-string steering. Constraint/logic errors are deliberately NOT treated
+/// as busy — they must surface, never retry-loop.
+fn is_busy_locked(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(inner, _)
+            if inner.code == rusqlite::ErrorCode::DatabaseBusy
+                || inner.code == rusqlite::ErrorCode::DatabaseLocked
+    )
+}
+
+/// True iff `error` is a persistence failure that originated from a typed
+/// SQLITE_BUSY / SQLITE_LOCKED contention error (as stamped by [`persistence`]
+/// via [`BUSY_PERSISTENCE_MARKER`]). This is how [`retry_on_busy`] recognises a
+/// retryable write without re-plumbing the raw `rusqlite::Error` through the
+/// many `CapabilityResult`-returning helpers a write transaction calls.
+fn capability_error_is_busy(error: &CapabilityError) -> bool {
+    error.code() == CapabilityErrorCode::PersistenceFailed
+        && error.to_string().contains(BUSY_PERSISTENCE_MARKER)
+}
+
+/// Run `op` under bounded retry-with-backoff on SQLite busy/locked contention
+/// (issue #4468). Any non-busy error — and busy/locked after `MAX_ATTEMPTS` —
+/// is returned as-is, never masked and never retried unbounded.
+///
+/// - `MAX_ATTEMPTS`: 6 (hard cap; anti-DoS on the single `Mutex<Connection>`).
+/// - Backoff: exponential from ~10ms, capped at 400ms per sleep.
+/// - Exhaustion: the final busy/locked error surfaces as `PersistenceFailed` —
+///   a genuinely wedged writer is still reported, never swallowed.
+///
+/// INVARIANT: `op` must acquire (and drop) the `Mutex<Connection>` guard
+/// *itself*, once per invocation, so the backoff `sleep` below runs strictly
+/// between `op` calls with the connection mutex **released** — a retrying
+/// writer never blocks same-handler callers during its backoff.
+fn retry_on_busy<T>(mut op: impl FnMut() -> CapabilityResult<T>) -> CapabilityResult<T> {
+    const MAX_ATTEMPTS: u32 = 6;
+    const MAX_BACKOFF: Duration = Duration::from_millis(400);
+    let mut attempt = 0u32;
+    loop {
+        match op() {
+            Ok(value) => return Ok(value),
+            Err(error) if capability_error_is_busy(&error) && attempt + 1 < MAX_ATTEMPTS => {
+                let backoff = (Duration::from_millis(10) * (1u32 << attempt)).min(MAX_BACKOFF);
+                tracing::warn!(
+                    target: "typed_ooda.outbox_write",
+                    attempt = attempt + 1,
+                    max_attempts = MAX_ATTEMPTS,
+                    backoff_ms = backoff.as_millis() as u64,
+                    "typed OODA outbox write contended (busy/locked); retrying",
+                );
+                // The guard is already dropped here: `op` acquired and released
+                // the connection mutex within its own body, so this sleep holds
+                // no lock.
+                std::thread::sleep(backoff);
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 fn persistence(error: rusqlite::Error) -> CapabilityError {
+    // Stamp a typed-only busy marker so `retry_on_busy` can recognise a
+    // retryable contention error after it has been mapped into a
+    // `CapabilityError`. The marker is derived purely from the typed
+    // `rusqlite::ErrorCode` (via `is_busy_locked`), not from message text.
+    let marker = if is_busy_locked(&error) {
+        BUSY_PERSISTENCE_MARKER
+    } else {
+        ""
+    };
     CapabilityError::new(
         CapabilityErrorCode::PersistenceFailed,
-        format!("typed outcome persistence failed: {error}"),
+        format!("typed outcome persistence failed: {marker}{error}"),
     )
 }
 
@@ -3516,6 +3617,184 @@ mod actor_session_scope_tests {
                          without an identity-binding violation, got: {err:?}"
                     )
                 });
+        }
+    }
+}
+
+#[cfg(test)]
+mod outbox_serialization_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    const REPO_OWNER: &str = "rysweet";
+    const REPO_NAME: &str = "Simard";
+    const POLICY_REVISION: &str = "policy-v1";
+
+    fn admission() -> AdmissionSnapshot {
+        AdmissionSnapshot {
+            concurrent_engineers: 0,
+            disk_used_percent: 1,
+            active_claims: BTreeSet::new(),
+            policy_revision: POLICY_REVISION.to_string(),
+        }
+    }
+
+    fn file_issue_actor(
+        session_id: &str,
+        cycle_id: &str,
+        goal_id: &str,
+    ) -> AuthenticatedToolContext {
+        AuthenticatedToolContext::new(
+            "goal-session-actor",
+            session_id,
+            [CapabilityGrant::RecordAction(ActionKind::FileIssue)],
+        )
+        .scoped_to_repository(RepositoryRef::new(REPO_OWNER, REPO_NAME))
+        .bound_to_cycle_goal(cycle_id, goal_id)
+    }
+
+    fn file_issue_request(
+        request_id: &str,
+        session_id: &str,
+        cycle_id: &str,
+        goal_id: &str,
+    ) -> RecordActionRequest {
+        RecordActionRequest {
+            identity: TerminalRequestIdentity::new(request_id, session_id, cycle_id, goal_id),
+            action: Action::FileIssue(FileIssueAction {
+                repository: RepositoryRef::new(REPO_OWNER, REPO_NAME),
+                title: OpaqueBytes::from(b"a real issue title".to_vec()),
+                body: OpaqueBytes::from(b"body".to_vec()),
+                labels: Vec::new(),
+            }),
+            raw_semantic: OpaqueBytes::from(b"raw".to_vec()),
+            evidence: Vec::new(),
+        }
+    }
+
+    fn is_database_locked(error: &CapabilityError) -> bool {
+        error
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("database is locked")
+    }
+
+    // ---------------------------------------------------------------------
+    // Regression: the typed-OODA outbox/outcome store must serialize writes so
+    // that concurrent cycles and startup recovery stop colliding on
+    // 'database is locked' (issue #4468).
+    //
+    // Reproduces the production shape: MANY independent writers (each with its
+    // own connection to the SAME sqlite file, as separate processes/handlers
+    // do) commit outbox + outcome rows in Immediate transactions while a
+    // startup-recovery sweep runs concurrently. Under the pre-fix
+    // configuration this surfaces SQLITE_BUSY / "database is locked". After the
+    // fix (WAL + busy_timeout on every connection + bounded busy retry) every
+    // write must succeed and NO 'database is locked' error may be observed.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn concurrent_outbox_writes_never_surface_database_is_locked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path: PathBuf = dir.path().join("outcomes.sqlite3");
+
+        const WRITERS: usize = 8;
+        const ITERATIONS: usize = 60;
+
+        // +1 participant for the concurrent startup-recovery sweeper so every
+        // writer overlaps with recovery contention on the same file.
+        let barrier = Arc::new(Barrier::new(WRITERS + 1));
+
+        let mut threads = Vec::new();
+        for writer in 0..WRITERS {
+            let path = db_path.clone();
+            let barrier = Arc::clone(&barrier);
+            threads.push(thread::spawn(move || -> Vec<String> {
+                let handler =
+                    CapabilityHandler::open(&path, CapabilityPolicy::new(POLICY_REVISION))
+                        .expect("open writer handler");
+                let mut locked_errors = Vec::new();
+                barrier.wait();
+                for iteration in 0..ITERATIONS {
+                    let session = format!("session-w{writer}-{iteration}");
+                    let cycle = format!("cycle-w{writer}-{iteration}");
+                    let goal = format!("goal-w{writer}-{iteration}");
+                    let request = format!("req-w{writer}-{iteration}");
+                    let actor = file_issue_actor(&session, &cycle, &goal);
+                    let req = file_issue_request(&request, &session, &cycle, &goal);
+                    match handler.record_action(&actor, req, &admission()) {
+                        Ok(_) => {}
+                        Err(error) if is_database_locked(&error) => {
+                            locked_errors
+                                .push(format!("record_action w{writer}/{iteration}: {error}"));
+                        }
+                        Err(error) => {
+                            panic!("unexpected non-lock write failure: {error:?}");
+                        }
+                    }
+                }
+                locked_errors
+            }));
+        }
+
+        // Concurrent startup-recovery sweeper: a separate connection running
+        // the outbox recovery path repeatedly while the writers commit.
+        {
+            let path = db_path.clone();
+            let barrier = Arc::clone(&barrier);
+            threads.push(thread::spawn(move || -> Vec<String> {
+                let handler =
+                    CapabilityHandler::open(&path, CapabilityPolicy::new(POLICY_REVISION))
+                        .expect("open recovery handler");
+                let mut locked_errors = Vec::new();
+                barrier.wait();
+                for sweep in 0..(WRITERS * ITERATIONS / 4) {
+                    let request_id = format!("recover-{sweep}");
+                    match handler.recover_expired_effects(&request_id, SystemTime::now()) {
+                        Ok(_) => {}
+                        Err(error) if is_database_locked(&error) => {
+                            locked_errors.push(format!("recover {sweep}: {error}"));
+                        }
+                        Err(error) => {
+                            panic!("unexpected non-lock recovery failure: {error:?}");
+                        }
+                    }
+                }
+                locked_errors
+            }));
+        }
+
+        let mut locked_errors = Vec::new();
+        for thread in threads {
+            locked_errors.extend(thread.join().expect("writer thread must not panic"));
+        }
+
+        assert!(
+            locked_errors.is_empty(),
+            "concurrent outbox writers and startup recovery must never surface \
+             'database is locked'; got {} occurrence(s): {:#?}",
+            locked_errors.len(),
+            locked_errors,
+        );
+
+        // Every terminal must be durably persisted: no write was silently lost
+        // to a swallowed lock error.
+        let verifier = CapabilityHandler::open(&db_path, CapabilityPolicy::new(POLICY_REVISION))
+            .expect("open verifier handler");
+        for writer in 0..WRITERS {
+            for iteration in 0..ITERATIONS {
+                let session = format!("session-w{writer}-{iteration}");
+                let cycle = format!("cycle-w{writer}-{iteration}");
+                let terminal = verifier
+                    .terminal_for_cycle(&session, &cycle)
+                    .expect("query terminal");
+                assert!(
+                    terminal.is_some(),
+                    "terminal for {session}/{cycle} must be durably persisted after \
+                     concurrent writes"
+                );
+            }
         }
     }
 }
