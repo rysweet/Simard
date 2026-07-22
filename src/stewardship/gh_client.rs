@@ -215,28 +215,11 @@ impl LabelDisposition {
     }
 }
 
-/// A `gh label create` execution failure. Mirrors the injectable
-/// [`CreateIssueExecutor`] seam so the label self-heal is unit-testable without
-/// spawning a real `gh`. `.output()` collapses spawn+wait into one error, so a
-/// single `Spawn` variant suffices.
-#[derive(Debug)]
-pub(crate) enum LabelEnsureExecutionError {
-    /// The `gh label create` subprocess could not be spawned or awaited.
-    Spawn(io::Error),
-}
-
 /// Injectable executor for `gh label create`, mirroring [`CreateIssueExecutor`].
 /// Real code binds [`execute_ensure_label`]; tests inject subprocess outcomes.
-type LabelEnsureExecutor = fn(&OsStr, &[&OsStr]) -> Result<Output, LabelEnsureExecutionError>;
-
-/// Render a [`LabelEnsureExecutionError`] as an observable degrade reason.
-fn label_ensure_execution_reason(error: LabelEnsureExecutionError) -> String {
-    match error {
-        LabelEnsureExecutionError::Spawn(error) => {
-            format!("failed to run `gh label create`: {error}")
-        }
-    }
-}
+/// `.output()` collapses spawn+wait into a single `io::Error`, so — unlike the
+/// multi-stage [`CreateIssueExecutor`] — no dedicated error enum is warranted.
+type LabelEnsureExecutor = fn(&OsStr, &[&OsStr]) -> Result<Output, io::Error>;
 
 /// Core, executor-injected label self-heal: run `gh label create <label>` and
 /// map the outcome to a [`LabelDisposition`]. NEVER returns an error — a
@@ -267,24 +250,20 @@ fn ensure_label_with(
             }
         }
         Err(error) => LabelDisposition::Omit {
-            reason: label_ensure_execution_reason(error),
+            reason: format!("failed to run `gh label create`: {error}"),
         },
     }
 }
 
 /// Real `gh label create` executor: spawn `gh`, capture stdout/stderr, no stdin
 /// (a label create carries no body). `.output()` folds spawn+wait errors.
-fn execute_ensure_label(
-    executable: &OsStr,
-    args: &[&OsStr],
-) -> Result<Output, LabelEnsureExecutionError> {
+fn execute_ensure_label(executable: &OsStr, args: &[&OsStr]) -> Result<Output, io::Error> {
     Command::new(executable)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .map_err(LabelEnsureExecutionError::Spawn)
 }
 
 /// Idempotently ensure `label` exists in the ambient repo before a tracking
@@ -777,16 +756,11 @@ exit 23
     // without the label rather than failing — the escalation must always
     // succeed. Mirrors the injectable `CreateIssueExecutor` fn-pointer seam.
 
-    use super::{
-        LabelDisposition, LabelEnsureExecutionError, ensure_label_with, execute_ensure_label,
-    };
+    use super::{LabelDisposition, ensure_label_with, execute_ensure_label};
     use std::os::unix::process::ExitStatusExt;
     use std::process::ExitStatus;
 
-    fn label_create_succeeds(
-        _executable: &OsStr,
-        _args: &[&OsStr],
-    ) -> Result<Output, LabelEnsureExecutionError> {
+    fn label_create_succeeds(_executable: &OsStr, _args: &[&OsStr]) -> Result<Output, io::Error> {
         Ok(Output {
             status: ExitStatus::from_raw(0),
             stdout: Vec::new(),
@@ -794,10 +768,7 @@ exit 23
         })
     }
 
-    fn label_already_exists(
-        _executable: &OsStr,
-        _args: &[&OsStr],
-    ) -> Result<Output, LabelEnsureExecutionError> {
+    fn label_already_exists(_executable: &OsStr, _args: &[&OsStr]) -> Result<Output, io::Error> {
         // Mixed-case wording forces the idempotency match to be case-insensitive
         // (the `gh`/GitHub message casing is not guaranteed stable).
         Ok(Output {
@@ -810,7 +781,7 @@ exit 23
     fn label_create_unauthorized(
         _executable: &OsStr,
         _args: &[&OsStr],
-    ) -> Result<Output, LabelEnsureExecutionError> {
+    ) -> Result<Output, io::Error> {
         Ok(Output {
             status: ExitStatus::from_raw(256),
             stdout: Vec::new(),
@@ -818,20 +789,11 @@ exit 23
         })
     }
 
-    fn label_spawn_fails(
-        _executable: &OsStr,
-        _args: &[&OsStr],
-    ) -> Result<Output, LabelEnsureExecutionError> {
-        Err(LabelEnsureExecutionError::Spawn(io::Error::new(
-            io::ErrorKind::NotFound,
-            "no gh binary",
-        )))
+    fn label_spawn_fails(_executable: &OsStr, _args: &[&OsStr]) -> Result<Output, io::Error> {
+        Err(io::Error::new(io::ErrorKind::NotFound, "no gh binary"))
     }
 
-    fn label_huge_stderr(
-        _executable: &OsStr,
-        _args: &[&OsStr],
-    ) -> Result<Output, LabelEnsureExecutionError> {
+    fn label_huge_stderr(_executable: &OsStr, _args: &[&OsStr]) -> Result<Output, io::Error> {
         Ok(Output {
             status: ExitStatus::from_raw(256),
             stdout: Vec::new(),
