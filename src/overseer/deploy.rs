@@ -370,7 +370,9 @@ impl Deployer for GuardedDeployer {
             // WARN-level fact the operator must be able to diagnose. The
             // `failing_gate` / `failing_detail` fields are empty for non-red
             // refusals and green canaries, so they appear only when a gate
-            // actually reddened. No silent fallback — always logged ≥ WARN.
+            // actually reddened. `failing_detail` is credential-redacted at
+            // population (SEC-D2), so emitting it directly here is token-safe.
+            // No silent fallback — always logged ≥ WARN.
             tracing::warn!(
                 target: "overseer::deploy",
                 target_commit = %commit,
@@ -571,26 +573,36 @@ impl CanaryRunner for ProdCanaryRunner {
                 // gate threaded up from the per-gate results; a green report
                 // carries neither. `verify_canary` returns `Ok` even when a gate
                 // legitimately fails (an `Err` means an infrastructure fault, the
-                // arm below), so this is the common red-canary path. Bound the
-                // detail here at population so the raw OTel attribute stays small.
+                // arm below), so this is the common red-canary path. Redact
+                // URL-embedded credentials (SEC-D2) then bound at population, so
+                // the stored `failing_detail` is credential-safe *by construction*
+                // for EVERY consumer — the `overseer::deploy` WARN/OTel span emits
+                // this field directly (not only via the redacted `refusal_reason`),
+                // and a reddening gate's stderr can carry a token-bearing remote URL.
                 failing_gate: report.failing_gate,
-                failing_detail: report.failing_detail.map(|d| bound_detail(&d).into_owned()),
+                failing_detail: report
+                    .failing_detail
+                    .map(|d| bound_detail(&redact_credentials(&d)).into_owned()),
             }),
             Err(SafeUpdateError::BuildFailed { detail }) => Ok(CanaryResult {
                 passed: false,
                 detail: format!("target canary build failed: {detail}"),
                 // A build failure reddens the canary before any gate runs — name
                 // the phase as the failing "gate" so telemetry is never blank.
+                // Redact-then-bound: a failed `cargo`/`git` fetch can print a
+                // token-bearing URL into this build stderr (SEC-D2).
                 failing_gate: Some("build".to_string()),
-                failing_detail: Some(bound_detail(&detail).into_owned()),
+                failing_detail: Some(bound_detail(&redact_credentials(&detail)).into_owned()),
             }),
             Err(SafeUpdateError::GateFailed { gate, detail }) => Ok(CanaryResult {
                 passed: false,
                 detail: format!("target canary gate {gate} failed: {detail}"),
                 // STEP 1 (#4420): thread the SPECIFIC reddening gate identity +
-                // its (bounded) detail through so the refusal reason can name it.
+                // its detail through so the refusal reason can name it. Redact
+                // credentials (SEC-D2) then bound so the stored field is safe for
+                // the OTel span that emits it directly.
                 failing_gate: Some(gate),
-                failing_detail: Some(bound_detail(&detail).into_owned()),
+                failing_detail: Some(bound_detail(&redact_credentials(&detail)).into_owned()),
             }),
             Err(e) => Err(OverseerError::Capability {
                 what: "target_canary",
@@ -1140,6 +1152,60 @@ mod tests {
             "operator notification must name the reddening gate: {}",
             notes[0].problem
         );
+    }
+
+    #[test]
+    fn target_canary_gate_detail_is_credential_redacted_at_population() {
+        // SEC-D2 regression: a reddening gate's stderr can embed a token-bearing
+        // remote URL. `CanaryResult.failing_detail` is emitted DIRECTLY as an
+        // `overseer::deploy` WARN/OTel attribute (not only via the redacted
+        // `refusal_reason`), so it must be credential-safe at population — no
+        // consumer may observe a live token.
+        let (runner, _seen) = target_canary(
+            SourceMode::Ok,
+            VerifierOutcome::GateRed {
+                gate: "unit-test",
+                detail: "fatal: unable to access \
+                         'https://x-access-token:ghp_SECRETTOKEN123@github.com/o/r.git/': 403",
+            },
+        );
+        let result = runner.run_canary("bbbbbbbbbbbb").expect("target canary");
+        let stored = result.failing_detail.expect("red canary carries a detail");
+        assert!(
+            !stored.contains("ghp_SECRETTOKEN123"),
+            "stored failing_detail must not carry a live token: {stored}"
+        );
+        assert!(
+            stored.contains("***@github.com"),
+            "redaction must preserve the host while stripping userinfo: {stored}"
+        );
+        // The same guarantee must hold through the surfaced WARN-span attribute
+        // and the operator notification, both derived from this stored field.
+        let (gd, _deployed, seen) =
+            deployer_with(Box::new(runner_gate_red()), Box::new(FakeAncestry(false)));
+        let err = format!("{}", gd.deploy("bbbbbbbbbbbb").unwrap_err());
+        assert!(
+            !err.contains("ghp_SECRETTOKEN123"),
+            "error must be token-safe: {err}"
+        );
+        assert!(
+            !seen.lock().unwrap()[0]
+                .problem
+                .contains("ghp_SECRETTOKEN123"),
+            "operator notification must be token-safe"
+        );
+    }
+
+    fn runner_gate_red() -> ProdCanaryRunner {
+        target_canary(
+            SourceMode::Ok,
+            VerifierOutcome::GateRed {
+                gate: "unit-test",
+                detail: "fatal: unable to access \
+                         'https://x-access-token:ghp_SECRETTOKEN123@github.com/o/r.git/': 403",
+            },
+        )
+        .0
     }
 
     #[test]
