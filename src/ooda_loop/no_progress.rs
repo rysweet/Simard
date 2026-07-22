@@ -428,20 +428,6 @@ pub(crate) fn classify_standing_idle(goal: &ActiveGoal) -> Option<StandingIdle> 
     }
 }
 
-/// Re-orient a standing research goal that slipped into an idle so the NEXT cycle
-/// re-enters Lever A work generation (design a NEW source/experiment). Uses the
-/// SAME [`ActiveGoal::roll_to_new_cycle`] path the completion gate uses for a
-/// non-completable standing goal: the goal is returned to the canonical
-/// re-dispatchable state (`NotStarted`, stale WIP dropped), never Blocked or
-/// removed. In-memory only; persisted by the next cycle commit. **Fail-closed**:
-/// if the goal cannot be located it is left exactly as it was (active) — a
-/// research-idle fault must never disable dispatch.
-fn reorient_research_goal(board: &mut GoalBoard, goal_id: &str) {
-    if let Some(goal) = board.active.iter_mut().find(|g| g.id == goal_id) {
-        goal.roll_to_new_cycle();
-    }
-}
-
 /// Apply the shared standing-idle policy at a breaker site (issue #4399):
 /// [`classify_standing_idle`] decides, and this performs the matching side
 /// effects. Returns `true` when `goal_id` names a standing goal that was fully
@@ -450,6 +436,12 @@ fn reorient_research_goal(board: &mut GoalBoard, goal_id: &str) {
 /// breaker sites ([`apply_no_progress_breaker_with_threshold`] and
 /// [`apply_no_progress_breaker_investigated`]) call THIS one function, so not just
 /// the classification but the whole exemption/fault behaviour can never drift.
+///
+/// The goal is located ONCE (mutably) so the fault branch can re-orient the very
+/// same goal it just classified — no second board scan. **Fail-closed**: if the
+/// goal is not on the board it is left exactly as it was (the early `return
+/// false` hands it back to the caller's normal path); a research-idle fault
+/// must never disable dispatch.
 ///
 /// `tracker` is the counter the driver detached from `state.no_progress_tracker`
 /// with `std::mem::take`, so a reset here mutates the same counter restored onto
@@ -462,12 +454,10 @@ fn apply_standing_idle(
     report: &mut NoProgressBreakerReport,
     goal_id: &str,
 ) -> bool {
-    let Some(classification) = board
-        .active
-        .iter()
-        .find(|g| g.id == goal_id)
-        .and_then(classify_standing_idle)
-    else {
+    let Some(goal) = board.active.iter_mut().find(|g| g.id == goal_id) else {
+        return false;
+    };
+    let Some(classification) = classify_standing_idle(goal) else {
         return false;
     };
 
@@ -506,7 +496,11 @@ fn apply_standing_idle(
                  generate a novel source/experiment next cycle \
                  (counter reset, goal stays active, never blocked)",
             );
-            reorient_research_goal(board, goal_id);
+            // Re-orient the SAME goal we already located and classified — no
+            // second board scan. roll_to_new_cycle returns it to the canonical
+            // re-dispatchable state (`NotStarted`, stale WIP dropped) so the next
+            // cycle re-enters work generation; it is never Blocked/killed/parked.
+            goal.roll_to_new_cycle();
         }
         StandingIdle::ResearchInFlight => {
             // Live in-flight progress (issue #4399, crusty finding 1): the
