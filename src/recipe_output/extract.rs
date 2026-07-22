@@ -575,28 +575,178 @@ fn has_unescaped_string_control(bytes: &[u8]) -> bool {
     false
 }
 
+/// The set of bytes that may legitimately follow a backslash inside a JSON
+/// string literal (the JSON grammar's escape initiators): `\" \\ \/ \b \f \n
+/// \r \t` and the `\uXXXX` unicode form. Any other byte after a backslash is an
+/// **invalid escape** that `serde_json` rejects.
+fn is_valid_json_escape_char(c: u8) -> bool {
+    matches!(
+        c,
+        b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' | b'u'
+    )
+}
+
+/// Escape **an invalid backslash escape sequence that appears INSIDE a JSON
+/// string literal** — a lone `\` whose following byte is not a JSON escape
+/// initiator (`" \ / b f n r t u`) — as a last-resort recovery view for
+/// otherwise-well-formed LLM JSON.
+///
+/// After the trailing comma and the unescaped control character, an invalid
+/// backslash escape is the next most common real-world LLM JSON defect: a model
+/// emitting a Windows path (`C:\Users`), a regular expression (`\d+`), or a
+/// LaTeX/Markdown fragment (`\alpha`) inside a `content`/`rationale` value writes
+/// a *literal* backslash that is not part of a valid `\n`/`\t`/`\uXXXX` escape.
+/// `serde_json` is spec-strict and rejects it (`invalid escape` while parsing a
+/// string), so the model's WHOLE structured decision is dropped on a single stray
+/// backslash — a parse-failure default, not a real model decision.
+///
+/// Recovery doubles the offending backslash (`\d` → `\\d`), which is the JSON
+/// spelling of a literal backslash and yields exactly the bytes the model plainly
+/// intended. A legitimate escape (`\n`, `\"`, `\\`, `\uXXXX`) is copied verbatim,
+/// so an already-valid sequence is never touched — in particular an existing
+/// `\\` is consumed as a single valid escape and never becomes `\\\\`.
+///
+/// Like [`strip_json_trailing_commas`] and [`escape_json_string_control_chars`]
+/// this is a **provable no-op on valid JSON**: valid JSON strings never contain
+/// an invalid escape (the grammar forbids a backslash not followed by an escape
+/// initiator), so [`has_invalid_string_escape`] returns `false` and the input
+/// borrows back byte-for-byte unchanged (the zero-allocation clean path). A
+/// caller therefore retries a strict-parse failure on this view without any risk
+/// of altering behaviour on well-formed output.
+///
+/// String-literal aware in exactly the same way as the rest of this module: the
+/// scan tracks `in_string` (consuming a valid `\`-escape as a unit so an escaped
+/// quote `\"` never closes the string), so a backslash is doubled **only** inside
+/// a string value. A backslash BETWEEN tokens is not valid JSON at all and is
+/// left untouched (the strict parse still rejects that shape). Only the ASCII
+/// backslash byte is ever inserted, so the result is always valid UTF-8 and every
+/// multibyte UTF-8 body byte (all `>= 0x80`) is copied through unchanged.
+///
+/// Leniency never widens beyond this one defect: an invalid escape is the only
+/// shape rewritten, so a genuinely malformed object (unquoted key, elided
+/// element, missing value) is left still-malformed and the caller's strict parse
+/// still rejects it.
+pub fn escape_json_string_invalid_escapes(s: &str) -> Cow<'_, str> {
+    let bytes = s.as_bytes();
+    // Cheap detection pass first so clean JSON borrows unchanged (zero-alloc).
+    if !has_invalid_string_escape(bytes) {
+        return Cow::Borrowed(s);
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len() + 8);
+    let mut in_string = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            if c == b'\\' {
+                match bytes.get(i + 1) {
+                    // Legitimate escape — copy the backslash and its target byte
+                    // verbatim as a unit (so `\"` does not close the string and
+                    // an existing `\\` is never re-doubled).
+                    Some(&next) if is_valid_json_escape_char(next) => {
+                        out.push(c);
+                        out.push(next);
+                        i += 2;
+                        continue;
+                    }
+                    // Invalid escape (lone backslash, or a trailing `\` at the
+                    // very end of input) — double it to a literal backslash.
+                    _ => out.extend_from_slice(b"\\\\"),
+                }
+            } else if c == b'"' {
+                out.push(c);
+                in_string = false;
+            } else {
+                out.push(c);
+            }
+        } else if c == b'"' {
+            in_string = true;
+            out.push(c);
+        } else {
+            out.push(c);
+        }
+        i += 1;
+    }
+    match String::from_utf8(out) {
+        Ok(fixed) => Cow::Owned(fixed),
+        // Unreachable in practice (only ASCII backslash bytes are inserted and
+        // every original byte is preserved), but never panic on recovery input.
+        Err(_) => Cow::Borrowed(s),
+    }
+}
+
+/// Does `bytes` contain at least one invalid backslash escape inside a JSON
+/// string literal (a `\` not followed by a JSON escape initiator)?
+///
+/// Mirrors the string-aware scan in [`escape_json_string_invalid_escapes`] but
+/// only detects, so the common clean case can borrow the input without
+/// allocating. A backslash OUTSIDE a string does not count (that shape is not
+/// valid JSON at all and is left for the strict parse to reject); a legitimate
+/// escape is consumed as a unit and never counts.
+fn has_invalid_string_escape(bytes: &[u8]) -> bool {
+    let mut in_string = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            if c == b'\\' {
+                match bytes.get(i + 1) {
+                    Some(&next) if is_valid_json_escape_char(next) => {
+                        // Valid escape — consume both bytes as a unit.
+                        i += 2;
+                        continue;
+                    }
+                    // Lone/invalid backslash (or trailing `\` at end of input).
+                    _ => return true,
+                }
+            } else if c == b'"' {
+                in_string = false;
+            }
+        } else if c == b'"' {
+            in_string = true;
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Compose every JSON **recovery view** this module applies to an
 /// otherwise-well-formed LLM JSON payload that failed a strict parse — currently
-/// unescaped-control-character escaping ([`escape_json_string_control_chars`])
-/// followed by trailing-comma stripping ([`strip_json_trailing_commas`]).
+/// invalid-backslash-escape doubling ([`escape_json_string_invalid_escapes`]),
+/// then unescaped-control-character escaping ([`escape_json_string_control_chars`]),
+/// then trailing-comma stripping ([`strip_json_trailing_commas`]).
 ///
-/// Returns [`Cow::Borrowed`] byte-for-byte unchanged when NEITHER defect is
+/// Returns [`Cow::Borrowed`] byte-for-byte unchanged when NONE of the defects is
 /// present (each sub-view is a provable no-op on valid JSON), and
 /// [`Cow::Owned`] only when at least one recovery actually rewrote the input.
 /// A caller retries a strict-parse failure **only** on the `Cow::Owned` arm, so
 /// identical bytes are never re-parsed and a payload malformed for any OTHER
 /// reason (unquoted key, elided element, missing value) preserves the strict
-/// miss unchanged. The two recoveries are independent — escaping only touches
-/// bytes inside string literals, trailing-comma stripping only touches structural
-/// commas outside string literals — so composing them cannot interfere.
+/// miss unchanged.
+///
+/// The three recoveries are independent — the two string-view recoveries touch
+/// only bytes inside string literals, trailing-comma stripping only touches
+/// structural commas outside them. The two string views are ordered
+/// invalid-escape **before** control-char on purpose: a model that emits a lone
+/// backslash immediately followed by a raw newline (`\` + the newline byte) is a
+/// backslash-then-control-char pair; doubling the backslash first
+/// (`\\` + raw newline) lets the control-char view then escape the newline
+/// (`\\` + `\n`), reproducing the intended two characters. Running control-char
+/// first would instead treat the raw newline as the (invalid) escape target of
+/// the backslash and leave it a raw control byte.
 pub fn recover_json_view(s: &str) -> Cow<'_, str> {
-    match escape_json_string_control_chars(s) {
-        // No control-char defect: run the trailing-comma view directly on the
-        // borrowed input so its own borrow/owned distinction flows through.
-        Cow::Borrowed(borrowed) => strip_json_trailing_commas(borrowed),
-        // Control chars were escaped: also strip any trailing comma from the
-        // recovered (owned) buffer and return the combined owned result.
-        Cow::Owned(escaped) => Cow::Owned(strip_json_trailing_commas(&escaped).into_owned()),
+    // Step 1: double any invalid backslash escape (string-literal aware).
+    let step1 = escape_json_string_invalid_escapes(s);
+    // Step 2: escape any unescaped control char inside a string literal, carrying
+    // the borrow/owned distinction through so a full no-op stays borrowed.
+    let step2 = match step1 {
+        Cow::Borrowed(b) => escape_json_string_control_chars(b),
+        Cow::Owned(o) => Cow::Owned(escape_json_string_control_chars(&o).into_owned()),
+    };
+    // Step 3: strip any structural trailing comma outside string literals.
+    match step2 {
+        Cow::Borrowed(b) => strip_json_trailing_commas(b),
+        Cow::Owned(o) => Cow::Owned(strip_json_trailing_commas(&o).into_owned()),
     }
 }
 
@@ -630,27 +780,32 @@ pub fn extract_json_payload(raw: &str) -> Option<String> {
 /// consolidation, outcome, decide, orient) reads its structured decision by
 /// extracting the balanced `{…}` object and `serde_json`-deserializing it.
 /// [`extract_json_payload`] strips the banner / ANSI / log noise but returns
-/// the object body **verbatim**, so two common real-world LLM JSON defects
+/// the object body **verbatim**, so three common real-world LLM JSON defects
 /// survive into the payload and fail a strict `serde_json::from_str`:
 ///
 ///  1. a `,` immediately before a closing `}`/`]` (the trailing comma,
-///     issue #2658), and
+///     issue #2658),
 ///  2. an UNescaped ASCII control character (a raw newline/tab/CR) inside a
 ///     string value — the shape a model emits for a multi-line
-///     `content`/`rationale` field.
+///     `content`/`rationale` field, and
+///  3. an INVALID backslash escape inside a string value — a lone `\` not
+///     followed by a JSON escape initiator, the shape a model emits for a
+///     Windows path (`C:\Users`), a regex (`\d+`), or a LaTeX fragment
+///     (`\alpha`).
 ///
 /// Before this helper each phase parsed strictly and silently dropped its whole
-/// structured decision on either stray byte, falling back to a permissive
+/// structured decision on any one stray byte, falling back to a permissive
 /// default and discarding the reasoner's actual judgment.
 ///
 /// Recovery retries the strict parse on the composed [`recover_json_view`]
-/// (control-character escaping + trailing-comma stripping). Each sub-view is a
-/// *provable no-op on valid JSON* — it returns [`Cow::Borrowed`] byte-for-byte
-/// unchanged unless its specific defect is present — so recovery is attempted
-/// **only** when a view actually rewrote the payload (the [`Cow::Owned`] arm).
-/// Any other malformed shape (unquoted key, elided element, missing value)
-/// yields [`Cow::Borrowed`] and returns `None` unchanged: leniency never widens
-/// beyond the two named defects and a genuine parse error is never masked.
+/// (invalid-escape doubling + control-character escaping + trailing-comma
+/// stripping). Each sub-view is a *provable no-op on valid JSON* — it returns
+/// [`Cow::Borrowed`] byte-for-byte unchanged unless its specific defect is
+/// present — so recovery is attempted **only** when a view actually rewrote the
+/// payload (the [`Cow::Owned`] arm). Any other malformed shape (unquoted key,
+/// elided element, missing value) yields [`Cow::Borrowed`] and returns `None`
+/// unchanged: leniency never widens beyond the three named defects and a genuine
+/// parse error is never masked.
 pub fn extract_and_parse_json<T: serde::de::DeserializeOwned>(raw: &str) -> Option<T> {
     let payload = extract_json_payload(raw)?;
     match serde_json::from_str::<T>(&payload) {
@@ -1084,6 +1239,181 @@ mod tests {
         assert_eq!(v["a"], "café\n日本");
     }
 
+    // ---- escape_json_string_invalid_escapes ------------------------------
+
+    #[test]
+    fn escape_invalid_escapes_valid_json_is_borrowed_zero_copy() {
+        // Valid JSON (every backslash is a legitimate escape) borrows unchanged.
+        for s in [
+            r#"{"a": "b"}"#,
+            r#"{"a": "line1\nline2"}"#,    // \n is a valid escape
+            r#"{"a": "quote \" here"}"#,   // \" is a valid escape
+            r#"{"a": "back \\ slash"}"#,   // \\ is a valid escape (not re-doubled)
+            r#"{"a": "tab\tend"}"#,        // \t is a valid escape
+            r#"{"a": "u \u00e9 nicode"}"#, // \u is a valid escape initiator
+            r#"{"a": "slash \/ ok"}"#,     // \/ is a valid escape
+            r#"{"items": ["x", "y"], "n": 3}"#,
+        ] {
+            assert!(
+                matches!(escape_json_string_invalid_escapes(s), Cow::Borrowed(_)),
+                "expected borrow for {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn escape_invalid_escapes_doubles_lone_backslash_inside_string() {
+        // A regex `\d+` inside a string: the lone `\` is not a valid escape and
+        // is doubled to a literal backslash, making the payload strict-parseable.
+        let raw = r#"{"pattern": "\d+ digits"}"#;
+        let fixed = escape_json_string_invalid_escapes(raw);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        assert_eq!(fixed.as_ref(), r#"{"pattern": "\\d+ digits"}"#);
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["pattern"], r"\d+ digits");
+    }
+
+    #[test]
+    fn escape_invalid_escapes_doubles_windows_path_backslashes() {
+        // A Windows path `C:\Users\model` — each lone backslash is doubled.
+        let raw = "{\"path\": \"C:\\Users\\model\"}";
+        let fixed = escape_json_string_invalid_escapes(raw);
+        assert_eq!(fixed.as_ref(), r#"{"path": "C:\\Users\\model"}"#);
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["path"], r"C:\Users\model");
+    }
+
+    #[test]
+    fn escape_invalid_escapes_leaves_valid_escape_untouched_next_to_invalid() {
+        // A string mixing a VALID escape (`\n`) and an INVALID one (`\a`): only
+        // the invalid backslash is doubled; the valid `\n` is preserved as-is.
+        let raw = "{\"a\": \"line\\none\\atwo\"}";
+        let fixed = escape_json_string_invalid_escapes(raw);
+        assert_eq!(fixed.as_ref(), r#"{"a": "line\none\\atwo"}"#);
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["a"], "line\none\\atwo");
+    }
+
+    #[test]
+    fn escape_invalid_escapes_respects_escaped_quote_in_string() {
+        // The `\"` is a valid escape and must NOT end the string, so a lone
+        // backslash that follows it is still inside the string and gets doubled.
+        let raw = "{\"a\": \"say \\\"hi\\\" then \\x done\"}";
+        let fixed = escape_json_string_invalid_escapes(raw);
+        assert_eq!(fixed.as_ref(), r#"{"a": "say \"hi\" then \\x done"}"#);
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["a"], r#"say "hi" then \x done"#);
+    }
+
+    #[test]
+    fn escape_invalid_escapes_leaves_backslash_outside_string_untouched() {
+        // A backslash OUTSIDE any string is not a string-interior defect (that
+        // shape is not valid JSON at all); the view leaves it for the strict
+        // parse to reject and borrows the input unchanged.
+        let raw = r#"{"a": "b"} \ trailing"#;
+        assert!(matches!(
+            escape_json_string_invalid_escapes(raw),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn escape_invalid_escapes_preserves_multibyte_utf8() {
+        // A multibyte body char (é, 日) plus a lone backslash: the backslash is
+        // doubled, the multibyte bytes pass through intact.
+        let raw = "{\"a\": \"café \\d 日本\"}";
+        let fixed = escape_json_string_invalid_escapes(raw);
+        assert_eq!(fixed.as_ref(), r#"{"a": "café \\d 日本"}"#);
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["a"], r"café \d 日本");
+    }
+
+    #[test]
+    fn escape_invalid_escapes_valid_escaped_backslash_adjacent_to_invalid() {
+        // Adversarial: a valid escaped backslash `\\` IMMEDIATELY followed by an
+        // invalid escape `\d`. The `\\` must be consumed as a unit (not seen as a
+        // backslash that then swallows the next `\`), and only the trailing lone
+        // backslash doubled. Bytes in the string body: \ \ \ d
+        // -> valid `\\` (one literal backslash) + invalid `\d` (literal `\` + d).
+        let raw = "{\"a\": \"\\\\\\d\"}";
+        let fixed = escape_json_string_invalid_escapes(raw);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        assert_eq!(fixed.as_ref(), r#"{"a": "\\\\d"}"#);
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["a"], r"\\d");
+    }
+
+    #[test]
+    fn escape_invalid_escapes_terminated_single_backslash_body() {
+        // A clearly-terminated string body `x\y` (x, lone backslash, y): the lone
+        // backslash is doubled to a parseable single-backslash string.
+        let terminated = "{\"a\": \"x\\y\"}"; // body: x, backslash, y
+        let fixed = escape_json_string_invalid_escapes(terminated);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        assert_eq!(fixed.as_ref(), r#"{"a": "x\\y"}"#);
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["a"], r"x\y");
+    }
+
+    #[test]
+    fn escape_invalid_escapes_trailing_backslash_at_end_of_input_no_panic() {
+        // A lone backslash as the very last byte (truncated capture): the
+        // bytes.get(i + 1) == None arm must double it without panicking. The
+        // string stays unterminated so it is not spuriously accepted downstream.
+        let raw = "{\"a\": \"tail\\"; // ends with a lone backslash, no closing quote
+        let fixed = escape_json_string_invalid_escapes(raw);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        assert_eq!(fixed.as_ref(), "{\"a\": \"tail\\\\");
+        // Still not valid JSON (unterminated string) — recovery never masks that.
+        assert!(serde_json::from_str::<serde_json::Value>(fixed.as_ref()).is_err());
+    }
+
+    #[test]
+    fn recover_json_view_recovers_invalid_escape_only() {
+        // A lone backslash (regex) with no other defect: owned and parseable.
+        let fixed = recover_json_view(r#"{"pattern": "\d+"}"#);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["pattern"], r"\d+");
+    }
+
+    #[test]
+    fn recover_json_view_composes_all_three_defects() {
+        // Invalid escape (`\d`), raw control char (newline), AND a trailing comma
+        // in one payload: all three recovery views compose to a parseable object.
+        let raw = "{\"a\": \"re \\d\nmulti\", \"b\": [1, 2,],}";
+        let fixed = recover_json_view(raw);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["a"], "re \\d\nmulti");
+        assert_eq!(v["b"], serde_json::json!([1, 2]));
+    }
+
+    #[test]
+    fn recover_json_view_orders_invalid_escape_before_control_char() {
+        // The ordering hazard: a lone backslash immediately followed by a RAW
+        // newline byte (`\` + 0x0a) is a backslash-then-newline pair. Doubling the
+        // backslash first (`\\` + raw newline) lets the control-char view then
+        // escape the newline, reproducing the intended two characters. If the
+        // control-char view ran first it would treat the raw newline as the
+        // backslash's (invalid) escape target and leave it a raw control byte,
+        // yielding invalid JSON.
+        let raw = "{\"a\": \"x\\\ny\"}"; // string body: x, backslash, newline, y
+        let fixed = recover_json_view(raw);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        let v: serde_json::Value =
+            serde_json::from_str(fixed.as_ref()).expect("ordered recovery is parseable");
+        assert_eq!(v["a"], "x\\\ny");
+    }
+
+    #[test]
+    fn recover_json_view_invalid_escape_only_still_owned() {
+        assert!(matches!(
+            recover_json_view(r#"{"a": "C:\Temp"}"#),
+            Cow::Owned(_)
+        ));
+    }
+
     // ---- recover_json_view (composed) ------------------------------------
 
     #[test]
@@ -1149,6 +1479,50 @@ mod tests {
         let env: Env = extract_and_parse_json(raw).expect("both defects recovered");
         assert_eq!(env.decision, "admit");
         assert_eq!(env.items, vec!["x\ny".to_string()]);
+    }
+
+    #[test]
+    fn extract_and_parse_json_recovers_invalid_escape_in_string() {
+        // End-to-end: a `rationale`/`items` value carrying a regex `\d+` (a lone
+        // backslash) is recovered through the shared chokepoint instead of
+        // dropping the whole decision on the invalid escape.
+        let raw = r#"{"decision": "admit", "items": ["match \d+ digits"]}"#;
+        let env: Env = extract_and_parse_json(raw).expect("invalid escape recovered");
+        assert_eq!(env.decision, "admit");
+        assert_eq!(env.items, vec![r"match \d+ digits".to_string()]);
+    }
+
+    #[test]
+    fn extract_and_parse_json_recovers_invalid_escape_through_banner_noise() {
+        // Banner + interleaved ANSI log line AND a Windows path (lone backslashes)
+        // inside a string: the extractor strips the noise, then recovery doubles
+        // the invalid escapes.
+        let raw = "Recipe: ooda SUCCESS (3.0s)\n\
+                   \x1b[2m2026-07-20T00:00:00.000000Z\x1b[0m INFO decide\n\
+                   {\"decision\": \"defer\", \"items\": [\"C:\\Users\\log\"]}";
+        let env: Env = extract_and_parse_json(raw).expect("noise + invalid escape recovered");
+        assert_eq!(env.decision, "defer");
+        assert_eq!(env.items, vec![r"C:\Users\log".to_string()]);
+    }
+
+    #[test]
+    fn extract_and_parse_json_recovers_all_three_defects_together() {
+        // A single payload with all three recoverable defects: an invalid escape
+        // (`\d`), a raw control char (newline), and a trailing comma.
+        let raw = "{\"decision\": \"admit\", \"items\": [\"re \\d\nline\",],}";
+        let env: Env = extract_and_parse_json(raw).expect("all three defects recovered");
+        assert_eq!(env.decision, "admit");
+        assert_eq!(env.items, vec!["re \\d\nline".to_string()]);
+    }
+
+    #[test]
+    fn extract_and_parse_json_none_for_non_escape_malformed() {
+        // Leniency never widens past the three named defects: an unquoted key is
+        // still a miss even though the new invalid-escape view exists.
+        assert_eq!(
+            extract_and_parse_json::<Env>(r#"{decision: "admit"}"#),
+            None
+        );
     }
 
     // ---- extract_verdict -------------------------------------------------

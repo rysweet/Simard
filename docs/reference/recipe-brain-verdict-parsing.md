@@ -52,6 +52,7 @@ related:
 > | Copilot launch-log preamble stripped at the shared chokepoint + decide/orient termination-cause wiring | **shipped** ([#2496](https://github.com/rysweet/Simard/issues/2496), generalising the distill regression PR [#2500](https://github.com/rysweet/Simard/pull/2500)) | `src/recipe_output/extract.rs`, `src/ooda_brain/recipe_brain.rs` |
 > | Trailing-comma recovery wired into every reasoner parse site via the shared `extract_and_parse_json` chokepoint | **shipped** ([#2658](https://github.com/rysweet/Simard/issues/2658) lineage) | `src/recipe_output/extract.rs`, `src/ooda_brain/recipe_brain.rs` |
 > | Unescaped-control-character recovery (raw newline/tab/CR inside a string value) composed with trailing-comma recovery in `recover_json_view`, wired into the same chokepoint | **shipped** (#2658 lineage) | `src/recipe_output/extract.rs`, `src/ooda_brain/recipe_brain.rs` |
+> | Invalid-backslash-escape recovery (a lone `\` inside a string value — a Windows path / regex / LaTeX fragment) composed into `recover_json_view` ahead of the control-char view, wired into the same chokepoint | **shipped** (#2658 lineage) | `src/recipe_output/extract.rs`, `src/ooda_brain/recipe_brain.rs` |
 >
 > Everything on this page describes code that exists today. A reader six months
 > from now should treat this as the current design, not a migration note.
@@ -515,25 +516,32 @@ For the design rationale, see
 ## Reasoner JSON recovery at the parse chokepoint (#2658 lineage)
 
 The shared extractor `recipe_output::extract_json_payload` strips banner / ANSI /
-log noise but returns the balanced `{…}` object body **verbatim**. Two common
+log noise but returns the balanced `{…}` object body **verbatim**. Three common
 real-world LLM JSON defects therefore survive into the extracted payload and fail
 a strict `serde_json::from_str`:
 
-1. a **trailing comma** before a closing `}`/`]` (issue #2658), and
+1. a **trailing comma** before a closing `}`/`]` (issue #2658),
 2. an **unescaped ASCII control character** (a raw newline/tab/CR) inside a
    string value — the shape a model emits for a multi-line `content`/`rationale`
    field; `serde_json` is spec-strict and rejects it with
-   `control character (\u0000-\u001F) found while parsing a string`.
+   `control character (\u0000-\u001F) found while parsing a string`, and
+3. an **invalid backslash escape** inside a string value — a lone `\` not
+   followed by a JSON escape initiator (`" \ / b f n r t u`), the shape a model
+   emits for a Windows path (`C:\Users`), a regular expression (`\d+`), or a
+   LaTeX/Markdown fragment (`\alpha`); `serde_json` rejects it with `invalid
+   escape` while parsing a string.
 
 Every reasoner parse site used to parse that payload strictly
 (`extract_json_payload(text)?` → `serde_json::from_str(&payload).ok()?`), so one
-stray comma OR one literal newline silently dropped the model's whole structured
-decision and the phase fell back to its deterministic default (a parse-failure
-default, per the section above — *not* a real model decision).
+stray comma, one literal newline, OR one lone backslash silently dropped the
+model's whole structured decision and the phase fell back to its deterministic
+default (a parse-failure default, per the section above — *not* a real model
+decision).
 
-Both recovery views (`strip_json_trailing_commas`, the pre-existing #2658 view,
-and `escape_json_string_control_chars`) are composed by `recover_json_view` and
-wired into these reasoner sites through one shared chokepoint:
+All three recovery views (`strip_json_trailing_commas`, the pre-existing #2658
+view; `escape_json_string_control_chars`; and `escape_json_string_invalid_escapes`)
+are composed by `recover_json_view` and wired into these reasoner sites through
+one shared chokepoint:
 
 ```rust
 pub fn extract_and_parse_json<T: serde::de::DeserializeOwned>(raw: &str) -> Option<T> {
@@ -541,9 +549,10 @@ pub fn extract_and_parse_json<T: serde::de::DeserializeOwned>(raw: &str) -> Opti
     match serde_json::from_str::<T>(&payload) {
         Ok(value) => Some(value),
         // Retry ONLY when a recovery view actually rewrote the payload (the Owned
-        // arm). recover_json_view composes escape_json_string_control_chars +
-        // strip_json_trailing_commas; each is a provable no-op (Cow::Borrowed) on
-        // valid JSON, so any OTHER malformed shape returns None unchanged.
+        // arm). recover_json_view composes escape_json_string_invalid_escapes +
+        // escape_json_string_control_chars + strip_json_trailing_commas; each is a
+        // provable no-op (Cow::Borrowed) on valid JSON, so any OTHER malformed
+        // shape returns None unchanged.
         Err(_) => match recover_json_view(&payload) {
             Cow::Owned(recovered) => serde_json::from_str::<T>(&recovered).ok(),
             Cow::Borrowed(_) => None,
@@ -552,24 +561,31 @@ pub fn extract_and_parse_json<T: serde::de::DeserializeOwned>(raw: &str) -> Opti
 }
 ```
 
-`recover_json_view` escapes any literal control character sitting **inside** a
-string literal (`\b \t \n \f \r`, else `\u00XX`) and then strips trailing commas.
-The two views cannot interfere: escaping only touches bytes inside string
-literals, comma-stripping only touches structural commas outside them. Both are
-string-literal aware, so a comma or control byte that is legitimate string
-content is preserved, and a raw newline/tab used as JSON whitespace *between*
-tokens is left untouched.
+`recover_json_view` first doubles any invalid backslash escape sitting **inside**
+a string literal (`\d` → `\\d`), then escapes any literal control character
+inside a string literal (`\b \t \n \f \r`, else `\u00XX`), then strips trailing
+commas. The three views cannot interfere: the two string views only touch bytes
+inside string literals, comma-stripping only touches structural commas outside
+them. The two string views are ordered invalid-escape **before** control-char on
+purpose — a lone backslash immediately followed by a raw newline (`\` + the
+newline byte) is a backslash-then-control-char pair, and doubling the backslash
+first lets the control-char view then escape the newline; running control-char
+first would treat the raw newline as the backslash's (invalid) escape target and
+leave it a raw control byte. All three are string-literal aware, so a comma,
+control byte, or backslash that is legitimate string content is preserved, and a
+raw newline/tab used as JSON whitespace *between* tokens is left untouched.
 
 Sites routed through it in `src/ooda_brain/recipe_brain.rs`:
 `parse_admission_decision`, `parse_resource_admission_decision`,
 `parse_idea_dedup_decision`, `parse_idea_consolidation`, `parse_outcome_decision`,
 `extract_decision_envelope` (the decide path), and `extract_orient_envelope`.
 
-Leniency never widens beyond these two named defects: an unquoted key, an
+Leniency never widens beyond these three named defects: an unquoted key, an
 elided array element, or a missing value still yields `None` (a loud parse
 miss + ladder escalation), exactly as before. This improves reasoner reliability
-— a genuine decision that is well-formed except for one comma or one literal
-newline is now honored instead of discarded — without accepting any broken JSON.
+— a genuine decision that is well-formed except for one comma, one literal
+newline, or one lone backslash is now honored instead of discarded — without
+accepting any broken JSON.
 
 ---
 
@@ -577,7 +593,7 @@ newline is now honored instead of discarded — without accepting any broken JSO
 
 | Module | Coverage |
 |--------|----------|
-| `src/recipe_output/extract.rs` | **`issue_2496_launcher_tests`**: each Copilot launcher shape dropped by `is_copilot_launcher_line` / `is_noise_line` (the `ℹ NODE_OPTIONS=… (saved preference)` info marker, `Run 'copilot update'…`, `launching copilot binary=… version="GitHub Copilot CLI 1.0.66-2."`, leading `INFO`/`WARN` launcher lines); payload-recovery cases (a launcher+ANSI preamble wrapped around a valid action keyword, a bare urgency decimal, and a `{…}` JSON body, each surviving the clean); negative/safety cases (a `{`-leading line, an action keyword, a bare decimal, and a verdict keyword are **never** dropped); and the `Cow::Borrowed` zero-copy clean-path assertion on noise-free input. **JSON recovery views**: `strip_json_trailing_commas` (borrow on valid JSON; strip before `}`/`]`; comma-in-string and escaped-quote preserved; multibyte-safe; other-malformed unchanged), `escape_json_string_control_chars` (borrow on valid/already-escaped JSON; escape raw newline/tab/CR and generic `\u00XX` inside a string; control bytes OUTSIDE strings left as whitespace; escaped-quote and multibyte preserved), and `recover_json_view` composing both (borrow on valid JSON; owned on either defect; other-malformed stays borrowed). **`extract_and_parse_json`** end-to-end recovery of a trailing comma and of an unescaped control character (each alone, both together, and through banner+ANSI+log noise), with a non-target-malformed body / no-object still returning `None`. |
+| `src/recipe_output/extract.rs` | **`issue_2496_launcher_tests`**: each Copilot launcher shape dropped by `is_copilot_launcher_line` / `is_noise_line` (the `ℹ NODE_OPTIONS=… (saved preference)` info marker, `Run 'copilot update'…`, `launching copilot binary=… version="GitHub Copilot CLI 1.0.66-2."`, leading `INFO`/`WARN` launcher lines); payload-recovery cases (a launcher+ANSI preamble wrapped around a valid action keyword, a bare urgency decimal, and a `{…}` JSON body, each surviving the clean); negative/safety cases (a `{`-leading line, an action keyword, a bare decimal, and a verdict keyword are **never** dropped); and the `Cow::Borrowed` zero-copy clean-path assertion on noise-free input. **JSON recovery views**: `strip_json_trailing_commas` (borrow on valid JSON; strip before `}`/`]`; comma-in-string and escaped-quote preserved; multibyte-safe; other-malformed unchanged), `escape_json_string_control_chars` (borrow on valid/already-escaped JSON; escape raw newline/tab/CR and generic `\u00XX` inside a string; control bytes OUTSIDE strings left as whitespace; escaped-quote and multibyte preserved), and `recover_json_view` composing both (borrow on valid JSON; owned on either defect; other-malformed stays borrowed). **`escape_json_string_invalid_escapes`** (borrow on valid JSON incl. `\\`/`\"`/`\n`/`\uXXXX`/`\/`; double a lone backslash from a regex `\d+` or a Windows path `C:\Users\model`; leave a valid escape untouched when adjacent to an invalid one; respect an escaped quote inside the string; leave a backslash OUTSIDE a string untouched; multibyte-safe), and the extended **`recover_json_view`** (recovers an invalid escape alone; composes all three defects; **orders invalid-escape before control-char** so a `\`+raw-newline pair recovers correctly). **`extract_and_parse_json`** end-to-end recovery of a trailing comma and of an unescaped control character (each alone, both together, and through banner+ANSI+log noise), plus of an invalid backslash escape (alone, through banner+ANSI+log noise, and with all three defects together), with a non-target-malformed body / no-object still returning `None`. |
 | `src/ooda_brain/recipe_brain.rs` | `extract_recipe_decision_output` success + decode/`success=false`/empty-`step_results` error cases; `parse_lifecycle_outcome` matrix; `run_escalation_ladder` recovery / exhaustion / invoke-error / disabled paths; `LadderTermination::cause_label` distinctness; `build_escalation_note` content pins; `build_lifecycle_metric_context` shape. **`issue_2421_tests`** + **`issue_2419_family_phase_tests`**: `parse_action_outcome` / `parse_orient_outcome` classification (parsed vs `DefaultEmpty`/`DefaultMalformed`), `build_decide_escalation_note` / `build_orient_escalation_note` / `build_phase_escalation_note` content (empty on `Base`), `brain_verdict_parsed_total` context shape, and the generic `run_brain_ladder` driving an arbitrary decision type. **`issue_2496_decide_orient_launcher_tests`**: `parse_action_outcome` and `parse_orient_outcome` fed a real Copilot 1.0.66-2 banner + ANSI-coloured `INFO`/`WARN` launcher lines wrapped around a valid decision / urgency decimal, asserting the decision parses (`Parsed`, not `DefaultMalformed`) and the version string `1.0.66-2` is not mined as the urgency; the **all-goals-`DefaultMalformed` stall regression** asserting that the same noisy capture across a batch of active goals now yields parsed decisions (the deadlock no longer reproduces); and the decide/orient `cause` wiring (a parse-failure default carries `ladder_exhausted` / `ladder_invoke_error`, distinct from a genuine decision). |
 | `src/memory_consolidation/distillation.rs` | **`issue_2496_distill_launcher_tests`** (built on the merged PR [#2500](https://github.com/rysweet/Simard/pull/2500) regression): the distill fact parser still recovers `{ "facts": […] }` from a launcher-preamble-wrapped capture, now via the shared `is_noise_line` chokepoint rather than a private cleaner. |
 | `src/stewardship/recipe_merge_judge.rs` | `parse_merge_verdict_from_text` keyword matrix (ready / not_ready / unclear / empty / no-keyword `Err`). **`issue_2428_tests`** + **`issue_2428_production_tests`**: JSON-envelope extraction, `parse_merge_outcome` (structured `parse_judge_response` first, then keyword prose fallback), prose keyword fallback, and fail-closed `Verdict::Unclear` on an unparseable verdict. |
