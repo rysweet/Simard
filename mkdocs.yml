@@ -232,6 +232,7 @@ nav:
     - Diagnose and Recover Lost Creative-Ideas Goals: howto/diagnose-lost-creative-ideas-goals.md
     - Clean Fixture Leaks: howto/clean-fixture-leaks.md
     - Verify and Roll Back a Self-Deploy: howto/verify-and-roll-back-a-self-deploy.md
+    - Diagnose and Confirm the Canary Gate Env-Isolation Fix: howto/canary-gate-env-isolation.md
     - Verify and Repair PATH-Entrypoint Parity: howto/verify-path-entrypoint-parity.md
     - Run Self-Deploy from Any Directory: howto/run-self-deploy-from-any-directory.md
     - Check for Updates: howto/check-for-updates.md
@@ -330,6 +331,7 @@ nav:
     - Multi-Binary Self-Update: reference/multi-binary-self-update.md
     - Self-Deploy API: reference/self-deploy-api.md
     - Self-Deploy Source Prep & Warm Target Dir: reference/self-deploy-source-prep.md
+    - Canary Gate Env-Isolation Contract: reference/canary-gate-convergence.md
     - State-Root Resolution: reference/state-root-resolution.md
     - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
     - Runtime Contracts: reference/runtime-contracts.md
