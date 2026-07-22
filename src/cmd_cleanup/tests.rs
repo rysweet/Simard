@@ -307,17 +307,7 @@ fn corrupt_db_removed_when_older_than_threshold() {
         .unwrap()
         .set_times(times)
         .unwrap();
-    let old_home = std::env::var_os("HOME");
-    unsafe {
-        std::env::set_var("HOME", tmp.path());
-    }
-    let mut report = CleanupReport::default();
-    remove_old_corrupt_dbs(&mut report);
-    if let Some(h) = old_home {
-        unsafe {
-            std::env::set_var("HOME", h);
-        }
-    }
+    run_corrupt_cleanup_with_home(tmp.path());
     assert!(!old.exists(), "old corrupt DB should be removed");
     assert!(young.exists(), "young corrupt DB should survive");
     assert!(unrelated.exists(), "non-corrupt DB must never be touched");
@@ -374,17 +364,7 @@ fn corrupt_db_keep_bounds_quarantine_count() {
         paths.push(p);
     }
 
-    let old_home = std::env::var_os("HOME");
-    unsafe {
-        std::env::set_var("HOME", tmp.path());
-    }
-    let mut report = CleanupReport::default();
-    remove_old_corrupt_dbs(&mut report);
-    if let Some(h) = old_home {
-        unsafe {
-            std::env::set_var("HOME", h);
-        }
-    }
+    run_corrupt_cleanup_with_home(tmp.path());
 
     let remaining = paths.iter().filter(|p| p.exists()).count();
     assert_eq!(
@@ -702,20 +682,30 @@ fn backdate(path: &std::path::Path, days: u64) {
 }
 
 /// Run `remove_old_corrupt_dbs` with `HOME` pointed at `home`, restoring the
-/// previous value afterward. Serialized by the caller's
-/// `#[serial(cognitive_memory)]` attribute so the process-wide `HOME` mutation
+/// previous environment afterward. Serialized by the caller's
+/// `#[serial(cognitive_memory)]` attribute so the process-wide env mutation
 /// cannot race other tests that read the cognitive-memory store.
+///
+/// `remove_old_corrupt_dbs` resolves its target via
+/// [`crate::state_root::simard_state_root`], which honors `SIMARD_STATE_ROOT`
+/// **before** falling back to `$HOME/.simard`. Other tests in the binary set
+/// `SIMARD_STATE_ROOT` and some leak it (never restore it), so this helper must
+/// unset it for the duration of the call — otherwise cleanup scans the leaked
+/// path instead of `home/.simard` and reclaims nothing. Both env vars are
+/// restored to their prior values before returning.
 fn run_corrupt_cleanup_with_home(home: &std::path::Path) -> CleanupReport {
     let old_home = std::env::var_os("HOME");
+    let old_state_root = std::env::var_os(crate::state_root::STATE_ROOT_ENV);
+    // SAFETY: serialized via the caller's #[serial(cognitive_memory)]; both
+    // vars are restored below before any assertion can unwind.
     unsafe {
         std::env::set_var("HOME", home);
+        std::env::remove_var(crate::state_root::STATE_ROOT_ENV);
     }
     let mut report = CleanupReport::default();
     remove_old_corrupt_dbs(&mut report);
-    match old_home {
-        Some(h) => unsafe { std::env::set_var("HOME", h) },
-        None => unsafe { std::env::remove_var("HOME") },
-    }
+    restore_env("HOME", old_home);
+    restore_env(crate::state_root::STATE_ROOT_ENV, old_state_root);
     report
 }
 
@@ -940,12 +930,6 @@ fn corrupt_db_reclaims_state_subdir_quarantines_bounded() {
     let state = tmp.path().join(".simard").join("state");
     std::fs::create_dir_all(&state).unwrap();
 
-    // Resolve the state root via HOME/.simard: ensure no leaked SIMARD_STATE_ROOT
-    // from another test redirects `resolve_subdir("state")` elsewhere.
-    let prev_state_root = std::env::var_os(crate::state_root::STATE_ROOT_ENV);
-    // SAFETY: serialized via #[serial(cognitive_memory)]; restored below.
-    unsafe { std::env::remove_var(crate::state_root::STATE_ROOT_ENV) };
-
     // Aged quarantines under state/ — must be reclaimed (the accumulation bug).
     let aged = [
         "cognitive.corrupt-1700000000",
@@ -993,8 +977,6 @@ fn corrupt_db_reclaims_state_subdir_quarantines_bounded() {
     std::fs::write(&live_wal, b"wal").unwrap();
 
     let report = run_corrupt_cleanup_with_home(tmp.path());
-
-    restore_env(crate::state_root::STATE_ROOT_ENV, prev_state_root);
 
     // Aged state/ quarantines reclaimed.
     for q in &aged {
