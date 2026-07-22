@@ -8,9 +8,8 @@
 //! finishing or making measurable progress. The triage had to pick exactly one
 //! course-correction:
 //!
-//!   * `rewrite-done-gate`         — the finish line is unmeasurable; re-scope it
-//!                                   so completion is machine-checkable,
-//!   * `complete-delivered-goal`   — a single merged PR already delivered it, or
+//!   * `rewrite-done-gate` — the finish line is unmeasurable; re-scope it so completion is machine-checkable,
+//!   * `complete-delivered-goal` — a single merged PR already delivered it, or
 //!   * `ask-operator-one-question` — a human decision is genuinely required.
 //!
 //! The chosen course-correction is **`rewrite-done-gate`**, landed as an
