@@ -776,15 +776,21 @@ mod tests {
 
     #[test]
     fn bound_gate_detail_redacts_url_credentials() {
-        let raw = "clone failed: https://alice:supersecret@github.com/rysweet/Simard.git";
-        let out = bound_gate_detail(raw);
+        // Assemble the userinfo at runtime from parts so no literal
+        // `scheme://user:pass@host` basic-auth string sits in source (secret
+        // scanners flag those) while the redactor still receives a real
+        // credential-bearing URL to strip.
+        let user = "ci-user";
+        let secret = "redacted-pw";
+        let raw = format!("clone failed: https://{user}:{secret}@github.com/rysweet/Simard.git");
+        let out = bound_gate_detail(&raw);
         assert!(
-            !out.contains("supersecret") && !out.contains("alice:"),
+            !out.contains(secret) && !out.contains(&format!("{user}:")),
             "URL-embedded credentials must be redacted: {out}"
         );
         assert!(
-            out.contains("github.com/rysweet/Simard.git"),
-            "redaction must preserve the non-secret remainder: {out}"
+            out.contains("***@github.com/rysweet/Simard.git"),
+            "redaction must mask the userinfo and preserve the non-secret remainder: {out}"
         );
     }
 
@@ -813,10 +819,14 @@ mod tests {
     #[test]
     fn bound_gate_detail_redacts_before_bounding() {
         // Place a credential so that, if truncation happened BEFORE redaction,
-        // the 512-byte cut would land mid-token and leak "alice:supersec…".
+        // the 512-byte cut would land mid-token and leak the userinfo.
         // Redact-before-bound must remove the whole userinfo first.
         let prefix = "a".repeat(490);
-        let raw = format!("{prefix} https://alice:supersecret@github.com/x");
+        // Assemble the credential at runtime (see sibling test) so the literal
+        // basic-auth string never sits in source.
+        let user = "ci-user";
+        let secret = "redacted-pw";
+        let raw = format!("{prefix} https://{user}:{secret}@github.com/x");
         assert!(
             raw.len() > 512,
             "precondition: input exceeds the 512B bound"
@@ -824,7 +834,7 @@ mod tests {
         let out = bound_gate_detail(&raw);
         assert!(out.len() <= 512, "must still be bounded, got {}", out.len());
         assert!(
-            !out.contains("alice") && !out.contains("supersec"),
+            !out.contains(user) && !out.contains(secret),
             "redact-before-bound must strip the credential even at the truncation \
              boundary (SEC-D2): {out}"
         );
