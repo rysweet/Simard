@@ -422,6 +422,15 @@ pub(crate) fn validate_module_path(module_path: &str) -> Result<(), CorrectionRe
     if description_marks_docs_only(module_path) {
         return Err(reject());
     }
+    // Symmetrically, a path that reads as a standing marker (e.g.
+    // `perpetual/standing` — pure letters and `/`, which the char-set above
+    // permits) would, once spliced into the description, durably reclassify the
+    // one-off coverage slice as a perpetual standing goal that never completes,
+    // defeating the course-correction. Reject it fail-closed, mirroring the
+    // `label` guard in `validate_tracking_ref`.
+    if description_marks_standing(module_path) {
+        return Err(reject());
+    }
     Ok(())
 }
 

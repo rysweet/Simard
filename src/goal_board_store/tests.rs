@@ -855,6 +855,14 @@ fn module_path_rejects_traversal_absolute_and_shell_metacharacters() {
         "docs-only",
         "src/docs-only/mod.rs",
         "documentation-only",
+        // Standing-marker smuggling: `perpetual/standing` / `standing/perpetual`
+        // are pure letters + `/`, which the char-set permits, but once spliced
+        // into the persisted description they read as a standing marker and
+        // durably reclassify the one-off coverage slice as a perpetual goal that
+        // never completes. Must be rejected fail-closed, mirroring the label
+        // guard.
+        "perpetual/standing",
+        "standing/perpetual",
     ] {
         assert!(
             matches!(

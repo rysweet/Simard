@@ -91,9 +91,9 @@ pub use priority_kind::{SyntheticPriorityKind, is_synthetic_id};
 pub use review::review_outcomes;
 pub use summary::summarize_cycle_report;
 pub use types::{
-    ActionKind, ActionOutcome, CycleReport, EnvironmentSnapshot, GoalSnapshot, IdentityCognition,
-    Observation, OodaClients, OodaConfig, OodaPhase, OodaState, OodaStateSnapshot,
-    OrchestratorSessionFactory, PlannedAction, Priority,
+    ActionKind, ActionOutcome, CycleReport, DEFAULT_MAX_CONCURRENT_ACTIONS, EnvironmentSnapshot,
+    GoalSnapshot, IdentityCognition, Observation, OodaClients, OodaConfig, OodaPhase, OodaState,
+    OodaStateSnapshot, OrchestratorSessionFactory, PlannedAction, Priority,
 };
 
 use crate::error::SimardResult;
