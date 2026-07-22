@@ -39,6 +39,10 @@
 //!   promotions, user decisions, recipe failures.
 //! - OVERRIDE: any episode carrying a failure/error summary is STORED even if
 //!   it also matches a drop marker (A7).
+//! - PRECEDENCE: a meaningful signal (handoff, goal transition, user decision,
+//!   completed action) is STORED even when the episode also matches a drop
+//!   marker — the same "higher-value signal beats the drop rule" ordering the
+//!   failure override applies. Only pure-noise episodes drop.
 
 use crate::memory_consolidation::classifier::{
     EpisodeMetadata, EventKind, IntakeContext, classify,
@@ -591,6 +595,129 @@ fn compound_pass_does_not_resurrect_lowercase_look_alikes() {
         assert!(
             !is_failure_store(&decision),
             "lowercase look-alike must stay excluded by the compound pass: {phrase:?} → {decision:?}"
+        );
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// PRECEDENCE: a meaningful signal beats the known-noise drop rule
+//
+// A durable episodic — handoff, goal-board transition, user decision, completed
+// action — must be RETAINED even when the same episode also carries a
+// bookkeeping noise phrase (`flushing working memory`, `completed and
+// persisted`, `continue_skipping`, …). Before this ordering the noise-drop rule
+// ran first and silently discarded these dual-signal episodes, losing a durable
+// signal to distillation (a fact-yield regression). This mirrors the failure
+// override, which already beats the drop rule.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// A handoff log that ALSO mentions the `flushing working memory` noise marker
+/// must be stored as a handoff, not dropped.
+#[test]
+fn handoff_with_noise_marker_beats_drop() {
+    let decision = classify(
+        "handoff: transferred goal ship-feature to wt-7; flushing working memory to episodes",
+        "consolidation-persistence",
+        &ctx(Some("ship-feature"), Some(4)),
+    );
+    assert!(
+        decision.is_store(),
+        "a handoff co-mentioning a noise phrase must be stored, got {decision:?}"
+    );
+    let meta = decision
+        .metadata()
+        .expect("stored episode carries metadata");
+    assert!(
+        matches!(meta.event_kind, EventKind::Handoff),
+        "the durable signal classifies as Handoff, got {:?}",
+        meta.event_kind
+    );
+    assert!(
+        !meta.is_operational,
+        "a rescued meaningful episode is full-importance, not operational"
+    );
+}
+
+/// A goal-board promotion that ALSO carries a session-lifecycle noise marker
+/// must be stored as a promotion, not dropped.
+#[test]
+fn goal_promotion_with_noise_marker_beats_drop() {
+    let decision = classify(
+        "promoted goal ship-feature from backlog to active; session sess-9 completed and persisted",
+        "goal-curator",
+        &empty_ctx(),
+    );
+    assert!(
+        decision.is_store(),
+        "a goal promotion co-mentioning a noise phrase must be stored, got {decision:?}"
+    );
+    assert!(
+        matches!(
+            decision.metadata().unwrap().event_kind,
+            EventKind::GoalPromotion
+        ),
+        "the durable signal classifies as GoalPromotion"
+    );
+}
+
+/// A user decision recorded in the same line as `continue_skipping` /
+/// `no decision keyword` noise must be stored as a user decision, not dropped.
+#[test]
+fn user_decision_with_noise_marker_beats_drop() {
+    let decision = classify(
+        "user decided to pause deploys; brain: continue_skipping (no decision keyword this cycle)",
+        "act-outcome",
+        &empty_ctx(),
+    );
+    assert!(
+        decision.is_store(),
+        "a user decision co-mentioning noise must be stored, got {decision:?}"
+    );
+    assert!(
+        matches!(
+            decision.metadata().unwrap().event_kind,
+            EventKind::UserDecision
+        ),
+        "the durable signal classifies as UserDecision"
+    );
+}
+
+/// A durable action completion (a merged PR) that ALSO mentions a noise phrase
+/// must be stored as a completed action, not dropped.
+#[test]
+fn completed_action_with_noise_marker_beats_drop() {
+    let decision = classify(
+        "merged pull request #42; flushing working memory to episodes",
+        "act-outcome",
+        &empty_ctx(),
+    );
+    assert!(
+        decision.is_store(),
+        "a completed action co-mentioning noise must be stored, got {decision:?}"
+    );
+    assert!(
+        matches!(
+            decision.metadata().unwrap().event_kind,
+            EventKind::ActionCompleted
+        ),
+        "the durable signal classifies as ActionCompleted"
+    );
+}
+
+/// The precedence change is narrow: an episode carrying ONLY a noise marker
+/// (no meaningful signal) still drops. The rescue never re-admits pure noise.
+#[test]
+fn pure_noise_without_meaningful_signal_still_drops() {
+    for phrase in [
+        "Session sess-abc started with objective: ship the feature",
+        "Session sess-abc completed and persisted",
+        "Session sess-abc flushing working memory to episodes",
+        "brain: continue_skipping (no decision keyword found in latest cycle output)",
+    ] {
+        let decision = classify(phrase, "consolidation-persistence", &empty_ctx());
+        assert!(
+            decision.is_dropped(),
+            "pure-noise episode must still drop after the precedence change: {phrase:?} → {decision:?}"
         );
     }
 }

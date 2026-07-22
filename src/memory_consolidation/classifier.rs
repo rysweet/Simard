@@ -28,11 +28,18 @@
 //!    matches a drop marker (A7). Recipe-context failures classify as
 //!    [`EventKind::RecipeFailure`], everything else as
 //!    [`EventKind::ActionFailure`].
-//! 2. **Known-noise markers → Drop.** `started with objective`,
+//! 2. **Meaningful content → Store.** handoffs, goal promotions/archival,
+//!    user decisions, durable action completions. Evaluated BEFORE the
+//!    known-noise drop rule so a genuine durable signal is retained even when
+//!    the same episode also mentions a bookkeeping noise phrase (a handoff log
+//!    that ends `"… flushing working memory"`) — the same "higher-value signal
+//!    beats the drop rule" precedence the failure override (1) already applies.
+//!    Checking noise first dropped those dual-signal episodes, losing a durable
+//!    handoff / goal-transition / decision to distillation (a fact-yield loss).
+//! 3. **Known-noise markers → Drop.** `started with objective`,
 //!    `completed and persisted`, `flushing working memory`,
-//!    `continue_skipping`, `no decision keyword`.
-//! 3. **Meaningful content → Store.** handoffs, goal promotions/archival,
-//!    user decisions, durable action completions.
+//!    `continue_skipping`, `no decision keyword`. Only reached once rules 1–2
+//!    have found no higher-value signal, so a pure-noise episode still drops.
 //! 4. **Operational bookkeeping → DownScope.** Cross-session hydration
 //!    summaries and any otherwise-unmatched content are persisted at low
 //!    importance with `is_operational = true` (never dropped — only
@@ -276,6 +283,87 @@ fn downscope_meta(ctx: &IntakeContext) -> EpisodeMetadata {
     }
 }
 
+/// Detect a meaningful, full-importance episodic signal in the already-
+/// lowercased `content_lc` / `source_lc`, returning the `Store` decision for the
+/// first signal that matches or `None` when no meaningful signal is present.
+///
+/// Split out of [`classify`] so the meaningful-signal check can run BEFORE the
+/// known-noise drop rule (`NOISE_MARKERS`). A durable episodic — a handoff, a
+/// goal-board transition, a user decision, a completed action — must be retained
+/// even when its free text ALSO contains a bookkeeping noise phrase (a handoff
+/// entry that ends `"… flushing working memory"`), exactly as the failure
+/// override already beats the drop rule. Running the drop rule first discarded
+/// those dual-signal episodes and lost them to distillation — a fact-yield
+/// regression this ordering closes. Content-driven so call sites need not
+/// pre-tag every event.
+fn meaningful_store(
+    content_lc: &str,
+    source_lc: &str,
+    ctx: &IntakeContext,
+) -> Option<IntakeDecision> {
+    // User decision.
+    if content_lc.contains("user decided")
+        || content_lc.contains("user decision")
+        || source_lc.contains("user-decision")
+    {
+        return Some(IntakeDecision::Store(store_meta(
+            0.85,
+            EventKind::UserDecision,
+            ctx,
+        )));
+    }
+    // Goal-board promotion / archival.
+    if content_lc.contains("promoted goal") || content_lc.contains("from backlog to active") {
+        return Some(IntakeDecision::Store(store_meta(
+            0.8,
+            EventKind::GoalPromotion,
+            ctx,
+        )));
+    }
+    if content_lc.contains("archived goal") || content_lc.contains("goal archival") {
+        return Some(IntakeDecision::Store(store_meta(
+            0.8,
+            EventKind::GoalArchival,
+            ctx,
+        )));
+    }
+    // Handoff between sessions / worktrees.
+    if content_lc.contains("handoff") || source_lc.contains("handoff") {
+        return Some(IntakeDecision::Store(store_meta(
+            0.8,
+            EventKind::Handoff,
+            ctx,
+        )));
+    }
+    // Durable action completion (opened/merged PR, etc.).
+    //
+    // `opened pr` / `pull request` are multi-word phrases that cannot embed in
+    // a single word, so a substring scan is already whole-word-safe for them.
+    // `merged`, by contrast, is a single token that a bare-substring scan also
+    // fires for inside `unmerged` / `submerged` — git vocabulary naming an
+    // outstanding, NOT-completed merge — so it is matched at word boundaries.
+    if content_lc.contains("opened pr")
+        || content_lc.contains("pull request")
+        || contains_word(content_lc, "merged")
+    {
+        return Some(IntakeDecision::Store(store_meta(
+            0.7,
+            EventKind::ActionCompleted,
+            ctx,
+        )));
+    }
+    // Goal-curator board summaries are durable goal-state transitions worth
+    // keeping even when the free text does not name the move explicitly.
+    if source_lc == "goal-curator" {
+        return Some(IntakeDecision::Store(store_meta(
+            0.8,
+            EventKind::GoalArchival,
+            ctx,
+        )));
+    }
+    None
+}
+
 /// Classify one episode into [`IntakeDecision::Drop`],
 /// [`IntakeDecision::DownScope`], or [`IntakeDecision::Store`].
 ///
@@ -285,7 +373,7 @@ pub fn classify(content: &str, source_label: &str, ctx: &IntakeContext) -> Intak
     let content_lc = content.to_lowercase();
     let source_lc = source_label.to_lowercase();
 
-    // Rule 1 — failure override (highest priority, beats drop markers).
+    // Rule 1 — failure override (highest priority, beats every rule below).
     // Uses the ORIGINAL-case `content` so the compound-type-name pass can see
     // PascalCase error types (`ParseError`); the lowercase pass is internal.
     if has_failure_signal(content) {
@@ -297,49 +385,18 @@ pub fn classify(content: &str, source_label: &str, ctx: &IntakeContext) -> Intak
         return IntakeDecision::Store(store_meta(0.9, kind, ctx));
     }
 
-    // Rule 2 — known-noise markers → drop.
-    if contains_any(&content_lc, NOISE_MARKERS) {
-        return IntakeDecision::Drop;
+    // Rule 2 — meaningful content → store. Evaluated BEFORE the known-noise
+    // drop rule so a durable signal (handoff, goal transition, user decision,
+    // completed action) is retained even when the same episode also mentions a
+    // bookkeeping noise phrase — mirroring the failure override above.
+    if let Some(decision) = meaningful_store(&content_lc, &source_lc, ctx) {
+        return decision;
     }
 
-    // Rule 3 — meaningful content → store (content-driven so call sites do
-    // not have to pre-tag every event).
-    //
-    // User decision.
-    if content_lc.contains("user decided")
-        || content_lc.contains("user decision")
-        || source_lc.contains("user-decision")
-    {
-        return IntakeDecision::Store(store_meta(0.85, EventKind::UserDecision, ctx));
-    }
-    // Goal-board promotion / archival.
-    if content_lc.contains("promoted goal") || content_lc.contains("from backlog to active") {
-        return IntakeDecision::Store(store_meta(0.8, EventKind::GoalPromotion, ctx));
-    }
-    if content_lc.contains("archived goal") || content_lc.contains("goal archival") {
-        return IntakeDecision::Store(store_meta(0.8, EventKind::GoalArchival, ctx));
-    }
-    // Handoff between sessions / worktrees.
-    if content_lc.contains("handoff") || source_lc.contains("handoff") {
-        return IntakeDecision::Store(store_meta(0.8, EventKind::Handoff, ctx));
-    }
-    // Durable action completion (opened/merged PR, etc.).
-    //
-    // `opened pr` / `pull request` are multi-word phrases that cannot embed in
-    // a single word, so a substring scan is already whole-word-safe for them.
-    // `merged`, by contrast, is a single token that a bare-substring scan also
-    // fires for inside `unmerged` / `submerged` — git vocabulary naming an
-    // outstanding, NOT-completed merge — so it is matched at word boundaries.
-    if content_lc.contains("opened pr")
-        || content_lc.contains("pull request")
-        || contains_word(&content_lc, "merged")
-    {
-        return IntakeDecision::Store(store_meta(0.7, EventKind::ActionCompleted, ctx));
-    }
-    // Goal-curator board summaries are durable goal-state transitions worth
-    // keeping even when the free text does not name the move explicitly.
-    if source_lc == "goal-curator" {
-        return IntakeDecision::Store(store_meta(0.8, EventKind::GoalArchival, ctx));
+    // Rule 3 — known-noise markers → drop. Only reached when no higher-value
+    // signal (rule 1 or 2) matched, so a pure-noise episode still drops.
+    if contains_any(&content_lc, NOISE_MARKERS) {
+        return IntakeDecision::Drop;
     }
 
     // Rule 4 — operational bookkeeping / unmatched → down-scope (never drop).
