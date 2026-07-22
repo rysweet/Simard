@@ -428,8 +428,68 @@ pub(crate) fn classify_standing_idle(goal: &ActiveGoal) -> Option<StandingIdle> 
     }
 }
 
-/// Apply the shared standing-idle policy at a breaker site (issue #4399):
-/// [`classify_standing_idle`] decides, and this performs the matching side
+/// Per-cycle PR-liveness reconcile (NEW-1 Prong 2, PR #4428). Prunes every `pr`
+/// [`WipRef`] on each ACTIVE goal whose PR number is NOT in `open_prs`, so a
+/// merged/closed PR can no longer read as a LIVE in-flight ref through
+/// [`ActiveGoal::has_live_in_flight_ref`] and suppress the never-idle fault
+/// forever.
+///
+/// This is the reconcile step [`has_live_in_flight_ref`](ActiveGoal::has_live_in_flight_ref)
+/// assumes has already run this cycle. It is **pure and IO-free**: the caller
+/// fetches the open-PR set once per cycle (via the existing
+/// [`crate::stewardship::merge_authority::PrGhClient::list_open_prs`] path — NO
+/// new shell/gh parse) and passes the numbers in. Tests drive it directly with
+/// an in-memory set.
+///
+/// Decisions (see PR #4428 brief):
+/// * **ref_id parse** — `ref_id.trim_start_matches('#').parse::<u32>()`, matching
+///   the repo's existing normalization. A ref whose id does NOT parse is LEFT in
+///   place (with a warning) rather than pruned: a malformed id may still be a
+///   live PR, and dropping it could reintroduce the round-1 finding-#1 regression.
+/// * **fail-open** — the caller SKIPS this reconcile entirely when the open-PR
+///   fetch errors (prunes nothing that cycle), so a fetch blip can never wipe a
+///   live PR ref. On a genuine empty open set (`Ok([])`) all `pr` refs prune.
+/// * **scope** — ACTIVE (non-terminal) goals only; backlog/archived untouched.
+///
+/// Only `pr` refs are considered; every other kind (branch/session/engineer are
+/// handled by the stale-assignment sweep, issue is durable) passes through.
+///
+/// Returns the pruned `(goal_id, ref_id)` pairs so the caller can log exactly
+/// what was dropped (used by the prod wrapper's per-ref `tracing::info!`).
+pub(crate) fn prune_merged_pr_refs(
+    board: &mut GoalBoard,
+    open_prs: &HashSet<u32>,
+) -> Vec<(String, String)> {
+    let mut pruned = Vec::new();
+    for goal in board.active.iter_mut() {
+        let goal_id = goal.id.clone();
+        goal.wip_refs.retain(|wip| {
+            if !wip.kind.trim().eq_ignore_ascii_case("pr") {
+                return true;
+            }
+            match wip.ref_id.trim_start_matches('#').parse::<u32>() {
+                Ok(num) => {
+                    let live = open_prs.contains(&num);
+                    if !live {
+                        pruned.push((goal_id.clone(), wip.ref_id.clone()));
+                    }
+                    live
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        target: "simard::ooda",
+                        goal = %goal_id,
+                        ref_id = %wip.ref_id,
+                        "pr wip_ref id did not parse as u32 — keeping ref (not pruning, fail-open)"
+                    );
+                    true
+                }
+            }
+        });
+    }
+    pruned
+}
+
 /// effects. Returns `true` when `goal_id` names a standing goal that was fully
 /// handled here — the caller must then `continue` — and `false` for an ordinary
 /// goal the breaker should process through its normal threshold path. **Both**

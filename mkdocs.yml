@@ -292,6 +292,7 @@ nav:
     - Stable Goal-Session Identity API: reference/stable-goal-session-identity-api.md
     - Standing-Research Novelty-Directive API: reference/standing-research-goal-novelty-directive-api.md
     - Research-Goal Never-Idle Rail API: reference/research-goal-never-idle-rail-api.md
+    - wip-ref Liveness Reconcile API: reference/wip-ref-liveness-reconcile-api.md
     - Actor-Session Scope-Key API: reference/actor-session-scope-key-api.md
     - WhisperGate Exponential-Backoff API: reference/whisper-gate-backoff-api.md
     - Subordinate Kill PID-Guard API: reference/subordinate-kill-pid-guard-api.md

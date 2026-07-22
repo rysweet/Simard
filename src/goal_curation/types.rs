@@ -403,6 +403,23 @@ impl ActiveGoal {
     /// any unknown/garbage kind is treated as not-live — so a goal tracking only
     /// those still faults toward re-orient. Reads only in-memory state; performs
     /// no IO and never panics.
+    ///
+    /// # Liveness precondition (NEW-1, PR #4428)
+    ///
+    /// This predicate keys on ref *kind*, NOT ref *liveness* — deliberately, to
+    /// stay IO-free. It therefore ASSUMES `wip_refs` has ALREADY been
+    /// liveness-reconciled earlier this cycle, so a dead/merged artifact never
+    /// lingers here reading as live and suppressing the never-idle fault forever.
+    /// Two reconcile prongs run before any breaker site calls this:
+    /// * **Dead sessions** — `sweep_stale_assignments_with_sessions`
+    ///   (`crate::ooda_loop::cycle`) drops a dead engineer's
+    ///   `session`/`branch`/`engineer` refs at cycle start.
+    /// * **Merged/closed PRs** — `prune_merged_pr_refs`
+    ///   (`crate::ooda_loop::no_progress`), fed the per-cycle open-PR set, drops
+    ///   any `pr` ref no longer open, before the breaker classifies.
+    ///
+    /// Without those prongs this guard is unsound (a merged PR or dead session
+    /// reads as live forever) — the exact NEW-1 loophole.
     pub fn has_live_in_flight_ref(&self) -> bool {
         const LIVE_KINDS: [&str; 4] = ["pr", "branch", "session", "engineer"];
         self.wip_refs.iter().any(|wip| {

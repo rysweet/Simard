@@ -1,7 +1,7 @@
 ---
 title: The standing research goal never idles — an idle cycle is a fault
-description: Why Simard's STANDING cognition-research goal must produce a concrete NOVEL action every cycle — a new external source ingestion OR a new measurable experiment (dedup'd against recent directions) — and why an idle cycle for THIS goal is a fault the daemon actively re-orients out of, rather than the benign perpetual-idle exemption granted to other standing goals; prompt-first (charter + directive), reinforced by a thin fail-closed breaker rail keyed on ActiveGoal::is_standing_research_goal() (#4399).
-last_updated: 2026-07-21
+description: Why Simard's STANDING cognition-research goal must produce a concrete NOVEL action every cycle — a new external source ingestion OR a new measurable experiment (dedup'd against recent directions) — and why an idle cycle for THIS goal is a fault the daemon actively re-orients out of, rather than the benign perpetual-idle exemption granted to other standing goals; prompt-first (charter + directive), reinforced by a thin fail-closed breaker rail keyed on ActiveGoal::is_standing_research_goal() (#4399) whose in-flight exemption is only sound because wip_refs are LIVENESS-RECONCILED each cycle before the breaker classifies — a dead engineer session's refs are dropped by the stale-assignment sweep and a merged/closed PR's ref is pruned by the per-cycle open-PR reconcile (#4428).
+last_updated: 2026-07-22
 review_schedule: as-needed
 owner: simard
 doc_type: concept
@@ -13,6 +13,7 @@ related:
   - ./hybrid-cognition-measurement.md
   - ./semantic-creative-ideas-dedup.md
   - ../reference/research-goal-never-idle-rail-api.md
+  - ../reference/wip-ref-liveness-reconcile-api.md
   - ../reference/standing-research-goal-novelty-directive-api.md
   - ../reference/no-progress-breaker-api.md
   - ../howto/keep-the-research-goal-never-idle.md
@@ -203,6 +204,54 @@ seam. The classifier therefore treats a live-in-flight research goal as
 re-orient, so the refs survive. Only a research goal with **no** live artifact is
 faulted and re-oriented.
 
+## Liveness precondition — `wip_refs` are reconciled before the breaker (#4428)
+
+The `ResearchInFlight` exemption above is only sound if a `wip_ref` that reads as
+"live" **actually is** live. The kind-based test
+[`has_live_in_flight_ref()`](../reference/wip-ref-liveness-reconcile-api.md#the-guarded-precondition-has_live_in_flight_ref)
+is deliberately **IO-free** — it keys on ref *kind*
+(`pr` / `branch` / `session` / `engineer`), not on whether the underlying artifact
+is still open/alive. On its own that is a loophole: a standing research goal whose
+PR has since **merged**, or whose engineer **tmux session died**, would keep a
+stale `pr` / `session` / `branch` ref, classify as `ResearchInFlight` on **every**
+subsequent no-action cycle, and thus **never** fault, never re-orient, and never
+log — silently idling forever. That is exactly the #4399 loophole re-opened behind
+a narrower gate.
+
+The fix (#4428) does **not** add liveness IO into `has_live_in_flight_ref()`.
+Instead it guarantees the function's **precondition**: every cycle, **before** the
+breaker classifies, `wip_refs` is reconciled so it holds only **LIVE** artifacts.
+Two reactive, in-memory prongs — both already positioned before the breaker sites —
+carry this out:
+
+| Prong | Where | Drops |
+| --- | --- | --- |
+| **1 — dead-session sweep** | [`sweep_stale_assignments_with_sessions`](../reference/wip-ref-liveness-reconcile-api.md#prong-1-dead-session-ref-drop) (cycle **start**, before the breaker) | When a goal's assignment is cleared because its tmux session is not in the live-session set, ALSO drop that goal's `session` / `branch` / `engineer` refs (the dead engineer's working artifacts). `pr` and `issue` refs are **kept** — a PR outlives the session and is Prong 2's job; an issue is a durable record. |
+| **2 — merged/closed PR prune** | [per-cycle open-PR reconcile](../reference/wip-ref-liveness-reconcile-api.md#prong-2-mergedclosed-pr-ref-prune) (after Act, **before** the breaker classifies) | For each active goal, drop any `pr` ref whose number is **not** in the current open-PR set. The open set is read once per cycle via the existing [`PrGhClient::list_open_prs`](https://github.com/rysweet/Simard/blob/main/src/stewardship/merge_authority.rs) path — **no new git/gh shell parse**. The prune core is a pure function over an in-memory `HashSet<u32>`. |
+
+After both prongs run, a goal whose only in-flight ref was a merged PR or a dead
+session has **no live ref left**, so `classify_standing_idle` correctly returns
+`ResearchFault` on a no-action cycle → the goal is counted in `research_idle_faults`,
+re-oriented, and kept active (never `Blocked`). A goal holding a **genuinely open**
+PR (its number is in the open set) survives the prune → still `ResearchInFlight` →
+its load-bearing `wip_refs` and `assigned_to` are preserved (round-1 finding #1 is
+intact). See the
+[wip-ref liveness reconcile API reference](../reference/wip-ref-liveness-reconcile-api.md)
+for the exact functions, ordering, parse rule, and fail-open behaviour.
+
+Two decisions keep this **fail-open, never fail-closed-wrong** — it must never
+wipe a *live* ref (that would re-introduce the round-1 F1 regression):
+
+- **Unparseable PR `ref_id` → keep the ref** (and warn). A `pr` ref whose
+  `ref_id.trim_start_matches('#').parse::<u32>()` fails is left in place, not
+  pruned — a malformed-but-possibly-live ref is never dropped on a guess.
+- **`list_open_prs` fetch error → skip PR pruning this cycle.** If the open-PR
+  listing errors, the error is surfaced (non-fatal) and **no** `pr` ref is pruned
+  that cycle. Rationale: wrongly wiping a live PR ref re-opens the round-1 bug,
+  whereas skipping merely **delays** a merged-PR fault by a cycle or two — never
+  forever. Only on a successful `Ok(...)` are refs pruned; an `Ok([])` (genuinely
+  no open PRs) correctly prunes all `pr` refs.
+
 ## Why this is safe
 
 - **Scoped by charter, not by id.** Both the never-idle mandate and the breaker
@@ -233,6 +282,15 @@ faulted and re-oriented.
   additive and, like `perpetual_idled`, is **excluded from `fired()`** — a
   research-idle fault is a re-orient, not a hard breaker action, but it is always
   visible via the per-goal `warn` and the report field.
+- **Liveness reconcile is fail-open, in-memory, and reuses existing IO (#4428).**
+  The two pruning prongs run before the breaker with **no new git/gh shell parse**
+  (Prong 2 reuses `list_open_prs`); the prune core is a pure function over an
+  in-memory set. Both prongs err toward **keeping** a ref: an unparseable PR
+  `ref_id` is kept-and-warned, and a `list_open_prs` fetch error skips PR pruning
+  for that cycle. So the reconcile can only ever remove a **dead/merged** ref — it
+  can never wipe a live one, so round-1 finding #1 (preserve a live in-flight ref)
+  cannot regress. A delayed fault (worst case) costs a cycle or two; a wiped live
+  ref would cost correctness, so the trade-off is deliberately asymmetric.
 
 ## What an operator sees
 
@@ -276,6 +334,9 @@ To read, verify, or revise the mandate, see
 - [Never-idle rail API reference](../reference/research-goal-never-idle-rail-api.md)
   — `classify_standing_idle`, the `research_idle_faults` field, the fault
   vocabulary, and both breaker sites.
+- [wip-ref liveness reconcile API reference](../reference/wip-ref-liveness-reconcile-api.md)
+  — the two per-cycle pruning prongs (dead-session sweep + merged-PR reconcile)
+  that make the `has_live_in_flight_ref()` precondition true (#4428).
 - [Standing-research novelty-directive API reference](../reference/standing-research-goal-novelty-directive-api.md)
   — the `is_standing_research_goal()` predicate and the directive injection point.
 - [How to keep the research goal never idle](../howto/keep-the-research-goal-never-idle.md).

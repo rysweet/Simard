@@ -584,6 +584,15 @@ fn run_ooda_cycle_inner(
     // corruption guard treats them as a legitimate departure (not a "vanished"
     // goal) and the persist step force-removes them from the snapshot.
     let breaker_dropped: Vec<String> = if let Some(source) = &memories.completion_evidence {
+        // NEW-1 Prong 2 (PR #4428): reconcile PR-ref liveness BEFORE the breaker
+        // classifies. A standing research goal that merged/closed its PR keeps a
+        // stale `pr` wip_ref that `has_live_in_flight_ref` reads as LIVE, so the
+        // breaker would classify it `ResearchInFlight` forever and it would idle
+        // silently. Pruning merged/closed PR refs here makes the kind-based guard
+        // sound; a genuinely-open PR survives (finding #1 intact).
+        let pr_client = crate::stewardship::RealPrGhClient::new();
+        let pr_repo = crate::stewardship::TargetRepo::Simard.slug();
+        reconcile_merged_prs(&mut state.active_goals, &pr_client, pr_repo);
         if crate::ooda_loop::no_progress::no_progress_investigation_enabled() {
             // Root-cause investigation (issue #16): before authoring any block,
             // the breaker classifies WHY a stalled goal made no shippable
@@ -1087,11 +1096,86 @@ pub(crate) fn sweep_stale_assignments_with_sessions(
             .is_some_and(|s| !live_sessions.contains(s));
         if is_stale {
             let session = goal.assigned_to.take().unwrap_or_default();
+            // NEW-1 Prong 1 (PR #4428): the dead engineer's session/branch/engineer
+            // wip_refs belong to the now-cleared session, so drop them here — the
+            // never-idle breaker's kind-based `has_live_in_flight_ref` guard reads
+            // them as live otherwise and the goal idles forever as
+            // `ResearchInFlight`. Durable `pr`/`issue` refs OUTLIVE the session and
+            // are KEPT: a merged PR is pruned by the separate per-cycle PR-liveness
+            // reconcile (`prune_merged_pr_refs`), and an `issue` is a durable record.
+            const DEAD_SESSION_KINDS: [&str; 3] = ["session", "branch", "engineer"];
+            let before = goal.wip_refs.len();
+            goal.wip_refs.retain(|wip| {
+                let kind = wip.kind.trim();
+                !DEAD_SESSION_KINDS
+                    .iter()
+                    .any(|dead| kind.eq_ignore_ascii_case(dead))
+            });
+            let dropped = before - goal.wip_refs.len();
             eprintln!(
-                "[simard] OODA start: cleared stale assignment '{}' for goal '{}'",
-                session, goal.id
+                "[simard] OODA start: cleared stale assignment '{}' for goal '{}' (dropped {} dead-session wip_ref(s))",
+                session, goal.id, dropped
             );
             goal.status = crate::goal_curation::GoalProgress::NotStarted;
+        }
+    }
+}
+
+// ============================================================================
+// NEW-1 Prong 2 (PR #4428): per-cycle PR-liveness reconcile — production wiring
+// ============================================================================
+
+/// Upper bound for the per-cycle open-PR fetch. MUST stay well ABOVE the repo's
+/// realistic simultaneous-open-PR count.
+///
+/// `list_open_prs` forwards this to `gh pr list --limit`, which TRUNCATES the
+/// result set. The pure prune treats the returned set as authoritative, so a
+/// `pr` ref whose PR is genuinely open but BEYOND the limit would be absent from
+/// the set and wrongly pruned — wiping a live in-flight ref, i.e. the exact
+/// round-1 finding-#1 (F1) regression. Fail-open covers a fetch `Err` and an
+/// unparseable id, but NOT a silently truncated `Ok(...)`, so this high cap is
+/// the guarantee. `1000` is far above any realistic open-PR count for this repo.
+const OPEN_PR_RECONCILE_LIMIT: u32 = 1000;
+
+/// Fetch the open-PR set ONCE per cycle and prune every merged/closed `pr`
+/// [`crate::goal_curation::WipRef`] from the active board via the pure
+/// [`crate::ooda_loop::no_progress::prune_merged_pr_refs`], BEFORE the never-idle
+/// breaker classifies (NEW-1 Prong 2, PR #4428).
+///
+/// Reuses the existing `gh pr list` path
+/// ([`crate::stewardship::PrGhClient::list_open_prs`]) — NO new brittle shell/gh
+/// parse. **Fail-open**: if the fetch errors, surface it and prune NOTHING this
+/// cycle, so a `gh` blip can never wipe a live PR ref (which would reintroduce
+/// the round-1 finding-#1 regression). A merged-PR fault is merely delayed a
+/// cycle, never suppressed forever. On a genuine empty open set (`Ok([])`) all
+/// `pr` refs prune (correct — nothing is open).
+///
+/// The `client` is injected so production wires the concrete
+/// [`crate::stewardship::RealPrGhClient`] while the pure core is unit-tested
+/// directly with an in-memory set (IO-free).
+fn reconcile_merged_prs(
+    board: &mut crate::goal_curation::GoalBoard,
+    client: &dyn crate::stewardship::PrGhClient,
+    repo: &str,
+) {
+    match client.list_open_prs(repo, OPEN_PR_RECONCILE_LIMIT) {
+        Ok(open) => {
+            let open_set: std::collections::HashSet<u32> = open.iter().map(|s| s.number).collect();
+            let pruned = crate::ooda_loop::no_progress::prune_merged_pr_refs(board, &open_set);
+            for (goal_id, ref_id) in pruned {
+                tracing::info!(
+                    target: "simard::ooda",
+                    goal = %goal_id,
+                    ref_id = %ref_id,
+                    "pruned merged/closed PR wip_ref (not in open-PR set)",
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "[simard] merged-PR reconcile: list_open_prs failed — skipping PR-ref \
+                 prune this cycle (fail-open — never wipe a possibly-live ref): {e}"
+            );
         }
     }
 }
@@ -1597,6 +1681,89 @@ mod tests_sweep {
                 goal.id
             );
         }
+    }
+
+    /// NEW-1 Prong 1 (PR #4428): a dead session's assignment sweep must ALSO drop
+    /// that goal's session/branch/engineer wip_refs — they belong to the dead
+    /// engineer — so `has_live_in_flight_ref` no longer reads them as live and the
+    /// never-idle breaker can fault. Durable `pr`/`issue` refs are KEPT: they
+    /// outlive the session, and a merged PR is pruned by the separate per-cycle
+    /// PR-liveness reconcile (`prune_merged_pr_refs`), not here.
+    #[test]
+    fn drops_dead_session_wip_refs_but_keeps_pr_and_issue() {
+        use crate::goal_curation::WipRef;
+        let wref = |kind: &str, id: &str| WipRef {
+            kind: kind.to_string(),
+            ref_id: id.to_string(),
+            label: format!("{kind} {id}"),
+            url: None,
+        };
+        let mut board = GoalBoard::new();
+        let mut goal = make_goal("g1", Some("dead-session"));
+        goal.wip_refs = vec![
+            wref("session", "dead-session"),
+            wref("branch", "feat/x"),
+            wref("engineer", "engineer-7"),
+            wref("pr", "42"),
+            wref("issue", "100"),
+        ];
+        add_active_goal(&mut board, goal).unwrap();
+
+        sweep_stale_assignments_with_sessions(&mut board, &live(&["other"]));
+
+        let goal = &board.active[0];
+        assert!(
+            goal.assigned_to.is_none(),
+            "assignment must be cleared for the dead session"
+        );
+        let kinds: Vec<&str> = goal.wip_refs.iter().map(|w| w.kind.as_str()).collect();
+        assert!(
+            !kinds.contains(&"session"),
+            "the dead session's session ref must be dropped, got {kinds:?}"
+        );
+        assert!(
+            !kinds.contains(&"branch"),
+            "the dead session's branch ref must be dropped, got {kinds:?}"
+        );
+        assert!(
+            !kinds.contains(&"engineer"),
+            "the dead session's engineer ref must be dropped, got {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"pr"),
+            "a durable PR ref must be kept (pruned separately by the PR-liveness reconcile), got {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"issue"),
+            "a durable issue ref must be kept, got {kinds:?}"
+        );
+    }
+
+    /// A LIVE session must keep its session/branch wip_refs untouched — the ref
+    /// drop is scoped strictly to DEAD sessions.
+    #[test]
+    fn keeps_wip_refs_for_live_session() {
+        use crate::goal_curation::WipRef;
+        let wref = |kind: &str, id: &str| WipRef {
+            kind: kind.to_string(),
+            ref_id: id.to_string(),
+            label: format!("{kind} {id}"),
+            url: None,
+        };
+        let mut board = GoalBoard::new();
+        let mut goal = make_goal("g1", Some("live-session"));
+        goal.wip_refs = vec![wref("session", "live-session"), wref("branch", "feat/y")];
+        add_active_goal(&mut board, goal).unwrap();
+
+        sweep_stale_assignments_with_sessions(&mut board, &live(&["live-session"]));
+
+        let goal = &board.active[0];
+        assert_eq!(goal.assigned_to.as_deref(), Some("live-session"));
+        assert_eq!(
+            goal.wip_refs.len(),
+            2,
+            "a live session's wip_refs must be preserved untouched"
+        );
     }
 }
 
