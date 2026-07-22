@@ -253,6 +253,7 @@ nav:
     - Reclaim Disk Space (Low-Space Rust Builds): howto/reclaim-disk-space-and-run-low-space-rust-builds.md
     - Fix CI Linker OOM: howto/fix-ci-linker-oom.md
     - Triage Stale Pull Requests: howto/triage-stale-pull-requests.md
+    - Triage a Blocked Goal with Unclear Finish Criteria: howto/triage-a-blocked-goal-with-unclear-finish-criteria.md
     - Enable Autonomous Self-Merge (canary one repo): howto/enable-autonomous-self-merge-canary.md
     - Diagnose merge-pr Verdict-Parse Failures: howto/diagnose-merge-pr-verdict-parse-failures.md
     - Monitor Simard with the TUI: howto/monitor-simard-with-tui.md
@@ -313,6 +314,7 @@ nav:
     - Overseer Workstream Gap-Scan: reference/overseer-workstream-gap-scan.md
     - Overseer BackoffGate &amp; Gap-Scan Dedup: reference/overseer-backoff-gate-api.md
     - Overseer Root-Cause (WHY) API: reference/overseer-root-cause-why-api.md
+    - Escalation-Triage Decision Pipeline: reference/escalation-triage-decision-pipeline.md
     - Overseer Self-Observation Stability: reference/overseer-self-observation-stability.md
     - simard-engineer-step CLI: reference/simard-engineer-step.md
     - simard-tui Dashboard: reference/simard-tui.md
