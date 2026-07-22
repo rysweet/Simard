@@ -10,6 +10,7 @@ related:
   - ../concepts/reconcile-and-self-deploy.md
   - ../concepts/operational-autonomy-model.md
   - ./self-deploy-source-prep.md
+  - ./self-deploy-quarantine-acknowledge.md
   - ./overseer-operator-notifications.md
   - ./overseer-tick-details.md
   - ../safe-self-update.md
@@ -334,15 +335,30 @@ internally. There are **six** probes: `version_advanced`, `memory_intact`,
 [`entrypoint_parity`](#entrypointparityprobe).
 
 ```text
-simard self-health [--json] [--pre-deploy-facts=N]
+simard self-health [--json] [--pre-deploy-facts=N] [--acknowledge-quarantine]
 
   --json               Emit the SelfHealthReport as JSON (default: human table).
   --pre-deploy-facts   Baseline fact count to compare against (the orchestrator
                        passes the count captured before the swap). When omitted,
                        the "memory intact" probe reports the live count only.
+  --acknowledge-quarantine
+                       Acknowledge every currently-present cognitive-memory
+                       quarantine artifact under the state root (writing an
+                       `.ack` sidecar next to each) before probing, so a
+                       genuinely-stuck quarantine clears the `no_quarantine`
+                       probe WITHOUT deleting the #2550 recovery asset.
+                       Idempotent. See the quarantine-acknowledge reference.
 
 Exit code: 0 when every probe is healthy; non-zero when any probe fails.
 ```
+
+The additive `--acknowledge-quarantine` flag resolves the `no_quarantine`
+deadlock (#4469) in which the retained #2550 recovery asset keeps the probe red
+forever. Acknowledgement silences the probe for a specific, named artifact but
+never deletes it, and a *new* corruption event reddens the probe again. The full
+`.ack` convention, the `quarantine_ack` module API, the ack-aware
+`count_quarantine_files`, and the guarded autonomous auto-ack are specified in
+[self-deploy quarantine-acknowledge](./self-deploy-quarantine-acknowledge.md).
 
 ### `self-health` output
 
@@ -362,6 +378,15 @@ Exit code: 0 when every probe is healthy; non-zero when any probe fails.
 
 `healthy` is the logical AND of every probe's `healthy`. A `false` from any probe
 fails the health check and triggers rollback when invoked by the orchestrator.
+
+> **`no_quarantine` is acknowledgement-aware (#4469).** The probe's JSON schema
+> is unchanged (`{ "healthy", "quarantined" }`), but `count_quarantine_files`
+> now counts only **unacknowledged** `cognitive*.corrupt-<ts>` artifacts: an
+> artifact with a sibling `.ack` sidecar — and the `.ack` files themselves — are
+> skipped. This lets a genuinely-stuck quarantine (the retained #2550 recovery
+> asset) clear so `all_healthy()` can converge, while a *new* corruption event
+> still reddens the probe. See
+> [self-deploy quarantine-acknowledge](./self-deploy-quarantine-acknowledge.md).
 
 ### `EntrypointParityProbe`
 

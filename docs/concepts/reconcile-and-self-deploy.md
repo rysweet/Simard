@@ -215,12 +215,32 @@ of the following hold:
 | **Memory intact** | cognitive-memory fact count ≥ the pre-deploy count (within tolerance), via the `CognitiveMemoryOps` count API |
 | **Goal board intact** | the goal board loads and the active-goal count is preserved |
 | **Brains LLM-backed** | zero `BrainJudgmentRecord.fallback == true` records over a probe cycle (see [parse-failure record](../reference/ooda-brain-parse-failure-record.md)) |
-| **No quarantine** | the cognitive-memory store quarantine flag is clear |
+| **No quarantine** | the cognitive-memory store quarantine flag is clear — i.e. no *unacknowledged* `cognitive*.corrupt-<ts>` artifact remains (see below) |
 
 Any single failing probe fails the health check and triggers rollback. The probe
 output is the same structured JSON whether it is run by the orchestrator or by an
 operator at a console — see
 [self-health output](../reference/self-deploy-api.md#self-health-output).
+
+### Clearing a stuck quarantine
+
+The **No quarantine** probe once had a deadlock (#4469): the largest corrupt
+store is a *recovery asset* that `simard cleanup` deliberately never deletes
+(#2550), so the one artifact keeping the probe red was exactly the one protected
+from deletion — the probe could never clear on its own, and self-deploy froze
+commits behind merged `main`.
+
+The probe is now **acknowledgement-aware**. An operator can acknowledge a
+genuinely-stuck quarantine (`simard self-health --acknowledge-quarantine`) — or,
+for the protected recovery asset past the 30-day forensic window, the daemon
+auto-acknowledges it — by writing a durable `.ack` sidecar next to the artifact.
+Acknowledgement silences the probe **without deleting the recovery asset**;
+`count_quarantine_files` counts only *unacknowledged* artifacts, so
+`all_healthy()` can converge. A *new* corruption event writes a fresh,
+unacknowledged artifact and correctly reddens the probe again. Full mechanics:
+[self-deploy quarantine-acknowledge](../reference/self-deploy-quarantine-acknowledge.md)
+and the runbook [Clear a stuck memory
+quarantine](../howto/clear-a-stuck-memory-quarantine.md).
 
 ## Why build-from-source, not release-download
 

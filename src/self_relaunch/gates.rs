@@ -76,12 +76,28 @@ fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
             detail: "all tests passed".to_string(),
         },
         Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let truncated = truncate_output(&stderr, 200);
+            // Surface WHICH test produced the red canary (#4470) instead of an
+            // opaque "exit 101". `cargo test` prints the `... FAILED` lines to
+            // stdout; fall back to a sanitized stderr tail when none is found
+            // (e.g. a compile error rather than a test failure).
+            let failing = extract_first_failure(&stdout).or_else(|| extract_first_failure(&stderr));
+            let detail = match failing {
+                Some(test) => format!(
+                    "tests failed (exit {}): first failing test {}",
+                    output.status, test
+                ),
+                None => format!(
+                    "tests failed (exit {}): {}",
+                    output.status,
+                    sanitize_gate_detail(&stderr, GATE_DETAIL_MAX_BYTES)
+                ),
+            };
             GateResult {
                 gate: RelaunchGate::UnitTest,
                 passed: false,
-                detail: format!("tests failed (exit {}): {}", output.status, truncated),
+                detail,
             }
         }
         Err(e) => GateResult {
@@ -144,18 +160,67 @@ fn run_rpc_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
     }
 }
 
-fn truncate_output(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.trim().to_string()
-    } else {
-        // Use char-boundary-safe truncation to avoid panic on multi-byte UTF-8.
-        let boundary = s
-            .char_indices()
-            .take_while(|(i, _)| *i < max_len)
-            .last()
-            .map_or(0, |(i, c)| i + c.len_utf8());
-        format!("{}...", s[..boundary].trim())
+/// Upper bound (bytes) on any gate `detail` derived from untrusted subprocess
+/// output (#4470). Bounds log/JSON size and blast radius of forged content.
+pub(crate) const GATE_DETAIL_MAX_BYTES: usize = 512;
+
+/// Extract the fully-qualified path of the FIRST failing test from `cargo test`
+/// stdout/stderr (#4470 diagnosability).
+///
+/// `cargo test` prints `test module::path::name ... FAILED` for each failure and
+/// a `failures:` summary block listing `    module::path::name`. This returns the
+/// first failing test's path (e.g. `self_deploy::tests_health::foo`), sanitized
+/// via [`sanitize_gate_detail`] and bounded to [`GATE_DETAIL_MAX_BYTES`], so the
+/// canary can surface WHICH test produced the red canary instead of an opaque
+/// "exit 101". Returns `None` when no failing-test line is present.
+pub(crate) fn extract_first_failure(cargo_test_output: &str) -> Option<String> {
+    for line in cargo_test_output.lines() {
+        // Per-test result lines look like `test <path> ... FAILED`. The summary
+        // line `test result: FAILED. ...` starts with `test ` too but never ends
+        // in ` ... FAILED`, so the suffix match below excludes it.
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("test ") else {
+            continue;
+        };
+        let Some(path) = rest.strip_suffix(" ... FAILED") else {
+            continue;
+        };
+        let path = path.trim();
+        if !path.is_empty() {
+            return Some(sanitize_gate_detail(path, GATE_DETAIL_MAX_BYTES));
+        }
     }
+    None
+}
+
+/// Sanitize an untrusted subprocess string for embedding in a `GateResult.detail`
+/// (#4470): strip CR/LF and other control characters, collapse to a single line,
+/// and bound the result to `max_bytes` (UTF-8-boundary-safe). Prevents a canary
+/// test name / stderr from forging log lines or JSON.
+pub(crate) fn sanitize_gate_detail(raw: &str, max_bytes: usize) -> String {
+    // Collapse every run of control characters (newlines, tabs, ANSI escapes,
+    // NUL) to a single space so the result is one readable line with no forgery
+    // vectors.
+    let mut collapsed = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        if c.is_control() {
+            if !collapsed.ends_with(' ') {
+                collapsed.push(' ');
+            }
+        } else {
+            collapsed.push(c);
+        }
+    }
+    let trimmed = collapsed.trim();
+    if trimmed.len() <= max_bytes {
+        return trimmed.to_string();
+    }
+    // Bound on a UTF-8 char boundary so we never split a multi-byte char.
+    let mut end = max_bytes;
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    trimmed[..end].to_string()
 }
 
 #[cfg(test)]
@@ -166,61 +231,6 @@ mod tests {
     fn smoke_gate_handles_missing_binary() {
         let result = run_smoke_gate(Path::new("/tmp/no-such-binary-48291"));
         assert!(!result.passed);
-    }
-
-    // --- truncate_output ---
-
-    #[test]
-    fn truncate_output_short_string_unchanged() {
-        let result = truncate_output("hello world", 100);
-        assert_eq!(result, "hello world");
-    }
-
-    #[test]
-    fn truncate_output_exact_length() {
-        let input = "abcde";
-        let result = truncate_output(input, 5);
-        assert_eq!(result, "abcde");
-    }
-
-    #[test]
-    fn truncate_output_over_limit_appends_ellipsis() {
-        let input = "abcdefghij";
-        let result = truncate_output(input, 5);
-        assert!(
-            result.ends_with("..."),
-            "should end with ellipsis: {result}"
-        );
-        assert!(result.len() <= 8, "should be truncated: {result}");
-    }
-
-    #[test]
-    fn truncate_output_trims_whitespace() {
-        let result = truncate_output("  hello  ", 100);
-        assert_eq!(result, "hello");
-    }
-
-    #[test]
-    fn truncate_output_empty_string() {
-        let result = truncate_output("", 100);
-        assert_eq!(result, "");
-    }
-
-    #[test]
-    fn truncate_output_multibyte_utf8_safe() {
-        let input = "héllo wörld café";
-        let result = truncate_output(input, 8);
-        assert!(
-            result.ends_with("..."),
-            "should end with ellipsis: {result}"
-        );
-        // Must not panic on multi-byte boundary
-    }
-
-    #[test]
-    fn truncate_output_zero_max_len() {
-        let result = truncate_output("hello", 0);
-        assert_eq!(result, "...");
     }
 
     // --- all_gates_passed ---
@@ -315,5 +325,96 @@ mod tests {
         let config = RelaunchConfig::default();
         let results = verify_canary(Path::new("/no-such-binary"), &[], &config).unwrap();
         assert!(results.is_empty());
+    }
+
+    // ── #4470: failing-test diagnosability (extract_first_failure / sanitize) ──
+
+    #[test]
+    fn extract_first_failure_parses_failed_test_path() {
+        let output = "\
+running 3 tests
+test self_deploy::tests_health::report_is_healthy_only_when_every_probe_is_healthy ... ok
+test self_deploy::tests_health::any_single_unhealthy_probe_fails_the_report ... FAILED
+test self_relaunch::gates::tests::smoke_gate_handles_missing_binary ... FAILED
+
+failures:
+
+failures:
+    self_deploy::tests_health::any_single_unhealthy_probe_fails_the_report
+    self_relaunch::gates::tests::smoke_gate_handles_missing_binary
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored;
+";
+        assert_eq!(
+            extract_first_failure(output).as_deref(),
+            Some("self_deploy::tests_health::any_single_unhealthy_probe_fails_the_report"),
+            "must surface the FIRST failing test's fully-qualified path"
+        );
+    }
+
+    #[test]
+    fn extract_first_failure_none_when_all_pass() {
+        let output = "\
+running 2 tests
+test a::b ... ok
+test c::d ... ok
+
+test result: ok. 2 passed; 0 failed;
+";
+        assert_eq!(extract_first_failure(output), None);
+    }
+
+    #[test]
+    fn extract_first_failure_is_bounded() {
+        // A pathological, very long "test path" must be bounded to the cap.
+        let long = "x".repeat(5000);
+        let line = format!("test {long} ... FAILED\n");
+        let extracted = extract_first_failure(&line).expect("a failure was present");
+        assert!(
+            extracted.len() <= GATE_DETAIL_MAX_BYTES,
+            "extracted failure must be bounded to {GATE_DETAIL_MAX_BYTES} bytes, got {}",
+            extracted.len()
+        );
+    }
+
+    #[test]
+    fn sanitize_gate_detail_strips_control_chars_and_newlines() {
+        let raw = "line one\nline two\r\n\ttabbed\x1b[31mred\x00nul";
+        let clean = sanitize_gate_detail(raw, GATE_DETAIL_MAX_BYTES);
+        assert!(!clean.contains('\n'), "newlines stripped: {clean:?}");
+        assert!(
+            !clean.contains('\r'),
+            "carriage returns stripped: {clean:?}"
+        );
+        assert!(
+            !clean.contains('\x1b'),
+            "escape sequences stripped: {clean:?}"
+        );
+        assert!(!clean.contains('\0'), "NUL stripped: {clean:?}");
+        assert!(
+            !clean.contains('\t') || clean.contains(' '),
+            "no raw tabs: {clean:?}"
+        );
+    }
+
+    #[test]
+    fn sanitize_gate_detail_bounds_length() {
+        let raw = "a".repeat(2000);
+        let clean = sanitize_gate_detail(&raw, GATE_DETAIL_MAX_BYTES);
+        assert!(
+            clean.len() <= GATE_DETAIL_MAX_BYTES,
+            "must bound to {GATE_DETAIL_MAX_BYTES} bytes, got {}",
+            clean.len()
+        );
+    }
+
+    #[test]
+    fn sanitize_gate_detail_utf8_boundary_safe() {
+        // Bounding must never split a multi-byte char (no panic, valid UTF-8).
+        let raw = "héllo wörld café ".repeat(100);
+        let clean = sanitize_gate_detail(&raw, 10);
+        assert!(clean.len() <= 10);
+        // Round-trips as valid UTF-8 (String is always valid; the point is no panic).
+        let _ = clean.chars().count();
     }
 }

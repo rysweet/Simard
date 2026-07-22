@@ -925,3 +925,235 @@ fn corrupt_db_keeps_young_library_quarantine() {
     assert!(young.exists(), "young library quarantine should survive");
     assert_eq!(report.bytes_freed, 0);
 }
+
+// ── #4469: acknowledgement-aware corrupt-DB sweep ──
+
+/// Run `remove_old_corrupt_dbs` with `SIMARD_STATE_ROOT` pointed at `root`,
+/// restoring the previous value afterward. Serialized by the caller's
+/// `#[serial(cognitive_memory)]` attribute (SIMARD_STATE_ROOT is on the watched
+/// env surface).
+fn run_corrupt_cleanup_with_state_root(root: &std::path::Path) -> CleanupReport {
+    let old = std::env::var_os("SIMARD_STATE_ROOT");
+    unsafe {
+        std::env::set_var("SIMARD_STATE_ROOT", root);
+    }
+    let mut report = CleanupReport::default();
+    remove_old_corrupt_dbs(&mut report);
+    match old {
+        Some(v) => unsafe { std::env::set_var("SIMARD_STATE_ROOT", v) },
+        None => unsafe { std::env::remove_var("SIMARD_STATE_ROOT") },
+    }
+    report
+}
+
+/// The sweep must scan the resolved `simard_state_root()` (honoring
+/// `SIMARD_STATE_ROOT`), not the hardcoded `$HOME/.simard`. Otherwise the
+/// health probe (which already uses `simard_state_root()`) and the cleanup
+/// sweep disagree on which directory holds the quarantines, so an acknowledged
+/// artifact is never swept from the directory the probe actually scans (#4469).
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn corrupt_db_sweep_scans_resolved_state_root() {
+    let root = tempfile::tempdir().unwrap();
+    // Quarantine lives DIRECTLY under the resolved state root (not a `.simard`
+    // subdir) when SIMARD_STATE_ROOT is set.
+    let aged = root.path().join("cognitive.corrupt-1700000000");
+    std::fs::write(&aged, b"corrupt-bytes").unwrap();
+    backdate(&aged, CORRUPT_DB_MAX_AGE_DAYS + 1);
+
+    let report = run_corrupt_cleanup_with_state_root(root.path());
+
+    assert!(
+        !aged.exists(),
+        "aged quarantine under SIMARD_STATE_ROOT must be swept (scan must use \
+         simard_state_root(), not $HOME/.simard)"
+    );
+    assert!(
+        report.dirs_removed.iter().any(|p| p == &aged),
+        "swept quarantine should be reported"
+    );
+}
+
+/// An acknowledgement sidecar (`*.ack`) is NOT a corrupt store: it must be
+/// excluded from the sweep's candidate scan. An orphan aged `.ack` (whatever
+/// its age) is therefore retained, never reported as a removed "corrupt DB".
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn corrupt_db_sweep_never_treats_ack_marker_as_quarantine() {
+    let tmp = tempfile::tempdir().unwrap();
+    let simard = tmp.path().join(".simard");
+    std::fs::create_dir_all(&simard).unwrap();
+    let marker = simard.join("cognitive.corrupt-1700000000.ack");
+    std::fs::write(&marker, b"").unwrap();
+    backdate(&marker, CORRUPT_DB_MAX_AGE_DAYS + 10);
+
+    let report = run_corrupt_cleanup_with_home(tmp.path());
+
+    assert!(
+        marker.exists(),
+        "an `.ack` marker must never be swept as if it were a corrupt store"
+    );
+    assert!(
+        !report.dirs_removed.iter().any(|p| p == &marker),
+        "an `.ack` marker must never be reported as a removed quarantine"
+    );
+}
+
+/// When a quarantine artifact is swept, its `.ack` sidecar is reclaimed
+/// alongside it — regardless of the marker's own mtime — so no orphaned markers
+/// accumulate (#4469).
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn corrupt_db_sweep_removes_sidecar_with_its_quarantine() {
+    let tmp = tempfile::tempdir().unwrap();
+    let simard = tmp.path().join(".simard");
+    std::fs::create_dir_all(&simard).unwrap();
+
+    // An aged, small (below the protection floor) quarantine that WILL be swept.
+    let quarantine = simard.join("cognitive.corrupt-1700000000");
+    std::fs::write(&quarantine, b"tiny").unwrap();
+    backdate(&quarantine, CORRUPT_DB_MAX_AGE_DAYS + 5);
+
+    // Its sidecar is FRESH — age/keep rules alone would retain it, leaving an
+    // orphan. The sweep must remove it because its parent quarantine is removed.
+    let marker = simard.join("cognitive.corrupt-1700000000.ack");
+    std::fs::write(&marker, b"").unwrap();
+
+    let report = run_corrupt_cleanup_with_home(tmp.path());
+
+    assert!(!quarantine.exists(), "aged quarantine should be swept");
+    assert!(
+        !marker.exists(),
+        "the sidecar must be reclaimed with its parent quarantine, even when the \
+         marker itself is fresh"
+    );
+    let _ = report;
+}
+
+/// The #2550 protected recovery asset is retained — and so is its `.ack`
+/// sidecar. Acknowledging silences the probe without deleting the recovery
+/// asset OR orphaning its marker.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn corrupt_db_sweep_retains_protected_asset_marker() {
+    let tmp = tempfile::tempdir().unwrap();
+    let simard = tmp.path().join(".simard");
+    std::fs::create_dir_all(&simard).unwrap();
+
+    // The recovery asset: multi-MB, aged — protected from BOTH caps by #2550.
+    let asset = simard.join("cognitive.corrupt-1700000000");
+    std::fs::write(
+        &asset,
+        vec![0u8; (CORRUPT_DB_PROTECT_MIN_BYTES + 512) as usize],
+    )
+    .unwrap();
+    backdate(&asset, CORRUPT_DB_MAX_AGE_DAYS + 7);
+
+    // Its durable acknowledgement, aged — must survive because the asset survives.
+    let marker = simard.join("cognitive.corrupt-1700000000.ack");
+    std::fs::write(&marker, b"").unwrap();
+    backdate(&marker, CORRUPT_DB_MAX_AGE_DAYS + 7);
+
+    let report = run_corrupt_cleanup_with_home(tmp.path());
+
+    assert!(
+        asset.exists(),
+        "protected recovery asset must be retained (#2550)"
+    );
+    assert!(
+        marker.exists(),
+        "the protected asset's `.ack` marker must be retained alongside it"
+    );
+    assert!(
+        !report
+            .dirs_removed
+            .iter()
+            .any(|p| p == &asset || p == &marker),
+        "neither the protected asset nor its marker should be reported removed"
+    );
+}
+
+// ── #4469: aged protected-recovery-asset selection (guarded auto-ack source) ──
+// `aged_protected_recovery_asset` is the single-sourced selector the health
+// probe's guarded auto-ack uses. It returns ONLY the #2550 protected asset
+// (largest quarantine >= CORRUPT_DB_PROTECT_MIN_BYTES) and ONLY once it is past
+// the forensic window, so fresh or trivial corruption is never auto-acked.
+
+#[test]
+fn aged_protected_asset_returns_the_aged_recovery_asset() {
+    let dir = tempfile::tempdir().unwrap();
+    let asset = dir.path().join("cognitive.corrupt-1700000000");
+    std::fs::write(
+        &asset,
+        vec![0u8; (CORRUPT_DB_PROTECT_MIN_BYTES + 512) as usize],
+    )
+    .unwrap();
+    backdate(&asset, CORRUPT_DB_MAX_AGE_DAYS + 1);
+
+    assert_eq!(
+        crate::cmd_cleanup::disk::aged_protected_recovery_asset(dir.path()).as_deref(),
+        Some("cognitive.corrupt-1700000000"),
+        "the aged, substantial recovery asset must be selected"
+    );
+}
+
+#[test]
+fn aged_protected_asset_none_when_inside_forensic_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let asset = dir.path().join("cognitive.corrupt-1700000000");
+    std::fs::write(
+        &asset,
+        vec![0u8; (CORRUPT_DB_PROTECT_MIN_BYTES + 512) as usize],
+    )
+    .unwrap();
+    // Substantial but still fresh — must NOT be eligible.
+    backdate(&asset, CORRUPT_DB_MAX_AGE_DAYS.saturating_sub(2));
+
+    assert_eq!(
+        crate::cmd_cleanup::disk::aged_protected_recovery_asset(dir.path()),
+        None,
+        "a fresh protected asset is never auto-ack eligible"
+    );
+}
+
+#[test]
+fn aged_protected_asset_none_for_sub_floor_quarantine() {
+    let dir = tempfile::tempdir().unwrap();
+    // Aged but below the protection floor — a trivial quarantine, not the asset.
+    let small = dir.path().join("cognitive.corrupt-1700000000");
+    std::fs::write(&small, b"tiny").unwrap();
+    backdate(&small, CORRUPT_DB_MAX_AGE_DAYS + 5);
+
+    assert_eq!(
+        crate::cmd_cleanup::disk::aged_protected_recovery_asset(dir.path()),
+        None,
+        "a sub-floor quarantine is never the protected recovery asset"
+    );
+}
+
+#[test]
+fn aged_protected_asset_picks_largest_and_ignores_ack_sidecar() {
+    let dir = tempfile::tempdir().unwrap();
+    let small = dir.path().join("cognitive.corrupt-1700000000");
+    std::fs::write(
+        &small,
+        vec![0u8; (CORRUPT_DB_PROTECT_MIN_BYTES + 16) as usize],
+    )
+    .unwrap();
+    backdate(&small, CORRUPT_DB_MAX_AGE_DAYS + 3);
+    let large = dir.path().join("cognitive.corrupt-1700000001");
+    std::fs::write(
+        &large,
+        vec![0u8; (CORRUPT_DB_PROTECT_MIN_BYTES * 3) as usize],
+    )
+    .unwrap();
+    backdate(&large, CORRUPT_DB_MAX_AGE_DAYS + 3);
+    // A `.ack` sidecar must never be considered a candidate itself.
+    std::fs::write(dir.path().join("cognitive.corrupt-1700000001.ack"), b"").unwrap();
+
+    assert_eq!(
+        crate::cmd_cleanup::disk::aged_protected_recovery_asset(dir.path()).as_deref(),
+        Some("cognitive.corrupt-1700000001"),
+        "the LARGEST aged substantial quarantine is the recovery asset"
+    );
+}
