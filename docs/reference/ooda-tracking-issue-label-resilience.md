@@ -85,29 +85,29 @@ no-progress breaker — see the
 pub(crate) const OODA_STUCK_LABEL: &str = "ooda-stuck";
 
 /// Outcome of an idempotent `gh label create ooda-stuck`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) enum LabelEnsure {
-    /// The label already existed. No mutation; no tracing warranted.
-    AlreadyPresent,
     /// The label did not exist and was just created. Callers emit an
     /// `info!`/`debug!` on this arm (a genuine, one-time repo mutation).
     Created,
+    /// The label already existed. No mutation; no tracing warranted.
+    AlreadyExists,
     /// The label could not be ensured (auth error, network error, `gh`
     /// missing, unclassifiable stderr). Carries a human-readable reason for
     /// the caller's `warn!`. Callers MUST fall back to filing without a label.
-    Unavailable { reason: String },
+    Unavailable(String),
 }
 
 /// Idempotently ensure the `ooda-stuck` label exists in the CWD's repo.
 ///
 /// Runs `gh label create ooda-stuck` (argv-only, never `sh -c`). Treats an
-/// "already exists" stderr as success (`AlreadyPresent`). Any other non-zero
-/// exit, or a spawn error, is classified `Unavailable { reason }`.
+/// "already exists" stderr as success (`AlreadyExists`). Any other non-zero
+/// exit, or a spawn error, is classified `Unavailable(reason)`.
 ///
 /// This function emits **no** tracing itself — it returns a classification so
 /// each call site can log with its own static `target:`. It never panics and
 /// never calls `unwrap`/`expect`.
-pub(crate) fn ensure_gh_label(label: &str) -> LabelEnsure { /* … */ }
+pub(crate) fn ensure_gh_label(label: &'static str) -> LabelEnsure { /* … */ }
 ```
 
 ### Classification rules
@@ -123,9 +123,9 @@ and classifies the result:
 | `gh` result | stderr contains | `LabelEnsure` |
 | --- | --- | --- |
 | exit 0 | — | `Created` |
-| exit ≠ 0 | `already exists` (case-insensitive substring) | `AlreadyPresent` |
-| exit ≠ 0 | anything else (auth, not-found repo, rate-limit, …) | `Unavailable { reason: <trimmed stderr> }` |
-| spawn error (`gh` not on `PATH`, etc.) | — | `Unavailable { reason: <io error> }` |
+| exit ≠ 0 | `already exists` (case-insensitive substring) | `AlreadyExists` |
+| exit ≠ 0 | anything else (auth, not-found repo, rate-limit, …) | `Unavailable(<trimmed stderr>)` |
+| spawn error (`gh` not on `PATH`, etc.) | — | `Unavailable(<io error>)` |
 
 The "already exists" substring match is intentionally the **only** wording the
 helper treats as idempotent success. If a future `gh` release changes that
@@ -140,10 +140,10 @@ unit-tested without spawning `gh` (see [Testing](#testing)).
 Every site follows the same three-step prelude before `gh issue create`:
 
 1. **Ensure the label.** Call `ensure_gh_label(OODA_STUCK_LABEL)`.
-   - `AlreadyPresent` → attach `--label ooda-stuck`. No tracing.
+   - `AlreadyExists` → attach `--label ooda-stuck`. No tracing.
    - `Created` → attach `--label ooda-stuck`. Emit a structured
      `info!`/`debug!` on the site's existing `target:` noting the auto-create.
-   - `Unavailable { reason }` → **do not abort**. Emit a `tracing::warn!` with
+   - `Unavailable(reason)` → **do not abort**. Emit a `tracing::warn!` with
      `reason` on the site's existing `target:`, then drop `--label` for this
      filing.
 2. **Build argv conditionally.** The `--label ooda-stuck` pair is appended to
@@ -207,7 +207,7 @@ changes none of the existing ones:
 | label auto-created | `info!` (or `debug!`) | site's existing target | `ensure_gh_label` returned `Created` |
 | label unavailable, filing unlabeled | `warn!` | site's existing target | `ensure_gh_label` returned `Unavailable`; includes `reason` |
 
-There is **no** new event for `AlreadyPresent` (the steady state) — it is silent
+There is **no** new event for `AlreadyExists` (the steady state) — it is silent
 by design to avoid per-cycle log noise.
 
 Example (degraded path, breaker site, `target: simard::ooda`):
@@ -244,7 +244,7 @@ INFO simard::ooda label=ooda-stuck no-progress breaker: created missing 'ooda-st
 ## Testing
 
 - **Unit (hermetic).** An inline `#[cfg(test)]` test in `gh_label.rs` exercises
-  the pure stderr classifier: `already exists` → `AlreadyPresent`; an auth
+  the pure stderr classifier: `already exists` → `AlreadyExists`; an auth
   string → `Unavailable`; empty/other → `Unavailable`. No live `gh` is spawned.
 - **Regression (must stay green).**
   - `src/ooda_loop/tests_no_progress_investigation.rs`
