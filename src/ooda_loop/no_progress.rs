@@ -462,7 +462,10 @@ pub(crate) fn prune_merged_pr_refs(
 ) -> Vec<(String, String)> {
     let mut pruned = Vec::new();
     for goal in board.active.iter_mut() {
-        let goal_id = goal.id.clone();
+        // Disjoint field borrows: `id` (read) and `wip_refs` (mutated) so the
+        // common no-prune case allocates nothing — this runs every cycle over
+        // every active goal (cf. the per-ref alloc trimmed in #4399).
+        let goal_id = &goal.id;
         goal.wip_refs.retain(|wip| {
             if !wip.kind.trim().eq_ignore_ascii_case("pr") {
                 return true;
