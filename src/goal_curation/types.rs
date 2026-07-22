@@ -102,6 +102,31 @@ pub fn description_marks_standing(description: &str) -> bool {
         .any(|phrase| contains_phrase_on_word_boundary(&lower, phrase))
 }
 
+/// Case-insensitive substring markers in a goal description that make it a
+/// *docs-only* goal — one that touches only documentation and is therefore not
+/// self-affecting, so the deploy-aware done-gate (clause 3) is skipped for it.
+/// Matched as plain substrings (not on a word boundary) to mirror the
+/// completion-gate classifier byte-for-byte: the guard and the classifier must
+/// never drift, or a value that survives validation could still reclassify the
+/// persisted goal.
+const DOCS_ONLY_DESCRIPTION_MARKERS: &[&str] = &["docs-only", "documentation-only"];
+
+/// True when `description` durably marks the goal as docs-only, which downgrades
+/// it to non-self-affecting in the completion gate (skipping the deploy clause).
+///
+/// This is the single source of truth for the docs-only marker: the completion
+/// gate reads it to decide self-affecting status, and the course-correction
+/// field validators reject any LLM-sourced field that would smuggle this marker
+/// into the persisted `goal.description` and thereby bypass the deploy-aware
+/// done-gate. Keeping both callers on this one function guarantees the guard can
+/// never fall behind the classifier.
+pub fn description_marks_docs_only(description: &str) -> bool {
+    let lower = description.to_ascii_lowercase();
+    DOCS_ONLY_DESCRIPTION_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
 /// Whole-word, case-insensitive markers in a goal description that make it a
 /// *cognition-research* goal — one whose durable subject is Simard's own
 /// cognition (graph memory, recall, distillation, reasoning). Matched with a
@@ -770,6 +795,24 @@ mod tests {
         ));
         assert!(!description_marks_standing("Ship the MVP"));
         assert!(!description_marks_standing(""));
+    }
+
+    #[test]
+    fn description_marks_docs_only_matches_the_completion_gate_classifier() {
+        // Both marker spellings, case-insensitively, mark a goal docs-only —
+        // which downgrades it to non-self-affecting and skips the deploy clause.
+        assert!(description_marks_docs_only("This is a docs-only change"));
+        assert!(description_marks_docs_only("DOCS-ONLY"));
+        assert!(description_marks_docs_only(
+            "documentation-only tidy of the README"
+        ));
+        assert!(description_marks_docs_only("Documentation-Only"));
+        // A description with no marker is not docs-only.
+        assert!(!description_marks_docs_only(
+            "Raise line coverage of `src/lib.rs` to at least 70%"
+        ));
+        assert!(!description_marks_docs_only("Ship the deploy pipeline"));
+        assert!(!description_marks_docs_only(""));
     }
 
     #[test]

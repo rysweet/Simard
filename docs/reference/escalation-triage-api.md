@@ -15,7 +15,7 @@ last_updated: 2026-07-22
 review_schedule: as-needed
 owner: simard
 doc_type: reference
-status: implemented
+status: partially implemented
 related:
   - ../concepts/blocked-goal-escalation-triage.md
   - ../reference/completion-evidence-gate-api.md
@@ -32,9 +32,21 @@ related:
 
 # Escalation-triage API reference
 
-> **Status: implemented (issue #4419).** The reasoning contract lives in
-> [`prompt_assets/simard/overseer/escalation_triage.md`](https://github.com/rysweet/Simard/blob/main/prompt_assets/simard/overseer/escalation_triage.md).
-> The correction is applied through
+> **Status: partially implemented (issue #4419).** The reasoning contract lives
+> in
+> [`prompt_assets/simard/overseer/escalation_triage.md`](https://github.com/rysweet/Simard/blob/main/prompt_assets/simard/overseer/escalation_triage.md),
+> and the thin trigger
+> [`overseer::act_escalate_blocked_goal`](https://github.com/rysweet/Simard/blob/main/src/overseer/mod.rs)
+> launches it today. The validated Rust primitives documented below —
+> [`goal_board_store::rewrite_blocked_goal_done_gate`](https://github.com/rysweet/Simard/blob/main/src/goal_board_store/mod.rs)
+> and its field validators, the
+> [`overseer::triage`](https://github.com/rysweet/Simard/blob/main/src/overseer/triage.rs)
+> escalation invariant, and
+> [`signal_conversation::operator_safe`](https://github.com/rysweet/Simard/blob/main/src/signal_conversation/operator_safe.rs)
+> — ship tested but are **not yet wired into the live escalation path**; hooking
+> them onto their call sites is tracked by
+> [#4427](https://github.com/rysweet/Simard/issues/4427). Once wired, the
+> correction is applied through
 > [`goal_board_store::mutate`](https://github.com/rysweet/Simard/blob/main/src/goal_board_store/mod.rs),
 > certified by the existing completion gate in
 > [`goal_curation::completion_gate`](https://github.com/rysweet/Simard/blob/main/src/goal_curation/completion_gate.rs)

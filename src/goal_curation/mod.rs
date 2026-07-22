@@ -37,7 +37,7 @@ pub use operations::{
 pub use types::{
     ActiveGoal, BacklogItem, CARRYOVER_CONCEPT, GoalBoard, GoalCarryoverRecord, GoalEdge,
     GoalEdgeType, GoalNode, GoalProgress, MAX_ACTIVE_GOALS, STANDING_MARKER_PREFIX, WipRef,
-    description_marks_research, description_marks_standing,
+    description_marks_docs_only, description_marks_research, description_marks_standing,
 };
 
 pub use decompose::{

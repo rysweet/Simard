@@ -47,7 +47,7 @@ use crate::goal_curation::completion_gate::{
 };
 use crate::goal_curation::{
     ActiveGoal, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS, NoProgressTracker, WipRef,
-    description_marks_standing, is_no_progress_marker,
+    description_marks_docs_only, description_marks_standing, is_no_progress_marker,
 };
 
 #[cfg(test)]
@@ -413,6 +413,15 @@ pub(crate) fn validate_module_path(module_path: &str) -> Result<(), CorrectionRe
     if module_path.split('/').any(|component| component == "..") {
         return Err(reject());
     }
+    // The module path is interpolated verbatim into the persisted
+    // `goal.description`, which the completion gate re-parses for a docs-only
+    // marker (`docs-only` / `documentation-only` both survive the char-set above
+    // — letters and `-` only). A path carrying that marker would durably
+    // reclassify a Simard-affecting coverage slice as non-self-affecting and
+    // silently skip the deploy-aware done-gate, so reject it fail-closed.
+    if description_marks_docs_only(module_path) {
+        return Err(reject());
+    }
     Ok(())
 }
 
@@ -465,10 +474,21 @@ pub(crate) fn validate_tracking_ref(tracking_ref: &WipRef) -> Result<(), Correct
         }
     }
     // The `label` is the only field spliced into the persisted description, so
-    // guard it against the exact classifier that reads that description: a label
-    // that reads as a standing marker would durably convert this one-off coverage
-    // slice into a perpetual goal with no terminal done-state.
+    // guard it against every classifier that reads that description. A label
+    // that reads as a standing marker would durably convert this one-off
+    // coverage slice into a perpetual goal with no terminal done-state...
     if description_marks_standing(&tracking_ref.label) {
+        return Err(CorrectionRejected::InvalidTrackingRef {
+            field: "label",
+            value: tracking_ref.label.clone(),
+        });
+    }
+    // ...and a label carrying a docs-only marker (`docs-only` /
+    // `documentation-only`) would flip the goal to non-self-affecting in the
+    // completion gate, skipping the deploy-aware done-gate (clause 3) so a
+    // Simard-affecting goal certifies complete on mere PR merge — never
+    // deployed. Reject it fail-closed, matching the standing guard above.
+    if description_marks_docs_only(&tracking_ref.label) {
         return Err(CorrectionRejected::InvalidTrackingRef {
             field: "label",
             value: tracking_ref.label.clone(),
@@ -476,7 +496,10 @@ pub(crate) fn validate_tracking_ref(tracking_ref: &WipRef) -> Result<(), Correct
     }
     Ok(())
 }
-/// checkable first slice, atomically under the store `flock` (issue #4419).
+
+/// Course-correct a `Blocked` goal by rewriting its unmeasurable done-gate into
+/// a concrete, per-module, machine-checkable first slice, atomically under the
+/// store `flock` (issue #4419).
 ///
 /// The entire read-modify-write runs inside one [`mutate`] window (no TOCTOU):
 /// the goal's done-criteria is rewritten to the concrete per-module target, the

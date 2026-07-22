@@ -16,7 +16,7 @@ last_updated: 2026-07-22
 review_schedule: as-needed
 owner: simard
 doc_type: concept
-status: implemented
+status: partially implemented
 related:
   - ./blocked-goal-escalation-backoff.md
   - ./overseer-agentic-health-review.md
@@ -29,16 +29,25 @@ related:
 
 # Triage & course-correct a blocked goal before escalating
 
-> **Status: implemented (issue #4419).** When the Overseer decides a goal is
-> genuinely blocked, it no longer ships a raw machine marker to a human and
-> counts that as "handled". It first INSPECTS the block, restates it in plain
+> **Status: partially implemented (issue #4419).** When the Overseer decides a
+> goal is genuinely blocked, it no longer ships a raw machine marker to a human
+> and counts that as "handled". It first INSPECTS the block, restates it in plain
 > English, attempts a root cause, and COURSE-CORRECTS it agentically — only
 > escalating a person when a human decision is genuinely required. The reasoning
 > lives in the recipe asset
 > [`prompt_assets/simard/overseer/escalation_triage.md`](https://github.com/rysweet/Simard/blob/main/prompt_assets/simard/overseer/escalation_triage.md);
 > the thin Rust trigger
 > [`overseer::act_escalate_blocked_goal`](https://github.com/rysweet/Simard/blob/main/src/overseer/mod.rs)
-> only launches it. State edits land through
+> launches it today. The validated Rust primitives that apply a course-correction
+> — [`goal_board_store::rewrite_blocked_goal_done_gate`](https://github.com/rysweet/Simard/blob/main/src/goal_board_store/mod.rs)
+> and its fail-closed field validators, the
+> [`overseer::triage`](https://github.com/rysweet/Simard/blob/main/src/overseer/triage.rs)
+> escalate-vs-course-correct invariant, and the
+> [`signal_conversation::operator_safe`](https://github.com/rysweet/Simard/blob/main/src/signal_conversation/operator_safe.rs)
+> guard — ship tested and ready, but are **not yet wired into the live
+> escalation path**; connecting them to their call sites is tracked by
+> [#4427](https://github.com/rysweet/Simard/issues/4427). Once wired, state edits
+> land through
 > [`goal_board_store::mutate`](https://github.com/rysweet/Simard/blob/main/src/goal_board_store/mod.rs),
 > the rewritten slice is certified by the existing
 > [`goal_curation::completion_gate`](https://github.com/rysweet/Simard/blob/main/src/goal_curation/completion_gate.rs)

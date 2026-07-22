@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::SimardResult;
 
-use super::types::{ActiveGoal, GoalBoard};
+use super::types::{ActiveGoal, GoalBoard, description_marks_docs_only};
 
 /// The verified facts the gate gathered for one goal.
 #[derive(Clone, Debug, PartialEq)]
@@ -500,10 +500,11 @@ fn routes_to_simard(goal: &ActiveGoal) -> bool {
     }
 }
 
-/// Explicit docs-only marker in the description.
+/// Explicit docs-only marker in the description. Delegates to the shared
+/// [`description_marks_docs_only`] classifier so this gate and the
+/// course-correction field validators read the exact same marker set.
 fn is_docs_only(goal: &ActiveGoal) -> bool {
-    let desc = goal.description.to_ascii_lowercase();
-    desc.contains("docs-only") || desc.contains("documentation-only")
+    description_marks_docs_only(&goal.description)
 }
 
 /// The goal bumps a pinned dependency rev in Simard's own `Cargo.toml`,

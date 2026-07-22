@@ -848,6 +848,13 @@ fn module_path_rejects_traversal_absolute_and_shell_metacharacters() {
         "src/$(whoami).rs",     // command substitution
         "src/a|b.rs",           // pipe
         "src/a\nb.rs",          // embedded newline
+        // Marker-smuggling: `docs-only` / `documentation-only` survive the
+        // char-set (letters + `-`) but would splice into the persisted
+        // description and flip the goal to non-self-affecting, skipping the
+        // deploy-aware done-gate. Must be rejected fail-closed.
+        "docs-only",
+        "src/docs-only/mod.rs",
+        "documentation-only",
     ] {
         assert!(
             matches!(
@@ -933,6 +940,25 @@ fn tracking_ref_rejects_empty_control_chars_and_smuggled_standing_markers() {
                 Err(CorrectionRejected::InvalidTrackingRef { field: "label", .. })
             ),
             "a label carrying a standing marker ({smuggled:?}) must be rejected"
+        );
+    }
+
+    // The same fail-closed guard covers the docs-only marker: a label carrying
+    // `docs-only` / `documentation-only` would, once spliced into the persisted
+    // description, flip the goal to non-self-affecting in the completion gate and
+    // skip the deploy-aware done-gate (clause 3) — certifying a Simard-affecting
+    // goal complete on mere PR merge without a deploy. It must be rejected.
+    for smuggled in [
+        "docs-only tracking PR",
+        "DOCS-ONLY",
+        "documentation-only follow-up",
+    ] {
+        assert!(
+            matches!(
+                validate_tracking_ref(&bad_field("label", smuggled)),
+                Err(CorrectionRejected::InvalidTrackingRef { field: "label", .. })
+            ),
+            "a label carrying a docs-only marker ({smuggled:?}) must be rejected"
         );
     }
 
