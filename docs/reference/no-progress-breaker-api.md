@@ -9,6 +9,8 @@ status: implemented
 related:
   - ../concepts/perpetual-goal-no-progress-exemption.md
   - ../concepts/no-progress-root-cause-resolution.md
+  - ../concepts/ooda-stuck-label-self-heal.md
+  - ../reference/ooda-stuck-label-self-heal-api.md
   - ../concepts/steerable-ooda-daemon.md
   - ../reference/no-progress-root-cause-resolution-api.md
   - ../reference/ooda-no-progress-why-recipe.md
