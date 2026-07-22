@@ -424,6 +424,12 @@ fn run_ooda_daemon_with_session_uses_session_for_advance_goal() {
     let mut state = OodaState::new(board);
     let config = OodaConfig {
         max_concurrent_actions: 2,
+        // Hermetic: pin `scaler: None` so the cycle honors the explicit
+        // concurrency cap regardless of the ambient `SIMARD_SCALING` env var.
+        // With `SIMARD_SCALING=auto`, `Default` would attach a scaler whose
+        // live limit `decide` prefers over `max_concurrent_actions`, making the
+        // number of advance-goal actions env-dependent.
+        scaler: None,
         ..Default::default()
     };
 

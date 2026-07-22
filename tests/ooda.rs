@@ -161,6 +161,12 @@ fn decide_selects_actions_within_concurrent_limit() {
     let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
     let config = OodaConfig {
         max_concurrent_actions: 2,
+        // Hermetic: pin `scaler: None` so the cap under test is honored
+        // regardless of the ambient `SIMARD_SCALING` env var. When
+        // `SIMARD_SCALING=auto` is set (CI and some dev hosts), `Default`
+        // populates a scaler whose live limit `decide` prefers over
+        // `max_concurrent_actions`, which would defeat this assertion.
+        scaler: None,
         ..Default::default()
     };
     let actions = decide(&priorities, &config).unwrap();
