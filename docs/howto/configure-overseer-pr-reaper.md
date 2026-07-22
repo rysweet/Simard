@@ -54,7 +54,8 @@ Background: [the concept](../concepts/overseer-pr-reaper-policy.md), the
 
 The reaper policy needs no enable flag — by design it only ever *tightens* what
 the reasoner already proposes, so once wired it is **on** whenever the
-merge-queue reasoner runs. It is **not yet wired into the live path** (see the
+merge-queue reasoner runs. It is **not yet wired into the live path** (tracked in
+[#4423](https://github.com/rysweet/Simard/issues/4423); see the
 [concept status note](../concepts/overseer-pr-reaper-policy.md)); the posture
 described here is what takes effect once integration lands. By design it is
 **non-destructive**: `Stale` and long-`CONFLICTING` PRs get a review-comment

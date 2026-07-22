@@ -31,7 +31,8 @@ related:
 
 # Overseer PR-Reaper Policy
 
-> **Status: policy layer implemented and unit-tested; live wiring pending.**
+> **Status: policy layer implemented and unit-tested; live wiring pending
+> ([#4423](https://github.com/rysweet/Simard/issues/4423)).**
 > The policy layer lives in
 > [`src/overseer/reaper_policy.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/reaper_policy.rs)
 > and is fully covered by the unit tests in

@@ -26,7 +26,8 @@ related:
 
 # Reference: Overseer PR-Reaper Policy API
 
-> **Status: policy layer implemented and unit-tested; live wiring pending.**
+> **Status: policy layer implemented and unit-tested; live wiring pending
+> ([#4423](https://github.com/rysweet/Simard/issues/4423)).**
 > The `evaluate(...)` contract and value types below are shipped and fully
 > unit-tested, but they are **not yet routed into the live merge-queue path** —
 > the `merge_queue_observe.rs` / `signal.rs` dispatch still hands dispositions to
