@@ -237,9 +237,9 @@ tracking issue is always filed. In current builds you will instead see a single
 WARN fallback followed by a successful file:
 
 ```text
-WARN … simard::ooda: no-progress breaker: 'ooda-stuck' label absent —
-  refiling tracking issue without label stderr=could not add label: 'ooda-stuck' not found
-WARN … simard::ooda: no-progress breaker: tracking issue filed for stuck goal issue=4231
+WARN … simard::ooda: no-progress breaker: 'ooda-stuck' label missing;
+  retrying gh issue create without --label stderr=could not add label: 'ooda-stuck' not found
+WARN … simard::ooda: no-progress breaker: tracking issue filed for stuck goal (without label) issue=4231
 ```
 
 No operator action is required — the goal is recorded and unblocked

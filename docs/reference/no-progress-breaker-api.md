@@ -326,9 +326,9 @@ After this change the same repo yields a single WARN fallback and a filed
 issue, and the goal leaves the crash loop:
 
 ```text
-WARN run_ooda_cycle: simard::ooda: no-progress breaker: 'ooda-stuck' label absent —
-  refiling tracking issue without label stderr=could not add label: 'ooda-stuck' not found
-WARN run_ooda_cycle: simard::ooda: no-progress breaker: tracking issue filed for stuck goal issue=4231
+WARN run_ooda_cycle: simard::ooda: no-progress breaker: 'ooda-stuck' label missing;
+  retrying gh issue create without --label stderr=could not add label: 'ooda-stuck' not found
+WARN run_ooda_cycle: simard::ooda: no-progress breaker: tracking issue filed for stuck goal (without label) issue=4231
 ```
 
 ### Missing-label detection
