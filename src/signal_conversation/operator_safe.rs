@@ -63,10 +63,11 @@ pub fn ensure_operator_safe(message: &str) -> Result<(), OperatorMessageRejected
         });
     }
     // Fail-closed marker denylist, matched case-insensitively so a lower-cased
-    // leak is caught just as a raw upper-cased token would be.
-    let haystack = message.to_ascii_lowercase();
+    // leak is caught just as a raw upper-cased token would be. Folding ASCII
+    // case per byte during the scan keeps this allocation-free — neither the
+    // message nor the compile-time markers need a lowercased copy per call.
     for marker in OPERATOR_FORBIDDEN_MARKERS {
-        if haystack.contains(&marker.to_ascii_lowercase()) {
+        if contains_ignore_ascii_case(message, marker) {
             return Err(OperatorMessageRejected {
                 reason: format!(
                     "message carries an internal marker that must be translated: {marker}"
@@ -75,4 +76,24 @@ pub fn ensure_operator_safe(message: &str) -> Result<(), OperatorMessageRejected
         }
     }
     Ok(())
+}
+
+/// ASCII-case-insensitive substring search that allocates nothing: it folds
+/// ASCII case per byte while scanning, so neither `haystack` nor `needle` needs
+/// a lowercased copy. Behaviour matches
+/// `haystack.to_ascii_lowercase().contains(&needle.to_ascii_lowercase())` for
+/// these ASCII markers — non-ASCII bytes (e.g. the 🔒 lock) compare exactly,
+/// just as `to_ascii_lowercase` leaves them untouched.
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    if needle.is_empty() {
+        return true;
+    }
+    let haystack = haystack.as_bytes();
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }
