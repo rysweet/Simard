@@ -219,7 +219,7 @@ The finish line is written as a **delimited criteria block** so re-runs overwrit
 exactly that section and never disturb the rest of the body:
 
 ```markdown
-<!-- SIMARD:done-criteria:begin -->
+<!-- SIMARD:done-criteria:start -->
 ### Finish line (machine-checkable)
 
 This goal is **done** when a single merged PR delivers all of the following, each
@@ -262,7 +262,7 @@ Write mechanics:
   **never** shell-interpolated — so criteria text and markers cannot inject a
   command.
 - The block is bounded by the stable HTML-comment markers
-  `<!-- SIMARD:done-criteria:begin -->` / `…:end -->`. On a re-run the brain
+  `<!-- SIMARD:done-criteria:start -->` / `…:end -->`. On a re-run the brain
   replaces **only** the delimited span; unrelated body content is preserved
   (idempotent).
 - The write is **scope-bound** to the exact repo/issue the Stage-2 probe read.

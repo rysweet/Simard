@@ -106,7 +106,7 @@ On the "write a checkable finish line" path, the pipeline edits the goal's
 a delimited checklist. For this goal it is:
 
 ```markdown
-<!-- SIMARD:done-criteria:begin -->
+<!-- SIMARD:done-criteria:start -->
 ### Finish line (machine-checkable)
 
 This goal is done when a single merged PR delivers all of the following, each of
@@ -140,11 +140,11 @@ goal-board entry) and confirm it now contains the delimited block:
 
 ```bash
 # Replace <n> with the goal's tracking-issue number.
-gh issue view <n> --json body --jq '.body' | sed -n '/SIMARD:done-criteria:begin/,/SIMARD:done-criteria:end/p'
+gh issue view <n> --json body --jq '.body' | sed -n '/SIMARD:done-criteria:start/,/SIMARD:done-criteria:end/p'
 ```
 
 You should see the four-item "Finish line (machine-checkable)" checklist between
-the `SIMARD:done-criteria:begin` / `…:end` markers. The rest of the issue body is
+the `SIMARD:done-criteria:start` / `…:end` markers. The rest of the issue body is
 unchanged — the pipeline only rewrites the delimited span, so re-running triage
 never duplicates or clobbers other content.
 
