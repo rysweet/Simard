@@ -1,9 +1,9 @@
 ---
 title: Configure the Overseer PR reaper
 description: >
-  Operator runbook for Simard's PR-reaper policy: confirm the deterministic,
-  fail-closed guard is active between the merge-queue reasoner and the
-  intervention gate, tune its conservative thresholds (stale 14d, CONFLICTING
+  Operator runbook for Simard's PR-reaper policy: the deterministic,
+  fail-closed guard designed to sit between the merge-queue reasoner and the
+  intervention gate (implemented and unit-tested; live wiring pending). Tune its conservative thresholds (stale 14d, CONFLICTING
   7d, title similarity >=0.85 + file overlap) via SIMARD_OVERSEER_REAPER_*,
   keep destructive duplicate-close in dry-run/notify-only by default, opt in to
   destructive close via allow_verify_merge, and verify decisions through the
@@ -13,7 +13,7 @@ last_updated: 2026-07-21
 review_schedule: as-needed
 owner: simard
 doc_type: howto
-status: implemented
+status: partial
 related:
   - ../concepts/overseer-pr-reaper-policy.md
   - ../reference/overseer-pr-reaper-policy-api.md
@@ -26,11 +26,12 @@ related:
 
 # Configure the Overseer PR reaper
 
-> **Goal.** Confirm the PR-reaper policy is guarding every `Stale` / `Duplicate`
-> disposition the merge-queue reasoner proposes, tune its conservative
-> thresholds, keep destructive duplicate-close **dry-run by default**, and — only
-> when you explicitly choose to — opt in to destructive close. **Never**
-> `--admin` / `--no-verify`.
+> **Goal.** Understand how the PR-reaper policy is designed to guard every
+> `Stale` / `Duplicate` disposition the merge-queue reasoner proposes, tune its
+> conservative thresholds, keep destructive duplicate-close **dry-run by
+> default**, and — only when you explicitly choose to — opt in to destructive
+> close. **Never** `--admin` / `--no-verify`. (Live wiring is pending — see the
+> [concept status note](../concepts/overseer-pr-reaper-policy.md).)
 
 Background: [the concept](../concepts/overseer-pr-reaper-policy.md), the
 [API reference](../reference/overseer-pr-reaper-policy-api.md), and the
@@ -39,18 +40,26 @@ Background: [the concept](../concepts/overseer-pr-reaper-policy.md), the
 ## Prerequisites
 
 - The daemon binary includes the merge-queue reasoning pass and the
-  `reaper_policy` layer (this feature).
+  `reaper_policy` layer (this feature). **Note:** the `reaper_policy` layer is
+  implemented and unit-tested but is **not yet routed into the live disposition
+  path** — see the [concept status note](../concepts/overseer-pr-reaper-policy.md).
+  Until wiring lands, the thresholds below configure the policy for its unit
+  tests and future integration; the live Overseer still hands `Stale`/`Duplicate`
+  dispositions to the existing `MergeAuthority`-gated interventions directly.
 - **`gh`** authenticated so the read-only reasoning step can list/view PRs.
 - The Overseer is acting (`SIMARD_OVERSEER_ENABLED` truthy). See
   [Watch Overseer activity](./watch-overseer-activity.md).
 
-## 1. Confirm the guard is active (dry-run by default)
+## 1. Confirm the guard is available (dry-run by default once wired)
 
-The reaper policy is **on** whenever the merge-queue reasoner runs — there is no
-enable flag, because the policy only ever *tightens* what the reasoner already
-proposes. By default it is **non-destructive**: `Stale` and long-`CONFLICTING`
-PRs get a review-comment `FlagStalePr`, and proposed duplicate closes are
-**downgraded to a flag** because the destructive gate is closed.
+The reaper policy needs no enable flag — by design it only ever *tightens* what
+the reasoner already proposes, so once wired it is **on** whenever the
+merge-queue reasoner runs. It is **not yet wired into the live path** (see the
+[concept status note](../concepts/overseer-pr-reaper-policy.md)); the posture
+described here is what takes effect once integration lands. By design it is
+**non-destructive**: `Stale` and long-`CONFLICTING` PRs get a review-comment
+`FlagStalePr`, and proposed duplicate closes are **downgraded to a flag** because
+the destructive gate is closed.
 
 Verify the default posture:
 

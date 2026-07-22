@@ -16,7 +16,7 @@ last_updated: 2026-07-21
 review_schedule: as-needed
 owner: simard
 doc_type: explanation
-status: implemented
+status: partial
 related:
   - ./agentic-merge-queue-reasoning.md
   - ./stale-engineer-claim-reaper.md
@@ -31,19 +31,29 @@ related:
 
 # Overseer PR-Reaper Policy
 
-> **Status: implemented.** This page describes shipped behaviour in the present
-> tense. The policy layer lives in
+> **Status: policy layer implemented and unit-tested; live wiring pending.**
+> The policy layer lives in
 > [`src/overseer/reaper_policy.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/reaper_policy.rs)
-> and is wired into the observe/orient dispatch in
-> [`src/overseer/merge_queue_observe.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/merge_queue_observe.rs),
-> ahead of the existing
-> [`Guardrails::admit`](../reference/agentic-merge-queue-reasoning-api.md) gate.
-> Thresholds resolve from
+> and is fully covered by the unit tests in
+> [`src/overseer/tests_merge_queue_reasoning.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/tests_merge_queue_reasoning.rs).
+> Its thresholds resolve from
 > [`src/overseer/config.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/config.rs).
-> The change is purely **additive**: it *repairs and extends* the existing
-> merge-queue reasoning surfaces rather than adding a new autonomous actor, and
-> it changes **no** merge authorization. Documentation and implementation land
-> in the **same pull request**.
+> **It is not yet routed into the live merge-queue path:** the observe/orient
+> dispatch in
+> [`src/overseer/merge_queue_observe.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/merge_queue_observe.rs)
+> and the disposition→signal lift in
+> [`src/overseer/signal.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/signal.rs)
+> still hand agent-proposed `Stale` / `Duplicate` dispositions straight to the
+> existing `MergeAuthority`-gated `FlagStalePr` / `CloseDuplicatePr` interventions.
+> Wiring `reaper_policy::evaluate` ahead of that gate — which requires gathering
+> per-PR facts (`updated_at`, `mergeable`, changed files) from `gh` and building
+> the peer set — is the remaining integration step. Existing merge **authorization**
+> is unchanged, and the destructive duplicate-close still sits behind the
+> notify-only `MergeAuthority` gate (opt-in via `allow_verify_merge`), so nothing
+> below regresses safety; the deterministic thresholds this page describes simply
+> do not apply in production until that wiring lands. The change is purely
+> **additive** and *repairs and extends* the existing merge-queue reasoning
+> surfaces rather than adding a new autonomous actor.
 
 ## The problem it solves
 
@@ -67,7 +77,8 @@ into closing more than the numbers justify.
 
 `reaper_policy` is a pure, fail-closed validation layer that mirrors the shape
 of the existing [claim reaper](./stale-engineer-claim-reaper.md): agent proposes,
-deterministic policy disposes. It sits **between** the parsed reasoner output and
+deterministic policy disposes. Once wired (see the status note above), it is
+designed to sit **between** the parsed reasoner output and
 `Guardrails::admit`:
 
 ```text

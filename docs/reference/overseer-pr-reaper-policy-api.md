@@ -5,7 +5,8 @@ description: >
   the pure fail-closed evaluate(...) validator and its tighten-only guarantee,
   the ReaperThresholds config (stale 14d, CONFLICTING 7d, title similarity
   >=0.85 + file overlap) and its SIMARD_OVERSEER_REAPER_* resolvers with clamps,
-  the merge_queue_observe wiring ahead of Guardrails::admit, the deterministic
+  the intended merge_queue_observe wiring ahead of Guardrails::admit (pending),
+  the deterministic
   survivor-selection rule, the fail-closed parse of mergeable/timestamps, the
   argv-safety and flag-injection assertions, the telemetry surface, and the
   regression test list.
@@ -13,7 +14,7 @@ last_updated: 2026-07-21
 review_schedule: as-needed
 owner: simard
 doc_type: reference
-status: implemented
+status: partial
 related:
   - ../concepts/overseer-pr-reaper-policy.md
   - ./agentic-merge-queue-reasoning-api.md
@@ -25,10 +26,16 @@ related:
 
 # Reference: Overseer PR-Reaper Policy API
 
-> **Status: implemented.** Present-tense description of shipped behaviour.
+> **Status: policy layer implemented and unit-tested; live wiring pending.**
+> The `evaluate(...)` contract and value types below are shipped and fully
+> unit-tested, but they are **not yet routed into the live merge-queue path** —
+> the `merge_queue_observe.rs` / `signal.rs` dispatch still hands dispositions to
+> the existing `MergeAuthority`-gated interventions directly. Sections that
+> describe the observe wiring and telemetry emission describe the **intended**
+> integration, not current runtime behaviour.
 > Primary source:
 > [`src/overseer/reaper_policy.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/reaper_policy.rs);
-> wiring in
+> intended wiring point:
 > [`src/overseer/merge_queue_observe.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/merge_queue_observe.rs);
 > thresholds in
 > [`src/overseer/config.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/config.rs).
@@ -153,9 +160,16 @@ candidate. This makes it impossible for an attacker who opens a near-duplicate
 | T5 | Fail-closed on bad facts. | `Unknown` mergeable / `None` timestamp ⇒ `NoAction`/no-close. |
 | T6 | Pure. | No I/O, no clock read (`now` injected), no globals. |
 
-## Wiring
+## Wiring (intended — not yet implemented)
 
-In [`merge_queue_observe.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/merge_queue_observe.rs),
+> **This section describes the planned integration, not current behaviour.** The
+> code snippet below does **not** yet exist in `merge_queue_observe.rs`; it is the
+> reference design for the pending wiring step. Today `signal.rs` lifts `Stale` /
+> `Duplicate` dispositions straight to `StalePrDetected` / `DuplicatePrDetected`
+> signals without calling `reaper_policy::evaluate`.
+
+Once wired, in
+[`merge_queue_observe.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/merge_queue_observe.rs),
 each parsed `ReasonedPr` whose disposition is `Stale` or `Duplicate` is routed
 through `reaper_policy::evaluate` **before** the corresponding intervention is
 constructed and handed to `Guardrails::admit`:
@@ -237,6 +251,10 @@ defaults. There is **no** env knob that opens destructive closes — that is onl
 
 ## Telemetry
 
+> **Emission pending wiring.** The counter *constants* below exist in `names.rs`,
+> but nothing increments them yet — the reaper is not on the live path. The
+> "When" table describes the intended emission once wired.
+
 Metric names follow the house **dotted OTel** convention (as in `names.rs`, e.g.
 `simard.daemon.cycle`). The internal constant *value* is the dotted name; the
 `_total` suffix and `{decision=…}` label shown below are the **Prometheus
@@ -267,7 +285,7 @@ decision, reason). No `print!` family calls.
 
 ## Regression tests
 
-Inline `#[cfg(test)]` in `reaper_policy.rs` and integration in
+Unit tests live in
 [`src/overseer/tests_merge_queue_reasoning.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/tests_merge_queue_reasoning.rs):
 
 | Test | Asserts |
@@ -280,5 +298,5 @@ Inline `#[cfg(test)]` in `reaper_policy.rs` and integration in
 | `fail_closed_on_unknown_mergeable_or_timestamp` | `Unknown` mergeable / `None` timestamp ⇒ never a close. |
 | `survivor_is_lowest_numbered_pr` | Duplicate survivor is the lowest-numbered (earliest) PR; the later PR is the close candidate (griefing resistance). |
 | `dry_run_gate_default_is_notify_only` | With `allow_verify_merge=false`, no destructive `CloseDuplicatePr` is admitted. |
-| `argv_never_contains_admin_or_no_verify` | Built close argv contains neither `--admin` nor `--no-verify`. |
+| `reaper_close_argv_never_contains_admin_or_no_verify` | Built close argv contains neither `--admin` nor `--no-verify`. |
 | `thresholds_resolver_defaults_and_clamps` | Resolver returns defaults when unset and clamps out-of-range values. |
