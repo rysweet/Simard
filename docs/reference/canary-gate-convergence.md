@@ -289,26 +289,32 @@ push raw values into `canary_env`.
 ## `bound_gate_detail` — redact-then-bound credential guard
 
 Gate failure detail (`GateResult.detail`) may echo subprocess **stderr**, which
-is untrusted, may contain URL-embedded credentials, and may be arbitrarily
-long. `bound_gate_detail` applies two transforms in a **mandatory order**:
+is untrusted, may contain URL-embedded credentials, control chars, and may be
+arbitrarily long. `bound_gate_detail` applies three transforms in a **mandatory
+order**:
 
 1. **Redact** credentials — strip `scheme://user:pass@host` userinfo and known
    secret-bearing tokens.
-2. **Bound** — UTF-8 / char-boundary-safe truncate so the returned string,
+2. **Sanitize** — collapse CR/LF and other control/whitespace runs into single
+   spaces so tainted stderr renders as one log line (defeats log forgery,
+   SEC-D4).
+3. **Bound** — UTF-8 / char-boundary-safe truncate so the returned string,
    including the ellipsis, is at most **512 bytes** (snaps the content boundary
    **down** to guarantee the total never exceeds the cap).
 
 ```rust
-/// Redact URL-embedded credentials THEN char-boundary-safe truncate so the
-/// final string (including any ellipsis) is at most 512 bytes. Order is
-/// mandatory: redact BEFORE bound, so truncation can never split a credential
-/// in a way that leaks the tail or defeats the redactor. The cap counts the
-/// trailing ellipsis and snaps DOWN to a UTF-8 char boundary, so multi-byte
-/// stderr can neither panic the overseer tick nor exceed 512 bytes.
+/// Redact URL-embedded credentials, collapse control/whitespace, THEN
+/// char-boundary-safe truncate so the final string (including any ellipsis) is
+/// at most 512 bytes. Order is mandatory: redact BEFORE sanitize BEFORE bound —
+/// redact-first stops truncation from splitting a credential, sanitize-second
+/// collapses CR/LF so the detail cannot forge log lines, bound-last snaps DOWN
+/// to a UTF-8 char boundary so multi-byte stderr can neither panic the overseer
+/// tick nor exceed 512 bytes.
 fn bound_gate_detail(raw: &str) -> String {
     const MAX: usize = 512;
     const ELLIPSIS: &str = "...";
     let redacted = redact_credentials(raw);
+    let redacted = collapse_control_whitespace(&redacted);
     if redacted.len() <= MAX {
         return redacted;
     }
@@ -325,8 +331,11 @@ fn bound_gate_detail(raw: &str) -> String {
   is always `<= 512` bytes. (A naive "truncate to 512 then append `...`" would
   overshoot to 515.)
 
-- **Redact-before-bound is mandatory.** Truncating first could cut a
-  `user:pass@host` token so the redactor no longer matches it.
+- **Redact-before-sanitize-before-bound is mandatory.** Truncating first could
+  cut a `user:pass@host` token so the redactor no longer matches it; sanitizing
+  after redaction collapses control chars (CR/LF) to single spaces so a
+  multiline stderr cannot forge a log entry when interpolated into a refusal
+  reason.
 - **UTF-8-safe.** Truncation snaps to a `char` boundary, so multi-byte stderr
   can never panic the overseer tick.
 - Applied to gate `detail` and to `CanaryResult::refusal_reason` in

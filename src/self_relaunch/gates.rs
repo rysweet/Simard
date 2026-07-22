@@ -88,19 +88,25 @@ fn scrub_gate_env(cmd: &mut Command, config: &RelaunchConfig, profile: GateEnvPr
     }
 }
 
-/// Redact URL-embedded credentials THEN char-boundary-safe truncate so the
-/// final string (including any ellipsis) is at most 512 bytes.
+/// Redact URL-embedded credentials, collapse control/whitespace, THEN
+/// char-boundary-safe truncate so the final string (including any ellipsis) is
+/// at most 512 bytes.
 ///
-/// Order is mandatory: redact BEFORE bound, so truncation can never split a
-/// `user:pass@host` credential in a way that leaks the tail or defeats the
-/// redactor (SEC-D2). The 512-byte cap counts the trailing ellipsis and snaps
-/// **down** to a UTF-8 char boundary, so multi-byte stderr can never panic the
-/// overseer tick or exceed the bound.
+/// Order is mandatory: redact BEFORE sanitize BEFORE bound.
+/// - Redact first so truncation can never split a `user:pass@host` credential
+///   in a way that leaks the tail or defeats the redactor (SEC-D2).
+/// - Sanitize second so CR/LF and other control chars from tainted subprocess
+///   stderr collapse to single spaces, denying log-forgery when the detail is
+///   inlined into a refusal reason (SEC-D4).
+/// - Bound last: the 512-byte cap counts the trailing ellipsis and snaps
+///   **down** to a UTF-8 char boundary, so multi-byte stderr can never panic
+///   the overseer tick or exceed the bound.
 fn bound_gate_detail(raw: &str) -> String {
     const MAX: usize = 512;
     const ELLIPSIS: &str = "...";
 
     let redacted = crate::self_deploy::source_prep::redact_credentials(raw);
+    let redacted = collapse_control_whitespace(&redacted);
     if redacted.len() <= MAX {
         return redacted;
     }
@@ -112,6 +118,28 @@ fn bound_gate_detail(raw: &str) -> String {
         end -= 1;
     }
     format!("{}{ELLIPSIS}", redacted[..end].trim_end())
+}
+
+/// Collapse ASCII control chars (CR/LF/TAB/etc.) and runs of whitespace into a
+/// single space so a tainted subprocess detail renders as one log line. This
+/// closes the log-forgery vector (SEC-D4) at the source, independent of whether
+/// the final sink is structured (tracing field) or interpolated (refusal text).
+fn collapse_control_whitespace(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut prev_space = false;
+    for ch in input.chars() {
+        // Treat any control char or whitespace as a space separator.
+        if ch.is_control() || ch.is_whitespace() {
+            if !prev_space {
+                out.push(' ');
+                prev_space = true;
+            }
+        } else {
+            out.push(ch);
+            prev_space = false;
+        }
+    }
+    out.trim().to_string()
 }
 
 /// Verify a canary binary against a sequence of gates (does not short-circuit).
@@ -809,6 +837,23 @@ mod tests {
             bound_gate_detail(raw),
             raw,
             "short, credential-free detail must be preserved verbatim"
+        );
+    }
+
+    #[test]
+    fn bound_gate_detail_collapses_multiline_to_single_line() {
+        // Tainted subprocess stderr with CR/LF and a forged log line. The
+        // detail must render as ONE line so it cannot forge log entries when
+        // interpolated into a refusal reason (SEC-D4).
+        let raw = "tests failed\r\nERROR forged log line\n\ttrace: x\r\ny";
+        let out = bound_gate_detail(raw);
+        assert!(
+            !out.contains('\n') && !out.contains('\r') && !out.contains('\t'),
+            "control chars must be collapsed to single-line output: {out:?}"
+        );
+        assert_eq!(
+            out, "tests failed ERROR forged log line trace: x y",
+            "whitespace/control runs must collapse to single spaces"
         );
     }
 
