@@ -93,6 +93,18 @@ fn scrub_gate_env(cmd: &mut Command, config: &RelaunchConfig) {
     }
 }
 
+/// Construct a [`Command`] for `program` already scrubbed to the canary gate
+/// environment (see [`scrub_gate_env`]). Every gate spawns through this, which
+/// makes "a gate subprocess is *always* run under the scrubbed env" a
+/// structural invariant: a gate cannot silently inherit the daemon's ambient
+/// env by forgetting the scrub call. `env_clear()` runs at construction, so any
+/// gate-specific `.env(...)` (e.g. `CARGO_BUILD_JOBS`) added afterwards survives.
+fn scrubbed_command(program: impl AsRef<std::ffi::OsStr>, config: &RelaunchConfig) -> Command {
+    let mut cmd = Command::new(program);
+    scrub_gate_env(&mut cmd, config);
+    cmd
+}
+
 /// Verify a canary binary against a sequence of gates (does not short-circuit).
 pub fn verify_canary(
     binary: &Path,
@@ -145,9 +157,8 @@ fn run_gate(binary: &Path, gate: RelaunchGate, config: &RelaunchConfig) -> GateR
 }
 
 fn run_smoke_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
-    let mut cmd = Command::new(binary);
+    let mut cmd = scrubbed_command(binary, config);
     cmd.arg("--version");
-    scrub_gate_env(&mut cmd, config);
     match cmd.output() {
         Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -175,14 +186,13 @@ fn run_smoke_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
 }
 
 fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
-    let mut cmd = Command::new("cargo");
+    let mut cmd = scrubbed_command("cargo", config);
     cmd.arg("test")
         .arg("--manifest-path")
         .arg(config.manifest_dir.join("Cargo.toml"))
         .arg("--target-dir")
-        .arg(&config.canary_target_dir);
-    scrub_gate_env(&mut cmd, config);
-    cmd.env("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs());
+        .arg(&config.canary_target_dir)
+        .env("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs());
     match cmd.output() {
         Ok(output) if output.status.success() => GateResult {
             gate: RelaunchGate::UnitTest,
@@ -207,9 +217,8 @@ fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
 }
 
 fn run_gym_baseline_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
-    let mut cmd = Command::new(binary);
+    let mut cmd = scrubbed_command(binary, config);
     cmd.args(["gym", "list"]);
-    scrub_gate_env(&mut cmd, config);
     match cmd.output() {
         Ok(output) if output.status.success() => GateResult {
             gate: RelaunchGate::GymBaseline,
@@ -235,9 +244,8 @@ fn run_gym_baseline_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
 
 fn run_rpc_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
     let timeout_secs = config.health_timeout.as_secs().to_string();
-    let mut cmd = Command::new(binary);
+    let mut cmd = scrubbed_command(binary, config);
     cmd.args(["probe", "rpc", "--timeout", &timeout_secs]);
-    scrub_gate_env(&mut cmd, config);
     match cmd.output() {
         Ok(output) if output.status.success() => GateResult {
             gate: RelaunchGate::RpcHealth,
