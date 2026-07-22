@@ -129,7 +129,7 @@ pub const DISK_RECLAIM_USED_PCT_AFTER: &str = "simard.disk.reclaim.used_pct_afte
 /// stall — a non-zero rate means a tick hung long enough to trip the self-heal.
 pub const OVERSEER_TICK_WATCHDOG_REARM: &str = "simard.overseer.tick_watchdog_rearm";
 
-/// One PR-reaper (issue #4) decision (counter). Attribute [`ATTR_OUTCOME`] =
+/// One PR-reaper (issue #4) decision (counter). Attribute [`ATTR_DECISION`] =
 /// `no_action` | `flag` | `close_duplicate`.
 pub const OVERSEER_REAPER_DECISION: &str = "simard.overseer.reaper_decision";
 

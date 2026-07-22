@@ -1695,6 +1695,17 @@ pub fn run_ooda_daemon(
             // overlap guard so the next `due()` boundary re-arms the cadence. This
             // recovers a latched cadence a hung/never-returning tick would otherwise
             // wedge forever.
+            // A healthy tick clears the overlap guard via its `ClearOnDrop` but
+            // cannot reach this loop-local marker; clear it here too the moment
+            // the guard is observed free so `overseer_tick_spawned_at` honours
+            // its documented "None when idle" invariant and never carries a
+            // stale spawn instant into a later iteration. Purely additive: the
+            // watchdog predicate already gates on `guard_held`, so this only
+            // makes the marker's meaning honest and never changes when a re-arm
+            // fires.
+            if overseer_tick_spawned_at.is_some() && !overseer_tick_running.load(Ordering::SeqCst) {
+                overseer_tick_spawned_at = None;
+            }
             // Read the in-flight tick's outstanding time ONCE so the value that
             // trips the predicate is exactly the value we log (a second
             // `elapsed()` would re-read the monotonic clock and could drift).
