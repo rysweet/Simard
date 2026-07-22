@@ -74,6 +74,8 @@ pub mod whisper_ops;
 pub mod wiring;
 
 #[cfg(test)]
+mod tests_coverage_goal_triage;
+#[cfg(test)]
 mod tests_deploy_drift;
 #[cfg(test)]
 mod tests_diagnosis;
