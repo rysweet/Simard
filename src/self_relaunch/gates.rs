@@ -120,14 +120,10 @@ pub fn verify_canary(
     gates: &[RelaunchGate],
     config: &RelaunchConfig,
 ) -> SimardResult<Vec<GateResult>> {
-    let mut results = Vec::with_capacity(gates.len());
-
-    for &gate in gates {
-        let result = run_gate(binary, gate, config);
-        results.push(result);
-    }
-
-    Ok(results)
+    Ok(gates
+        .iter()
+        .map(|&gate| run_gate(binary, gate, config))
+        .collect())
 }
 
 pub fn all_gates_passed(results: &[GateResult]) -> bool {
@@ -210,56 +206,66 @@ fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
 }
 
 fn run_gym_baseline_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
-    let mut cmd = Command::new(binary);
-    scrub_gate_env(&mut cmd, config, GateEnvProfile::CandidateBinary);
-    cmd.args(["gym", "list"]);
-    match cmd.output() {
-        Ok(output) if output.status.success() => GateResult {
-            gate: RelaunchGate::GymBaseline,
-            passed: true,
-            detail: "gym list succeeded".to_string(),
-        },
-        Ok(output) => GateResult {
-            gate: RelaunchGate::GymBaseline,
-            passed: false,
-            detail: bound_gate_detail(&format!(
-                "gym probe failed (exit {}): {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            )),
-        },
-        Err(e) => GateResult {
-            gate: RelaunchGate::GymBaseline,
-            passed: false,
-            detail: bound_gate_detail(&format!("gym probe failed to run: {e}")),
-        },
-    }
+    run_candidate_probe(
+        binary,
+        config,
+        RelaunchGate::GymBaseline,
+        &["gym", "list"],
+        "gym list succeeded",
+        "gym probe failed",
+        "gym probe failed to run",
+    )
 }
 
 fn run_rpc_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
     let timeout_secs = config.health_timeout.as_secs().to_string();
+    run_candidate_probe(
+        binary,
+        config,
+        RelaunchGate::RpcHealth,
+        &["probe", "rpc", "--timeout", &timeout_secs],
+        "rpc health check passed",
+        "rpc health failed",
+        "rpc health probe failed to run",
+    )
+}
+
+/// Run a candidate-binary probe gate (`gym-baseline`, `rpc-health`): spawn the
+/// freshly built binary under the [`GateEnvProfile::CandidateBinary`] env, then
+/// map its outcome to a [`GateResult`]. A zero exit is PASS with `success_detail`;
+/// any other outcome is a redact-then-bound FAIL detail. `exit_prefix` labels a
+/// non-zero exit, `spawn_fail` labels a failure to spawn the process at all.
+fn run_candidate_probe(
+    binary: &Path,
+    config: &RelaunchConfig,
+    gate: RelaunchGate,
+    args: &[&str],
+    success_detail: &str,
+    exit_prefix: &str,
+    spawn_fail: &str,
+) -> GateResult {
     let mut cmd = Command::new(binary);
     scrub_gate_env(&mut cmd, config, GateEnvProfile::CandidateBinary);
-    cmd.args(["probe", "rpc", "--timeout", &timeout_secs]);
+    cmd.args(args);
     match cmd.output() {
         Ok(output) if output.status.success() => GateResult {
-            gate: RelaunchGate::RpcHealth,
+            gate,
             passed: true,
-            detail: "rpc health check passed".to_string(),
+            detail: success_detail.to_string(),
         },
         Ok(output) => GateResult {
-            gate: RelaunchGate::RpcHealth,
+            gate,
             passed: false,
             detail: bound_gate_detail(&format!(
-                "rpc health failed (exit {}): {}",
+                "{exit_prefix} (exit {}): {}",
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
             )),
         },
         Err(e) => GateResult {
-            gate: RelaunchGate::RpcHealth,
+            gate,
             passed: false,
-            detail: bound_gate_detail(&format!("rpc health probe failed to run: {e}")),
+            detail: bound_gate_detail(&format!("{spawn_fail}: {e}")),
         },
     }
 }
