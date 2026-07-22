@@ -8,7 +8,6 @@ doc_type: howto
 status: implemented
 related:
   - ../atlas/escalation-flow/README.md
-  - ./triage-a-stuck-coverage-goal.md
   - ../../Specs/GOVERNED_REPO_ROSTER.md
   - ../concepts/identity-scoped-cognition.md
   - ../../prompt_assets/simard/overseer/escalation_triage.md
@@ -22,8 +21,8 @@ related:
 > It documents the *finished* outcome for the recurring governed-repo roster
 > goal so a future operator or OODA cycle that re-surfaces the goal gets the
 > resolution instead of restarting the loop. It is the worked companion to the
-> [Escalation-Triage Atlas](../atlas/escalation-flow/README.md) and to the
-> earlier [coverage-goal triage record](./triage-a-stuck-coverage-goal.md).
+> [Escalation-Triage Atlas](../atlas/escalation-flow/README.md) and follows the
+> same pattern as the earlier coverage-goal triage run.
 
 ## The goal that kept restarting
 
