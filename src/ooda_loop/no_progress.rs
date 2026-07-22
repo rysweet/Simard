@@ -29,7 +29,7 @@ use crate::goal_curation::no_progress_breaker::{
 use crate::goal_curation::no_progress_why::{
     Evidence, NoProgressClass, NoProgressWhy, NoProgressWhyReasoner,
 };
-use crate::goal_curation::{ActiveGoal, GoalProgress, WipRef};
+use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, WipRef};
 use crate::ooda_actions::outcome_made_no_progress;
 use crate::ooda_loop::{ActionOutcome, OodaState};
 
@@ -278,6 +278,18 @@ pub(crate) struct NoProgressBreakerReport {
     /// standing goal is normal, not a fault. Never contributes to
     /// [`fired`](Self::fired).
     pub perpetual_idled: Vec<String>,
+    /// Standing **research** goals (issue #4399) that produced a no-action
+    /// ("idle") cycle. For a standing cognition-research goal an idle cycle is a
+    /// **FAULT**, not the benign bursty idle of [`perpetual_idled`]: its charter
+    /// is continuous exploration, so it must generate a NEW source/experiment
+    /// every cycle. The never-idle rail therefore re-orients the goal
+    /// ([`ActiveGoal::roll_to_new_cycle`]) so the next OODA cycle re-enters work
+    /// generation, resets its no-action counter, and records the fault here so it
+    /// is visible in the cycle log — the opposite of the old silent exemption.
+    /// It stays **fail-closed**: the goal is never blocked/killed/parked, and
+    /// this is deliberately NOT a [`fired`](Self::fired) firing (it is a
+    /// re-orient, not a terminal breaker action).
+    pub research_idle_faults: Vec<String>,
 }
 
 impl NoProgressBreakerReport {
@@ -298,7 +310,8 @@ impl NoProgressBreakerReport {
     pub fn log_line(&self) -> String {
         format!(
             "done={} dropped={} escalated={} healed={} deferred={} engineer={} \
-             auto_cleared={} reinvestigated={} errors={} perpetual_idled={}",
+             auto_cleared={} reinvestigated={} errors={} perpetual_idled={} \
+             research_faults={}",
             self.marked_done.len(),
             self.dropped.len(),
             self.escalated.len(),
@@ -309,8 +322,208 @@ impl NoProgressBreakerReport {
             self.reinvestigated.len(),
             self.investigation_errors.len(),
             self.perpetual_idled.len(),
+            self.research_idle_faults.len(),
         )
     }
+
+    /// True when this pass produced something worth surfacing in the aggregate
+    /// cycle log: a threshold [`fired`](Self::fired), an auto-clear, a
+    /// fail-closed investigation error, OR a research-idle fault (issue #4399,
+    /// crusty finding 2). A *pure* research-idle cycle is none of the first three
+    /// — the never-idle rail re-oriented a goal without firing/clearing/erroring
+    /// — so without the last term the `research_faults=N` metric would never
+    /// reach the cycle log even though a fault occurred. This is the single
+    /// source of truth for the root-cause breaker's log gate so the count is
+    /// surfaced consistently. (The per-goal `warn!` inside `apply_standing_idle`
+    /// still fires regardless; this makes the *aggregate count* observable too.)
+    pub fn is_noteworthy(&self) -> bool {
+        self.fired()
+            || !self.auto_cleared.is_empty()
+            || !self.investigation_errors.is_empty()
+            || !self.research_idle_faults.is_empty()
+    }
+}
+
+/// Fixed vocabulary of research-goal idle-fault categories (issue #4399).
+/// Rendered to a stable, constant `&str` for the cycle log so no untrusted text
+/// is ever folded into a log line — this is the log-injection guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResearchIdleFault {
+    /// The standing research goal advanced but produced no source-ingestion and
+    /// no experiment — an idle cycle, which for a research charter is a fault.
+    NoNovelActionProduced,
+}
+
+impl ResearchIdleFault {
+    /// Stable, lowercase-kebab category token for the cycle log.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            ResearchIdleFault::NoNovelActionProduced => "no-novel-action-produced",
+        }
+    }
+}
+
+/// How the breaker must treat a confirmed no-action ("idle") cycle for a
+/// STANDING/perpetual goal. Non-standing goals are never classified here — they
+/// fall through to the normal escalation ladder unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StandingIdle {
+    /// Non-research standing goal (e.g. CI-stewardship). Idling is NORMAL for a
+    /// bursty goal — take the benign perpetual-idle exemption (issue #2589):
+    /// reset the counter, keep the goal active, record it in `perpetual_idled`.
+    BenignExempt,
+    /// Standing RESEARCH goal ([`ActiveGoal::is_standing_research_goal`]). Idling
+    /// is a FAULT (issue #4399): record the goal in `research_idle_faults`, warn
+    /// with the `fault` category, reset the counter, and re-orient via
+    /// [`ActiveGoal::roll_to_new_cycle`]. Never block/kill/park.
+    ResearchFault { fault: ResearchIdleFault },
+    /// Standing RESEARCH goal that still holds a LIVE in-flight artifact — an
+    /// open PR / working branch / engineer session
+    /// ([`ActiveGoal::has_live_in_flight_ref`]). It is NOT idle: a durable,
+    /// unmerged PR in review is genuine novel progress (issue #4399, crusty
+    /// finding 1). This is PROGRESS, not a fault — reset the no-action counter
+    /// and keep the goal active, but record NO fault and do NOT re-orient.
+    /// Re-orienting would call [`ActiveGoal::roll_to_new_cycle`], wiping the
+    /// load-bearing `wip_refs` the Overseer dedup set, engineer-admission
+    /// control, and completion gate depend on — which would lose merge tracking
+    /// and let the next cycle spawn an overlapping engineer on the same seam.
+    ResearchInFlight,
+}
+
+/// Classify a confirmed no-action cycle for a STANDING goal (issue #4399). Pure
+/// and total: reads only the in-memory goal and performs no IO. Returns `None`
+/// when the goal is not standing (the caller then runs the normal escalation
+/// ladder). This is the ONE place the research-vs-benign split is decided —
+/// shared by both breaker sites via [`apply_standing_idle`] so their semantics
+/// can never drift apart.
+///
+/// * standing AND research ([`ActiveGoal::is_standing_research_goal`]) with a
+///   LIVE in-flight ref ([`ActiveGoal::has_live_in_flight_ref`]) →
+///   [`StandingIdle::ResearchInFlight`] (progress — preserve refs, no fault)
+/// * standing AND research, NO live ref →
+///   [`StandingIdle::ResearchFault`]
+/// * standing, non-research ([`ActiveGoal::is_perpetual`] only) →
+///   [`StandingIdle::BenignExempt`]
+///
+/// Research is checked first because a research goal is *also* perpetual; the
+/// conjunction predicate keeps the branches mutually exclusive. Within the
+/// research branch the live-in-flight guard is checked first so a goal holding an
+/// open, unmerged PR is treated as progress and NEVER faulted or re-oriented
+/// (issue #4399, crusty finding 1) — wiping its load-bearing `wip_refs` would
+/// drop dedup / admission / merge-tracking state. The decision is a pure function
+/// of the structured charter predicates — no hardcoded goal id.
+pub(crate) fn classify_standing_idle(goal: &ActiveGoal) -> Option<StandingIdle> {
+    if goal.is_standing_research_goal() {
+        if goal.has_live_in_flight_ref() {
+            Some(StandingIdle::ResearchInFlight)
+        } else {
+            Some(StandingIdle::ResearchFault {
+                fault: ResearchIdleFault::NoNovelActionProduced,
+            })
+        }
+    } else if goal.is_perpetual() {
+        Some(StandingIdle::BenignExempt)
+    } else {
+        None
+    }
+}
+
+/// Apply the shared standing-idle policy at a breaker site (issue #4399):
+/// [`classify_standing_idle`] decides, and this performs the matching side
+/// effects. Returns `true` when `goal_id` names a standing goal that was fully
+/// handled here — the caller must then `continue` — and `false` for an ordinary
+/// goal the breaker should process through its normal threshold path. **Both**
+/// breaker sites ([`apply_no_progress_breaker_with_threshold`] and
+/// [`apply_no_progress_breaker_investigated`]) call THIS one function, so not just
+/// the classification but the whole exemption/fault behaviour can never drift.
+///
+/// The goal is located ONCE (mutably) so the fault branch can re-orient the very
+/// same goal it just classified — no second board scan. **Fail-closed**: if the
+/// goal is not on the board it is left exactly as it was (the early `return
+/// false` hands it back to the caller's normal path); a research-idle fault
+/// must never disable dispatch.
+///
+/// `tracker` is the counter the driver detached from `state.no_progress_tracker`
+/// with `std::mem::take`, so a reset here mutates the same counter restored onto
+/// `state` at the end of the pass. The `research_idle_faults` / `perpetual_idled`
+/// entry is the **bare goal id** (a controlled goal-board slug); the fixed-
+/// vocabulary fault category is surfaced only in the always-present `warn` log.
+fn apply_standing_idle(
+    board: &mut GoalBoard,
+    tracker: &mut NoProgressTracker,
+    report: &mut NoProgressBreakerReport,
+    goal_id: &str,
+) -> bool {
+    let Some(goal) = board.active.iter_mut().find(|g| g.id == goal_id) else {
+        return false;
+    };
+    let Some(classification) = classify_standing_idle(goal) else {
+        return false;
+    };
+
+    // Every standing-idle path — benign OR research-fault — resets the no-action
+    // counter and keeps the goal active for the next cycle; only the reporting and
+    // re-orient differ. Hoisted so that "a standing idle never advances the breaker
+    // toward a firing" is a single, unmissable invariant.
+    tracker.record_progress(goal_id);
+
+    match classification {
+        StandingIdle::BenignExempt => {
+            // Benign standing/perpetual exemption (issue #2589): a non-research
+            // standing goal is inherently bursty — an idle no-action cycle is
+            // NORMAL, not the livelock the breaker guards against. Keep it active
+            // for the next cycle.
+            report.perpetual_idled.push(goal_id.to_string());
+            tracing::info!(
+                target: "simard::ooda",
+                goal = %goal_id,
+                "no-progress breaker: standing/perpetual goal idled this cycle \
+                 (normal, not a fault) — counter reset, goal stays active",
+            );
+        }
+        StandingIdle::ResearchFault { fault } => {
+            // Never-idle rail (issue #4399): a standing research goal that idles
+            // is a FAULT. Record the fault and re-orient it (roll_to_new_cycle:
+            // NotStarted + stale WIP dropped) so the NEXT cycle re-enters work
+            // generation and yields a NEW source or a NEW experiment — while
+            // staying fail-closed (never block/kill/park, never a firing).
+            report.research_idle_faults.push(goal_id.to_string());
+            tracing::warn!(
+                target: "simard::ooda",
+                goal = %goal_id,
+                category = fault.as_str(),
+                "no-progress breaker: research goal idled — FAULT: re-orienting to \
+                 generate a novel source/experiment next cycle \
+                 (counter reset, goal stays active, never blocked)",
+            );
+            // Re-orient the SAME goal we already located and classified — no
+            // second board scan. roll_to_new_cycle returns it to the canonical
+            // re-dispatchable state (`NotStarted`, stale WIP dropped) so the next
+            // cycle re-enters work generation; it is never Blocked/killed/parked.
+            goal.roll_to_new_cycle();
+        }
+        StandingIdle::ResearchInFlight => {
+            // Live in-flight progress (issue #4399, crusty finding 1): the
+            // research goal still holds an open, unmerged PR (or a working branch
+            // / engineer session) — genuine novel progress, NOT an idle. The
+            // hoisted counter reset above already keeps it active for the next
+            // cycle; we deliberately record NO fault and do NOT re-orient, because
+            // roll_to_new_cycle would wipe the load-bearing wip_refs the Overseer
+            // dedup set, engineer-admission control, and completion gate depend on
+            // — losing merge tracking and letting the next cycle spawn an
+            // overlapping engineer on the same seam. wip_refs / assigned_to /
+            // status are left untouched. Neither `research_idle_faults` nor
+            // `perpetual_idled`: it was not idle.
+            tracing::info!(
+                target: "simard::ooda",
+                goal = %goal_id,
+                "no-progress breaker: research goal holds a live in-flight artifact \
+                 (open PR/branch/session) — progress, not idle: counter reset, refs \
+                 preserved, goal stays active (not faulted, not re-oriented)",
+            );
+        }
+    }
+    true
 }
 
 /// Establishes a machine-fixable precondition for a `MISSING-PRECONDITION` stall
@@ -404,29 +617,17 @@ pub(crate) fn apply_no_progress_breaker_with_threshold(
             continue;
         }
 
-        // Standing/perpetual exemption (issue #2589). A standing/perpetual goal
-        // is inherently bursty — it ships a durable improvement periodically and
-        // idles between while there is nothing new to ship. An idle no-action
-        // cycle is NORMAL, not the livelock the breaker guards against, so such a
-        // goal must NEVER be hard-blocked / parked "needs human review": that is
-        // the production defect this fixes. Reset its counter and keep it active
-        // for the next cycle. Detection reuses the *same* `is_perpetual()` flag
-        // (issue #2580) the non-completability path keys on — there is exactly one
-        // notion of "standing/perpetual", never a second one.
-        if state
-            .active_goals
-            .active
-            .iter()
-            .any(|g| g.id == goal_id && g.is_perpetual())
-        {
-            tracker.record_progress(goal_id);
-            report.perpetual_idled.push(goal_id.to_string());
-            tracing::info!(
-                target: "simard::ooda",
-                goal = %goal_id,
-                "no-progress breaker: standing/perpetual goal idled this cycle \
-                 (normal, not a fault) — counter reset, goal stays active",
-            );
+        // Standing/perpetual exemption (issue #2589) + never-idle research rail
+        // (issue #4399), unified in `apply_standing_idle` (which calls the shared
+        // pure `classify_standing_idle`) so the two breaker sites can never drift.
+        // A standing NON-research goal keeps the benign "idle = normal" exemption;
+        // a standing RESEARCH goal's idle is a FAULT that re-orients it to generate
+        // a novel source/experiment next cycle. Both stay fail-closed — never
+        // hard-blocked / parked "needs human review": that is the production defect
+        // this fixes. Detection reuses the *same* `is_perpetual()` flag (issue
+        // #2580) the non-completability path keys on; the research split adds only
+        // `is_standing_research_goal()` on top — never a second notion of standing.
+        if apply_standing_idle(&mut state.active_goals, &mut tracker, &mut report, goal_id) {
             continue;
         }
 
@@ -605,22 +806,14 @@ pub(crate) fn apply_no_progress_breaker_investigated(
             continue;
         }
 
-        // Standing/perpetual exemption (issue #2589) runs BEFORE investigation, so
-        // the reasoner is never consulted for a goal that is *allowed* to idle.
-        if state
-            .active_goals
-            .active
-            .iter()
-            .any(|g| g.id == goal_id && g.is_perpetual())
-        {
-            tracker.record_progress(goal_id);
-            report.perpetual_idled.push(goal_id.to_string());
-            tracing::info!(
-                target: "simard::ooda",
-                goal = %goal_id,
-                "no-progress breaker: standing/perpetual goal idled this cycle \
-                 (normal, not a fault) — counter reset, goal stays active",
-            );
+        // Standing/perpetual exemption (issue #2589) + never-idle research rail
+        // (issue #4399) run BEFORE investigation, via the SAME `apply_standing_idle`
+        // helper as the non-investigated site so the reasoner is never consulted for
+        // a goal that is exempt OR that must be re-oriented. A standing NON-research
+        // goal keeps the benign "idle = normal" exemption; a standing RESEARCH
+        // goal's idle is a FAULT that re-orients it (never blocked, never
+        // investigated).
+        if apply_standing_idle(&mut state.active_goals, &mut tracker, &mut report, goal_id) {
             continue;
         }
 

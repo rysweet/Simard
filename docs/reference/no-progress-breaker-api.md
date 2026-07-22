@@ -34,6 +34,15 @@ related:
 > The standing/perpetual flag it reuses is
 > [`ActiveGoal::is_perpetual()`](https://github.com/rysweet/Simard/blob/main/src/goal_curation/types.rs).
 
+> **`perpetual_idled` is now scoped to NON-research standing goals (#4399).** The
+> `perpetual_idled` exemption below is unchanged for standing goals whose charter
+> genuinely permits bursty idling. For the standing **research** goal, an idle is a
+> **fault**: the shared `classify_standing_idle` classifier routes it to the new
+> `research_idle_faults` report field and re-orients the goal instead of exempting
+> it. See the
+> [never-idle rail API reference](./research-goal-never-idle-rail-api.md) and
+> [concept](../concepts/research-goal-never-idle.md).
+
 This reference specifies the API of the no-progress breaker and the
 standing/perpetual-goal exemption added in issue #2589. For the rationale, see
 [Standing/perpetual goals are exempt from the no-progress hard-block](../concepts/perpetual-goal-no-progress-exemption.md).
@@ -211,6 +220,11 @@ pub(crate) struct NoProgressBreakerReport {
     /// NEW (#2589): standing/perpetual goals that idled this cycle. Their
     /// counters were reset and they were kept active — an idle is NORMAL for a
     /// bursty goal, not a fault, so this list is informational only.
+    ///
+    /// SCOPED by #4399: this now holds only NON-research standing goals. A
+    /// standing RESEARCH goal that idles is routed instead to
+    /// `research_idle_faults` (a fault → re-orient); see the
+    /// [never-idle rail API](./research-goal-never-idle-rail-api.md).
     pub perpetual_idled: Vec<String>,
 }
 

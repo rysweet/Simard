@@ -1,3 +1,18 @@
+---
+title: Steer a standing research goal toward novelty
+description: How to read, verify, and revise the #4347 novelty-first steer for Simard's standing cognition-research goal — the prompt directive and thin is_standing_research_goal() hook that make it prefer a novel benchmarked direction over an incremental refinement — via durable prompt assets and code, not a runtime CLI tweak the daemon would clobber. See also the stronger #4399 never-idle mandate.
+last_updated: 2026-07-21
+review_schedule: as-needed
+owner: simard
+doc_type: how-to
+status: implemented
+related:
+  - ../concepts/novelty-first-standing-research-steering.md
+  - ../reference/standing-research-goal-novelty-directive-api.md
+  - ../concepts/research-goal-never-idle.md
+  - ./keep-the-research-goal-never-idle.md
+---
+
 # How-To: Steer a Standing Research Goal Toward Novelty
 
 Simard's standing cognition-research goal is durably steered to **first survey
@@ -5,6 +20,12 @@ genuinely-new research directions each cycle** and **prefer a novel, benchmarked
 improvement over another incremental parse-site/dedup refinement** (#4347). This
 guide shows how to read, verify, and revise that steer — **without a runtime CLI
 tweak**, which the daemon would clobber.
+
+> **See also #4399 (never idle).** This guide covers the novelty *steer* (prefer a
+> novel direction when the goal acts). The stronger **never-idle** mandate — the
+> goal must produce a NEW source or NEW experiment **every** cycle, and an idle is
+> a fault, not a disclosed incremental fallback — is documented in
+> [How to keep the research goal never idle](keep-the-research-goal-never-idle.md).
 
 For the rationale, see
 [Novelty-first steering for standing research/cognition goals](../concepts/novelty-first-standing-research-steering.md).
@@ -67,9 +88,9 @@ description:
   `STANDING PERPETUAL goal`, or the `[standing]` sentinel
   (`description_marks_standing` / `is_perpetual()`).
 - **Research?** Its description names cognition/research subject matter — any of
-  `cognition`, `recall`, `distillation`, `reasoner`, `consolidation`,
-  `retrieval`, `embedding` (word-boundary match). The broad token `memory` is
-  deliberately excluded to avoid steering unrelated standing goals.
+  `cognition`, `recall`, `distillation`, `reasoner`, `memory`, `consolidation`,
+  `retrieval`, `embedding` (leading-word-boundary match, so a description that
+  merely contains a marker as a non-leading substring never falsely qualifies).
 
 Both true → the novelty directive is injected. Confirm at runtime by reading the
 goal-session input or the cycle report for that goal:
