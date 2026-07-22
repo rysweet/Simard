@@ -1153,11 +1153,27 @@ const OPEN_PR_RECONCILE_LIMIT: u32 = 1000;
 /// The `client` is injected so production wires the concrete
 /// [`crate::stewardship::RealPrGhClient`] while the pure core is unit-tested
 /// directly with an in-memory set (IO-free).
+///
+/// Fast path: when no active goal carries a `pr` wip_ref the open-PR fetch is
+/// skipped entirely (the pure prune would be a no-op), avoiding the `gh pr
+/// list` subprocess on the common cycle.
 fn reconcile_merged_prs(
     board: &mut crate::goal_curation::GoalBoard,
     client: &dyn crate::stewardship::PrGhClient,
     repo: &str,
 ) {
+    // Skip the `gh pr list` subprocess+network round-trip entirely when no
+    // active goal carries a `pr` wip_ref: the pure prune would drop nothing,
+    // so the fetch is pure waste. Behaviourally identical, avoids a process
+    // spawn on the common (no-PR-ref) cycle.
+    let has_pr_ref = board.active.iter().any(|goal| {
+        goal.wip_refs
+            .iter()
+            .any(|wip| wip.kind.trim().eq_ignore_ascii_case("pr"))
+    });
+    if !has_pr_ref {
+        return;
+    }
     match client.list_open_prs(repo, OPEN_PR_RECONCILE_LIMIT) {
         Ok(open) => {
             let open_set: std::collections::HashSet<u32> = open.iter().map(|s| s.number).collect();
@@ -1763,6 +1779,161 @@ mod tests_sweep {
             goal.wip_refs.len(),
             2,
             "a live session's wip_refs must be preserved untouched"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests_reconcile_fetch_guard {
+    use std::cell::Cell;
+
+    use super::reconcile_merged_prs;
+    use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, WipRef, add_active_goal};
+    use crate::stewardship::merge_authority::{OpenPrSummary, PrGhClient, PrSnapshot};
+
+    /// Fake that records how many times `list_open_prs` (the `gh pr list`
+    /// subprocess in prod) was invoked, so we can assert the fast-path guard
+    /// skips the fetch when there is nothing to reconcile.
+    struct CountingClient {
+        calls: Cell<u32>,
+        open: Vec<u32>,
+    }
+
+    impl PrGhClient for CountingClient {
+        fn view_pr(&self, _repo: &str, _pr_number: u32) -> crate::error::SimardResult<PrSnapshot> {
+            unimplemented!("not exercised by the reconcile fetch-guard tests")
+        }
+        fn squash_merge(&self, _repo: &str, _pr_number: u32) -> crate::error::SimardResult<()> {
+            unimplemented!("not exercised by the reconcile fetch-guard tests")
+        }
+        fn list_open_prs(
+            &self,
+            _repo: &str,
+            _limit: u32,
+        ) -> crate::error::SimardResult<Vec<OpenPrSummary>> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(self
+                .open
+                .iter()
+                .map(|n| OpenPrSummary {
+                    number: *n,
+                    ..Default::default()
+                })
+                .collect())
+        }
+    }
+
+    fn goal_with_refs(id: &str, refs: Vec<WipRef>) -> ActiveGoal {
+        ActiveGoal {
+            labels: Vec::new(),
+            parent_goal_id: None,
+            priority_explicit: false,
+            repo: None,
+            id: id.to_string(),
+            description: format!("Goal {id}"),
+            priority: 1,
+            status: GoalProgress::InProgress { percent: 50 },
+            assigned_to: None,
+            current_activity: None,
+            wip_refs: refs,
+            last_progress_update_at: None,
+        }
+    }
+
+    fn wref(kind: &str, ref_id: &str) -> WipRef {
+        WipRef {
+            kind: kind.to_string(),
+            ref_id: ref_id.to_string(),
+            label: format!("{kind} {ref_id}"),
+            url: None,
+        }
+    }
+
+    /// No active goal carries a `pr` wip_ref → the `gh pr list` fetch must be
+    /// SKIPPED entirely (the pure prune would be a no-op).
+    #[test]
+    fn skips_open_pr_fetch_when_no_pr_ref() {
+        let mut board = GoalBoard::new();
+        add_active_goal(
+            &mut board,
+            goal_with_refs("g1", vec![wref("branch", "feat/x"), wref("issue", "100")]),
+        )
+        .unwrap();
+        let client = CountingClient {
+            calls: Cell::new(0),
+            open: vec![],
+        };
+
+        reconcile_merged_prs(&mut board, &client, "owner/repo");
+
+        assert_eq!(
+            client.calls.get(),
+            0,
+            "list_open_prs (the gh subprocess) must not run when no goal has a pr ref"
+        );
+        assert_eq!(
+            board.active[0].wip_refs.len(),
+            2,
+            "non-pr refs must be untouched"
+        );
+    }
+
+    /// An empty active board → also no fetch.
+    #[test]
+    fn skips_open_pr_fetch_on_empty_board() {
+        let mut board = GoalBoard::new();
+        let client = CountingClient {
+            calls: Cell::new(0),
+            open: vec![],
+        };
+
+        reconcile_merged_prs(&mut board, &client, "owner/repo");
+
+        assert_eq!(client.calls.get(), 0, "no goals → no fetch");
+    }
+
+    /// A `pr` wip_ref present → fetch runs exactly once and merged/closed refs
+    /// (not in the open set) are pruned while a genuinely-open one survives.
+    #[test]
+    fn fetches_once_and_prunes_when_pr_ref_present() {
+        let mut board = GoalBoard::new();
+        add_active_goal(
+            &mut board,
+            goal_with_refs(
+                "g1",
+                vec![wref("pr", "42"), wref("pr", "99"), wref("branch", "feat/x")],
+            ),
+        )
+        .unwrap();
+        // 42 is open, 99 is merged/closed (absent).
+        let client = CountingClient {
+            calls: Cell::new(0),
+            open: vec![42],
+        };
+
+        reconcile_merged_prs(&mut board, &client, "owner/repo");
+
+        assert_eq!(
+            client.calls.get(),
+            1,
+            "the open-PR fetch must run exactly once per cycle when a pr ref exists"
+        );
+        let kinds_ids: Vec<(&str, &str)> = board.active[0]
+            .wip_refs
+            .iter()
+            .map(|w| (w.kind.as_str(), w.ref_id.as_str()))
+            .collect();
+        assert!(
+            kinds_ids.contains(&("pr", "42")),
+            "the open PR ref must survive, got {kinds_ids:?}"
+        );
+        assert!(
+            !kinds_ids.contains(&("pr", "99")),
+            "the merged/closed PR ref must be pruned, got {kinds_ids:?}"
+        );
+        assert!(
+            kinds_ids.contains(&("branch", "feat/x")),
+            "non-pr refs must be untouched, got {kinds_ids:?}"
         );
     }
 }
