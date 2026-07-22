@@ -305,17 +305,35 @@ fn lock_escalated() -> std::sync::MutexGuard<'static, Option<String>> {
 /// Record one canary OUTCOME for `sha` at the ACT/canary site. `is_red == true`
 /// (the canary reddened) increments that SHA's consecutive streak; `false` (the
 /// canary went green) CLEARS it — the SHA is no longer stuck, so the loop-halt
-/// guard re-arms from zero. A red for a NEW target starts its own count and
-/// clears any superseded SHA (at most one active stuck entry).
+/// guard re-arms from zero AND the one-shot stuck-escalation latch re-arms, so a
+/// fresh stall on the same SHA can escalate to the operator again (this matches
+/// the documented "re-arms when the canary goes green" contract). A red for a
+/// NEW target starts its own count and clears any superseded SHA (at most one
+/// active stuck entry).
 pub(crate) fn record_red_canary_result(sha: &str, is_red: bool) {
-    let mut streak = lock_streak();
     if is_red {
+        let mut streak = lock_streak();
         match streak.as_mut() {
             Some((s, count)) if s == sha => *count = count.saturating_add(1),
             _ => *streak = Some((sha.to_string(), 1)),
         }
-    } else if matches!(streak.as_ref(), Some((s, _)) if s == sha) {
-        *streak = None;
+        return;
+    }
+    // Green result: the SHA is no longer stuck. Clear its streak, then re-arm the
+    // one-shot escalation latch so a subsequent stall re-escalates. The two
+    // process-global locks are taken in the streak→escalated order used
+    // everywhere else (never held simultaneously) to keep the ordering total.
+    {
+        let mut streak = lock_streak();
+        if matches!(streak.as_ref(), Some((s, _)) if s == sha) {
+            *streak = None;
+        }
+    }
+    {
+        let mut latch = lock_escalated();
+        if matches!(latch.as_ref(), Some(s) if s == sha) {
+            *latch = None;
+        }
     }
 }
 
@@ -542,7 +560,35 @@ mod tests {
         reset_red_canary_streak();
     }
 
-    /// T3b — the streak is per-SHA and holds AT MOST ONE active entry: recording
+    /// T3a — a GREEN canary re-arms the one-shot stuck-escalation latch (doc
+    /// contract: "re-arms when the canary goes green"). A SHA that escalated,
+    /// recovered (green), then re-stalls must be allowed to escalate ONCE more —
+    /// otherwise a flapping deploy could go permanently silent after its first
+    /// escalation. `mark_deploy_stuck_escalated` returns `true` only on a fresh
+    /// arm, so we assert the second stall re-arms.
+    #[test]
+    fn green_canary_rearms_the_stuck_escalation_latch() {
+        let _guard = deploy_throttle_test_guard();
+        reset_red_canary_streak();
+        let sha = "c".repeat(40);
+        // First stall escalates once; the latch is now set for this SHA.
+        assert!(
+            mark_deploy_stuck_escalated(&sha),
+            "first stall arms and escalates"
+        );
+        assert!(
+            !mark_deploy_stuck_escalated(&sha),
+            "still latched — no re-escalation while stuck"
+        );
+        // Canary recovers (green): the latch must re-arm for this same SHA.
+        record_red_canary_result(&sha, false);
+        assert!(
+            mark_deploy_stuck_escalated(&sha),
+            "a green result re-arms the one-shot latch, so a fresh stall escalates again"
+        );
+        reset_red_canary_streak();
+    }
+
     /// a red for a NEW target starts its own count and clears the superseded SHA
     /// (bounded memory; a new target is a fresh attempt, design steady-state).
     #[test]
