@@ -89,6 +89,31 @@ pub enum ClaimLiveness {
 /// real filesystem, process, or `gh` is touched.
 pub trait ClaimLivenessProbe: Send + Sync {
     fn assess(&self, claim_key: &str) -> ClaimLiveness;
+
+    /// Whether the claim's goal is standing/perpetual
+    /// ([`ActiveGoal::is_perpetual`](crate::goal_curation::types::ActiveGoal::is_perpetual)).
+    ///
+    /// A standing/perpetual goal's engineer idles BENIGNLY between cycles — the
+    /// no-progress breaker already treats this as `BenignExempt` (see
+    /// [`crate::ooda_loop::no_progress::classify_standing_idle`]), "standing/
+    /// perpetual goal idled this cycle (normal, not a fault)". The claim-reaper
+    /// historically LACKED this exemption, so it drove an expensive
+    /// investigate-before-reap sweep on a HEALTHY standing engineer purely
+    /// because its newest-file age crossed the idle threshold — a false positive
+    /// (issue #4437). Reusing the SAME `is_perpetual()` flag, a `HeartbeatStale`
+    /// (idle-age) staleness on a perpetual goal is exempted BEFORE any
+    /// investigation.
+    ///
+    /// Scope: this governs ONLY the idle-age (`HeartbeatStale`) path. A
+    /// `NoWorktree` claim (the worktree is physically gone) is provably dead and
+    /// is reclaimed regardless — a perpetual goal must not leak a claim whose
+    /// worktree no longer exists.
+    ///
+    /// Default `false` (treat as non-perpetual) so every existing probe impl
+    /// keeps its current behavior unchanged until it opts in.
+    fn is_perpetual_goal(&self, _claim_key: &str) -> bool {
+        false
+    }
 }
 
 /// Ledger seam the reaper sweeps and reclaims through. Backed in production by
@@ -332,6 +357,33 @@ pub fn reap_stale_claims(
         let verdict = match reason {
             DeadReason::NoWorktree => None,
             DeadReason::HeartbeatStale => {
+                // BENIGN-EXEMPT (issue #4437): a standing/perpetual goal's
+                // engineer idles between cycles as NORMAL operation, not a
+                // fault — exactly what the no-progress breaker already exempts
+                // via `classify_standing_idle` → `BenignExempt`. Reusing the
+                // SAME `is_perpetual()` flag, an idle-age (`HeartbeatStale`)
+                // staleness on such a goal is NOT death: skip it BEFORE the
+                // expensive investigate-before-reap sweep, keeping the claim,
+                // its worktree, and its evidence. This closes the false
+                // positive where a healthy standing engineer was investigated
+                // (and risked reaping) purely for idling. `NoWorktree` is
+                // deliberately NOT exempted above — a physically-absent worktree
+                // is provably dead even for a perpetual goal.
+                if probe.is_perpetual_goal(&claim_key) {
+                    let age_label = age_secs
+                        .map(|a| format!("{a}s"))
+                        .unwrap_or_else(|| "n/a".to_string());
+                    tracing::info!(
+                        target: "simard::claim_reaper",
+                        claim_key = %claim_key,
+                        age_secs = %age_label,
+                        "[simard] claim-reaper: NOT reaping {claim_key} \
+                         (standing/perpetual goal idled — benign, not a fault; \
+                         claim + worktree + evidence preserved, no investigation)",
+                    );
+                    summary.skipped += 1;
+                    continue;
+                }
                 let idle_age = age_secs.unwrap_or(0);
                 let outcome = investigator.investigate(&claim_key, idle_age);
                 // Findings ALWAYS feed the gated Act path — even a kept claim's
@@ -547,6 +599,27 @@ impl ClaimLivenessProbe for WorktreeClaimLivenessProbe {
             },
             None => ClaimLiveness::Live,
         }
+    }
+
+    /// Resolve whether the claim's goal is standing/perpetual by reading the
+    /// authoritative goal board rooted at the SAME `state_root` the reaper and
+    /// engineers share, then reusing the durable `is_perpetual()` marker
+    /// predicate (issue #4437). Correlates by goal id recovered from the
+    /// `claim_key` the same repo-agnostic way [`assess`](Self::assess) matches
+    /// worktrees.
+    ///
+    /// Fail-closed for the EXEMPTION (not for reaping): a goal id that is not on
+    /// the active board — or a board that reads as empty — returns `false`
+    /// (not-perpetual), so an unknown/stale goal is NOT granted the idle
+    /// exemption and still flows through the normal investigate-before-reap
+    /// path. Only a goal the board CONFIRMS is perpetual is exempted.
+    fn is_perpetual_goal(&self, claim_key: &str) -> bool {
+        let goal_id = goal_id_from_claim_key(claim_key);
+        crate::goal_board_store::load(&self.state_root)
+            .board
+            .active
+            .iter()
+            .any(|goal| goal.id == goal_id && goal.is_perpetual())
     }
 }
 
@@ -1295,6 +1368,9 @@ mod tests {
     /// Deterministic probe: fixed verdict per claim key.
     struct MapProbe {
         verdicts: BTreeMap<String, ClaimLiveness>,
+        /// Claim keys whose goal reads as standing/perpetual (issue #4437). Empty
+        /// by default so existing tests see non-perpetual behavior unchanged.
+        perpetual: std::collections::BTreeSet<String>,
     }
 
     impl MapProbe {
@@ -1304,7 +1380,15 @@ mod tests {
                     .iter()
                     .map(|(k, v)| ((*k).to_string(), v.clone()))
                     .collect(),
+                perpetual: std::collections::BTreeSet::new(),
             }
+        }
+
+        /// Mark the given claim keys' goals as standing/perpetual so the probe's
+        /// `is_perpetual_goal` returns `true` for them (issue #4437 exemption).
+        fn with_perpetual(mut self, keys: &[&str]) -> Self {
+            self.perpetual = keys.iter().map(|k| (*k).to_string()).collect();
+            self
         }
     }
 
@@ -1315,6 +1399,10 @@ mod tests {
                 .get(claim_key)
                 .cloned()
                 .unwrap_or(ClaimLiveness::Live)
+        }
+
+        fn is_perpetual_goal(&self, claim_key: &str) -> bool {
+            self.perpetual.contains(claim_key)
         }
     }
 
@@ -2042,8 +2130,88 @@ mod tests {
         assert_eq!(summary.skipped, 1);
     }
 
-    /// `Blocked` and `Recoverable` engineers may still resume, so neither is
-    /// reaped — but their remediation interventions ARE surfaced for dispatch.
+    // ----- Standing/perpetual idle is BENIGN-EXEMPT (issue #4437) -------------
+
+    /// A standing/perpetual goal's engineer that has merely IDLED past the stale
+    /// threshold is exempt from the reap sweep entirely — its idle is benign
+    /// (the no-progress breaker already treats it as `BenignExempt`). It is NOT
+    /// reaped, NOT released, its worktree is preserved, AND — crucially — the
+    /// expensive investigate-before-reap sweep is SKIPPED (no investigation is
+    /// launched), because idling is normal operation for a standing goal, not a
+    /// fault. This is the direct fix for the false positive that investigated
+    /// and risked reaping a healthy standing engineer purely for idling.
+    #[test]
+    fn perpetual_goal_idle_is_benign_exempt_and_not_even_investigated() {
+        let key = "rysweet/Simard:advance-rysweet-agent-kgpacks-rs-to-full-parity";
+        let ledger = FakeLedger::new(&[key]);
+        // Idle FAR past the threshold — would be investigated (and possibly
+        // reaped) if it were not a standing/perpetual goal.
+        let probe = MapProbe::new(&[(key, dead(DeadReason::HeartbeatStale, Some(2363)))])
+            .with_perpetual(&[key]);
+        let cleanup = FakeCleanup::new();
+        // A `Dead` investigator proves the exemption fires BEFORE investigation:
+        // if the goal were ever investigated it would resolve `Dead` and reap.
+        let investigator = FakeInvestigator::dead_unknown();
+
+        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+
+        assert!(
+            summary.reclaimed.is_empty(),
+            "a standing/perpetual goal's benign idle must never be reaped"
+        );
+        assert!(ledger.released.borrow().is_empty());
+        assert_eq!(
+            ledger.list_engineer_claims(),
+            vec![key.to_string()],
+            "the perpetual goal's claim is preserved"
+        );
+        assert!(
+            cleanup.cleaned().is_empty(),
+            "the perpetual goal's worktree is preserved"
+        );
+        assert!(
+            investigator.investigated().is_empty(),
+            "a perpetual goal's benign idle must be exempted BEFORE any \
+             investigate-before-reap sweep (no expensive investigation, no \
+             evidence-archival churn)"
+        );
+        assert_eq!(summary.skipped, 1);
+        assert!(
+            summary.pending_interventions.is_empty(),
+            "a benign standing idle surfaces no interventions"
+        );
+    }
+
+    /// The exemption is scoped to the idle-age (`HeartbeatStale`) path ONLY: a
+    /// standing/perpetual goal whose worktree is PHYSICALLY GONE (`NoWorktree`)
+    /// is provably dead and IS reclaimed, because a perpetual goal must not leak
+    /// a claim whose worktree no longer exists. This guards the exemption from
+    /// over-reaching into a genuine dead-claim signal.
+    #[test]
+    fn perpetual_goal_with_no_worktree_is_still_reclaimed() {
+        let key = "rysweet/Simard:standing-but-worktree-gone";
+        let ledger = FakeLedger::new(&[key]);
+        let probe =
+            MapProbe::new(&[(key, dead(DeadReason::NoWorktree, None))]).with_perpetual(&[key]);
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown();
+
+        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+
+        assert_eq!(
+            summary.reclaimed,
+            vec![key.to_string()],
+            "a perpetual goal with a physically-absent worktree is provably \
+             dead and must still be reclaimed"
+        );
+        assert_eq!(*ledger.released.borrow(), vec![key.to_string()]);
+        assert_eq!(cleanup.cleaned(), vec![key.to_string()]);
+        assert!(
+            investigator.investigated().is_empty(),
+            "a NoWorktree claim has no evidence to preserve, so it is reclaimed \
+             directly without investigation — perpetual or not"
+        );
+    }
     #[test]
     fn blocked_and_recoverable_are_not_reaped_but_surface_interventions() {
         let blocked = "rysweet/Simard:waiting-on-dep";
