@@ -616,41 +616,7 @@ impl<'a> OutboxWorker<'a> {
             Ok(result) => result,
             Err(error) => {
                 if error.no_op {
-                    // Benign goal-lifecycle race (issue #4468): the goal was
-                    // legitimately completed/removed between preparing this
-                    // effect and dispatching it. Do NOT map this to
-                    // DownstreamFailed. Close the outbox row as a succeeded
-                    // no-op (empty evidence) so it is never redispatched, emit
-                    // a structured tracing event, and increment a counter so
-                    // the race stays observable rather than silently swallowed.
-                    tracing::warn!(
-                        target: "typed_ooda.effect_dispatch",
-                        effect_id = %job.effect_id,
-                        outcome_id = %job.outcome_id,
-                        goal_id = %job.goal_id,
-                        reason = %error,
-                        "typed goal-session effect skipped as benign no-op: goal completed or removed between prepare and dispatch",
-                    );
-                    let _ = crate::self_metrics::record_metric(
-                        "typed_ooda_effect_benign_no_op",
-                        1.0,
-                        &format!(
-                            "goal={};effect={};outcome={};reason={}",
-                            job.goal_id, job.effect_id, job.outcome_id, error
-                        ),
-                    );
-                    let result = EffectResult::Succeeded { evidence: vec![] };
-                    self.handler
-                        .finish_effect(
-                            &job,
-                            &effect_mutation_request_id(&job, "noop"),
-                            SystemTime::now(),
-                            &result,
-                        )
-                        .map_err(|failure| {
-                            CycleError::new(CycleErrorCode::PersistenceFailed, failure.to_string())
-                        })?;
-                    return Ok(());
+                    return self.finish_effect_as_benign_no_op(&job, &error);
                 }
                 if !error.permanent {
                     self.handler
@@ -703,6 +669,47 @@ impl<'a> OutboxWorker<'a> {
                 Err(CycleError::new(CycleErrorCode::DownstreamFailed, error))
             }
         }
+    }
+
+    /// Close the outbox row for a benign goal-lifecycle race (issue #4468): the
+    /// goal was legitimately completed/removed between preparing this effect and
+    /// dispatching it. Do NOT map this to `DownstreamFailed`. The row is closed
+    /// as a succeeded no-op (empty evidence) so it is never redispatched, a
+    /// structured tracing event is emitted, and a counter is incremented so the
+    /// race stays observable rather than silently swallowed.
+    fn finish_effect_as_benign_no_op(
+        &self,
+        job: &EffectJob,
+        error: &EffectExecutionError,
+    ) -> Result<(), CycleError> {
+        tracing::warn!(
+            target: "typed_ooda.effect_dispatch",
+            effect_id = %job.effect_id,
+            outcome_id = %job.outcome_id,
+            goal_id = %job.goal_id,
+            reason = %error,
+            "typed goal-session effect skipped as benign no-op: goal completed or removed between prepare and dispatch",
+        );
+        let _ = crate::self_metrics::record_metric(
+            "typed_ooda_effect_benign_no_op",
+            1.0,
+            &format!(
+                "goal={};effect={};outcome={};reason={}",
+                job.goal_id, job.effect_id, job.outcome_id, error
+            ),
+        );
+        let result = EffectResult::Succeeded { evidence: vec![] };
+        self.handler
+            .finish_effect(
+                job,
+                &effect_mutation_request_id(job, "noop"),
+                SystemTime::now(),
+                &result,
+            )
+            .map_err(|failure| {
+                CycleError::new(CycleErrorCode::PersistenceFailed, failure.to_string())
+            })?;
+        Ok(())
     }
 }
 
