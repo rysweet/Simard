@@ -590,19 +590,20 @@ fn observe_only_objective_forbids_engineer_dispatch_and_requires_evidence_protoc
     assert!(input.objective.contains("modest positive progress"));
 }
 
-// ── Novelty-first steering for standing research/cognition goals (#4347) ──
+// ── Never-idle steering for standing research/cognition goals (#4347, #4399) ──
 //
-// TDD: `build_goal_advance_input` must durably inject a novelty-first directive
+// TDD: `build_goal_advance_input` must durably inject a never-idle directive
 // into the goal-session objective ONLY when the goal is a standing
 // research/cognition goal (`ActiveGoal::is_standing_research_goal`), so the
-// standing cognition-research goal seeks GENUINELY NEW directions each cycle
-// instead of another incremental parse-site / dedup fix. This lives in the
-// daemon (code hook + prompt asset), so it survives goal-board re-persist —
-// it is NOT a runtime CLI priority tweak.
+// standing cognition-research goal NEVER idles — each cycle it must seek a NEW
+// source or design a NEW experiment (deduped against recent directions) instead
+// of idling or repeating an incremental parse-site / dedup fix. This lives in the
+// daemon (code hook + prompt asset), so it survives goal-board re-persist — it is
+// NOT a runtime CLI priority tweak.
 //
 // The code-owned hook emits this exact sentinel; the always-embedded prompt
 // asset must NOT contain it, so the positive/negative split is meaningful.
-const NOVELTY_FIRST_SENTINEL: &str = "[novelty-first: standing research goal]";
+const NEVER_IDLE_SENTINEL: &str = "[never-idle: standing research goal]";
 
 fn research_goal() -> crate::goal_curation::ActiveGoal {
     crate::goal_curation::ActiveGoal::new(
@@ -616,7 +617,7 @@ fn research_goal() -> crate::goal_curation::ActiveGoal {
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn advance_input_injects_novelty_directive_for_standing_research_goal() {
+fn advance_input_injects_never_idle_directive_for_standing_research_goal() {
     let _guard = lock_env_for_test();
     let _env = set_observe_only_for_test(None);
 
@@ -626,34 +627,65 @@ fn advance_input_injects_novelty_directive_for_standing_research_goal() {
         crate::ooda_actions::goal_session::build_goal_advance_input(&*mem, None, &goal, false);
 
     let obj = &input.objective;
-    let obj_lc = obj.to_lowercase();
     assert!(
-        obj.contains(NOVELTY_FIRST_SENTINEL),
-        "standing research goal must get the code-owned novelty-first directive sentinel"
+        obj.contains(NEVER_IDLE_SENTINEL),
+        "standing research goal must get the code-owned never-idle directive sentinel"
     );
-    // The directive must steer toward surveying NOVEL directions and preferring
-    // them over incremental refinement, with benchmark / negative-result rigor.
+    // Assert on the code-owned directive itself (deterministic regardless of the
+    // installed `goal_session_objective.md` asset the prompt store also loads).
+    let directive_lc = obj
+        .split("## Never-idle directive")
+        .nth(1)
+        .expect("objective must contain the injected never-idle directive")
+        .to_lowercase();
+    // The directive must mandate never idling and producing a NOVEL action.
     assert!(
-        obj_lc.contains("novel"),
-        "directive must mention novel directions"
-    );
-    assert!(
-        obj_lc.contains("survey") || obj_lc.contains("unexplored"),
-        "directive must instruct surveying unexplored directions"
-    );
-    assert!(
-        obj_lc.contains("incremental"),
-        "directive must contrast novel work against incremental refinement"
+        directive_lc.contains("never idle"),
+        "directive must mandate that the goal never idles"
     );
     assert!(
-        obj_lc.contains("benchmark"),
-        "directive must require benchmarking a novel direction against the baseline"
+        directive_lc.contains("novel"),
+        "directive must require a novel action each cycle"
+    );
+    // Each cycle must yield a NEW external SOURCE or a NEW EXPERIMENT.
+    assert!(
+        directive_lc.contains("source"),
+        "directive must offer discovering + ingesting a new external source"
+    );
+    assert!(
+        directive_lc.contains("experiment"),
+        "directive must offer designing + running a new experiment"
+    );
+    // Dedup against recent directions so the action is a genuinely new direction.
+    assert!(
+        directive_lc.contains("dedup") || directive_lc.contains("recent direction"),
+        "directive must dedup the chosen action against recent directions"
+    );
+    // An idle/repeat cycle is a FAULT — not a tolerated fall-back to incremental work.
+    assert!(
+        directive_lc.contains("fault"),
+        "directive must frame an idle/repeat cycle as a fault"
+    );
+    // Degrade to a NEW LOCAL experiment when no external source is reachable —
+    // there is NO idle fallback and NO incremental-maintenance fallback.
+    assert!(
+        directive_lc.contains("local"),
+        "directive must degrade to a new local experiment, not idle, when no \
+         external source is reachable"
+    );
+    assert!(
+        directive_lc.contains("never fall back to idling"),
+        "the directive must explicitly forbid the idle / incremental-maintenance loophole"
+    );
+    assert!(
+        !directive_lc.contains("only fall back to incremental maintenance"),
+        "the old incremental-maintenance idle loophole must be gone from the directive"
     );
 }
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn advance_input_omits_novelty_directive_for_ordinary_goal() {
+fn advance_input_omits_never_idle_directive_for_ordinary_goal() {
     let _guard = lock_env_for_test();
     let _env = set_observe_only_for_test(None);
 
@@ -663,14 +695,14 @@ fn advance_input_omits_novelty_directive_for_ordinary_goal() {
         crate::ooda_actions::goal_session::build_goal_advance_input(&*mem, None, &goal, false);
 
     assert!(
-        !input.objective.contains(NOVELTY_FIRST_SENTINEL),
-        "an ordinary (non-standing, non-research) goal must NOT get the novelty-first sentinel"
+        !input.objective.contains(NEVER_IDLE_SENTINEL),
+        "an ordinary (non-standing, non-research) goal must NOT get the never-idle sentinel"
     );
 }
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn advance_input_omits_novelty_directive_for_standing_non_research_goal() {
+fn advance_input_omits_never_idle_directive_for_standing_non_research_goal() {
     let _guard = lock_env_for_test();
     let _env = set_observe_only_for_test(None);
 
@@ -686,14 +718,14 @@ fn advance_input_omits_novelty_directive_for_standing_non_research_goal() {
         crate::ooda_actions::goal_session::build_goal_advance_input(&*mem, None, &goal, false);
 
     assert!(
-        !input.objective.contains(NOVELTY_FIRST_SENTINEL),
-        "a standing NON-research goal must NOT get the novelty-first sentinel"
+        !input.objective.contains(NEVER_IDLE_SENTINEL),
+        "a standing NON-research goal must NOT get the never-idle sentinel"
     );
 }
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn advance_input_omits_novelty_directive_for_research_non_standing_goal() {
+fn advance_input_omits_never_idle_directive_for_research_non_standing_goal() {
     let _guard = lock_env_for_test();
     let _env = set_observe_only_for_test(None);
 
@@ -709,7 +741,7 @@ fn advance_input_omits_novelty_directive_for_research_non_standing_goal() {
         crate::ooda_actions::goal_session::build_goal_advance_input(&*mem, None, &goal, false);
 
     assert!(
-        !input.objective.contains(NOVELTY_FIRST_SENTINEL),
-        "a non-standing research goal must NOT get the novelty-first sentinel"
+        !input.objective.contains(NEVER_IDLE_SENTINEL),
+        "a non-standing research goal must NOT get the never-idle sentinel"
     );
 }

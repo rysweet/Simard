@@ -10,8 +10,13 @@
 //! goal that is being worked.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 
-use super::no_progress::{NoProgressIssueFiler, apply_no_progress_breaker_with_threshold};
+use super::cycle::sweep_stale_assignments_with_sessions;
+use super::no_progress::{
+    NoProgressBreakerReport, NoProgressIssueFiler, ResearchIdleFault, StandingIdle,
+    apply_no_progress_breaker_with_threshold, classify_standing_idle, prune_merged_pr_refs,
+};
 use crate::error::SimardResult;
 use crate::goal_curation::completion_gate::EvidenceSource;
 use crate::goal_curation::no_progress_breaker::{
@@ -75,6 +80,28 @@ fn pr_ref(num: &str) -> WipRef {
         kind: "pr".to_string(),
         ref_id: num.to_string(),
         label: format!("PR #{num}"),
+        url: None,
+    }
+}
+
+/// A `session` wip_ref keyed on the engineer tmux session name — a LIVE kind
+/// (`has_live_in_flight_ref`) until the stale-assignment sweep drops it.
+fn session_ref(session: &str) -> WipRef {
+    WipRef {
+        kind: "session".to_string(),
+        ref_id: session.to_string(),
+        label: format!("engineer session {session}"),
+        url: None,
+    }
+}
+
+/// A `branch` wip_ref for the dead engineer's working branch — a LIVE kind that
+/// must be dropped alongside the session when its tmux session dies.
+fn branch_ref(name: &str) -> WipRef {
+    WipRef {
+        kind: "branch".to_string(),
+        ref_id: name.to_string(),
+        label: format!("branch {name}"),
         url: None,
     }
 }
@@ -354,35 +381,60 @@ fn stale_counter_is_pruned_when_goal_leaves_the_board() {
 
 // --- perpetual/standing-goal exemption (issue #2589) ------------------------
 
-/// A STANDING/PERPETUAL goal (issues #2580/#2589): its description carries the
-/// durable standing marker, so it is recognised by the *same* `is_perpetual()`
-/// flag the non-completability path keys on. Modeled on the live
-/// `continuously-research-and-improve-your-own-cogn-*` research goal, at 0%.
+/// A STANDING/PERPETUAL but **non-research** goal (issues #2580/#2589): a
+/// CI-stewardship charter whose bursty idling is genuinely benign. It carries
+/// the durable standing marker (so `is_perpetual()` holds) but NO cognition /
+/// research marker, so `is_standing_research_goal()` is false. This is the goal
+/// class that KEEPS the benign perpetual-idle exemption (issue #4399): for it an
+/// idle cycle is normal, not a fault. Deliberately kept distinct from
+/// [`standing_research_goal`] so the #4399 fixture split can never drift the two
+/// exemption paths back together.
 fn perpetual_goal(id: &str) -> ActiveGoal {
-    let g = ActiveGoal::new(
-        id,
-        "STANDING PERPETUAL goal — never mark complete; continuously research \
-         and improve your own cognition",
-        5,
-    );
+    let g = ActiveGoal::new(id, "Steward CI health. STANDING PERPETUAL goal.", 5);
     assert!(
         g.is_perpetual(),
         "fixture must be recognised as standing/perpetual by the shared #2580/#2589 flag"
+    );
+    assert!(
+        !g.is_standing_research_goal(),
+        "the benign-exemption fixture must NOT read as a standing research goal (#4399)"
+    );
+    g
+}
+
+/// A STANDING/PERPETUAL **research** goal (issue #4399): standing/perpetual AND
+/// marked cognition-research, i.e. `is_standing_research_goal()` holds. Modeled
+/// on the live `continuously-research-and-improve-your-own-cogn-70ab8541` goal.
+/// For this class an idle cycle is a FAULT — the never-idle rail records it in
+/// `research_idle_faults` (never `perpetual_idled`) and re-orients the goal so
+/// the next cycle generates a novel source/experiment.
+fn standing_research_goal(id: &str) -> ActiveGoal {
+    let g = ActiveGoal::new(
+        id,
+        "Continuously research and improve your own cognition: graph memory, \
+         recall quality, and reasoner reliability. STANDING PERPETUAL goal.",
+        5,
+    );
+    assert!(
+        g.is_standing_research_goal(),
+        "fixture must read as a standing research goal (#4399)"
     );
     g
 }
 
 #[test]
 fn perpetual_goal_idles_instead_of_blocking_past_threshold() {
-    // The production defect: a STANDING/PERPETUAL goal is inherently bursty — it
-    // ships durable improvements periodically and idles between. Idle cycles are
-    // NORMAL, not a livelock, so the no-progress SAFEGUARD must NEVER hard-block
-    // it. Driven N+1 consecutive no-action cycles (one past where a normal goal
-    // is parked), it must: stay ACTIVE (never Blocked), file NO tracking issue,
-    // set NO [OODA-SAFEGUARD] sentinel, never be escalated, be reported as a
-    // perpetual idle, and have its no-action counter reset every cycle.
+    // A STANDING/PERPETUAL but NON-research goal (CI stewardship) is inherently
+    // bursty — it ships durable improvements periodically and idles between. For
+    // this class idle cycles are NORMAL, not a livelock, so the no-progress
+    // SAFEGUARD must NEVER hard-block it. Driven N+1 consecutive no-action cycles
+    // (one past where a normal goal is parked), it must: stay ACTIVE (never
+    // Blocked), file NO tracking issue, set NO [OODA-SAFEGUARD] sentinel, never be
+    // escalated, be reported as a (benign) perpetual idle, and have its no-action
+    // counter reset every cycle. (Research goals take the fault path instead —
+    // see `research_goal_idle_is_a_fault_not_a_benign_perpetual_idle`.)
     let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
-    let id = "continuously-research-and-improve";
+    let id = "steward-ci-health";
     let mut goal = perpetual_goal(id);
     goal.wip_refs = vec![pr_ref("7")]; // an open, unmerged PR
     let mut state = state_with(goal);
@@ -510,6 +562,711 @@ fn non_perpetual_goal_still_escalates_and_is_never_reported_idled() {
         ),
         other => panic!("expected Blocked, got {other:?}"),
     }
+}
+
+// --- research goal never-idle: idle is a FAULT, not exempt (issue #4399) -----
+
+#[test]
+fn research_goal_idle_is_a_fault_not_a_benign_perpetual_idle() {
+    // The #4399 defect: the standing RESEARCH goal was silently swept into the
+    // benign perpetual-idle exemption ("standing/perpetual goal idled this cycle
+    // — normal, not a fault"), so over many cycles it produced nothing new. Under
+    // the never-idle rail an idle research cycle is a FAULT: it is recorded in
+    // `research_idle_faults` — NEVER `perpetual_idled` — while STILL staying
+    // fail-closed (never blocked, never escalated, never a firing). Driven N+1
+    // consecutive no-action cycles (past where a normal goal is parked).
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let id = "continuously-research-and-improve-your-own-cogn-70ab8541";
+    let mut goal = standing_research_goal(id);
+    // Genuinely idle: NO live in-flight artifact (empty wip_refs). This is the
+    // case that MUST fault — a research goal holding an open PR is progress
+    // (ResearchInFlight), not an idle fault; see
+    // `research_goal_with_live_pr_is_in_flight_progress_not_a_fault`.
+    goal.wip_refs.clear();
+    assert!(!goal.has_live_in_flight_ref());
+    let mut state = state_with(goal);
+    let evidence = FakeEvidence {
+        pr_merged: false,
+        issue_closed: false,
+        deployed: false,
+    };
+    let filer = RecordingFiler::default();
+
+    for cycle in 1..=(threshold + 1) {
+        let report = apply_no_progress_breaker_with_threshold(
+            &mut state,
+            &[no_action_outcome(id)],
+            &evidence,
+            &filer,
+            threshold,
+        );
+        assert_eq!(
+            report.research_idle_faults,
+            vec![id.to_string()],
+            "cycle {cycle}: a research-goal idle must be recorded as a FAULT"
+        );
+        assert!(
+            report.perpetual_idled.is_empty(),
+            "cycle {cycle}: a research goal must NOT get the benign perpetual-idle exemption"
+        );
+        assert!(
+            !report.fired(),
+            "cycle {cycle}: an idle fault is a fail-closed re-orient, not a breaker firing"
+        );
+        assert!(
+            report.escalated.is_empty(),
+            "cycle {cycle}: a research idle must never escalate to a human"
+        );
+    }
+    assert!(
+        filer.calls.borrow().is_empty(),
+        "a research-goal idle must never file an [OODA-SAFEGUARD] tracking issue"
+    );
+}
+
+#[test]
+fn research_goal_with_live_pr_is_in_flight_progress_not_a_fault() {
+    // Crusty finding 1 (HIGH): a research goal that opened a durable PR (a genuine
+    // novel action) and then produces a no-action cycle while that PR is still
+    // open/unmerged is NOT meaningfully idle — it holds a live in-flight artifact.
+    // The never-idle rail must treat it as PROGRESS (ResearchInFlight): the goal
+    // must NOT be counted as a research_idle_fault and must NOT be re-oriented,
+    // because roll_to_new_cycle would wipe the load-bearing wip_refs the Overseer
+    // dedup set, engineer-admission control, and completion gate depend on — which
+    // would let the next cycle spawn an overlapping engineer on the same seam and
+    // lose merge tracking of the open PR. Its wip_refs, assignment, and status
+    // must be PRESERVED; the counter still resets and it stays active.
+    // (This replaces the pre-fix assertion that the PR ref was DROPPED — that
+    // asserted the buggy behavior.)
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let id = "continuously-research-and-improve-your-own-cogn-70ab8541";
+    let mut goal = standing_research_goal(id);
+    goal.status = GoalProgress::InProgress { percent: 40 };
+    goal.assigned_to = Some("engineer-42".to_string());
+    goal.wip_refs = vec![pr_ref("7")]; // an open, unmerged PR — live in-flight work
+    assert!(goal.has_live_in_flight_ref());
+    let mut state = state_with(goal);
+    let evidence = FakeEvidence {
+        pr_merged: false,
+        issue_closed: false,
+        deployed: false,
+    };
+    let filer = RecordingFiler::default();
+
+    for cycle in 1..=(threshold + 1) {
+        let report = apply_no_progress_breaker_with_threshold(
+            &mut state,
+            &[no_action_outcome(id)],
+            &evidence,
+            &filer,
+            threshold,
+        );
+        assert!(
+            report.research_idle_faults.is_empty(),
+            "cycle {cycle}: a research goal holding a live PR is in-flight progress, not an idle fault"
+        );
+        assert!(
+            report.perpetual_idled.is_empty(),
+            "cycle {cycle}: in-flight progress is neither a fault nor a benign perpetual idle"
+        );
+        assert!(
+            !report.fired(),
+            "cycle {cycle}: in-flight progress must never fire the breaker"
+        );
+
+        let goal = &state.active_goals.active[0];
+        assert_eq!(
+            goal.wip_refs,
+            vec![pr_ref("7")],
+            "cycle {cycle}: the open PR ref must be PRESERVED (dedup/admission/merge-tracking depend on it)"
+        );
+        assert_eq!(
+            goal.assigned_to.as_deref(),
+            Some("engineer-42"),
+            "cycle {cycle}: assignment must be preserved for the in-flight goal"
+        );
+        assert!(
+            matches!(goal.status, GoalProgress::InProgress { percent: 40 }),
+            "cycle {cycle}: an in-flight research goal must NOT be reset to NotStarted, got {:?}",
+            goal.status
+        );
+        assert!(
+            !matches!(goal.status, GoalProgress::Blocked(_)),
+            "cycle {cycle}: an in-flight research goal must never be Blocked"
+        );
+        assert_eq!(
+            state.no_progress_tracker.consecutive(id),
+            0,
+            "cycle {cycle}: the no-action counter must still reset each cycle (stays active)"
+        );
+    }
+    assert_eq!(
+        state.active_goals.active.len(),
+        1,
+        "the research goal must remain active and re-selectable"
+    );
+    assert!(
+        filer.calls.borrow().is_empty(),
+        "in-flight progress must never file an [OODA-SAFEGUARD] tracking issue"
+    );
+}
+
+#[test]
+fn research_goal_idle_with_no_live_ref_faults_and_reorients() {
+    // Fail-closed re-orient of a GENUINELY idle research goal (empty wip_refs — no
+    // live in-flight artifact). On an idle fault it must be driven back to a fresh,
+    // re-dispatchable cycle (`roll_to_new_cycle`: status NotStarted, stale WIP
+    // dropped) so the NEXT OODA cycle re-enters work generation — while NEVER being
+    // blocked/parked, its no-action counter reset each cycle, and staying active.
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let id = "continuously-research-and-improve-your-own-cogn-70ab8541";
+    let mut goal = standing_research_goal(id);
+    goal.status = GoalProgress::InProgress { percent: 40 };
+    goal.wip_refs.clear(); // genuinely idle: no live in-flight artifact
+    assert!(!goal.has_live_in_flight_ref());
+    let mut state = state_with(goal);
+    let evidence = FakeEvidence {
+        pr_merged: false,
+        issue_closed: false,
+        deployed: false,
+    };
+    let filer = RecordingFiler::default();
+
+    for cycle in 1..=(threshold + 1) {
+        let report = apply_no_progress_breaker_with_threshold(
+            &mut state,
+            &[no_action_outcome(id)],
+            &evidence,
+            &filer,
+            threshold,
+        );
+        assert_eq!(
+            report.research_idle_faults,
+            vec![id.to_string()],
+            "cycle {cycle}: a genuinely idle research goal must be recorded as a FAULT"
+        );
+        let goal = &state.active_goals.active[0];
+        assert!(
+            matches!(goal.status, GoalProgress::NotStarted),
+            "cycle {cycle}: an idle research goal must be re-oriented to NotStarted, got {:?}",
+            goal.status
+        );
+        assert!(
+            goal.wip_refs.is_empty(),
+            "cycle {cycle}: re-orient must drop stale WIP so the next cycle starts fresh"
+        );
+        assert!(
+            !matches!(goal.status, GoalProgress::Blocked(_)),
+            "cycle {cycle}: a research goal must never be Blocked by the no-progress breaker"
+        );
+        assert!(
+            !state.active_goals.active.iter().any(|g| matches!(
+                &g.status,
+                GoalProgress::Blocked(r) if is_no_progress_marker(r)
+            )),
+            "cycle {cycle}: no [OODA-SAFEGUARD] sentinel may ever be set on a research goal"
+        );
+        assert_eq!(
+            state.no_progress_tracker.consecutive(id),
+            0,
+            "cycle {cycle}: the research goal's no-action counter must reset each idle cycle"
+        );
+    }
+    assert_eq!(
+        state.active_goals.active.len(),
+        1,
+        "the research goal must remain active and re-selectable"
+    );
+}
+
+#[test]
+fn research_idle_fault_is_not_a_firing_and_is_logged() {
+    // Contract on the report itself: `research_idle_faults` is a fail-closed
+    // re-orient signal, NOT a terminal breaker action, so it must never count as a
+    // `fired()`. It must still be surfaced in the one-line cycle log so an idle
+    // research fault is visible (never silent, unlike the old benign exemption).
+    let mut report = NoProgressBreakerReport::default();
+    report
+        .research_idle_faults
+        .push("continuously-research-and-improve-your-own-cogn-70ab8541".to_string());
+    assert!(
+        !report.fired(),
+        "a research idle fault is a re-orient, not a terminal breaker firing"
+    );
+    let line = report.log_line();
+    assert!(
+        line.contains("research_faults=1"),
+        "the cycle log must surface the research idle fault count: {line}"
+    );
+}
+
+#[test]
+fn research_idle_fault_alone_makes_the_report_noteworthy_so_the_count_is_surfaced() {
+    // Crusty finding 2 (observability): on a PURE research-idle cycle the report
+    // does NOT fire, auto-clear, or error — so before the fix the root-cause
+    // breaker's aggregate log gate (`fired() || auto_cleared || errors`) stayed
+    // false and `research_faults=N` never reached the cycle log. `is_noteworthy()`
+    // is the single source of truth for that gate and MUST be true when a
+    // research-idle fault occurred, so the count is consistently surfaced.
+    let empty = NoProgressBreakerReport::default();
+    assert!(
+        !empty.is_noteworthy(),
+        "a truly empty pass has nothing to surface"
+    );
+
+    let mut report = NoProgressBreakerReport::default();
+    report
+        .research_idle_faults
+        .push("continuously-research-and-improve-your-own-cogn-70ab8541".to_string());
+    assert!(
+        !report.fired(),
+        "the fault path must not be a firing (guards the gate is not merely fired())"
+    );
+    assert!(
+        report.is_noteworthy(),
+        "a pure research-idle cycle must be noteworthy so the aggregate log surfaces research_faults=N"
+    );
+}
+
+// --- classify_standing_idle: the single, pure decision point (issue #4399) ---
+
+#[test]
+fn classify_standing_idle_flags_a_research_goal_as_a_fault() {
+    // A standing RESEARCH goal (perpetual AND cognition-research) with NO live
+    // in-flight artifact idling is a FAULT — the classifier returns ResearchFault
+    // with a fixed-vocabulary category, never the benign exemption.
+    let g = standing_research_goal("continuously-research-and-improve-your-own-cogn-70ab8541");
+    assert!(
+        !g.has_live_in_flight_ref(),
+        "fixture must be genuinely idle"
+    );
+    assert_eq!(
+        classify_standing_idle(&g),
+        Some(StandingIdle::ResearchFault {
+            fault: ResearchIdleFault::NoNovelActionProduced
+        }),
+        "a genuinely idle standing research goal must classify as a research fault"
+    );
+}
+
+#[test]
+fn classify_standing_idle_research_with_live_ref_is_in_flight_not_a_fault() {
+    // Crusty finding 1: a standing research goal holding a LIVE in-flight artifact
+    // (open PR / branch / session) is making progress — the classifier must return
+    // ResearchInFlight, NOT ResearchFault, so the breaker preserves its wip_refs and
+    // does not re-orient it.
+    let mut g = standing_research_goal("continuously-research-and-improve-your-own-cogn-70ab8541");
+    g.wip_refs = vec![pr_ref("7")];
+    assert!(g.has_live_in_flight_ref());
+    assert_eq!(
+        classify_standing_idle(&g),
+        Some(StandingIdle::ResearchInFlight),
+        "a research goal holding a live PR must classify as in-flight progress, not a fault"
+    );
+}
+
+#[test]
+fn classify_standing_idle_keeps_non_research_standing_goal_benign() {
+    // A standing NON-research goal (CI stewardship) idling is BENIGN — the
+    // classifier returns BenignExempt, preserving the #2589 exemption.
+    let g = perpetual_goal("steward-ci-health");
+    assert_eq!(
+        classify_standing_idle(&g),
+        Some(StandingIdle::BenignExempt),
+        "a non-research standing goal's idle must stay a benign exemption"
+    );
+}
+
+#[test]
+fn classify_standing_idle_is_none_for_an_ordinary_goal() {
+    // A bounded, non-standing goal is never classified here — it falls through to
+    // the normal escalation ladder.
+    let g = ActiveGoal::new("ship-feature-x", "Ship feature X and close the epic.", 5);
+    assert!(
+        !g.is_perpetual(),
+        "fixture must be an ordinary bounded goal"
+    );
+    assert_eq!(
+        classify_standing_idle(&g),
+        None,
+        "an ordinary goal must not be classified as a standing idle"
+    );
+}
+
+#[test]
+fn classify_standing_idle_is_total_over_pathological_descriptions() {
+    // Totality / panic-freedom (enforced under clippy -D warnings): the classifier
+    // is pure and must never panic on empty, very-long, Unicode, or control-char
+    // descriptions — only the structured predicates decide the branch.
+    for desc in [
+        String::new(),
+        "🧠".repeat(4096),
+        "STANDING PERPETUAL\u{0000}\u{202e}research cognition".to_string(),
+        "x".repeat(100_000),
+    ] {
+        let g = ActiveGoal::new("pathological-id", &desc, 5);
+        let _ = classify_standing_idle(&g); // must not panic
+    }
+}
+
+// ===========================================================================
+// NEW-1 (PR #4428): the ResearchInFlight exemption keys on ref KIND, not ref
+// LIVENESS. Nothing pruned stale/merged/dead refs before the breaker ran, so a
+// research goal holding a MERGED PR ref or a DEAD engineer session read as
+// `has_live_in_flight_ref` forever and silently idled — reintroducing the #4399
+// loophole behind a narrower gate. `wip_refs` must reflect only LIVE artifacts
+// BEFORE the breaker classifies, via two liveness-pruning prongs:
+//   Prong 1 — the stale-assignment sweep also drops a dead session's
+//             session/branch/engineer refs (cycle.rs).
+//   Prong 2 — a per-cycle, IO-free `prune_merged_pr_refs` reconcile drops `pr`
+//             refs whose number is not in the open-PR set (no_progress.rs).
+// The three tests below are the authoritative NEW-1 contract (fail before the
+// fix, pass after). They deliberately reuse the round-1 breaker harness so the
+// preserved-refs finding #1 (test c) and the never-idle guarantee (tests a/b)
+// are exercised through the exact same shared classifier.
+// ===========================================================================
+
+/// (a) A standing research goal whose ONLY `wip_ref` is a MERGED/CLOSED PR.
+///
+/// Before the fix the kind-based guard reads that dead `pr` ref as live, so the
+/// goal is classified `ResearchInFlight` on every subsequent NO-ACTION cycle:
+/// never faulted, never re-oriented, never logged — it silently idles forever.
+/// After Prong 2 prunes the ref (PR #7 is not in the open set), the now-refless
+/// goal is correctly a `ResearchFault`: counted in `research_idle_faults`,
+/// re-oriented (`NotStarted`), stays active, and is never `Blocked`.
+#[test]
+fn research_goal_whose_only_ref_is_a_merged_pr_faults_after_liveness_reconcile() {
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let id = "continuously-research-and-improve-your-own-cogn-70ab8541";
+    let mut goal = standing_research_goal(id);
+    goal.status = GoalProgress::InProgress { percent: 40 };
+    goal.assigned_to = Some("engineer-42".to_string());
+    goal.wip_refs = vec![pr_ref("7")]; // its ONLY ref — a PR that has since merged/closed
+    assert!(
+        goal.has_live_in_flight_ref(),
+        "precondition: the kind-based guard reads the stale PR ref as live (the NEW-1 loophole)"
+    );
+    let mut state = state_with(goal);
+
+    // Prong 2: PR #7 is NOT in the open-PR set (it merged/closed), so the pure,
+    // IO-free reconcile prunes it — leaving the goal with no live in-flight ref.
+    let open_prs: HashSet<u32> = HashSet::new();
+    prune_merged_pr_refs(&mut state.active_goals, &open_prs);
+    assert!(
+        !state.active_goals.active[0].has_live_in_flight_ref(),
+        "a merged/closed PR ref must be pruned so the goal no longer reads as in-flight"
+    );
+    assert!(
+        state.active_goals.active[0].wip_refs.is_empty(),
+        "the goal's only (stale) ref was the merged PR — after prune wip_refs is empty"
+    );
+
+    let evidence = FakeEvidence {
+        pr_merged: false,
+        issue_closed: false,
+        deployed: false,
+    };
+    let filer = RecordingFiler::default();
+
+    for cycle in 1..=(threshold + 1) {
+        let report = apply_no_progress_breaker_with_threshold(
+            &mut state,
+            &[no_action_outcome(id)],
+            &evidence,
+            &filer,
+            threshold,
+        );
+        assert_eq!(
+            report.research_idle_faults,
+            vec![id.to_string()],
+            "cycle {cycle}: after the merged PR ref is pruned, an idle research goal is a FAULT (never ResearchInFlight)"
+        );
+        assert!(
+            report.perpetual_idled.is_empty(),
+            "cycle {cycle}: an idle research goal is a fault, not a benign perpetual idle"
+        );
+        assert!(
+            !report.fired(),
+            "cycle {cycle}: a research idle fault is fail-closed — never a firing"
+        );
+
+        let goal = &state.active_goals.active[0];
+        assert!(
+            matches!(goal.status, GoalProgress::NotStarted),
+            "cycle {cycle}: an idle research goal must be re-oriented to NotStarted, got {:?}",
+            goal.status
+        );
+        assert!(
+            !matches!(goal.status, GoalProgress::Blocked(_)),
+            "cycle {cycle}: a research goal must never be Blocked by the no-progress breaker"
+        );
+        assert_eq!(
+            state.no_progress_tracker.consecutive(id),
+            0,
+            "cycle {cycle}: the no-action counter must reset each idle cycle (stays active)"
+        );
+    }
+    assert_eq!(
+        state.active_goals.active.len(),
+        1,
+        "the research goal must remain active and re-selectable"
+    );
+    assert!(
+        filer.calls.borrow().is_empty(),
+        "a research idle fault must never file an [OODA-SAFEGUARD] tracking issue"
+    );
+}
+
+/// (b) A standing research goal with a `session`/`branch` `wip_ref` whose tmux
+/// session is DEAD.
+///
+/// Before the fix `sweep_stale_assignments_with_sessions` cleared the dead
+/// engineer's assignment but LEFT its session/branch refs, so the goal kept
+/// reading as `has_live_in_flight_ref` and idled forever as `ResearchInFlight`.
+/// After Prong 1 the sweep also drops the dead session's session/branch/engineer
+/// refs, so the next NO-ACTION cycle correctly faults and re-orients.
+#[test]
+fn research_goal_with_dead_session_ref_is_swept_then_faults_and_reorients() {
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let id = "continuously-research-and-improve-your-own-cogn-70ab8541";
+    let mut goal = standing_research_goal(id);
+    goal.status = GoalProgress::InProgress { percent: 40 };
+    goal.assigned_to = Some("dead-session".to_string());
+    goal.wip_refs = vec![session_ref("dead-session"), branch_ref("feat/x")];
+    assert!(
+        goal.has_live_in_flight_ref(),
+        "precondition: a session/branch ref reads as live until the sweep drops it"
+    );
+    let mut state = state_with(goal);
+
+    // Prong 1: the engineer's tmux session is DEAD (absent from the live set). The
+    // sweep clears the assignment AND drops that dead session's session/branch refs.
+    let live: HashSet<String> = ["other-live-session".to_string()].into_iter().collect();
+    sweep_stale_assignments_with_sessions(&mut state.active_goals, &live);
+    let swept = &state.active_goals.active[0];
+    assert!(
+        swept.assigned_to.is_none(),
+        "the dead-session assignment must be cleared by the sweep"
+    );
+    assert!(
+        !swept.has_live_in_flight_ref(),
+        "the dead session's session/branch refs must be dropped so the goal no longer reads as in-flight"
+    );
+
+    let evidence = FakeEvidence {
+        pr_merged: false,
+        issue_closed: false,
+        deployed: false,
+    };
+    let filer = RecordingFiler::default();
+
+    for cycle in 1..=(threshold + 1) {
+        let report = apply_no_progress_breaker_with_threshold(
+            &mut state,
+            &[no_action_outcome(id)],
+            &evidence,
+            &filer,
+            threshold,
+        );
+        assert_eq!(
+            report.research_idle_faults,
+            vec![id.to_string()],
+            "cycle {cycle}: with the dead-session refs swept, an idle research goal must FAULT"
+        );
+        let goal = &state.active_goals.active[0];
+        assert!(
+            matches!(goal.status, GoalProgress::NotStarted),
+            "cycle {cycle}: an idle research goal must be re-oriented to NotStarted, got {:?}",
+            goal.status
+        );
+        assert!(
+            !matches!(goal.status, GoalProgress::Blocked(_)),
+            "cycle {cycle}: a research goal must never be Blocked by the no-progress breaker"
+        );
+        assert_eq!(
+            state.no_progress_tracker.consecutive(id),
+            0,
+            "cycle {cycle}: the no-action counter must reset each idle cycle (stays active)"
+        );
+    }
+    assert_eq!(
+        state.active_goals.active.len(),
+        1,
+        "the research goal must remain active and re-selectable"
+    );
+    assert!(
+        filer.calls.borrow().is_empty(),
+        "a research idle fault must never file an [OODA-SAFEGUARD] tracking issue"
+    );
+}
+
+/// (c) Regression guard (round-1 finding #1 must stay intact): a standing
+/// research goal whose PR ref is GENUINELY OPEN (its number is in the open-PR
+/// set) must SURVIVE the per-cycle liveness reconcile untouched, so it is still
+/// classified `ResearchInFlight`: `wip_refs` + `assigned_to` preserved, NOT
+/// faulted, NOT re-oriented (`roll_to_new_cycle` would wipe the load-bearing
+/// refs the Overseer dedup set, engineer-admission control, and completion gate
+/// all depend on).
+#[test]
+fn genuinely_open_pr_ref_survives_liveness_reconcile_and_stays_in_flight() {
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let id = "continuously-research-and-improve-your-own-cogn-70ab8541";
+    let mut goal = standing_research_goal(id);
+    goal.status = GoalProgress::InProgress { percent: 40 };
+    goal.assigned_to = Some("engineer-42".to_string());
+    goal.wip_refs = vec![pr_ref("7")]; // an OPEN, unmerged PR — live in-flight work
+    let mut state = state_with(goal);
+
+    // Prong 2: PR #7 IS in the open set → the reconcile must NOT prune it.
+    let open_prs: HashSet<u32> = [7u32].into_iter().collect();
+    prune_merged_pr_refs(&mut state.active_goals, &open_prs);
+    assert_eq!(
+        state.active_goals.active[0].wip_refs,
+        vec![pr_ref("7")],
+        "an OPEN PR ref must survive the liveness reconcile (round-1 finding #1 intact)"
+    );
+    assert!(
+        state.active_goals.active[0].has_live_in_flight_ref(),
+        "the surviving open PR ref keeps the goal reading as in-flight"
+    );
+
+    let evidence = FakeEvidence {
+        pr_merged: false,
+        issue_closed: false,
+        deployed: false,
+    };
+    let filer = RecordingFiler::default();
+
+    for cycle in 1..=(threshold + 1) {
+        let report = apply_no_progress_breaker_with_threshold(
+            &mut state,
+            &[no_action_outcome(id)],
+            &evidence,
+            &filer,
+            threshold,
+        );
+        assert!(
+            report.research_idle_faults.is_empty(),
+            "cycle {cycle}: a goal holding a genuinely-open PR is in-flight progress, not an idle fault"
+        );
+        assert!(
+            report.perpetual_idled.is_empty(),
+            "cycle {cycle}: in-flight progress is neither a fault nor a benign perpetual idle"
+        );
+        assert!(
+            !report.fired(),
+            "cycle {cycle}: in-flight progress must never fire the breaker"
+        );
+
+        let goal = &state.active_goals.active[0];
+        assert_eq!(
+            goal.wip_refs,
+            vec![pr_ref("7")],
+            "cycle {cycle}: the open PR ref must be PRESERVED (dedup/admission/merge-tracking depend on it)"
+        );
+        assert_eq!(
+            goal.assigned_to.as_deref(),
+            Some("engineer-42"),
+            "cycle {cycle}: assignment must be preserved for the in-flight goal"
+        );
+        assert!(
+            matches!(goal.status, GoalProgress::InProgress { percent: 40 }),
+            "cycle {cycle}: an in-flight research goal must NOT be reset to NotStarted, got {:?}",
+            goal.status
+        );
+        assert_eq!(
+            state.no_progress_tracker.consecutive(id),
+            0,
+            "cycle {cycle}: the no-action counter must still reset each cycle (stays active)"
+        );
+    }
+    assert!(
+        filer.calls.borrow().is_empty(),
+        "in-flight progress must never file an [OODA-SAFEGUARD] tracking issue"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// NEW-1 Prong 2 fail-open unit tests (PR #4428): the pure `prune_merged_pr_refs`
+// must only ever remove a provably-dead `pr` ref — never a possibly-live one —
+// so every ambiguous case errs toward KEEPING the ref.
+// ---------------------------------------------------------------------------
+
+/// An unparseable `pr` `ref_id` is KEPT (not pruned) — a malformed-but-possibly
+/// -live ref must never be dropped on a guess (would risk the round-1 F1 bug).
+#[test]
+fn prune_keeps_unparseable_pr_ref_and_reports_nothing() {
+    let mut goal = standing_research_goal("g-unparseable");
+    let bad = WipRef {
+        kind: "pr".to_string(),
+        ref_id: "not-a-number".to_string(),
+        label: "PR ???".to_string(),
+        url: None,
+    };
+    goal.wip_refs = vec![bad.clone()];
+    let mut state = state_with(goal);
+
+    let open: HashSet<u32> = HashSet::new();
+    let pruned = prune_merged_pr_refs(&mut state.active_goals, &open);
+
+    assert!(
+        pruned.is_empty(),
+        "an unparseable pr ref must not be reported as pruned"
+    );
+    assert_eq!(
+        state.active_goals.active[0].wip_refs,
+        vec![bad],
+        "an unparseable pr ref_id must be KEPT (fail-open), even against an empty open set"
+    );
+}
+
+/// An `Ok([])` open set (genuinely no open PRs) prunes EVERY `pr` ref — each is
+/// necessarily stale.
+#[test]
+fn prune_drops_all_pr_refs_when_open_set_is_empty() {
+    let mut goal = standing_research_goal("g-allmerged");
+    goal.wip_refs = vec![pr_ref("11"), pr_ref("#22")];
+    let mut state = state_with(goal);
+
+    let open: HashSet<u32> = HashSet::new();
+    let pruned = prune_merged_pr_refs(&mut state.active_goals, &open);
+
+    assert!(
+        state.active_goals.active[0].wip_refs.is_empty(),
+        "with no open PRs every pr ref is stale and must be pruned"
+    );
+    assert_eq!(
+        pruned.len(),
+        2,
+        "both pruned pr refs must be reported (including the '#'-prefixed one)"
+    );
+}
+
+/// A non-`pr` (`issue`) ref is NEVER touched by Prong 2 — it is a durable record,
+/// and is already deny-by-default in `has_live_in_flight_ref`.
+#[test]
+fn prune_never_touches_non_pr_refs() {
+    let mut goal = standing_research_goal("g-issue");
+    let issue = WipRef {
+        kind: "issue".to_string(),
+        ref_id: "100".to_string(),
+        label: "issue #100".to_string(),
+        url: None,
+    };
+    let branch = branch_ref("feat/z");
+    goal.wip_refs = vec![issue.clone(), branch.clone()];
+    let mut state = state_with(goal);
+
+    // An empty open set would prune every `pr` ref — but there are none here.
+    let open: HashSet<u32> = HashSet::new();
+    let pruned = prune_merged_pr_refs(&mut state.active_goals, &open);
+
+    assert!(pruned.is_empty(), "no pr refs present → nothing pruned");
+    assert_eq!(
+        state.active_goals.active[0].wip_refs,
+        vec![issue, branch],
+        "issue/branch refs must pass through the PR-liveness reconcile untouched"
+    );
 }
 
 // ===========================================================================

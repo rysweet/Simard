@@ -584,6 +584,14 @@ fn run_ooda_cycle_inner(
     // corruption guard treats them as a legitimate departure (not a "vanished"
     // goal) and the persist step force-removes them from the snapshot.
     let breaker_dropped: Vec<String> = if let Some(source) = &memories.completion_evidence {
+        // NEW-1 Prong 2 (PR #4428): reconcile PR-ref liveness BEFORE the breaker
+        // classifies. A standing research goal that merged/closed its PR keeps a
+        // stale `pr` wip_ref that `has_live_in_flight_ref` reads as LIVE, so the
+        // breaker would classify it `ResearchInFlight` forever and it would idle
+        // silently. Pruning merged/closed PR refs here makes the kind-based guard
+        // sound; a genuinely-open PR survives (finding #1 intact).
+        let pr_client = crate::stewardship::RealPrGhClient::new();
+        reconcile_merged_prs(&mut state.active_goals, &pr_client);
         if crate::ooda_loop::no_progress::no_progress_investigation_enabled() {
             // Root-cause investigation (issue #16): before authoring any block,
             // the breaker classifies WHY a stalled goal made no shippable
@@ -610,10 +618,7 @@ fn run_ooda_cycle_inner(
                 &crate::ooda_loop::no_progress::GhIssueFiler,
                 crate::ooda_loop::no_progress::INVESTIGATED_BREAKER_THRESHOLD,
             );
-            if report.fired()
-                || !report.auto_cleared.is_empty()
-                || !report.investigation_errors.is_empty()
-            {
+            if report.is_noteworthy() {
                 tracing::info!(
                     target: "simard::ooda",
                     summary = %report.log_line(),
@@ -1083,7 +1088,16 @@ pub(crate) fn sweep_stale_assignments_with_sessions(
         return;
     }
 
+    // Kinds whose liveness is bound to the owning engineer's session: once that
+    // session is gone they are dead artifacts. `pr`/`issue` refs OUTLIVE the
+    // session and are KEPT here (a merged PR is pruned by the separate per-cycle
+    // PR-liveness reconcile; an `issue` is a durable record).
+    const DEAD_SESSION_KINDS: [&str; 3] = ["session", "branch", "engineer"];
+
     for goal in board.active.iter_mut() {
+        // (A) Stale-ASSIGNMENT reset (unchanged): a goal assigned to a session
+        // that is no longer live has its assignment cleared and is reset to
+        // `NotStarted` so it is re-dispatched.
         let is_stale = goal
             .assigned_to
             .as_deref()
@@ -1096,6 +1110,200 @@ pub(crate) fn sweep_stale_assignments_with_sessions(
             );
             goal.status = crate::goal_curation::GoalProgress::NotStarted;
         }
+
+        // (B) FIX-1 (OBSERVATION 1, hardening): prune dead-session
+        // session/branch/engineer wip_refs for EVERY goal, keyed on whether the
+        // goal's session is actually alive — NOT on whether it carries a stale
+        // ASSIGNMENT. An UNASSIGNED goal (`assigned_to == None`) that still holds
+        // such a ref (e.g. `clear_goal_assignment` cleared the assignment but left
+        // the ref) otherwise reads as live in-flight forever through the kind-based
+        // `has_live_in_flight_ref` guard and suppresses the never-idle fault.
+        //
+        // A `branch`/`engineer` ref_id is a branch name / engineer id, NOT a
+        // session id, so the group's liveness is keyed on the goal's session
+        // anchor — a live `assigned_to`, or a `session`/`engineer` ref pointing at
+        // a live session. When no anchor is live the whole session-bound group is
+        // dropped; when one IS live the group is preserved untouched. Pure/total:
+        // no session lookup panics (plain `HashSet` membership).
+        let session_is_live = goal
+            .assigned_to
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|s| live_sessions.contains(s))
+            || goal.wip_refs.iter().any(|wip| {
+                let kind = wip.kind.trim();
+                (kind.eq_ignore_ascii_case("session") || kind.eq_ignore_ascii_case("engineer"))
+                    && live_sessions.contains(wip.ref_id.trim())
+            });
+        if !session_is_live {
+            let before = goal.wip_refs.len();
+            goal.wip_refs.retain(|wip| {
+                let kind = wip.kind.trim();
+                !DEAD_SESSION_KINDS
+                    .iter()
+                    .any(|dead| kind.eq_ignore_ascii_case(dead))
+            });
+            let dropped = before - goal.wip_refs.len();
+            if dropped > 0 {
+                eprintln!(
+                    "[simard] OODA start: pruned {} dead-session wip_ref(s) for goal '{}' (owning session not live)",
+                    dropped, goal.id
+                );
+            }
+        }
+    }
+}
+
+// ============================================================================
+// NEW-1 Prong 2 (PR #4428): per-cycle PR-liveness reconcile — production wiring
+// ============================================================================
+
+/// Upper bound for the per-cycle open-PR fetch. MUST stay well ABOVE the repo's
+/// realistic simultaneous-open-PR count.
+///
+/// `list_open_prs` forwards this to `gh pr list --limit`, which TRUNCATES the
+/// result set. The pure prune treats the returned set as authoritative, so a
+/// `pr` ref whose PR is genuinely open but BEYOND the limit would be absent from
+/// the set and wrongly pruned — wiping a live in-flight ref, i.e. the exact
+/// round-1 finding-#1 (F1) regression. Fail-open covers a fetch `Err` and an
+/// unparseable id, but NOT a silently truncated `Ok(...)`, so this high cap is
+/// the guarantee. `1000` is far above any realistic open-PR count for this repo.
+const OPEN_PR_RECONCILE_LIMIT: u32 = 1000;
+
+/// Conservative validation of a single `owner` or `repo` path segment for the
+/// `gh pr list --repo` slug (FIX-2). Mirrors the shape of `repo_resolver`'s
+/// `validate_repo_slug`: ASCII alphanumeric plus `.`/`_`/`-`, 1..=64 chars, no
+/// `..` traversal, no leading `-`/`.`. Every slug is already passed to `gh` as a
+/// discrete argv element (never string-interpolated into a shell line), but a
+/// malformed segment is still rejected so we never issue a nonsense query and
+/// fail open on it instead.
+fn valid_repo_segment(seg: &str) -> bool {
+    !seg.is_empty()
+        && seg.len() <= 64
+        && !seg.contains("..")
+        && !seg.starts_with('-')
+        && !seg.starts_with('.')
+        && seg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// Canonical `owner/repo` slug for a goal's PR reconcile (FIX-2, OBSERVATION 2).
+/// `None`, `""`, or `"simard"` (case-insensitive) fold to the canonical
+/// [`crate::stewardship::TargetRepo::Simard`] slug; a value already containing
+/// `'/'` is treated as an `owner/repo` slug (both components validated); a bare
+/// name maps to `rysweet/{name}`. Returns `None` for any slug that fails
+/// validation so the caller fails open and prunes NOTHING for that goal rather
+/// than issuing a malformed `gh` query.
+fn repo_slug_for_goal(goal: &crate::goal_curation::ActiveGoal) -> Option<String> {
+    let simard = crate::stewardship::TargetRepo::Simard.slug();
+    match goal.repo.as_deref().map(str::trim) {
+        None | Some("") => Some(simard.to_string()),
+        Some(s) if s.eq_ignore_ascii_case("simard") => Some(simard.to_string()),
+        Some(s) if s.contains('/') => {
+            let mut parts = s.splitn(2, '/');
+            let owner = parts.next().unwrap_or_default();
+            let repo = parts.next().unwrap_or_default();
+            // `splitn(2, '/')` leaves any 3rd+ segment inside `repo`; reject it.
+            if repo.contains('/') || !valid_repo_segment(owner) || !valid_repo_segment(repo) {
+                None
+            } else {
+                Some(format!("{owner}/{repo}"))
+            }
+        }
+        Some(name) if valid_repo_segment(name) => Some(format!("rysweet/{name}")),
+        Some(_) => None,
+    }
+}
+
+/// Fetch the open-PR set ONCE per distinct repo among the active goals holding a
+/// `pr` ref and prune every merged/closed `pr`
+/// [`crate::goal_curation::WipRef`] from the active board via the pure
+/// [`crate::ooda_loop::no_progress::prune_merged_pr_refs_scoped`], BEFORE the
+/// never-idle breaker classifies (NEW-1 Prong 2, PR #4428; FIX-2, OBSERVATION 2).
+///
+/// FIX-2 (OBSERVATION 2): each `pr` ref is reconciled against the open-PR set of
+/// ITS OWN repo ([`goal_repo_slug`]), NOT a hardcoded `TargetRepo::Simard`. A
+/// standing goal tracking a still-OPEN PR in another repo therefore survives
+/// instead of being wrongly pruned against Simard's open set. The `gh pr list`
+/// calls are DEDUPED to one per distinct repo.
+///
+/// Reuses the existing `gh pr list` path
+/// ([`crate::stewardship::PrGhClient::list_open_prs`]) — NO new brittle shell/gh
+/// parse. **Fail-open per repo**: if a repo's fetch errors it is omitted from
+/// the open-set map, so [`prune_merged_pr_refs_scoped`] prunes NOTHING for that
+/// repo's goals this cycle — a `gh` blip can never wipe a live PR ref (which
+/// would reintroduce the round-1 finding-#1 regression). A merged-PR fault is
+/// merely delayed a cycle, never suppressed forever. On a genuine empty open set
+/// (`Ok([])`) that repo's `pr` refs prune (correct — nothing is open).
+///
+/// The `client` is injected so production wires the concrete
+/// [`crate::stewardship::RealPrGhClient`] while the pure core is unit-tested
+/// directly with an in-memory set (IO-free).
+///
+/// Fast path: when no active goal carries a `pr` wip_ref the open-PR fetch is
+/// skipped entirely (the pure prune would be a no-op), avoiding the `gh pr
+/// list` subprocess on the common cycle.
+fn reconcile_merged_prs(
+    board: &mut crate::goal_curation::GoalBoard,
+    client: &dyn crate::stewardship::PrGhClient,
+) {
+    use std::collections::{HashMap, HashSet};
+
+    // Skip the `gh pr list` subprocess+network round-trip entirely when no
+    // active goal carries a `pr` wip_ref: the pure prune would drop nothing,
+    // so the fetch is pure waste. Behaviourally identical, avoids a process
+    // spawn on the common (no-PR-ref) cycle.
+    let has_pr = |goal: &crate::goal_curation::ActiveGoal| {
+        goal.wip_refs
+            .iter()
+            .any(|wip| wip.kind.trim().eq_ignore_ascii_case("pr"))
+    };
+    if !board.active.iter().any(has_pr) {
+        return;
+    }
+
+    // Distinct, safe repo slugs among the goals that actually hold a `pr` ref —
+    // dedup the `gh pr list` calls and never fetch a repo we won't prune.
+    let mut slugs: Vec<String> = Vec::new();
+    for goal in board.active.iter().filter(|g| has_pr(g)) {
+        if let Some(slug) = repo_slug_for_goal(goal)
+            && !slugs.contains(&slug)
+        {
+            slugs.push(slug);
+        }
+    }
+
+    // Fetch each distinct repo's open-PR set once. Fail-open per repo: on `Err`
+    // the repo is simply omitted, so its goals' `pr` refs are left untouched.
+    let mut open_by_repo: HashMap<String, HashSet<u32>> = HashMap::new();
+    for slug in slugs {
+        match client.list_open_prs(&slug, OPEN_PR_RECONCILE_LIMIT) {
+            Ok(open) => {
+                open_by_repo.insert(slug, open.iter().map(|s| s.number).collect());
+            }
+            Err(e) => {
+                eprintln!(
+                    "[simard] merged-PR reconcile: list_open_prs failed for repo '{slug}' — \
+                     skipping PR-ref prune for that repo this cycle (fail-open — never wipe a \
+                     possibly-live ref): {e}"
+                );
+            }
+        }
+    }
+
+    let pruned = crate::ooda_loop::no_progress::prune_merged_pr_refs_scoped(
+        board,
+        |goal| repo_slug_for_goal(goal).unwrap_or_default(),
+        &open_by_repo,
+    );
+    for (goal_id, ref_id) in pruned {
+        tracing::info!(
+            target: "simard::ooda",
+            goal = %goal_id,
+            ref_id = %ref_id,
+            "pruned merged/closed PR wip_ref (not in its repo's open-PR set)",
+        );
     }
 }
 
@@ -1600,6 +1808,512 @@ mod tests_sweep {
                 goal.id
             );
         }
+    }
+
+    /// NEW-1 Prong 1 (PR #4428): a dead session's assignment sweep must ALSO drop
+    /// that goal's session/branch/engineer wip_refs — they belong to the dead
+    /// engineer — so `has_live_in_flight_ref` no longer reads them as live and the
+    /// never-idle breaker can fault. Durable `pr`/`issue` refs are KEPT: they
+    /// outlive the session, and a merged PR is pruned by the separate per-cycle
+    /// PR-liveness reconcile (`prune_merged_pr_refs`), not here.
+    #[test]
+    fn drops_dead_session_wip_refs_but_keeps_pr_and_issue() {
+        use crate::goal_curation::WipRef;
+        let wref = |kind: &str, id: &str| WipRef {
+            kind: kind.to_string(),
+            ref_id: id.to_string(),
+            label: format!("{kind} {id}"),
+            url: None,
+        };
+        let mut board = GoalBoard::new();
+        let mut goal = make_goal("g1", Some("dead-session"));
+        goal.wip_refs = vec![
+            wref("session", "dead-session"),
+            wref("branch", "feat/x"),
+            wref("engineer", "engineer-7"),
+            wref("pr", "42"),
+            wref("issue", "100"),
+        ];
+        add_active_goal(&mut board, goal).unwrap();
+
+        sweep_stale_assignments_with_sessions(&mut board, &live(&["other"]));
+
+        let goal = &board.active[0];
+        assert!(
+            goal.assigned_to.is_none(),
+            "assignment must be cleared for the dead session"
+        );
+        let kinds: Vec<&str> = goal.wip_refs.iter().map(|w| w.kind.as_str()).collect();
+        assert!(
+            !kinds.contains(&"session"),
+            "the dead session's session ref must be dropped, got {kinds:?}"
+        );
+        assert!(
+            !kinds.contains(&"branch"),
+            "the dead session's branch ref must be dropped, got {kinds:?}"
+        );
+        assert!(
+            !kinds.contains(&"engineer"),
+            "the dead session's engineer ref must be dropped, got {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"pr"),
+            "a durable PR ref must be kept (pruned separately by the PR-liveness reconcile), got {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"issue"),
+            "a durable issue ref must be kept, got {kinds:?}"
+        );
+    }
+
+    /// A LIVE session must keep its session/branch wip_refs untouched — the ref
+    /// drop is scoped strictly to DEAD sessions.
+    #[test]
+    fn keeps_wip_refs_for_live_session() {
+        use crate::goal_curation::WipRef;
+        let wref = |kind: &str, id: &str| WipRef {
+            kind: kind.to_string(),
+            ref_id: id.to_string(),
+            label: format!("{kind} {id}"),
+            url: None,
+        };
+        let mut board = GoalBoard::new();
+        let mut goal = make_goal("g1", Some("live-session"));
+        goal.wip_refs = vec![wref("session", "live-session"), wref("branch", "feat/y")];
+        add_active_goal(&mut board, goal).unwrap();
+
+        sweep_stale_assignments_with_sessions(&mut board, &live(&["live-session"]));
+
+        let goal = &board.active[0];
+        assert_eq!(goal.assigned_to.as_deref(), Some("live-session"));
+        assert_eq!(
+            goal.wip_refs.len(),
+            2,
+            "a live session's wip_refs must be preserved untouched"
+        );
+    }
+
+    /// FIX-1 (OBSERVATION 1, hardening): the dead-session ref prune must run for
+    /// an UNASSIGNED goal too, keyed on whether the session is actually alive —
+    /// NOT gated on the goal carrying a stale ASSIGNMENT.
+    ///
+    /// Scenario: a standing *research* goal with `assigned_to == None` whose only
+    /// wip_ref is an `engineer` ref for a session that is NOT in the live set
+    /// (e.g. `clear_goal_assignment` cleared the assignment but left the ref).
+    /// After the sweep the dead ref must be dropped, so
+    /// [`ActiveGoal::has_live_in_flight_ref`] reads `false` and the never-idle
+    /// breaker classifies it as a [`ResearchFault`] — the goal is re-oriented,
+    /// stays active, and is never wrongly held as `ResearchInFlight` forever.
+    ///
+    /// **RED before FIX-1:** the pre-fix sweep prunes session/branch/engineer
+    /// refs only INSIDE the `if is_stale` block, which requires a stale
+    /// *assignment*. An unassigned goal (`assigned_to == None`) is never stale,
+    /// so the dead-session ref survives, `has_live_in_flight_ref()` stays `true`,
+    /// and `classify_standing_idle` returns `ResearchInFlight` (the fault is
+    /// suppressed) — this assertion fails.
+    #[test]
+    fn prunes_dead_session_ref_for_unassigned_standing_research_goal() {
+        use crate::goal_curation::WipRef;
+        use crate::ooda_loop::no_progress::{
+            ResearchIdleFault, StandingIdle, classify_standing_idle,
+        };
+
+        // Unassigned (assigned_to == None) standing research goal.
+        let mut goal = make_goal("standing-research", None);
+        goal.description = "[standing] improve memory recall quality".to_string();
+        // Its only ref is a dead engineer/session artifact (session not live).
+        goal.wip_refs = vec![WipRef {
+            kind: "engineer".to_string(),
+            ref_id: "dead-session-xyz".to_string(),
+            label: "engineer dead-session-xyz".to_string(),
+            url: None,
+        }];
+
+        let mut board = GoalBoard::new();
+        add_active_goal(&mut board, goal).unwrap();
+        assert!(
+            board.active[0].is_standing_research_goal(),
+            "precondition: the test goal must read as a standing research goal"
+        );
+        assert!(
+            board.active[0].has_live_in_flight_ref(),
+            "precondition: before the sweep the dead-session ref reads as live in-flight"
+        );
+
+        // A non-empty live-session set that does NOT contain the dead session.
+        sweep_stale_assignments_with_sessions(&mut board, &live(&["some-other-live-session"]));
+
+        let goal = &board.active[0];
+        assert!(
+            goal.wip_refs.is_empty(),
+            "the dead-session engineer ref must be pruned even though the goal is UNASSIGNED, got {:?}",
+            goal.wip_refs
+        );
+        assert!(
+            !goal.has_live_in_flight_ref(),
+            "with the dead ref pruned the goal must no longer read as holding a live in-flight ref"
+        );
+        assert_eq!(
+            classify_standing_idle(goal),
+            Some(StandingIdle::ResearchFault {
+                fault: ResearchIdleFault::NoNovelActionProduced,
+            }),
+            "an idle standing research goal with no live ref must classify as a ResearchFault (active, re-oriented, never Blocked)"
+        );
+    }
+
+    /// FIX-1 (OBSERVATION 1, hardening) — keyed-not-drop-all divergence: the
+    /// dead-session prune is keyed on whether the goal's OWNING session is alive,
+    /// NOT a blanket drop of every working ref whenever the assignment is stale.
+    ///
+    /// Scenario: a goal whose ASSIGNMENT is stale (`assigned_to = "dead-sess"`,
+    /// absent from `live_sessions`) but which ALSO carries a `session` ref for a
+    /// DIFFERENT, still-live session (`"live-sess"`). After the sweep the stale
+    /// assignment is cleared and the goal reset to `NotStarted` (branch (a),
+    /// unchanged) — but the live `session` ref MUST survive, so the goal still
+    /// reads `has_live_in_flight_ref() == true` (its live engineer session is not
+    /// discarded as collateral of the stale assignment pointer).
+    ///
+    /// **RED against NEW-1's drop-all:** the base #4428 sweep dropped ALL
+    /// session/branch/engineer refs inside the `if is_stale` block, so the live
+    /// ref would be wiped and `has_live_in_flight_ref()` would read `false`.
+    #[test]
+    fn keeps_live_session_ref_when_assignment_is_stale() {
+        use crate::goal_curation::WipRef;
+        let mut board = GoalBoard::new();
+        let mut goal = make_goal("g1", Some("dead-sess"));
+        goal.wip_refs = vec![WipRef {
+            kind: "session".to_string(),
+            ref_id: "live-sess".to_string(),
+            label: "session live-sess".to_string(),
+            url: None,
+        }];
+        add_active_goal(&mut board, goal).unwrap();
+
+        sweep_stale_assignments_with_sessions(&mut board, &live(&["live-sess"]));
+
+        let goal = &board.active[0];
+        assert!(
+            goal.assigned_to.is_none(),
+            "the stale assignment must be cleared"
+        );
+        assert!(
+            matches!(goal.status, GoalProgress::NotStarted),
+            "a stale-assignment goal must be reset to NotStarted"
+        );
+        assert_eq!(
+            goal.wip_refs.len(),
+            1,
+            "the ref for a DIFFERENT, still-live session must survive, got {:?}",
+            goal.wip_refs
+        );
+        assert!(
+            goal.has_live_in_flight_ref(),
+            "a live session ref must keep the goal reading as holding live in-flight work"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests_reconcile_fetch_guard {
+    use std::cell::Cell;
+
+    use super::reconcile_merged_prs;
+    use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, WipRef, add_active_goal};
+    use crate::stewardship::merge_authority::{OpenPrSummary, PrGhClient, PrSnapshot};
+
+    /// Fake that records how many times `list_open_prs` (the `gh pr list`
+    /// subprocess in prod) was invoked, so we can assert the fast-path guard
+    /// skips the fetch when there is nothing to reconcile.
+    struct CountingClient {
+        calls: Cell<u32>,
+        open: Vec<u32>,
+    }
+
+    impl PrGhClient for CountingClient {
+        fn view_pr(&self, _repo: &str, _pr_number: u32) -> crate::error::SimardResult<PrSnapshot> {
+            unimplemented!("not exercised by the reconcile fetch-guard tests")
+        }
+        fn squash_merge(&self, _repo: &str, _pr_number: u32) -> crate::error::SimardResult<()> {
+            unimplemented!("not exercised by the reconcile fetch-guard tests")
+        }
+        fn list_open_prs(
+            &self,
+            _repo: &str,
+            _limit: u32,
+        ) -> crate::error::SimardResult<Vec<OpenPrSummary>> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(self
+                .open
+                .iter()
+                .map(|n| OpenPrSummary {
+                    number: *n,
+                    ..Default::default()
+                })
+                .collect())
+        }
+    }
+
+    fn goal_with_refs(id: &str, refs: Vec<WipRef>) -> ActiveGoal {
+        ActiveGoal {
+            labels: Vec::new(),
+            parent_goal_id: None,
+            priority_explicit: false,
+            repo: None,
+            id: id.to_string(),
+            description: format!("Goal {id}"),
+            priority: 1,
+            status: GoalProgress::InProgress { percent: 50 },
+            assigned_to: None,
+            current_activity: None,
+            wip_refs: refs,
+            last_progress_update_at: None,
+        }
+    }
+
+    fn wref(kind: &str, ref_id: &str) -> WipRef {
+        WipRef {
+            kind: kind.to_string(),
+            ref_id: ref_id.to_string(),
+            label: format!("{kind} {ref_id}"),
+            url: None,
+        }
+    }
+
+    /// No active goal carries a `pr` wip_ref → the `gh pr list` fetch must be
+    /// SKIPPED entirely (the pure prune would be a no-op).
+    #[test]
+    fn skips_open_pr_fetch_when_no_pr_ref() {
+        let mut board = GoalBoard::new();
+        add_active_goal(
+            &mut board,
+            goal_with_refs("g1", vec![wref("branch", "feat/x"), wref("issue", "100")]),
+        )
+        .unwrap();
+        let client = CountingClient {
+            calls: Cell::new(0),
+            open: vec![],
+        };
+
+        reconcile_merged_prs(&mut board, &client);
+
+        assert_eq!(
+            client.calls.get(),
+            0,
+            "list_open_prs (the gh subprocess) must not run when no goal has a pr ref"
+        );
+        assert_eq!(
+            board.active[0].wip_refs.len(),
+            2,
+            "non-pr refs must be untouched"
+        );
+    }
+
+    /// An empty active board → also no fetch.
+    #[test]
+    fn skips_open_pr_fetch_on_empty_board() {
+        let mut board = GoalBoard::new();
+        let client = CountingClient {
+            calls: Cell::new(0),
+            open: vec![],
+        };
+
+        reconcile_merged_prs(&mut board, &client);
+
+        assert_eq!(client.calls.get(), 0, "no goals → no fetch");
+    }
+
+    /// A `pr` wip_ref present → fetch runs exactly once and merged/closed refs
+    /// (not in the open set) are pruned while a genuinely-open one survives.
+    #[test]
+    fn fetches_once_and_prunes_when_pr_ref_present() {
+        let mut board = GoalBoard::new();
+        add_active_goal(
+            &mut board,
+            goal_with_refs(
+                "g1",
+                vec![wref("pr", "42"), wref("pr", "99"), wref("branch", "feat/x")],
+            ),
+        )
+        .unwrap();
+        // 42 is open, 99 is merged/closed (absent).
+        let client = CountingClient {
+            calls: Cell::new(0),
+            open: vec![42],
+        };
+
+        reconcile_merged_prs(&mut board, &client);
+
+        assert_eq!(
+            client.calls.get(),
+            1,
+            "the open-PR fetch must run exactly once per cycle when a pr ref exists"
+        );
+        let kinds_ids: Vec<(&str, &str)> = board.active[0]
+            .wip_refs
+            .iter()
+            .map(|w| (w.kind.as_str(), w.ref_id.as_str()))
+            .collect();
+        assert!(
+            kinds_ids.contains(&("pr", "42")),
+            "the open PR ref must survive, got {kinds_ids:?}"
+        );
+        assert!(
+            !kinds_ids.contains(&("pr", "99")),
+            "the merged/closed PR ref must be pruned, got {kinds_ids:?}"
+        );
+        assert!(
+            kinds_ids.contains(&("branch", "feat/x")),
+            "non-pr refs must be untouched, got {kinds_ids:?}"
+        );
+    }
+}
+
+/// FIX-2 (OBSERVATION 2): the merged-PR reconcile must query each goal's OWN
+/// repo, not a hardcoded `TargetRepo::Simard`. These tests drive the new,
+/// repo-scoped [`reconcile_merged_prs`] (which derives the `owner/repo` slug
+/// per active goal and prunes each `pr` ref only against ITS OWN repo's open
+/// set) with a repo-keyed fake so the scoping is asserted directly, IO-free.
+#[cfg(test)]
+mod tests_reconcile_repo_scope {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    use super::reconcile_merged_prs;
+    use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, WipRef, add_active_goal};
+    use crate::stewardship::merge_authority::{OpenPrSummary, PrGhClient, PrSnapshot};
+
+    /// Fake keyed by the `owner/repo` slug: `list_open_prs(repo, _)` returns the
+    /// open-PR set registered for THAT repo (empty for an unregistered repo) and
+    /// records the per-repo call count, so we can assert each distinct goal repo
+    /// is queried against its OWN slug (deduped).
+    struct RepoKeyedClient {
+        open_by_repo: HashMap<String, Vec<u32>>,
+        calls_by_repo: RefCell<HashMap<String, u32>>,
+    }
+
+    impl PrGhClient for RepoKeyedClient {
+        fn view_pr(&self, _repo: &str, _pr_number: u32) -> crate::error::SimardResult<PrSnapshot> {
+            unimplemented!("not exercised by the repo-scope reconcile test")
+        }
+        fn squash_merge(&self, _repo: &str, _pr_number: u32) -> crate::error::SimardResult<()> {
+            unimplemented!("not exercised by the repo-scope reconcile test")
+        }
+        fn list_open_prs(
+            &self,
+            repo: &str,
+            _limit: u32,
+        ) -> crate::error::SimardResult<Vec<OpenPrSummary>> {
+            *self
+                .calls_by_repo
+                .borrow_mut()
+                .entry(repo.to_string())
+                .or_insert(0) += 1;
+            let open = self.open_by_repo.get(repo).cloned().unwrap_or_default();
+            Ok(open
+                .into_iter()
+                .map(|number| OpenPrSummary {
+                    number,
+                    ..Default::default()
+                })
+                .collect())
+        }
+    }
+
+    fn goal_in_repo(id: &str, repo: Option<&str>, refs: Vec<WipRef>) -> ActiveGoal {
+        ActiveGoal {
+            labels: Vec::new(),
+            parent_goal_id: None,
+            priority_explicit: false,
+            repo: repo.map(str::to_string),
+            id: id.to_string(),
+            description: format!("Goal {id}"),
+            priority: 1,
+            status: GoalProgress::InProgress { percent: 50 },
+            assigned_to: None,
+            current_activity: None,
+            wip_refs: refs,
+            last_progress_update_at: None,
+        }
+    }
+
+    fn pr_ref(number: &str) -> WipRef {
+        WipRef {
+            kind: "pr".to_string(),
+            ref_id: number.to_string(),
+            label: format!("pr {number}"),
+            url: None,
+        }
+    }
+
+    /// A goal in a repo OTHER than Simard, holding an OPEN pr ref, must have that
+    /// ref reconciled against ITS OWN repo — so the open PR survives — while a
+    /// Simard goal's merged pr ref is still pruned (NEW-1 not regressed).
+    ///
+    /// **RED before FIX-2:** the pre-fix `reconcile_merged_prs` hardcodes
+    /// `TargetRepo::Simard` and ignores `goal.repo`, so the other-repo goal's
+    /// OPEN pr (#500) is checked against Simard's open set (which does not
+    /// contain it) and wrongly pruned — the exact F1-style false prune this fix
+    /// closes. (The pre-fix signature also still takes a `repo` argument, so this
+    /// test — written against the target repo-scoped signature — does not even
+    /// compile until FIX-2 lands.)
+    #[test]
+    fn scopes_open_pr_reconcile_to_each_goals_own_repo() {
+        let mut board = GoalBoard::new();
+        // Simard goal (repo: None → rysweet/Simard) with a MERGED pr (#77).
+        add_active_goal(
+            &mut board,
+            goal_in_repo("simard-goal", None, vec![pr_ref("77")]),
+        )
+        .unwrap();
+        // Other-repo goal (repo: Some("other") → rysweet/other) with an OPEN pr (#500).
+        add_active_goal(
+            &mut board,
+            goal_in_repo("other-goal", Some("other"), vec![pr_ref("500")]),
+        )
+        .unwrap();
+
+        let mut open_by_repo = HashMap::new();
+        // Simard: #77 is NOT open (merged) → must be pruned.
+        open_by_repo.insert("rysweet/Simard".to_string(), Vec::new());
+        // rysweet/other: #500 IS open → must survive.
+        open_by_repo.insert("rysweet/other".to_string(), vec![500]);
+        let client = RepoKeyedClient {
+            open_by_repo,
+            calls_by_repo: RefCell::new(HashMap::new()),
+        };
+
+        reconcile_merged_prs(&mut board, &client);
+
+        let simard = board.active.iter().find(|g| g.id == "simard-goal").unwrap();
+        assert!(
+            !simard.wip_refs.iter().any(|w| w.kind == "pr"),
+            "the Simard goal's merged PR ref must still be pruned (NEW-1 intact), got {:?}",
+            simard.wip_refs
+        );
+
+        let other = board.active.iter().find(|g| g.id == "other-goal").unwrap();
+        assert!(
+            other
+                .wip_refs
+                .iter()
+                .any(|w| w.kind == "pr" && w.ref_id == "500"),
+            "the other-repo goal's OPEN PR ref must survive — it must be queried against its OWN repo (rysweet/other), got {:?}",
+            other.wip_refs
+        );
+
+        // Each distinct goal repo is queried against its own slug, deduped.
+        let calls = client.calls_by_repo.borrow();
+        assert_eq!(
+            calls.get("rysweet/other").copied(),
+            Some(1),
+            "the other-repo goal's PR must be checked against rysweet/other exactly once, calls={calls:?}"
+        );
+        assert_eq!(
+            calls.get("rysweet/Simard").copied(),
+            Some(1),
+            "the Simard goal's PR must be checked against rysweet/Simard exactly once, calls={calls:?}"
+        );
     }
 }
 
