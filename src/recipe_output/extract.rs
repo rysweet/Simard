@@ -710,8 +710,133 @@ fn has_invalid_string_escape(bytes: &[u8]) -> bool {
     false
 }
 
+/// Strip **JavaScript-style comments that appear OUTSIDE a JSON string literal**
+/// — a `// …` line comment (to end-of-line) or a `/* … */` block comment — as a
+/// last-resort recovery view for otherwise-well-formed LLM JSON.
+///
+/// After the trailing comma, the unescaped control character, and the invalid
+/// backslash escape, an interleaved comment is the next most common real-world
+/// LLM JSON defect: a model narrating its structured decision writes
+/// `"confidence": 0.8 // high` or `/* rationale below */` between fields, the
+/// "JSONC" shape it has seen throughout its training data. `serde_json` is
+/// spec-strict — the JSON grammar has no comment production — and rejects the
+/// stray `/` (`expected value` / `trailing characters`), so the model's WHOLE
+/// structured decision is dropped on the annotation — a parse-failure default,
+/// not a real model decision.
+///
+/// Like [`strip_json_trailing_commas`] this is a **provable no-op on valid
+/// JSON**: valid JSON contains a `/` byte only INSIDE a string literal (a URL,
+/// a path, a date) — outside a string the grammar permits only structural
+/// punctuation, numbers, the three literals, and whitespace, none of which is a
+/// `/`. So [`has_json_comment`] returns `false` on any well-formed payload and
+/// the input borrows back byte-for-byte unchanged (the zero-allocation clean
+/// path). A caller therefore retries a strict-parse failure on this view without
+/// any risk of altering behaviour on well-formed output.
+///
+/// String-literal aware in exactly the same way as the rest of this module: the
+/// scan tracks `in_string` (respecting `\"` escapes), so a `//` or `/*` **inside**
+/// a string value — the `//` in `"http://example.com"`, the `/*` in a glob — is a
+/// legitimate content byte and is copied through untouched. A comment is
+/// recognised **only** outside a string. A lone `/` outside a string that is not
+/// followed by `/` or `*` is not a comment (it is simply invalid JSON) and is
+/// left in place for the strict parse to reject; leniency never widens beyond a
+/// real comment. Only whole comment spans — each bounded by ASCII delimiters
+/// (`//`…newline, `/*`…`*/`) — are removed, so every surviving byte, including
+/// any multibyte UTF-8 body byte (all `>= 0x80`) outside a comment, is copied
+/// through unchanged and the result is always valid UTF-8.
+pub fn strip_json_comments(s: &str) -> Cow<'_, str> {
+    let bytes = s.as_bytes();
+    // Cheap detection pass first so clean JSON borrows unchanged (zero-alloc).
+    if !has_json_comment(bytes) {
+        return Cow::Borrowed(s);
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+            i += 1;
+        } else if c == b'"' {
+            in_string = true;
+            out.push(c);
+            i += 1;
+        } else if c == b'/' && bytes.get(i + 1) == Some(&b'/') {
+            // Line comment — drop from `//` to (but not including) the next
+            // newline, leaving the newline as legitimate JSON whitespace.
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+        } else if c == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            // Block comment — drop from `/*` through the closing `*/`. An
+            // unterminated block (no `*/`) is dropped to end of input; the
+            // truncated object then fails the strict parse (never masked).
+            i += 2;
+            while i < bytes.len() && !(bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/')) {
+                i += 1;
+            }
+            // Skip the closing `*/` when present.
+            if i < bytes.len() {
+                i += 2;
+            }
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    match String::from_utf8(out) {
+        Ok(stripped) => Cow::Owned(stripped),
+        // Unreachable in practice (only whole ASCII-delimited comment spans are
+        // dropped and every surviving byte is preserved), but never panic on
+        // recovery input — fall back to the original text.
+        Err(_) => Cow::Borrowed(s),
+    }
+}
+
+/// Does `bytes` contain at least one JavaScript-style comment (`//` or `/*`)
+/// OUTSIDE a JSON string literal?
+///
+/// Mirrors the string-aware scan in [`strip_json_comments`] but only detects, so
+/// the common clean case can borrow the input without allocating. A `//` or `/*`
+/// INSIDE a string (a URL, a glob) is a content byte and does not count; a lone
+/// `/` not followed by `/` or `*` is not a comment and does not count.
+fn has_json_comment(bytes: &[u8]) -> bool {
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+        } else if c == b'"' {
+            in_string = true;
+        } else if c == b'/' && matches!(bytes.get(i + 1), Some(&b'/') | Some(&b'*')) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Compose every JSON **recovery view** this module applies to an
 /// otherwise-well-formed LLM JSON payload that failed a strict parse — currently
+/// JavaScript-comment stripping ([`strip_json_comments`]), then
 /// invalid-backslash-escape doubling ([`escape_json_string_invalid_escapes`]),
 /// then unescaped-control-character escaping ([`escape_json_string_control_chars`]),
 /// then trailing-comma stripping ([`strip_json_trailing_commas`]).
@@ -724,19 +849,34 @@ fn has_invalid_string_escape(bytes: &[u8]) -> bool {
 /// reason (unquoted key, elided element, missing value) preserves the strict
 /// miss unchanged.
 ///
-/// The three recoveries are independent — the two string-view recoveries touch
-/// only bytes inside string literals, trailing-comma stripping only touches
-/// structural commas outside them. The two string views are ordered
-/// invalid-escape **before** control-char on purpose: a model that emits a lone
-/// backslash immediately followed by a raw newline (`\` + the newline byte) is a
-/// backslash-then-control-char pair; doubling the backslash first
-/// (`\\` + raw newline) lets the control-char view then escape the newline
-/// (`\\` + `\n`), reproducing the intended two characters. Running control-char
-/// first would instead treat the raw newline as the (invalid) escape target of
-/// the backslash and leave it a raw control byte.
+/// The four recoveries are independent — the two string-view recoveries touch
+/// only bytes inside string literals, comment-stripping and trailing-comma
+/// stripping only touch bytes outside them. Comment-stripping runs **first**,
+/// ahead of the two string-aware views, on purpose: a `"` byte inside a `//` or
+/// `/* */` comment (`// see "foo"`) is comment text, not a string delimiter, so
+/// removing whole comment spans before any string-tracking view runs keeps every
+/// downstream `in_string` scan aligned with the real string boundaries. On a
+/// comment-free payload [`strip_json_comments`] borrows unchanged, so the
+/// pre-existing three-view recovery and its ordering are preserved exactly.
+///
+/// The two string views are ordered invalid-escape **before** control-char on
+/// purpose: a model that emits a lone backslash immediately followed by a raw
+/// newline (`\` + the newline byte) is a backslash-then-control-char pair;
+/// doubling the backslash first (`\\` + raw newline) lets the control-char view
+/// then escape the newline (`\\` + `\n`), reproducing the intended two
+/// characters. Running control-char first would instead treat the raw newline as
+/// the (invalid) escape target of the backslash and leave it a raw control byte.
 pub fn recover_json_view(s: &str) -> Cow<'_, str> {
-    // Step 1: double any invalid backslash escape (string-literal aware).
-    let step1 = escape_json_string_invalid_escapes(s);
+    // Step 0: strip any JavaScript-style comment outside string literals, before
+    // the string-aware views run so a quote inside a comment can never desync
+    // their string tracking.
+    let step0 = strip_json_comments(s);
+    // Step 1: double any invalid backslash escape (string-literal aware),
+    // carrying the borrow/owned distinction through so a full no-op stays borrowed.
+    let step1 = match step0 {
+        Cow::Borrowed(b) => escape_json_string_invalid_escapes(b),
+        Cow::Owned(o) => Cow::Owned(escape_json_string_invalid_escapes(&o).into_owned()),
+    };
     // Step 2: escape any unescaped control char inside a string literal, carrying
     // the borrow/owned distinction through so a full no-op stays borrowed.
     let step2 = match step1 {
@@ -780,32 +920,35 @@ pub fn extract_json_payload(raw: &str) -> Option<String> {
 /// consolidation, outcome, decide, orient) reads its structured decision by
 /// extracting the balanced `{…}` object and `serde_json`-deserializing it.
 /// [`extract_json_payload`] strips the banner / ANSI / log noise but returns
-/// the object body **verbatim**, so three common real-world LLM JSON defects
+/// the object body **verbatim**, so four common real-world LLM JSON defects
 /// survive into the payload and fail a strict `serde_json::from_str`:
 ///
 ///  1. a `,` immediately before a closing `}`/`]` (the trailing comma,
 ///     issue #2658),
 ///  2. an UNescaped ASCII control character (a raw newline/tab/CR) inside a
 ///     string value — the shape a model emits for a multi-line
-///     `content`/`rationale` field, and
+///     `content`/`rationale` field,
 ///  3. an INVALID backslash escape inside a string value — a lone `\` not
 ///     followed by a JSON escape initiator, the shape a model emits for a
 ///     Windows path (`C:\Users`), a regex (`\d+`), or a LaTeX fragment
-///     (`\alpha`).
+///     (`\alpha`), and
+///  4. a JavaScript-style COMMENT outside a string value — a `// …` line or
+///     `/* … */` block comment, the "JSONC" shape a model emits to annotate a
+///     field (`"confidence": 0.8 // high`).
 ///
 /// Before this helper each phase parsed strictly and silently dropped its whole
 /// structured decision on any one stray byte, falling back to a permissive
 /// default and discarding the reasoner's actual judgment.
 ///
 /// Recovery retries the strict parse on the composed [`recover_json_view`]
-/// (invalid-escape doubling + control-character escaping + trailing-comma
-/// stripping). Each sub-view is a *provable no-op on valid JSON* — it returns
-/// [`Cow::Borrowed`] byte-for-byte unchanged unless its specific defect is
-/// present — so recovery is attempted **only** when a view actually rewrote the
-/// payload (the [`Cow::Owned`] arm). Any other malformed shape (unquoted key,
-/// elided element, missing value) yields [`Cow::Borrowed`] and returns `None`
-/// unchanged: leniency never widens beyond the three named defects and a genuine
-/// parse error is never masked.
+/// (comment stripping + invalid-escape doubling + control-character escaping +
+/// trailing-comma stripping). Each sub-view is a *provable no-op on valid JSON* —
+/// it returns [`Cow::Borrowed`] byte-for-byte unchanged unless its specific
+/// defect is present — so recovery is attempted **only** when a view actually
+/// rewrote the payload (the [`Cow::Owned`] arm). Any other malformed shape
+/// (unquoted key, elided element, missing value) yields [`Cow::Borrowed`] and
+/// returns `None` unchanged: leniency never widens beyond the four named defects
+/// and a genuine parse error is never masked.
 pub fn extract_and_parse_json<T: serde::de::DeserializeOwned>(raw: &str) -> Option<T> {
     let payload = extract_json_payload(raw)?;
     match serde_json::from_str::<T>(&payload) {
@@ -1414,6 +1557,139 @@ mod tests {
         ));
     }
 
+    // ---- strip_json_comments ---------------------------------------------
+
+    #[test]
+    fn strip_comments_valid_json_is_borrowed_zero_copy() {
+        // Valid JSON has no `/` outside a string, so the view borrows unchanged.
+        // A `/` (and even `//`, `/*`) INSIDE a string is content and must borrow.
+        for s in [
+            r#"{"a": "b"}"#,
+            r#"{"url": "http://example.com/x"}"#, // `//` inside a string is content
+            r#"{"glob": "src/*/mod.rs"}"#,        // `/*` inside a string is content
+            r#"{"path": "a/b/c", "n": 3}"#,
+            r#"{"note": "closes a block */ here"}"#, // `*/` inside a string is content
+        ] {
+            assert!(
+                matches!(strip_json_comments(s), Cow::Borrowed(_)),
+                "expected borrow for {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn strip_comments_removes_line_comment() {
+        // A `// …` line comment outside a string is dropped to end-of-line; the
+        // newline (JSON whitespace) is kept so the object stays parseable.
+        let raw = "{\"a\": 1, // trailing note\n\"b\": 2}";
+        let fixed = strip_json_comments(raw);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["a"], 1);
+        assert_eq!(v["b"], 2);
+    }
+
+    #[test]
+    fn strip_comments_removes_line_comment_at_end_of_input() {
+        // A `//` comment as the last thing in the payload (no trailing newline)
+        // is dropped to end of input without panicking.
+        let raw = "{\"a\": 1} // final";
+        let fixed = strip_json_comments(raw);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["a"], 1);
+    }
+
+    #[test]
+    fn strip_comments_removes_block_comment() {
+        // A `/* … */` block comment between fields is dropped in full.
+        let raw = r#"{"a": 1, /* rationale */ "b": 2}"#;
+        let fixed = strip_json_comments(raw);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["a"], 1);
+        assert_eq!(v["b"], 2);
+    }
+
+    #[test]
+    fn strip_comments_removes_multiline_block_comment() {
+        // A block comment may span lines (raw newlines inside the comment are
+        // dropped with it, not mistaken for a string control char).
+        let raw = "{\"a\": 1, /* line one\nline two */ \"b\": 2}";
+        let fixed = strip_json_comments(raw);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["a"], 1);
+        assert_eq!(v["b"], 2);
+    }
+
+    #[test]
+    fn strip_comments_leaves_double_slash_inside_string() {
+        // The whole defining property: a `//` inside a string value is content,
+        // never a comment — the URL survives byte-for-byte and borrows.
+        let raw = r#"{"url": "https://a.example//b", "ok": true}"#;
+        let fixed = strip_json_comments(raw);
+        assert!(matches!(fixed, Cow::Borrowed(_)));
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["url"], "https://a.example//b");
+    }
+
+    #[test]
+    fn strip_comments_respects_escaped_quote_before_comment_delimiter() {
+        // An escaped quote inside a string must NOT close it early, so a `//`
+        // sequence that follows while still inside the string stays content.
+        let raw = r#"{"a": "he said \"hi//\" there", "b": 2}"#;
+        let fixed = strip_json_comments(raw);
+        assert!(matches!(fixed, Cow::Borrowed(_)));
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["a"], r#"he said "hi//" there"#);
+        assert_eq!(v["b"], 2);
+    }
+
+    #[test]
+    fn strip_comments_lone_slash_is_not_a_comment() {
+        // A single `/` outside a string is invalid JSON but NOT a comment: it is
+        // left in place (borrow) for the strict parse to reject. Leniency never
+        // widens beyond a real `//`/`/*` comment.
+        let raw = r#"{"a": 1 / 2}"#;
+        let fixed = strip_json_comments(raw);
+        assert!(matches!(fixed, Cow::Borrowed(_)));
+        assert!(serde_json::from_str::<serde_json::Value>(fixed.as_ref()).is_err());
+    }
+
+    #[test]
+    fn strip_comments_preserves_multibyte_outside_comment() {
+        // A multibyte UTF-8 string body outside any comment is copied through
+        // unchanged when a comment elsewhere forces the owned path.
+        let raw = "{\"a\": \"héllo→x\", /* note */ \"b\": 2}";
+        let fixed = strip_json_comments(raw);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["a"], "héllo→x");
+        assert_eq!(v["b"], 2);
+    }
+
+    #[test]
+    fn strip_comments_unterminated_block_no_panic() {
+        // An unterminated block comment (no closing `*/`) is dropped to end of
+        // input without panicking; the truncated object is still not valid JSON,
+        // so recovery never masks the miss.
+        let raw = "{\"a\": 1, /* never closed";
+        let fixed = strip_json_comments(raw);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        assert!(serde_json::from_str::<serde_json::Value>(fixed.as_ref()).is_err());
+    }
+
+    #[test]
+    fn strip_comments_other_malformed_stays_borrowed() {
+        // No comment present (unquoted key) => borrow => the strict miss is
+        // preserved for the caller.
+        assert!(matches!(
+            strip_json_comments(r#"{a: "b"}"#),
+            Cow::Borrowed(_)
+        ));
+    }
+
     // ---- recover_json_view (composed) ------------------------------------
 
     #[test]
@@ -1448,6 +1724,52 @@ mod tests {
         // Neither target defect present (unquoted key) => borrow => caller's
         // strict miss is preserved.
         assert!(matches!(recover_json_view(r#"{a: "b"}"#), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn recover_json_view_recovers_comment_only() {
+        // A line comment alone: owned and parseable.
+        let fixed = recover_json_view("{\"a\": 1 // note\n}");
+        assert!(matches!(fixed, Cow::Owned(_)));
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["a"], 1);
+    }
+
+    #[test]
+    fn recover_json_view_comment_before_string_views_keeps_tracking_aligned() {
+        // The ordering hazard the comment view guards: a `"` INSIDE a block
+        // comment (`/* "x */`) must not be seen as a string delimiter by the
+        // later string-aware views. Comment-stripping runs first, so the quote in
+        // the comment is removed before any `in_string` scan, and a genuine
+        // string defect (a raw newline in `a`) still recovers correctly.
+        let raw = "{\"a\": \"one\ntwo\" /* an odd \" quote */, \"b\": 2}";
+        let fixed = recover_json_view(raw);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        let v: serde_json::Value =
+            serde_json::from_str(fixed.as_ref()).expect("comment-first recovery is parseable");
+        assert_eq!(v["a"], "one\ntwo");
+        assert_eq!(v["b"], 2);
+    }
+
+    #[test]
+    fn recover_json_view_composes_all_four_defects() {
+        // A comment, an invalid escape (`\d`), a raw control char (newline), and
+        // a trailing comma in one payload: all four recovery views compose to a
+        // parseable object.
+        let raw = "{\"a\": \"re \\d\nmulti\", /* note */ \"b\": [1, 2,],}";
+        let fixed = recover_json_view(raw);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["a"], "re \\d\nmulti");
+        assert_eq!(v["b"], serde_json::json!([1, 2]));
+    }
+
+    #[test]
+    fn recover_json_view_comment_only_still_owned() {
+        assert!(matches!(
+            recover_json_view("{\"a\": 1 /* x */}"),
+            Cow::Owned(_)
+        ));
     }
 
     #[test]
@@ -1513,6 +1835,49 @@ mod tests {
         let env: Env = extract_and_parse_json(raw).expect("all three defects recovered");
         assert_eq!(env.decision, "admit");
         assert_eq!(env.items, vec!["re \\d\nline".to_string()]);
+    }
+
+    #[test]
+    fn extract_and_parse_json_recovers_line_comment_in_envelope() {
+        // End-to-end: a model annotating a field with a `// …` line comment (the
+        // JSONC shape) is recovered through the shared chokepoint instead of
+        // dropping the whole decision.
+        let raw = "{\"decision\": \"admit\", // high confidence\n\"items\": [\"a\"]}";
+        let env: Env = extract_and_parse_json(raw).expect("line comment recovered");
+        assert_eq!(env.decision, "admit");
+        assert_eq!(env.items, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn extract_and_parse_json_recovers_block_comment_through_banner_noise() {
+        // Banner + interleaved ANSI log line AND a `/* … */` block comment
+        // between fields: the extractor strips the noise, then recovery strips
+        // the comment.
+        let raw = "Recipe: ooda SUCCESS (3.0s)\n\
+                   \x1b[2m2026-07-20T00:00:00.000000Z\x1b[0m INFO decide\n\
+                   {\"decision\": \"defer\", /* rationale */ \"items\": [\"a\"]}";
+        let env: Env = extract_and_parse_json(raw).expect("noise + block comment recovered");
+        assert_eq!(env.decision, "defer");
+        assert_eq!(env.items, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn extract_and_parse_json_recovers_all_four_defects_together() {
+        // A single payload with every recoverable defect: a comment, an invalid
+        // escape (`\d`), a raw control char (newline), and a trailing comma.
+        let raw = "{\"decision\": \"admit\", /* note */ \"items\": [\"re \\d\nline\",],}";
+        let env: Env = extract_and_parse_json(raw).expect("all four defects recovered");
+        assert_eq!(env.decision, "admit");
+        assert_eq!(env.items, vec!["re \\d\nline".to_string()]);
+    }
+
+    #[test]
+    fn extract_and_parse_json_preserves_url_slashes_in_string() {
+        // A `//` inside a string value (a URL) is content, never a comment: the
+        // clean payload parses strictly and the recovery view never mangles it.
+        let raw = r#"{"decision": "admit", "items": ["see https://x.example//y"]}"#;
+        let env: Env = extract_and_parse_json(raw).expect("url slashes preserved");
+        assert_eq!(env.items, vec!["see https://x.example//y".to_string()]);
     }
 
     #[test]
