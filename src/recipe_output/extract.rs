@@ -982,9 +982,11 @@ pub const RAW_EXTRACT_TRUNCATE_BYTES: usize = 8 * 1024;
 /// Truncate `s` to at most [`RAW_EXTRACT_TRUNCATE_BYTES`] on a UTF-8 char
 /// boundary for log/error embedding. Never panics on multi-byte input.
 fn truncate_for_record(s: &str) -> String {
-    let mut out = s.to_string();
-    crate::util::string_truncate::truncate_to_char_boundary(&mut out, RAW_EXTRACT_TRUNCATE_BYTES);
-    out
+    // Only the retained prefix is allocated: a pathological multi-megabyte
+    // agent response is capped to a `&str` view *before* the single `to_string`,
+    // so this error path allocates at most `RAW_EXTRACT_TRUNCATE_BYTES` rather
+    // than copying the whole input just to discard almost all of it.
+    crate::util::string_truncate::head_within_budget(s, RAW_EXTRACT_TRUNCATE_BYTES).to_string()
 }
 
 /// Why [`extract_and_parse_json_result`] could not turn noisy recipe stdout
