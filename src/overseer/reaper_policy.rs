@@ -182,16 +182,23 @@ fn evaluate_duplicate(
 ) -> ReaperDecision {
     // Build the near-duplicate cluster: peers with sufficient title similarity AND
     // a non-empty changed-file overlap. Title similarity alone is never evidence.
+    //
+    // The candidate's title token set is invariant across peers, so tokenize it
+    // ONCE here rather than re-splitting `facts.normalized_title` on every peer.
+    // The changed-file overlap check (`is_disjoint`) is cheap and highly
+    // selective, so it is evaluated first and short-circuits the similarity work
+    // (a token-set Jaccard) for the common non-overlapping-peer case.
+    let facts_tokens = title_tokens(&facts.normalized_title);
     let mut cluster_min = facts.number;
     let mut has_duplicate_peer = false;
     for peer in peers {
         if peer.number == facts.number {
             continue;
         }
-        let similar = title_similarity(&facts.normalized_title, &peer.normalized_title)
-            >= thresholds.similarity;
         let overlaps = !facts.changed_files.is_disjoint(&peer.changed_files);
-        if similar && overlaps {
+        if overlaps
+            && title_similarity(&facts_tokens, &peer.normalized_title) >= thresholds.similarity
+        {
             has_duplicate_peer = true;
             cluster_min = cluster_min.min(peer.number);
         }
@@ -226,13 +233,19 @@ fn evaluate_duplicate(
     }
 }
 
-/// Token-set Jaccard similarity over whitespace-split words of two normalized
-/// titles, in `[0.0, 1.0]`. Two empty titles are treated as fully dissimilar
-/// (`0.0`) so blank titles never form a duplicate cluster. Identical non-empty
-/// titles yield `1.0`.
-fn title_similarity(a: &str, b: &str) -> f64 {
-    let ta: BTreeSet<&str> = a.split_whitespace().collect();
-    let tb: BTreeSet<&str> = b.split_whitespace().collect();
+/// Tokenize a normalized title into its whitespace-split word set. Hoisted out of
+/// [`title_similarity`] so the candidate's tokens are computed once per evaluation
+/// rather than once per peer.
+fn title_tokens(s: &str) -> BTreeSet<&str> {
+    s.split_whitespace().collect()
+}
+
+/// Token-set Jaccard similarity between an already-tokenized title `ta` and the
+/// raw normalized title `b`, in `[0.0, 1.0]`. Two empty titles are treated as
+/// fully dissimilar (`0.0`) so blank titles never form a duplicate cluster.
+/// Identical non-empty titles yield `1.0`.
+fn title_similarity(ta: &BTreeSet<&str>, b: &str) -> f64 {
+    let tb = title_tokens(b);
     if ta.is_empty() || tb.is_empty() {
         return 0.0;
     }
