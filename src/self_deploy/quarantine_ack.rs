@@ -18,7 +18,7 @@
 //! so acknowledging `cognitive.corrupt-20260101` never silences a *new*
 //! `cognitive.corrupt-20260202` — fresh corruption still re-fails the probe.
 //!
-//! ## Contract (specified by the tests below — implementation is TODO)
+//! ## Contract
 //!
 //! * [`ack_marker_path`] — the sidecar path for a *valid* corrupt-quarantine
 //!   basename directly under `state_root`; `None` for any unsafe / non-quarantine
@@ -43,17 +43,16 @@ use crate::error::{SimardError, SimardResult};
 /// acknowledgement sidecar.
 pub const ACK_SUFFIX: &str = ".ack";
 
-/// Upper bound (bytes) on the sidecar's payload. The marker is a presence flag,
-/// not a data store; keeping it tiny bounds disk use and forgery blast radius.
+/// The sidecar's payload. The marker is a presence flag, not a data store;
+/// keeping it tiny bounds disk use and forgery blast radius.
 const ACK_MARKER_BYTES: &[u8] = b"acknowledged\n";
 
-/// `true` for a quarantined corrupt cognitive-memory basename. Mirrors
-/// `cmd_cleanup::disk::is_corrupt_quarantine_name` and the health-probe scan:
-/// both backend generations leave a `cognitive*.corrupt-<ts>` artifact when a
-/// store is quarantined, and only those are acknowledgeable.
+/// `true` for a quarantined corrupt cognitive-memory basename. Delegates to the
+/// canonical [`crate::cmd_cleanup::is_corrupt_quarantine_name`] so the cleanup
+/// sweep, the health probe, and this acknowledge path can never disagree about
+/// which artifacts are corrupt-quarantines.
 fn is_corrupt_quarantine_name(name: &str) -> bool {
-    (name.starts_with("cognitive.") || name.starts_with("cognitive_memory."))
-        && name.contains(".corrupt-")
+    crate::cmd_cleanup::is_corrupt_quarantine_name(name)
 }
 
 /// True when `name` is an acknowledgement sidecar (`*.ack`) rather than a

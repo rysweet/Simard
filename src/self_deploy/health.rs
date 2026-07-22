@@ -139,14 +139,6 @@ fn commits_compatible(running: &str, target: &str) -> bool {
     r == t || r.starts_with(&t) || t.starts_with(&r)
 }
 
-/// `true` for a quarantined corrupt cognitive-memory filename. Mirrors
-/// `cmd_cleanup::disk::is_corrupt_quarantine_name`: both backend generations
-/// leave a `cognitive*.corrupt-<ts>` artifact when a store is quarantined.
-fn is_corrupt_quarantine_name(name: &str) -> bool {
-    (name.starts_with("cognitive.") || name.starts_with("cognitive_memory."))
-        && name.contains(".corrupt-")
-}
-
 /// Count quarantined corrupt cognitive-memory artifacts directly under
 /// `state_root`. Absent/unreadable dir ⇒ `0` (nothing to quarantine).
 ///
@@ -165,7 +157,7 @@ fn count_quarantine_files(state_root: &std::path::Path) -> u64 {
         .flatten()
         .filter(|e| {
             let name = e.file_name().to_string_lossy().to_string();
-            is_corrupt_quarantine_name(&name)
+            crate::cmd_cleanup::is_corrupt_quarantine_name(&name)
                 && !crate::self_deploy::quarantine_ack::is_ack_marker_name(&name)
                 && !crate::self_deploy::quarantine_ack::is_acknowledged(state_root, &name)
         })
