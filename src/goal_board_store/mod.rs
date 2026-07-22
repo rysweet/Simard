@@ -385,15 +385,22 @@ pub(crate) fn validate_threshold(threshold_percent: u32) -> Result<(), Correctio
     Ok(())
 }
 
+/// Maximum length of a repo-relative module path — bounds the field so a
+/// pathological payload can't be smuggled through even if it were otherwise
+/// well-formed, mirroring [`MAX_OWNER_LEN`] and [`MAX_TRACKING_REF_FIELD_LEN`]
+/// on the sibling durable fields.
+const MAX_MODULE_PATH_LEN: usize = 256;
+
 /// A module path must be a non-empty, repo-relative path free of `..` traversal,
-/// absolute roots, shell metacharacters, and control characters. It is validated
-/// by *form* (not filesystem existence) so the check is pure and cwd-independent.
-/// Internal field-validator behind [`FirstSliceTarget::new`].
+/// absolute roots, shell metacharacters, and control characters, within
+/// [`MAX_MODULE_PATH_LEN`]. It is validated by *form* (not filesystem existence)
+/// so the check is pure and cwd-independent. Internal field-validator behind
+/// [`FirstSliceTarget::new`].
 pub(crate) fn validate_module_path(module_path: &str) -> Result<(), CorrectionRejected> {
     let reject = || CorrectionRejected::UnsafeModulePath {
         path: module_path.to_string(),
     };
-    if module_path.is_empty() {
+    if module_path.is_empty() || module_path.len() > MAX_MODULE_PATH_LEN {
         return Err(reject());
     }
     // Absolute paths escape the repo.

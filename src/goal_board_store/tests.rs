@@ -872,6 +872,22 @@ fn module_path_rejects_traversal_absolute_and_shell_metacharacters() {
             "module path {bad:?} must be rejected as unsafe"
         );
     }
+
+    // Length bound: a path at the ceiling is accepted; one byte over is rejected
+    // (mirrors the owner / tracking-ref field bounds so no field is unbounded).
+    let at_limit = "a".repeat(256);
+    assert!(
+        validate_module_path(&at_limit).is_ok(),
+        "a well-formed path at MAX_MODULE_PATH_LEN must be accepted"
+    );
+    let over_limit = "a".repeat(257);
+    assert!(
+        matches!(
+            validate_module_path(&over_limit),
+            Err(CorrectionRejected::UnsafeModulePath { .. })
+        ),
+        "a path exceeding MAX_MODULE_PATH_LEN must be rejected as unsafe"
+    );
 }
 
 #[test]
