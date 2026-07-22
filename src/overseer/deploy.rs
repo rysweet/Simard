@@ -123,6 +123,70 @@ fn is_hex_commitish(s: &str) -> bool {
 pub struct CanaryResult {
     pub passed: bool,
     pub detail: String,
+    /// STEP 1 (#4420): the NAME of the specific gate that reddened, when the
+    /// canary failed on a single identifiable gate (e.g. `unit-test`,
+    /// `rpc-health`). `None` on a green canary or when no single gate is named
+    /// (e.g. a build failure before any gate ran). Additive/non-breaking — it
+    /// carries the identity that [`DeployRefusal::RedCanary`]'s opaque `Display`
+    /// discards, so a refused self-deploy is diagnosable in logs/OTel.
+    pub failing_gate: Option<String>,
+    /// STEP 1 (#4420): the reddening gate's own failure detail (its stderr /
+    /// assertion / probe message). `None` when there is no gate-specific detail.
+    /// Bounded to a UTF-8-safe length at population time by the [`CanaryRunner`]
+    /// (see [`bound_detail`]) so the raw OTel attribute and the composed reason
+    /// both stay small; `refusal_reason` re-applies the same (idempotent) bound
+    /// defensively for values constructed by other paths.
+    pub failing_detail: Option<String>,
+}
+
+impl CanaryResult {
+    /// Maximum length (bytes) of a gate detail carried in `failing_detail` and
+    /// folded into a composed refusal reason. A pathological gate can emit
+    /// megabytes of stderr; bounding keeps the operator notification, the
+    /// surfaced error, and OTel telemetry from bloating while still naming the
+    /// gate and its head detail.
+    const DETAIL_CAP: usize = 512;
+
+    /// Compose the operator/telemetry-facing reason for a refused deploy.
+    ///
+    /// For a [`DeployRefusal::RedCanary`] this NAMES the specific reddening gate
+    /// and folds in its (bounded) detail — replacing the opaque
+    /// `"one or more gates failed"` that made the #4420 self-deploy crash-loop
+    /// undiagnosable. Every other refusal (`NoOp` / `Rollback` / `CrashLoop`) is
+    /// unchanged: it falls back verbatim to [`DeployRefusal`]'s `Display`, so
+    /// only the red-canary path is enriched (additive/non-breaking).
+    pub fn refusal_reason(&self, refusal: &DeployRefusal) -> String {
+        if !matches!(refusal, DeployRefusal::RedCanary) {
+            return refusal.to_string();
+        }
+        match (&self.failing_gate, &self.failing_detail) {
+            (Some(gate), Some(detail)) => {
+                format!("red canary (gate {gate}: {})", bound_detail(detail))
+            }
+            (Some(gate), None) => format!("red canary (gate {gate})"),
+            // Defensive: a red canary lacking structured gate identity still
+            // names a red canary and carries the aggregate gate tally — never
+            // empty or misleading.
+            (None, _) => format!("red canary ({})", self.detail),
+        }
+    }
+}
+
+/// Truncate `s` to at most [`CanaryResult::DETAIL_CAP`] bytes at a UTF-8 char
+/// boundary, appending a visible `… (truncated)` marker so the bounding is
+/// never mistaken for the gate's own output. The marker is counted against the
+/// cap, so the returned string is always `<= DETAIL_CAP` bytes — which makes the
+/// bound **idempotent**: applying it to already-bounded text returns it unchanged.
+fn bound_detail(s: &str) -> std::borrow::Cow<'_, str> {
+    const MARKER: &str = "… (truncated)";
+    if s.len() <= CanaryResult::DETAIL_CAP {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut end = CanaryResult::DETAIL_CAP.saturating_sub(MARKER.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    std::borrow::Cow::Owned(format!("{}{MARKER}", &s[..end]))
 }
 
 /// Build + verify the canary binary for a target. Real impl reuses
@@ -285,16 +349,33 @@ impl Deployer for GuardedDeployer {
         // best-effort here (a refusal already surfaces as an Err); the mandatory
         // dispatch assertion below guards the swap path.
         if let Err(refusal) = evaluate_deploy_gate(&ctx) {
-            let notification = OperatorNotification::deploy_refused(
-                commit,
-                &running,
-                &self.repo,
-                &refusal.to_string(),
+            // STEP 1 (#4420): compose a NAMED reason (the specific reddening gate
+            // + its bounded detail for a red canary; the plain refusal Display
+            // otherwise) and surface it into BOTH the operator notification and
+            // the returned error, replacing the opaque "one or more gates failed".
+            let reason = canary.refusal_reason(&refusal);
+            let failing_gate = canary.failing_gate.as_deref().unwrap_or("");
+            let failing_detail = canary.failing_detail.as_deref().unwrap_or("");
+            // Structured tracing/OTel observation: a refused self-deploy is a
+            // WARN-level fact the operator must be able to diagnose. The
+            // `failing_gate` / `failing_detail` fields are empty for non-red
+            // refusals and green canaries, so they appear only when a gate
+            // actually reddened. No silent fallback — always logged ≥ WARN.
+            tracing::warn!(
+                target: "overseer::deploy",
+                target_commit = %commit,
+                running_commit = %running,
+                failing_gate,
+                failing_detail,
+                refusal = %reason,
+                "self-deploy refused by deploy gate"
             );
+            let notification =
+                OperatorNotification::deploy_refused(commit, &running, &self.repo, &reason);
             let _ = self.notifier.notify(&notification);
             return Err(OverseerError::Capability {
                 what: "deploy_gate",
-                detail: refusal.to_string(),
+                detail: reason,
             });
         }
 
@@ -405,6 +486,16 @@ struct TargetCanaryReport {
     passed: bool,
     passed_gates: usize,
     total_gates: usize,
+    /// STEP 1 (#4420): the NAME of the first gate that reddened, threaded up from
+    /// the per-gate [`GateResult`](crate::self_relaunch::GateResult) list. `None`
+    /// on a green report. This is the identity the opaque
+    /// `"one or more gates failed"` discarded — a normally-failing gate flows
+    /// through `verify_canary`'s `Ok(results)` (an `Err` only on infrastructure
+    /// faults), so without this the reddening gate would be lost on the common path.
+    failing_gate: Option<String>,
+    /// STEP 1 (#4420): that gate's own detail (its `--version` / `cargo test` /
+    /// probe output). `None` on a green report.
+    failing_detail: Option<String>,
 }
 
 trait TargetCanaryVerifier: Send + Sync {
@@ -441,10 +532,16 @@ impl TargetCanaryVerifier for SharedTargetCanaryVerifier {
         )?;
         let passed = crate::self_relaunch::all_gates_passed(&results);
         let passed_gates = results.iter().filter(|r| r.passed).count();
+        // STEP 1 (#4420): capture the FIRST reddening gate's identity + detail so
+        // the refusal reason can name it. `verify_canary` does not short-circuit,
+        // so the first failed entry is the earliest gate in the sequence to fail.
+        let failing = results.iter().find(|r| !r.passed);
         Ok(TargetCanaryReport {
             passed,
             passed_gates,
             total_gates: results.len(),
+            failing_gate: failing.map(|r| r.gate.to_string()),
+            failing_detail: failing.map(|r| r.detail.clone()),
         })
     }
 }
@@ -460,14 +557,30 @@ impl CanaryRunner for ProdCanaryRunner {
             Ok(report) => Ok(CanaryResult {
                 passed: report.passed,
                 detail: format!("{}/{} gates", report.passed_gates, report.total_gates),
+                // STEP 1 (#4420): a red aggregate names the SPECIFIC reddening
+                // gate threaded up from the per-gate results; a green report
+                // carries neither. `verify_canary` returns `Ok` even when a gate
+                // legitimately fails (an `Err` means an infrastructure fault, the
+                // arm below), so this is the common red-canary path. Bound the
+                // detail here at population so the raw OTel attribute stays small.
+                failing_gate: report.failing_gate,
+                failing_detail: report.failing_detail.map(|d| bound_detail(&d).into_owned()),
             }),
             Err(SafeUpdateError::BuildFailed { detail }) => Ok(CanaryResult {
                 passed: false,
                 detail: format!("target canary build failed: {detail}"),
+                // A build failure reddens the canary before any gate runs — name
+                // the phase as the failing "gate" so telemetry is never blank.
+                failing_gate: Some("build".to_string()),
+                failing_detail: Some(bound_detail(&detail).into_owned()),
             }),
             Err(SafeUpdateError::GateFailed { gate, detail }) => Ok(CanaryResult {
                 passed: false,
                 detail: format!("target canary gate {gate} failed: {detail}"),
+                // STEP 1 (#4420): thread the SPECIFIC reddening gate identity +
+                // its (bounded) detail through so the refusal reason can name it.
+                failing_gate: Some(gate),
+                failing_detail: Some(bound_detail(&detail).into_owned()),
             }),
             Err(e) => Err(OverseerError::Capability {
                 what: "target_canary",
@@ -670,6 +783,8 @@ mod tests {
             Ok(CanaryResult {
                 passed: self.0,
                 detail: "4/4 gates".to_string(),
+                failing_gate: None,
+                failing_detail: None,
             })
         }
     }
@@ -901,6 +1016,13 @@ mod tests {
     enum VerifierOutcome {
         Pass,
         BuildFail,
+        /// A gate legitimately reddened — `verify_canary` returns `Ok` with a
+        /// failed `GateResult`, so the report carries `passed: false` plus the
+        /// named failing gate (the common red-canary path, #4420).
+        GateRed {
+            gate: &'static str,
+            detail: &'static str,
+        },
     }
 
     impl TargetCanaryVerifier for RecordingTargetCanaryVerifier {
@@ -915,9 +1037,18 @@ mod tests {
                     passed: true,
                     passed_gates: 4,
                     total_gates: 4,
+                    failing_gate: None,
+                    failing_detail: None,
                 }),
                 VerifierOutcome::BuildFail => Err(SafeUpdateError::BuildFailed {
                     detail: "target build failed".to_string(),
+                }),
+                VerifierOutcome::GateRed { gate, detail } => Ok(TargetCanaryReport {
+                    passed: false,
+                    passed_gates: 3,
+                    total_gates: 4,
+                    failing_gate: Some(gate.to_string()),
+                    failing_detail: Some(detail.to_string()),
                 }),
             }
         }
@@ -964,6 +1095,41 @@ mod tests {
         );
         assert_eq!(*deployed.lock().unwrap(), 0, "red canary blocks swap");
         assert_eq!(seen.lock().unwrap()[0].kind, "deploy-refused");
+    }
+
+    #[test]
+    fn target_canary_gate_failure_names_the_reddening_gate_end_to_end() {
+        // The COMMON red path: `verify_canary` returns `Ok` with a failed gate
+        // (an `Err` only signals an infrastructure fault). The specific gate name
+        // + detail must survive through `TargetCanaryReport` → `CanaryResult` →
+        // the refusal reason, so the surfaced error and operator notification
+        // name it — not the opaque "one or more gates failed" (#4420).
+        let (runner, _seen_targets) = target_canary(
+            SourceMode::Ok,
+            VerifierOutcome::GateRed {
+                gate: "unit-test",
+                detail: "tests failed (exit 101): overseer::tick::latch",
+            },
+        );
+        let (gd, deployed, seen) = deployer_with(Box::new(runner), Box::new(FakeAncestry(false)));
+        let err = gd.deploy("bbbbbbbbbbbb").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unit-test"),
+            "must name the reddening gate: {msg}"
+        );
+        assert!(
+            msg.contains("overseer::tick::latch"),
+            "must carry the gate detail: {msg}"
+        );
+        assert_eq!(*deployed.lock().unwrap(), 0, "red canary blocks the swap");
+        let notes = seen.lock().unwrap();
+        assert_eq!(notes[0].kind, "deploy-refused");
+        assert!(
+            notes[0].problem.contains("unit-test"),
+            "operator notification must name the reddening gate: {}",
+            notes[0].problem
+        );
     }
 
     #[test]
@@ -1067,5 +1233,186 @@ mod tests {
             "rysweet/Simard".to_string(),
         );
         let _ = gd.deploy("bbbbbbbbbbbb");
+    }
+
+    // ── STEP 1: reddening-gate observability (issue #4420) ──────────────────
+    //
+    // The recurring self-deploy crash-loop logged only the opaque
+    // "red canary (one or more gates failed)" and never named the specific gate
+    // that reddened, so DeployDrift climbed unbounded and the failure was
+    // undiagnosable. STEP 1 threads the specific `failing_gate` + `failing_detail`
+    // (already computed by the gate runners) additively onto `CanaryResult`, and
+    // the refusal site composes a named reason for the operator notification,
+    // the surfaced `OverseerError`, and OTel telemetry. `DeployRefusal::Display`
+    // stays untouched (additive/non-breaking).
+
+    /// A canary fake that reports a RED result carrying the specific reddening
+    /// gate identity and detail — the structured data STEP 1 must surface.
+    struct RedGateCanary {
+        gate: &'static str,
+        detail: &'static str,
+    }
+    impl CanaryRunner for RedGateCanary {
+        fn run_canary(&self, _t: &str) -> Result<CanaryResult, OverseerError> {
+            Ok(CanaryResult {
+                passed: false,
+                detail: "3/4 gates".to_string(),
+                failing_gate: Some(self.gate.to_string()),
+                failing_detail: Some(self.detail.to_string()),
+            })
+        }
+    }
+
+    #[test]
+    fn green_canary_carries_no_failing_gate_fields() {
+        // A green canary must leave both structured fields `None` — the enriched
+        // reason path only fires on a genuine red canary, never on success.
+        let r = CanaryResult {
+            passed: true,
+            detail: "4/4 gates".to_string(),
+            failing_gate: None,
+            failing_detail: None,
+        };
+        assert!(r.failing_gate.is_none());
+        assert!(r.failing_detail.is_none());
+    }
+
+    #[test]
+    fn refusal_reason_names_the_reddening_gate_for_red_canary() {
+        // For a RED canary, the composed reason must NAME the specific gate and
+        // carry its detail — not the opaque "one or more gates failed" phrasing
+        // that made 8/8 crash-loop ticks undiagnosable.
+        let r = CanaryResult {
+            passed: false,
+            detail: "3/4 gates".to_string(),
+            failing_gate: Some("unit-test".to_string()),
+            failing_detail: Some("test overseer::tick::latch failed".to_string()),
+        };
+        let reason = r.refusal_reason(&DeployRefusal::RedCanary);
+        assert!(
+            reason.contains("unit-test"),
+            "reason must name the reddening gate: {reason}"
+        );
+        assert!(
+            reason.contains("test overseer::tick::latch failed"),
+            "reason must carry the gate detail: {reason}"
+        );
+        assert_ne!(
+            reason,
+            DeployRefusal::RedCanary.to_string(),
+            "the enriched reason must not collapse back to the opaque Display"
+        );
+    }
+
+    #[test]
+    fn refusal_reason_falls_back_to_display_for_non_red_refusals() {
+        // NoOp / Rollback / CrashLoop are unchanged — only RedCanary is enriched.
+        let r = CanaryResult {
+            passed: true,
+            detail: "4/4 gates".to_string(),
+            failing_gate: None,
+            failing_detail: None,
+        };
+        assert_eq!(
+            r.refusal_reason(&DeployRefusal::NoOp),
+            DeployRefusal::NoOp.to_string()
+        );
+        assert_eq!(
+            r.refusal_reason(&DeployRefusal::Rollback),
+            DeployRefusal::Rollback.to_string()
+        );
+        let churn = DeployRefusal::CrashLoop { churn: 5 };
+        assert_eq!(r.refusal_reason(&churn), churn.to_string());
+    }
+
+    #[test]
+    fn refusal_reason_red_without_gate_data_still_identifies_red_canary() {
+        // Defensive: a red canary lacking structured gate data must still yield a
+        // reason that identifies a red canary (never empty/misleading).
+        let r = CanaryResult {
+            passed: false,
+            detail: "0/4 gates".to_string(),
+            failing_gate: None,
+            failing_detail: None,
+        };
+        let reason = r.refusal_reason(&DeployRefusal::RedCanary);
+        assert!(
+            reason.to_lowercase().contains("red canary"),
+            "reason must still identify a red canary: {reason}"
+        );
+    }
+
+    #[test]
+    fn red_canary_deploy_surfaces_gate_name_in_error_and_notification() {
+        // End-to-end at the refusal site: a red canary refusal must put the
+        // specific gate name + detail into BOTH the surfaced OverseerError and
+        // the operator `deploy-refused` notification — not the opaque phrase.
+        let (gd, deployed, seen) = deployer_with(
+            Box::new(RedGateCanary {
+                gate: "unit-test",
+                detail: "test overseer::tick::latch failed",
+            }),
+            Box::new(FakeAncestry(false)),
+        );
+        let err = gd.deploy("bbbbbbbbbbbb").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unit-test"),
+            "surfaced error must name the reddening gate: {msg}"
+        );
+        assert!(
+            msg.contains("test overseer::tick::latch failed"),
+            "surfaced error must carry the gate detail: {msg}"
+        );
+        assert_eq!(*deployed.lock().unwrap(), 0, "red canary blocks the swap");
+        let notes = seen.lock().unwrap();
+        assert_eq!(notes[0].kind, "deploy-refused");
+        assert!(
+            notes[0].problem.contains("unit-test"),
+            "operator notification must name the reddening gate: {}",
+            notes[0].problem
+        );
+    }
+
+    #[test]
+    fn red_canary_deploy_error_is_still_classified_deploy_gate() {
+        // The enriched detail must not change the error's `what` discriminant —
+        // downstream fail-closed classification keys on `what == "deploy_gate"`.
+        let (gd, _deployed, _seen) = deployer_with(
+            Box::new(RedGateCanary {
+                gate: "unit-test",
+                detail: "assertion failed",
+            }),
+            Box::new(FakeAncestry(false)),
+        );
+        match gd.deploy("bbbbbbbbbbbb").unwrap_err() {
+            OverseerError::Capability { what, .. } => assert_eq!(what, "deploy_gate"),
+            other => panic!("expected deploy_gate Capability error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn failing_detail_is_bounded_for_telemetry() {
+        // A pathological gate can emit megabytes of stderr. The composed reason
+        // must be bounded (truncated at a UTF-8 char boundary) so it can't bloat
+        // logs/OTel — while still naming the gate.
+        let huge = "x".repeat(64 * 1024);
+        let r = CanaryResult {
+            passed: false,
+            detail: "3/4 gates".to_string(),
+            failing_gate: Some("gym-baseline".to_string()),
+            failing_detail: Some(huge.clone()),
+        };
+        let reason = r.refusal_reason(&DeployRefusal::RedCanary);
+        assert!(
+            reason.len() < huge.len(),
+            "reason must bound an oversized gate detail (got {} bytes)",
+            reason.len()
+        );
+        assert!(
+            reason.contains("gym-baseline"),
+            "bounding must not drop the gate name: {}",
+            &reason[..reason.len().min(80)]
+        );
     }
 }
