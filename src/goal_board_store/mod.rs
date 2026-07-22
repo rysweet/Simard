@@ -360,8 +360,10 @@ pub enum CorrectionOutcome {
 /// pathological payload can't be smuggled through even if it were control-free.
 const MAX_OWNER_LEN: usize = 128;
 
-/// A coverage threshold must be a reachable percentage (0..=100).
-pub fn validate_threshold(threshold_percent: u32) -> Result<(), CorrectionRejected> {
+/// A coverage threshold must be a reachable percentage (0..=100). Internal
+/// field-validator behind [`FirstSliceTarget::new`] — the public contract is the
+/// constructor, not the individual checks.
+pub(crate) fn validate_threshold(threshold_percent: u32) -> Result<(), CorrectionRejected> {
     if threshold_percent > 100 {
         return Err(CorrectionRejected::ThresholdOutOfRange {
             got: threshold_percent,
@@ -373,7 +375,8 @@ pub fn validate_threshold(threshold_percent: u32) -> Result<(), CorrectionReject
 /// A module path must be a non-empty, repo-relative path free of `..` traversal,
 /// absolute roots, shell metacharacters, and control characters. It is validated
 /// by *form* (not filesystem existence) so the check is pure and cwd-independent.
-pub fn validate_module_path(module_path: &str) -> Result<(), CorrectionRejected> {
+/// Internal field-validator behind [`FirstSliceTarget::new`].
+pub(crate) fn validate_module_path(module_path: &str) -> Result<(), CorrectionRejected> {
     let reject = || CorrectionRejected::UnsafeModulePath {
         path: module_path.to_string(),
     };
@@ -402,7 +405,8 @@ pub fn validate_module_path(module_path: &str) -> Result<(), CorrectionRejected>
 
 /// An owner must be a non-empty, single-token identifier free of control
 /// characters and newlines (a log-injection guard), within [`MAX_OWNER_LEN`].
-pub fn validate_owner(owner: &str) -> Result<(), CorrectionRejected> {
+/// Internal field-validator behind [`FirstSliceTarget::new`].
+pub(crate) fn validate_owner(owner: &str) -> Result<(), CorrectionRejected> {
     let reject = || CorrectionRejected::InvalidOwner {
         owner: owner.to_string(),
     };
