@@ -29,6 +29,8 @@ fn all_healthy_probes() -> SelfHealthProbes {
         no_quarantine: NoQuarantineProbe {
             healthy: true,
             quarantined: false,
+            fresh_quarantines: 0,
+            retained: 0,
         },
         entrypoint_parity: EntrypointParityProbe {
             healthy: true,
@@ -106,7 +108,7 @@ fn report_deserializes_from_documented_json_and_is_unhealthy() {
             "memory_intact":    { "healthy": false, "live_facts": 1180, "baseline_facts": 1206 },
             "goal_board_intact":{ "healthy": true,  "active_goals": 5 },
             "brains_llm_backed":{ "healthy": true,  "fallback_records": 0 },
-            "no_quarantine":    { "healthy": true,  "quarantined": false }
+            "no_quarantine":    { "healthy": true,  "quarantined": false, "fresh_quarantines": 0, "retained": 3 }
         }
     }"#;
     let report: SelfHealthReport = serde_json::from_str(doc_json).unwrap();
@@ -117,6 +119,8 @@ fn report_deserializes_from_documented_json_and_is_unhealthy() {
     assert_eq!(report.probes.goal_board_intact.active_goals, 5);
     assert_eq!(report.probes.brains_llm_backed.fallback_records, 0);
     assert!(!report.probes.no_quarantine.quarantined);
+    assert_eq!(report.probes.no_quarantine.fresh_quarantines, 0);
+    assert_eq!(report.probes.no_quarantine.retained, 3);
     // The AND invariant agrees with the recorded top-level flag.
     assert_eq!(report.healthy, report.probes.all_healthy());
 }
@@ -208,6 +212,10 @@ fn no_quarantine_fails_on_fresh_quarantine_in_state_dir() {
         !report.probes.no_quarantine.healthy,
         "no_quarantine must FAIL on fresh corruption"
     );
+    assert_eq!(
+        report.probes.no_quarantine.fresh_quarantines, 1,
+        "the single fresh quarantine must be counted"
+    );
 }
 
 /// Acceptance #1: retained historical snapshots (mtime before the window) under
@@ -243,6 +251,14 @@ fn no_quarantine_passes_with_only_historical_quarantines_in_state_dir() {
     assert!(
         report.probes.no_quarantine.healthy,
         "no_quarantine must be HEALTHY when only historical snapshots exist"
+    );
+    assert_eq!(
+        report.probes.no_quarantine.fresh_quarantines, 0,
+        "no fresh quarantines exist"
+    );
+    assert_eq!(
+        report.probes.no_quarantine.retained, 5,
+        "all 5 historical snapshots must be surfaced as retained diagnostics"
     );
 }
 
