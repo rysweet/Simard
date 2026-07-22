@@ -25,7 +25,10 @@ pub fn canary_gate_env_allowlist() -> Vec<String> {
 /// binary need to execute at all under `env_clear()`. Carries **no** deploy state
 /// and **no** `HOME` (`HOME` is set by the profile layer). `CARGO_HOME` /
 /// `RUSTUP_HOME` are pinned here so the `unit-test` gate's neutral `HOME` never
-/// forces cargo/rustup to fall back to `$HOME`.
+/// forces cargo/rustup to fall back to `$HOME`. When the daemon env exports
+/// neither (the common deploy-host case that relies on the default `~/.cargo` /
+/// `~/.rustup` layout), the `UnitTest` profile derives them from the live `HOME`
+/// instead (see [`scrub_gate_env`]).
 const GATE_ENV_BASE_FLOOR: &[&str] = &["PATH", "USER", "CARGO_HOME", "RUSTUP_HOME"];
 
 /// Which environment profile a canary gate subprocess must run under.
@@ -79,8 +82,36 @@ fn scrub_gate_env(cmd: &mut Command, config: &RelaunchConfig, profile: GateEnvPr
         // Unit tests: neutral scratch HOME, NO SIMARD_* — tests use their own
         // hermetic fixtures.
         GateEnvProfile::UnitTest => {
+            // Pin CARGO_HOME / RUSTUP_HOME derived from the *live* HOME (the
+            // rustup/cargo defaults, `~/.cargo` and `~/.rustup`) BEFORE we
+            // neutralize HOME — but only when they aren't already exported.
+            // The base floor carries them ONLY if present in the daemon env; a
+            // deploy host that relies on the default layout exports neither, so
+            // without this a neutral HOME would strand the rustup shim / cargo
+            // registry and turn a healthy candidate RED for the wrong reason.
+            if let Ok(live_home) = std::env::var("HOME") {
+                let live_home = Path::new(&live_home);
+                if std::env::var_os("CARGO_HOME").is_none() {
+                    cmd.env("CARGO_HOME", live_home.join(".cargo"));
+                }
+                if std::env::var_os("RUSTUP_HOME").is_none() {
+                    cmd.env("RUSTUP_HOME", live_home.join(".rustup"));
+                }
+            }
             let neutral_home = config.canary_target_dir.join("gate-home");
-            let _ = std::fs::create_dir_all(&neutral_home);
+            if let Err(e) = std::fs::create_dir_all(&neutral_home) {
+                // Fail-closed behavior is preserved: cargo will still run under
+                // the (possibly missing) neutral HOME and the gate reports the
+                // real outcome. Surface the scratch-dir failure instead of
+                // swallowing it so a genuinely broken canary_target_dir is
+                // diagnosable rather than silent (Zero-BS).
+                tracing::warn!(
+                    neutral_home = %neutral_home.display(),
+                    error = %e,
+                    "failed to create neutral scratch HOME for unit-test gate; \
+                     proceeding with cargo test under a non-materialized HOME"
+                );
+            }
             cmd.env("HOME", neutral_home);
             // Intentionally NO SIMARD_HOME / SIMARD_STATE_ROOT /
             // SIMARD_PROMPT_ASSETS_DIR here.
@@ -120,7 +151,7 @@ fn bound_gate_detail(raw: &str) -> String {
     format!("{}{ELLIPSIS}", redacted[..end].trim_end())
 }
 
-/// Collapse ASCII control chars (CR/LF/TAB/etc.) and runs of whitespace into a
+/// Collapse Unicode control chars (CR/LF/TAB/etc.) and runs of whitespace into a
 /// single space so a tainted subprocess detail renders as one log line. This
 /// closes the log-forgery vector (SEC-D4) at the source, independent of whether
 /// the final sink is structured (tracing field) or interpolated (refusal text).
@@ -675,6 +706,118 @@ mod tests {
         assert!(
             expected_home.exists(),
             "scrub_gate_env must create the neutral scratch HOME dir"
+        );
+        let _ = std::fs::remove_dir_all(&config.canary_target_dir);
+    }
+
+    /// M1: when the daemon env exports NEITHER `CARGO_HOME` NOR `RUSTUP_HOME`
+    /// (the default-layout deploy host), the `UnitTest` profile must inject them
+    /// derived from the *live* `HOME` so the neutral scratch `HOME` can never
+    /// strand the rustup shim / cargo registry and turn a healthy candidate RED.
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn unit_test_profile_derives_cargo_rustup_home_from_live_home() {
+        let _g = env_lock().lock().unwrap();
+        if env_binary().is_none() {
+            return;
+        }
+        let _snap = EnvSnapshot::capture(&["CARGO_HOME", "RUSTUP_HOME", "HOME"]);
+        // SAFETY: serialized via env_lock + restored by EnvSnapshot::drop.
+        unsafe {
+            std::env::set_var("HOME", "/live/home/dir");
+            std::env::remove_var("CARGO_HOME");
+            std::env::remove_var("RUSTUP_HOME");
+        }
+        let config = unique_config();
+        let child = scrubbed_child_env(&config, GateEnvProfile::UnitTest);
+
+        assert_eq!(
+            child.get("CARGO_HOME").map(String::as_str),
+            Some("/live/home/dir/.cargo"),
+            "CARGO_HOME must be derived from the live HOME when unset (M1)"
+        );
+        assert_eq!(
+            child.get("RUSTUP_HOME").map(String::as_str),
+            Some("/live/home/dir/.rustup"),
+            "RUSTUP_HOME must be derived from the live HOME when unset (M1)"
+        );
+        // The derivation must NOT leak the live HOME as the gate's HOME.
+        assert_ne!(
+            child.get("HOME").map(String::as_str),
+            Some("/live/home/dir"),
+            "unit-test gate HOME must be the neutral scratch dir, not the live HOME"
+        );
+        let _ = std::fs::remove_dir_all(&config.canary_target_dir);
+    }
+
+    /// M1: an explicitly exported `CARGO_HOME` / `RUSTUP_HOME` must win over the
+    /// derived default — derivation only fills the gap when the daemon env is
+    /// silent, it never overrides an operator-pinned toolchain location.
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn unit_test_profile_preserves_explicit_cargo_rustup_home() {
+        let _g = env_lock().lock().unwrap();
+        if env_binary().is_none() {
+            return;
+        }
+        let _snap = EnvSnapshot::capture(&["CARGO_HOME", "RUSTUP_HOME", "HOME"]);
+        // SAFETY: serialized via env_lock + restored by EnvSnapshot::drop.
+        unsafe {
+            std::env::set_var("HOME", "/live/home/dir");
+            std::env::set_var("CARGO_HOME", "/explicit/cargo");
+            std::env::set_var("RUSTUP_HOME", "/explicit/rustup");
+        }
+        let config = unique_config();
+        let child = scrubbed_child_env(&config, GateEnvProfile::UnitTest);
+
+        assert_eq!(
+            child.get("CARGO_HOME").map(String::as_str),
+            Some("/explicit/cargo"),
+            "an explicit CARGO_HOME must survive (carried by the base floor)"
+        );
+        assert_eq!(
+            child.get("RUSTUP_HOME").map(String::as_str),
+            Some("/explicit/rustup"),
+            "an explicit RUSTUP_HOME must survive (carried by the base floor)"
+        );
+        let _ = std::fs::remove_dir_all(&config.canary_target_dir);
+    }
+
+    /// M1 integration: a *healthy* toolchain must survive the scrubbed neutral
+    /// `HOME`. Simulates the deploy host (CARGO_HOME/RUSTUP_HOME unexported) and
+    /// runs the real `cargo` binary through `scrub_gate_env` to lock the contract
+    /// end-to-end — with the fix, cargo/rustup resolve via the HOME-derived
+    /// defaults instead of the empty neutral HOME.
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn unit_test_profile_runs_real_cargo_under_neutral_home() {
+        let _g = env_lock().lock().unwrap();
+        // `cargo` sets $CARGO to its own absolute path when running tests; skip
+        // cleanly on any non-cargo runner where the real binary isn't known.
+        let Some(cargo_bin) = std::env::var_os("CARGO").map(PathBuf::from) else {
+            return;
+        };
+        if !cargo_bin.exists() {
+            return;
+        }
+        let _snap = EnvSnapshot::capture(&["CARGO_HOME", "RUSTUP_HOME"]);
+        // SAFETY: serialized via env_lock + restored by EnvSnapshot::drop.
+        unsafe {
+            // Deploy-host simulation: a real HOME with the default toolchain
+            // layout, but NEITHER CARGO_HOME NOR RUSTUP_HOME exported.
+            std::env::remove_var("CARGO_HOME");
+            std::env::remove_var("RUSTUP_HOME");
+        }
+        let config = unique_config();
+        let mut cmd = Command::new(&cargo_bin);
+        cmd.arg("--version");
+        scrub_gate_env(&mut cmd, &config, GateEnvProfile::UnitTest);
+        let output = cmd.output().expect("spawning cargo must succeed");
+        assert!(
+            output.status.success(),
+            "cargo must run under the neutral scratch HOME once CARGO_HOME/RUSTUP_HOME \
+             are derived from the live HOME (M1); stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
         let _ = std::fs::remove_dir_all(&config.canary_target_dir);
     }

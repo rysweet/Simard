@@ -139,8 +139,21 @@ fn scrub_gate_env(cmd: &mut Command, config: &RelaunchConfig, profile: GateEnvPr
         }
         // Unit tests: neutral HOME, NO SIMARD_* — tests use their own fixtures.
         GateEnvProfile::UnitTest => {
+            // Derive CARGO_HOME/RUSTUP_HOME from the live HOME (when unexported)
+            // BEFORE neutralizing HOME, so the toolchain never strands.
+            if let Ok(live_home) = std::env::var("HOME") {
+                let live_home = Path::new(&live_home);
+                if std::env::var_os("CARGO_HOME").is_none() {
+                    cmd.env("CARGO_HOME", live_home.join(".cargo"));
+                }
+                if std::env::var_os("RUSTUP_HOME").is_none() {
+                    cmd.env("RUSTUP_HOME", live_home.join(".rustup"));
+                }
+            }
             let neutral_home = config.canary_target_dir.join("gate-home");
-            let _ = std::fs::create_dir_all(&neutral_home);
+            if let Err(e) = std::fs::create_dir_all(&neutral_home) {
+                tracing::warn!(error = %e, "neutral scratch HOME create failed");
+            }
             cmd.env("HOME", neutral_home);
             // Intentionally NO SIMARD_HOME / SIMARD_STATE_ROOT /
             // SIMARD_PROMPT_ASSETS_DIR here.
@@ -190,12 +203,16 @@ deploy state** and **no `HOME`** — `HOME` is set by the profile layer.
 |---|---|
 | `PATH` | locate `cargo`, `rustc`, linker, and the candidate's runtime deps |
 | `USER` | some toolchain/test scaffolding reads it |
-| `CARGO_HOME` | cargo registry/cache (set explicitly, so a neutral `HOME` is safe) |
-| `RUSTUP_HOME` | rustup toolchain root (set explicitly, so a neutral `HOME` is safe) |
+| `CARGO_HOME` | cargo registry/cache — carried if exported, else derived from live `HOME` for the `unit-test` gate |
+| `RUSTUP_HOME` | rustup toolchain root — carried if exported, else derived from live `HOME` for the `unit-test` gate |
 
-Because `CARGO_HOME` and `RUSTUP_HOME` are pinned in the base floor, the
-`unit-test` gate's neutral `HOME` never breaks the toolchain — cargo/rustup do
-not have to fall back to `$HOME`.
+The base floor carries `CARGO_HOME` / `RUSTUP_HOME` **only when the daemon env
+exports them**. On a deploy host that relies on the default `~/.cargo` /
+`~/.rustup` layout neither is exported, so the `unit-test` profile derives them
+from the **live `HOME`** (`~/.cargo`, `~/.rustup`) *before* neutralizing `HOME`.
+Either way, the `unit-test` gate's neutral `HOME` never strands cargo/rustup —
+the toolchain never has to fall back to the (empty) neutral `$HOME`. An
+explicitly exported value always wins over the derived default.
 
 `CARGO_BUILD_JOBS` continues to be set explicitly by each gate spawn (via
 `crate::cargo_jobs::cargo_jobs()`) **after** `scrub_gate_env`, exactly as
