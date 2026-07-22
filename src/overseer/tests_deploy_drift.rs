@@ -496,7 +496,7 @@ fn backoff_base_floor_prevents_a_busy_loop() {
 }
 
 #[test]
-#[serial_test::serial(transient_backoff_env)]
+#[serial_test::serial(transient_backoff_env, cognitive_memory)]
 fn backoff_base_defaults_when_env_is_unset() {
     let prev = std::env::var(TRANSIENT_BACKOFF_BASE_ENV).ok();
     // SAFETY: serialized env toggle, restored below.
@@ -516,7 +516,7 @@ fn backoff_base_defaults_when_env_is_unset() {
 }
 
 #[test]
-#[serial_test::serial(transient_backoff_env)]
+#[serial_test::serial(transient_backoff_env, cognitive_memory)]
 fn backoff_base_env_override_is_parsed_and_floored() {
     let prev = std::env::var(TRANSIENT_BACKOFF_BASE_ENV).ok();
     // SAFETY: serialized env toggle, restored below.

@@ -251,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(relaunch_gate_timeout_env)]
+    #[serial_test::serial(relaunch_gate_timeout_env, cognitive_memory)]
     fn relaunch_config_default_gate_timeout_is_ten_minutes() {
         let prev = std::env::var(GATE_TIMEOUT_ENV).ok();
         // SAFETY: serialized env toggle, restored below.
@@ -302,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(relaunch_gate_timeout_env)]
+    #[serial_test::serial(relaunch_gate_timeout_env, cognitive_memory)]
     fn resolve_gate_timeout_parses_a_valid_env_value() {
         let prev = std::env::var(GATE_TIMEOUT_ENV).ok();
         // SAFETY: serialized env toggle, restored below.
@@ -314,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(relaunch_gate_timeout_env)]
+    #[serial_test::serial(relaunch_gate_timeout_env, cognitive_memory)]
     fn resolve_gate_timeout_defaults_on_unparseable_env() {
         let prev = std::env::var(GATE_TIMEOUT_ENV).ok();
         // SAFETY: serialized env toggle, restored below.
@@ -330,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(relaunch_gate_timeout_env)]
+    #[serial_test::serial(relaunch_gate_timeout_env, cognitive_memory)]
     fn resolve_gate_timeout_clamps_a_zero_env_to_the_floor() {
         let prev = std::env::var(GATE_TIMEOUT_ENV).ok();
         // SAFETY: serialized env toggle, restored below.
