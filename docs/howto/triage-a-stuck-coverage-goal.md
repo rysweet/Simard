@@ -90,10 +90,15 @@ immediately … do not change any code or CI".
 
 ### 2. Re-pointed the goal's done-criteria
 
-The goal's finish criteria (its description / tracking issue) were re-pointed
-from the vague "70% everywhere" at the charter's **machine-checkable**
-milestones in §2 and §3, scoped to **this** repository (`rysweet/Simard`), not
-`amplihack-rs`.
+The recurring goal family's finish criteria are re-pointed at the charter's
+**machine-checkable** milestones (§2 and §3), scoped to **this** repository
+(`rysweet/Simard`), not `amplihack-rs`. The **auditable** artifact for that
+re-point is committed in this PR: the charter's `Consolidates goal slugs` field
+(in `## Status`) absorbs the recurring slugs — `audit-simard-test-coverage`,
+`raise-coverage-to-70`, `improve-amplihack-test-coverage` — so any future
+resurfacing of the goal resolves to this charter instead of re-opening a
+planning cycle. No out-of-repo goal-store edit is claimed as the evidence; the
+committed charter field plus this record *are* the re-point.
 
 ## The machine-checkable finish line
 
@@ -167,7 +172,7 @@ string is plain English with zero raw markers.
   "next_step": "Replace the vague 70%-everywhere target with the coverage plan's measurable checklist: each area reaches 70% coverage as shown by the coverage command, the backlog of remaining areas is empty, and a scan finds no risky untested files left.",
   "root_cause": "The finish line was mis-scoped and unmeasurable: '70%' was read as a single workspace-wide figure pointed at the amplihack-rs codebase, which cannot be certified from this checkout, so every cycle restarted without a checkable done-condition.",
   "decision": "rewrite-done-gate",
-  "action_taken": "Re-pointed the goal's done-criteria at the Coverage-Audit Charter's machine-checkable milestones (Specs/COVERAGE_AUDIT.md sections 2 and 3) and ratified the charter by moving its State from PROPOSED to RATIFIED. The change is additive, non-breaking, and CI-green.",
+  "action_taken": "Ratified the Coverage-Audit Charter (Specs/COVERAGE_AUDIT.md State: PROPOSED to RATIFIED) and re-pointed the recurring goal family at its machine-checkable milestones (sections 2 and 3) via the charter's committed 'Consolidates goal slugs' declaration. Both effects are committed and auditable in this PR; no out-of-repo goal-store edit is claimed. The change is additive, non-breaking, and CI-green.",
   "escalate": null
 }
 ```
@@ -193,9 +198,11 @@ no human-only call remained.
       `OODA-SAFEGUARD`, `UNCLEAR-CRITERIA`, `GENUINELY-STUCK`, `evidence=[`,
       `why=`, or 🔒 tokens in any operator-visible string.
 - [x] `decision` is exactly `rewrite-done-gate` (a single allowed enum value).
-- [x] `action_taken` is a **performed** rewrite, not a proposal: the charter
-      `State` line flips `PROPOSED` → `RATIFIED` and the goal's done-criteria
-      point at charter §2/§3.
+- [x] `action_taken` is a **performed** rewrite, not a proposal, and every
+      claimed effect is committed and auditable in this PR: the charter `State`
+      line flips `PROPOSED` → `RATIFIED` and the charter's `Consolidates goal
+      slugs` field re-points the goal family at §2/§3 (no un-committed
+      goal-store edit is claimed as the evidence).
 - [x] The charter diff touches **only** the `State` line; §1–§3 are unchanged.
 - [x] The rewritten finish condition is **machine-checkable**: each condition is
       observable from `cargo llvm-cov` output or the ledger file.

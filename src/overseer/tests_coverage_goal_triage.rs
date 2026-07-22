@@ -19,10 +19,16 @@
 //! charter's machine-checkable milestones (§2/§3) instead of the vague
 //! "70% everywhere". No Rust escalation-seam change, no CI hard gate.
 //!
-//! These tests are written BEFORE that edit lands. Today `Specs/COVERAGE_AUDIT.md`
-//! still reads `State: PROPOSED`, so `charter_is_ratified_not_proposed` FAILS —
-//! that failure is the RED of red→green→refactor. Each assertion below is the
-//! executable contract the course-correction must satisfy.
+//! These tests began as the RED of red→green→refactor: before the edit landed,
+//! `Specs/COVERAGE_AUDIT.md` read `State: PROPOSED` and
+//! `charter_is_ratified_not_proposed` failed. The course-correction has since
+//! landed (the charter is `RATIFIED`), so all assertions are GREEN. Each one is
+//! the executable contract the course-correction must keep satisfying. To avoid
+//! coupling the build to incidental doc wording, the assertions are anchored on
+//! stable structural markers — section headings, the `**State**` line, literal
+//! commands, and PR/issue numbers — rather than free prose, so cosmetic rewording
+//! of the charter does not break the tests while genuine contract removals still
+//! fail loud.
 //!
 //! Everything here is hermetic: it reads only checked-in repository artifacts
 //! relative to `CARGO_MANIFEST_DIR`. No network, no `~/.simard`, no goal store.
@@ -62,6 +68,34 @@ fn read_repo_file(rel: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
     std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("expected repo file {rel} to exist and be readable: {e}"))
+}
+
+/// Extract the body of the first `## ` (H2) section whose heading contains
+/// `needle` (case-insensitive), spanning from that heading up to the next `## `
+/// heading (or end of file). Returns an empty string when no such section
+/// exists, so callers assert the section's presence explicitly and fail loud on
+/// a missing structural anchor. Anchoring assertions inside a named section — as
+/// opposed to scanning the whole document for a prose phrase — keeps the tests
+/// robust against cosmetic rewording elsewhere in the charter.
+fn section(doc: &str, needle: &str) -> String {
+    let needle_lower = needle.to_lowercase();
+    let mut out = String::new();
+    let mut in_section = false;
+    for line in doc.lines() {
+        if line.starts_with("## ") {
+            if in_section {
+                break; // reached the next H2 section — stop.
+            }
+            if line.to_lowercase().contains(&needle_lower) {
+                in_section = true;
+            }
+        }
+        if in_section {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 /// Extract the fenced ```json OUTPUT example block from the how-to — the set of
@@ -150,27 +184,36 @@ fn charter_is_ratified_not_proposed() {
 #[test]
 fn charter_done_gate_is_machine_checkable() {
     let charter = read_repo_file(CHARTER);
-    let lower = charter.to_lowercase();
+    let done = section(&charter, "Measurable done-criteria");
+    assert!(
+        !done.is_empty(),
+        "the charter must carry a `## 2. Measurable done-criteria` section — the \
+         structural home of the machine-checkable done-gate"
+    );
+    let lower = done.to_lowercase();
 
     assert!(
         lower.contains("cargo llvm-cov"),
-        "the machine-checkable done-gate must name the measuring command (cargo llvm-cov)"
+        "§2's machine-checkable done-gate must name the measuring command (cargo llvm-cov)"
     );
     assert!(
-        charter.contains("70%") || charter.contains("\u{2265} 70") || lower.contains("70% "),
-        "the done-gate must state the ≥70% aggregate bar"
+        done.contains("70%") || done.contains("\u{2265} 70") || lower.contains("70 "),
+        "§2 must state the ≥70% aggregate bar"
     );
+    // Per-group aggregate — not a single workspace-wide percentage. Assert the two
+    // contract tokens independently rather than the exact phrase "aggregate line
+    // coverage", so re-wording (e.g. "aggregate coverage of lines") stays green.
     assert!(
-        lower.contains("aggregate line coverage"),
-        "the unit of measurement must be the per-group aggregate line coverage, not a \
-         single workspace-wide percentage"
+        lower.contains("aggregate") && lower.contains("line coverage"),
+        "§2's unit of measurement must be the per-group aggregate line coverage, not \
+         a single workspace-wide percentage"
     );
     assert!(
         lower.contains("simard goal remove"),
-        "the done-gate must specify the concrete tombstone command a cycle runs when DONE"
+        "§2 must specify the concrete tombstone command a cycle runs when DONE"
     );
     assert!(
-        charter.contains(LEDGER) || lower.contains("companion ledger"),
+        charter.contains(LEDGER) || charter.to_lowercase().contains("companion ledger"),
         "the done-gate must reference the observable ledger evidence surface"
     );
 }
@@ -183,16 +226,28 @@ fn charter_done_gate_is_machine_checkable() {
 #[test]
 fn charter_done_criteria_are_unchecked_justifying_rewrite_over_completion() {
     let charter = read_repo_file(CHARTER);
-    let unchecked = charter.matches("- [ ]").count();
+    let done = section(&charter, "Measurable done-criteria");
+    assert!(
+        !done.is_empty(),
+        "the charter must carry a `## 2. Measurable done-criteria` section listing \
+         the whole-audit DONE conditions"
+    );
+
+    // The three whole-audit DONE conditions live as unchecked checkboxes in §2.
+    let unchecked = done.matches("- [ ]").count();
     assert!(
         unchecked >= 3,
-        "the whole-audit DONE gate must list its (still-open) machine-checkable \
-         conditions as unchecked checkboxes, justifying rewrite-done-gate over \
-         complete-delivered-goal; found {unchecked}"
+        "§2 must list its (still-open) machine-checkable DONE conditions as unchecked \
+         checkboxes, justifying rewrite-done-gate over complete-delivered-goal; \
+         found {unchecked}"
     );
+    // No §2 DONE condition may be pre-checked: the audit is not certified complete,
+    // which is exactly why complete-delivered-goal was rejected. Scoped to §2 (not
+    // the whole file) so a legitimate future checkbox in any other section cannot
+    // spuriously break this contract.
     assert!(
-        !charter.contains("- [x]") && !charter.contains("- [X]"),
-        "no DONE condition may be pre-checked: the audit is not certified complete, \
+        !done.contains("- [x]") && !done.contains("- [X]"),
+        "no §2 DONE condition may be pre-checked: the audit is not certified complete, \
          which is exactly why complete-delivered-goal was rejected"
     );
 }
@@ -208,22 +263,27 @@ fn charter_done_criteria_are_unchecked_justifying_rewrite_over_completion() {
 #[test]
 fn charter_disambiguates_repository_scope_as_root_cause() {
     let charter = read_repo_file(CHARTER);
-    let lower = charter.to_lowercase();
+    let scope = section(&charter, "Scope and repository disambiguation");
+    assert!(
+        !scope.is_empty(),
+        "the charter must carry a `## 1. Scope and repository disambiguation` section"
+    );
+    let lower = scope.to_lowercase();
 
     assert!(
         lower.contains("amplihack-rs"),
-        "the charter must name the wrong repository the goal was mis-scoped against"
+        "§1 must name the wrong repository the goal was mis-scoped against"
     );
     assert!(
         lower.contains("rysweet/simard")
             || lower.contains("this repository")
             || lower.contains("this `simard` repo")
             || lower.contains("simard crate"),
-        "the charter must scope the goal to THIS Simard repository"
+        "§1 must scope the goal to THIS Simard repository"
     );
     assert!(
         lower.contains("in scope") && lower.contains("out of scope"),
-        "the charter must carry an explicit in-scope / out-of-scope disambiguation (§1)"
+        "§1 must carry an explicit in-scope / out-of-scope disambiguation"
     );
 }
 
@@ -265,18 +325,19 @@ fn charter_consolidates_the_coverage_goal_family() {
 #[test]
 fn charter_forbids_workspace_wide_ci_hard_gate() {
     let charter = read_repo_file(CHARTER);
-    let lower = charter.to_lowercase();
-
+    let out_of_scope = section(&charter, "Explicitly NOT in this charter");
     assert!(
-        lower.contains("not in this charter") || lower.contains("explicitly not"),
-        "the charter must carry an explicit out-of-scope section (§4)"
+        !out_of_scope.is_empty(),
+        "the charter must carry a `## 4. Explicitly NOT in this charter` out-of-scope section"
     );
+    let lower = out_of_scope.to_lowercase();
+
     assert!(
         lower.contains("workspace-wide") && lower.contains("ci"),
         "§4 must explicitly exclude a workspace-wide CI coverage gate"
     );
     assert!(
-        charter.contains("#2150") && charter.contains("#2151"),
+        out_of_scope.contains("#2150") && out_of_scope.contains("#2151"),
         "§4 must cite the owner's rejection of the bash CI gate (PRs #2150 / #2151)"
     );
 }
