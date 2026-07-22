@@ -156,10 +156,36 @@ impl std::fmt::Debug for CognitiveOpenGuard {
     }
 }
 
+/// Outcome of a *classified* open-lock acquisition
+/// ([`CognitiveOpenGuard::try_acquire_classified`]).
+///
+/// Lets a *may-degrade* caller (an OODA engineer) distinguish a benign flock
+/// **contention** — the budget expired while another live process still held the
+/// lock (`EWOULDBLOCK`) — from a genuine IO fault (which stays an `Err`). The
+/// fail-loud [`CognitiveOpenGuard::acquire`] path keeps mapping `Contended` to
+/// the same corruption-guard `Err`, so the classifier is purely additive.
+pub(crate) enum OpenLockOutcome {
+    /// The exclusive advisory `flock` was taken (or shared re-entrantly within
+    /// this process). Carries the held guard; the caller may proceed to open the
+    /// store.
+    Acquired(CognitiveOpenGuard),
+    /// The budget expired while another live process still held the lock — a
+    /// contention, not an IO fault. Carries a bounded, control-stripped holder
+    /// marker for logging only (never a store path or raw identity).
+    Contended { holder: String },
+}
+
 impl CognitiveOpenGuard {
     /// Acquire the cross-process open-lock for the cognitive store under
     /// `state_root`, blocking with **bounded exponential backoff** until either
     /// the lock is held or the budget expires.
+    ///
+    /// Fail-loud corruption-guard path (unchanged): a thin wrapper over
+    /// [`Self::try_acquire_classified`] that maps
+    /// [`OpenLockOutcome::Contended`] back to the exact
+    /// `Err(SimardError::PersistentStoreIo { action: "acquire_open_lock", .. })`
+    /// it has always returned, so existing callers (the daemon / any true
+    /// exclusive writer) are byte-for-byte unaffected.
     ///
     /// # Errors
     ///
@@ -170,6 +196,37 @@ impl CognitiveOpenGuard {
     /// library's lock-conflict-as-corruption rebuild, which would wipe memory.
     #[cfg(unix)]
     pub(crate) fn acquire(state_root: &Path) -> SimardResult<Self> {
+        match Self::try_acquire_classified(state_root)? {
+            OpenLockOutcome::Acquired(guard) => Ok(guard),
+            OpenLockOutcome::Contended { holder } => Err(SimardError::PersistentStoreIo {
+                store: "cognitive-open-lock".to_string(),
+                action: "acquire_open_lock".to_string(),
+                path: lock_path_for(state_root),
+                reason: format!(
+                    "cognitive store is held open by another process ({holder}); \
+                     refusing to open a second concurrent handle after waiting {}ms. \
+                     Opening anyway would trip the lbug lock-conflict-as-corruption \
+                     path and wipe memory. Route access through the daemon IPC, or \
+                     use an isolated state root for this run.",
+                    configured_budget().as_millis(),
+                ),
+            }),
+        }
+    }
+
+    /// Classified acquisition: identical bounded exponential-backoff budget,
+    /// same-process re-entrancy, process-global registry, and atomic
+    /// registry+`flock` check as [`Self::acquire`], but returns
+    /// [`OpenLockOutcome::Contended`] for a budget-exceeded flock contention
+    /// instead of an `Err`. A genuine IO fault on the lock file (a non-
+    /// `EWOULDBLOCK` `flock` errno, or a failure to create the lock file / its
+    /// parent) is still surfaced as `Err(SimardError::PersistentStoreIo)`.
+    ///
+    /// This is the seam a *may-degrade* caller (an engineer) uses to choose
+    /// deferred/read-only cognition over the fail-loud hard-exit; the guard
+    /// itself is never weakened.
+    #[cfg(unix)]
+    pub(crate) fn try_acquire_classified(state_root: &Path) -> SimardResult<OpenLockOutcome> {
         use std::os::unix::io::AsRawFd;
 
         // Ensure `state_root` exists *before* canonicalizing so the registry key
@@ -190,7 +247,7 @@ impl CognitiveOpenGuard {
         // this path. Share it (re-entrant, matching lbug's per-PID semantics) —
         // no second `flock`, no wait.
         if let Some(existing) = live_lock_for(&lock_path) {
-            return Ok(Self { _lock: existing });
+            return Ok(OpenLockOutcome::Acquired(Self { _lock: existing }));
         }
 
         let file = std::fs::OpenOptions::new()
@@ -231,7 +288,9 @@ impl CognitiveOpenGuard {
                 // have taken the lock since our pre-loop fast path.
                 if let Some(weak) = map.get(&lock_path) {
                     match weak.upgrade() {
-                        Some(existing) => return Ok(Self { _lock: existing }),
+                        Some(existing) => {
+                            return Ok(OpenLockOutcome::Acquired(Self { _lock: existing }));
+                        }
                         // Dead entry from a dropped guard: clear it so we can
                         // re-acquire below.
                         None => {
@@ -251,7 +310,7 @@ impl CognitiveOpenGuard {
                     });
                     // Publish so concurrent same-process opens can share it.
                     map.insert(lock_path.clone(), Arc::downgrade(&lock));
-                    return Ok(Self { _lock: lock });
+                    return Ok(OpenLockOutcome::Acquired(Self { _lock: lock }));
                 }
 
                 let err = std::io::Error::last_os_error();
@@ -272,20 +331,13 @@ impl CognitiveOpenGuard {
 
             let elapsed = start.elapsed();
             if elapsed >= budget {
-                let holder = current_holder(&lock_path);
-                return Err(SimardError::PersistentStoreIo {
-                    store: "cognitive-open-lock".to_string(),
-                    action: "acquire_open_lock".to_string(),
-                    path: lock_path.clone(),
-                    reason: format!(
-                        "cognitive store is held open by another process ({holder}); \
-                         refusing to open a second concurrent handle after waiting {}ms. \
-                         Opening anyway would trip the lbug lock-conflict-as-corruption \
-                         path and wipe memory. Route access through the daemon IPC, or \
-                         use an isolated state root for this run.",
-                        budget.as_millis(),
-                    ),
-                });
+                // Budget spent while another live process still holds the lock:
+                // a benign contention (EWOULDBLOCK), NOT an IO fault. Classify it
+                // so a may-degrade caller can defer; `acquire` maps this back to
+                // the fail-loud corruption-guard error for true writers. The
+                // holder marker is bounded + control-stripped for safe logging.
+                let holder = sanitized_holder(&lock_path);
+                return Ok(OpenLockOutcome::Contended { holder });
             }
 
             // Exponential backoff, capped, with a little jitter, never sleeping
@@ -301,6 +353,15 @@ impl CognitiveOpenGuard {
     #[cfg(not(unix))]
     pub(crate) fn acquire(_state_root: &std::path::Path) -> SimardResult<Self> {
         Ok(Self {})
+    }
+
+    /// Non-unix classified acquisition: always [`OpenLockOutcome::Acquired`]
+    /// (there is no cross-process `flock` to contend on non-unix targets).
+    #[cfg(not(unix))]
+    pub(crate) fn try_acquire_classified(
+        _state_root: &std::path::Path,
+    ) -> SimardResult<OpenLockOutcome> {
+        Ok(OpenLockOutcome::Acquired(Self {}))
     }
 }
 
@@ -332,12 +393,22 @@ fn live_lock_for(lock_path: &Path) -> Option<Arc<ProcessOpenLock>> {
 }
 
 /// Budget from [`BUDGET_ENV`] (milliseconds) or [`DEFAULT_BUDGET`].
+///
+/// The override is **clamped to `[1, DEFAULT_BUDGET]`**: it can only *shorten*
+/// the race (its intended use — forcing fast contention in tests), never
+/// lengthen it. This enforces the "do not raise `DEFAULT_BUDGET` as the fix"
+/// constraint — the env var can never be used to paper over the crash-loop by
+/// widening the open-lock budget past the 15 000 ms corruption-guard ceiling. A
+/// missing or unparseable value falls back to [`DEFAULT_BUDGET`].
 #[cfg(unix)]
 fn configured_budget() -> Duration {
     std::env::var(BUDGET_ENV)
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .map(Duration::from_millis)
+        .map(|ms| {
+            let clamped = ms.clamp(1, DEFAULT_BUDGET.as_millis() as u64);
+            Duration::from_millis(clamped)
+        })
         .unwrap_or(DEFAULT_BUDGET)
 }
 
@@ -373,6 +444,26 @@ fn current_holder(lock_path: &Path) -> String {
         }
         Err(_) => "unknown PID".to_string(),
     }
+}
+
+/// Bounded, control-stripped holder marker for logging. The lock-file contents
+/// are attacker-influenceable (any process can write the sidecar), so the marker
+/// is stripped of control characters and length-bounded before it can reach a
+/// log line or a classified [`OpenLockOutcome::Contended`] value — log-injection
+/// / forging defence. Never carries a store path or raw identity.
+#[cfg(unix)]
+fn sanitized_holder(lock_path: &Path) -> String {
+    const MAX_HOLDER_BYTES: usize = 48;
+    let raw = current_holder(lock_path);
+    let stripped: String = raw.chars().filter(|c| !c.is_control()).collect();
+    if stripped.len() <= MAX_HOLDER_BYTES {
+        return stripped;
+    }
+    let mut end = MAX_HOLDER_BYTES;
+    while end > 0 && !stripped.is_char_boundary(end) {
+        end -= 1;
+    }
+    stripped[..end].to_string()
 }
 
 #[cfg(all(test, unix))]
@@ -524,6 +615,85 @@ mod tests {
         unsafe { std::env::remove_var(BUDGET_ENV) };
         // Once the foreign holder releases, acquire succeeds again.
         let _g = CognitiveOpenGuard::acquire(&root).expect("acquire after holder released");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn budget_env_override_is_clamped_to_the_ceiling_and_never_raises_the_guard() {
+        // SAFETY: single-threaded test; env is scoped and restored below.
+        // A value ABOVE the ceiling is clamped down — the override can never be
+        // used to widen the open-lock budget past DEFAULT_BUDGET (enforces the
+        // "do not raise DEFAULT_BUDGET as the fix" constraint).
+        unsafe { std::env::set_var(BUDGET_ENV, "999999999") };
+        assert_eq!(
+            configured_budget(),
+            DEFAULT_BUDGET,
+            "an over-ceiling override must clamp to DEFAULT_BUDGET, never raise it"
+        );
+
+        // Zero clamps up to the 1 ms floor (a valid, tiny budget — never a
+        // disabled guard).
+        unsafe { std::env::set_var(BUDGET_ENV, "0") };
+        assert_eq!(configured_budget(), Duration::from_millis(1));
+
+        // A value within range is honoured verbatim (its intended use: SHORTEN
+        // the race for tests).
+        unsafe { std::env::set_var(BUDGET_ENV, "300") };
+        assert_eq!(configured_budget(), Duration::from_millis(300));
+
+        // An unparseable value falls back to the default.
+        unsafe { std::env::set_var(BUDGET_ENV, "not-a-number") };
+        assert_eq!(configured_budget(), DEFAULT_BUDGET);
+
+        unsafe { std::env::remove_var(BUDGET_ENV) };
+        assert_eq!(configured_budget(), DEFAULT_BUDGET);
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn try_acquire_classified_returns_contended_on_a_foreign_holder() {
+        // SAFETY: single-threaded test; env is scoped to this test's body.
+        // The may-degrade seam classifies a budget-exceeded flock contention as
+        // `Ok(Contended)` (NOT an `Err`), so an engineer can degrade instead of
+        // hard-exiting — while `acquire()` still maps the same state to fail-loud.
+        unsafe { std::env::set_var(BUDGET_ENV, "300") };
+        let root = temp_root("classified-contended");
+        let key = lock_path_for(&root);
+        let holder = ForeignHolder::hold(&key);
+
+        let start = Instant::now();
+        let outcome = CognitiveOpenGuard::try_acquire_classified(&root)
+            .expect("a foreign flock holder is a contention, not an IO error");
+        let waited = start.elapsed();
+
+        match outcome {
+            OpenLockOutcome::Contended { holder } => {
+                assert!(
+                    !holder.contains('\n') && holder.len() <= 48,
+                    "holder marker must be bounded + control-stripped, got: {holder:?}"
+                );
+            }
+            OpenLockOutcome::Acquired(_) => {
+                panic!("a store held open by a foreign process must classify as Contended")
+            }
+        }
+        assert!(
+            waited < Duration::from_secs(3),
+            "classification should resolve near the budget, waited {waited:?}"
+        );
+
+        drop(holder);
+        // Once the foreign holder releases, the same seam yields `Acquired`.
+        match CognitiveOpenGuard::try_acquire_classified(&root)
+            .expect("acquire-classified after holder released")
+        {
+            OpenLockOutcome::Acquired(_guard) => {}
+            OpenLockOutcome::Contended { .. } => {
+                panic!("an uncontended open must classify as Acquired")
+            }
+        }
+        unsafe { std::env::remove_var(BUDGET_ENV) };
         let _ = std::fs::remove_dir_all(&root);
     }
 }

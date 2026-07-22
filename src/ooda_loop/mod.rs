@@ -78,7 +78,10 @@ mod tests_phase_recall_episodes;
 mod tests_pr_c_procedures;
 
 // Re-export all public items so `crate::ooda_loop::X` still works.
-pub use client_factory::{clients_from_state_root, connect_memory};
+pub use client_factory::{
+    CallerRole, CognitiveAccess, WriteMode, clients_from_state_root, connect_memory,
+    connect_memory_for_role,
+};
 pub use curate::{
     check_meeting_handoffs, drain_overseer_whispers, load_tombstones, promote_from_backlog,
     reap_old_handoffs, tombstone_goals,
