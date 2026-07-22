@@ -194,12 +194,23 @@ impl<S: LlmSubmitter> OodaOrientBrain for RustyClawdOrientBrain<S> {
     fn judge_orientation(&self, ctx: &OrientContext) -> SimardResult<OrientJudgment> {
         let prompt = self.render_prompt(ctx);
         let raw = self.submitter.submit(&prompt)?;
-        let judgment = parse_judgment_from_response(&raw).map_err(|reason| {
-            SimardError::AdapterInvocationFailed {
-                base_type: ADAPTER_TAG.to_string(),
-                reason,
+        let judgment = match parse_judgment_from_response(&raw) {
+            Ok(judgment) => {
+                // Parity with the recipe-runner-driven orient path
+                // (`recipe_brain`): record the shared per-phase parse metric so
+                // the `orient` success/failure ratio is observable whichever
+                // orient brain the daemon wired (issue #2484).
+                crate::recipe_output::record_parse_outcome("orient", true);
+                judgment
             }
-        })?;
+            Err(reason) => {
+                crate::recipe_output::record_parse_outcome("orient", false);
+                return Err(SimardError::AdapterInvocationFailed {
+                    base_type: ADAPTER_TAG.to_string(),
+                    reason,
+                });
+            }
+        };
         judgment.validate(ctx.base_urgency).map_err(|reason| {
             SimardError::AdapterInvocationFailed {
                 base_type: ADAPTER_TAG.to_string(),
@@ -210,17 +221,30 @@ impl<S: LlmSubmitter> OodaOrientBrain for RustyClawdOrientBrain<S> {
     }
 }
 
-/// Parse the brain response as a JSON object.
+/// Parse the brain response as a JSON object via the shared recipe-output
+/// extract-and-parse chokepoint (issues #2484 / #969).
 ///
-/// Expected format (single line, no markdown fences):
+/// Expected wire shape (surrounding prose / markdown fences tolerated, not
+/// encouraged):
 /// ```json
 /// {"adjusted_urgency": 0.4, "demotion_applied": 0.2, "rationale": "transient", "confidence": 0.9}
 /// ```
 ///
-/// The parser extracts the first `{…}` substring so the brain can
-/// optionally surround it with prose (tolerated, not encouraged).
-/// `adjusted_urgency` and `rationale` are required; `confidence` defaults
-/// to 1.0 and `demotion_applied` defaults to 0.0 (caller recomputes).
+/// Historically this parser sliced the first `{…}` substring with
+/// `find('{')`/`rfind('}')` and fed it **verbatim** to `serde_json`, so any
+/// ANSI/log/banner noise wrapping the object, a trailing comma before the
+/// closing brace, an unescaped ASCII control character inside the `rationale`
+/// string, a JSONC comment, or an invalid backslash escape sank the whole
+/// judgment and forced the daemon onto the deterministic floor. It now routes
+/// through [`crate::recipe_output::extract_and_parse_json_result`] — the same
+/// hardened chokepoint every other recipe-backed reasoning phase uses — which
+/// strips the noise, extracts the balanced object, and applies the four shared
+/// recovery views before declaring a response unparseable. A miss is
+/// **fail-closed** and diagnosable: the returned error names *why* and embeds a
+/// truncated copy of the raw response for operators, so a drop is never silent.
+///
+/// `adjusted_urgency` and `rationale` are required; `confidence` defaults to
+/// 1.0 and `demotion_applied` defaults to 0.0 (caller recomputes).
 fn parse_judgment_from_response(raw: &str) -> Result<OrientJudgment, String> {
     let stripped = raw.trim();
     if stripped.is_empty() {
@@ -230,33 +254,17 @@ fn parse_judgment_from_response(raw: &str) -> Result<OrientJudgment, String> {
         ));
     }
 
-    // Find the first JSON object substring.
-    let start = stripped.find('{').ok_or_else(|| {
-        format!(
-            "orient brain response contains no JSON object; raw_response={:?}",
-            super::rustyclawd::truncate_for_log_pub(raw)
-        )
-    })?;
-    let end = stripped.rfind('}').ok_or_else(|| {
-        format!(
-            "orient brain response contains no closing brace; raw_response={:?}",
-            super::rustyclawd::truncate_for_log_pub(raw)
-        )
-    })?;
-
-    if end <= start {
-        return Err(format!(
-            "orient brain response has malformed JSON braces; raw_response={:?}",
-            super::rustyclawd::truncate_for_log_pub(raw)
-        ));
-    }
-
-    let json_slice = &stripped[start..=end];
-    serde_json::from_str::<OrientJudgment>(json_slice).map_err(|e| {
-        format!(
-            "orient brain JSON parse error: {e}; raw_response={:?}",
-            super::rustyclawd::truncate_for_log_pub(raw)
-        )
+    crate::recipe_output::extract_and_parse_json_result::<OrientJudgment>(raw).map_err(|err| {
+        let raw_truncated = super::rustyclawd::truncate_for_log_pub(raw);
+        match err {
+            crate::recipe_output::JsonExtractError::NoBalancedObject { .. } => format!(
+                "orient brain response contains no JSON object; raw_response={raw_truncated:?}"
+            ),
+            crate::recipe_output::JsonExtractError::Unrecoverable { source, .. }
+            | crate::recipe_output::JsonExtractError::RecoveredParseFailed { source, .. } => {
+                format!("orient brain JSON parse error: {source}; raw_response={raw_truncated:?}")
+            }
+        }
     })
 }
 
@@ -368,6 +376,57 @@ mod tests {
         assert!(
             err.contains("no JSON object"),
             "labeled lines without JSON should be rejected: {err}"
+        );
+    }
+
+    // ----- #2484 / #969 shared-chokepoint tolerance + diagnostics ----------
+
+    #[test]
+    fn parse_tolerates_trailing_comma() {
+        // A trailing comma before the closing brace sank the old verbatim serde
+        // parse; the shared recovery view now rescues it.
+        let raw = r#"{"adjusted_urgency": 0.4, "rationale": "x",}"#;
+        let j = parse_judgment_from_response(raw).expect("trailing comma must recover");
+        assert!((j.adjusted_urgency - 0.4).abs() < 1e-9);
+        assert_eq!(j.rationale, "x");
+    }
+
+    #[test]
+    fn parse_tolerates_ansi_and_banner_noise() {
+        // Recipe-runner stdout wraps the object in ANSI color codes and a
+        // launcher banner line — the old brace-slice fed those bytes straight
+        // to serde and failed. The shared chokepoint strips the noise first.
+        let raw = "\x1b[32mℹ launcher banner\x1b[0m\n{\"adjusted_urgency\": 0.25, \"rationale\": \"noisy\"}\n";
+        let j = parse_judgment_from_response(raw).expect("ansi/banner noise must be stripped");
+        assert!((j.adjusted_urgency - 0.25).abs() < 1e-9);
+        assert_eq!(j.rationale, "noisy");
+    }
+
+    #[test]
+    fn parse_tolerates_unescaped_control_char_in_rationale() {
+        // A raw TAB inside the rationale string is the shape a model emits for a
+        // formatted reason; strict serde rejects the unescaped control char,
+        // the shared recovery view escapes it and the retry parses.
+        let raw = "{\"adjusted_urgency\": 0.3, \"rationale\": \"col\tone\"}";
+        let j = parse_judgment_from_response(raw).expect("control char must be escaped");
+        assert!((j.adjusted_urgency - 0.3).abs() < 1e-9);
+        assert!(
+            j.rationale.contains("col"),
+            "rationale preserved: {:?}",
+            j.rationale
+        );
+    }
+
+    #[test]
+    fn parse_error_embeds_raw_response_for_diagnostics() {
+        // #969 contract: an unparseable response is fail-closed AND diagnosable
+        // — the raw text is embedded in the error so a drop is never silent.
+        let raw = "totally not json at all";
+        let err = parse_judgment_from_response(raw).expect_err("must Err");
+        assert!(err.contains("no JSON object"), "names the failure: {err}");
+        assert!(
+            err.contains("totally not json"),
+            "embeds raw response: {err}"
         );
     }
 }
