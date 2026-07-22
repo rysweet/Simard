@@ -949,17 +949,215 @@ pub fn extract_json_payload(raw: &str) -> Option<String> {
 /// (unquoted key, elided element, missing value) yields [`Cow::Borrowed`] and
 /// returns `None` unchanged: leniency never widens beyond the four named defects
 /// and a genuine parse error is never masked.
+///
+/// # Visibility (issue #969)
+///
+/// A drop is **never silent**. Before returning `None`, this function fires a
+/// structured `tracing::error!` (target `simard::recipe_output`) naming the
+/// drop site (`failure_kind`), the destination type, the raw length, and a
+/// truncated view of the offending text — the same visibility contract the
+/// #1890 brain parse-failure fix established. Callers that want the typed
+/// failure instead of a bare `None` can use [`extract_and_parse_json_result`].
 pub fn extract_and_parse_json<T: serde::de::DeserializeOwned>(raw: &str) -> Option<T> {
-    let payload = extract_json_payload(raw)?;
-    match serde_json::from_str::<T>(&payload) {
+    match extract_and_parse_json_result::<T>(raw) {
         Ok(value) => Some(value),
-        Err(_) => match recover_json_view(&payload) {
+        Err(err) => {
+            // #969: never a *silent* `None`. Every drop that the `Option`
+            // callers turn into a fail-open default is surfaced first through
+            // the structured `tracing::error!` channel, mirroring the #1890
+            // brain parse-failure visibility fix (`ooda_brain::parse_failure`).
+            err.emit_trace::<T>(raw);
+            None
+        }
+    }
+}
+
+/// Maximum bytes of `raw` recipe output / extracted payload embedded in a
+/// [`JsonExtractError`] and its `tracing::error!` record. Matches the 8 KiB
+/// cap used by [`crate::ooda_brain::parse_failure::RAW_RESPONSE_TRUNCATE_BYTES`]
+/// and `truncate_for_log` in `ooda_actions/advance_goal/spawn.rs` so a
+/// pathological multi-megabyte agent response cannot flood `~/.simard/logs`.
+pub const RAW_EXTRACT_TRUNCATE_BYTES: usize = 8 * 1024;
+
+/// Truncate `s` to at most [`RAW_EXTRACT_TRUNCATE_BYTES`] on a UTF-8 char
+/// boundary for log/error embedding. Never panics on multi-byte input.
+fn truncate_for_record(s: &str) -> String {
+    let mut out = s.to_string();
+    crate::util::string_truncate::truncate_to_char_boundary(&mut out, RAW_EXTRACT_TRUNCATE_BYTES);
+    out
+}
+
+/// Why [`extract_and_parse_json_result`] could not turn noisy recipe stdout
+/// into a `T` — the typed, diagnosable failure that #969 asked for in place of
+/// the former silent `None`.
+///
+/// Each variant carries a **truncated** copy of the relevant text (via
+/// [`RAW_EXTRACT_TRUNCATE_BYTES`]) so an operator reading a surfaced error can
+/// see the shape that defeated the parser without the record ever growing
+/// unbounded. The three variants map one-to-one onto the three drop sites the
+/// old `Option`-returning code had:
+///
+///  1. [`NoBalancedObject`](JsonExtractError::NoBalancedObject) — neither the
+///     `strip_recipe_noise` view nor the `strip_ansi` view contained a
+///     balanced top-level `{…}` object.
+///  2. [`Unrecoverable`](JsonExtractError::Unrecoverable) — a balanced object
+///     was found but strict `serde_json` rejected it and no recovery view
+///     rewrote it (some malformed shape outside the four named defects, e.g.
+///     an unquoted key or an elided element).
+///  3. [`RecoveredParseFailed`](JsonExtractError::RecoveredParseFailed) — a
+///     recovery view rewrote the payload but the retry parse still failed.
+#[derive(Debug)]
+pub enum JsonExtractError {
+    /// No balanced top-level `{…}` object in either cleaned view.
+    NoBalancedObject {
+        /// Truncated copy of the raw recipe stdout that yielded no object.
+        raw_truncated: String,
+    },
+    /// A balanced object was found but strict parse failed with no recovery.
+    Unrecoverable {
+        /// Truncated copy of the extracted (but unparseable) payload.
+        payload_truncated: String,
+        /// The strict-parse `serde_json` error.
+        source: serde_json::Error,
+    },
+    /// A recovery view rewrote the payload but the retry parse still failed.
+    RecoveredParseFailed {
+        /// Truncated copy of the recovered payload that still failed to parse.
+        recovered_truncated: String,
+        /// The `serde_json` error from the retry parse of the recovered view.
+        source: serde_json::Error,
+    },
+}
+
+impl JsonExtractError {
+    /// Stable, low-cardinality tag identifying the drop site, for the
+    /// `failure_kind` structured field and metric slicing.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            JsonExtractError::NoBalancedObject { .. } => "no_balanced_object",
+            JsonExtractError::Unrecoverable { .. } => "unrecoverable",
+            JsonExtractError::RecoveredParseFailed { .. } => "recovered_parse_failed",
+        }
+    }
+
+    /// Fire the structured `tracing::error!` visibility channel for this
+    /// failure, tagged with the destination type `T`. Called by the
+    /// `Option`-returning [`extract_and_parse_json`] so no caller that keeps
+    /// the ergonomic `Option` API loses the drop diagnostics.
+    fn emit_trace<T>(&self, raw: &str) {
+        let target_type = std::any::type_name::<T>();
+        match self {
+            JsonExtractError::NoBalancedObject { raw_truncated } => {
+                tracing::error!(
+                    target: "simard::recipe_output",
+                    failure_kind = self.kind(),
+                    target_type,
+                    raw_len = raw.len(),
+                    raw = %raw_truncated,
+                    "recipe output finalization: no balanced JSON object in agent response (#969)"
+                );
+            }
+            JsonExtractError::Unrecoverable {
+                payload_truncated,
+                source,
+            } => {
+                tracing::error!(
+                    target: "simard::recipe_output",
+                    failure_kind = self.kind(),
+                    target_type,
+                    raw_len = raw.len(),
+                    payload = %payload_truncated,
+                    error = %source,
+                    "recipe output finalization: extracted JSON object failed strict parse and was not recoverable (#969)"
+                );
+            }
+            JsonExtractError::RecoveredParseFailed {
+                recovered_truncated,
+                source,
+            } => {
+                tracing::error!(
+                    target: "simard::recipe_output",
+                    failure_kind = self.kind(),
+                    target_type,
+                    raw_len = raw.len(),
+                    recovered = %recovered_truncated,
+                    error = %source,
+                    "recipe output finalization: recovered JSON view still failed to parse (#969)"
+                );
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for JsonExtractError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JsonExtractError::NoBalancedObject { .. } => {
+                write!(f, "no balanced JSON object in recipe output")
+            }
+            JsonExtractError::Unrecoverable { source, .. } => {
+                write!(
+                    f,
+                    "recipe output JSON failed strict parse (unrecoverable): {source}"
+                )
+            }
+            JsonExtractError::RecoveredParseFailed { source, .. } => {
+                write!(
+                    f,
+                    "recovered recipe output JSON still failed to parse: {source}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for JsonExtractError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            JsonExtractError::NoBalancedObject { .. } => None,
+            JsonExtractError::Unrecoverable { source, .. }
+            | JsonExtractError::RecoveredParseFailed { source, .. } => Some(source),
+        }
+    }
+}
+
+/// Typed sibling of [`extract_and_parse_json`]: extract a balanced JSON object
+/// from noisy recipe stdout and deserialize it into `T`, returning a
+/// [`JsonExtractError`] that names *why* on a miss instead of a bare `None`
+/// (issue #969).
+///
+/// Parsing semantics are **identical** to [`extract_and_parse_json`] — the
+/// same two cleaned views, the same single bounded recovery retry, the same
+/// "leniency never widens beyond the four named defects" guarantee. The only
+/// difference is the return shape: every success path yields the same `T`, and
+/// every drop path yields a diagnosable, `std::error::Error`-implementing
+/// value. [`extract_and_parse_json`] is a thin wrapper that maps `Err(_)` back
+/// to `None` after firing the `tracing::error!` visibility channel, so the
+/// existing `Option` call sites keep their exact behaviour while a caller that
+/// wants the typed error can call this function directly.
+pub fn extract_and_parse_json_result<T: serde::de::DeserializeOwned>(
+    raw: &str,
+) -> Result<T, JsonExtractError> {
+    let payload = extract_json_payload(raw).ok_or_else(|| JsonExtractError::NoBalancedObject {
+        raw_truncated: truncate_for_record(raw),
+    })?;
+    match serde_json::from_str::<T>(&payload) {
+        Ok(value) => Ok(value),
+        Err(strict_err) => match recover_json_view(&payload) {
             // A recovery view actually rewrote the payload — retry the strict
             // parse on the recovered view.
-            Cow::Owned(recovered) => serde_json::from_str::<T>(&recovered).ok(),
+            Cow::Owned(recovered) => serde_json::from_str::<T>(&recovered).map_err(|source| {
+                JsonExtractError::RecoveredParseFailed {
+                    recovered_truncated: truncate_for_record(&recovered),
+                    source,
+                }
+            }),
             // Nothing was recovered: the payload is malformed for some other
             // reason. Do not re-parse identical bytes; preserve the strict miss.
-            Cow::Borrowed(_) => None,
+            Cow::Borrowed(_) => Err(JsonExtractError::Unrecoverable {
+                payload_truncated: truncate_for_record(&payload),
+                source: strict_err,
+            }),
         },
     }
 }
@@ -1305,6 +1503,139 @@ mod tests {
         let raw = r#"{"decision": "admit", "items": ["a, b, c"]}"#;
         let env: Env = extract_and_parse_json(raw).expect("string-content comma preserved");
         assert_eq!(env.items, vec!["a, b, c".to_string()]);
+    }
+
+    // ---- extract_and_parse_json_result (typed errors, issue #969) ---------
+
+    #[test]
+    fn result_ok_matches_option_some_on_clean_object() {
+        // The typed `Result` API returns the same value the `Option` API does
+        // on success — no behavioural divergence between the two entry points.
+        let raw = r#"{"decision": "admit", "items": ["a", "b"]}"#;
+        let via_result: Env =
+            extract_and_parse_json_result(raw).expect("clean object parses via result");
+        let via_option: Env = extract_and_parse_json(raw).expect("clean object parses via option");
+        assert_eq!(via_result, via_option);
+        assert_eq!(via_result.decision, "admit");
+    }
+
+    #[test]
+    fn result_ok_on_recovered_trailing_comma() {
+        // Recovery success is a success in the typed API too.
+        let raw = r#"{"decision": "admit", "items": ["a"],}"#;
+        let env: Env =
+            extract_and_parse_json_result(raw).expect("trailing comma recovered via result");
+        assert_eq!(env.decision, "admit");
+        assert_eq!(env.items, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn result_no_balanced_object_when_no_object_present() {
+        // The "no `{…}` in either cleaned view" drop is a typed
+        // `NoBalancedObject`, carrying a truncated copy of the raw input — the
+        // #969 replacement for the former silent `None`.
+        let raw = "2026-07-20 INFO no json here";
+        let err =
+            extract_and_parse_json_result::<Env>(raw).expect_err("no object must be a typed error");
+        match err {
+            JsonExtractError::NoBalancedObject { ref raw_truncated } => {
+                assert!(raw_truncated.contains("no json here"));
+            }
+            ref other => panic!("expected NoBalancedObject, got {other:?}"),
+        }
+        assert_eq!(err.kind(), "no_balanced_object");
+        // The `Option` wrapper still drops to `None` on the same input.
+        assert_eq!(extract_and_parse_json::<Env>(raw), None);
+    }
+
+    #[test]
+    fn result_unrecoverable_for_non_comma_malformed() {
+        // A balanced object is present, strict parse fails, and no recovery view
+        // rewrites it (unquoted key / missing value are outside the four named
+        // defects) — a typed `Unrecoverable` carrying the serde source error.
+        for raw in [r#"{decision: "admit"}"#, r#"{"decision":}"#] {
+            let err = extract_and_parse_json_result::<Env>(raw)
+                .expect_err("non-comma malformed must be a typed error");
+            match &err {
+                JsonExtractError::Unrecoverable {
+                    payload_truncated,
+                    source,
+                } => {
+                    assert!(!payload_truncated.is_empty());
+                    // The serde error is preserved and reachable via Display.
+                    assert!(!source.to_string().is_empty());
+                }
+                other => panic!("expected Unrecoverable for {raw:?}, got {other:?}"),
+            }
+            assert_eq!(err.kind(), "unrecoverable");
+            // Parity: the `Option` API drops the same inputs to `None`.
+            assert_eq!(extract_and_parse_json::<Env>(raw), None);
+        }
+    }
+
+    #[test]
+    fn result_recovered_parse_failed_when_recovery_rewrites_but_still_invalid() {
+        // A trailing comma triggers the recovery view (so it is rewritten,
+        // taking the `Cow::Owned` arm), but the type constraint is still
+        // violated: `items` must be a `Vec<String>`, here it holds a number.
+        // Recovery strips the comma, the retry parse still fails on the type
+        // mismatch -> typed `RecoveredParseFailed`.
+        let raw = r#"{"decision": "admit", "items": [1, 2],}"#;
+        let err = extract_and_parse_json_result::<Env>(raw)
+            .expect_err("recovered-but-type-invalid must be a typed error");
+        match &err {
+            JsonExtractError::RecoveredParseFailed {
+                recovered_truncated,
+                source,
+            } => {
+                // The comma was stripped in the recovered view.
+                assert!(!recovered_truncated.contains(",]"));
+                assert!(!source.to_string().is_empty());
+            }
+            other => panic!("expected RecoveredParseFailed, got {other:?}"),
+        }
+        assert_eq!(err.kind(), "recovered_parse_failed");
+        // Parity with the `Option` API.
+        assert_eq!(extract_and_parse_json::<Env>(raw), None);
+    }
+
+    #[test]
+    fn json_extract_error_display_and_source_are_populated() {
+        // `Display` is human-readable and `source()` chains to the serde error
+        // for the two parse-failure variants (and is `None` for the
+        // no-object variant).
+        let no_obj = extract_and_parse_json_result::<Env>("nope")
+            .expect_err("no object")
+            .to_string();
+        assert!(no_obj.contains("no balanced JSON object"));
+
+        let unrecoverable =
+            extract_and_parse_json_result::<Env>(r#"{"decision":}"#).expect_err("unrecoverable");
+        assert!(std::error::Error::source(&unrecoverable).is_some());
+
+        let no_source =
+            extract_and_parse_json_result::<Env>("no object here").expect_err("no object");
+        assert!(std::error::Error::source(&no_source).is_none());
+    }
+
+    #[test]
+    fn record_truncation_caps_embedded_raw_at_budget() {
+        // A pathological multi-megabyte agent response must not embed unbounded
+        // text into the error / log record: the raw copy is capped at
+        // `RAW_EXTRACT_TRUNCATE_BYTES`.
+        let huge = "x".repeat(RAW_EXTRACT_TRUNCATE_BYTES * 4);
+        let err =
+            extract_and_parse_json_result::<Env>(&huge).expect_err("no object in a wall of x's");
+        match err {
+            JsonExtractError::NoBalancedObject { raw_truncated } => {
+                assert!(
+                    raw_truncated.len() <= RAW_EXTRACT_TRUNCATE_BYTES,
+                    "embedded raw must respect the byte budget, got {}",
+                    raw_truncated.len()
+                );
+            }
+            other => panic!("expected NoBalancedObject, got {other:?}"),
+        }
     }
 
     // ---- escape_json_string_control_chars --------------------------------
