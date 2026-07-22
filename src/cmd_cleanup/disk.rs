@@ -427,8 +427,7 @@ fn reclaim_corrupt_dbs_in_dir(dir: &Path, report: &mut CleanupReport) {
     // because the largest-asset guard below needs it for every candidate.
     let mut candidates: Vec<(PathBuf, bool, u64, std::time::SystemTime)> = Vec::new();
     for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !is_corrupt_quarantine_name(&name) {
+        if !is_corrupt_quarantine_name(&entry.file_name().to_string_lossy()) {
             continue;
         }
         let Ok(meta) = entry.metadata() else { continue };
