@@ -405,9 +405,12 @@ impl ActiveGoal {
     /// no IO and never panics.
     pub fn has_live_in_flight_ref(&self) -> bool {
         const LIVE_KINDS: [&str; 4] = ["pr", "branch", "session", "engineer"];
-        self.wip_refs
-            .iter()
-            .any(|wip| LIVE_KINDS.contains(&wip.kind.trim().to_ascii_lowercase().as_str()))
+        self.wip_refs.iter().any(|wip| {
+            let kind = wip.kind.trim();
+            LIVE_KINDS
+                .iter()
+                .any(|live| kind.eq_ignore_ascii_case(live))
+        })
     }
 }
 
