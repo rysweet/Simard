@@ -137,6 +137,15 @@ pub struct CanaryResult {
     /// both stay small; `refusal_reason` re-applies the same (idempotent) bound
     /// defensively for values constructed by other paths.
     pub failing_detail: Option<String>,
+    /// Failure class of a RED canary, consumed by the deploy trigger's retry
+    /// scheduler ONLY (Brick B/C, #4415). `true` => a transient infrastructure
+    /// blip (candidate build fault, a gate that exceeded its `gate_timeout`,
+    /// or a subprocess spawn fault) that is likely to clear on retry; `false`
+    /// => a deterministic result: any gate assertion/regression, and ALWAYS
+    /// `false` on a green canary. INVARIANT: `passed == true` implies
+    /// `transient == false`. It NEVER influences [`evaluate_deploy_gate`] — a
+    /// red canary is refused regardless of class.
+    pub transient: bool,
 }
 
 impl CanaryResult {
@@ -313,6 +322,14 @@ impl Deployer for GuardedDeployer {
                 return Err(e);
             }
         };
+
+        // STEP 7 (#4415): record the canary's failure class into the process
+        // -global class-aware backoff. A green canary or a deterministic red
+        // resets the streak (converge / hold at base); a transient red grows the
+        // bounded exponential backoff the OBSERVE throttle reads next tick. This
+        // NEVER affects the deploy decision below — `evaluate_deploy_gate` is
+        // unchanged and does not read the class.
+        crate::overseer::deploy_trigger::record_canary_outcome(canary.passed, canary.transient);
 
         // A rollback check only matters when the target differs from running.
         // A hard error from the ancestry oracle (e.g. the target commit is not
@@ -496,6 +513,12 @@ struct TargetCanaryReport {
     /// STEP 1 (#4420): that gate's own detail (its `--version` / `cargo test` /
     /// probe output). `None` on a green report.
     failing_detail: Option<String>,
+    /// STEP 7 (#4415): `true` when the first reddening gate was killed for
+    /// exceeding its `gate_timeout` (threaded up from
+    /// [`GateResult.timed_out`](crate::self_relaunch::GateResult)). This is the
+    /// structured signal `run_canary` classifies a transient red on — never the
+    /// `detail` text. `false` on a green report or a deterministic gate failure.
+    timed_out: bool,
 }
 
 trait TargetCanaryVerifier: Send + Sync {
@@ -542,6 +565,10 @@ impl TargetCanaryVerifier for SharedTargetCanaryVerifier {
             total_gates: results.len(),
             failing_gate: failing.map(|r| r.gate.to_string()),
             failing_detail: failing.map(|r| r.detail.clone()),
+            // STEP 7 (#4415): a hung gate that was killed for exceeding its
+            // budget carries `timed_out`; thread the first reddening gate's flag
+            // up so `run_canary` can classify it a transient red.
+            timed_out: failing.map(|r| r.timed_out).unwrap_or(false),
         })
     }
 }
@@ -565,6 +592,11 @@ impl CanaryRunner for ProdCanaryRunner {
                 // detail here at population so the raw OTel attribute stays small.
                 failing_gate: report.failing_gate,
                 failing_detail: report.failing_detail.map(|d| bound_detail(&d).into_owned()),
+                // STEP 7 (#4415): a green canary is NEVER transient; a red is
+                // transient ONLY when a gate exceeded its timeout (the structured
+                // `report.timed_out` flag). A plain gate assertion (the common
+                // `Ok(passed == false, timed_out == false)` path) is deterministic.
+                transient: !report.passed && report.timed_out,
             }),
             Err(SafeUpdateError::BuildFailed { detail }) => Ok(CanaryResult {
                 passed: false,
@@ -573,7 +605,26 @@ impl CanaryRunner for ProdCanaryRunner {
                 // the phase as the failing "gate" so telemetry is never blank.
                 failing_gate: Some("build".to_string()),
                 failing_detail: Some(bound_detail(&detail).into_owned()),
+                // STEP 7 (#4415): a candidate build fault (OOM, disk, toolchain)
+                // is infrastructural and likely to clear on retry → transient.
+                transient: true,
             }),
+            Err(
+                e @ (SafeUpdateError::PretestTimeout { .. } | SafeUpdateError::PretestSpawn { .. }),
+            ) => {
+                // STEP 7 (#4415): could not even RUN the gate subprocess (a hung
+                // self-test or a spawn fault) → infrastructural, transient. Route
+                // it to a RED CanaryResult (not the OverseerError catch-all) so it
+                // reaches the class-aware backoff instead of being swallowed.
+                let detail = e.to_string();
+                Ok(CanaryResult {
+                    passed: false,
+                    detail: format!("target canary probe could not run: {detail}"),
+                    failing_gate: Some("probe".to_string()),
+                    failing_detail: Some(bound_detail(&detail).into_owned()),
+                    transient: true,
+                })
+            }
             Err(SafeUpdateError::GateFailed { gate, detail }) => Ok(CanaryResult {
                 passed: false,
                 detail: format!("target canary gate {gate} failed: {detail}"),
@@ -581,6 +632,9 @@ impl CanaryRunner for ProdCanaryRunner {
                 // its (bounded) detail through so the refusal reason can name it.
                 failing_gate: Some(gate),
                 failing_detail: Some(bound_detail(&detail).into_owned()),
+                // STEP 7 (#4415): default-deny — a named gate failure cannot be
+                // proven infrastructural, so treat it as a real regression.
+                transient: false,
             }),
             Err(e) => Err(OverseerError::Capability {
                 what: "target_canary",
@@ -785,6 +839,7 @@ mod tests {
                 detail: "4/4 gates".to_string(),
                 failing_gate: None,
                 failing_detail: None,
+                transient: false,
             })
         }
     }
@@ -1039,6 +1094,7 @@ mod tests {
                     total_gates: 4,
                     failing_gate: None,
                     failing_detail: None,
+                    timed_out: false,
                 }),
                 VerifierOutcome::BuildFail => Err(SafeUpdateError::BuildFailed {
                     detail: "target build failed".to_string(),
@@ -1049,6 +1105,7 @@ mod tests {
                     total_gates: 4,
                     failing_gate: Some(gate.to_string()),
                     failing_detail: Some(detail.to_string()),
+                    timed_out: false,
                 }),
             }
         }
@@ -1141,6 +1198,201 @@ mod tests {
         assert_eq!(seen_targets.lock().unwrap().as_slice(), ["bbbbbbbbbbbb"]);
         assert_eq!(*deployed.lock().unwrap(), 0, "resolve error blocks swap");
         assert_eq!(seen.lock().unwrap()[0].kind, "deploy-refused");
+    }
+
+    // ── STEP 7 TDD (#4415): transient vs deterministic red classification ──────
+    //
+    // Brick B: `CanaryResult.transient` distinguishes a flaky/infrastructure red
+    // (candidate build failure, gate timeout, probe spawn fault) from a genuine
+    // regression (a gate assertion legitimately failed). The deploy DECISION is
+    // unchanged — any red still refuses (see `evaluate_deploy_gate`, contract
+    // preserved) — but the class feeds the class-aware backoff (Brick C) so a
+    // transient red cannot wedge self-deploy forever, while a real regression is
+    // never spuriously fast-retried. Classification is DEFAULT-DENY: only
+    // recognized build/timeout/spawn faults are transient; every other red is
+    // deterministic, and a green canary is NEVER transient (invariant). These
+    // tests are written FIRST and fail until `CanaryResult.transient`,
+    // `TargetCanaryReport.timed_out`, and the classification arms exist.
+
+    /// A `TargetCanaryVerifier` that yields one pre-seeded outcome, so a specific
+    /// build/gate/timeout shape can be mapped through `ProdCanaryRunner`.
+    struct FixedVerifier(Mutex<Option<Result<TargetCanaryReport, SafeUpdateError>>>);
+    impl TargetCanaryVerifier for FixedVerifier {
+        fn build_and_verify(
+            &self,
+            source: &dyn crate::self_deploy::SelfDeploySourcePreparer,
+            target_commit: &str,
+        ) -> Result<TargetCanaryReport, SafeUpdateError> {
+            // Exercise the source seam like the real verifier, then return the
+            // seeded outcome exactly once.
+            let _ = source.prepare(target_commit)?;
+            self.0
+                .lock()
+                .unwrap()
+                .take()
+                .expect("FixedVerifier outcome consumed exactly once")
+        }
+    }
+
+    fn prod_runner_returning(
+        outcome: Result<TargetCanaryReport, SafeUpdateError>,
+    ) -> ProdCanaryRunner {
+        ProdCanaryRunner::with_target_seams(
+            Box::new(RecordingSource {
+                seen_targets: Arc::new(Mutex::new(vec![])),
+                mode: SourceMode::Ok,
+            }),
+            Box::new(FixedVerifier(Mutex::new(Some(outcome)))),
+        )
+    }
+
+    fn green_report() -> TargetCanaryReport {
+        TargetCanaryReport {
+            passed: true,
+            passed_gates: 4,
+            total_gates: 4,
+            failing_gate: None,
+            failing_detail: None,
+            timed_out: false,
+        }
+    }
+
+    #[test]
+    fn green_canary_is_never_transient() {
+        let runner = prod_runner_returning(Ok(green_report()));
+        let r = runner.run_canary("bbbbbbbbbbbb").expect("green canary");
+        assert!(r.passed);
+        assert!(!r.transient, "invariant: a green canary is never transient");
+    }
+
+    #[test]
+    fn build_failure_is_a_transient_red() {
+        let runner = prod_runner_returning(Err(SafeUpdateError::BuildFailed {
+            detail: "candidate `cargo build --release` failed (linker OOM)".to_string(),
+        }));
+        let r = runner
+            .run_canary("bbbbbbbbbbbb")
+            .expect("a build failure is a RED canary, not a hard error");
+        assert!(!r.passed);
+        assert!(
+            r.transient,
+            "a candidate build failure is infrastructure/flaky → transient"
+        );
+    }
+
+    #[test]
+    fn pretest_timeout_is_a_transient_red() {
+        let runner = prod_runner_returning(Err(SafeUpdateError::PretestTimeout { seconds: 600 }));
+        let r = runner
+            .run_canary("bbbbbbbbbbbb")
+            .expect("a pretest timeout must be a transient RED canary, not a hard error");
+        assert!(!r.passed);
+        assert!(
+            r.transient,
+            "a timeout is transient — a hung/flaky probe must not wedge deploy forever"
+        );
+    }
+
+    #[test]
+    fn pretest_spawn_fault_is_a_transient_red() {
+        let runner = prod_runner_returning(Err(SafeUpdateError::PretestSpawn {
+            path: PathBuf::from("/candidate/simard"),
+            reason: "No such file or directory (os error 2)".to_string(),
+        }));
+        let r = runner
+            .run_canary("bbbbbbbbbbbb")
+            .expect("a probe spawn fault must be a transient RED canary, not a hard error");
+        assert!(!r.passed);
+        assert!(
+            r.transient,
+            "a probe spawn fault is infrastructure → transient"
+        );
+    }
+
+    #[test]
+    fn gate_regression_is_a_deterministic_red() {
+        let mut report = green_report();
+        report.passed = false;
+        report.passed_gates = 3;
+        report.failing_gate = Some("unit-test".to_string());
+        report.failing_detail = Some("assertion failed: overseer::tick::latch".to_string());
+        let runner = prod_runner_returning(Ok(report));
+        let r = runner.run_canary("bbbbbbbbbbbb").expect("gate red");
+        assert!(!r.passed);
+        assert!(
+            !r.transient,
+            "a failing gate ASSERTION is a genuine regression → deterministic, not transient"
+        );
+    }
+
+    #[test]
+    fn gate_timeout_report_is_a_transient_red() {
+        // A gate that TIMED OUT is transient even though a gate name is present:
+        // classification keys on the structured `timed_out` signal, not on the
+        // presence of a failing-gate name.
+        let mut report = green_report();
+        report.passed = false;
+        report.passed_gates = 3;
+        report.failing_gate = Some("unit-test".to_string());
+        report.failing_detail = Some("gate timed out after 600s".to_string());
+        report.timed_out = true;
+        let runner = prod_runner_returning(Ok(report));
+        let r = runner.run_canary("bbbbbbbbbbbb").expect("gate red");
+        assert!(!r.passed);
+        assert!(
+            r.transient,
+            "a gate that timed out is transient, even with a gate name present"
+        );
+    }
+
+    #[test]
+    fn ambiguous_red_defaults_to_deterministic() {
+        // Default-deny to deterministic on ambiguity: a red with no build/timeout/
+        // spawn signal must NOT be fast-retried as if flaky.
+        let mut report = green_report();
+        report.passed = false;
+        report.passed_gates = 2;
+        report.failing_gate = None;
+        report.failing_detail = None;
+        let runner = prod_runner_returning(Ok(report));
+        let r = runner.run_canary("bbbbbbbbbbbb").expect("red");
+        assert!(!r.passed);
+        assert!(
+            !r.transient,
+            "an ambiguous red must default to deterministic (no spurious fast-retry)"
+        );
+    }
+
+    #[test]
+    fn unknown_infra_error_stays_a_hard_error() {
+        // A source-resolve failure is neither a recognized transient class nor a
+        // gate red → it must remain a HARD error (fail-safe path unchanged).
+        let runner = prod_runner_returning(Err(SafeUpdateError::SourceResolveFailed {
+            detail: "canonical source unavailable".to_string(),
+        }));
+        let err = runner.run_canary("bbbbbbbbbbbb").unwrap_err();
+        assert!(
+            matches!(err, OverseerError::Capability { .. }),
+            "an unknown infrastructure error stays a hard OverseerError, not a transient red"
+        );
+    }
+
+    #[test]
+    fn transient_class_never_changes_the_deploy_gate_decision() {
+        // Contract preservation: `transient` is scheduler-only. Whether a red is
+        // transient or deterministic, the pure deploy gate refuses it identically.
+        let ctx = DeployContext {
+            running_commit: "aaaaaaaaaaaa".to_string(),
+            target_commit: "bbbbbbbbbbbb".to_string(),
+            target_is_ancestor_of_running: false,
+            canary_passed: false,
+            recent_restart_churn: 0,
+        };
+        assert_eq!(
+            evaluate_deploy_gate(&ctx),
+            Err(DeployRefusal::RedCanary),
+            "any red canary must still refuse — the transient class must not gate the decision"
+        );
     }
 
     // ── pre-swap notification must precede process replacement ──────────────
@@ -1259,6 +1511,7 @@ mod tests {
                 detail: "3/4 gates".to_string(),
                 failing_gate: Some(self.gate.to_string()),
                 failing_detail: Some(self.detail.to_string()),
+                transient: false,
             })
         }
     }
@@ -1272,6 +1525,7 @@ mod tests {
             detail: "4/4 gates".to_string(),
             failing_gate: None,
             failing_detail: None,
+            transient: false,
         };
         assert!(r.failing_gate.is_none());
         assert!(r.failing_detail.is_none());
@@ -1287,6 +1541,7 @@ mod tests {
             detail: "3/4 gates".to_string(),
             failing_gate: Some("unit-test".to_string()),
             failing_detail: Some("test overseer::tick::latch failed".to_string()),
+            transient: false,
         };
         let reason = r.refusal_reason(&DeployRefusal::RedCanary);
         assert!(
@@ -1312,6 +1567,7 @@ mod tests {
             detail: "4/4 gates".to_string(),
             failing_gate: None,
             failing_detail: None,
+            transient: false,
         };
         assert_eq!(
             r.refusal_reason(&DeployRefusal::NoOp),
@@ -1334,6 +1590,7 @@ mod tests {
             detail: "0/4 gates".to_string(),
             failing_gate: None,
             failing_detail: None,
+            transient: false,
         };
         let reason = r.refusal_reason(&DeployRefusal::RedCanary);
         assert!(
@@ -1402,6 +1659,7 @@ mod tests {
             detail: "3/4 gates".to_string(),
             failing_gate: Some("gym-baseline".to_string()),
             failing_detail: Some(huge.clone()),
+            transient: false,
         };
         let reason = r.refusal_reason(&DeployRefusal::RedCanary);
         assert!(

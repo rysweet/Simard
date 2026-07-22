@@ -725,11 +725,15 @@ impl Overseer {
             return;
         };
         // 3) Anti-thrash: at most one probe+attempt per min-interval, process
-        //    -global so the per-tick-rebuilt Overseer cannot reset it.
+        //    -global so the per-tick-rebuilt Overseer cannot reset it. STEP 7
+        //    (#4415): the interval is the class-aware EFFECTIVE interval — a
+        //    transient red canary widens it with bounded exponential backoff so a
+        //    flaky canary is retried politely instead of hammered every base
+        //    interval, while a green/deterministic outcome holds it at the base.
         let now = crate::self_quality_audit::now_epoch_secs();
         if !deploy_trigger::global_deploy_throttle_allow(
             now,
-            deploy_trigger::deploy_min_interval_secs(),
+            deploy_trigger::effective_deploy_min_interval_secs(),
         ) {
             return;
         }

@@ -12,11 +12,13 @@ use std::sync::{Arc, Mutex};
 use crate::overseer::capabilities::{Deployer, OverseerError};
 use crate::overseer::deploy::{
     AncestryOracle, BinaryDeployer, CRASH_LOOP_CHURN_THRESHOLD, CanaryResult, CanaryRunner,
-    GuardedDeployer,
+    DeployContext, DeployRefusal, GuardedDeployer, evaluate_deploy_gate,
 };
 use crate::overseer::deploy_trigger::{
+    DEFAULT_TRANSIENT_BACKOFF_BASE_SECS, MIN_TRANSIENT_BACKOFF_BASE_SECS,
+    TRANSIENT_BACKOFF_BASE_ENV, TRANSIENT_BACKOFF_CEILING_SECS, TransientRedBackoff,
     deploy_drift_signal, deploy_throttle_test_guard, global_deploy_throttle_allow,
-    reset_global_deploy_throttle,
+    reset_global_deploy_throttle, transient_backoff_base_secs, transient_backoff_secs,
 };
 use crate::overseer::intervention::Intervention;
 use crate::overseer::notify::{
@@ -36,6 +38,7 @@ impl CanaryRunner for FakeCanary {
             detail: "4/4 gates".to_string(),
             failing_gate: None,
             failing_detail: None,
+            transient: false,
         })
     }
 }
@@ -361,5 +364,230 @@ fn wired_daemon_behind_main_autonomously_emits_and_executes_a_guarded_deploy() {
         seen.lock().unwrap()[0].kind,
         "deploy-starting",
         "operator notified before the autonomous deploy swap"
+    );
+}
+
+// ─────────────── STEP 7 TDD (#4415): transient-red classification ───────────
+//
+// A1 (reproduce-first): before `CanaryResult.transient`, a transient build
+// failure reddened IDENTICALLY to a genuine regression, so the self-deploy loop
+// could not tell a flaky red (safe to retry) from a real one (must not thrash).
+// The new flag distinguishes them WITHOUT changing the deploy decision. These
+// tests are written FIRST and fail until the field and the class-aware backoff
+// exist.
+
+#[test]
+fn transient_and_deterministic_red_are_distinguishable_but_both_refuse() {
+    let transient_red = CanaryResult {
+        passed: false,
+        detail: "target canary build failed: linker OOM".to_string(),
+        failing_gate: Some("build".to_string()),
+        failing_detail: Some("SIGKILL (out of memory)".to_string()),
+        transient: true,
+    };
+    let regression_red = CanaryResult {
+        passed: false,
+        detail: "3/4 gates".to_string(),
+        failing_gate: Some("unit-test".to_string()),
+        failing_detail: Some("assertion failed: overseer::tick::latch".to_string()),
+        transient: false,
+    };
+
+    // The reproduce-first crux: the two reds are now distinguishable.
+    assert!(transient_red.transient, "a build/OOM red is transient");
+    assert!(
+        !regression_red.transient,
+        "a real gate regression is deterministic"
+    );
+    assert_ne!(
+        transient_red.transient, regression_red.transient,
+        "the two red classes must be distinguishable (the whole point of #4415)"
+    );
+
+    // Contract preserved: `transient` NEVER influences the deploy gate — a red is
+    // a red; both refuse regardless of class.
+    for red in [&transient_red, &regression_red] {
+        assert!(!red.passed);
+        let ctx = DeployContext {
+            running_commit: "aaaaaaaaaaaa".to_string(),
+            target_commit: "bbbbbbbbbbbb".to_string(),
+            target_is_ancestor_of_running: false,
+            canary_passed: red.passed,
+            recent_restart_churn: 0,
+        };
+        assert_eq!(
+            evaluate_deploy_gate(&ctx),
+            Err(DeployRefusal::RedCanary),
+            "any red canary must still refuse the deploy"
+        );
+    }
+}
+
+#[test]
+fn green_canary_is_never_transient_invariant() {
+    let green = CanaryResult {
+        passed: true,
+        detail: "4/4 gates".to_string(),
+        failing_gate: None,
+        failing_detail: None,
+        transient: false,
+    };
+    assert!(green.passed);
+    assert!(
+        !green.transient,
+        "invariant: transient == false whenever the canary is green"
+    );
+}
+
+// ───────────── STEP 7 TDD (#4415): class-aware bounded backoff (Brick C) ─────
+//
+// A transient red must back off with bounded exponential growth so it neither
+// hammers the tick (busy-loop) nor sleeps unboundedly, and a green canary must
+// RESET the backoff so self-deploy can converge to merged main. The math is
+// saturating (no overflow), floored to a non-zero base, and capped at an
+// absolute ceiling. Written FIRST — fail until the backoff API exists.
+
+#[test]
+fn backoff_is_zero_when_there_are_no_transient_failures() {
+    assert_eq!(
+        transient_backoff_secs(0, 60),
+        0,
+        "no transient failures → no backoff (nothing to recover from)"
+    );
+}
+
+#[test]
+fn backoff_grows_exponentially_with_consecutive_transient_failures() {
+    assert_eq!(transient_backoff_secs(1, 60), 60);
+    assert_eq!(transient_backoff_secs(2, 60), 120);
+    assert_eq!(transient_backoff_secs(3, 60), 240);
+    assert_eq!(transient_backoff_secs(4, 60), 480);
+}
+
+#[test]
+fn backoff_saturates_at_the_absolute_ceiling_without_overflow() {
+    // A pathological streak must not overflow (saturating math) and must never
+    // exceed the absolute ceiling.
+    assert_eq!(
+        transient_backoff_secs(64, 60),
+        TRANSIENT_BACKOFF_CEILING_SECS,
+        "backoff must clamp to the absolute ceiling"
+    );
+    assert_eq!(
+        transient_backoff_secs(u32::MAX, 60),
+        TRANSIENT_BACKOFF_CEILING_SECS,
+        "a huge streak must clamp, never panic on overflow"
+    );
+}
+
+#[test]
+fn backoff_base_floor_prevents_a_busy_loop() {
+    // A mis-set base of 0 must clamp to a non-zero floor so a transient red can
+    // never produce a zero-delay retry storm (self-DoS).
+    let d = transient_backoff_secs(1, 0);
+    assert!(
+        d >= MIN_TRANSIENT_BACKOFF_BASE_SECS,
+        "base=0 must clamp up to the non-zero floor, got {d}"
+    );
+    assert!(
+        d > 0,
+        "a transient failure must always back off by a non-zero amount"
+    );
+}
+
+#[test]
+#[serial_test::serial(transient_backoff_env)]
+fn backoff_base_defaults_when_env_is_unset() {
+    let prev = std::env::var(TRANSIENT_BACKOFF_BASE_ENV).ok();
+    // SAFETY: serialized env toggle, restored below.
+    unsafe {
+        std::env::remove_var(TRANSIENT_BACKOFF_BASE_ENV);
+    }
+    assert_eq!(
+        transient_backoff_base_secs(),
+        DEFAULT_TRANSIENT_BACKOFF_BASE_SECS
+    );
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var(TRANSIENT_BACKOFF_BASE_ENV, v),
+            None => std::env::remove_var(TRANSIENT_BACKOFF_BASE_ENV),
+        }
+    }
+}
+
+#[test]
+#[serial_test::serial(transient_backoff_env)]
+fn backoff_base_env_override_is_parsed_and_floored() {
+    let prev = std::env::var(TRANSIENT_BACKOFF_BASE_ENV).ok();
+    // SAFETY: serialized env toggle, restored below.
+    unsafe {
+        std::env::set_var(TRANSIENT_BACKOFF_BASE_ENV, "0");
+    }
+    assert!(
+        transient_backoff_base_secs() >= MIN_TRANSIENT_BACKOFF_BASE_SECS,
+        "an env base of 0 must clamp to the non-zero floor"
+    );
+    unsafe {
+        std::env::set_var(TRANSIENT_BACKOFF_BASE_ENV, "30");
+    }
+    assert_eq!(
+        transient_backoff_base_secs(),
+        30,
+        "a valid env base is honoured"
+    );
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var(TRANSIENT_BACKOFF_BASE_ENV, v),
+            None => std::env::remove_var(TRANSIENT_BACKOFF_BASE_ENV),
+        }
+    }
+}
+
+#[test]
+fn backoff_state_grows_then_resets_on_green() {
+    // Convergence: consecutive transient reds back off increasingly, then a green
+    // canary RESETS the streak so the running binary can advance to merged main.
+    let mut b = TransientRedBackoff::new();
+    let d1 = b.record_transient_red();
+    let d2 = b.record_transient_red();
+    let d3 = b.record_transient_red();
+    assert!(
+        d1 > 0 && d2 > d1 && d3 > d2,
+        "consecutive transient reds must back off increasingly: {d1}, {d2}, {d3}"
+    );
+    b.record_green();
+    assert_eq!(
+        b.current_delay_secs(),
+        0,
+        "a green canary must reset the transient backoff so self-deploy converges"
+    );
+}
+
+#[test]
+fn backoff_state_is_idempotent_on_repeated_green() {
+    let mut b = TransientRedBackoff::new();
+    b.record_transient_red();
+    b.record_green();
+    b.record_green();
+    assert_eq!(
+        b.current_delay_secs(),
+        0,
+        "repeated greens stay reset (idempotent — no double-count, no thrash)"
+    );
+}
+
+#[test]
+fn backoff_state_deterministic_red_does_not_fast_retry() {
+    // A genuine regression is NOT fast-retried by the transient backoff; the
+    // existing global min-interval throttle owns its cadence. A deterministic red
+    // clears the transient streak.
+    let mut b = TransientRedBackoff::new();
+    b.record_transient_red();
+    b.record_transient_red();
+    b.record_deterministic_red();
+    assert_eq!(
+        b.current_delay_secs(),
+        0,
+        "a deterministic red must clear the transient fast-retry streak"
     );
 }

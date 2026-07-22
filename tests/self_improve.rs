@@ -251,16 +251,19 @@ fn all_gates_passed_with_mixed_results() {
             gate: RelaunchGate::Smoke,
             passed: true,
             detail: "ok".to_string(),
+            timed_out: false,
         },
         GateResult {
             gate: RelaunchGate::UnitTest,
             passed: true,
             detail: "ok".to_string(),
+            timed_out: false,
         },
         GateResult {
             gate: RelaunchGate::GymBaseline,
             passed: false,
             detail: "gym failed".to_string(),
+            timed_out: false,
         },
     ];
     assert!(!all_gates_passed(&results));
