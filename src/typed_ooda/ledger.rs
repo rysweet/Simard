@@ -124,8 +124,12 @@ fn is_sqlite_busy(error: &rusqlite::Error) -> bool {
     }
 }
 
-/// Capped exponential backoff (10ms, 20ms, 40ms, 80ms, then capped at 100ms)
-/// between busy-retry attempts.
+/// Exponential backoff of `5 * 2^attempt` milliseconds, capped at 100ms.
+///
+/// `begin_immediate!` calls this only for `attempt` 1..=4 (it returns at
+/// `BUSY_RETRY_MAX_ATTEMPTS = 5` before sleeping), so the effective sleep
+/// sequence is 10ms, 20ms, 40ms, 80ms. The 100ms cap guards against overflow
+/// and is unreachable at the current `BUSY_RETRY_MAX_ATTEMPTS`.
 fn busy_backoff(attempt: u32) -> Duration {
     let millis = 5u64.saturating_mul(1u64 << attempt.min(5)).min(100);
     Duration::from_millis(millis)
