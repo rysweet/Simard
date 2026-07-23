@@ -67,6 +67,11 @@ fn scrub_gate_env(cmd: &mut Command, config: &RelaunchConfig) {
         // Core process env.
         "PATH",
         "HOME",
+        // Temp dir for the `unit-test` gate's `cargo test` toolchain: rustc/cargo
+        // write intermediate artifacts under $TMPDIR, so dropping it can push
+        // compile temporaries onto an unintended default and falsely redden a
+        // healthy candidate. Part of the universal floor by design intent.
+        "TMPDIR",
         // Cargo/rustup toolchain — load-bearing for the `unit-test` gate, which
         // shells out to `cargo test`. Without these `env_clear()` would falsely
         // redden a healthy candidate (a self-inflicted stall).
@@ -337,14 +342,9 @@ fn truncate_output(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         return s.trim().to_string();
     }
-    // Char-boundary-safe truncation to avoid panic on multi-byte UTF-8. Walk
-    // forward from `max_len` to the next boundary — an O(1) back-off (≤3 bytes)
-    // rather than an O(max_len) scan of every preceding char, mirroring the
-    // boundary handling in [`truncate_output_tail`].
-    let mut end = max_len;
-    while end < s.len() && !s.is_char_boundary(end) {
-        end += 1;
-    }
+    // Char-boundary-safe truncation (never splits a multi-byte codepoint); see
+    // [`super::types::next_char_boundary`] for the shared O(1) back-off.
+    let end = super::types::next_char_boundary(s, max_len);
     format!("{}...", s[..end].trim())
 }
 
@@ -361,11 +361,9 @@ fn truncate_output_tail(s: &str, max_len: usize) -> String {
         return trimmed.to_string();
     }
     // Take the last `max_len` bytes, then move forward to the next char boundary
-    // so the retained tail is always valid whole UTF-8.
-    let mut start = trimmed.len() - max_len;
-    while start < trimmed.len() && !trimmed.is_char_boundary(start) {
-        start += 1;
-    }
+    // (shared [`super::types::next_char_boundary`]) so the retained tail is
+    // always valid whole UTF-8.
+    let start = super::types::next_char_boundary(trimmed, trimmed.len() - max_len);
     format!("...{}", &trimmed[start..])
 }
 

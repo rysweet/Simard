@@ -87,16 +87,26 @@ impl GateResult {
         let detail = if trimmed.len() <= MAX_DETAIL_BYTES {
             trimmed.to_string()
         } else {
-            // Char-boundary-safe back-off (≤3 bytes) so a multi-byte codepoint is
-            // never split; mirrors the truncation helpers in `gates.rs`.
-            let mut end = MAX_DETAIL_BYTES;
-            while end < trimmed.len() && !trimmed.is_char_boundary(end) {
-                end += 1;
-            }
+            let end = next_char_boundary(trimmed, MAX_DETAIL_BYTES);
             format!("{}...", &trimmed[..end])
         };
         format!("[{}] {}: {}", status, self.gate, detail)
     }
+}
+
+/// Smallest index `>= idx` (clamped to `s.len()`) that lands on a UTF-8 char
+/// boundary. Slicing a `&str` at a mid-codepoint byte panics, so every byte-cap
+/// truncation in this module (`redacted_display` here, `truncate_output` /
+/// `truncate_output_tail` in `gates.rs`) walks forward from its cap to the next
+/// boundary before slicing. The back-off is O(1) — at most 3 bytes for any
+/// UTF-8 codepoint — never an O(idx) rescan. Extracted so the boundary rule
+/// lives in exactly one place (the three sites previously duplicated it).
+pub(super) fn next_char_boundary(s: &str, idx: usize) -> usize {
+    let mut end = idx.min(s.len());
+    while end < s.len() && !s.is_char_boundary(end) {
+        end += 1;
+    }
+    end
 }
 
 pub fn default_gates() -> Vec<RelaunchGate> {
