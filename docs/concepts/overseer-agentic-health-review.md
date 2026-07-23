@@ -119,6 +119,17 @@ The agent emits plain-text marker lines; the rail parses them:
 uses: `problem` and `next_step` are **plain English** for the human, while
 `reason`/`why` are internal jargon for telemetry.
 
+The marker parse is **decoration-tolerant but fail-closed**. Agents routinely
+present their decisions as a markdown list, a blockquote, or an inline-code span,
+so the rail strips a leading `-`/`*`/`+`/`N.`/`N)` list bullet, a `>` blockquote
+caret, or surrounding backticks *before* matching a marker — otherwise a
+well-formed `LAUNCH_RECIPE=` line dressed as `- LAUNCH_RECIPE=…` would be
+silently dropped and a real crash-loop would go un-remediated with no signal
+(the terminal marker still parses, so the degraded-pass ladder never fires).
+Stripping decoration never *invents* a decision: only the three distinctive
+markers are ever acted on, a bulleted line of prose normalises to prose and
+matches nothing, and a malformed-JSON or empty-field decision is still skipped.
+
 ### The verdict is observable, never a silent pass
 
 The `HEALTH_REVIEW_COMPLETE=<summary>` marker is not just a gate — its one-line

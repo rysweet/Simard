@@ -201,12 +201,19 @@ pub struct HealthReviewReport {
 ///   fabricated intervention with missing text. Other decisions on the pass
 ///   still apply.
 /// - Unknown lines are ignored (a `HEALTHY` line carries no payload).
+/// - Benign markdown decoration an agent commonly wraps a decision line in — a
+///   leading `-`/`*`/`+`/`N.`/`N)` list bullet, a `>` blockquote caret, or
+///   surrounding inline-code backticks — is stripped BEFORE marker matching
+///   ([`strip_marker_decoration`]) so a well-formed decision is DISPATCHED
+///   rather than silently dropped. This never invents a marker: only the three
+///   distinctive markers are ever acted on, and a bulleted line of prose still
+///   matches nothing.
 pub fn parse_health_review_output(stdout: &str) -> Result<HealthReviewReport, String> {
     let mut interventions: Vec<Intervention> = Vec::new();
     let mut summary: Option<String> = None;
 
     for line in stdout.lines() {
-        let trimmed = line.trim();
+        let trimmed = strip_marker_decoration(line);
         if trimmed.is_empty() {
             continue;
         }
@@ -239,6 +246,69 @@ pub fn parse_health_review_output(stdout: &str) -> Result<HealthReviewReport, St
         interventions,
         summary,
     })
+}
+
+/// Strip benign markdown decoration an agent commonly wraps a single decision
+/// line in, so a well-formed marker survives ordinary formatting instead of
+/// being silently dropped by the strict prefix match. Removes, in order:
+///
+/// 1. any leading `>` blockquote carets (each optionally space-padded),
+/// 2. a SINGLE leading list bullet — `-`/`*`/`+` or an ordered `N.`/`N)` — that
+///    is followed by whitespace (so a genuine `-`-prefixed marker is never
+///    mistaken as content, and prose bullets simply match no marker), and
+/// 3. one layer of surrounding inline-code backticks (```` ``` ```` or `` ` ``).
+///
+/// It is decoration-only and fail-closed: the returned slice is still matched
+/// against the three DISTINCTIVE markers, so this can never invent a decision —
+/// a decorated line of prose normalises to prose and matches nothing.
+fn strip_marker_decoration(line: &str) -> &str {
+    let mut s = line.trim();
+    // 1. Leading blockquote carets, possibly repeated (`> > `).
+    loop {
+        let t = s.trim_start();
+        match t.strip_prefix('>') {
+            Some(rest) => s = rest,
+            None => {
+                s = t;
+                break;
+            }
+        }
+    }
+    // 2. A single leading list bullet (unordered or ordered).
+    s = strip_leading_bullet(s.trim_start()).unwrap_or_else(|| s.trim_start());
+    // 3. One layer of surrounding inline-code backticks (triple before single).
+    s = s.trim();
+    for fence in ["```", "`"] {
+        if let Some(inner) = s.strip_prefix(fence) {
+            s = inner.strip_suffix(fence).unwrap_or(inner);
+            break;
+        }
+    }
+    s.trim()
+}
+
+/// Strip a SINGLE leading list bullet — unordered (`-`/`*`/`+`) or ordered
+/// (`N.`/`N)`) — plus its trailing whitespace, or `None` when `s` is not
+/// bulleted. The trailing-whitespace requirement keeps a bare marker (or prose)
+/// that merely starts with a bullet character from being mis-stripped.
+fn strip_leading_bullet(s: &str) -> Option<&str> {
+    for bullet in ['-', '*', '+'] {
+        if let Some(rest) = s.strip_prefix(bullet)
+            && rest.starts_with(char::is_whitespace)
+        {
+            return Some(rest.trim_start());
+        }
+    }
+    let digit_len = s.chars().take_while(char::is_ascii_digit).count();
+    if digit_len > 0 {
+        let after = &s[digit_len..];
+        if let Some(rest) = after.strip_prefix('.').or_else(|| after.strip_prefix(')'))
+            && rest.starts_with(char::is_whitespace)
+        {
+            return Some(rest.trim_start());
+        }
+    }
+    None
 }
 
 /// Parse one `LAUNCH_RECIPE=` JSON payload into an [`Intervention::LaunchRecipe`],
@@ -810,6 +880,77 @@ mod tests {
         let report = parse_health_review_output(out).expect("parses");
         assert!(report.interventions.is_empty());
         assert_eq!(report.summary, "healthy");
+    }
+
+    #[test]
+    fn parse_tolerates_bulleted_decision_lines() {
+        // Agents very commonly present their decisions as a markdown list. The
+        // strict prefix match used to DROP these silently, losing remediation on
+        // the critical self-heal path while still parsing "successfully".
+        let out = concat!(
+            r#"- LAUNCH_RECIPE={"task_description":"fix actor-binding crash-loop (286x)","target_repo":"rysweet/Simard","sequence_group":null}"#,
+            "\n",
+            r#"* ESCALATE_GOAL={"goal_id":"g-9","problem":"The done-gate cannot be measured.","next_step":"Pick a measurable target.","why":"unmeasurable done-gate","reason":"health-review:per-goal","link":null}"#,
+            "\n",
+            r#"1. LAUNCH_RECIPE={"task_description":"second systemic sweep on shared parse path","target_repo":"rysweet/Simard","sequence_group":null}"#,
+            "\n- HEALTH_REVIEW_COMPLETE=2 launched, 1 escalated\n"
+        );
+        let report = parse_health_review_output(out).expect("parses");
+        assert_eq!(report.interventions.len(), 3);
+        assert!(matches!(
+            report.interventions[0],
+            Intervention::LaunchRecipe { .. }
+        ));
+        assert!(matches!(
+            report.interventions[1],
+            Intervention::EscalateBlockedGoal { .. }
+        ));
+        assert!(matches!(
+            report.interventions[2],
+            Intervention::LaunchRecipe { .. }
+        ));
+        assert_eq!(report.summary, "2 launched, 1 escalated");
+    }
+
+    #[test]
+    fn parse_tolerates_blockquote_and_inline_code_wrapping() {
+        let out = concat!(
+            "> ",
+            r#"LAUNCH_RECIPE={"task_description":"fix crash-loop root cause","target_repo":"rysweet/Simard","sequence_group":null}"#,
+            "\n`HEALTH_REVIEW_COMPLETE=1 systemic launch`\n"
+        );
+        let report = parse_health_review_output(out).expect("parses");
+        assert_eq!(report.interventions.len(), 1);
+        assert!(matches!(
+            report.interventions[0],
+            Intervention::LaunchRecipe { .. }
+        ));
+        assert_eq!(report.summary, "1 systemic launch");
+    }
+
+    #[test]
+    fn parse_decoration_never_fabricates_from_bulleted_prose() {
+        // A bulleted line of ordinary prose must normalise to prose and match no
+        // marker — decoration-stripping is fail-closed, never marker-inventing.
+        let out = concat!(
+            "- The agent observed a crash-loop and reasoned about it.\n",
+            "> LAUNCH the fix soon (prose, not a marker).\n",
+            "HEALTH_REVIEW_COMPLETE=healthy\n"
+        );
+        let report = parse_health_review_output(out).expect("parses");
+        assert!(report.interventions.is_empty());
+        assert_eq!(report.summary, "healthy");
+    }
+
+    #[test]
+    fn strip_marker_decoration_is_identity_on_plain_lines() {
+        assert_eq!(strip_marker_decoration("HEALTHY"), "HEALTHY");
+        assert_eq!(
+            strip_marker_decoration("  HEALTH_REVIEW_COMPLETE=ok  "),
+            "HEALTH_REVIEW_COMPLETE=ok"
+        );
+        // A bullet char with no trailing whitespace is NOT a list bullet.
+        assert_eq!(strip_marker_decoration("-notabullet"), "-notabullet");
     }
 
     // ── reviewer over the injectable seam ─────────────────────────────────
