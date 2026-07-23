@@ -247,6 +247,40 @@ fn resolve_recipe_path(repo_root: &Path, home_override: Option<&Path>) -> Option
     None
 }
 
+/// Build the `recipe-runner-rs` [`Command`] for the self-quality-audit recipe.
+///
+/// Sets the recipe path, JSON output format, and the `state_root` / `repo_path`
+/// context vars. Exports `AMPLIHACK_AGENT_BINARY` (Copilot/Claude parity) and
+/// [`WORKFLOW_PR_LABELS_ENV`](crate::overseer::config::WORKFLOW_PR_LABELS_ENV) =
+/// [`SIMARD_ENGINEER_PR_LABEL`](crate::overseer::config::SIMARD_ENGINEER_PR_LABEL)
+/// so the PRs this monthly audit opens against rysweet/Simard carry the durable
+/// engineer marker and are visible to the self-merge queue (#4097). Inert until
+/// the amplihack publish consumer (#979) lands.
+///
+/// Extracted as a seam so the env contract is unit-testable via
+/// [`Command::get_envs`] without spawning `recipe-runner-rs`.
+fn build_audit_command(
+    recipe_path: &Path,
+    state_root: &Path,
+    repo_root: &Path,
+    agent_binary: &str,
+) -> Command {
+    let mut cmd = Command::new("recipe-runner-rs");
+    cmd.arg(recipe_path.as_os_str())
+        .arg("--output-format")
+        .arg("json")
+        .env("AMPLIHACK_AGENT_BINARY", agent_binary)
+        .env(
+            crate::overseer::config::WORKFLOW_PR_LABELS_ENV,
+            crate::overseer::config::SIMARD_ENGINEER_PR_LABEL,
+        )
+        .arg("-c")
+        .arg(format!("state_root={}", state_root.display()))
+        .arg("-c")
+        .arg(format!("repo_path={}", repo_root.display()));
+    cmd
+}
+
 /// Run the monthly self-quality-audit recipe via `recipe-runner-rs`.
 ///
 /// `repo_root` locates the recipe YAML and is passed to the recipe as the
@@ -273,15 +307,7 @@ pub fn run_self_quality_audit(
 
     let agent_binary = RuntimeConfig::load()?.llm_provider.agent_binary_value();
 
-    let output = Command::new("recipe-runner-rs")
-        .arg(recipe_path.as_os_str())
-        .arg("--output-format")
-        .arg("json")
-        .env("AMPLIHACK_AGENT_BINARY", agent_binary)
-        .arg("-c")
-        .arg(format!("state_root={}", state_root.display()))
-        .arg("-c")
-        .arg(format!("repo_path={}", repo_root.display()))
+    let output = build_audit_command(&recipe_path, state_root, repo_root, agent_binary)
         .output()
         .map_err(|e| SimardError::AdapterInvocationFailed {
             base_type: ADAPTER_TAG.to_string(),
@@ -344,5 +370,53 @@ fn truncate(s: &str, max: usize) -> String {
         prefix + "…"
     } else {
         prefix
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    /// Seam (d): the monthly self-quality-audit runs `recipe-runner-rs` and
+    /// opens PRs against rysweet/Simard, so its Command must export
+    /// `WORKFLOW_PR_LABELS` alongside the existing `AMPLIHACK_AGENT_BINARY`.
+    /// Extracting `build_audit_command` makes the env contract unit-testable via
+    /// `Command::get_envs()` without spawning `recipe-runner-rs`.
+    #[test]
+    fn build_audit_command_exports_workflow_pr_labels() {
+        let cmd = build_audit_command(
+            Path::new("/tmp/recipe.yaml"),
+            Path::new("/home/agent/.simard"),
+            Path::new("/home/agent/src/Simard"),
+            "copilot",
+        );
+
+        assert_eq!(
+            cmd.get_program(),
+            OsStr::new("recipe-runner-rs"),
+            "the audit command must invoke recipe-runner-rs"
+        );
+
+        let labels_set = cmd.get_envs().any(|(k, v)| {
+            k == OsStr::new(crate::overseer::config::WORKFLOW_PR_LABELS_ENV)
+                && v == Some(OsStr::new(
+                    crate::overseer::config::SIMARD_ENGINEER_PR_LABEL,
+                ))
+        });
+        assert!(
+            labels_set,
+            "build_audit_command must set WORKFLOW_PR_LABELS=simard-autonomous \
+             via the shared constants"
+        );
+
+        // The pre-existing agent-binary contract must be preserved.
+        let agent_binary_set = cmd.get_envs().any(|(k, v)| {
+            k == OsStr::new("AMPLIHACK_AGENT_BINARY") && v == Some(OsStr::new("copilot"))
+        });
+        assert!(
+            agent_binary_set,
+            "build_audit_command must still forward AMPLIHACK_AGENT_BINARY"
+        );
     }
 }
