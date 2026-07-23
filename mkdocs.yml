@@ -108,6 +108,7 @@ nav:
     - Write-Authority Posture: concepts/write-authority-posture.md
     - Identity-Scoped Cognition (Seed Goals, Observe-Only Act): concepts/identity-scoped-cognition.md
     - OODA Loop Self-Detection: concepts/ooda-loop-self-detection.md
+    - Typed-Outcome Ledger Shared Connection: concepts/typed-outcome-ledger-shared-connection.md
     - Unified RecipeBrain: concepts/unified-recipe-brain.md
     - Prompt-Driven OODA Brain: concepts/prompt-driven-ooda-brain.md
     - Prompt-Driven Brain Iteration: concepts/prompt-driven-brain-iteration.md
@@ -202,6 +203,7 @@ nav:
       - Brain Decision Parse Failures: howto/diagnose-brain-decision-parse-failures.md
       - Decide/Orient Parse Failures: howto/diagnose-decide-orient-parse-failures.md
     - Diagnose and Recover OODA Step Failures: howto/diagnose-and-recover-ooda-step-failures.md
+    - Diagnose Typed-Outcome "database is locked": howto/diagnose-typed-outcome-database-is-locked.md
     - Diagnose Journal E2BIG Spawn Failures: howto/diagnose-journal-e2big-spawn-failures.md
     - Diagnose Signal-Meeting E2BIG Spawn Failures: howto/diagnose-signal-meeting-e2big.md
     - Add a Safe Agent/Recipe Spawn Site: howto/add-a-safe-agent-spawn-site.md
@@ -290,6 +292,7 @@ nav:
     - Investigate-Before-Reap API: reference/investigate-stale-engineer-api.md
     - Tombstoned-Goal Engineer Reaper API: reference/tombstoned-goal-engineer-reaper-api.md
     - Typed OODA Goal-Session Deterministic Rails: reference/typed-ooda-goal-session-rails.md
+    - Typed-Outcome Ledger Connection Registry API: reference/typed-outcome-ledger-connection-registry-api.md
     - Stable Goal-Session Identity API: reference/stable-goal-session-identity-api.md
     - Standing-Research Novelty-Directive API: reference/standing-research-goal-novelty-directive-api.md
     - Research-Goal Never-Idle Rail API: reference/research-goal-never-idle-rail-api.md
