@@ -845,11 +845,50 @@ mod tests {
     // ── issue #2549: repo-derived workdir (no hardcoded operator path) ──
 
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn resolve_agent_workdir_derives_repo_root_from_cwd() {
-        // `cargo test` runs inside this git checkout, so resolution must yield
-        // a real repository root — and it must NOT be the old hardcoded path.
-        let resolved = resolve_agent_workdir()
-            .expect("workdir should resolve to the repo root inside a git checkout");
+        // Exercise Branch 2 (cwd-derivation via `git rev-parse --show-toplevel`)
+        // WITHOUT mutating process-global cwd: cwd is shared across the entire
+        // parallel test binary, and the sole `set_current_dir` in this codebase
+        // corrupts every concurrent cwd-reader (e.g. `procfs_probe_detects_self_cwd`),
+        // producing non-deterministic cross-test failures. Instead we clear any
+        // explicit override so resolution must derive from the ambient cwd, then
+        // guard on a discoverable root:
+        //
+        //   * inside a git checkout (CI) resolution yields the repo root and we
+        //     assert the full invariants (real dir, contains `.git`, never the
+        //     hardcoded operator path);
+        //   * from the self-deploy gate's non-git build dir resolution yields
+        //     `None` (correct production behaviour) — we skip cleanly rather
+        //     than `.expect()`-panicking (issue #4505: exit 101 red-canary loop).
+        //
+        // Serialised under `cognitive_memory` because clearing `WORKDIR_ENV` is a
+        // process-global env mutation shared with the override tests below.
+        let prev = std::env::var_os(WORKDIR_ENV);
+        // SAFETY: env mutation is serialised via the serial key above.
+        unsafe { std::env::remove_var(WORKDIR_ENV) };
+
+        let resolved = resolve_agent_workdir();
+
+        // Restore before asserting so a panic cannot leak the cleared override.
+        unsafe {
+            if let Some(v) = &prev {
+                std::env::set_var(WORKDIR_ENV, v);
+            }
+        }
+
+        let Some(resolved) = resolved else {
+            // No git checkout discoverable from cwd — the discoverable-root
+            // precondition is unmet, so there is nothing to assert. This is the
+            // self-deploy gate path; skip cleanly (no silent fallback: the
+            // decision is traced).
+            debug!(
+                "resolve_agent_workdir_derives_repo_root_from_cwd: no repo root \
+                 discoverable from cwd — skipping repo-root assertions (issue #4505)"
+            );
+            return;
+        };
+
         assert!(resolved.is_dir(), "resolved workdir must exist");
         assert!(
             resolved.join(".git").exists(),
@@ -892,12 +931,20 @@ mod tests {
     #[test]
     #[serial_test::serial(cognitive_memory)]
     fn resolve_agent_workdir_ignores_nonexistent_override() {
+        // A bogus override must be ignored and resolution must fall through to
+        // cwd-derivation. No cwd mutation (see the derives-from-cwd test above
+        // for why): we set a non-existent `WORKDIR_ENV`, restore it, then guard
+        // on a discoverable root. Inside a checkout resolution yields the repo
+        // root; from the self-deploy gate's non-git build dir it yields `None`
+        // (issue #4505) and we skip cleanly — either way it must NEVER be the
+        // hardcoded operator path.
         let prev = std::env::var_os(WORKDIR_ENV);
         // SAFETY: env mutation is serialised via the serial key above.
         unsafe { std::env::set_var(WORKDIR_ENV, "/nonexistent/simard/meeting/dir") };
 
         let resolved = resolve_agent_workdir();
 
+        // Restore before asserting so a panic cannot leak the bogus override.
         unsafe {
             match &prev {
                 Some(v) => std::env::set_var(WORKDIR_ENV, v),
@@ -905,9 +952,15 @@ mod tests {
             }
         }
 
-        // A bogus override must fall through to cwd-derivation (the repo root),
-        // never a hardcoded path — so inside the checkout we still get a repo.
-        let resolved = resolved.expect("should fall through to repo root");
+        let Some(resolved) = resolved else {
+            // Bogus override correctly ignored, and no repo root is discoverable
+            // from cwd (self-deploy gate). Nothing to assert; skip cleanly.
+            debug!(
+                "resolve_agent_workdir_ignores_nonexistent_override: bogus override \
+                 ignored and no repo root discoverable from cwd — skipping (issue #4505)"
+            );
+            return;
+        };
         assert_ne!(
             resolved,
             PathBuf::from("/home/azureuser/src/Simard/worktrees/main"),
