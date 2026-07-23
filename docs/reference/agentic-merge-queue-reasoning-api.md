@@ -144,29 +144,29 @@ pub enum MergeReasoningScope {
     Disabled,
 }
 
-/// Pure, unit-testable resolver. `roster` is the validated ecosystem_repos.toml
-/// slug list, used as the default scope when the env var is unset.
+/// Pure, unit-testable resolver. `roster` is the validated active-identity
+/// governed slug list, used as the default scope when the env var is unset.
 pub fn merge_reasoning_scope_from(
     lookup: impl Fn(&str) -> Option<String>,
     roster: &[String],
 ) -> MergeReasoningScope;
 
-/// Production entry: reads SIMARD_MERGE_REASONING_SCOPE and the governed roster.
+/// Production entry: reads SIMARD_MERGE_REASONING_SCOPE and the active identity roster.
 pub fn merge_reasoning_scope() -> MergeReasoningScope;
 ```
 
 | `SIMARD_MERGE_REASONING_SCOPE` | Result | Reasoning |
 |---|---|---|
-| unset | `Roster` | ON over governed repos + Simard |
+| unset | `Roster` | ON over the active identity roster |
 | `""` / whitespace | `Roster` | ON |
 | `rysweet/Simard,rysweet/azlin` | `Explicit([…])` | ON, narrowed |
 | `off` / `disabled` / `0` / `false` / `no` | `Disabled` | **OFF, LOUD** |
 
 > **Unset ≠ disabled.** The old `SIMARD_AUTOMERGE_REPOS` conflated them (unset ⇒
 > silent zero reasoning). Here only an explicit off value disables, and it is
-> announced on every channel. Roster resolution reuses the install-first
-> [ecosystem-roster resolver](./ecosystem-roster-resolution.md); an empty roster
-> is a loud error.
+> announced on every channel. Roster resolution reuses the identity-state
+> [governed-roster resolver](./ecosystem-roster-resolution.md); an empty or
+> all-invalid roster is a loud error.
 
 ## The reasoner seam
 

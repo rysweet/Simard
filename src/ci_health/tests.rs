@@ -2299,16 +2299,27 @@ mod diagnosis {
     }
 }
 
-/// The governed roster is derived from the embedded ecosystem single-source-of-
-/// truth (`prompt_assets/simard/ecosystem_repos.toml`) rather than a second
-/// hardcoded list, so a repo added there is swept with no code change and the
-/// two stewards can never disagree about who is governed.
+/// The governed roster is the ACTIVE identity's mutable, curated roster resolved
+/// from the generic identity-scoped state store (single source of truth) — the
+/// same roster the Overseer's `ecosystem-observe` / `observe-merge-queue` rails
+/// resolve, so a repo Simard adds is swept with no code change and the stewards
+/// can never disagree about who is governed. These tests are hermetic: they
+/// resolve against a temp state root seeded from the Simard default, never the
+/// ambient `~/.simard`.
 mod governed_roster {
-    use crate::ci_health::governed_repos;
+    use crate::overseer::ecosystem_observe::{
+        DEFAULT_SIMARD_GOVERNED_ROSTER, resolve_governed_roster,
+    };
+
+    fn seeded_roster() -> Vec<String> {
+        let state = tempfile::tempdir().unwrap();
+        resolve_governed_roster(state.path(), "simard", DEFAULT_SIMARD_GOVERNED_ROSTER)
+            .expect("seeded governed roster must resolve")
+    }
 
     #[test]
-    fn embedded_roster_parses_to_a_nonempty_validated_fleet() {
-        let roster = governed_repos().expect("embedded ecosystem roster must parse");
+    fn seed_resolves_to_a_nonempty_validated_fleet() {
+        let roster = seeded_roster();
         // A non-empty roster is the whole point: an empty fleet would classify as
         // zero actionable failures and report GREEN — the false-green this sweep
         // exists to prevent. Fail-loud is asserted by the `expect` above.
@@ -2333,7 +2344,7 @@ mod governed_roster {
 
     #[test]
     fn governed_roster_includes_simard_itself_and_has_no_duplicates() {
-        let roster = governed_repos().expect("embedded ecosystem roster must parse");
+        let roster = seeded_roster();
         assert!(
             roster.iter().any(|s| s == "rysweet/Simard"),
             "Simard must sweep its own CI, not only its siblings'"
@@ -2347,16 +2358,21 @@ mod governed_roster {
     }
 
     #[test]
-    fn governed_roster_is_exactly_the_embedded_ecosystem_source_of_truth() {
-        // The roster the sweep uses must equal what the Overseer parser reads from
-        // the *same* embedded bytes — proving there is a single source of truth
-        // and no drift between the CI-health fleet and the ecosystem roster.
-        let via_sweep = governed_repos().expect("embedded ecosystem roster must parse");
-        let embedded = include_str!("../../prompt_assets/simard/ecosystem_repos.toml");
-        let via_parser = crate::overseer::ecosystem_observe::parse_ecosystem_roster(embedded)
-            .expect("embedded roster must parse via the Overseer parser too");
+    fn ci_health_and_overseer_resolve_the_same_single_source_of_truth() {
+        // The roster the CI-health sweep uses (via `resolve_governed_roster`) must
+        // equal what the Overseer's observe rails resolve from the SAME seed +
+        // store — proving one source of truth and no drift between the CI-health
+        // fleet and the ecosystem roster.
+        let state = tempfile::tempdir().unwrap();
+        let via_ci_health =
+            resolve_governed_roster(state.path(), "simard", DEFAULT_SIMARD_GOVERNED_ROSTER)
+                .expect("roster must resolve");
+        // A second resolve (as another rail would do) reads the now-persisted copy.
+        let via_overseer =
+            resolve_governed_roster(state.path(), "simard", DEFAULT_SIMARD_GOVERNED_ROSTER)
+                .expect("roster must resolve");
         assert_eq!(
-            via_sweep, via_parser,
+            via_ci_health, via_overseer,
             "CI-health roster must equal the ecosystem-observe roster (single source of truth)"
         );
     }

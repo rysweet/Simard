@@ -25,7 +25,6 @@ fn asset(rel: &str) -> String {
 const RECIPE: &str = "prompt_assets/simard/recipes/ecosystem-observe.yaml";
 const OBSERVE_PROMPT: &str = "prompt_assets/simard/overseer/observe.md";
 const BRIEF_PROMPT: &str = "prompt_assets/simard/overseer/problem_to_brief.md";
-const ROSTER: &str = "prompt_assets/simard/ecosystem_repos.toml";
 
 /// The recipe exposes exactly the context vars the thin rail renders (all `_path`
 /// values ride `ContextFile`), plus the rail-owned `escalation_note`.
@@ -145,11 +144,19 @@ fn observe_prompt_is_multi_repo_and_agentic() {
     }
 }
 
-/// The roster is the single source of truth: it lists the 10 stewarded slugs and
-/// deliberately excludes the deprecated Python `rysweet/amplihack`.
+/// The roster is the single source of truth — now sourced from Simard's IDENTITY
+/// SEED (`DEFAULT_SIMARD_GOVERNED_ROSTER`), NOT a committed framework file.
+/// Resolving the seed into a fresh identity-scoped state root yields exactly the
+/// 10 stewarded slugs and deliberately excludes the deprecated Python
+/// `rysweet/amplihack`.
 #[test]
 fn roster_is_the_single_source_of_truth() {
-    let body = asset(ROSTER);
+    use simard::overseer::ecosystem_observe::{
+        DEFAULT_SIMARD_GOVERNED_ROSTER, resolve_governed_roster,
+    };
+    let state = tempfile::tempdir().expect("tempdir");
+    let slugs = resolve_governed_roster(state.path(), "simard", DEFAULT_SIMARD_GOVERNED_ROSTER)
+        .expect("the identity seed roster must resolve to validated slugs");
     for slug in [
         "rysweet/Simard",
         "rysweet/RustyClawd",
@@ -163,12 +170,17 @@ fn roster_is_the_single_source_of_truth() {
         "rysweet/gadugi-agentic-test",
     ] {
         assert!(
-            body.contains(slug),
+            slugs.iter().any(|s| s == slug),
             "roster must list stewarded repo {slug}"
         );
     }
     assert!(
-        !body.contains("slug = \"rysweet/amplihack\""),
+        !slugs.iter().any(|s| s == "rysweet/amplihack"),
         "roster must NOT list the deprecated Python rysweet/amplihack"
+    );
+    assert_eq!(
+        slugs.len(),
+        10,
+        "the seed roster is exactly the ten stewarded slugs"
     );
 }

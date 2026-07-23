@@ -1,13 +1,12 @@
 ---
-title: Ecosystem-roster path resolution
+title: Governed-roster identity-state resolution
 description: >
-  How the ecosystem-observe rail resolves the stewarded roster
-  (ecosystem_repos.toml) install-first — from ~/.simard/prompt_assets before the
-  in-tree checkout — so the rail wires live on a deployed daemon whose repo_root
-  is a source (or stale) checkout. Documents resolve_ecosystem_roster_path, the
-  resolution ladder it shares with the recipe resolver, the fail-visible /
-  fail-open wiring contract in build_ecosystem_observer, and how to verify it.
-last_updated: 2026-07-16
+  How ecosystem-observe, agentic merge-queue reasoning, and ci-health resolve
+  the same identity-curated governed repository roster from durable identity
+  state; documents IdentityStateStore, the governed_repos key, seed-once
+  initialization, deploy durability, resolve_governed_roster, fail-loud
+  validation, and the simard roster curation CLI.
+last_updated: 2026-07-23
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -21,224 +20,238 @@ related:
   - ./state-root-resolution.md
 ---
 
-# Ecosystem-roster path resolution
+# Governed-roster identity-state resolution
 
-> **Status: current.** This page is the contract for how the
-> `ecosystem-observe` rail finds its stewarded roster
-> (`ecosystem_repos.toml`). The rail resolves the roster **install-first**:
-> `~/.simard/prompt_assets/simard/ecosystem_repos.toml` (the deployed install
-> location) is preferred over `<repo_root>/prompt_assets/simard/ecosystem_repos.toml`
-> (the in-tree checkout). This mirrors, exactly, how the rail already resolves
-> its recipe (`resolve_observe_recipe_path`), so both prompt-assets live under
-> one resolution ladder.
+> **Status: current.** This page is the contract for how Simard resolves the
+> governed repository roster. The roster is **mutable, identity-scoped state**
+> under the durable state root. It is not a committed framework asset, and it is
+> not overwritten by `simard install`.
 
-The rail is otherwise unchanged: it loads the roster, applies the Overseer
-cadence, spawns `recipe-runner-rs` on `ecosystem-observe.yaml`, and forwards the
-agent's opaque result. See [Ecosystem Observe](../design/ecosystem-observe.md)
-for the end-to-end chain. This page documents **only** the roster path
-resolution and the wiring behavior around it.
+The roster is one payload in the generic `IdentityStateStore`: per-identity,
+per-key TOML stored at `<state_root>/identity_state/<identity>/<key>.toml`.
+For Simard's governed repositories the key is `governed_repos`, so the active
+file is:
+
+```text
+<state_root>/identity_state/<identity>/governed_repos.toml
+```
+
+The same resolved, validated slug list feeds the `ecosystem-observe` rail, the
+agentic merge-queue reasoner, and the `ci-health` sweep. There is one curated
+source of truth for the active identity.
 
 ---
 
-## Why install-first
+## Why identity-curated durable state
 
-A deployed Simard daemon runs with `WorkingDirectory=~/.simard`, and the
-prompt-assets tree it actually reads from is the **installed** one at
-`~/.simard/prompt_assets/`. The daemon's `repo_root`, however, points at a
-**source checkout** — which on a deployed host may be a *stale* deploy directory
-that predates the roster file entirely (for example `…/Simard-deploy-4049`).
+A self-deploy (`simard install`) refreshes framework assets under
+`~/.simard/prompt_assets`. Operator-curated stewardship data must survive that
+refresh. Putting the roster under the state root makes curation durable across
+upgrades and identity-specific: `simard` can steward one set of repos, while a
+future identity can store different typed data under its own keys without the
+framework core learning a hardcoded "roster" concept.
 
-The recipe path already accounts for this: `resolve_observe_recipe_path` checks
-the `~/.simard` install location first and only falls back to `repo_root`. The
-roster load historically did **not** — it resolved the roster solely as
-`repo_root.join("prompt_assets/simard/ecosystem_repos.toml")`. On a deployed
-daemon that path does not exist, so the rail failed closed on **every** tick
-with:
+The framework mechanism is intentionally generic:
 
-```
-WARN simard::ecosystem_observe: [simard] ecosystem-observe NOT wired: failed to load stewarded roster
-  error=… read ecosystem roster failed: No such file or directory (os error 2)
-  roster_path=…/Simard-deploy-4049/prompt_assets/simard/ecosystem_repos.toml
-```
-
-The feature was effectively dead in production. Giving the roster the **same
-install-first resolution as the recipe** fixes the inconsistency: the roster is
-found at its installed location, and the rail wires live.
+- `IdentityStateStore` stores TOML payloads by `(identity, key)`.
+- Each identity can have differently typed curated data.
+- `governed_repos` is Simard's payload key, not a framework-wide special case.
 
 ---
 
-## Resolution ladder
+## Resolution
 
-`resolve_ecosystem_roster_path(repo_root, home_override)` returns the first
-existing candidate, checked in this order:
+Resolution uses two inputs:
 
-1. **Install location** —
-   `<home>/.simard/prompt_assets/simard/ecosystem_repos.toml`, where `<home>` is
-   `home_override` when provided, otherwise `dirs::home_dir()`. Used when it
-   `is_file()`.
-2. **In-tree checkout** —
-   `<repo_root>/prompt_assets/simard/ecosystem_repos.toml`. Used when it
-   `is_file()` and the install candidate was absent.
-3. **None** — neither candidate is a file. The rail treats this as
-   "roster unavailable" (fail-open: the observation pass is skipped, and a
-   warning naming **both** attempted paths is logged; the daemon never panics).
-
-This is the same ladder the recipe resolver uses, only with the roster's
-relative path (`prompt_assets/simard/ecosystem_repos.toml`) instead of the
-recipe's (`prompt_assets/simard/recipes/ecosystem-observe.yaml`).
-
-| Candidate | Path | Chosen when |
+| Input | Source | Default |
 |---|---|---|
-| Install (preferred) | `~/.simard/prompt_assets/simard/ecosystem_repos.toml` | file exists |
-| In-tree (fallback) | `<repo_root>/prompt_assets/simard/ecosystem_repos.toml` | install absent, file exists |
-| None | — | neither exists |
+| `state_root` | `$SIMARD_STATE_ROOT` | `$HOME/.simard` |
+| `identity` | `$SIMARD_IDENTITY` | `simard` |
 
-> The resolver **probes the filesystem only** — no shell, no `Command`, no
-> network. It never reads or parses the roster contents; parsing remains the
-> job of `load_ecosystem_roster`. It never panics.
+The governed roster path is derived directly from those inputs:
+
+```text
+${SIMARD_STATE_ROOT:-$HOME/.simard}/identity_state/${SIMARD_IDENTITY:-simard}/governed_repos.toml
+```
+
+There is no source-tree fallback and no prompt-assets roster file. The on-disk
+identity-state payload is the authoritative curated copy after first
+initialization.
+
+---
+
+## Seed-once behavior
+
+On first use, if the active identity has no `governed_repos` payload, Simard
+seeds it once from the in-code identity seed constant
+`DEFAULT_SIMARD_GOVERNED_ROSTER` in `src/overseer/ecosystem_observe.rs`, then
+persists it to identity state.
+
+After that first write:
+
+1. the on-disk curated copy is authoritative;
+2. the seed constant is not reapplied;
+3. operator or agentic curation survives `simard install`;
+4. empty or all-invalid curated data is a hard error, never a silent green pass.
+
+This seed is a bootstrap default, not a perpetual template.
 
 ---
 
 ## API
 
-Module-private helper in `src/overseer/ecosystem_observe.rs`, alongside
-`resolve_observe_recipe_path`:
+The resolution entry point is the roster-specific helper layered on the generic
+identity-state store:
 
 ```rust
-/// The stewarded-roster filename. A compile-time constant — never derived
-/// from env, argv, or file contents (path-traversal invariant).
-const ECOSYSTEM_ROSTER_FILENAME: &str = "ecosystem_repos.toml";
-
-/// Resolve the `ecosystem_repos.toml` roster path. Checks, in order:
-///   1. `~/.simard/prompt_assets/simard/<name>` (installed / hot-reload path)
-///   2. `<repo_root>/prompt_assets/simard/<name>` (in-tree)
-///
-/// Mirrors `resolve_observe_recipe_path`. `home_override` keeps tests hermetic
-/// against the ambient `~/.simard`; production passes `None`.
-fn resolve_ecosystem_roster_path(
-    repo_root: &Path,
-    home_override: Option<&Path>,
-) -> Option<PathBuf>;
+/// Resolve, seed if missing, parse, and validate the active identity's governed
+/// repository roster.
+fn resolve_governed_roster(
+    state_root: &Path,
+    identity: &str,
+    seed_toml: &str,
+) -> SimardResult<Vec<String>>;
 ```
 
 ### Parameters
 
 | Parameter | Meaning |
 |---|---|
-| `repo_root` | The daemon's source checkout root. Used only for the in-tree fallback. |
-| `home_override` | Test seam. `Some(dir)` resolves the install candidate under `dir/.simard/…` instead of the real home; production passes `None`, which uses `dirs::home_dir()`. |
+| `state_root` | Durable state root. Production resolves it from `$SIMARD_STATE_ROOT`, else `$HOME/.simard`. |
+| `identity` | Active identity. Production resolves it from `$SIMARD_IDENTITY`, else `simard`. |
+| `seed_toml` | In-code bootstrap TOML used only when the identity has no persisted `governed_repos` payload yet. |
 
 ### Return value
 
-`Some(path)` — the first existing roster file (install-first). `None` — neither
-candidate is a file. The resolver performs no I/O beyond `is_file()` probes and
-never panics.
+`Ok(Vec<String>)` returns validated `owner/name` slugs from the active identity's
+curated roster. An absent payload is created from `seed_toml` before validation.
+Malformed slugs are rejected; an empty or all-invalid roster returns an error.
 
 ---
 
-## Wiring contract (`build_ecosystem_observer`)
+## Wiring contract
 
-`build_ecosystem_observer` (in `src/overseer/wiring.rs`) resolves the roster via
-`resolve_ecosystem_roster_path(repo_root, None)` and preserves the rail's
-established **fail-visible / fail-open** posture:
+All three consumers call the same roster resolution path:
 
-| Resolver result | Behavior |
+| Consumer | Uses the resolved roster for |
 |---|---|
-| `Some(path)` | Call `load_ecosystem_roster(&path)`. On parse `Err`, emit the existing fail-visible `WARN` (logging the resolved `path`) and return `None`. |
-| `None` | Emit the fail-visible `WARN` `"[simard] ecosystem-observe NOT wired: failed to load stewarded roster"` on target `simard::ecosystem_observe`, logging **both attempted candidate paths** (the `~/.simard` install location and the `<repo_root>` in-tree location), and return `None`. |
+| `ecosystem-observe` | Agentic multi-repo observation scope. |
+| Agentic merge-queue reasoner | Default-ON issue and PR reasoning scope. |
+| `simard ci-health` | Governed-fleet CI sweep. |
 
-Both misses return `None` — the rail is left unwired and the observation pass is
-skipped for that build; the daemon **never panics** and **never silently
-degrades**. The resolver miss and the loader error are distinct log lines so the
-failure mode is unambiguous in the journal.
+The `ecosystem-observe` and merge-queue rails still pass a recipe-level
+`{{roster_path}}` context variable. That variable is a **per-invocation context
+file** containing the already-resolved, validated slugs. It is not the identity
+TOML file and not a source asset. Recipes should treat it as input data for that
+run only.
 
-Because the resolver returns a bare `Option<PathBuf>` (it collapses both
-candidates to the winner or `None`), the `None` branch reconstructs the two
-candidate paths for the warning — using `ECOSYSTEM_ROSTER_FILENAME` and the same
-`prompt_assets/simard` relative path — so the journal names **every** location
-that was probed. This is deliberately more fail-visible than logging a single
-representative path: an operator diagnosing a dead rail sees both the install
-location and the in-tree location in one line.
+Failures are visible:
 
-Only the roster **path selection** changed. The loader
-(`load_ecosystem_roster`), the recipe runner spawn
-(`SpawnEcosystemRecipeRunner`), the cadence gates, and the OBSERVE→BRIEF recipe
-semantics are untouched.
+| Condition | Behavior |
+|---|---|
+| Missing payload | Seed once from `DEFAULT_SIMARD_GOVERNED_ROSTER`, persist, then validate. |
+| Malformed entries | Reject invalid slugs and warn. |
+| Empty / all-invalid roster | Hard error; the consumer skips/fails the pass loudly. |
+| `simard install` | Refreshes prompt assets only; leaves identity state untouched. |
 
 ---
 
-## Configuration
+## Configuration and curation
 
-There is **no new environment variable.** The roster is data, configured by
-placing/editing `ecosystem_repos.toml` at one of the two resolved locations.
+Roster curation is done through the operator CLI, which mutates the active
+identity's `governed_repos` payload durably:
 
-| Deployment | Where the roster lives | How it resolves |
-|---|---|---|
-| Deployed daemon (`WorkingDirectory=~/.simard`) | `~/.simard/prompt_assets/simard/ecosystem_repos.toml` | Install candidate (preferred) |
-| Local source checkout / dev | `<repo_root>/prompt_assets/simard/ecosystem_repos.toml` | In-tree fallback |
+```bash
+simard roster list              # same as: simard roster
+simard roster add rysweet/tool "why this repo is stewarded"
+simard roster remove rysweet/tool
+```
 
-Editing the roster (adding or removing a stewarded repo) is still a one-line
-data change with no code change — see
-[Ecosystem Observe → Roster](../design/ecosystem-observe.md#1-roster--the-single-source-of-truth).
-On a deployed daemon, edit the **installed** copy under `~/.simard`; the next
-Overseer tick that builds the rail picks it up.
+The commands are idempotent. They operate on the active identity, so set
+`SIMARD_STATE_ROOT` or `SIMARD_IDENTITY` first when curating a non-default state
+root or identity.
+
+To inspect the backing state directly when debugging:
+
+```bash
+state_root=${SIMARD_STATE_ROOT:-$HOME/.simard}
+identity=${SIMARD_IDENTITY:-simard}
+ls "$state_root/identity_state/$identity/governed_repos.toml"
+```
+
+Prefer `simard roster` for normal changes; direct file edits are an escape hatch
+for recovery, not the curation surface.
 
 ---
 
 ## Examples
 
-### Deployed daemon (install-first)
+### First run on a fresh state root
 
-The roster is installed under `~/.simard`; `repo_root` is a source checkout that
-may not contain it. The rail resolves the installed copy and wires live — no
-`NOT wired` warning:
-
-```
-$ ls ~/.simard/prompt_assets/simard/ecosystem_repos.toml
-/home/azureuser/.simard/prompt_assets/simard/ecosystem_repos.toml
-
-# Next Overseer tick — no "ecosystem-observe NOT wired" warning; the agentic
-# ecosystem-observe recipe runs and surfaces problems from stewarded repos.
+```bash
+SIMARD_STATE_ROOT="$PWD/.simard-state" SIMARD_IDENTITY=simard simard roster list
 ```
 
-### Local development (in-tree fallback)
+If the payload is absent, Simard seeds
+`.simard-state/identity_state/simard/governed_repos.toml` from
+`DEFAULT_SIMARD_GOVERNED_ROSTER`, validates it, and prints the active roster.
+Later runs read the persisted file.
 
-Running from a source checkout with no installed `~/.simard` copy, the rail
-falls back to the in-tree roster:
+### Add a stewarded repo
 
+```bash
+simard roster add rysweet/new-tool "Reason this repo is now stewarded"
+simard roster list
 ```
-<repo_root>/prompt_assets/simard/ecosystem_repos.toml   ← resolved (fallback)
+
+The next ecosystem observation, merge-queue reasoning pass, and CI-health sweep
+use the same updated active-identity roster.
+
+### Recipe invocation by hand
+
+When invoking a recipe manually, pass `roster_path` as a context file containing
+resolved slugs for that invocation:
+
+```bash
+mkdir -p .simard-run-context
+cat > .simard-run-context/roster.txt <<'EOF'
+rysweet/Simard
+rysweet/azlin
+EOF
+: > .simard-run-context/inflight-refs.json
+
+amplihack recipe run prompt_assets/simard/recipes/ecosystem-observe.yaml \
+  -c roster_path=.simard-run-context/roster.txt \
+  -c inflight_refs_path=.simard-run-context/inflight-refs.json \
+  -c observed_problems_path=.simard-run-context/observed-problems.txt \
+  -c escalation_note=""
 ```
 
-### Neither present (fail-open)
-
-If neither candidate exists, the rail logs the fail-visible warning naming
-**both** attempted paths and skips the observation pass. The daemon keeps
-running:
-
-```
-WARN simard::ecosystem_observe: [simard] ecosystem-observe NOT wired: failed to load stewarded roster
-  install_candidate=~/.simard/prompt_assets/simard/ecosystem_repos.toml
-  in_tree_candidate=<repo_root>/prompt_assets/simard/ecosystem_repos.toml
-```
+On the live cadence the rail creates that context file after resolving identity
+state; operators do not pass the TOML backing file to the agent.
 
 ---
 
 ## Verifying resolution
 
-On a deployed host, confirm the installed roster exists and that the journal no
-longer carries the `NOT wired: failed to load stewarded roster` line after the
-next tick:
+Use the CLI to verify the active identity and roster contents:
 
 ```bash
-# 1. Confirm the installed roster is present.
-test -f ~/.simard/prompt_assets/simard/ecosystem_repos.toml && echo "roster present"
+simard roster list
 
-# 2. Watch the daemon journal for a clean wire (absence of the failure line).
-journalctl --user -u simard -f | grep -i ecosystem-observe
-#   Expect NO "NOT wired: failed to load stewarded roster".
-#   Expect the ecosystem-observe recipe to run on cadence.
+state_root=${SIMARD_STATE_ROOT:-$HOME/.simard}
+identity=${SIMARD_IDENTITY:-simard}
+test -f "$state_root/identity_state/$identity/governed_repos.toml" && echo "identity roster present"
 ```
+
+Then watch the relevant consumer:
+
+```bash
+journalctl --user -u simard -f | grep -E 'ecosystem-observe|merge_queue|ci-health'
+```
+
+Expect roster faults to be logged loudly. Do not accept a green ecosystem or
+fleet result if the active roster is empty or invalid; that is a bug.
 
 See [Watch Overseer activity](../howto/watch-overseer-activity.md) for the
 broader journal-tailing workflow.
@@ -247,54 +260,45 @@ broader journal-tailing workflow.
 
 ## Testing
 
-The resolver is covered by hermetic unit tests in
-`src/overseer/ecosystem_observe.rs` that use `tempfile::tempdir()` plus
-`home_override`, so they never touch the real `~/.simard`:
+Coverage should prove the durable-state contract, not a path ladder:
 
-| Test | Setup | Expectation |
-|---|---|---|
-| Prefers install | Roster file under `home_override/.simard/prompt_assets/simard/ecosystem_repos.toml` (and/or in-tree) | Returns the `~/.simard` path |
-| Falls back to in-tree | Roster only under `repo_root/prompt_assets/simard/…` | Returns the `repo_root` path |
-| None when absent | Neither location has the file | Returns `None` |
-| Regression (bug #2419) | `repo_root` **lacks** the roster but `home_override/.simard/…` has it | Returns the install path — proves the rail wires from the installed location even when `repo_root` is stale/source-only |
+| Case | Expectation |
+|---|---|
+| Missing identity payload | Seeds from `DEFAULT_SIMARD_GOVERNED_ROSTER`, persists, then returns valid slugs. |
+| Existing identity payload | Reads the persisted payload and does not reseed. |
+| Different identity | Resolves a separate `<identity>/governed_repos.toml`. |
+| `SIMARD_STATE_ROOT` override | Uses that state root instead of `$HOME/.simard`. |
+| Invalid entries | Rejects malformed slugs before they reach `gh`. |
+| Empty / all-invalid roster | Returns a hard error. |
+| Self-deploy | Leaves the identity-state payload untouched. |
 
-The regression test pins the reported production failure so it cannot recur: a
-`repo_root` without the roster must still resolve the installed copy.
-
-Gates: full `cargo test` (not `--lib` only) and
-`cargo clippy --all-targets -- -D warnings` pass. No `--no-verify`, no `--admin`.
+Gates: full `cargo test` and `cargo clippy --all-targets -- -D warnings` should
+cover code changes. Documentation-only edits do not require Rust validation.
 
 ---
 
 ## Security notes
 
-- **Constant filename.** `ECOSYSTEM_ROSTER_FILENAME` is a compile-time constant;
-  the roster filename is never constructed from env, argv, or file contents
-  (path-traversal prevention).
-- **No untrusted input reaches the resolver.** Production passes
-  `home_override = None`; the override exists solely so tests avoid the ambient
-  home. `repo_root` and `~/.simard` are both operator-controlled.
-- **Pure filesystem probe.** The resolver runs no shell, no `Command`, and no
-  network — this posture is preserved from the recipe resolver.
-- **Logs are paths only.** The fail-visible warnings log resolved-or-attempted
-  paths (both candidates on a total miss), never roster contents or credentials
-  (no info disclosure / log injection).
-- **Never panics.** Missing or inaccessible paths return `None`, keeping the
-  daemon available (fail-open, DoS-resistant).
-- **TOCTOU/symlink between `is_file()` and load** is a LOW/accepted residual:
-  both roots are operator-controlled on the single-user host, consistent with
-  the [state-root resolution](./state-root-resolution.md) threat model.
+- **Identity/key path is controlled.** The store derives paths from the active
+  state root, identity, and a fixed payload key; roster entries do not influence
+  filesystem paths.
+- **No shell expansion.** Validated `owner/name` slugs are passed to downstream
+  `gh` calls as positional argv, not interpolated shell text.
+- **Fail loud.** Empty/all-invalid curated state is an error, preventing a false
+  green pass over zero repos.
+- **Durable curation.** Deployment refreshes prompt assets, not identity state,
+  so operator curation is not lost during upgrades.
+- **Logs avoid contents where possible.** Diagnostics should identify the active
+  state path and validation failures without treating roster text as commands.
 
 ---
 
 ## See also
 
 - [Ecosystem Observe](../design/ecosystem-observe.md) — the full agentic
-  OBSERVE→BRIEF chain and the roster's role as an allowlist. This page covers
-  only the roster path resolution.
-- [State-root resolution](./state-root-resolution.md) — the sibling
-  install/override resolution ladder and its shared threat model.
-- [Fail-open audit](../fail-open-audit.md) — the fail-visible / fail-open
-  posture this rail preserves.
+  OBSERVE→BRIEF chain and the roster's role as an allowlist.
+- [State-root resolution](./state-root-resolution.md) — state-root override and
+  threat-model background.
+- [Fail-open audit](../fail-open-audit.md) — fail-visible posture across rails.
 - [Watch Overseer activity](../howto/watch-overseer-activity.md) — how to
-  confirm the rail wires on the deployed daemon.
+  confirm the live rail runs.

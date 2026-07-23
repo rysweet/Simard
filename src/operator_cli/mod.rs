@@ -13,6 +13,7 @@ mod memory;
 mod merge;
 mod ooda;
 mod review;
+mod roster;
 mod safe_update;
 mod self_deploy;
 mod self_health;
@@ -140,6 +141,11 @@ Product modes:
   ci-health [--json] [--no-cache] [--file-issues] [--exit-zero]
                          — sweep active default-branch CI across the governed fleet (green-SHA cached;
                            --file-issues dedupes tracking issues, --exit-zero for the scheduled sweep)
+  roster [list]          — list the active identity's governed-repo roster
+  roster add <slug> [note...]
+                         — add a stewarded repo (owner/name) to the identity-curated
+                           roster (durable state root; survives self-deploy; idempotent)
+  roster remove <slug>   — remove a stewarded repo from the identity-curated roster
   self-deploy [--check]  — close the merged-but-not-running gap (operator-only)
   safe-update            — drain → snapshot → pre-test → swap → exec
   rollback               — restore the latest backup over the install path
@@ -299,6 +305,14 @@ where
                 return Ok(());
             }
             ci_health::dispatch_ci_health_command(args)
+        }
+        "roster" => {
+            let mut args = args.peekable();
+            if let Some(help) = check_help_flag(&mut args, roster::ROSTER_HELP) {
+                print!("{help}");
+                return Ok(());
+            }
+            roster::dispatch_roster_command(args)
         }
         "self-deploy" => {
             let mut args = args.peekable();

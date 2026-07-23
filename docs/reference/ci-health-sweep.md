@@ -100,7 +100,7 @@ workflow recovers](#closing-tracking-issues-when-a-workflow-recovers---file-issu
 
 ```
 src/ci_health/
-├── mod.rs        public entrypoint, governed_repos() (embedded ecosystem roster), sweep_live/sweep_fixture/report_to_json, run_sweep
+├── mod.rs        public entrypoint, governed_repos() (active identity roster), sweep_live/sweep_fixture/report_to_json, run_sweep
 ├── types.rs      WorkflowState, RunConclusion, WorkflowRun/Snapshot, RepoSnapshot (head_sha, green_from_cache), FleetSnapshot
 ├── classify.rs   WorkflowVerdict, IgnoreReason, build_report, repo_cacheable, update_cache_from_report, FleetReport (serializable DTOs)
 ├── cache.rs      GreenShaCache — persisted {repo -> last-known-green head SHA}
@@ -402,14 +402,15 @@ tracking issue of every workflow that is **green again**:
 
 ### Governed fleet
 
-The swept slugs come from [`ci_health::governed_repos`], which parses the
-ecosystem's **single source of truth** — `prompt_assets/simard/ecosystem_repos.toml`
-— embedded at compile time (`include_str!`) and validated by the same parser the
-Overseer's `ecosystem-observe` sweep uses (note `amplihack` → `amplihack-rs` on
-GitHub). There is no second hardcoded roster to drift: adding a repo to that TOML
-(its documented "one-line edit, no code change" contract) extends this sweep on
-the next build. An empty or corrupt embedded roster is a fail-loud error, never a
-silently empty sweep that would report the fleet green.
+The swept slugs come from [`ci_health::governed_repos`], which resolves the active
+identity's **single source of truth** at
+`<state_root>/identity_state/<identity>/governed_repos.toml` via the same
+`resolve_governed_roster` path used by `ecosystem-observe` and agentic
+merge-queue reasoning (note `amplihack` → `amplihack-rs` on GitHub). There is no
+second hardcoded roster to drift: `simard roster add <owner/name> [note...]`
+extends this sweep for the active identity without a code change or rebuild. An
+empty or all-invalid curated roster is a fail-loud error, never a silently empty
+sweep that would report the fleet green.
 
 ## Scheduled recurring sweep
 

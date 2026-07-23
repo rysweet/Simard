@@ -39,9 +39,11 @@ Background: [the concept](../concepts/agentic-merge-queue-reasoning.md), the
 - The daemon binary includes the merge-queue reasoning pass (this feature).
 - **`gh`** authenticated so the read-only reasoning step can list/view PRs and
   issues (`gh auth status`).
-- The governed roster `prompt_assets/simard/ecosystem_repos.toml` is populated
-  (install-first on a deployed daemon:
-  `~/.simard/prompt_assets/simard/ecosystem_repos.toml`).
+- The active identity's governed roster is populated. Check it with
+  `simard roster list`; it is stored under
+  `<state_root>/identity_state/<identity>/governed_repos.toml` where
+  `state_root` is `$SIMARD_STATE_ROOT` or `$HOME/.simard`, and `identity` is
+  `$SIMARD_IDENTITY` or `simard`.
 
 ## Key change from the old allowlist sensor
 
@@ -173,19 +175,26 @@ journalctl --user -u simard-ooda | grep -E 'NotifyOperator|merge notify'
 ## Run the reasoning chain by hand (debugging)
 
 ```bash
-amplihack recipe run observe-merge-queue \
-  -c roster_path="$PWD/prompt_assets/simard/ecosystem_repos.toml" \
-  -c inflight_refs_path="/tmp/inflight.json" \
-  -c merge_queue_brief_path="/tmp/merge_queue_brief.json"
+mkdir -p .simard-run-context
+cat > .simard-run-context/roster.txt <<'EOF'
+rysweet/Simard
+rysweet/azlin
+EOF
+: > .simard-run-context/inflight.json
 
-cat /tmp/merge_queue_brief.json   # the bounded JSON brief the rail parses fail-closed
+amplihack recipe run observe-merge-queue \
+  -c roster_path=.simard-run-context/roster.txt \
+  -c inflight_refs_path=.simard-run-context/inflight.json \
+  -c merge_queue_brief_path=.simard-run-context/merge_queue_brief.json
+
+cat .simard-run-context/merge_queue_brief.json   # the bounded JSON brief the rail parses fail-closed
 ```
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `reasoned_prs=0` with open PRs on the roster | roster empty or `gh` not authed | populate `ecosystem_repos.toml`; `gh auth status` |
+| `reasoned_prs=0` with open PRs on the roster | roster empty or `gh` not authed | `simard roster list`; add missing repos with `simard roster add <owner/name> [note...]`; `gh auth status` |
 | `status=Disabled` unexpectedly | `SIMARD_MERGE_REASONING_SCOPE` set to a falsey value | `unset-environment`, restart |
 | reasoning ON but nothing merges | expected — action still gated by `SIMARD_AUTOMERGE_*` + objective/agentic gate | canary-enable per [self-merge runbook](./enable-autonomous-self-merge-canary.md) |
 | a `ready-for-merge` PR never merges | it failed the re-narrowing projection (author/engineer-PR/objective gate) | check the `reasoned->ready EXCLUDED` log line for the reason |

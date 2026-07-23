@@ -137,12 +137,13 @@ narrow authorization).
 
 ## 1. Roster — the reasoning scope (single source of truth)
 
-The default reasoning scope is the existing governed-repos roster,
-`prompt_assets/simard/ecosystem_repos.toml` — the same validated-slug, pure-data
-roster the [`ecosystem-observe`](./ecosystem-observe.md) chain reads, including
-Simard's own repo (`rysweet/Simard`). It is loaded through the existing
-install-first [ecosystem-roster resolver](../reference/ecosystem-roster-resolution.md);
-an empty roster is a **loud error**, never a silent empty scope.
+The default reasoning scope is the active identity's governed-repos roster,
+`<state_root>/identity_state/<identity>/governed_repos.toml` — the same
+validated-slug, pure-data roster the [`ecosystem-observe`](./ecosystem-observe.md)
+chain and `simard ci-health` use, including Simard's own repo (`rysweet/Simard`).
+It is resolved through
+[governed-roster identity state](../reference/ecosystem-roster-resolution.md);
+an empty or all-invalid roster is a **loud error**, never a silent empty scope.
 
 Reusing the roster satisfies the anti-silent-OFF mandate directly: "unset merge
 env vars" no longer means "no reasoning", it means "reason over the governed
@@ -173,7 +174,7 @@ pub fn merge_reasoning_scope_from(
 ) -> MergeReasoningScope;
 
 /// Production entry: reads SIMARD_MERGE_REASONING_SCOPE from the environment and
-/// the governed roster from ecosystem_repos.toml.
+/// the governed roster from active identity state.
 pub fn merge_reasoning_scope() -> MergeReasoningScope;
 ```
 
@@ -201,7 +202,7 @@ The canonical read-only reasoning prompt. Framing rules:
   `gh issue view`, `gh pr checks` — never `gh pr merge`, `gh pr close`,
   `gh pr comment`, or any write. All *action* is re-derived in Rust from
   objective state.
-- **Roster-scoped.** Reason only about repos in the provided roster file.
+- **Roster-scoped.** Reason only about repos in the provided per-invocation roster context file.
 - **What to reason about, per open PR:** CI/check state, `mergeable`/review
   state, merge conflicts, staleness (age + inactivity), and duplication/overlap
   with other open PRs or already-merged work. Conclude one of:
@@ -391,24 +392,31 @@ are **notify-only**). They:
 | `SIMARD_AUTOMERGE_REPOS` | unset | **Action-side** narrowing only. No longer gates *reasoning*; unset can no longer silence it. |
 | `SIMARD_AUTOMERGE_AUTHOR` | unset | **Action-side** own-PR identity for the merge gate (defense-in-depth). |
 
-The reasoning scope roster is configured by editing
-`prompt_assets/simard/ecosystem_repos.toml` (data, not env), install-first on a
-deployed daemon.
+The reasoning scope roster is curated with `simard roster` (data, not env). The
+commands mutate the active identity's durable `governed_repos` payload under the
+state root, and the same resolved roster feeds ecosystem observation and
+`simard ci-health`.
 
 ## Examples
 
 ### Run the merge-queue reasoning chain by hand
 
 ```bash
-# Point the recipe at the committed roster + Simard's in-flight refs, plus a
-# writable handoff path for the REASON→BRIEF semantic handoff. On the live
-# cadence the rail creates these via ContextFile; by hand you pass real files.
-amplihack recipe run observe-merge-queue \
-  -c roster_path="$PWD/prompt_assets/simard/ecosystem_repos.toml" \
-  -c inflight_refs_path="/tmp/inflight.json" \
-  -c merge_queue_brief_path="/tmp/merge_queue_brief.json"
+# Point the recipe at per-invocation context files. On the live cadence the rail
+# creates these after resolving the active identity roster; by hand you pass real files.
+mkdir -p .simard-run-context
+cat > .simard-run-context/roster.txt <<'EOF'
+rysweet/Simard
+rysweet/azlin
+EOF
+: > .simard-run-context/inflight.json
 
-cat /tmp/merge_queue_brief.json   # the bounded JSON brief the rail parses
+amplihack recipe run observe-merge-queue \
+  -c roster_path=.simard-run-context/roster.txt \
+  -c inflight_refs_path=.simard-run-context/inflight.json \
+  -c merge_queue_brief_path=.simard-run-context/merge_queue_brief.json
+
+cat .simard-run-context/merge_queue_brief.json   # the bounded JSON brief the rail parses
 ```
 
 ### Confirm reasoning is default-ON with the merge env vars unset

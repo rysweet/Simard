@@ -103,9 +103,9 @@ gate.**
 ## Safety posture
 
 - **Reasoning default-ON, disablement LOUD.** With
-  `SIMARD_MERGE_REASONING_SCOPE` unset, Simard reasons over the governed roster
-  (the fix for the zero-reasoning bug). Only an *explicit* `off`/`disabled`
-  value turns reasoning off — and when it does, the daemon emits a `WARN`, sets
+  `SIMARD_MERGE_REASONING_SCOPE` unset, Simard reasons over the active identity's
+  governed roster (the fix for the zero-reasoning bug). Only an *explicit*
+  `off`/`disabled` value turns reasoning off — and when it does, the daemon emits a `WARN`, sets
   `ObservedState.merge_reasoning_status`, and sends a **one-time** dual-channel
   `NotifyOperator` note "merge reasoning DISABLED". Unset ≠ disabled; nothing is
   ever silently off.
