@@ -211,7 +211,11 @@ fn tally_quarantine_files(dir: &std::path::Path, window_start: DateTime<Utc>) ->
     };
     let mut tally = QuarantineTally::default();
     for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
+        // Borrow the lossy name instead of forcing a `String` per entry: most
+        // entries fail the predicate below and are skipped, so avoid the
+        // per-entry heap allocation.
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
         if !crate::cmd_cleanup::is_corrupt_quarantine_name(&name) {
             continue;
         }

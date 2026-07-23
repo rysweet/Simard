@@ -418,7 +418,11 @@ fn scan_quarantine_candidates(scan_dir: &Path) -> Vec<QuarantineCandidate> {
     };
     let mut candidates = Vec::new();
     for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
+        // Borrow the lossy name instead of forcing a `String` per entry: most
+        // entries fail the predicates below and are skipped, so avoid the
+        // per-entry heap allocation.
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
         if crate::self_deploy::quarantine_ack::is_ack_marker_name(&name) {
             continue;
         }
