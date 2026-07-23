@@ -583,6 +583,22 @@ pub fn automerge_author() -> Option<String> {
 /// (`not-simard-autonomous`, `simard-autonomous-ish`) through the gate.
 pub const SIMARD_ENGINEER_PR_LABEL: &str = "simard-autonomous";
 
+/// The environment-variable name the amplihack publish step
+/// (`workflow_publish_pr.sh`, amplihack-rs #979) reads for the comma-separated
+/// list of best-effort labels to stamp on a PR at `gh pr create` time.
+///
+/// This is the SHELL CONTRACT wire name: `workflow_publish_pr.sh` greps for the
+/// literal `WORKFLOW_PR_LABELS`, so this constant's VALUE is frozen — renaming
+/// the Rust identifier is fine, but changing the string would silently break the
+/// contract and make every engineer PR invisible to the self-merge queue again.
+///
+/// Every Simard-side PR-producing spawn/recipe site sets this env var to
+/// [`SIMARD_ENGINEER_PR_LABEL`] so the published PR carries the durable
+/// engineer marker. The variable is INERT until amplihack-rs #979 lands the
+/// consumer (`workflow_publish_pr.sh`); until then it is a harmless,
+/// backward-compatible no-op (unset => existing behavior).
+pub const WORKFLOW_PR_LABELS_ENV: &str = "WORKFLOW_PR_LABELS";
+
 /// The Rust-deterministic, engineer-EXCLUSIVE head-branch namespaces. These are
 /// code-generated and NEVER hand-typed by a human operator, so a head branch
 /// under one of them is proof-of-Simard-origin. They are the SECONDARY
@@ -1063,6 +1079,22 @@ mod tests {
             SIMARD_ENGINEER_PR_LABEL, "simard-autonomous",
             "the engineer-PR label must be the exact durable machine marker \
              engineers stamp at `gh pr create` time"
+        );
+    }
+
+    /// The env var name the amplihack publish step (`workflow_publish_pr.sh`,
+    /// amplihack-rs #979) reads for best-effort PR labels is a FROZEN wire
+    /// contract. The shell consumer greps for the literal `WORKFLOW_PR_LABELS`;
+    /// renaming the constant's VALUE (even while keeping the Rust identifier)
+    /// would silently break the contract and make every engineer PR invisible
+    /// to the self-merge queue again. Pin the exact string so a rename can't
+    /// pass CI unnoticed.
+    #[test]
+    fn workflow_pr_labels_env_is_the_frozen_wire_name() {
+        assert_eq!(
+            WORKFLOW_PR_LABELS_ENV, "WORKFLOW_PR_LABELS",
+            "the env var name is a shell-contract shared with \
+             workflow_publish_pr.sh (amplihack-rs #979); its value must not drift"
         );
     }
 

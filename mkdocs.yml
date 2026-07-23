@@ -418,6 +418,7 @@ nav:
     - PR-Finalization Review Pipeline: reference/pr-finalization-pipeline.md
     - Cross-Repo Merge Authority: reference/cross-repo-merge-authority.md
     - ready_prs Sensor API: reference/ready-prs-sensor-api.md
+    - Engineer-PR Label Injection API: reference/engineer-pr-label-injection.md
     - Agentic Merge-Queue Reasoning API: reference/agentic-merge-queue-reasoning-api.md
     - Autonomous-Merge Review Gate API: reference/autonomous-merge-review-gate.md
     - "No Point-in-Time Report Docs Scan (pr-verify #8)": reference/no-point-in-time-docs-scan.md
