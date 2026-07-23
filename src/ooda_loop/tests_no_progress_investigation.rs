@@ -693,9 +693,10 @@ fn perpetual_goal(id: &str) -> ActiveGoal {
 
 /// A STANDING/PERPETUAL **research** goal (issue #4399) — standing/perpetual AND
 /// marked cognition-research (`is_standing_research_goal()` holds). For this class
-/// an idle cycle is a FAULT: the investigated adapter must record it in
-/// `research_idle_faults` (never `perpetual_idled`) and re-orient the goal, all
-/// BEFORE any root-cause investigation runs.
+/// an idle cycle is a FAULT: the investigated adapter records it in
+/// `research_idle_faults` (never `perpetual_idled`) as a SIGNAL, BEFORE any
+/// root-cause investigation runs; re-orienting the goal is the agentic per-goal
+/// reasoner's job (#4453), not the breaker's.
 fn standing_research_goal(id: &str) -> ActiveGoal {
     let g = ActiveGoal::new(
         id,
@@ -772,14 +773,18 @@ fn perpetual_goal_is_exempt_and_never_investigated_or_blocked() {
 }
 
 #[test]
-fn research_goal_idle_is_a_fault_via_investigated_adapter() {
+fn research_goal_idle_is_a_fault_signal_without_reorient_via_investigated_adapter() {
     // The #4399 rail, enforced on the investigated adapter (site L610) too, so the
     // two breaker sites cannot drift: a standing RESEARCH goal that idles is a
     // FAULT, not the benign exemption. The classifier runs BEFORE investigation
     // (a panicking reasoner proves it is never consulted), records the idle in
-    // `research_idle_faults` (NEVER `perpetual_idled`), re-orients the goal
-    // (`roll_to_new_cycle`: NotStarted + WIP dropped), and stays fail-closed
+    // `research_idle_faults` (NEVER `perpetual_idled`), and stays fail-closed
     // (never fired, never blocked, never escalated, never a spawned engineer).
+    // Issue #4453: this imperative path records the fault SIGNAL but must NOT
+    // re-orient the goal — the destructive `roll_to_new_cycle` is owned solely by
+    // the agentic per-goal reasoner (`drive_per_goal_cycle`). Rolling here as well
+    // would double-drive the goal (the 70ab8541 idle→reset loop), so the goal's
+    // status and WIP must survive the breaker unchanged.
     struct PanicReasoner;
     impl NoProgressWhyReasoner for PanicReasoner {
         fn investigate(&self, _goal: &ActiveGoal) -> SimardResult<NoProgressWhy> {
@@ -815,7 +820,7 @@ fn research_goal_idle_is_a_fault_via_investigated_adapter() {
         assert_eq!(
             report.research_idle_faults,
             vec![id.to_string()],
-            "cycle {cycle}: a research idle must be recorded as a FAULT"
+            "cycle {cycle}: a research idle must be recorded as a FAULT signal"
         );
         assert!(
             report.perpetual_idled.is_empty(),
@@ -831,13 +836,10 @@ fn research_goal_idle_is_a_fault_via_investigated_adapter() {
         );
         let goal = &state.active_goals.active[0];
         assert!(
-            matches!(goal.status, GoalProgress::NotStarted),
-            "cycle {cycle}: an idle research goal must be re-oriented to NotStarted, got {:?}",
+            matches!(goal.status, GoalProgress::InProgress { percent: 40 }),
+            "cycle {cycle}: the imperative breaker must NOT re-orient the goal \
+             (re-orient is the reasoner's job, #4453) — status must be unchanged, got {:?}",
             goal.status
-        );
-        assert!(
-            goal.wip_refs.is_empty(),
-            "cycle {cycle}: re-orient must drop stale WIP so the next cycle starts fresh"
         );
     }
     assert!(

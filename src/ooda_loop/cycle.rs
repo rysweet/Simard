@@ -571,6 +571,28 @@ fn run_ooda_cycle_inner(
         }
     }
 
+    // --- Per-goal, per-cycle agentic decision (issue #4453) ---
+    // Run EXACTLY ONE reasoned decision per active goal per cycle
+    // (continue / spawn / reorient / investigate / wait / complete), replacing
+    // the imperative never-idle / reap / grace-window predicates with a thin
+    // deterministic rail that dispatches to the reasoner. A non-destructive
+    // verdict (continue / spawn / wait / investigate) PRESERVES the goal's
+    // in-flight `wip_refs` — the root-cause fix for the 70ab8541 idle->reset
+    // fault-loop: a standing research goal holding a live PR is never silently
+    // reset by a threshold. Destructive ref mutation is reachable only via a
+    // reasoned `reorient` / `complete` (a stale-worker concern goes through
+    // `investigate` first). NO silent fallback: a reasoner `Err` fails the cycle
+    // loudly (#1711) rather than masquerading as a no-op decision.
+    let per_goal_outcomes = drive_per_goal_cycle(state, memories.brain.as_ref())?;
+    if !per_goal_outcomes.is_empty() {
+        tracing::info!(
+            target: "simard::ooda",
+            decisions = per_goal_outcomes.len(),
+            reoriented = per_goal_outcomes.iter().filter(|o| o.touched_refs).count(),
+            "OODA per-goal-cycle: one agentic decision per active goal",
+        );
+    }
+
     // --- Fix 3: no-progress breaker (issue #1) ---
     // Before curation, bound the *no-action* livelock: a goal that produced a
     // no-shippable-progress cycle (`NO ACTION` / rejected progress claim) has
@@ -1529,6 +1551,176 @@ fn learn_from_refuted_goals(
         report.lessons_distilled,
         report.repeat_failures,
     );
+}
+
+// ===========================================================================
+// Per-goal, per-cycle agentic decision driver (issue #4453)
+//
+// Runs EXACTLY ONE agentic reasoning decision per active goal per cycle
+// (continue / spawn / reorient / investigate / wait / complete), replacing the
+// imperative never-idle / reap / grace-window predicates with a thin
+// deterministic rail that dispatches to the reasoner and executes the returned
+// action. The three former imperative deciders (classify_standing_idle, the
+// claim-reaper staleness sweep, and the effect board-miss) survive ONLY as
+// read-only INPUTS on `PerGoalCycleCtx` — never as the decision.
+// ===========================================================================
+
+/// The observable outcome of one per-goal, per-cycle decision. Returned per
+/// active goal so the caller (and the regression tests) can assert routing and
+/// the A6 invariant (only `reorient`/`complete` touch refs).
+#[derive(Clone, Debug)]
+pub struct PerGoalDecisionOutcome {
+    /// The goal this decision was made for.
+    pub goal_id: String,
+    /// Stable snake_case label of the chosen action (`"continue"`, `"spawn"`, …).
+    pub action_label: String,
+    /// The reasoner's mandatory reason for the chosen action.
+    pub reason: String,
+    /// `true` when the applied action performed a DESTRUCTIVE ref mutation
+    /// (cleared `wip_refs` / rolled or completed the goal). Only `reorient` and
+    /// `complete` do so — the code-level guarantee that a `continue` / `spawn` /
+    /// `wait` / `investigate` verdict never reproduces the 70ab8541 idle→reset
+    /// loop.
+    pub touched_refs: bool,
+}
+
+/// Gather the DURABLE per-goal context for one per-cycle reasoning decision
+/// (issue #4453). Best-effort and total: a goal id absent from the board yields
+/// a defaulted ctx (never panics). Reads only in-memory durable state — never a
+/// live worker's mere presence as the decision input. The three demoted
+/// imperative deciders are surfaced here as read-only signals.
+pub(crate) fn gather_per_goal_cycle_ctx(
+    state: &OodaState,
+    goal_id: &str,
+) -> crate::ooda_brain::PerGoalCycleCtx {
+    use crate::ooda_brain::PerGoalCycleCtx;
+
+    let Some(goal) = state.active_goals.active.iter().find(|g| g.id == goal_id) else {
+        return PerGoalCycleCtx {
+            goal_id: goal_id.to_string(),
+            cycle_number: state.cycle_count,
+            ..PerGoalCycleCtx::default()
+        };
+    };
+
+    // Durable in-flight work (NOT live-worktree presence).
+    let open_pr_refs: Vec<String> = goal
+        .wip_refs
+        .iter()
+        .filter(|w| w.kind.trim().eq_ignore_ascii_case("pr"))
+        .map(|w| w.ref_id.clone())
+        .collect();
+    let worker_present = state.engineer_worktrees.contains_key(goal_id);
+
+    // DEMOTED decider #1 — classify_standing_idle: a standing goal that looks
+    // idle (no live in-flight ref) becomes a SIGNAL, not a roll.
+    let standing_idle_signal = matches!(
+        crate::ooda_loop::no_progress::classify_standing_idle(goal),
+        Some(crate::ooda_loop::no_progress::StandingIdle::ResearchFault { .. })
+    ) || (goal.is_perpetual() && !goal.has_live_in_flight_ref());
+
+    // DEMOTED decider #2 — claim-reaper staleness: when a worker claim is
+    // EXPECTED (assignment or engineer/session/branch ref) but no live worktree
+    // is present, surface how long since the claim was last observed alive as a
+    // read-only INPUT. STALE_SECS survives only as the threshold that populates
+    // this field, never as the reap trigger; no new SIMARD_*_SECS is added.
+    let expects_worker = goal.assigned_to.is_some()
+        || goal.wip_refs.iter().any(|w| {
+            let kind = w.kind.trim();
+            kind.eq_ignore_ascii_case("engineer")
+                || kind.eq_ignore_ascii_case("session")
+                || kind.eq_ignore_ascii_case("branch")
+        });
+    let stale_claim_secs = if expects_worker && !worker_present {
+        Some(claim_age_secs(goal))
+    } else {
+        None
+    };
+
+    PerGoalCycleCtx {
+        goal_id: goal.id.clone(),
+        goal_description: goal.description.clone(),
+        goal_status: goal.status.to_string(),
+        cycle_number: state.cycle_count,
+        history_summary: goal.current_activity.clone().unwrap_or_default(),
+        effect_jobs_in_flight: 0,
+        open_pr_refs,
+        last_outcomes: Vec::new(),
+        wip_ref_count: goal.wip_refs.len() as u32,
+        worker_present,
+        worker_log_tail: String::new(),
+        standing_idle_signal,
+        stale_claim_secs,
+        // DEMOTED decider #3 — effect board-miss: gathered by the caller from
+        // the durable effect-dispatch ledger when available; defaulted false
+        // here so the pure gather stays IO-free.
+        effect_board_missed: false,
+    }
+}
+
+/// Seconds since a goal's worker claim was last observed making durable
+/// progress. `u64::MAX` means "a claim is expected but was never observed
+/// progressing" (no `last_progress_update_at` recorded). A FACT fed to the
+/// reasoner — never a reap threshold.
+fn claim_age_secs(goal: &crate::goal_curation::ActiveGoal) -> u64 {
+    match goal.last_progress_update_at {
+        Some(ts) => (chrono::Utc::now() - ts).num_seconds().max(0) as u64,
+        None => u64::MAX,
+    }
+}
+
+/// Run EXACTLY ONE agentic reasoning decision per active goal for this cycle
+/// (issue #4453), routing each outcome through the thin deterministic state
+/// rail [`crate::ooda_brain::apply_per_goal_action_to_state`] and recording a
+/// [`BrainJudgmentRecord`] for EVERY goal (an action + a reason each cycle —
+/// none left idle without both).
+///
+/// NO silent fallback: an `Err` from the reasoner surfaces as a cycle failure
+/// (#1711). Destructive ref mutation is reachable only via a reasoned
+/// `reorient`/`complete` (a worker-health concern goes through `investigate`
+/// first) — never a threshold/counter/grace-window.
+pub fn drive_per_goal_cycle<B: crate::ooda_brain::OodaBrain + ?Sized>(
+    state: &mut OodaState,
+    brain: &B,
+) -> SimardResult<Vec<PerGoalDecisionOutcome>> {
+    use crate::ooda_brain::{
+        BrainJudgmentRecord, apply_per_goal_action_to_state, push_brain_judgment,
+    };
+
+    // Snapshot the active goal ids first (cf. the pre-cycle active-id snapshot)
+    // so the per-goal `apply_*` mutation cannot invalidate the iteration.
+    let active_ids: Vec<String> = state
+        .active_goals
+        .active
+        .iter()
+        .map(|g| g.id.clone())
+        .collect();
+
+    let mut outcomes = Vec::with_capacity(active_ids.len());
+    for goal_id in active_ids {
+        let ctx = gather_per_goal_cycle_ctx(state, &goal_id);
+        // One agentic decision for this goal this cycle. Err => cycle failure.
+        let action = brain.decide_per_goal_cycle(&ctx)?;
+        let touched_refs = action.mutates_refs();
+
+        // Thin deterministic rail: apply the chosen action to in-memory state.
+        let detail = apply_per_goal_action_to_state(&action, state, &goal_id);
+
+        // Record the judgment for EVERY goal — an action + a reason each cycle.
+        push_brain_judgment(BrainJudgmentRecord::from_per_goal_cycle(
+            &goal_id, &action, false, "",
+        ));
+
+        eprintln!("[simard] OODA per-goal-cycle: {} -> {}", goal_id, detail);
+
+        outcomes.push(PerGoalDecisionOutcome {
+            goal_id,
+            action_label: action.variant_label().to_string(),
+            reason: action.reason().to_string(),
+            touched_refs,
+        });
+    }
+    Ok(outcomes)
 }
 
 #[cfg(test)]

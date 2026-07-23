@@ -31,6 +31,8 @@ mod tests_orient_extra;
 #[cfg(test)]
 mod tests_parse_failure_1890;
 #[cfg(test)]
+mod tests_per_goal_cycle;
+#[cfg(test)]
 mod tests_types;
 
 // Fix 3 (issue #1): integration tests for the no-progress breaker wiring.
