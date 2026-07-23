@@ -210,6 +210,7 @@ If you are changing architecture, start with the [architecture overview](./archi
 
 - [Architecture overview](./architecture/overview.md) - System diagram, core principles, component descriptions, and module map.
 - [Goal board persistence](./concepts/goal-board-persistence.md) — cognitive-memory single source of truth.
+- [Goal-curator operator-author gate](./concepts/goal-curator-operator-author-gate.md) — why only `rysweet`-filed issues/PRs become goals: the operator-author gate (mirroring `engineer_system.md` rule #3) restated in the curator prompt because the `simard-goal-curator` identity does not inherit the engineer prompt, closing the ecosystem-stewardship attack surface in the *proactive backfill* path, plus the compile-time prompt-presence test that locks the invariant and the XPIA untrusted-input note.
 - [Keeping the OODA daemon steerable](./concepts/steerable-ooda-daemon.md) — read-your-writes goal board, the evidence-gated done-gate, the no-progress breaker, and distillation banner-stripping, unified.
 - [File-backed goal store simplification](./concepts/file-backed-goal-store-simplification.md) — why GoalStore uses a plain JSON file instead of IPC.
 - [Adaptive scaling](./concepts/adaptive-scaling.md) — AIMD concurrency control for the OODA cycle.

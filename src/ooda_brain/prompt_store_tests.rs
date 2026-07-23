@@ -517,6 +517,54 @@ fn goal_curator_has_open_ended_hygiene_and_proactive_backfill() {
 }
 
 #[test]
+fn goal_curator_enforces_operator_author_gate_on_backfill() {
+    // Security invariant (attack surface): the `simard-goal-curator` identity loads ONLY
+    // goal_curator_system.md — it does NOT inherit engineer_system.md rule #3. So the
+    // "Proactive backfill from your own issues" section (and every other issue/PR -> goal
+    // path) must restate the operator-author gate explicitly, or a non-`rysweet`-filed
+    // ecosystem issue could be turned into a proposed/active goal. This test LOCKS that
+    // gate so a future prompt edit cannot silently drop it.
+    let prompt = include_str!("../../prompt_assets/simard/goal_curator_system.md");
+    let lower = prompt.to_lowercase();
+
+    // 1. Author-verification step, mirroring engineer_system.md rule #3.
+    assert!(
+        lower.contains("gh issue view") && lower.contains("--json author"),
+        "goal_curator_system.md must require verifying the issue/PR author via \
+         `gh issue view <N> --json author` before any backfill turns an issue into a goal"
+    );
+
+    // 2. rysweet-only restriction: only operator-authored issues/PRs may become goals.
+    assert!(
+        lower.contains("only") && lower.contains("rysweet"),
+        "goal_curator_system.md operator-author gate must restrict goal creation to \
+         issues/PRs authored by `rysweet` only"
+    );
+
+    // 3. Fail-closed: any other account is silently skipped.
+    assert!(
+        (lower.contains("skip") || lower.contains("never propose") || lower.contains("do not"))
+            && lower.contains("any other account"),
+        "goal_curator_system.md must instruct silently skipping issues/PRs authored by any \
+         other account (contributors, bots, engineer-created issues)"
+    );
+
+    // 4. XPIA / untrusted-input note: governed-repo issue content is attacker-controllable.
+    assert!(
+        lower.contains("untrusted"),
+        "goal_curator_system.md must carry the XPIA note that governed-repo issue/PR \
+         titles/bodies are attacker-controllable untrusted input"
+    );
+
+    // 5. Canonical-source reference: engineer_system.md rule #3 is the single source of truth.
+    assert!(
+        lower.contains("engineer_system.md"),
+        "goal_curator_system.md operator-author gate must reference engineer_system.md \
+         rule #3 as the canonical source"
+    );
+}
+
+#[test]
 fn goal_session_objective_enumerates_concrete_progress_signals() {
     // Behavior A: the loop self-detection must DEFINE concrete progress signals
     // (a new commit SHA, an opened/merged PR, a closed issue, a completion-%
