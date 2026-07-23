@@ -23,7 +23,7 @@ use crate::goal_curation::completion_gate::{
 };
 use crate::goal_curation::no_progress_breaker::{
     NO_PROGRESS_BREAKER_THRESHOLD, NoProgressResolution, NoProgressTracker,
-    SURFACED_INVESTIGATION_FAILURE_LIMIT, needs_reinvestigation,
+    SURFACED_INVESTIGATION_FAILURE_LIMIT, is_no_progress_marker, needs_reinvestigation,
     no_progress_blocked_reason_with_why, obsolescence_reason, resolution_for_why,
     surfaced_failure_escalation_issue, verify_stuck_goal,
 };
@@ -68,6 +68,30 @@ fn is_breaker_tracking_ref(wip: &WipRef) -> bool {
         && wip.label.starts_with(NO_PROGRESS_TRACKING_LABEL_PREFIX)
 }
 
+/// True when `goal_id` currently stands **Blocked with the no-progress sentinel**
+/// — i.e. the breaker has already escalated it and that block is still standing
+/// (issue #4497). Such a goal is skipped by the breaker's outcome loop so it
+/// escalates EXACTLY ONCE and does not re-fire (re-file a duplicate `ooda-stuck`
+/// issue) every tick while its block stands.
+///
+/// The guard is deliberately keyed on the LIVE block status, not a persisted
+/// "halted forever" flag: when an operator OR the agentic reasoner
+/// ([`ActiveGoal::roll_to_new_cycle`]) lifts the block (status → non-Blocked),
+/// the goal becomes eligible again — but the remote signature dedup in
+/// [`escalate_with_tracking_issue`] still prevents a duplicate tracking issue, so
+/// a re-stall re-blocks idempotently instead of spamming.
+fn goal_is_sentinel_blocked(state: &OodaState, goal_id: &str) -> bool {
+    state
+        .active_goals
+        .active
+        .iter()
+        .find(|g| g.id == goal_id)
+        .is_some_and(|g| match &g.status {
+            GoalProgress::Blocked(reason) => is_no_progress_marker(reason),
+            _ => false,
+        })
+}
+
 /// A tracking issue the breaker successfully filed for an escalated goal.
 ///
 /// Returned by [`NoProgressIssueFiler::file_issue`] so the caller can link the
@@ -83,6 +107,40 @@ pub(crate) struct FiledIssue {
     pub url: Option<String>,
 }
 
+/// The `ooda-signature:<sig>` body marker prefix the breaker embeds in every
+/// `ooda-stuck` tracking issue it files, and greps for when searching before
+/// creating (issue #4497). It is a single whitespace-delimited token so a plain
+/// substring / token scan of an issue body finds it, mirroring the proven
+/// `stewardship-signature:` convention in [`crate::stewardship::dedup`].
+const OODA_SIGNATURE_MARKER: &str = "ooda-signature:";
+
+/// A stable, per-goal dedup key for the no-progress breaker's tracking issue
+/// (issue #4497). It is the durable identity of "this goal's `ooda-stuck`
+/// tracking issue": the first 8 bytes of `sha256("ooda-no-progress" || "\n" ||
+/// goal_id)` rendered as 16 lowercase hex chars.
+///
+/// Reuses the sha256-prefix **shape** of
+/// [`crate::stewardship::dedup::failure_signature`] (so the marker is
+/// indistinguishable in form from the stewardship convention) but deliberately
+/// hashes the goal id VERBATIM rather than through the volatile-token redactor:
+/// a goal id is a stable identity, and folding an embedded UUID/hex run would
+/// wrongly collapse two DISTINCT goals onto one tracking issue. The result is
+/// therefore identical across re-orientation and process restart (deterministic
+/// on `goal_id`) yet distinct per goal — exactly what a search-before-create
+/// dedup key needs.
+pub(crate) fn breaker_signature(goal_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"ooda-no-progress\n");
+    hasher.update(goal_id.trim().as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(16);
+    for b in &digest[..8] {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
 /// Files a tracking issue for a goal the breaker escalated. Injected so tests
 /// exercise the escalation path without shelling out to `gh`.
 pub(crate) trait NoProgressIssueFiler {
@@ -96,6 +154,26 @@ pub(crate) trait NoProgressIssueFiler {
     /// `None` simply means the goal stays Blocked without a linked artifact
     /// (no worse than before this linkage existed).
     fn file_issue(&self, title: &str, body: &str) -> Option<FiledIssue>;
+
+    /// **Search before create** (issue #4497): return the OPEN `ooda-stuck`
+    /// tracking issue whose body embeds `ooda-signature:<signature>`, or `None`
+    /// when none is open (or the remote is unreachable).
+    ///
+    /// This is the dedup **source of truth**: the remote open-issue list, NOT the
+    /// volatile in-memory `wip_refs` link. Keying dedup on the remote (matched by
+    /// the goal's stable [`breaker_signature`]) is what stops a re-orientation
+    /// (which clears the in-memory link) or a restart from resurrecting the
+    /// duplicate-filing livelock. It MUST be read-only and **fail closed** —
+    /// return `None` on any `gh`/parse error so a transient outage never blocks
+    /// the cycle (the escalation still marks the goal Blocked; it simply files no
+    /// linked artifact, no worse than an outage of [`file_issue`] itself).
+    ///
+    /// The default returns `None` (no remote dedup) so a filer with no remote
+    /// store — every legacy test fake — keeps its prior create-always behaviour;
+    /// [`GhIssueFiler`] and the remote-modelling test fakes override it.
+    fn find_open_tracking_issue(&self, _signature: &str) -> Option<FiledIssue> {
+        None
+    }
 }
 
 /// Production filer: `gh issue create --label ooda-stuck`, mirroring the
@@ -151,6 +229,84 @@ impl NoProgressIssueFiler for GhIssueFiler {
             }
         }
     }
+
+    fn find_open_tracking_issue(&self, signature: &str) -> Option<FiledIssue> {
+        // Read-only search-before-create against the REMOTE open-issue list — the
+        // dedup source of truth (issue #4497). Fail closed: any spawn/exit/parse
+        // error returns `None` so a transient `gh` outage can never abort the
+        // cycle (the caller still Blocks the goal; it just files no linked issue).
+        let out = match std::process::Command::new("gh")
+            .args([
+                "issue",
+                "list",
+                "--state",
+                "open",
+                "--label",
+                "ooda-stuck",
+                "--limit",
+                "200",
+                "--json",
+                "number,url,body",
+            ])
+            .output()
+        {
+            Ok(out) if out.status.success() => out,
+            Ok(out) => {
+                tracing::error!(
+                    target: "simard::ooda",
+                    stderr = %String::from_utf8_lossy(&out.stderr),
+                    "no-progress breaker: gh issue list failed during dedup search (failing closed)",
+                );
+                return None;
+            }
+            Err(e) => {
+                tracing::error!(
+                    target: "simard::ooda",
+                    error = %e,
+                    "no-progress breaker: gh spawn failed during dedup search (failing closed)",
+                );
+                return None;
+            }
+        };
+
+        #[derive(serde::Deserialize)]
+        struct GhListedIssue {
+            number: u64,
+            #[serde(default)]
+            url: Option<String>,
+            #[serde(default)]
+            body: String,
+        }
+
+        let issues: Vec<GhListedIssue> = match serde_json::from_slice(&out.stdout) {
+            Ok(issues) => issues,
+            Err(e) => {
+                tracing::error!(
+                    target: "simard::ooda",
+                    error = %e,
+                    "no-progress breaker: could not parse gh issue list JSON during dedup (failing closed)",
+                );
+                return None;
+            }
+        };
+
+        let needle = format!("{OODA_SIGNATURE_MARKER}{signature}");
+        issues
+            .into_iter()
+            .find(|i| body_has_signature(&i.body, &needle))
+            .map(|i| FiledIssue {
+                number: i.number.to_string(),
+                url: i.url,
+            })
+    }
+}
+
+/// True when `body` embeds the `ooda-signature:<sig>` `needle` as a whole
+/// whitespace-delimited token (issue #4497). Token-level (not a bare
+/// `contains`) so a signature can never be matched as a prefix of a longer
+/// token, keeping dedup exact.
+fn body_has_signature(body: &str, needle: &str) -> bool {
+    body.split_whitespace().any(|t| t == needle)
 }
 
 /// Parse the issue number from a `gh issue create` success line, which prints
@@ -207,8 +363,11 @@ fn escalate_with_tracking_issue(
     issue_body: &str,
     filer: &dyn NoProgressIssueFiler,
 ) {
-    // Idempotence: never file a second tracking issue for a goal already linked
-    // to one (a re-stall must not spam duplicate `ooda-stuck` issues).
+    // The goal's durable dedup identity (stable across re-orient / restart).
+    let signature = breaker_signature(goal_id);
+
+    // First-line idempotence: never re-file for a goal that already carries its
+    // breaker tracking ref in memory this cycle.
     let already_tracked = state
         .active_goals
         .active
@@ -218,8 +377,25 @@ fn escalate_with_tracking_issue(
 
     let filed = if already_tracked {
         None
+    } else if let Some(existing) = filer.find_open_tracking_issue(&signature) {
+        // Search-before-create (issue #4497): a prior cycle or process already
+        // filed this goal's tracking issue. Re-link that standing issue instead
+        // of spamming a duplicate — this is what defeats the re-orient/restart
+        // livelock that clears the in-memory ref.
+        tracing::info!(
+            target: "simard::ooda",
+            goal = %goal_id,
+            issue = %existing.number,
+            signature = %signature,
+            "no-progress breaker: standing ooda-stuck issue found via signature — re-linking (no duplicate filed)",
+        );
+        Some(existing)
     } else {
-        filer.file_issue(issue_title, issue_body)
+        // No standing issue: file one, embedding the `ooda-signature:<sig>` body
+        // marker so the next search-before-create (after a re-orient / restart)
+        // can find it and dedup.
+        let body = format!("{issue_body}\n\n{OODA_SIGNATURE_MARKER}{signature}");
+        filer.file_issue(issue_title, &body)
     };
 
     if let Some(g) = state
@@ -291,6 +467,18 @@ pub(crate) struct NoProgressBreakerReport {
     /// SIGNAL. It stays **fail-closed**: the goal is never blocked/killed/parked,
     /// and this is deliberately NOT a [`fired`](Self::fired) firing.
     pub research_idle_faults: Vec<String>,
+    /// Goals the breaker **terminally halted** this pass (issue #4497): escalated
+    /// to a human exactly once and recorded in the tracker's halt set so their
+    /// subsequent no-action cycles are skipped rather than re-escalated. This is
+    /// the fix for the observed livelock where a single still-blocked goal spammed
+    /// five near-duplicate `ooda-stuck` tracking issues in ~6h
+    /// (#4497/#4499/#4504/#4508/#4509) because each agentic re-orientation cleared
+    /// its in-memory tracking ref and the next threshold cycle re-filed. Recorded
+    /// on the SAME pass as the escalation (so it accompanies the `escalated`
+    /// entry); a goal already halted on entry is silently skipped and does NOT
+    /// re-appear here. Not itself a [`fired`](Self::fired) — the escalation that
+    /// accompanies it is.
+    pub halted: Vec<String>,
 }
 
 impl NoProgressBreakerReport {
@@ -312,7 +500,7 @@ impl NoProgressBreakerReport {
         format!(
             "done={} dropped={} escalated={} healed={} deferred={} engineer={} \
              auto_cleared={} reinvestigated={} errors={} perpetual_idled={} \
-             research_faults={}",
+             research_faults={} halted={}",
             self.marked_done.len(),
             self.dropped.len(),
             self.escalated.len(),
@@ -324,6 +512,7 @@ impl NoProgressBreakerReport {
             self.investigation_errors.len(),
             self.perpetual_idled.len(),
             self.research_idle_faults.len(),
+            self.halted.len(),
         )
     }
 
@@ -744,6 +933,21 @@ pub(crate) fn apply_no_progress_breaker_with_threshold(
             continue;
         }
 
+        // Terminal-halt guard (issue #4497): a goal already escalated by the
+        // breaker still stands Blocked with the sentinel, so skip it entirely —
+        // no counter bump, no re-escalation, no duplicate tracking issue — while
+        // that block stands. This is what stops the observed re-fire livelock. An
+        // operator or the agentic reasoner lifting the block re-admits the goal;
+        // the remote signature dedup then keeps a re-stall from filing a duplicate.
+        if goal_is_sentinel_blocked(state, goal_id) {
+            tracing::debug!(
+                target: "simard::ooda",
+                goal = %goal_id,
+                "no-progress breaker: goal already escalated (sentinel-blocked) — skipping (escalated once)",
+            );
+            continue;
+        }
+
         // Standing/perpetual exemption (issue #2589) + never-idle research rail
         // (issue #4399), unified in `apply_standing_idle` (which calls the shared
         // pure `classify_standing_idle`) so the two breaker sites can never drift.
@@ -814,10 +1018,14 @@ pub(crate) fn apply_no_progress_breaker_with_threshold(
                     filer,
                 );
                 report.escalated.push(goal_id.to_string());
+                // Terminal halt (issue #4497): record the goal as escalated-once so
+                // the sentinel-block guard skips its later no-action cycles instead
+                // of re-firing every tick.
+                report.halted.push(goal_id.to_string());
                 tracing::warn!(
                     target: "simard::ooda",
                     goal = %goal_id,
-                    "no-progress breaker: unresolved after threshold — BLOCKED + tracking issue filed and linked",
+                    "no-progress breaker: unresolved after threshold — BLOCKED + tracking issue filed and linked (halted, escalated once)",
                 );
             }
             // The base breaker's ladder ([`resolve_no_progress`]) only yields the
@@ -930,6 +1138,22 @@ pub(crate) fn apply_no_progress_breaker_investigated(
             if outcome.success {
                 tracker.record_progress(goal_id);
             }
+            continue;
+        }
+
+        // Terminal-halt guard (issue #4497): a goal already escalated by the
+        // breaker still stands Blocked with the sentinel, so skip it — no counter
+        // bump, no re-investigation, no re-escalation — while that block stands.
+        // This stops the observed re-fire livelock in the production (investigated)
+        // path. An operator or the agentic reasoner lifting the block re-admits the
+        // goal; the remote signature dedup then keeps a re-stall from filing a
+        // duplicate tracking issue.
+        if goal_is_sentinel_blocked(state, goal_id) {
+            tracing::debug!(
+                target: "simard::ooda",
+                goal = %goal_id,
+                "no-progress breaker: goal already escalated (sentinel-blocked) — skipping (escalated once)",
+            );
             continue;
         }
 
@@ -1123,11 +1347,12 @@ fn apply_resolution_side_effects(
                     );
                     tracker.reset_count(goal_id);
                     report.escalated.push(goal_id.to_string());
+                    report.halted.push(goal_id.to_string());
                     tracing::error!(
                         target: "simard::ooda",
                         goal = %goal_id,
                         error = %err,
-                        "no-progress breaker: precondition heal FAILED — escalating WITH why",
+                        "no-progress breaker: precondition heal FAILED — escalating WITH why (halted, escalated once)",
                     );
                 }
             }
@@ -1215,10 +1440,11 @@ fn apply_resolution_side_effects(
             );
             tracker.reset_count(goal_id);
             report.escalated.push(goal_id.to_string());
+            report.halted.push(goal_id.to_string());
             tracing::warn!(
                 target: "simard::ooda",
                 goal = %goal_id,
-                "no-progress breaker: stuck after guided retry — BLOCKED WITH why + issue filed and linked",
+                "no-progress breaker: stuck after guided retry — BLOCKED WITH why + issue filed and linked (halted, escalated once)",
             );
         }
         NoProgressResolution::SurfaceInvestigationFailure { class, reason } => {
@@ -1257,6 +1483,7 @@ fn apply_resolution_side_effects(
                 tracker.clear_surfaced_failures(goal_id);
                 tracker.reset_count(goal_id);
                 report.escalated.push(goal_id.to_string());
+                report.halted.push(goal_id.to_string());
                 tracing::warn!(
                     target: "simard::ooda",
                     goal = %goal_id,

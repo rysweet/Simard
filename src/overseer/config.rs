@@ -583,6 +583,23 @@ pub fn automerge_author() -> Option<String> {
 /// (`not-simard-autonomous`, `simard-autonomous-ish`) through the gate.
 pub const SIMARD_ENGINEER_PR_LABEL: &str = "simard-autonomous";
 
+/// The EXPLICIT, whole-string objective anchor marking a Simard-origin PR as one
+/// that **converges the active deploy gate** (issue #4505). When a red-canary /
+/// DeployDrift blocker is active — the running binary is behind merged `main`
+/// because the self-deploy canary is red — the overseer's escalation ranking
+/// ([`prioritize_gate_converging_prs`](crate::overseer::prioritize_gate_converging_prs))
+/// surfaces the PR carrying this label FIRST, so a green, mergeable PR that fixes
+/// the very gate the deploy keeps failing on is escalated-to-merge instead of
+/// sitting idle behind ordinary ready PRs.
+///
+/// Matched EXACTLY (whole-string, case-sensitive) by [`is_converges_gate_label`]:
+/// a title/branch/author heuristic (or a loose substring match) could be spoofed
+/// by free text, so ONLY this durable label promotes a PR. Distinct from
+/// [`SIMARD_ENGINEER_PR_LABEL`] — a PR must still prove Simard-origin AND pass the
+/// full six-criteria merge-authority gate; this label only re-orders the
+/// already-authorized set.
+pub const CONVERGES_GATE_PR_LABEL: &str = "converges-gate";
+
 /// The Rust-deterministic, engineer-EXCLUSIVE head-branch namespaces. These are
 /// code-generated and NEVER hand-typed by a human operator, so a head branch
 /// under one of them is proof-of-Simard-origin. They are the SECONDARY
@@ -604,6 +621,14 @@ pub const ENGINEER_BRANCH_PREFIXES: &[&str] = &["engineer/", "chore/advisory-"];
 /// [`SIMARD_ENGINEER_PR_LABEL`]. Whole-string, case-sensitive.
 pub fn is_engineer_pr_label(label: &str) -> bool {
     label == SIMARD_ENGINEER_PR_LABEL
+}
+
+/// True iff `label` is EXACTLY the deploy-gate-converging marker
+/// [`CONVERGES_GATE_PR_LABEL`] (issue #4505). Whole-string, case-sensitive — a
+/// substring or loose match would let a spoofed look-alike promote a PR ahead of
+/// the merge queue under active DeployDrift.
+pub fn is_converges_gate_label(label: &str) -> bool {
+    label == CONVERGES_GATE_PR_LABEL
 }
 
 /// True iff `head` rides a Rust-deterministic, engineer-only branch namespace

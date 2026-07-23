@@ -501,3 +501,4 @@ journalctl --user -u simard-ooda | grep 'merge reasoning DISABLED'
 - [Concept: autonomous self-merge sensor](../concepts/autonomous-self-merge-sensor.md) — the retired imperative sensor
 - [Reference: cross-repo merge authority](../reference/cross-repo-merge-authority.md) — the unchanged action gate
 - [How to triage stale pull requests](../howto/triage-stale-pull-requests.md)
+- [Concept: Overseer escalates the deploy-gate-converging PR](../concepts/deploy-gate-converging-pr-escalation.md) — the DeployDrift-aware ranking that sits behind this re-narrowing

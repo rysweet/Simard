@@ -633,9 +633,12 @@ impl PrOps for MergePrOps {
         &self,
         reasoned: &[crate::overseer::capabilities::ReasonedPr],
         overseer_login: &str,
+        deploy_drift: Option<&crate::overseer::capabilities::DeployDriftObservation>,
     ) -> Vec<PrRef> {
         use crate::overseer::capabilities::PrDisposition;
-        use crate::overseer::{ProjectionCandidate, project_ready_prs};
+        use crate::overseer::{
+            ProjectionCandidate, prioritize_gate_converging_prs, project_ready_prs,
+        };
         use std::collections::BTreeMap;
 
         let ready: Vec<&crate::overseer::capabilities::ReasonedPr> = reasoned
@@ -686,7 +689,12 @@ impl PrOps for MergePrOps {
                 snapshot: summary.to_snapshot(),
             });
         }
-        project_ready_prs(&candidates, &self.base_allowlist, overseer_login)
+        let authorized = project_ready_prs(&candidates, &self.base_allowlist, overseer_login);
+        // Escalation ranking (issue #4505): under an ACTIVE DeployDrift blocker,
+        // surface a deploy-gate-converging PR FIRST so it is escalated-to-merge
+        // instead of sitting behind ordinary ready PRs. Pure re-ordering of the
+        // already-authorized set — never widens authority.
+        prioritize_gate_converging_prs(&authorized, &candidates, deploy_drift)
     }
 }
 
