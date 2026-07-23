@@ -38,6 +38,33 @@ pub fn truncate_to_char_boundary(s: &mut String, max_bytes: usize) {
     s.truncate(idx);
 }
 
+/// Return the **prefix** of `s` whose byte length does not exceed `max_bytes`,
+/// backing up to the previous UTF-8 char boundary when `max_bytes` falls inside
+/// a multi-byte sequence.
+///
+/// The borrowing analog of [`truncate_to_char_boundary`]: it computes the same
+/// boundary but returns a `&str` view instead of mutating a `String`. Use it
+/// when the input is a `&str` you only need to *read* a capped prefix of — for
+/// example embedding a bounded snapshot of a multi-megabyte agent response in a
+/// log record — so you allocate at most `max_bytes`, not a full copy of `s`.
+///
+/// Properties:
+///
+/// - If `s.len() <= max_bytes` the whole string is returned.
+/// - Otherwise the result is a valid `&str` with `result.len() <= max_bytes`.
+/// - Never panics. Byte 0 is always a valid boundary, so the boundary search
+///   always terminates.
+pub fn head_within_budget(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut idx = max_bytes;
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    &s[..idx]
+}
+
 /// Return the **suffix** of `s` whose byte length does not exceed `max_bytes`,
 /// advancing *forward* to the next UTF-8 char boundary when `s.len() - max_bytes`
 /// falls inside a multi-byte sequence.
@@ -251,5 +278,64 @@ mod tests {
     fn tail_empty_string_no_op() {
         assert_eq!(tail_within_budget("", 100), "");
         assert_eq!(tail_within_budget("", 0), "");
+    }
+
+    // ── head_within_budget ──────────────────────────────────────────
+
+    #[test]
+    fn head_no_op_when_within_budget() {
+        assert_eq!(head_within_budget("short", 1024), "short");
+        assert_eq!(head_within_budget("exact", 5), "exact");
+    }
+
+    #[test]
+    fn head_ascii_keeps_first_n_bytes() {
+        let s = "a".repeat(20);
+        assert_eq!(head_within_budget(&s, 5), "aaaaa");
+        assert_eq!(head_within_budget(&s, 5).len(), 5);
+    }
+
+    #[test]
+    fn head_matches_truncate_to_char_boundary() {
+        // The borrowing prefix helper must select the exact same boundary as
+        // the in-place `String` truncator for every budget.
+        let mut s = "a".repeat(97);
+        s.push('日'); // 3-byte CJK straddling later budgets
+        s.push('🎉'); // 4-byte emoji
+        s.push_str(&"b".repeat(30));
+        for budget in 0..s.len() + 5 {
+            let mut owned = s.clone();
+            truncate_to_char_boundary(&mut owned, budget);
+            assert_eq!(
+                head_within_budget(&s, budget),
+                owned.as_str(),
+                "mismatch at budget {budget}"
+            );
+        }
+    }
+
+    #[test]
+    fn head_multibyte_at_boundary_does_not_panic() {
+        // Em-dash '—' is 3 bytes; a budget landing mid-char backs up.
+        let mut s = "a".repeat(511);
+        s.push('—'); // bytes 511,512,513
+        s.push_str(&"b".repeat(20));
+        let out = head_within_budget(&s, 512);
+        assert!(out.len() <= 512);
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+        assert_eq!(out.len(), 511);
+        assert!(!out.contains('—'));
+    }
+
+    #[test]
+    fn head_empty_string_no_op() {
+        assert_eq!(head_within_budget("", 100), "");
+        assert_eq!(head_within_budget("", 0), "");
+    }
+
+    #[test]
+    fn head_zero_budget_with_multibyte_lead_is_empty() {
+        assert_eq!(head_within_budget("—🎉日", 0), "");
+        assert_eq!(head_within_budget("—trailing", 1), "");
     }
 }
