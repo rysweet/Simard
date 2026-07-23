@@ -1364,16 +1364,38 @@ impl Overseer {
         if self.inflight_investigations.is_empty() {
             return;
         }
-        let done: Vec<String> = self
+        // Collect the signatures whose investigation recipe reached a TERMINAL
+        // state this tick, together with that status for observability. A
+        // `Running` poll — or a transient poll `Err` we cannot interpret —
+        // leaves the handle in place (fail-closed: never drop an investigation
+        // we cannot confirm has finished).
+        let done: Vec<(String, WorkstreamStatus)> = self
             .inflight_investigations
             .iter()
             .filter_map(|(key, handle)| match self.caps.recipes.poll(handle) {
                 Ok(WorkstreamStatus::Running) | Err(_) => None,
-                Ok(_) => Some(key.clone()),
+                Ok(status) => Some((key.clone(), status)),
             })
             .collect();
-        for key in done {
+        for (key, status) in done {
             self.inflight_investigations.remove(&key);
+            // Observability for the verdict write-back gap (#4467): this
+            // reconcile only frees the in-flight dedup slot — it does NOT itself
+            // persist the concluded recipe's verdict into the store the
+            // claim-reaper reads (`StaleEngineerInvestigator::investigate`). A
+            // stale-engineer investigation that finishes here without a later
+            // write-back leaves the reaper stuck on `Pending` and re-archiving
+            // evidence every sweep. Logging the conclusion turns that otherwise
+            // silent event into a diagnosable signal (root cause: goal
+            // `advance-rysweet-agent-kgpacks-rs-to-full-parity-f29bb15c`,
+            // 2026-07-22, hourly re-archival with verdict=pending).
+            tracing::info!(
+                target: "overseer::investigation",
+                investigation_key = %key,
+                terminal_status = ?status,
+                "[simard] stale-engineer investigation recipe concluded; in-flight \
+                 slot released (verdict write-back tracked separately: #4467)",
+            );
         }
     }
 
@@ -4613,6 +4635,67 @@ mod tests {
             log.lock().expect("log").len(),
             0,
             "the reasoner recipe is never spawned under the resource opt-out"
+        );
+    }
+
+    // A recipes seam whose poll reports a TERMINAL status, so an in-flight
+    // investigation slot is reconciled (freed) on the next tick.
+    struct CompletingInvestigation;
+    impl RecipeLauncher for CompletingInvestigation {
+        fn launch(&self, _brief: &RecipeBrief) -> Result<WorkstreamHandle, OverseerError> {
+            Ok(WorkstreamHandle {
+                id: "ws-done".to_string(),
+            })
+        }
+        fn poll(&self, _h: &WorkstreamHandle) -> Result<WorkstreamStatus, OverseerError> {
+            Ok(WorkstreamStatus::ProducedPr {
+                repo: "rysweet/Simard".to_string(),
+                pr: 1,
+            })
+        }
+    }
+
+    /// A concluded investigation recipe frees its in-flight dedup slot so a
+    /// re-observed signature is no longer held (the observable half of #4467).
+    #[test]
+    fn reconcile_frees_slot_for_completed_investigation() {
+        let mut c = caps(ObservedState::default(), false, vec![]);
+        c.recipes = Box::new(CompletingInvestigation);
+        let mut ov = Overseer::new(c);
+        ov.inflight_investigations.insert(
+            "sig-completed".to_string(),
+            WorkstreamHandle {
+                id: "ws-done".to_string(),
+            },
+        );
+
+        ov.reconcile_inflight_investigations();
+
+        assert!(
+            ov.inflight_investigations.is_empty(),
+            "a terminal investigation recipe must free its in-flight slot"
+        );
+    }
+
+    /// Fail-closed: a still-running investigation (FakeRecipes::poll => Running)
+    /// is KEPT, so the reaper never drops an investigation it cannot confirm has
+    /// finished.
+    #[test]
+    fn reconcile_keeps_still_running_investigation() {
+        let mut ov = Overseer::new(caps(ObservedState::default(), false, vec![]));
+        ov.inflight_investigations.insert(
+            "sig-running".to_string(),
+            WorkstreamHandle {
+                id: "ws-1".to_string(),
+            },
+        );
+
+        ov.reconcile_inflight_investigations();
+
+        assert_eq!(
+            ov.inflight_investigations.len(),
+            1,
+            "a still-running investigation must be kept — fail closed"
         );
     }
 }
