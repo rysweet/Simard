@@ -47,14 +47,6 @@ pub const ACK_SUFFIX: &str = ".ack";
 /// keeping it tiny bounds disk use and forgery blast radius.
 const ACK_MARKER_BYTES: &[u8] = b"acknowledged\n";
 
-/// `true` for a quarantined corrupt cognitive-memory basename. Delegates to the
-/// canonical [`crate::cmd_cleanup::is_corrupt_quarantine_name`] so the cleanup
-/// sweep, the health probe, and this acknowledge path can never disagree about
-/// which artifacts are corrupt-quarantines.
-fn is_corrupt_quarantine_name(name: &str) -> bool {
-    crate::cmd_cleanup::is_corrupt_quarantine_name(name)
-}
-
 /// True when `name` is an acknowledgement sidecar (`*.ack`) rather than a
 /// quarantine artifact. Scanners MUST exclude these so a marker is never
 /// itself treated as a corrupt store.
@@ -79,7 +71,10 @@ fn is_ackable_quarantine_basename(name: &str) -> bool {
         (Some(Component::Normal(c)), None) if c == OsStr::new(name) => {}
         _ => return false,
     }
-    is_corrupt_quarantine_name(name)
+    // Delegate to the canonical predicate so the cleanup sweep, the health
+    // probe, and this acknowledge path can never disagree about which artifacts
+    // are corrupt-quarantines.
+    crate::cmd_cleanup::is_corrupt_quarantine_name(name)
 }
 
 /// Compute the durable ack-marker path for the corrupt-quarantine artifact
