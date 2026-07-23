@@ -537,6 +537,41 @@ mod probe_logic_tests {
         );
     }
 
+    /// Root Cause A boundary: the window filter is an INCLUSIVE lower bound
+    /// (`mtime >= window_start`). A quarantine whose mtime lands exactly on the
+    /// window start is a fresh, post-deploy event and must be counted; one a
+    /// single second earlier is a retained historical snapshot. This pins the
+    /// exact edge the fresh/retained split hinges on — the existing tests only
+    /// cover instants clearly inside or clearly before the window. A
+    /// whole-second instant is used so filesystem mtime truncation can never
+    /// blur the boundary and make the assertion flaky.
+    #[test]
+    fn fresh_quarantine_scan_window_start_is_inclusive_lower_bound() {
+        let dir = tempdir().unwrap();
+        let boundary = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let window = DateTime::<Utc>::from(boundary);
+
+        // Exactly on the boundary ⇒ fresh (inclusive `>=`).
+        let on = dir.path().join("cognitive.corrupt-onboundary");
+        std::fs::write(&on, b"x").unwrap();
+        set_mtime(&on, boundary);
+
+        // One second before the boundary ⇒ retained.
+        let before = dir.path().join("cognitive.corrupt-beforeboundary");
+        std::fs::write(&before, b"x").unwrap();
+        set_mtime(&before, boundary - std::time::Duration::from_secs(1));
+
+        let tally = tally_quarantine_files(dir.path(), window);
+        assert_eq!(
+            tally.fresh, 1,
+            "a quarantine whose mtime equals window_start must count as fresh"
+        );
+        assert_eq!(
+            tally.retained, 1,
+            "a quarantine one second before window_start must be retained"
+        );
+    }
+
     #[test]
     fn fresh_quarantine_scan_missing_dir_is_zero() {
         let tally =
