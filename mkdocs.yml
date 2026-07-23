@@ -506,6 +506,7 @@ nav:
     - Writing Hermetic Tests: testing/hermetic-tests.md
     - serial(cognitive_memory) Isolation: testing/cognitive-memory-serial-isolation.md
     - De-Flaking Known Flaky Tests: testing/deflaking-known-flaky-tests.md
+    - Tool-Executor ECHILD (SIGCHLD=SIG_IGN): testing/tool-executor-idle-liveness-serial-isolation.md
   - Ecosystem & Audits:
     - Amplihack Ecosystem Map: ecosystem-map.md
     - amplihack-rs ↔ amplihack Parity Matrix: amplihack-rs-parity.md
