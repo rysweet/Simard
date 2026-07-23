@@ -177,7 +177,7 @@ smart-orchestrator` to fix a goal — a real PR producer. Command construction i
 extracted into a testable seam:
 
 ```rust
-fn build_overseer_recipe_command(brief: &FixBrief) -> Command {
+fn build_overseer_recipe_command(brief: &RecipeBrief) -> Command {
     let mut cmd = Command::new("amplihack");
     cmd.args(smart_orchestrator_args(brief))
         .env(config::WORKFLOW_PR_LABELS_ENV, config::SIMARD_ENGINEER_PR_LABEL);
