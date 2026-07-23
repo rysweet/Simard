@@ -222,13 +222,37 @@ impl SpawnedChild for RealChild {
     }
 }
 
+/// Build the `amplihack recipe run smart-orchestrator …` [`Command`] for a
+/// brief — program, argv, and the envs it must carry — WITHOUT stdio, so it can
+/// be unit-tested via `get_envs()`/`get_args()` (mirrors the `route.rs`
+/// construction-seam pattern) and the spawner only has to attach the log fds.
+///
+/// Sets `WORKFLOW_PR_LABELS = SIMARD_ENGINEER_PR_LABEL` so the PR this recipe
+/// publishes is stamped with the durable engineer-PR marker at creation —
+/// otherwise the Overseer-launched PR rides a shared `feat/*`/`fix/*` branch
+/// under the operator's gh login and `survey_ready_prs` never sees it (the same
+/// self-merge-visibility gap fixed for direct engineer spawns). Sourced from the
+/// single-source-of-truth constant so producer and merge-queue consumer
+/// (`is_engineer_pr_label`) cannot drift.
+///
+/// `AMPLIHACK_AGENT_BINARY` is intentionally NOT set here: it is inherited from
+/// the caller's environment (Copilot/Claude parity) and must not be overridden.
+fn build_overseer_recipe_command(brief: &RecipeBrief) -> std::process::Command {
+    let mut cmd = std::process::Command::new("amplihack");
+    cmd.args(smart_orchestrator_args(brief)).env(
+        "WORKFLOW_PR_LABELS",
+        crate::overseer::config::SIMARD_ENGINEER_PR_LABEL,
+    );
+    cmd
+}
+
 /// Production [`ChildSpawner`]: spawns `amplihack recipe run smart-orchestrator …`
 /// capturing output to a temp log, with `AMPLIHACK_AGENT_BINARY` preserved from
 /// the caller's environment (Copilot/Claude parity).
 struct RealChildSpawner;
 impl ChildSpawner for RealChildSpawner {
     fn spawn(&self, brief: &RecipeBrief) -> std::io::Result<(Box<dyn SpawnedChild>, PathBuf)> {
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
 
         let log_path = std::env::temp_dir().join(format!(
             "overseer-recipe-{}.log",
@@ -252,10 +276,8 @@ impl ChildSpawner for RealChildSpawner {
         })?;
         let log_err = log.try_clone()?;
 
-        let mut cmd = Command::new("amplihack");
-        cmd.args(smart_orchestrator_args(brief))
-            .stdout(Stdio::from(log))
-            .stderr(Stdio::from(log_err));
+        let mut cmd = build_overseer_recipe_command(brief);
+        cmd.stdout(Stdio::from(log)).stderr(Stdio::from(log_err));
         // Preserve AMPLIHACK_AGENT_BINARY if the caller set it (Copilot/Claude
         // parity) — inherited automatically; we do not override it.
 
@@ -535,6 +557,37 @@ mod tests {
                 .any(|a| a == "task_description=fix distillation banner pollution")
         );
         assert!(args.iter().any(|a| a == "target_repo=rysweet/Simard"));
+    }
+
+    #[test]
+    fn overseer_recipe_command_stamps_engineer_pr_label() {
+        use std::ffi::OsStr;
+        // The Overseer fix-launch recipe also publishes PRs; they must carry the
+        // durable engineer-PR marker so survey_ready_prs sees them (same
+        // self-merge-visibility gap as direct engineer spawns).
+        let brief = RecipeBrief {
+            task_description: "steward fix".to_string(),
+            target_repo: "rysweet/Simard".to_string(),
+            sequence_group: None,
+        };
+        let cmd = build_overseer_recipe_command(&brief);
+        let label = cmd
+            .get_envs()
+            .find(|(k, _)| *k == OsStr::new("WORKFLOW_PR_LABELS"))
+            .and_then(|(_, v)| v);
+        assert_eq!(
+            label,
+            Some(OsStr::new(
+                crate::overseer::config::SIMARD_ENGINEER_PR_LABEL
+            )),
+            "Overseer recipe Command must export WORKFLOW_PR_LABELS=<engineer-PR marker>"
+        );
+        // Adding the env must not disturb the pinned recipe argv.
+        let argv: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(argv, smart_orchestrator_args(&brief));
     }
 
     #[test]
