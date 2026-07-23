@@ -724,6 +724,15 @@ closedByPullRequestsReferences(first:50,includeClosedPrs:true){nodes{merged}}}}}
     /// Run `gh <kind> view <num> --repo <repo> --json state --jq .state` and
     /// return the trimmed state string (e.g. `MERGED`, `CLOSED`, `OPEN`).
     fn gh_state(&self, kind: &str, repo: &str, num: &str) -> SimardResult<String> {
+        // Uniform injection guard: every `gh <kind> view` call — the `pr`
+        // fast-path, `issue_closed`, and any future caller — validates its
+        // `repo` slug and parses `num` into a positive integer *before* spawn,
+        // matching the merged-PR issue fallback. A flag-like `num` (leading
+        // `-`) or an unsafe slug fails **closed** (`CouldNotVerify`) instead of
+        // reaching `gh` as an argument.
+        validate_repo_slug(repo)?;
+        let num = parse_ref_number(kind, num)?.to_string();
+        let num = num.as_str();
         let out = std::process::Command::new("gh")
             .args([
                 kind, "view", num, "--repo", repo, "--json", "state", "--jq", ".state",

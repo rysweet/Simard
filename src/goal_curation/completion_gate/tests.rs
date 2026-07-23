@@ -957,6 +957,64 @@ fn gh_source_first_ref_of_kind_matches_case_insensitively() {
     assert_eq!(super::first_ref_of_kind(&goal, "commit"), None);
 }
 
+// --- Uniform fast-path injection guard (guard-symmetry follow-up) -----------
+//
+// The merged-PR issue fallback validated its `ref_id`/`repo_slug` before spawn,
+// but the pre-existing `pr`/`issue` fast paths forwarded raw values to
+// `gh_state`. These tests pin that `gh_state` now applies the SAME
+// `parse_ref_number` + `validate_repo_slug` guards, so a flag-like `ref_id` or
+// unsafe slug on the fast path fails **closed** (`Err`) BEFORE any `gh` spawn —
+// hermetically (no network), never reaching `gh` as an argument.
+
+#[test]
+fn gh_source_pr_fast_path_rejects_flag_like_ref_id_fail_closed() {
+    let source = GhCliEvidenceSource::new("/nonexistent/repo/dir");
+    let mut goal = no_signal_goal("g"); // repo_slug ⇒ valid "rysweet/amplihack-rs"
+    goal.wip_refs = vec![WipRef {
+        kind: "pr".to_string(),
+        ref_id: "-12 --json state".to_string(), // flag-injection attempt
+        label: "the pr".to_string(),
+        url: None,
+    }];
+    assert!(
+        source.any_pr_merged(&goal).is_err(),
+        "flag-like pr ref_id must fail closed before any `gh` spawn"
+    );
+}
+
+#[test]
+fn gh_source_issue_fast_path_rejects_flag_like_ref_id_fail_closed() {
+    let source = GhCliEvidenceSource::new("/nonexistent/repo/dir");
+    let mut goal = no_signal_goal("g");
+    goal.wip_refs = vec![WipRef {
+        kind: "issue".to_string(),
+        ref_id: "0".to_string(), // non-positive ⇒ rejected
+        label: "the issue".to_string(),
+        url: None,
+    }];
+    assert!(
+        source.issue_closed(&goal).is_err(),
+        "non-positive issue ref_id must fail closed before any `gh` spawn"
+    );
+}
+
+#[test]
+fn gh_source_fast_path_rejects_unsafe_repo_slug_fail_closed() {
+    let source = GhCliEvidenceSource::new("/nonexistent/repo/dir");
+    let mut goal = no_signal_goal("g");
+    goal.repo = Some("../evil".to_string()); // path-traversal slug
+    goal.wip_refs = vec![WipRef {
+        kind: "pr".to_string(),
+        ref_id: "101".to_string(), // otherwise-valid ref
+        label: "the pr".to_string(),
+        url: None,
+    }];
+    assert!(
+        source.any_pr_merged(&goal).is_err(),
+        "unsafe repo slug must fail closed before any `gh` spawn"
+    );
+}
+
 // ===========================================================================
 // issue #12 — completed-vs-PrNotMerged reconciliation (the systemic churn).
 //
