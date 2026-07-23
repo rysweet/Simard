@@ -1,3 +1,4 @@
+use super::disk::remove_old_corrupt_dbs_in;
 use super::*;
 
 /// Set a path's mtime to roughly `days` days in the past (plus an hour of
@@ -287,7 +288,6 @@ fn trim_snapshots_keeps_newest_n() {
 // ── remove_old_corrupt_dbs ──
 
 #[test]
-#[serial_test::serial(cognitive_memory)]
 fn corrupt_db_removed_when_older_than_threshold() {
     let tmp = tempfile::tempdir().unwrap();
     let simard = tmp.path().join(".simard");
@@ -307,17 +307,8 @@ fn corrupt_db_removed_when_older_than_threshold() {
         .unwrap()
         .set_times(times)
         .unwrap();
-    let old_home = std::env::var_os("HOME");
-    unsafe {
-        std::env::set_var("HOME", tmp.path());
-    }
     let mut report = CleanupReport::default();
-    remove_old_corrupt_dbs(&mut report);
-    if let Some(h) = old_home {
-        unsafe {
-            std::env::set_var("HOME", h);
-        }
-    }
+    remove_old_corrupt_dbs_in(&simard, &mut report);
     assert!(!old.exists(), "old corrupt DB should be removed");
     assert!(young.exists(), "young corrupt DB should survive");
     assert!(unrelated.exists(), "non-corrupt DB must never be touched");
@@ -335,7 +326,6 @@ fn corrupt_db_keep_is_sane() {
 /// quarantines present, only the newest `CORRUPT_DB_KEEP` survive, and the live
 /// store files are never touched.
 #[test]
-#[serial_test::serial(cognitive_memory)]
 fn corrupt_db_keep_bounds_quarantine_count() {
     let tmp = tempfile::tempdir().unwrap();
     let simard = tmp.path().join(".simard");
@@ -374,17 +364,8 @@ fn corrupt_db_keep_bounds_quarantine_count() {
         paths.push(p);
     }
 
-    let old_home = std::env::var_os("HOME");
-    unsafe {
-        std::env::set_var("HOME", tmp.path());
-    }
     let mut report = CleanupReport::default();
-    remove_old_corrupt_dbs(&mut report);
-    if let Some(h) = old_home {
-        unsafe {
-            std::env::set_var("HOME", h);
-        }
-    }
+    remove_old_corrupt_dbs_in(&simard, &mut report);
 
     let remaining = paths.iter().filter(|p| p.exists()).count();
     assert_eq!(
@@ -701,21 +682,16 @@ fn backdate(path: &std::path::Path, days: u64) {
     f.set_times(times).unwrap();
 }
 
-/// Run `remove_old_corrupt_dbs` with `HOME` pointed at `home`, restoring the
-/// previous value afterward. Serialized by the caller's
-/// `#[serial(cognitive_memory)]` attribute so the process-wide `HOME` mutation
-/// cannot race other tests that read the cognitive-memory store.
+/// Run `remove_old_corrupt_dbs_in` against `home/.simard` directly.
+///
+/// Path-injected rather than `HOME`-mutating: the sweep now resolves its scan
+/// dir via `simard_state_root()`, which reads the process-global
+/// `SIMARD_STATE_ROOT`/`HOME` env that parallel tests mutate under other serial
+/// keys. Driving the injected `remove_old_corrupt_dbs_in` makes these tests
+/// deterministic and free of cross-test env races (#4469 regression fix).
 fn run_corrupt_cleanup_with_home(home: &std::path::Path) -> CleanupReport {
-    let old_home = std::env::var_os("HOME");
-    unsafe {
-        std::env::set_var("HOME", home);
-    }
     let mut report = CleanupReport::default();
-    remove_old_corrupt_dbs(&mut report);
-    match old_home {
-        Some(h) => unsafe { std::env::set_var("HOME", h) },
-        None => unsafe { std::env::remove_var("HOME") },
-    }
+    remove_old_corrupt_dbs_in(&home.join(".simard"), &mut report);
     report
 }
 

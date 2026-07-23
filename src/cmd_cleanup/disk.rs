@@ -484,8 +484,19 @@ pub fn remove_old_corrupt_dbs(report: &mut CleanupReport) {
     // hardcoded `$HOME/.simard` here would let the probe and the sweep disagree
     // on which directory holds the quarantines, so an acknowledged artifact
     // would never be swept from the directory the probe actually watches.
-    let scan_dir = crate::state_root::simard_state_root();
-    let mut candidates = scan_quarantine_candidates(&scan_dir);
+    remove_old_corrupt_dbs_in(&crate::state_root::simard_state_root(), report);
+}
+
+/// Sweep aged / over-count corrupt-quarantine artifacts under `scan_dir`,
+/// applying the age cap, the keep-last-N cap, and the #2550 protected-asset
+/// guard, and reclaiming each swept artifact's `.ack` sidecar (#4469).
+///
+/// Path-injected so the sweep logic is decoupled from state-root resolution:
+/// [`remove_old_corrupt_dbs`] passes the resolved [`crate::state_root::simard_state_root`],
+/// while tests pass a tempdir directly and never mutate the process-global
+/// `SIMARD_STATE_ROOT`/`HOME` env (which parallel tests race on).
+pub(crate) fn remove_old_corrupt_dbs_in(scan_dir: &Path, report: &mut CleanupReport) {
+    let mut candidates = scan_quarantine_candidates(scan_dir);
     if candidates.is_empty() {
         return;
     }
