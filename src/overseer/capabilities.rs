@@ -573,6 +573,7 @@ pub trait PrOps {
         &self,
         _reasoned: &[ReasonedPr],
         _overseer_login: &str,
+        _deploy_drift: Option<&DeployDriftObservation>,
     ) -> Vec<PrRef> {
         Vec::new()
     }

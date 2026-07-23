@@ -39,6 +39,15 @@ mod tests_types;
 #[cfg(test)]
 mod tests_no_progress;
 
+// Issue #4497 (TDD): the OODA no-progress / re-orientation LIVELOCK fix — a
+// still-blocked goal must file at most one `ooda-stuck` tracking issue via a
+// remote signature search-before-create that survives re-orient/restart, and
+// must escalate exactly once then be skipped while it stands Blocked with the
+// no-progress sentinel (no re-orientation, no duplicate issue) until its block
+// is lifted (#4499/#4504/#4508/#4509/#4474/#4472).
+#[cfg(test)]
+mod tests_no_progress_livelock_dedup;
+
 // Issue #16 (TDD): integration tests for the agentic root-cause upgrade — the
 // investigated adapter routes a stuck goal down the self-resolving ladder and
 // only ever authors a human block WITH the concrete why + evidence attached.

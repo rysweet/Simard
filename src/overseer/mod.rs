@@ -76,6 +76,8 @@ pub mod wiring;
 #[cfg(test)]
 mod tests_deploy_drift;
 #[cfg(test)]
+mod tests_deploy_gate_escalation;
+#[cfg(test)]
 mod tests_diagnosis;
 #[cfg(test)]
 mod tests_escalation_triage;
@@ -1241,10 +1243,11 @@ impl Overseer {
         // deterministic survey), the ONLY thing that drives `PrReadyToMerge` into
         // the gated merge chain. An agent can never widen merge authorization.
         let overseer_login = self.recursion.author_login.clone();
-        let projected = self
-            .caps
-            .prs
-            .project_reasoned_ready_prs(&observed.reasoned_prs, &overseer_login);
+        let projected = self.caps.prs.project_reasoned_ready_prs(
+            &observed.reasoned_prs,
+            &overseer_login,
+            observed.deploy_drift.as_ref(),
+        );
         for pr in projected {
             if !observed.ready_prs.contains(&pr) {
                 observed.ready_prs.push(pr);
@@ -2779,6 +2782,63 @@ pub fn project_ready_prs(
             pr: c.reasoned.pr,
         })
         .collect()
+}
+
+/// Re-rank the ALREADY-AUTHORIZED merge set so a PR that converges the active
+/// deploy gate is surfaced FIRST (issue #4505). This is the fix for the observed
+/// escalation gap: while a red-canary / DeployDrift blocker is active (the running
+/// binary is behind merged `main` because the self-deploy canary is red), the
+/// overseer keeps failing on the very gate that a green, mergeable, non-draft PR
+/// (e.g. #4505) would converge — yet that PR sat idle for hours because the
+/// escalation candidate set treated it as just another ready PR.
+///
+/// Contract (deliberately narrow so it can NEVER widen merge authority):
+/// * **Set-preserving permutation.** The result is a re-ordering of `authorized`
+///   ONLY — same multiset in, same multiset out. It can never add, remove, or
+///   fabricate authorization for any PR; the six-criteria merge-authority gate
+///   still runs downstream unchanged. An `authorized` entry with no matching
+///   `candidate` is preserved in place.
+/// * **Scoped to an active blocker.** With `deploy_drift == None` the function is
+///   the identity — no gate to converge means no promotion, even for a PR that
+///   carries the label.
+/// * **Explicit label only.** A PR is treated as gate-converging iff its
+///   [`ProjectionCandidate::snapshot`] carries the whole-string
+///   [`CONVERGES_GATE_PR_LABEL`](crate::overseer::config::CONVERGES_GATE_PR_LABEL);
+///   title/branch/author heuristics never promote a PR.
+/// * **Never injects an unauthorized PR.** Only members of `authorized` appear in
+///   the output — a converging candidate absent from `authorized` (it failed the
+///   projection) is never pulled in. Authorization stays owned by
+///   [`project_ready_prs`].
+///
+/// The promotion is a STABLE partition: converging PRs keep their relative order
+/// and precede the non-converging PRs, which also keep theirs.
+pub fn prioritize_gate_converging_prs(
+    authorized: &[PrRef],
+    candidates: &[ProjectionCandidate],
+    deploy_drift: Option<&capabilities::DeployDriftObservation>,
+) -> Vec<PrRef> {
+    // Scoped to an active DeployDrift blocker: no drift ⇒ identity (no promotion).
+    if deploy_drift.is_none() {
+        return authorized.to_vec();
+    }
+
+    let converges = |pr: &PrRef| -> bool {
+        candidates.iter().any(|c| {
+            c.reasoned.repo == pr.repo
+                && c.reasoned.pr == pr.pr
+                && c.snapshot
+                    .labels
+                    .iter()
+                    .any(|l| config::is_converges_gate_label(l))
+        })
+    };
+
+    // Stable partition: gate-converging first (original order), then the rest
+    // (original order). A pure re-ordering of the authorized set — never a widen.
+    let mut ranked: Vec<PrRef> = Vec::with_capacity(authorized.len());
+    ranked.extend(authorized.iter().filter(|pr| converges(pr)).cloned());
+    ranked.extend(authorized.iter().filter(|pr| !converges(pr)).cloned());
+    ranked
 }
 
 /// Decide: choose one `Intervention` for a `Problem`. Illustrative routing; a
@@ -4442,6 +4502,7 @@ mod tests {
             &self,
             _reasoned: &[capabilities::ReasonedPr],
             _overseer_login: &str,
+            _deploy_drift: Option<&capabilities::DeployDriftObservation>,
         ) -> Vec<PrRef> {
             self.projected.clone()
         }

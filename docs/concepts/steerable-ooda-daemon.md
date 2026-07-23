@@ -329,3 +329,4 @@ contract plus stricter contract validation, not a larger parser.
 - [How OODA spawns engineer agents](../howto/spawn-engineers-from-ooda-daemon.md)
 - [Simard CLI reference](../reference/simard-cli.md)
 - [OODA coverage parallelism ceiling](../reference/ooda-coverage-parallelism-ceiling.md)
+- [No-progress breaker escalates once, then halts (livelock dedup)](./no-progress-livelock-dedup.md)
