@@ -10,6 +10,7 @@ related:
   - ../concepts/reconcile-and-self-deploy.md
   - ../concepts/operational-autonomy-model.md
   - ./self-deploy-source-prep.md
+  - ./self-deploy-quarantine-acknowledge.md
   - ./overseer-operator-notifications.md
   - ./overseer-tick-details.md
   - ../safe-self-update.md
@@ -334,15 +335,30 @@ internally. There are **six** probes: `version_advanced`, `memory_intact`,
 [`entrypoint_parity`](#entrypointparityprobe).
 
 ```text
-simard self-health [--json] [--pre-deploy-facts=N]
+simard self-health [--json] [--pre-deploy-facts=N] [--acknowledge-quarantine]
 
   --json               Emit the SelfHealthReport as JSON (default: human table).
   --pre-deploy-facts   Baseline fact count to compare against (the orchestrator
                        passes the count captured before the swap). When omitted,
                        the "memory intact" probe reports the live count only.
+  --acknowledge-quarantine
+                       Acknowledge every currently-present cognitive-memory
+                       quarantine artifact under the state root (writing an
+                       `.ack` sidecar next to each) before probing, so a
+                       genuinely-stuck quarantine clears the `no_quarantine`
+                       probe WITHOUT deleting the #2550 recovery asset.
+                       Idempotent. See the quarantine-acknowledge reference.
 
 Exit code: 0 when every probe is healthy; non-zero when any probe fails.
 ```
+
+The additive `--acknowledge-quarantine` flag resolves the `no_quarantine`
+deadlock (#4469) in which the retained #2550 recovery asset keeps the probe red
+forever. Acknowledgement silences the probe for a specific, named artifact but
+never deletes it, and a *new* corruption event reddens the probe again. The full
+`.ack` convention, the `quarantine_ack` module API, the ack-aware
+`count_quarantine_files`, and the guarded autonomous auto-ack are specified in
+[self-deploy quarantine-acknowledge](./self-deploy-quarantine-acknowledge.md).
 
 ### `self-health` output
 
@@ -419,6 +435,16 @@ and `retained` is the number of out-of-window snapshots the probe ignored. Emitt
 both lets operators tell "clean store" (`0` / `0`) apart from "clean since deploy,
 N forensic snapshots retained" (`0` / `N`) directly from the health JSON, without
 inspecting the store directory by hand.
+
+> **Acknowledgement-aware counting (#4469).** The probe's JSON schema is unchanged,
+> but both `count_quarantine_files` and the fresh/retained tally count only
+> **unacknowledged** `cognitive*.corrupt-<ts>` artifacts: an artifact with a
+> sibling `.ack` sidecar — and the `.ack` files themselves — are skipped, counting
+> as neither fresh nor retained. This lets a genuinely-stuck quarantine (the
+> retained #2550 recovery asset) clear so `all_healthy()` can converge without
+> deleting it, while a *new* (unacknowledged) corruption event still reddens the
+> probe. See
+> [self-deploy quarantine-acknowledge](./self-deploy-quarantine-acknowledge.md).
 
 > **Known limitation — mtime freshness.** Freshness is keyed on filesystem mtime.
 > Any operation that rewrites the mtime of a *retained* historical snapshot —

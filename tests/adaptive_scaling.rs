@@ -312,9 +312,17 @@ fn scaler_current_max_can_override_config() {
         })
         .collect();
 
-    // Use scaler's current_max as the config limit.
+    // Use scaler's current_max as the config limit. Set `scaler: None`
+    // explicitly instead of relying on `..OodaConfig::default()`:
+    // `OodaConfig::default()` reads process env (`SIMARD_SCALING`), so on a host
+    // with `SIMARD_SCALING=auto` the inherited default scaler would drive the
+    // limit via `scaler.adjust()` and override the explicit
+    // `max_concurrent_actions` under test, making the result depend on the
+    // environment rather than the config. Building it explicitly keeps the test
+    // hermetic (issue #2732).
     let config = OodaConfig {
         max_concurrent_actions: scaler.current_max(),
+        scaler: None,
         ..OodaConfig::default()
     };
 

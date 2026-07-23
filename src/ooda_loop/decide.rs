@@ -225,6 +225,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn decide_skips_zero_urgency_priorities() {
         let priorities = vec![
@@ -245,6 +246,7 @@ mod tests {
         assert_eq!(actions[0].goal_id, Some("g1".to_string()));
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn decide_maps_memory_priority_to_consolidate_action() {
         let priorities = vec![Priority {
@@ -259,6 +261,7 @@ mod tests {
         assert!(actions[0].goal_id.is_none());
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn decide_maps_improvement_priority_to_run_improvement() {
         let priorities = vec![Priority {
@@ -272,6 +275,7 @@ mod tests {
         assert!(actions[0].goal_id.is_none());
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn decide_maps_regular_goal_to_advance_goal() {
         let priorities = vec![Priority {
@@ -285,6 +289,7 @@ mod tests {
         assert_eq!(actions[0].goal_id, Some("ship-v1".to_string()));
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn decide_empty_priorities_returns_empty() {
         let config = OodaConfig::default();
@@ -292,6 +297,7 @@ mod tests {
         assert!(actions.is_empty());
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn decide_preserves_reason_as_description() {
         let priorities = vec![Priority {
@@ -304,6 +310,7 @@ mod tests {
         assert_eq!(actions[0].description, "important task");
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn decide_maps_extract_ideas_priority() {
         let priorities = vec![Priority {
@@ -318,6 +325,7 @@ mod tests {
         assert!(actions[0].goal_id.is_none());
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn decide_maps_safe_update_priority() {
         let priorities = vec![Priority {
@@ -337,6 +345,7 @@ mod tests {
     // a brain error transparently falls back to the deterministic mapping.
     // -----------------------------------------------------------------------
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn decide_with_brain_uses_brain_judgment_for_action_kind() {
         struct AlwaysGymBrain;
@@ -361,6 +370,7 @@ mod tests {
         assert_eq!(actions[0].kind, ActionKind::RunGymEval);
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn decide_with_brain_records_brain_rationale_not_fallback_marker() {
         // Wiring test: when an LLM-backed brain is provided, the rationale
@@ -407,6 +417,7 @@ mod tests {
     //   (2) embed a ParseFailureRecord on the per-cycle BrainJudgmentRecord,
     //   (3) SKIP the priority (no action produced — no fallback).
     // -----------------------------------------------------------------------
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn decide_with_brain_skips_priority_on_brain_error() {
         use crate::error::SimardError;
@@ -478,6 +489,7 @@ mod tests {
         reset_consecutive_count_for_tests(BrainPhase::Decide, goal_id);
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn decide_with_brain_successful_parse_resets_consecutive_counter() {
         use crate::ooda_brain::BrainPhase;
@@ -603,6 +615,7 @@ mod tests {
     // Issue #2227: eval-watchdog routing and defense-in-depth guard
     // -----------------------------------------------------------------------
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn decide_maps_eval_watchdog_to_run_gym_eval() {
         let priorities = vec![Priority {
@@ -621,6 +634,7 @@ mod tests {
         assert!(actions[0].goal_id.is_none());
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn decide_routes_synthetic_deterministically_even_with_llm_brain() {
         // An LLM brain that always returns AdvanceGoal. For synthetic
@@ -666,6 +680,7 @@ mod tests {
         assert_eq!(actions[1].goal_id, Some("real-goal".to_string()));
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn decide_guard_still_catches_unknown_synthetic_advance_goal() {
         // The defense-in-depth guard is still needed for edge cases where

@@ -4,8 +4,18 @@ use crate::{CognitiveStatistics, GoalProgress};
 
 // --- OodaConfig defaults ---
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn ooda_config_default_values() {
+    // Race A (issue #4433): OodaConfig::default() reads the concurrency env.
+    // Clear it under the serial key so the default assertion cannot observe a
+    // value leaked by a #2935 concurrency-env writer.
+    // SAFETY: serialised via #[serial(cognitive_memory)].
+    unsafe {
+        std::env::remove_var("SIMARD_OODA_MAX_CONCURRENT");
+        std::env::remove_var("SIMARD_MAX_CONCURRENT_ACTIONS");
+        std::env::remove_var("SIMARD_SCALING");
+    }
     let config = OodaConfig::default();
     // Issue #2935: raised from 5 to 24 (env-configurable via SIMARD_OODA_MAX_CONCURRENT).
     assert_eq!(config.max_concurrent_actions, 24);
@@ -157,14 +167,24 @@ fn ooda_state_has_empty_active_goals() {
 
 // --- OodaConfig ---
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn ooda_config_gym_suite_id_is_progressive() {
     let config = OodaConfig::default();
     assert_eq!(config.gym_suite_id, "progressive");
 }
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn ooda_config_max_concurrent_defaults_to_24() {
+    // Race A (issue #4433): clear the concurrency env under the serial key so
+    // the default assertion cannot observe a leaked #2935 writer value.
+    // SAFETY: serialised via #[serial(cognitive_memory)].
+    unsafe {
+        std::env::remove_var("SIMARD_OODA_MAX_CONCURRENT");
+        std::env::remove_var("SIMARD_MAX_CONCURRENT_ACTIONS");
+        std::env::remove_var("SIMARD_SCALING");
+    }
     let config = OodaConfig::default();
     // Issue #2935: raised from 5 to 24 (env-configurable via SIMARD_OODA_MAX_CONCURRENT).
     assert_eq!(config.max_concurrent_actions, 24);

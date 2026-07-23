@@ -26,6 +26,7 @@ pub mod drift;
 pub mod health;
 pub mod orchestrator;
 pub mod orphan;
+pub mod quarantine_ack;
 pub mod requeue;
 pub mod restart;
 pub mod source_prep;
@@ -42,6 +43,9 @@ pub use health::{
 pub use orchestrator::{DeploySourceKind, SelfDeployOrchestrator, SelfDeployOutcome};
 pub use orphan::{
     OrphanEngineer, find_engineer_orphans, match_engineer_orphan, reap_engineer_orphans,
+};
+pub use quarantine_ack::{
+    ack_marker_path, acknowledge, is_ack_marker_name, is_acknowledged, present_quarantine_artifacts,
 };
 pub use requeue::ProdEngineerRequeue;
 pub use restart::{DaemonRestarter, FakeRestarter, SystemdOrExecRestarter};
