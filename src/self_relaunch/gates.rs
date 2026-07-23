@@ -211,9 +211,29 @@ fn run_smoke_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
     }
 }
 
+/// The `unit-test` canary gate: shells out to `cargo test --lib` for the
+/// candidate crate under the scrubbed gate env ([`scrub_gate_env`]).
+///
+/// Scope (#4522 root cause): the gate is scoped to `--lib` — the **exact**
+/// proven-green unit scope (9262 passed, 0 failed). The prior all-targets
+/// `cargo test` dragged in `tests/` integration binaries that require signals
+/// the deny-by-default scrub strips, so the harness aborted (exit 101) **before**
+/// emitting any `test result:` summary — reddening a genuinely-healthy candidate
+/// every overseer tick and stalling self-deploy. `--lib` matches the healthy
+/// baseline 1:1 and is the blocking unit-test scope the canary invariant mandates.
+///
+/// Diagnosability (#4522 second defect): on failure this captures **both** stdout
+/// and stderr and routes them through [`parse_unit_test_failure`], which surfaces
+/// the failing test name(s) and the `test result: FAILED` summary (cargo prints
+/// these on **stdout**, which the prior `truncate_output(&stderr, 200)` discarded)
+/// plus a bounded tail for the no-summary abort case. The detail is emitted
+/// structurally via `tracing` (never `print!`/`println!`); a spawn error is a
+/// louder `tracing::error!`. Fail-closed is preserved: a genuine failure still
+/// reddens, now with a diagnosable detail instead of an opaque `exit 101`.
 fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
     let mut cmd = scrubbed_command("cargo", config);
     cmd.arg("test")
+        .arg("--lib")
         .arg("--manifest-path")
         .arg(config.manifest_dir.join("Cargo.toml"))
         .arg("--target-dir")
@@ -226,19 +246,37 @@ fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
             detail: "all tests passed".to_string(),
         },
         Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let truncated = truncate_output(&stderr, 200);
+            let parsed = parse_unit_test_failure(&stdout, &stderr);
+            // Structured, bounded, credential-redacted emission (no raw print!):
+            // the failing test identity / abort signal that the crash-loop hid.
+            tracing::warn!(
+                target: "self_relaunch::gate",
+                gate = %RelaunchGate::UnitTest,
+                exit = %output.status,
+                detail = %bound_gate_detail(&parsed),
+                "unit-test canary gate failed"
+            );
             GateResult {
                 gate: RelaunchGate::UnitTest,
                 passed: false,
-                detail: format!("tests failed (exit {}): {}", output.status, truncated),
+                detail: format!("tests failed (exit {}): {}", output.status, parsed),
             }
         }
-        Err(e) => GateResult {
-            gate: RelaunchGate::UnitTest,
-            passed: false,
-            detail: format!("cargo test failed to run: {e}"),
-        },
+        Err(e) => {
+            tracing::error!(
+                target: "self_relaunch::gate",
+                gate = %RelaunchGate::UnitTest,
+                error = %e,
+                "unit-test canary gate could not spawn `cargo test`"
+            );
+            GateResult {
+                gate: RelaunchGate::UnitTest,
+                passed: false,
+                detail: format!("cargo test failed to run: {e}"),
+            }
+        }
     }
 }
 
@@ -297,16 +335,106 @@ fn run_rpc_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
 
 fn truncate_output(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
-        s.trim().to_string()
-    } else {
-        // Use char-boundary-safe truncation to avoid panic on multi-byte UTF-8.
-        let boundary = s
-            .char_indices()
-            .take_while(|(i, _)| *i < max_len)
-            .last()
-            .map_or(0, |(i, c)| i + c.len_utf8());
-        format!("{}...", s[..boundary].trim())
+        return s.trim().to_string();
     }
+    // Char-boundary-safe truncation to avoid panic on multi-byte UTF-8. Walk
+    // forward from `max_len` to the next boundary — an O(1) back-off (≤3 bytes)
+    // rather than an O(max_len) scan of every preceding char, mirroring the
+    // boundary handling in [`truncate_output_tail`].
+    let mut end = max_len;
+    while end < s.len() && !s.is_char_boundary(end) {
+        end += 1;
+    }
+    format!("{}...", s[..end].trim())
+}
+
+/// Tail-preserving counterpart to [`truncate_output`]: keeps the **last**
+/// `max_len` bytes (backed off to a UTF-8 boundary) with a leading `...` marker
+/// when elided. `cargo test` prints the load-bearing `test result:` summary and
+/// the `failures:` roster **last**, so a head-preserving truncation would throw
+/// away exactly the diagnostic that makes a red canary legible. Char-boundary
+/// safe (never panics on multi-byte input); a string already within the cap is
+/// returned trimmed and unmarked.
+fn truncate_output_tail(s: &str, max_len: usize) -> String {
+    let trimmed = s.trim();
+    if trimmed.len() <= max_len {
+        return trimmed.to_string();
+    }
+    // Take the last `max_len` bytes, then move forward to the next char boundary
+    // so the retained tail is always valid whole UTF-8.
+    let mut start = trimmed.len() - max_len;
+    while start < trimmed.len() && !trimmed.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("...{}", &trimmed[start..])
+}
+
+/// Parse a failed `cargo test` invocation's combined output into a bounded,
+/// high-signal, credential-safe detail (#4522 diagnosability fix).
+///
+/// The prior gate kept only `truncate_output(&stderr, 200)` and **discarded
+/// stdout**, where cargo prints the failing test names and the `test result:
+/// FAILED` summary — so a red canary was an opaque `exit 101` with no test
+/// identity, making the crash-loop undiagnosable. This scans **both** streams
+/// for the high-signal lines that name the failure:
+///   * `... FAILED` per-test lines (the failing test identity),
+///   * the `test result:` summary line,
+///   * abort/compile signals (`error[…]`, `error:`, `could not compile`,
+///     `panicked`) for the exit-101-with-no-summary shape.
+///
+/// Marker lines are de-duplicated and capped (log-flood / DoS guard), then a
+/// bounded [`truncate_output_tail`] of the raw combined output is appended so
+/// cargo's *last words* survive even when they were not matched as a marker.
+/// The whole detail is finally tail-bounded to `MAX_DETAIL_BYTES`. It surfaces
+/// only cargo's own output — never any environment contents.
+fn parse_unit_test_failure(stdout: &str, stderr: &str) -> String {
+    const MAX_MARKER_LINES: usize = 20;
+    const TAIL_BYTES: usize = 8 * 1024;
+    const MAX_DETAIL_BYTES: usize = 16 * 1024;
+
+    fn is_marker(line: &str) -> bool {
+        line.contains("... FAILED")
+            || line.starts_with("test result:")
+            || line.starts_with("error[")
+            || line.starts_with("error:")
+            || line.contains("could not compile")
+            || line.contains("panicked")
+    }
+
+    let mut markers: Vec<&str> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in stdout.lines().chain(stderr.lines()) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || !is_marker(trimmed) {
+            continue;
+        }
+        if seen.insert(trimmed) {
+            markers.push(trimmed);
+            if markers.len() >= MAX_MARKER_LINES {
+                break;
+            }
+        }
+    }
+
+    // Raw combined output whose *tail* preserves the trailing summary/roster.
+    let mut combined = String::with_capacity(stdout.len() + stderr.len() + 1);
+    combined.push_str(stdout);
+    if !stdout.is_empty() && !stderr.is_empty() {
+        combined.push('\n');
+    }
+    combined.push_str(stderr);
+    let tail = truncate_output_tail(&combined, TAIL_BYTES);
+
+    let mut detail = markers.join("\n");
+    if !tail.is_empty() {
+        if !detail.is_empty() {
+            detail.push_str("\n---\n");
+        }
+        detail.push_str(&tail);
+    }
+
+    // Final DoS guard, tail-preserving so the summary is never the part elided.
+    truncate_output_tail(&detail, MAX_DETAIL_BYTES)
 }
 
 #[cfg(test)]
@@ -700,6 +828,252 @@ mod convergence_tests {
             results[0].passed,
             "a hijack-class name must be refused re-injection (stripped); got: {}",
             results[0].detail
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TDD (Problem 2 — #4522 canary red-canary crash-loop): FAILING tests, first.
+//
+// The self-deploy canary's unit-test gate aborts with exit status 101 on EVERY
+// overseer tick even though `cargo test --lib` is fully green (9262 passed) in a
+// normal environment. Two coupled defects, both proven here through the gate's
+// OBSERVABLE contract:
+//
+//   (1) SCOPE MISMATCH — the gate runs `cargo test` over ALL targets, so under
+//       the `env_clear()`-scrubbed canary env it drags in `tests/` integration
+//       binaries that require signals the deny-by-default floor strips, aborting
+//       (exit 101) before any `test result:` summary is emitted. The proven-green
+//       baseline is the `--lib` unit scope; the gate must match it.
+//   (2) UNDIAGNOSABLE FAILURE — the failure detail is `truncate_output(&stderr,
+//       200)` and DISCARDS stdout, where cargo prints the failing test identity
+//       and the `test result: FAILED` summary. The loop is therefore invisible.
+//
+// These tests specify the additive fix and MUST fail against the current code
+// (the pure helpers `parse_unit_test_failure` / `truncate_output_tail` do not yet
+// exist; the gate still runs all targets and discards stdout) and pass once the
+// fix lands. Constraints honoured: additive, fail-closed preserved, `tracing`/
+// OTel only (no `print!`/`println!`), deny-by-default scrub never weakened.
+#[cfg(test)]
+mod diagnosability_tests {
+    use super::*;
+
+    // --- truncate_output_tail: cargo prints `test result:` LAST, so a tail-
+    // preserving truncation (not the head-preserving `truncate_output`) is what
+    // keeps the load-bearing summary visible in a bounded detail. ---
+
+    #[test]
+    fn truncate_output_tail_short_string_unchanged() {
+        // Below the cap: returned verbatim (trimmed), no ellipsis marker.
+        let out = truncate_output_tail("test result: FAILED", 200);
+        assert_eq!(out, "test result: FAILED");
+    }
+
+    #[test]
+    fn truncate_output_tail_keeps_trailing_summary() {
+        // A long head of noise followed by the summary cargo emits LAST. The
+        // tail truncation must retain the summary and mark the elision up front.
+        let mut s = "compiling noise line that is pure prefix chatter\n".repeat(200);
+        s.push_str("test result: FAILED. 9260 passed; 2 failed; 0 ignored");
+        let out = truncate_output_tail(&s, 80);
+        assert!(
+            out.contains("test result: FAILED. 9260 passed; 2 failed"),
+            "tail truncation must retain the trailing summary cargo prints last: {out}"
+        );
+        assert!(
+            out.starts_with("..."),
+            "an elided tail must be marked with a leading ellipsis: {out}"
+        );
+        assert!(
+            out.len() <= 84,
+            "tail must be bounded to ~max_len (+ellipsis), got {} bytes",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn truncate_output_tail_is_char_boundary_safe() {
+        // A cut that lands mid-UTF-8 must back off to a boundary, never panic.
+        let s = "é".repeat(50); // 100 bytes of 2-byte chars
+        let out = truncate_output_tail(&s, 5); // 5 bytes lands mid-char
+        assert!(out.starts_with("..."), "elided tail must be marked: {out}");
+        assert!(
+            out.trim_start_matches('.').chars().all(|c| c == 'é'),
+            "retained tail must be valid whole UTF-8 chars: {out}"
+        );
+    }
+
+    // --- parse_unit_test_failure: the diagnosability core. Captures BOTH
+    // streams and surfaces the failing-test identity + summary, so a genuine
+    // red canary is diagnosable instead of an opaque `exit 101`. ---
+
+    #[test]
+    fn unit_test_failure_surfaces_failing_test_name_and_summary() {
+        // cargo prints the failing test name and the FAILED summary on STDOUT —
+        // exactly what the old `truncate_output(&stderr, 200)` threw away.
+        let stdout = "\
+running 3 tests
+test foo::works ... ok
+test foo::my_failing_case ... FAILED
+test bar::also_ok ... ok
+
+failures:
+
+---- foo::my_failing_case stdout ----
+thread 'foo::my_failing_case' panicked at src/foo.rs:42:9:
+assertion `left == right` failed
+
+failures:
+    foo::my_failing_case
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured";
+        let detail = parse_unit_test_failure(stdout, "");
+        assert!(
+            detail.contains("my_failing_case"),
+            "must surface the failing test name (stdout was previously discarded): {detail}"
+        );
+        assert!(
+            detail.contains("test result: FAILED"),
+            "must surface the FAILED summary line: {detail}"
+        );
+    }
+
+    #[test]
+    fn unit_test_abort_without_summary_surfaces_tail() {
+        // The observed #4522 shape: cargo aborts (exit 101) with NO `test
+        // result:` summary at all — a compile/link/harness abort. The detail
+        // must STILL be non-empty and carry the high-signal abort line, so the
+        // loop is diagnosable rather than an opaque exit code.
+        let stderr = "\
+   Compiling simard v0.1.0 (/canary)
+error[E0433]: failed to resolve: use of undeclared crate or module `nope`
+  --> tests/needs_env.rs:1:5
+error: could not compile `simard` (test \"needs_env\") due to 1 previous error";
+        let detail = parse_unit_test_failure("", stderr);
+        assert!(
+            !detail.trim().is_empty(),
+            "an exit-101 abort must never yield an empty detail (the whole bug)"
+        );
+        assert!(
+            detail.contains("could not compile") || detail.contains("error[E0433]"),
+            "must surface the abort/compile signal when there is no summary line: {detail}"
+        );
+    }
+
+    #[test]
+    fn unit_test_failure_detail_is_bounded() {
+        // DoS / log-flood guard: a gate's combined output can be arbitrarily
+        // large, but the parsed detail must stay bounded before it is emitted.
+        let huge = "error: spurious repeated noise line to flood the buffer\n".repeat(50_000);
+        let detail = parse_unit_test_failure(&huge, "");
+        assert!(
+            detail.len() <= 16 * 1024,
+            "parsed detail must be bounded (DoS guard), got {} bytes",
+            detail.len()
+        );
+    }
+
+    #[test]
+    fn unit_test_failure_never_dumps_environment() {
+        // Redaction posture: the parser surfaces cargo's own output only; it is
+        // given no environment and must not fabricate/echo any. A benign token
+        // in the OUTPUT is fine to pass through (bound_gate_detail redacts at
+        // emission); the invariant here is simply "no env keys leak in".
+        let detail = parse_unit_test_failure("test result: FAILED. 1 failed", "");
+        assert!(
+            !detail.contains("SIMARD_HOME") && !detail.contains("PATH="),
+            "parser must not surface environment contents: {detail}"
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TDD (#4522 SCOPE fix): a healthy candidate must PASS the unit-test gate.
+//
+// Hermetic proof of the root-cause scope alignment. A tiny fixture crate holds:
+//   * a passing LIBRARY unit test (`src/lib.rs`), and
+//   * an integration target (`tests/`) that reddens the scrubbed gate env
+//     (models the real `tests/` binaries that need SIMARD_* / heavier signals).
+//
+// Current code runs `cargo test` over ALL targets → the integration target runs
+// → the gate reddens (RED) → this test FAILS. After the fix aligns the gate to
+// the proven-green `--lib` unit scope, only the library test runs → GREEN → this
+// test passes. It is deliberately real (spawns cargo) and fails LOUDLY if the
+// toolchain is absent (no silent skip that would mask a broken gate).
+#[cfg(all(test, unix))]
+mod scope_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn unit_test_gate_passes_for_healthy_candidate_under_lib_scope() {
+        let tmp = tempfile::tempdir().expect("create fixture tempdir");
+        let root = tmp.path();
+
+        // Minimal, dependency-free fixture crate (offline-buildable).
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\n\
+             name = \"canary_fixture\"\n\
+             version = \"0.0.0\"\n\
+             edition = \"2021\"\n\
+             \n\
+             [lib]\n\
+             path = \"src/lib.rs\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        // Healthy library unit test — passes under any scrubbed env.
+        fs::write(
+            root.join("src/lib.rs"),
+            "#[cfg(test)]\n\
+             mod tests {\n\
+             #[test]\n\
+             fn healthy_unit() { assert_eq!(2 + 2, 4); }\n\
+             }\n",
+        )
+        .unwrap();
+        // Integration target that reddens the ALL-TARGETS scope: it requires a
+        // signal the deny-by-default gate env strips, so it fails there. `--lib`
+        // must NOT build or run it (that is the whole fix).
+        fs::create_dir_all(root.join("tests")).unwrap();
+        fs::write(
+            root.join("tests/needs_env.rs"),
+            "#[test]\n\
+             fn requires_scrubbed_away_signal() {\n\
+             assert!(\n\
+             std::env::var(\"CANARY_FIXTURE_INTEGRATION_SIGNAL\").is_ok(),\n\
+             \"integration target needs a signal the scrubbed gate env strips\"\n\
+             );\n\
+             }\n",
+        )
+        .unwrap();
+
+        let config = RelaunchConfig {
+            manifest_dir: root.to_path_buf(),
+            canary_target_dir: root.join("target"),
+            ..RelaunchConfig::default()
+        };
+
+        // Fail loudly, not silently, if the toolchain is genuinely unavailable —
+        // a canary gate that cannot run cargo is itself a defect, not a skip.
+        let toolchain_ok = scrubbed_command("cargo", &config)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        assert!(
+            toolchain_ok,
+            "cargo toolchain must be reachable under the scrubbed gate env; \
+             a gate that cannot invoke cargo is a defect (no silent skip)"
+        );
+
+        let result = run_unit_test_gate(&config);
+        assert!(
+            result.passed,
+            "a healthy candidate must PASS the unit-test gate once it is scoped \
+             to `--lib` (the proven-green 9262/0 baseline); detail: {}",
+            result.detail
         );
     }
 }

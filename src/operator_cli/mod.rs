@@ -472,7 +472,7 @@ fn dispatch_handover_command(
     let gates = default_gates();
     let results = verify_canary(&canary, &gates, &config)?;
     for r in &results {
-        eprintln!("  {r}");
+        eprintln!("  {}", r.redacted_display());
     }
 
     if !all_gates_passed(&results) {
