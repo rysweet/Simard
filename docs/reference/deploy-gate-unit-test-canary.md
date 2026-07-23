@@ -101,16 +101,16 @@ OTel — never full test output, tokens, or approval payloads.
 
 Exit status `101` is `cargo test`'s exit code for **test failures** (not a gate
 or harness bug). Reproducing the canary suite locally with the same fixed
-arguments surfaced the failing test in the typed-OODA persistence/lifecycle
-surface: the same `database is locked` contention and reaper races described in
+arguments surfaced the failing test in the typed-OODA persistence surface: the
+same `database is locked` contention described in
 [typed-OODA ledger concurrency hardening](./typed-ooda-ledger-concurrency.md)
 made the affected tests fail non-deterministically under the canary's parallel
 test execution.
 
 The resolution root-causes the defect rather than quarantining the symptom:
 
-- The underlying concurrency defect is fixed in the ledger/reaper layer, so the
-  previously-failing tests now pass deterministically.
+- The underlying ledger concurrency defect is fixed at connection open (WAL +
+  30s busy_timeout), so the previously-failing tests now pass deterministically.
 - The gate itself is unchanged in posture — it is **not** disabled, weakened, or
   made non-blocking.
 - Per issue #4471, deliberate quarantine remains available **only** for a test

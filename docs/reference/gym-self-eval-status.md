@@ -61,7 +61,7 @@ Behaviour by mode:
 
 | Condition | `configured_scenarios` | `self_eval_state` |
 |---|---|---|
-| Gym enabled (`skip_gym == false`) | `Some(N)` where `N` = number of built-in benchmark scenarios | non-idle (e.g. `"active"`) |
+| Gym enabled (`skip_gym == false`) | `Some(N)` where `N` = number of built-in benchmark scenarios | non-idle (`"enabled"`) |
 | Gym skipped (`skip_gym == true`, `SIMARD_SKIP_GYM=1`) | `None` | `"idle"` |
 
 The configured count is the length of the canonical built-in scenario set
@@ -91,7 +91,7 @@ prints:
 GYM
   SIMARD_SKIP_GYM   unset (gym enabled)
   scenarios         12 configured
-  self-eval         active
+  self-eval         enabled
 ```
 
 versus the skipped case:
@@ -114,7 +114,7 @@ The JSON status API surfaces the same `Gym` fields
 - **Status-only.** This change reports the scenario count and self-eval state;
   it does **not** schedule, execute, or change gym scenarios. Runtime behaviour
   when scenarios were previously absent is unchanged except that the enabled-gym
-  path is now honestly reported as configured/active.
+  path is now honestly reported as configured/enabled.
 - No new environment variables or configuration flags are introduced. The gym
   is enabled by default; set `SIMARD_SKIP_GYM=1` to skip it (unchanged).
 

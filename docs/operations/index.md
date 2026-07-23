@@ -16,7 +16,7 @@ Related reference pages:
 
 | Page | Topic |
 |---|---|
-| [Typed-OODA ledger concurrency hardening](../reference/typed-ooda-ledger-concurrency.md) | WAL + 30s busy_timeout, Immediate write txns, fail-visible lock propagation, reaper lease-ownership guard (#4483/#4468/#4467/#4464/#4462/#4500) |
+| [Typed-OODA ledger concurrency hardening](../reference/typed-ooda-ledger-concurrency.md) | WAL + 30s busy_timeout applied at every ledger open, Immediate write txns, fail-visible lock propagation (#4483) |
 | [Deploy-gate canary unit-test stage](../reference/deploy-gate-unit-test-canary.md) | The self-deploy canary unit-test gate and the exit-101 red-canary root-cause fix (#4470/#4471/#4481/#4475) |
 | [Gym self-eval status wiring](../reference/gym-self-eval-status.md) | Real scenario count + non-idle self-eval in `simard status` |
 

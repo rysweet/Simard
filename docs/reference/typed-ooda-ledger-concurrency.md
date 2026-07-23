@@ -4,10 +4,8 @@ description: >
   The concurrency contract for the typed-OODA SQLite ledger: unconditional
   WAL journal mode and a 30s busy_timeout applied at every connection open,
   Immediate write transactions with minimized hold time, and fail-visible
-  propagation of `database is locked` faults through CapabilityResult with
-  bounded retry (never swallowed). Also documents the decide->act
-  outcome-persistence fix and the reaper lease-ownership guard that eliminates
-  false stale-engineer reaps and leaked claims.
+  propagation of `database is locked` faults through CapabilityResult
+  (never swallowed).
 last_updated: 2026-07-23
 review_schedule: as-needed
 owner: simard
@@ -22,22 +20,22 @@ related:
   - ../howto/diagnose-typed-ooda-database-locked.md
   - ../../src/typed_ooda/ledger.rs
   - ../../src/typed_ooda/schema.rs
-  - ../../src/overseer/claim_reaper.rs
 ---
 
 # Reference: Typed-OODA ledger concurrency hardening
 
-> **Status: implemented (issues #4483, #4468, #4467, #4464, #4462, #4500).**
-> Present-tense description of shipped behaviour. Primary sources:
-> [`src/typed_ooda/ledger.rs`](https://github.com/rysweet/Simard/blob/main/src/typed_ooda/ledger.rs),
-> [`src/typed_ooda/schema.rs`](https://github.com/rysweet/Simard/blob/main/src/typed_ooda/schema.rs),
+> **Status: implemented (issue #4483).** Present-tense description of shipped
+> behaviour. Primary sources:
+> [`src/typed_ooda/ledger.rs`](https://github.com/rysweet/Simard/blob/main/src/typed_ooda/ledger.rs)
 > and
-> [`src/overseer/claim_reaper.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/claim_reaper.rs).
+> [`src/typed_ooda/schema.rs`](https://github.com/rysweet/Simard/blob/main/src/typed_ooda/schema.rs).
 >
 > This change eliminates the `typed outcome persistence failed: database is
-> locked` crash-loop (#4483) that was failing OODA cycles across many goals,
-> and the associated decide→act effect-dispatch (#4468) and claim-reaper
-> lifecycle (#4467/#4464/#4462/#4500) concurrency defects.
+> locked` crash-loop (#4483) that was failing OODA cycles across many goals, by
+> correcting the ledger's SQLite concurrency configuration at connection open.
+> The adjacent decide→act effect-dispatch (#4468) and claim-reaper lifecycle
+> (#4467/#4464/#4462/#4500) concurrency defects are tracked and delivered
+> **separately** — see [Stale-Engineer-Claim Reaper API](./claim-reaper-api.md).
 
 ---
 
@@ -59,9 +57,7 @@ migrations):
 
 1. Correct SQLite concurrency configuration at every open.
 2. Immediate, short-lived write transactions.
-3. Fail-visible lock-error propagation with bounded retry.
-
-Plus a fourth, lifecycle part: a reaper lease-ownership guard.
+3. Fail-visible lock-error propagation.
 
 ---
 
@@ -131,45 +127,37 @@ and `release_engineer_claim`.
 
 ## 3. Lock errors are propagated, never swallowed
 
-`database is locked` is treated as a **first-class, retryable** condition, not a
-terminal failure and never a silently-discarded one:
+`database is locked` is treated as a **first-class** condition — never a
+silently-discarded one:
 
-- Persistence faults surface through `CapabilityResult` (the
+- The 30s `busy_timeout` (part 1) absorbs contention at the SQLite layer: a
+  writer that cannot immediately acquire the write lock waits and retries
+  internally for up to 30s before SQLite surfaces `SQLITE_BUSY`.
+- If a write still cannot acquire the lock within that window, the fault
+  surfaces through `CapabilityResult` (the
   [`persistence`](https://github.com/rysweet/Simard/blob/main/src/typed_ooda/ledger.rs)
-  error mapper), preserving the fail-visible posture of the capability layer.
-- The Act-loop persistence path retries a locked write with **bounded
-  backoff**. Because `busy_timeout` already absorbs sub-second contention, a
-  retry escalation only fires on sustained contention, and after the bounded
-  retries are exhausted the error is returned (visible in the daemon log and
-  metrics) rather than looping forever.
+  error mapper) and is returned to the caller — visible in the daemon log and
+  metrics — rather than being swallowed or converted to a silent no-op. No
+  application-level retry loop wraps the persistence call; the busy-timeout wait
+  is the sole retry mechanism.
 
 > **Security requirement.** A swallowed lock error on a claim-release or
 > outcome-persist would leak a privileged `engineer_claims` row or drop a
-> terminal outcome. Lock errors are therefore **always** propagated — dropping
-> them is prohibited by the regression tests below.
+> terminal outcome. Lock errors are therefore **always** propagated: the
+> [`persistence`](https://github.com/rysweet/Simard/blob/main/src/typed_ooda/ledger.rs)
+> mapper returns an `Err` on the `CapabilityResult` path and never converts a
+> lock failure into a silent no-op.
 
 ---
 
-## 4. Reaper lease-ownership guard
+## 4. Related: reaper lifecycle and decide→act persistence
 
-The claim reaper (#4467/#4464/#4462/#4500) reaps an `effect_jobs` /
-`engineer_claims` lease **only** when all of the following hold under a
-consistent, monotonic clock:
-
-1. `lease_owner` matches the reaping actor's identity, **and**
-2. `lease_generation` matches the generation the reaper observed, **and**
-3. `lease_expires_at` is genuinely in the past.
-
-A lease owned by a *different* actor, or whose generation has advanced (a live
-renewal), is never reaped — this eliminates the false stale-engineer reaps and
-leaked claims. Expiry is evaluated against a monotonic time source so wall-clock
-skew cannot trigger a premature or cross-owner reap. The decide→act
-outcome-persistence defect (#4468) is fixed in the same effect-dispatch path so
-a decided effect is persisted exactly once before it is dispatched.
-
-See the [Stale-Engineer-Claim Reaper API](./claim-reaper-api.md) for the full
-reaper contract; this section documents only the ownership/expiry guard added
-by the concurrency hardening.
+The claim-reaper lease-ownership guard (#4467/#4464/#4462/#4500) and the
+decide→act outcome-persistence fix (#4468) address adjacent concurrency defects
+in the same subsystem, but are tracked and delivered **separately** from this
+ledger-open hardening — they are not part of the change documented here. See the
+[Stale-Engineer-Claim Reaper API](./claim-reaper-api.md) for the reaper
+contract.
 
 ---
 
@@ -177,10 +165,9 @@ by the concurrency hardening.
 
 | Test surface | Guarantee |
 |---|---|
-| `ledger.rs` — concurrent-writer test | Multiple writers persisting outcomes concurrently all succeed; no `database is locked` terminal error. |
-| `ledger.rs` — lock-error-propagation test | A forced lock returns a `CapabilityResult` error; it is never swallowed or converted to a silent no-op. |
-| `engineer_worktree/tests_reaping_safety.rs` — cross-owner no-reap | A lease owned by another actor (or with an advanced generation) is not reaped. |
-| `engineer_worktree/tests_reaping_safety.rs` — reaper race | Concurrent renew + reap never double-releases or leaks a claim. |
+| `ledger.rs` — `open_applies_wal_journal_mode_on_preexisting_v1_db` | Re-opening a pre-existing v1 ledger whose journal was reverted to rollback mode leaves it in WAL mode. |
+| `ledger.rs` — `open_sets_busy_timeout_at_least_30s` | A `busy_timeout` of at least 30s is configured at every open. |
+| `ledger.rs` — `concurrent_cross_connection_writers_never_hit_database_locked` | Multiple writers on separate connections to the same file all succeed; no `database is locked` error surfaces. |
 
 ---
 

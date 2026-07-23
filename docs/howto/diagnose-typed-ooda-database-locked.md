@@ -4,9 +4,8 @@ description: >
   Confirm, diagnose, and clear the `typed outcome persistence failed: database
   is locked` crash-loop in the typed-OODA ledger. Covers reading the
   fail-visible tracing lines, verifying the WAL journal mode and 30s
-  busy_timeout are applied at open, checking for the `-wal`/`-shm` sidecars, and
-  confirming the reaper lease-ownership guard so OODA cycles persist outcomes
-  reliably.
+  busy_timeout are applied at open, and checking for the `-wal`/`-shm` sidecars,
+  so OODA cycles persist outcomes reliably.
 last_updated: 2026-07-23
 review_schedule: as-needed
 owner: simard
@@ -22,7 +21,7 @@ related:
 
 # Diagnose a typed-OODA "database is locked" crash-loop
 
-> **Status: implemented (issues #4483, #4468, #4467, #4464, #4462, #4500).**
+> **Status: implemented (issue #4483).**
 > The concurrency hardening described here ships in
 > [`src/typed_ooda/ledger.rs`](https://github.com/rysweet/Simard/blob/main/src/typed_ooda/ledger.rs)
 > and [`src/typed_ooda/schema.rs`](https://github.com/rysweet/Simard/blob/main/src/typed_ooda/schema.rs).
@@ -88,17 +87,16 @@ write lock at `BEGIN` and wait out the `busy_timeout` instead of racing and
 failing late. If you still see sustained lock errors after confirming WAL +
 busy_timeout, look for a writer holding a transaction open across slow work
 (network / agent I/O) — transaction bodies are meant to contain only
-bound-parameter SQL. A genuinely exhausted bounded-retry surfaces the error to
-the log and metrics rather than looping forever; that surfaced error is the
-signal to investigate the slow holder.
+bound-parameter SQL. A write that cannot acquire the lock within the
+`busy_timeout` surfaces the error to the log and metrics rather than looping
+forever; that surfaced error is the signal to investigate the slow holder.
 
 ## 5. Rule out false reaps / leaked claims
 
-The same release fixed the reaper lease-ownership races (#4467/#4464/#4462/#4500).
-Confirm the reaper only reaps a lease when `lease_owner` **and**
-`lease_generation` match and `lease_expires_at` is genuinely past under a
-monotonic clock — a live, renewed, or cross-owner lease is never reaped. To
-inspect leaked or reaped claims, follow
+Persistent lock contention can coincide with engineer-claim lifecycle issues.
+The reaper lease-ownership guard that prevents false stale-engineer reaps is
+tracked separately (#4467/#4464/#4462/#4500) and is **not** part of this
+ledger-open hardening. To inspect leaked or reaped claims, follow
 [Diagnose and clear leaked engineer claims](./diagnose-leaked-engineer-claims.md).
 
 ## Resolution checklist
