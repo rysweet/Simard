@@ -1,0 +1,353 @@
+{
+  "domain": "rust",
+  "baseline": {
+    "domain": "rust",
+    "variant": "baseline",
+    "scenarios_total": 5,
+    "scenarios_passed": 0,
+    "pass_rate": 0.0,
+    "per_subskill": [
+      {
+        "subskill": "ownership",
+        "passed": 0,
+        "total": 1,
+        "pass_rate": 0.0
+      },
+      {
+        "subskill": "borrow-checker",
+        "passed": 0,
+        "total": 1,
+        "pass_rate": 0.0
+      },
+      {
+        "subskill": "lifetimes",
+        "passed": 0,
+        "total": 1,
+        "pass_rate": 0.0
+      },
+      {
+        "subskill": "error-handling",
+        "passed": 0,
+        "total": 1,
+        "pass_rate": 0.0
+      },
+      {
+        "subskill": "error-types",
+        "passed": 0,
+        "total": 1,
+        "pass_rate": 0.0
+      }
+    ],
+    "level": "novice",
+    "facts_in_memory": 0,
+    "procedures_in_memory": 0,
+    "results": [
+      {
+        "scenario_id": "rust-ownership-fix-use-after-move",
+        "subskill": "ownership",
+        "passed": false,
+        "facts_recalled": 0,
+        "procedures_recalled": 0,
+        "query_recall_hits": 0,
+        "expected_concepts_present": false,
+        "expected_procedure_present": false,
+        "detail": "sub-skill 'ownership': expected_concepts_present=false (need [\"move-semantics\", \"ownership-transfer-on-call\"]), expected_procedure_present=false ('rust-expert:fix-use-after-move'), query surfaced 0 sub-skill fact(s); grader: cargo build (must compile; E0382 resolved)"
+      },
+      {
+        "scenario_id": "rust-borrowck-resolve-aliasing",
+        "subskill": "borrow-checker",
+        "passed": false,
+        "facts_recalled": 0,
+        "procedures_recalled": 0,
+        "query_recall_hits": 0,
+        "expected_concepts_present": false,
+        "expected_procedure_present": false,
+        "detail": "sub-skill 'borrow-checker': expected_concepts_present=false (need [\"aliasing-xor-mutability\", \"non-lexical-lifetimes\"]), expected_procedure_present=false ('rust-expert:resolve-borrow-conflict'), query surfaced 0 sub-skill fact(s); grader: cargo build (must compile; E0502 resolved)"
+      },
+      {
+        "scenario_id": "rust-lifetimes-annotate-struct",
+        "subskill": "lifetimes",
+        "passed": false,
+        "facts_recalled": 0,
+        "procedures_recalled": 0,
+        "query_recall_hits": 0,
+        "expected_concepts_present": false,
+        "expected_procedure_present": false,
+        "detail": "sub-skill 'lifetimes': expected_concepts_present=false (need [\"lifetime-elision-rules\", \"struct-holding-reference\"]), expected_procedure_present=false ('rust-expert:annotate-lifetimes'), query surfaced 0 sub-skill fact(s); grader: cargo build (must compile; E0106 resolved)"
+      },
+      {
+        "scenario_id": "rust-error-propagate-with-question-mark",
+        "subskill": "error-handling",
+        "passed": false,
+        "facts_recalled": 0,
+        "procedures_recalled": 0,
+        "query_recall_hits": 0,
+        "expected_concepts_present": false,
+        "expected_procedure_present": false,
+        "detail": "sub-skill 'error-handling': expected_concepts_present=false (need [\"question-mark-operator\", \"avoid-unwrap-in-libraries\"]), expected_procedure_present=false ('rust-expert:propagate-with-question-mark'), query surfaced 0 sub-skill fact(s); grader: cargo test (parses ok input, returns Err on bad input; no panic)"
+      },
+      {
+        "scenario_id": "rust-error-types-define-thiserror",
+        "subskill": "error-types",
+        "passed": false,
+        "facts_recalled": 0,
+        "procedures_recalled": 0,
+        "query_recall_hits": 0,
+        "expected_concepts_present": false,
+        "expected_procedure_present": false,
+        "detail": "sub-skill 'error-types': expected_concepts_present=false (need [\"thiserror-for-libraries\", \"anyhow-for-applications\"]), expected_procedure_present=false ('rust-expert:define-thiserror-enum'), query surfaced 0 sub-skill fact(s); grader: cargo build + cargo test (typed error, ? conversions work)"
+      }
+    ],
+    "notes": [
+      "Deterministic single-seed run; grading is a pure function of memory contents, so repeated runs reproduce this scorecard exactly.",
+      "Scope (first experiment): the level reflects whether the competency required to solve each scenario is present and recallable from memory (knowledge acquisition + right-moment recall), NOT autonomous code generation. No cargo build/test is run against a candidate solution in this cycle; the scenario graders describe the verification the next cycle will drive an LLM engineer against.",
+      "Baseline is an empty-memory control (no rust-expert pack ingested), representing Simard's pre-acquisition starting point for these sub-skills."
+    ]
+  },
+  "with_pack": {
+    "domain": "rust",
+    "variant": "rust-expert-pack",
+    "scenarios_total": 5,
+    "scenarios_passed": 5,
+    "pass_rate": 1.0,
+    "per_subskill": [
+      {
+        "subskill": "ownership",
+        "passed": 1,
+        "total": 1,
+        "pass_rate": 1.0
+      },
+      {
+        "subskill": "borrow-checker",
+        "passed": 1,
+        "total": 1,
+        "pass_rate": 1.0
+      },
+      {
+        "subskill": "lifetimes",
+        "passed": 1,
+        "total": 1,
+        "pass_rate": 1.0
+      },
+      {
+        "subskill": "error-handling",
+        "passed": 1,
+        "total": 1,
+        "pass_rate": 1.0
+      },
+      {
+        "subskill": "error-types",
+        "passed": 1,
+        "total": 1,
+        "pass_rate": 1.0
+      }
+    ],
+    "level": "expert",
+    "facts_in_memory": 13,
+    "procedures_in_memory": 5,
+    "results": [
+      {
+        "scenario_id": "rust-ownership-fix-use-after-move",
+        "subskill": "ownership",
+        "passed": true,
+        "facts_recalled": 3,
+        "procedures_recalled": 1,
+        "query_recall_hits": 3,
+        "expected_concepts_present": true,
+        "expected_procedure_present": true,
+        "detail": "sub-skill 'ownership': expected_concepts_present=true (need [\"move-semantics\", \"ownership-transfer-on-call\"]), expected_procedure_present=true ('rust-expert:fix-use-after-move'), query surfaced 3 sub-skill fact(s); grader: cargo build (must compile; E0382 resolved)"
+      },
+      {
+        "scenario_id": "rust-borrowck-resolve-aliasing",
+        "subskill": "borrow-checker",
+        "passed": true,
+        "facts_recalled": 4,
+        "procedures_recalled": 1,
+        "query_recall_hits": 4,
+        "expected_concepts_present": true,
+        "expected_procedure_present": true,
+        "detail": "sub-skill 'borrow-checker': expected_concepts_present=true (need [\"aliasing-xor-mutability\", \"non-lexical-lifetimes\"]), expected_procedure_present=true ('rust-expert:resolve-borrow-conflict'), query surfaced 4 sub-skill fact(s); grader: cargo build (must compile; E0502 resolved)"
+      },
+      {
+        "scenario_id": "rust-lifetimes-annotate-struct",
+        "subskill": "lifetimes",
+        "passed": true,
+        "facts_recalled": 3,
+        "procedures_recalled": 1,
+        "query_recall_hits": 3,
+        "expected_concepts_present": true,
+        "expected_procedure_present": true,
+        "detail": "sub-skill 'lifetimes': expected_concepts_present=true (need [\"lifetime-elision-rules\", \"struct-holding-reference\"]), expected_procedure_present=true ('rust-expert:annotate-lifetimes'), query surfaced 3 sub-skill fact(s); grader: cargo build (must compile; E0106 resolved)"
+      },
+      {
+        "scenario_id": "rust-error-propagate-with-question-mark",
+        "subskill": "error-handling",
+        "passed": true,
+        "facts_recalled": 3,
+        "procedures_recalled": 1,
+        "query_recall_hits": 3,
+        "expected_concepts_present": true,
+        "expected_procedure_present": true,
+        "detail": "sub-skill 'error-handling': expected_concepts_present=true (need [\"question-mark-operator\", \"avoid-unwrap-in-libraries\"]), expected_procedure_present=true ('rust-expert:propagate-with-question-mark'), query surfaced 3 sub-skill fact(s); grader: cargo test (parses ok input, returns Err on bad input; no panic)"
+      },
+      {
+        "scenario_id": "rust-error-types-define-thiserror",
+        "subskill": "error-types",
+        "passed": true,
+        "facts_recalled": 2,
+        "procedures_recalled": 1,
+        "query_recall_hits": 2,
+        "expected_concepts_present": true,
+        "expected_procedure_present": true,
+        "detail": "sub-skill 'error-types': expected_concepts_present=true (need [\"thiserror-for-libraries\", \"anyhow-for-applications\"]), expected_procedure_present=true ('rust-expert:define-thiserror-enum'), query surfaced 2 sub-skill fact(s); grader: cargo build + cargo test (typed error, ? conversions work)"
+      }
+    ],
+    "notes": [
+      "Deterministic single-seed run; grading is a pure function of memory contents, so repeated runs reproduce this scorecard exactly.",
+      "Scope (first experiment): the level reflects whether the competency required to solve each scenario is present and recallable from memory (knowledge acquisition + right-moment recall), NOT autonomous code generation. No cargo build/test is run against a candidate solution in this cycle; the scenario graders describe the verification the next cycle will drive an LLM engineer against.",
+      "Ingested 13 facts + 5 procedures from pack 'rust-expert'."
+    ]
+  },
+  "degraded": {
+    "domain": "rust",
+    "variant": "degraded",
+    "scenarios_total": 5,
+    "scenarios_passed": 1,
+    "pass_rate": 0.2,
+    "per_subskill": [
+      {
+        "subskill": "ownership",
+        "passed": 1,
+        "total": 1,
+        "pass_rate": 1.0
+      },
+      {
+        "subskill": "borrow-checker",
+        "passed": 0,
+        "total": 1,
+        "pass_rate": 0.0
+      },
+      {
+        "subskill": "lifetimes",
+        "passed": 0,
+        "total": 1,
+        "pass_rate": 0.0
+      },
+      {
+        "subskill": "error-handling",
+        "passed": 0,
+        "total": 1,
+        "pass_rate": 0.0
+      },
+      {
+        "subskill": "error-types",
+        "passed": 0,
+        "total": 1,
+        "pass_rate": 0.0
+      }
+    ],
+    "level": "novice",
+    "facts_in_memory": 3,
+    "procedures_in_memory": 1,
+    "results": [
+      {
+        "scenario_id": "rust-ownership-fix-use-after-move",
+        "subskill": "ownership",
+        "passed": true,
+        "facts_recalled": 3,
+        "procedures_recalled": 1,
+        "query_recall_hits": 3,
+        "expected_concepts_present": true,
+        "expected_procedure_present": true,
+        "detail": "sub-skill 'ownership': expected_concepts_present=true (need [\"move-semantics\", \"ownership-transfer-on-call\"]), expected_procedure_present=true ('rust-expert:fix-use-after-move'), query surfaced 3 sub-skill fact(s); grader: cargo build (must compile; E0382 resolved)"
+      },
+      {
+        "scenario_id": "rust-borrowck-resolve-aliasing",
+        "subskill": "borrow-checker",
+        "passed": false,
+        "facts_recalled": 1,
+        "procedures_recalled": 0,
+        "query_recall_hits": 1,
+        "expected_concepts_present": false,
+        "expected_procedure_present": false,
+        "detail": "sub-skill 'borrow-checker': expected_concepts_present=false (need [\"aliasing-xor-mutability\", \"non-lexical-lifetimes\"]), expected_procedure_present=false ('rust-expert:resolve-borrow-conflict'), query surfaced 1 sub-skill fact(s); grader: cargo build (must compile; E0502 resolved)"
+      },
+      {
+        "scenario_id": "rust-lifetimes-annotate-struct",
+        "subskill": "lifetimes",
+        "passed": false,
+        "facts_recalled": 0,
+        "procedures_recalled": 0,
+        "query_recall_hits": 0,
+        "expected_concepts_present": false,
+        "expected_procedure_present": false,
+        "detail": "sub-skill 'lifetimes': expected_concepts_present=false (need [\"lifetime-elision-rules\", \"struct-holding-reference\"]), expected_procedure_present=false ('rust-expert:annotate-lifetimes'), query surfaced 0 sub-skill fact(s); grader: cargo build (must compile; E0106 resolved)"
+      },
+      {
+        "scenario_id": "rust-error-propagate-with-question-mark",
+        "subskill": "error-handling",
+        "passed": false,
+        "facts_recalled": 0,
+        "procedures_recalled": 0,
+        "query_recall_hits": 0,
+        "expected_concepts_present": false,
+        "expected_procedure_present": false,
+        "detail": "sub-skill 'error-handling': expected_concepts_present=false (need [\"question-mark-operator\", \"avoid-unwrap-in-libraries\"]), expected_procedure_present=false ('rust-expert:propagate-with-question-mark'), query surfaced 0 sub-skill fact(s); grader: cargo test (parses ok input, returns Err on bad input; no panic)"
+      },
+      {
+        "scenario_id": "rust-error-types-define-thiserror",
+        "subskill": "error-types",
+        "passed": false,
+        "facts_recalled": 0,
+        "procedures_recalled": 0,
+        "query_recall_hits": 0,
+        "expected_concepts_present": false,
+        "expected_procedure_present": false,
+        "detail": "sub-skill 'error-types': expected_concepts_present=false (need [\"thiserror-for-libraries\", \"anyhow-for-applications\"]), expected_procedure_present=false ('rust-expert:define-thiserror-enum'), query surfaced 0 sub-skill fact(s); grader: cargo build + cargo test (typed error, ? conversions work)"
+      }
+    ],
+    "notes": [
+      "Deterministic single-seed run; grading is a pure function of memory contents, so repeated runs reproduce this scorecard exactly.",
+      "Scope (first experiment): the level reflects whether the competency required to solve each scenario is present and recallable from memory (knowledge acquisition + right-moment recall), NOT autonomous code generation. No cargo build/test is run against a candidate solution in this cycle; the scenario graders describe the verification the next cycle will drive an LLM engineer against.",
+      "Deliberately-degraded state: only the 'ownership' sub-skill ingested (issue #1241 calibration guard)."
+    ]
+  },
+  "pack_ingest": {
+    "pack_name": "rust-expert",
+    "facts_ingested": 13,
+    "facts_failed": 0,
+    "procedures_ingested": 5,
+    "procedures_failed": 0,
+    "fact_ids": [
+      "sem_d8f501091adf",
+      "sem_60f117e7afbf",
+      "sem_f6a51798ee11",
+      "sem_826431ac5c9d",
+      "sem_b1a2bf11a205",
+      "sem_011e1ca4cf97",
+      "sem_ac4b21e2b60e",
+      "sem_fc44ad84f2ed",
+      "sem_2a6993ad57c0",
+      "sem_06485e38dab5",
+      "sem_4e377cfa24a8",
+      "sem_3786c40a20f9",
+      "sem_351e6d32dedd"
+    ],
+    "procedure_ids": [
+      "proc_bdc23fbb43dc",
+      "proc_0c8d374b5d7e",
+      "proc_0940d16b41ba",
+      "proc_8f8c2c119133",
+      "proc_d1766dad6710"
+    ]
+  },
+  "calibration": {
+    "healthy_pass_rate": 1.0,
+    "degraded_pass_rate": 0.2,
+    "gap": 0.8,
+    "healthy_min": 0.9,
+    "degraded_max": 0.5,
+    "min_gap": 0.4,
+    "passed": true
+  }
+}
