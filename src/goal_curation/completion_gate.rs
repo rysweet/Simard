@@ -633,6 +633,94 @@ impl GhCliEvidenceSource {
         }
     }
 
+    /// Issue-based merged-PR fallback (issue #12).
+    ///
+    /// When `reconcile_merged_prs` prunes a merged PR's `pr` wip_ref (a not-open
+    /// PR ref is deleted) *before* the completion gate reads it, the goal's only
+    /// remaining signal is its linked `issue` ref. Without this fallback the gate
+    /// perpetually reports [`MissingEvidence::PrNotMerged`] for a genuinely-merged
+    /// goal, re-blocking it every OODA cycle (the 153-emission churn).
+    ///
+    /// Resolve whether a **merged** PR closes the issue `issue_num` in `repo_slug`
+    /// via a read-only `gh api graphql` query over
+    /// `issue.closedByPullRequestsReferences{ merged }`. Cross-repo aware: the
+    /// query is scoped to the goal's own `repo_slug`, not Simard's default owner.
+    ///
+    /// Fail-closed: any spawn/exit/parse ambiguity surfaces as `Err`
+    /// (→ [`MissingEvidence::CouldNotVerify`]); only an authoritative merged PR
+    /// yields `Ok(true)`. `owner`/`name`/`number` are passed as parameterized
+    /// `gh api` variables (never interpolated into the query body), and are
+    /// validated by the caller before we reach this point.
+    fn merged_pr_closes_issue(&self, repo_slug: &str, issue_num: u64) -> SimardResult<bool> {
+        let (owner, name) = repo_slug.split_once('/').ok_or_else(|| {
+            crate::error::SimardError::VerificationFailed {
+                reason: format!("repo slug `{repo_slug}` is not `owner/repo`"),
+            }
+        })?;
+        const QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){\
+repository(owner:$owner,name:$name){\
+issue(number:$number){\
+closedByPullRequestsReferences(first:50,includeClosedPrs:true){nodes{merged}}}}}";
+        let number_arg = format!("number={issue_num}");
+        let owner_arg = format!("owner={owner}");
+        let name_arg = format!("name={name}");
+        let query_arg = format!("query={QUERY}");
+        // `-f` = raw string variable (owner/name); `-F` = typed variable (number
+        // parsed as an Int). `--jq` reduces the node set to a single `true`/`false`.
+        let out = std::process::Command::new("gh")
+            .args([
+                "api",
+                "graphql",
+                "-f",
+                &owner_arg,
+                "-f",
+                &name_arg,
+                "-F",
+                &number_arg,
+                "-f",
+                &query_arg,
+                "--jq",
+                "[.data.repository.issue.closedByPullRequestsReferences.nodes[].merged] | any",
+            ])
+            .output()
+            .map_err(|e| crate::error::SimardError::VerificationFailed {
+                reason: format!(
+                    "failed to spawn `gh api graphql` (issue #{issue_num} in {repo_slug}): {e}"
+                ),
+            })?;
+        if !out.status.success() {
+            return Err(crate::error::SimardError::VerificationFailed {
+                reason: format!(
+                    "`gh api graphql` for issue #{issue_num} in {repo_slug} exited {}: {}",
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+            });
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let merged = match stdout.trim() {
+            "true" => true,
+            "false" => false,
+            other => {
+                // Fail-closed on any ambiguous/unexpected payload rather than
+                // guessing — never silently `false`, never speculatively `true`.
+                return Err(crate::error::SimardError::VerificationFailed {
+                    reason: format!(
+                        "unexpected `gh api graphql` result for issue #{issue_num} in {repo_slug}: {other:?}"
+                    ),
+                });
+            }
+        };
+        tracing::debug!(
+            target: "simard::completion_gate",
+            repo_slug,
+            issue_num,
+            merged,
+            "issue-based merged-PR fallback resolved"
+        );
+        Ok(merged)
+    }
+
     /// Run `gh <kind> view <num> --repo <repo> --json state --jq .state` and
     /// return the trimmed state string (e.g. `MERGED`, `CLOSED`, `OPEN`).
     fn gh_state(&self, kind: &str, repo: &str, num: &str) -> SimardResult<String> {
@@ -666,17 +754,70 @@ fn first_ref_of_kind<'a>(goal: &'a ActiveGoal, want: &str) -> Option<&'a str> {
         .map(|r| r.ref_id.as_str())
 }
 
+/// Argument-injection guard: parse an issue/PR `ref_id` into a positive `u64`.
+///
+/// A malformed `ref_id` (empty, non-numeric, a leading `-`, embedded spaces or
+/// flag-like text such as `-12 --json state`) is rejected to `Err` — so it can
+/// never be forwarded to `gh` where it might be interpreted as a flag, and the
+/// gate fails **closed** ([`MissingEvidence::CouldNotVerify`]) rather than
+/// silently treating the goal as unmerged.
+fn parse_ref_number(kind: &str, ref_id: &str) -> SimardResult<u64> {
+    match ref_id.trim().parse::<u64>() {
+        Ok(n) if n > 0 => Ok(n),
+        _ => Err(crate::error::SimardError::VerificationFailed {
+            reason: format!("{kind} ref_id {ref_id:?} is not a positive integer"),
+        }),
+    }
+}
+
+/// Argument/GraphQL-injection guard on a `owner/repo` slug.
+///
+/// Requires exactly two non-empty segments separated by a single `/`, each
+/// drawn from `[A-Za-z0-9._-]` and neither equal to `.`/`..` nor containing a
+/// `..` path-traversal. Anything else (extra slashes, metacharacters, traversal)
+/// is rejected to `Err` (fail-closed) before any subprocess is spawned.
+fn validate_repo_slug(slug: &str) -> SimardResult<()> {
+    fn is_segment(s: &str) -> bool {
+        !s.is_empty()
+            && s != "."
+            && s != ".."
+            && !s.contains("..")
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    }
+    let mut parts = slug.split('/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(owner), Some(name), None) if is_segment(owner) && is_segment(name) => Ok(()),
+        _ => Err(crate::error::SimardError::VerificationFailed {
+            reason: format!("repo slug {slug:?} is not a safe `owner/repo`"),
+        }),
+    }
+}
+
 impl EvidenceSource for GhCliEvidenceSource {
     fn any_pr_merged(&self, goal: &ActiveGoal) -> SimardResult<bool> {
         match first_ref_of_kind(goal, "pr") {
-            // No tracked PR ⇒ no merge evidence (block, cheaply, no network).
-            None => Ok(false),
+            // A tracked `pr` ref is the fast path: read its state directly.
             Some(num) => {
                 let repo = self.repo_slug(goal);
                 Ok(self
                     .gh_state("pr", &repo, num)?
                     .eq_ignore_ascii_case("MERGED"))
             }
+            // No tracked `pr` ref: it may have been pruned by
+            // `reconcile_merged_prs` after the PR merged (issue #12). Recover the
+            // merged-PR evidence from the linked `issue` ref, if any. The network
+            // call fires ONLY when an `issue` ref is present (over-fetch guard).
+            None => match first_ref_of_kind(goal, "issue") {
+                // No `pr` and no `issue` ⇒ no merge evidence (block, cheaply).
+                None => Ok(false),
+                Some(issue_ref) => {
+                    let issue_num = parse_ref_number("issue", issue_ref)?;
+                    let repo = self.repo_slug(goal);
+                    validate_repo_slug(&repo)?;
+                    self.merged_pr_closes_issue(&repo, issue_num)
+                }
+            },
         }
     }
 
