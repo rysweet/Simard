@@ -1626,10 +1626,10 @@ pub(crate) fn gather_per_goal_cycle_ctx(
     // this field, never as the reap trigger; no new SIMARD_*_SECS is added.
     let expects_worker = goal.assigned_to.is_some()
         || goal.wip_refs.iter().any(|w| {
-            matches!(
-                w.kind.trim().to_ascii_lowercase().as_str(),
-                "engineer" | "session" | "branch"
-            )
+            let kind = w.kind.trim();
+            kind.eq_ignore_ascii_case("engineer")
+                || kind.eq_ignore_ascii_case("session")
+                || kind.eq_ignore_ascii_case("branch")
         });
     let stale_claim_secs = if expects_worker && !worker_present {
         Some(claim_age_secs(goal))

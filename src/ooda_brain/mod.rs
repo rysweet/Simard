@@ -318,10 +318,15 @@ impl PerGoalAction {
             return None;
         }
         let reason = recipe_brain::truncate(reason, PER_GOAL_REASON_MAX_CHARS);
-        let task_hint = recipe_brain::truncate(env.task_hint.trim(), PER_GOAL_REASON_MAX_CHARS);
         match env.choice.trim() {
             c if c.eq_ignore_ascii_case("continue") => Some(Self::Continue { reason }),
-            c if c.eq_ignore_ascii_case("spawn") => Some(Self::Spawn { reason, task_hint }),
+            // `task_hint` is truncated only here — it is discarded by every other
+            // variant, so we avoid the allocation on the non-spawn paths.
+            c if c.eq_ignore_ascii_case("spawn") => {
+                let task_hint =
+                    recipe_brain::truncate(env.task_hint.trim(), PER_GOAL_REASON_MAX_CHARS);
+                Some(Self::Spawn { reason, task_hint })
+            }
             c if c.eq_ignore_ascii_case("reorient") => Some(Self::Reorient { reason }),
             c if c.eq_ignore_ascii_case("investigate") => Some(Self::Investigate { reason }),
             c if c.eq_ignore_ascii_case("wait") => Some(Self::Wait { reason }),
