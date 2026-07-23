@@ -168,6 +168,13 @@ fn absent_section_serializes_as_unavailable_absent_not_zero() {
 fn assemble_on_empty_state_root_never_panics_and_degrades() {
     let _skip = EnvGuard::unset("SIMARD_SKIP_GYM");
     let dir = tempfile::tempdir().expect("tempdir");
+    // The daemon section falls back to the durable `daemon_health.json`
+    // heartbeat under `dirs::data_local_dir()/simard/`, which is NOT under the
+    // state root. Pin `XDG_DATA_HOME` to the empty tempdir so the heartbeat
+    // resolves to a nonexistent path — otherwise a live daemon writing its
+    // heartbeat on the host would leak in and this test would depend on the
+    // environment rather than the (empty) state root.
+    let _data_home = EnvGuard::set("XDG_DATA_HOME", &dir.path().to_string_lossy());
     let snap = status::assemble(&hermetic_opts(dir.path()));
 
     // Structurally complete: generated + schema version set.
