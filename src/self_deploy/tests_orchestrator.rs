@@ -293,6 +293,8 @@ mod fake_sequence {
             no_quarantine: NoQuarantineProbe {
                 healthy: true,
                 quarantined: false,
+                fresh_quarantines: 0,
+                retained: 0,
             },
             entrypoint_parity: EntrypointParityProbe {
                 healthy,

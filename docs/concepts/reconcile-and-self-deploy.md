@@ -1,7 +1,7 @@
 ---
 title: "Concept: reconcile-and-self-deploy (closing the merged-but-not-running gap)"
 description: How Simard closes the loop between a merged self-change and a running daemon — a per-cycle reconciliation detector that measures deploy drift, a build-from-source self-deploy that ends with the new binary verified-running, autonomous drift-triggered deploy through the Overseer (with its origin/main root-of-trust security prerequisites and least-privilege non-root swap), and rollback on a failed health check.
-last_updated: 2026-07-21
+last_updated: 2026-07-22
 review_schedule: as-needed
 owner: simard
 doc_type: concept
@@ -215,12 +215,28 @@ of the following hold:
 | **Memory intact** | cognitive-memory fact count ≥ the pre-deploy count (within tolerance), via the `CognitiveMemoryOps` count API |
 | **Goal board intact** | the goal board loads and the active-goal count is preserved |
 | **Brains LLM-backed** | zero `BrainJudgmentRecord.fallback == true` records over a probe cycle (see [parse-failure record](../reference/ooda-brain-parse-failure-record.md)) |
-| **No quarantine** | the cognitive-memory store quarantine flag is clear |
+| **No quarantine** | no *fresh* corrupt-store quarantine appeared in the live cognitive-store directory since the deploy window opened (retained historical forensic snapshots are ignored) |
 
 Any single failing probe fails the health check and triggers rollback. The probe
 output is the same structured JSON whether it is run by the orchestrator or by an
 operator at a console — see
 [self-health output](../reference/self-deploy-api.md#self-health-output).
+
+Both **Brains LLM-backed** and **No quarantine** are *window-scoped*: they judge
+only events that occurred at/after the deploy observation window opened
+(`fallback_window_start`), so a fault inherited from the *previous* binary can
+never fail a *fresh* deploy. For **No quarantine** this is essential — the
+cleanup path deliberately **retains** the newest handful of corrupt-store
+quarantines as forensic recovery assets (see
+[Bounded corrupt-quarantine retention](../operations/verified-backups.md#bounded-corrupt-quarantine-retention)),
+so a count-based "any quarantine present" test would fail forever against exactly
+the snapshots retention is designed to keep, freezing the daemon on a stale
+build. The window filter flags only a quarantine *created during/after* the
+deploy — genuine post-deploy corruption still fails the probe and rolls back.
+The probe also reports the in-window (`fresh_quarantines`) and retained
+(`retained`) counts so an operator can tell a truly empty store from one holding
+only retained forensic snapshots (see
+[`NoQuarantineProbe`](../reference/self-deploy-api.md#noquarantineprobe)).
 
 ## Why build-from-source, not release-download
 
