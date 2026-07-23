@@ -170,8 +170,12 @@ const ACTIVE_QUARANTINE_MAX_AGE: std::time::Duration = std::time::Duration::from
 /// metadata errors, the artifact is treated as [`QuarantineClass::Active`] — the
 /// safe verdict that blocks self-deploy rather than masking a live corruption.
 /// Reads metadata ONLY; never opens, moves, or deletes the file.
+///
+/// Uses [`std::fs::symlink_metadata`] (lstat), so a symlink is classified by the
+/// age of the *link itself* and never followed to a target outside the quarantine
+/// directory — honouring the directory-confinement guarantee (SR-V4).
 fn classify_quarantine(path: &std::path::Path, now: std::time::SystemTime) -> QuarantineClass {
-    let mtime = match std::fs::metadata(path).and_then(|m| m.modified()) {
+    let mtime = match std::fs::symlink_metadata(path).and_then(|m| m.modified()) {
         Ok(t) => t,
         // Missing/unreadable metadata ⇒ fail closed to Active.
         Err(_) => return QuarantineClass::Active,
@@ -614,6 +618,27 @@ mod probe_logic_tests {
                 SystemTime::now()
             ),
             QuarantineClass::Active,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classify_quarantine_does_not_follow_symlinks_sr_v4() {
+        // SR-V4: the classifier must read the LINK's own metadata (lstat) and
+        // never follow a symlink out of the quarantine directory. A symlink to a
+        // non-existent target is the discriminator: `symlink_metadata` reads the
+        // link itself (Ok, aged by the link's own mtime), whereas the old
+        // `metadata` call would follow the dangling link, error, and fail closed
+        // to Active. Injecting `now = link_mtime + 48h` puts the link squarely in
+        // the RETAINED band, which is only reachable when the link is NOT followed.
+        let dir = tempdir().unwrap();
+        let link = dir.path().join("cognitive.corrupt-symlink");
+        std::os::unix::fs::symlink("/no-such-quarantine-target-xyz", &link).unwrap();
+        let now = SystemTime::now() + Duration::from_secs(48 * 3600);
+        assert_eq!(
+            classify_quarantine(&link, now),
+            QuarantineClass::RetainedRecovery,
+            "an aged symlink must be classified by its own mtime (link not followed) — SR-V4"
         );
     }
 

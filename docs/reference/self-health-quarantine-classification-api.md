@@ -109,7 +109,9 @@ pub struct NoQuarantineProbe {
 /// Fail-CLOSED: if the modified-time cannot be read (permission, races,
 /// spoofed/absent mtime), the artifact is treated as `Active` — the safe
 /// verdict that blocks self-deploy rather than masking a live corruption.
-/// Reads metadata ONLY; never opens, moves, or deletes the file.
+/// Reads metadata ONLY; never opens, moves, or deletes the file. Uses
+/// `symlink_metadata` (lstat), so a symlink is aged by the link itself and is
+/// never followed to a target outside the quarantine directory (SR-V4).
 fn classify_quarantine(path: &std::path::Path, now: std::time::SystemTime)
     -> QuarantineClass;
 ```
@@ -252,6 +254,7 @@ intact.
 | `unreadable_mtime_fails_closed` | A metadata error classifies as `Active` (probe fails). |
 | `filename_parity_health_vs_disk` | `health.rs` and `disk.rs` `is_corrupt_quarantine_name` agree on a shared fixture set. |
 | `classifier_never_mutates_files` | Directory contents are byte-identical before/after a scan. |
+| `classify_quarantine_does_not_follow_symlinks_sr_v4` | An aged symlink is classified by the link's own mtime (never followed to its target) — SR-V4. |
 
 All tests are hermetic — `tempfile`-backed state roots, no network, no live
 deploy.
