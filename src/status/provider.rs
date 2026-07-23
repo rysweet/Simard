@@ -611,11 +611,23 @@ fn clamp_u64(v: i64) -> u64 {
 // ── gym ─────────────────────────────────────────────────────────────────────
 
 fn assemble_gym(skip_gym: bool) -> SectionEnvelope<Gym> {
+    // Issue #4483 (P3): when the gym is enabled, surface the REAL curated
+    // benchmark-scenario count and a non-idle self-eval state so the
+    // self-evaluation loop is no longer inert. When skipped, stay
+    // absent/idle (no behaviour change).
+    let (configured_scenarios, self_eval_state) = if skip_gym {
+        (None, "idle")
+    } else {
+        (
+            Some(crate::gym::benchmark_scenarios().len() as u32),
+            "active",
+        )
+    };
     SectionEnvelope::live(
         Gym {
             skip_gym,
-            configured_scenarios: None,
-            self_eval_state: "idle".to_string(),
+            configured_scenarios,
+            self_eval_state: self_eval_state.to_string(),
         },
         None,
     )
@@ -1017,6 +1029,39 @@ mod pure_helper_tests {
 
         let off = assemble_gym(false);
         assert!(!off.data.unwrap().skip_gym);
+    }
+
+    /// Issue #4483 (P3): when the gym is ENABLED (`SIMARD_SKIP_GYM` unset) the
+    /// status section must report the REAL configured scenario count and a
+    /// non-idle self-eval state, so the self-evaluation loop is no longer inert.
+    /// When the gym is skipped it stays `absent`/`idle` (no behaviour change).
+    /// RED (TDD Step 7): fails until `assemble_gym` is wired to
+    /// `benchmark_scenarios()` and an `active` state.
+    #[test]
+    fn assemble_gym_reports_real_scenarios_and_active_when_enabled() {
+        let enabled = assemble_gym(false);
+        let g = enabled.data.as_ref().unwrap();
+        assert!(!g.skip_gym);
+        let expected = crate::gym::benchmark_scenarios().len() as u32;
+        assert!(expected >= 1, "the curated benchmark set must be non-empty");
+        assert_eq!(
+            g.configured_scenarios,
+            Some(expected),
+            "enabled gym must report the real benchmark-scenario count"
+        );
+        assert_eq!(
+            g.self_eval_state, "active",
+            "enabled gym must report a non-idle self-eval state"
+        );
+
+        let skipped = assemble_gym(true);
+        let s = skipped.data.as_ref().unwrap();
+        assert!(s.skip_gym);
+        assert_eq!(
+            s.configured_scenarios, None,
+            "skipped gym reports no configured scenarios"
+        );
+        assert_eq!(s.self_eval_state, "idle", "skipped gym stays idle");
     }
 
     #[test]
