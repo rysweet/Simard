@@ -940,6 +940,18 @@ pub fn run_ooda_daemon(
     let mut overseer_gap_scan_tick_idx: u64 = 0;
     // Prevents overlapping ticks from stacking up if one runs long.
     let overseer_tick_running = Arc::new(AtomicBool::new(false));
+    // Cadence-watchdog (issue #3): the loop-side self-heal for a tick thread that
+    // hangs indefinitely (e.g. a gh-bound tick that never returns). Such a thread
+    // never clears `overseer_tick_running` via its `ClearOnDrop`, so `due()` could
+    // spawn no further tick and the cadence would latch — `simard status` would
+    // show `(stale)` even as the interval keeps elapsing. We record when the
+    // in-flight tick was spawned and, if the guard stays held past
+    // `multiplier x cadence`, force-clear ONLY the guard so the next `due()`
+    // re-arms the cadence. Additive and non-breaking: it never shortens the
+    // cadence and never touches `OverseerCadence`.
+    let mut overseer_tick_spawned_at: Option<Instant> = None;
+    let overseer_tick_watchdog_multiplier =
+        crate::overseer::config::overseer_tick_watchdog_multiplier();
     // #893: running count of CONSECUTIVE transient (self-healable) cycle
     // failures, owned by the daemon across ticks (each tick rebuilds the
     // Overseer on a fresh thread). Reset to 0 on any completed tick; incremented
@@ -1677,11 +1689,66 @@ pub fn run_ooda_daemon(
         // never crashes the daemon.
         if overseer_acting_enabled {
             let now_secs = overseer_epoch.elapsed().as_secs();
+            // Cadence watchdog (issue #3): before considering a new tick, detect a
+            // hung in-flight tick and re-arm. If the guard is held and the tick has
+            // been outstanding past `multiplier x cadence`, force-clear ONLY the
+            // overlap guard so the next `due()` boundary re-arms the cadence. This
+            // recovers a latched cadence a hung/never-returning tick would otherwise
+            // wedge forever.
+            // A healthy tick clears the overlap guard via its `ClearOnDrop` but
+            // cannot reach this loop-local marker; clear it here too the moment
+            // the guard is observed free so `overseer_tick_spawned_at` honours
+            // its documented "None when idle" invariant and never carries a
+            // stale spawn instant into a later iteration. Purely additive: the
+            // watchdog predicate already gates on `guard_held`, so this only
+            // makes the marker's meaning honest and never changes when a re-arm
+            // fires.
+            if overseer_tick_spawned_at.is_some() && !overseer_tick_running.load(Ordering::SeqCst) {
+                overseer_tick_spawned_at = None;
+            }
+            // Read the in-flight tick's outstanding time ONCE so the value that
+            // trips the predicate is exactly the value we log (a second
+            // `elapsed()` would re-read the monotonic clock and could drift).
+            let overseer_tick_elapsed = overseer_tick_spawned_at.map(|at| at.elapsed());
+            if let Some(elapsed) = overseer_tick_elapsed
+                && watchdog_should_rearm(
+                    overseer_tick_running.load(Ordering::SeqCst),
+                    elapsed,
+                    overseer_interval_secs,
+                    overseer_tick_watchdog_multiplier,
+                )
+            {
+                overseer_tick_running.store(false, Ordering::SeqCst);
+                overseer_tick_spawned_at = None;
+                let overdue_secs = elapsed.as_secs();
+                tracing::warn!(
+                    target: "simard.overseer",
+                    overdue_secs,
+                    cadence_secs = overseer_interval_secs,
+                    multiplier = overseer_tick_watchdog_multiplier,
+                    "overseer cadence watchdog re-armed a hung tick (overlap guard force-cleared)"
+                );
+                crate::telemetry::counter_add(
+                    crate::telemetry::names::OVERSEER_TICK_WATCHDOG_REARM,
+                    1,
+                    &[],
+                );
+                daemon_log(
+                    &state_root,
+                    &format!(
+                        "[simard] WARN: overseer cadence watchdog re-armed a hung tick \
+                         (outstanding {overdue_secs}s > {overseer_tick_watchdog_multiplier}x \
+                         {overseer_interval_secs}s cadence); cadence will re-arm on next due()"
+                    ),
+                );
+            }
             if overseer_cadence.due(now_secs)
                 && overseer_tick_running
                     .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
             {
+                // Record the spawn instant for the watchdog's hung-tick detection.
+                overseer_tick_spawned_at = Some(Instant::now());
                 let running = Arc::clone(&overseer_tick_running);
                 let consecutive_transient_counter = Arc::clone(&overseer_consecutive_transient);
                 let transient_ceiling = overseer_transient_ceiling;
@@ -1815,6 +1882,9 @@ pub fn run_ooda_daemon(
                 if let Err(e) = spawn {
                     // Spawn failed — clear the guard so the next cadence retries.
                     overseer_tick_running.store(false, Ordering::SeqCst);
+                    // No live tick to watch; clear the spawn marker so the watchdog
+                    // never mistakes a failed spawn for a hung tick.
+                    overseer_tick_spawned_at = None;
                     daemon_log(
                         &state_root,
                         &format!("[simard] WARN: overseer tick thread spawn failed: {e}"),
@@ -2067,6 +2137,36 @@ fn shutdown_daemon(
         "[simard] OODA daemon: shutdown complete (writer Arc will drop on return)",
     );
     Ok(())
+}
+
+/// Cadence-watchdog predicate (issue #3): decide whether the daemon's loop-side
+/// self-heal should force-clear a hung Overseer tick's overlap guard and re-arm
+/// the cadence.
+///
+/// Returns `true` **iff** the overlap guard is currently held (`guard_held`) AND
+/// the single in-flight tick has been outstanding **strictly longer** than
+/// `max(multiplier, FLOOR) x cadence`. The multiplier is clamped UP to
+/// [`OVERSEER_TICK_WATCHDOG_MULTIPLIER_FLOOR`](crate::overseer::config::OVERSEER_TICK_WATCHDOG_MULTIPLIER_FLOOR)
+/// so even a caller-supplied `0`/`1` keeps the window at least `2 x cadence`,
+/// guaranteeing a slow-but-healthy tick (under `2x`) is never re-armed.
+///
+/// Pure and deterministic — all timing is injected, so there is no clock read and
+/// no I/O. The daemon, on `true`, force-clears **only** the overlap `AtomicBool`
+/// (never `OverseerCadence::last_tick_secs`), so the next genuine `due()` boundary
+/// re-arms the cadence without any double-fire.
+pub(crate) fn watchdog_should_rearm(
+    guard_held: bool,
+    elapsed: Duration,
+    cadence_secs: u64,
+    multiplier: u32,
+) -> bool {
+    use crate::overseer::config::OVERSEER_TICK_WATCHDOG_MULTIPLIER_FLOOR;
+    if !guard_held {
+        return false;
+    }
+    let effective = multiplier.max(OVERSEER_TICK_WATCHDOG_MULTIPLIER_FLOOR) as u64;
+    let threshold = Duration::from_secs(effective.saturating_mul(cadence_secs.max(1)));
+    elapsed > threshold
 }
 
 #[cfg(test)]
@@ -2380,5 +2480,147 @@ mod tests {
 
         assert_eq!(seed_cycle_count(0, tmp.path()), 42);
         assert_eq!(seed_cycle_count(0, tmp.path()), 42);
+    }
+
+    // ── P3: Overseer cadence watchdog — pure predicate (issue #3) ────────────
+    //
+    // RED-phase TDD spec for the loop-side self-heal. The daemon's Overseer tick
+    // runs on a background thread guarded by an `AtomicBool` overlap flag
+    // (`overseer_tick_running`), cleared by a `ClearOnDrop` when the tick thread
+    // ends. ROOT CAUSE (issue #3): if that thread hangs indefinitely (a
+    // gh-bound tick that never returns), the guard is NEVER cleared, so `due()`
+    // can spawn no further tick — the cadence latches and `simard status` shows
+    // `(stale)` even though the 15-min interval keeps elapsing.
+    //
+    // These tests pin the pure decision function that does not yet exist:
+    //
+    //   watchdog_should_rearm(guard_held, elapsed, cadence_secs, multiplier) -> bool
+    //
+    // It returns true IFF the guard is held AND the in-flight tick has been
+    // outstanding STRICTLY longer than `max(multiplier, FLOOR) * cadence`. The
+    // daemon loop, on true, force-clears ONLY the overlap `AtomicBool` (never
+    // `OverseerCadence.last_tick_secs`) so the next `due()` re-arms the cadence.
+    // Pure/deterministic: all timing is injected — no clock read, no I/O.
+
+    use crate::overseer::config::{
+        DEFAULT_OVERSEER_TICK_WATCHDOG_MULTIPLIER, OVERSEER_TICK_WATCHDOG_MULTIPLIER_FLOOR,
+    };
+    use crate::overseer::wiring::OverseerCadence;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    const WD_CADENCE: u64 = 900; // DEFAULT_OVERSEER_INTERVAL_SECS
+
+    #[test]
+    fn watchdog_rearms_when_guard_held_past_multiplier() {
+        // Guard held, tick outstanding for > 3x cadence (default multiplier) ⇒
+        // re-arm. This is the hung-tick recovery path.
+        let over = Duration::from_secs(WD_CADENCE * 3 + 1);
+        assert!(
+            watchdog_should_rearm(true, over, WD_CADENCE, 3),
+            "a guard held strictly past multiplier x cadence must re-arm the cadence"
+        );
+    }
+
+    #[test]
+    fn watchdog_does_not_rearm_slow_but_healthy_tick() {
+        // A genuinely-running-but-slow tick (cadence < elapsed < 2x cadence) is
+        // NOT hung — it must never be re-armed, or the watchdog would race a live
+        // tick and risk a double-fire (R-A2).
+        let slow = Duration::from_secs(WD_CADENCE + WD_CADENCE / 2); // 1.5x
+        assert!(
+            !watchdog_should_rearm(true, slow, WD_CADENCE, 3),
+            "a slow-but-healthy tick under the threshold must not be re-armed"
+        );
+        // Exactly at the threshold is still not re-armed (strict greater-than).
+        let exact = Duration::from_secs(WD_CADENCE * 3);
+        assert!(
+            !watchdog_should_rearm(true, exact, WD_CADENCE, 3),
+            "elapsed == multiplier x cadence is not yet overdue (strict >)"
+        );
+    }
+
+    #[test]
+    fn watchdog_does_not_rearm_when_guard_free() {
+        // No tick in flight ⇒ nothing to re-arm, regardless of elapsed. A false
+        // guard short-circuits to false so an idle cadence is never disturbed.
+        let huge = Duration::from_secs(WD_CADENCE * 100);
+        assert!(
+            !watchdog_should_rearm(false, huge, WD_CADENCE, 3),
+            "a free guard must never re-arm even after an arbitrarily long gap"
+        );
+    }
+
+    #[test]
+    fn watchdog_multiplier_floors_at_two() {
+        // The effective multiplier is clamped to FLOOR (2) inside the predicate,
+        // so even a caller-supplied 0 or 1 cannot shrink the window below 2x —
+        // guaranteeing a healthy-slow tick (<2x) is never re-armed (R-A2).
+        assert_eq!(OVERSEER_TICK_WATCHDOG_MULTIPLIER_FLOOR, 2);
+        // At 2.5x cadence with a requested multiplier of 0/1, floor=2 ⇒ overdue.
+        let two_and_half = Duration::from_secs(WD_CADENCE * 2 + WD_CADENCE / 2);
+        for bad in [0u32, 1u32] {
+            assert!(
+                watchdog_should_rearm(true, two_and_half, WD_CADENCE, bad),
+                "multiplier {bad} must clamp up to the floor of 2 (2.5x > 2x ⇒ re-arm)"
+            );
+        }
+        // But 1.5x is still under the floored 2x window ⇒ never re-arm.
+        let one_and_half = Duration::from_secs(WD_CADENCE + WD_CADENCE / 2);
+        assert!(
+            !watchdog_should_rearm(true, one_and_half, WD_CADENCE, 0),
+            "even a clamped multiplier keeps 1.5x under the 2x floor (no re-arm)"
+        );
+    }
+
+    #[test]
+    fn watchdog_rearm_is_idempotent_with_clear_on_drop() {
+        // The re-arm and the abandoned thread's ClearOnDrop both only ever
+        // `store(false)`. A watchdog re-arm followed by a late ClearOnDrop must
+        // leave the guard cleared — never flip it back to a spurious "running"
+        // that would suppress the next real tick (I3).
+        let guard = AtomicBool::new(true);
+        // Watchdog force-clear (models the daemon's re-arm branch).
+        if watchdog_should_rearm(
+            guard.load(Ordering::SeqCst),
+            Duration::from_secs(WD_CADENCE * 3 + 1),
+            WD_CADENCE,
+            DEFAULT_OVERSEER_TICK_WATCHDOG_MULTIPLIER,
+        ) {
+            guard.store(false, Ordering::SeqCst);
+        }
+        assert!(!guard.load(Ordering::SeqCst), "watchdog re-armed the guard");
+        // Late ClearOnDrop of the abandoned tick — a second store(false).
+        guard.store(false, Ordering::SeqCst);
+        assert!(
+            !guard.load(Ordering::SeqCst),
+            "a late ClearOnDrop after a re-arm is a harmless no-op, never a re-latch"
+        );
+    }
+
+    #[test]
+    fn watchdog_never_writes_last_tick_secs() {
+        // I1: the watchdog force-clears ONLY the overlap guard; it must never
+        // touch the cadence marker. The overlap guard and the cadence are
+        // independent state, so re-arming the guard leaves the cadence's own
+        // schedule intact — a fresh tick is spawned by the NEXT genuine `due()`
+        // boundary, not immediately (which would be the double-fire the design
+        // forbids).
+        let mut cadence = OverseerCadence::new(WD_CADENCE, 0);
+        // Advance the marker: the first real tick fires at t=cadence.
+        assert!(cadence.due(WD_CADENCE), "cadence fires one interval in");
+        // Model a watchdog re-arm: it flips only a separate AtomicBool.
+        let guard = AtomicBool::new(true);
+        guard.store(false, Ordering::SeqCst);
+        // Because the watchdog did NOT rewind last_tick_secs, the cadence must
+        // still refuse to fire until a FULL further interval elapses.
+        assert!(
+            !cadence.due(WD_CADENCE + WD_CADENCE - 1),
+            "re-arming the guard must not shorten the cadence (no double-fire)"
+        );
+        assert!(
+            cadence.due(WD_CADENCE * 2),
+            "the next tick is due only at the genuine cadence boundary"
+        );
     }
 }
