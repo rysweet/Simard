@@ -30,6 +30,7 @@ pub mod allowlist;
 pub mod channel;
 pub mod config;
 pub mod gating;
+pub mod operator_safe;
 pub mod session_store;
 pub mod transport;
 
@@ -46,4 +47,7 @@ pub use channel::{
 };
 pub use config::SignalConfig;
 pub use gating::{GateDecision, InboundCommand, RiskClass, classify, gate, parse_inbound};
+pub use operator_safe::{
+    OPERATOR_FORBIDDEN_MARKERS, OperatorMessageRejected, ensure_operator_safe,
+};
 pub use transport::{JsonRpcTransport, SignalTransport};

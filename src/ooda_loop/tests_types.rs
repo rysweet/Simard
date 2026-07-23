@@ -1,5 +1,39 @@
 use super::types::*;
 use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
+use serial_test::serial;
+
+/// Module-local RAII env guard: records `key`'s prior value on construction and
+/// restores it exactly (set-if-present, remove-if-absent) on `Drop`, so the
+/// process environment is restored during normal return **and** panic
+/// unwinding. Used to neutralize the concurrency env vars that
+/// `OodaConfig::default()` reads so the default assertion is hermetic
+/// regardless of the runner's ambient environment.
+struct EnvGuard {
+    key: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl EnvGuard {
+    /// Remove `key` from the process env, remembering its prior value.
+    fn unset(key: &'static str) -> Self {
+        let prev = std::env::var_os(key);
+        // SAFETY: serialized via `#[serial(cognitive_memory)]`.
+        unsafe { std::env::remove_var(key) };
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: serialized via `#[serial(cognitive_memory)]`.
+        unsafe {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
 
 // --- OodaPhase Display ---
 
@@ -245,12 +279,24 @@ fn action_kind_equality() {
 // --- OodaConfig ---
 
 #[test]
+#[serial(cognitive_memory)]
 fn ooda_config_default_values() {
+    // Neutralize BOTH concurrency env vars so `Default` observes the
+    // compiled-in ceiling regardless of the runner's ambient environment.
+    // Guards restore the prior values on drop (including on panic). See
+    // docs/testing/ooda-config-env-hermeticity.md.
+    let _g1 = EnvGuard::unset("SIMARD_OODA_MAX_CONCURRENT");
+    let _g2 = EnvGuard::unset("SIMARD_MAX_CONCURRENT_ACTIONS");
+
     let config = OodaConfig::default();
     // Issue #2935: the per-OODA-cycle goal-coverage parallelism ceiling was
     // raised from the arbitrary low default of 5 to 24 (env-configurable via
-    // SIMARD_OODA_MAX_CONCURRENT).
-    assert_eq!(config.max_concurrent_actions, 24);
+    // SIMARD_OODA_MAX_CONCURRENT). Assert against the constant (PRD source of
+    // truth), not a magic literal.
+    assert_eq!(
+        config.max_concurrent_actions,
+        DEFAULT_MAX_CONCURRENT_ACTIONS
+    );
     assert!((config.improvement_threshold - 0.02).abs() < f64::EPSILON);
     assert_eq!(config.gym_suite_id, "progressive");
 }

@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::SimardResult;
 
-use super::types::{ActiveGoal, GoalBoard};
+use super::types::{ActiveGoal, GoalBoard, description_marks_docs_only};
 
 /// The verified facts the gate gathered for one goal.
 #[derive(Clone, Debug, PartialEq)]
@@ -161,6 +161,26 @@ pub fn has_derivable_signal(goal: &ActiveGoal) -> bool {
             .any(|r| r.kind.eq_ignore_ascii_case(kind))
     };
     has_ref_of("pr") || has_ref_of("issue") || is_self_affecting(goal)
+}
+
+/// Whether this goal's finish line is *machine-checkable*: the completion gate
+/// can read at least one external signal (a tracked PR, a tracked issue, or a
+/// self-affecting deploy state) and therefore certify — or refute — done
+/// automatically (issue #4419).
+///
+/// This is the predicate the escalation-triage course-correction relies on to
+/// prove a rewritten done-gate is actually evaluable *before* it persists the
+/// rewrite: a bare goal like "raise coverage to 70%" with no tracked ref exposes
+/// nothing the gate can read, so it is held `UnverifiedNoSignal` forever (the
+/// "no measurable done-gate" root cause). Attaching an observable tracking ref
+/// makes this return `true`, turning the finish line machine-checkable.
+///
+/// It is the named, intent-revealing counterpart to [`has_derivable_signal`]
+/// (same rule) so callers reasoning about *done-gate measurability* read a
+/// predicate that says what they mean rather than the internal "derivable
+/// signal" phrasing.
+pub fn done_gate_is_machine_checkable(goal: &ActiveGoal) -> bool {
+    has_derivable_signal(goal)
 }
 
 /// Classify a gate verdict into a [`VerificationOutcome`] for one goal.
@@ -480,10 +500,11 @@ fn routes_to_simard(goal: &ActiveGoal) -> bool {
     }
 }
 
-/// Explicit docs-only marker in the description.
+/// Explicit docs-only marker in the description. Delegates to the shared
+/// [`description_marks_docs_only`] classifier so this gate and the
+/// course-correction field validators read the exact same marker set.
 fn is_docs_only(goal: &ActiveGoal) -> bool {
-    let desc = goal.description.to_ascii_lowercase();
-    desc.contains("docs-only") || desc.contains("documentation-only")
+    description_marks_docs_only(&goal.description)
 }
 
 /// The goal bumps a pinned dependency rev in Simard's own `Cargo.toml`,

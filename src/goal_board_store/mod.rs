@@ -46,7 +46,8 @@ use crate::goal_curation::completion_gate::{
     CompletionEvidenceGate, CompletionVerdict, EvidenceSource,
 };
 use crate::goal_curation::{
-    ActiveGoal, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS, NoProgressTracker, is_no_progress_marker,
+    ActiveGoal, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS, NoProgressTracker, WipRef,
+    description_marks_docs_only, description_marks_standing, is_no_progress_marker,
 };
 
 #[cfg(test)]
@@ -246,6 +247,347 @@ pub fn mutate<R>(
     let out = f(&mut state);
     write_atomic(state_root, &state)?;
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// #4419 — course-correct a blocked goal by rewriting its unmeasurable done-gate
+// ---------------------------------------------------------------------------
+
+/// A concrete, machine-checkable *first slice* that replaces an unmeasurable
+/// done-gate on a blocked goal (issue #4419).
+///
+/// A goal like "raise Simard test coverage to 70%" churns because "70%" is not a
+/// finish line the completion gate can read: with no tracked PR/issue there is
+/// nothing to certify, so after repeated no-progress cycles it is demoted to a
+/// `Blocked` cooldown with no engineer assigned. The self-correction narrows it
+/// to ONE named under-tested module with a bounded coverage threshold, attaches
+/// an observable tracking ref the gate CAN read
+/// ([`crate::goal_curation::done_gate_is_machine_checkable`]), and names an
+/// owner. Constructed only through [`FirstSliceTarget::new`], which validates
+/// every field, so a malformed target can never reach the board — a validation
+/// failure is exactly the signal the triage brain uses to fall back to asking
+/// the operator one question instead.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FirstSliceTarget {
+    /// The one under-tested module the first slice targets (a repo-relative,
+    /// traversal-free, metacharacter-free path).
+    pub module_path: String,
+    /// The bounded line-coverage percentage the slice must reach (0..=100).
+    pub threshold_percent: u32,
+    /// The engineer made responsible for moving the goal.
+    pub owner: String,
+    /// The observable tracking ref (issue / PR) whose state the completion gate
+    /// can read — this is what makes the rewritten done-gate machine-checkable.
+    pub tracking_ref: WipRef,
+}
+
+impl FirstSliceTarget {
+    /// Build a validated first-slice target. Fields are checked in a fixed order
+    /// — threshold, then module path, then owner, then tracking ref — so the first
+    /// malformed input determines the [`CorrectionRejected`] returned. A rejected
+    /// construction never persists anything and routes the triage brain to the
+    /// ask-operator path.
+    pub fn new(
+        module_path: impl Into<String>,
+        threshold_percent: u32,
+        owner: impl Into<String>,
+        tracking_ref: WipRef,
+    ) -> Result<Self, CorrectionRejected> {
+        let module_path = module_path.into();
+        let owner = owner.into();
+        validate_threshold(threshold_percent)?;
+        validate_module_path(&module_path)?;
+        validate_owner(&owner)?;
+        validate_tracking_ref(&tracking_ref)?;
+        Ok(Self {
+            module_path,
+            threshold_percent,
+            owner,
+            tracking_ref,
+        })
+    }
+}
+
+/// Why a course-correction was refused. Every variant is a *rejection the caller
+/// can act on* — never a silent fallback: an unknown or non-blocked goal, or a
+/// malformed first-slice field, is surfaced so the triage brain either fixes the
+/// input or escalates one plain-English question to the operator.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CorrectionRejected {
+    /// No active goal on the board carries this id.
+    GoalNotFound {
+        /// The id that was looked up and not found.
+        goal_id: String,
+    },
+    /// The goal exists but is not in a `Blocked` state — there is no block to
+    /// course-correct.
+    NotBlocked {
+        /// The goal that was targeted.
+        goal_id: String,
+        /// Its actual (non-blocked) status.
+        status: GoalProgress,
+    },
+    /// The coverage threshold is not a reachable percentage (must be 0..=100).
+    ThresholdOutOfRange {
+        /// The out-of-range value supplied.
+        got: u32,
+    },
+    /// The module path is empty, absolute, contains a `..` traversal, or carries
+    /// a shell metacharacter / control character.
+    UnsafeModulePath {
+        /// The rejected path.
+        path: String,
+    },
+    /// The owner is empty or carries a newline / control character (log-injection
+    /// guard).
+    InvalidOwner {
+        /// The rejected owner string.
+        owner: String,
+    },
+    /// A tracking-ref field (`kind`, `ref_id`, or `label`) is empty, over-length,
+    /// carries a control character / newline (log-injection guard), or — for the
+    /// `label`, which is interpolated verbatim into the persisted `goal.description`
+    /// — would smuggle a durable standing marker in and silently reclassify the
+    /// course-corrected goal as a perpetual one that never completes.
+    InvalidTrackingRef {
+        /// Which tracking-ref field was rejected (`"kind"`, `"ref_id"`, or
+        /// `"label"`).
+        field: &'static str,
+        /// The rejected value.
+        value: String,
+    },
+}
+
+/// The result of a [`rewrite_blocked_goal_done_gate`] attempt: either the goal
+/// was corrected (and the corrected goal is returned verbatim as persisted), or
+/// the correction was rejected with a reason.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CorrectionOutcome {
+    /// The block was course-corrected; carries the goal exactly as persisted.
+    Corrected(ActiveGoal),
+    /// The correction was refused; the board is left untouched.
+    Rejected(CorrectionRejected),
+}
+
+/// Maximum length of an owner identifier — bounds a single plain identifier so a
+/// pathological payload can't be smuggled through even if it were control-free.
+const MAX_OWNER_LEN: usize = 128;
+
+/// A coverage threshold must be a reachable percentage (0..=100). Internal
+/// field-validator behind [`FirstSliceTarget::new`] — the public contract is the
+/// constructor, not the individual checks.
+pub(crate) fn validate_threshold(threshold_percent: u32) -> Result<(), CorrectionRejected> {
+    if threshold_percent > 100 {
+        return Err(CorrectionRejected::ThresholdOutOfRange {
+            got: threshold_percent,
+        });
+    }
+    Ok(())
+}
+
+/// Maximum length of a repo-relative module path — bounds the field so a
+/// pathological payload can't be smuggled through even if it were otherwise
+/// well-formed, mirroring [`MAX_OWNER_LEN`] and [`MAX_TRACKING_REF_FIELD_LEN`]
+/// on the sibling durable fields.
+const MAX_MODULE_PATH_LEN: usize = 256;
+
+/// A module path must be a non-empty, repo-relative path free of `..` traversal,
+/// absolute roots, shell metacharacters, and control characters, within
+/// [`MAX_MODULE_PATH_LEN`]. It is validated by *form* (not filesystem existence)
+/// so the check is pure and cwd-independent. Internal field-validator behind
+/// [`FirstSliceTarget::new`].
+pub(crate) fn validate_module_path(module_path: &str) -> Result<(), CorrectionRejected> {
+    let reject = || CorrectionRejected::UnsafeModulePath {
+        path: module_path.to_string(),
+    };
+    if module_path.is_empty() || module_path.len() > MAX_MODULE_PATH_LEN {
+        return Err(reject());
+    }
+    // Absolute paths escape the repo.
+    if module_path.starts_with('/') {
+        return Err(reject());
+    }
+    // Only a conservative, safe character set: letters, digits, and the path
+    // punctuation `_ - / .`. Anything else (`; | & $ ( ) < > * ? whitespace`,
+    // quotes, backticks, control chars, newlines) is rejected.
+    if !module_path
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/' | '.'))
+    {
+        return Err(reject());
+    }
+    // No parent-directory traversal in any component.
+    if module_path.split('/').any(|component| component == "..") {
+        return Err(reject());
+    }
+    // The module path is interpolated verbatim into the persisted
+    // `goal.description`, which the completion gate re-parses for a docs-only
+    // marker (`docs-only` / `documentation-only` both survive the char-set above
+    // — letters and `-` only). A path carrying that marker would durably
+    // reclassify a Simard-affecting coverage slice as non-self-affecting and
+    // silently skip the deploy-aware done-gate, so reject it fail-closed.
+    if description_marks_docs_only(module_path) {
+        return Err(reject());
+    }
+    // Symmetrically, a path that reads as a standing marker (e.g.
+    // `perpetual/standing` — pure letters and `/`, which the char-set above
+    // permits) would, once spliced into the description, durably reclassify the
+    // one-off coverage slice as a perpetual standing goal that never completes,
+    // defeating the course-correction. Reject it fail-closed, mirroring the
+    // `label` guard in `validate_tracking_ref`.
+    if description_marks_standing(module_path) {
+        return Err(reject());
+    }
+    Ok(())
+}
+
+/// An owner must be a non-empty, single-token identifier free of control
+/// characters and newlines (a log-injection guard), within [`MAX_OWNER_LEN`].
+/// Internal field-validator behind [`FirstSliceTarget::new`].
+pub(crate) fn validate_owner(owner: &str) -> Result<(), CorrectionRejected> {
+    let reject = || CorrectionRejected::InvalidOwner {
+        owner: owner.to_string(),
+    };
+    if owner.trim().is_empty() || owner.len() > MAX_OWNER_LEN {
+        return Err(reject());
+    }
+    if owner.chars().any(char::is_control) {
+        return Err(reject());
+    }
+    Ok(())
+}
+
+/// Maximum length of any single tracking-ref field — bounds `kind`, `ref_id`,
+/// and `label` so a pathological payload can't be smuggled through even if it
+/// were control-free.
+const MAX_TRACKING_REF_FIELD_LEN: usize = 256;
+
+/// A tracking ref becomes part of durable state: its `ref_id` is matched by the
+/// completion gate and emitted under structured `tracing`, and its `label` is
+/// interpolated **verbatim** into the persisted `goal.description` by
+/// [`rewrite_blocked_goal_done_gate`]. Every field (`kind`, `ref_id`, `label`)
+/// must therefore be a non-empty, control-character-free, newline-free token
+/// within [`MAX_TRACKING_REF_FIELD_LEN`] (a log-injection / marker-smuggling
+/// guard), and the `label` must not itself read as a standing marker — otherwise
+/// an LLM-sourced tracking ref could silently reclassify the course-corrected
+/// goal as a perpetual standing goal that never completes. Internal
+/// field-validator behind [`FirstSliceTarget::new`].
+pub(crate) fn validate_tracking_ref(tracking_ref: &WipRef) -> Result<(), CorrectionRejected> {
+    for (field, value) in [
+        ("kind", tracking_ref.kind.as_str()),
+        ("ref_id", tracking_ref.ref_id.as_str()),
+        ("label", tracking_ref.label.as_str()),
+    ] {
+        let reject = || CorrectionRejected::InvalidTrackingRef {
+            field,
+            value: value.to_string(),
+        };
+        if value.trim().is_empty() || value.len() > MAX_TRACKING_REF_FIELD_LEN {
+            return Err(reject());
+        }
+        if value.chars().any(char::is_control) {
+            return Err(reject());
+        }
+    }
+    // The `label` is the only field spliced into the persisted description, so
+    // guard it against every classifier that reads that description. A label
+    // that reads as a standing marker would durably convert this one-off
+    // coverage slice into a perpetual goal with no terminal done-state...
+    if description_marks_standing(&tracking_ref.label) {
+        return Err(CorrectionRejected::InvalidTrackingRef {
+            field: "label",
+            value: tracking_ref.label.clone(),
+        });
+    }
+    // ...and a label carrying a docs-only marker (`docs-only` /
+    // `documentation-only`) would flip the goal to non-self-affecting in the
+    // completion gate, skipping the deploy-aware done-gate (clause 3) so a
+    // Simard-affecting goal certifies complete on mere PR merge — never
+    // deployed. Reject it fail-closed, matching the standing guard above.
+    if description_marks_docs_only(&tracking_ref.label) {
+        return Err(CorrectionRejected::InvalidTrackingRef {
+            field: "label",
+            value: tracking_ref.label.clone(),
+        });
+    }
+    Ok(())
+}
+
+/// Course-correct a `Blocked` goal by rewriting its unmeasurable done-gate into
+/// a concrete, per-module, machine-checkable first slice, atomically under the
+/// store `flock` (issue #4419).
+///
+/// The entire read-modify-write runs inside one [`mutate`] window (no TOCTOU):
+/// the goal's done-criteria is rewritten to the concrete per-module target, the
+/// observable tracking ref is attached so the completion gate can certify done,
+/// an owner is assigned, and the goal transitions `Blocked(..) -> NotStarted` so
+/// it re-enters the active list. Returns [`CorrectionOutcome::Rejected`] (leaving
+/// the board untouched) when the goal is unknown or not blocked. The change is
+/// additive and non-breaking; no serde shape changes.
+pub fn rewrite_blocked_goal_done_gate(
+    state_root: &Path,
+    goal_id: &str,
+    target: &FirstSliceTarget,
+) -> SimardResult<CorrectionOutcome> {
+    mutate(state_root, |state| {
+        let Some(goal) = state.board.active.iter_mut().find(|g| g.id == goal_id) else {
+            tracing::warn!(
+                target: "simard::overseer",
+                goal = %goal_id,
+                "escalation-triage: refused to rewrite done-gate — no active goal with that id"
+            );
+            return CorrectionOutcome::Rejected(CorrectionRejected::GoalNotFound {
+                goal_id: goal_id.to_string(),
+            });
+        };
+        if !matches!(goal.status, GoalProgress::Blocked(_)) {
+            tracing::warn!(
+                target: "simard::overseer",
+                goal = %goal_id,
+                status = %goal.status,
+                "escalation-triage: refused to rewrite done-gate — goal is not blocked"
+            );
+            return CorrectionOutcome::Rejected(CorrectionRejected::NotBlocked {
+                goal_id: goal_id.to_string(),
+                status: goal.status.clone(),
+            });
+        }
+
+        // Rewrite the finish line to a concrete, bounded, per-module slice.
+        goal.description = format!(
+            "Raise line coverage of `{module}` to at least {pct}% \
+             (first slice of the coverage goal; tracked by {label}). \
+             Done when {label} is observed CLOSED/MERGED.",
+            module = target.module_path,
+            pct = target.threshold_percent,
+            label = target.tracking_ref.label,
+        );
+        // Attach the observable tracking ref (idempotent) so the completion gate
+        // has a signal it can read.
+        let already_tracked = goal.wip_refs.iter().any(|r| {
+            r.kind.eq_ignore_ascii_case(&target.tracking_ref.kind)
+                && r.ref_id == target.tracking_ref.ref_id
+        });
+        if !already_tracked {
+            goal.wip_refs.push(target.tracking_ref.clone());
+        }
+        // Assign an owner and re-enter the active list.
+        goal.assigned_to = Some(target.owner.clone());
+        goal.status = GoalProgress::NotStarted;
+
+        tracing::info!(
+            target: "simard::overseer",
+            goal = %goal_id,
+            module = %target.module_path,
+            threshold_percent = target.threshold_percent,
+            owner = %target.owner,
+            tracking_ref = %target.tracking_ref.ref_id,
+            "escalation-triage: rewrote unmeasurable done-gate to a machine-checkable \
+             first slice and returned the goal to the active list"
+        );
+
+        CorrectionOutcome::Corrected(goal.clone())
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -144,6 +144,7 @@ nav:
     - Overseer Goal-Board Health: concepts/overseer-goal-board-health.md
     - Stable Goal-Session Identity: concepts/stable-goal-session-identity.md
     - Blocked-Goal Escalation Backoff: concepts/blocked-goal-escalation-backoff.md
+    - Blocked-Goal Escalation Triage (course-correct before a human): concepts/blocked-goal-escalation-triage.md
     - PID-Reuse-Safe Subordinate Reaper: concepts/pid-reuse-safe-subordinate-reaper.md
     - Coverage Comment Transient Resilience: concepts/coverage-comment-transient-resilience.md
     - Overseer Root-Cause (WHY) Principle: concepts/overseer-root-cause-why.md
@@ -310,6 +311,7 @@ nav:
     - Overseer Goal-Board Health API: reference/overseer-goal-board-health-api.md
     - Overseer Memory-Recall API: reference/overseer-memory-recall-api.md
     - Overseer Operator Notifications: reference/overseer-operator-notifications.md
+    - Escalation-Triage API: reference/escalation-triage-api.md
     - Overseer Signal JSON-RPC Transport: reference/overseer-signal-jsonrpc-transport.md
     - Overseer Workstream Gap-Scan: reference/overseer-workstream-gap-scan.md
     - Overseer BackoffGate &amp; Gap-Scan Dedup: reference/overseer-backoff-gate-api.md
@@ -500,6 +502,7 @@ nav:
     - Writing Hermetic Tests: testing/hermetic-tests.md
     - serial(cognitive_memory) Isolation: testing/cognitive-memory-serial-isolation.md
     - De-Flaking Known Flaky Tests: testing/deflaking-known-flaky-tests.md
+    - Hermetic OodaConfig env Tests: testing/ooda-config-env-hermeticity.md
   - Ecosystem & Audits:
     - Amplihack Ecosystem Map: ecosystem-map.md
     - amplihack-rs ↔ amplihack Parity Matrix: amplihack-rs-parity.md
