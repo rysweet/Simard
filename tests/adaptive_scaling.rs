@@ -312,9 +312,15 @@ fn scaler_current_max_can_override_config() {
         })
         .collect();
 
-    // Use scaler's current_max as the config limit.
+    // Use scaler's current_max as the plain config limit. Force `scaler: None`
+    // so this exercises the base `max_concurrent_actions` cap path
+    // deterministically: with `SIMARD_SCALING=auto` in the ambient env,
+    // `OodaConfig::default()` would otherwise attach its own AIMD scaler (whose
+    // ceiling is the default max of 24) that `decide` prefers over
+    // `max_concurrent_actions`, leaking env state into the assertion.
     let config = OodaConfig {
         max_concurrent_actions: scaler.current_max(),
+        scaler: None,
         ..OodaConfig::default()
     };
 
