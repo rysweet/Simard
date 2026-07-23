@@ -256,6 +256,14 @@ struct QuarantineTally {
 /// sweep can never disagree about which artifact is protected. Fresh corruption
 /// (young, or not the protected asset) is never eligible and still reddens the
 /// probe.
+///
+/// Deliberate asymmetry with the manual
+/// [`acknowledge`](crate::self_deploy::quarantine_ack::acknowledge) path: the
+/// operator `--acknowledge-quarantine` CLI acknowledges *any* present, ackable
+/// artifact the operator explicitly chooses, whereas this *automatic* probe path
+/// narrows itself to the single aged #2550 protected recovery asset — the one
+/// quarantine that can never clear on its own — precisely because it fires
+/// unattended and must not silently acknowledge genuine fresh corruption.
 fn auto_ack_stuck_recovery_asset(state_root: &std::path::Path) -> Option<String> {
     let name = crate::cmd_cleanup::disk::aged_protected_recovery_asset(state_root)?;
     if crate::self_deploy::quarantine_ack::is_acknowledged(state_root, &name) {
@@ -295,9 +303,13 @@ fn auto_ack_stuck_recovery_asset(state_root: &std::path::Path) -> Option<String>
 ///
 /// Effectful: reads the running build commit, the live memory fact count, the
 /// goal board, recent `brain_parse_failure` metrics, and the store quarantine
-/// state. Every probe degrades to `healthy: false` on its own error rather than
-/// aborting the whole report, so the orchestrator always gets a verdict to act
-/// on (and rolls back on any unhealthy probe).
+/// state. The `no_quarantine` probe additionally has an intentional *write*
+/// side-effect — it may durably write one `.ack` sidecar via the guarded
+/// [`auto_ack_stuck_recovery_asset`] auto-ack (aged #2550 protected recovery
+/// asset only; #4469) so the deadlock can self-clear on the unattended
+/// post-deploy path. Every probe degrades to `healthy: false` on its own error
+/// rather than aborting the whole report, so the orchestrator always gets a
+/// verdict to act on (and rolls back on any unhealthy probe).
 ///
 /// * `target_commit` — the commit the candidate was built from.
 /// * `baseline_facts` — pre-deploy memory count (the orchestrator captures it);

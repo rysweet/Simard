@@ -84,6 +84,10 @@ fn is_ackable_quarantine_basename(name: &str) -> bool {
 /// corrupt-quarantine basename: anything containing a path separator, a `..`
 /// component, an absolute path, an empty string, an existing `.ack` marker
 /// name, or a name that is not a corrupt-quarantine artifact is rejected.
+///
+/// Kept `pub` (not `pub(crate)`): the `self_deploy_convergence` integration
+/// test — a separate crate — asserts the marker path against this helper, so
+/// narrowing visibility would break the build.
 pub fn ack_marker_path(state_root: &Path, quarantine_name: &str) -> Option<PathBuf> {
     if !is_ackable_quarantine_basename(quarantine_name) {
         return None;
