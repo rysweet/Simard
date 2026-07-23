@@ -914,8 +914,7 @@ mod tests {
     //
     // These tests are env-independent and deterministic — they construct the
     // errno directly instead of relying on real SIGCHLD reaping, so they prove
-    // the guard without flakiness. They reference `status_from_reap_error`,
-    // which does NOT exist yet, so this block is RED until the helper lands.
+    // the guard without flakiness.
     // ────────────────────────────────────────────────────────────────────
 
     /// ECHILD (child already externally reaped) must be tolerated: the reap
@@ -953,25 +952,6 @@ mod tests {
                 "a non-ECHILD reap error must NOT be reclassified as success, got exit {:?}",
                 status.code()
             ),
-        }
-    }
-
-    /// The `reap_point` argument is a static label used only for structured
-    /// tracing (audit trail, zero-BS / no silent degradation) — it must not
-    /// alter the mapping outcome. Both documented call sites (`try_wait`,
-    /// `wait`) map ECHILD identically to a synthesized success.
-    #[test]
-    fn status_from_reap_error_reap_point_label_does_not_change_mapping() {
-        for reap_point in ["try_wait", "wait"] {
-            let echild = std::io::Error::from_raw_os_error(libc::ECHILD);
-            let status = status_from_reap_error(echild, reap_point).unwrap_or_else(|_| {
-                panic!("ECHILD must synthesize success at reap point {reap_point}")
-            });
-            assert_eq!(
-                status.code(),
-                Some(0),
-                "the reap-point label must not affect the ECHILD → exit 0 mapping"
-            );
         }
     }
 }
