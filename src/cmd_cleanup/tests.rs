@@ -961,14 +961,22 @@ fn corrupt_db_sweep_scans_resolved_state_root() {
 }
 
 /// An acknowledgement sidecar (`*.ack`) is NOT a corrupt store: it must be
-/// excluded from the sweep's candidate scan. An orphan aged `.ack` (whatever
-/// its age) is therefore retained, never reported as a removed "corrupt DB".
+/// excluded from the sweep's candidate scan. While its parent quarantine is
+/// still present (here: retained because it is young and below the count cap),
+/// the marker is retained too — never counted or reported as a removed
+/// "corrupt DB". (Orphan markers whose parent is *gone* are reclaimed; see
+/// `corrupt_db_sweep_reclaims_orphaned_ack_sidecar`.)
 #[test]
 #[serial_test::serial(cognitive_memory)]
 fn corrupt_db_sweep_never_treats_ack_marker_as_quarantine() {
     let tmp = tempfile::tempdir().unwrap();
     let simard = tmp.path().join(".simard");
     std::fs::create_dir_all(&simard).unwrap();
+
+    // A live parent quarantine that is retained (young, only candidate → within
+    // the keep-last-N cap), so its marker must be retained alongside it.
+    let quarantine = simard.join("cognitive.corrupt-1700000000");
+    std::fs::write(&quarantine, b"tiny").unwrap();
     let marker = simard.join("cognitive.corrupt-1700000000.ack");
     std::fs::write(&marker, b"").unwrap();
     backdate(&marker, CORRUPT_DB_MAX_AGE_DAYS + 10);
@@ -976,12 +984,51 @@ fn corrupt_db_sweep_never_treats_ack_marker_as_quarantine() {
     let report = run_corrupt_cleanup_with_home(tmp.path());
 
     assert!(
+        quarantine.exists(),
+        "the young, in-cap parent quarantine must be retained"
+    );
+    assert!(
         marker.exists(),
-        "an `.ack` marker must never be swept as if it were a corrupt store"
+        "an `.ack` marker must never be swept as if it were a corrupt store while \
+         its parent quarantine is retained"
     );
     assert!(
         !report.dirs_removed.iter().any(|p| p == &marker),
         "an `.ack` marker must never be reported as a removed quarantine"
+    );
+}
+
+/// An orphaned `.ack` sidecar — one whose parent quarantine no longer exists
+/// (operator `rm`, or manual deletion of the #2550 protected asset) — is
+/// reclaimed by the sweep so stale markers cannot accumulate unbounded (#4469).
+/// This holds even when the directory has *no* remaining quarantine candidates.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn corrupt_db_sweep_reclaims_orphaned_ack_sidecar() {
+    let tmp = tempfile::tempdir().unwrap();
+    let simard = tmp.path().join(".simard");
+    std::fs::create_dir_all(&simard).unwrap();
+
+    // A marker with NO parent quarantine present — a pure orphan. Its own age is
+    // irrelevant to orphan reclaim, but back-date it to prove age is not the
+    // trigger.
+    let marker = simard.join("cognitive.corrupt-1700000000.ack");
+    std::fs::write(&marker, b"acknowledged\n").unwrap();
+    backdate(&marker, CORRUPT_DB_MAX_AGE_DAYS + 10);
+    assert!(
+        !simard.join("cognitive.corrupt-1700000000").exists(),
+        "precondition: the parent quarantine is absent",
+    );
+
+    let report = run_corrupt_cleanup_with_home(tmp.path());
+
+    assert!(
+        !marker.exists(),
+        "an orphaned `.ack` marker (parent gone) must be reclaimed"
+    );
+    assert!(
+        report.dirs_removed.iter().any(|p| p == &marker),
+        "the reclaimed orphan marker must be reported in the cleanup report"
     );
 }
 

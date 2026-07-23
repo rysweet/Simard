@@ -267,13 +267,15 @@ fn auto_ack_stuck_recovery_asset(state_root: &std::path::Path) -> Option<String>
     }
     match crate::self_deploy::quarantine_ack::acknowledge(state_root, &name) {
         Ok(marker) => {
-            // `?name` (Debug) escapes control chars: a quarantine basename is an
-            // untrusted on-disk filename that may contain newlines, so logging it
-            // raw via `%name` under the default non-JSON subscriber would allow
-            // log-line forgery (#4469 security review).
+            // Both `artifact` and `marker` embed the untrusted quarantine
+            // basename (the marker is `{name}.ack`); an on-disk filename may
+            // contain a newline (a single `Component::Normal` on Unix), so log
+            // BOTH via Debug (`?`) — which escapes control chars — to prevent
+            // log-line forgery under the default non-JSON subscriber (#4469
+            // security review, LOW-1/LOW-2).
             tracing::warn!(
                 artifact = ?name,
-                marker = %marker.display(),
+                marker = ?marker,
                 min_age_days = crate::cmd_cleanup::disk::CORRUPT_DB_MAX_AGE_DAYS,
                 "self_deploy.quarantine.auto_ack: acknowledged aged #2550 protected \
                  recovery asset to break the stuck no_quarantine deadlock (#4469); \
@@ -368,14 +370,17 @@ pub fn run_self_health_probe(
     };
 
     // Probe 5: no *fresh* quarantined corrupt cognitive-memory store. Scans the
-    // live-store directory `<state_root>/state/` (where LadybugDB drops corrupt
-    // snapshots next to the live `cognitive` store) — the SAME directory
-    // `cmd_cleanup::disk` reclaims. Only quarantines at/after the window start
-    // count as fresh, so retained historical forensic snapshots don't fail the
-    // probe forever, but genuine post-deploy corruption still does (issue #4469).
+    // SAME directory set the cleanup sweep reclaims — the top-level state root
+    // AND the live-store subdir `<state_root>/state/` (where LadybugDB drops
+    // corrupt snapshots next to the live `cognitive` store) — single-sourced
+    // from `state_root::quarantine_scan_dirs`, so the probe and
+    // `cmd_cleanup::disk` can never disagree on where quarantines live. Only
+    // quarantines at/after the window start count as fresh, so retained
+    // historical forensic snapshots don't fail the probe forever, but genuine
+    // post-deploy corruption still does (issue #4469).
     //
-    // #4469: before counting, run the guarded autonomous auto-ack against that
-    // same live-store directory. The #2550 protected recovery asset — retained
+    // #4469: before counting, run the guarded autonomous auto-ack against each
+    // of those directories. The #2550 protected recovery asset — retained
     // forever yet always red — is the one quarantine that can NEVER clear on its
     // own and freezes self-deploy. Once it ages past the forensic window,
     // acknowledge it (durable `.ack` sidecar) so the probe can converge WITHOUT
@@ -383,9 +388,13 @@ pub fn run_self_health_probe(
     // on the probe path (not the operator CLI) so it also fires for the
     // orchestrator's unattended post-deploy health check. Fresh corruption is
     // never eligible for auto-ack.
-    let live_store_dir = crate::state_root::resolve_subdir("state");
-    let _ = auto_ack_stuck_recovery_asset(&live_store_dir);
-    let quarantine_tally = tally_quarantine_files(&live_store_dir, fallback_window_start);
+    let mut quarantine_tally = QuarantineTally::default();
+    for dir in crate::state_root::quarantine_scan_dirs() {
+        let _ = auto_ack_stuck_recovery_asset(&dir);
+        let dir_tally = tally_quarantine_files(&dir, fallback_window_start);
+        quarantine_tally.fresh += dir_tally.fresh;
+        quarantine_tally.retained += dir_tally.retained;
+    }
     let quarantined = quarantine_tally.fresh > 0;
     let no_quarantine = NoQuarantineProbe {
         healthy: !quarantined,

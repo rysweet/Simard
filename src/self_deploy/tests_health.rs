@@ -262,16 +262,19 @@ fn no_quarantine_passes_with_only_historical_quarantines_in_state_dir() {
     );
 }
 
-/// Directory-targeting regression: a fresh quarantine at TOP-LEVEL
-/// `<state_root>/` (the pre-fix scan location) must NOT fail the probe, because
-/// the live store and its quarantines live under `<state_root>/state/`. This
-/// pins that probe and cleanup agree on the same live-store directory.
+/// Directory-parity contract (#4469): the `no_quarantine` probe scans the SAME
+/// directory set the cleanup sweep reclaims — BOTH the live-store subdir
+/// `<state_root>/state/` AND the top-level `<state_root>/` (the native pre-#2307
+/// quarantine location). A fresh quarantine at the top level must therefore fail
+/// the probe too, so the probe and cleanup can never disagree on where
+/// quarantines live. (The `state/` side is covered by
+/// `no_quarantine_fails_on_fresh_quarantine_in_state_dir`.)
 #[test]
 #[serial_test::serial(simard_state_root_env, cognitive_memory)]
-fn no_quarantine_scans_state_dir_not_top_level() {
+fn no_quarantine_scans_both_state_root_and_state_subdir() {
     let root = tempfile::tempdir().unwrap();
     let _g = StateRootGuard::set(root.path());
-    // Empty live-store dir; the only quarantine is at the wrong (top) level.
+    // Empty live-store dir; the only quarantine is at the TOP level.
     std::fs::create_dir_all(root.path().join("state")).unwrap();
     std::fs::write(root.path().join("cognitive.corrupt-toplevel"), b"corrupt").unwrap();
 
@@ -280,8 +283,10 @@ fn no_quarantine_scans_state_dir_not_top_level() {
     let report = run_self_health_probe(&mem, "deadbeef", None, 0, window).unwrap();
 
     assert!(
-        !report.probes.no_quarantine.quarantined,
-        "the probe must scan <state_root>/state/, not top-level <state_root>"
+        report.probes.no_quarantine.quarantined,
+        "a fresh top-level quarantine must fail the probe — it scans the same \
+         directory set (top-level AND state/) that cleanup sweeps"
     );
-    assert!(report.probes.no_quarantine.healthy);
+    assert!(!report.probes.no_quarantine.healthy);
+    assert_eq!(report.probes.no_quarantine.fresh_quarantines, 1);
 }

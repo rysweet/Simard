@@ -495,24 +495,20 @@ pub(crate) fn aged_protected_recovery_asset(state_root: &Path) -> Option<String>
 }
 
 pub fn remove_old_corrupt_dbs(report: &mut CleanupReport) {
-    // #4469: sweep BOTH the top-level state root (`~/.simard`, the native
-    // pre-#2307 quarantine location) AND the live-store subdir
-    // `<state_root>/state/`, where the de-forked library backend actually drops
-    // corrupt snapshots next to the live `cognitive` store. Before this the
-    // driver only scanned the top level, so 62 corrupt artifacts accumulated
-    // unbounded under `state/` on the live host. Both directories resolve through
-    // the canonical `crate::state_root` helpers (honoring `SIMARD_STATE_ROOT`) —
-    // the SAME directory the self-health `no_quarantine` probe scans — so the
-    // probe and the sweep can never disagree on where the quarantines live. The
-    // age / keep-last-N / largest-asset bounds are applied independently per
-    // directory via `remove_old_corrupt_dbs_in`. `resolve_subdir("state")` is
-    // always distinct from the top-level root, but guard against an unexpected
-    // alias so a directory is never scanned twice.
-    let state_root = crate::state_root::simard_state_root();
-    let live_store_dir = crate::state_root::resolve_subdir("state");
-    remove_old_corrupt_dbs_in(&state_root, report);
-    if live_store_dir != state_root {
-        remove_old_corrupt_dbs_in(&live_store_dir, report);
+    // #4469: sweep every directory that can hold corrupt cognitive-memory
+    // quarantines — the top-level state root (`~/.simard`, the native pre-#2307
+    // quarantine location) AND the live-store subdir `<state_root>/state/`,
+    // where the de-forked library backend actually drops corrupt snapshots next
+    // to the live `cognitive` store. Before this the driver only scanned the top
+    // level, so 62 corrupt artifacts accumulated unbounded under `state/` on the
+    // live host. The directory set is single-sourced from
+    // `state_root::quarantine_scan_dirs` (honoring `SIMARD_STATE_ROOT`, deduped)
+    // — the SAME set the self-health `no_quarantine` probe scans — so the probe
+    // and the sweep can never disagree on where the quarantines live. The age /
+    // keep-last-N / largest-asset bounds are applied independently per directory
+    // via `remove_old_corrupt_dbs_in`.
+    for dir in crate::state_root::quarantine_scan_dirs() {
+        remove_old_corrupt_dbs_in(&dir, report);
     }
 }
 
@@ -525,6 +521,11 @@ pub fn remove_old_corrupt_dbs(report: &mut CleanupReport) {
 /// while tests pass a tempdir directly and never mutate the process-global
 /// `SIMARD_STATE_ROOT`/`HOME` env (which parallel tests race on).
 pub(crate) fn remove_old_corrupt_dbs_in(scan_dir: &Path, report: &mut CleanupReport) {
+    // #4469: first reclaim any orphaned `.ack` sidecars (parent quarantine
+    // already gone), independent of whether there are live quarantine
+    // candidates below — otherwise a directory with zero remaining quarantines
+    // would never shed its stale markers.
+    reclaim_orphaned_ack_sidecars(scan_dir, report);
     let mut candidates = scan_quarantine_candidates(scan_dir);
     if candidates.is_empty() {
         return;
@@ -557,7 +558,7 @@ pub(crate) fn remove_old_corrupt_dbs_in(scan_dir: &Path, report: &mut CleanupRep
         let reason = if too_old { "age" } else { "keep-last-N" };
         eprintln!(
             "  Removing corrupt DB {} ({} MB, {reason})",
-            cand.path.display(),
+            sanitize_path_for_log(&cand.path),
             cand.size / (1024 * 1024)
         );
         let removed = if cand.is_dir {
@@ -566,9 +567,10 @@ pub(crate) fn remove_old_corrupt_dbs_in(scan_dir: &Path, report: &mut CleanupRep
             std::fs::remove_file(&cand.path)
         };
         if let Err(e) = removed {
-            report
-                .errors
-                .push(format!("failed to remove {}: {e}", cand.path.display()));
+            report.errors.push(format!(
+                "failed to remove {}: {e}",
+                sanitize_path_for_log(&cand.path)
+            ));
         } else {
             report.bytes_freed += cand.size;
             report.dirs_removed.push(cand.path.clone());
@@ -600,12 +602,87 @@ fn reclaim_ack_sidecar(quarantine: &Path, report: &mut CleanupReport) {
                     report.bytes_freed += size;
                     report.dirs_removed.push(sidecar);
                 }
-                Err(e) => report
-                    .errors
-                    .push(format!("failed to remove {}: {e}", sidecar.display())),
+                Err(e) => report.errors.push(format!(
+                    "failed to remove {}: {e}",
+                    sanitize_path_for_log(&sidecar)
+                )),
             }
         }
         _ => {}
+    }
+}
+
+/// Maximum byte length of a filesystem path rendered into operator-facing
+/// stderr / [`CleanupReport`] output. Generous (well past `PATH_MAX`) so real
+/// paths are never truncated; the bound only exists as a belt-and-suspenders
+/// cap on a maliciously long untrusted basename.
+const PATH_LOG_MAX_BYTES: usize = 4096;
+
+/// Render a filesystem path for operator-facing stderr / [`CleanupReport`]
+/// output with control characters neutralized (#4469 security review, LOW-1).
+///
+/// A corrupt-quarantine basename is an untrusted on-disk filename (it only needs
+/// the `cognitive*` prefix + `.corrupt-` infix to be swept) that may embed CR/LF
+/// or ANSI escape sequences. `Path::display()` emits those verbatim, letting an
+/// attacker with write access to the state root forge log lines or inject
+/// terminal-control sequences into the operator's console. Route every
+/// operator-visible path through the shared `sanitize_gate_detail` control-char
+/// strip — the same escaping the health probe applies via Debug (`?name`).
+fn sanitize_path_for_log(path: &Path) -> String {
+    crate::self_relaunch::sanitize_gate_detail(&path.display().to_string(), PATH_LOG_MAX_BYTES)
+}
+
+/// Reclaim orphaned `.ack` acknowledgement sidecars (#4469) directly under
+/// `scan_dir`: a marker whose parent quarantine artifact no longer exists
+/// (operator `rm`, or manual deletion of the #2550 protected asset).
+///
+/// [`reclaim_ack_sidecar`] only sheds a sidecar when *this* sweep removes its
+/// parent, so a parent deleted out-of-band would otherwise leave the marker as a
+/// permanent orphan — 13 bytes each, but unbounded over time. This pass closes
+/// that gap. Only a durable regular-file marker with a missing parent is
+/// reclaimed; a marker whose parent still exists is left for the normal sweep,
+/// and a non-regular-file at the marker path (planted symlink/dir) is never
+/// followed or removed.
+fn reclaim_orphaned_ack_sidecars(scan_dir: &Path, report: &mut CleanupReport) {
+    let Ok(entries) = std::fs::read_dir(scan_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        if !crate::self_deploy::quarantine_ack::is_ack_marker_name(&name) {
+            continue;
+        }
+        // `DirEntry::metadata` does not traverse a symlink at the entry, so this
+        // never follows a planted link — only a genuine regular file is eligible.
+        match entry.metadata() {
+            Ok(meta) if meta.file_type().is_file() => {}
+            _ => continue,
+        }
+        // Parent quarantine basename = marker name minus the `.ack` suffix.
+        let Some(parent_name) = name.strip_suffix(crate::self_deploy::quarantine_ack::ACK_SUFFIX)
+        else {
+            continue;
+        };
+        // If the parent quarantine still exists (as anything), keep the marker;
+        // the normal sweep will reclaim it in lockstep when the parent goes.
+        if std::fs::symlink_metadata(scan_dir.join(parent_name)).is_ok() {
+            continue;
+        }
+        let marker = entry.path();
+        let size = std::fs::symlink_metadata(&marker)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        match std::fs::remove_file(&marker) {
+            Ok(()) => {
+                report.bytes_freed += size;
+                report.dirs_removed.push(marker);
+            }
+            Err(e) => report.errors.push(format!(
+                "failed to remove {}: {e}",
+                sanitize_path_for_log(&marker)
+            )),
+        }
     }
 }
 
