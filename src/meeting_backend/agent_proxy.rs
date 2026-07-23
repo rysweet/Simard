@@ -847,23 +847,15 @@ mod tests {
     #[test]
     #[serial_test::serial(cognitive_memory)]
     fn resolve_agent_workdir_derives_repo_root_from_cwd() {
-        // Exercise Branch 2 (cwd-derivation via `git rev-parse --show-toplevel`)
-        // WITHOUT mutating process-global cwd: cwd is shared across the entire
-        // parallel test binary, and the sole `set_current_dir` in this codebase
-        // corrupts every concurrent cwd-reader (e.g. `procfs_probe_detects_self_cwd`),
-        // producing non-deterministic cross-test failures. Instead we clear any
-        // explicit override so resolution must derive from the ambient cwd, then
-        // guard on a discoverable root:
-        //
-        //   * inside a git checkout (CI) resolution yields the repo root and we
-        //     assert the full invariants (real dir, contains `.git`, never the
-        //     hardcoded operator path);
-        //   * from the self-deploy gate's non-git build dir resolution yields
-        //     `None` (correct production behaviour) — we skip cleanly rather
-        //     than `.expect()`-panicking (issue #4505: exit 101 red-canary loop).
-        //
-        // Serialised under `cognitive_memory` because clearing `WORKDIR_ENV` is a
-        // process-global env mutation shared with the override tests below.
+        // Exercise cwd-derivation (`git rev-parse --show-toplevel`) without
+        // mutating process-global cwd — `set_current_dir` corrupts concurrent
+        // cwd-readers (e.g. `procfs_probe_detects_self_cwd`) in the same parallel
+        // test binary. Clear any override, then guard on a discoverable root:
+        // assert full invariants inside a checkout (CI); skip cleanly when none is
+        // found (the self-deploy gate's non-git build dir, issue #4505) instead of
+        // `.expect()`-panicking. Serialised because clearing WORKDIR_ENV is shared
+        // with the override tests below.
+        // Contract: docs/testing/checkout-independent-workdir-tests.md
         let prev = std::env::var_os(WORKDIR_ENV);
         // SAFETY: env mutation is serialised via the serial key above.
         unsafe { std::env::remove_var(WORKDIR_ENV) };
@@ -878,10 +870,8 @@ mod tests {
         }
 
         let Some(resolved) = resolved else {
-            // No git checkout discoverable from cwd — the discoverable-root
-            // precondition is unmet, so there is nothing to assert. This is the
-            // self-deploy gate path; skip cleanly (no silent fallback: the
-            // decision is traced).
+            // No git checkout discoverable from cwd (self-deploy gate) — nothing
+            // to assert; skip cleanly with a traced decision, not a silent fallback.
             debug!(
                 "resolve_agent_workdir_derives_repo_root_from_cwd: no repo root \
                  discoverable from cwd — skipping repo-root assertions (issue #4505)"
@@ -932,12 +922,10 @@ mod tests {
     #[serial_test::serial(cognitive_memory)]
     fn resolve_agent_workdir_ignores_nonexistent_override() {
         // A bogus override must be ignored and resolution must fall through to
-        // cwd-derivation. No cwd mutation (see the derives-from-cwd test above
-        // for why): we set a non-existent `WORKDIR_ENV`, restore it, then guard
-        // on a discoverable root. Inside a checkout resolution yields the repo
-        // root; from the self-deploy gate's non-git build dir it yields `None`
-        // (issue #4505) and we skip cleanly — either way it must NEVER be the
-        // hardcoded operator path.
+        // cwd-derivation. No cwd mutation (see the derives-from-cwd test above for
+        // why): set a non-existent WORKDIR_ENV, restore it, then guard on a
+        // discoverable root. Skips cleanly outside a checkout (issue #4505); either
+        // way it must NEVER be the hardcoded operator path.
         let prev = std::env::var_os(WORKDIR_ENV);
         // SAFETY: env mutation is serialised via the serial key above.
         unsafe { std::env::set_var(WORKDIR_ENV, "/nonexistent/simard/meeting/dir") };
