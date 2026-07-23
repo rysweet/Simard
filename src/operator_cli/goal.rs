@@ -267,6 +267,7 @@ fn with_state<R>(
     Ok(out)
 }
 
+/// Blind-overwrite the authoritative board with `board` under the store lock,
 /// then refresh the memory cache. Used only by `goal decompose`, where the
 /// mutated board (parent placement + new child goals) IS the operator's explicit
 /// intent, so a surgical merge would fight the demotion the operator asked for.
