@@ -470,11 +470,12 @@ fn select_protected_asset(candidates: &[QuarantineCandidate]) -> Option<&Quarant
 /// Basename of the #2550 protected recovery asset directly under `state_root`
 /// when it is past the forensic window ([`CORRUPT_DB_MAX_AGE_DAYS`]).
 ///
-/// This is the one artifact that keeps the self-health `no_quarantine` probe red
-/// yet is never swept, so it can never clear on its own — the #4469 deadlock. The
-/// guarded auto-ack acknowledges exactly this artifact (and only once it is aged
-/// out of the forensic window) to converge self-deploy WITHOUT deleting the
-/// retained recovery asset. Returns `None` when there is no protected asset or it
+/// This is the largest retained recovery asset that the #2550 rule never sweeps.
+/// The guarded defense-in-depth auto-ack in
+/// [`crate::self_deploy::health`] acknowledges exactly this artifact (and only
+/// once it is aged out of the forensic window) WITHOUT deleting the retained
+/// recovery asset — see that module for how this interacts with the probe's
+/// fresh-window semantics. Returns `None` when there is no protected asset or it
 /// is still inside the window (fresh corruption is never eligible).
 pub(crate) fn aged_protected_recovery_asset(state_root: &Path) -> Option<String> {
     let candidates = scan_quarantine_candidates(state_root);

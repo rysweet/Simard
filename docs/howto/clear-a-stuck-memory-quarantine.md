@@ -52,15 +52,18 @@ simard self-health: UNHEALTHY
 ```
 
 Only `no_quarantine` is red, and the artifact is the retained recovery asset.
-Inspect what is present under the state root:
+Inspect what is present under **both** locations the probe scans — the
+top-level state root and the live-store subdir `<state_root>/state/` (where the
+de-forked backend drops corrupt snapshots):
 
 ```console
-$ ls -1 ~/.simard/ | grep '\.corrupt-'
+$ ls -1 ~/.simard/ ~/.simard/state/ 2>/dev/null | grep '\.corrupt-'
 cognitive.corrupt-20260601T090412Z        # large recovery asset — retained by #2550
 ```
 
-(If `SIMARD_STATE_ROOT` is set, look there instead — the probe, the
-acknowledge path, and `simard cleanup` all resolve the same root.)
+(If `SIMARD_STATE_ROOT` is set, look under that root and its `state/` subdir
+instead — the probe, the acknowledge path, and `simard cleanup` all resolve the
+same directory set.)
 
 ## Step 2 — Acknowledge the quarantine
 
@@ -75,8 +78,9 @@ simard self-health: HEALTHY
   [ok  ] entrypoint_parity  path=/home/you/.local/bin/simard version=simard 0.35.0 mismatch=false foreign=false
 ```
 
-This writes an `.ack` sidecar next to each present quarantine artifact and
-re-runs the probe. The artifact is **not** deleted:
+This writes an `.ack` sidecar next to each present quarantine artifact — in
+both the top-level state root and `<state_root>/state/` — and re-runs the probe.
+The artifact is **not** deleted:
 
 ```console
 $ ls -1 ~/.simard/ | grep '\.corrupt-'

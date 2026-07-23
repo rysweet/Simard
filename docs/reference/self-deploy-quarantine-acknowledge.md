@@ -219,7 +219,8 @@ simard self-health [--json] [--pre-deploy-facts=N] [--acknowledge-quarantine]
 
   --acknowledge-quarantine
         Acknowledge every currently-present cognitive-memory quarantine
-        artifact under the state root, writing an `.ack` sidecar next to each
+        artifact under the state root AND the live-store subdir
+        `<state_root>/state/`, writing an `.ack` sidecar next to each
         (source: operator). Idempotent. Does NOT delete any artifact — the
         #2550 recovery asset is retained. After acknowledging, the probe is
         re-run and the (now-cleared) report is printed.
@@ -230,10 +231,15 @@ Exit code: 0 when every probe is healthy; non-zero when any probe fails.
 Behaviour:
 
 - With `--acknowledge-quarantine`, the command first acknowledges each present
-  quarantine artifact (via `quarantine_ack::acknowledge`), then runs the normal
-  probe and prints the report. Because acknowledgement is idempotent, running it
-  twice is safe: the second run finds each sidecar already present and re-writes
-  nothing.
+  quarantine artifact (via `quarantine_ack::acknowledge`) across the **same
+  directory set the probe and cleanup sweep scan** — the top-level state root
+  and `<state_root>/state/`, single-sourced from
+  `state_root::quarantine_scan_dirs_under` — then runs the normal probe and
+  prints the report. Scanning only the top level would silently miss a stuck
+  quarantine under `state/` (the primary location the de-forked backend drops
+  corrupt snapshots), leaving the probe red despite a "success" here. Because
+  acknowledgement is idempotent, running it twice is safe: the second run finds
+  each sidecar already present and re-writes nothing.
 - Without the flag, `self-health` behaviour is exactly as before: it reports the
   six probes and exits non-zero if any is unhealthy. Acknowledgement is **never**
   implicit for a manual health check.
@@ -242,20 +248,29 @@ Behaviour:
 
 ### Guarded autonomous auto-ack
 
-To break the deadlock **without** operator intervention, the auto-ack runs
-**inside the probe itself** — in `run_self_health_probe`
+The auto-ack runs **inside the probe itself** — in `run_self_health_probe`
 ([`src/self_deploy/health.rs`](https://github.com/rysweet/Simard/blob/main/src/self_deploy/health.rs)),
 the function the `no_quarantine` probe already calls — **not** in the operator
-CLI. This placement is load-bearing: the autonomous orchestrator's post-deploy
-`health_check` calls `run_self_health_probe` directly and **never** goes through
-`operator_cli::self_health`. If the auto-ack lived only in the CLI it would never
-fire during an unattended self-deploy, the internal probe would keep counting the
-protected asset, and rollback would repeat forever. It must live on the probe
-path so the same code clears the deadlock for both the operator command and the
-autonomous daemon.
+CLI, so it also fires for the autonomous orchestrator's post-deploy
+`health_check` (which calls `run_self_health_probe` directly and never goes
+through `operator_cli::self_health`).
 
-The auto-ack is narrowly scoped — it fires only for the case that can genuinely
-never clear otherwise:
+> **This is defense-in-depth, not the primary convergence mechanism.** The
+> `no_quarantine` probe already converges on retained (old) quarantines via the
+> **fresh-window semantics**: only a quarantine with mtime at/after the caller's
+> `window_start` counts as *fresh*, and only fresh quarantines redden the probe
+> (see `no_quarantine_passes_with_only_historical_quarantines_in_state_dir`).
+> Under the current callers the window is recent (the orchestrator passes `now`;
+> the operator CLI `now - 5m`), so the aged protected asset the auto-ack targets
+> — mtime at least `CORRUPT_DB_MAX_AGE_DAYS` old — is already counted `retained`,
+> never `fresh`, and the probe already passes on it. The auto-ack adds two
+> guarantees on top: it drops the aged protected asset out of the `retained`
+> diagnostic, and it keeps the probe green even if a caller were to pass an
+> observation window *older* than the forensic age. A genuinely-stuck *fresh*
+> quarantine is cleared by the operator's manual `--acknowledge-quarantine`, not
+> by this path.
+
+The auto-ack is narrowly scoped — it fires only for the aged protected asset:
 
 - **Only** the #2550 **protected recovery asset** is eligible — the single
   artifact `remove_old_corrupt_dbs` refuses to sweep: the largest quarantine

@@ -69,18 +69,30 @@ pub fn resolve_subdir(name: &str) -> PathBuf {
 /// never scanned twice.
 ///
 /// Single-sourced deliberately so the cleanup sweep
-/// ([`crate::cmd_cleanup::disk::remove_old_corrupt_dbs`]) and the self-health
-/// `no_quarantine` probe / autonomous auto-ack ([`crate::self_deploy::health`])
-/// scan the **identical** directory set — the probe and the sweep can never
-/// disagree about where the quarantines live (the divergence that caused the
-/// stuck-quarantine self-deploy deadlock).
+/// ([`crate::cmd_cleanup::disk::remove_old_corrupt_dbs`]), the self-health
+/// `no_quarantine` probe / autonomous auto-ack ([`crate::self_deploy::health`]),
+/// and the operator `--acknowledge-quarantine` remediation
+/// ([`crate::operator_cli`]) all scan the **identical** directory set — they can
+/// never disagree about where the quarantines live (the divergence that caused
+/// the stuck-quarantine self-deploy deadlock).
 pub fn quarantine_scan_dirs() -> Vec<PathBuf> {
-    let root = simard_state_root();
+    quarantine_scan_dirs_under(&simard_state_root())
+}
+
+/// The quarantine-scan directory set computed under an explicit `root`, rather
+/// than the process-global [`simard_state_root`] (issue #4469).
+///
+/// Same `[root, root/state]` (deduped) contract as [`quarantine_scan_dirs`], but
+/// path-injected so callers with an already-resolved root — and tests passing a
+/// tempdir — get the SAME two-directory coverage without reading (or racing on)
+/// the process-global `SIMARD_STATE_ROOT`/`HOME` env. [`quarantine_scan_dirs`]
+/// is the thin production wrapper over this.
+pub fn quarantine_scan_dirs_under(root: &Path) -> Vec<PathBuf> {
     let live_store = root.join("state");
-    if live_store == root {
-        vec![root]
+    if live_store == *root {
+        vec![root.to_path_buf()]
     } else {
-        vec![root, live_store]
+        vec![root.to_path_buf(), live_store]
     }
 }
 

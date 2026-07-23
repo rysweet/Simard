@@ -246,10 +246,10 @@ struct QuarantineTally {
 
 /// Guarded autonomous auto-ack (#4469): if the #2550 protected recovery asset
 /// under `state_root` is past the forensic window and not already acknowledged,
-/// durably acknowledge it so the `no_quarantine` probe can converge — WITHOUT
-/// deleting the retained asset. Best-effort: emits a structured tracing/OTel
-/// WARN and continues on any error (never `print!`). Returns the acknowledged
-/// artifact basename when it fired, else `None`.
+/// durably acknowledge it WITHOUT deleting the retained asset. Best-effort:
+/// emits a structured tracing/OTel WARN and continues on any error (never
+/// `print!`). Returns the acknowledged artifact basename when it fired, else
+/// `None`.
 ///
 /// The "protected recovery asset" selection and the forensic-window age gate are
 /// single-sourced from [`crate::cmd_cleanup::disk`], so the probe and the cleanup
@@ -257,13 +257,30 @@ struct QuarantineTally {
 /// (young, or not the protected asset) is never eligible and still reddens the
 /// probe.
 ///
+/// **What this does and does NOT do.** This is *defense-in-depth*, not the
+/// primary convergence mechanism. Under the current callers the observation
+/// window is recent ([`run_self_health_probe`] receives `now` from the
+/// orchestrator, `now - 5m` from the operator CLI), so the aged protected asset
+/// this path targets — mtime at least [`CORRUPT_DB_MAX_AGE_DAYS`] old — is
+/// already counted `retained`, never `fresh`, and the `no_quarantine` probe
+/// therefore already passes on it via the fresh-window semantics of
+/// [`tally_quarantine_files`] (see
+/// `no_quarantine_passes_with_only_historical_quarantines_in_state_dir`). The
+/// auto-ack adds two guarantees on top: it drops the aged protected asset out of
+/// the `retained` diagnostic, and it keeps the probe green even if a caller were
+/// to pass an observation window *older* than the forensic age (which would
+/// otherwise re-classify the aged asset as `fresh`). The escape hatch for a
+/// genuinely-stuck *fresh* quarantine is the manual `--acknowledge-quarantine`
+/// operator command, which the auto-ack deliberately does NOT replicate — this
+/// path fires unattended and must never silence genuine fresh corruption.
+///
 /// Deliberate asymmetry with the manual
 /// [`acknowledge`](crate::self_deploy::quarantine_ack::acknowledge) path: the
 /// operator `--acknowledge-quarantine` CLI acknowledges *any* present, ackable
 /// artifact the operator explicitly chooses, whereas this *automatic* probe path
-/// narrows itself to the single aged #2550 protected recovery asset — the one
-/// quarantine that can never clear on its own — precisely because it fires
-/// unattended and must not silently acknowledge genuine fresh corruption.
+/// narrows itself to the single aged #2550 protected recovery asset, precisely
+/// because it fires unattended and must not silently acknowledge genuine fresh
+/// corruption.
 fn auto_ack_stuck_recovery_asset(state_root: &std::path::Path) -> Option<String> {
     let name = crate::cmd_cleanup::disk::aged_protected_recovery_asset(state_root)?;
     if crate::self_deploy::quarantine_ack::is_acknowledged(state_root, &name) {
@@ -281,9 +298,9 @@ fn auto_ack_stuck_recovery_asset(state_root: &std::path::Path) -> Option<String>
                 artifact = ?name,
                 marker = ?marker,
                 min_age_days = crate::cmd_cleanup::disk::CORRUPT_DB_MAX_AGE_DAYS,
-                "self_deploy.quarantine.auto_ack: acknowledged aged #2550 protected \
-                 recovery asset to break the stuck no_quarantine deadlock (#4469); \
-                 artifact retained on disk"
+                "self_deploy.quarantine.auto_ack: durably acknowledged aged #2550 \
+                 protected recovery asset as defense-in-depth (#4469); artifact \
+                 retained on disk"
             );
             Some(name)
         }
@@ -388,14 +405,18 @@ pub fn run_self_health_probe(
     // post-deploy corruption still does (issue #4469).
     //
     // #4469: before counting, run the guarded autonomous auto-ack against each
-    // of those directories. The #2550 protected recovery asset — retained
-    // forever yet always red — is the one quarantine that can NEVER clear on its
-    // own and freezes self-deploy. Once it ages past the forensic window,
-    // acknowledge it (durable `.ack` sidecar) so the probe can converge WITHOUT
-    // deleting it; an acknowledged quarantine never counts as fresh. This lives
-    // on the probe path (not the operator CLI) so it also fires for the
-    // orchestrator's unattended post-deploy health check. Fresh corruption is
-    // never eligible for auto-ack.
+    // of those directories as *defense-in-depth*. The `no_quarantine` probe
+    // already converges on retained (old) quarantines via the fresh-window
+    // semantics below — only quarantines with mtime at/after `window_start`
+    // count as fresh. The auto-ack additionally acknowledges the #2550 protected
+    // recovery asset once it ages past the forensic window (durable `.ack`
+    // sidecar, WITHOUT deleting it) so it drops out of the `retained` diagnostic
+    // and the probe stays green even if a caller passes an observation window
+    // older than the forensic age. It lives on the probe path (not just the
+    // operator CLI) so it also fires for the orchestrator's unattended
+    // post-deploy health check. Fresh corruption is never eligible for auto-ack;
+    // a genuinely-stuck *fresh* quarantine is cleared by the operator's manual
+    // `--acknowledge-quarantine` command.
     let mut quarantine_tally = QuarantineTally::default();
     for dir in crate::state_root::quarantine_scan_dirs() {
         // Best-effort guarded auto-ack: the return value (which artifact, if any,

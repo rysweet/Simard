@@ -23,8 +23,9 @@ Usage: simard self-health [--json] [--pre-deploy-facts=N] [--acknowledge-quarant
                             swap). When omitted, the memory probe reports the live
                             count only.
   --acknowledge-quarantine  Acknowledge every present cognitive-memory quarantine
-                            artifact under the state root, writing a durable `.ack`
-                            sidecar next to each so the `no_quarantine` probe stops
+                            artifact under the state root AND the live-store subdir
+                            `<state_root>/state/`, writing a durable `.ack` sidecar
+                            next to each so the `no_quarantine` probe stops
                             counting it (issue #4469). Idempotent and NON-destructive:
                             no artifact is deleted — the #2550 recovery asset is
                             retained. Use this to clear a genuinely-stuck quarantine
@@ -66,18 +67,30 @@ fn parse_flags(
 /// no artifact is deleted (the #2550 recovery asset is retained). Returns the
 /// number of artifacts acknowledged. Best-effort: a per-artifact failure is
 /// logged and skipped so one hostile entry cannot block clearing the rest.
+///
+/// Scans the SAME directory set the `no_quarantine` probe and the cleanup sweep
+/// scan — the top-level state root AND the live-store subdir
+/// `<state_root>/state/` (where the de-forked backend actually drops corrupt
+/// snapshots) — single-sourced via
+/// [`crate::state_root::quarantine_scan_dirs_under`]. Otherwise this operator
+/// remediation would silently miss a stuck quarantine in `state/` (the primary
+/// location) that still reddens the probe, leaving self-deploy frozen despite a
+/// "success" from this command.
 fn acknowledge_all_present_quarantines(state_root: &Path) -> usize {
     let mut acknowledged = 0;
-    for name in crate::self_deploy::present_quarantine_artifacts(state_root) {
-        match crate::self_deploy::acknowledge(state_root, &name) {
-            Ok(_) => acknowledged += 1,
-            // `?name` (Debug) escapes control chars in the untrusted quarantine
-            // basename to prevent log-line forgery (#4469 security review).
-            Err(e) => tracing::warn!(
-                artifact = ?name,
-                error = %e,
-                "self_health.acknowledge_quarantine_failed: skipping one artifact (#4469)"
-            ),
+    for dir in crate::state_root::quarantine_scan_dirs_under(state_root) {
+        for name in crate::self_deploy::present_quarantine_artifacts(&dir) {
+            match crate::self_deploy::acknowledge(&dir, &name) {
+                Ok(_) => acknowledged += 1,
+                // `?name` (Debug) escapes control chars in the untrusted quarantine
+                // basename to prevent log-line forgery (#4469 security review).
+                Err(e) => tracing::warn!(
+                    artifact = ?name,
+                    dir = ?dir,
+                    error = %e,
+                    "self_health.acknowledge_quarantine_failed: skipping one artifact (#4469)"
+                ),
+            }
         }
     }
     acknowledged
@@ -267,5 +280,37 @@ mod tests {
             .filter(|e| crate::self_deploy::is_ack_marker_name(&e.file_name().to_string_lossy()))
             .count();
         assert_eq!(markers, 2, "exactly one sidecar per quarantine");
+    }
+
+    /// #4469 regression: the operator remediation MUST cover the live-store
+    /// subdir `<state_root>/state/` too — the primary location the de-forked
+    /// backend drops corrupt snapshots, which the `no_quarantine` probe and the
+    /// cleanup sweep both scan. Before the fix this scanned only the top level,
+    /// so a stuck quarantine under `state/` could never be cleared manually and
+    /// self-deploy stayed frozen despite a "success" from this command.
+    #[test]
+    fn acknowledge_all_covers_state_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let state = root.join("state");
+        std::fs::create_dir_all(&state).unwrap();
+
+        // One quarantine at the top level, one under state/.
+        std::fs::write(root.join("cognitive.corrupt-20260101120000"), b"a").unwrap();
+        std::fs::write(state.join("cognitive.corrupt-20260202120000"), b"b").unwrap();
+
+        let n = acknowledge_all_present_quarantines(root);
+        assert_eq!(
+            n, 2,
+            "quarantines under BOTH the state root and <state_root>/state/ must be acknowledged"
+        );
+        assert!(root.join("cognitive.corrupt-20260101120000.ack").is_file());
+        assert!(
+            state.join("cognitive.corrupt-20260202120000.ack").is_file(),
+            "the state/ quarantine's sidecar must be written next to it"
+        );
+        // Non-destructive: both artifacts retained.
+        assert!(root.join("cognitive.corrupt-20260101120000").is_file());
+        assert!(state.join("cognitive.corrupt-20260202120000").is_file());
     }
 }
