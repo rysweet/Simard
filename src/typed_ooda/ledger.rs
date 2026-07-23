@@ -269,6 +269,27 @@ impl CapabilityHandler {
         connection
             .pragma_update(None, "journal_mode", "WAL")
             .map_err(persistence)?;
+        // `pragma_update` ignores the journal-mode SQLite echoes back, so on an
+        // exotic filesystem that silently refuses WAL (e.g. some network mounts)
+        // the ledger would fall back to rollback journaling with no signal.
+        // Read the mode back and warn — non-fatal, since rollback journaling
+        // fails toward stricter (whole-file) locking, not data loss.
+        match connection.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0)) {
+            Ok(mode) if !mode.eq_ignore_ascii_case("wal") => {
+                tracing::warn!(
+                    journal_mode = %mode,
+                    "ledger open() requested WAL but SQLite reports a different journal mode; \
+                     concurrent readers/writers may serialize on a whole-file lock"
+                );
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "ledger open() could not read back journal_mode to confirm WAL"
+                );
+            }
+        }
         super::schema::initialize(&mut connection, now_millis()).map_err(persistence)?;
         Ok(Self {
             connection: Mutex::new(connection),

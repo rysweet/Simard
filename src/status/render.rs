@@ -694,7 +694,7 @@ mod tests {
             Gym {
                 skip_gym: true,
                 configured_scenarios: Some(9),
-                self_eval_state: "active".to_string(),
+                self_eval_state: "idle".to_string(),
             },
             Some(AS_OF.to_string()),
         );
