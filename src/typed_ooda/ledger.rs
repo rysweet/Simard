@@ -61,16 +61,19 @@ fn connection_registry() -> &'static Mutex<HashMap<PathBuf, SharedConnection>> {
 /// distinct temp DBs (per-test isolation) on distinct shared connections while
 /// still collapsing different spellings of the same file to one entry.
 fn canonical_key(path: &Path) -> PathBuf {
-    match (
-        path.parent()
-            .filter(|parent| !parent.as_os_str().is_empty()),
-        path.file_name(),
-    ) {
-        (Some(parent), Some(file_name)) => match parent.canonicalize() {
-            Ok(directory) => directory.join(file_name),
-            Err(_) => path.to_path_buf(),
-        },
-        _ => path.to_path_buf(),
+    let Some(file_name) = path.file_name() else {
+        return path.to_path_buf();
+    };
+    // A parent-less path (bare relative file name) is anchored to the current
+    // working directory so it still canonicalizes to an absolute key, keeping
+    // the invariant that one file maps to exactly one shared connection.
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    match directory.canonicalize() {
+        Ok(canonical) => canonical.join(file_name),
+        Err(_) => path.to_path_buf(),
     }
 }
 
@@ -103,9 +106,19 @@ fn apply_connection_pragmas(connection: &Connection) -> CapabilityResult<()> {
     connection
         .execute_batch("PRAGMA foreign_keys = ON;")
         .map_err(persistence)?;
-    let _journal_mode: String = connection
+    // SQLite reports the *resulting* journal mode without erroring when it
+    // cannot honor the request (e.g. an unsupported filesystem). Verify WAL was
+    // actually engaged instead of silently proceeding, since the whole
+    // shared-connection concurrency fix depends on WAL being active.
+    let journal_mode: String = connection
         .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
         .map_err(persistence)?;
+    if !journal_mode.eq_ignore_ascii_case("wal") {
+        return Err(persistence_message(format!(
+            "typed outcome connection could not enter WAL journal mode (got {journal_mode:?}); \
+             the shared-connection concurrency fix requires WAL"
+        )));
+    }
     Ok(())
 }
 
