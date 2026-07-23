@@ -1,8 +1,160 @@
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use super::types::{GateResult, RelaunchConfig, RelaunchGate};
 use crate::error::SimardResult;
+
+/// Outcome of running a gate subprocess under a wall-clock bound (Brick A, #4415).
+pub enum GateExec {
+    /// The child exited on its own before the timeout; carries its captured output.
+    Completed(Output),
+    /// The child exceeded its budget and was killed **and** reaped.
+    TimedOut,
+}
+
+/// SIGKILL the gate subprocess's ENTIRE process group (leader + every
+/// descendant), then fall back to a direct-child kill on non-Unix. The child is
+/// spawned as the leader of its own group via [`process_group(0)`] (see
+/// `run_with_timeout`), so its PGID equals its PID and signalling the negated
+/// PID reaches the whole subtree — never the daemon's own group. This is the
+/// established repo pattern (see `meeting_backend::agent_proxy::kill_process_group`,
+/// #2549).
+fn kill_gate_process_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let pid = child.id() as i32;
+        // Guard pathological ids: `-0` targets the caller's own group and `-1`
+        // broadcasts to every process. Real child PIDs are always > 1.
+        if pid > 1 {
+            // SAFETY: `libc::kill` is FFI but well-defined for any (pid, signal).
+            // The negated group-leader PID targets exactly the child's own
+            // process group, created via `process_group(0)`; it cannot reach
+            // this process.
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+            return;
+        }
+    }
+    let _ = child.kill();
+}
+
+/// Run `cmd` with a wall-clock `timeout`. On expiry the child's ENTIRE process
+/// group is killed AND the leader reaped (waited on) so no zombie or runaway
+/// build survives the tick; its stdout/stderr are drained on helper threads so a
+/// chatty child can never deadlock on a full pipe. Returns `Err` only if the
+/// child could not be spawned (an infrastructural spawn fault), never on a
+/// timeout.
+///
+/// The child runs as the LEADER of its own process group (`process_group(0)` on
+/// Unix). This is load-bearing for the UnitTest gate: `cargo test` spawns
+/// `rustc`/test-binary descendants that inherit the stdout/stderr pipe
+/// write-ends. Killing only the direct child would leave those descendants
+/// alive holding the pipes open, so the drain-thread `join()` below would never
+/// see EOF and would block PAST the timeout — defeating the bound for the very
+/// gate it exists to protect (the recurring hung canary, #4415). Group-killing
+/// reaps the whole subtree so every descendant releases the pipes and the drain
+/// threads finish promptly.
+pub fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> std::io::Result<GateExec> {
+    use std::io::Read;
+
+    // Lead our own process group so a timeout can reap the WHOLE subtree (see
+    // the fn doc: descendants inherit the pipe write-ends).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+
+    // Drain both pipes concurrently so a subprocess that emits more than a pipe
+    // buffer's worth of output cannot block before it exits (which would defeat
+    // the timeout).
+    let mut child_stdout = child.stdout.take();
+    let mut child_stderr = child.stderr.take();
+    let out_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(s) = child_stdout.as_mut() {
+            let _ = s.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let err_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(s) = child_stderr.as_mut() {
+            let _ = s.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if start.elapsed() >= timeout {
+            // Kill the whole group (not just the leader) and reap the leader so
+            // no zombie / runaway cargo survives the tick AND every descendant
+            // releases the stdout/stderr pipes, letting the drain threads below
+            // finish promptly instead of blocking past the timeout (#4415).
+            kill_gate_process_group(&mut child);
+            let _ = child.wait();
+            let _ = out_handle.join();
+            let _ = err_handle.join();
+            return Ok(GateExec::TimedOut);
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+
+    let stdout = out_handle.join().unwrap_or_default();
+    let stderr = err_handle.join().unwrap_or_default();
+    Ok(GateExec::Completed(Output {
+        status,
+        stdout,
+        stderr,
+    }))
+}
+
+/// Fold a bounded gate execution into a [`GateResult`]. A timeout is a FAILED
+/// gate carrying the structured `timed_out: true` flag (never inferred from
+/// `detail` text); a spawn fault is a failed, non-timeout gate.
+fn finish_gate(
+    gate: RelaunchGate,
+    exec: std::io::Result<GateExec>,
+    timeout: Duration,
+    on_success: impl FnOnce(&Output) -> String,
+    on_failure: impl FnOnce(&Output) -> String,
+    spawn_context: &str,
+) -> GateResult {
+    match exec {
+        Ok(GateExec::Completed(output)) if output.status.success() => GateResult {
+            gate,
+            passed: true,
+            detail: on_success(&output),
+            timed_out: false,
+        },
+        Ok(GateExec::Completed(output)) => GateResult {
+            gate,
+            passed: false,
+            detail: on_failure(&output),
+            timed_out: false,
+        },
+        Ok(GateExec::TimedOut) => GateResult {
+            gate,
+            passed: false,
+            detail: format!("{gate} gate timed out after {}s", timeout.as_secs()),
+            timed_out: true,
+        },
+        Err(e) => GateResult {
+            gate,
+            passed: false,
+            detail: format!("{spawn_context}: {e}"),
+            timed_out: false,
+        },
+    }
+}
 
 /// Verify a canary binary against a sequence of gates (does not short-circuit).
 pub fn verify_canary(
@@ -26,122 +178,94 @@ pub fn all_gates_passed(results: &[GateResult]) -> bool {
 
 fn run_gate(binary: &Path, gate: RelaunchGate, config: &RelaunchConfig) -> GateResult {
     match gate {
-        RelaunchGate::Smoke => run_smoke_gate(binary),
+        RelaunchGate::Smoke => run_smoke_gate(binary, config.gate_timeout),
         RelaunchGate::UnitTest => run_unit_test_gate(config),
-        RelaunchGate::GymBaseline => run_gym_baseline_gate(binary),
+        RelaunchGate::GymBaseline => run_gym_baseline_gate(binary, config.gate_timeout),
         RelaunchGate::RpcHealth => run_rpc_health_gate(binary, config),
     }
 }
 
-fn run_smoke_gate(binary: &Path) -> GateResult {
-    match Command::new(binary).arg("--version").output() {
-        Ok(output) if output.status.success() => {
+fn run_smoke_gate(binary: &Path, timeout: Duration) -> GateResult {
+    let mut cmd = Command::new(binary);
+    cmd.arg("--version");
+    finish_gate(
+        RelaunchGate::Smoke,
+        run_with_timeout(&mut cmd, timeout),
+        timeout,
+        |output| {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            GateResult {
-                gate: RelaunchGate::Smoke,
-                passed: true,
-                detail: format!("version: {}", stdout.trim()),
-            }
-        }
-        Ok(output) => GateResult {
-            gate: RelaunchGate::Smoke,
-            passed: false,
-            detail: format!(
+            format!("version: {}", stdout.trim())
+        },
+        |output| {
+            format!(
                 "binary exited with {}: {}",
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
-            ),
+            )
         },
-        Err(e) => GateResult {
-            gate: RelaunchGate::Smoke,
-            passed: false,
-            detail: format!("failed to execute binary: {e}"),
-        },
-    }
+        "failed to execute binary",
+    )
 }
 
 fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
-    match Command::new("cargo")
-        .arg("test")
+    let mut cmd = Command::new("cargo");
+    cmd.arg("test")
         .arg("--manifest-path")
         .arg(config.manifest_dir.join("Cargo.toml"))
         .arg("--target-dir")
         .arg(&config.canary_target_dir)
-        .env("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs())
-        .output()
-    {
-        Ok(output) if output.status.success() => GateResult {
-            gate: RelaunchGate::UnitTest,
-            passed: true,
-            detail: "all tests passed".to_string(),
-        },
-        Ok(output) => {
+        .env("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs());
+    finish_gate(
+        RelaunchGate::UnitTest,
+        run_with_timeout(&mut cmd, config.gate_timeout),
+        config.gate_timeout,
+        |_output| "all tests passed".to_string(),
+        |output| {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let truncated = truncate_output(&stderr, 200);
-            GateResult {
-                gate: RelaunchGate::UnitTest,
-                passed: false,
-                detail: format!("tests failed (exit {}): {}", output.status, truncated),
-            }
-        }
-        Err(e) => GateResult {
-            gate: RelaunchGate::UnitTest,
-            passed: false,
-            detail: format!("cargo test failed to run: {e}"),
+            format!("tests failed (exit {}): {}", output.status, truncated)
         },
-    }
+        "cargo test failed to run",
+    )
 }
 
-fn run_gym_baseline_gate(binary: &Path) -> GateResult {
-    match Command::new(binary).args(["gym", "list"]).output() {
-        Ok(output) if output.status.success() => GateResult {
-            gate: RelaunchGate::GymBaseline,
-            passed: true,
-            detail: "gym list succeeded".to_string(),
-        },
-        Ok(output) => GateResult {
-            gate: RelaunchGate::GymBaseline,
-            passed: false,
-            detail: format!(
+fn run_gym_baseline_gate(binary: &Path, timeout: Duration) -> GateResult {
+    let mut cmd = Command::new(binary);
+    cmd.args(["gym", "list"]);
+    finish_gate(
+        RelaunchGate::GymBaseline,
+        run_with_timeout(&mut cmd, timeout),
+        timeout,
+        |_output| "gym list succeeded".to_string(),
+        |output| {
+            format!(
                 "gym probe failed (exit {}): {}",
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
-            ),
+            )
         },
-        Err(e) => GateResult {
-            gate: RelaunchGate::GymBaseline,
-            passed: false,
-            detail: format!("gym probe failed to run: {e}"),
-        },
-    }
+        "gym probe failed to run",
+    )
 }
 
 fn run_rpc_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
     let timeout_secs = config.health_timeout.as_secs().to_string();
-    match Command::new(binary)
-        .args(["probe", "rpc", "--timeout", &timeout_secs])
-        .output()
-    {
-        Ok(output) if output.status.success() => GateResult {
-            gate: RelaunchGate::RpcHealth,
-            passed: true,
-            detail: "rpc health check passed".to_string(),
-        },
-        Ok(output) => GateResult {
-            gate: RelaunchGate::RpcHealth,
-            passed: false,
-            detail: format!(
+    let mut cmd = Command::new(binary);
+    cmd.args(["probe", "rpc", "--timeout", &timeout_secs]);
+    finish_gate(
+        RelaunchGate::RpcHealth,
+        run_with_timeout(&mut cmd, config.gate_timeout),
+        config.gate_timeout,
+        |_output| "rpc health check passed".to_string(),
+        |output| {
+            format!(
                 "rpc health failed (exit {}): {}",
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
-            ),
+            )
         },
-        Err(e) => GateResult {
-            gate: RelaunchGate::RpcHealth,
-            passed: false,
-            detail: format!("rpc health probe failed to run: {e}"),
-        },
-    }
+        "rpc health probe failed to run",
+    )
 }
 
 fn truncate_output(s: &str, max_len: usize) -> String {
@@ -164,7 +288,10 @@ mod tests {
 
     #[test]
     fn smoke_gate_handles_missing_binary() {
-        let result = run_smoke_gate(Path::new("/tmp/no-such-binary-48291"));
+        let result = run_smoke_gate(
+            Path::new("/tmp/no-such-binary-48291"),
+            Duration::from_secs(600),
+        );
         assert!(!result.passed);
     }
 
@@ -237,11 +364,13 @@ mod tests {
                 gate: RelaunchGate::Smoke,
                 passed: true,
                 detail: "ok".to_string(),
+                timed_out: false,
             },
             GateResult {
                 gate: RelaunchGate::UnitTest,
                 passed: true,
                 detail: "ok".to_string(),
+                timed_out: false,
             },
         ];
         assert!(all_gates_passed(&results));
@@ -254,16 +383,19 @@ mod tests {
                 gate: RelaunchGate::Smoke,
                 passed: true,
                 detail: "ok".to_string(),
+                timed_out: false,
             },
             GateResult {
                 gate: RelaunchGate::UnitTest,
                 passed: false,
                 detail: "fail".to_string(),
+                timed_out: false,
             },
             GateResult {
                 gate: RelaunchGate::GymBaseline,
                 passed: true,
                 detail: "ok".to_string(),
+                timed_out: false,
             },
         ];
         assert!(!all_gates_passed(&results));
@@ -315,5 +447,105 @@ mod tests {
         let config = RelaunchConfig::default();
         let results = verify_canary(Path::new("/no-such-binary"), &[], &config).unwrap();
         assert!(results.is_empty());
+    }
+
+    // ── STEP 7 TDD (#4415): bounded per-gate subprocess timeout (Brick A) ─────
+    //
+    // A hung or flaky gate subprocess (a `cargo test` that never returns, a
+    // wedged rpc probe) must not wedge the whole self-deploy tick — the recurring
+    // "red canary" the OODA loop keeps re-observing. `run_with_timeout` bounds
+    // each gate subprocess: on expiry it KILLS and REAPS the child (no zombie, no
+    // runaway cargo) and reports a timeout, which the gate encodes as a
+    // failed-but-`timed_out` result. A normal (non-timeout) failure leaves
+    // `timed_out == false`. These tests are written FIRST and fail until the
+    // `run_with_timeout` helper, the `GateExec` outcome, and the
+    // `GateResult.timed_out` field exist.
+
+    #[test]
+    fn run_with_timeout_kills_and_reaps_a_slow_child_promptly() {
+        let start = std::time::Instant::now();
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        let exec = run_with_timeout(&mut cmd, std::time::Duration::from_millis(100))
+            .expect("spawning `sleep` must succeed");
+        assert!(
+            matches!(exec, GateExec::TimedOut),
+            "a child exceeding the timeout must report TimedOut"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "must kill+reap the child promptly, not block for its full 30s runtime"
+        );
+    }
+
+    #[test]
+    fn run_with_timeout_is_not_wedged_by_a_pipe_holding_grandchild() {
+        // Regression (#4415): the UnitTest gate is `cargo test`, which spawns
+        // `rustc`/test-binary DESCENDANTS that inherit the stdout/stderr pipe
+        // write-ends. If a timeout kills only the direct child, those
+        // descendants stay alive holding the pipes open, so the drain-thread
+        // `join()` never sees EOF and blocks PAST the timeout — wedging the very
+        // gate the bound exists to protect. `sh -c "sleep 30; echo done"` keeps
+        // `sh` as the parent (a trailing command forces a fork, not an exec) with
+        // a `sleep` GRANDCHILD holding fd1/fd2. The group-kill must reap the
+        // whole subtree so we still return promptly.
+        let start = std::time::Instant::now();
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("sleep 30; echo done");
+        let exec = run_with_timeout(&mut cmd, std::time::Duration::from_millis(200))
+            .expect("spawning `sh` must succeed");
+        assert!(
+            matches!(exec, GateExec::TimedOut),
+            "the parent outlives the timeout, so this must report TimedOut"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "must not block on a pipe-holding grandchild: the whole group is \
+             killed so the drain threads see EOF and join() returns promptly"
+        );
+    }
+
+    #[test]
+    fn run_with_timeout_returns_completed_for_a_fast_child() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("0");
+        let exec = run_with_timeout(&mut cmd, std::time::Duration::from_secs(10))
+            .expect("spawning `sleep` must succeed");
+        match exec {
+            GateExec::Completed(output) => {
+                assert!(output.status.success(), "`sleep 0` must exit 0")
+            }
+            GateExec::TimedOut => {
+                panic!("a fast child must complete within the timeout, not time out")
+            }
+        }
+    }
+
+    #[test]
+    fn normal_gate_failure_is_not_flagged_as_timed_out() {
+        // A plain gate failure (missing binary) must set `passed = false` but
+        // leave `timed_out = false` — only an actual timeout sets the flag, so a
+        // genuine regression is never misclassified as a flaky/transient timeout.
+        let result = run_smoke_gate(
+            Path::new("/tmp/no-such-binary-48291"),
+            Duration::from_secs(600),
+        );
+        assert!(!result.passed);
+        assert!(
+            !result.timed_out,
+            "a normal (non-timeout) failure must not be flagged timed_out"
+        );
+    }
+
+    #[test]
+    fn gate_result_carries_a_timed_out_flag() {
+        let timed = GateResult {
+            gate: RelaunchGate::UnitTest,
+            passed: false,
+            detail: "gate timed out after 600s".to_string(),
+            timed_out: true,
+        };
+        assert!(timed.timed_out);
+        assert!(!timed.passed, "a timed-out gate is a failed gate");
     }
 }

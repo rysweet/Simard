@@ -12,11 +12,14 @@ use std::sync::{Arc, Mutex};
 use crate::overseer::capabilities::{Deployer, OverseerError};
 use crate::overseer::deploy::{
     AncestryOracle, BinaryDeployer, CRASH_LOOP_CHURN_THRESHOLD, CanaryResult, CanaryRunner,
-    GuardedDeployer,
+    DeployContext, DeployRefusal, GuardedDeployer, evaluate_deploy_gate,
 };
 use crate::overseer::deploy_trigger::{
-    deploy_drift_signal, deploy_throttle_test_guard, global_deploy_throttle_allow,
-    reset_global_deploy_throttle,
+    DEFAULT_TRANSIENT_BACKOFF_BASE_SECS, MIN_TRANSIENT_BACKOFF_BASE_SECS,
+    TRANSIENT_BACKOFF_BASE_ENV, TRANSIENT_BACKOFF_CEILING_SECS, TransientRedBackoff,
+    deploy_drift_signal, deploy_throttle_test_guard, effective_deploy_min_interval_secs,
+    global_deploy_throttle_allow, record_canary_outcome, reset_global_deploy_throttle,
+    transient_backoff_base_secs, transient_backoff_secs,
 };
 use crate::overseer::intervention::Intervention;
 use crate::overseer::notify::{
@@ -36,6 +39,7 @@ impl CanaryRunner for FakeCanary {
             detail: "4/4 gates".to_string(),
             failing_gate: None,
             failing_detail: None,
+            transient: false,
         })
     }
 }
@@ -362,4 +366,339 @@ fn wired_daemon_behind_main_autonomously_emits_and_executes_a_guarded_deploy() {
         "deploy-starting",
         "operator notified before the autonomous deploy swap"
     );
+}
+
+// ─────────────── STEP 7 TDD (#4415): transient-red classification ───────────
+//
+// A1 (reproduce-first): before `CanaryResult.transient`, a transient build
+// failure reddened IDENTICALLY to a genuine regression, so the self-deploy loop
+// could not tell a flaky red (safe to retry) from a real one (must not thrash).
+// The new flag distinguishes them WITHOUT changing the deploy decision. These
+// tests are written FIRST and fail until the field and the class-aware backoff
+// exist.
+
+#[test]
+fn transient_and_deterministic_red_are_distinguishable_but_both_refuse() {
+    let transient_red = CanaryResult {
+        passed: false,
+        detail: "target canary build failed: linker OOM".to_string(),
+        failing_gate: Some("build".to_string()),
+        failing_detail: Some("SIGKILL (out of memory)".to_string()),
+        transient: true,
+    };
+    let regression_red = CanaryResult {
+        passed: false,
+        detail: "3/4 gates".to_string(),
+        failing_gate: Some("unit-test".to_string()),
+        failing_detail: Some("assertion failed: overseer::tick::latch".to_string()),
+        transient: false,
+    };
+
+    // The reproduce-first crux: the two reds are now distinguishable.
+    assert!(transient_red.transient, "a build/OOM red is transient");
+    assert!(
+        !regression_red.transient,
+        "a real gate regression is deterministic"
+    );
+    assert_ne!(
+        transient_red.transient, regression_red.transient,
+        "the two red classes must be distinguishable (the whole point of #4415)"
+    );
+
+    // Contract preserved: `transient` NEVER influences the deploy gate — a red is
+    // a red; both refuse regardless of class.
+    for red in [&transient_red, &regression_red] {
+        assert!(!red.passed);
+        let ctx = DeployContext {
+            running_commit: "aaaaaaaaaaaa".to_string(),
+            target_commit: "bbbbbbbbbbbb".to_string(),
+            target_is_ancestor_of_running: false,
+            canary_passed: red.passed,
+            recent_restart_churn: 0,
+        };
+        assert_eq!(
+            evaluate_deploy_gate(&ctx),
+            Err(DeployRefusal::RedCanary),
+            "any red canary must still refuse the deploy"
+        );
+    }
+}
+
+#[test]
+fn green_canary_is_never_transient_invariant() {
+    let green = CanaryResult {
+        passed: true,
+        detail: "4/4 gates".to_string(),
+        failing_gate: None,
+        failing_detail: None,
+        transient: false,
+    };
+    assert!(green.passed);
+    assert!(
+        !green.transient,
+        "invariant: transient == false whenever the canary is green"
+    );
+}
+
+// ───────────── STEP 7 TDD (#4415): class-aware bounded backoff (Brick C) ─────
+//
+// A transient red must back off with bounded exponential growth so it neither
+// hammers the tick (busy-loop) nor sleeps unboundedly, and a green canary must
+// RESET the backoff so self-deploy can converge to merged main. The math is
+// saturating (no overflow), floored to a non-zero base, and capped at an
+// absolute ceiling. Written FIRST — fail until the backoff API exists.
+
+#[test]
+fn backoff_is_zero_when_there_are_no_transient_failures() {
+    assert_eq!(
+        transient_backoff_secs(0, 60),
+        0,
+        "no transient failures → no backoff (nothing to recover from)"
+    );
+}
+
+#[test]
+fn backoff_grows_exponentially_with_consecutive_transient_failures() {
+    assert_eq!(transient_backoff_secs(1, 60), 60);
+    assert_eq!(transient_backoff_secs(2, 60), 120);
+    assert_eq!(transient_backoff_secs(3, 60), 240);
+    assert_eq!(transient_backoff_secs(4, 60), 480);
+}
+
+#[test]
+fn backoff_saturates_at_the_absolute_ceiling_without_overflow() {
+    // A pathological streak must not overflow (saturating math) and must never
+    // exceed the absolute ceiling.
+    assert_eq!(
+        transient_backoff_secs(64, 60),
+        TRANSIENT_BACKOFF_CEILING_SECS,
+        "backoff must clamp to the absolute ceiling"
+    );
+    assert_eq!(
+        transient_backoff_secs(u32::MAX, 60),
+        TRANSIENT_BACKOFF_CEILING_SECS,
+        "a huge streak must clamp, never panic on overflow"
+    );
+}
+
+#[test]
+fn backoff_base_floor_prevents_a_busy_loop() {
+    // A mis-set base of 0 must clamp to a non-zero floor so a transient red can
+    // never produce a zero-delay retry storm (self-DoS).
+    let d = transient_backoff_secs(1, 0);
+    assert!(
+        d >= MIN_TRANSIENT_BACKOFF_BASE_SECS,
+        "base=0 must clamp up to the non-zero floor, got {d}"
+    );
+    assert!(
+        d > 0,
+        "a transient failure must always back off by a non-zero amount"
+    );
+}
+
+#[test]
+#[serial_test::serial(transient_backoff_env, cognitive_memory)]
+fn backoff_base_defaults_when_env_is_unset() {
+    let prev = std::env::var(TRANSIENT_BACKOFF_BASE_ENV).ok();
+    // SAFETY: serialized env toggle, restored below.
+    unsafe {
+        std::env::remove_var(TRANSIENT_BACKOFF_BASE_ENV);
+    }
+    assert_eq!(
+        transient_backoff_base_secs(),
+        DEFAULT_TRANSIENT_BACKOFF_BASE_SECS
+    );
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var(TRANSIENT_BACKOFF_BASE_ENV, v),
+            None => std::env::remove_var(TRANSIENT_BACKOFF_BASE_ENV),
+        }
+    }
+}
+
+#[test]
+#[serial_test::serial(transient_backoff_env, cognitive_memory)]
+fn backoff_base_env_override_is_parsed_and_floored() {
+    let prev = std::env::var(TRANSIENT_BACKOFF_BASE_ENV).ok();
+    // SAFETY: serialized env toggle, restored below.
+    unsafe {
+        std::env::set_var(TRANSIENT_BACKOFF_BASE_ENV, "0");
+    }
+    assert!(
+        transient_backoff_base_secs() >= MIN_TRANSIENT_BACKOFF_BASE_SECS,
+        "an env base of 0 must clamp to the non-zero floor"
+    );
+    unsafe {
+        std::env::set_var(TRANSIENT_BACKOFF_BASE_ENV, "30");
+    }
+    assert_eq!(
+        transient_backoff_base_secs(),
+        30,
+        "a valid env base is honoured"
+    );
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var(TRANSIENT_BACKOFF_BASE_ENV, v),
+            None => std::env::remove_var(TRANSIENT_BACKOFF_BASE_ENV),
+        }
+    }
+}
+
+#[test]
+fn backoff_state_grows_then_resets_on_green() {
+    // Convergence: consecutive transient reds back off increasingly, then a green
+    // canary RESETS the streak so the running binary can advance to merged main.
+    let mut b = TransientRedBackoff::new();
+    let d1 = b.record_transient_red();
+    let d2 = b.record_transient_red();
+    let d3 = b.record_transient_red();
+    assert!(
+        d1 > 0 && d2 > d1 && d3 > d2,
+        "consecutive transient reds must back off increasingly: {d1}, {d2}, {d3}"
+    );
+    b.record_green();
+    assert_eq!(
+        b.current_delay_secs(),
+        0,
+        "a green canary must reset the transient backoff so self-deploy converges"
+    );
+}
+
+#[test]
+fn backoff_state_is_idempotent_on_repeated_green() {
+    let mut b = TransientRedBackoff::new();
+    b.record_transient_red();
+    b.record_green();
+    b.record_green();
+    assert_eq!(
+        b.current_delay_secs(),
+        0,
+        "repeated greens stay reset (idempotent — no double-count, no thrash)"
+    );
+}
+
+#[test]
+fn backoff_state_deterministic_red_does_not_fast_retry() {
+    // A genuine regression is NOT fast-retried by the transient backoff; the
+    // existing global min-interval throttle owns its cadence. A deterministic red
+    // clears the transient streak.
+    let mut b = TransientRedBackoff::new();
+    b.record_transient_red();
+    b.record_transient_red();
+    b.record_deterministic_red();
+    assert_eq!(
+        b.current_delay_secs(),
+        0,
+        "a deterministic red must clear the transient fast-retry streak"
+    );
+}
+
+// ───── STEP 7 (#4415): the PRODUCTION atomic path drives the effective interval ─
+//
+// The `TransientRedBackoff` struct above is a pure, unit-testable model, but
+// PRODUCTION does not use it — `GuardedDeployer::deploy` calls the process-global
+// `record_canary_outcome`, and the OBSERVE rail throttles on
+// `effective_deploy_min_interval_secs`. These tests exercise that REAL atomic
+// path end-to-end (record → effective interval) so a refactor of the globals
+// that diverges from the struct model cannot pass unnoticed. They share the
+// process-global streak/throttle statics, so they take the throttle guard AND
+// pin the base-interval env for deterministic math.
+
+/// Restore (or clear) the base-interval env after a test that pinned it.
+fn restore_deploy_interval_env(prev: Option<String>) {
+    // SAFETY: serialized env toggle (throttle guard + serial keys), restored here.
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var(TRANSIENT_BACKOFF_BASE_ENV, v),
+            None => std::env::remove_var(TRANSIENT_BACKOFF_BASE_ENV),
+        }
+    }
+}
+
+#[test]
+#[serial_test::serial(transient_backoff_env, cognitive_memory)]
+fn record_canary_outcome_widens_and_resets_the_effective_interval() {
+    let _guard = deploy_throttle_test_guard();
+    let prev = std::env::var(TRANSIENT_BACKOFF_BASE_ENV).ok();
+    // Pin a known base (≥ the 60s floor) so the doubling math is exact.
+    // SAFETY: serialized env toggle, restored below.
+    unsafe {
+        std::env::set_var(TRANSIENT_BACKOFF_BASE_ENV, "100");
+    }
+
+    // Clean slate: a green outcome zeroes the process-global streak. With no
+    // streak the effective interval is exactly the base.
+    record_canary_outcome(true, false);
+    assert_eq!(
+        effective_deploy_min_interval_secs(),
+        100,
+        "no transient streak → effective interval is the plain base"
+    );
+
+    // A green canary must NEVER be transient even if mislabelled; the pass flag
+    // wins and the streak stays clear.
+    record_canary_outcome(true, true);
+    assert_eq!(
+        effective_deploy_min_interval_secs(),
+        100,
+        "a green canary never grows the streak (pass overrides the class)"
+    );
+
+    // First transient red: streak=1 → base * 2^0 == base (backoff arms at base).
+    record_canary_outcome(false, true);
+    assert_eq!(effective_deploy_min_interval_secs(), 100);
+
+    // Second consecutive transient red: streak=2 → base * 2^1 == 200 (widened).
+    record_canary_outcome(false, true);
+    assert_eq!(
+        effective_deploy_min_interval_secs(),
+        200,
+        "consecutive transient reds must WIDEN the effective interval"
+    );
+
+    // A deterministic red RESETS the streak (waiting will not fix a regression).
+    record_canary_outcome(false, false);
+    assert_eq!(
+        effective_deploy_min_interval_secs(),
+        100,
+        "a deterministic red clears the transient streak back to base"
+    );
+
+    // Re-arm, then a GREEN resets so self-deploy converges to merged main.
+    record_canary_outcome(false, true);
+    record_canary_outcome(false, true);
+    assert!(effective_deploy_min_interval_secs() > 100);
+    record_canary_outcome(true, false);
+    assert_eq!(
+        effective_deploy_min_interval_secs(),
+        100,
+        "a green canary resets the backoff so the running binary can advance"
+    );
+
+    restore_deploy_interval_env(prev);
+}
+
+#[test]
+#[serial_test::serial(transient_backoff_env, cognitive_memory)]
+fn effective_interval_matches_the_pure_backoff_and_never_dips_below_base() {
+    let _guard = deploy_throttle_test_guard();
+    let prev = std::env::var(TRANSIENT_BACKOFF_BASE_ENV).ok();
+    // SAFETY: serialized env toggle, restored below.
+    unsafe {
+        std::env::set_var(TRANSIENT_BACKOFF_BASE_ENV, "120");
+    }
+
+    record_canary_outcome(true, false); // clean slate
+    for expected_streak in 1..=4u32 {
+        record_canary_outcome(false, true);
+        let base = 120;
+        assert_eq!(
+            effective_deploy_min_interval_secs(),
+            transient_backoff_secs(expected_streak, base).max(base),
+            "the effective interval must equal the pure class-aware backoff, floored at base"
+        );
+    }
+
+    record_canary_outcome(true, false); // reset for sibling tests
+    restore_deploy_interval_env(prev);
 }

@@ -139,6 +139,169 @@ pub(crate) fn reset_global_deploy_throttle() {
     LAST_DEPLOY_ATTEMPT_SECS.store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
+// ───────────── class-aware bounded transient-red backoff (Brick C, #4415) ────
+//
+// The process-global anti-thrash throttle above already stops the daemon
+// redeploying every tick. Brick C layers a class-aware bounded EXPONENTIAL
+// backoff on top, keyed on the last canary's `transient` class, so a FLAKY red
+// canary is retried on a widening (but capped) interval instead of hammering
+// the same failing build every base interval — while a DETERMINISTIC red canary
+// is simply held at the base interval (waiting will not fix a real regression).
+//
+// State is in-memory (process-global, like the throttle) and idempotent: a green
+// canary resets it, a deterministic red clears it, and restarting the daemon
+// starts from a clean slate. There is NO persisted poison state.
+
+/// Env var for the transient-backoff BASE interval (seconds). Reuses the
+/// existing anti-thrash min-interval knob so the backoff base is the same
+/// base interval an operator already tunes (see the reference doc).
+pub const TRANSIENT_BACKOFF_BASE_ENV: &str = DEPLOY_MIN_INTERVAL_ENV;
+
+/// Default transient-backoff base: the same 15-minute anti-thrash default.
+pub const DEFAULT_TRANSIENT_BACKOFF_BASE_SECS: u64 = DEFAULT_DEPLOY_INTERVAL_SECS;
+
+/// Non-zero floor for the backoff base so a mis-set base can never collapse the
+/// transient retry into a zero-delay busy-loop (self-DoS).
+pub const MIN_TRANSIENT_BACKOFF_BASE_SECS: u64 = 1;
+
+/// Absolute ceiling for the backed-off transient interval (2 hours). A
+/// pathological streak saturates here rather than growing to an unbounded sleep.
+pub const TRANSIENT_BACKOFF_CEILING_SECS: u64 = 7200;
+
+/// Resolve the transient-backoff base interval (seconds) from
+/// [`TRANSIENT_BACKOFF_BASE_ENV`]. Fail-safe: unset/empty/unparseable falls back
+/// to [`DEFAULT_TRANSIENT_BACKOFF_BASE_SECS`]; the result is floored to
+/// [`MIN_TRANSIENT_BACKOFF_BASE_SECS`]. Never panics.
+pub fn transient_backoff_base_secs() -> u64 {
+    std::env::var(TRANSIENT_BACKOFF_BASE_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_TRANSIENT_BACKOFF_BASE_SECS)
+        .max(MIN_TRANSIENT_BACKOFF_BASE_SECS)
+}
+
+/// Pure class-aware backoff: the interval (seconds) before the next retry after
+/// `consecutive` consecutive TRANSIENT red canaries at `base` seconds. Zero
+/// consecutive failures ⇒ `0` (nothing to recover from). Otherwise
+/// `min(base * 2^(n-1), TRANSIENT_BACKOFF_CEILING_SECS)` with `base` floored to
+/// [`MIN_TRANSIENT_BACKOFF_BASE_SECS`]. All arithmetic is SATURATING: a
+/// pathological streak clamps to the ceiling and never overflows/panics.
+pub fn transient_backoff_secs(consecutive: u32, base: u64) -> u64 {
+    if consecutive == 0 {
+        return 0;
+    }
+    let base = base.max(MIN_TRANSIENT_BACKOFF_BASE_SECS);
+    let shift = consecutive - 1;
+    let grown = if shift >= 63 {
+        u64::MAX
+    } else {
+        base.saturating_mul(1u64 << shift)
+    };
+    grown.min(TRANSIENT_BACKOFF_CEILING_SECS)
+}
+
+/// In-memory, idempotent class-aware backoff state (Brick C, #4415). Tracks the
+/// consecutive-transient-red streak and turns it into a bounded exponential
+/// retry interval. A green canary or a deterministic red RESETS the streak, so a
+/// single flaky red can never permanently widen the interval and self-deploy
+/// converges the instant the canary goes green. No persisted state.
+#[derive(Clone, Debug)]
+pub struct TransientRedBackoff {
+    consecutive_transient: u32,
+    base_secs: u64,
+}
+
+impl TransientRedBackoff {
+    /// New backoff seeded with the env-resolved base interval.
+    pub fn new() -> Self {
+        Self {
+            consecutive_transient: 0,
+            base_secs: transient_backoff_base_secs(),
+        }
+    }
+
+    /// Record a TRANSIENT red canary: grow the streak and return the new
+    /// (bounded) delay before the next retry.
+    pub fn record_transient_red(&mut self) -> u64 {
+        self.consecutive_transient = self.consecutive_transient.saturating_add(1);
+        self.current_delay_secs()
+    }
+
+    /// Record a DETERMINISTIC red canary: it does not fast-retry, so clear the
+    /// transient streak (the existing base-interval throttle owns its cadence).
+    pub fn record_deterministic_red(&mut self) {
+        self.consecutive_transient = 0;
+    }
+
+    /// Record a GREEN canary / successful deploy: reset the streak so the next
+    /// transient failure starts backoff from the base again (convergence).
+    pub fn record_green(&mut self) {
+        self.consecutive_transient = 0;
+    }
+
+    /// The current bounded delay (seconds) for the recorded streak. `0` when the
+    /// streak is clear.
+    pub fn current_delay_secs(&self) -> u64 {
+        transient_backoff_secs(self.consecutive_transient, self.base_secs)
+    }
+}
+
+impl Default for TransientRedBackoff {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Process-global consecutive-transient-red streak driving the live backoff.
+/// PROCESS-GLOBAL for the same reason as [`LAST_DEPLOY_ATTEMPT_SECS`]: the daemon
+/// rebuilds the acting `Overseer` every tick, so per-instance state could never
+/// persist a streak across ticks. `0` means "no transient streak".
+static CONSECUTIVE_TRANSIENT_REDS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
+/// Record the class of the canary from a deploy ATTEMPT into the process-global
+/// backoff streak. A green canary or a deterministic red RESETS the streak; a
+/// transient red GROWS it (saturating). Idempotent per class. Emits a structured
+/// tracing event (OTel attributes `consecutive_transient` / `backoff_secs`) on a
+/// transient red so the widening retry cadence is diagnosable — no `println!`.
+pub fn record_canary_outcome(passed: bool, transient: bool) {
+    use std::sync::atomic::Ordering;
+    if passed || !transient {
+        // Green canary, or a deterministic red: converge / hold at base.
+        CONSECUTIVE_TRANSIENT_REDS.store(0, Ordering::Release);
+        return;
+    }
+    // Transient red: grow the bounded streak.
+    let prev = CONSECUTIVE_TRANSIENT_REDS.load(Ordering::Acquire);
+    let next = prev.saturating_add(1);
+    CONSECUTIVE_TRANSIENT_REDS.store(next, Ordering::Release);
+    // Log the SAME base the OBSERVE rail actually enforces
+    // (`deploy_min_interval_secs`, floored at `MIN_DEPLOY_INTERVAL_FLOOR`), not
+    // the more permissive `transient_backoff_base_secs` floor, so the diagnosed
+    // `backoff_secs` never understates the interval `effective_deploy_min_interval_secs`
+    // will impose.
+    let backoff_secs = transient_backoff_secs(next, deploy_min_interval_secs());
+    tracing::warn!(
+        target: "overseer::deploy_trigger",
+        consecutive_transient = next,
+        backoff_secs,
+        "transient red canary: backing off before the next self-deploy retry"
+    );
+}
+
+/// The EFFECTIVE anti-thrash minimum interval for the next deploy attempt: the
+/// base interval widened by the class-aware transient backoff when a transient
+/// red streak is in effect, else the plain base interval. Never below the base.
+pub fn effective_deploy_min_interval_secs() -> u64 {
+    use std::sync::atomic::Ordering;
+    let base = deploy_min_interval_secs();
+    let streak = CONSECUTIVE_TRANSIENT_REDS.load(Ordering::Acquire);
+    if streak == 0 {
+        return base;
+    }
+    transient_backoff_secs(streak, base).max(base)
+}
+
 /// Serialises every test that touches the process-global deploy throttle (in this
 /// module AND the overseer OBSERVE-rail tests), since `cargo test` runs tests in
 /// parallel threads that share the one static. Poisoning is tolerated — the guard

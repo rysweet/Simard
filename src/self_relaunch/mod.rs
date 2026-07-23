@@ -37,11 +37,13 @@ mod tests {
                 gate: RelaunchGate::Smoke,
                 passed: true,
                 detail: "ok".into(),
+                timed_out: false,
             },
             GateResult {
                 gate: RelaunchGate::UnitTest,
                 passed: true,
                 detail: "ok".into(),
+                timed_out: false,
             },
         ];
         assert!(all_gates_passed(&results));
@@ -54,11 +56,13 @@ mod tests {
                 gate: RelaunchGate::Smoke,
                 passed: true,
                 detail: "ok".into(),
+                timed_out: false,
             },
             GateResult {
                 gate: RelaunchGate::UnitTest,
                 passed: false,
                 detail: "fail".into(),
+                timed_out: false,
             },
         ];
         assert!(!all_gates_passed(&results));
