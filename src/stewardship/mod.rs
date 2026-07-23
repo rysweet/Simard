@@ -18,6 +18,7 @@ pub mod dedup;
 pub mod gh_client;
 pub mod merge_authority;
 pub mod merge_judge;
+pub mod objective_merge_judge;
 pub mod recipe_merge_judge;
 pub mod routing;
 pub mod types;
@@ -26,6 +27,9 @@ pub mod types;
 mod tests;
 #[cfg(test)]
 mod tests_extra;
+// TDD (Step 7): failing tests for the P1 objective-merge-judge fallback.
+#[cfg(test)]
+mod tests_objective_merge_judge;
 
 pub use dedup::{failure_signature, find_existing, normalize};
 pub use gh_client::{GhClient, GhIssue, RealGhClient};
@@ -37,8 +41,9 @@ pub use merge_authority::{
 };
 pub use merge_judge::{
     Blocker, JudgeOutcome, LlmMergeJudge, MergeJudge, MergeJudgeKind, RefusingMergeJudge, Verdict,
-    build_merge_judge,
+    build_merge_judge, resolve_merge_judge_kind,
 };
+pub use objective_merge_judge::ObjectiveMergeJudge;
 pub use recipe_merge_judge::RecipeMergeJudge;
 pub use routing::route_failure;
 pub use types::{OrchestratorRunSummary, StewardshipOutcome, TargetRepo};

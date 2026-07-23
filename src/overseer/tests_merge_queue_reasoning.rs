@@ -121,6 +121,7 @@ fn green_engineer_snapshot() -> PrSnapshot {
         }],
         base_ref_name: "main".to_string(),
         labels: vec![SIMARD_ENGINEER_PR_LABEL.to_string()],
+        author_login: "engineer-bot".to_string(),
     }
 }
 
@@ -641,7 +642,7 @@ fn projection_admits_a_ready_engineer_pr_that_passes_every_gate() {
         "engineer/4097-abcdef",
         green_engineer_snapshot(),
     )];
-    let ready = project_ready_prs(&cands, &base_allowlist(), &overseer_login());
+    let ready = project_ready_prs(&cands, &base_allowlist(), &overseer_login(), &[]);
     assert_eq!(
         ready,
         vec![PrRef {
@@ -667,7 +668,7 @@ fn projection_excludes_non_ready_dispositions() {
             "engineer/x",
             green_engineer_snapshot(),
         )];
-        let ready = project_ready_prs(&cands, &base_allowlist(), &overseer_login());
+        let ready = project_ready_prs(&cands, &base_allowlist(), &overseer_login(), &[]);
         assert!(
             ready.is_empty(),
             "only ReadyForMerge is a merge candidate; {disp:?} must never be projected"
@@ -687,7 +688,7 @@ fn projection_refuses_the_overseer_bots_own_pr_anti_recursion() {
         "engineer/x",
         green_engineer_snapshot(),
     )];
-    let ready = project_ready_prs(&cands, &base_allowlist(), &overseer_login());
+    let ready = project_ready_prs(&cands, &base_allowlist(), &overseer_login(), &[]);
     assert!(
         ready.is_empty(),
         "the anti-recursion author guard must exclude the overseer bot's own PR"
@@ -708,7 +709,7 @@ fn projection_refuses_a_pr_that_is_neither_labeled_nor_on_an_engineer_branch() {
         "feature/human-typed-branch",
         snap,
     )];
-    let ready = project_ready_prs(&cands, &base_allowlist(), &overseer_login());
+    let ready = project_ready_prs(&cands, &base_allowlist(), &overseer_login(), &[]);
     assert!(
         ready.is_empty(),
         "a PR that is neither labeled simard-autonomous nor on an engineer branch is an operator PR — never projected"
@@ -739,7 +740,7 @@ fn projection_refuses_a_pr_that_fails_the_objective_gates() {
             "engineer/x",
             snap,
         )];
-        let ready = project_ready_prs(&cands, &base_allowlist(), &overseer_login());
+        let ready = project_ready_prs(&cands, &base_allowlist(), &overseer_login(), &[]);
         assert!(
             ready.is_empty(),
             "a PR failing the objective gates must never be authorized, even with a ReadyForMerge proposal"
@@ -761,7 +762,7 @@ fn projection_admits_via_engineer_branch_when_label_is_absent() {
         "engineer/4097-fallback",
         snap,
     )];
-    let ready = project_ready_prs(&cands, &base_allowlist(), &overseer_login());
+    let ready = project_ready_prs(&cands, &base_allowlist(), &overseer_login(), &[]);
     assert_eq!(
         ready.len(),
         1,
@@ -789,7 +790,7 @@ fn projection_excludes_a_draft_pr_even_when_every_other_gate_passes() {
             green_engineer_snapshot(),
         )
     }];
-    let ready = project_ready_prs(&cands, &base_allowlist(), &overseer_login());
+    let ready = project_ready_prs(&cands, &base_allowlist(), &overseer_login(), &[]);
     assert!(
         ready.is_empty(),
         "a draft PR must never be projected, even when disposition + author + \
@@ -813,7 +814,7 @@ fn projection_admits_identical_non_draft_pr() {
             green_engineer_snapshot(),
         )
     }];
-    let ready = project_ready_prs(&cands, &base_allowlist(), &overseer_login());
+    let ready = project_ready_prs(&cands, &base_allowlist(), &overseer_login(), &[]);
     assert_eq!(
         ready,
         vec![PrRef {
@@ -841,7 +842,7 @@ fn projection_excludes_pr_with_unknown_draft_state_fail_closed() {
             green_engineer_snapshot(),
         )
     }];
-    let ready = project_ready_prs(&cands, &base_allowlist(), &overseer_login());
+    let ready = project_ready_prs(&cands, &base_allowlist(), &overseer_login(), &[]);
     assert!(
         ready.is_empty(),
         "unknown draft state must fail closed to exclusion (admit only isDraft==Some(false))"

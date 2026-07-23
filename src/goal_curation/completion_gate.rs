@@ -770,5 +770,111 @@ pub fn archive_completed_evidence_aware(
     (archived, blocked)
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// Done-gate slug convergence (#4326/#4329/#4332 churn) — P3
+// ════════════════════════════════════════════════════════════════════════════
+//
+// A completed goal can accumulate MULTIPLE competing "done-gate" PRs for the
+// same goal slug (retry churn without delivery). The convergence logic below is
+// pure: it decides — by goal slug + bot ownership — which single done-gate PR to
+// KEEP and which duplicates to SUPERSEDE, so the caller can close/supersede the
+// extras via the gated PR-ops path (never a blind hand-close). It NEVER selects
+// a human-authored PR or a PR belonging to a different goal slug.
+//
+// NOTE: this decision helper is not yet wired into the live stewardship loop;
+// the effectful close/supersede caller lands as follow-up (#4326/#4329/#4332)
+// in a separate, integration-testable change.
+
+/// Sanitise a goal slug down to the `[a-z0-9-]` alphabet before it is used in a
+/// branch name, an argv value, or a path. Lowercases, drops every other byte
+/// (so `..`, path separators, spaces, and shell metacharacters can never
+/// survive), and trims leading/trailing `-` (so the result can never be parsed
+/// as a flag). Idempotent: applying it to its own output is a no-op.
+pub fn sanitize_goal_slug(raw: &str) -> String {
+    let filtered: String = raw
+        .to_ascii_lowercase()
+        .bytes()
+        .filter(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+        .map(|b| b as char)
+        .collect();
+    filtered.trim_matches('-').to_string()
+}
+
+/// One done-gate PR candidate, projected from `gh pr list` for a completed
+/// goal. `slug` is the goal slug the PR was opened for (parsed from its branch
+/// or body); `author` is the AUTHENTICATED `author.login`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DoneGatePr {
+    pub number: u32,
+    pub author: String,
+    pub slug: String,
+    /// `mergeable` from `gh` — `"MERGEABLE"` marks a CLEAN done-gate candidate.
+    pub mergeable: String,
+    /// `createdAt` (ISO-8601) — lexicographic order is chronological, so the
+    /// OLDEST CLEAN PR is the stable survivor.
+    pub created_at: String,
+}
+
+/// The convergence decision for one goal slug: the single PR to KEEP and the
+/// in-scope duplicates to SUPERSEDE.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct SlugConvergence {
+    /// The single surviving done-gate PR (oldest CLEAN in-scope PR), or `None`
+    /// when no in-scope PR is mergeable (nothing is destroyed in that case).
+    pub keep: Option<u32>,
+    /// The in-scope duplicates (newer CLEAN + stale CONFLICTING) to supersede.
+    pub supersede: Vec<u32>,
+}
+
+/// Converge the done-gate PRs for `target_slug` (authored by `bot_author`) onto
+/// a single survivor.
+///
+/// In-scope = a PR whose author matches `bot_author` (case-insensitive) AND
+/// whose sanitised slug equals the sanitised `target_slug`. A human PR or a PR
+/// for any other slug is never touched.
+///
+/// * `keep` = the OLDEST CLEAN (`MERGEABLE`) in-scope PR.
+/// * `supersede` = every OTHER in-scope PR (newer clean duplicates + stale
+///   conflicting branches).
+/// * If NO in-scope PR is mergeable, `keep` is `None` and `supersede` is empty
+///   (fail-safe: the only representatives are left for the stale-goal path).
+pub fn converge_done_gate_prs(
+    prs: &[DoneGatePr],
+    target_slug: &str,
+    bot_author: &str,
+) -> SlugConvergence {
+    let target = sanitize_goal_slug(target_slug);
+    let in_scope: Vec<&DoneGatePr> = prs
+        .iter()
+        .filter(|p| p.author.eq_ignore_ascii_case(bot_author))
+        .filter(|p| sanitize_goal_slug(&p.slug) == target)
+        .collect();
+
+    let keeper = in_scope
+        .iter()
+        .filter(|p| p.mergeable.eq_ignore_ascii_case("MERGEABLE"))
+        .min_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.number.cmp(&b.number))
+        })
+        .map(|p| p.number);
+
+    let Some(keep) = keeper else {
+        return SlugConvergence::default();
+    };
+
+    let supersede = in_scope
+        .iter()
+        .map(|p| p.number)
+        .filter(|n| *n != keep)
+        .collect();
+
+    SlugConvergence {
+        keep: Some(keep),
+        supersede,
+    }
+}
+
 #[cfg(test)]
 mod tests;

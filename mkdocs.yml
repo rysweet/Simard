@@ -101,6 +101,7 @@ nav:
     - Agentic Merge-Queue + Issue Reasoning (observe/orient): concepts/agentic-merge-queue-reasoning.md
     - Overseer Agentic Health-Review (self-heal crash-loops): concepts/overseer-agentic-health-review.md
     - Autonomous-Merge Review Gate (agentic merge-judge): concepts/autonomous-merge-review-gate.md
+    - Objective Merge-Judge Fallback (converge delivery-ready PRs): concepts/objective-merge-judge-fallback.md
     - Adaptive Scaling: concepts/adaptive-scaling.md
     - Pluggable Identity: concepts/pluggable-identity.md
     - Concierge Identity (Hospitality Design + Ops Software): concepts/concierge-identity.md
@@ -121,6 +122,7 @@ nav:
     - Closing the Procedural-Learning Loop: concepts/procedural-learning-loop.md
     - Reconcile-and-Self-Deploy: concepts/reconcile-and-self-deploy.md
     - Deploy-Aware Done-Gate: concepts/deploy-aware-done-gate.md
+    - Done-Gate Slug Convergence (one goal → one done-gate PR): concepts/done-gate-slug-convergence.md
     - Closed-Loop Outcome Verification (live-verified done): concepts/closed-loop-outcome-verification.md
     - Dependency/Overlap-Aware Engineer Scheduling: concepts/dependency-overlap-aware-scheduling.md
     - Resource-Aware Engineer Admission: concepts/resource-aware-engineer-admission.md
@@ -255,6 +257,7 @@ nav:
     - Fix CI Linker OOM: howto/fix-ci-linker-oom.md
     - Triage Stale Pull Requests: howto/triage-stale-pull-requests.md
     - Enable Autonomous Self-Merge (canary one repo): howto/enable-autonomous-self-merge-canary.md
+    - Enable the Objective Merge-Judge Fallback: howto/enable-objective-merge-fallback.md
     - Diagnose merge-pr Verdict-Parse Failures: howto/diagnose-merge-pr-verdict-parse-failures.md
     - Monitor Simard with the TUI: howto/monitor-simard-with-tui.md
     - Browse the Simard Journal: howto/browse-the-simard-journal.md
@@ -330,6 +333,7 @@ nav:
     - Multi-Binary Self-Update: reference/multi-binary-self-update.md
     - Self-Deploy API: reference/self-deploy-api.md
     - Self-Deploy Source Prep & Warm Target Dir: reference/self-deploy-source-prep.md
+    - Self-Deploy Head-Advance & Per-SHA Dedupe: reference/self-deploy-head-advance-dedup.md
     - State-Root Resolution: reference/state-root-resolution.md
     - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
     - Runtime Contracts: reference/runtime-contracts.md
@@ -414,6 +418,8 @@ nav:
     - ready_prs Sensor API: reference/ready-prs-sensor-api.md
     - Agentic Merge-Queue Reasoning API: reference/agentic-merge-queue-reasoning-api.md
     - Autonomous-Merge Review Gate API: reference/autonomous-merge-review-gate.md
+    - Objective Merge-Judge Fallback API: reference/objective-merge-judge-api.md
+    - Done-Gate Slug Dedup API: reference/done-gate-slug-dedup-api.md
     - "No Point-in-Time Report Docs Scan (pr-verify #8)": reference/no-point-in-time-docs-scan.md
     - Completion-Evidence Gate API: reference/completion-evidence-gate-api.md
     - Outcome-Verification API: reference/outcome-verification-api.md

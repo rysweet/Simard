@@ -686,7 +686,21 @@ impl PrOps for MergePrOps {
                 snapshot: summary.to_snapshot(),
             });
         }
-        project_ready_prs(&candidates, &self.base_allowlist, overseer_login)
+        // Trusted-author widening (P1 / #4389) is opt-in: only when the
+        // objective merge-judge fallback is enabled do we let a trusted author's
+        // green PR reach the merge chain without an engineer label/branch. Off ⇒
+        // pre-P1 engineer-only projection.
+        let trusted_authors = if crate::overseer::config::merge_objective_fallback_enabled() {
+            crate::overseer::config::merge_trusted_authors()
+        } else {
+            Vec::new()
+        };
+        project_ready_prs(
+            &candidates,
+            &self.base_allowlist,
+            overseer_login,
+            &trusted_authors,
+        )
     }
 }
 
@@ -830,6 +844,7 @@ mod tests {
             checks,
             base_ref_name: "main".to_string(),
             labels: Vec::new(),
+            author_login: "rysweet".to_string(),
         }
     }
 

@@ -616,6 +616,64 @@ pub fn is_engineer_branch(head: &str) -> bool {
         .any(|prefix| head.starts_with(prefix))
 }
 
+// ─── objective merge-judge fallback + trusted authors (P1 / #4389) ──────────
+//
+// The merge-judge falls back to `RefusingMergeJudge` (always NotReady) whenever
+// no LLM/recipe provider is wired, which stalls every delivery-ready PR. These
+// two opt-in knobs let an operator enable an OBJECTIVE last-resort tier that
+// issues a Ready verdict for a green PR authored by an explicitly-TRUSTED
+// author — the JUDGMENT half only; the objective gates (CI-green, mergeable,
+// base/repo allowlists) still run downstream and are never bypassed.
+
+/// Env var that opts INTO the objective merge-judge fallback. Default OFF
+/// (fail-closed): deploying the code must never silently flip merge policy.
+pub const SIMARD_MERGE_OBJECTIVE_FALLBACK_ENV: &str = "SIMARD_MERGE_OBJECTIVE_FALLBACK";
+
+/// Env var holding the comma-separated allowlist of GitHub logins whose green
+/// PRs the objective tier may pass. Unset ⇒ the single documented default
+/// [`DEFAULT_MERGE_TRUSTED_AUTHOR`].
+pub const SIMARD_MERGE_TRUSTED_AUTHORS_ENV: &str = "SIMARD_MERGE_TRUSTED_AUTHORS";
+
+/// The default trusted author when [`SIMARD_MERGE_TRUSTED_AUTHORS_ENV`] is unset.
+pub const DEFAULT_MERGE_TRUSTED_AUTHOR: &str = "rysweet";
+
+/// Resolve whether the objective merge-judge fallback is enabled. Default OFF:
+/// only an explicit truthy value (`1`/`true`/`yes`/`on`, case/space-insensitive)
+/// turns it on; unset, empty, falsey, and garbage all stay OFF (fail-closed).
+pub fn merge_objective_fallback_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    lookup(SIMARD_MERGE_OBJECTIVE_FALLBACK_ENV)
+        .map(|v| is_truthy(&v))
+        .unwrap_or(false)
+}
+
+/// Production entry point: read the real process environment.
+pub fn merge_objective_fallback_enabled() -> bool {
+    merge_objective_fallback_enabled_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the trusted-author allowlist for the objective merge-judge tier.
+/// Unset ⇒ `["rysweet"]`. A set value is split on commas, trimmed, and empties
+/// dropped; an entry containing internal whitespace or a `/` is rejected
+/// (defense-in-depth — a GitHub login can contain neither, so such an entry is
+/// malformed/injected).
+pub fn merge_trusted_authors_from(lookup: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    match lookup(SIMARD_MERGE_TRUSTED_AUTHORS_ENV) {
+        None => vec![DEFAULT_MERGE_TRUSTED_AUTHOR.to_string()],
+        Some(raw) => raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter(|s| !s.contains(char::is_whitespace) && !s.contains('/'))
+            .map(str::to_string)
+            .collect(),
+    }
+}
+
+/// Production entry point: read the real process environment.
+pub fn merge_trusted_authors() -> Vec<String> {
+    merge_trusted_authors_from(|k| std::env::var(k).ok())
+}
+
 // ─── agentic merge-queue reasoning scope (issue #4097) ─────────────────────
 //
 // The reasoning-scope gate is DELIBERATELY DISTINCT from the automerge sensor

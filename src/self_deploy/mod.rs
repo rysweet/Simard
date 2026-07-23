@@ -23,6 +23,7 @@
 
 pub mod backup;
 pub mod drift;
+pub mod head_advance;
 pub mod health;
 pub mod orchestrator;
 pub mod orphan;
@@ -33,6 +34,10 @@ pub mod source_prep;
 pub use backup::{ProtectiveBackup, take_protective_backup};
 pub use drift::{
     DeployDrift, DeploySource, GitDeploySource, ReconcileDetector, production_reconcile_detector,
+};
+pub use head_advance::{
+    DeployHeadState, DeployResult, UnitLoadState, classify_unit_load, is_valid_deploy_sha,
+    needs_head_advance, should_deploy_target_sha, should_reconcile_unit,
 };
 pub use health::{
     BrainsLlmBackedProbe, EntrypointParityProbe, GoalBoardIntactProbe, MemoryIntactProbe,
@@ -62,3 +67,6 @@ mod tests_orphan;
 mod tests_restart;
 #[cfg(test)]
 mod tests_source_prep;
+// TDD (Step 7): failing tests for the P2 per-SHA dedupe / head-advance logic.
+#[cfg(test)]
+mod tests_deploy_dedup;
