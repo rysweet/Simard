@@ -164,6 +164,7 @@ fn goal_curator_plan_turn_with_active_goals_in_context() {
     let program = GoalCuratorProgram::try_default().expect("create test program");
     let mut context = test_context("goal: Review | priority=1 | status=active");
     context.active_goals = vec![GoalRecord {
+        wip_refs: Vec::new(),
         labels: Vec::new(),
         slug: "existing".to_string(),
         title: "Existing Goal".to_string(),
@@ -250,6 +251,7 @@ fn goal_plan_turn_objective_with_no_active_goals() {
 fn goal_plan_turn_objective_with_active_goals() {
     let plan = StructuredGoalPlan::parse("goal: X | status=active").expect("parse test goal plan");
     let goals = vec![GoalRecord {
+        wip_refs: Vec::new(),
         labels: Vec::new(),
         slug: "existing".to_string(),
         title: "Existing".to_string(),

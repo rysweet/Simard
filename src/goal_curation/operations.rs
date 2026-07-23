@@ -1467,6 +1467,7 @@ pub fn active_goals_as_records(board: &GoalBoard) -> Vec<crate::goals::GoalRecor
                 updated_in: crate::session::SessionPhase::Persistence,
                 evidence: Vec::new(),
                 labels: active.labels.clone(),
+                wip_refs: active.wip_refs.clone(),
             }
         })
         .collect()
@@ -1509,7 +1510,8 @@ pub enum BoardPlacement {
 /// | `Paused`     | backlog   | — |
 /// | `Completed`  | skipped   | terminal |
 ///
-/// A `GoalRecord` carries none of the snapshot-only rich fields, so they are
+/// A `GoalRecord` carries none of the snapshot-only rich fields *except*
+/// `wip_refs` (persisted for breaker dedup), so the remaining ones are
 /// synthesized as `None` / `[]` / `false`. Pure struct mapping — panic-free on
 /// arbitrary record text: overlay records carry untrusted, model-generated
 /// content and a panic here would 500 the dashboard read path.
@@ -1532,7 +1534,10 @@ pub fn record_as_active_goal(record: &crate::goals::GoalRecord) -> BoardPlacemen
                 assigned_to,
                 repo: None,
                 current_activity: None,
-                wip_refs: Vec::new(),
+                // Rehydrate the goal's WIP references from the persisted record
+                // so the no-progress breaker's tracking-issue dedup survives a
+                // goal-store round-trip (rysweet/Simard#4508/#4504/#4502/#4499/#4497).
+                wip_refs: record.wip_refs.clone(),
                 last_progress_update_at: None,
                 parent_goal_id: None,
                 priority_explicit: false,

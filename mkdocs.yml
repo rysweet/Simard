@@ -331,6 +331,7 @@ nav:
     - Multi-Binary Self-Update: reference/multi-binary-self-update.md
     - Self-Deploy API: reference/self-deploy-api.md
     - Self-Deploy Source Prep & Warm Target Dir: reference/self-deploy-source-prep.md
+    - Deploy-Gate Self-Deploy Test State-Root Robustness: reference/deploy-gate-drop-test-state-root-robustness.md
     - State-Root Resolution: reference/state-root-resolution.md
     - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
     - Runtime Contracts: reference/runtime-contracts.md
@@ -395,6 +396,7 @@ nav:
     - spawn_agent_for_goal API: reference/spawn-agent-for-goal.md
     - Stewardship API: reference/stewardship-api.md
     - CI-Health Sweep: reference/ci-health-sweep.md
+    - Pre-Commit CI Determinism (verify.yml): reference/pre-commit-ci-determinism.md
     - Simard Whisperer API: reference/simard-whisperer-api.md
     - Maximum Safe Parallelism: reference/maximum-safe-parallelism.md
     - OODA Coverage Parallelism Ceiling: reference/ooda-coverage-parallelism-ceiling.md
@@ -414,6 +416,7 @@ nav:
     - Agent-Log WebSocket API: reference/agent-log-websocket.md
     - PR-Finalization Review Pipeline: reference/pr-finalization-pipeline.md
     - Cross-Repo Merge Authority: reference/cross-repo-merge-authority.md
+    - default-workflow Step 15 Rebase-Target Selection: reference/default-workflow-step15-rebase-target-selection.md
     - ready_prs Sensor API: reference/ready-prs-sensor-api.md
     - Agentic Merge-Queue Reasoning API: reference/agentic-merge-queue-reasoning-api.md
     - Autonomous-Merge Review Gate API: reference/autonomous-merge-review-gate.md
@@ -421,6 +424,7 @@ nav:
     - Completion-Evidence Gate API: reference/completion-evidence-gate-api.md
     - Outcome-Verification API: reference/outcome-verification-api.md
     - No-Progress Breaker API: reference/no-progress-breaker-api.md
+    - No-Progress Breaker Tracking-Issue Dedup & Filing API: reference/no-progress-breaker-tracking-issue-dedup-api.md
     - No-Progress Root-Cause Resolution API: reference/no-progress-root-cause-resolution-api.md
     - OODA No-Progress WHY Recipe: reference/ooda-no-progress-why-recipe.md
     - Durable OODA Cycle Counter API: reference/durable-ooda-cycle-counter.md

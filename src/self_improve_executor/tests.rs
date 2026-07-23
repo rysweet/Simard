@@ -230,6 +230,7 @@ fn test_inspection() -> crate::engineer_loop::RepoInspection {
         worktree_dirty: false,
         changed_files: Vec::new(),
         active_goals: vec![GoalRecord {
+            wip_refs: Vec::new(),
             labels: Vec::new(),
             slug: "g".into(),
             title: "Self-improvement".into(),

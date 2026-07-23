@@ -1,5 +1,5 @@
 use super::operations::*;
-use super::types::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS};
+use super::types::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS, WipRef};
 
 fn make_goal(id: &str, priority: u32) -> ActiveGoal {
     ActiveGoal {
@@ -1684,4 +1684,130 @@ fn board_write_lock_serializes_independent_acquirers() {
     );
 
     handle.join().expect("lock thread should join cleanly");
+}
+
+// ---------------------------------------------------------------------------
+// Persistence round-trip of `wip_refs` (TDD, Step 7)
+//
+// Root cause of the no-progress breaker's duplicate-issue churn
+// (rysweet/Simard#4508/#4504/#4502/#4499/#4497): the breaker records its
+// `ooda-stuck` tracking issue as a `WipRef` on the goal, but that field was
+// DROPPED every time the goal round-tripped through the persistent goal store.
+// On the next OODA cycle the goal came back with empty `wip_refs`, the breaker's
+// `already_tracked` dedup guard evaluated `false`, and it filed a *new* tracking
+// issue each cycle.
+//
+// The store boundary is `active_goals_as_records` (ActiveGoal -> GoalRecord,
+// what gets serialized) and its inverse `record_as_active_goal`
+// (GoalRecord -> ActiveGoal, the reload path). These tests pin that a goal's
+// `wip_refs` — specifically a breaker tracking ref — SURVIVES that round-trip.
+//
+// See docs/reference/no-progress-breaker-tracking-issue-dedup-api.md.
+// EXPECTED STATE (TDD): RED until `GoalRecord` carries `wip_refs`, the forward
+// map copies it, and the reverse map (`record_as_active_goal`) rehydrates it.
+// ---------------------------------------------------------------------------
+
+/// The breaker sentinel label prefix (mirror of the private
+/// `NO_PROGRESS_TRACKING_LABEL_PREFIX` in `ooda_loop::no_progress`). Kept as a
+/// literal here so the persistence test does not depend on that module's
+/// visibility; the dedup key the breaker uses is `kind == "issue"` + this
+/// prefix on the label.
+const BREAKER_TRACKING_LABEL_PREFIX: &str = "[no-progress-tracking] ";
+
+fn breaker_tracking_ref(number: &str) -> WipRef {
+    WipRef {
+        kind: "issue".to_string(),
+        ref_id: number.to_string(),
+        label: format!("{BREAKER_TRACKING_LABEL_PREFIX}#{number}"),
+        url: Some(format!("https://github.com/rysweet/Simard/issues/{number}")),
+    }
+}
+
+#[test]
+fn wip_refs_survive_active_goal_record_round_trip() {
+    // A goal the breaker has escalated: it is Blocked and carries the tracking
+    // issue it filed as a `wip_ref`. (Blocked maps to `GoalStatus::Active` in the
+    // forward adapter, so it survives as an active-board record.)
+    let mut board = GoalBoard::new();
+    let mut goal = make_goal("stuck-goal", 1);
+    goal.status = GoalProgress::Blocked("[OODA-SAFEGUARD] no derivable criteria".to_string());
+    goal.wip_refs = vec![breaker_tracking_ref("4231")];
+    add_active_goal(&mut board, goal).unwrap();
+
+    // Round-trip through the persistence boundary: serialize to records, then
+    // rehydrate onto the live board (a store reload between OODA cycles).
+    let records = active_goals_as_records(&board);
+    assert_eq!(records.len(), 1, "one active goal must map to one record");
+
+    let placement = record_as_active_goal(&records[0]);
+    let rehydrated = match placement {
+        BoardPlacement::Active(g) => g,
+        other => panic!("Blocked/active goal must rehydrate onto the active board, got {other:?}"),
+    };
+
+    assert_eq!(
+        rehydrated.wip_refs.len(),
+        1,
+        "the breaker's tracking `wip_ref` MUST survive the goal-store round-trip; \
+         dropping it re-fires the breaker and spams duplicate ooda-stuck issues \
+         (rysweet/Simard#4508/#4504/#4502/#4499/#4497)"
+    );
+    let w = &rehydrated.wip_refs[0];
+    assert_eq!(w.kind, "issue");
+    assert_eq!(w.ref_id, "4231");
+    assert!(
+        w.kind.eq_ignore_ascii_case("issue") && w.label.starts_with(BREAKER_TRACKING_LABEL_PREFIX),
+        "the rehydrated ref must remain recognisable as a breaker tracking ref so \
+         the next cycle's `already_tracked` dedup guard evaluates true"
+    );
+}
+
+#[test]
+fn ordinary_wip_refs_also_survive_round_trip() {
+    // The persistence fix is not breaker-specific: any engineer/PR `wip_ref`
+    // (the Overseer dedup set, engineer-admission control) must also survive a
+    // store reload. This guards against a fix that special-cases only the
+    // breaker ref.
+    let mut board = GoalBoard::new();
+    let mut goal = make_goal("wip-goal", 2);
+    goal.status = GoalProgress::InProgress { percent: 40 };
+    goal.wip_refs = vec![
+        WipRef {
+            kind: "pr".to_string(),
+            ref_id: "1200".to_string(),
+            label: "engineer PR".to_string(),
+            url: None,
+        },
+        WipRef {
+            kind: "branch".to_string(),
+            ref_id: "feat/x".to_string(),
+            label: "worktree branch".to_string(),
+            url: None,
+        },
+    ];
+    add_active_goal(&mut board, goal).unwrap();
+
+    let records = active_goals_as_records(&board);
+    let rehydrated = match record_as_active_goal(&records[0]) {
+        BoardPlacement::Active(g) => g,
+        other => panic!("in-progress goal must rehydrate active, got {other:?}"),
+    };
+
+    assert_eq!(
+        rehydrated.wip_refs.len(),
+        2,
+        "all `wip_refs` (pr + branch) must survive the goal-store round-trip"
+    );
+    assert!(
+        rehydrated
+            .wip_refs
+            .iter()
+            .any(|w| w.kind == "pr" && w.ref_id == "1200")
+    );
+    assert!(
+        rehydrated
+            .wip_refs
+            .iter()
+            .any(|w| w.kind == "branch" && w.ref_id == "feat/x")
+    );
 }

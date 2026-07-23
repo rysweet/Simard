@@ -122,6 +122,7 @@ fn mixed_goal_store_memory() -> CognitiveMemoryClient {
     use crate::session::SessionPhase;
 
     let make_record = |slug: &str, title: &str| GoalRecord {
+        wip_refs: Vec::new(),
         labels: Vec::new(),
         slug: slug.to_string(),
         title: title.to_string(),
@@ -419,6 +420,7 @@ fn preparation_recalls_keyword_and_goal_facts() {
     // A goal record filed under the goal-store:record concept. Its slug
     // is in the live active set, so the stale-slug filter keeps it.
     let goal = GoalRecord {
+        wip_refs: Vec::new(),
         labels: Vec::new(),
         slug: "fix-auth".to_string(),
         title: "Stabilize auth module tests".to_string(),

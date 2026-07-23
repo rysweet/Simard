@@ -127,6 +127,24 @@ pub struct GoalRecord {
     /// snapshots with no `labels` key load with an empty list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
+    /// Work-in-progress references (PRs, issues, branches, breaker tracking
+    /// issues) carried over from the live [`ActiveGoal`](crate::goal_curation::ActiveGoal).
+    /// Empty for legacy/seed records and for records built via
+    /// [`GoalRecord::from_update`].
+    ///
+    /// CRITICAL round-trip contract (rysweet/Simard#4508/#4504/#4502/#4499/#4497):
+    /// the OODA no-progress breaker records its operator-facing tracking issue as
+    /// a `wip_ref` on the stuck goal. If this field is dropped when the goal is
+    /// serialized to the goal store and reloaded on the next OODA cycle, the
+    /// breaker's `already_tracked` dedup guard evaluates `false` and it files a
+    /// brand-new duplicate `ooda-stuck` tracking issue every cycle. Persisting
+    /// `wip_refs` here (and rehydrating it in
+    /// [`record_as_active_goal`](crate::goal_curation::record_as_active_goal))
+    /// keeps the dedup key alive across the round-trip. Serialised with
+    /// `#[serde(default)]` so pre-existing goal-store snapshots without this key
+    /// still deserialise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wip_refs: Vec<crate::goal_curation::WipRef>,
 }
 
 impl GoalRecord {
@@ -148,6 +166,7 @@ impl GoalRecord {
             updated_in,
             evidence: update.evidence,
             labels: Vec::new(),
+            wip_refs: Vec::new(),
         })
     }
 

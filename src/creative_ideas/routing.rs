@@ -89,6 +89,7 @@ pub fn route_idea_to_goal(
         idea.node_id
     ))];
     let record = GoalRecord {
+        wip_refs: Vec::new(),
         slug: goal_slug(&idea.idea),
         title: idea.idea.clone(),
         rationale: creative_idea_rationale(idea),

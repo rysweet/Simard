@@ -290,7 +290,7 @@ fn ordering_of_records_matches_ordering_of_active_goals() {
 }
 
 #[test]
-fn wip_refs_do_not_affect_record_construction() {
+fn wip_refs_are_preserved_in_record_construction() {
     let mut board = GoalBoard::new();
     let mut g = active("with-wip-goal-id", "Has WIP refs attached", 1);
     g.wip_refs.push(WipRef {
@@ -303,8 +303,12 @@ fn wip_refs_do_not_affect_record_construction() {
 
     let records = active_goals_as_records(&board);
     assert_eq!(records.len(), 1);
-    // WIP refs are not part of GoalRecord — adapter must not panic on them.
     assert_eq!(records[0].slug, "with-wip-goal-id");
+    // WIP refs are now persisted on the GoalRecord so the no-progress breaker's
+    // tracking-issue dedup survives a goal-store round-trip (rysweet/Simard#4508).
+    assert_eq!(records[0].wip_refs.len(), 1);
+    assert_eq!(records[0].wip_refs[0].kind, "pr");
+    assert_eq!(records[0].wip_refs[0].ref_id, "1234");
 }
 
 #[test]

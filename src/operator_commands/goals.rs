@@ -103,6 +103,7 @@ mod tests {
 
     fn make_goal(title: &str, status: GoalStatus, priority: u8) -> GoalRecord {
         GoalRecord {
+            wip_refs: Vec::new(),
             labels: Vec::new(),
             slug: title.to_lowercase().replace(' ', "-"),
             title: s(title),

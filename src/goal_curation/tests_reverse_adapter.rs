@@ -44,6 +44,7 @@ use crate::session::{SessionId, SessionPhase};
 /// (`route_idea_to_goal`) constructs the record it `put`s.
 fn record(title: &str, status: GoalStatus, priority: u8, labels: Vec<String>) -> GoalRecord {
     GoalRecord {
+        wip_refs: Vec::new(),
         slug: goal_slug(title),
         title: title.to_string(),
         rationale: "why this goal matters".to_string(),

@@ -100,6 +100,7 @@ fn preparation_path_recalls_keyword_decoy_and_goal_facts() {
         updated_in: SessionPhase::Reflection,
         evidence: Vec::new(),
         labels: Vec::new(),
+        wip_refs: Vec::new(),
     };
     mem.store_fact(
         GOAL_STORE_FACT_CONCEPT,

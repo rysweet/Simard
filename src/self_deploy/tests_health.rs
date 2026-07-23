@@ -285,3 +285,102 @@ fn no_quarantine_scans_state_dir_not_top_level() {
     );
     assert!(report.probes.no_quarantine.healthy);
 }
+
+/// Scoped `HOME` override that restores on drop. Env access is process-global,
+/// so this runs under the same `#[serial]` key as the state-root tests.
+struct HomeGuard {
+    prev: Option<std::ffi::OsString>,
+}
+
+impl HomeGuard {
+    fn set(value: &std::path::Path) -> Self {
+        let prev = std::env::var_os("HOME");
+        // SAFETY: serialized via #[serial(simard_state_root_env, cognitive_memory)].
+        unsafe {
+            std::env::set_var("HOME", value);
+        }
+        Self { prev }
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        // SAFETY: serialized via #[serial(simard_state_root_env, cognitive_memory)].
+        unsafe {
+            match self.prev.take() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+}
+
+/// Deploy-gate exit-101 regression (rysweet/Simard#4506): the self-deploy health
+/// probe must be **independent of the ambient `$HOME`**. The deploy-gate canary
+/// runs `cargo test` under a `$HOME`/`SIMARD_STATE_ROOT` that differs from a
+/// developer laptop; if the probe (or a test-body assertion) resolved paths from
+/// `$HOME`, the on-disk layout would diverge and a `.unwrap()`/`assert!` would
+/// panic — surfacing as `process didn't exit successfully: ... (exit status:
+/// 101)`. Because the state root is pinned to a per-test `TempDir` via
+/// `StateRootGuard`, a deliberately hostile `HOME=/nonexistent` must NOT change
+/// the outcome: the probe sees exactly the files the test created and clears.
+///
+/// See docs/reference/deploy-gate-drop-test-state-root-robustness.md. This locks
+/// the env-independence contract so a future change that reintroduces a `$HOME`
+/// dependency fails here instead of red-canarying the deploy-gate.
+#[test]
+#[serial_test::serial(simard_state_root_env, cognitive_memory)]
+fn health_probe_is_independent_of_ambient_home() {
+    let root = tempfile::tempdir().unwrap();
+    // A divergent, non-existent HOME mirrors the deploy-gate canary environment.
+    let _home = HomeGuard::set(std::path::Path::new("/nonexistent"));
+    let _g = StateRootGuard::set(root.path());
+    let state = root.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+
+    // Only historical (pre-window) snapshots exist: the probe must clear.
+    let window = chrono::Utc::now();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 24 * 3600);
+    let p = state.join("cognitive.corrupt-old");
+    std::fs::write(&p, b"forensic").unwrap();
+    set_mtime(&p, old);
+
+    let mem = FakeMemory::new();
+    let report = run_self_health_probe(&mem, "deadbeef", None, 0, window).unwrap();
+
+    assert!(
+        report.probes.no_quarantine.healthy,
+        "under a hostile HOME the probe must still resolve <SIMARD_STATE_ROOT>/state \
+         from the TempDir and clear (rysweet/Simard#4506 exit-101 regression)"
+    );
+    assert!(
+        !report.probes.no_quarantine.quarantined,
+        "no fresh quarantine exists; a $HOME-derived path divergence must not \
+         invent one"
+    );
+}
+
+/// A fresh quarantine must STILL be detected under a hostile `$HOME` — proving
+/// the env-independence fix did not silently disable detection (the probe reads
+/// the TempDir state root, not `$HOME`, in both the pass and fail directions).
+#[test]
+#[serial_test::serial(simard_state_root_env, cognitive_memory)]
+fn health_probe_detects_fresh_quarantine_regardless_of_home() {
+    let root = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(std::path::Path::new("/nonexistent"));
+    let _g = StateRootGuard::set(root.path());
+    let state = root.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+
+    std::fs::write(state.join("cognitive.corrupt-20260722"), b"corrupt").unwrap();
+
+    let window = chrono::Utc::now() - chrono::Duration::seconds(120);
+    let mem = FakeMemory::new();
+    let report = run_self_health_probe(&mem, "deadbeef", None, 0, window).unwrap();
+
+    assert!(
+        report.probes.no_quarantine.quarantined,
+        "detection must read the TempDir state root, not $HOME, in both directions"
+    );
+    assert!(!report.probes.no_quarantine.healthy);
+}

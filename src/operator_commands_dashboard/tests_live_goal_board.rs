@@ -192,6 +192,7 @@ impl FaultFixture {
 /// (`route_idea_to_goal`) does when an operator promotes an idea.
 fn proposed_record(title: &str) -> GoalRecord {
     GoalRecord {
+        wip_refs: Vec::new(),
         slug: goal_slug(title),
         title: title.to_string(),
         rationale: "routed from a promoted creative idea".to_string(),

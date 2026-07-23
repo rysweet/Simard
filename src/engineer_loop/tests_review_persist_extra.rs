@@ -112,6 +112,7 @@ fn persist_artifacts_with_active_goals() {
     let state_dir = tempfile::tempdir().unwrap();
     let mut inspection = make_inspection();
     inspection.active_goals = vec![crate::goals::GoalRecord {
+        wip_refs: Vec::new(),
         labels: Vec::new(),
         slug: "g1".to_string(),
         title: "First goal".to_string(),

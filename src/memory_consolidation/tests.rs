@@ -348,6 +348,7 @@ fn goal_dedup_memory() -> CognitiveMemoryClient {
                     // Two revisions of slug "alpha" (node_id n2 > n1) plus
                     // one entry for slug "beta".
                     let alpha_v1 = GoalRecord {
+                        wip_refs: Vec::new(),
                         labels: Vec::new(),
                         slug: "alpha".to_string(),
                         title: "Alpha v1".to_string(),
@@ -363,6 +364,7 @@ fn goal_dedup_memory() -> CognitiveMemoryClient {
                         evidence: Vec::new(),
                     };
                     let alpha_v2 = GoalRecord {
+                        wip_refs: Vec::new(),
                         labels: Vec::new(),
                         slug: "alpha".to_string(),
                         title: "Alpha v2".to_string(),
@@ -378,6 +380,7 @@ fn goal_dedup_memory() -> CognitiveMemoryClient {
                         evidence: Vec::new(),
                     };
                     let beta = GoalRecord {
+                        wip_refs: Vec::new(),
                         labels: Vec::new(),
                         slug: "beta".to_string(),
                         title: "Beta".to_string(),
