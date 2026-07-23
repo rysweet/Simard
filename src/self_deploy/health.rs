@@ -305,7 +305,7 @@ fn auto_ack_stuck_recovery_asset(state_root: &std::path::Path) -> Option<String>
 /// goal board, recent `brain_parse_failure` metrics, and the store quarantine
 /// state. The `no_quarantine` probe additionally has an intentional *write*
 /// side-effect — it may durably write one `.ack` sidecar via the guarded
-/// [`auto_ack_stuck_recovery_asset`] auto-ack (aged #2550 protected recovery
+/// `auto_ack_stuck_recovery_asset` auto-ack (aged #2550 protected recovery
 /// asset only; #4469) so the deadlock can self-clear on the unattended
 /// post-deploy path. Every probe degrades to `healthy: false` on its own error
 /// rather than aborting the whole report, so the orchestrator always gets a
