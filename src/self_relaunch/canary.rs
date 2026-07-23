@@ -278,4 +278,105 @@ mod tests {
         assert!(dir.join("simard-leader.lock").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // P1 deploy-gate immutability & loud-build guards.
+    //
+    // File under test: the FROZEN deploy gate in src/overseer/deploy.rs (imported
+    // here per the design's test-placement: canary.rs owns the gate-preservation
+    // guard) plus build_self_deploy_candidate's fail-loud contract. These pin the
+    // "convergence must never weaken the gate or silently promote an unbuilt
+    // binary" invariants.
+    // ────────────────────────────────────────────────────────────────────────
+
+    use crate::overseer::deploy::{
+        CRASH_LOOP_CHURN_THRESHOLD, DeployContext, DeployRefusal, evaluate_deploy_gate,
+    };
+
+    fn forward_ctx() -> DeployContext {
+        DeployContext {
+            running_commit: "aaaaaaaaaaaa".to_string(),
+            target_commit: "bbbbbbbbbbbb".to_string(),
+            target_is_ancestor_of_running: false,
+            canary_passed: true,
+            recent_restart_churn: 0,
+        }
+    }
+
+    /// GATE-PRESERVATION GUARD (design: gate is FROZEN). A convergence change
+    /// must never "unstick" a deploy by weakening the red-canary rule. For every
+    /// genuine forward deploy (non-no-op, non-rollback), a failed canary MUST
+    /// yield exactly `RedCanary` and NEVER `Ok`, at any churn level. Exhaustive
+    /// over the remaining gate inputs.
+    #[test]
+    fn deploy_gate_red_canary_is_immutable_for_forward_deploys() {
+        for churn in [
+            0,
+            1,
+            CRASH_LOOP_CHURN_THRESHOLD - 1,
+            CRASH_LOOP_CHURN_THRESHOLD,
+            99,
+        ] {
+            let mut c = forward_ctx();
+            c.canary_passed = false;
+            c.recent_restart_churn = churn;
+            assert_eq!(
+                evaluate_deploy_gate(&c),
+                Err(DeployRefusal::RedCanary),
+                "a red canary must block a forward deploy regardless of churn={churn}"
+            );
+        }
+    }
+
+    /// GATE-PRESERVATION GUARD: a passing canary on a clean forward deploy is
+    /// still allowed — the immutability guard above must not be satisfied by
+    /// simply refusing everything.
+    #[test]
+    fn deploy_gate_still_allows_clean_forward_deploy() {
+        assert!(
+            evaluate_deploy_gate(&forward_ctx()).is_ok(),
+            "convergence must not over-tighten the gate into refusing valid deploys"
+        );
+    }
+
+    /// GATE-PRESERVATION GUARD: the crash-loop threshold is a frozen safety
+    /// constant; a convergence change must not raise it to force a stuck deploy
+    /// through.
+    #[test]
+    fn crash_loop_threshold_is_frozen() {
+        assert_eq!(
+            CRASH_LOOP_CHURN_THRESHOLD, 3,
+            "crash-loop churn threshold is a frozen safety constant"
+        );
+    }
+
+    /// CONVERGENCE BUILD GUARD: a convergence re-trigger reuses the shared
+    /// release-build driver, which MUST surface a build failure as `Err` — never
+    /// a silent `Ok`. A silently-successful "convergence" would promote an
+    /// unbuilt/stale binary. Exercised through `build_self_deploy_candidate`
+    /// (the self-deploy sibling the convergence path builds with) against a repo
+    /// dir with no `Cargo.toml`.
+    #[test]
+    fn convergence_build_failure_is_loud_never_silent_ok() {
+        let repo = std::env::temp_dir().join(format!(
+            "simard-converge-build-{}-{}",
+            std::process::id(),
+            "no-manifest"
+        ));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        let target = repo.join("target");
+
+        let result = build_self_deploy_candidate(&repo, &target);
+        assert!(
+            result.is_err(),
+            "a convergence build with no Cargo.toml must fail loudly, not return Ok"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("build failed") || msg.contains("cargo") || msg.contains("self-deploy"),
+            "error must name the build failure, got: {msg}"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
 }

@@ -332,3 +332,174 @@ mod prod_source_tests {
         );
     }
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// TDD (Step 7) — P1 drift-read hardening: fail-closed, never fail-open.
+//
+// File under test: src/self_deploy/drift.rs. These lock the "malformed/absent
+// drift inputs fail closed (block deploy); no fail-open" contract via an
+// injected fake `DeploySource`, so the convergence work can never regress the
+// autonomous read into fabricating (or silently swallowing) a deploy signal.
+// ────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod fail_closed_tests {
+    use super::*;
+
+    fn git_err(reason: &str) -> SimardError {
+        SimardError::GitCommandFailed {
+            command: "fake".to_string(),
+            reason: reason.to_string(),
+        }
+    }
+
+    /// Fully injectable source: each fact is either produced or reported as an
+    /// unreadable/unknown source error (`ok_*: false`).
+    struct FakeSource {
+        behind: usize,
+        ok_behind: bool,
+        merged: BTreeMap<String, String>,
+        running: BTreeMap<String, String>,
+        ok_pins: bool,
+    }
+
+    impl FakeSource {
+        fn current() -> Self {
+            Self {
+                behind: 0,
+                ok_behind: true,
+                merged: BTreeMap::new(),
+                running: BTreeMap::new(),
+                ok_pins: true,
+            }
+        }
+        fn unreadable() -> Self {
+            Self {
+                ok_behind: false,
+                ..Self::current()
+            }
+        }
+    }
+
+    impl DeploySource for FakeSource {
+        fn merged_head(&self) -> SimardResult<String> {
+            Ok("m".repeat(40))
+        }
+        fn running_commit(&self) -> SimardResult<String> {
+            Ok("r".repeat(40))
+        }
+        fn behind_count(&self) -> SimardResult<usize> {
+            if self.ok_behind {
+                Ok(self.behind)
+            } else {
+                Err(git_err("behind-count unreadable"))
+            }
+        }
+        fn merged_pins(&self) -> SimardResult<BTreeMap<String, String>> {
+            if self.ok_pins {
+                Ok(self.merged.clone())
+            } else {
+                Err(git_err("merged pins unreadable"))
+            }
+        }
+        fn running_pins(&self) -> SimardResult<BTreeMap<String, String>> {
+            Ok(self.running.clone())
+        }
+    }
+
+    /// FAIL-CLOSED: an unreadable/unknown source must surface from `try_detect`
+    /// as an explicit `Err` — the caller must be able to tell "positively no
+    /// drift" apart from "could not determine", never treating unknown as a
+    /// confirmed state.
+    #[test]
+    fn try_detect_fails_closed_on_unreadable_source() {
+        let det = ReconcileDetector::new(FakeSource::unreadable());
+        assert!(
+            det.try_detect().is_err(),
+            "an unreadable drift source must fail closed (explicit Err), not a fabricated state"
+        );
+    }
+
+    /// NO FAIL-OPEN: an unreadable source must NEVER be turned into a spurious
+    /// `needs_deploy` — the fail-safe `detect` collapses the unknown to "no
+    /// drift" (blocking any autonomous deploy), never into a phantom signal.
+    #[test]
+    fn detect_never_fails_open_on_unreadable_source() {
+        let det = ReconcileDetector::new(FakeSource::unreadable());
+        let drift = det.detect();
+        assert!(
+            !drift.needs_deploy,
+            "unreadable source must not fabricate a deploy signal (no fail-open)"
+        );
+        assert_eq!(
+            drift.behind_commits, 0,
+            "no fabricated behind-count on error"
+        );
+        assert!(
+            drift.drifted_pins.is_empty(),
+            "no fabricated pin drift on error"
+        );
+    }
+
+    /// UNKNOWN != CURRENT: a positively-current source and an unreadable source
+    /// must be distinguishable through `try_detect` (Ok(current) vs Err) even
+    /// though both collapse to "no drift" under the fail-safe `detect`.
+    #[test]
+    fn unknown_is_distinguishable_from_positively_current() {
+        let current = ReconcileDetector::new(FakeSource::current());
+        let unknown = ReconcileDetector::new(FakeSource::unreadable());
+
+        let current_read = current.try_detect().expect("current source reads cleanly");
+        assert!(!current_read.needs_deploy, "a current source has no drift");
+        assert!(
+            unknown.try_detect().is_err(),
+            "an unknown source must not masquerade as positively current"
+        );
+    }
+
+    /// Pin-read failure is likewise fail-closed on `try_detect`: a partial read
+    /// (behind ok, pins unreadable) must not silently drop the pin dimension.
+    #[test]
+    fn try_detect_fails_closed_when_pins_unreadable() {
+        let src = FakeSource {
+            behind: 0,
+            ok_behind: true,
+            ok_pins: false,
+            ..FakeSource::current()
+        };
+        assert!(
+            ReconcileDetector::new(src).try_detect().is_err(),
+            "an unreadable pin dimension must fail closed, not report no-drift"
+        );
+    }
+
+    /// A cleanly-readable source with a positive behind-count reports drift —
+    /// the fail-closed hardening must not suppress a genuine deploy signal.
+    #[test]
+    fn readable_behind_source_reports_drift() {
+        let src = FakeSource {
+            behind: 2,
+            ..FakeSource::current()
+        };
+        let drift = ReconcileDetector::new(src).try_detect().expect("readable");
+        assert!(
+            drift.needs_deploy,
+            "a real behind-count must still signal a deploy"
+        );
+        assert_eq!(drift.behind_commits, 2);
+    }
+
+    /// Pin drift (a merged pin whose rev differs from / is absent in the running
+    /// binary) is a genuine deploy signal and must be preserved.
+    #[test]
+    fn readable_pin_drift_source_reports_drift() {
+        let mut merged = BTreeMap::new();
+        merged.insert("amplihack-memory".to_string(), "rev-new".to_string());
+        let src = FakeSource {
+            merged,
+            ..FakeSource::current()
+        };
+        let drift = ReconcileDetector::new(src).try_detect().expect("readable");
+        assert!(drift.needs_deploy);
+        assert_eq!(drift.drifted_pins, vec!["amplihack-memory".to_string()]);
+    }
+}

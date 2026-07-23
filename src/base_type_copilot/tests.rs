@@ -1304,3 +1304,52 @@ fn open_session_without_enrichment_leaves_readers_none() {
         "default adapter must not wire a knowledge reader"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// TDD (Step 7) — P2 cost-enrichment determinism guards.
+//
+// File under test: src/base_type_copilot/mod.rs cost accounting (#4164). The
+// heavy end-to-end assertion lives in
+// `meeting_turn_records_full_enriched_prompt_tokens_not_bare_objective`; these
+// pin the underlying arithmetic contract WITHOUT spawning copilot or mutating
+// HOME, so they are fully deterministic and cannot flake on env isolation.
+// ────────────────────────────────────────────────────────────────────────────
+
+/// The enriched meeting prompt wraps the objective in the `## Objective` /
+/// `## Instructions` scaffold, which adds well over `CHARS_PER_TOKEN` (4)
+/// characters. So the recorded prompt-token estimate for the enriched prompt
+/// must STRICTLY exceed the bare objective's token count for every objective
+/// length — the exact invariant #4164 restored (recorded > bare, never ==).
+#[test]
+fn enriched_prompt_token_estimate_strictly_exceeds_bare_objective() {
+    use crate::cost_tracking::estimate_tokens;
+    // Conservative lower bound on scaffold overhead (headings + separators is
+    // far more than this); >= 4 guarantees crossing at least one token boundary.
+    const MIN_SCAFFOLD_CHARS: usize = 8;
+    for objective_len in [0usize, 1, 3, 4, 5, 63, 64, 65, 4096] {
+        let bare = estimate_tokens(objective_len);
+        let enriched = estimate_tokens(objective_len + MIN_SCAFFOLD_CHARS);
+        assert!(
+            enriched > bare,
+            "enriched prompt tokens must exceed the bare objective (#4164): \
+             objective_len={objective_len} bare={bare} enriched={enriched}"
+        );
+    }
+}
+
+/// `estimate_tokens` must be monotonic non-decreasing: a larger prompt never
+/// costs fewer tokens. Guards against a regression that would let the enriched
+/// meeting prompt under-count relative to the bare objective (#4164).
+#[test]
+fn estimate_tokens_is_monotonic_nondecreasing() {
+    use crate::cost_tracking::estimate_tokens;
+    let mut prev = 0u64;
+    for n in 0usize..2048 {
+        let t = estimate_tokens(n);
+        assert!(
+            t >= prev,
+            "estimate_tokens must be monotonic non-decreasing at n={n}: {t} < {prev}"
+        );
+        prev = t;
+    }
+}

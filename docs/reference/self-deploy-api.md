@@ -10,6 +10,8 @@ related:
   - ../concepts/reconcile-and-self-deploy.md
   - ../concepts/operational-autonomy-model.md
   - ./self-deploy-source-prep.md
+  - ./deploy-canary-convergence.md
+  - ../howto/converge-a-stuck-deploy-canary.md
   - ./overseer-operator-notifications.md
   - ./overseer-tick-details.md
   - ../safe-self-update.md
