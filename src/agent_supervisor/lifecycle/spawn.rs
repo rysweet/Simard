@@ -41,6 +41,17 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
         .arg(&config.worktree_path)
         .arg(&config.goal)
         .env("SIMARD_AGENT_NAME", &config.agent_name)
+        // Issue: engineer PRs published via the amplihack recipe land on shared
+        // `feat/*`/`fix/*` branches authored by the same gh login as the operator,
+        // so neither author nor branch discriminates them for the self-merge queue.
+        // Stamp every engineer PR with the durable engineer-PR marker label at
+        // creation. `workflow_publish_pr.sh` reads WORKFLOW_PR_LABELS and applies
+        // it best-effort (no-op where the label/PR/host is absent), and the child
+        // recipe-runner inherits this env.
+        .env(
+            "WORKFLOW_PR_LABELS",
+            crate::overseer::config::SIMARD_ENGINEER_PR_LABEL,
+        )
         .env(
             "SIMARD_SUBORDINATE_DEPTH",
             (config.current_depth + 1).to_string(),

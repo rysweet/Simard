@@ -213,6 +213,41 @@ fn compute_tmux_env_seeds_required_simard_vars_from_config() {
 }
 
 #[test]
+fn compute_tmux_env_seeds_engineer_pr_label_for_self_merge_discrimination() {
+    // Every engineer spawned under tmux must carry WORKFLOW_PR_LABELS =
+    // SIMARD_ENGINEER_PR_LABEL so its published PR is stamped with the durable
+    // marker the self-merge queue uses to tell agent PRs from operator PRs.
+    // This is NOT a SIMARD_* var, so the SIMARD_* forwarding rule would miss
+    // it — it must be seeded explicitly.
+    let config = make_test_config("engineer-abc", 0);
+    let env = compute_tmux_env(&config, std::iter::empty::<(String, String)>());
+    assert_eq!(
+        env_value(&env, "WORKFLOW_PR_LABELS"),
+        Some(crate::overseer::config::SIMARD_ENGINEER_PR_LABEL),
+        "engineer tmux env must seed WORKFLOW_PR_LABELS with the engineer-PR marker label"
+    );
+    // The marker must reach the engineer via a tmux `-e KEY=VAL` flag.
+    let argv = build_tmux_wrapped_command(
+        "simard-engineer-abc",
+        &["/bin/printenv".to_string()],
+        &PathBuf::from("/tmp/x.log"),
+        &env,
+    );
+    let expected = format!(
+        "WORKFLOW_PR_LABELS={}",
+        crate::overseer::config::SIMARD_ENGINEER_PR_LABEL
+    );
+    let has_flag = argv
+        .iter()
+        .enumerate()
+        .any(|(i, a)| a == "-e" && i + 1 < argv.len() && argv[i + 1] == expected);
+    assert!(
+        has_flag,
+        "WORKFLOW_PR_LABELS must thread through as a tmux -e flag: {argv:?}"
+    );
+}
+
+#[test]
 fn compute_tmux_env_respects_simard_cargo_jobs_override() {
     let config = make_test_config("e1", 0);
     let parent = vec![("SIMARD_CARGO_JOBS".to_string(), "6".to_string())];

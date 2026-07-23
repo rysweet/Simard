@@ -128,10 +128,12 @@ fn default_cargo_target_for_worktree(
 ///
 /// Composition rules (kept stable so issue #1658 can regression-test this):
 ///
-/// 1. Always-set vars seeded from `config`:
+/// 1. Always-set vars seeded from `config`/constants:
 ///    - `SIMARD_AGENT_NAME`        = `config.agent_name`
 ///    - `SIMARD_SUBORDINATE_DEPTH` = `config.current_depth + 1`
 ///    - `CARGO_BUILD_JOBS`         = `cargo_jobs_from(SIMARD_CARGO_JOBS)` (issues #373, #2199 OOM guard)
+///    - `WORKFLOW_PR_LABELS`       = [`SIMARD_ENGINEER_PR_LABEL`] so the engineer's
+///      published PR is stamped with the durable engineer-PR marker label
 /// 2. `CARGO_TARGET_DIR` honors a `parent_env` override; otherwise defaults
 ///    to a **per-worktree** path so concurrent engineers never share one
 ///    cargo target dir (which would deadlock cargo's file lock or corrupt
@@ -175,6 +177,16 @@ where
             (config.current_depth + 1).to_string(),
         ),
         ("CARGO_BUILD_JOBS".to_string(), cargo_jobs),
+        // Stamp every engineer PR with the durable engineer-PR marker label at
+        // creation so the self-merge queue can tell agent PRs from operator PRs
+        // (same gh author, shared feat/*/fix/* branches). The child
+        // recipe-runner → workflow_publish_pr.sh reads WORKFLOW_PR_LABELS and
+        // applies it best-effort. Not a SIMARD_* var, so it must be seeded
+        // explicitly here (the SIMARD_* forwarding below would miss it).
+        (
+            "WORKFLOW_PR_LABELS".to_string(),
+            crate::overseer::config::SIMARD_ENGINEER_PR_LABEL.to_string(),
+        ),
     ];
 
     let cargo_target = parent_pairs
