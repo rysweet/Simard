@@ -277,7 +277,7 @@ the retained security assertions:
 | `unit_test_gate_passes_for_healthy_candidate` | A hermetic temp fixture crate (minimal `Cargo.toml` + one passing `#[test]`) run through the gate under `--lib` returns `passed == true`. Fails loudly if the toolchain is missing — **no silent skip**. |
 | `unit_test_failure_surfaces_failing_test_name` | Canned `cargo` stdout/stderr containing `test my_failing_case ... FAILED` + `test result: FAILED` fed to `parse_unit_test_failure` yields a detail containing **both** `my_failing_case` and `test result: FAILED`. No `cargo` invocation. |
 | `unit_test_abort_without_summary_surfaces_tail` | The exit-`101` **no-summary** shape (a compile `error[...]` / panic with no `test result:` line) still yields a non-empty detail carrying `cargo`'s tail — the previously-undiagnosable case. |
-| `truncate_output_tail_keeps_summary` | `truncate_output_tail` keeps the **last** `max_len` bytes and prefixes `...`, so a trailing `test result:` line survives while a long head is dropped. Char-boundary-safe on multi-byte input. |
+| `truncate_output_tail_keeps_trailing_summary` | `truncate_output_tail` keeps the **last** `max_len` bytes and prefixes `...`, so a trailing `test result:` line survives while a long head is dropped. Char-boundary-safe on multi-byte input. |
 | `canary_gate_env_allowlist_carries_deploy_shape_names_not_hijack_vars` (retained) | The allow-list includes the `SIMARD_*` deploy-shape names and excludes `LD_PRELOAD`/hijack-class — the scrub defense is not weakened by the scope fix. |
 
 The failing-name and no-summary tests are pure (canned input, no `cargo`), so
