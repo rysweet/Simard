@@ -760,6 +760,32 @@ exit 23
     use std::os::unix::process::ExitStatusExt;
     use std::process::ExitStatus;
 
+    /// Retry the real `gh` executor on transient `ETXTBSY` ("text file busy").
+    ///
+    /// The real-executor tests write a throwaway `gh` script and immediately
+    /// exec it. Under parallel test execution a sibling thread's `fork()` (from
+    /// another `Command::spawn`) can momentarily keep this just-written script's
+    /// fd open, so the exec races with `ETXTBSY`. `ensure_label_with` maps that
+    /// `Err` to `Omit`, flaking assertions that expect `Attach`. This is a pure
+    /// test-harness artifact — a long-installed production `gh` is never
+    /// written-then-exec'd — so we absorb it here rather than complicate the
+    /// production executor.
+    fn execute_ensure_label_no_etxtbsy(
+        executable: &OsStr,
+        args: &[&OsStr],
+    ) -> Result<Output, io::Error> {
+        const ETXTBSY: i32 = 26;
+        for _ in 0..100 {
+            match execute_ensure_label(executable, args) {
+                Err(e) if e.raw_os_error() == Some(ETXTBSY) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                result => return result,
+            }
+        }
+        execute_ensure_label(executable, args)
+    }
+
     fn label_create_succeeds(_executable: &OsStr, _args: &[&OsStr]) -> Result<Output, io::Error> {
         Ok(Output {
             status: ExitStatus::from_raw(0),
@@ -890,7 +916,11 @@ printf '%s\n' "$@" > "$dir/argv"
 exit 0
 "#;
         let (dir, executable) = fake_gh(script);
-        let disp = ensure_label_with(executable.as_os_str(), execute_ensure_label, "ooda-stuck");
+        let disp = ensure_label_with(
+            executable.as_os_str(),
+            execute_ensure_label_no_etxtbsy,
+            "ooda-stuck",
+        );
         assert_eq!(disp, LabelDisposition::Attach);
         let argv = fs::read_to_string(dir.path().join("argv")).unwrap();
         assert!(argv.contains("label\ncreate\n"), "argv was: {argv:?}");
@@ -910,7 +940,11 @@ printf '%s\n' 'label already exists' >&2
 exit 1
 "#;
         let (_dir, executable) = fake_gh(script);
-        let disp = ensure_label_with(executable.as_os_str(), execute_ensure_label, "ooda-stuck");
+        let disp = ensure_label_with(
+            executable.as_os_str(),
+            execute_ensure_label_no_etxtbsy,
+            "ooda-stuck",
+        );
         assert_eq!(
             disp,
             LabelDisposition::Attach,
@@ -925,7 +959,11 @@ printf '%s\n' 'HTTP 403: Resource not accessible by integration' >&2
 exit 1
 "#;
         let (_dir, executable) = fake_gh(script);
-        let disp = ensure_label_with(executable.as_os_str(), execute_ensure_label, "ooda-stuck");
+        let disp = ensure_label_with(
+            executable.as_os_str(),
+            execute_ensure_label_no_etxtbsy,
+            "ooda-stuck",
+        );
         assert!(
             matches!(disp, LabelDisposition::Omit { .. }),
             "a genuine failure from the real path must degrade to Omit",
