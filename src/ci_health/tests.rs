@@ -2299,16 +2299,28 @@ mod diagnosis {
     }
 }
 
-/// The governed roster is derived from the embedded ecosystem single-source-of-
-/// truth (`prompt_assets/simard/ecosystem_repos.toml`) rather than a second
-/// hardcoded list, so a repo added there is swept with no code change and the
-/// two stewards can never disagree about who is governed.
+/// The governed roster is the identity-curated stewarded roster
+/// (`identity-state/<identity>/stewarded_repos.toml`, seeded from
+/// `prompt_assets/simard/identity/stewarded_repos.seed.toml`) rather than a
+/// second hardcoded list, so a repo Simard curates is swept with no code change
+/// and the two stewards can never disagree about who is governed.
 mod governed_roster {
-    use crate::ci_health::governed_repos;
+    use crate::overseer::ecosystem_observe::load_stewarded_roster;
+
+    /// Hermetically load the roster the sweep uses: a fresh temp state root
+    /// (seeded from the real in-tree seed under `CARGO_MANIFEST_DIR`) and an
+    /// empty home so the ambient `~/.simard` is never touched.
+    fn hermetic_roster() -> Vec<String> {
+        let state = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        load_stewarded_roster(&repo_root, "simard", Some(state.path()), Some(home.path()))
+            .expect("identity-curated roster must load (seeded from the in-tree seed)")
+    }
 
     #[test]
-    fn embedded_roster_parses_to_a_nonempty_validated_fleet() {
-        let roster = governed_repos().expect("embedded ecosystem roster must parse");
+    fn roster_is_a_nonempty_validated_fleet() {
+        let roster = hermetic_roster();
         // A non-empty roster is the whole point: an empty fleet would classify as
         // zero actionable failures and report GREEN — the false-green this sweep
         // exists to prevent. Fail-loud is asserted by the `expect` above.
@@ -2332,11 +2344,11 @@ mod governed_roster {
     }
 
     #[test]
-    fn governed_roster_includes_simard_itself_and_has_no_duplicates() {
-        let roster = governed_repos().expect("embedded ecosystem roster must parse");
+    fn roster_includes_simard_itself_and_has_no_duplicates() {
+        let roster = hermetic_roster();
         assert!(
             roster.iter().any(|s| s == "rysweet/Simard"),
-            "Simard must sweep its own CI, not only its siblings'"
+            "Simard must sweep her own CI, not only her siblings'"
         );
         let unique: std::collections::HashSet<&String> = roster.iter().collect();
         assert_eq!(
@@ -2347,17 +2359,23 @@ mod governed_roster {
     }
 
     #[test]
-    fn governed_roster_is_exactly_the_embedded_ecosystem_source_of_truth() {
-        // The roster the sweep uses must equal what the Overseer parser reads from
-        // the *same* embedded bytes — proving there is a single source of truth
-        // and no drift between the CI-health fleet and the ecosystem roster.
-        let via_sweep = governed_repos().expect("embedded ecosystem roster must parse");
-        let embedded = include_str!("../../prompt_assets/simard/ecosystem_repos.toml");
-        let via_parser = crate::overseer::ecosystem_observe::parse_ecosystem_roster(embedded)
-            .expect("embedded roster must parse via the Overseer parser too");
+    fn ci_health_and_overseer_share_one_roster_source() {
+        // Both the CI-health sweep and the Overseer's ecosystem-observe rail call
+        // the SAME `load_stewarded_roster`, so — given the same identity, state
+        // root, and seed — they resolve an identical roster. This pins the
+        // single-source-of-truth contract with no second parse path to drift.
+        let state = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let first =
+            load_stewarded_roster(&repo_root, "simard", Some(state.path()), Some(home.path()))
+                .expect("roster loads");
+        let second =
+            load_stewarded_roster(&repo_root, "simard", Some(state.path()), Some(home.path()))
+                .expect("roster loads again from the now-persisted curated copy");
         assert_eq!(
-            via_sweep, via_parser,
-            "CI-health roster must equal the ecosystem-observe roster (single source of truth)"
+            first, second,
+            "the sweep and the rail read one identity-curated roster (single source of truth)"
         );
     }
 }

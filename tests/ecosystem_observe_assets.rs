@@ -25,7 +25,7 @@ fn asset(rel: &str) -> String {
 const RECIPE: &str = "prompt_assets/simard/recipes/ecosystem-observe.yaml";
 const OBSERVE_PROMPT: &str = "prompt_assets/simard/overseer/observe.md";
 const BRIEF_PROMPT: &str = "prompt_assets/simard/overseer/problem_to_brief.md";
-const ROSTER: &str = "prompt_assets/simard/ecosystem_repos.toml";
+const ROSTER_SEED: &str = "prompt_assets/simard/identity/stewarded_repos.seed.toml";
 
 /// The recipe exposes exactly the context vars the thin rail renders (all `_path`
 /// values ride `ContextFile`), plus the rail-owned `escalation_note`.
@@ -145,11 +145,14 @@ fn observe_prompt_is_multi_repo_and_agentic() {
     }
 }
 
-/// The roster is the single source of truth: it lists the 10 stewarded slugs and
-/// deliberately excludes the deprecated Python `rysweet/amplihack`.
+/// The stewarded-roster SEED is identity DATA and the default source of truth
+/// for a fresh identity: it lists the 10 stewarded slugs (as generic curated
+/// `[[item]]` keys) and deliberately excludes the deprecated Python
+/// `rysweet/amplihack`. The durable, mutable roster is seeded from this file on
+/// first use and then owned as identity-scoped state.
 #[test]
-fn roster_is_the_single_source_of_truth() {
-    let body = asset(ROSTER);
+fn roster_seed_is_the_default_source_of_truth() {
+    let body = asset(ROSTER_SEED);
     for slug in [
         "rysweet/Simard",
         "rysweet/RustyClawd",
@@ -164,11 +167,11 @@ fn roster_is_the_single_source_of_truth() {
     ] {
         assert!(
             body.contains(slug),
-            "roster must list stewarded repo {slug}"
+            "roster seed must list stewarded repo {slug}"
         );
     }
     assert!(
-        !body.contains("slug = \"rysweet/amplihack\""),
-        "roster must NOT list the deprecated Python rysweet/amplihack"
+        !body.contains("key = \"rysweet/amplihack\""),
+        "roster seed must NOT list the deprecated Python rysweet/amplihack"
     );
 }
