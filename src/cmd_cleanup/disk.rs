@@ -370,14 +370,26 @@ pub(crate) fn is_corrupt_quarantine_name(name: &str) -> bool {
         && name.contains(".corrupt-")
 }
 
-/// Remove quarantined corrupt cognitive-memory snapshots in `~/.simard` that are
-/// either older than [`CORRUPT_DB_MAX_AGE_DAYS`] **or** beyond the newest
-/// [`CORRUPT_DB_KEEP`] quarantines (issue #2420). Covers both the native
-/// single-file `cognitive_memory.corrupt-*` snapshots and the library backend's
+/// Remove quarantined corrupt cognitive-memory snapshots that are either older
+/// than [`CORRUPT_DB_MAX_AGE_DAYS`] **or** beyond the newest [`CORRUPT_DB_KEEP`]
+/// quarantines (issue #2420). Covers both the native single-file
+/// `cognitive_memory.corrupt-*` snapshots and the library backend's
 /// `cognitive.corrupt-*` / `cognitive.wal.corrupt-*` / `*.cognitive.shadow`
 /// quarantines (see [`is_corrupt_quarantine_name`]). These are useful briefly
 /// for forensics then pure dead weight. The live store (`cognitive`,
 /// `cognitive.wal`) is never matched.
+///
+/// Reclaims BOTH the top-level state root (`~/.simard`, the native pre-#2307
+/// quarantine location) AND the live-store subdir `<state_root>/state/`, where
+/// the de-forked library backend actually drops corrupt snapshots next to the
+/// live `cognitive` store (issue #4469). Before this the driver only scanned the
+/// top level, so 62 corrupt artifacts accumulated unbounded under `state/` on
+/// the live host. Both directories resolve through the canonical
+/// [`crate::state_root`] helpers — one source of truth, no hardcoded duplicate
+/// path. The age / keep-last-N / largest-asset bounds are applied
+/// **independently per directory** (separate listings), so the newer `state/`
+/// branch cannot erode the top-level directory's keep-N / recovery-asset
+/// protection or vice-versa.
 ///
 /// The age cap alone leaves a burst of *young* quarantines untouched for a week
 /// (this host saw 88 MB / 112 artifacts accumulate); the keep-last-N cap bounds
@@ -479,12 +491,25 @@ pub(crate) fn aged_protected_recovery_asset(state_root: &Path) -> Option<String>
 }
 
 pub fn remove_old_corrupt_dbs(report: &mut CleanupReport) {
-    // Scan the RESOLVED state root (honoring `SIMARD_STATE_ROOT`), the same
-    // directory the self-health `no_quarantine` probe scans (#4469). Using the
-    // hardcoded `$HOME/.simard` here would let the probe and the sweep disagree
-    // on which directory holds the quarantines, so an acknowledged artifact
-    // would never be swept from the directory the probe actually watches.
-    remove_old_corrupt_dbs_in(&crate::state_root::simard_state_root(), report);
+    // #4469: sweep BOTH the top-level state root (`~/.simard`, the native
+    // pre-#2307 quarantine location) AND the live-store subdir
+    // `<state_root>/state/`, where the de-forked library backend actually drops
+    // corrupt snapshots next to the live `cognitive` store. Before this the
+    // driver only scanned the top level, so 62 corrupt artifacts accumulated
+    // unbounded under `state/` on the live host. Both directories resolve through
+    // the canonical `crate::state_root` helpers (honoring `SIMARD_STATE_ROOT`) —
+    // the SAME directory the self-health `no_quarantine` probe scans — so the
+    // probe and the sweep can never disagree on where the quarantines live. The
+    // age / keep-last-N / largest-asset bounds are applied independently per
+    // directory via `remove_old_corrupt_dbs_in`. `resolve_subdir("state")` is
+    // always distinct from the top-level root, but guard against an unexpected
+    // alias so a directory is never scanned twice.
+    let state_root = crate::state_root::simard_state_root();
+    let live_store_dir = crate::state_root::resolve_subdir("state");
+    remove_old_corrupt_dbs_in(&state_root, report);
+    if live_store_dir != state_root {
+        remove_old_corrupt_dbs_in(&live_store_dir, report);
+    }
 }
 
 /// Sweep aged / over-count corrupt-quarantine artifacts under `scan_dir`,

@@ -45,7 +45,7 @@ pub mod thread;
 pub mod types;
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 #[cfg(all(test, unix))]
 mod tests_clean_result_channel;
 #[cfg(test)]

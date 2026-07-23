@@ -46,7 +46,19 @@ pub struct BrainsLlmBackedProbe {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoQuarantineProbe {
     pub healthy: bool,
+    /// `true` when at least one corrupt-store quarantine in the live-store
+    /// directory has an mtime at/after `fallback_window_start` (a fresh event).
+    /// Retained historical snapshots (mtime before the window) never set this.
     pub quarantined: bool,
+    /// Count of quarantines with mtime at/after `fallback_window_start` (the
+    /// events that drive `quarantined` / failure). `quarantined ==
+    /// (fresh_quarantines > 0)`.
+    pub fresh_quarantines: u64,
+    /// Count of quarantines present in the directory whose mtime is *before*
+    /// the window — retained forensic snapshots the probe deliberately ignores.
+    /// Lets operators distinguish "0 quarantines total" from "0 fresh + N
+    /// retained" without shelling into the store directory.
+    pub retained: u64,
 }
 
 /// Probe: the PATH-resolved `simard` is the installed entrypoint (no stale
@@ -140,7 +152,8 @@ fn commits_compatible(running: &str, target: &str) -> bool {
 }
 
 /// Count quarantined corrupt cognitive-memory artifacts directly under
-/// `state_root`. Absent/unreadable dir ⇒ `0` (nothing to quarantine).
+/// `state_root`, ignoring acknowledgement sidecars. Absent/unreadable dir ⇒ `0`
+/// (nothing to quarantine).
 ///
 /// A quarantine that carries a durable `.ack` sidecar (issue #4469) is treated
 /// as "seen" and does NOT count — this is what lets a genuinely-stuck but
@@ -148,6 +161,12 @@ fn commits_compatible(running: &str, target: &str) -> bool {
 /// sidecars themselves are never mistaken for quarantines, and a *fresh*
 /// (unacknowledged) corruption event still counts because the marker is keyed
 /// to the exact filename.
+///
+/// Test-only helper: production probe 5 now uses [`tally_quarantine_files`],
+/// which additionally splits fresh vs. retained counts against the forensic
+/// window. This total-count wrapper is retained purely for the acknowledgement
+/// unit tests below, so it is compiled only under `#[cfg(test)]`.
+#[cfg(test)]
 fn count_quarantine_files(state_root: &std::path::Path) -> u64 {
     let entries = match std::fs::read_dir(state_root) {
         Ok(e) => e,
@@ -162,6 +181,67 @@ fn count_quarantine_files(state_root: &std::path::Path) -> u64 {
                 && !crate::self_deploy::quarantine_ack::is_acknowledged(state_root, &name)
         })
         .count() as u64
+}
+
+/// Tally quarantined corrupt cognitive-memory artifacts directly under `dir`,
+/// split into *fresh* (mtime at/after `window_start`) and *retained* (mtime
+/// before the window) counts, in a single directory scan.
+///
+/// This mirrors the `brains_llm_backed` probe's `fallback_window_start`
+/// semantics (issue #4469): retained historical snapshots (the newest
+/// `CORRUPT_DB_KEEP` forensic assets that cleanup deliberately keeps) predate
+/// the deploy/observation window and must NOT be flagged as *current*
+/// corruption, or the probe fails forever. A quarantine created at/after the
+/// window is genuine post-deploy corruption and is still counted, so the probe
+/// is not neutered into always passing.
+///
+/// Acknowledgement-aware (issue #4469): a quarantine carrying a durable `.ack`
+/// sidecar is treated as "seen" and counts as neither fresh nor retained, so a
+/// genuinely-stuck but acknowledged protected recovery asset can clear the
+/// probe without being deleted. The `.ack` sidecar files themselves are never
+/// counted as quarantines.
+///
+/// Absent/unreadable dir ⇒ `(0, 0)` (nothing to quarantine). Entries whose
+/// mtime cannot be read are skipped entirely (fail-safe: never counted fresh,
+/// and not surfaced as retained either since freshness is unknowable).
+fn tally_quarantine_files(dir: &std::path::Path, window_start: DateTime<Utc>) -> QuarantineTally {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return QuarantineTally::default(),
+    };
+    let mut tally = QuarantineTally::default();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !crate::cmd_cleanup::is_corrupt_quarantine_name(&name) {
+            continue;
+        }
+        // #4469: `.ack` sidecars are never quarantines, and an acknowledged
+        // artifact is "seen" — it counts as neither fresh nor retained so a
+        // stuck protected recovery asset can converge without being deleted.
+        if crate::self_deploy::quarantine_ack::is_ack_marker_name(&name)
+            || crate::self_deploy::quarantine_ack::is_acknowledged(dir, &name)
+        {
+            continue;
+        }
+        let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if DateTime::<Utc>::from(mtime) >= window_start {
+            tally.fresh += 1;
+        } else {
+            tally.retained += 1;
+        }
+    }
+    tally
+}
+
+/// Fresh vs. retained quarantine counts from a single live-store directory scan.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct QuarantineTally {
+    /// Quarantines with mtime at/after the window start (genuine fresh events).
+    fresh: u64,
+    /// Quarantines with mtime before the window (retained forensic snapshots).
+    retained: u64,
 }
 
 /// Guarded autonomous auto-ack (#4469): if the #2550 protected recovery asset
@@ -228,8 +308,6 @@ pub fn run_self_health_probe(
     memory_count_tolerance: u64,
     fallback_window_start: DateTime<Utc>,
 ) -> SimardResult<SelfHealthReport> {
-    let state_root = crate::state_root::simard_state_root();
-
     // Probe 1: version advanced to (>=) the target commit.
     let running = running_commit().to_string();
     let version_advanced = VersionAdvancedProbe {
@@ -281,20 +359,31 @@ pub fn run_self_health_probe(
         fallback_records,
     };
 
-    // Probe 5: no quarantined corrupt cognitive-memory store.
+    // Probe 5: no *fresh* quarantined corrupt cognitive-memory store. Scans the
+    // live-store directory `<state_root>/state/` (where LadybugDB drops corrupt
+    // snapshots next to the live `cognitive` store) — the SAME directory
+    // `cmd_cleanup::disk` reclaims. Only quarantines at/after the window start
+    // count as fresh, so retained historical forensic snapshots don't fail the
+    // probe forever, but genuine post-deploy corruption still does (issue #4469).
     //
-    // #4469: before counting, run the guarded autonomous auto-ack. The #2550
-    // protected recovery asset — retained forever yet always red — is the one
-    // quarantine that can NEVER clear on its own and freezes self-deploy. Once
-    // it ages past the forensic window, acknowledge it so the probe can converge
-    // WITHOUT deleting it. This lives on the probe path (not the operator CLI)
-    // so it also fires for the orchestrator's unattended post-deploy health
-    // check. Fresh corruption is never eligible.
-    let _ = auto_ack_stuck_recovery_asset(&state_root);
-    let quarantined = count_quarantine_files(&state_root) > 0;
+    // #4469: before counting, run the guarded autonomous auto-ack against that
+    // same live-store directory. The #2550 protected recovery asset — retained
+    // forever yet always red — is the one quarantine that can NEVER clear on its
+    // own and freezes self-deploy. Once it ages past the forensic window,
+    // acknowledge it (durable `.ack` sidecar) so the probe can converge WITHOUT
+    // deleting it; an acknowledged quarantine never counts as fresh. This lives
+    // on the probe path (not the operator CLI) so it also fires for the
+    // orchestrator's unattended post-deploy health check. Fresh corruption is
+    // never eligible for auto-ack.
+    let live_store_dir = crate::state_root::resolve_subdir("state");
+    let _ = auto_ack_stuck_recovery_asset(&live_store_dir);
+    let quarantine_tally = tally_quarantine_files(&live_store_dir, fallback_window_start);
+    let quarantined = quarantine_tally.fresh > 0;
     let no_quarantine = NoQuarantineProbe {
         healthy: !quarantined,
         quarantined,
+        fresh_quarantines: quarantine_tally.fresh,
+        retained: quarantine_tally.retained,
     };
 
     // Probe 6: the PATH-resolved `simard` is the installed entrypoint.
@@ -450,24 +539,136 @@ mod probe_logic_tests {
         assert!(!commits_compatible("deadbeef", ""));
     }
 
+    /// Set a path's mtime to an absolute instant (test-only helper).
+    fn set_mtime(path: &std::path::Path, when: std::time::SystemTime) {
+        let times = std::fs::FileTimes::new().set_modified(when);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+    }
+
+    /// Root Cause A (issue #4469): only corrupt cognitive-memory artifacts whose
+    /// mtime is at/after the window start are "fresh". Corrupt-name detection is
+    /// unchanged from the old count; the window filter is the new behavior that
+    /// lets the probe distinguish current corruption from retained snapshots.
     #[test]
-    fn quarantine_scan_detects_only_corrupt_cognitive_files() {
+    fn fresh_quarantine_scan_counts_only_corrupt_cognitive_files_within_window() {
         let dir = tempdir().unwrap();
+        // A window that opened well in the past: files created "now" are fresh.
+        let window = Utc::now() - chrono::Duration::seconds(300);
+
         std::fs::write(dir.path().join("cognitive.db"), b"x").unwrap();
         std::fs::write(dir.path().join("unrelated.corrupt-123"), b"x").unwrap();
-        assert_eq!(count_quarantine_files(dir.path()), 0);
+        // Non-corrupt / non-cognitive names never count, even when fresh.
+        assert_eq!(tally_quarantine_files(dir.path(), window).fresh, 0);
 
         std::fs::write(dir.path().join("cognitive.corrupt-20260101"), b"x").unwrap();
         std::fs::write(dir.path().join("cognitive_memory.corrupt-20260102"), b"x").unwrap();
-        assert_eq!(count_quarantine_files(dir.path()), 2);
+        assert_eq!(tally_quarantine_files(dir.path(), window).fresh, 2);
+    }
+
+    /// Root Cause A, acceptance #1: retained *historical* snapshots (mtime before
+    /// the window) are forensic recovery assets, NOT evidence of current
+    /// corruption. The probe must ignore them — this is what lets the permanently
+    /// failing `no_quarantine` probe finally clear. Mirrors the
+    /// `brains_llm_backed` `fallback_window_start` semantics.
+    #[test]
+    fn fresh_quarantine_scan_ignores_historical_snapshots_before_window() {
+        let dir = tempdir().unwrap();
+        // The window opens "now"; every snapshot below predates it.
+        let window = Utc::now();
+
+        // Simulate the CORRUPT_DB_KEEP retained forensic snapshots that cleanup
+        // deliberately keeps, all aged well before the observation window.
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 24 * 3600);
+        for i in 0..5 {
+            let p = dir.path().join(format!("cognitive.corrupt-{i:04}"));
+            std::fs::write(&p, b"forensic").unwrap();
+            set_mtime(&p, old);
+        }
+        let tally = tally_quarantine_files(dir.path(), window);
+        assert_eq!(
+            tally.fresh, 0,
+            "retained snapshots older than the window must not be counted fresh"
+        );
+        assert_eq!(
+            tally.retained, 5,
+            "all 5 out-of-window snapshots must be surfaced as retained"
+        );
+    }
+
+    /// Root Cause A, acceptance #2: a genuinely fresh quarantine created within
+    /// the window still counts — the probe must not be neutered into always
+    /// passing. A post-deploy corruption event must still FAIL the probe.
+    #[test]
+    fn fresh_quarantine_scan_counts_new_corruption_within_window() {
+        let dir = tempdir().unwrap();
+        let window = Utc::now() - chrono::Duration::seconds(60);
+
+        // A historical retained snapshot (ignored) ...
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(10 * 24 * 3600);
+        let hist = dir.path().join("cognitive.corrupt-0000");
+        std::fs::write(&hist, b"old").unwrap();
+        set_mtime(&hist, old);
+
+        // ... plus a fresh post-window quarantine that must be caught.
+        std::fs::write(dir.path().join("cognitive.corrupt-9999"), b"fresh").unwrap();
+
+        let tally = tally_quarantine_files(dir.path(), window);
+        assert_eq!(
+            tally.fresh, 1,
+            "a fresh quarantine inside the window must still be flagged"
+        );
+        assert_eq!(
+            tally.retained, 1,
+            "the historical snapshot must be surfaced as retained, not fresh"
+        );
+    }
+
+    /// Root Cause A boundary: the window filter is an INCLUSIVE lower bound
+    /// (`mtime >= window_start`). A quarantine whose mtime lands exactly on the
+    /// window start is a fresh, post-deploy event and must be counted; one a
+    /// single second earlier is a retained historical snapshot. This pins the
+    /// exact edge the fresh/retained split hinges on — the existing tests only
+    /// cover instants clearly inside or clearly before the window. A
+    /// whole-second instant is used so filesystem mtime truncation can never
+    /// blur the boundary and make the assertion flaky.
+    #[test]
+    fn fresh_quarantine_scan_window_start_is_inclusive_lower_bound() {
+        let dir = tempdir().unwrap();
+        let boundary = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let window = DateTime::<Utc>::from(boundary);
+
+        // Exactly on the boundary ⇒ fresh (inclusive `>=`).
+        let on = dir.path().join("cognitive.corrupt-onboundary");
+        std::fs::write(&on, b"x").unwrap();
+        set_mtime(&on, boundary);
+
+        // One second before the boundary ⇒ retained.
+        let before = dir.path().join("cognitive.corrupt-beforeboundary");
+        std::fs::write(&before, b"x").unwrap();
+        set_mtime(&before, boundary - std::time::Duration::from_secs(1));
+
+        let tally = tally_quarantine_files(dir.path(), window);
+        assert_eq!(
+            tally.fresh, 1,
+            "a quarantine whose mtime equals window_start must count as fresh"
+        );
+        assert_eq!(
+            tally.retained, 1,
+            "a quarantine one second before window_start must be retained"
+        );
     }
 
     #[test]
-    fn quarantine_scan_missing_dir_is_zero() {
-        assert_eq!(
-            count_quarantine_files(std::path::Path::new("/no-such-dir-xyz-123")),
-            0
-        );
+    fn fresh_quarantine_scan_missing_dir_is_zero() {
+        let tally =
+            tally_quarantine_files(std::path::Path::new("/no-such-dir-xyz-123"), Utc::now());
+        assert_eq!(tally.fresh, 0);
+        assert_eq!(tally.retained, 0);
     }
 
     // ── #4469: acknowledgement-aware quarantine scan ──

@@ -1,7 +1,7 @@
 ---
 title: Self-deploy API reference
 description: Reference for the reconciliation detector, build-from-source self-deploy orchestrator extensions, the DaemonRestarter abstraction, the dual protective backup, the engineer-orphan reaper, the simard self-health probe (including the entrypoint-parity probe that verifies the PATH-resolved `simard` matches the installed version), the Overseer autonomous deploy wiring (its security prerequisites/trust model, Signal::DeployDriftDetected, ProblemKind::DeployDrift, Intervention::Deploy, GuardedDeployer, the OrchestratedBinaryDeployer adapter, notify-on-every-outcome, and the min-interval anti-thrash guard), and the UpdateConfig / environment fields that govern self-deploy.
-last_updated: 2026-07-21
+last_updated: 2026-07-22
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -370,7 +370,7 @@ never deletes it, and a *new* corruption event reddens the probe again. The full
     "memory_intact":    { "healthy": false, "live_facts": 1180, "baseline_facts": 1206 },
     "goal_board_intact":{ "healthy": true,  "active_goals": 5 },
     "brains_llm_backed":{ "healthy": true,  "fallback_records": 0 },
-    "no_quarantine":    { "healthy": true,  "quarantined": false },
+    "no_quarantine":    { "healthy": true,  "quarantined": false, "fresh_quarantines": 0, "retained": 3 },
     "entrypoint_parity":{ "healthy": true,  "installed_version": "simard 0.35.0", "path_version": "simard 0.35.0", "resolved_path": "/home/you/.local/bin/simard", "canonical_path": "/home/you/.simard/bin/simard", "path_mismatch": false, "foreign_shadow": false }
   }
 }
@@ -379,14 +379,83 @@ never deletes it, and a *new* corruption event reddens the probe again. The full
 `healthy` is the logical AND of every probe's `healthy`. A `false` from any probe
 fails the health check and triggers rollback when invoked by the orchestrator.
 
-> **`no_quarantine` is acknowledgement-aware (#4469).** The probe's JSON schema
-> is unchanged (`{ "healthy", "quarantined" }`), but `count_quarantine_files`
-> now counts only **unacknowledged** `cognitive*.corrupt-<ts>` artifacts: an
-> artifact with a sibling `.ack` sidecar — and the `.ack` files themselves — are
-> skipped. This lets a genuinely-stuck quarantine (the retained #2550 recovery
-> asset) clear so `all_healthy()` can converge, while a *new* corruption event
-> still reddens the probe. See
+### `NoQuarantineProbe`
+
+```rust
+/// Probe: no *fresh* corrupt cognitive-memory quarantine appeared in the live
+/// store directory since the deploy window opened.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoQuarantineProbe {
+    pub healthy: bool,
+    /// `true` when at least one corrupt-store quarantine in the live-store
+    /// directory has an mtime at/after `fallback_window_start` (a fresh event).
+    /// Retained historical snapshots (mtime before the window) never set this.
+    pub quarantined: bool,
+    /// Count of quarantines with mtime at/after `fallback_window_start`
+    /// (the events that drive `quarantined` / failure). `quarantined ==
+    /// (fresh_quarantines > 0)`.
+    pub fresh_quarantines: u64,
+    /// Count of quarantines present in the directory whose mtime is *before*
+    /// the window — retained forensic snapshots the probe deliberately ignores.
+    /// Lets operators distinguish "0 quarantines total" from "0 fresh + N
+    /// retained" without shelling into the store directory.
+    pub retained: u64,
+}
+```
+
+The probe scans the **live cognitive-store directory** — `resolve_subdir("state")`
+(i.e. `<state_root>/state/`, the directory the daemon actually opens the store
+in and where LadybugDB drops `cognitive*.corrupt-<ts>` quarantines), resolved via
+the [`state_root`](./state-root-resolution.md) helpers. It is **window-scoped**,
+mirroring [`brains_llm_backed`](#self-health-output): a quarantine counts only
+when its filesystem mtime is **at or after** the `fallback_window_start` instant
+already passed to `run_self_health_probe`. The entry mtime is converted to
+`DateTime<Utc>` and compared against the window start; entries whose metadata
+cannot be read are skipped (fail-safe: never counted fresh, never deleted).
+
+This resolves a permanent-failure trap. Cleanup deliberately **retains** the
+newest [`CORRUPT_DB_KEEP`](../operations/verified-backups.md#bounded-corrupt-quarantine-retention)
+quarantines as forensic recovery assets, so a naive "quarantine count > 0" test
+would fail on exactly the snapshots retention is designed to keep — the probe
+could never clear, and the daemon (which rolls back on any unhealthy probe) would
+freeze on a stale build. The window filter distinguishes a *historical retained
+snapshot* (mtime before the window → `quarantined: false`, healthy) from a
+*genuinely fresh* post-deploy corruption event (mtime at/after the window →
+`quarantined: true`, fails and rolls back). The probe is **not** neutered:
+real corruption during or after the deploy still fails it.
+
+The probe scans the **same** directory that [`simard cleanup`](../operations/verified-backups.md#bounded-corrupt-quarantine-retention)
+reclaims (`resolve_subdir("state")`); both route through the `state_root` helpers
+with no hardcoded duplicate path, so "where corruption is detected" and "where it
+is reclaimed" can never drift apart.
+
+The probe surfaces two diagnostic counts alongside the boolean. `fresh_quarantines`
+is the number of in-window quarantines (`quarantined == (fresh_quarantines > 0)`),
+and `retained` is the number of out-of-window snapshots the probe ignored. Emitting
+both lets operators tell "clean store" (`0` / `0`) apart from "clean since deploy,
+N forensic snapshots retained" (`0` / `N`) directly from the health JSON, without
+inspecting the store directory by hand.
+
+> **Acknowledgement-aware counting (#4469).** The probe's JSON schema is unchanged,
+> but both `count_quarantine_files` and the fresh/retained tally count only
+> **unacknowledged** `cognitive*.corrupt-<ts>` artifacts: an artifact with a
+> sibling `.ack` sidecar — and the `.ack` files themselves — are skipped, counting
+> as neither fresh nor retained. This lets a genuinely-stuck quarantine (the
+> retained #2550 recovery asset) clear so `all_healthy()` can converge without
+> deleting it, while a *new* (unacknowledged) corruption event still reddens the
+> probe. See
 > [self-deploy quarantine-acknowledge](./self-deploy-quarantine-acknowledge.md).
+
+> **Known limitation — mtime freshness.** Freshness is keyed on filesystem mtime.
+> Any operation that rewrites the mtime of a *retained* historical snapshot —
+> a rename, a `.bak` copy that preserves the original name, or a manual `touch` —
+> can push that snapshot's mtime past `fallback_window_start` and be misread as a
+> fresh corruption event, spuriously failing the probe. This is acceptable because
+> [`simard cleanup`](../operations/verified-backups.md#bounded-corrupt-quarantine-retention)
+> only deletes retained assets (it never rewrites their mtimes), so under normal
+> operation retained snapshots keep their original quarantine timestamps. Operators
+> performing manual forensics on the live-store directory should copy snapshots
+> *out* rather than mutate them in place.
 
 ### `EntrypointParityProbe`
 

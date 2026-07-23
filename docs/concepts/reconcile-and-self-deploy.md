@@ -1,7 +1,7 @@
 ---
 title: "Concept: reconcile-and-self-deploy (closing the merged-but-not-running gap)"
 description: How Simard closes the loop between a merged self-change and a running daemon — a per-cycle reconciliation detector that measures deploy drift, a build-from-source self-deploy that ends with the new binary verified-running, autonomous drift-triggered deploy through the Overseer (with its origin/main root-of-trust security prerequisites and least-privilege non-root swap), and rollback on a failed health check.
-last_updated: 2026-07-21
+last_updated: 2026-07-22
 review_schedule: as-needed
 owner: simard
 doc_type: concept
@@ -215,29 +215,48 @@ of the following hold:
 | **Memory intact** | cognitive-memory fact count ≥ the pre-deploy count (within tolerance), via the `CognitiveMemoryOps` count API |
 | **Goal board intact** | the goal board loads and the active-goal count is preserved |
 | **Brains LLM-backed** | zero `BrainJudgmentRecord.fallback == true` records over a probe cycle (see [parse-failure record](../reference/ooda-brain-parse-failure-record.md)) |
-| **No quarantine** | the cognitive-memory store quarantine flag is clear — i.e. no *unacknowledged* `cognitive*.corrupt-<ts>` artifact remains (see below) |
+| **No quarantine** | no *fresh*, *unacknowledged* corrupt-store quarantine appeared in the live cognitive-store directory since the deploy window opened — retained historical forensic snapshots and acknowledged artifacts are ignored (see below) |
 
 Any single failing probe fails the health check and triggers rollback. The probe
 output is the same structured JSON whether it is run by the orchestrator or by an
 operator at a console — see
 [self-health output](../reference/self-deploy-api.md#self-health-output).
 
+Both **Brains LLM-backed** and **No quarantine** are *window-scoped*: they judge
+only events that occurred at/after the deploy observation window opened
+(`fallback_window_start`), so a fault inherited from the *previous* binary can
+never fail a *fresh* deploy. For **No quarantine** this is essential — the
+cleanup path deliberately **retains** the newest handful of corrupt-store
+quarantines as forensic recovery assets (see
+[Bounded corrupt-quarantine retention](../operations/verified-backups.md#bounded-corrupt-quarantine-retention)),
+so a count-based "any quarantine present" test would fail forever against exactly
+the snapshots retention is designed to keep, freezing the daemon on a stale
+build. The window filter flags only a quarantine *created during/after* the
+deploy — genuine post-deploy corruption still fails the probe and rolls back.
+The probe also reports the in-window (`fresh_quarantines`) and retained
+(`retained`) counts so an operator can tell a truly empty store from one holding
+only retained forensic snapshots (see
+[`NoQuarantineProbe`](../reference/self-deploy-api.md#noquarantineprobe)).
+
 ### Clearing a stuck quarantine
 
-The **No quarantine** probe once had a deadlock (#4469): the largest corrupt
-store is a *recovery asset* that `simard cleanup` deliberately never deletes
-(#2550), so the one artifact keeping the probe red was exactly the one protected
-from deletion — the probe could never clear on its own, and self-deploy froze
-commits behind merged `main`.
+The window filter alone does not cover one pathological case (#4469): the largest
+corrupt store is a *recovery asset* that `simard cleanup` deliberately never
+deletes (#2550). If such an asset lands *inside* the deploy window — or a fresh
+corruption keeps re-landing on the one artifact protected from deletion — the
+probe stays red on exactly the artifact that can never be swept, and self-deploy
+freezes commits behind merged `main`.
 
-The probe is now **acknowledgement-aware**. An operator can acknowledge a
-genuinely-stuck quarantine (`simard self-health --acknowledge-quarantine`) — or,
-for the protected recovery asset past the 30-day forensic window, the daemon
-auto-acknowledges it — by writing a durable `.ack` sidecar next to the artifact.
-Acknowledgement silences the probe **without deleting the recovery asset**;
-`count_quarantine_files` counts only *unacknowledged* artifacts, so
-`all_healthy()` can converge. A *new* corruption event writes a fresh,
-unacknowledged artifact and correctly reddens the probe again. Full mechanics:
+The probe is therefore also **acknowledgement-aware**. An operator can
+acknowledge a genuinely-stuck quarantine (`simard self-health
+--acknowledge-quarantine`) — or, for the protected recovery asset past the
+30-day forensic window, the daemon auto-acknowledges it — by writing a durable
+`.ack` sidecar next to the artifact. Acknowledgement silences the probe
+**without deleting the recovery asset**: an acknowledged quarantine counts as
+neither *fresh* nor *retained*, so `all_healthy()` can converge. A *new*
+corruption event writes a fresh, unacknowledged artifact and correctly reddens
+the probe again, because the marker is keyed to the exact filename. Full
+mechanics:
 [self-deploy quarantine-acknowledge](../reference/self-deploy-quarantine-acknowledge.md)
 and the runbook [Clear a stuck memory
 quarantine](../howto/clear-a-stuck-memory-quarantine.md).
