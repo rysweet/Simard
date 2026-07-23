@@ -620,7 +620,7 @@ fn assemble_gym(skip_gym: bool) -> SectionEnvelope<Gym> {
     } else {
         (
             Some(crate::gym::benchmark_scenarios().len() as u32),
-            "active",
+            "enabled",
         )
     };
     SectionEnvelope::live(
@@ -1050,7 +1050,7 @@ mod pure_helper_tests {
             "enabled gym must report the real benchmark-scenario count"
         );
         assert_eq!(
-            g.self_eval_state, "active",
+            g.self_eval_state, "enabled",
             "enabled gym must report a non-idle self-eval state"
         );
 
