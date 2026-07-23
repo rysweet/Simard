@@ -267,8 +267,12 @@ fn auto_ack_stuck_recovery_asset(state_root: &std::path::Path) -> Option<String>
     }
     match crate::self_deploy::quarantine_ack::acknowledge(state_root, &name) {
         Ok(marker) => {
+            // `?name` (Debug) escapes control chars: a quarantine basename is an
+            // untrusted on-disk filename that may contain newlines, so logging it
+            // raw via `%name` under the default non-JSON subscriber would allow
+            // log-line forgery (#4469 security review).
             tracing::warn!(
-                artifact = %name,
+                artifact = ?name,
                 marker = %marker.display(),
                 min_age_days = crate::cmd_cleanup::disk::CORRUPT_DB_MAX_AGE_DAYS,
                 "self_deploy.quarantine.auto_ack: acknowledged aged #2550 protected \
@@ -279,7 +283,7 @@ fn auto_ack_stuck_recovery_asset(state_root: &std::path::Path) -> Option<String>
         }
         Err(e) => {
             tracing::warn!(
-                artifact = %name,
+                artifact = ?name,
                 error = %e,
                 "self_deploy.quarantine.auto_ack_failed: could not acknowledge aged \
                  protected recovery asset (#4469)"

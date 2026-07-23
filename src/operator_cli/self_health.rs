@@ -71,8 +71,10 @@ fn acknowledge_all_present_quarantines(state_root: &Path) -> usize {
     for name in crate::self_deploy::present_quarantine_artifacts(state_root) {
         match crate::self_deploy::acknowledge(state_root, &name) {
             Ok(_) => acknowledged += 1,
+            // `?name` (Debug) escapes control chars in the untrusted quarantine
+            // basename to prevent log-line forgery (#4469 security review).
             Err(e) => tracing::warn!(
-                artifact = %name,
+                artifact = ?name,
                 error = %e,
                 "self_health.acknowledge_quarantine_failed: skipping one artifact (#4469)"
             ),
