@@ -172,12 +172,13 @@ fn render_per_goal_cycle_prompt(ctx: &PerGoalCycleCtx) -> String {
 }
 
 /// Parse a strict `{"choice","reason"[,"task_hint"]}` per-goal action envelope
-/// from a model response. Routes through the shared sanitizing JSON chokepoint
-/// so a banner-polluted or trailing-comma body still parses. Returns `Err` (no
-/// silent fallback) when no valid envelope is present — a missing `reason` or an
-/// unknown `choice` fails the serde parse and surfaces here.
+/// from a model response via the SINGLE canonical parser
+/// [`PerGoalAction::from_recipe_envelope`] (shared with `RecipeBrain`), so every
+/// backend agrees on what a valid envelope is. Returns `Err` (no silent
+/// fallback) when no valid envelope is present — a missing/empty `reason` or an
+/// unknown `choice` yields `None` there and surfaces here.
 fn parse_per_goal_action_from_response(text: &str) -> Result<PerGoalAction, String> {
-    crate::recipe_output::extract_and_parse_json::<PerGoalAction>(text).ok_or_else(|| {
+    PerGoalAction::from_recipe_envelope(text).ok_or_else(|| {
         format!(
             "no parseable per-goal action envelope in response: {}",
             truncate_for_log(text)

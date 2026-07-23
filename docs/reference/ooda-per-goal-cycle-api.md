@@ -103,9 +103,16 @@ and a `reason`:
 {"choice": "complete",   "reason": "goal shipped and merged in PR #1234"}
 ```
 
-An unknown `choice`, a missing `reason`, or an otherwise unparseable envelope is
-an **error**, never a silent default (see
+An unknown `choice`, a missing **or empty** `reason`, or an otherwise
+unparseable envelope is an **error**, never a silent default (see
 [Reference: OODA Per-Goal-Cycle Recipe](ooda-per-goal-cycle-recipe.md)).
+
+Every reasoner backend routes its raw output through the single canonical parser
+`PerGoalAction::from_recipe_envelope`, so `RecipeBrain` and `RustyClawdBrain`
+agree bit-for-bit on what a valid envelope is: `choice` is matched
+case-insensitively, `reason`/`task_hint` are trimmed and bounded, and an
+empty/whitespace `reason` or an unknown `choice` yields `None` (surfaced by the
+caller as a no-fallback `Err`).
 
 ## `apply_per_goal_action_to_state`
 
@@ -172,7 +179,8 @@ pub trait OodaBrain: Send + Sync {
 
 | Impl | File | Behavior |
 |---|---|---|
-| `RecipeBrain` | `recipe_brain.rs` | Runs the `ooda-per-goal-cycle` recipe subprocess, parses the JSON envelope, and **surfaces `Err` on any parse/subprocess failure** — no silent fallback. Reuses the `invoke_lifecycle_raw` pattern and bounded escalation ladder. |
+| `RecipeBrain` | `recipe_brain.rs` | Runs the `ooda-per-goal-cycle` recipe subprocess, then parses the JSON envelope via the canonical `PerGoalAction::from_recipe_envelope`, and **surfaces `Err` on any parse/subprocess failure** — no silent fallback. Reuses the `invoke_lifecycle_raw` pattern and bounded escalation ladder. |
+| `RustyClawdBrain` | `rustyclawd.rs` | Renders a compact prompt, submits it through the `LlmSubmitter`, then parses the response via the same canonical `PerGoalAction::from_recipe_envelope`. **Surfaces `Err`** on an unparseable envelope — no silent fallback. |
 | `DeterministicLifecycleBrain` | `fallback.rs` | Returns `Continue` unconditionally. This preserves the no-LLM behavior of the fallback: it **never** rolls the cycle and **never** reaps, so the fallback path cannot re-introduce the idle→reset loop. |
 | Test doubles (5 across 3 files) | `tests.rs`, `spawn.rs`, `recipe_brain.rs` | Return scripted `PerGoalAction`s for regression tests. |
 

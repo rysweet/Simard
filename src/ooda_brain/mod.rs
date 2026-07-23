@@ -283,7 +283,53 @@ pub enum PerGoalAction {
     Complete { reason: String },
 }
 
+/// Max characters retained for a per-goal action's `reason`/`task_hint` when
+/// parsed from an untrusted reasoner envelope (mirrors the act-phase rationale
+/// bound). Caps the blast radius of a runaway model response on logs/records.
+const PER_GOAL_REASON_MAX_CHARS: usize = 500;
+
+/// Raw `{"choice","reason"[,"task_hint"]}` shape emitted by the per-goal-cycle
+/// recipe/model, before validation into a [`PerGoalAction`] by
+/// [`PerGoalAction::from_recipe_envelope`].
+#[derive(serde::Deserialize)]
+struct PerGoalEnvelope {
+    choice: String,
+    #[serde(default)]
+    reason: String,
+    #[serde(default)]
+    task_hint: String,
+}
+
 impl PerGoalAction {
+    /// Parse a per-goal-cycle reasoner envelope into a [`PerGoalAction`] — the
+    /// SINGLE canonical parser shared by every brain backend (`RecipeBrain`,
+    /// `RustyClawdBrain`, …) so the "what is a valid action envelope?" contract
+    /// has exactly one definition. Returns `None` (surfaced by the caller as a
+    /// NO-FALLBACK `Err`, #1711) unless the text contains a balanced JSON object
+    /// with a known `choice` variant AND a non-empty `reason`. `choice` is
+    /// matched case-insensitively; `reason`/`task_hint` are trimmed and bounded.
+    /// A missing/empty `reason` or an unknown `choice` yields `None`, so a
+    /// compromised prompt cannot smuggle a reason-less or novel destructive
+    /// action past any backend.
+    pub fn from_recipe_envelope(text: &str) -> Option<Self> {
+        let env: PerGoalEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
+        let reason = env.reason.trim();
+        if reason.is_empty() {
+            return None;
+        }
+        let reason = recipe_brain::truncate(reason, PER_GOAL_REASON_MAX_CHARS);
+        let task_hint = recipe_brain::truncate(env.task_hint.trim(), PER_GOAL_REASON_MAX_CHARS);
+        match env.choice.trim() {
+            c if c.eq_ignore_ascii_case("continue") => Some(Self::Continue { reason }),
+            c if c.eq_ignore_ascii_case("spawn") => Some(Self::Spawn { reason, task_hint }),
+            c if c.eq_ignore_ascii_case("reorient") => Some(Self::Reorient { reason }),
+            c if c.eq_ignore_ascii_case("investigate") => Some(Self::Investigate { reason }),
+            c if c.eq_ignore_ascii_case("wait") => Some(Self::Wait { reason }),
+            c if c.eq_ignore_ascii_case("complete") => Some(Self::Complete { reason }),
+            _ => None,
+        }
+    }
+
     /// Stable snake_case label — identical to the serde `choice` tag. Shared by
     /// the judgment record, the applied-detail string, and the per-goal outcome.
     pub fn variant_label(&self) -> &'static str {

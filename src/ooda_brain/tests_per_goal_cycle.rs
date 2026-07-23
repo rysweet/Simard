@@ -218,6 +218,75 @@ fn per_goal_action_exposes_label_and_reason_accessors() {
 }
 
 // ---------------------------------------------------------------------------
+// PerGoalAction::from_recipe_envelope — the SINGLE canonical envelope parser
+// shared by every brain backend (RecipeBrain, RustyClawdBrain). These lock the
+// consolidated contract so the backends can never drift apart again.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn from_recipe_envelope_parses_a_banner_polluted_fenced_body() {
+    // The canonical parser routes through the shared sanitizing JSON chokepoint,
+    // so a fenced block wrapped in log banners still yields the action.
+    let raw = "recipe-runner banner\n```json\n{\"choice\":\"spawn\",\"reason\":\"dispatch next source\",\"task_hint\":\"read arxiv\"}\n```\ntrailing noise";
+    let parsed = PerGoalAction::from_recipe_envelope(raw).expect("must parse polluted envelope");
+    assert_eq!(
+        parsed,
+        PerGoalAction::Spawn {
+            reason: "dispatch next source".into(),
+            task_hint: "read arxiv".into(),
+        }
+    );
+}
+
+#[test]
+fn from_recipe_envelope_rejects_empty_or_whitespace_reason() {
+    // Mandatory-reason invariant enforced for EVERY backend (previously the
+    // rustyclawd path accepted an empty reason via direct enum deserialize).
+    assert!(
+        PerGoalAction::from_recipe_envelope(r#"{"choice":"continue","reason":""}"#).is_none(),
+        "an empty reason must not parse"
+    );
+    assert!(
+        PerGoalAction::from_recipe_envelope(r#"{"choice":"continue","reason":"   "}"#).is_none(),
+        "a whitespace-only reason must not parse"
+    );
+}
+
+#[test]
+fn from_recipe_envelope_rejects_unknown_choice() {
+    // A compromised prompt cannot smuggle a novel destructive action.
+    assert!(
+        PerGoalAction::from_recipe_envelope(r#"{"choice":"reap_now","reason":"x"}"#).is_none(),
+        "an unknown choice must not parse"
+    );
+}
+
+#[test]
+fn from_recipe_envelope_matches_choice_case_insensitively_and_trims() {
+    let parsed = PerGoalAction::from_recipe_envelope(r#"{"choice":" Continue ","reason":" ok "}"#)
+        .expect("case-insensitive trimmed choice must parse");
+    assert_eq!(
+        parsed,
+        PerGoalAction::Continue {
+            reason: "ok".into()
+        }
+    );
+}
+
+#[test]
+fn from_recipe_envelope_bounds_a_runaway_reason() {
+    // A runaway model reason is truncated so it cannot bloat logs/records.
+    let huge = "z".repeat(5_000);
+    let raw = format!(r#"{{"choice":"wait","reason":"{huge}"}}"#);
+    let parsed = PerGoalAction::from_recipe_envelope(&raw).expect("must parse");
+    assert!(
+        parsed.reason().chars().count() <= 501,
+        "reason must be bounded, got {} chars",
+        parsed.reason().chars().count()
+    );
+}
+
+// ---------------------------------------------------------------------------
 // apply_per_goal_action_to_state — PURE state rail (A6)
 //
 // The crux of the 70ab8541 fix: only a DELIBERATE Reorient or Complete may

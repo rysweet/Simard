@@ -1240,12 +1240,14 @@ impl OodaBrain for RecipeBrain {
     /// "leave it" answer is a real, model-emitted `continue` (parsed).
     fn decide_per_goal_cycle(&self, ctx: &PerGoalCycleCtx) -> SimardResult<PerGoalAction> {
         let raw = self.invoke_per_goal_cycle_raw(ctx)?;
-        parse_per_goal_action(&raw).ok_or_else(|| SimardError::AdapterInvocationFailed {
-            base_type: PER_GOAL_CYCLE_ADAPTER_TAG.to_string(),
-            reason: format!(
-                "per-goal-cycle recipe output had no parseable action envelope: {}",
-                truncate(&raw, MAX_RATIONALE_CHARS)
-            ),
+        PerGoalAction::from_recipe_envelope(&raw).ok_or_else(|| {
+            SimardError::AdapterInvocationFailed {
+                base_type: PER_GOAL_CYCLE_ADAPTER_TAG.to_string(),
+                reason: format!(
+                    "per-goal-cycle recipe output had no parseable action envelope: {}",
+                    truncate(&raw, MAX_RATIONALE_CHARS)
+                ),
+            }
         })
     }
 
@@ -2109,47 +2111,6 @@ fn render_live_signals(signals: &[crate::goal_curation::live_signal::LiveSignal]
         })
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// A structured per-goal, per-cycle action envelope (issue #4453). The strict
-/// 6-variant contract: `choice` is the required action token, `reason` is
-/// mandatory, and `task_hint` is optional guidance carried only by `spawn`.
-/// Unknown extra fields are ignored for forward-compatibility.
-#[derive(Debug, Clone, serde::Deserialize)]
-struct PerGoalEnvelope {
-    choice: String,
-    #[serde(default)]
-    reason: String,
-    #[serde(default)]
-    task_hint: String,
-}
-
-/// Parse the per-goal-cycle recipe output into a [`PerGoalAction`], or `None`
-/// when no balanced JSON object with a known `choice` variant AND a non-empty
-/// `reason` is present (the caller surfaces that as a NO-FALLBACK `Err`). Routes
-/// through the shared sanitizing chokepoint so a banner-polluted envelope still
-/// parses. A missing/empty `reason` or an unknown `choice` yields `None` — a
-/// compromised prompt cannot smuggle a reason-less or novel destructive action.
-fn parse_per_goal_action(text: &str) -> Option<PerGoalAction> {
-    let env: PerGoalEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
-    let reason = env.reason.trim();
-    if reason.is_empty() {
-        return None;
-    }
-    let reason = truncate(reason, MAX_RATIONALE_CHARS);
-    let hint = truncate(env.task_hint.trim(), MAX_RATIONALE_CHARS);
-    match env.choice.trim() {
-        c if c.eq_ignore_ascii_case("continue") => Some(PerGoalAction::Continue { reason }),
-        c if c.eq_ignore_ascii_case("spawn") => Some(PerGoalAction::Spawn {
-            reason,
-            task_hint: hint,
-        }),
-        c if c.eq_ignore_ascii_case("reorient") => Some(PerGoalAction::Reorient { reason }),
-        c if c.eq_ignore_ascii_case("investigate") => Some(PerGoalAction::Investigate { reason }),
-        c if c.eq_ignore_ascii_case("wait") => Some(PerGoalAction::Wait { reason }),
-        c if c.eq_ignore_ascii_case("complete") => Some(PerGoalAction::Complete { reason }),
-        _ => None,
-    }
 }
 
 /// A structured outcome-verification decision envelope. Unlike the shared
