@@ -66,6 +66,7 @@ pub mod merge_queue_observe;
 pub mod notify;
 pub mod observer;
 pub mod pr_verify;
+pub mod reaper_lease;
 pub mod root_cause;
 pub mod sensor;
 pub mod signal;
@@ -356,6 +357,11 @@ struct ClaimReaperSeams {
     probe: Box<dyn claim_reaper::ClaimLivenessProbe>,
     cleanup: Box<dyn claim_reaper::OrphanWorktreeCleanup>,
     investigator: Box<dyn claim_reaper::StaleEngineerInvestigator>,
+    /// Single-writer lease guarding the sweep so co-resident daemons never race
+    /// the shared ledger (issue #4477). Defaults to the fail-safe
+    /// [`reaper_lease::AlwaysAcquireLease`]; production wires the flock lease via
+    /// [`Overseer::with_reaper_single_writer_lease`].
+    lease: Box<dyn reaper_lease::SingleWriterLease>,
 }
 
 /// The result of one meta-OODA turn. Side-effect free: it reports what was
@@ -676,7 +682,26 @@ impl Overseer {
             probe,
             cleanup,
             investigator,
+            // Fail-safe default: no cross-daemon exclusion. Production installs the
+            // flock single-writer lease via `with_reaper_single_writer_lease`.
+            lease: Box::new(reaper_lease::AlwaysAcquireLease),
         });
+        self
+    }
+
+    /// Install the single-writer lease guarding the claim-reaper sweep (issue
+    /// #4477). Additive: a no-op when the reaper is not wired; otherwise it
+    /// replaces the fail-safe [`reaper_lease::AlwaysAcquireLease`] default so
+    /// co-resident daemons on the same state-root can never race the shared
+    /// ledger. Production wiring passes a [`reaper_lease::FlockReaperLease`] rooted
+    /// at the engineers' state-root.
+    pub fn with_reaper_single_writer_lease(
+        mut self,
+        lease: Box<dyn reaper_lease::SingleWriterLease>,
+    ) -> Self {
+        if let Some(reaper) = self.claim_reaper.as_mut() {
+            reaper.lease = lease;
+        }
         self
     }
 
@@ -1385,7 +1410,15 @@ impl Overseer {
         let Some(reaper) = self.claim_reaper.as_ref() else {
             return;
         };
-        let summary = claim_reaper::reap_stale_claims(
+        // SINGLE-WRITER GATE (issue #4477): the sweep runs through the
+        // lease-guarded wrapper, which acquires the exclusive single-writer lease
+        // BEFORE touching the shared ledger. If another co-resident daemon holds
+        // it, the wrapper returns an empty summary WITHOUT sweeping — fail-closed,
+        // so a naive `NoWorktree` immediate reclaim can never override another
+        // daemon's in-flight investigate-before-reap and false-reclaim a live
+        // engineer mid-recreate. The lease releases on every exit path via RAII.
+        let summary = claim_reaper::reap_stale_claims_single_writer(
+            reaper.lease.as_ref(),
             reaper.ledger.as_ref(),
             reaper.probe.as_ref(),
             reaper.cleanup.as_ref(),

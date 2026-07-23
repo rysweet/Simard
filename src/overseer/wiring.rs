@@ -1302,14 +1302,22 @@ pub fn build_overseer(
     // ledger is fail-visible: if it fails the reaper is simply not wired this
     // tick (the sweep is skipped), never a panic that would abort the tick.
     match build_claim_reaper_seams(&state_root) {
-        Some((ledger, probe, cleanup, investigator)) => overseer.with_claim_reaper(
-            ledger,
-            probe,
-            cleanup,
-            investigator,
-            claim_reap_enabled(),
-            claim_reap_stale_secs(),
-        ),
+        Some((ledger, probe, cleanup, investigator)) => overseer
+            .with_claim_reaper(
+                ledger,
+                probe,
+                cleanup,
+                investigator,
+                claim_reap_enabled(),
+                claim_reap_stale_secs(),
+            )
+            // SINGLE-WRITER LEASE (issue #4477): install the flock lease rooted at
+            // the SAME state-root the engineers spawn under, so co-resident daemons
+            // on this host contend on ONE inode and only the lease-winner ever
+            // mutates the shared ledger — no concurrent false-reclaim race.
+            .with_reaper_single_writer_lease(Box::new(
+                crate::overseer::reaper_lease::FlockReaperLease::new(&state_root),
+            )),
         None => overseer,
     }
 }

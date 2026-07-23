@@ -126,7 +126,30 @@ fn run_ooda_cycle_inner(
     // Sweep stale assigned_to fields against live tmux sessions.
     // Best-effort: if tmux is absent or returns no sessions, skip entirely
     // to avoid false-positive clearing in non-tmux environments.
-    sweep_stale_assignments(&mut state.active_goals);
+    //
+    // IDEMPOTENCY (issue #4462): when the sweep actually clears a stale pointer,
+    // persist the board IMMEDIATELY so the clear reaches the durable snapshot
+    // exactly once. Without this the in-memory clear was re-discovered every OODA
+    // cycle (and re-logged) because it never reached disk — the same dead
+    // engineer id was re-cleared each tick. A no-op sweep (nothing stale) skips
+    // the write entirely, so a clean board is never rewritten.
+    let sweep = sweep_stale_assignments(&mut state.active_goals);
+    if sweep.changed() {
+        match crate::goal_curation::persist_board(&state.active_goals, &*memories.memory) {
+            Ok(()) => tracing::info!(
+                target: "simard::ooda",
+                cleared = sweep.cleared_assignments.len(),
+                pruned_refs = sweep.pruned_refs,
+                "[simard] OODA start: persisted stale-assignment sweep (durable, once)",
+            ),
+            Err(error) => tracing::warn!(
+                target: "simard::ooda",
+                error = %error,
+                "[simard] OODA start: failed to persist stale-assignment sweep; \
+                 next cycle will retry (clear not yet durable)",
+            ),
+        }
+    }
 
     // Seed with the identity's seed goals (override) or the defaults if the
     // board is still empty (#3125). When the resolved identity declares its own
@@ -1063,6 +1086,29 @@ pub(crate) fn is_placeholder_description(desc: &str) -> bool {
     }
 }
 
+/// What one stale-assignment sweep changed on the board. Returned so the caller
+/// can (a) persist the clear DURABLY exactly once — issue #4462: without an
+/// immediate persist the in-memory clear was re-discovered and re-logged every
+/// OODA cycle — and (b) emit structured telemetry only on a real change.
+///
+/// `changed()` is `false` for a no-op sweep (nothing stale), which is the steady
+/// state once a dead assignment has been cleared and persisted: the next sweep
+/// over the (now-clean) board finds nothing, so the clear happens EXACTLY ONCE.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AssignmentSweepSummary {
+    /// `(session_id, goal_id)` pairs whose stale assignment was cleared this sweep.
+    pub cleared_assignments: Vec<(String, String)>,
+    /// Count of dead-session `wip_ref`s pruned this sweep.
+    pub pruned_refs: usize,
+}
+
+impl AssignmentSweepSummary {
+    /// Whether the sweep mutated the board (and therefore must be persisted).
+    pub fn changed(&self) -> bool {
+        !self.cleared_assignments.is_empty() || self.pruned_refs > 0
+    }
+}
+
 /// Clear `assigned_to` for any active goal whose assigned tmux session is no
 /// longer alive. Resets the goal status to `NotStarted` so it can be
 /// re-dispatched on the next OODA cycle.
@@ -1073,7 +1119,10 @@ pub(crate) fn is_placeholder_description(desc: &str) -> bool {
 ///
 /// This prevents false-positive clearing when Simard is run outside a tmux
 /// environment (e.g., in CI).
-fn sweep_stale_assignments(board: &mut crate::goal_curation::GoalBoard) {
+///
+/// Returns an [`AssignmentSweepSummary`] so the caller can persist the clear
+/// durably and idempotently (issue #4462).
+fn sweep_stale_assignments(board: &mut crate::goal_curation::GoalBoard) -> AssignmentSweepSummary {
     use std::collections::HashSet;
     use std::process::Command;
 
@@ -1082,7 +1131,7 @@ fn sweep_stale_assignments(board: &mut crate::goal_curation::GoalBoard) {
         .output()
     {
         Ok(o) if o.status.success() => o.stdout,
-        _ => return,
+        _ => return AssignmentSweepSummary::default(),
     };
 
     let live: HashSet<String> = String::from_utf8_lossy(&output)
@@ -1091,7 +1140,7 @@ fn sweep_stale_assignments(board: &mut crate::goal_curation::GoalBoard) {
         .filter(|s| !s.is_empty())
         .collect();
 
-    sweep_stale_assignments_with_sessions(board, &live);
+    sweep_stale_assignments_with_sessions(board, &live)
 }
 
 /// Core assignment-sweep logic parameterised on a pre-built live session set.
@@ -1102,12 +1151,18 @@ fn sweep_stale_assignments(board: &mut crate::goal_curation::GoalBoard) {
 ///
 /// Skipped (no-op) when `live_sessions` is empty — avoids clearing all
 /// assignments when running outside a tmux environment (e.g., CI).
+///
+/// Returns an [`AssignmentSweepSummary`] recording exactly what changed. When it
+/// [`changed()`](AssignmentSweepSummary::changed) is `false` the board was not
+/// mutated — the idempotent steady state after a stale assignment has already
+/// been cleared and persisted (issue #4462).
 pub(crate) fn sweep_stale_assignments_with_sessions(
     board: &mut crate::goal_curation::GoalBoard,
     live_sessions: &std::collections::HashSet<String>,
-) {
+) -> AssignmentSweepSummary {
+    let mut summary = AssignmentSweepSummary::default();
     if live_sessions.is_empty() {
-        return;
+        return summary;
     }
 
     // Kinds whose liveness is bound to the owning engineer's session: once that
@@ -1126,10 +1181,17 @@ pub(crate) fn sweep_stale_assignments_with_sessions(
             .is_some_and(|s| !live_sessions.contains(s));
         if is_stale {
             let session = goal.assigned_to.take().unwrap_or_default();
-            eprintln!(
+            // Structured, fail-visible telemetry (no stray println). Recorded on
+            // the summary so the caller persists the clear durably EXACTLY ONCE
+            // rather than re-discovering + re-logging it every cycle (#4462).
+            tracing::info!(
+                target: "simard::ooda",
+                session = %session,
+                goal = %goal.id,
                 "[simard] OODA start: cleared stale assignment '{}' for goal '{}'",
                 session, goal.id
             );
+            summary.cleared_assignments.push((session, goal.id.clone()));
             goal.status = crate::goal_curation::GoalProgress::NotStarted;
         }
 
@@ -1167,13 +1229,19 @@ pub(crate) fn sweep_stale_assignments_with_sessions(
             });
             let dropped = before - goal.wip_refs.len();
             if dropped > 0 {
-                eprintln!(
+                tracing::info!(
+                    target: "simard::ooda",
+                    goal = %goal.id,
+                    dropped,
                     "[simard] OODA start: pruned {} dead-session wip_ref(s) for goal '{}' (owning session not live)",
                     dropped, goal.id
                 );
+                summary.pruned_refs += dropped;
             }
         }
     }
+
+    summary
 }
 
 // ============================================================================
@@ -1907,6 +1975,54 @@ mod tests_sweep {
             matches!(goal.status, GoalProgress::NotStarted),
             "status must be reset to NotStarted, got {:?}",
             goal.status
+        );
+    }
+
+    /// IDEMPOTENCY (issue #4462): the SAME dead assignment id is cleared EXACTLY
+    /// ONCE. The first sweep reports a change; a second sweep over the now-cleared
+    /// board is a no-op — `changed()` is `false` and nothing is re-cleared or
+    /// re-logged. This is the invariant that stops the per-cycle re-clear churn.
+    #[test]
+    fn stale_assignment_is_cleared_exactly_once() {
+        let mut board = GoalBoard::new();
+        add_active_goal(&mut board, make_goal("g1", Some("dead-session"))).unwrap();
+        let live = live(&["alive-session"]);
+
+        // First sweep: clears the stale pointer and reports the change so the
+        // caller can persist it durably.
+        let first = sweep_stale_assignments_with_sessions(&mut board, &live);
+        assert!(first.changed(), "the first sweep must report the clear");
+        assert_eq!(
+            first.cleared_assignments,
+            vec![("dead-session".to_string(), "g1".to_string())],
+            "the summary must name the (session, goal) it cleared"
+        );
+        assert!(board.active[0].assigned_to.is_none());
+
+        // Second sweep over the SAME (now-cleared) board: idempotent no-op. The
+        // dead id is NOT re-discovered, so it is never re-cleared or re-logged.
+        let second = sweep_stale_assignments_with_sessions(&mut board, &live);
+        assert!(
+            !second.changed(),
+            "a repeat sweep over an already-cleared board must be a no-op (idempotent)"
+        );
+        assert!(second.cleared_assignments.is_empty());
+        assert_eq!(second, super::AssignmentSweepSummary::default());
+    }
+
+    /// A no-op sweep (no stale assignment, no dead refs) reports `changed() ==
+    /// false`, so the caller skips the durable persist entirely — a clean board
+    /// is never rewritten every cycle.
+    #[test]
+    fn clean_board_sweep_reports_no_change() {
+        let mut board = GoalBoard::new();
+        add_active_goal(&mut board, make_goal("g1", Some("live-session"))).unwrap();
+
+        let summary = sweep_stale_assignments_with_sessions(&mut board, &live(&["live-session"]));
+
+        assert!(
+            !summary.changed(),
+            "a sweep that clears nothing must report no change"
         );
     }
 

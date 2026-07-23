@@ -419,6 +419,52 @@ pub fn reap_stale_claims(
     summary
 }
 
+/// Single-writer wrapper around [`reap_stale_claims`] (issue #4477).
+///
+/// Acquires the exclusive [`SingleWriterLease`](crate::overseer::reaper_lease::SingleWriterLease)
+/// guarding the shared `engineer_claims` ledger BEFORE sweeping, so at most one
+/// co-resident `simard` daemon per state-root ever mutates the ledger at a time.
+///
+/// Fail-closed ordering:
+///   * `enabled == false` ⇒ no-op WITHOUT acquiring the lease (the off switch is
+///     honoured before any contention).
+///   * lease DENIED (another daemon holds it) ⇒ return an empty [`ReapSummary`]
+///     WITHOUT sweeping — the sweep is skipped this tick, never a partial racy
+///     reclaim that could override another daemon's in-flight investigate-before
+///     -reap and false-reclaim a live engineer mid-recreate.
+///   * lease GRANTED ⇒ delegate to the pure [`reap_stale_claims`] and hold the
+///     lease for the WHOLE sweep; the RAII guard releases it on every exit path
+///     (normal return or panic unwind).
+#[allow(clippy::too_many_arguments)]
+pub fn reap_stale_claims_single_writer(
+    lease: &dyn crate::overseer::reaper_lease::SingleWriterLease,
+    ledger: &dyn ClaimLedger,
+    probe: &dyn ClaimLivenessProbe,
+    cleanup: &dyn OrphanWorktreeCleanup,
+    investigator: &dyn StaleEngineerInvestigator,
+    enabled: bool,
+    stale_secs: u64,
+) -> ReapSummary {
+    // Honour the off switch before touching the lease: a disabled reaper never
+    // contends for the single-writer lease.
+    if !enabled {
+        return ReapSummary::default();
+    }
+
+    let Some(_guard) = lease.try_acquire() else {
+        // Another daemon owns the single-writer lease. Skip — fail-closed.
+        tracing::info!(
+            target: "simard::claim_reaper",
+            "[simard] claim-reaper: single-writer lease held by another daemon; \
+             skipping this sweep (no reclaim)",
+        );
+        return ReapSummary::default();
+    };
+
+    // Lease held for the whole sweep; released by `_guard`'s RAII Drop on return.
+    reap_stale_claims(ledger, probe, cleanup, investigator, enabled, stale_secs)
+}
+
 /// Extract the goal id from a `claim_key` of the shape `{owner}/{repo}:{goal_id}`.
 ///
 /// Goal ids are validated identifiers (no `:`), so split at the LAST `:`. A
@@ -1983,6 +2029,117 @@ mod tests {
             investigator.investigated().is_empty(),
             "a NoWorktree claim has no evidence to preserve and must not be investigated"
         );
+    }
+
+    // ----- Single-writer lease gate (issue #4477) ----------------------------
+
+    /// When the single-writer lease is DENIED (another co-resident daemon already
+    /// holds it), the wrapper skips the whole sweep: an empty summary, and — the
+    /// crux of #4477 — the shared ledger is NOT mutated, so a naive concurrent
+    /// daemon can never false-reclaim a claim another daemon is protecting.
+    #[test]
+    fn single_writer_wrapper_skips_sweep_when_lease_denied() {
+        use crate::overseer::reaper_lease::NeverAcquireLease;
+
+        let key = "rysweet/Simard:ghost";
+        let ledger = FakeLedger::new(&[key]);
+        // A provably-dead NoWorktree claim that WOULD be reclaimed if the sweep ran.
+        let probe = MapProbe::new(&[(key, dead(DeadReason::NoWorktree, None))]);
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown();
+        let lease = NeverAcquireLease;
+
+        let summary = reap_stale_claims_single_writer(
+            &lease,
+            &ledger,
+            &probe,
+            &cleanup,
+            &investigator,
+            true,
+            STALE_SECS,
+        );
+
+        assert!(
+            summary.reclaimed.is_empty(),
+            "a denied single-writer lease must skip all reclaims"
+        );
+        assert_eq!(
+            summary,
+            ReapSummary::default(),
+            "denied lease ⇒ empty summary"
+        );
+        assert!(
+            ledger.released.borrow().is_empty(),
+            "the shared ledger must NOT be touched when another daemon holds the lease"
+        );
+        assert_eq!(
+            ledger.list_engineer_claims(),
+            vec![key.to_string()],
+            "the claim must survive — no concurrent false-reclaim"
+        );
+        assert!(cleanup.cleaned().is_empty());
+    }
+
+    /// When the single-writer lease is GRANTED, the wrapper runs the full sweep:
+    /// the same reclaim the pure `reap_stale_claims` would perform. Proves the
+    /// gate is transparent to the single-writer winner (no behavioural change).
+    #[test]
+    fn single_writer_wrapper_runs_sweep_when_lease_granted() {
+        use crate::overseer::reaper_lease::AlwaysAcquireLease;
+
+        let key = "rysweet/Simard:ghost";
+        let ledger = FakeLedger::new(&[key]);
+        let probe = MapProbe::new(&[(key, dead(DeadReason::NoWorktree, None))]);
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown();
+        let lease = AlwaysAcquireLease;
+
+        let summary = reap_stale_claims_single_writer(
+            &lease,
+            &ledger,
+            &probe,
+            &cleanup,
+            &investigator,
+            true,
+            STALE_SECS,
+        );
+
+        assert_eq!(
+            summary.reclaimed,
+            vec![key.to_string()],
+            "the lease winner performs the reclaim exactly as the ungated sweep would"
+        );
+        assert!(ledger.list_engineer_claims().is_empty());
+    }
+
+    /// A disabled reaper is a total no-op and never even CONTENDS for the lease:
+    /// the off switch is honoured before acquisition (a granted lease would still
+    /// reap nothing).
+    #[test]
+    fn single_writer_wrapper_is_noop_when_disabled_without_touching_lease() {
+        use crate::overseer::reaper_lease::NeverAcquireLease;
+
+        let key = "rysweet/Simard:ghost";
+        let ledger = FakeLedger::new(&[key]);
+        let probe = MapProbe::new(&[(key, dead(DeadReason::NoWorktree, None))]);
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown();
+        // Even a NeverAcquireLease is irrelevant when disabled — the off switch
+        // short-circuits before any acquire attempt.
+        let lease = NeverAcquireLease;
+
+        let summary = reap_stale_claims_single_writer(
+            &lease,
+            &ledger,
+            &probe,
+            &cleanup,
+            &investigator,
+            false,
+            STALE_SECS,
+        );
+
+        assert_eq!(summary, ReapSummary::default());
+        assert_eq!(ledger.list_engineer_claims(), vec![key.to_string()]);
     }
 
     // ----- No reap until the investigation is terminal (Pending) -------------
