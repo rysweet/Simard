@@ -286,8 +286,44 @@ fn from_recipe_envelope_bounds_a_runaway_reason() {
     );
 }
 
+#[test]
+fn from_recipe_envelope_strips_ansi_and_control_from_reason_and_task_hint() {
+    // SECURITY regression (mirror of #2751): `reason`/`task_hint` are
+    // model-controlled and flow verbatim to operator stderr logs and the
+    // *persisted* BrainJudgmentRecord. A prompt-injected model must not be able
+    // to smuggle ANSI escapes / raw C0 control bytes into those sinks to spoof
+    // or hide operator log lines and audit records.
+    let raw = "{\"choice\":\"spawn\",\
+        \"reason\":\"do \u{1b}[31mthing\u{1b}[0m now\u{7}\u{0}\",\
+        \"task_hint\":\"run \u{1b}[2Jclobber\u{1b}[H tests\"}";
+    let parsed = PerGoalAction::from_recipe_envelope(raw).expect("must parse");
+    let reason = parsed.reason();
+    assert!(
+        !reason.contains('\u{1b}'),
+        "ESC (0x1b) must be stripped from reason; got {reason:?}"
+    );
+    assert!(
+        !reason.chars().any(|c| c.is_control() && !c.is_whitespace()),
+        "non-whitespace C0/DEL controls must be stripped from reason; got {reason:?}"
+    );
+    match parsed {
+        PerGoalAction::Spawn { task_hint, .. } => {
+            assert!(
+                !task_hint.contains('\u{1b}'),
+                "ESC (0x1b) must be stripped from task_hint; got {task_hint:?}"
+            );
+            assert!(
+                !task_hint
+                    .chars()
+                    .any(|c| c.is_control() && !c.is_whitespace()),
+                "non-whitespace controls must be stripped from task_hint; got {task_hint:?}"
+            );
+        }
+        other => panic!("expected Spawn, got {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
-// apply_per_goal_action_to_state — PURE state rail (A6)
 //
 // The crux of the 70ab8541 fix: only a DELIBERATE Reorient or Complete may
 // clear the load-bearing `wip_refs`. Continue / Wait / Investigate / Spawn

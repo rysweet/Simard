@@ -307,7 +307,9 @@ impl PerGoalAction {
     /// has exactly one definition. Returns `None` (surfaced by the caller as a
     /// NO-FALLBACK `Err`, #1711) unless the text contains a balanced JSON object
     /// with a known `choice` variant AND a non-empty `reason`. `choice` is
-    /// matched case-insensitively; `reason`/`task_hint` are trimmed and bounded.
+    /// matched case-insensitively; `reason`/`task_hint` are sanitized (ANSI/C0
+    /// control stripped, whitespace collapsed) and bounded, since these
+    /// model-controlled strings flow to operator logs and persisted audit records.
     /// A missing/empty `reason` or an unknown `choice` yields `None`, so a
     /// compromised prompt cannot smuggle a reason-less or novel destructive
     /// action past any backend.
@@ -317,14 +319,22 @@ impl PerGoalAction {
         if reason.is_empty() {
             return None;
         }
-        let reason = recipe_brain::truncate(reason, PER_GOAL_REASON_MAX_CHARS);
+        // SECURITY (mirror of #2751): `reason`/`task_hint` are MODEL-CONTROLLED
+        // and flow verbatim to operator stderr logs and the *persisted*
+        // `BrainJudgmentRecord.rationale`. A prompt-injected model could smuggle
+        // ANSI escapes / raw C0 control bytes to spoof or hide operator log lines
+        // and audit records. Sanitize at this single canonical chokepoint (strip
+        // ANSI/control + collapse whitespace + bound length) so every downstream
+        // sink receives clean text — the outbound counterpart to the inbound
+        // `sanitize_context_var` applied to recipe `-c` context vars.
+        let reason = sanitize::sanitize_context_var(reason, PER_GOAL_REASON_MAX_CHARS);
         match env.choice.trim() {
             c if c.eq_ignore_ascii_case("continue") => Some(Self::Continue { reason }),
-            // `task_hint` is truncated only here — it is discarded by every other
+            // `task_hint` is sanitized only here — it is discarded by every other
             // variant, so we avoid the allocation on the non-spawn paths.
             c if c.eq_ignore_ascii_case("spawn") => {
                 let task_hint =
-                    recipe_brain::truncate(env.task_hint.trim(), PER_GOAL_REASON_MAX_CHARS);
+                    sanitize::sanitize_context_var(&env.task_hint, PER_GOAL_REASON_MAX_CHARS);
                 Some(Self::Spawn { reason, task_hint })
             }
             c if c.eq_ignore_ascii_case("reorient") => Some(Self::Reorient { reason }),
