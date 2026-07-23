@@ -517,6 +517,34 @@ fn goal_curator_has_open_ended_hygiene_and_proactive_backfill() {
 }
 
 #[test]
+fn goal_curator_gates_backfill_to_rysweet_authored_issues() {
+    // Regression: only `rysweet`-authored issues/PRs may become goals. The curator
+    // prompt must (a) mandate the `gh issue view --json author` verification step
+    // and (b) require skipping any non-`rysweet` account. This gate stops any
+    // external filer (contributor, bot, or Simard's own engineer-created issue)
+    // from steering the goal board — the curator-side mirror of engineer_system.md
+    // rule #3. If this gate is ever dropped from the prompt, this test must fail.
+    let prompt = include_str!("../../prompt_assets/simard/goal_curator_system.md");
+    let lower = prompt.to_lowercase();
+
+    // (a) the author-verification step must be present.
+    assert!(
+        prompt.contains("gh issue view") && lower.contains("--json author"),
+        "goal_curator_system.md must mandate `gh issue view <N> --json author` to verify the issue/PR author before backfilling a goal"
+    );
+
+    // (b) the rysweet-only + skip-other-account language must be present.
+    assert!(
+        lower.contains("rysweet"),
+        "goal_curator_system.md must restrict backfill to `rysweet`-authored issues/PRs"
+    );
+    assert!(
+        lower.contains("skip"),
+        "goal_curator_system.md must instruct skipping issues/PRs authored by any non-`rysweet` account"
+    );
+}
+
+#[test]
 fn goal_session_objective_enumerates_concrete_progress_signals() {
     // Behavior A: the loop self-detection must DEFINE concrete progress signals
     // (a new commit SHA, an opened/merged PR, a closed issue, a completion-%
