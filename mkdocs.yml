@@ -233,6 +233,7 @@ nav:
     - Diagnose and Recover Lost Creative-Ideas Goals: howto/diagnose-lost-creative-ideas-goals.md
     - Clean Fixture Leaks: howto/clean-fixture-leaks.md
     - Verify and Roll Back a Self-Deploy: howto/verify-and-roll-back-a-self-deploy.md
+    - Clear a Stuck Memory Quarantine: howto/clear-a-stuck-memory-quarantine.md
     - Verify and Repair PATH-Entrypoint Parity: howto/verify-path-entrypoint-parity.md
     - Run Self-Deploy from Any Directory: howto/run-self-deploy-from-any-directory.md
     - Check for Updates: howto/check-for-updates.md
@@ -330,6 +331,7 @@ nav:
     - amplihack Freshness Gate: reference/amplihack-freshness-gate.md
     - Multi-Binary Self-Update: reference/multi-binary-self-update.md
     - Self-Deploy API: reference/self-deploy-api.md
+    - Self-Deploy Quarantine-Acknowledge: reference/self-deploy-quarantine-acknowledge.md
     - Self-Deploy Source Prep & Warm Target Dir: reference/self-deploy-source-prep.md
     - State-Root Resolution: reference/state-root-resolution.md
     - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
@@ -503,6 +505,7 @@ nav:
     - Writing Hermetic Tests: testing/hermetic-tests.md
     - serial(cognitive_memory) Isolation: testing/cognitive-memory-serial-isolation.md
     - De-Flaking Known Flaky Tests: testing/deflaking-known-flaky-tests.md
+    - De-Flaking OODA & Meeting Env Races: testing/deflaking-ooda-meeting-env-races.md
   - Ecosystem & Audits:
     - Amplihack Ecosystem Map: ecosystem-map.md
     - amplihack-rs ↔ amplihack Parity Matrix: amplihack-rs-parity.md

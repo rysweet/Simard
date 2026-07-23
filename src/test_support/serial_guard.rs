@@ -189,6 +189,10 @@ pub(crate) enum Reason {
     /// meeting-persistence resolver (`write_auto_save` / `write_transcript` /
     /// `write_meeting_bundle`).
     CallsEnvReadingHandler { handler: String },
+    /// Constructs `OodaConfig::default()`, which reads the OODA concurrency env
+    /// surface (`SIMARD_OODA_MAX_CONCURRENT` / `SIMARD_MAX_CONCURRENT_ACTIONS` /
+    /// `SIMARD_SCALING`) indirectly through the constructor (issue #4433).
+    ConstructsOodaConfigDefault,
     /// An allowlist entry was added without a justification.
     EmptyAllowlistJustification,
 }
@@ -212,6 +216,11 @@ impl Reason {
                     "calls env-reading handler `{handler}` (resolves the state-root / meetings surface)"
                 )
             }
+            Reason::ConstructsOodaConfigDefault => {
+                "constructs OodaConfig::default() (reads SIMARD_OODA_MAX_CONCURRENT / \
+                 SIMARD_MAX_CONCURRENT_ACTIONS / SIMARD_SCALING)"
+                    .to_string()
+            }
             Reason::EmptyAllowlistJustification => {
                 "allowlist entry has no justification".to_string()
             }
@@ -227,6 +236,7 @@ impl Reason {
             Reason::ConstructsHermeticState => 2,
             Reason::CallsEnvReadingHandler { .. } => 3,
             Reason::ReadsStateRootDefault => 4,
+            Reason::ConstructsOodaConfigDefault => 5,
         }
     }
 
@@ -543,6 +553,16 @@ impl<'a, 'ast> Visit<'ast> for BodyScan<'a> {
                 self.reasons.push(Reason::ReadsStateRootDefault);
             }
 
+            // (E) OodaConfig::default() — an INDIRECT read of the OODA
+            // concurrency env (SIMARD_OODA_MAX_CONCURRENT /
+            // SIMARD_MAX_CONCURRENT_ACTIONS / SIMARD_SCALING) hidden inside the
+            // constructor (issue #4433). Matched by the fuller `OodaConfig::default`
+            // path — never a bare `default()` — so only the concurrency-config
+            // constructor is watched, not every `::default()` in the tree.
+            if penult == "OodaConfig" && last == "default" {
+                self.reasons.push(Reason::ConstructsOodaConfigDefault);
+            }
+
             // (D) env-reading async goal route handlers and meeting-persistence
             // resolvers (write_auto_save / write_transcript / write_meeting_bundle).
             if segs.len() == 1 && ENV_READING_HANDLERS.contains(&last.as_str()) {
@@ -846,5 +866,188 @@ fn skip_guard_helper_mutation_requires_the_key() {
     assert!(
         !flagged.contains("skip_guard_with_key"),
         "a SkipGuard writer sharing the cognitive_memory key must be accepted: {flagged:?}"
+    );
+}
+
+// ===========================================================================
+// TDD (Step 7): Race A — the `OodaConfig::default()` concurrency-env blind spot
+// ===========================================================================
+//
+// These tests are written FIRST and are expected to FAIL against the current
+// code. They pin the contract for the fix of the deterministic race that flaked
+// `src/ooda_loop/tests_types.rs::ooda_config_default_values` (PR #4433 cluster).
+//
+// Root cause (grounded in the live source, NOT the retracted HOME/serial
+// theory): `ooda_config_default_values` calls `OodaConfig::default()`, which
+// reads `SIMARD_OODA_MAX_CONCURRENT` / `SIMARD_MAX_CONCURRENT_ACTIONS` /
+// `SIMARD_SCALING` from the process-global environment (see
+// `src/ooda_loop/types.rs` `impl Default for OodaConfig`). That read is
+// concurrent with sibling tests in `types.rs` that `set_var` those same vars —
+// but `ooda_config_default_values` carries NO `serial(cognitive_memory)` key,
+// so it races them and intermittently observes an override instead of 24.
+//
+// The `serial_guard` meta-test is supposed to catch exactly this class, yet it
+// has a real blind spot: the concurrency-env read is INDIRECT (hidden inside
+// `OodaConfig::default()`), and those vars are not in `READ_WATCHED_VARS`, so
+// the current scanner never flags the offending test. The fix has two coupled
+// parts, both encoded below:
+//   (1) Guardrail: teach the scanner that a `#[test]` calling
+//       `OodaConfig::default()` is an env reader of the cognitive-memory serial
+//       group and must carry the key (mirrors the `HermeticState::new` /
+//       `resolve_state_root` recognizers).
+//   (2) Race A remediation: add `#[serial_test::serial(cognitive_memory)]` to
+//       the real `ooda_config_default_values` test (and clear the concurrency
+//       env before `OodaConfig::default()`, mirroring the already-correct twin
+//       `max_concurrent_defaults_to_24_when_unset` in `types.rs`).
+//
+// The single canonical serial key is `cognitive_memory`: a second key would not
+// help, because glibc `setenv` can `realloc(environ)` and tear ANY concurrent
+// `getenv`, so every env reader/writer in the lib binary must funnel through the
+// one key. Exemptions use the existing `(name, justification)` allowlist.
+
+/// (1a) The scanner MUST flag a `#[test]` that reads concurrency env indirectly
+/// via `OodaConfig::default()` and lacks the `cognitive_memory` key, and MUST
+/// accept the same reader once it carries the key.
+///
+/// FAILS today: `OodaConfig::default()` is an unrecognized indirect env read,
+/// so `ooda_default_reader_without_key` is not flagged.
+///
+/// Reads in-memory source fixtures only; mutates no env, so it carries no key.
+#[test]
+fn ooda_config_default_read_requires_the_key() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("fixture.rs"),
+        "#[test]\n\
+         #[serial]\n\
+         fn ooda_default_reader_without_key() {\n\
+         let _c = OodaConfig::default();\n\
+         }\n\
+         #[test]\n\
+         #[serial_test::serial(cognitive_memory)]\n\
+         fn ooda_default_reader_with_key() {\n\
+         let _c = OodaConfig::default();\n\
+         }\n",
+    )
+    .unwrap();
+
+    let opts = AuditOptions {
+        roots: vec![dir.path().to_path_buf()],
+        excluded_prefixes: Vec::new(),
+        watched: EnvWatch::AnyVar,
+        allowlist: Vec::new(),
+    };
+    let flagged: BTreeSet<String> = audit_env_mutating_tests(&opts)
+        .into_iter()
+        .map(|o| o.test_name)
+        .collect();
+
+    assert!(
+        flagged.contains("ooda_default_reader_without_key"),
+        "a test calling OodaConfig::default() (an indirect read of \
+         SIMARD_OODA_MAX_CONCURRENT / SIMARD_MAX_CONCURRENT_ACTIONS / \
+         SIMARD_SCALING) without the cognitive_memory key must be flagged: \
+         {flagged:?}"
+    );
+    assert!(
+        !flagged.contains("ooda_default_reader_with_key"),
+        "an OodaConfig::default() reader sharing the cognitive_memory key must \
+         be accepted: {flagged:?}"
+    );
+}
+
+/// (1b) A flagged `OodaConfig::default()` reader MUST be exemptible through the
+/// existing `(name, justification)` allowlist — and only that entry is spared;
+/// an un-allowlisted sibling reader is still flagged.
+///
+/// FAILS today: with no detection, the un-allowlisted reader is not flagged, so
+/// the "still flagged" assertion fails (the detection precondition is missing).
+///
+/// Reads in-memory source fixtures only; mutates no env, so it carries no key.
+#[test]
+fn ooda_config_default_reader_is_exemptible_via_allowlist() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("fixture.rs"),
+        "#[test]\n\
+         #[serial]\n\
+         fn exempt_ooda_reader() {\n\
+         let _c = OodaConfig::default();\n\
+         }\n\
+         #[test]\n\
+         #[serial]\n\
+         fn non_exempt_ooda_reader() {\n\
+         let _c = OodaConfig::default();\n\
+         }\n",
+    )
+    .unwrap();
+
+    let opts = AuditOptions {
+        roots: vec![dir.path().to_path_buf()],
+        excluded_prefixes: Vec::new(),
+        watched: EnvWatch::AnyVar,
+        allowlist: vec![(
+            "exempt_ooda_reader".to_string(),
+            "reads only concurrency env in isolation; serialized elsewhere".to_string(),
+        )],
+    };
+    let flagged: BTreeSet<String> = audit_env_mutating_tests(&opts)
+        .into_iter()
+        .map(|o| o.test_name)
+        .collect();
+
+    assert!(
+        !flagged.contains("exempt_ooda_reader"),
+        "an OodaConfig::default() reader with a justified allowlist entry must \
+         be exempt: {flagged:?}"
+    );
+    assert!(
+        flagged.contains("non_exempt_ooda_reader"),
+        "an un-allowlisted OodaConfig::default() reader must still be flagged: \
+         {flagged:?}"
+    );
+}
+
+/// (2) Race A remediation contract, asserted against the REAL source: the live
+/// `ooda_config_default_values` test in `src/ooda_loop/tests_types.rs` MUST
+/// carry the `cognitive_memory` serial key, so its `OodaConfig::default()` read
+/// can never run concurrently with the sibling concurrency-env writers.
+///
+/// FAILS today: the real test currently has no `serial(cognitive_memory)` key.
+/// This is decoupled from the scanner extension above — it directly parses the
+/// source and checks the annotation, so it pins the fix even if the guardrail
+/// recognizer is implemented differently.
+///
+/// Reads source only; mutates no env, so it carries no key.
+#[test]
+fn real_ooda_config_default_values_test_carries_the_cognitive_memory_key() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ooda_loop/tests_types.rs");
+    let src = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let ast =
+        syn::parse_file(&src).unwrap_or_else(|e| panic!("cannot parse {}: {e}", path.display()));
+
+    let target = ast.items.iter().find_map(|item| match item {
+        syn::Item::Fn(f) if f.sig.ident == "ooda_config_default_values" => Some(f),
+        _ => None,
+    });
+    let target = target.unwrap_or_else(|| {
+        panic!(
+            "expected a `#[test] fn ooda_config_default_values` in {}",
+            path.display()
+        )
+    });
+
+    assert!(
+        is_test_fn(&target.attrs),
+        "ooda_config_default_values must remain a #[test]"
+    );
+    assert!(
+        serial_keys(&target.attrs).contains(REQUIRED_KEY),
+        "Race A (PR #4433): ooda_config_default_values calls OodaConfig::default() \
+         (an indirect read of SIMARD_OODA_MAX_CONCURRENT / \
+         SIMARD_MAX_CONCURRENT_ACTIONS / SIMARD_SCALING) and MUST carry \
+         #[serial_test::serial({REQUIRED_KEY})] so it never races the sibling \
+         concurrency-env writers in src/ooda_loop/types.rs"
     );
 }

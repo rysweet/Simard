@@ -151,12 +151,32 @@ fn commits_compatible(running: &str, target: &str) -> bool {
     r == t || r.starts_with(&t) || t.starts_with(&r)
 }
 
-/// `true` for a quarantined corrupt cognitive-memory filename. Mirrors
-/// `cmd_cleanup::disk::is_corrupt_quarantine_name`: both backend generations
-/// leave a `cognitive*.corrupt-<ts>` artifact when a store is quarantined.
-fn is_corrupt_quarantine_name(name: &str) -> bool {
-    (name.starts_with("cognitive.") || name.starts_with("cognitive_memory."))
-        && name.contains(".corrupt-")
+/// Count quarantined corrupt cognitive-memory artifacts directly under
+/// `state_root`, ignoring acknowledgement sidecars. Absent/unreadable dir ⇒ `0`
+/// (nothing to quarantine).
+///
+/// A quarantine that carries a durable `.ack` sidecar (issue #4469) is treated
+/// as "seen" and does NOT count — this is what lets a genuinely-stuck but
+/// retained recovery asset clear the probe without deleting it. The `.ack`
+/// sidecars themselves are never mistaken for quarantines, and a *fresh*
+/// (unacknowledged) corruption event still counts because the marker is keyed
+/// to the exact filename.
+///
+/// Test-only helper: total count of unacknowledged quarantined corrupt
+/// cognitive-memory artifacts directly under `state_root`, regardless of
+/// forensic-window age. Delegates to the production [`tally_quarantine_files`]
+/// scan (summing *fresh* + *retained*) so the directory-scan and
+/// acknowledgement logic lives in exactly one place — the test helper can never
+/// drift from the production probe path (#4469 philosophy review S5). Compiled
+/// only under `#[cfg(test)]`.
+#[cfg(test)]
+fn count_quarantine_files(state_root: &std::path::Path) -> u64 {
+    // Any window start yields the same total: an artifact is either fresh
+    // (mtime ≥ window) or retained (mtime < window), and this helper wants the
+    // age-agnostic sum. Acknowledged artifacts and `.ack` sidecars are already
+    // excluded by the production scan.
+    let tally = tally_quarantine_files(state_root, Utc::now());
+    tally.fresh + tally.retained
 }
 
 /// Tally quarantined corrupt cognitive-memory artifacts directly under `dir`,
@@ -171,6 +191,12 @@ fn is_corrupt_quarantine_name(name: &str) -> bool {
 /// window is genuine post-deploy corruption and is still counted, so the probe
 /// is not neutered into always passing.
 ///
+/// Acknowledgement-aware (issue #4469): a quarantine carrying a durable `.ack`
+/// sidecar is treated as "seen" and counts as neither fresh nor retained, so a
+/// genuinely-stuck but acknowledged protected recovery asset can clear the
+/// probe without being deleted. The `.ack` sidecar files themselves are never
+/// counted as quarantines.
+///
 /// Absent/unreadable dir ⇒ `(0, 0)` (nothing to quarantine). Entries whose
 /// mtime cannot be read are skipped entirely (fail-safe: never counted fresh,
 /// and not surfaced as retained either since freshness is unknowable).
@@ -181,7 +207,20 @@ fn tally_quarantine_files(dir: &std::path::Path, window_start: DateTime<Utc>) ->
     };
     let mut tally = QuarantineTally::default();
     for entry in entries.flatten() {
-        if !is_corrupt_quarantine_name(&entry.file_name().to_string_lossy()) {
+        // Borrow the lossy name instead of forcing a `String` per entry: most
+        // entries fail the predicate below and are skipped, so avoid the
+        // per-entry heap allocation.
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        if !crate::cmd_cleanup::is_corrupt_quarantine_name(&name) {
+            continue;
+        }
+        // #4469: `.ack` sidecars are never quarantines, and an acknowledged
+        // artifact is "seen" — it counts as neither fresh nor retained so a
+        // stuck protected recovery asset can converge without being deleted.
+        if crate::self_deploy::quarantine_ack::is_ack_marker_name(&name)
+            || crate::self_deploy::quarantine_ack::is_acknowledged(dir, &name)
+        {
             continue;
         }
         let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
@@ -205,13 +244,72 @@ struct QuarantineTally {
     retained: u64,
 }
 
+/// Guarded autonomous auto-ack (#4469): if the #2550 protected recovery asset
+/// under `state_root` is past the forensic window and not already acknowledged,
+/// durably acknowledge it so the `no_quarantine` probe can converge — WITHOUT
+/// deleting the retained asset. Best-effort: emits a structured tracing/OTel
+/// WARN and continues on any error (never `print!`). Returns the acknowledged
+/// artifact basename when it fired, else `None`.
+///
+/// The "protected recovery asset" selection and the forensic-window age gate are
+/// single-sourced from [`crate::cmd_cleanup::disk`], so the probe and the cleanup
+/// sweep can never disagree about which artifact is protected. Fresh corruption
+/// (young, or not the protected asset) is never eligible and still reddens the
+/// probe.
+///
+/// Deliberate asymmetry with the manual
+/// [`acknowledge`](crate::self_deploy::quarantine_ack::acknowledge) path: the
+/// operator `--acknowledge-quarantine` CLI acknowledges *any* present, ackable
+/// artifact the operator explicitly chooses, whereas this *automatic* probe path
+/// narrows itself to the single aged #2550 protected recovery asset — the one
+/// quarantine that can never clear on its own — precisely because it fires
+/// unattended and must not silently acknowledge genuine fresh corruption.
+fn auto_ack_stuck_recovery_asset(state_root: &std::path::Path) -> Option<String> {
+    let name = crate::cmd_cleanup::disk::aged_protected_recovery_asset(state_root)?;
+    if crate::self_deploy::quarantine_ack::is_acknowledged(state_root, &name) {
+        return None;
+    }
+    match crate::self_deploy::quarantine_ack::acknowledge(state_root, &name) {
+        Ok(marker) => {
+            // Both `artifact` and `marker` embed the untrusted quarantine
+            // basename (the marker is `{name}.ack`); an on-disk filename may
+            // contain a newline (a single `Component::Normal` on Unix), so log
+            // BOTH via Debug (`?`) — which escapes control chars — to prevent
+            // log-line forgery under the default non-JSON subscriber (#4469
+            // security review, LOW-1/LOW-2).
+            tracing::warn!(
+                artifact = ?name,
+                marker = ?marker,
+                min_age_days = crate::cmd_cleanup::disk::CORRUPT_DB_MAX_AGE_DAYS,
+                "self_deploy.quarantine.auto_ack: acknowledged aged #2550 protected \
+                 recovery asset to break the stuck no_quarantine deadlock (#4469); \
+                 artifact retained on disk"
+            );
+            Some(name)
+        }
+        Err(e) => {
+            tracing::warn!(
+                artifact = ?name,
+                error = %e,
+                "self_deploy.quarantine.auto_ack_failed: could not acknowledge aged \
+                 protected recovery asset (#4469)"
+            );
+            None
+        }
+    }
+}
+
 /// Run the post-deploy probes against the live daemon and assemble a report.
 ///
 /// Effectful: reads the running build commit, the live memory fact count, the
 /// goal board, recent `brain_parse_failure` metrics, and the store quarantine
-/// state. Every probe degrades to `healthy: false` on its own error rather than
-/// aborting the whole report, so the orchestrator always gets a verdict to act
-/// on (and rolls back on any unhealthy probe).
+/// state. The `no_quarantine` probe additionally has an intentional *write*
+/// side-effect — it may durably write one `.ack` sidecar via the guarded
+/// `auto_ack_stuck_recovery_asset` auto-ack (aged #2550 protected recovery
+/// asset only; #4469) so the deadlock can self-clear on the unattended
+/// post-deploy path. Every probe degrades to `healthy: false` on its own error
+/// rather than aborting the whole report, so the orchestrator always gets a
+/// verdict to act on (and rolls back on any unhealthy probe).
 ///
 /// * `target_commit` — the commit the candidate was built from.
 /// * `baseline_facts` — pre-deploy memory count (the orchestrator captures it);
@@ -280,13 +378,35 @@ pub fn run_self_health_probe(
     };
 
     // Probe 5: no *fresh* quarantined corrupt cognitive-memory store. Scans the
-    // live-store directory `<state_root>/state/` (where LadybugDB drops corrupt
-    // snapshots next to the live `cognitive` store) — the SAME directory
-    // `cmd_cleanup::disk` reclaims. Only quarantines at/after the window start
-    // count, so retained historical forensic snapshots don't fail the probe
-    // forever, but genuine post-deploy corruption still does (issue #4469).
-    let live_store_dir = crate::state_root::resolve_subdir("state");
-    let quarantine_tally = tally_quarantine_files(&live_store_dir, fallback_window_start);
+    // SAME directory set the cleanup sweep reclaims — the top-level state root
+    // AND the live-store subdir `<state_root>/state/` (where LadybugDB drops
+    // corrupt snapshots next to the live `cognitive` store) — single-sourced
+    // from `state_root::quarantine_scan_dirs`, so the probe and
+    // `cmd_cleanup::disk` can never disagree on where quarantines live. Only
+    // quarantines at/after the window start count as fresh, so retained
+    // historical forensic snapshots don't fail the probe forever, but genuine
+    // post-deploy corruption still does (issue #4469).
+    //
+    // #4469: before counting, run the guarded autonomous auto-ack against each
+    // of those directories. The #2550 protected recovery asset — retained
+    // forever yet always red — is the one quarantine that can NEVER clear on its
+    // own and freezes self-deploy. Once it ages past the forensic window,
+    // acknowledge it (durable `.ack` sidecar) so the probe can converge WITHOUT
+    // deleting it; an acknowledged quarantine never counts as fresh. This lives
+    // on the probe path (not the operator CLI) so it also fires for the
+    // orchestrator's unattended post-deploy health check. Fresh corruption is
+    // never eligible for auto-ack.
+    let mut quarantine_tally = QuarantineTally::default();
+    for dir in crate::state_root::quarantine_scan_dirs() {
+        // Best-effort guarded auto-ack: the return value (which artifact, if any,
+        // was acked) is intentionally discarded here — success/failure is logged
+        // internally via structured tracing/OTel WARN inside the helper, and the
+        // subsequent tally re-scans the directory to reflect any new `.ack`.
+        let _ = auto_ack_stuck_recovery_asset(&dir);
+        let dir_tally = tally_quarantine_files(&dir, fallback_window_start);
+        quarantine_tally.fresh += dir_tally.fresh;
+        quarantine_tally.retained += dir_tally.retained;
+    }
     let quarantined = quarantine_tally.fresh > 0;
     let no_quarantine = NoQuarantineProbe {
         healthy: !quarantined,
@@ -578,6 +698,172 @@ mod probe_logic_tests {
             tally_quarantine_files(std::path::Path::new("/no-such-dir-xyz-123"), Utc::now());
         assert_eq!(tally.fresh, 0);
         assert_eq!(tally.retained, 0);
+    }
+
+    // ── #4469: acknowledgement-aware quarantine scan ──
+    // The `no_quarantine` probe must stop failing on a quarantine that carries a
+    // durable `.ack` sidecar, so a genuinely-stuck (but protected/retained)
+    // corrupt store can clear without deleting the recovery asset.
+
+    #[test]
+    fn quarantine_scan_ignores_acknowledged_artifact_and_its_marker() {
+        let dir = tempdir().unwrap();
+        // A quarantined corrupt store that has been durably acknowledged.
+        std::fs::write(dir.path().join("cognitive.corrupt-20260101"), b"x").unwrap();
+        std::fs::write(dir.path().join("cognitive.corrupt-20260101.ack"), b"").unwrap();
+        // An acked artifact does not count, and the `.ack` sidecar itself is
+        // never mistaken for a quarantine.
+        assert_eq!(
+            count_quarantine_files(dir.path()),
+            0,
+            "acknowledged quarantine (and its marker) must not fail the probe"
+        );
+    }
+
+    #[test]
+    fn quarantine_scan_still_flags_fresh_corruption_after_ack() {
+        let dir = tempdir().unwrap();
+        // Old, acknowledged quarantine.
+        std::fs::write(dir.path().join("cognitive.corrupt-20260101"), b"x").unwrap();
+        std::fs::write(dir.path().join("cognitive.corrupt-20260101.ack"), b"").unwrap();
+        // A NEW corruption event — filename-keyed markers must not silence it.
+        std::fs::write(dir.path().join("cognitive.corrupt-20260202"), b"x").unwrap();
+        assert_eq!(
+            count_quarantine_files(dir.path()),
+            1,
+            "fresh corruption must re-fail the probe despite an earlier ack"
+        );
+    }
+
+    #[test]
+    fn quarantine_scan_end_to_end_ack_clears_probe() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("cognitive.corrupt-20260101120000"), b"x").unwrap();
+        assert_eq!(
+            count_quarantine_files(dir.path()),
+            1,
+            "unacked = quarantined"
+        );
+
+        crate::self_deploy::quarantine_ack::acknowledge(
+            dir.path(),
+            "cognitive.corrupt-20260101120000",
+        )
+        .expect("acknowledge succeeds");
+        assert_eq!(
+            count_quarantine_files(dir.path()),
+            0,
+            "durable ack clears the no_quarantine probe"
+        );
+    }
+
+    // ── #4469: guarded autonomous auto-ack of the stuck recovery asset ──
+    // The #2550 protected recovery asset (largest quarantine ≥ 1 MB) is retained
+    // forever yet keeps `no_quarantine` red, so it can never clear on its own.
+    // Once it ages past the forensic window the probe auto-acks it — and only it.
+
+    /// Backdate a path's mtime `days` into the past (plus slack).
+    fn backdate(path: &std::path::Path, days: u64) {
+        let when =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(days * 24 * 3600 + 3600);
+        let times = std::fs::FileTimes::new().set_modified(when);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+    }
+
+    const PROTECT_MIN: u64 = crate::cmd_cleanup::disk::CORRUPT_DB_PROTECT_MIN_BYTES;
+    const MAX_AGE_DAYS: u64 = crate::cmd_cleanup::disk::CORRUPT_DB_MAX_AGE_DAYS;
+
+    #[test]
+    fn auto_ack_clears_aged_protected_recovery_asset_and_retains_it() {
+        let dir = tempdir().unwrap();
+        let asset = dir.path().join("cognitive.corrupt-20260101120000");
+        std::fs::write(&asset, vec![0u8; (PROTECT_MIN + 512) as usize]).unwrap();
+        backdate(&asset, MAX_AGE_DAYS + 1);
+
+        // Before: the aged protected asset keeps the probe red.
+        assert_eq!(
+            count_quarantine_files(dir.path()),
+            1,
+            "unacked = quarantined"
+        );
+
+        let acked = auto_ack_stuck_recovery_asset(dir.path());
+        assert_eq!(
+            acked.as_deref(),
+            Some("cognitive.corrupt-20260101120000"),
+            "auto-ack must fire for the aged protected asset"
+        );
+        // After: probe clears, artifact retained, sidecar written.
+        assert_eq!(
+            count_quarantine_files(dir.path()),
+            0,
+            "auto-ack clears the probe"
+        );
+        assert!(asset.is_file(), "the recovery asset must be retained");
+        assert!(
+            dir.path()
+                .join("cognitive.corrupt-20260101120000.ack")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn auto_ack_ignores_fresh_protected_asset() {
+        let dir = tempdir().unwrap();
+        // Large enough to be "protected", but INSIDE the forensic window.
+        let asset = dir.path().join("cognitive.corrupt-20260101120000");
+        std::fs::write(&asset, vec![0u8; (PROTECT_MIN + 512) as usize]).unwrap();
+        backdate(&asset, MAX_AGE_DAYS.saturating_sub(2));
+
+        assert_eq!(
+            auto_ack_stuck_recovery_asset(dir.path()),
+            None,
+            "fresh asset not eligible"
+        );
+        assert_eq!(
+            count_quarantine_files(dir.path()),
+            1,
+            "fresh quarantine still reddens"
+        );
+    }
+
+    #[test]
+    fn auto_ack_ignores_trivial_aged_quarantine() {
+        let dir = tempdir().unwrap();
+        // Aged, but below the protection floor — not the recovery asset.
+        let small = dir.path().join("cognitive.corrupt-20260101120000");
+        std::fs::write(&small, b"tiny").unwrap();
+        backdate(&small, MAX_AGE_DAYS + 5);
+
+        assert_eq!(
+            auto_ack_stuck_recovery_asset(dir.path()),
+            None,
+            "a trivial (sub-floor) quarantine is never auto-acked"
+        );
+        assert_eq!(count_quarantine_files(dir.path()), 1);
+    }
+
+    #[test]
+    fn auto_ack_is_idempotent() {
+        let dir = tempdir().unwrap();
+        let asset = dir.path().join("cognitive.corrupt-20260101120000");
+        std::fs::write(&asset, vec![0u8; (PROTECT_MIN + 512) as usize]).unwrap();
+        backdate(&asset, MAX_AGE_DAYS + 1);
+
+        assert!(
+            auto_ack_stuck_recovery_asset(dir.path()).is_some(),
+            "first pass acks"
+        );
+        assert_eq!(
+            auto_ack_stuck_recovery_asset(dir.path()),
+            None,
+            "already acknowledged ⇒ no repeat ack"
+        );
     }
 
     #[test]

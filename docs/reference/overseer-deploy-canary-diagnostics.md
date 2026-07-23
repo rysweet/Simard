@@ -173,6 +173,48 @@ downstream sink at once. `refusal_reason` re-applies the same idempotent bound
 defensively for `CanaryResult`s built by other paths. Truncation never splits a
 multi-byte character.
 
+### `unit-test` gate `first_failure=` detail (#4470)
+
+The `failing_detail` surfaced above is only as useful as the underlying
+`GateResult.detail`. For the `unit-test` gate — the gate that reddened the
+self-deploy canary in the #4470 incident — the raw `cargo test` stderr tail
+often does **not** contain the failing test's name near the end, so the bounded
+512-byte tail could name no test at all. `run_unit_test_gate`
+([`src/self_relaunch/gates.rs`](https://github.com/rysweet/Simard/blob/main/src/self_relaunch/gates.rs))
+therefore **extracts the first failing test path** from the full `cargo test`
+output and prepends it to the gate detail as a stable `first_failure=` prefix:
+
+```text
+tests failed (exit 101): first_failure=<crate>::<module>::<test_name>; <bounded stderr tail>
+```
+
+| Field | Meaning |
+| --- | --- |
+| `first_failure=<test::path>` | The first test path parsed from a `test <path> ... FAILED` line (or the `failures:` block) in the `cargo test` output. Omitted only when no test name can be parsed (e.g. a link/compile abort with no test lines) — the bounded stderr tail is still included. |
+| `<bounded stderr tail>` | The existing truncated stderr, unchanged. |
+
+Extraction rules:
+
+- **Parsed from the runner output**, not guessed — it reads the `... FAILED`
+  lines / `failures:` section that `cargo test` emits. The first failing test
+  wins (deterministic).
+- **Bounded** to ≤ 512 bytes total, at a UTF-8 char boundary, consistent with the
+  `failing_detail` cap above.
+- **Sanitized**: CR, LF, and other control characters are stripped from the
+  parsed test name before it is embedded, so the detail is a single clean line
+  and cannot forge additional log fields or JSON. The parsed name is treated as
+  **data, not a format string**.
+- **Schema-stable**: `GateResult` keeps its `{ gate, passed, detail }` shape;
+  only the *content* of `detail` is enriched. `exit 101` (a Rust test-binary
+  panic/abort) still surfaces as before, now accompanied by the specific test.
+
+Because the failing gate's `detail` is what `TargetCanaryReport.failing_detail`
+copies from, the `first_failure=` prefix rides all the way up to the operator
+`deploy_refused` reason, the `overseer::deploy` WARN, and the `failing_detail`
+OTel attribute — so a red `unit-test` canary now names the exact test to fix in
+one glance. Acting on it is covered in
+[STEP 2: acting on the surfaced detail](#step-2-acting-on-the-surfaced-detail).
+
 ### `CanaryResult::refusal_reason`
 
 A new inherent method composes the enriched, human-readable refusal string
@@ -386,3 +428,6 @@ weakened or disabled to mask a real regression.
   WARN event and the per-problem detail rows.
 - [Overseer tick self-healing](./overseer-tick-self-healing.md) — the
   `is_transient` fail-closed classifier and the SR-1 latch invariant.
+- [Self-deploy quarantine-acknowledge](./self-deploy-quarantine-acknowledge.md)
+  — the paired `no_quarantine` deadlock fix (#4469): the *other* self-deploy
+  blocker that had to clear alongside the red canary for self-deploy to converge.

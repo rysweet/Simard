@@ -54,6 +54,36 @@ pub fn resolve_subdir(name: &str) -> PathBuf {
     simard_state_root().join(name)
 }
 
+/// The canonical set of directories that hold corrupt cognitive-memory
+/// quarantine artifacts (issue #4469).
+///
+/// Two directories can accumulate quarantines and must both be reconciled:
+/// - the **top-level state root** (`~/.simard`) — the native pre-#2307
+///   quarantine location, and
+/// - the **live-store subdir** `<state_root>/state/` — where the de-forked
+///   LadybugDB backend drops corrupt snapshots next to the live `cognitive`
+///   store (62 corrupt artifacts accumulated here unbounded on the live host).
+///
+/// The set is **deduped**: `state/` is normally distinct from the root, but if
+/// they ever resolve to the same path a directory is returned only once so it is
+/// never scanned twice.
+///
+/// Single-sourced deliberately so the cleanup sweep
+/// ([`crate::cmd_cleanup::disk::remove_old_corrupt_dbs`]) and the self-health
+/// `no_quarantine` probe / autonomous auto-ack ([`crate::self_deploy::health`])
+/// scan the **identical** directory set — the probe and the sweep can never
+/// disagree about where the quarantines live (the divergence that caused the
+/// stuck-quarantine self-deploy deadlock).
+pub fn quarantine_scan_dirs() -> Vec<PathBuf> {
+    let root = simard_state_root();
+    let live_store = root.join("state");
+    if live_store == root {
+        vec![root]
+    } else {
+        vec![root, live_store]
+    }
+}
+
 /// Canonical path for the file-backed goal store.
 ///
 /// Resolves to `<state_root>/state/goal_store.json`. All consumers

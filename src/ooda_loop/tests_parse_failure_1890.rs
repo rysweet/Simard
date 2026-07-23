@@ -186,6 +186,7 @@ fn run_isolated<R>(f: impl FnOnce() -> R) -> R {
 // decide_with_brain — silent-fallback closure
 // ===========================================================================
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn decide_with_brain_errored_pushes_parse_failure_record() {
     // ANTI-REGRESSION (issue #1890): before this PR, decide_with_brain on
@@ -212,6 +213,7 @@ fn decide_with_brain_errored_pushes_parse_failure_record() {
     );
 }
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn decide_with_brain_errored_parse_failure_carries_error_and_raw_response() {
     let priorities = one_priority("g1");
@@ -258,6 +260,7 @@ fn decide_with_brain_errored_parse_failure_carries_error_and_raw_response() {
     );
 }
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn decide_with_brain_errored_skips_priority() {
     // Brain error must skip the priority (no action produced).
@@ -275,6 +278,7 @@ fn decide_with_brain_errored_skips_priority() {
     );
 }
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn decide_with_brain_errored_record_marks_brain_error() {
     // The judgment record must indicate brain_error (not fallback).
@@ -295,6 +299,7 @@ fn decide_with_brain_errored_record_marks_brain_error() {
     );
 }
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn decide_with_brain_ok_path_leaves_parse_failure_none() {
     // Healthy LLM brain returns Ok — no parse failure, no schema churn.
@@ -320,6 +325,7 @@ fn decide_with_brain_ok_path_leaves_parse_failure_none() {
     );
 }
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn decide_with_brain_errored_record_serializes_parse_failure_to_json() {
     // End-to-end: the BrainJudgmentRecord MUST serialize the parse_failure
@@ -353,6 +359,7 @@ fn decide_with_brain_errored_record_serializes_parse_failure_to_json() {
     assert!(back.parse_failure.is_some());
 }
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn decide_with_brain_errored_consecutive_count_increments_per_call() {
     // Resolution A6: track consecutive failures per (phase, goal_id) so
@@ -380,6 +387,7 @@ fn decide_with_brain_errored_consecutive_count_increments_per_call() {
     );
 }
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn decide_with_brain_consecutive_count_resets_on_next_successful_parse() {
     // Three failures, then one Ok — counter MUST reset.
@@ -406,6 +414,7 @@ fn decide_with_brain_consecutive_count_resets_on_next_successful_parse() {
     );
 }
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn decide_with_brain_errored_continues_to_next_priority() {
     // One failing priority must NOT stop the cycle — subsequent priorities
@@ -615,6 +624,7 @@ fn orient_with_brain_errored_consecutive_count_increments_per_call() {
     );
 }
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn orient_and_decide_counters_are_independent_for_same_goal() {
     // Resolution A7: (phase, goal_id) is the counter key. A decide failure
