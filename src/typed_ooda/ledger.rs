@@ -257,7 +257,17 @@ impl CapabilityHandler {
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(persistence)?;
-        super::schema::initialize(&mut connection, now_millis()).map_err(persistence)?;
+        // Schema initialization performs writes (the WAL-mode switch and the
+        // CREATE-TABLE migration transaction) that collide with concurrent
+        // first-opens and the startup-recovery sweep on the shared sqlite file
+        // (issue #4468). Serialize it under the same bounded busy/locked retry
+        // as the live write paths so a transient lock during handler
+        // construction is retried, not surfaced as a hard open failure.
+        // `initialize` is idempotent (version-guarded, CREATE ... IF NOT EXISTS,
+        // INSERT OR IGNORE), so re-running it on retry is safe.
+        retry_on_busy(|| {
+            super::schema::initialize(&mut connection, now_millis()).map_err(persistence)
+        })?;
         Ok(Self {
             connection: Mutex::new(connection),
             policy,
@@ -616,32 +626,10 @@ impl CapabilityHandler {
 
         let fingerprint = fingerprint(actor, &self.policy.revision, &request)?;
 
-        let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(persistence)?;
-        if let Some(existing) = replay_request(
-            &transaction,
-            &request.identity.request_id,
-            "terminal",
-            &fingerprint,
-        )? {
-            return Ok(existing);
-        }
-        if let Action::SpawnEngineer(spawn) = &request.action {
-            let expected_claim = format!(
-                "{}/{}:{}",
-                spawn.repository.owner, spawn.repository.name, request.identity.goal_id
-            );
-            if spawn.claim_key != expected_claim {
-                return Err(CapabilityError::new(
-                    CapabilityErrorCode::InvalidArgument,
-                    format!("engineer claim key must be {expected_claim:?}"),
-                ));
-            }
-        }
-        self.admit(&request.action, admission)?;
-        ensure_cycle_open(&transaction, &request.identity)?;
+        // Build the terminal outcome once, before the busy-retry loop, so the
+        // generated `outcome_id`/timestamp stay stable across retries (issue
+        // #4468): a retried write must re-commit the *same* outcome identity,
+        // never mint a fresh one.
         let RecordActionRequest {
             identity,
             action,
@@ -656,28 +644,61 @@ impl CapabilityHandler {
         });
         let outcome = self.new_outcome(actor, &identity, payload, raw_semantic, evidence);
         let outcome_json = serde_json::to_vec(&outcome).map_err(serialization)?;
-        insert_terminal(&transaction, &outcome, &fingerprint, &outcome_json)?;
-        record_request_json(
-            &transaction,
-            &outcome.request_id,
-            "terminal",
-            &fingerprint,
-            &outcome_json,
-        )?;
         let TypedOutcomePayload::Action(action_payload) = &outcome.payload else {
             unreachable!("record_action always creates an action payload");
         };
-        if let Action::SpawnEngineer(spawn) = &action_payload.action {
-            self.insert_engineer_claim(
+        let action = &action_payload.action;
+
+        // Serialize the primary live-cycle write under bounded busy/locked
+        // retry (issue #4468): this path collides with concurrent cycles and
+        // startup recovery on the shared sqlite file. The lock is acquired
+        // *inside* the closure so the guard is released across each backoff
+        // sleep. `admit`/replay ordering is preserved (admit runs after the
+        // replay check, so an idempotent replay hit never re-admits).
+        retry_on_busy(|| {
+            let mut connection = self.lock()?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(persistence)?;
+            if let Some(existing) =
+                replay_request(&transaction, &identity.request_id, "terminal", &fingerprint)?
+            {
+                return Ok(existing);
+            }
+            if let Action::SpawnEngineer(spawn) = action {
+                let expected_claim = format!(
+                    "{}/{}:{}",
+                    spawn.repository.owner, spawn.repository.name, identity.goal_id
+                );
+                if spawn.claim_key != expected_claim {
+                    return Err(CapabilityError::new(
+                        CapabilityErrorCode::InvalidArgument,
+                        format!("engineer claim key must be {expected_claim:?}"),
+                    ));
+                }
+            }
+            self.admit(action, admission)?;
+            ensure_cycle_open(&transaction, &identity)?;
+            insert_terminal(&transaction, &outcome, &fingerprint, &outcome_json)?;
+            record_request_json(
                 &transaction,
-                &spawn.claim_key,
-                &outcome.outcome_id,
                 &outcome.request_id,
+                "terminal",
+                &fingerprint,
+                &outcome_json,
             )?;
-        }
-        insert_effect(&transaction, &outcome, &action_payload.action)?;
-        transaction.commit().map_err(persistence)?;
-        Ok(outcome)
+            if let Action::SpawnEngineer(spawn) = action {
+                self.insert_engineer_claim(
+                    &transaction,
+                    &spawn.claim_key,
+                    &outcome.outcome_id,
+                    &outcome.request_id,
+                )?;
+            }
+            insert_effect(&transaction, &outcome, action)?;
+            transaction.commit().map_err(persistence)?;
+            Ok(outcome.clone())
+        })
     }
 
     pub fn record_no_action(
@@ -1206,39 +1227,46 @@ impl CapabilityHandler {
                 lease_millis,
             ),
         )?;
-        let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(persistence)?;
-        if let Some(existing) =
-            replay_request(&transaction, request_id, "effect_claim", &fingerprint)?
-        {
-            return Ok(existing);
-        }
-        let claimed = query_effect(
-            &transaction,
-            "
-            UPDATE effect_jobs
-            SET state='running', attempt=attempt+1, lease_generation=lease_generation+1,
-                lease_owner=?2, lease_expires_at=?3
-            WHERE outcome_id=?1 AND state='pending'
-            RETURNING effect_id, outcome_id, request_id, kind, state, action_json, attempt,
-                      lease_generation, lease_owner, lease_expires_at, error, result_json,
-                      (SELECT decision_json FROM authorization_decisions
-                       WHERE effect_id=effect_jobs.effect_id AND decision='approved'
-                       ORDER BY recorded_at DESC, rowid DESC LIMIT 1)
-            ",
-            params![outcome_id, worker, now.saturating_add(lease_millis)],
-        )?;
-        record_request(
-            &transaction,
-            request_id,
-            "effect_claim",
-            &fingerprint,
-            &claimed,
-        )?;
-        transaction.commit().map_err(persistence)?;
-        Ok(claimed)
+        // Serialize the effect claim under bounded busy/locked retry (issue
+        // #4468): claiming races with concurrent cycles and the startup
+        // recovery sweep on the shared sqlite file. The lock is acquired
+        // *inside* the closure so the guard is released across each backoff
+        // sleep.
+        retry_on_busy(|| {
+            let mut connection = self.lock()?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(persistence)?;
+            if let Some(existing) =
+                replay_request(&transaction, request_id, "effect_claim", &fingerprint)?
+            {
+                return Ok(existing);
+            }
+            let claimed = query_effect(
+                &transaction,
+                "
+                UPDATE effect_jobs
+                SET state='running', attempt=attempt+1, lease_generation=lease_generation+1,
+                    lease_owner=?2, lease_expires_at=?3
+                WHERE outcome_id=?1 AND state='pending'
+                RETURNING effect_id, outcome_id, request_id, kind, state, action_json, attempt,
+                          lease_generation, lease_owner, lease_expires_at, error, result_json,
+                          (SELECT decision_json FROM authorization_decisions
+                           WHERE effect_id=effect_jobs.effect_id AND decision='approved'
+                           ORDER BY recorded_at DESC, rowid DESC LIMIT 1)
+                ",
+                params![outcome_id, worker, now.saturating_add(lease_millis)],
+            )?;
+            record_request(
+                &transaction,
+                request_id,
+                "effect_claim",
+                &fingerprint,
+                &claimed,
+            )?;
+            transaction.commit().map_err(persistence)?;
+            Ok(claimed)
+        })
     }
 
     pub fn recover_expired_effects(
@@ -1595,28 +1623,38 @@ impl CapabilityHandler {
         evidence: Vec<EvidenceRef>,
         fingerprint: String,
     ) -> CapabilityResult<TerminalOutcome> {
-        let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(persistence)?;
-        if let Some(existing) =
-            replay_request(&transaction, &identity.request_id, "terminal", &fingerprint)?
-        {
-            return Ok(existing);
-        }
-        ensure_cycle_open(&transaction, identity)?;
+        // Build the terminal outcome once, before the busy-retry loop, so the
+        // generated `outcome_id`/timestamp stay stable across retries (issue
+        // #4468).
         let outcome = self.new_outcome(actor, identity, payload, raw_semantic, evidence);
         let outcome_json = serde_json::to_vec(&outcome).map_err(serialization)?;
-        insert_terminal(&transaction, &outcome, &fingerprint, &outcome_json)?;
-        record_request_json(
-            &transaction,
-            &outcome.request_id,
-            "terminal",
-            &fingerprint,
-            &outcome_json,
-        )?;
-        transaction.commit().map_err(persistence)?;
-        Ok(outcome)
+        // Serialize the terminal write under bounded busy/locked retry (issue
+        // #4468): this feeds record_no_action / record_action_denied, which
+        // contend with concurrent cycles and startup recovery on the shared
+        // sqlite file. The lock is acquired *inside* the closure so the guard
+        // is released across each backoff sleep.
+        retry_on_busy(|| {
+            let mut connection = self.lock()?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(persistence)?;
+            if let Some(existing) =
+                replay_request(&transaction, &identity.request_id, "terminal", &fingerprint)?
+            {
+                return Ok(existing);
+            }
+            ensure_cycle_open(&transaction, identity)?;
+            insert_terminal(&transaction, &outcome, &fingerprint, &outcome_json)?;
+            record_request_json(
+                &transaction,
+                &outcome.request_id,
+                "terminal",
+                &fingerprint,
+                &outcome_json,
+            )?;
+            transaction.commit().map_err(persistence)?;
+            Ok(outcome.clone())
+        })
     }
 
     fn record_action_denied(
@@ -3706,14 +3744,28 @@ mod outbox_serialization_tests {
         // writer overlaps with recovery contention on the same file.
         let barrier = Arc::new(Barrier::new(WRITERS + 1));
 
+        // Construct every handler up front, before the barrier. A transient
+        // open-time lock is now retried inside `open` (issue #4468), but even
+        // so a spawned participant must never `.expect()`-panic *before*
+        // `barrier.wait()`: that would leave the remaining threads blocked on
+        // the barrier forever. Hoisting construction keeps this test focused on
+        // its subject — concurrent *writes* and a concurrent *recovery* sweep
+        // over separate connections to the same file — and turns any open
+        // failure into a clean test failure instead of a barrier deadlock.
+        let writer_handlers: Vec<CapabilityHandler> = (0..WRITERS)
+            .map(|_| {
+                CapabilityHandler::open(&db_path, CapabilityPolicy::new(POLICY_REVISION))
+                    .expect("open writer handler")
+            })
+            .collect();
+        let recovery_handler =
+            CapabilityHandler::open(&db_path, CapabilityPolicy::new(POLICY_REVISION))
+                .expect("open recovery handler");
+
         let mut threads = Vec::new();
-        for writer in 0..WRITERS {
-            let path = db_path.clone();
+        for (writer, handler) in writer_handlers.into_iter().enumerate() {
             let barrier = Arc::clone(&barrier);
             threads.push(thread::spawn(move || -> Vec<String> {
-                let handler =
-                    CapabilityHandler::open(&path, CapabilityPolicy::new(POLICY_REVISION))
-                        .expect("open writer handler");
                 let mut locked_errors = Vec::new();
                 barrier.wait();
                 for iteration in 0..ITERATIONS {
@@ -3741,12 +3793,9 @@ mod outbox_serialization_tests {
         // Concurrent startup-recovery sweeper: a separate connection running
         // the outbox recovery path repeatedly while the writers commit.
         {
-            let path = db_path.clone();
             let barrier = Arc::clone(&barrier);
+            let handler = recovery_handler;
             threads.push(thread::spawn(move || -> Vec<String> {
-                let handler =
-                    CapabilityHandler::open(&path, CapabilityPolicy::new(POLICY_REVISION))
-                        .expect("open recovery handler");
                 let mut locked_errors = Vec::new();
                 barrier.wait();
                 for sweep in 0..(WRITERS * ITERATIONS / 4) {
@@ -3799,7 +3848,78 @@ mod outbox_serialization_tests {
     }
 
     // ---------------------------------------------------------------------
-    // Direct unit coverage for the SQLite busy/locked retry mechanism
+    // Regression: concurrent first-open of the shared ledger must survive
+    // lock contention (issue #4468).
+    //
+    // `CapabilityHandler::open` runs schema-init WRITES — the WAL-mode switch
+    // and the CREATE-TABLE migration transaction. When many handlers open the
+    // SAME fresh sqlite file at once (the daemon's writers plus the
+    // startup-recovery sweeper, as separate connections), those writes contend
+    // and a transient SQLITE_BUSY / "database is locked" can surface from the
+    // migration. Before the fix that failed handler construction outright.
+    // After the fix (busy_timeout + bounded busy-retry around `initialize`)
+    // every concurrent open must succeed.
+    //
+    // `barrier.wait()` runs BEFORE `open` so no participant can panic ahead of
+    // the barrier: an open failure surfaces as a joined `Err`, never a
+    // barrier deadlock.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn concurrent_open_of_shared_ledger_survives_contention() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path: PathBuf = dir.path().join("outcomes.sqlite3");
+
+        const OPENERS: usize = 12;
+        let barrier = Arc::new(Barrier::new(OPENERS));
+
+        let mut threads = Vec::new();
+        for _ in 0..OPENERS {
+            let path = db_path.clone();
+            let barrier = Arc::clone(&barrier);
+            threads.push(thread::spawn(move || -> Result<(), String> {
+                // Synchronize BEFORE the open so every handler races schema
+                // initialization against the others on the same fresh file.
+                barrier.wait();
+                CapabilityHandler::open(&path, CapabilityPolicy::new(POLICY_REVISION))
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }));
+        }
+
+        let mut failures = Vec::new();
+        for thread in threads {
+            if let Err(error) = thread.join().expect("open thread must not panic") {
+                failures.push(error);
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "concurrent first-open of the shared ledger must never fail on lock \
+             contention; got {} failure(s): {:#?}",
+            failures.len(),
+            failures,
+        );
+
+        // The schema is usable after the concurrent-open race: a subsequent
+        // write commits durably, proving initialization completed exactly once
+        // and left the file in a consistent state.
+        let handler = CapabilityHandler::open(&db_path, CapabilityPolicy::new(POLICY_REVISION))
+            .expect("open after concurrent race");
+        let actor = file_issue_actor("session-open", "cycle-open", "goal-open");
+        let req = file_issue_request("req-open", "session-open", "cycle-open", "goal-open");
+        handler
+            .record_action(&actor, req, &admission())
+            .expect("write after concurrent open must succeed");
+        assert!(
+            handler
+                .terminal_for_cycle("session-open", "cycle-open")
+                .expect("query terminal")
+                .is_some(),
+            "terminal must be durably persisted after the concurrent-open race"
+        );
+    }
     // (issue #4468). `retry_on_busy` takes an injectable closure, so its
     // control flow — retry on contention, bounded exhaustion, and immediate
     // passthrough for non-contention errors — is unit-testable deterministically
