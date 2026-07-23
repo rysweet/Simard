@@ -4,6 +4,133 @@ use std::process::Command;
 use super::types::{GateResult, RelaunchConfig, RelaunchGate};
 use crate::error::SimardResult;
 
+/// The Simard-specific environment the canary gates legitimately need to render
+/// a **true** verdict for a healthy candidate — the deploy-shape signals that
+/// the deployed binary itself runs under (systemd sets `SIMARD_HOME` /
+/// `SIMARD_PROMPT_ASSETS_DIR`; see [`crate::install::systemd`]) plus the state
+/// root the `rpc-health` probe dials to reach the **currently running** daemon.
+///
+/// This is populated into [`RelaunchConfig::canary_env`] by the canary build
+/// wiring (`prepare_build_and_verify_canary`) so the root-cause repair for the
+/// #4440 red-canary stall "supplies the missing signal" through an audited
+/// **allow-list of names** rather than by widening the deny-by-default base
+/// floor or inheriting the daemon's whole ambient env. Names only — values are
+/// read live at spawn time; a name absent from the environment is skipped, so a
+/// gate still fails closed on a genuinely missing signal.
+///
+/// These are deliberately **not** in [`scrub_gate_env`]'s universal base floor:
+/// that floor is the minimum for *any* gate to run at all, whereas these are
+/// Simard-candidate policy, derived from the #4420 `failing_gate` diagnostics.
+pub fn canary_gate_env_allowlist() -> Vec<String> {
+    [
+        "SIMARD_HOME",
+        "SIMARD_PROMPT_ASSETS_DIR",
+        "SIMARD_STATE_ROOT",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+/// `env_clear()` + selective re-injection of the always-required base variables
+/// and any names in `config.canary_env`, for **every** canary gate subprocess
+/// (`smoke`, `unit-test`, `gym-baseline`, `rpc-health`).
+///
+/// Why (root cause of the #4440 red-canary non-convergence): the running
+/// Overseer spawns these gates with its own (possibly hostile or dev-polluted)
+/// ambient environment. Inheriting it wholesale causes two failures:
+///   * **Hijack** — an ambient `LD_PRELOAD`, `GIT_SSH_COMMAND`, or an injected
+///     `SIMARD_*` toggle could steer a gate into a false verdict (mirrors the
+///     [`scrub_git_env`](crate::self_deploy::source_prep) defense).
+///   * **Shape drift** — the deployed binary ships under a *clean* systemd env
+///     (`SIMARD_HOME`, `SIMARD_PROMPT_ASSETS_DIR`, `PATH`; see
+///     [`crate::install::systemd`]). Verifying the canary under a fatter ambient
+///     env can pass a binary that then reddens once deployed — or redden a
+///     healthy binary every tick (the observed 928cd7da stall).
+///
+/// The base set is the **universal floor**: enough for *any* gate to run at all.
+/// It must keep every gate functional so a genuinely healthy candidate stays
+/// GREEN (no false RED that would perpetuate the stall). It therefore spans the
+/// candidate binary's core runtime needs and the `cargo test` toolchain the
+/// `unit-test` gate shells out to (`CARGO_HOME`/`RUSTUP_HOME`/`RUSTUP_TOOLCHAIN`).
+/// Simard deploy-shape signals (`SIMARD_HOME`, …) are **not** in this floor; they
+/// arrive as the explicit [`canary_gate_env_allowlist`] via `config.canary_env`.
+/// Anything outside this base set and `config.canary_env` is dropped
+/// (deny-by-default); `LD_PRELOAD`-class variables are never allow-listable —
+/// [`is_hijack_class_env`] enforces this in code (SEC-D3 defense-in-depth), so
+/// the guarantee holds even if a future caller populates `config.canary_env`
+/// from a less-trusted source than [`canary_gate_env_allowlist`].
+/// Names absent from the environment are skipped. Nothing is logged here.
+fn scrub_gate_env(cmd: &mut Command, config: &RelaunchConfig) {
+    cmd.env_clear();
+    const BASE: &[&str] = &[
+        // Core process env.
+        "PATH",
+        "HOME",
+        // Cargo/rustup toolchain — load-bearing for the `unit-test` gate, which
+        // shells out to `cargo test`. Without these `env_clear()` would falsely
+        // redden a healthy candidate (a self-inflicted stall).
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+        "RUSTUP_TOOLCHAIN",
+        // ssh-agent for any git the binary shells out to (mirrors scrub_git_env).
+        "SSH_AUTH_SOCK",
+        // User / locale basics so a gate does not misbehave on a bare env.
+        "USER",
+        "LOGNAME",
+        "LANG",
+        "LC_ALL",
+        "TZ",
+        "TERM",
+    ];
+    for var in BASE {
+        if let Ok(val) = std::env::var(var) {
+            cmd.env(var, val);
+        }
+    }
+    // Operator/canary-build allow-list: names only, values read live at spawn.
+    // A hijack-class name (`LD_*`, `DYLD_*`, `GIT_SSH*`, `BASH_ENV`, …) is
+    // refused even if it appears here (SEC-D3): re-injecting one would reopen
+    // exactly the ambient-env hijack this scrub exists to close.
+    for name in &config.canary_env {
+        if is_hijack_class_env(name) {
+            continue;
+        }
+        if let Ok(val) = std::env::var(name) {
+            cmd.env(name, val);
+        }
+    }
+}
+
+/// True when `name` is an execution-hijack environment variable that must never
+/// be re-injected into a canary gate subprocess, regardless of whether an
+/// operator or build step listed it in [`RelaunchConfig::canary_env`]. These
+/// steer a dynamic loader, shell, or git transport into running attacker code
+/// (`LD_PRELOAD` / `LD_LIBRARY_PATH`, macOS `DYLD_*`, `GIT_SSH_COMMAND`,
+/// `BASH_ENV` / `ENV`, `SHELLOPTS` / `BASHOPTS`, `IFS`). Matching is
+/// case-insensitive so a lower/mixed-case spelling cannot slip a variant past
+/// the floor. This is the code-enforced counterpart to the docstring guarantee
+/// on [`scrub_gate_env`] — the deny-by-default floor already omits them; this
+/// prevents the allow-list re-injection loop from restoring one.
+fn is_hijack_class_env(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    const HIJACK_PREFIXES: &[&str] = &["LD_", "DYLD_", "GIT_SSH"];
+    const HIJACK_EXACT: &[&str] = &["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "IFS"];
+    HIJACK_PREFIXES.iter().any(|p| upper.starts_with(p)) || HIJACK_EXACT.iter().any(|n| upper == *n)
+}
+
+/// Construct a [`Command`] for `program` already scrubbed to the canary gate
+/// environment (see [`scrub_gate_env`]). Every gate spawns through this, which
+/// makes "a gate subprocess is *always* run under the scrubbed env" a
+/// structural invariant: a gate cannot silently inherit the daemon's ambient
+/// env by forgetting the scrub call. `env_clear()` runs at construction, so any
+/// gate-specific `.env(...)` (e.g. `CARGO_BUILD_JOBS`) added afterwards survives.
+fn scrubbed_command(program: impl AsRef<std::ffi::OsStr>, config: &RelaunchConfig) -> Command {
+    let mut cmd = Command::new(program);
+    scrub_gate_env(&mut cmd, config);
+    cmd
+}
+
 /// Verify a canary binary against a sequence of gates (does not short-circuit).
 pub fn verify_canary(
     binary: &Path,
@@ -13,11 +140,33 @@ pub fn verify_canary(
     let mut results = Vec::with_capacity(gates.len());
 
     for &gate in gates {
+        // Per-gate tracing span (#4440): the exact gate that reddens — and its
+        // bounded, credential-redacted detail — is emitted structurally as it
+        // runs, not only reconstructed after the fact from the aggregate report.
+        let span = tracing::info_span!(target: "self_relaunch::gate", "canary_gate", gate = %gate);
+        let _enter = span.enter();
         let result = run_gate(binary, gate, config);
+        tracing::info!(
+            target: "self_relaunch::gate",
+            gate = %result.gate,
+            passed = result.passed,
+            detail = %bound_gate_detail(&result.detail),
+            "canary gate evaluated"
+        );
         results.push(result);
     }
 
     Ok(results)
+}
+
+/// Redact URL-embedded credentials (SEC-D2) and bound the length of a gate
+/// detail before it is emitted to `tracing`/OTel — a gate's stderr can embed a
+/// token-bearing remote URL and can be arbitrarily long.
+fn bound_gate_detail(detail: &str) -> String {
+    truncate_output(
+        &crate::self_deploy::source_prep::redact_credentials(detail),
+        512,
+    )
 }
 
 pub fn all_gates_passed(results: &[GateResult]) -> bool {
@@ -26,15 +175,17 @@ pub fn all_gates_passed(results: &[GateResult]) -> bool {
 
 fn run_gate(binary: &Path, gate: RelaunchGate, config: &RelaunchConfig) -> GateResult {
     match gate {
-        RelaunchGate::Smoke => run_smoke_gate(binary),
+        RelaunchGate::Smoke => run_smoke_gate(binary, config),
         RelaunchGate::UnitTest => run_unit_test_gate(config),
-        RelaunchGate::GymBaseline => run_gym_baseline_gate(binary),
+        RelaunchGate::GymBaseline => run_gym_baseline_gate(binary, config),
         RelaunchGate::RpcHealth => run_rpc_health_gate(binary, config),
     }
 }
 
-fn run_smoke_gate(binary: &Path) -> GateResult {
-    match Command::new(binary).arg("--version").output() {
+fn run_smoke_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
+    let mut cmd = scrubbed_command(binary, config);
+    cmd.arg("--version");
+    match cmd.output() {
         Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             GateResult {
@@ -61,15 +212,14 @@ fn run_smoke_gate(binary: &Path) -> GateResult {
 }
 
 fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
-    match Command::new("cargo")
-        .arg("test")
+    let mut cmd = scrubbed_command("cargo", config);
+    cmd.arg("test")
         .arg("--manifest-path")
         .arg(config.manifest_dir.join("Cargo.toml"))
         .arg("--target-dir")
         .arg(&config.canary_target_dir)
-        .env("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs())
-        .output()
-    {
+        .env("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs());
+    match cmd.output() {
         Ok(output) if output.status.success() => GateResult {
             gate: RelaunchGate::UnitTest,
             passed: true,
@@ -92,8 +242,10 @@ fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
     }
 }
 
-fn run_gym_baseline_gate(binary: &Path) -> GateResult {
-    match Command::new(binary).args(["gym", "list"]).output() {
+fn run_gym_baseline_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
+    let mut cmd = scrubbed_command(binary, config);
+    cmd.args(["gym", "list"]);
+    match cmd.output() {
         Ok(output) if output.status.success() => GateResult {
             gate: RelaunchGate::GymBaseline,
             passed: true,
@@ -118,10 +270,9 @@ fn run_gym_baseline_gate(binary: &Path) -> GateResult {
 
 fn run_rpc_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
     let timeout_secs = config.health_timeout.as_secs().to_string();
-    match Command::new(binary)
-        .args(["probe", "rpc", "--timeout", &timeout_secs])
-        .output()
-    {
+    let mut cmd = scrubbed_command(binary, config);
+    cmd.args(["probe", "rpc", "--timeout", &timeout_secs]);
+    match cmd.output() {
         Ok(output) if output.status.success() => GateResult {
             gate: RelaunchGate::RpcHealth,
             passed: true,
@@ -164,8 +315,60 @@ mod tests {
 
     #[test]
     fn smoke_gate_handles_missing_binary() {
-        let result = run_smoke_gate(Path::new("/tmp/no-such-binary-48291"));
+        let result = run_smoke_gate(
+            Path::new("/tmp/no-such-binary-48291"),
+            &RelaunchConfig::default(),
+        );
         assert!(!result.passed);
+    }
+
+    #[test]
+    fn canary_gate_env_allowlist_carries_deploy_shape_names_not_hijack_vars() {
+        let allow = canary_gate_env_allowlist();
+        // Deploy-shape signals the healthy candidate's gates legitimately need.
+        assert!(allow.iter().any(|n| n == "SIMARD_HOME"));
+        assert!(allow.iter().any(|n| n == "SIMARD_PROMPT_ASSETS_DIR"));
+        assert!(allow.iter().any(|n| n == "SIMARD_STATE_ROOT"));
+        // Never an injection vector: an `LD_PRELOAD`-class var is not allow-listed.
+        assert!(!allow.iter().any(|n| n == "LD_PRELOAD"));
+        assert!(!allow.iter().any(|n| n == "GIT_SSH_COMMAND"));
+    }
+
+    #[test]
+    fn is_hijack_class_env_flags_execution_hijack_vars() {
+        // Loader / shell / git-transport steering vars — refused regardless of case.
+        for name in [
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "ld_preload",
+            "DYLD_INSERT_LIBRARIES",
+            "GIT_SSH",
+            "GIT_SSH_COMMAND",
+            "BASH_ENV",
+            "ENV",
+            "SHELLOPTS",
+            "BASHOPTS",
+            "IFS",
+        ] {
+            assert!(
+                is_hijack_class_env(name),
+                "must refuse hijack-class var: {name}"
+            );
+        }
+        // Legitimate deploy-shape / toolchain names are never treated as hijacks.
+        for name in [
+            "SIMARD_HOME",
+            "SIMARD_PROMPT_ASSETS_DIR",
+            "SIMARD_STATE_ROOT",
+            "PATH",
+            "CARGO_HOME",
+            "ENVOY", // superstring of ENV must not false-positive
+        ] {
+            assert!(
+                !is_hijack_class_env(name),
+                "must not refuse a legitimate name: {name}"
+            );
+        }
     }
 
     // --- truncate_output ---
@@ -315,5 +518,188 @@ mod tests {
         let config = RelaunchConfig::default();
         let results = verify_canary(Path::new("/no-such-binary"), &[], &config).unwrap();
         assert!(results.is_empty());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TDD (Problem 1 — canary-gate convergence): FAILING tests, written first.
+//
+// These specify the fix for the persistently-RED self-deploy canary (deploy
+// 928cd7da reddens identically every tick, blocking self-deploy convergence).
+// They MUST fail against the current code and pass once the fix lands.
+//
+// The fix must run gate subprocesses under an `env_clear()` + narrow allow-list
+// (mirroring `self_deploy::source_prep::scrub_git_env`) so (a) a hostile ambient
+// env cannot hijack a gate and (b) the canary is verified in the same scrubbed
+// shape the deployed binary will ship in. That contract is asserted here purely
+// through OBSERVABLE gate behavior — not by coupling to an internal helper name:
+//   * Bidirectional gate verdict: a healthy candidate goes GREEN *because* the
+//     ambient hijack was stripped; an unhealthy candidate stays fail-closed RED.
+//
+// Constraints honoured: additive, fail-closed preserved, intent-revealing names only,
+// `tracing`/OTel only (no `print!`/`println!`).
+#[cfg(all(test, unix))]
+mod convergence_tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn write_exe(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        {
+            let mut f = fs::File::create(&path).expect("create fake candidate binary");
+            f.write_all(body.as_bytes())
+                .expect("write candidate script");
+        }
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    fn unique_tmp(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "simard-gate-tdd-{}-{}-{:?}",
+            tag,
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // GREEN side of the bidirectional verdict AND the load-bearing convergence
+    // proof: a HEALTHY candidate that refuses to run under a hijacked env passes
+    // ONLY when the gate spawned it in a scrubbed env. Current code inherits the
+    // full ambient env (no scrub) → the probe leaks → gate FAILS (RED). After the
+    // fix wires `scrub_gate_env` into the gate spawn → probe stripped → PASS.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn healthy_candidate_passes_only_in_a_scrubbed_gate_env() {
+        let dir = unique_tmp("healthy");
+        let bin = write_exe(
+            &dir,
+            "candidate",
+            "#!/bin/sh\n\
+             if [ -n \"$SIMARD_GATE_HIJACK_PROBE\" ]; then\n\
+             echo 'ambient env leaked into gate' >&2; exit 3; fi\n\
+             exit 0\n",
+        );
+        let config = RelaunchConfig::default();
+
+        // SAFETY: serialized by the cognitive_memory serial key (whole-binary);
+        // no concurrent test reads this var.
+        unsafe { std::env::set_var("SIMARD_GATE_HIJACK_PROBE", "leak") };
+        let results = verify_canary(&bin, &[RelaunchGate::Smoke], &config).unwrap();
+        unsafe { std::env::remove_var("SIMARD_GATE_HIJACK_PROBE") };
+
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].passed,
+            "a healthy candidate must be gated in a scrubbed env (ambient hijack stripped); got: {}",
+            results[0].detail
+        );
+    }
+
+    // RED side of the bidirectional verdict: an unhealthy candidate stays
+    // fail-closed regardless of env. Locks that the fix does NOT weaken the gate.
+    #[test]
+    fn unhealthy_candidate_stays_fail_closed_red() {
+        let dir = unique_tmp("unhealthy");
+        let bin = write_exe(&dir, "candidate", "#!/bin/sh\nexit 1\n");
+        let config = RelaunchConfig::default();
+
+        let results = verify_canary(&bin, &[RelaunchGate::Smoke], &config).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(
+            !results[0].passed,
+            "an unhealthy candidate must stay RED (fail-closed)"
+        );
+        assert!(!all_gates_passed(&results));
+    }
+
+    // The additive `canary_env` knob (#4440): a var stripped by the deny-by-
+    // default floor is re-injected when the operator allow-lists its NAME, so a
+    // candidate that legitimately REQUIRES that signal goes GREEN — without
+    // widening the base floor or inheriting the daemon's whole ambient env.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn canary_env_allowlist_reinjects_a_required_signal() {
+        let dir = unique_tmp("allowlist");
+        // Candidate is healthy ONLY when it can see the allow-listed signal.
+        let bin = write_exe(
+            &dir,
+            "candidate",
+            "#!/bin/sh\n\
+             if [ \"$SIMARD_CANARY_ALLOWLISTED\" = \"present\" ]; then exit 0; fi\n\
+             echo 'required signal missing' >&2; exit 4\n",
+        );
+
+        // SAFETY: serialized by the cognitive_memory serial key (whole-binary);
+        // no concurrent test reads this var.
+        unsafe { std::env::set_var("SIMARD_CANARY_ALLOWLISTED", "present") };
+
+        // Not allow-listed → stripped by the floor → candidate reddens.
+        let denied =
+            verify_canary(&bin, &[RelaunchGate::Smoke], &RelaunchConfig::default()).unwrap();
+        assert!(
+            !denied[0].passed,
+            "deny-by-default: an un-listed var must be stripped, reddening the gate"
+        );
+
+        // Allow-listed by NAME → re-injected → candidate goes green.
+        let config = RelaunchConfig {
+            canary_env: vec!["SIMARD_CANARY_ALLOWLISTED".to_string()],
+            ..RelaunchConfig::default()
+        };
+        let allowed = verify_canary(&bin, &[RelaunchGate::Smoke], &config).unwrap();
+        unsafe { std::env::remove_var("SIMARD_CANARY_ALLOWLISTED") };
+
+        assert!(
+            allowed[0].passed,
+            "an allow-listed var must be re-injected so a healthy candidate passes; got: {}",
+            allowed[0].detail
+        );
+    }
+
+    // SEC-D3 (defense-in-depth): a hijack-class NAME placed in `canary_env` must
+    // NOT be re-injected — the code-enforced denylist keeps the docstring's
+    // "`LD_PRELOAD`-class variables are never allow-listable" guarantee true even
+    // when a less-trusted source populates the allow-list. Uses `GIT_SSH_COMMAND`
+    // (matches the `GIT_SSH` prefix) because it is inert for `/bin/sh` yet is a
+    // real ambient-hijack vector for any git the candidate shells out to.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn hijack_class_name_in_canary_env_is_never_reinjected() {
+        let dir = unique_tmp("hijackdeny");
+        // Candidate is healthy ONLY when the hijack var is absent from its env.
+        let bin = write_exe(
+            &dir,
+            "candidate",
+            "#!/bin/sh\n\
+             if [ -n \"$GIT_SSH_COMMAND\" ]; then\n\
+             echo 'hijack var leaked into gate' >&2; exit 5; fi\n\
+             exit 0\n",
+        );
+
+        // SAFETY: serialized by the cognitive_memory serial key (whole-binary);
+        // no concurrent test reads this var.
+        unsafe { std::env::set_var("GIT_SSH_COMMAND", "malicious --oProxyCommand") };
+
+        // Even though the operator allow-listed the NAME, the denylist refuses it.
+        let config = RelaunchConfig {
+            canary_env: vec!["GIT_SSH_COMMAND".to_string()],
+            ..RelaunchConfig::default()
+        };
+        let results = verify_canary(&bin, &[RelaunchGate::Smoke], &config).unwrap();
+        unsafe { std::env::remove_var("GIT_SSH_COMMAND") };
+
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].passed,
+            "a hijack-class name must be refused re-injection (stripped); got: {}",
+            results[0].detail
+        );
     }
 }
