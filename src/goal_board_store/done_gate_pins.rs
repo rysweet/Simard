@@ -142,28 +142,71 @@ fn pins_path(state_root: &Path) -> PathBuf {
 /// Load the operator done-gate pins (`goal id -> pin`).
 ///
 /// Returns an empty map if the file is absent or unparsable (fail-open: a
-/// corrupt pin file must never wedge the daemon's commit path).
+/// corrupt pin file must never wedge the daemon's commit path). Fail-open is
+/// **observable**: a corrupt or unreadable pin file silently disables the very
+/// clobber-protection this module exists for, so both branches emit a
+/// `tracing::warn!` (an absent file is the expected empty-state and stays
+/// silent) rather than swallowing the failure.
 #[must_use]
 pub fn load_done_gate_pins(state_root: &Path) -> BTreeMap<String, DoneGatePin> {
-    match std::fs::read_to_string(pins_path(state_root)) {
-        Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
-        Err(_) => BTreeMap::new(),
+    let path = pins_path(state_root);
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => match serde_json::from_str(&raw) {
+            Ok(pins) => pins,
+            Err(e) => {
+                tracing::warn!(
+                    target: "simard::goal",
+                    path = %path.display(),
+                    error = %e,
+                    "done-gate pins file is corrupt; ignoring it this cycle \
+                     (operator finish lines will NOT be re-asserted until it is \
+                     repaired or rewritten by `goal set-done-gate`)"
+                );
+                BTreeMap::new()
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(e) => {
+            tracing::warn!(
+                target: "simard::goal",
+                path = %path.display(),
+                error = %e,
+                "done-gate pins file could not be read; ignoring it this cycle \
+                 (operator finish lines will NOT be re-asserted)"
+            );
+            BTreeMap::new()
+        }
     }
 }
 
-/// Persist the full pin map.
+/// Persist the full pin map with an atomic temp-file + `rename` (mirroring the
+/// authoritative board's [`crate::goal_board_store`] write) so a crash mid-write
+/// or a concurrent daemon read can never observe a torn, half-written pin file —
+/// which would otherwise be silently discarded by [`load_done_gate_pins`],
+/// re-opening the clobber this module closes.
 pub fn save_done_gate_pins(
     state_root: &Path,
     pins: &BTreeMap<String, DoneGatePin>,
 ) -> SimardResult<()> {
     let path = pins_path(state_root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| SimardError::ArtifactIo {
+            path: parent.to_path_buf(),
+            reason: format!("creating done-gate pins dir: {e}"),
+        })?;
+    }
     let json = serde_json::to_string_pretty(pins).map_err(|e| SimardError::ArtifactIo {
         path: path.clone(),
         reason: format!("serializing done-gate pins: {e}"),
     })?;
-    std::fs::write(&path, json).map_err(|e| SimardError::ArtifactIo {
-        path,
-        reason: format!("writing done-gate pins: {e}"),
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json.as_bytes()).map_err(|e| SimardError::ArtifactIo {
+        path: tmp.clone(),
+        reason: format!("writing done-gate pins temp file: {e}"),
+    })?;
+    std::fs::rename(&tmp, &path).map_err(|e| SimardError::ArtifactIo {
+        path: path.clone(),
+        reason: format!("renaming done-gate pins temp file into place: {e}"),
     })
 }
 
@@ -327,6 +370,17 @@ mod tests {
 
         clear_done_gate_pins(root, &["g1".to_string()]).unwrap();
         assert!(load_done_gate_pins(root).is_empty());
+    }
+
+    #[test]
+    fn corrupt_pins_file_fails_open_to_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(pins_path(root), b"{ this is not valid json").unwrap();
+        assert!(
+            load_done_gate_pins(root).is_empty(),
+            "a corrupt pins file must fail open to an empty map, never panic or wedge"
+        );
     }
 
     #[test]
