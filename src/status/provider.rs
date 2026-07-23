@@ -1036,9 +1036,9 @@ mod pure_helper_tests {
     /// non-idle self-eval state, so the self-evaluation loop is no longer inert.
     /// When the gym is skipped it stays `absent`/`idle` (no behaviour change).
     /// RED (TDD Step 7): fails until `assemble_gym` is wired to
-    /// `benchmark_scenarios()` and an `active` state.
+    /// `benchmark_scenarios()` and an `enabled` state.
     #[test]
-    fn assemble_gym_reports_real_scenarios_and_active_when_enabled() {
+    fn assemble_gym_reports_real_scenarios_and_enabled_when_enabled() {
         let enabled = assemble_gym(false);
         let g = enabled.data.as_ref().unwrap();
         assert!(!g.skip_gym);
