@@ -471,3 +471,128 @@ fn spawn_diagnosis_serialises_exit_code_as_null() {
     assert_eq!(v["cause"], serde_json::json!("arg-list-too-long"));
     assert!(v["exit_code"].is_null(), "spawn failure has no exit code");
 }
+
+// ---------------------------------------------------------------------------
+// Issue #4289 — E2BIG errno → Signal representation alignment.
+//
+// The classifier maps errno 7 (E2BIG) → `FailureCause::ArgListTooLong`
+// (covered above). #4289 is the *next hop*: a diagnosed E2BIG failure must flow
+// through `signals_from` into a `Signal::StepFailureDiagnosed` that carries the
+// SAME cause verbatim, and `Signal::describe` must render the stable
+// `arg-list-too-long` label — no parser/enum mismatch between the errno mapping
+// and the emitted signal. These are regression guards: they encode the
+// currently-correct behaviour so a future edit to either the errno mapping or
+// the signal rendering that desynchronises them fails loudly.
+// ---------------------------------------------------------------------------
+
+use super::capabilities::ObservedState;
+use super::signal::{Signal, signals_from};
+
+/// A diagnosed E2BIG failure drained into `recent_step_failures` must surface as
+/// exactly one `Signal::StepFailureDiagnosed` carrying `ArgListTooLong` and the
+/// preserved exit code — the errno→cause mapping and the signal must not diverge.
+#[cfg(unix)]
+#[test]
+fn e2big_diagnosis_flows_into_step_failure_signal_verbatim() {
+    let diagnosis = classify_terminal_failure(
+        &exit_status_with_code_or_generic(126),
+        "execve: Argument list too long",
+    );
+    assert_eq!(
+        diagnosis.cause,
+        FailureCause::ArgListTooLong,
+        "precondition: E2BIG transcript classifies as arg-list-too-long"
+    );
+
+    let state = ObservedState {
+        recent_step_failures: vec![diagnosis.clone()],
+        ..Default::default()
+    };
+    let signals = signals_from(&state);
+
+    let emitted: Vec<&Signal> = signals
+        .iter()
+        .filter(|s| matches!(s, Signal::StepFailureDiagnosed { .. }))
+        .collect();
+    assert_eq!(
+        emitted.len(),
+        1,
+        "exactly one StepFailureDiagnosed signal must be emitted per diagnosis"
+    );
+    match emitted[0] {
+        Signal::StepFailureDiagnosed {
+            cause, exit_code, ..
+        } => {
+            assert_eq!(
+                *cause,
+                FailureCause::ArgListTooLong,
+                "issue #4289: the signal must carry the E2BIG cause verbatim"
+            );
+            assert_eq!(
+                *exit_code, diagnosis.exit_code,
+                "the diagnosis exit code must be preserved onto the signal"
+            );
+        }
+        other => panic!("unexpected signal shape: {other:?}"),
+    }
+}
+
+/// A `Signal::StepFailureDiagnosed` for an E2BIG failure renders the stable
+/// kebab-case `arg-list-too-long` label (the errno mapping's `as_str`), so the
+/// operator-facing line matches the authoritative cause definition.
+#[test]
+fn step_failure_signal_renders_arg_list_too_long_label() {
+    let line = Signal::StepFailureDiagnosed {
+        cause: FailureCause::ArgListTooLong,
+        exit_code: Some(126),
+        evidence: "execve: Argument list too long".to_string(),
+    }
+    .describe();
+    assert!(
+        line.contains("arg-list-too-long"),
+        "issue #4289: the rendered signal must surface the authoritative \
+         E2BIG label 'arg-list-too-long', got: {line:?}"
+    );
+    assert!(
+        line.contains("diagnosed step failure"),
+        "the rendered signal must identify itself as a diagnosed step failure: {line:?}"
+    );
+}
+
+/// End-to-end for a *spawn* E2BIG (errno 7, no exit code): the diagnosis flows
+/// into a signal whose cause is `ArgListTooLong` and whose rendered line carries
+/// the stable label — with the exit code rendered as `signal` (no child exit).
+#[test]
+fn spawn_e2big_end_to_end_to_signal() {
+    let diagnosis = classify_spawn_failure(&io::Error::from_raw_os_error(7));
+    assert_eq!(diagnosis.cause, FailureCause::ArgListTooLong);
+    assert!(
+        diagnosis.exit_code.is_none(),
+        "a spawn failure has no child exit code"
+    );
+
+    let state = ObservedState {
+        recent_step_failures: vec![diagnosis],
+        ..Default::default()
+    };
+    let signals = signals_from(&state);
+    let rendered: Vec<String> = signals
+        .iter()
+        .filter(|s| matches!(s, Signal::StepFailureDiagnosed { .. }))
+        .map(|s| s.describe())
+        .collect();
+    assert_eq!(rendered.len(), 1);
+    assert!(
+        rendered[0].contains("arg-list-too-long"),
+        "issue #4289: spawn-E2BIG must render the authoritative label: {:?}",
+        rendered[0]
+    );
+}
+
+/// Helper: a real `ExitStatus` carrying `code`, falling back to a generic
+/// non-zero status on platforms without `ExitStatusExt`. On unix this reuses the
+/// module's `exit_status_with_code`.
+#[cfg(unix)]
+fn exit_status_with_code_or_generic(code: i32) -> std::process::ExitStatus {
+    exit_status_with_code(code)
+}

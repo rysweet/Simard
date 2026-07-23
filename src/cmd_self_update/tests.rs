@@ -169,3 +169,75 @@ fn test_self_test_uses_starter_suite() {
     assert!(!CURRENT_VERSION.is_empty());
     assert!(GITHUB_REPO.contains("Simard"));
 }
+
+// ---------------------------------------------------------------------------
+// Problem 1 (WS1) — self-deploy release-adoption gate must be fail-closed semver.
+//
+// The live operator is stuck on 0.31.0 while 0.33.1 is published. The adoption
+// gate in `cmd_self_update::update` currently decides "should I adopt?" with a
+// fragile STRING-EQUALITY check (`version == CURRENT_VERSION`): anything that is
+// merely *unequal* — including an OLDER or malformed tag — passes the gate and
+// triggers a download/relaunch. The design replaces that with the authoritative
+// semver predicate `update_check::is_newer(current, latest)`, which the fix must
+// also promote from a private `fn` to `pub(crate)` so the adoption trigger can
+// reuse it.
+//
+// These tests reference `crate::update_check::is_newer`. They FAIL TO COMPILE
+// against the current tree (the fn is private → E0603) and pass once WS1 makes
+// it `pub(crate)` and routes the gate through it. `is_newer(current, latest)`
+// returns true iff `latest` is STRICTLY newer than `current`, and is fail-closed
+// (returns false, never panics) on any unparseable input.
+// ---------------------------------------------------------------------------
+
+/// The exact live scenario: a 0.31.0 binary MUST adopt a published 0.33.1.
+#[test]
+fn adoption_gate_adopts_a_strictly_newer_published_release() {
+    assert!(
+        crate::update_check::is_newer("0.31.0", "0.33.1"),
+        "the stale 0.31.0 operator must detect+adopt the newer 0.33.1 release"
+    );
+    assert!(crate::update_check::is_newer("0.33.0", "0.33.1"));
+    assert!(crate::update_check::is_newer("0.32.9", "0.33.0"));
+}
+
+/// The gate must NOT fire when already at the latest — the equal case is a
+/// no-op, exactly as the old `version == CURRENT_VERSION` short-circuit intended.
+#[test]
+fn adoption_gate_is_a_noop_at_the_latest_version() {
+    assert!(!crate::update_check::is_newer("0.33.1", "0.33.1"));
+    assert!(!crate::update_check::is_newer(
+        super::platform::CURRENT_VERSION,
+        super::platform::CURRENT_VERSION
+    ));
+}
+
+/// Fail-closed DOWNGRADE guard — the whole reason to replace `!=` with
+/// `is_newer`: an OLDER remote tag is *unequal* to the current version and would
+/// wrongly pass a string-inequality gate, but must NEVER be adopted.
+#[test]
+fn adoption_gate_refuses_to_downgrade_to_an_older_release() {
+    assert!(
+        !crate::update_check::is_newer("0.33.1", "0.31.0"),
+        "an older published tag must never be adopted (no silent downgrade)"
+    );
+    assert!(!crate::update_check::is_newer("1.0.0", "0.9.9"));
+}
+
+/// Fail-closed on MALFORMED input: an unparseable/`v`-prefixed remote tag must
+/// yield "not newer" (no adoption) and must never panic.
+#[test]
+fn adoption_gate_fails_closed_on_malformed_remote_tag() {
+    let result = std::panic::catch_unwind(|| {
+        // A raw `v`-prefixed tag is not valid semver — the release path strips
+        // the prefix before comparing, so an un-stripped tag reaching the gate
+        // must be treated as "not newer", never coerced into an update.
+        assert!(!crate::update_check::is_newer("0.31.0", "v0.33.1"));
+        assert!(!crate::update_check::is_newer("0.31.0", "not-a-version"));
+        assert!(!crate::update_check::is_newer("garbage", "0.33.1"));
+        assert!(!crate::update_check::is_newer("", ""));
+    });
+    assert!(
+        result.is_ok(),
+        "the adoption gate must be panic-safe (fail-closed) on bad input"
+    );
+}

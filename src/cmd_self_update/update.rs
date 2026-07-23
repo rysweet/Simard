@@ -67,7 +67,7 @@ pub fn handle_self_update() -> Result<(), Box<dyn std::error::Error>> {
 
     let (url, version) = find_latest_release()?;
 
-    if version == CURRENT_VERSION {
+    if !crate::update_check::is_newer(CURRENT_VERSION, &version) {
         println!("Already at the latest version (v{CURRENT_VERSION}).");
         return Ok(());
     }
@@ -125,7 +125,7 @@ pub fn handle_self_update_download_only()
 -> Result<Option<std::path::PathBuf>, Box<dyn std::error::Error>> {
     println!("simard safe-update (current: v{CURRENT_VERSION})");
     let (url, version) = find_latest_release()?;
-    if version == CURRENT_VERSION {
+    if !crate::update_check::is_newer(CURRENT_VERSION, &version) {
         return Ok(None);
     }
     println!("New version available: v{CURRENT_VERSION} → v{version}");

@@ -916,6 +916,62 @@ fn run_ooda_cycle_inner(
             if let Err(e) = persist_result {
                 eprintln!("[simard] OODA curate: failed to persist goal board: {e}");
             }
+
+            // Issue #4287: route the post-cycle board through the SAME
+            // authoritative, lock-serialised file store the daemon and the
+            // `simard goal` CLI read (`<state_root>/state/goal_board.json`).
+            //
+            // The persist above writes only the cognitive-memory snapshot,
+            // which `goal_board_store` explicitly demotes to a *derived cache*.
+            // Before this, the authoritative load/commit boundary lived outside
+            // the `run_ooda_cycle` API — the daemon patched around it, but any
+            // *direct* caller (a cognitive-thread OODA tick, or any embedder)
+            // wrote only the cache and let the durable file diverge, so a later
+            // process (or the daemon after its ~hourly restart) read a stale
+            // board. Committing here moves that boundary into the cycle API so
+            // every caller is read-your-writes correct for free.
+            //
+            // `commit_cycle` is an idempotent, monotonic, tombstone-honouring
+            // reconcile under the cross-process `flock`; the daemon still runs
+            // its own done-gate + commit afterwards, and the second pass
+            // converges on the same board rather than conflicting.
+            let state_root = crate::goal_curation::simard_state_root();
+            let new_tombstones: Vec<String> = {
+                let post_active: std::collections::HashSet<&str> = state
+                    .active_goals
+                    .active
+                    .iter()
+                    .map(|g| g.id.as_str())
+                    .collect();
+                let post_backlog: std::collections::HashSet<&str> = state
+                    .active_goals
+                    .backlog
+                    .iter()
+                    .map(|b| b.id.as_str())
+                    .collect();
+                pre_cycle_active_ids
+                    .iter()
+                    .filter(|id| {
+                        !post_active.contains(id.as_str()) && !post_backlog.contains(id.as_str())
+                    })
+                    .cloned()
+                    .collect()
+            };
+            match crate::goal_board_store::commit_cycle(
+                &state_root,
+                &state.active_goals,
+                &state.no_progress_tracker,
+                state.cycle_count,
+                &new_tombstones,
+            ) {
+                Ok(committed) => state.active_goals = committed,
+                Err(e) => tracing::warn!(
+                    target: "simard::ooda",
+                    error = %e,
+                    "issue #4287: authoritative goal_board_store commit failed inside \
+                     run_ooda_cycle; the cognitive-memory cache was still updated"
+                ),
+            }
         }
     }
 

@@ -254,9 +254,13 @@ fn format_banner(info: &UpdateInfo) -> String {
 }
 
 /// Returns `true` iff `latest` is strictly newer than `current` under semver
-/// ordering. Fail-open: if either string is not valid semver, returns `false`
-/// (never panics).
-fn is_newer(current: &str, latest: &str) -> bool {
+/// ordering. Fail-closed: if either string is not valid semver, returns `false`
+/// (never panics) so a malformed or `v`-prefixed remote tag can never coerce an
+/// update. Exposed as `pub(crate)` so the self-deploy release-adoption gate in
+/// [`crate::cmd_self_update`] shares this one authoritative predicate instead of
+/// a fragile string-inequality check (Problem 1 — stale operator must adopt a
+/// strictly-newer release and must never silently downgrade).
+pub(crate) fn is_newer(current: &str, latest: &str) -> bool {
     match (
         semver::Version::parse(current),
         semver::Version::parse(latest),
