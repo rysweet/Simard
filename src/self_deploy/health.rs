@@ -162,25 +162,21 @@ fn commits_compatible(running: &str, target: &str) -> bool {
 /// (unacknowledged) corruption event still counts because the marker is keyed
 /// to the exact filename.
 ///
-/// Test-only helper: production probe 5 now uses [`tally_quarantine_files`],
-/// which additionally splits fresh vs. retained counts against the forensic
-/// window. This total-count wrapper is retained purely for the acknowledgement
-/// unit tests below, so it is compiled only under `#[cfg(test)]`.
+/// Test-only helper: total count of unacknowledged quarantined corrupt
+/// cognitive-memory artifacts directly under `state_root`, regardless of
+/// forensic-window age. Delegates to the production [`tally_quarantine_files`]
+/// scan (summing *fresh* + *retained*) so the directory-scan and
+/// acknowledgement logic lives in exactly one place — the test helper can never
+/// drift from the production probe path (#4469 philosophy review S5). Compiled
+/// only under `#[cfg(test)]`.
 #[cfg(test)]
 fn count_quarantine_files(state_root: &std::path::Path) -> u64 {
-    let entries = match std::fs::read_dir(state_root) {
-        Ok(e) => e,
-        Err(_) => return 0,
-    };
-    entries
-        .flatten()
-        .filter(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            crate::cmd_cleanup::is_corrupt_quarantine_name(&name)
-                && !crate::self_deploy::quarantine_ack::is_ack_marker_name(&name)
-                && !crate::self_deploy::quarantine_ack::is_acknowledged(state_root, &name)
-        })
-        .count() as u64
+    // Any window start yields the same total: an artifact is either fresh
+    // (mtime ≥ window) or retained (mtime < window), and this helper wants the
+    // age-agnostic sum. Acknowledged artifacts and `.ack` sidecars are already
+    // excluded by the production scan.
+    let tally = tally_quarantine_files(state_root, Utc::now());
+    tally.fresh + tally.retained
 }
 
 /// Tally quarantined corrupt cognitive-memory artifacts directly under `dir`,
@@ -390,6 +386,10 @@ pub fn run_self_health_probe(
     // never eligible for auto-ack.
     let mut quarantine_tally = QuarantineTally::default();
     for dir in crate::state_root::quarantine_scan_dirs() {
+        // Best-effort guarded auto-ack: the return value (which artifact, if any,
+        // was acked) is intentionally discarded here — success/failure is logged
+        // internally via structured tracing/OTel WARN inside the helper, and the
+        // subsequent tally re-scans the directory to reflect any new `.ack`.
         let _ = auto_ack_stuck_recovery_asset(&dir);
         let dir_tally = tally_quarantine_files(&dir, fallback_window_start);
         quarantine_tally.fresh += dir_tally.fresh;

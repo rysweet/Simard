@@ -13,9 +13,6 @@ mod types;
 // Re-export all public items so `crate::self_relaunch::X` still works.
 pub use canary::{build_canary, build_self_deploy_candidate, coordinated_relaunch, handover};
 pub use gates::{all_gates_passed, verify_canary};
-// Shared control-char sanitizer, reused by `cmd_cleanup::disk` to neutralize
-// untrusted quarantine basenames in operator-facing output (#4469, LOW-1).
-pub(crate) use gates::sanitize_gate_detail;
 pub use types::{GateResult, RelaunchConfig, RelaunchGate, default_gates};
 
 #[cfg(test)]

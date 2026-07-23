@@ -91,7 +91,10 @@ fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
                 None => format!(
                     "tests failed (exit {}): {}",
                     output.status,
-                    sanitize_gate_detail(&stderr, GATE_DETAIL_MAX_BYTES)
+                    crate::util::log_sanitize::sanitize_to_single_line(
+                        &stderr,
+                        GATE_DETAIL_MAX_BYTES
+                    )
                 ),
             };
             GateResult {
@@ -170,9 +173,10 @@ pub(crate) const GATE_DETAIL_MAX_BYTES: usize = 512;
 /// `cargo test` prints `test module::path::name ... FAILED` for each failure and
 /// a `failures:` summary block listing `    module::path::name`. This returns the
 /// first failing test's path (e.g. `self_deploy::tests_health::foo`), sanitized
-/// via [`sanitize_gate_detail`] and bounded to [`GATE_DETAIL_MAX_BYTES`], so the
-/// canary can surface WHICH test produced the red canary instead of an opaque
-/// "exit 101". Returns `None` when no failing-test line is present.
+/// via [`crate::util::log_sanitize::sanitize_to_single_line`] and bounded to
+/// [`GATE_DETAIL_MAX_BYTES`], so the canary can surface WHICH test produced the
+/// red canary instead of an opaque "exit 101". Returns `None` when no
+/// failing-test line is present.
 pub(crate) fn extract_first_failure(cargo_test_output: &str) -> Option<String> {
     for line in cargo_test_output.lines() {
         // Per-test result lines look like `test <path> ... FAILED`. The summary
@@ -187,40 +191,13 @@ pub(crate) fn extract_first_failure(cargo_test_output: &str) -> Option<String> {
         };
         let path = path.trim();
         if !path.is_empty() {
-            return Some(sanitize_gate_detail(path, GATE_DETAIL_MAX_BYTES));
+            return Some(crate::util::log_sanitize::sanitize_to_single_line(
+                path,
+                GATE_DETAIL_MAX_BYTES,
+            ));
         }
     }
     None
-}
-
-/// Sanitize an untrusted subprocess string for embedding in a `GateResult.detail`
-/// (#4470): strip CR/LF and other control characters, collapse to a single line,
-/// and bound the result to `max_bytes` (UTF-8-boundary-safe). Prevents a canary
-/// test name / stderr from forging log lines or JSON.
-pub(crate) fn sanitize_gate_detail(raw: &str, max_bytes: usize) -> String {
-    // Collapse every run of control characters (newlines, tabs, ANSI escapes,
-    // NUL) to a single space so the result is one readable line with no forgery
-    // vectors.
-    let mut collapsed = String::with_capacity(raw.len());
-    for c in raw.chars() {
-        if c.is_control() {
-            if !collapsed.ends_with(' ') {
-                collapsed.push(' ');
-            }
-        } else {
-            collapsed.push(c);
-        }
-    }
-    let trimmed = collapsed.trim();
-    if trimmed.len() <= max_bytes {
-        return trimmed.to_string();
-    }
-    // Bound on a UTF-8 char boundary so we never split a multi-byte char.
-    let mut end = max_bytes;
-    while end > 0 && !trimmed.is_char_boundary(end) {
-        end -= 1;
-    }
-    trimmed[..end].to_string()
 }
 
 #[cfg(test)]
@@ -375,46 +352,5 @@ test result: ok. 2 passed; 0 failed;
             "extracted failure must be bounded to {GATE_DETAIL_MAX_BYTES} bytes, got {}",
             extracted.len()
         );
-    }
-
-    #[test]
-    fn sanitize_gate_detail_strips_control_chars_and_newlines() {
-        let raw = "line one\nline two\r\n\ttabbed\x1b[31mred\x00nul";
-        let clean = sanitize_gate_detail(raw, GATE_DETAIL_MAX_BYTES);
-        assert!(!clean.contains('\n'), "newlines stripped: {clean:?}");
-        assert!(
-            !clean.contains('\r'),
-            "carriage returns stripped: {clean:?}"
-        );
-        assert!(
-            !clean.contains('\x1b'),
-            "escape sequences stripped: {clean:?}"
-        );
-        assert!(!clean.contains('\0'), "NUL stripped: {clean:?}");
-        assert!(
-            !clean.contains('\t') || clean.contains(' '),
-            "no raw tabs: {clean:?}"
-        );
-    }
-
-    #[test]
-    fn sanitize_gate_detail_bounds_length() {
-        let raw = "a".repeat(2000);
-        let clean = sanitize_gate_detail(&raw, GATE_DETAIL_MAX_BYTES);
-        assert!(
-            clean.len() <= GATE_DETAIL_MAX_BYTES,
-            "must bound to {GATE_DETAIL_MAX_BYTES} bytes, got {}",
-            clean.len()
-        );
-    }
-
-    #[test]
-    fn sanitize_gate_detail_utf8_boundary_safe() {
-        // Bounding must never split a multi-byte char (no panic, valid UTF-8).
-        let raw = "héllo wörld café ".repeat(100);
-        let clean = sanitize_gate_detail(&raw, 10);
-        assert!(clean.len() <= 10);
-        // Round-trips as valid UTF-8 (String is always valid; the point is no panic).
-        let _ = clean.chars().count();
     }
 }

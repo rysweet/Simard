@@ -153,26 +153,47 @@ non-empty, absolute, NUL-free path. The sidecar holds a small fixed marker
 
 The [`no_quarantine`](./self-deploy-api.md#self-health-output) probe in
 [`src/self_deploy/health.rs`](https://github.com/rysweet/Simard/blob/main/src/self_deploy/health.rs)
-now counts only **unacknowledged** quarantine artifacts. `count_quarantine_files`
-skips both `.ack` sidecars and any artifact that has a present `.ack` sidecar:
+now counts only **unacknowledged** quarantine artifacts. The production scan
+`tally_quarantine_files` skips both `.ack` sidecars and any artifact that has a
+present `.ack` sidecar, splitting the rest into *fresh* vs. *retained* counts
+against the forensic window (only *fresh* fails the probe):
 
 ```rust
-fn count_quarantine_files(state_root: &std::path::Path) -> u64 {
-    let entries = match std::fs::read_dir(state_root) {
+fn tally_quarantine_files(dir: &std::path::Path, window_start: DateTime<Utc>) -> QuarantineTally {
+    let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
-        Err(_) => return 0,
+        Err(_) => return QuarantineTally::default(),
     };
-    entries
-        .flatten()
-        .filter(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            is_corrupt_quarantine_name(&name)
-                && !quarantine_ack::is_ack_marker_name(&name)
-                && !quarantine_ack::is_acknowledged(state_root, &name)
-        })
-        .count() as u64
+    let mut tally = QuarantineTally::default();
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        if !is_corrupt_quarantine_name(&name) {
+            continue;
+        }
+        // `.ack` sidecars are never quarantines, and an acknowledged artifact
+        // is "seen" — it counts as neither fresh nor retained.
+        if quarantine_ack::is_ack_marker_name(&name)
+            || quarantine_ack::is_acknowledged(dir, &name)
+        {
+            continue;
+        }
+        let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if DateTime::<Utc>::from(mtime) >= window_start {
+            tally.fresh += 1;
+        } else {
+            tally.retained += 1;
+        }
+    }
+    tally
 }
 ```
+
+The test-only `count_quarantine_files` helper delegates to this same scan
+(summing `fresh + retained`) so there is a single source of the acknowledgement
+logic.
 
 The `NoQuarantineProbe` **JSON schema is unchanged** — it still serializes as
 `{ "healthy": bool, "quarantined": bool }`. `quarantined` is now `false` once

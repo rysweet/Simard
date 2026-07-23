@@ -626,10 +626,13 @@ const PATH_LOG_MAX_BYTES: usize = 4096;
 /// or ANSI escape sequences. `Path::display()` emits those verbatim, letting an
 /// attacker with write access to the state root forge log lines or inject
 /// terminal-control sequences into the operator's console. Route every
-/// operator-visible path through the shared `sanitize_gate_detail` control-char
+/// operator-visible path through the shared `util::log_sanitize` control-char
 /// strip — the same escaping the health probe applies via Debug (`?name`).
 fn sanitize_path_for_log(path: &Path) -> String {
-    crate::self_relaunch::sanitize_gate_detail(&path.display().to_string(), PATH_LOG_MAX_BYTES)
+    crate::util::log_sanitize::sanitize_to_single_line(
+        &path.display().to_string(),
+        PATH_LOG_MAX_BYTES,
+    )
 }
 
 /// Reclaim orphaned `.ack` acknowledgement sidecars (#4469) directly under
