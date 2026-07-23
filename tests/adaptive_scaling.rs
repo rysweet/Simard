@@ -312,9 +312,14 @@ fn scaler_current_max_can_override_config() {
         })
         .collect();
 
-    // Use scaler's current_max as the config limit.
+    // Use scaler's current_max as the config limit. `scaler: None` keeps this
+    // test hermetic: `OodaConfig::default()` injects an AIMD scaler (starting at
+    // its ceiling, ignoring `max_concurrent_actions`) whenever the ambient
+    // `SIMARD_SCALING=auto` is set, which would otherwise mask the cap this test
+    // asserts. Pinning it to None verifies the config limit path deterministically.
     let config = OodaConfig {
         max_concurrent_actions: scaler.current_max(),
+        scaler: None,
         ..OodaConfig::default()
     };
 
