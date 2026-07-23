@@ -283,13 +283,13 @@ pub(crate) struct NoProgressBreakerReport {
     /// ("idle") cycle. For a standing cognition-research goal an idle cycle is a
     /// **FAULT**, not the benign bursty idle of [`perpetual_idled`]: its charter
     /// is continuous exploration, so it must generate a NEW source/experiment
-    /// every cycle. The never-idle rail therefore re-orients the goal
-    /// ([`ActiveGoal::roll_to_new_cycle`]) so the next OODA cycle re-enters work
-    /// generation, resets its no-action counter, and records the fault here so it
-    /// is visible in the cycle log — the opposite of the old silent exemption.
-    /// It stays **fail-closed**: the goal is never blocked/killed/parked, and
-    /// this is deliberately NOT a [`fired`](Self::fired) firing (it is a
-    /// re-orient, not a terminal breaker action).
+    /// every cycle. The breaker records the fault here (so it is visible in the
+    /// cycle log — the opposite of the old silent exemption) and resets its
+    /// no-action counter. Issue #4453: the breaker no longer re-orients the goal
+    /// itself — the destructive [`ActiveGoal::roll_to_new_cycle`] is owned solely
+    /// by the agentic per-goal reasoner's `reorient` action, so this is purely a
+    /// SIGNAL. It stays **fail-closed**: the goal is never blocked/killed/parked,
+    /// and this is deliberately NOT a [`fired`](Self::fired) firing.
     pub research_idle_faults: Vec<String>,
 }
 
@@ -375,8 +375,10 @@ pub(crate) enum StandingIdle {
     BenignExempt,
     /// Standing RESEARCH goal ([`ActiveGoal::is_standing_research_goal`]). Idling
     /// is a FAULT (issue #4399): record the goal in `research_idle_faults`, warn
-    /// with the `fault` category, reset the counter, and re-orient via
-    /// [`ActiveGoal::roll_to_new_cycle`]. Never block/kill/park.
+    /// with the `fault` category, and reset the counter. Issue #4453 demoted this
+    /// to a pure SIGNAL — the breaker no longer re-orients here; the destructive
+    /// [`ActiveGoal::roll_to_new_cycle`] is owned solely by the agentic per-goal
+    /// reasoner's `reorient` action. Never block/kill/park.
     ResearchFault { fault: ResearchIdleFault },
     /// Standing RESEARCH goal that still holds a LIVE in-flight artifact — an
     /// open PR / working branch / engineer session
@@ -574,7 +576,7 @@ fn apply_standing_idle(
     report: &mut NoProgressBreakerReport,
     goal_id: &str,
 ) -> bool {
-    let Some(goal) = board.active.iter_mut().find(|g| g.id == goal_id) else {
+    let Some(goal) = board.active.iter().find(|g| g.id == goal_id) else {
         return false;
     };
     let Some(classification) = classify_standing_idle(goal) else {
@@ -582,9 +584,10 @@ fn apply_standing_idle(
     };
 
     // Every standing-idle path — benign OR research-fault — resets the no-action
-    // counter and keeps the goal active for the next cycle; only the reporting and
-    // re-orient differ. Hoisted so that "a standing idle never advances the breaker
-    // toward a firing" is a single, unmissable invariant.
+    // counter and keeps the goal active for the next cycle; only the reporting
+    // differs (re-orient is no longer done here — issue #4453). Hoisted so that
+    // "a standing idle never advances the breaker toward a firing" is a single,
+    // unmissable invariant.
     tracker.record_progress(goal_id);
 
     match classification {
@@ -602,25 +605,29 @@ fn apply_standing_idle(
             );
         }
         StandingIdle::ResearchFault { fault } => {
-            // Never-idle rail (issue #4399): a standing research goal that idles
-            // is a FAULT. Record the fault and re-orient it (roll_to_new_cycle:
-            // NotStarted + stale WIP dropped) so the NEXT cycle re-enters work
-            // generation and yields a NEW source or a NEW experiment — while
-            // staying fail-closed (never block/kill/park, never a firing).
+            // Never-idle rail (issue #4399), demoted to a pure SIGNAL by the
+            // agentic per-goal-per-cycle rail (issue #4453): a standing research
+            // goal that idles is recorded as a FAULT signal and its no-action
+            // counter is reset (done above) so the breaker never fires on it — but
+            // this imperative path NO LONGER re-orients it. The re-orient decision
+            // (and the destructive `roll_to_new_cycle`) is owned exclusively by the
+            // reasoner's `reorient` action in `drive_per_goal_cycle`, which runs
+            // once per active goal every cycle and reads this same idle condition
+            // via `classify_standing_idle`. Rolling here as well would double-drive
+            // the goal — resetting it to `NotStarted` and dropping WIP even when the
+            // reasoner decided to `wait`/`continue`/`investigate` — which was the
+            // 70ab8541 idle→reset fault-loop. Stays fail-closed: never
+            // block/kill/park, never a firing; the goal stays active for the
+            // reasoner to decide on next.
             report.research_idle_faults.push(goal_id.to_string());
             tracing::warn!(
                 target: "simard::ooda",
                 goal = %goal_id,
                 category = fault.as_str(),
-                "no-progress breaker: research goal idled — FAULT: re-orienting to \
-                 generate a novel source/experiment next cycle \
-                 (counter reset, goal stays active, never blocked)",
+                "no-progress breaker: research goal idled — FAULT signal recorded \
+                 (counter reset, goal stays active, never blocked); re-orient is \
+                 owned by the agentic per-goal reasoner, not this imperative path",
             );
-            // Re-orient the SAME goal we already located and classified — no
-            // second board scan. roll_to_new_cycle returns it to the canonical
-            // re-dispatchable state (`NotStarted`, stale WIP dropped) so the next
-            // cycle re-enters work generation; it is never Blocked/killed/parked.
-            goal.roll_to_new_cycle();
         }
         StandingIdle::ResearchInFlight => {
             // Live in-flight progress (issue #4399, crusty finding 1): the
