@@ -1,7 +1,15 @@
 name: verify
 
 on:
+  # Scope push runs to the default branch only. Feature branches are validated
+  # via the pull_request event (which tests the branch merged into current
+  # main). Running verify on push for every branch produced a second,
+  # redundant "pre-commit" check per PR that validated the raw branch head
+  # instead of the merge result; whenever a branch lagged main it failed on
+  # already-fixed tests, red-flagging a cluster of otherwise-mergeable PRs.
+  # This mirrors release.yml, which already scopes push to main.
   push:
+    branches: [main]
   pull_request:
 
 permissions: {}
