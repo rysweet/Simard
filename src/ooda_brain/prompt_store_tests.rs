@@ -534,8 +534,11 @@ fn goal_curator_gates_backfill_to_rysweet_authored_issues() {
     );
 
     // (b) the rysweet-only + skip-other-account language must be present.
+    // Anchor on a phrase unique to the gate block so this assertion is an
+    // independent tripwire (bare "rysweet" also appears in the operator/ecosystem
+    // sections and would not fail on gate removal).
     assert!(
-        lower.contains("rysweet"),
+        lower.contains("only issues/prs authored by") && lower.contains("rysweet"),
         "goal_curator_system.md must restrict backfill to `rysweet`-authored issues/PRs"
     );
     assert!(
