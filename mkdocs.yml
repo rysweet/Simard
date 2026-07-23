@@ -110,6 +110,7 @@ nav:
     - OODA Loop Self-Detection: concepts/ooda-loop-self-detection.md
     - Unified RecipeBrain: concepts/unified-recipe-brain.md
     - Prompt-Driven OODA Brain: concepts/prompt-driven-ooda-brain.md
+    - Agentic Per-Goal, Per-Cycle Decision: concepts/agentic-per-goal-per-cycle.md
     - Prompt-Driven Brain Iteration: concepts/prompt-driven-brain-iteration.md
     - Text-Based Brain Protocol: concepts/text-based-brain-protocol.md
     - Prompt-Driven TDD Discipline: concepts/prompt-driven-tdd-discipline.md
@@ -356,6 +357,8 @@ nav:
     - OODA Orient Prompt Schema: reference/ooda-orient-prompt.md
     - OODA Orient Recipe: reference/ooda-orient-recipe.md
     - OODA Engineer-Lifecycle Recipe: reference/ooda-engineer-lifecycle-recipe.md
+    - OODA Per-Goal-Cycle API: reference/ooda-per-goal-cycle-api.md
+    - OODA Per-Goal-Cycle Recipe: reference/ooda-per-goal-cycle-recipe.md
     - OODA Procedural Memory: reference/ooda-procedural-memory.md
     - OODA Binary-Identity Reload Gate: reference/ooda-binary-identity-reload-gate.md
     - Distill Recipe-Output Capture: reference/distill-recipe-output-capture.md

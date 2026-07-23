@@ -375,6 +375,12 @@ mod tests {
         ) -> SimardResult<crate::ooda_brain::EngineerLifecycleDecision> {
             unreachable!()
         }
+        fn decide_per_goal_cycle(
+            &self,
+            _ctx: &crate::ooda_brain::PerGoalCycleCtx,
+        ) -> SimardResult<crate::ooda_brain::PerGoalAction> {
+            unreachable!()
+        }
         fn decide_goal_outcome_verification(
             &self,
             _ctx: &GoalOutcomeCtx,

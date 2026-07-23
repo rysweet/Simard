@@ -1300,6 +1300,13 @@ mod tests {
         ) -> crate::error::SimardResult<crate::ooda_brain::EngineerLifecycleDecision> {
             panic!("read-only cognition rail must not consult the brain");
         }
+
+        fn decide_per_goal_cycle(
+            &self,
+            _ctx: &crate::ooda_brain::PerGoalCycleCtx,
+        ) -> crate::error::SimardResult<crate::ooda_brain::PerGoalAction> {
+            panic!("read-only cognition rail must not consult the brain");
+        }
     }
 
     #[test]

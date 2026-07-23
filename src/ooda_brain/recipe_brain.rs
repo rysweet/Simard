@@ -30,8 +30,8 @@ use super::sanitize::sanitize_context_var;
 use super::{
     BrainPhase, EngineerAdmissionCtx, EngineerAdmissionDecision, EngineerLifecycleCtx,
     EngineerLifecycleDecision, GoalOutcomeCtx, GoalOutcomeDecision, IdeaCluster,
-    IdeaConsolidationCtx, IdeaDedupCtx, IdeaDedupDecision, OodaBrain, ResourceAdmissionCtx,
-    ResourceAdmissionDecision,
+    IdeaConsolidationCtx, IdeaDedupCtx, IdeaDedupDecision, OodaBrain, PerGoalAction,
+    PerGoalCycleCtx, ResourceAdmissionCtx, ResourceAdmissionDecision,
 };
 use crate::error::{SimardError, SimardResult};
 
@@ -60,6 +60,11 @@ const IDEA_DEDUP_RECIPE_FILENAME: &str = "creative-idea-dedup.yaml";
 const IDEA_CONSOLIDATION_ADAPTER_TAG: &str = "recipe-idea-consolidation-brain";
 /// Recipe filename for the one-time consolidation clustering step (#2925).
 const IDEA_CONSOLIDATION_RECIPE_FILENAME: &str = "creative-ideas-consolidation.yaml";
+/// Adapter tag for the per-goal, per-cycle agentic decision recipe (issue #4453).
+const PER_GOAL_CYCLE_ADAPTER_TAG: &str = "recipe-per-goal-cycle-brain";
+/// Recipe filename for the per-goal, per-cycle reasoning step (issue #4453).
+/// Resolved as a sibling of the lifecycle recipe, like the admission recipes.
+const PER_GOAL_CYCLE_RECIPE_FILENAME: &str = "ooda-per-goal-cycle.yaml";
 
 /// Cap on raw response text embedded in error messages and rationale fields.
 const MAX_RATIONALE_CHARS: usize = 500;
@@ -1222,6 +1227,28 @@ impl OodaBrain for RecipeBrain {
         })
     }
 
+    /// Per-goal, per-cycle agentic decision (issue #4453). Runs the
+    /// `ooda-per-goal-cycle.yaml` recipe (a sibling of this act-phase brain's
+    /// lifecycle recipe) over the goal's DURABLE state and the three demoted
+    /// signals, then parses the strict `{"choice","reason"[,"task_hint"]}`
+    /// envelope into a [`PerGoalAction`].
+    ///
+    /// NO-FALLBACK (operator zero-fallback contract, #2580 / #1711): a recipe
+    /// invocation failure OR an unparseable/forged envelope surfaces as an
+    /// explicit `Err`. The driver records it as a visible cycle failure — never
+    /// a silent `continue` masquerading as a reasoned decision. A genuine
+    /// "leave it" answer is a real, model-emitted `continue` (parsed).
+    fn decide_per_goal_cycle(&self, ctx: &PerGoalCycleCtx) -> SimardResult<PerGoalAction> {
+        let raw = self.invoke_per_goal_cycle_raw(ctx)?;
+        parse_per_goal_action(&raw).ok_or_else(|| SimardError::AdapterInvocationFailed {
+            base_type: PER_GOAL_CYCLE_ADAPTER_TAG.to_string(),
+            reason: format!(
+                "per-goal-cycle recipe output had no parseable action envelope: {}",
+                truncate(&raw, MAX_RATIONALE_CHARS)
+            ),
+        })
+    }
+
     /// Dependency/overlap-aware engineer admission (issue #2690). Resolves the
     /// admission recipe as a sibling of this act-phase brain's recipe, renders
     /// the overlap context, runs the recipe, and parses the
@@ -1392,8 +1419,117 @@ impl RecipeBrain {
         extract_recipe_decision_output(&output.stdout, self.adapter_tag)
     }
 
-    /// Invoke the engineer-admission recipe once and return the raw decision
-    /// text. The recipe is resolved as a **sibling** of this brain's own recipe
+    /// Invoke the per-goal, per-cycle recipe once and return the raw decision
+    /// text (issue #4453). The recipe is resolved as a **sibling** of this
+    /// brain's own lifecycle recipe (same `recipes/` dir, whether that resolved
+    /// to the hot-reload `~/.simard/...` copy or the in-tree copy). Every ctx
+    /// field is routed through [`sanitize_context_var`] before it becomes a `-c`
+    /// arg (YAML/context/prompt-injection + `E2BIG` defence). Errors surface as
+    /// `Err` (no silent fallback).
+    fn invoke_per_goal_cycle_raw(&self, ctx: &PerGoalCycleCtx) -> SimardResult<String> {
+        let recipe = self
+            .recipe_path
+            .parent()
+            .map(|d| d.join(PER_GOAL_CYCLE_RECIPE_FILENAME))
+            .filter(|p| p.is_file())
+            .ok_or_else(|| SimardError::AdapterInvocationFailed {
+                base_type: PER_GOAL_CYCLE_ADAPTER_TAG.to_string(),
+                reason: format!(
+                    "per-goal-cycle recipe '{PER_GOAL_CYCLE_RECIPE_FILENAME}' not found beside {}",
+                    self.recipe_path.display()
+                ),
+            })?;
+
+        let stale = match ctx.stale_claim_secs {
+            Some(secs) => secs.to_string(),
+            None => "none".to_string(),
+        };
+        let open_prs = ctx.open_pr_refs.join(", ");
+        let last_outcomes = ctx.last_outcomes.join(" | ");
+
+        let output = Command::new("recipe-runner-rs")
+            .arg(recipe.as_os_str())
+            .arg("--output-format")
+            .arg("json")
+            .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
+            .arg("-c")
+            .arg(format!(
+                "goal_id={}",
+                sanitize_context_var(&ctx.goal_id, 500)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "goal_description={}",
+                sanitize_context_var(&ctx.goal_description, 2000)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "goal_status={}",
+                sanitize_context_var(&ctx.goal_status, 200)
+            ))
+            .arg("-c")
+            .arg(format!("cycle_number={}", ctx.cycle_number))
+            .arg("-c")
+            .arg(format!(
+                "history_summary={}",
+                sanitize_context_var(&ctx.history_summary, 4000)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "effect_jobs_in_flight={}",
+                ctx.effect_jobs_in_flight
+            ))
+            .arg("-c")
+            .arg(format!(
+                "open_pr_refs={}",
+                sanitize_context_var(&open_prs, 1000)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "last_outcomes={}",
+                sanitize_context_var(&last_outcomes, 4000)
+            ))
+            .arg("-c")
+            .arg(format!("wip_ref_count={}", ctx.wip_ref_count))
+            .arg("-c")
+            .arg(format!("worker_present={}", ctx.worker_present))
+            .arg("-c")
+            .arg(format!(
+                "worker_log_tail={}",
+                sanitize_context_var(&ctx.worker_log_tail, 8000)
+            ))
+            .arg("-c")
+            .arg(format!("standing_idle_signal={}", ctx.standing_idle_signal))
+            .arg("-c")
+            .arg(format!("stale_claim_secs={stale}"))
+            .arg("-c")
+            .arg(format!("effect_board_missed={}", ctx.effect_board_missed))
+            .output();
+
+        let output = match output {
+            Ok(o) => o,
+            Err(e) => {
+                return Err(SimardError::AdapterInvocationFailed {
+                    base_type: PER_GOAL_CYCLE_ADAPTER_TAG.to_string(),
+                    reason: format!("recipe-runner-rs spawn failed: {e}"),
+                });
+            }
+        };
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(SimardError::AdapterInvocationFailed {
+                base_type: PER_GOAL_CYCLE_ADAPTER_TAG.to_string(),
+                reason: format!(
+                    "recipe exited with {}: {}",
+                    output.status,
+                    truncate(&stderr, MAX_RATIONALE_CHARS)
+                ),
+            });
+        }
+
+        extract_recipe_decision_output(&output.stdout, PER_GOAL_CYCLE_ADAPTER_TAG)
+    }
     /// (the act-phase [`RecipeBrain`] holds the lifecycle recipe; the admission
     /// recipe lives beside it in the same `recipes/` dir, whether that resolved
     /// to the hot-reload `~/.simard/...` copy or the in-tree copy). Every ctx
@@ -1973,6 +2109,47 @@ fn render_live_signals(signals: &[crate::goal_curation::live_signal::LiveSignal]
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// A structured per-goal, per-cycle action envelope (issue #4453). The strict
+/// 6-variant contract: `choice` is the required action token, `reason` is
+/// mandatory, and `task_hint` is optional guidance carried only by `spawn`.
+/// Unknown extra fields are ignored for forward-compatibility.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct PerGoalEnvelope {
+    choice: String,
+    #[serde(default)]
+    reason: String,
+    #[serde(default)]
+    task_hint: String,
+}
+
+/// Parse the per-goal-cycle recipe output into a [`PerGoalAction`], or `None`
+/// when no balanced JSON object with a known `choice` variant AND a non-empty
+/// `reason` is present (the caller surfaces that as a NO-FALLBACK `Err`). Routes
+/// through the shared sanitizing chokepoint so a banner-polluted envelope still
+/// parses. A missing/empty `reason` or an unknown `choice` yields `None` — a
+/// compromised prompt cannot smuggle a reason-less or novel destructive action.
+fn parse_per_goal_action(text: &str) -> Option<PerGoalAction> {
+    let env: PerGoalEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
+    let reason = env.reason.trim();
+    if reason.is_empty() {
+        return None;
+    }
+    let reason = truncate(reason, MAX_RATIONALE_CHARS);
+    let hint = truncate(env.task_hint.trim(), MAX_RATIONALE_CHARS);
+    match env.choice.trim() {
+        c if c.eq_ignore_ascii_case("continue") => Some(PerGoalAction::Continue { reason }),
+        c if c.eq_ignore_ascii_case("spawn") => Some(PerGoalAction::Spawn {
+            reason,
+            task_hint: hint,
+        }),
+        c if c.eq_ignore_ascii_case("reorient") => Some(PerGoalAction::Reorient { reason }),
+        c if c.eq_ignore_ascii_case("investigate") => Some(PerGoalAction::Investigate { reason }),
+        c if c.eq_ignore_ascii_case("wait") => Some(PerGoalAction::Wait { reason }),
+        c if c.eq_ignore_ascii_case("complete") => Some(PerGoalAction::Complete { reason }),
+        _ => None,
+    }
 }
 
 /// A structured outcome-verification decision envelope. Unlike the shared

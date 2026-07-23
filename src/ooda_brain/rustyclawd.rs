@@ -3,7 +3,9 @@
 //! canned-response stub.
 
 use super::prompt_store;
-use super::{EngineerLifecycleCtx, EngineerLifecycleDecision, OodaBrain};
+use super::{
+    EngineerLifecycleCtx, EngineerLifecycleDecision, OodaBrain, PerGoalAction, PerGoalCycleCtx,
+};
 use crate::base_types::BaseTypeTurnInput;
 use crate::error::{SimardError, SimardResult};
 use crate::identity::OperatingMode;
@@ -91,6 +93,96 @@ impl<S: LlmSubmitter> OodaBrain for RustyClawdBrain<S> {
             reason,
         })
     }
+
+    /// Per-goal, per-cycle agentic decision (issue #4453). Renders a compact
+    /// prompt describing the goal's durable state and the three demoted signals,
+    /// submits it through the same LLM submitter, and parses the strict
+    /// `{"choice","reason"[,"task_hint"]}` envelope. NO silent fallback: an
+    /// unparseable envelope (unknown choice, missing reason) surfaces as an
+    /// `Err` the driver records as a cycle failure (#1711).
+    fn decide_per_goal_cycle(&self, ctx: &PerGoalCycleCtx) -> SimardResult<PerGoalAction> {
+        let prompt = render_per_goal_cycle_prompt(ctx);
+        let raw = self.submitter.submit(&prompt)?;
+        parse_per_goal_action_from_response(&raw).map_err(|reason| {
+            SimardError::AdapterInvocationFailed {
+                base_type: ADAPTER_TAG.to_string(),
+                reason,
+            }
+        })
+    }
+}
+
+/// Render the per-goal, per-cycle reasoning prompt (issue #4453). Compact and
+/// self-contained: it states the six actions, the strict output envelope, and
+/// the invariants (never idle-reset a healthy standing goal; investigate before
+/// any destructive action). Durable state and the three demoted signals are fed
+/// as read-only context; the CHOICE among the actions is the agentic part.
+fn render_per_goal_cycle_prompt(ctx: &PerGoalCycleCtx) -> String {
+    let open_prs = if ctx.open_pr_refs.is_empty() {
+        "none".to_string()
+    } else {
+        ctx.open_pr_refs.join(", ")
+    };
+    let stale = match ctx.stale_claim_secs {
+        Some(secs) => format!("{secs}s since worker claim last seen alive"),
+        None => "n/a (live worker present or none expected)".to_string(),
+    };
+    format!(
+        "# OODA Brain — Per-Goal, Per-Cycle Decision\n\n\
+         You decide the single best next action for ONE active goal THIS cycle.\n\
+         This runs for every goal every cycle: a healthy in-flight goal is left\n\
+         alone; a goal with no live work is advanced; a goal that looks wrong is\n\
+         INVESTIGATED (read logs/tools) BEFORE any destructive step. NEVER\n\
+         reap/reset a worker purely because a heartbeat or worktree looks stale.\n\n\
+         ## Goal\n\
+         - goal_id: {goal_id}\n\
+         - description: {desc}\n\
+         - status: {status}\n\
+         - cycle_number: {cycle}\n\
+         - history: {history}\n\
+         - effect_jobs_in_flight: {jobs}\n\
+         - open_pr_refs: {open_prs}\n\
+         - wip_ref_count: {wip}\n\
+         - worker_present: {worker}\n\n\
+         ## Signals (INPUTS ONLY — never the decision by themselves)\n\
+         - standing_idle_signal: {idle}\n\
+         - stale_claim: {stale}\n\
+         - effect_board_missed: {board}\n\n\
+         ## Actions (pick exactly one)\n\
+         continue | spawn | reorient | investigate | wait | complete\n\n\
+         ## Output\n\
+         Respond with ONE JSON object of this exact shape (a fenced ```json block\n\
+         is fine):\n\
+         {{\"choice\": \"<one action>\", \"reason\": \"<why>\"}}\n\
+         For `spawn` you may add \"task_hint\". A missing reason or unknown choice\n\
+         is an error — the daemon does NOT default on your behalf.",
+        goal_id = ctx.goal_id,
+        desc = ctx.goal_description,
+        status = ctx.goal_status,
+        cycle = ctx.cycle_number,
+        history = ctx.history_summary,
+        jobs = ctx.effect_jobs_in_flight,
+        open_prs = open_prs,
+        wip = ctx.wip_ref_count,
+        worker = ctx.worker_present,
+        idle = ctx.standing_idle_signal,
+        stale = stale,
+        board = ctx.effect_board_missed,
+    )
+}
+
+/// Parse a strict `{"choice","reason"[,"task_hint"]}` per-goal action envelope
+/// from a model response. Routes through the shared sanitizing JSON chokepoint
+/// so a banner-polluted or trailing-comma body still parses. Returns `Err` (no
+/// silent fallback) when no valid envelope is present — a missing `reason` or an
+/// unknown `choice` fails the serde parse and surfaces here.
+fn parse_per_goal_action_from_response(text: &str) -> Result<PerGoalAction, String> {
+    crate::recipe_output::extract_and_parse_json::<PerGoalAction>(text).ok_or_else(|| {
+        format!(
+            "no parseable per-goal action envelope in response: {}",
+            truncate_for_log(text)
+        )
+    })
 }
 
 /// Closed set of `EngineerLifecycleDecision` variant tags. Kept in sync
