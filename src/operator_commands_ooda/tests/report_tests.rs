@@ -2,10 +2,35 @@ use super::{make_minimal_observation, make_report_with_goals_and_outcomes, make_
 use crate::ooda_loop::{EnvironmentSnapshot, OodaConfig, OodaState};
 use crate::{CognitiveStatistics, GoalProgress};
 
+/// Remove every env var that influences `OodaConfig::default()` so tests that
+/// assert on the built-in concurrency default start from a known-unset baseline.
+///
+/// `OodaConfig::default()` reads process-global env (issue #2935:
+/// SIMARD_OODA_MAX_CONCURRENT / SIMARD_MAX_CONCURRENT_ACTIONS / SIMARD_SCALING).
+/// Without this clear, a sibling env-mutating test running in parallel can leak
+/// a value and corrupt the "default" observed here — the root cause of the
+/// cross-PR flaky `Run cargo test` failures (issue #4433).
+///
+/// # Safety
+/// `std::env::remove_var` is only sound with no concurrent env access. Callers
+/// carry `#[serial_test::serial(cognitive_memory)]`, whose string key serializes
+/// them against every other env-mutating OODA-config test across the whole test
+/// binary (the `ooda_loop` modules use the same literal key), so no other thread
+/// touches the environment during this call.
+fn clear_concurrency_env() {
+    unsafe { std::env::remove_var("SIMARD_OODA_MAX_CONCURRENT") };
+    unsafe { std::env::remove_var("SIMARD_MAX_CONCURRENT_ACTIONS") };
+    unsafe { std::env::remove_var("SIMARD_SCALING") };
+}
+
 // --- OodaConfig defaults ---
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn ooda_config_default_values() {
+    // Hermetic precondition: scrub concurrency env so the assertion reflects the
+    // built-in default, not a value leaked from a parallel sibling test.
+    clear_concurrency_env();
     let config = OodaConfig::default();
     // Issue #2935: raised from 5 to 24 (env-configurable via SIMARD_OODA_MAX_CONCURRENT).
     assert_eq!(config.max_concurrent_actions, 24);
@@ -163,8 +188,12 @@ fn ooda_config_gym_suite_id_is_progressive() {
     assert_eq!(config.gym_suite_id, "progressive");
 }
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn ooda_config_max_concurrent_defaults_to_24() {
+    // Hermetic precondition: scrub concurrency env so the default is observed
+    // clean, not leaked from a parallel sibling test.
+    clear_concurrency_env();
     let config = OodaConfig::default();
     // Issue #2935: raised from 5 to 24 (env-configurable via SIMARD_OODA_MAX_CONCURRENT).
     assert_eq!(config.max_concurrent_actions, 24);

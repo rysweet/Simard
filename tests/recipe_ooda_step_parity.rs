@@ -163,6 +163,13 @@ fn parity_decide_caps_at_max_concurrent_actions() {
         .collect();
     let config = OodaConfig {
         max_concurrent_actions: 2,
+        // Hermetic: pin `scaler: None` so the in-process `direct` call caps at
+        // `max_concurrent_actions` regardless of the ambient `SIMARD_SCALING`
+        // env var. The subprocess path deserializes the config from JSON where
+        // `scaler` is `#[serde(skip)]` (always None), so leaving the direct
+        // config env-dependent would break both the cap and the parity check
+        // under `SIMARD_SCALING=auto`.
+        scaler: None,
         ..Default::default()
     };
 
