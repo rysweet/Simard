@@ -36,17 +36,11 @@
 
 use std::error::Error;
 
-use crate::goal_curation::{GoalDecomposer, GoalProgress, WipRef, labels, simard_state_root};
+use crate::goal_curation::{GoalDecomposer, GoalProgress, labels, simard_state_root};
 use crate::memory_ipc::launch_writer_client;
 use crate::ooda_actions::advance_goal::spawn::is_brain_failure_marker;
 
 use super::args::{next_required, reject_extra_args};
-
-/// Marker that separates a goal's prose from an operator-pinned, machine-checkable
-/// finish line appended by `goal set-done-gate`. Kept stable so the append is
-/// idempotent: a later `set-done-gate` truncates at this marker before writing a
-/// fresh finish line rather than stacking duplicate clauses.
-const DONE_WHEN_MARKER: &str = "\n\nDone when: ";
 
 pub(super) const GOAL_HELP: &str = "\
 Simard goal subcommand
@@ -582,27 +576,6 @@ fn parse_ref_number(flag: &str, raw: &str) -> Result<String, Box<dyn Error>> {
     Ok(trimmed.to_string())
 }
 
-/// Upsert a single `wip_ref` of `kind` (e.g. `"pr"`, `"issue"`) so it is the
-/// FIRST ref of that kind — which is exactly what the completion gate's
-/// `first_ref_of_kind` reads. Any prior ref with the same kind+id is dropped
-/// first so the operation is idempotent.
-fn upsert_first_ref(refs: &mut Vec<WipRef>, kind: &str, num: &str, label: String) {
-    refs.retain(|r| !(r.kind.eq_ignore_ascii_case(kind) && r.ref_id == num));
-    let insert_at = refs
-        .iter()
-        .position(|r| r.kind.eq_ignore_ascii_case(kind))
-        .unwrap_or(0);
-    refs.insert(
-        insert_at,
-        WipRef {
-            kind: kind.to_string(),
-            ref_id: num.to_string(),
-            label,
-            url: None,
-        },
-    );
-}
-
 /// `simard goal set-done-gate <id> [--pr n] [--issue n] [--criteria text]` —
 /// bind a machine-checkable finish line to a goal so the completion gate
 /// (`src/goal_curation/completion_gate.rs`) can certify it automatically. A goal
@@ -611,6 +584,12 @@ fn upsert_first_ref(refs: &mut Vec<WipRef>, kind: &str, num: &str, label: String
 /// supported operator remedy — it links the PR (checked MERGED) and/or issue
 /// (checked CLOSED), rewrites the plain-English finish line, resets the breaker,
 /// and restores the goal to `NotStarted` so work resumes toward a checkable end.
+///
+/// The edit is made **durable** against the daemon's in-flight-wins reconcile by
+/// recording a [`crate::goal_board_store::DoneGatePin`]: the daemon re-asserts
+/// the pinned anchor + finish line every cycle instead of clobbering the goal
+/// back to unmeasurable prose (the failure mode that made prior manual edits
+/// evaporate within a cycle).
 fn handle_set_done_gate(goal_id: &str, flags: &[String]) -> Result<(), Box<dyn Error>> {
     let parsed = parse_done_gate_flags(flags)?;
     if parsed.pr.is_none() && parsed.issue.is_none() {
@@ -620,8 +599,14 @@ fn handle_set_done_gate(goal_id: &str, flags: &[String]) -> Result<(), Box<dyn E
                 .into(),
         );
     }
+    let pin = crate::goal_board_store::DoneGatePin {
+        pr: parsed.pr.clone(),
+        issue: parsed.issue.clone(),
+        criteria: parsed.criteria.clone(),
+    };
+    let anchor = pin.anchor();
     let goal_id_owned = goal_id.to_string();
-    let anchor = done_gate_anchor(parsed.pr.as_deref(), parsed.issue.as_deref());
+    let pin_for_board = pin.clone();
     with_state(move |s| {
         let goal = s
             .board
@@ -632,30 +617,14 @@ fn handle_set_done_gate(goal_id: &str, flags: &[String]) -> Result<(), Box<dyn E
                 format!("goal '{goal_id_owned}' not found on the active board").into()
             })?;
 
-        if let Some(num) = &parsed.pr {
-            upsert_first_ref(&mut goal.wip_refs, "pr", num, format!("PR #{num}"));
-        }
-        if let Some(num) = &parsed.issue {
-            upsert_first_ref(&mut goal.wip_refs, "issue", num, format!("issue #{num}"));
-        }
-
-        // Rewrite the plain-English finish line. Truncate any prior appended
-        // finish line at the stable marker so repeated calls do not stack.
-        let base = match goal.description.split_once(DONE_WHEN_MARKER) {
-            Some((head, _)) => head.to_string(),
-            None => goal.description.clone(),
-        };
-        let anchor = done_gate_anchor(parsed.pr.as_deref(), parsed.issue.as_deref());
-        let finish_line = match &parsed.criteria {
-            Some(text) => format!("{text} (certified automatically when {anchor})"),
-            None => format!("Certified automatically when {anchor}."),
-        };
-        goal.description = format!("{base}{DONE_WHEN_MARKER}{finish_line}");
+        // Bind the measurable anchor(s) and rewrite the plain-English finish
+        // line via the shared pin logic (identical to the daemon's re-assert).
+        pin_for_board.apply_to(goal);
 
         goal.status = GoalProgress::NotStarted;
         goal.current_activity = Some(format!(
             "done-gate pinned by operator: {}",
-            done_gate_anchor(parsed.pr.as_deref(), parsed.issue.as_deref())
+            pin_for_board.anchor()
         ));
 
         // The goal now has a checkable finish line — treat that as concrete
@@ -666,21 +635,22 @@ fn handle_set_done_gate(goal_id: &str, flags: &[String]) -> Result<(), Box<dyn E
         Ok(())
     })?;
 
+    // Record the durable pin so the daemon's per-cycle reconcile re-asserts the
+    // finish line instead of reverting it. A pin-write failure is non-fatal: the
+    // board edit already landed; we only warn that it may not survive a cycle.
+    let state_root = simard_state_root();
+    if let Err(e) = crate::goal_board_store::record_done_gate_pin(&state_root, goal_id, pin) {
+        eprintln!(
+            "[simard] goal set-done-gate: warning: durable pin not recorded (edit applied but \
+             the daemon may revert it next cycle): {e}"
+        );
+    }
+
     eprintln!(
         "[simard] goal set-done-gate: '{goal_id}' pinned — {anchor}; breaker reset; status \
          NotStarted"
     );
     Ok(())
-}
-
-/// Human-readable anchor phrase describing what the done-gate now measures.
-fn done_gate_anchor(pr: Option<&str>, issue: Option<&str>) -> String {
-    match (pr, issue) {
-        (Some(p), Some(i)) => format!("PR #{p} is merged and issue #{i} is closed"),
-        (Some(p), None) => format!("PR #{p} is merged"),
-        (None, Some(i)) => format!("issue #{i} is closed"),
-        (None, None) => "its linked work lands".to_string(),
-    }
 }
 
 fn handle_unblock_all() -> Result<(), Box<dyn Error>> {
