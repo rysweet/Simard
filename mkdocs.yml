@@ -234,6 +234,7 @@ nav:
     - Clean Fixture Leaks: howto/clean-fixture-leaks.md
     - Verify and Roll Back a Self-Deploy: howto/verify-and-roll-back-a-self-deploy.md
     - Verify and Repair PATH-Entrypoint Parity: howto/verify-path-entrypoint-parity.md
+    - Converge a Stuck Red-Canary Self-Deploy: howto/converge-a-stuck-red-canary-self-deploy.md
     - Run Self-Deploy from Any Directory: howto/run-self-deploy-from-any-directory.md
     - Check for Updates: howto/check-for-updates.md
     - Configure the amplihack Freshness Gate: howto/configure-amplihack-freshness-gate.md
@@ -331,6 +332,8 @@ nav:
     - Multi-Binary Self-Update: reference/multi-binary-self-update.md
     - Self-Deploy API: reference/self-deploy-api.md
     - Self-Deploy Source Prep & Warm Target Dir: reference/self-deploy-source-prep.md
+    - Overseer Deploy Red-Canary Diagnostics: reference/overseer-deploy-canary-diagnostics.md
+    - Canary Gate Isolation & Self-Deploy Convergence: reference/canary-gate-convergence.md
     - State-Root Resolution: reference/state-root-resolution.md
     - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
     - Runtime Contracts: reference/runtime-contracts.md

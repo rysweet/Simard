@@ -451,7 +451,12 @@ fn dispatch_handover_command(
         }
     }
 
-    let mut config = RelaunchConfig::default();
+    // Mirror the automated self-deploy canary: supply the same deploy-shape
+    // env allow-list so a manual handover verdict matches the daemon's (#4440).
+    let mut config = RelaunchConfig {
+        canary_env: crate::self_relaunch::canary_gate_env_allowlist(),
+        ..RelaunchConfig::default()
+    };
     if let Some(dir) = canary_dir {
         config.canary_target_dir = dir;
     }

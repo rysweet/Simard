@@ -670,6 +670,11 @@ pub(crate) fn prepare_build_and_verify_canary(
         let config = crate::self_relaunch::RelaunchConfig {
             manifest_dir: repo,
             canary_target_dir: target_dir.to_path_buf(),
+            // #4440 root-cause repair: supply the deploy-shape signals a healthy
+            // candidate's gates legitimately need (scrubbed to a deny-by-default
+            // floor + this audited allow-list), so a genuinely-healthy binary
+            // renders a GREEN verdict and the self-deploy loop converges.
+            canary_env: crate::self_relaunch::canary_gate_env_allowlist(),
             ..Default::default()
         };
         let gates = crate::self_relaunch::default_gates();
