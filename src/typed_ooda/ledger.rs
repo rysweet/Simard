@@ -254,9 +254,42 @@ impl std::fmt::Debug for CapabilityHandler {
 impl CapabilityHandler {
     pub fn open(path: impl AsRef<Path>, policy: CapabilityPolicy) -> CapabilityResult<Self> {
         let mut connection = Connection::open(path.as_ref()).map_err(persistence)?;
+        // Issue #4483: absorb cross-process contention (daemon + engineer
+        // worktree + reaper share one ledger file) by waiting-and-retrying for
+        // up to 30s instead of erroring out with `database is locked`.
         connection
-            .busy_timeout(Duration::from_secs(5))
+            .busy_timeout(Duration::from_secs(30))
             .map_err(persistence)?;
+        // Issue #4483: apply WAL journal mode UNCONDITIONALLY at every open, not
+        // only inside the one-time schema-migration branch. A ledger created
+        // before WAL (or whose journal was reverted to rollback mode) is at
+        // `user_version == 1`, so `schema::initialize` short-circuits before it
+        // would re-assert WAL — leaving readers and writers serializing on a
+        // whole-file lock and surfacing the persistence crash-loop.
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .map_err(persistence)?;
+        // `pragma_update` ignores the journal-mode SQLite echoes back, so on an
+        // exotic filesystem that silently refuses WAL (e.g. some network mounts)
+        // the ledger would fall back to rollback journaling with no signal.
+        // Read the mode back and warn — non-fatal, since rollback journaling
+        // fails toward stricter (whole-file) locking, not data loss.
+        match connection.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0)) {
+            Ok(mode) if !mode.eq_ignore_ascii_case("wal") => {
+                tracing::warn!(
+                    journal_mode = %mode,
+                    "ledger open() requested WAL but SQLite reports a different journal mode; \
+                     concurrent readers/writers may serialize on a whole-file lock"
+                );
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "ledger open() could not read back journal_mode to confirm WAL"
+                );
+            }
+        }
         super::schema::initialize(&mut connection, now_millis()).map_err(persistence)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -3516,6 +3549,151 @@ mod actor_session_scope_tests {
                          without an identity-binding violation, got: {err:?}"
                     )
                 });
+        }
+    }
+}
+
+/// Issue #4483 — typed-OODA outcome-persistence "database is locked" crash-loop
+/// (RED phase, TDD Step 7). These tests specify the connection-tuning contract in
+/// `docs/reference/typed-ooda-ledger-concurrency.md`:
+///
+///   1. WAL journal mode is applied UNCONDITIONALLY at every `open()`, so a
+///      pre-existing v1 database (created before WAL, or whose journal was
+///      reverted) still gets WAL — not only during the one-time schema
+///      migration branch (`schema.rs`). Without this, two OS processes sharing
+///      the ledger serialize on a whole-file lock and a writer that cannot
+///      acquire it within the busy timeout fails with `database is locked`.
+///   2. A generous busy timeout (>= 30s) is set at open so a briefly-contended
+///      writer waits and retries instead of erroring out.
+///   3. Concurrent writers on SEPARATE connections to the same file never
+///      surface a `database is locked` persistence error.
+///
+/// They MUST fail before the fix lands (WAL-in-migration-only, 5s timeout) and
+/// MUST pass once the fix lands without further test edits.
+#[cfg(test)]
+mod ledger_concurrency_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    const POLICY_REVISION: &str = "policy-v1";
+
+    fn open_handler(path: &std::path::Path) -> CapabilityHandler {
+        CapabilityHandler::open(path, CapabilityPolicy::new(POLICY_REVISION))
+            .expect("open capability handler")
+    }
+
+    /// Read the live `PRAGMA journal_mode` of the handler's own connection.
+    fn journal_mode(handler: &CapabilityHandler) -> String {
+        let connection = handler.lock().expect("lock ledger");
+        connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+            .expect("query journal_mode")
+    }
+
+    /// Read the live `PRAGMA busy_timeout` (milliseconds) of the handler's own
+    /// connection.
+    fn busy_timeout_millis(handler: &CapabilityHandler) -> i64 {
+        let connection = handler.lock().expect("lock ledger");
+        connection
+            .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+            .expect("query busy_timeout")
+    }
+
+    /// A1 (issue #4483): opening a PRE-EXISTING v1 ledger whose journal mode is
+    /// NOT WAL must still leave the database in WAL mode. This is the exact
+    /// crash-loop trigger: the WAL pragma lives only inside the schema-migration
+    /// branch, which is skipped once `user_version == 1`, so a database created
+    /// before WAL (or reverted to rollback journaling) opens WITHOUT the
+    /// concurrency mode that lets a reader and a writer coexist.
+    #[test]
+    fn open_applies_wal_journal_mode_on_preexisting_v1_db() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("outcomes.sqlite3");
+
+        // First open creates the schema at v1. Drop it so nothing else holds the
+        // file, then forcibly revert the journal to rollback mode to emulate a
+        // ledger created before WAL was introduced.
+        drop(open_handler(&path));
+        {
+            let raw = rusqlite::Connection::open(&path).expect("raw open");
+            let mode: String = raw
+                .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+                .expect("revert journal mode");
+            assert_eq!(
+                mode.to_ascii_lowercase(),
+                "delete",
+                "precondition: journal must be reverted to rollback mode"
+            );
+        }
+
+        // Re-open the now-pre-existing v1 database. The open path MUST re-assert
+        // WAL unconditionally.
+        let handler = open_handler(&path);
+        assert_eq!(
+            journal_mode(&handler).to_ascii_lowercase(),
+            "wal",
+            "open() must apply WAL journal mode even on a pre-existing v1 database"
+        );
+    }
+
+    /// A generous busy timeout (>= 30s) must be configured at open so a briefly
+    /// contended writer waits-and-retries instead of failing with
+    /// `database is locked`.
+    #[test]
+    fn open_sets_busy_timeout_at_least_30s() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handler = open_handler(&dir.path().join("outcomes.sqlite3"));
+        let timeout = busy_timeout_millis(&handler);
+        assert!(
+            timeout >= 30_000,
+            "busy_timeout must be >= 30000ms to absorb cross-process contention, got {timeout}ms"
+        );
+    }
+
+    /// Regression: concurrent writers on SEPARATE connections to the same ledger
+    /// file must never surface a `database is locked` persistence error. Each
+    /// thread opens its OWN `CapabilityHandler` (a distinct SQLite connection,
+    /// modelling the daemon + engineer-worktree + reaper processes) and hammers a
+    /// real write path (`release_engineer_claim`, an idempotent immediate-txn
+    /// DELETE) against a shared, pre-existing database.
+    #[test]
+    fn concurrent_cross_connection_writers_never_hit_database_locked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("outcomes.sqlite3");
+        // Materialise the schema once so every worker opens a pre-existing DB.
+        drop(open_handler(&path));
+
+        const WRITERS: usize = 6;
+        const ITERATIONS: usize = 40;
+        let barrier = Arc::new(Barrier::new(WRITERS));
+
+        let mut handles = Vec::with_capacity(WRITERS);
+        for writer in 0..WRITERS {
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                let handler = open_handler(&path);
+                barrier.wait();
+                for i in 0..ITERATIONS {
+                    let claim_key = format!("rysweet/Simard:goal-{writer}-{i}");
+                    if let Err(err) = handler.release_engineer_claim(&claim_key) {
+                        return Err(err.to_string());
+                    }
+                }
+                Ok(())
+            }));
+        }
+
+        for handle in handles {
+            let result = handle.join().expect("writer thread must not panic");
+            if let Err(message) = result {
+                assert!(
+                    !message.to_ascii_lowercase().contains("database is locked"),
+                    "concurrent cross-connection writers must not hit a lock error: {message}"
+                );
+                panic!("concurrent writer failed: {message}");
+            }
         }
     }
 }

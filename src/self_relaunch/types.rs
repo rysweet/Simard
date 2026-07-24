@@ -135,6 +135,22 @@ mod tests {
         assert_eq!(RelaunchGate::RpcHealth.to_string(), "rpc-health");
     }
 
+    /// P1 invariant (issues #4470/#4471): the blocking `UnitTest` canary gate
+    /// must remain part of the default self-deploy gate sequence. The sanctioned
+    /// resolution of the red-canary (exit 101) is to ROOT-CAUSE the failing unit
+    /// test — never to paper over it by dropping or disabling the gate. This
+    /// guard fails loudly if a future change quietly removes the unit-test canary
+    /// stage to make self-deploy "pass".
+    #[test]
+    fn canary_default_gates_include_blocking_unit_test_gate() {
+        let gates = default_gates();
+        assert!(
+            gates.contains(&RelaunchGate::UnitTest),
+            "the blocking unit-test canary gate must not be disabled or removed \
+             from the default self-deploy sequence: {gates:?}"
+        );
+    }
+
     #[test]
     fn gate_result_display_pass() {
         let result = GateResult {

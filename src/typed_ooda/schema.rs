@@ -12,7 +12,10 @@ pub(super) fn initialize(connection: &mut Connection, now_millis: i64) -> rusqli
         return Err(rusqlite::Error::InvalidQuery);
     }
 
-    connection.execute_batch("PRAGMA journal_mode = WAL;")?;
+    // WAL journal mode is applied unconditionally at connection open
+    // (`CapabilityHandler::open`), so it is guaranteed to be in effect here for
+    // both fresh and pre-existing databases — no need to re-assert it inside the
+    // one-time migration branch.
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version = schema_version(&transaction)?;
     if version == SCHEMA_VERSION {

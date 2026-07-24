@@ -184,6 +184,7 @@ nav:
     - Attach to a Running Engineer: howto/attach-to-a-running-engineer.md
     - Inspect and Clean Engineer Worktrees: howto/inspect-and-clean-engineer-worktrees.md
     - Diagnose and Clear Leaked Engineer Claims: howto/diagnose-leaked-engineer-claims.md
+    - Diagnose a Typed-OODA "database is locked" Crash-Loop: howto/diagnose-typed-ooda-database-locked.md
     - Investigate a Stale Engineer Before Reap: howto/investigate-a-stale-engineer-before-reap.md
     - Diagnose a Reaped Engineer After Goal Removal: howto/diagnose-a-reaped-engineer-after-goal-removal.md
     - Grant Engineer Write Permissions: howto/grant-engineer-write-permissions.md
@@ -292,6 +293,7 @@ nav:
     - Investigate-Before-Reap API: reference/investigate-stale-engineer-api.md
     - Tombstoned-Goal Engineer Reaper API: reference/tombstoned-goal-engineer-reaper-api.md
     - Typed OODA Goal-Session Deterministic Rails: reference/typed-ooda-goal-session-rails.md
+    - Typed-OODA Ledger Concurrency Hardening: reference/typed-ooda-ledger-concurrency.md
     - Stable Goal-Session Identity API: reference/stable-goal-session-identity-api.md
     - Standing-Research Novelty-Directive API: reference/standing-research-goal-novelty-directive-api.md
     - Research-Goal Never-Idle Rail API: reference/research-goal-never-idle-rail-api.md
@@ -306,6 +308,7 @@ nav:
     - Knowledge-Pack Article Relevance Ranking: reference/knowledge-pack-article-relevance-ranking.md
     - Enrichment Observability API: reference/enrichment-observability-api.md
     - StatusSnapshot API: reference/status-snapshot-api.md
+    - Gym Self-Eval Status Wiring: reference/gym-self-eval-status.md
     - Daily-Budget Display Guard: reference/daily-budget-display-guard.md
     - Overseer Activity Feed: reference/overseer-activity-feed.md
     - Overseer Tick Details: reference/overseer-tick-details.md
@@ -331,6 +334,7 @@ nav:
     - amplihack Freshness Gate: reference/amplihack-freshness-gate.md
     - Multi-Binary Self-Update: reference/multi-binary-self-update.md
     - Self-Deploy API: reference/self-deploy-api.md
+    - Deploy-Gate Canary Unit-Test Stage: reference/deploy-gate-unit-test-canary.md
     - Self-Deploy Source Prep & Warm Target Dir: reference/self-deploy-source-prep.md
     - Overseer Deploy Red-Canary Diagnostics: reference/overseer-deploy-canary-diagnostics.md
     - Canary Gate Isolation & Self-Deploy Convergence: reference/canary-gate-convergence.md
