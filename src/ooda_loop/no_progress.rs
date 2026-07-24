@@ -33,6 +33,7 @@ use crate::goal_curation::no_progress_why::{
 use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, WipRef};
 use crate::ooda_actions::outcome_made_no_progress;
 use crate::ooda_loop::{ActionOutcome, OodaState};
+use crate::stewardship::gh_client::{LabelDisposition, OODA_STUCK_LABEL, ensure_label};
 
 /// `WipRef.kind` marking a breaker-authored defer annotation (issue #16).
 const DEPENDENCY_WIP_KIND: &str = "dependency";
@@ -102,21 +103,33 @@ pub(crate) trait NoProgressIssueFiler {
 /// brain-failure safeguard in `ooda_actions::advance_goal::spawn`.
 pub(crate) struct GhIssueFiler;
 
+/// Build the `gh issue create` argv for a no-progress tracking issue, splicing
+/// the `--label ooda-stuck` fragment only when the label was ensured
+/// ([`LabelDisposition::Attach`]). A degraded [`LabelDisposition::Omit`] drops
+/// the label so the issue is *still filed* — the fix for issue #4474, where a
+/// missing `ooda-stuck` label made `gh` exit non-zero and silently aborted the
+/// escalation of a blocked goal.
+fn issue_create_argv<'a>(title: &'a str, body: &'a str, label: &LabelDisposition) -> Vec<&'a str> {
+    let mut argv = vec!["issue", "create", "--title", title, "--body", body];
+    argv.extend(label.label_args(OODA_STUCK_LABEL));
+    argv
+}
+
 impl NoProgressIssueFiler for GhIssueFiler {
     fn file_issue(&self, title: &str, body: &str) -> Option<FiledIssue> {
-        match std::process::Command::new("gh")
-            .args([
-                "issue",
-                "create",
-                "--title",
-                title,
-                "--body",
-                body,
-                "--label",
-                "ooda-stuck",
-            ])
-            .output()
-        {
+        // Self-heal the `ooda-stuck` label before filing; on failure, degrade
+        // to filing without the label so the blocked goal is still escalated.
+        let disposition = ensure_label(OODA_STUCK_LABEL);
+        if let LabelDisposition::Omit { reason } = &disposition {
+            tracing::warn!(
+                target: "simard::ooda",
+                label = OODA_STUCK_LABEL,
+                reason = %reason,
+                "no-progress breaker: label unensurable; filing tracking issue without it",
+            );
+        }
+        let argv = issue_create_argv(title, body, &disposition);
+        match std::process::Command::new("gh").args(&argv).output() {
             Ok(out) if out.status.success() => {
                 // `gh issue create` prints the created issue's URL on success,
                 // e.g. `https://github.com/rysweet/Simard/issues/4231`.
@@ -1838,6 +1851,56 @@ mod tests_tracking_issue_link {
             goal.wip_refs.len(),
             1,
             "no duplicate ref for an issue number the goal already carries",
+        );
+    }
+}
+
+/// Tests for the `ooda-stuck` label self-heal (issue #4474): the production
+/// filer must attach the label when it was ensured, and DROP the label while
+/// still filing the issue when the label could not be ensured — so a stuck
+/// goal is always escalated even when `ooda-stuck` is missing / uncreatable.
+#[cfg(test)]
+mod tests_label_self_heal {
+    use super::issue_create_argv;
+    use crate::stewardship::gh_client::{LabelDisposition, OODA_STUCK_LABEL};
+
+    #[test]
+    fn argv_attaches_ooda_stuck_label_when_ensured() {
+        let argv = issue_create_argv("stuck goal", "body", &LabelDisposition::Attach);
+        assert!(
+            argv.windows(2).any(|w| w == ["--label", OODA_STUCK_LABEL]),
+            "an ensured label must be attached so the tracking issue is tagged",
+        );
+        assert_eq!(
+            &argv[..6],
+            &["issue", "create", "--title", "stuck goal", "--body", "body"],
+        );
+    }
+
+    #[test]
+    fn argv_drops_label_but_still_files_when_label_unensurable() {
+        // The bug: an unknown `ooda-stuck` label made `gh` exit non-zero and the
+        // escalation silently failed. The degraded path must still file the
+        // issue — just without the label — so the blocked goal is escalated.
+        let argv = issue_create_argv(
+            "stuck goal",
+            "body",
+            &LabelDisposition::Omit {
+                reason: "label create unauthorized".into(),
+            },
+        );
+        assert!(
+            !argv.contains(&"--label"),
+            "the degraded path must not pass --label",
+        );
+        assert!(
+            !argv.contains(&OODA_STUCK_LABEL),
+            "the degraded path must not reference the ooda-stuck label",
+        );
+        assert_eq!(
+            &argv[..6],
+            &["issue", "create", "--title", "stuck goal", "--body", "body"],
+            "the issue must still be filed so the blocked goal is escalated",
         );
     }
 }

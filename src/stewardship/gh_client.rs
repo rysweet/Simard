@@ -153,6 +153,133 @@ fn create_issue_execution_reason(error: CreateIssueExecutionError) -> String {
     }
 }
 
+// ── Issue #4474: `ooda-stuck` label self-heal ──────────────────────────────
+//
+// The OODA no-progress breaker files a tracking issue via
+// `gh issue create --label ooda-stuck` when a goal is Blocked. When the
+// `ooda-stuck` label does not exist in the repo, `gh` exits non-zero and the
+// whole escalation silently fails — a blocked goal can never reach the
+// operator. The self-heal below idempotently ensures the label exists first
+// (`gh label create`), and — crucially — never fails: a label that cannot be
+// created (e.g. a token with issue-write but not label-write) DEGRADES to
+// filing the issue *without* the label, so the escalation always proceeds.
+
+/// The GitHub label the OODA no-progress breaker attaches to the tracking
+/// issues it files for stalled / Blocked goals. Filing historically failed when
+/// this label was absent from the repo; [`ensure_label`] self-heals it first.
+pub(crate) const OODA_STUCK_LABEL: &str = "ooda-stuck";
+
+/// Upper bound (bytes) on the `gh` stderr folded into a degrade reason or
+/// failure note, so a hostile or runaway stderr cannot flood the logs.
+pub(crate) const GH_STDERR_LOG_LIMIT: usize = 2048;
+
+/// Truncate `text` to at most [`GH_STDERR_LOG_LIMIT`] bytes (on a UTF-8 char
+/// boundary), appending a marker when truncated, so decoded `gh` stderr is
+/// safe to fold into a log field without flooding the journal.
+pub(crate) fn truncate_for_log(text: &str) -> String {
+    if text.len() <= GH_STDERR_LOG_LIMIT {
+        return text.to_string();
+    }
+    let mut end = GH_STDERR_LOG_LIMIT;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}… (truncated)", &text[..end])
+}
+
+/// Whether the `ooda-stuck` label may be attached to a `gh issue create`.
+///
+/// Returned by [`ensure_label`]; it is *never* an error, so the escalation
+/// always proceeds — either with the label ([`Attach`](Self::Attach)) or,
+/// when the label could not be ensured, without it
+/// ([`Omit`](Self::Omit)) while surfacing the reason.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LabelDisposition {
+    /// The label exists (created just now, or already present): safe to pass
+    /// `--label <name>`.
+    Attach,
+    /// The label could not be ensured; file the issue *without* it and surface
+    /// `reason`. Degraded, but the escalation still succeeds.
+    Omit { reason: String },
+}
+
+impl LabelDisposition {
+    /// The `--label <name>` argv fragment when the label is ensured; empty when
+    /// degraded — so a single argv builder can splice it unconditionally and
+    /// stay the one source of truth for label handling across all filer sites.
+    pub(crate) fn label_args<'a>(&self, label: &'a str) -> Vec<&'a str> {
+        match self {
+            LabelDisposition::Attach => vec!["--label", label],
+            LabelDisposition::Omit { .. } => Vec::new(),
+        }
+    }
+}
+
+/// Injectable executor for `gh label create`, mirroring [`CreateIssueExecutor`].
+/// Real code binds [`execute_ensure_label`]; tests inject subprocess outcomes.
+/// `.output()` collapses spawn+wait into a single `io::Error`, so — unlike the
+/// multi-stage [`CreateIssueExecutor`] — no dedicated error enum is warranted.
+type LabelEnsureExecutor = fn(&OsStr, &[&OsStr]) -> Result<Output, io::Error>;
+
+/// Core, executor-injected label self-heal: run `gh label create <label>` and
+/// map the outcome to a [`LabelDisposition`]. NEVER returns an error — a
+/// failure to create the label degrades to [`LabelDisposition::Omit`] so the
+/// caller still files the escalation issue. A non-zero exit whose stderr says
+/// the label already exists is the *idempotent success* path (case-insensitive,
+/// since the `gh`/GitHub wording is not a stable contract).
+fn ensure_label_with(
+    executable: &OsStr,
+    executor: LabelEnsureExecutor,
+    label: &str,
+) -> LabelDisposition {
+    let args = [OsStr::new("label"), OsStr::new("create"), OsStr::new(label)];
+    match executor(executable, &args) {
+        Ok(output) if output.status.success() => LabelDisposition::Attach,
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.to_lowercase().contains("already exists") {
+                LabelDisposition::Attach
+            } else {
+                LabelDisposition::Omit {
+                    reason: format!(
+                        "`gh label create {label}` exited {}: {}",
+                        output.status,
+                        truncate_for_log(stderr.trim())
+                    ),
+                }
+            }
+        }
+        Err(error) => LabelDisposition::Omit {
+            reason: format!("failed to run `gh label create`: {error}"),
+        },
+    }
+}
+
+/// Real `gh label create` executor: spawn `gh`, capture stdout/stderr, no stdin
+/// (a label create carries no body). `.output()` folds spawn+wait errors.
+fn execute_ensure_label(executable: &OsStr, args: &[&OsStr]) -> Result<Output, io::Error> {
+    Command::new(executable)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+}
+
+/// Idempotently ensure `label` exists in the ambient repo before a tracking
+/// issue is filed, self-healing the missing-label failure that broke OODA
+/// no-progress escalation (issue #4474). Never errors: an un-creatable label
+/// degrades to [`LabelDisposition::Omit`], letting the caller file the issue
+/// without the label so the blocked goal is still escalated.
+///
+/// Scoping is intentionally *ambient* (no `-R`): the label is created in the
+/// same repo context the sibling `gh issue create` runs in, so the two can
+/// never target different repos. See
+/// `docs/concepts/ooda-stuck-label-self-heal.md`.
+pub(crate) fn ensure_label(label: &str) -> LabelDisposition {
+    ensure_label_with(OsStr::new("gh"), execute_ensure_label, label)
+}
+
 /// How many of the newest open issues to scan directly — via the
 /// **strongly-consistent** `gh issue list` (no `--search`) — when the
 /// eventually-consistent search index has not yet surfaced a just-filed
@@ -617,5 +744,229 @@ exit 23
         assert!(error.contains("injected wait failure"));
         assert!(!error.contains(body));
         assert!(!error.contains(title));
+    }
+
+    // ── ooda-stuck label self-heal (issue #4474) ───────────────────────────
+    //
+    // The no-progress breaker escalation filed `gh issue create --label
+    // ooda-stuck`, but that label does not exist in rysweet/Simard, so `gh`
+    // exited non-zero and the escalation silently failed. These tests pin the
+    // contract of the fix: before filing, idempotently ensure the label exists
+    // (`gh label create`), and if it cannot be ensured, DEGRADE to filing
+    // without the label rather than failing — the escalation must always
+    // succeed. Mirrors the injectable `CreateIssueExecutor` fn-pointer seam.
+
+    use super::{LabelDisposition, ensure_label_with, execute_ensure_label};
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    /// Retry the real `gh` executor on transient `ETXTBSY` ("text file busy").
+    ///
+    /// The real-executor tests write a throwaway `gh` script and immediately
+    /// exec it. Under parallel test execution a sibling thread's `fork()` (from
+    /// another `Command::spawn`) can momentarily keep this just-written script's
+    /// fd open, so the exec races with `ETXTBSY`. `ensure_label_with` maps that
+    /// `Err` to `Omit`, flaking assertions that expect `Attach`. This is a pure
+    /// test-harness artifact — a long-installed production `gh` is never
+    /// written-then-exec'd — so we absorb it here rather than complicate the
+    /// production executor.
+    fn execute_ensure_label_no_etxtbsy(
+        executable: &OsStr,
+        args: &[&OsStr],
+    ) -> Result<Output, io::Error> {
+        const ETXTBSY: i32 = 26;
+        for _ in 0..100 {
+            match execute_ensure_label(executable, args) {
+                Err(e) if e.raw_os_error() == Some(ETXTBSY) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                result => return result,
+            }
+        }
+        execute_ensure_label(executable, args)
+    }
+
+    fn label_create_succeeds(_executable: &OsStr, _args: &[&OsStr]) -> Result<Output, io::Error> {
+        Ok(Output {
+            status: ExitStatus::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+
+    fn label_already_exists(_executable: &OsStr, _args: &[&OsStr]) -> Result<Output, io::Error> {
+        // Mixed-case wording forces the idempotency match to be case-insensitive
+        // (the `gh`/GitHub message casing is not guaranteed stable).
+        Ok(Output {
+            status: ExitStatus::from_raw(256),
+            stdout: Vec::new(),
+            stderr: b"HTTP 422: Validation Failed. Label \"ooda-stuck\" Already EXISTS".to_vec(),
+        })
+    }
+
+    fn label_create_unauthorized(
+        _executable: &OsStr,
+        _args: &[&OsStr],
+    ) -> Result<Output, io::Error> {
+        Ok(Output {
+            status: ExitStatus::from_raw(256),
+            stdout: Vec::new(),
+            stderr: b"HTTP 403: Resource not accessible by integration".to_vec(),
+        })
+    }
+
+    fn label_spawn_fails(_executable: &OsStr, _args: &[&OsStr]) -> Result<Output, io::Error> {
+        Err(io::Error::new(io::ErrorKind::NotFound, "no gh binary"))
+    }
+
+    fn label_huge_stderr(_executable: &OsStr, _args: &[&OsStr]) -> Result<Output, io::Error> {
+        Ok(Output {
+            status: ExitStatus::from_raw(256),
+            stdout: Vec::new(),
+            stderr: vec![b'x'; 100_000],
+        })
+    }
+
+    #[test]
+    fn ooda_stuck_label_constant_is_ooda_stuck() {
+        assert_eq!(super::OODA_STUCK_LABEL, "ooda-stuck");
+    }
+
+    #[test]
+    fn ensure_label_attaches_when_create_succeeds() {
+        let disp = ensure_label_with(OsStr::new("gh"), label_create_succeeds, "ooda-stuck");
+        assert_eq!(disp, LabelDisposition::Attach);
+    }
+
+    #[test]
+    fn ensure_label_attaches_idempotently_when_label_already_exists() {
+        // A non-zero exit whose stderr says the label already exists is the
+        // idempotent success case — the label is present, so keep attaching it.
+        let disp = ensure_label_with(OsStr::new("gh"), label_already_exists, "ooda-stuck");
+        assert_eq!(
+            disp,
+            LabelDisposition::Attach,
+            "an `already exists` failure must be treated as Attach (case-insensitive)",
+        );
+    }
+
+    #[test]
+    fn ensure_label_omits_with_reason_when_unauthorized() {
+        // A token that can file issues may lack repo-write to create labels.
+        // The fail-safe path degrades to Omit so the escalation still proceeds.
+        let disp = ensure_label_with(OsStr::new("gh"), label_create_unauthorized, "ooda-stuck");
+        match disp {
+            LabelDisposition::Omit { reason } => assert!(
+                reason.contains("403") || reason.to_lowercase().contains("not accessible"),
+                "the degrade reason must surface the gh stderr, got {reason:?}",
+            ),
+            LabelDisposition::Attach => {
+                panic!("unauthorized label creation must degrade to Omit, never Attach")
+            }
+        }
+    }
+
+    #[test]
+    fn ensure_label_omits_when_spawn_fails_and_never_errs() {
+        // No silent fallback, no propagated error: a spawn failure becomes an
+        // observable Omit so the caller still files the issue without the label.
+        let disp = ensure_label_with(OsStr::new("gh"), label_spawn_fails, "ooda-stuck");
+        assert!(
+            matches!(disp, LabelDisposition::Omit { .. }),
+            "a spawn failure must degrade to Omit, not panic or Err",
+        );
+    }
+
+    #[test]
+    fn ensure_label_omit_reason_is_bounded_for_huge_stderr() {
+        // Truncate the degrade reason so a hostile/huge stderr cannot flood logs.
+        let disp = ensure_label_with(OsStr::new("gh"), label_huge_stderr, "ooda-stuck");
+        match disp {
+            LabelDisposition::Omit { reason } => assert!(
+                reason.len() <= 4096,
+                "omit reason must be bounded to prevent log flooding, was {}",
+                reason.len(),
+            ),
+            LabelDisposition::Attach => panic!("a hard failure must degrade to Omit"),
+        }
+    }
+
+    #[test]
+    fn label_args_present_on_attach_absent_on_omit() {
+        assert_eq!(
+            LabelDisposition::Attach.label_args("ooda-stuck"),
+            vec!["--label", "ooda-stuck"],
+        );
+        assert!(
+            LabelDisposition::Omit {
+                reason: "unauthorized".into(),
+            }
+            .label_args("ooda-stuck")
+            .is_empty(),
+        );
+    }
+
+    #[test]
+    fn ensure_label_runs_gh_label_create_argv_via_real_executor() {
+        // The real subprocess path must invoke `gh label create <label>` with no
+        // issue body, and map a clean exit to Attach.
+        let script = r#"
+dir=${0%/*}
+printf '%s\n' "$@" > "$dir/argv"
+exit 0
+"#;
+        let (dir, executable) = fake_gh(script);
+        let disp = ensure_label_with(
+            executable.as_os_str(),
+            execute_ensure_label_no_etxtbsy,
+            "ooda-stuck",
+        );
+        assert_eq!(disp, LabelDisposition::Attach);
+        let argv = fs::read_to_string(dir.path().join("argv")).unwrap();
+        assert!(argv.contains("label\ncreate\n"), "argv was: {argv:?}");
+        assert!(argv.contains("ooda-stuck"), "argv was: {argv:?}");
+        assert!(
+            !argv.contains("--body"),
+            "`gh label create` must not carry an issue body",
+        );
+    }
+
+    #[test]
+    fn ensure_label_treats_real_already_exists_stderr_as_attach() {
+        // End-to-end through the real executor: a non-zero exit whose stderr
+        // reports the label already exists is idempotent success.
+        let script = r#"
+printf '%s\n' 'label already exists' >&2
+exit 1
+"#;
+        let (_dir, executable) = fake_gh(script);
+        let disp = ensure_label_with(
+            executable.as_os_str(),
+            execute_ensure_label_no_etxtbsy,
+            "ooda-stuck",
+        );
+        assert_eq!(
+            disp,
+            LabelDisposition::Attach,
+            "`already exists` from the real subprocess path is idempotent success",
+        );
+    }
+
+    #[test]
+    fn ensure_label_degrades_when_real_executor_reports_other_failure() {
+        let script = r#"
+printf '%s\n' 'HTTP 403: Resource not accessible by integration' >&2
+exit 1
+"#;
+        let (_dir, executable) = fake_gh(script);
+        let disp = ensure_label_with(
+            executable.as_os_str(),
+            execute_ensure_label_no_etxtbsy,
+            "ooda-stuck",
+        );
+        assert!(
+            matches!(disp, LabelDisposition::Omit { .. }),
+            "a genuine failure from the real path must degrade to Omit",
+        );
     }
 }

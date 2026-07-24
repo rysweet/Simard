@@ -79,6 +79,15 @@ The matching escalation issue (label `ooda-stuck`) carries the same WHY plus the
 agentic narrative paragraph, if the [optional WHY
 recipe](../reference/ooda-no-progress-why-recipe.md) is enabled.
 
+> **The `ooda-stuck` label self-heals.** If the label is missing from the target
+> repo, the escalation no longer fails: the filers idempotently create it
+> (create-if-missing) or file the issue **without** the label (with a structured
+> `WARN`) rather than let `gh issue create` exit non-zero. So a stalled goal is
+> always escalable through the issue channel — an escalation issue **without** the
+> `ooda-stuck` label just means the label could not be created (check the `WARN`).
+> See [`ooda-stuck` label self-heal](../concepts/ooda-stuck-label-self-heal.md)
+> and its [API reference](../reference/ooda-stuck-label-self-heal-api.md).
+
 > If you see a block **without** a `why=` segment, it is either a legacy block
 > from before this upgrade or a block authored by a *different* path (operator
 > hold, scope, dependency, or the brain-failure safeguard). Those are out of

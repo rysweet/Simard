@@ -1,6 +1,7 @@
 //! AdvanceGoal dispatch — routing, subordinate heartbeat, and session-based advancement.
 
 use std::path::Path;
+use std::process::Output;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,11 +15,43 @@ use crate::ooda_brain::{
     gather_engineer_lifecycle_ctx, push_brain_judgment,
 };
 use crate::ooda_loop::{ActionOutcome, OodaState, PlannedAction};
+use crate::stewardship::gh_client::{LabelDisposition, OODA_STUCK_LABEL, ensure_label};
 
 use crate::ooda_actions::make_outcome;
 
 use super::admission;
 use super::resource_admission;
+
+/// Build the engineer-lifecycle tracking-issue `gh issue create` argv, attaching
+/// `--label ooda-stuck` only when the label was ensured
+/// ([`LabelDisposition::Attach`]). A degraded [`LabelDisposition::Omit`] drops
+/// it so the issue is still filed (issue #4474).
+fn ooda_stuck_issue_argv<'a>(
+    title: &'a str,
+    body: &'a str,
+    label: &LabelDisposition,
+) -> Vec<&'a str> {
+    let mut argv = vec!["issue", "create", "--title", title, "--body", body];
+    argv.extend(label.label_args(OODA_STUCK_LABEL));
+    argv
+}
+
+/// Inspect a completed `gh issue create` [`Output`], returning `Some(note)` with
+/// a bounded, lossy-decoded stderr when the process exited non-zero, or `None`
+/// on success. Replaces the prior `.status()` call at the `open_tracking_issue`
+/// site that silently swallowed a non-zero exit — e.g. the `ooda-stuck`
+/// label-not-found failure of issue #4474.
+fn tracking_issue_failure_note(output: &Output) -> Option<String> {
+    if output.status.success() {
+        return None;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Some(format!(
+        "`gh issue create` exited {}: {}",
+        output.status,
+        truncate_for_log(stderr.trim())
+    ))
+}
 
 // ── Issue #1911: brain-failure auto-recovery marker ────────────────────────
 //
@@ -366,20 +399,21 @@ pub fn dispatch_spawn_engineer(
                         }
                     }
                     // File tracking issue. Failure to file is logged but
-                    // does NOT swallow the original brain failure.
-                    match std::process::Command::new("gh")
-                        .args([
-                            "issue",
-                            "create",
-                            "--title",
-                            &title,
-                            "--body",
-                            &body,
-                            "--label",
-                            "ooda-stuck",
-                        ])
-                        .output()
-                    {
+                    // does NOT swallow the original brain failure. Self-heal the
+                    // `ooda-stuck` label first; degrade to no label on failure
+                    // so the escalation still files (issue #4474).
+                    let disposition = ensure_label(OODA_STUCK_LABEL);
+                    if let LabelDisposition::Omit { reason } = &disposition {
+                        tracing::warn!(
+                            target: "simard::ooda_brain",
+                            goal = %goal_id,
+                            label = OODA_STUCK_LABEL,
+                            reason = %reason,
+                            "deterministic safeguard: label unensurable; filing tracking issue without it",
+                        );
+                    }
+                    let argv = ooda_stuck_issue_argv(&title, &body, &disposition);
+                    match std::process::Command::new("gh").args(&argv).output() {
                         Ok(out) if out.status.success() => {
                             eprintln!(
                                 "[simard] DETERMINISTIC SAFEGUARD: goal '{}' marked Blocked + tracking issue filed",
@@ -924,25 +958,40 @@ fn apply_lifecycle_decision(
     }
 
     if let EngineerLifecycleDecision::OpenTrackingIssue { title, body, .. } = &decision {
-        let result = std::process::Command::new("gh")
-            .args([
-                "issue",
-                "create",
-                "--title",
-                title,
-                "--body",
-                body,
-                "--label",
-                "ooda-stuck",
-            ])
-            .status();
-        if let Err(e) = result {
+        // Self-heal the `ooda-stuck` label before filing; degrade to no label
+        // on failure so the tracking issue is still opened (issue #4474).
+        let disposition = ensure_label(OODA_STUCK_LABEL);
+        if let LabelDisposition::Omit { reason } = &disposition {
             tracing::warn!(
                 target: "simard::ooda_brain",
                 goal = %goal_id,
-                error = %e,
-                "open_tracking_issue: gh issue create failed",
+                label = OODA_STUCK_LABEL,
+                reason = %reason,
+                "open_tracking_issue: label unensurable; filing tracking issue without it",
             );
+        }
+        let argv = ooda_stuck_issue_argv(title, body, &disposition);
+        // `.output()` (not `.status()`) so a non-zero exit — e.g. the historic
+        // label-not-found failure — is captured and surfaced, never swallowed.
+        match std::process::Command::new("gh").args(&argv).output() {
+            Ok(out) => {
+                if let Some(note) = tracking_issue_failure_note(&out) {
+                    tracing::warn!(
+                        target: "simard::ooda_brain",
+                        goal = %goal_id,
+                        detail = %note,
+                        "open_tracking_issue: gh issue create failed",
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "simard::ooda_brain",
+                    goal = %goal_id,
+                    error = %e,
+                    "open_tracking_issue: gh issue create failed to spawn",
+                );
+            }
         }
     }
 
@@ -1374,5 +1423,95 @@ mod tests {
             .is_none(),
             "Simard (no identity) must never take the observe-only branch"
         );
+    }
+
+    // ── ooda-stuck label self-heal + exit-capture (issue #4474) ────────────
+    //
+    // Both `gh issue create` sites in this module hardcoded `--label ooda-stuck`.
+    // When that label does not exist in the repo, `gh` exits non-zero. These
+    // tests pin two contract points of the fix:
+    //   1. The label is attached only when it was ensured; otherwise the issue
+    //      is still filed (degraded, no label) so the goal is escalated.
+    //   2. The `open_tracking_issue` site must inspect the process `Output`
+    //      (was `.status()`, which swallowed non-zero exits) and surface a
+    //      bounded failure note — never silently drop the failure.
+    mod ooda_stuck_label_self_heal {
+        use super::super::{ooda_stuck_issue_argv, tracking_issue_failure_note};
+        use crate::stewardship::gh_client::{LabelDisposition, OODA_STUCK_LABEL};
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::{ExitStatus, Output};
+
+        #[test]
+        fn argv_carries_label_when_ensured() {
+            let argv = ooda_stuck_issue_argv("t", "b", &LabelDisposition::Attach);
+            assert!(
+                argv.windows(2).any(|w| w == ["--label", OODA_STUCK_LABEL]),
+                "an ensured label must be attached",
+            );
+        }
+
+        #[test]
+        fn argv_drops_label_when_degraded_but_still_files() {
+            let argv = ooda_stuck_issue_argv(
+                "t",
+                "b",
+                &LabelDisposition::Omit {
+                    reason: "no perms".into(),
+                },
+            );
+            assert!(!argv.contains(&"--label"));
+            assert_eq!(
+                &argv[..6],
+                &["issue", "create", "--title", "t", "--body", "b"],
+                "the issue must still be filed without the label",
+            );
+        }
+
+        #[test]
+        fn success_output_produces_no_failure_note() {
+            let out = Output {
+                status: ExitStatus::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            };
+            assert!(
+                tracking_issue_failure_note(&out).is_none(),
+                "a successful `gh issue create` must not emit a failure note",
+            );
+        }
+
+        #[test]
+        fn nonzero_exit_is_surfaced_not_swallowed() {
+            // Regression for the latent second bug: the site used `.status()` and
+            // only logged the spawn `Err`, silently swallowing a non-zero exit
+            // (e.g. the `ooda-stuck` label-not-found failure). `.output()` must
+            // capture stderr and surface it in the note.
+            let out = Output {
+                status: ExitStatus::from_raw(256),
+                stdout: Vec::new(),
+                stderr: b"could not add label: 'ooda-stuck' not found".to_vec(),
+            };
+            let note = tracking_issue_failure_note(&out)
+                .expect("a non-zero exit must produce a surfaced failure note");
+            assert!(
+                note.contains("ooda-stuck"),
+                "the note must include the gh stderr, got {note:?}",
+            );
+        }
+
+        #[test]
+        fn failure_note_is_bounded_for_huge_stderr() {
+            let out = Output {
+                status: ExitStatus::from_raw(256),
+                stdout: Vec::new(),
+                stderr: vec![b'x'; 100_000],
+            };
+            let note = tracking_issue_failure_note(&out).unwrap();
+            assert!(
+                note.len() <= 4096,
+                "the failure note must be bounded to prevent log flooding, was {}",
+                note.len(),
+            );
+        }
     }
 }
