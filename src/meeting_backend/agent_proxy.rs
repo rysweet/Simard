@@ -845,9 +845,16 @@ mod tests {
     // ── issue #2549: repo-derived workdir (no hardcoded operator path) ──
 
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn resolve_agent_workdir_derives_repo_root_from_cwd() {
         // `cargo test` runs inside this git checkout, so resolution must yield
         // a real repository root — and it must NOT be the old hardcoded path.
+        //
+        // Shares the `cognitive_memory` serial key with the two override tests
+        // below: they mutate the process-global WORKDIR_ENV, and this test reads
+        // it via resolve_agent_workdir(). Without the shared key a concurrent
+        // override test's set_var/restore window leaks its temp path into this
+        // read, so cwd-derivation is bypassed and the .git assertion fails.
         let resolved = resolve_agent_workdir()
             .expect("workdir should resolve to the repo root inside a git checkout");
         assert!(resolved.is_dir(), "resolved workdir must exist");
