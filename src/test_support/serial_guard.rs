@@ -29,12 +29,12 @@
 
 #![allow(dead_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use proc_macro2::TokenTree;
 use syn::visit::Visit;
-use syn::{Attribute, Expr, ExprCall, ExprStruct, ItemFn, Lit, Meta};
+use syn::{Attribute, Expr, ExprCall, ExprStruct, ImplItem, ItemFn, ItemImpl, Lit, Meta, Type};
 
 /// The serial key that serializes every cognitive-memory env reader/writer.
 const REQUIRED_KEY: &str = "cognitive_memory";
@@ -177,7 +177,8 @@ impl Default for AuditOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Reason {
     /// Mutates a watched process-global variable via `set_var`/`remove_var`
-    /// (or the `EnvGuard` / `SkipGuard` test helpers).
+    /// (or the `EnvGuard` / `SkipGuard` test helpers), or constructs a guard
+    /// type whose `impl` methods (constructor or `Drop` teardown) mutate one.
     MutatesEnv { var: String },
     /// Reads the state-root/socket env default (directly, or via
     /// `resolve_state_root` / `default_state_root` / `simard_state_root`).
@@ -355,8 +356,25 @@ fn audit_file(
     allowed: &BTreeSet<&str>,
     out: &mut Vec<Offender>,
 ) {
+    // Pass 0: discover env-mutating guard TYPES in this file — types whose
+    // `impl` methods (a constructor, a helper, or the `Drop` teardown) mutate a
+    // watched process-global env var. A test that merely *constructs* such a
+    // type is an env mutator even though its own body issues no `set_var`: the
+    // mutation lives in the guard's `impl`, which `FnCollector` never visits and
+    // whose type name is not one of the hard-coded helper recognizers. This is
+    // the indirect Drop-teardown blind spot behind the #4519 canary exit-101
+    // flake. The discovery is file-local (cross-file guard types remain a
+    // documented blind spot, like cross-file helpers).
+    let mut guard_collector = GuardTypeCollector {
+        watched,
+        env_mutating_types: BTreeMap::new(),
+    };
+    guard_collector.visit_file(ast);
+    let guard_types = guard_collector.env_mutating_types;
+
     let mut collector = FnCollector {
         watched,
+        guard_types: &guard_types,
         fns: Vec::new(),
     };
     collector.visit_file(ast);
@@ -416,6 +434,7 @@ fn audit_file(
 
 struct FnCollector<'a> {
     watched: &'a EnvWatch,
+    guard_types: &'a BTreeMap<String, String>,
     fns: Vec<FnInfo>,
 }
 
@@ -423,6 +442,7 @@ impl<'a, 'ast> Visit<'ast> for FnCollector<'a> {
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
         let mut body = BodyScan {
             watched: self.watched,
+            guard_types: self.guard_types,
             reasons: Vec::new(),
         };
         body.visit_block(&node.block);
@@ -463,6 +483,7 @@ impl<'ast> Visit<'ast> for CallCollector {
 
 struct BodyScan<'a> {
     watched: &'a EnvWatch,
+    guard_types: &'a BTreeMap<String, String>,
     reasons: Vec<Reason>,
 }
 
@@ -485,34 +506,23 @@ impl<'a, 'ast> Visit<'ast> for BodyScan<'a> {
                 .map(|s| s.ident.to_string())
                 .unwrap_or_default();
 
-            // (B) direct env mutation: std::env::set_var / remove_var(VAR, ..)
-            if (last == "set_var" || last == "remove_var")
-                && let Some(var) = node.args.first().and_then(arg_to_var)
-                && self.watched.watches_mutation(&var)
-            {
+            // (B) direct env mutation via the primitive `set_var`/`remove_var`
+            // or the by-name `EnvGuard`/`SkipGuard` helper mutators.
+            if let Some(var) = direct_mutation_var(node, self.watched) {
                 self.reasons.push(Reason::MutatesEnv { var });
             }
 
-            // (B) EnvGuard test-helper mutation: EnvGuard::set / unset(VAR, ..)
-            if penult == "EnvGuard"
-                && (last == "set" || last == "unset")
-                && let Some(var) = node.args.first().and_then(arg_to_var)
-                && self.watched.watches_mutation(&var)
+            // (B') generic env-mutating guard construction: `T::method(...)`
+            // where T's `impl` methods (a constructor or the `Drop` teardown)
+            // mutate a watched env var. The mutation is invisible to the direct
+            // scan because it lives in the guard's `impl`, not the test body —
+            // the indirect Drop-teardown blind spot behind the #4519 canary
+            // exit-101 flake. `penult` is the type name for an associated-fn
+            // call (`StateRootGuard::set` → penult == "StateRootGuard").
+            if !penult.is_empty()
+                && let Some(var) = self.guard_types.get(&penult)
             {
-                self.reasons.push(Reason::MutatesEnv { var });
-            }
-
-            // (B) SkipGuard test-helper mutation (src/gym_runner_client.rs):
-            // `SkipGuard::set`/`clear` always set/remove the hard-coded
-            // `SIMARD_SKIP_GYM` var, so the var name is implicit (not an arg) and
-            // must be supplied here rather than resolved from the call site.
-            if penult == "SkipGuard"
-                && (last == "set" || last == "clear")
-                && self.watched.watches_mutation("SIMARD_SKIP_GYM")
-            {
-                self.reasons.push(Reason::MutatesEnv {
-                    var: "SIMARD_SKIP_GYM".to_string(),
-                });
+                self.reasons.push(Reason::MutatesEnv { var: var.clone() });
             }
 
             // (A) HermeticState constructor.
@@ -554,16 +564,143 @@ impl<'a, 'ast> Visit<'ast> for BodyScan<'a> {
     }
 
     fn visit_expr_struct(&mut self, node: &'ast ExprStruct) {
-        if node
+        let last = node
             .path
             .segments
             .last()
-            .map(|s| s.ident == "HermeticState")
-            .unwrap_or(false)
-        {
+            .map(|s| s.ident.to_string())
+            .unwrap_or_default();
+        if last == "HermeticState" {
             self.reasons.push(Reason::ConstructsHermeticState);
         }
+        // Generic env-mutating guard constructed via struct literal `T { .. }`.
+        if let Some(var) = self.guard_types.get(&last) {
+            self.reasons.push(Reason::MutatesEnv { var: var.clone() });
+        }
         syn::visit::visit_expr_struct(self, node);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Env-mutating guard-type discovery (the indirect Drop-teardown blind spot)
+// ---------------------------------------------------------------------------
+
+/// Detect a *direct* watched env mutation at a call site — the primitive
+/// `std::env::set_var`/`remove_var`, or the by-name `EnvGuard`/`SkipGuard`
+/// helper mutators (whose own `set_var`/`remove_var` is hidden in their impl
+/// methods, so the var name is implicit). Returns the mutated watched var name,
+/// or `None`. Shared by the per-test body scan and the guard-type discovery
+/// pass so both agree on what "directly mutates env" means. Conservative:
+/// unresolvable (dynamic) var names never match, so it never emits a false
+/// positive.
+fn direct_mutation_var(node: &ExprCall, watched: &EnvWatch) -> Option<String> {
+    let Expr::Path(path) = node.func.as_ref() else {
+        return None;
+    };
+    let segs = &path.path.segments;
+    let last = segs.last().map(|s| s.ident.to_string()).unwrap_or_default();
+    let penult = segs
+        .iter()
+        .rev()
+        .nth(1)
+        .map(|s| s.ident.to_string())
+        .unwrap_or_default();
+
+    // std::env::set_var / remove_var(VAR, ..)
+    if (last == "set_var" || last == "remove_var")
+        && let Some(var) = node.args.first().and_then(arg_to_var)
+        && watched.watches_mutation(&var)
+    {
+        return Some(var);
+    }
+    // EnvGuard::set / unset(VAR, ..)
+    if penult == "EnvGuard"
+        && (last == "set" || last == "unset")
+        && let Some(var) = node.args.first().and_then(arg_to_var)
+        && watched.watches_mutation(&var)
+    {
+        return Some(var);
+    }
+    // SkipGuard::set / clear() — always the hard-coded `SIMARD_SKIP_GYM`, so the
+    // var name is implicit (not an argument).
+    if penult == "SkipGuard"
+        && (last == "set" || last == "clear")
+        && watched.watches_mutation("SIMARD_SKIP_GYM")
+    {
+        return Some("SIMARD_SKIP_GYM".to_string());
+    }
+    None
+}
+
+/// File-level pre-pass: find guard TYPES whose `impl` methods (a constructor, a
+/// helper, or the `Drop` teardown) directly mutate a watched process-global env
+/// var. Maps each such type name to a representative watched var it mutates.
+///
+/// This closes the indirect Drop-teardown blind spot behind the #4519 canary
+/// exit-101 flake: a guard's methods are `ImplItemFn`, never visited by
+/// `FnCollector` (which only visits free `ItemFn`), and the guard's *type* name
+/// need not be one of the hard-coded `EnvGuard`/`SkipGuard`/`HermeticState`
+/// recognizers. A test that merely constructs such a type is therefore an env
+/// mutator that the direct scan alone cannot see. Discovery is file-local, so
+/// this stays a pure AST scan with no cross-file coupling (cross-file guard
+/// types remain a documented blind spot, like cross-file helpers).
+struct GuardTypeCollector<'a> {
+    watched: &'a EnvWatch,
+    env_mutating_types: BTreeMap<String, String>,
+}
+
+impl<'a, 'ast> Visit<'ast> for GuardTypeCollector<'a> {
+    fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
+        if let Some(ty) = impl_self_type_name(&node.self_ty) {
+            let mut scan = FirstMutationScan {
+                watched: self.watched,
+                var: None,
+            };
+            for item in &node.items {
+                if let ImplItem::Fn(method) = item {
+                    scan.visit_block(&method.block);
+                    if scan.var.is_some() {
+                        break;
+                    }
+                }
+            }
+            if let Some(var) = scan.var {
+                self.env_mutating_types.entry(ty).or_insert(var);
+            }
+        }
+        syn::visit::visit_item_impl(self, node);
+    }
+}
+
+/// Walks a code block for the first *direct* watched env mutation (via
+/// [`direct_mutation_var`]). Used to decide whether a guard type's `impl`
+/// methods mutate the environment.
+struct FirstMutationScan<'a> {
+    watched: &'a EnvWatch,
+    var: Option<String>,
+}
+
+impl<'a, 'ast> Visit<'ast> for FirstMutationScan<'a> {
+    fn visit_expr_call(&mut self, node: &'ast ExprCall) {
+        if self.var.is_none()
+            && let Some(v) = direct_mutation_var(node, self.watched)
+        {
+            self.var = Some(v);
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+}
+
+/// The last path segment of an `impl` block's self type (`impl Drop for T`,
+/// `impl T`), unwrapping references / groups / parens. `None` for exotic
+/// self types (tuples, trait objects, …), which are never env guards here.
+fn impl_self_type_name(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
+        Type::Reference(r) => impl_self_type_name(&r.elem),
+        Type::Group(g) => impl_self_type_name(&g.elem),
+        Type::Paren(p) => impl_self_type_name(&p.elem),
+        _ => None,
     }
 }
 
@@ -846,5 +983,202 @@ fn skip_guard_helper_mutation_requires_the_key() {
     assert!(
         !flagged.contains("skip_guard_with_key"),
         "a SkipGuard writer sharing the cognitive_memory key must be accepted: {flagged:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FAILING TDD SPEC — the indirect **Drop-teardown** blind spot
+// (self-deploy canary exit-101 flake, issue #4519 /
+//  docs/testing/canary-gate-drop-test-determinism.md).
+//
+// The canary-only exit-101 came from a test whose *only* env mutation lives
+// inside a custom RAII guard's `Drop` (the guard restores/removes
+// `SIMARD_STATE_ROOT` when it falls out of scope). Under the scrubbed canary
+// env that teardown `set_var`/`remove_var` ran concurrently with a sibling
+// test's env read and tore it → panic → exit 101 → RED canary.
+//
+// The audit is blind to this because `FnCollector::visit_item_fn` only visits
+// FREE functions (`ItemFn`). A guard's `new`/`drop` are `impl` methods
+// (`ImplItemFn`), never visited, and the guard's TYPE name is not one of the
+// hard-coded `EnvGuard` / `SkipGuard` / `HermeticState` recognizers — so the
+// mutation is invisible and the constructing test is not flagged.
+//
+// These two tests pin the strengthened contract:
+//   * A test constructing an env-mutating-`Drop` guard type WITHOUT the
+//     `cognitive_memory` key must be flagged (fails today; passes once the
+//     audit learns the pattern).
+//   * A benign guard whose `Drop` touches no watched env var must NOT be
+//     flagged — the strengthening keeps the doc's "zero false positives"
+//     guarantee and must not degrade into "flag every guard construction".
+//
+// Like every meta-test here, the fixtures are written to a TempDir and are
+// never real `#[test]`s, so the real-tree audit is unaffected and this module
+// still mutates no process-global env (hence no serial key).
+// ---------------------------------------------------------------------------
+
+/// A guard type whose `Drop` restores/removes `SIMARD_STATE_ROOT` is an env
+/// mutator even though its constructing test never calls `set_var` directly:
+/// the mutation lives in the guard's `impl` methods, and the teardown
+/// `set_var`/`remove_var` in `Drop` is what raced the reader under the canary.
+/// The audit must therefore flag a `#[test]` that constructs such a guard
+/// unless it carries the `cognitive_memory` key — regardless of the guard's
+/// type name (it is NOT one of the hard-coded helper names).
+///
+/// Reads in-memory source fixtures only; mutates no env, so it carries no
+/// serial key.
+#[test]
+fn drop_teardown_guard_mutation_requires_the_key() {
+    let dir = tempfile::tempdir().unwrap();
+    // A hand-rolled restore-on-Drop env guard (the exact shape of the local
+    // `EnvGuard` in tests_hermetic_state.rs, but under a DIFFERENT, unrecognized
+    // type name so only Drop/impl analysis — not a name allowlist — can catch
+    // it). `set_guard_without_key` mutates SIMARD_STATE_ROOT purely through the
+    // guard's constructor + `Drop`; `remove_guard_without_key` exercises the
+    // `remove_var` teardown path; the `_with_key` sibling is correctly keyed.
+    std::fs::write(
+        dir.path().join("fixture.rs"),
+        r#"
+struct StateRootGuard {
+    prev: Option<std::ffi::OsString>,
+}
+
+impl StateRootGuard {
+    fn set(value: &str) -> Self {
+        let prev = std::env::var_os("SIMARD_STATE_ROOT");
+        unsafe {
+            std::env::set_var("SIMARD_STATE_ROOT", value);
+        }
+        Self { prev }
+    }
+
+    fn cleared() -> Self {
+        let prev = std::env::var_os("SIMARD_STATE_ROOT");
+        unsafe {
+            std::env::remove_var("SIMARD_STATE_ROOT");
+        }
+        Self { prev }
+    }
+}
+
+impl Drop for StateRootGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match self.prev.take() {
+                Some(v) => std::env::set_var("SIMARD_STATE_ROOT", v),
+                None => std::env::remove_var("SIMARD_STATE_ROOT"),
+            }
+        }
+    }
+}
+
+#[test]
+#[serial]
+fn set_guard_without_key() {
+    let _g = StateRootGuard::set("/tmp/hermetic");
+}
+
+#[test]
+#[serial]
+fn remove_guard_without_key() {
+    let _g = StateRootGuard::cleared();
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn set_guard_with_key() {
+    let _g = StateRootGuard::set("/tmp/hermetic");
+}
+"#,
+    )
+    .unwrap();
+
+    let opts = AuditOptions {
+        roots: vec![dir.path().to_path_buf()],
+        excluded_prefixes: Vec::new(),
+        watched: EnvWatch::AnyVar,
+        allowlist: Vec::new(),
+    };
+    let flagged: BTreeSet<String> = audit_env_mutating_tests(&opts)
+        .into_iter()
+        .map(|o| o.test_name)
+        .collect();
+
+    assert!(
+        flagged.contains("set_guard_without_key"),
+        "a test whose only env mutation is a custom guard's Drop-teardown \
+         (set_var restore) must be flagged without the cognitive_memory key — \
+         this is the indirect Drop-teardown blind spot behind the #4519 canary \
+         exit-101 flake: {flagged:?}"
+    );
+    assert!(
+        flagged.contains("remove_guard_without_key"),
+        "the remove_var teardown path of a custom Drop guard must also be \
+         flagged without the key: {flagged:?}"
+    );
+    assert!(
+        !flagged.contains("set_guard_with_key"),
+        "a test constructing the same env-mutating guard while sharing the \
+         cognitive_memory key must be accepted (no false positive): {flagged:?}"
+    );
+}
+
+/// The Drop-teardown strengthening must not degrade into flagging *every* RAII
+/// guard construction. A guard whose `Drop` performs no watched env mutation
+/// (here it only touches a struct field) is hermetic and must never be
+/// reported — this pins the doc's "zero false positives" guarantee against an
+/// over-broad fix.
+///
+/// Reads in-memory source fixtures only; mutates no env, so it carries no
+/// serial key.
+#[test]
+fn drop_teardown_detection_has_zero_false_positives() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("fixture.rs"),
+        r#"
+struct Spinner {
+    ticks: u32,
+}
+
+impl Spinner {
+    fn new() -> Self {
+        Self { ticks: 0 }
+    }
+}
+
+impl Drop for Spinner {
+    fn drop(&mut self) {
+        // No env mutation whatsoever — a purely in-process guard.
+        self.ticks = self.ticks.wrapping_add(1);
+    }
+}
+
+#[test]
+#[serial]
+fn benign_guard_without_key() {
+    let mut s = Spinner::new();
+    s.ticks += 1;
+    let _ = s.ticks;
+}
+"#,
+    )
+    .unwrap();
+
+    let opts = AuditOptions {
+        roots: vec![dir.path().to_path_buf()],
+        excluded_prefixes: Vec::new(),
+        watched: EnvWatch::AnyVar,
+        allowlist: Vec::new(),
+    };
+    let flagged: BTreeSet<String> = audit_env_mutating_tests(&opts)
+        .into_iter()
+        .map(|o| o.test_name)
+        .collect();
+
+    assert!(
+        flagged.is_empty(),
+        "a guard whose Drop performs no watched env mutation must never be \
+         flagged; the Drop-teardown strengthening must stay a zero-false-positive \
+         static scan: {flagged:?}"
     );
 }

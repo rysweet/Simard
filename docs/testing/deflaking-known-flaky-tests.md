@@ -16,6 +16,7 @@ related:
   - ./hermetic-tests.md
   - ./cognitive-memory-serial-isolation.md
   - ./ci-resilient-test-patterns.md
+  - ./canary-gate-drop-test-determinism.md
   - ./COVERAGE_BASELINE.md
   - ../reference/goal-board-api.md
   - ../prompt-delivery.md
