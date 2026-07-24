@@ -1136,19 +1136,25 @@ mod tests {
         // window must NOT be killed, as long as it keeps producing output — and
         // its output must arrive incrementally (streamed), not in one final
         // blob. The child prints a 4-digit line (survives noise-stripping) every
-        // 100 ms for 20 lines (~2 s total) with a 1 s idle window: 2× the window
-        // overall, but each gap (0.1 s) is well under it, so the clock keeps
-        // resetting. Under the OLD wall-clock cap this turn would have been
-        // killed at 1 s; under idle-liveness it runs to completion. This is the
+        // 100 ms for 45 lines (~4.5 s total) with a 3 s idle window: 1.5× the
+        // window overall, but each gap (0.1 s) is well under it, so the clock
+        // keeps resetting. Under the OLD wall-clock cap this turn would have been
+        // killed at 3 s; under idle-liveness it runs to completion. This is the
         // bounded, CI-safe stand-in for the ">120 s productive turn" case — the
         // property proven (no upper bound while output flows) is identical.
+        //
+        // The 3 s window (vs. the earlier 1 s) and the longer 45-line burst give
+        // the test slack under CPU-oversubscribed gate load: a scheduling stall
+        // between two 0.1 s-spaced lines is far less likely to exceed 3 s, so the
+        // monitor won't spuriously reap a genuinely-productive turn. The
+        // production DEFAULT_IDLE_LIVENESS_SECS (3600 s) is untouched.
         let mut proxy = PersistentAgentProxy::new().unwrap();
         proxy.agent_cmd = "sh".to_string();
         proxy.agent_base_args = vec![
             "-c".to_string(),
-            "i=1000; while [ $i -lt 1020 ]; do echo $i; i=$((i+1)); sleep 0.1; done".to_string(),
+            "i=1000; while [ $i -lt 1045 ]; do echo $i; i=$((i+1)); sleep 0.1; done".to_string(),
         ];
-        proxy.idle_window = Some(Duration::from_secs(1));
+        proxy.idle_window = Some(Duration::from_secs(3));
 
         let mut chunks: Vec<String> = Vec::new();
         let started = Instant::now();
@@ -1157,22 +1163,24 @@ mod tests {
             .expect("a long-but-productive turn must return Ok, never be killed");
         let elapsed = started.elapsed();
 
-        // It ran the full duration — proof it was not reaped early at ~1 s.
+        // It ran past the 3 s idle window — proof it was not reaped at the window
+        // boundary. `sleep 0.1` is fixed wall-clock time, so load can only make
+        // this LONGER (never shorter); the >= window+margin floor stays robust.
         assert!(
-            elapsed >= Duration::from_millis(1500),
+            elapsed >= Duration::from_millis(3500),
             "productive turn was cut short (took only {elapsed:?}) — idle-liveness wrongly killed it"
         );
         // Output arrived incrementally: one streamed chunk per produced line.
         assert_eq!(
             chunks.len(),
-            20,
-            "expected 20 incrementally-streamed chunks, got {}",
+            45,
+            "expected 45 incrementally-streamed chunks, got {}",
             chunks.len()
         );
         assert_eq!(chunks.first().map(String::as_str), Some("1000"));
-        assert_eq!(chunks.last().map(String::as_str), Some("1019"));
+        assert_eq!(chunks.last().map(String::as_str), Some("1044"));
         // The final aggregate response carries every line.
-        assert_eq!(response.lines().count(), 20);
+        assert_eq!(response.lines().count(), 45);
     }
 
     #[test]

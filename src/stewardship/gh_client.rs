@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
 use crate::error::{SimardError, SimardResult};
 
@@ -102,18 +103,60 @@ fn create_issue_with(
     })
 }
 
+/// Bounded retry budget for the `gh` fork+exec race (`ETXTBSY`). Kept
+/// deliberately small: an unbounded retry on a genuinely-stuck exec would hang
+/// the create-issue path (a self-inflicted DoS surface).
+const SPAWN_MAX_ATTEMPTS: usize = 5;
+
+/// Run `spawn` up to [`SPAWN_MAX_ATTEMPTS`] times, retrying **only** on
+/// `ETXTBSY` ("text file busy", os error 26).
+///
+/// This closes the fork+exec race in which a sibling thread's
+/// `write(executable)` is momentarily visible to `exec()` while another handle
+/// to that just-written binary is still open. Every other error — missing
+/// binary, `EACCES`, PATH hijack — surfaces immediately and unchanged on the
+/// first attempt, so real faults are never masked or delayed. On exhaustion the
+/// last (original) `ETXTBSY` error is returned verbatim: no fabricated error,
+/// no silent success (fail-closed with the real cause).
+fn spawn_with_etxtbsy_retry<T, F>(mut spawn: F) -> io::Result<T>
+where
+    F: FnMut() -> io::Result<T>,
+{
+    let mut attempt = 1usize;
+    loop {
+        match spawn() {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let is_etxtbsy = error.raw_os_error() == Some(libc::ETXTBSY);
+                if !is_etxtbsy || attempt >= SPAWN_MAX_ATTEMPTS {
+                    return Err(error);
+                }
+                tracing::warn!(
+                    attempt,
+                    max_attempts = SPAWN_MAX_ATTEMPTS,
+                    "gh spawn hit ETXTBSY (text file busy); retrying after backoff"
+                );
+                std::thread::sleep(Duration::from_millis(5 * attempt as u64));
+                attempt += 1;
+            }
+        }
+    }
+}
+
 fn execute_create_issue(
     executable: &OsStr,
     args: &[&OsStr],
     body: &[u8],
 ) -> Result<Output, CreateIssueExecutionError> {
-    let mut child = Command::new(executable)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(CreateIssueExecutionError::Spawn)?;
+    let mut child = spawn_with_etxtbsy_retry(|| {
+        Command::new(executable)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+    })
+    .map_err(CreateIssueExecutionError::Spawn)?;
 
     let write_result = match child.stdin.take() {
         Some(mut stdin) => stdin.write_all(body),
@@ -473,6 +516,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(gh_exec)]
     fn create_issue_sends_large_body_byte_for_byte_through_stdin_only() {
         let script = r#"
 dir=${0%/*}
@@ -528,6 +572,7 @@ printf '%s\n' 'https://github.com/rysweet/Simard/issues/321'
     }
 
     #[test]
+    #[serial_test::serial(gh_exec)]
     fn create_issue_reports_nonzero_exit_and_stderr_without_body_content() {
         let script = r#"
 cat >/dev/null
@@ -615,6 +660,161 @@ exit 23
 
         assert!(error.contains("failed to wait for `gh issue create`"));
         assert!(error.contains("injected wait failure"));
+        assert!(!error.contains(body));
+        assert!(!error.contains(title));
+    }
+
+    // ── issue #4536: fork+exec ETXTBSY race — bounded, errno-gated spawn retry ──
+    //
+    // When sibling threads race a `write(executable)` + `Command::spawn()` of a
+    // just-written binary, the exec can transiently fail with ETXTBSY ("text
+    // file busy", os error 26) while another handle to that file is still open.
+    // The production fix is a bounded retry that fires ONLY for ETXTBSY and
+    // surfaces every other error immediately, so real faults — missing binary,
+    // PATH hijack, EACCES — are never masked or delayed. These tests pin that
+    // contract against `super::spawn_with_etxtbsy_retry` /
+    // `super::SPAWN_MAX_ATTEMPTS`, which Step 8 implements. Until then the crate
+    // will not compile: that is the intended TDD RED state.
+    use super::{SPAWN_MAX_ATTEMPTS, spawn_with_etxtbsy_retry};
+
+    fn etxtbsy() -> io::Error {
+        io::Error::from_raw_os_error(libc::ETXTBSY)
+    }
+
+    #[test]
+    fn spawn_retry_bound_is_small_and_fixed() {
+        // Documents the chosen budget. It MUST stay small: an unbounded retry on
+        // a genuinely-stuck exec would hang the create-issue path (DoS surface).
+        assert_eq!(SPAWN_MAX_ATTEMPTS, 5);
+    }
+
+    #[test]
+    fn spawn_retry_succeeds_on_first_attempt_without_extra_calls() {
+        // The happy path must not add any retries or delay: exactly one call.
+        let mut calls = 0usize;
+        let out: u32 = spawn_with_etxtbsy_retry(|| {
+            calls += 1;
+            Ok(42)
+        })
+        .expect("a clean spawn must return Ok");
+        assert_eq!(out, 42);
+        assert_eq!(calls, 1, "a clean spawn must not retry");
+    }
+
+    #[test]
+    fn spawn_retry_recovers_after_transient_etxtbsy() {
+        // ETXTBSY on every attempt but the last-allowed one, then success:
+        // the helper must ride out the transient race and return Ok, having
+        // used exactly the full budget.
+        let mut calls = 0usize;
+        let out: u32 = spawn_with_etxtbsy_retry(|| {
+            calls += 1;
+            if calls < SPAWN_MAX_ATTEMPTS {
+                Err(etxtbsy())
+            } else {
+                Ok(7)
+            }
+        })
+        .expect("a transient ETXTBSY that clears within budget must recover");
+        assert_eq!(out, 7);
+        assert_eq!(calls, SPAWN_MAX_ATTEMPTS);
+    }
+
+    #[test]
+    fn spawn_retry_exhausts_and_returns_original_etxtbsy_error() {
+        // Persistent ETXTBSY → exhaust the budget and surface the LAST error
+        // unchanged (errno preserved). No fabricated/substituted error, no
+        // silent success: fail-closed with the real cause.
+        let mut calls = 0usize;
+        let err = spawn_with_etxtbsy_retry::<u32, _>(|| {
+            calls += 1;
+            Err(etxtbsy())
+        })
+        .expect_err("persistent ETXTBSY must exhaust and surface an error");
+        assert_eq!(
+            calls, SPAWN_MAX_ATTEMPTS,
+            "must attempt exactly SPAWN_MAX_ATTEMPTS times — no more, no fewer"
+        );
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::ETXTBSY),
+            "the surfaced error must be the original ETXTBSY, unchanged"
+        );
+    }
+
+    #[test]
+    fn spawn_retry_does_not_retry_non_etxtbsy_error() {
+        // Correctness + security: a real failure (missing binary → ENOENT) must
+        // surface on the FIRST attempt. Retrying it would both waste the budget
+        // and mask/delay a genuine fault.
+        let mut calls = 0usize;
+        let err = spawn_with_etxtbsy_retry::<u32, _>(|| {
+            calls += 1;
+            Err(io::Error::from_raw_os_error(libc::ENOENT))
+        })
+        .expect_err("a non-ETXTBSY error must propagate immediately");
+        assert_eq!(calls, 1, "non-ETXTBSY errors must never be retried");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::ENOENT),
+            "the propagated error must be the original, unmasked failure"
+        );
+    }
+
+    #[test]
+    fn spawn_retry_bound_is_an_upper_limit_not_off_by_one() {
+        // ETXTBSY on the first SPAWN_MAX_ATTEMPTS calls, then a would-be success
+        // on attempt MAX+1. The helper must have already given up: the budget is
+        // an inclusive upper bound, guarding against an off-by-one that silently
+        // allows an extra attempt.
+        let mut calls = 0usize;
+        let result = spawn_with_etxtbsy_retry::<u32, _>(|| {
+            calls += 1;
+            if calls <= SPAWN_MAX_ATTEMPTS {
+                Err(etxtbsy())
+            } else {
+                Ok(99)
+            }
+        });
+        assert!(
+            result.is_err(),
+            "helper must stop at SPAWN_MAX_ATTEMPTS, never reach the MAX+1 success"
+        );
+        assert_eq!(calls, SPAWN_MAX_ATTEMPTS);
+    }
+
+    /// Models `execute_create_issue` after the ETXTBSY retry budget is
+    /// exhausted: the original spawn error is surfaced as `Spawn(..)`.
+    fn etxtbsy_spawn_exhaustion(
+        _executable: &OsStr,
+        _args: &[&OsStr],
+        _body: &[u8],
+    ) -> Result<Output, CreateIssueExecutionError> {
+        Err(CreateIssueExecutionError::Spawn(etxtbsy()))
+    }
+
+    #[test]
+    fn create_issue_spawn_exhaustion_redacts_body_and_title() {
+        // Even when spawn exhaustion surfaces as `Spawn`, the reported error
+        // must carry the spawn-failure message and NEVER leak the issue body or
+        // title (the existing redaction contract holds on the retry path too).
+        let body = "SECRET_BODY_MUST_NOT_APPEAR";
+        let title = "SECRET_TITLE_MUST_NOT_APPEAR";
+
+        let error = create_issue_with(
+            OsStr::new("gh"),
+            etxtbsy_spawn_exhaustion,
+            "rysweet/Simard",
+            title,
+            body,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            error.contains("failed to spawn `gh issue create`"),
+            "{error}"
+        );
         assert!(!error.contains(body));
         assert!(!error.contains(title));
     }

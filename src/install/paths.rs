@@ -9,6 +9,20 @@ use super::{InstallConfig, InstallResult, err};
 pub const OODA_UNIT: &str = "simard-ooda.service";
 pub const SIGNAL_UNIT: &str = "simard-signal.service";
 
+/// Deadline for riding out a transient `EWOULDBLOCK` on the install-lock
+/// `flock`. A genuine concurrent installer holds the lock for its entire
+/// transaction (many seconds: clone + build + swap), so real contention still
+/// fails after this deadline; the deadline only rides out the window in which a
+/// sibling thread's `fork()` (e.g. `Command::spawn` elsewhere in the process)
+/// has transiently inherited the close-on-exec lock fd and not yet reached
+/// `exec()`. Under CPU-oversubscribed load that window can reach tens of
+/// milliseconds; without this retry the inherited fd keeps the lock held just
+/// long enough to make an acquire spuriously report "another install is
+/// running" — a systemic, non-deterministic unit-test failure that reds the
+/// deploy gate.
+#[cfg(unix)]
+const INSTALL_LOCK_ACQUIRE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstallLayout {
     pub simard_home: PathBuf,
@@ -158,12 +172,36 @@ pub fn acquire_install_lock(layout: &InstallLayout) -> InstallResult<InstallLock
         })?;
 
         // SAFETY: flock only uses the open lock-file descriptor; the File stays
-        // alive in InstallLock until the installer transaction ends.
-        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if result != 0 {
-            let error = std::io::Error::last_os_error();
+        // alive in InstallLock until the installer transaction ends. We retry on
+        // EWOULDBLOCK until a deadline to ride out the fork→exec window in which
+        // a sibling thread's forked child has inherited (but not yet exec'd
+        // away) this close-on-exec fd; genuine contention persists past the
+        // deadline and is reported honestly below. Capped-exponential backoff
+        // keeps the common transient case fast while bounding total wait.
+        let start = std::time::Instant::now();
+        let mut backoff = std::time::Duration::from_millis(1);
+        loop {
+            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if result == 0 {
+                break;
+            }
+            let os_error = std::io::Error::last_os_error();
+            let would_block = matches!(
+                os_error.raw_os_error(),
+                Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN
+            );
+            if would_block && start.elapsed() < INSTALL_LOCK_ACQUIRE_DEADLINE {
+                tracing::debug!(
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    lock = %lock_path.display(),
+                    "install lock flock hit EWOULDBLOCK; retrying (transient fork-inherited fd or genuine contention)"
+                );
+                std::thread::sleep(backoff);
+                backoff = std::cmp::min(backoff * 2, std::time::Duration::from_millis(100));
+                continue;
+            }
             return err(format!(
-                "another simard install appears to be running for {}; lock {} could not be acquired: {error}",
+                "another simard install appears to be running for {}; lock {} could not be acquired: {os_error}",
                 layout.simard_home.display(),
                 lock_path.display()
             ));
