@@ -281,7 +281,11 @@ relying solely on LLM training data.
 Simard's **native Rust reimplementation** of the knowledge-pack client
 ("kgpacks-rs", `src/native_knowledge.rs` + `src/knowledge_client.rs`) is tracked to full parity
 with the Python agent-kgpacks contract by a measurable criteria checklist at
-`Specs/agent-kgpacks-rs-parity.md`.
+`Specs/agent-kgpacks-rs-parity.md`. All in-scope criteria are now DONE: retrieval
+uses the same GraphRAG method as the original — multi-hop graph traversal, vector
+semantic (embedding-cosine) search, and a hybrid ranker that blends the graph,
+vector, and keyword signals into one fused ranking — with every answer tracing
+back to a specific source article.
 
 ### amplihack-rs ↔ amplihack-xpia-defender
 
