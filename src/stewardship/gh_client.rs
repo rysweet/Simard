@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
 use crate::error::{SimardError, SimardResult};
 
@@ -102,18 +103,68 @@ fn create_issue_with(
     })
 }
 
+/// Maximum number of `gh` spawn attempts when the kernel returns `ETXTBSY`
+/// (`Text file busy`, errno 26). The cap bounds the transient exec-vs-write
+/// fork/exec race so a genuinely persistent failure still surfaces rather than
+/// spinning forever (security S4).
+const ETXTBSY_MAX_ATTEMPTS: usize = 8;
+
+/// Constant backoff between `ETXTBSY` retries. A short synchronous sleep is
+/// enough for a racing writer's file descriptor to close; it never busy-spins.
+const ETXTBSY_RETRY_BACKOFF: Duration = Duration::from_millis(5);
+
+/// Classify an [`io::Error`] as the transient `ETXTBSY` ("Text file busy")
+/// spawn race, strictly by numeric errno. String matching is deliberately
+/// avoided so the predicate stays locale-independent (security S2).
+fn is_etxtbsy(err: &io::Error) -> bool {
+    err.raw_os_error() == Some(libc::ETXTBSY)
+}
+
+/// Run `op`, retrying **only** on transient `ETXTBSY` spawn failures up to
+/// [`ETXTBSY_MAX_ATTEMPTS`] times with a constant [`ETXTBSY_RETRY_BACKOFF`].
+///
+/// Any `Ok`, and any `Err` that is not `ETXTBSY`, returns immediately — the
+/// helper never masks real failures such as `ENOENT`/`EACCES` (security S3).
+/// The retry path logs only the attempt index and numeric errno via
+/// `tracing::debug!`; it never logs the command, args, body, or token
+/// (security S1).
+fn retry_on_etxtbsy<T, F>(mut op: F) -> io::Result<T>
+where
+    F: FnMut() -> io::Result<T>,
+{
+    let mut attempt = 1usize;
+    loop {
+        match op() {
+            Ok(value) => return Ok(value),
+            Err(err) if is_etxtbsy(&err) && attempt < ETXTBSY_MAX_ATTEMPTS => {
+                tracing::debug!(
+                    attempt,
+                    max_attempts = ETXTBSY_MAX_ATTEMPTS,
+                    errno = err.raw_os_error(),
+                    "retrying `gh` spawn after transient ETXTBSY"
+                );
+                attempt += 1;
+                std::thread::sleep(ETXTBSY_RETRY_BACKOFF);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 fn execute_create_issue(
     executable: &OsStr,
     args: &[&OsStr],
     body: &[u8],
 ) -> Result<Output, CreateIssueExecutionError> {
-    let mut child = Command::new(executable)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(CreateIssueExecutionError::Spawn)?;
+    let mut child = retry_on_etxtbsy(|| {
+        Command::new(executable)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+    })
+    .map_err(CreateIssueExecutionError::Spawn)?;
 
     let write_result = match child.stdin.take() {
         Some(mut stdin) => stdin.write_all(body),
@@ -304,11 +355,11 @@ mod tests {
 
     use super::{CreateIssueExecutionError, create_issue_with, execute_create_issue};
     use super::{
-        GhIssue, IssueListQuery, RECENT_OPEN_ISSUE_SCAN_LIMIT, issue_list_args,
-        merge_issue_candidates, parse_issue_list, resolve_dedup_candidates,
+        GhIssue, IssueListQuery, RECENT_OPEN_ISSUE_SCAN_LIMIT, is_etxtbsy, issue_list_args,
+        merge_issue_candidates, parse_issue_list, resolve_dedup_candidates, retry_on_etxtbsy,
     };
     use crate::error::SimardError;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     fn issue(number: u64, signature: &str) -> GhIssue {
         GhIssue {
@@ -617,5 +668,132 @@ exit 23
         assert!(error.contains("injected wait failure"));
         assert!(!error.contains(body));
         assert!(!error.contains(title));
+    }
+
+    // --- ETXTBSY classification + bounded-retry contract (PR #4523) ---------
+    //
+    // These tests specify the deterministic, hermetic fix for the `Text file
+    // busy (os error 26)` fork/exec-vs-write race that flakes the `fake_gh`
+    // spawn tests under parallel load. They are pure and subprocess-free: no
+    // real `gh`, no real backoff observed by the assertions.
+
+    /// The retry cap contracted by the design spec: 8 attempts total.
+    const EXPECTED_MAX_ATTEMPTS: usize = 8;
+
+    /// `is_etxtbsy` must classify strictly by numeric errno, never by string.
+    #[test]
+    fn is_etxtbsy_true_only_for_errno_26() {
+        let etxtbsy = io::Error::from_raw_os_error(libc::ETXTBSY);
+        assert_eq!(libc::ETXTBSY, 26, "ETXTBSY is errno 26 on Linux");
+        assert!(is_etxtbsy(&etxtbsy), "errno 26 must classify as ETXTBSY");
+    }
+
+    /// Neighbouring spawn errnos must NOT be treated as ETXTBSY — they are real
+    /// failures that must surface immediately (fail-loud, security S3).
+    #[test]
+    fn is_etxtbsy_false_for_other_spawn_errnos() {
+        for errno in [libc::ENOENT, libc::EACCES, libc::EPERM, libc::ENOMEM] {
+            let err = io::Error::from_raw_os_error(errno);
+            assert!(
+                !is_etxtbsy(&err),
+                "errno {errno} must NOT classify as ETXTBSY"
+            );
+        }
+    }
+
+    /// A synthesized error with no OS errno (e.g. `io::Error::other`) must not
+    /// be mistaken for ETXTBSY — guards against `raw_os_error() == None`.
+    #[test]
+    fn is_etxtbsy_false_for_non_os_error() {
+        let err = io::Error::other("no raw os errno here");
+        assert!(err.raw_os_error().is_none());
+        assert!(
+            !is_etxtbsy(&err),
+            "non-OS error must not classify as ETXTBSY"
+        );
+    }
+
+    /// On first-try success the op is invoked exactly once — no spurious
+    /// retries, no latency on the happy path.
+    #[test]
+    fn retry_on_etxtbsy_returns_ok_without_retrying() {
+        let calls = Cell::new(0usize);
+        let result: io::Result<u32> = retry_on_etxtbsy(|| {
+            calls.set(calls.get() + 1);
+            Ok(42)
+        });
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(calls.get(), 1, "success path must not retry");
+    }
+
+    /// Transient ETXTBSY failures are retried until the op succeeds; the return
+    /// value of the successful attempt is surfaced.
+    #[test]
+    fn retry_on_etxtbsy_retries_transient_then_succeeds() {
+        let calls = Cell::new(0usize);
+        let result: io::Result<&str> = retry_on_etxtbsy(|| {
+            let n = calls.get() + 1;
+            calls.set(n);
+            if n < 3 {
+                Err(io::Error::from_raw_os_error(libc::ETXTBSY))
+            } else {
+                Ok("spawned")
+            }
+        });
+        assert_eq!(result.unwrap(), "spawned");
+        assert_eq!(calls.get(), 3, "should retry exactly until success");
+    }
+
+    /// A non-ETXTBSY error is surfaced immediately on the first attempt — the
+    /// helper must never mask ENOENT/EACCES/etc. behind retries.
+    #[test]
+    fn retry_on_etxtbsy_surfaces_other_errors_immediately() {
+        let calls = Cell::new(0usize);
+        let result: io::Result<()> = retry_on_etxtbsy(|| {
+            calls.set(calls.get() + 1);
+            Err(io::Error::from_raw_os_error(libc::ENOENT))
+        });
+        let err = result.unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
+        assert_eq!(calls.get(), 1, "non-ETXTBSY must not be retried");
+    }
+
+    /// Persistent ETXTBSY is bounded: the op is attempted exactly
+    /// `EXPECTED_MAX_ATTEMPTS` times, then the last ETXTBSY error is returned
+    /// (no infinite loop, no busy-spin — security S4).
+    #[test]
+    fn retry_on_etxtbsy_respects_attempt_cap() {
+        let calls = Cell::new(0usize);
+        let result: io::Result<()> = retry_on_etxtbsy(|| {
+            calls.set(calls.get() + 1);
+            Err(io::Error::from_raw_os_error(libc::ETXTBSY))
+        });
+        let err = result.unwrap_err();
+        assert!(
+            is_etxtbsy(&err),
+            "final error must remain the ETXTBSY error"
+        );
+        assert_eq!(
+            calls.get(),
+            EXPECTED_MAX_ATTEMPTS,
+            "persistent ETXTBSY must be attempted exactly {EXPECTED_MAX_ATTEMPTS} times"
+        );
+    }
+
+    /// The retry wrapper is transparent to arbitrary success payloads and does
+    /// not require `Clone`/`Copy` on the returned value.
+    #[test]
+    fn retry_on_etxtbsy_passes_through_owned_values() {
+        let calls = RefCell::new(0usize);
+        let result: io::Result<String> = retry_on_etxtbsy(|| {
+            *calls.borrow_mut() += 1;
+            if *calls.borrow() == 1 {
+                Err(io::Error::from_raw_os_error(libc::ETXTBSY))
+            } else {
+                Ok(String::from("owned-output"))
+            }
+        });
+        assert_eq!(result.unwrap(), "owned-output");
+        assert_eq!(*calls.borrow(), 2);
     }
 }
