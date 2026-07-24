@@ -300,12 +300,13 @@ fn pressure_signals_return_none_on_non_linux() {
 #[test]
 fn scaler_current_max_can_override_config() {
     use simard::ooda_loop::{OodaConfig, Priority, decide};
+    use std::sync::Arc;
 
     // Pin the scaler explicitly (ceiling == floor == current == 2) so its
     // adjust() is deterministically 2, independent of SIMARD_SCALING. This is
     // the hermeticity contract: the verdict is a function of the test's own
     // inputs, never the ambient environment (deploy-canary exit-101 fix).
-    let scaler = std::sync::Arc::new(AdaptiveScaler::new(2, 2, 2));
+    let scaler = Arc::new(AdaptiveScaler::new(2, 2, 2));
 
     // 5 over-quota priorities: would produce 5 actions without a cap.
     let priorities: Vec<Priority> = (1..=5)
