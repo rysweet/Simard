@@ -137,12 +137,14 @@ narrow authorization).
 
 ## 1. Roster — the reasoning scope (single source of truth)
 
-The default reasoning scope is the existing governed-repos roster,
-`prompt_assets/simard/ecosystem_repos.toml` — the same validated-slug, pure-data
+The default reasoning scope is Simard's stewarded roster — the identity-curated
+`stewarded_repos` collection (durable at
+`<state_root>/identity-state/simard/stewarded_repos.toml`, seeded once from
+`prompt_assets/simard/identity/stewarded_repos.seed.toml`) — the same validated-slug
 roster the [`ecosystem-observe`](./ecosystem-observe.md) chain reads, including
-Simard's own repo (`rysweet/Simard`). It is loaded through the existing
-install-first [ecosystem-roster resolver](../reference/ecosystem-roster-resolution.md);
-an empty roster is a **loud error**, never a silent empty scope.
+Simard's own repo (`rysweet/Simard`). It is loaded through the single-source-of-truth
+[`load_stewarded_roster`](../reference/ecosystem-roster-resolution.md); an empty roster
+is a **loud error**, never a silent empty scope.
 
 Reusing the roster satisfies the anti-silent-OFF mandate directly: "unset merge
 env vars" no longer means "no reasoning", it means "reason over the governed
@@ -173,7 +175,7 @@ pub fn merge_reasoning_scope_from(
 ) -> MergeReasoningScope;
 
 /// Production entry: reads SIMARD_MERGE_REASONING_SCOPE from the environment and
-/// the governed roster from ecosystem_repos.toml.
+/// the stewarded roster (identity-curated `stewarded_repos` collection).
 pub fn merge_reasoning_scope() -> MergeReasoningScope;
 ```
 
@@ -391,20 +393,21 @@ are **notify-only**). They:
 | `SIMARD_AUTOMERGE_REPOS` | unset | **Action-side** narrowing only. No longer gates *reasoning*; unset can no longer silence it. |
 | `SIMARD_AUTOMERGE_AUTHOR` | unset | **Action-side** own-PR identity for the merge gate (defense-in-depth). |
 
-The reasoning scope roster is configured by editing
-`prompt_assets/simard/ecosystem_repos.toml` (data, not env), install-first on a
-deployed daemon.
+The reasoning scope roster is Simard's identity-curated `stewarded_repos`
+collection (durable at `<state_root>/identity-state/simard/stewarded_repos.toml`,
+seeded once from `prompt_assets/simard/identity/stewarded_repos.seed.toml`), curated
+agentically rather than by editing a committed framework file.
 
 ## Examples
 
 ### Run the merge-queue reasoning chain by hand
 
 ```bash
-# Point the recipe at the committed roster + Simard's in-flight refs, plus a
+# Point the recipe at the stewarded roster + Simard's in-flight refs, plus a
 # writable handoff path for the REASON→BRIEF semantic handoff. On the live
 # cadence the rail creates these via ContextFile; by hand you pass real files.
 amplihack recipe run observe-merge-queue \
-  -c roster_path="$PWD/prompt_assets/simard/ecosystem_repos.toml" \
+  -c roster_path="$HOME/.simard/identity-state/simard/stewarded_repos.toml" \
   -c inflight_refs_path="/tmp/inflight.json" \
   -c merge_queue_brief_path="/tmp/merge_queue_brief.json"
 

@@ -144,8 +144,9 @@ pub enum MergeReasoningScope {
     Disabled,
 }
 
-/// Pure, unit-testable resolver. `roster` is the validated ecosystem_repos.toml
-/// slug list, used as the default scope when the env var is unset.
+/// Pure, unit-testable resolver. `roster` is the validated stewarded roster
+/// (identity-curated `stewarded_repos` collection), used as the default scope
+/// when the env var is unset.
 pub fn merge_reasoning_scope_from(
     lookup: impl Fn(&str) -> Option<String>,
     roster: &[String],
