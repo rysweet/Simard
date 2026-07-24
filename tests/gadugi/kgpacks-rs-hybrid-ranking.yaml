@@ -1,0 +1,56 @@
+name: "kgpacks-rs hybrid ranking parity (KGP-Q10)"
+description: "Outside-in coverage for kgpacks-rs parity criterion KGP-Q10: Simard's native Rust knowledge client (the agent-kgpacks port) must answer knowledge.query by BLENDING the multi-hop graph, vector-semantic, and keyword signals into one ranker (weighted Reciprocal Rank Fusion) instead of selecting a single retrieval path. Proven by a shared fixture where the semantically-near / graph-linked source outranks a purely lexical match (semantic/graph outweighs literal keyword overlap) and cross-signal agreement tops the list, with single-signal packs degrading to that signal's order unchanged. See Specs/agent-kgpacks-rs-parity.md."
+version: "1.0.0"
+
+config:
+  timeout: 600000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 600000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "native knowledge client blends graph + vector + keyword signals (hybrid ranking)"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/kgpacks-rs-hybrid-ranking.sh"
+    timeout: 600000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "kgpacks-rs"
+    - "knowledge"
+    - "parity"
+    - "hybrid"
+    - "ranking"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

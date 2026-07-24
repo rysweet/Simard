@@ -1,7 +1,7 @@
 ---
 title: Knowledge-pack article relevance ranking
 description: How the native knowledge reader ranks matching articles within a knowledge pack by keyword coverage — weighting title hits above body hits, de-duplicating query keywords, and truncating by the LIMIT only after a deterministic ordering — so a knowledge.query answer cites the most relevant sources reproducibly.
-last_updated: 2026-07-21
+last_updated: 2026-07-24
 owner: simard
 doc_type: reference
 related:
@@ -69,12 +69,13 @@ matches.
   overlap), which chooses *which packs* to consult; this page covers ranking
   *within* a chosen pack.
 
-## Retrieval strategy order (graph → vector → keyword)
+## Hybrid retrieval ranking (graph + vector + keyword)
 
-The keyword-coverage ranking above governs the **keyword** retrieval path
-(`query_articles`). It is the *fallback* tier: `knowledge.query` first tries two
-richer strategies that mirror the original agent-kgpacks GraphRAG method, and
-only falls through to the keyword `LIKE` scan when neither applies.
+The keyword-coverage ranking above governs the **keyword** retrieval signal
+(`query_articles`). It is one of three signals that `knowledge.query` **blends**
+into a single ranked result. Rather than committing to one retrieval path,
+`query_hybrid` fuses whichever of these signals the pack exposes (KGP-Q10),
+mirroring the original agent-kgpacks GraphRAG *ranker*:
 
 1. **Graph (KGP-Q5).** When the pack exposes `entities` + `relationships`
    tables, `query_graph` seeds keyword-matched entities and traverses
@@ -84,20 +85,57 @@ only falls through to the keyword `LIKE` scan when neither applies.
    embeddings — a JSON float array in an `embedding` column (the SQLite-port
    stand-in for the upstream `Section.embedding DOUBLE[768]` vector) —
    `query_vector` ranks articles by **cosine similarity** between the query
-   embedding and each stored embedding, returning the top `limit` as cited
-   sources. Because it ranks by *vector proximity* rather than literal token
-   overlap, it can retrieve an on-topic article that shares **no keyword** with
-   the question — which the keyword scan misses. The query is embedded by the
-   deterministic default embedder `embed_text` (a normalized FNV-1a
-   feature-hash), the port of upstream's default deterministic-hash embedder.
-   Semantic recall *quality* tracks the pack's embedder; wiring a real-model
-   embedder is pack-build-time (out of scope here). `query_vector` declines
-   (falling back) when the pack has no `embedding` column, the query carries no
-   signal, or a stored vector's dimension does not match the query embedding.
+   embedding and each stored embedding. Because it ranks by *vector proximity*
+   rather than literal token overlap, it can retrieve an on-topic article that
+   shares **no keyword** with the question — which the keyword scan misses. The
+   query is embedded by the deterministic default embedder `embed_text` (a
+   normalized FNV-1a feature-hash), the port of upstream's default
+   deterministic-hash embedder. Semantic recall *quality* tracks the pack's
+   embedder; wiring a real-model embedder is pack-build-time (out of scope here).
+   `query_vector` declines when the pack has no `embedding` column, the query
+   carries no signal, or a stored vector's dimension does not match the query
+   embedding.
 3. **Keyword (KGP-Q4/Q8).** The `LIKE`-based coverage-ranked scan documented
-   above — the tier that runs when a pack has neither a knowledge graph nor
-   stored embeddings, so keyword-only packs behave exactly as before.
+   above.
 
-The `knowledge.query` wire response shape is identical across all three tiers,
-so callers are unaffected by which strategy answered.
+### The blend: weighted Reciprocal Rank Fusion
+
+`query_hybrid` combines the three signals' ranked lists with **weighted
+Reciprocal Rank Fusion (RRF)**. Each source accumulates, from every signal it
+appears in, a contribution
+
+```
+contribution = weight / (K + rank)          # K = 60, rank is 1-based
+fused_score  = Σ contributions across the graph, vector, and keyword signals
+ORDER BY fused_score DESC, title ASC
+```
+
+with the semantic and graph signals weighted **above** the keyword signal
+(`HYBRID_VECTOR_WEIGHT = HYBRID_GRAPH_WEIGHT = 1.0` vs
+`HYBRID_KEYWORD_WEIGHT = 0.6`). This yields two properties no single signal has:
+
+- **Semantic/graph outweighs literal keyword overlap.** A source that is
+  semantically near — or graph-linked to — the query outranks one that only
+  shares a literal keyword. So a purely lexical match cannot crowd out a stronger
+  semantic or graph match.
+- **Agreement rises to the top.** A source that several signals rank ranks above
+  any single-signal match, because its contributions sum.
+
+Sources are fused by `(title, section)` identity; a citation URL from any signal
+upgrades a urlless representative so the source-citation guarantee (KGP-Q1) holds
+across the blend. When the graph signal contributes, its narrative answer (naming
+the linked entities and relations) is used; otherwise the answer is synthesized
+from the fused article sources.
+
+### Single-signal packs are unchanged
+
+Every signal is optional. A pack exposing only one signal degrades to exactly
+that signal's order (RRF over a single list preserves it), so a keyword-only,
+vector-only, or graph-only pack behaves as it did before the blend. When **no**
+signal matches, `knowledge.query` emits the graceful "no relevant information"
+answer.
+
+The `knowledge.query` wire response shape (`{ answer, sources, confidence }`) is
+identical regardless of which signals answered, so callers are unaffected by the
+blend.
 
