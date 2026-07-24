@@ -93,7 +93,7 @@ pub fn coordinated_handoff(my_pid: u32, config: &HandoffConfig) -> SimardResult<
         let failures: Vec<String> = gate_results
             .iter()
             .filter(|g| !g.passed)
-            .map(|g| g.to_string())
+            .map(|g| g.redacted_display())
             .collect();
         return Err(SimardError::RpcCallFailed {
             endpoint: "handoff".to_string(),

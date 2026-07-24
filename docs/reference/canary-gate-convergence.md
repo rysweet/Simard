@@ -8,6 +8,7 @@ doc_type: reference
 status: implemented
 related:
   - ./overseer-deploy-canary-diagnostics.md
+  - ./canary-unit-test-gate-diagnostics.md
   - ./self-deploy-api.md
   - ./self-deploy-source-prep.md
   - ./overseer-tick-self-healing.md
@@ -366,6 +367,10 @@ green."
 
 ## See also
 
+- [Diagnosable canary unit-test gate](./canary-unit-test-gate-diagnostics.md) —
+  the #4522 follow-on that fixes the `unit-test` gate itself: `cargo test --lib`
+  scope alignment and the `parse_unit_test_failure` / `truncate_output_tail`
+  diagnostics that name the failing test in the gate detail.
 - [Overseer deploy red-canary diagnostics](./overseer-deploy-canary-diagnostics.md) —
   the #4420 observability this repair acts on (`failing_gate` / `failing_detail`,
   `refusal_reason`, the `overseer::deploy` WARN, the `is_transient` guard).

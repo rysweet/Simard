@@ -8,6 +8,7 @@ doc_type: howto
 status: active
 related:
   - ../reference/canary-gate-convergence.md
+  - ../reference/canary-unit-test-gate-diagnostics.md
   - ../reference/overseer-deploy-canary-diagnostics.md
   - ../reference/self-deploy-api.md
   - ../reference/overseer-tick-self-healing.md
@@ -150,6 +151,10 @@ simard status | grep -Ei 'deploy_drift|running_commit'
 - [Canary gate isolation and self-deploy convergence](../reference/canary-gate-convergence.md) —
   the full design: per-gate spans, `canary_env`, `scrub_gate_env`, and the
   preserved fail-closed invariants.
+- [Diagnosable canary unit-test gate](../reference/canary-unit-test-gate-diagnostics.md) —
+  why the `unit-test` gate detail now names the failing test: the
+  `cargo test --lib` scope alignment and the `parse_unit_test_failure` /
+  `truncate_output_tail` capture of stdout+stderr (#4522).
 - [Overseer deploy red-canary diagnostics](../reference/overseer-deploy-canary-diagnostics.md) —
   how the reddening gate is named in the tick WARN and the operator
   notification.
