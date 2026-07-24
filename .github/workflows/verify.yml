@@ -38,6 +38,13 @@ jobs:
       - name: Rust-only gate (no new .py / .js / .ts)
         run: scripts/check-rust-only-gate.sh
 
+      # Locks in the idempotent release-publish fix: hermetic (bundles its own
+      # mock `gh`, no network/cargo), so it runs early and fast. Guards against a
+      # regression to the non-idempotent "Create release" step that raced on an
+      # unbumped version and reddened otherwise-green release runs.
+      - name: Release-create idempotency gate
+        run: scripts/qa-release-create-idempotent.sh
+
       - name: Prepare Rust runner (free disk, swap, mold, rust)
         uses: ./.github/actions/rust-runner-prep
         with:
