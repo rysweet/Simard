@@ -7,8 +7,10 @@ description: >
   state-root, LLM-provider, and meetings-resolver variables) shares the
   cognitive_memory serial key, a regression-guard meta-test enforces it, and the
   rule is documented at the HermeticState source. Extending enforcement to every
-  process-global variable is tracked follow-up (issue #2375).
-last_updated: 2026-07-03
+  process-global variable is tracked follow-up (issue #2375). The same
+  one-resource/one-group-name invariant is applied to the meetings-dir surface to
+  unfreeze Simard self-deploy (issue #4520).
+last_updated: 2026-07-23
 review_schedule: when a new process-global env var is read by a production handler, or when serial_test is upgraded
 owner: cognitive-memory
 doc_type: reference
@@ -702,7 +704,7 @@ the audit gap:
 
 | File | Previous key | Now |
 |------|--------------|-----|
-| `meeting_backend/tests_persist_extra.rs` | `meeting_persist` | `meeting_persist, cognitive_memory` |
+| `meeting_backend/tests_persist_extra.rs` | `meeting_persist` | `simard_meetings_dir_env, cognitive_memory` (unified — see [Unifying the meetings-dir group](#unifying-the-meetings-dir-group-issue-4520)) |
 | `meeting_backend/persist/mod.rs`, `persist/markdown.rs` | `simard_meetings_dir_env` | `simard_meetings_dir_env, cognitive_memory` |
 | `meeting_facilitator/handoff/persistence.rs` | `simard_meetings_root_env` | `simard_meetings_root_env, cognitive_memory` |
 | `engineer_loop/tests_meeting_decisions.rs` | bare `#[serial]` | `#[serial(cognitive_memory)]` |
@@ -772,6 +774,130 @@ tracked as a follow-up. They are **theoretical** contributors (the race is
 var-agnostic) but were not demonstrated to flake; they are migrated to
 multi-key annotations on a rolling basis, and the `serial_guard` meta-test
 makes any new offender fail immediately rather than waiting for a flake.
+
+---
+
+## Unifying the meetings-dir group (issue #4520)
+
+> **Status:** specification of the target state. This section is written in
+> finished-state tense (retcon convention) and defines exactly how the
+> meetings-dir serial group is to be unified — the single source of truth the
+> implementation must satisfy. The isolation edits described below (rename the
+> eight `tests_persist_extra.rs` attributes; guard the two `tests_persist.rs`
+> handoff-report tests) land in this same change; until they are merged the
+> "now"/"unchanged" tenses describe the intended, not yet deployed, state.
+
+### Symptom — a frozen self-deploy
+
+The deploy unit-test canary refused every Simard self-deploy with **exit 101**.
+Reproduced on `origin/main`:
+`meeting_backend::tests_persist::handoff_report_omits_agenda_section_when_no_template_applied`
+(`src/meeting_backend/tests_persist.rs:245`) panicked at `.expect("write
+report")` under full-parallel `cargo test --lib` (9277 passed, **1 failed**),
+yet **passed in isolation** — the classic signature of a non-hermetic,
+load-dependent, process-global-env flake.
+
+### Root cause — two serial groups guarding one global resource
+
+`meetings_dir()` (`src/meeting_backend/persist/mod.rs:62`) resolves its target
+directory from the **process-global** env vars `SIMARD_MEETINGS_DIR`, then
+`SIMARD_MEETINGS_ROOT`, then `SIMARD_STATE_ROOT`. `serial_test` only serializes
+tests that **share a group name**. Before the fix, tests touching this single
+global resource were split across **two mutually non-exclusive** serial groups:
+
+- `#[serial(simard_meetings_dir_env, cognitive_memory)]` in
+  `persist/markdown.rs` and `persist/mod.rs`, and
+- `#[serial(meeting_persist, cognitive_memory)]` in `tests_persist_extra.rs`.
+
+Because `meeting_persist` and `simard_meetings_dir_env` are different names,
+serial_test let those two groups **race each other**. Worse, the two
+handoff-report tests at `tests_persist.rs:245` and `:271` — which call
+`write_handoff_markdown_report` into the **default** `meetings_dir` — carried
+**no serial guard at all**. Under load a concurrent test would `set_var`
+`SIMARD_MEETINGS_DIR` to a `tempfile::tempdir()` that was then dropped and
+removed; the unguarded test wrote into that deleted directory, got an `Err`,
+and panicked — exit 101, red canary, every self-deploy refused.
+
+### The fix — one group name for one global resource
+
+Isolation-only. No production code, no assertion, and no timeout/sleep/retry was
+changed. The finished state:
+
+1. **One serial group name.** Every test that reads or writes the meetings dir,
+   or mutates `SIMARD_MEETINGS_DIR` / `SIMARD_MEETINGS_ROOT` / `SIMARD_STATE_ROOT`,
+   now shares the single key **`simard_meetings_dir_env`** (with
+   `cognitive_memory` appended, per the multi-key rule above). The eight
+   `#[serial(meeting_persist, cognitive_memory)]` attributes in
+   `tests_persist_extra.rs` were renamed to
+   `#[serial(simard_meetings_dir_env, cognitive_memory)]`. The `meeting_persist`
+   name is retired.
+2. **The two unguarded tests are guarded.**
+   `handoff_report_omits_agenda_section_when_no_template_applied` and
+   `handoff_report_includes_agenda_section_when_template_applied` in
+   `tests_persist.rs` now carry
+   `#[serial(simard_meetings_dir_env, cognitive_memory)]` (with a
+   `use serial_test::serial;` import added to the module).
+3. **The already-correct files are unchanged.** `persist/mod.rs` (9 guards) and
+   `persist/markdown.rs` (5 guards) already used
+   `simard_meetings_dir_env, cognitive_memory`; they were verified, not edited.
+
+The invariant is now: **two group names may never guard the same process-global
+resource.** One resource → one name.
+
+| File | Previous key | Now |
+|------|--------------|-----|
+| `meeting_backend/tests_persist_extra.rs` (8 tests) | `meeting_persist, cognitive_memory` | `simard_meetings_dir_env, cognitive_memory` |
+| `meeting_backend/tests_persist.rs` (2 handoff-report tests, L245 & L271) | *(unguarded)* | `simard_meetings_dir_env, cognitive_memory` |
+| `meeting_backend/persist/mod.rs` (9), `persist/markdown.rs` (5) | `simard_meetings_dir_env, cognitive_memory` | *(unchanged — already correct)* |
+
+**Audit closed.** The only tests in `tests_persist.rs` that touch
+`meetings_dir` / `write_handoff_markdown_report` are the two at L245 and L271;
+every other test in that module is a pure function (sanitize/extract) that never
+reads the resolver. The `cognitive_memory`-only tests in `agent_proxy.rs` and
+`tests_goal_records_migration.rs` never touch the meetings dir and are correctly
+left unchanged.
+
+### Assertions preserved
+
+Isolation was fixed; behaviour was not. Both handoff-report tests keep their
+original assertions verbatim:
+
+```rust
+// handoff_report_omits_agenda_section_when_no_template_applied
+assert!(!body.contains("## Agenda"));
+
+// handoff_report_includes_agenda_section_when_template_applied
+assert!(body.contains("## Agenda"));
+```
+
+### Validation — de-flaking a load-dependent bug
+
+A single green run does **not** clear a load-flaky test. The acceptance gate is:
+
+```bash
+# Full-parallel, five consecutive runs — every run must be green.
+# Fail fast: abort the moment any run is red rather than swallowing the status.
+for i in 1 2 3 4 5; do
+  echo "=== run $i ==="
+  cargo test --lib || { echo "FAILED on run $i"; exit 1; }
+done
+
+# Formatting and lint gates (fmt invoked directly, never piped).
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+```
+
+Acceptance gate:
+
+- `cargo test --lib` full-parallel passes **five consecutive times** with zero
+  failures.
+- `cargo fmt --check` is clean (direct invocation, no pipe).
+- `cargo clippy --all-targets -- -D warnings` is clean.
+- The two handoff-report assertions above are intact — no assertion weakened,
+  moved, or deleted; no wall-clock timeout, sleep, or retry introduced.
+
+Shipping this unfreezes Simard self-deploy so the already-merged label fix
+(#4525) can go live.
 
 ---
 
