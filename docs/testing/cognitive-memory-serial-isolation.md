@@ -18,6 +18,7 @@ related:
   - ./hermetic-tests.md
   - ./ci-resilient-test-patterns.md
   - ./deflaking-known-flaky-tests.md
+  - ./install-serial-isolation.md
   - ./COVERAGE_BASELINE.md
   - ../reference/goal-board-api.md
   - ../reference/cognitive-memory-client-helpers.md
