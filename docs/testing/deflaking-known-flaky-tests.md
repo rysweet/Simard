@@ -15,6 +15,7 @@ doc_type: reference
 related:
   - ./hermetic-tests.md
   - ./cognitive-memory-serial-isolation.md
+  - ./install-serial-isolation.md
   - ./ci-resilient-test-patterns.md
   - ./COVERAGE_BASELINE.md
   - ../reference/goal-board-api.md

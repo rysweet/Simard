@@ -293,6 +293,7 @@ mod unix {
         }
 
         #[test]
+        #[serial_test::serial(install)]
         fn reconcile_creates_owned_symlink_on_fresh_home() {
             let temp = tempfile::TempDir::new().unwrap();
             let layout = layout_for(temp.path());
@@ -311,6 +312,7 @@ mod unix {
         }
 
         #[test]
+        #[serial_test::serial(install)]
         fn reconcile_removes_ours_symlink_orphan() {
             let temp = tempfile::TempDir::new().unwrap();
             let layout = layout_for(temp.path());
@@ -328,6 +330,7 @@ mod unix {
         }
 
         #[test]
+        #[serial_test::serial(install)]
         fn reconcile_removes_ours_marker_orphan() {
             let temp = tempfile::TempDir::new().unwrap();
             let layout = layout_for(temp.path());
@@ -344,6 +347,7 @@ mod unix {
         }
 
         #[test]
+        #[serial_test::serial(install)]
         fn reconcile_preserves_foreign_orphan() {
             let temp = tempfile::TempDir::new().unwrap();
             let layout = layout_for(temp.path());
@@ -362,6 +366,7 @@ mod unix {
         }
 
         #[test]
+        #[serial_test::serial(install)]
         fn reconcile_replaces_ours_marker_at_entrypoint() {
             let temp = tempfile::TempDir::new().unwrap();
             let layout = layout_for(temp.path());
@@ -382,6 +387,7 @@ mod unix {
         }
 
         #[test]
+        #[serial_test::serial(install)]
         fn reconcile_surfaces_foreign_shadow_at_entrypoint_untouched() {
             let temp = tempfile::TempDir::new().unwrap();
             let layout = layout_for(temp.path());
@@ -402,6 +408,7 @@ mod unix {
         }
 
         #[test]
+        #[serial_test::serial(install)]
         fn reconcile_is_idempotent() {
             let temp = tempfile::TempDir::new().unwrap();
             let layout = layout_for(temp.path());
@@ -424,6 +431,7 @@ mod unix {
         }
 
         #[test]
+        #[serial_test::serial(install)]
         fn classify_broken_symlink_is_foreign() {
             let temp = tempfile::TempDir::new().unwrap();
             let bin_dir = temp.path().join(".simard/bin");
