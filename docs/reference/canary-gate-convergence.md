@@ -7,6 +7,7 @@ owner: simard
 doc_type: reference
 status: implemented
 related:
+  - ./canary-unit-test-gate-hermetic-isolation.md
   - ./overseer-deploy-canary-diagnostics.md
   - ./self-deploy-api.md
   - ./self-deploy-source-prep.md
@@ -202,6 +203,17 @@ below); confirm it against a real gate run before narrowing it.
 - **Fail closed on absence.** A missing allow-listed name is skipped, so the gate
   proceeds with the missing signal and reddens if that signal is required.
 
+> **Follow-on: the `unit-test` gate needs its own hermetic state root (#4522).**
+> Allow-listing `SIMARD_STATE_ROOT` (above) is correct for the process-probe
+> gates, which must dial the **running daemon's** state. But the `unit-test` gate
+> shells out to `cargo test`, and the test suite reads `SIMARD_STATE_ROOT` — so
+> inheriting the live root made that gate collide with the running daemon and
+> crash-loop with `cargo test` exit `101`. The repair injects a **private,
+> per-run state root** into the `unit-test` gate's scrubbed env (overriding the
+> allow-listed value for that one gate). The allow-list and deny-by-default floor
+> are unchanged; see
+> [Canary unit-test gate hermetic isolation](./canary-unit-test-gate-hermetic-isolation.md).
+
 ## Behavior
 
 ### Per-gate tracing spans
@@ -366,6 +378,9 @@ green."
 
 ## See also
 
+- [Canary unit-test gate hermetic isolation](./canary-unit-test-gate-hermetic-isolation.md) —
+  the #4522 follow-on that gives the `unit-test` gate a private state root so it
+  stops crash-looping (`cargo test` exit `101`) against the live daemon.
 - [Overseer deploy red-canary diagnostics](./overseer-deploy-canary-diagnostics.md) —
   the #4420 observability this repair acts on (`failing_gate` / `failing_detail`,
   `refusal_reason`, the `overseer::deploy` WARN, the `is_transient` guard).

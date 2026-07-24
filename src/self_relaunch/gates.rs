@@ -211,14 +211,90 @@ fn run_smoke_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
     }
 }
 
-fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
+/// A private, empty state root leased to the `unit-test` gate for the lifetime
+/// of one `cargo test` run, then removed. RAII wrapper over a
+/// [`tempfile::TempDir`] created owner-only (mode `0700`).
+///
+/// Root cause it repairs (#4522): the #4440 [`canary_gate_env_allowlist`]
+/// forwards the daemon's live `SIMARD_STATE_ROOT` into gate subprocesses, which
+/// is correct for the process-probe gates. But the `unit-test` gate shells out
+/// to `cargo test`, whose suite reads `SIMARD_STATE_ROOT` (via
+/// `resolve_state_root()`) and then races the **live** daemon's cognitive-memory
+/// state root — aborting the test process with `cargo test` exit status 101 on
+/// every Overseer tick, deterministically reddening the canary and stalling
+/// self-deploy (DeployDrift climbs, the daemon goes stale).
+///
+/// The fix is additive and scoped to only the `unit-test` gate: hand `cargo
+/// test` its own empty state root so it can never collide with the live one.
+/// `0700` (owner-only) is a TOCTOU/symlink defense — no other user can pre-seed
+/// or observe the per-run directory. The directory is removed when this guard
+/// drops, so no per-run temp state leaks even across many Overseer ticks.
+struct IsolatedStateRoot {
+    dir: tempfile::TempDir,
+}
+
+impl IsolatedStateRoot {
+    /// Create a fresh, empty, owner-only (`0700`) state root. The directory is
+    /// removed when the returned guard drops.
+    fn create() -> std::io::Result<Self> {
+        let dir = tempfile::Builder::new()
+            .prefix("simard-canary-unit-test-state-")
+            .tempdir()?;
+        // Defense-in-depth: pin owner-only perms even though tempfile creates
+        // `0700` by default, so the TOCTOU/symlink guarantee does not silently
+        // depend on the dependency's default.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(Self { dir })
+    }
+
+    /// Path of the isolated state root (valid until this guard drops).
+    fn path(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
+/// Build the (already env-scrubbed) `cargo test` command for the `unit-test`
+/// gate, pinned to `state_root` as its `SIMARD_STATE_ROOT`.
+///
+/// The `SIMARD_STATE_ROOT` override is applied **after** [`scrub_gate_env`] has
+/// re-injected any allow-listed live value, so the isolated root deterministically
+/// wins (last `.env(...)` for a key is what the child sees). This is the seam the
+/// #4522 convergence tests assert against via [`Command::get_envs`], without
+/// spawning a real `cargo test` (which would trigger a full workspace rebuild).
+fn build_unit_test_command(config: &RelaunchConfig, state_root: &Path) -> Command {
     let mut cmd = scrubbed_command("cargo", config);
     cmd.arg("test")
         .arg("--manifest-path")
         .arg(config.manifest_dir.join("Cargo.toml"))
         .arg("--target-dir")
         .arg(&config.canary_target_dir)
-        .env("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs());
+        .env("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs())
+        // Deny-over-allow discipline is preserved by scrub_gate_env above; this
+        // override only pins the state root the suite must not share with the
+        // live daemon. It is applied last so it wins over any re-injected
+        // allow-listed live value (#4522 exit-101 collision).
+        .env("SIMARD_STATE_ROOT", state_root);
+    cmd
+}
+
+fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
+    // Lease a private, empty state root for this run so `cargo test` cannot race
+    // the live daemon's cognitive-memory root (#4522 exit-101). Removed on drop.
+    let isolated = match IsolatedStateRoot::create() {
+        Ok(isolated) => isolated,
+        Err(e) => {
+            return GateResult {
+                gate: RelaunchGate::UnitTest,
+                passed: false,
+                detail: format!("could not create isolated gate state root: {e}"),
+            };
+        }
+    };
+    let mut cmd = build_unit_test_command(config, isolated.path());
     match cmd.output() {
         Ok(output) if output.status.success() => GateResult {
             gate: RelaunchGate::UnitTest,
@@ -700,6 +776,220 @@ mod convergence_tests {
             results[0].passed,
             "a hijack-class name must be refused re-injection (stripped); got: {}",
             results[0].detail
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // TDD (Problem 1 / #4522 — hermetic unit-test gate): FAILING tests, first.
+    //
+    // Root cause (see docs/reference/canary-unit-test-gate-hermetic-isolation.md):
+    // #4440's `canary_gate_env_allowlist()` forwards `SIMARD_STATE_ROOT` into gate
+    // subprocesses. That is correct for the process-probe gates, but the
+    // `unit-test` gate shells out to `cargo test`, whose suite reads
+    // `SIMARD_STATE_ROOT` (via `resolve_state_root()`) and then races the LIVE
+    // daemon's state root — aborting the test process with `cargo test` exit
+    // status 101 on every Overseer tick, deterministically reddening the canary
+    // and stalling self-deploy (DeployDrift climbs, daemon goes stale).
+    //
+    // The additive, non-breaking fix gives ONLY the `unit-test` gate a private,
+    // empty state root — a `tempfile::TempDir`-backed `IsolatedStateRoot` (mode
+    // 0700, removed on drop) — injected as `SIMARD_STATE_ROOT` on the gate command
+    // *after* `scrub_gate_env` re-injects the allow-listed live value, so the
+    // isolated root wins. The command is built through a rebuild-free seam,
+    // `build_unit_test_command(config, state_root) -> Command`, so the contract is
+    // asserted via `Command::get_envs()` WITHOUT spawning a real `cargo test`
+    // (which would trigger a full workspace rebuild / OOM).
+    //
+    // These tests MUST fail against the current code (the `IsolatedStateRoot` and
+    // `build_unit_test_command` seams do not exist yet) and pass once the fix
+    // lands. Constraints honoured: additive; deny-by-default / deny-over-allow env
+    // discipline preserved; intent-revealing names; `tracing`/OTel only — no
+    // `print!`/`println!`.
+
+    /// Latest value bound for `key` on the (already-scrubbed) command, if any.
+    /// Mirrors the `Command::get_envs()` idiom used elsewhere in the crate; a
+    /// name that was never set (or was refused) yields `None`. `get_envs()`
+    /// reports each key once (the final `.env(...)` for a key wins), so a plain
+    /// `find` observes the post-override value.
+    fn built_env_value(cmd: &Command, key: &str) -> Option<std::ffi::OsString> {
+        cmd.get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(key))
+            .and_then(|(_, v)| v.map(std::ffi::OsStr::to_owned))
+    }
+
+    /// True when `key` is explicitly cleared/absent (either never set, or present
+    /// as an explicit removal) on the built command.
+    fn built_env_is_absent(cmd: &Command, key: &str) -> bool {
+        match cmd
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(key))
+        {
+            None => true,
+            Some((_, v)) => v.is_none(),
+        }
+    }
+
+    // Load-bearing convergence proof (rebuild-free): with an ambient / allow-listed
+    // `SIMARD_STATE_ROOT` pointing at a "busy" live root, the command built for the
+    // unit-test gate must map `SIMARD_STATE_ROOT` to the ISOLATED root, not the
+    // ambient one. Fails before the fix (no override / seam absent); passes after.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn unit_test_gate_overrides_allowlisted_live_state_root_with_isolated_root() {
+        let busy = unique_tmp("busy-live-root");
+        let config = RelaunchConfig {
+            // The #4440 allow-list forwards the live root into gate subprocesses.
+            canary_env: vec!["SIMARD_STATE_ROOT".to_string()],
+            ..RelaunchConfig::default()
+        };
+
+        // SAFETY: serialized by the cognitive_memory serial key (whole-binary);
+        // no concurrent test reads `SIMARD_STATE_ROOT` while this runs.
+        unsafe { std::env::set_var("SIMARD_STATE_ROOT", &busy) };
+
+        let isolated = IsolatedStateRoot::create().expect("create isolated gate state root");
+        let cmd = build_unit_test_command(&config, isolated.path());
+        let bound = built_env_value(&cmd, "SIMARD_STATE_ROOT");
+
+        unsafe { std::env::remove_var("SIMARD_STATE_ROOT") };
+
+        assert_eq!(
+            bound.as_deref(),
+            Some(isolated.path().as_os_str()),
+            "unit-test gate must run cargo test under the ISOLATED state root, not the live one"
+        );
+        assert_ne!(
+            bound.as_deref(),
+            Some(busy.as_os_str()),
+            "the live/busy `SIMARD_STATE_ROOT` must NOT leak into the unit-test gate (exit-101 collision)"
+        );
+    }
+
+    // Ordering guarantee: the isolated override wins BECAUSE it is applied after
+    // `scrub_gate_env` re-injects the allow-listed live value. Constructing under
+    // a set ambient value and resolving `get_envs()` to the isolated path proves
+    // the layering, not merely that the value happens to be set.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn isolated_state_root_wins_over_reinjected_allowlist_by_ordering() {
+        let ambient = unique_tmp("ambient-live-root");
+        let config = RelaunchConfig {
+            canary_env: vec!["SIMARD_STATE_ROOT".to_string()],
+            ..RelaunchConfig::default()
+        };
+
+        // SAFETY: serialized by the cognitive_memory serial key (whole-binary).
+        unsafe { std::env::set_var("SIMARD_STATE_ROOT", &ambient) };
+
+        let isolated = IsolatedStateRoot::create().expect("create isolated gate state root");
+        let cmd = build_unit_test_command(&config, isolated.path());
+        let bound = built_env_value(&cmd, "SIMARD_STATE_ROOT");
+
+        unsafe { std::env::remove_var("SIMARD_STATE_ROOT") };
+
+        assert_eq!(
+            bound.as_deref(),
+            Some(isolated.path().as_os_str()),
+            "isolated override must be applied after scrub re-injection so it wins"
+        );
+    }
+
+    // SEC (deny-over-allow preserved): adding the state-root override must NOT
+    // weaken `is_hijack_class_env`. With `LD_PRELOAD` present in both the ambient
+    // env and `config.canary_env`, the built unit-test command must NOT carry it,
+    // even though the gate now also sets an extra `SIMARD_STATE_ROOT` override.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn isolation_does_not_reinject_a_hijack_var_into_unit_test_gate() {
+        let config = RelaunchConfig {
+            canary_env: vec!["LD_PRELOAD".to_string(), "SIMARD_STATE_ROOT".to_string()],
+            ..RelaunchConfig::default()
+        };
+
+        // SAFETY: serialized by the cognitive_memory serial key (whole-binary).
+        unsafe { std::env::set_var("LD_PRELOAD", "/tmp/evil.so") };
+
+        let isolated = IsolatedStateRoot::create().expect("create isolated gate state root");
+        let cmd = build_unit_test_command(&config, isolated.path());
+
+        let hijack_absent = built_env_is_absent(&cmd, "LD_PRELOAD");
+        let has_isolated_root = built_env_value(&cmd, "SIMARD_STATE_ROOT").as_deref()
+            == Some(isolated.path().as_os_str());
+
+        unsafe { std::env::remove_var("LD_PRELOAD") };
+
+        assert!(
+            hijack_absent,
+            "a hijack-class var (LD_PRELOAD) must never reach the unit-test gate, even with the new override"
+        );
+        assert!(
+            has_isolated_root,
+            "the isolated state-root override must still be present alongside the preserved hijack guard"
+        );
+    }
+
+    // Fail-closed invariant preserved: the fix must NOT narrow, filter, or skip
+    // the gate. The built command still invokes the FULL suite via
+    // `cargo test --manifest-path <dir>/Cargo.toml --target-dir <canary_target_dir>`
+    // with the bounded job count — asserted structurally, no spawn.
+    #[test]
+    fn unit_test_gate_still_runs_the_full_cargo_test_suite() {
+        let config = RelaunchConfig::default();
+        let isolated = IsolatedStateRoot::create().expect("create isolated gate state root");
+        let cmd = build_unit_test_command(&config, isolated.path());
+
+        assert_eq!(
+            cmd.get_program(),
+            std::ffi::OsStr::new("cargo"),
+            "unit-test gate must still shell out to cargo"
+        );
+
+        let args: Vec<std::ffi::OsString> = cmd.get_args().map(std::ffi::OsStr::to_owned).collect();
+        assert!(
+            args.iter().any(|a| a == std::ffi::OsStr::new("test")),
+            "must still run `cargo test` (the whole suite), not a narrowed/skipped invocation"
+        );
+        assert!(
+            args.iter()
+                .any(|a| a == std::ffi::OsStr::new("--manifest-path")),
+            "must still target the workspace manifest"
+        );
+        assert!(
+            args.iter()
+                .any(|a| a == std::ffi::OsStr::new("--target-dir")),
+            "must still use the isolated canary target-dir"
+        );
+        // The job cap must survive the refactor (it prevents build OOM).
+        assert!(
+            built_env_value(&cmd, "CARGO_BUILD_JOBS").is_some(),
+            "must still bound cargo build jobs on the gate command"
+        );
+    }
+
+    // Security / lifecycle: the isolated root is created owner-only (mode 0700,
+    // TOCTOU/symlink defense) and removed when the RAII guard drops (no leaked
+    // per-run temp state).
+    #[test]
+    fn isolated_state_root_is_private_0700_and_removed_on_drop() {
+        let path = {
+            let isolated = IsolatedStateRoot::create().expect("create isolated gate state root");
+            let path = isolated.path().to_path_buf();
+
+            assert!(
+                path.is_dir(),
+                "isolated state root must exist while the guard lives"
+            );
+            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o700,
+                "isolated state root must be owner-only (0700) to prevent TOCTOU/symlink attacks, got {mode:o}"
+            );
+            path
+        }; // guard dropped here
+
+        assert!(
+            !path.exists(),
+            "isolated state root must be removed when the RAII guard drops (no leaked temp state)"
         );
     }
 }

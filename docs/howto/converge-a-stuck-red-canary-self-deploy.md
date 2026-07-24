@@ -8,6 +8,7 @@ doc_type: howto
 status: active
 related:
   - ../reference/canary-gate-convergence.md
+  - ../reference/canary-unit-test-gate-hermetic-isolation.md
   - ../reference/overseer-deploy-canary-diagnostics.md
   - ../reference/self-deploy-api.md
   - ../reference/overseer-tick-self-healing.md
@@ -67,7 +68,8 @@ Note the `failing_gate` value: `smoke`, `unit-test`, `gym-baseline`, or
 
 | Symptom | Likely cause | Action |
 | --- | --- | --- |
-| `unit-test` fails reproducibly on merged `main` | **Genuine regression** | Fix the failing source/test at its origin so the canary goes green legitimately. Do **not** disable the gate. |
+| `unit-test` fails reproducibly on merged `main` (assertion failures, exit `1`) | **Genuine regression** | Fix the failing source/test at its origin so the canary goes green legitimately. Do **not** disable the gate. |
+| `unit-test` fails with `cargo test` exit **`101`** (test process aborts) every tick, but the same tests pass in a normal `cargo test` run | **Non-hermetic gate** — the gate's `cargo test` collides with the **live daemon** through the allow-listed `SIMARD_STATE_ROOT` | Already repaired by [unit-test gate hermetic isolation](../reference/canary-unit-test-gate-hermetic-isolation.md) (#4522): the gate runs against a private per-run state root. See step 4b. |
 | `rpc-health` / `gym-baseline` fails with `connection refused`, a missing socket/endpoint, or an absent env var — but the same probe passes against the running binary | **Missing signal** in the ephemeral canary context | Supply the required signal through the `canary_env` allow-list (step 4). |
 | Non-deterministic pass/fail | **Flaky gate** | Correct the gate's logic/threshold so it stops false-reddening **while still failing closed** on real regressions. |
 
@@ -94,6 +96,41 @@ Rules — these keep the gate a real authorization control, not a rubber stamp:
   force green. Supplying the missing signal is the only sanctioned fix here.
 - **Absent name → still red.** If an allow-listed name is missing from the
   environment, the gate proceeds without it and reddens — that is intended.
+
+## 4b. `unit-test` gate crash-looping with exit `101` (hermetic-isolation case)
+
+If `failing_gate=unit-test` and `failing_detail` reports `cargo test` exit
+**`101`** (the test binary *aborted*, not an ordinary assertion `1`) on every
+tick, the cause is almost always a **non-hermetic gate**, not a source
+regression. The `unit-test` gate shells out to `cargo test`, and the Simard test
+suite reads `SIMARD_STATE_ROOT`. Because that name is allow-listed for the
+process-probe gates (step 4), the tests would otherwise inherit the **running
+daemon's live state root** and race it — reading a half-written record or
+colliding on a lock — aborting with exit `101`.
+
+This is already repaired by
+[unit-test gate hermetic isolation](../reference/canary-unit-test-gate-hermetic-isolation.md)
+(#4522): `run_unit_test_gate` injects a **private, per-run state root** (mode
+`0700`, auto-cleaned) into the gate's scrubbed env, overriding the live value for
+that one gate. Confirm the fix is in the running binary and that the gate now
+goes green:
+
+```bash
+# Reproduce the gate's env locally: scrubbed env + an isolated state root.
+# The load-bearing override is SIMARD_STATE_ROOT — the same single override the
+# fix applies. A healthy candidate must pass; if it does, the live-daemon
+# collision was the cause. (TMPDIR is only added if a run shows the suite needs
+# a private scratch dir; it is not part of the base fix — see the reference doc.)
+env -i PATH="$PATH" HOME="$HOME" \
+    CARGO_HOME="$CARGO_HOME" RUSTUP_HOME="$RUSTUP_HOME" \
+    SIMARD_STATE_ROOT="$(mktemp -d)" \
+    cargo test --locked -p simard self_relaunch::gates
+```
+
+If exit `101` **persists** even against a private state root, it is a genuine
+abort in the candidate's tests — treat it as the "genuine regression" row of the
+step-3 table and fix the failing test at its origin. Never allow-list a way to
+skip the gate.
 
 ## 5. Confirm convergence
 
@@ -147,6 +184,9 @@ simard status | grep -Ei 'deploy_drift|running_commit'
 
 ## Related reading
 
+- [Canary unit-test gate hermetic isolation](../reference/canary-unit-test-gate-hermetic-isolation.md) —
+  the #4522 fix for the `unit-test` exit-`101` crash-loop: a private per-run
+  state root so the gate stops colliding with the live daemon.
 - [Canary gate isolation and self-deploy convergence](../reference/canary-gate-convergence.md) —
   the full design: per-gate spans, `canary_env`, `scrub_gate_env`, and the
   preserved fail-closed invariants.
