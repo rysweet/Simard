@@ -1711,14 +1711,19 @@ fn has_checkable_item(text: &str) -> bool {
 /// evidence carries only the goal id and a constant heading token — never raw
 /// goal text — so nothing is smuggled into the WHY / log line.
 fn derive_criteria(goal: &ActiveGoal) -> Option<Vec<Evidence>> {
+    // One length-capped, lower-cased pass over the untrusted description. The
+    // heading match and the checkable-item scan both read this same buffer:
+    // bullets, checkboxes and ordered markers are case-invariant (and
+    // `has_checkable_item` already accepts either checkbox case), so a second
+    // original-case allocation is unnecessary.
     let scan: String = goal
         .description
         .chars()
         .take(DERIVE_CRITERIA_MAX_SCAN)
+        .map(|c| c.to_ascii_lowercase())
         .collect();
-    let lower = scan.to_ascii_lowercase();
 
-    let heading = CRITERIA_HEADINGS.iter().find(|h| lower.contains(**h))?;
+    let heading = CRITERIA_HEADINGS.iter().find(|h| scan.contains(**h))?;
 
     // A bare heading with no concrete items is not derivable — stay conservative.
     if !has_checkable_item(&scan) {
