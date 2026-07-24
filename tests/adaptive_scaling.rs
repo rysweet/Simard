@@ -301,9 +301,13 @@ fn pressure_signals_return_none_on_non_linux() {
 fn scaler_current_max_can_override_config() {
     use simard::ooda_loop::{OodaConfig, Priority, decide};
 
-    let scaler = AdaptiveScaler::new(2, 1, 8);
+    // Pin the scaler explicitly (ceiling == floor == current == 2) so its
+    // adjust() is deterministically 2, independent of SIMARD_SCALING. This is
+    // the hermeticity contract: the verdict is a function of the test's own
+    // inputs, never the ambient environment (deploy-canary exit-101 fix).
+    let scaler = std::sync::Arc::new(AdaptiveScaler::new(2, 2, 2));
 
-    // Create priorities that would normally produce more than 2 actions.
+    // 5 over-quota priorities: would produce 5 actions without a cap.
     let priorities: Vec<Priority> = (1..=5)
         .map(|i| Priority {
             goal_id: format!("g{i}"),
@@ -312,16 +316,27 @@ fn scaler_current_max_can_override_config() {
         })
         .collect();
 
-    // Use scaler's current_max as the config limit.
+    // Fully specified — NO `..OodaConfig::default()`. All nine OodaConfig
+    // fields are enumerated so no env-derived value (scaler, budgets, distill
+    // schedule, lesson threshold) can leak in. The config's
+    // max_concurrent_actions is 8; the pinned scaler ceiling of 2 must win,
+    // proving the scaler overrides max_concurrent_actions regardless of env.
     let config = OodaConfig {
-        max_concurrent_actions: scaler.current_max(),
-        ..OodaConfig::default()
+        max_concurrent_actions: 8,
+        improvement_threshold: 0.02,
+        gym_suite_id: "progressive".to_string(),
+        daily_budget_usd: 500.0,
+        weekly_budget_usd: 2500.0,
+        distill_min_episodes: 25,
+        distill_interval_cycles: 50,
+        lesson_recurrence_threshold: 2,
+        scaler: Some(scaler),
     };
 
     let actions = decide(&priorities, &config).unwrap();
     assert!(
         actions.len() <= 2,
-        "decide should respect scaler's current_max of 2; got {} actions",
+        "pinned scaler ceiling of 2 must override config max_concurrent_actions=8; got {} actions",
         actions.len()
     );
 }
