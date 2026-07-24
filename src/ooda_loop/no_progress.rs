@@ -282,38 +282,30 @@ fn escalate_with_tracking_issue(
     // Idempotence: a goal already carrying any breaker artifact (a bare
     // suppression marker OR a linked tracking ref) is never re-filed — a re-stall
     // must not spam duplicate `ooda-stuck` issues, even across a daemon restart.
-    let already_tracked = state
-        .active_goals
-        .active
-        .iter()
-        .find(|g| g.id == goal_id)
-        .is_some_and(|g| g.wip_refs.iter().any(is_breaker_tracking_ref));
-
-    // 1. Durable, link-independent suppression FIRST. Block the goal and, unless
-    //    it is already suppressed, persist the bare marker — this survives a `gh`
-    //    failure and a restart because it lives on the goal board, not the tracker.
-    if let Some(g) = state
+    let Some(g) = state
         .active_goals
         .active
         .iter_mut()
         .find(|g| g.id == goal_id)
-    {
-        g.status = GoalProgress::Blocked(blocked_reason);
-        if !already_tracked {
-            g.wip_refs.push(suppression_marker());
-        }
-    }
+    else {
+        return;
+    };
+    let already_tracked = g.wip_refs.iter().any(is_breaker_tracking_ref);
 
-    // 2. Best-effort link SECOND. Only attempt a filing when we just wrote a fresh
-    //    marker; on success upgrade the bare marker in place to the linked ref.
-    if !already_tracked
-        && let Some(filed) = filer.file_issue(issue_title, issue_body)
-        && let Some(g) = state
-            .active_goals
-            .active
-            .iter_mut()
-            .find(|g| g.id == goal_id)
-    {
+    // 1. Durable, link-independent suppression FIRST. Always block the goal; an
+    //    already-suppressed goal stops here so it is never re-filed (idempotence
+    //    across a `gh` failure and a daemon restart, since the marker lives on the
+    //    goal board, not the in-memory tracker).
+    g.status = GoalProgress::Blocked(blocked_reason);
+    if already_tracked {
+        return;
+    }
+    g.wip_refs.push(suppression_marker());
+
+    // 2. Best-effort link SECOND, holding the same borrow (`file_issue` does not
+    //    touch `state`). On success upgrade the bare marker in place to the linked
+    //    ref; on `None` the goal stays Blocked + suppressed and is not re-filed.
+    if let Some(filed) = filer.file_issue(issue_title, issue_body) {
         upgrade_suppression_marker_to_link(g, &filed);
     }
 }
