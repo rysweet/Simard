@@ -190,9 +190,10 @@ pub fn acquire_install_lock(layout: &InstallLayout) -> InstallResult<InstallLock
                 os_error.raw_os_error(),
                 Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN
             );
-            if would_block && start.elapsed() < INSTALL_LOCK_ACQUIRE_DEADLINE {
+            let elapsed = start.elapsed();
+            if would_block && elapsed < INSTALL_LOCK_ACQUIRE_DEADLINE {
                 tracing::debug!(
-                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    elapsed_ms = elapsed.as_millis() as u64,
                     lock = %lock_path.display(),
                     "install lock flock hit EWOULDBLOCK; retrying (transient fork-inherited fd or genuine contention)"
                 );
