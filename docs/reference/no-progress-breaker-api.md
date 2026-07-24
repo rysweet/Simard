@@ -396,6 +396,7 @@ status is persisted by the next `commit_cycle`.
 
 ## See also
 
+- [Issue-storm suppression API reference](../reference/no-progress-breaker-storm-suppression-api.md) — the durable suppression marker and storm-safe escalation that cap breaker-authored `ooda-stuck` filings at one per goal, plus the `derive_criteria` terminal-rung helper.
 - [Concept: the breaker explains WHY and self-resolves before escalating](../concepts/no-progress-root-cause-resolution.md) — the root-cause classification and resolution ladder layered on this base breaker.
 - [Root-cause resolution API reference](../reference/no-progress-root-cause-resolution-api.md) — `NoProgressClass`, the WHY types, the reasoner, and the extended resolution ladder.
 - [The `ooda-no-progress-why` recipe reference](../reference/ooda-no-progress-why-recipe.md) — the optional agentic WHY narrator.
