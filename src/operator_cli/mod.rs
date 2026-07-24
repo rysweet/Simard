@@ -472,7 +472,13 @@ fn dispatch_handover_command(
     let gates = default_gates();
     let results = verify_canary(&canary, &gates, &config)?;
     for r in &results {
-        eprintln!("  {r}");
+        // Redact URL-embedded credentials (SEC-D2) before printing the raw gate
+        // detail — a failing gate's captured output can carry a token-bearing
+        // remote URL, matching the `overseer::deploy` redact-at-emission pattern.
+        eprintln!(
+            "  {}",
+            crate::self_deploy::source_prep::redact_credentials(&r.to_string())
+        );
     }
 
     if !all_gates_passed(&results) {
