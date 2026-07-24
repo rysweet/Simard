@@ -34,6 +34,7 @@ pub use operations::{
     seed_board_from_seed_goals, seed_default_board, simard_state_root, update_goal_progress,
     update_goal_progress_with_evidence, verify_goal_carryover, write_goal_carryover,
 };
+pub(crate) use types::NO_PROGRESS_TRACKING_LABEL_PREFIX;
 pub use types::{
     ActiveGoal, BacklogItem, CARRYOVER_CONCEPT, GoalBoard, GoalCarryoverRecord, GoalEdge,
     GoalEdgeType, GoalNode, GoalProgress, MAX_ACTIVE_GOALS, STANDING_MARKER_PREFIX, WipRef,

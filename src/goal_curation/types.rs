@@ -153,6 +153,15 @@ fn contains_phrase_on_word_boundary(haystack_lower: &str, phrase: &str) -> bool 
     false
 }
 
+/// Label prefix on the no-progress breaker's tracking-issue [`WipRef`] — the
+/// link an escalated goal carries to its `ooda-stuck` tracking issue (issue
+/// #4497/#4509). Centralised here beside [`WipRef`] (rather than living only in
+/// [`crate::ooda_loop::no_progress`]) so [`ActiveGoal::roll_to_new_cycle`] can
+/// PRESERVE this one ref across a re-orient/roll without depending on the
+/// breaker module — the durable, IO-free half of the breaker's duplicate-issue
+/// dedup. Both sides MUST agree on this exact prefix, so it has a single home.
+pub(crate) const NO_PROGRESS_TRACKING_LABEL_PREFIX: &str = "[no-progress-tracking] ";
+
 /// A reference to work-in-progress associated with a goal.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WipRef {
@@ -165,6 +174,23 @@ pub struct WipRef {
     /// URL if available
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+}
+
+impl WipRef {
+    /// True when this is the no-progress breaker's tracking-issue link (an
+    /// `issue` ref whose label carries [`NO_PROGRESS_TRACKING_LABEL_PREFIX`]).
+    ///
+    /// This is the one `wip_ref` [`ActiveGoal::roll_to_new_cycle`] deliberately
+    /// keeps: it is a durable RECORD, not live in-flight work
+    /// ([`ActiveGoal::has_live_in_flight_ref`] treats `issue` refs as not-live),
+    /// so preserving it neither suppresses the never-idle fault nor spawns an
+    /// overlapping engineer — but it lets the breaker's in-memory
+    /// `already_tracked` fast-path dedup survive a re-orient/roll IO-free,
+    /// instead of relying on the remote `gh` search-before-create.
+    pub(crate) fn is_no_progress_tracking(&self) -> bool {
+        self.kind.eq_ignore_ascii_case("issue")
+            && self.label.starts_with(NO_PROGRESS_TRACKING_LABEL_PREFIX)
+    }
 }
 
 /// An active goal on the board. Active goals are limited to `MAX_ACTIVE_GOALS`.
@@ -357,14 +383,15 @@ impl ActiveGoal {
     /// Roll a standing/perpetual goal into a fresh cycle after its current unit
     /// of work finishes, instead of terminating it (issue #2580). Resets the
     /// goal to an actionable, re-dispatchable state: status back to
-    /// `NotStarted`, assignment cleared, and stale work-in-progress refs
+    /// `NotStarted`, assignment cleared, and stale live work-in-progress refs
     /// dropped so the next OODA cycle re-enters the spawn path. The
     /// standing-goal description marker (and thus [`is_perpetual`]) is
-    /// preserved.
+    /// preserved, and so is the no-progress breaker's tracking-issue ref (see
+    /// below).
     ///
-    /// **`wip_refs.clear()` is load-bearing, not cosmetic** — and therefore this
-    /// must only be called once the goal's current unit of work is genuinely
-    /// finished. Those refs feed the Overseer/Orient dedup set
+    /// **Dropping the live `wip_refs` is load-bearing, not cosmetic** — and
+    /// therefore this must only be called once the goal's current unit of work
+    /// is genuinely finished. Those refs feed the Overseer/Orient dedup set
     /// (`overseer::sensor::in_flight_from_board`, "so the Overseer never fights
     /// an engineer already on a case"), engineer-admission control
     /// (`ooda_brain::depended_on`), and the no-progress completion gate's
@@ -375,11 +402,28 @@ impl ActiveGoal {
     /// research goal still holding a live PR/branch/session is treated as
     /// in-flight progress and is NOT rolled (issue #4399, crusty finding 1).
     ///
+    /// **Exception — the breaker tracking ref is preserved** (issue #4497/#4509).
+    /// A `wip_ref` matching [`WipRef::is_no_progress_tracking`] is kept across the
+    /// roll: it is a durable RECORD (`issue` kind — not-live per
+    /// `has_live_in_flight_ref`, so it neither suppresses the never-idle fault nor
+    /// admits an overlapping engineer), and keeping it lets the breaker's in-memory
+    /// duplicate-issue dedup survive a re-orient/roll IO-free, instead of relying
+    /// on the remote `gh` search-before-create when a re-stall re-escalates.
+    ///
     /// [`is_perpetual`]: ActiveGoal::is_perpetual
     pub fn roll_to_new_cycle(&mut self) {
         self.status = GoalProgress::NotStarted;
         self.assigned_to = None;
-        self.wip_refs.clear();
+        // Drop stale live work-in-progress refs (PR/branch/session/engineer) so
+        // the next cycle re-enters the spawn path, but PRESERVE the no-progress
+        // breaker's tracking-issue ref (issue #4497/#4509). That ref is a durable
+        // RECORD, not live work (`has_live_in_flight_ref` treats `issue` as
+        // not-live), so keeping it neither suppresses the never-idle fault nor
+        // spawns an overlapping engineer — while letting the breaker's in-memory
+        // `already_tracked` dedup survive this roll/re-orient IO-free, instead of
+        // depending on the remote `gh` search-before-create (which is unavailable
+        // during a `gh` outage). Belt-and-suspenders with the remote signature.
+        self.wip_refs.retain(WipRef::is_no_progress_tracking);
         self.current_activity =
             Some("standing goal — finished a unit of work; rolled to a fresh cycle".to_string());
     }
@@ -873,7 +917,55 @@ mod tests {
         );
     }
 
-    // ── has_live_in_flight_ref: the never-idle preservation guard (#4399) ──
+    #[test]
+    fn roll_to_new_cycle_preserves_breaker_tracking_ref_but_drops_live_refs() {
+        // The no-progress breaker's tracking-issue ref is a durable RECORD that
+        // must survive a re-orient/roll so the in-memory duplicate-issue dedup
+        // works IO-free across the roll (issue #4497/#4509) — while all live
+        // in-flight refs are still dropped so the next cycle re-enters the spawn
+        // path and no overlapping engineer is admitted.
+        let mut g = sample_goal();
+        g.description = "Research cognition. STANDING PERPETUAL goal.".to_string();
+        g.status = GoalProgress::Blocked("ooda-no-progress".to_string());
+        g.assigned_to = Some("engineer-x".to_string());
+        let tracking = WipRef {
+            kind: "issue".to_string(),
+            ref_id: "4231".to_string(),
+            label: format!("{NO_PROGRESS_TRACKING_LABEL_PREFIX}#4231"),
+            url: Some("https://example/issues/4231".to_string()),
+        };
+        g.wip_refs = vec![
+            WipRef {
+                kind: "pr".to_string(),
+                ref_id: "1".to_string(),
+                label: "old".to_string(),
+                url: None,
+            },
+            WipRef {
+                kind: "branch".to_string(),
+                ref_id: "feat/x".to_string(),
+                label: "old".to_string(),
+                url: None,
+            },
+            tracking.clone(),
+        ];
+
+        g.roll_to_new_cycle();
+
+        assert_eq!(g.status, GoalProgress::NotStarted);
+        assert_eq!(g.assigned_to, None);
+        assert_eq!(
+            g.wip_refs,
+            vec![tracking],
+            "only the breaker tracking-issue ref must survive the roll"
+        );
+        // A preserved `issue` ref is a not-live record: it must NOT read as live
+        // in-flight work (else it would suppress the never-idle fault forever).
+        assert!(
+            !g.has_live_in_flight_ref(),
+            "a preserved tracking-issue ref must not count as live in-flight work"
+        );
+    }
     //
     // `wip_refs` is load-bearing — the Overseer dedup set (sensor.rs),
     // engineer-admission control (ooda_brain), and the completion-gate's

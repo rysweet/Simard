@@ -30,7 +30,9 @@ use crate::goal_curation::no_progress_breaker::{
 use crate::goal_curation::no_progress_why::{
     Evidence, NoProgressClass, NoProgressWhy, NoProgressWhyReasoner,
 };
-use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, WipRef};
+use crate::goal_curation::{
+    ActiveGoal, GoalBoard, GoalProgress, NO_PROGRESS_TRACKING_LABEL_PREFIX, WipRef,
+};
 use crate::ooda_actions::outcome_made_no_progress;
 use crate::ooda_loop::{ActionOutcome, OodaState};
 
@@ -59,13 +61,16 @@ fn is_breaker_defer_ref(wip: &WipRef) -> bool {
 ///   synthetic `simard-identity-*` goals into a checkable criterion.
 /// * **Idempotence.** A goal already carrying its breaker tracking issue is
 ///   never re-filed, so a re-stall can never spam duplicate `ooda-stuck` issues.
-const NO_PROGRESS_TRACKING_LABEL_PREFIX: &str = "[no-progress-tracking] ";
-
+///
+/// The prefix is defined once beside [`WipRef`]
+/// ([`crate::goal_curation::NO_PROGRESS_TRACKING_LABEL_PREFIX`]) so
+/// [`ActiveGoal::roll_to_new_cycle`] can preserve this ref across a re-orient/roll
+/// (the durable, IO-free half of the dedup) without a duplicated magic string.
+///
 /// True when `wip` is a breaker-authored tracking-issue link (the escalation
 /// artifact authored by [`link_tracking_issue`]).
 fn is_breaker_tracking_ref(wip: &WipRef) -> bool {
-    wip.kind.eq_ignore_ascii_case("issue")
-        && wip.label.starts_with(NO_PROGRESS_TRACKING_LABEL_PREFIX)
+    wip.is_no_progress_tracking()
 }
 
 /// True when `goal_id` currently stands **Blocked with the no-progress sentinel**

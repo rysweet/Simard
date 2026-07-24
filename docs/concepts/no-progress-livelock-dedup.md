@@ -5,8 +5,9 @@ description: >
   `ooda-stuck` tracking issues for a still-blocked goal. Dedup is now sourced from a
   remote, restart-durable signature (`ooda-signature:<sig>` embedded in the issue body,
   computed per-goal over the un-redacted `goal_id` via a dedicated
-  `no_progress::breaker_signature` helper) rather than
-  the volatile in-memory `wip_refs` that `roll_to_new_cycle` clears on every re-orient.
+  `no_progress::breaker_signature` helper), backed by an IO-free complement — the
+  breaker's tracking-issue `wip_ref` is now PRESERVED across `roll_to_new_cycle`
+  (issue #4509), so an in-process re-orient dedups from memory without a `gh` call.
   After a guided retry still leaves the goal Blocked, the breaker escalates exactly once and
   the goal — still standing Blocked with the no-progress sentinel — is skipped on subsequent
   ticks (no re-orientation, no duplicate issue) until its block is lifted, repairing the
@@ -57,11 +58,19 @@ The root cause was two-fold:
 
 1. **Dedup was in-memory only.** `escalate_with_tracking_issue` deduped by
    scanning the goal's in-memory `wip_refs` for a breaker-authored tracking ref
-   (`is_breaker_tracking_ref`). But `roll_to_new_cycle` **clears `wip_refs`** on
+   (`is_breaker_tracking_ref`). But `roll_to_new_cycle` **cleared `wip_refs`** on
    every re-orient, so the dedup memory was wiped each cycle. The next tick saw a
    goal with empty `wip_refs`, concluded "no tracking issue yet", and filed
    another one. Restarts had the same effect. The remote issue list — the actual
    source of truth — was never consulted.
+
+   The fix attacks this on **two** independent fronts (issue #4509): the remote
+   signature search below makes dedup durable even when the in-memory link is
+   genuinely gone (process restart), **and** `roll_to_new_cycle` now
+   *preserves* the breaker's tracking-issue ref (a durable `issue` RECORD, not
+   live work — see `WipRef::is_no_progress_tracking` in `src/goal_curation/types.rs`) so an **in-process**
+   re-orient keeps deduping from memory, IO-free, with no dependence on `gh`
+   availability.
 
 2. **No terminal boundary.** After a guided retry still left a goal Blocked, the
    breaker kept **re-orienting the same goal every tick** with no backoff and no
@@ -73,10 +82,11 @@ self-inflicted denial-of-service on the issue tracker.
 
 ## The fix, in one sentence
 
-Make dedup **remote and restart-durable** (a signature the issue body carries),
-and make a post-guided-retry stall **skip**: escalate exactly once, then skip
-that goal while it stands Blocked with the no-progress sentinel — until its block
-is lifted.
+Make dedup **remote and restart-durable** (a signature the issue body carries)
+**and preserve the breaker's tracking-issue ref across `roll_to_new_cycle`** so
+an in-process re-orient dedups IO-free from memory, and make a post-guided-retry
+stall **skip**: escalate exactly once, then skip that goal while it stands
+Blocked with the no-progress sentinel — until its block is lifted.
 
 ## Part 1 — remote, restart-durable dedup
 
@@ -159,10 +169,13 @@ aborts the cycle** (this is the direct repair of `#4472` / `#4474`).
 **≤ 1 open `ooda-stuck` issue per blocked goal**:
 
 1. **Live `wip_ref` check** — if the current in-memory goal still carries a
-   breaker-authored tracking ref, reuse it. Cheap fast path.
+   breaker-authored tracking ref, reuse it (no remote call). Because
+   `roll_to_new_cycle` now **preserves** that ref (issue #4509), this fast path
+   survives an in-process re-orient — the remote search is only needed after a
+   true process restart, when in-memory state is genuinely gone.
 2. **Remote signature search** — call `find_open_tracking_issue(signature)`. If a
    matching open issue exists, re-link it to the goal and file nothing. This
-   survives the `wip_refs` wipe and process restarts.
+   survives process restarts (and any path where the in-memory ref was lost).
 3. **File** — only when both of the above miss, `file_issue` creates one and
    embeds the `ooda-signature:` marker; the result is linked back to the goal via
    `link_tracking_issue`.
@@ -221,10 +234,11 @@ Sentinel-Blocked
 **Why status-based, not a persisted flag.** Keying on the live block status means
 the skip lifts automatically the instant the goal is unblocked — whether an
 operator re-scopes it or the agentic reasoner re-orients it — with no separate
-"clear the halt" bookkeeping to get wrong. The remote signature dedup
-(Part 1) is what still prevents a *re-stall* from filing a **duplicate** issue:
-an unblocked-then-re-stalled goal re-escalates idempotently against its existing
-`ooda-signature:` marker.
+"clear the halt" bookkeeping to get wrong. Dedup (Part 1) is what still prevents
+a *re-stall* from filing a **duplicate** issue: the preserved in-memory tracking
+ref covers an in-process re-orient IO-free, and the remote `ooda-signature:`
+marker covers a restart — so an unblocked-then-re-stalled goal re-escalates
+idempotently either way.
 
 Key properties:
 
@@ -254,6 +268,7 @@ Key properties:
 | `NoProgressBreakerReport.halted` | `src/ooda_loop/no_progress.rs` | Goal IDs escalated-once-and-skipped this tick. |
 | `goal_is_sentinel_blocked` | `src/ooda_loop/no_progress.rs` | Skip guard: `continue`s past a goal still standing Blocked with the no-progress sentinel, before any escalation. |
 | `is_no_progress_marker` | `src/goal_curation/no_progress_breaker.rs` | Recognizes the breaker's own Blocked-reason sentinel that the skip guard keys on. |
+| `WipRef::is_no_progress_tracking` | `src/goal_curation/types.rs` | Marks the breaker's tracking-issue ref; `roll_to_new_cycle` **preserves** exactly this ref so in-memory dedup survives an in-process re-orient (IO-free, `gh`-independent). Prefix constant `NO_PROGRESS_TRACKING_LABEL_PREFIX` lives here (single home shared with `no_progress.rs`). |
 
 ## Configuration
 
@@ -291,21 +306,34 @@ Expected log lines (structured tracing; no `print!`/`println!`):
 
 ```text
 tick N    : file #4600 (marker ooda-signature:3f9a1c77b0e42d18)
+--- in-process re-orient: roll_to_new_cycle PRESERVES the tracking ref ---
+tick N+1  : live wip_ref check HITS (ref survived the roll) → re-link
+            in memory, NO remote call, NO new issue
 --- daemon restart; wip_refs empty ---
-tick N+1  : live wip_ref check MISSES (memory cleared)
+tick N+2  : live wip_ref check MISSES (memory cleared by restart)
             remote search HITS #4600 → re-link, NO new issue
 ```
 
 This is exactly the path that previously produced `#4499`/`#4504`/`#4508` and no
-longer does.
+longer does. Note the two distinct dedup sources: an **in-process** re-orient is
+handled IO-free by the preserved in-memory ref (issue #4509); a **restart** — the
+only path that genuinely loses the in-memory ref — falls back to the remote
+signature search.
 
 ## Verifying the behavior
 
-Unit tests (inline `#[cfg(test)]` in `no_progress.rs` plus the
+Unit tests (inline `#[cfg(test)]` in `no_progress.rs` and `types.rs` plus the
 `tests_no_progress*` / `tests_no_progress_breaker` suites) assert:
 
-- **Dedup survives re-orient** — clearing `wip_refs` between ticks matches the
-  existing remote issue, not a second file.
+- **Dedup survives an in-process re-orient (in-memory)** — the real
+  `roll_to_new_cycle` preserves the breaker tracking ref, so a re-stall dedups
+  from memory **without** consulting the remote
+  (`roll_to_new_cycle_preserves_in_memory_dedup_across_reorient`, plus
+  `roll_to_new_cycle_preserves_breaker_tracking_ref_but_drops_live_refs` in
+  `types.rs`).
+- **Dedup survives loss of the in-memory link (remote)** — when `wip_refs` are
+  gone (process restart), the remote signature search matches the existing issue,
+  not a second file.
 - **Dedup survives restart** — a fresh filer whose remote list already contains
   the marker re-links the existing issue instead of filing.
 - **Distinct goals get distinct signatures** — two different `goal_id`s (e.g. the

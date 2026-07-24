@@ -199,10 +199,14 @@ fn drive_to_escalation(
     last
 }
 
-/// Simulate the per-goal re-orientation the agentic reasoner performs
-/// (`ActiveGoal::roll_to_new_cycle`): drop the goal's tracked refs so the OLD
-/// in-memory-only dedup is defeated. The remote store is untouched — that is the
-/// whole point of the fix.
+/// Simulate LOSS of the in-memory tracking link — the goal's `wip_refs` are
+/// dropped WITHOUT a matching remote loss, as happens on a process restart (or,
+/// before the #4509 preservation fix, on every `roll_to_new_cycle`). This
+/// exercises the REMOTE search-before-create fallback: the durable dedup source
+/// of truth when the in-memory link is gone. The remote store is untouched —
+/// that is the whole point. (The in-process re-orient path, where the link now
+/// SURVIVES the roll, is covered by
+/// `roll_to_new_cycle_preserves_in_memory_dedup_across_reorient`.)
 fn reorient(state: &mut OodaState, goal_id: &str) {
     if let Some(g) = state
         .active_goals
@@ -296,6 +300,82 @@ fn a_still_blocked_goal_files_at_most_one_issue_across_reorient() {
     assert!(
         filer.searches.borrow().contains(&expected_sig),
         "the remote search must key on the goal's stable breaker_signature"
+    );
+}
+
+#[test]
+fn roll_to_new_cycle_preserves_in_memory_dedup_across_reorient() {
+    // The #4509 durable, IO-free complement to the remote search: an in-PROCESS
+    // re-orientation calls the REAL `ActiveGoal::roll_to_new_cycle`, which now
+    // PRESERVES the breaker's tracking-issue ref. So on the re-stall the
+    // in-memory `already_tracked` fast-path dedups WITHOUT ever consulting the
+    // remote — no duplicate issue AND no dependence on `gh` availability.
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let filer = RemoteFiler::default();
+    let evidence = NoEvidence;
+    let mut state = state_with(stuck_goal("simard-identity-4d27c91a"));
+
+    let _ = drive_to_escalation(
+        &mut state,
+        "simard-identity-4d27c91a",
+        &evidence,
+        &filer,
+        threshold,
+    );
+    assert_eq!(
+        filer.files.borrow().len(),
+        1,
+        "the first escalation files exactly one ooda-stuck issue"
+    );
+    let searches_after_first = filer.searches.borrow().len();
+    assert_eq!(
+        state.active_goals.active[0]
+            .wip_refs
+            .iter()
+            .filter(|w| w.kind.eq_ignore_ascii_case("issue"))
+            .count(),
+        1,
+        "the escalated goal carries its linked tracking issue ref"
+    );
+
+    // Real in-process re-orientation: lifts the block AND preserves the tracking
+    // ref (drops the stale live PR ref).
+    state.active_goals.active[0].roll_to_new_cycle();
+    assert_eq!(
+        state.active_goals.active[0]
+            .wip_refs
+            .iter()
+            .filter(|w| w.kind.eq_ignore_ascii_case("issue"))
+            .count(),
+        1,
+        "roll_to_new_cycle must PRESERVE the breaker tracking-issue ref"
+    );
+    assert!(
+        !state.active_goals.active[0]
+            .wip_refs
+            .iter()
+            .any(|w| w.kind.eq_ignore_ascii_case("pr")),
+        "roll_to_new_cycle must still DROP the stale live PR ref"
+    );
+
+    // Re-stall to the threshold again.
+    let _ = drive_to_escalation(
+        &mut state,
+        "simard-identity-4d27c91a",
+        &evidence,
+        &filer,
+        threshold,
+    );
+
+    assert_eq!(
+        filer.files.borrow().len(),
+        1,
+        "no duplicate issue: the preserved in-memory ref dedups across the roll (#4509)"
+    );
+    assert_eq!(
+        filer.searches.borrow().len(),
+        searches_after_first,
+        "the remote search is NOT consulted after a roll — in-memory dedup short-circuits (IO-free, gh-independent)"
     );
 }
 
