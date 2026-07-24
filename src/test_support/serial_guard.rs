@@ -290,30 +290,37 @@ pub(crate) fn audit_env_mutating_tests(opts: &AuditOptions) -> Vec<Offender> {
     }
     files.sort();
 
-    for file in files {
-        let rel = file.strip_prefix(manifest).unwrap_or(&file).to_path_buf();
-        let rel_str = rel.to_string_lossy().replace('\\', "/");
-        if opts
-            .excluded_prefixes
-            .iter()
-            .any(|p| rel_str == *p || rel_str.starts_with(&format!("{p}/")))
-        {
-            continue;
-        }
-
-        let src = match std::fs::read_to_string(&file) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        // Files that don't parse with `syn` (rare on stable) are skipped rather
-        // than failing the audit spuriously; they remain a documented blind
-        // spot.
-        let ast = match syn::parse_file(&src) {
-            Ok(a) => a,
-            Err(_) => continue,
-        };
-
-        audit_file(&rel, &ast, &opts.watched, &allowed, &mut offenders);
+    // Each file's audit (read → parse → scan) is independent and writes no
+    // shared state, so this parse-bound scan of the whole source tree fans out
+    // across the available cores via scoped threads (std-only, no extra deps).
+    // The deterministic final sort below makes the result independent of thread
+    // scheduling and chunk boundaries.
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(files.len().max(1));
+    let chunk_len = files.len().div_ceil(threads).max(1);
+    let allowed = &allowed;
+    let per_thread: Vec<Vec<Offender>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = files
+            .chunks(chunk_len)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    let mut local = Vec::new();
+                    for file in chunk {
+                        audit_path(file, manifest, opts, allowed, &mut local);
+                    }
+                    local
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("serial_guard audit worker panicked"))
+            .collect()
+    });
+    for local in per_thread {
+        offenders.extend(local);
     }
 
     offenders.sort_by(|a, b| {
@@ -325,9 +332,38 @@ pub(crate) fn audit_env_mutating_tests(opts: &AuditOptions) -> Vec<Offender> {
     offenders
 }
 
-// ---------------------------------------------------------------------------
-// AST visitors
-// ---------------------------------------------------------------------------
+/// Read, parse, and audit a single source file, appending any offenders to
+/// `out`. Files under an excluded prefix are skipped; files that are unreadable
+/// or that don't parse with `syn` (rare on stable) are skipped rather than
+/// failing the audit spuriously — they remain a documented blind spot. Pure and
+/// side-effect-free apart from `out`, so it is safe to run concurrently across
+/// disjoint file chunks.
+fn audit_path(
+    file: &Path,
+    manifest: &Path,
+    opts: &AuditOptions,
+    allowed: &BTreeSet<&str>,
+    out: &mut Vec<Offender>,
+) {
+    let rel = file.strip_prefix(manifest).unwrap_or(file).to_path_buf();
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+    if opts
+        .excluded_prefixes
+        .iter()
+        .any(|p| rel_str == *p || rel_str.starts_with(&format!("{p}/")))
+    {
+        return;
+    }
+
+    let Ok(src) = std::fs::read_to_string(file) else {
+        return;
+    };
+    let Ok(ast) = syn::parse_file(&src) else {
+        return;
+    };
+
+    audit_file(&rel, &ast, &opts.watched, allowed, out);
+}
 
 // ---------------------------------------------------------------------------
 // Per-file two-pass audit
