@@ -422,8 +422,13 @@ fn run_ooda_daemon_with_session_uses_session_for_advance_goal() {
     let mut bridges = test_bridges();
     let board = board_with_active_goals();
     let mut state = OodaState::new(board);
+    // `scaler: None` keeps the per-cycle concurrency cap hermetic under
+    // `SIMARD_SCALING=auto` (the deploy environment), where
+    // `OodaConfig::default()` would otherwise seed an ambient AIMD scaler that
+    // overrides the explicit `max_concurrent_actions` under test (issue #2732).
     let config = OodaConfig {
         max_concurrent_actions: 2,
+        scaler: None,
         ..Default::default()
     };
 
