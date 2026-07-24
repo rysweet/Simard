@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::types::{GateResult, RelaunchConfig, RelaunchGate};
@@ -211,14 +211,193 @@ fn run_smoke_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
     }
 }
 
+/// Create a fresh, private RAII isolation directory for one `unit-test` gate
+/// run. The gate overrides `SIMARD_STATE_ROOT` / `SIMARD_HOME` / `HOME` /
+/// `TMPDIR` to this dir so the in-process lib-test suite resolves an **empty,
+/// private** state root ([`crate::runtime_config`]: `SIMARD_STATE_ROOT` else
+/// `$HOME/.simard`) instead of the live daemon's — it therefore cannot open the
+/// daemon's WAL / cognitive-store or bind its socket (the #4558 abort). The dir
+/// is randomized (`tempfile`, `O_EXCL`) and canonicalized; if it resolves
+/// **outside** the temp root (a symlink escape) the call fails so the caller can
+/// fail closed rather than run against a rediscovered production state root.
+///
+/// Returns `Err` on any setup failure. The caller ([`run_unit_test_gate`]) then
+/// returns a **failing** `GateResult` — never a silent non-hermetic fallback to
+/// the daemon's live state root (a gate must never write production runtime
+/// state).
+fn unit_test_isolation_dir() -> std::io::Result<tempfile::TempDir> {
+    let dir = tempfile::Builder::new()
+        .prefix("simard-unit-test-gate-")
+        .tempdir()?;
+    // Symlink-escape defense: the isolation path must stay inside the temp root
+    // so a test cannot rediscover the production state root through a symlink.
+    let canon = dir.path().canonicalize()?;
+    let temp_root = std::env::temp_dir().canonicalize()?;
+    if !canon.starts_with(&temp_root) {
+        return Err(std::io::Error::other(format!(
+            "isolation dir {} escaped temp root {}",
+            canon.display(),
+            temp_root.display()
+        )));
+    }
+    Ok(dir)
+}
+
+/// The real, pre-override `HOME` — the value used to derive the toolchain roots
+/// **before** the hermetic `HOME` override redirects `HOME` to the empty temp
+/// dir. Falls back to `/` (an absolute, non-writable root) only if `HOME` is
+/// entirely unset, which keeps the derived toolchain paths absolute.
+fn real_home() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+/// Resolve absolute `CARGO_HOME` / `RUSTUP_HOME` for the gate child, pinned from
+/// the **real, pre-override** `HOME` (or the ambient values when set), so the
+/// hermetic `HOME` override cannot strand `cargo`/`rustup`.
+///
+/// Load-bearing invariant (see `docs/reference/hermetic-unit-test-gate.md`):
+/// `cargo`/`rustup` resolve their toolchain from `CARGO_HOME` / `RUSTUP_HOME`
+/// and, *only when those are unset*, fall back to `$HOME/.cargo` /
+/// `$HOME/.rustup`. Under a clean systemd unit those vars are frequently absent
+/// (the daemon relies on the `$HOME/.cargo` default). If `HOME` is then
+/// overridden to an **empty** temp dir while they are unset, `cargo test` hunts
+/// the toolchain under the empty temp `$HOME/.cargo` and aborts — a fresh
+/// #4558-class self-inflicted red. Pinning them here from the real `HOME`
+/// (preferring ambient values) prevents that.
+fn resolve_toolchain_home() -> (PathBuf, PathBuf) {
+    let cargo_home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| real_home().join(".cargo"));
+    let rustup_home = std::env::var_os("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| real_home().join(".rustup"));
+    (cargo_home, rustup_home)
+}
+
+/// Upper bound (bytes) on the extracted `unit-test` failure detail. Raised from
+/// the old 200-byte stderr-only head so the failing test NAME survives; the
+/// downstream deploy `bound_detail` 512-byte cap still governs the final size.
+const FAILURE_DETAIL_MAX_BYTES: usize = 4096;
+
+/// Extract the operator-actionable failure block from a `cargo test` run.
+///
+/// Scans the COMBINED stdout+stderr stream (stdout carries `test … FAILED` /
+/// `failures:`; stderr carries `panicked at …`) and returns the first matching
+/// marker block with the failing test NAME preserved, in precedence order:
+/// `failures:` > `panicked at …` > `test … FAILED`. The block is captured from
+/// the **start of the marker's line** so a name that precedes `panicked at`
+/// (`thread '…' panicked at …`) or heads the `failures:` dump survives. With no
+/// marker at all (e.g. a linker OOM or an abort before any test line) it falls
+/// back to the tail of the combined stream so the detail is never empty. The
+/// result is UTF-8-safely clamped to [`FAILURE_DETAIL_MAX_BYTES`] — never a raw
+/// dump — so an enlarged detail cannot leak unrelated output into logs.
+fn extract_failure_detail(stdout: &str, stderr: &str) -> String {
+    let combined = if stdout.is_empty() {
+        stderr.to_string()
+    } else if stderr.is_empty() {
+        stdout.to_string()
+    } else {
+        format!("{stdout}\n{stderr}")
+    };
+
+    // First match wins, in precedence order. `failures:` heads the richest
+    // libtest block (test name AND panic message); `panicked at` carries the
+    // panic site (name precedes it on the same line); `FAILED` is the bare
+    // per-test result line (`test <name> … FAILED`).
+    for marker in ["failures:", "panicked at", "FAILED"] {
+        if let Some(pos) = combined.find(marker) {
+            let line_start = combined[..pos].rfind('\n').map_or(0, |nl| nl + 1);
+            let block = combined[line_start..].trim();
+            return clamp_utf8(block, FAILURE_DETAIL_MAX_BYTES);
+        }
+    }
+
+    // No structured marker: bounded, non-empty tail so the operator sees the
+    // real output (e.g. a linker/OOM abort) rather than an empty detail.
+    let trimmed = combined.trim();
+    clamp_utf8_tail(trimmed, FAILURE_DETAIL_MAX_BYTES)
+}
+
+/// UTF-8-safe head clamp to at most `max` bytes (never splits a codepoint,
+/// never appends an ellipsis that could exceed `max`).
+fn clamp_utf8(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
+/// UTF-8-safe tail clamp to at most `max` bytes (keeps the END of `s`, which is
+/// where an abort's real error typically lands).
+fn clamp_utf8_tail(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut start = s.len() - max;
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    s[start..].to_string()
+}
+
+/// Run the `unit-test` canary gate: `cargo test` against `config.manifest_dir`,
+/// **hermetically** isolated so a running daemon cannot red-canary a passing
+/// suite (#4558), and **diagnosably** — a real failure names the failing test.
+///
+/// Isolation: after [`scrub_gate_env`], four keys (`SIMARD_STATE_ROOT`,
+/// `SIMARD_HOME`, `HOME`, `TMPDIR`) are overridden **per child** to a fresh
+/// [`unit_test_isolation_dir`] and `current_dir` is set to the manifest dir, so
+/// the in-process test suite resolves an empty private state root and cannot
+/// open the live daemon's WAL / cognitive-store or bind its socket. The
+/// toolchain (`CARGO_HOME` / `RUSTUP_HOME`) is pinned from the real
+/// pre-override `HOME` **before** the `HOME` override so the redirect cannot
+/// strand `cargo`/`rustup` (see [`resolve_toolchain_home`]). Fail-closed: a
+/// temp-dir setup failure returns a failing `GateResult`, never a non-hermetic
+/// run against the live state root.
 fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
+    // Fail closed: no isolation dir -> failing GateResult, never a live-root fallback.
+    let isolation = match unit_test_isolation_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            return GateResult {
+                gate: RelaunchGate::UnitTest,
+                passed: false,
+                detail: format!("unit-test gate could not create an isolated state root: {e}"),
+            };
+        }
+    };
+    let iso = isolation.path();
+
+    // Pin the toolchain from the REAL (pre-override) HOME before HOME is
+    // redirected to the empty temp dir (otherwise cargo/rustup hunt the
+    // toolchain under the empty temp $HOME/.cargo and abort — a #4558-class red).
+    let (cargo_home, rustup_home) = resolve_toolchain_home();
+
     let mut cmd = scrubbed_command("cargo", config);
     cmd.arg("test")
         .arg("--manifest-path")
         .arg(config.manifest_dir.join("Cargo.toml"))
         .arg("--target-dir")
         .arg(&config.canary_target_dir)
-        .env("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs());
+        .env("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs())
+        // Toolchain pin — absolute, resolved from the real HOME, set explicitly
+        // so the HOME override below cannot strand cargo/rustup.
+        .env("CARGO_HOME", &cargo_home)
+        .env("RUSTUP_HOME", &rustup_home)
+        // Hermetic override — applied AFTER scrub_gate_env so the isolated temp
+        // path wins over the allow-listed SIMARD_HOME / SIMARD_STATE_ROOT.
+        .env("SIMARD_STATE_ROOT", iso)
+        .env("SIMARD_HOME", iso)
+        .env("HOME", iso)
+        .env("TMPDIR", iso)
+        .current_dir(&config.manifest_dir);
+
     match cmd.output() {
         Ok(output) if output.status.success() => GateResult {
             gate: RelaunchGate::UnitTest,
@@ -226,12 +405,17 @@ fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
             detail: "all tests passed".to_string(),
         },
         Ok(output) => {
+            // Capture BOTH streams (#4558): the failing test name lives on
+            // stdout (`failures:` / `test … FAILED`); a panic site lives on
+            // stderr (`panicked at …`). The old stderr-only, 200-byte head
+            // landed on a progress-spinner fragment (`Drop t…`) and hid it.
+            let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let truncated = truncate_output(&stderr, 200);
+            let detail = extract_failure_detail(&stdout, &stderr);
             GateResult {
                 gate: RelaunchGate::UnitTest,
                 passed: false,
-                detail: format!("tests failed (exit {}): {}", output.status, truncated),
+                detail: format!("tests failed (exit {}): {}", output.status, detail),
             }
         }
         Err(e) => GateResult {
@@ -518,6 +702,208 @@ mod tests {
         let config = RelaunchConfig::default();
         let results = verify_canary(Path::new("/no-such-binary"), &[], &config).unwrap();
         assert!(results.is_empty());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // TDD (Problem 2 — #4558 diagnosable unit-test gate): FAILING tests, written
+    // first. These specify `extract_failure_detail(stdout, stderr)`, the pure
+    // helper the hermetic gate uses so a red tree's failing test NAME survives
+    // into `failing_detail` instead of being lost to the old stderr-only,
+    // 200-byte spinner-fragment head (`Drop t…`).
+    //
+    // Contract (see docs/reference/hermetic-unit-test-gate.md):
+    //   * Scans the COMBINED stdout+stderr stream (libtest writes `failures:` /
+    //     `test … FAILED` to stdout; a panic writes `panicked at …` to stderr).
+    //   * Extracts the FIRST structured marker block, test-name first, in
+    //     precedence order: `failures:` > `panicked at …` > `test … FAILED`.
+    //   * UTF-8-safely clamps the result to 4096 bytes (raised from 200).
+    //   * No-marker input falls back to a bounded, non-empty tail — never a
+    //     raw dump, never empty for non-empty input.
+    //
+    // They MUST fail to compile/run against the current code (the function does
+    // not exist yet) and pass once the fix lands. Pure — no subprocess, no env
+    // mutation, so no `serial(cognitive_memory)` key is required. `tracing`/OTel
+    // discipline is a runtime concern; these assert only the extractor's return.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// A realistic libtest `failures:` block on **stdout** — the richest marker
+    /// (test name AND panic message) and the one the old stderr-only capture
+    /// missed entirely.
+    const FAILURES_BLOCK_STDOUT: &str = "\
+running 2 tests
+test tests::fixture_passes_cleanly ... ok
+test tests::fixture_panics_when_toggled ... FAILED
+
+failures:
+
+---- tests::fixture_panics_when_toggled stdout ----
+thread 'tests::fixture_panics_when_toggled' panicked at tests/fixtures/unit_test_gate_fixture/lib.rs:44:13:
+intentional fixture failure for red-canary detail extraction
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::fixture_panics_when_toggled
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+";
+
+    /// What cargo itself prints to **stderr** for a failed test run — carries no
+    /// test name, so a stderr-only capture cannot name the failure.
+    const CARGO_STDERR: &str = "error: test failed, to rerun pass `--lib`\n";
+
+    #[test]
+    fn extract_failure_detail_names_failing_test_from_failures_block() {
+        let detail = extract_failure_detail(FAILURES_BLOCK_STDOUT, CARGO_STDERR);
+        assert!(
+            detail.contains("fixture_panics_when_toggled"),
+            "failing test NAME must survive into the detail; got: {detail}"
+        );
+        assert!(
+            detail.contains("failures:"),
+            "the `failures:` marker block must be selected; got: {detail}"
+        );
+        // The #4558 regression: the detail must NOT be a truncated progress
+        // spinner fragment that hides which test failed.
+        assert!(
+            !detail.trim().starts_with("Drop t"),
+            "detail must not be a spinner fragment; got: {detail}"
+        );
+    }
+
+    #[test]
+    fn extract_failure_detail_names_failing_test_from_panicked_at_on_stderr() {
+        // No `failures:` anywhere; the panic site is on stderr (uncaptured
+        // panic / abort path). The extractor must still surface it.
+        let stderr = "\
+thread 'tests::open_wal_lock' panicked at src/cognitive_memory/open_guard.rs:88:9:
+state root already locked by the live daemon
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+";
+        let detail = extract_failure_detail("", stderr);
+        assert!(
+            detail.contains("panicked at"),
+            "the `panicked at` marker must be selected; got: {detail}"
+        );
+        assert!(
+            detail.contains("open_wal_lock"),
+            "the panicking test/context name must survive; got: {detail}"
+        );
+    }
+
+    #[test]
+    fn extract_failure_detail_names_failing_test_from_failed_line() {
+        // Lowest-precedence marker: only a per-test `... FAILED` result line,
+        // no `failures:` block and no `panicked at` (e.g. a `#[should_panic]`
+        // that did not panic, or a non-panicking assertion harness).
+        let stdout = "\
+running 1 test
+test tests::rpc_dials_live_socket ... FAILED
+";
+        let detail = extract_failure_detail(stdout, "");
+        assert!(
+            detail.contains("rpc_dials_live_socket"),
+            "the FAILED test name must survive; got: {detail}"
+        );
+        assert!(
+            detail.contains("FAILED"),
+            "the `FAILED` marker must be present; got: {detail}"
+        );
+    }
+
+    #[test]
+    fn extract_failure_detail_prefers_failures_block_over_panicked_at() {
+        // Both markers present with DIFFERENT names: `failures:` wins, so the
+        // richer name+panic block is returned rather than a bare panic site.
+        let stdout = "\
+test tests::the_failures_block_test ... FAILED
+
+failures:
+
+---- tests::the_failures_block_test stdout ----
+assertion `left == right` failed
+
+failures:
+    tests::the_failures_block_test
+";
+        let stderr = "thread 'tests::a_different_panic_test' panicked at src/x.rs:1:1:\nboom\n";
+        let detail = extract_failure_detail(stdout, stderr);
+        assert!(
+            detail.contains("the_failures_block_test"),
+            "the `failures:` block must take precedence; got: {detail}"
+        );
+    }
+
+    #[test]
+    fn extract_failure_detail_clamps_to_4096_bytes() {
+        // A marker followed by a very long body must be bounded to 4096 bytes
+        // (raised from the old 200) — the failing name still fits well inside.
+        let mut stdout = String::from("failures:\n    tests::huge_output_test\n");
+        stdout.push_str(&"x".repeat(20_000));
+        let detail = extract_failure_detail(&stdout, "");
+        assert!(
+            detail.len() <= 4096,
+            "detail must be clamped to <= 4096 bytes; got {} bytes",
+            detail.len()
+        );
+        assert!(
+            detail.contains("huge_output_test"),
+            "the failing name must survive the clamp; got: {detail}"
+        );
+    }
+
+    #[test]
+    fn extract_failure_detail_is_utf8_boundary_safe() {
+        // Multi-byte characters straddling the 4096-byte clamp must never panic
+        // and must yield valid UTF-8 (guaranteed by the `String` return, but
+        // the clamp must not truncate mid-codepoint and lose data or abort).
+        let mut stdout = String::from("failures:\n    tests::utf8_boundary_test\n");
+        stdout.push_str(&"é".repeat(4000)); // 2 bytes each → ~8000 bytes body
+        let detail = extract_failure_detail(&stdout, "");
+        assert!(
+            detail.len() <= 4096,
+            "clamped detail must be <= 4096 bytes; got {} bytes",
+            detail.len()
+        );
+        // Round-trips as valid UTF-8 without panicking (implicit in `String`).
+        assert!(
+            detail.contains("utf8_boundary_test"),
+            "the failing name must survive the UTF-8-safe clamp; got: {detail}"
+        );
+    }
+
+    #[test]
+    fn extract_failure_detail_no_marker_falls_back_to_bounded_nonempty_tail() {
+        // No structured marker at all (e.g. a linker OOM or an abort before any
+        // test line). The detail must be non-empty (so the operator sees
+        // *something*) and still bounded.
+        let stdout = "";
+        let stderr = "collect2: fatal error: ld terminated with signal 9 [Killed]\n";
+        let detail = extract_failure_detail(stdout, stderr);
+        assert!(
+            !detail.trim().is_empty(),
+            "no-marker input must still yield a non-empty detail"
+        );
+        assert!(
+            detail.len() <= 4096,
+            "fallback detail must be bounded; got {} bytes",
+            detail.len()
+        );
+        assert!(
+            detail.contains("ld terminated") || detail.contains("fatal error"),
+            "fallback must carry a tail of the real output; got: {detail}"
+        );
+    }
+
+    #[test]
+    fn extract_failure_detail_scans_stdout_when_stderr_empty() {
+        // Proves stdout is scanned even when stderr is empty — the exact #4558
+        // gap (the failing name lives on stdout; the old code read only stderr).
+        let detail = extract_failure_detail(FAILURES_BLOCK_STDOUT, "");
+        assert!(
+            detail.contains("fixture_panics_when_toggled"),
+            "stdout must be scanned for the failing name; got: {detail}"
+        );
     }
 }
 
