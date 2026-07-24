@@ -673,8 +673,7 @@ exit 23
     // surfaces every other error immediately, so real faults — missing binary,
     // PATH hijack, EACCES — are never masked or delayed. These tests pin that
     // contract against `super::spawn_with_etxtbsy_retry` /
-    // `super::SPAWN_MAX_ATTEMPTS`, which Step 8 implements. Until then the crate
-    // will not compile: that is the intended TDD RED state.
+    // `super::SPAWN_MAX_ATTEMPTS`.
     use super::{SPAWN_MAX_ATTEMPTS, spawn_with_etxtbsy_retry};
 
     fn etxtbsy() -> io::Error {
