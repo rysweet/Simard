@@ -29,11 +29,29 @@ pub fn advance_goal_with_subordinate(
     // available so artifact validation looks at the engineer's own scope,
     // not the parent checkout. Falls back to "." for legacy/manual paths
     // that pre-date worktree isolation.
-    let worktree_path = state
-        .engineer_worktrees
-        .get(goal_id)
-        .map(|w| w.path().to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    //
+    // Presence guard (issue #4578): a stored worktree can be reaped out of
+    // band between cycles. Consult is_present() before trusting the stored
+    // path; when the checkout is gone, warn, drop the stale entry (the next
+    // spawn cycle re-provisions a clean worktree) and fall back to the parent
+    // scope instead of dereferencing a missing path.
+    let worktree_path = match state.engineer_worktrees.get(goal_id) {
+        Some(worktree) if worktree.is_present() => worktree.path().to_path_buf(),
+        Some(worktree) => {
+            let stale_path = worktree.path().to_path_buf();
+            tracing::warn!(
+                target: "simard::engineer_worktree",
+                event = "engineer_worktree.reaped_before_reuse",
+                goal_id,
+                worktree = %stale_path.display(),
+                action = "reprovision",
+                "stored engineer worktree reaped before reuse; dropping stale entry",
+            );
+            state.engineer_worktrees.remove(goal_id);
+            std::path::PathBuf::from(".")
+        }
+        None => std::path::PathBuf::from("."),
+    };
     let handle = crate::agent_supervisor::SubordinateHandle {
         pid: 0,
         agent_name: sub_name.to_string(),

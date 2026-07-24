@@ -29,6 +29,8 @@ mod overlap;
 // so `spawn::dispatch_spawn_engineer` can invoke the gate.
 pub(crate) mod resource_admission;
 mod subordinate;
+#[cfg(test)]
+mod tests_presence_guard;
 #[cfg(not(test))]
 pub(crate) mod typed_goal_session;
 #[cfg(test)]

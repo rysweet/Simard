@@ -47,6 +47,8 @@ mod tests_extra;
 #[cfg(test)]
 mod tests_more;
 #[cfg(test)]
+mod tests_presence_guard;
+#[cfg(test)]
 mod tests_reaping_safety;
 
 /// Subdirectory under the supervisor state root that holds all engineer worktrees.
@@ -70,8 +72,8 @@ pub const ENGINEER_CLAIM_FILE: &str = ".simard-engineer-claim";
 mod claim;
 mod discovery;
 mod precommit;
-use claim::{claim_is_live, format_engineer_claim, read_engineer_claim_full};
-pub use claim::{is_pid_alive_public, read_pid_starttime_public};
+use claim::{claim_is_live, format_engineer_claim};
+pub use claim::{is_pid_alive_public, read_engineer_claim_full, read_pid_starttime_public};
 pub(crate) use discovery::goal_id_from_worktree_dir;
 pub use discovery::{
     LiveEngineerWorktree, live_claimed_engineers, live_claimed_engineers_in_worktrees,
@@ -446,6 +448,25 @@ impl EngineerWorktree {
     /// Name of the branch checked out in this worktree.
     pub fn branch(&self) -> &str {
         &self.branch
+    }
+
+    /// Returns `true` iff this worktree still holds a readable engineer-claim
+    /// sentinel (`.simard-engineer-claim`) on disk.
+    ///
+    /// Side-effect-free, fail-closed presence probe that closes the worktree
+    /// reuse TOCTOU (issue #4578). Implemented as a single claim read via
+    /// [`read_engineer_claim_full`]: if the worktree directory was reaped out
+    /// of band, or the sentinel was removed/corrupted, the read errors and
+    /// this returns `false`. Reuse sites call it immediately before they
+    /// depend on `path()` still being on disk.
+    ///
+    /// Scope: worktree presence, not engineer PID liveness — discovery
+    /// (`find_live_engineer_for_goal`) owns the liveness check. The single
+    /// claim read is the smallest sufficient seam: `read_engineer_claim_full`
+    /// already fails closed when the directory is gone, so a separate `lstat`
+    /// buys nothing.
+    pub fn is_present(&self) -> bool {
+        read_engineer_claim_full(&self.path).is_some()
     }
 
     /// Remove the worktree, prune its registration, delete its branch.

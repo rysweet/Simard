@@ -16,6 +16,7 @@ use super::repo_resolver;
 use super::spawn::{
     derive_session_id, find_live_engineer_for_goal, lock_state, typed_ooda_state_root,
 };
+use crate::engineer_worktree::read_engineer_claim_full;
 use crate::ooda_actions::make_outcome;
 
 pub(crate) fn run(
@@ -327,21 +328,58 @@ impl LiveGoalSessionEffects<'_, '_> {
             ));
         }
         self.require_goal_repository(goal_id, &spawn.repository)?;
-        let (goal_repo, already_assigned) = {
-            let guard = lock_state(self.state);
-            let goal = guard
-                .active_goals
-                .active
-                .iter()
-                .find(|goal| goal.id == goal_id)
-                .ok_or_else(|| EffectExecutionError::permanent("goal disappeared before spawn"))?;
-            (goal.repo.clone(), goal.assigned_to.is_some())
+        let goal_repo = {
+            let mut guard = lock_state(self.state);
+            let (goal_repo, already_assigned) = {
+                let goal = guard
+                    .active_goals
+                    .active
+                    .iter()
+                    .find(|goal| goal.id == goal_id)
+                    .ok_or_else(|| {
+                        EffectExecutionError::permanent("goal disappeared before spawn")
+                    })?;
+                (goal.repo.clone(), goal.assigned_to.is_some())
+            };
+            if already_assigned {
+                // Presence guard (issue #4578): an assigned goal's worktree can
+                // be reaped out of band by the concurrent GC/reaper. Only keep
+                // the existing engineer when its checkout is still on disk;
+                // otherwise clear the stale assignment + map entry and fall
+                // through to a clean re-provision instead of failing
+                // permanently with a missing-workspace fault.
+                let present = guard
+                    .engineer_worktrees
+                    .get(goal_id)
+                    .map(|worktree| worktree.is_present())
+                    .unwrap_or(false);
+                if present {
+                    return Ok(EffectResult::Succeeded {
+                        evidence: vec![EvidenceRef::EngineerRun {
+                            session_id: format!("engineer-{goal_id}"),
+                            claim_key: spawn.claim_key.clone(),
+                        }],
+                    });
+                }
+                tracing::warn!(
+                    target: "simard::engineer_worktree",
+                    event = "engineer_worktree.reaped_before_reuse",
+                    goal_id,
+                    action = "reprovision",
+                    "assigned engineer worktree reaped before reuse; re-provisioning",
+                );
+                if let Some(goal) = guard
+                    .active_goals
+                    .active
+                    .iter_mut()
+                    .find(|goal| goal.id == goal_id)
+                {
+                    goal.assigned_to = None;
+                }
+                guard.engineer_worktrees.remove(goal_id);
+            }
+            goal_repo
         };
-        if already_assigned {
-            return Err(EffectExecutionError::permanent(
-                "goal already has an assigned engineer",
-            ));
-        }
         // The spawn repository is already admitted against the normalized goal
         // repository by `require_goal_repository` above (which routes through
         // the single `goal_repository` -> `RepositoryRef::from_goal_slug`
@@ -360,17 +398,33 @@ impl LiveGoalSessionEffects<'_, '_> {
         }
         let state_root = typed_ooda_state_root();
         if let Some(path) = find_live_engineer_for_goal(&state_root, goal_id) {
-            let session_id = path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("existing-engineer")
-                .to_string();
-            return Ok(EffectResult::Succeeded {
-                evidence: vec![EvidenceRef::EngineerRun {
-                    session_id,
-                    claim_key: spawn.claim_key.clone(),
-                }],
-            });
+            // Presence guard (issue #4578): discovery holds only a PathBuf, so
+            // re-read the claim sentinel with the same primitive is_present()
+            // wraps immediately before reporting the existing engineer. If the
+            // reaper removed the checkout between discovery and reuse, warn and
+            // fall through to allocate() a clean replacement rather than
+            // returning a stale Succeeded that crashes the next cycle.
+            if read_engineer_claim_full(&path).is_some() {
+                let session_id = path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("existing-engineer")
+                    .to_string();
+                return Ok(EffectResult::Succeeded {
+                    evidence: vec![EvidenceRef::EngineerRun {
+                        session_id,
+                        claim_key: spawn.claim_key.clone(),
+                    }],
+                });
+            }
+            tracing::warn!(
+                target: "simard::engineer_worktree",
+                event = "engineer_worktree.reaped_before_reuse",
+                goal_id,
+                worktree = %path.display(),
+                action = "reprovision",
+                "discovered engineer worktree reaped before reuse; re-provisioning",
+            );
         }
         let parent_repo =
             repo_resolver::resolve_goal_repo(goal_repo.as_deref()).map_err(|error| {
