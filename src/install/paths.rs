@@ -341,4 +341,62 @@ mod tests {
         drop(first);
         acquire_install_lock(&layout).expect("lock should be available after guard drop");
     }
+
+    // ── Deflake #4559: flock exclusivity is deterministic under repeat ───────
+    //
+    // The self-deploy canary gate flaked because `install_lock_is_exclusive_per_
+    // simard_home` intermittently saw a spurious flock `EAGAIN` when full-parallel
+    // canaries oversubscribed the CPU (observed load avg 73–158) and widened the
+    // fd-inheritance window. The real guard is the `install` serial key (#4536,
+    // enforced by serial_isolation_guard.rs) plus std's default `O_CLOEXEC` on the
+    // lock fd — no extra product flag is needed. This test pins the exclusivity +
+    // re-acquire-after-drop contract deterministically across many iterations
+    // while actively inducing oversubscription, so a residual EAGAIN flake fails
+    // here rather than in the canary gate.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial(install)]
+    fn install_lock_exclusivity_is_deterministic_under_repeat() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let hog_count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let hogs: Vec<_> = (0..hog_count)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        std::hint::spin_loop();
+                    }
+                })
+            })
+            .collect();
+
+        for i in 0..25 {
+            let temp = tempfile::TempDir::new().expect("tempdir");
+            let layout = layout(&temp.path().join("simard-home"));
+
+            let first = acquire_install_lock(&layout).expect("first lock");
+            let error = acquire_install_lock(&layout)
+                .expect_err("second lock for same SIMARD_HOME should fail")
+                .to_string();
+            assert!(
+                error.contains("another simard install appears to be running"),
+                "iteration {i}: {error}"
+            );
+
+            drop(first);
+            acquire_install_lock(&layout).unwrap_or_else(|e| {
+                panic!("iteration {i}: re-acquire after drop must succeed: {e}")
+            });
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        for h in hogs {
+            let _ = h.join();
+        }
+    }
 }

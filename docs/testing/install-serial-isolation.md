@@ -340,6 +340,11 @@ modules; `git diff` touches only install files.
 - [De-flaking the known flaky tests](./deflaking-known-flaky-tests.md) — the
   prompt-delivery env race and goal-board state-root race, the companion
   parallel-`cargo test` de-flakes.
+- [De-flaking the local canary deploy-gate under CPU oversubscription](./deploy-gate-oversubscription-deflake.md)
+  — confirms the `install_lock_is_exclusive_per_simard_home` `flock` EAGAIN
+  fork-inheritance flake (#4559) stays closed under oversubscription via this
+  page's `serial(install)` key (no new product code), alongside the dispatch and
+  terminal-sleep timing fixes (#4560).
 - [serial(cognitive_memory) test isolation](./cognitive-memory-serial-isolation.md)
   — the whole-binary watched-env contract and the `serial_guard` meta-test that
   this dedicated `install` key deliberately stays orthogonal to.

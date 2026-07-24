@@ -475,6 +475,10 @@ CI); any change to CI workflow definitions.
   — the whole-binary watched-env contract and the `serial_guard` meta-test.
 - [CI-resilient test patterns](./ci-resilient-test-patterns.md) — companion
   patterns (lazy config resolution, serial env-var tests).
+- [De-flaking the local canary deploy-gate under CPU oversubscription](./deploy-gate-oversubscription-deflake.md)
+  — the `flock` fork-inheritance flake (closed by the existing `serial(install)`
+  key) and the wall-clock/terminal-deadline
+  fixes that keep the local canary unit-test gate green under full-parallel load.
 - [Subprocess prompt delivery](../prompt-delivery.md) — the `prompt_delivery`
   module, `select_mode`, and `ENV_OVERRIDE`.
 - [Goal-board API](../reference/goal-board-api.md) — the dashboard goal-CRUD

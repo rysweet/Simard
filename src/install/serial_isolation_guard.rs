@@ -93,6 +93,10 @@ const REQUIRED_INSTALL_TESTS: &[(&str, &str)] = &[
         "src/install/paths.rs",
         "install_lock_is_exclusive_per_simard_home",
     ),
+    (
+        "src/install/paths.rs",
+        "install_lock_exclusivity_is_deterministic_under_repeat",
+    ),
 ];
 
 /// A function is a test if any attribute's path ends in `test`

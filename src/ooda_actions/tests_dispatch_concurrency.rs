@@ -169,12 +169,15 @@ fn concurrent_dispatch_parallelizes_and_respects_cap() {
         "cap=1 must serialize dispatch; peak={peak_serial}"
     );
 
-    // The cap=N run must be substantially faster than the cap=1 run. This is
-    // robust to per-call overhead (both runs incur the same N input builds);
-    // only the sleep parallelizes.
+    // Deflake #4560: the real concurrency guarantee is carried by the
+    // deterministic logical assertions above (peak_parallel >= 2, peak_serial
+    // <= 1). The wall-clock comparison is kept only as a weak, oversubscription-
+    // tolerant sanity bound: under full-parallel canary CPU oversubscription
+    // (observed load avg 73–158) a strict >=2x speedup flakes, so we merely
+    // require the parallel run not to be slower than the serialized run.
     assert!(
-        parallel_elapsed * 2 <= serial_elapsed,
-        "concurrent dispatch must be >=2x faster than serialized: parallel={parallel_elapsed:?}, serial={serial_elapsed:?}"
+        parallel_elapsed <= serial_elapsed,
+        "concurrent dispatch must not be slower than serialized: parallel={parallel_elapsed:?}, serial={serial_elapsed:?}"
     );
 }
 
@@ -267,4 +270,108 @@ fn one_failing_advance_does_not_abort_others() {
     assert_eq!(outcomes[0].action.goal_id.as_deref(), Some("adv-ok-a"));
     assert_eq!(outcomes[1].action.goal_id.as_deref(), Some("adv-fail-b"));
     assert_eq!(outcomes[2].action.goal_id.as_deref(), Some("adv-ok-c"));
+}
+
+// ── Deflake #4560a: oversubscription-tolerant logical concurrency contract ───
+//
+// The self-deploy canary gate flaked because `concurrent_dispatch_parallelizes_
+// and_respects_cap` asserted a wall-clock speedup ratio (`parallel*2 <= serial`)
+// that does not hold when full-parallel canaries oversubscribe the CPU (observed
+// load avg 73–158). The REAL guarantee dispatch must provide is LOGICAL, not a
+// wall-clock ratio: with cap=N the slow `run_turn`s overlap (peak >= 2), with
+// cap=1 they serialize (peak <= 1), and each goal's `run_turn` fires exactly
+// once. This test pins that logical contract while actively inducing CPU
+// oversubscription, so it stays deterministic regardless of scheduler pressure.
+
+/// Spins up CPU-hog threads to simulate the full-parallel canary
+/// oversubscription under which wall-clock assertions flake. The hogs stop and
+/// join when the guard is dropped.
+struct CpuHogs {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    handles: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl CpuHogs {
+    fn spawn() -> Self {
+        let count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handles = (0..count)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        std::hint::spin_loop();
+                    }
+                })
+            })
+            .collect();
+        Self { stop, handles }
+    }
+}
+
+impl Drop for CpuHogs {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        for h in self.handles.drain(..) {
+            let _ = h.join();
+        }
+    }
+}
+
+#[test]
+fn concurrent_dispatch_logical_guarantees_hold_under_oversubscription() {
+    let _hogs = CpuHogs::spawn();
+
+    let ids = ["over-0", "over-1", "over-2", "over-3"];
+    let actions: Vec<PlannedAction> = ids.iter().map(|id| advance_action(id)).collect();
+
+    let instr = Arc::new(Instrumentation::default());
+    let mut memories = test_memories();
+    memories.session_factory = Some(Arc::new(FakeFactory {
+        instr: Arc::clone(&instr),
+        sleep: Duration::from_millis(200),
+        response: "NO ACTION\nREASON: oversubscription logical test no-op".to_string(),
+        fail_substring: None,
+    }));
+    let mut state = OodaState::new(board_with_unassigned_goals(&ids));
+
+    // cap = N → the slow run_turns must overlap (logical parallelism), even
+    // when every core is already saturated by the hog threads.
+    let outcomes =
+        dispatch_actions_bounded(&actions, &mut memories, &mut state, ids.len()).unwrap();
+    assert_eq!(outcomes.len(), ids.len());
+    for o in &outcomes {
+        assert!(o.success, "NO ACTION dispatch should succeed: {}", o.detail);
+    }
+    assert_eq!(
+        instr.run_count.load(Ordering::SeqCst),
+        ids.len(),
+        "each goal's run_turn must be invoked exactly once under cap=N"
+    );
+    let peak_parallel = instr.peak.load(Ordering::SeqCst);
+    assert!(
+        peak_parallel >= 2,
+        "cap=N must overlap slow run_turns even under oversubscription; peak={peak_parallel}"
+    );
+
+    // NO ACTION leaves goals NotStarted + unassigned, so the same state is
+    // reusable for a serialized run.
+    instr.run_count.store(0, Ordering::SeqCst);
+    instr.peak.store(0, Ordering::SeqCst);
+    instr.live.store(0, Ordering::SeqCst);
+
+    // cap = 1 → dispatch must serialize regardless of load (peak never > 1).
+    let _ = dispatch_actions_bounded(&actions, &mut memories, &mut state, 1).unwrap();
+    let peak_serial = instr.peak.load(Ordering::SeqCst);
+    assert!(
+        peak_serial <= 1,
+        "cap=1 must serialize dispatch regardless of load; peak={peak_serial}"
+    );
+    assert_eq!(
+        instr.run_count.load(Ordering::SeqCst),
+        ids.len(),
+        "cap=1 still runs every goal exactly once"
+    );
 }

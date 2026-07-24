@@ -8,7 +8,9 @@ fn test_interruptible_sleep_returns_immediately_on_shutdown() {
     let shutdown = AtomicBool::new(true);
     let start = Instant::now();
     interruptible_sleep(Duration::from_secs(60), &shutdown);
-    assert!(start.elapsed() < Duration::from_secs(1));
+    // Deflake #4560: 1s → 5s tolerates canary CPU oversubscription; still a
+    // 12x margin below the 60s sleep this early-return guards against.
+    assert!(start.elapsed() < Duration::from_secs(5));
 }
 
 #[test]
@@ -157,7 +159,9 @@ fn interruptible_sleep_very_short_duration() {
     let shutdown = AtomicBool::new(false);
     let start = Instant::now();
     interruptible_sleep(Duration::from_millis(1), &shutdown);
-    assert!(start.elapsed() < Duration::from_secs(1));
+    // Deflake #4560: 1s → 5s tolerates canary CPU oversubscription for this
+    // ~1ms sleep's completion deadline.
+    assert!(start.elapsed() < Duration::from_secs(5));
 }
 
 #[test]
@@ -168,4 +172,80 @@ fn dashboard_config_fields_are_independent() {
     };
     assert!(!config.enabled);
     assert_eq!(config.port, 3000);
+}
+
+// ── Deflake #4560b: oversubscription-tolerant interruptible_sleep bounds ──────
+//
+// The self-deploy canary gate flaked because the shutdown fast-return and
+// very-short-completion assertions used a 1s ceiling that does not hold when
+// full-parallel canaries oversubscribe the CPU (observed load avg 73–158). The
+// robust contract is a 5s ceiling: still 12x below the 60s guarded sleep, so a
+// genuine no-wake hang is caught, but tolerant of scheduler pressure. These
+// tests pin that contract under actively induced oversubscription and repeat to
+// expose any residual flake.
+
+/// Spins up CPU-hog threads to simulate the full-parallel canary
+/// oversubscription under which the 1s bounds flaked. Stops and joins on drop.
+struct CpuHogs {
+    stop: Arc<AtomicBool>,
+    handles: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl CpuHogs {
+    fn spawn() -> Self {
+        let count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let stop = Arc::new(AtomicBool::new(false));
+        let handles = (0..count)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        std::hint::spin_loop();
+                    }
+                })
+            })
+            .collect();
+        Self { stop, handles }
+    }
+}
+
+impl Drop for CpuHogs {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        for h in self.handles.drain(..) {
+            let _ = h.join();
+        }
+    }
+}
+
+#[test]
+fn interruptible_sleep_shutdown_return_is_oversubscription_tolerant() {
+    let _hogs = CpuHogs::spawn();
+    for i in 0..20 {
+        let shutdown = AtomicBool::new(true);
+        let start = Instant::now();
+        interruptible_sleep(Duration::from_secs(60), &shutdown);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "iteration {i}: already-shutdown sleep must fast-return under oversubscription, took {elapsed:?}"
+        );
+    }
+}
+
+#[test]
+fn interruptible_sleep_short_completion_is_oversubscription_tolerant() {
+    let _hogs = CpuHogs::spawn();
+    for i in 0..20 {
+        let shutdown = AtomicBool::new(false);
+        let start = Instant::now();
+        interruptible_sleep(Duration::from_millis(1), &shutdown);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "iteration {i}: very-short sleep must complete promptly under oversubscription, took {elapsed:?}"
+        );
+    }
 }

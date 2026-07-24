@@ -687,7 +687,10 @@ mod tests {
         let shutdown = AtomicBool::new(true);
         let start = Instant::now();
         interruptible_sleep(Duration::from_secs(60), &shutdown);
-        assert!(start.elapsed() < Duration::from_secs(1));
+        // Deflake #4560: widened 1s → 5s so full-parallel canary CPU
+        // oversubscription can't push the (near-instant) early-return past the
+        // deadline. Still a 12x margin below the 60s it guards against.
+        assert!(start.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
