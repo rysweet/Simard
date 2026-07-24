@@ -471,6 +471,7 @@ nav:
     - Supply-Chain Advisory Stewardship: reference/supply-chain-advisory-stewardship.md
     - amplihack Pin Bump to Upstream main (#2626): reference/amplihack-pin-bump-2626.md
     - Release Integrity (SBOM + Signing): reference/release-integrity.md
+    - Idempotent Release Publishing: reference/release-idempotency.md
     - Distill Raw-Capture on Parse Failure: reference/distill-raw-capture-on-parse-failure.md
     - Cognitive-Thread Scheduling: reference/cognitive-thread-scheduling.md
     - Creative Ideas Subsystem API: reference/creative-ideas-api.md
