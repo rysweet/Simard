@@ -508,6 +508,7 @@ nav:
     - Writing Hermetic Tests: testing/hermetic-tests.md
     - serial(cognitive_memory) Isolation: testing/cognitive-memory-serial-isolation.md
     - De-Flaking Known Flaky Tests: testing/deflaking-known-flaky-tests.md
+    - Deploy-Canary Scaler Env Hermeticity: testing/deploy-canary-scaler-env-hermeticity.md
   - Ecosystem & Audits:
     - Amplihack Ecosystem Map: ecosystem-map.md
     - amplihack-rs ↔ amplihack Parity Matrix: amplihack-rs-parity.md
