@@ -152,9 +152,13 @@ The other **four** never `exec` — `classify` short-circuits *before*
 (`classify_broken_symlink_is_foreign`). They are serialized with the group
 **anyway**. Serializing at the whole-`mod unix::tests` boundary (rather than
 cherry-picking only the four spawning members) is deliberate defense-in-depth: it
-keeps every member from running concurrently with a spawning sibling, and
-future-proofs the file so a newly-added test in this module can't silently
-re-open the window:
+keeps every member from running concurrently with a spawning sibling, and keeps
+the serial-key convention uniform across the whole group. This is a maintainer
+convention backed by an **allowlist** guard, not an automatic guarantee: the
+regression guard enforces the key only on the forking install tests it already
+knows about, so a newly-added test that omits the key still runs in parallel and
+could re-open the window until it is added (see
+[Adding a new install test](#adding-a-new-install-test)):
 
 ```rust
 // src/install/entrypoint.rs — mod unix::tests
