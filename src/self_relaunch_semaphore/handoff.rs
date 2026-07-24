@@ -90,10 +90,16 @@ pub fn coordinated_handoff(my_pid: u32, config: &HandoffConfig) -> SimardResult<
     // 3. Verify gates.
     let gate_results = verify_canary(&canary_path, &config.gates, &config.relaunch)?;
     if !all_gates_passed(&gate_results) {
+        // Redact URL-embedded credentials (SEC-D2) before the raw gate detail
+        // reaches the error `reason`, which propagates through
+        // `coordinated_relaunch` into the daemon's restart-error logging. The
+        // #4558 detail enlargement (200B→4096B + stdout capture) widened what a
+        // failing test's output can carry here, so this must be credential-safe
+        // like the `overseer::deploy` path, not a raw `Display`.
         let failures: Vec<String> = gate_results
             .iter()
             .filter(|g| !g.passed)
-            .map(|g| g.to_string())
+            .map(|g| crate::self_deploy::source_prep::redact_credentials(&g.to_string()))
             .collect();
         return Err(SimardError::RpcCallFailed {
             endpoint: "handoff".to_string(),

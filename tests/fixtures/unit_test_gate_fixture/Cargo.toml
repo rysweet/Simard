@@ -1,0 +1,15 @@
+[package]
+name = "unit_test_gate_fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Standalone workspace root: the fixture is NOT a member of the `simard`
+# package. The `unit-test` canary gate builds it in isolation via
+# `--manifest-path`, so it must never inherit a parent workspace (which would
+# make `cargo test --manifest-path <this>/Cargo.toml` try to resolve the whole
+# simard tree). An empty `[workspace]` table pins it as its own root.
+[workspace]
+
+[lib]
+path = "lib.rs"
