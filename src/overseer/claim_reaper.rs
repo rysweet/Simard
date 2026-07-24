@@ -928,8 +928,21 @@ fn collect_worktree_evidence(worktree: &std::path::Path) -> String {
                 continue;
             }
             if meta.is_dir() {
-                // Skip .git internals — noise, not diagnostic evidence.
-                if path.file_name().and_then(|n| n.to_str()) != Some(".git") {
+                // Skip noise directories that are NEVER the engineer's real
+                // diagnostic transcript:
+                //   * `.git` — internal object store.
+                //   * `target` — Cargo build / test / operator-probe output. Its
+                //     `operator-probe-state/**` and `test-state/**` fixtures carry
+                //     canned `error_reflection.json` blobs (e.g. a bogus
+                //     `NOT_A_REPO: '/tmp/simard-engineer-loop-not-a-repo-*'`) that,
+                //     being freshly rewritten each run, sort NEWEST and evict the
+                //     real transcript from the bounded MAX_FILES window — manu-
+                //     facturing a false "cause of death" for the investigator
+                //     (issue #4449). The genuine engineer transcript lives outside
+                //     `target/` (recipe-runner logs, `.claude/runtime/`, session
+                //     state), so skipping the whole subtree is safe.
+                let dir_name = path.file_name().and_then(|n| n.to_str());
+                if !matches!(dir_name, Some(".git") | Some("target")) {
                     stack.push(path);
                 }
                 continue;
@@ -2375,8 +2388,53 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    // =========================================================================
-    // CROSS-TICK DEDUP + BOUNDED JOURNAL (PR #4403 crusty findings, issue #4400)
+    #[test]
+    fn collect_worktree_evidence_skips_target_probe_fixtures() {
+        // Regression for issue #4449 (grounded in the false-positive reap of goal
+        // `advance-rysweet-agent-kgpacks-rs-to-full-parity-f29bb15c`): Cargo's
+        // `target/operator-probe-state/**` and `target/test-state/**` carry canned
+        // `error_reflection.json` fixtures. Being rewritten each run they sort
+        // NEWEST and, under the bounded MAX_FILES window, evict the real engineer
+        // transcript — surfacing a bogus `NOT_A_REPO` probe path as the apparent
+        // cause of death. The collector must skip the entire `target/` subtree.
+        let tmp = std::env::temp_dir().join(format!(
+            "reap-target-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let worktree = tmp.join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        // The canned probe fixture that manufactured the false positive.
+        let probe = worktree.join("target/operator-probe-state/engineer-loop-run");
+        std::fs::create_dir_all(&probe).unwrap();
+        std::fs::write(
+            probe.join("error_reflection.json"),
+            "{\"error_message\":\"NOT_A_REPO: '/tmp/simard-engineer-loop-not-a-repo-123' is not inside a valid git worktree\"}",
+        )
+        .unwrap();
+        // A real engineer transcript elsewhere in the worktree.
+        std::fs::write(
+            worktree.join("engineer-transcript.log"),
+            "real engineer transcript: terminal-foundation-ok",
+        )
+        .unwrap();
+
+        let evidence = collect_worktree_evidence(&worktree);
+        assert!(
+            !evidence.contains("NOT_A_REPO"),
+            "target/ probe fixtures must never be archived as engineer evidence: {evidence}"
+        );
+        assert!(
+            evidence.contains("real engineer transcript"),
+            "the genuine transcript outside target/ must still be collected: {evidence}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
     //
     // Finding 1 [CRITICAL] — every overseer tick re-archived evidence AND
     // re-launched a fresh investigation for the SAME still-stale engineer
