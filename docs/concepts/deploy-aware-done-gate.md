@@ -8,7 +8,9 @@ doc_type: concept
 related:
   - progress-evidence-gating.md
   - reconcile-and-self-deploy.md
+  - cross-repo-completion-reconciliation.md
   - ../reference/completion-evidence-gate-api.md
+  - ../reference/cross-repo-merged-pr-evidence.md
   - ../howto/diagnose-a-rejected-goal-completion.md
   - ../operations/progress-evidence-kill-switch.md
   - ../howto/self-maintain-dependency-pins.md
@@ -78,7 +80,12 @@ A goal may transition to `Completed` — or be archived as complete — only whe
 
 1. **Merged PR.** The goal's `wip_refs` include a pull request that is actually
    **merged** (verified, not merely referenced), or a merged PR references the
-   goal's linked issue.
+   goal's linked issue. The merge check is **repo-relative** — it resolves against
+   the goal's own target repository and reads the persisted PR linkage (numeric
+   `ref_id` **or** `url`), so a PR merged in a non-Simard ecosystem repo satisfies
+   this clause instead of re-blocking every cycle. See
+   [cross-repo completion reconciliation](cross-repo-completion-reconciliation.md)
+   ([#4375](https://github.com/rysweet/Simard/issues/4375)).
 2. **Closed issue.** The goal's linked issue is **closed**.
 3. **Deployed-and-running** *(self-affecting changes only)*. For a change to
    Simard's own running code — a goal whose `repo` is the Simard repo (the
@@ -171,6 +178,8 @@ its done-when wording.
 ## See also
 
 - [Completion-evidence gate API reference](../reference/completion-evidence-gate-api.md)
+- [Cross-repo completion reconciliation](cross-repo-completion-reconciliation.md) — repo-relative merged-PR evidence.
+- [Cross-repo merged-PR evidence API reference](../reference/cross-repo-merged-pr-evidence.md)
 - [How to diagnose a rejected goal completion](../howto/diagnose-a-rejected-goal-completion.md)
 - [Progress-evidence gating](progress-evidence-gating.md) — the sibling percent-increase gate.
 - [reconcile-and-self-deploy](reconcile-and-self-deploy.md) — the deploy evidence source.

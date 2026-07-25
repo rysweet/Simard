@@ -633,6 +633,63 @@ impl GhCliEvidenceSource {
         }
     }
 
+    /// Resolve the `(owner/repo, pr_number)` the merged-PR gate must query for
+    /// `goal`, honoring each goal's OWN target repo and its persisted PR linkage
+    /// (issue #4375). Returns `None` when the goal carries no resolvable PR
+    /// reference at all — the caller treats that as "no merge evidence" and
+    /// blocks without a network call (fail-closed).
+    ///
+    /// How the `(repo, number)` pair is sourced depends on where the number
+    /// comes from:
+    ///
+    /// * **Number** — the numeric `WipRef.ref_id` when present; otherwise the
+    ///   number recovered from the PR `WipRef.url` (`.../pull/<digits>`).
+    /// * **Repo** — when the number came from a numeric `ref_id`, the repo is
+    ///   resolved independently: an already-qualified `goal.repo` wins, else the
+    ///   repo recovered from the PR URL, else the bare/`None` `goal.repo`
+    ///   resolved via [`repo_slug`] (default `rysweet/Simard`). This is the one
+    ///   *mixed-source* case — number from `ref_id`, repo possibly from the URL
+    ///   or `goal.repo` — and it still fails closed: if the two disagree, the
+    ///   subsequent `gh` query finds no matching merged PR and archival is
+    ///   blocked. When instead the number came from the URL, the repo is taken
+    ///   from that **same** URL so the pair is strictly single-source — a
+    ///   qualified `goal.repo` does **not** override a URL-derived number.
+    ///
+    /// Pure and network-free: this never spawns a subprocess and never touches
+    /// the filesystem, so a goal reconciles deterministically every OODA cycle.
+    fn resolve_pr_target(&self, goal: &ActiveGoal) -> Option<(String, String)> {
+        let pr = goal
+            .wip_refs
+            .iter()
+            .find(|r| r.kind.eq_ignore_ascii_case("pr"))?;
+
+        let numeric_ref = {
+            let id = pr.ref_id.trim();
+            if is_ascii_digits(id) {
+                Some(id.to_string())
+            } else {
+                None
+            }
+        };
+        let url_target = pr.url.as_deref().and_then(parse_pr_url);
+
+        match (numeric_ref, url_target) {
+            // Number from a numeric `ref_id`: qualified goal.repo → URL repo →
+            // bare/None goal.repo (default rysweet/Simard).
+            (Some(num), url) => {
+                let repo = qualified_goal_repo(goal)
+                    .or_else(|| url.map(|(repo, _)| repo))
+                    .unwrap_or_else(|| self.repo_slug(goal));
+                Some((repo, num))
+            }
+            // No numeric `ref_id`: recover BOTH repo and number atomically from
+            // the PR URL. This is the kgpacks failure mode (URL-only linkage).
+            (None, Some((repo, num))) => Some((repo, num)),
+            // Neither a numeric ref_id nor a parseable URL ⇒ nothing to query.
+            (None, None) => None,
+        }
+    }
+
     /// Run `gh <kind> view <num> --repo <repo> --json state --jq .state` and
     /// return the trimmed state string (e.g. `MERGED`, `CLOSED`, `OPEN`).
     fn gh_state(&self, kind: &str, repo: &str, num: &str) -> SimardResult<String> {
@@ -666,15 +723,111 @@ fn first_ref_of_kind<'a>(goal: &'a ActiveGoal, want: &str) -> Option<&'a str> {
         .map(|r| r.ref_id.as_str())
 }
 
+/// True iff `s` is a non-empty run of ASCII digits. Used to validate a PR
+/// number before it is ever handed to the `gh` CLI.
+fn is_ascii_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// True iff `s` is a safe single path component for an `owner/repo` slug:
+/// non-empty, no leading `-` (which would be read by `gh` as a flag), and only
+/// `[A-Za-z0-9._-]`. This is the argument-injection defense for `--repo`.
+fn is_safe_slug_component(s: &str) -> bool {
+    !s.is_empty()
+        && !s.starts_with('-')
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+}
+
+/// True iff `slug` is a safe `owner/repo` with both components passing
+/// [`is_safe_slug_component`].
+fn is_safe_repo_slug(slug: &str) -> bool {
+    match slug.split_once('/') {
+        Some((owner, repo)) => is_safe_slug_component(owner) && is_safe_slug_component(repo),
+        None => false,
+    }
+}
+
+/// The already-qualified `owner/repo` of a goal, if it carries one. `None`,
+/// `"Simard"`, or a bare (owner-less) slug return `None` so the caller can fall
+/// through to URL- or default-based resolution.
+fn qualified_goal_repo(goal: &ActiveGoal) -> Option<String> {
+    match &goal.repo {
+        Some(r) if r.contains('/') && !r.eq_ignore_ascii_case("Simard") => Some(r.clone()),
+        _ => None,
+    }
+}
+
+/// Parse a GitHub pull-request URL into `(owner/repo, pr_number)`.
+///
+/// Total and panic-free: any input that is not a `.../<owner>/<repo>/pull/<digits>`
+/// URL (optionally followed by `/…`) returns `None`. Both the recovered
+/// `owner`/`repo` components and the number are validated so nothing that could
+/// be an argument-injection vector into the `gh` CLI (leading `-`, whitespace,
+/// non-digit "number") ever survives parsing. Input length is bounded so
+/// pathological URLs cannot trigger unbounded work.
+///
+/// This is deliberately conservative — an issue URL (`.../issues/<n>`), a
+/// missing number, or a malformed slug all yield `None` rather than a guess, so
+/// the merged-PR gate never mistakes a non-PR link for merge evidence.
+fn parse_pr_url(url: &str) -> Option<(String, String)> {
+    const MAX_URL_LEN: usize = 2048;
+    if url.len() > MAX_URL_LEN {
+        tracing::debug!(len = url.len(), "parse_pr_url: input exceeds length cap");
+        return None;
+    }
+
+    let idx = url.find("/pull/")?;
+    let before = &url[..idx];
+    let after = &url[idx + "/pull/".len()..];
+
+    // PR number = the leading run of ASCII digits immediately after `/pull/`.
+    let num: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if num.is_empty() {
+        tracing::debug!("parse_pr_url: no PR number after /pull/");
+        return None;
+    }
+    // Whatever follows the number must be end-of-string or a path separator
+    // (`/pull/42`, `/pull/42/files`) — never trailing junk (`/pull/42x`).
+    let rest = &after[num.len()..];
+    if !(rest.is_empty() || rest.starts_with('/')) {
+        tracing::debug!("parse_pr_url: unexpected characters after PR number");
+        return None;
+    }
+
+    // owner/repo = the last two path segments before `/pull/`.
+    let mut segs = before.rsplit('/');
+    let repo = segs.next()?;
+    let owner = segs.next()?;
+    if !is_safe_slug_component(owner) || !is_safe_slug_component(repo) {
+        tracing::debug!("parse_pr_url: owner/repo failed slug validation");
+        return None;
+    }
+    Some((format!("{owner}/{repo}"), num))
+}
+
 impl EvidenceSource for GhCliEvidenceSource {
     fn any_pr_merged(&self, goal: &ActiveGoal) -> SimardResult<bool> {
-        match first_ref_of_kind(goal, "pr") {
-            // No tracked PR ⇒ no merge evidence (block, cheaply, no network).
+        match self.resolve_pr_target(goal) {
+            // No resolvable PR ⇒ no merge evidence (block, cheaply, no network).
             None => Ok(false),
-            Some(num) => {
-                let repo = self.repo_slug(goal);
+            Some((repo, num)) => {
+                // Defense-in-depth: never hand an unvalidated slug/number to the
+                // `gh` CLI. The resolver already validates URL-derived values;
+                // this also covers a qualified `goal.repo` supplied upstream.
+                // A validation failure fails **closed** (block), never silently
+                // passes.
+                if !is_safe_repo_slug(&repo) || !is_ascii_digits(&num) {
+                    tracing::warn!(
+                        goal_id = %goal.id,
+                        repo,
+                        num,
+                        "resolved PR target failed slug/number validation; failing closed"
+                    );
+                    return Ok(false);
+                }
                 Ok(self
-                    .gh_state("pr", &repo, num)?
+                    .gh_state("pr", &repo, &num)?
                     .eq_ignore_ascii_case("MERGED"))
             }
         }
@@ -686,6 +839,21 @@ impl EvidenceSource for GhCliEvidenceSource {
             None => Ok(true),
             Some(num) => {
                 let repo = self.repo_slug(goal);
+                // Defense-in-depth: the issue number is an untrusted `WipRef.ref_id`
+                // and `repo_slug` may echo an unvalidated `goal.repo`. Never hand a
+                // non-digit number or an unsafe slug (e.g. a leading `-` that `gh`
+                // reads as a flag) to the subprocess. A validation failure fails
+                // **closed** (issue treated as still open → blocks archival),
+                // mirroring `any_pr_merged`.
+                if !is_safe_repo_slug(&repo) || !is_ascii_digits(num) {
+                    tracing::warn!(
+                        goal_id = %goal.id,
+                        repo,
+                        num,
+                        "issue target failed slug/number validation; failing closed"
+                    );
+                    return Ok(false);
+                }
                 Ok(self
                     .gh_state("issue", &repo, num)?
                     .eq_ignore_ascii_case("CLOSED"))

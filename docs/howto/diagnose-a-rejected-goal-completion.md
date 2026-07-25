@@ -8,7 +8,9 @@ doc_type: howto
 status: implemented
 related:
   - ../concepts/deploy-aware-done-gate.md
+  - ../concepts/cross-repo-completion-reconciliation.md
   - ../reference/completion-evidence-gate-api.md
+  - ../reference/cross-repo-merged-pr-evidence.md
   - ../howto/verify-and-roll-back-a-self-deploy.md
   - ../howto/diagnose-rejected-progress-claims.md
   - ../operations/progress-evidence-kill-switch.md
@@ -86,6 +88,31 @@ a goal in that exact shape — `status=Completed`, no merged PR, issue open — 
 by a regression test (see
 [completion-evidence-gate API](../reference/completion-evidence-gate-api.md#archive-integration)).
 
+## Cross-repo re-block loop
+
+If a goal that `simard goal list` shows as **completed** re-emits
+
+```text
+OODA curate: completion BLOCKED for goal '<id>' — missing PR not merged
+```
+
+on **every** cycle even though its PR is merged, its merged PR most likely lives
+in another ecosystem repo (e.g. `rysweet/agent-kgpacks-rs`). The merged-PR check
+is repo-relative: it resolves against the goal's own target repo and reads the
+persisted PR linkage (numeric `ref_id` **or** `url`). Confirm both are present:
+
+- The goal carries a **qualified** `goal.repo` (`owner/repo`) *or* a `pr`
+  `WipRef` whose `url` is a full GitHub PR URL
+  (`https://github.com/<owner>/<repo>/pull/<num>`).
+- The `debug` trace shows the gate querying the **expected repo and PR number**.
+
+If neither the `ref_id` nor a parseable PR URL is present, re-link the merged PR
+in the goal's `wip_refs` (with its URL) so the gate can resolve it. For the
+design, see
+[cross-repo completion reconciliation](../concepts/cross-repo-completion-reconciliation.md)
+and the
+[cross-repo merged-PR evidence API reference](../reference/cross-repo-merged-pr-evidence.md).
+
 ## Override the gate (recovery only)
 
 If the gate itself is defective and is wrongly blocking a genuinely complete
@@ -103,6 +130,7 @@ to recover from a gate defect — never as normal operation — and re-enable th
 ## See also
 
 - [deploy-aware-done-gate concept](../concepts/deploy-aware-done-gate.md)
+- [Cross-repo completion reconciliation](../concepts/cross-repo-completion-reconciliation.md) — the cross-repo re-block loop and its fix.
 - [Completion-evidence gate API reference](../reference/completion-evidence-gate-api.md)
 - [How to verify and roll back a self-deploy](../howto/verify-and-roll-back-a-self-deploy.md)
 - [How to diagnose rejected progress claims](../howto/diagnose-rejected-progress-claims.md) — the sibling percent-increase gate.
