@@ -337,12 +337,27 @@ impl PtyTerminalSession {
                                     _ => {
                                         #[cfg(unix)]
                                         {
-                                            use std::os::unix::process::ExitStatusExt;
-                                            break std::process::ExitStatus::from_raw(0);
+                                            // SIGTERM did not reap the wedged
+                                            // shell within the grace window.
+                                            // Escalate to SIGKILL and block until
+                                            // it is reaped so we never leak a
+                                            // zombie, then report a NON-SUCCESS
+                                            // "timed out" status. A session we had
+                                            // to force-kill for hanging must never
+                                            // be reported as success — doing so
+                                            // silently masks a failed or hung turn
+                                            // as a passing one.
+                                            unsafe {
+                                                libc::kill(self.child.id() as i32, libc::SIGKILL);
+                                            }
+                                            let _ = self.child.wait();
+                                            break hung_session_timeout_status();
                                         }
                                         #[cfg(not(unix))]
                                         {
-                                            break self.child.wait().unwrap_or_default();
+                                            let _ = self.child.kill();
+                                            let _ = self.child.wait();
+                                            break hung_session_timeout_status();
                                         }
                                     }
                                 }
@@ -452,10 +467,35 @@ fn is_bash_shell(name: &str) -> bool {
     }
 }
 
+/// The exit status reported when a terminal session had to be force-killed
+/// after hanging past the idle timeout.
+///
+/// Code `124` mirrors `timeout(1)`'s "command timed out" convention and is
+/// deliberately **non-success**: a session we had to SIGTERM/SIGKILL because it
+/// wedged must never be reported as a passing turn. Returning a synthesized
+/// `exit 0` here previously masked a failed or hung turn (e.g. a one-shot
+/// terminal command that actually exited non-zero but whose interactive shell
+/// stalled on EOF under host load) as success.
+#[cfg(unix)]
+fn hung_session_timeout_status() -> ExitStatus {
+    use std::os::unix::process::ExitStatusExt;
+    // Encode as a normal `exit(124)` wait status: low byte 0 (not signalled),
+    // exit code in the high byte, so `.code()` == Some(124) and `.success()`
+    // == false.
+    ExitStatus::from_raw(124 << 8)
+}
+
+/// Non-unix counterpart: `ExitStatusExt::from_raw` takes the raw exit code
+/// directly, so a non-zero value is likewise non-success.
+#[cfg(not(unix))]
+fn hung_session_timeout_status() -> ExitStatus {
+    use std::os::windows::process::ExitStatusExt;
+    ExitStatus::from_raw(124)
+}
+
 /// Process names that indicate active LLM work is in progress.
 #[cfg(unix)]
 const WORK_PROCESS_NAMES: &[&str] = &["copilot", "node", "amplihack"];
-
 /// Return `true` if any descendant of `root_pid` (via `/proc`) is named one
 /// of the `WORK_PROCESS_NAMES`.  Used to suppress premature SIGTERM when
 /// transcript growth has stopped but the LLM is still computing silently.
@@ -645,6 +685,25 @@ mod tests {
     }
 
     // ── has_active_work_processes ─────────────────────────────────────────────
+
+    /// A force-killed hung session must NEVER be reported as success. The status
+    /// synthesized on the SIGTERM/SIGKILL idle-timeout path must be non-success
+    /// and carry the `timeout(1)` code 124 so `describe_terminal_failure`
+    /// surfaces an actionable "timed out" diagnostic instead of silently passing.
+    #[test]
+    fn hung_session_timeout_status_is_never_success() {
+        let status = hung_session_timeout_status();
+        assert!(
+            !status.success(),
+            "a session we had to force-kill for hanging must not be success"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            status.code(),
+            Some(124),
+            "hung-session status must carry the timeout(1) exit code 124"
+        );
+    }
 
     /// A PID that virtually cannot exist (u32::MAX - 1) must return false
     /// without panicking — the function must be race-safe for vanished PIDs.

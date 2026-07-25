@@ -11,12 +11,26 @@
 //! ## Durability model
 //!
 //! 1. Build the whole record (`line` + one `\n`) in a single buffer.
-//! 2. Take a process-global, poison-tolerant append mutex so no two in-process
-//!    threads write at once.
+//! 2. Take a process-global, poison-tolerant append mutex. This is what
+//!    guarantees no two in-process threads interleave or drop a record: every
+//!    append is fully serialized, so read-back always sees exactly one intact
+//!    line per successful call.
 //! 3. Open the file `O_CREAT | O_APPEND` and emit the record with ONE
-//!    `write_all`, then `flush`. Records stay well under `PIPE_BUF`, so a lone
-//!    `O_APPEND` `write()` is atomic at EOF — durable across *processes* too.
+//!    `write_all`, then `flush`. `O_APPEND` keeps writes positioned at EOF so
+//!    sequential appends never overwrite each other; combined with the mutex,
+//!    concurrent in-process appenders never tear or clobber a record.
 //! 4. Propagate every `io::Result`; no IO error is ever swallowed.
+//!
+//! ## Scope of the guarantee
+//!
+//! This helper guarantees **no dropped or torn entries among concurrent
+//! in-process appenders** (the failure the cost ledger exhibited under load —
+//! the whole test suite is a single process). `flush` here is
+//! `std::io::Write::flush`, a no-op for `File` (there is no user-space buffer),
+//! so it does **not** provide crash durability against power loss; the bytes
+//! reach the page cache, not stable storage. Add an explicit `fsync` only if
+//! crash-durability is ever required — it is not for the ledger's no-loss
+//! contract.
 
 use std::fs::OpenOptions;
 use std::io::Write;

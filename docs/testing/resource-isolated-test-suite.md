@@ -164,6 +164,26 @@ itself out of a re-install after spawning a child), verified by
 a child that deliberately holds the inherited fd past the guard drop and asserts
 re-acquire still succeeds at once.
 
+## Fix 7 — Terminal force-kill never reports success (production bug)
+
+`PtyTerminalSession::finish()` drives a one-shot terminal turn to completion by
+closing stdin and waiting for the shell to exit. Under massively-parallel host
+load that exit can stall long enough to hit the idle timeout, at which point the
+session escalated `SIGTERM`. The old code, if the child still had not been reaped
+after the grace window, synthesized `ExitStatus::from_raw(0)` — a **success**
+status — and returned the transcript as if the turn had passed. Because
+`ExitStatus::from_raw(0).success()` is `true`, `run_terminal_script`'s
+`if !capture.exit_status.success()` check treated a force-killed hung shell as a
+*passing* turn, and the child was never `wait(2)`-ed (a zombie leak).
+
+`finish()` now escalates `SIGTERM`→`SIGKILL`, performs a blocking `wait(2)` to
+reap the child (no zombie), and returns a non-success status via
+`hung_session_timeout_status()` (exit code `124`, the `timeout(1)` convention;
+`.success()` is always `false`). A hung, force-killed session therefore surfaces
+as a failure with its transcript and diagnostic preserved, instead of being
+silently masked as success. The contract is locked deterministically by
+`hung_session_timeout_status_is_never_success`.
+
 ## Suite-wide sweep rules
 
 Two standing rules keep new tests canary-safe:
