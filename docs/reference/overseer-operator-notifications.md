@@ -15,6 +15,7 @@ issues: ["#2631"]
 related:
   - ../index.md
   - ../design/overseer.md
+  - ./overseer-operator-notification-dedup.md
   - ./signal-conversation.md
   - ./overseer-signal-jsonrpc-transport.md
   - ./conversation-channel-api.md
