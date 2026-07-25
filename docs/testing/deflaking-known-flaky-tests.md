@@ -1,15 +1,19 @@
 ---
-title: De-flaking the known flaky tests (prompt-delivery env race + goal-board state-root race)
+title: De-flaking the known flaky tests (prompt-delivery env race + goal-board state-root race + parallel `cargo test --lib` reaper/timing aborts)
 description: >
-  How the three known-flaky tests were made deterministic under parallel
+  How the known-flaky tests were made deterministic under parallel
   `cargo test`: the prompt_delivery env-var race (issue #2412) is closed by
   sharing the prompt_delivery_env serial key on the two Auto-mode size tests,
-  and the goal-board state-root race (issues #2408 / #2384) is closed by
+  the goal-board state-root race (issues #2408 / #2384) is closed by
   threading an explicit state root through the goal-CRUD handlers (the `_at`
   cores) so the dashboard's read/write path never resolves the root ambiently
-  from the process environment during a test.
-last_updated: 2026-07-24
-review_schedule: when a new env-reading handler is added to the dashboard, when serial_test is upgraded, or when the stewardship `gh` spawn path changes
+  from the process environment during a test, the stewardship `gh` spawn
+  `ETXTBSY` race (#4523) is closed by a bounded exec-retry, and the self-deploy
+  `unit-test` gate aborts (#4619) — a family of process-wide-reaper `ECHILD`
+  races and CPU-oversubscription timing windows — are closed by errno-gated
+  retries, `simard_process_reaper` serial grouping, and widened timing windows.
+last_updated: 2026-07-25
+review_schedule: when a new env-reading handler is added to the dashboard, when serial_test is upgraded, when the stewardship `gh` spawn path changes, or when a new subprocess-spawning unit test is added under the process-wide `reap_zombies()` reaper
 owner: simard
 doc_type: reference
 related:
@@ -26,9 +30,9 @@ related:
 
 This page documents the finished state of the work that made the known-flaky
 tests deterministic under parallel `cargo test`. It is the test-author and
-reviewer contract for the three de-flake mechanisms that closed the flakes — two
-env-isolation fixes and one `gh` spawn `ETXTBSY` retry — and the verification
-gate that keeps them closed.
+reviewer contract for the four de-flake mechanisms that closed the flakes — two
+env-isolation fixes, one `gh` spawn `ETXTBSY` retry, and one `unit-test`-gate
+reaper/timing de-flake — and the verification gate that keeps them closed.
 
 The flakes and their fixes:
 
@@ -37,14 +41,19 @@ The flakes and their fixes:
 | [#2412](https://github.com/rysweet/Simard/issues/2412) | `prompt_delivery::applied_mode_reports_inline_for_small_prompt`, `…_tempfile_for_large_prompt` | `Auto` mode reads `AMPLIHACK_PROMPT_DELIVERY` (`ENV_OVERRIDE`) and could observe a leaked `inline`/`tempfile` value set by a *concurrent* env test | Share the `prompt_delivery_env` serial key on the two Auto-mode size tests |
 | [#2408](https://github.com/rysweet/Simard/issues/2408) · [#2384](https://github.com/rysweet/Simard/issues/2384) | `operator_commands_dashboard::tests_goals_crud::full_goal_lifecycle_crud` (and siblings) | The goal-CRUD handlers resolved `SIMARD_STATE_ROOT` ambiently via `resolve_state_root()`, so a concurrent `setenv`/`remove_var` in an unrelated lib-binary test could tear the read and route a handler at the wrong state root | Thread an explicit state root through the goal-CRUD path (the `_at` handler cores) so the exercised path never reads the env |
 | [#4523](https://github.com/rysweet/Simard/pull/4523) | `stewardship::gh_client::tests::create_issue_reports_nonzero_exit_and_stderr_without_body_content` (and its sibling `fake_gh` test) | Under parallel `cargo test`, one thread writes its per-test `fake_gh` script and immediately `Command::spawn()`s it while another thread's concurrent `fork()` has inherited a still-open write descriptor to that file, so the kernel refuses the `exec` with `ETXTBSY` (`Text file busy`, `os error 26`) — a transient exec-vs-write race, not a logic bug | Wrap the `execute_create_issue` spawn in a bounded, `ETXTBSY`-exclusive retry (`retry_on_etxtbsy`) so the transient kernel condition is retried and the test path is deterministic |
+| [#4619](https://github.com/rysweet/Simard/pull/4627) | `base_type_copilot` fake-meeting turns, the five `base_type_rustyclawd::tool_executor` `Bash` tests, `terminal_session::execution` timeout test, `ooda_actions::tests_dispatch_concurrency` overlap test, `overseer::claim_reaper` deadline test | The self-deploy `unit-test` gate aborted intermittently (exit status 101) running the full ~9295-test suite under the gate's high `CARGO_BUILD_JOBS`. A family of parallelism-only flakes: the dominant class is an **`ECHILD` race** — `agent_supervisor::reap_zombies()` does a process-wide `waitpid(-1)` and, run concurrently with a subprocess-spawning test, steals that test's child so the test's own `wait()`/`output()` returns "No child processes" (issue #1779); the rest are scheduler-starvation timing windows too tight under CPU oversubscription. (The truncated gate tail `⠋ Drop t...` was a red herring — a raw spinner frame the `spinner_drop_cleans_up` test writes to fd 2, bypassing libtest capture.) | Per flake class, all additive: errno-gated `ECHILD` retry for the copilot fake-meeting turns **and** the PRODUCTION daemon self-update self-test; `#[serial(simard_process_reaper)]` grouping for the non-idempotent `tool_executor` Bash tests; widened timing windows for the three load-sensitive timing tests. No test deleted or `#[ignore]`d; every assertion keeps its original strength |
 
-All three fixes preserve full test parallelism. None blanket-serializes the
-suite, and the de-flake mechanisms themselves do not change production
-behaviour: the HTTP handlers still resolve the state root from the environment
-exactly as before, `select_mode` still reads the same env override, and
-`gh_client` still spawns the same `gh` argv over the same `--body-file -` stdin
-channel. The suite is simply prevented from racing on those reads and from
-tripping over the transient exec-vs-write `ETXTBSY` window.
+All four fixes preserve full test parallelism. None blanket-serializes the
+suite, and the de-flake mechanisms leave production behaviour unchanged with a
+single deliberate exception: the HTTP handlers still resolve the state root from
+the environment exactly as before, `select_mode` still reads the same env
+override, and `gh_client` still spawns the same `gh` argv over the same
+`--body-file -` stdin channel; the suite is simply prevented from racing on those
+reads, from tripping over the transient exec-vs-write `ETXTBSY` window, and (Fix
+#4619) from being reaped out from under its own `waitpid` or starved past a tight
+timing window. The one intended production change is Fix #4619's errno-gated
+`ECHILD` retry on the `cmd_self_update` daemon self-test — a fix, not a
+behavioural drift (see the Fix #4619 section).
 
 > **One coupled bug fix.** Wiring `remove_goal` through the explicit-root core
 > surfaced a pre-existing dashboard bug: it persisted removals through the plain
@@ -69,6 +78,14 @@ tripping over the transient exec-vs-write `ETXTBSY` window.
 >   `ETXTBSY`-exclusive retry that tolerates the transient exec-vs-write race on
 >   the `fake_gh` helper without deleting or ignoring any test. Leaves
 >   `tool_executor.rs` (the PR's ECHILD/SIGCHLD fix) untouched.
+> - **#4619:** de-flake the parallel `cargo test --lib` aborts that were blocking
+>   the self-deploy `unit-test` gate. Six files, fixed by flake class: errno-gated
+>   `ECHILD` retry for the `base_type_copilot` fake-meeting turns **and** the
+>   PRODUCTION `cmd_self_update` daemon self-test; `#[serial(simard_process_reaper)]`
+>   on the five non-idempotent `tool_executor` `Bash` tests; widened timing windows
+>   in `terminal_session::execution`, `ooda_actions::tests_dispatch_concurrency`,
+>   and `overseer::claim_reaper`. The deploy gate itself is untouched. See the
+>   Fix #4619 section.
 > - **Gate:** ≥20 consecutive parallel runs of the affected tests with zero
 >   failures, plus a green `cargo test --all-features`.
 
@@ -569,14 +586,168 @@ gh pr checks 4523
 > **Do not merge.** This work leaves PR #4523 green and merge-ready; landing it is
 > a human/merge-queue action, out of scope here.
 
+## Fix #4619 — the parallel `cargo test --lib` reaper/timing aborts
+
+### The failure this eliminates
+
+The self-deploy **`unit-test` gate** aborted intermittently with **exit status
+101** on `Running unittests src/lib.rs`, blocking 10+ consecutive Overseer ticks
+(2026-07-24 18:32Z–23:44Z) and freezing the running binary at `7d0964ff`
+(12 commits behind main). The gate runs the full ~9295-test lib-test binary
+under a high `CARGO_BUILD_JOBS`, so the whole suite executes inside **one
+process** at heavy CPU oversubscription — the exact conditions that surface a
+family of parallelism-only flakes that never occur in production or in a
+single-threaded run.
+
+> **The `⠋ Drop t...` tail was a red herring.** The gate captures only the last
+> ~200 bytes of stderr. `meeting_repl::spinner`'s `spinner_drop_cleans_up` test
+> writes a raw spinner frame (`\r  ⠋ Drop test`, no newline) directly to fd 2,
+> bypassing libtest's per-test capture, so that fragment is simply whatever
+> happened to be last on the shared stderr — it is **not** the failing test.
+> The real aborts are the reaper/timing flakes below.
+
+### The flake classes and their fixes
+
+Six files change, grouped by root cause. Every fix is additive and
+non-breaking: no test is deleted or `#[ignore]`d, the deploy gate is untouched,
+every assertion keeps its original strength, and only structured `tracing` is
+added (no stray `println!`).
+
+#### Class 1 — the `ECHILD` process-wide-reaper race (issue #1779)
+
+The dominant class. `agent_supervisor::reap_zombies()` reaps process-wide with
+`waitpid(-1)`. Run concurrently with a test that spawned its own child, the
+reaper **steals that child's `SIGCHLD`**, so the test's own `wait()` / `output()`
+returns `ECHILD` ("No child processes", errno 10) even though the child ran to
+completion. Three sites, three remedies chosen by idempotency:
+
+- **`src/base_type_copilot/tests.rs` — retry.** The existing `run_fake_meeting_turn`
+  retry loop only recognised `ETXTBSY`. It now classifies transient spawn/wait
+  races via a new `is_transient_meeting_spawn_race(reason)` predicate that matches
+  **both** `"Text file busy"` (exec race) and `"No child processes"` (wait race),
+  and retries the whole fake turn (8 attempts, 20 ms × attempt backoff). Re-running
+  a fake meeting turn is idempotent, so retry is safe. Any *other* error still
+  `panic!`s immediately, and exhausting the retries still `panic!`s loudly — real
+  regressions are never masked.
+
+- **`src/cmd_self_update/update.rs` — PRODUCTION retry.** This is the one
+  production-behaviour change in the PR. The daemon self-update path runs inside a
+  Tokio runtime whose signal driver reaps children process-wide, so a
+  `<binary> self-test` child can be reaped before `Command::output`'s own `waitpid`,
+  making a *valid* update wrongly look like a failed self-test. A new
+  `run_self_test_output()` retries **only** `ECHILD` (matched by
+  `raw_os_error() == Some(libc::ECHILD)`, locale-independent) up to
+  `SELF_TEST_MAX_ATTEMPTS = 8` with a `SELF_TEST_RETRY_BACKOFF = 20 ms` constant
+  sleep, logging each retry at `tracing::debug!`. A self-test is a pure health
+  probe (idempotent), so re-running is safe; `ENOENT`, `EACCES`, and every other
+  error surface immediately and unchanged.
+
+- **`src/base_type_rustyclawd/tool_executor.rs` — serial grouping.** The five
+  `Bash` tests each spawn a real `sh -c …` child. Because **re-running an
+  arbitrary bash command is not idempotent**, retry is the wrong tool; instead all
+  five join the `#[serial_test::serial(simard_process_reaper)]` group — the
+  documented #1779 remedy — so they never run alongside the reaper. This leaves
+  `tool_executor.rs`'s production ECHILD/SIGCHLD tolerance (from PR #4523's scope)
+  intact and only adds the serial attribute to the tests.
+
+#### Class 2 — CPU-oversubscription timing windows
+
+Three tests encode a timing window that is comfortable on an idle machine but too
+tight when the gate starves threads under oversubscription. Each window is
+widened; **no assertion is weakened**:
+
+- **`src/terminal_session/execution.rs`** — the timeout test's
+  `wait-timeout-seconds` goes **1 → 10**. The `TimedOut` branch is still the path
+  under test; the wider window only lets the PTY shell fork/exec and emit its
+  `command not found` diagnostic before the timeout fires, so the test has real
+  output to assert on instead of a bare "did not emit expected output".
+
+- **`src/ooda_actions/tests_dispatch_concurrency.rs`** — the per-`run_turn` "live"
+  overlap window goes **200 ms → 1000 ms**. Under saturation, worker-thread start
+  can stagger by >200 ms, serialising the calls so `peak` never reaches 2. The
+  wider window swamps that scheduling jitter; both the `peak >= 2` (real overlap)
+  and `cap == 1` assertions are unchanged.
+
+- **`src/overseer/claim_reaper.rs`** — the deadline-bounding test gets headroom:
+  child `sleep` **10 → 30 s** and the elapsed bound **3 → 10 s**. Its 20 ms poll
+  loop can be starved for seconds under oversubscription, so a sub-second bound was
+  unrealistic. The test still proves boundedness against the child's full 30 s
+  runtime (a removed/broken deadline would take ~30 s), not a tight wake-up.
+
+### Why not just serialize the whole suite?
+
+Blanket-serializing would hide the races at the cost of a much slower gate and
+would mask any *genuine* concurrency regression. Each fix instead targets the
+specific mechanism: retry where re-execution is idempotent (copilot turns, the
+self-test probe), a **scoped** serial group only for the non-idempotent bash
+tests, and honest timing headroom for load-sensitive windows. Suite parallelism
+is otherwise preserved.
+
+### What this fix deliberately does *not* do
+
+- It does **not** delete, `#[ignore]`, or weaken any test. Every assertion keeps
+  its original strength; the widened windows change only *how long the test is
+  willing to wait*, never *what it proves*.
+- It does **not** touch the deploy gate, the spinner, or `reap_zombies()` itself —
+  the process-wide reaper is correct; the tests are made robust to it.
+- It does **not** retry anything but the classified transient races. In
+  `cmd_self_update` only `ECHILD` is retried; `ENOENT`/`EACCES`/etc. fail loud on
+  the first attempt.
+- It does **not** log sensitive content. The new `tracing::debug!` lines emit only
+  the attempt index and numeric errno.
+- It leaves the residual production spawn-starvation (the underlying EAGAIN/ETXTBSY
+  load sensitivity) as an optional follow-up (bounded spawn-retry with backoff);
+  it is out of scope for restoring a green gate.
+
+### Security properties
+
+| # | Property | Guarantee |
+| - | -------- | --------- |
+| S1 | Fail-loud on real errors | `cmd_self_update` retries only `ECHILD`; the copilot loop retries only the two classified reasons. All other spawn/wait errors surface immediately and unchanged, so a genuinely un-spawnable or malicious binary is never silently accepted. |
+| S2 | Numeric/exact classification | `ECHILD` matched via `raw_os_error() == Some(libc::ECHILD)`; the copilot predicate matches fixed reason substrings — locale/format drift cannot mis-route. |
+| S3 | Bounded, no busy-spin | Hard caps (`SELF_TEST_MAX_ATTEMPTS = 8`, 8 copilot attempts) with short synchronous backoff — no unbounded loop, no local DoS. |
+| S4 | Idempotent retry only | Retry is used only where re-execution is a pure probe (self-test) or a rebuildable fake turn; the non-idempotent real-bash tests are serial-grouped, never retried. |
+| S5 | No new attack surface | Test-only changes plus one errno-gated retry on an existing self-test spawn — no new I/O, parsing, privilege, network, secret, or dependency change. |
+
+### Verification
+
+```bash
+# Build the lib-test binary once.
+cargo test --lib --no-run
+
+# Parallel stress: rebuild-free reruns of the whole lib-test binary at high
+# thread count. The reaper/timing races only surface with the FULL suite in one
+# process under oversubscription, so never name-filter this loop.
+for i in $(seq 1 15); do
+  cargo test --lib || { echo "FLAKE on run $i"; break; }
+done
+
+# Control: single-threaded run (the races cannot occur serially).
+cargo test --lib -- --test-threads=1
+```
+
+The gate for this fix: a **15-iteration full-suite stress loop of the rebuilt
+lib-test binary passing 15/15** (9295 passed, 0 failed every run), versus **5/10
+failing on the pre-fix binary**, plus a green `cargo test --all-features`. The
+authoritative signal is real CI on PR #4627:
+
+```bash
+gh pr checks 4627
+```
+
+> **Do not merge.** This work leaves PR #4627 green and merge-ready; landing it is
+> a human/merge-queue action, out of scope here.
+
 ## Verification gate
 
-A change to any of the three fixes is merge-ready only when all of the following
-pass.
+A change to any of the four fixes is merge-ready only when all of the following
+pass. Fix #4619 additionally carries its own full-suite stress proof in the
+Verification subsection of the Fix #4619 section (15× `cargo test --lib`,
+15/15 green) — run that too when touching the reaper/timing de-flakes.
 
 ### Targeted stress (the de-flake proof)
 
-Run the three formerly-flaky tests ≥**20 consecutive** times under parallel
+Run the formerly-flaky tests ≥**20 consecutive** times under parallel
 execution with **zero** failures. The repo's pre-push
 `cargo-test-race-subset` approach (issue
 [#1631](https://github.com/rysweet/Simard/issues/1631)) is the reference:
@@ -643,6 +814,7 @@ These fixes add no new runtime configuration. The relevant variables are:
 | `AMPLIHACK_PROMPT_DELIVERY` (`ENV_OVERRIDE`) | Forces `Auto` mode selection in `prompt_delivery` | Read by `select_mode`; the `prompt_delivery_env` serial key prevents test reads from racing test writes |
 | `SIMARD_STATE_ROOT` (`STATE_ROOT_ENV`) | Ambient state-root source for `resolve_state_root()` | Still read by the handler **wrappers** in production; the `_at` cores take it as an explicit `&Path` and never read the env |
 | `SIMARD_MEMORY_SOCKET` (`MEMORY_SOCKET_ENV`) | Cognitive-memory socket path | Unset by `HermeticState` so the socket follows the state root |
+| `CARGO_BUILD_JOBS` | Parallelism of the self-deploy `unit-test` gate | Not a Simard variable; its high gate value is what oversubscribes the CPU and surfaces the Fix #4619 reaper/timing races. Fix #4619 makes the affected tests robust to it rather than lowering it |
 
 ### Local stress-run memory budget
 
@@ -656,22 +828,27 @@ tests.
 
 ## Scope
 
-**In scope:** the three de-flake mechanisms above (the two env-isolation fixes
-and the Fix #4523 `gh` spawn `ETXTBSY` retry), their tests, the one coupled
-removal bug fix (`remove_goal` now persists removals via
-`save_goal_board_with_removals`, surfaced while wiring `remove_goal_at`), and this
-page. Fix #4523 touches only `src/stewardship/gh_client.rs` (spawn retry +
-deterministic unit tests); it leaves `src/base_type_rustyclawd/tool_executor.rs`
-(the PR's ECHILD/SIGCHLD fix) unchanged.
+**In scope:** the four de-flake mechanisms above (the two env-isolation fixes,
+the Fix #4523 `gh` spawn `ETXTBSY` retry, and the Fix #4619 `unit-test`-gate
+reaper/timing de-flake across six files), their tests, the one coupled removal
+bug fix (`remove_goal` now persists removals via
+`save_goal_board_with_removals`, surfaced while wiring `remove_goal_at`), the one
+Fix #4619 production change (the errno-gated `ECHILD` retry on the
+`cmd_self_update` daemon self-test), and this page. Fix #4523 touches only
+`src/stewardship/gh_client.rs` (spawn retry + deterministic unit tests). Fix
+#4619 adds `#[serial(simard_process_reaper)]` to the `tool_executor` **Bash
+tests** but leaves that module's production ECHILD/SIGCHLD tolerance unchanged.
 
 **Out of scope (confirmed):** snapshot/redeploy docs; refactoring `select_mode`
 or the goal-board logic beyond the isolation needs and that coupled removal fix;
-broad `rustyclawd` refactors or any change to the ECHILD-tolerance fix; merging
-any PR (including #4523 — left green for the merge queue); unrelated flaky tests
-(e.g. the `ooda_brain::recipe_brain` recipe-resolution and `base_type_copilot`
-copilot-spawning tests, which only fail on a developer box that has a live
-`~/.simard` install / `copilot` on `PATH` and pass/skip in clean CI); any change
-to CI workflow definitions.
+broad `rustyclawd` refactors or any change to the ECHILD-tolerance production
+fix; lowering `CARGO_BUILD_JOBS` or otherwise changing the deploy gate; the
+residual production spawn-starvation (bounded spawn-retry with backoff is a noted
+optional follow-up, not part of restoring a green gate); merging any PR
+(including #4523 and #4619 — left green for the merge queue); unrelated flaky
+tests (e.g. the `ooda_brain::recipe_brain` recipe-resolution tests, which only
+fail on a developer box that has a live `~/.simard` install / `copilot` on
+`PATH` and pass/skip in clean CI); any change to CI workflow definitions.
 
 ## Related pages
 
@@ -688,3 +865,6 @@ to CI workflow definitions.
 - [`stewardship::gh_client`](../prompt-delivery.md) — the GitHub issue-creation
   path (`src/stewardship/gh_client.rs`) whose `gh` spawn is guarded by the
   `ETXTBSY` retry (Fix #4523).
+- [PID-reuse-safe subordinate reaper](../concepts/pid-reuse-safe-subordinate-reaper.md)
+  — the process-wide `reap_zombies()` / `waitpid(-1)` behaviour behind the Fix
+  #4619 `ECHILD` race (issue #1779) and the `simard_process_reaper` serial group.
