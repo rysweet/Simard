@@ -730,6 +730,31 @@ upstream at the Overseer's observe rail, so a throttled tick never constructs a
 deploy attempt (see [Autonomous deploy
 configuration](#autonomous-deploy-configuration)).
 
+### Canary gate commands
+
+`verify_canary` runs each [`RelaunchGate`](../../src/self_relaunch/types.rs)
+against the **candidate** binary under a scrubbed env (`scrub_gate_env`). Each
+gate is a real candidate-binary invocation; a non-zero exit, a spawn error, or a
+timeout is a **red** (`passed: false`) verdict — gates fail closed.
+
+| Gate | Candidate invocation | Passes when |
+| --- | --- | --- |
+| `smoke` | `simard --version` | the binary runs and prints its version |
+| `unit-test` | `cargo test` (isolated `SIMARD_STATE_ROOT` TempDir, #4628) | the candidate's own test suite is green |
+| `gym-baseline` | `simard gym list` | the gym registry loads |
+| `rpc-health` | `simard memory stats` | a real stats **RPC round-trip** to the running memory daemon succeeds |
+
+The `rpc-health` gate dials the live daemon via `simard memory stats` →
+`open_reader_client`, which connects the daemon socket resolved by
+`socket_path_for(SIMARD_STATE_ROOT)` (the allow-listed state root is re-injected
+into the scrubbed gate env). A socket that is present but unconnectable **fails
+closed** (`SimardError::RpcSpawnFailed`, bug #2896), so the gate reddens on a
+wedged daemon rather than passing blindly. `memory stats` is read-only, so the
+probe never mutates the live store. The gate enforces `UpdateConfig`'s
+`health_timeout` itself (via a spawn + bounded-wait wrapper), because neither
+`memory stats` nor `status` exposes a `--timeout` flag; a probe that never
+returns is killed and reddened.
+
 ### `OrchestratedBinaryDeployer` adapter
 
 The `BinaryDeployer` seam is implemented by a thin adapter that performs the swap

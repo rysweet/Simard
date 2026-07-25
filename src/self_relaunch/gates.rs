@@ -1,5 +1,7 @@
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
@@ -197,6 +199,28 @@ fn run_gate(binary: &Path, gate: RelaunchGate, config: &RelaunchConfig) -> GateR
     }
 }
 
+/// Argument vector the RpcHealth canary gate runs against the **candidate**
+/// binary to genuinely dial the running memory daemon.
+///
+/// `simard memory stats` routes through `dispatch_operator_cli` →
+/// `dispatch_memory_command` → `run_stats` → `open_reader_client`. When the live
+/// daemon's socket is present (the self-deploy scenario: the current daemon is
+/// running while the canary is verified), `open_reader_client` performs a real
+/// stats **RPC round-trip** over that socket. Crucially, a socket that is
+/// present but unconnectable **fails closed** (`SimardError::RpcSpawnFailed`,
+/// bug #2896) → non-zero exit → this gate reddens — the exact reachability
+/// signal the gate must assert.
+///
+/// Why not the previous `["probe", "rpc", "--timeout", N]`: `probe` is **not a
+/// dispatched subcommand** (`dispatch_operator_cli`'s default arm returns
+/// `unsupported command 'probe'`), so the old gate never dialed anything — it
+/// errored on an unknown subcommand for *every* candidate regardless of RPC
+/// health. `memory stats` is read-only, so unlike `memory remember` (a write
+/// that can pollute/quarantine the store) it verifies reachability without any
+/// side effect on the live store. The R5 unit test pins that this argv resolves
+/// to a dispatched subcommand and is not the `unsupported command` regression.
+const RPC_HEALTH_PROBE_ARGS: &[&str] = &["memory", "stats"];
+
 fn run_smoke_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
     let mut cmd = scrubbed_command(binary, config);
     cmd.arg("--version");
@@ -367,26 +391,98 @@ fn run_gym_baseline_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
     }
 }
 
+/// The terminal disposition of the RpcHealth probe subprocess, so
+/// [`run_rpc_health_gate`] can render a fail-closed verdict for each of the
+/// three ways it can end: a clean exit, exhausting the health timeout, or
+/// failing to spawn at all.
+enum ProbeOutcome {
+    Exited { status: ExitStatus, stderr: String },
+    TimedOut,
+    SpawnFailed(std::io::Error),
+}
+
+/// Spawn `cmd` and wait at most `timeout` for it to exit, killing it on elapse.
+///
+/// Neither `status` nor `memory stats` exposes a `--timeout` flag, so the gate's
+/// `config.health_timeout` is enforced here as a **spawn + bounded wait** rather
+/// than delegated to the CLI: a hung RPC dial (e.g. a wedged daemon that
+/// accepted the connection but never answers) must still redden the gate instead
+/// of blocking the deploy loop forever.
+///
+/// `stderr` is piped so a red verdict carries the daemon's own error text;
+/// `stdout` is discarded (the human/JSON stats table is not needed for a
+/// pass/fail signal). The probe emits only a few lines, so draining the pipe
+/// *after* the process exits cannot deadlock on a full pipe buffer.
+fn run_probe_with_timeout(mut cmd: Command, timeout: Duration) -> ProbeOutcome {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => return ProbeOutcome::SpawnFailed(e),
+    };
+
+    let start = Instant::now();
+    let poll = Duration::from_millis(50);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stderr = String::new();
+                if let Some(mut pipe) = child.stderr.take() {
+                    let _ = pipe.read_to_string(&mut stderr);
+                }
+                return ProbeOutcome::Exited { status, stderr };
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    // FAIL CLOSED on a hung probe: kill and reap the child so it
+                    // does not leak, then report the timeout as a red verdict.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return ProbeOutcome::TimedOut;
+                }
+                std::thread::sleep(poll);
+            }
+            Err(e) => return ProbeOutcome::SpawnFailed(e),
+        }
+    }
+}
+
+/// Verify the candidate can reach the running memory daemon over RPC.
+///
+/// Runs `simard memory stats` (see [`RPC_HEALTH_PROBE_ARGS`]) against the
+/// **candidate** binary under the scrubbed canary env, which re-injects the
+/// allow-listed `SIMARD_STATE_ROOT` so `memory stats` resolves the SAME state
+/// root — and therefore the SAME daemon socket — as the live daemon. A present
+/// socket makes `open_reader_client` perform a real stats RPC round-trip that
+/// fails closed if the socket is unconnectable (#2896).
+///
+/// FAIL CLOSED: a non-zero exit, a spawn error, or exhausting
+/// `config.health_timeout` all yield `passed: false`. Only a clean exit (a
+/// genuine round-trip) yields `passed: true`.
 fn run_rpc_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
-    let timeout_secs = config.health_timeout.as_secs().to_string();
     let mut cmd = scrubbed_command(binary, config);
-    cmd.args(["probe", "rpc", "--timeout", &timeout_secs]);
-    match cmd.output() {
-        Ok(output) if output.status.success() => GateResult {
+    cmd.args(RPC_HEALTH_PROBE_ARGS);
+    match run_probe_with_timeout(cmd, config.health_timeout) {
+        ProbeOutcome::Exited { status, .. } if status.success() => GateResult {
             gate: RelaunchGate::RpcHealth,
             passed: true,
-            detail: "rpc health check passed".to_string(),
+            detail: "rpc health check passed (memory stats round-trip)".to_string(),
         },
-        Ok(output) => GateResult {
+        ProbeOutcome::Exited { status, stderr } => GateResult {
+            gate: RelaunchGate::RpcHealth,
+            passed: false,
+            detail: format!("rpc health failed (exit {status}): {}", stderr.trim()),
+        },
+        ProbeOutcome::TimedOut => GateResult {
             gate: RelaunchGate::RpcHealth,
             passed: false,
             detail: format!(
-                "rpc health failed (exit {}): {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
+                "rpc health timed out after {}s (memory stats did not return)",
+                config.health_timeout.as_secs()
             ),
         },
-        Err(e) => GateResult {
+        ProbeOutcome::SpawnFailed(e) => GateResult {
             gate: RelaunchGate::RpcHealth,
             passed: false,
             detail: format!("rpc health probe failed to run: {e}"),
@@ -563,6 +659,80 @@ mod tests {
             &RelaunchConfig::default(),
         );
         assert!(!result.passed);
+    }
+
+    #[test]
+    fn rpc_health_probe_args_resolve_to_a_dispatched_subcommand() {
+        // R5: the rpc-health gate must run a REAL dispatched subcommand, not the
+        // old `probe rpc` which `dispatch_operator_cli` rejects as an unknown
+        // command (so the gate never dialed anything).
+        assert_eq!(
+            RPC_HEALTH_PROBE_ARGS,
+            &["memory", "stats"],
+            "the rpc-health probe must dial via `memory stats`"
+        );
+
+        // The NEW argv dispatches: `memory stats <state-root>` resolves through
+        // dispatch_operator_cli → dispatch_memory_command → run_stats and opens a
+        // hermetic tier-2 store in the temp root (no live socket present), so it
+        // returns Ok(()). Critically it is NOT the `unsupported command` arm.
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut argv: Vec<String> = RPC_HEALTH_PROBE_ARGS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        argv.push(root.path().display().to_string());
+        let dispatched = crate::operator_cli::dispatch_operator_cli(argv);
+        if let Err(e) = &dispatched {
+            assert!(
+                !e.to_string().contains("unsupported command"),
+                "rpc-health argv must dispatch, not fall to the unsupported-command arm: {e}"
+            );
+        }
+
+        // Guard/documentation: the OLD `probe` argv is exactly the regression the
+        // fix removes — an unknown subcommand that reddened every candidate.
+        let old =
+            crate::operator_cli::dispatch_operator_cli(["probe".to_string(), "rpc".to_string()]);
+        let old_err = old.expect_err("`probe` must not be a dispatched command");
+        assert!(
+            old_err.to_string().contains("unsupported command"),
+            "expected the old `probe` argv to be an unsupported command, got: {old_err}"
+        );
+    }
+
+    #[test]
+    fn rpc_health_gate_fails_closed_on_missing_binary() {
+        // A candidate that cannot even be spawned must redden (fail closed),
+        // never silently pass.
+        let result = run_rpc_health_gate(
+            Path::new("/tmp/no-such-binary-rpc-48291"),
+            &RelaunchConfig::default(),
+        );
+        assert!(!result.passed, "rpc-health must fail closed on spawn error");
+    }
+
+    #[test]
+    fn rpc_health_gate_fails_closed_on_timeout() {
+        // A probe that never returns within the health timeout must be killed and
+        // reddened, not left to block the deploy loop forever. `sleep 30` stands
+        // in for a wedged daemon dial; the 1s timeout forces the kill path.
+        let config = RelaunchConfig {
+            health_timeout: Duration::from_secs(1),
+            ..RelaunchConfig::default()
+        };
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        let start = Instant::now();
+        let outcome = run_probe_with_timeout(cmd, config.health_timeout);
+        assert!(
+            matches!(outcome, ProbeOutcome::TimedOut),
+            "a probe exceeding the health timeout must be reported as TimedOut"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "the timeout wrapper must return promptly after the deadline, not wait for the child"
+        );
     }
 
     #[test]
