@@ -1,7 +1,7 @@
 ---
 title: Canary gate isolation and self-deploy convergence
 description: Reference for the root-cause repair (#4440) that lets a healthy Overseer deploy candidate pass the relaunch canary and converge — the per-gate tracing/OTel spans emitted by verify_canary, the additive RelaunchConfig.canary_env narrow allow-list that supplies the environment a gate legitimately needs (scrub_gate_env), the preserved fail-closed gate ordering, and the self-deploy/DeployDrift loop advancing past a stuck target SHA once the canary goes green.
-last_updated: 2026-07-22
+last_updated: 2026-07-25
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -366,6 +366,10 @@ green."
 
 ## See also
 
+- [RPC-health canary gate probe](./rpc-health-canary-gate-probe.md) — how the
+  `rpc-health` gate genuinely dials the daemon via `simard memory stats`
+  (`RPC_HEALTH_PROBE_ARGS`), the socket-liveness pre-flight, the fail-closed
+  timeout handling, and the #4646 regression guard.
 - [Overseer deploy red-canary diagnostics](./overseer-deploy-canary-diagnostics.md) —
   the #4420 observability this repair acts on (`failing_gate` / `failing_detail`,
   `refusal_reason`, the `overseer::deploy` WARN, the `is_transient` guard).
