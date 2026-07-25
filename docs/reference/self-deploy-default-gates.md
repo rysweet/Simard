@@ -65,7 +65,7 @@ from source — is **not** in the default set. See
 ///
 /// `RelaunchGate::UnitTest` is deliberately **excluded** from this default set.
 /// Full-suite verification is owned by CI: `.github/workflows/verify.yml`
-/// (a required status check on both `push` and `pull_request`) runs
+/// (which runs on both `push` and `pull_request`) executes
 /// `cargo test --all-features --locked --no-fail-fast` on clean, dedicated
 /// runners, so any commit that reaches a deploy target (`main`) already has a
 /// green full test suite. Re-running the full `cargo test` suite from source in
@@ -146,10 +146,18 @@ cargo test --all-features --locked --no-fail-fast \
 (The single `--skip` excludes only the multi-minute self-install test, which the
 dedicated `install-real` job covers; the rest of the suite runs in full.)
 
-Because that job is a required status check with branch protection on `main`,
-**any commit that becomes a deploy target already has a verified-green full test
-suite**. Re-running the same suite in the self-deploy canary verifies nothing
-new about the source.
+Because that job runs on every push to and pull request against `main`, any
+commit that becomes a deploy target has already had its full test suite run by
+CI. Re-running the same suite in the self-deploy canary verifies nothing new
+about the source.
+
+> **Follow-up (recommended, not required by this change):** `main` does not yet
+> have branch protection enabling `verify.yml` as a *required* status check, so
+> the CI full-suite run is not currently an enforced hard merge gate. Enabling
+> it makes the redundancy argument above fully load-bearing. Until then, the
+> retained deploy-time gates (`Smoke`, `GymBaseline`, `RpcHealth`) still verify
+> that the locally-built candidate binary boots and its core subsystems respond
+> on the production host, so a corrupt or non-functional binary is still caught.
 
 ### Re-running it under host load froze self-deploy
 
@@ -226,7 +234,8 @@ the exact three-gate ordered set **and** the explicit absence of `UnitTest`:
 | [`tests/self_improve.rs`](https://github.com/rysweet/Simard/blob/main/tests/self_improve.rs) (`default_gates_is_ordered`) | Same three-gate order; negative `UnitTest` assertion. |
 
 No test is weakened, re-timed, serialized, or deleted. Full-suite coverage
-remains enforced by CI (`verify.yml`).
+remains provided by CI (`verify.yml`), which runs on every push and pull
+request.
 
 ## See also
 

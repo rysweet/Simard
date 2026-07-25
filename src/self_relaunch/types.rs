@@ -78,11 +78,14 @@ impl Display for GateResult {
 ///
 /// `RelaunchGate::UnitTest` is deliberately **not** in this list. That gate
 /// shells out to the full `cargo test` suite (lib + all integration tests) from
-/// source. Full-suite verification is already owned by CI: `.github/workflows/
-/// verify.yml` is required on every push and pull_request and runs
-/// `cargo test --all-features --locked --no-fail-fast` on clean, dedicated
-/// runners. By the time a commit reaches `main` (a deploy target) its full test
-/// suite is already verified green, so re-running it in the canary is redundant.
+/// source. Full-suite verification is owned by CI: `.github/workflows/
+/// verify.yml` runs `cargo test --all-features --locked --no-fail-fast` on
+/// clean, dedicated runners for every push and pull_request. By the time a
+/// commit reaches `main` (a deploy target) its full test suite has already been
+/// run green by CI, so re-running it in the canary is redundant. (Making
+/// `verify.yml` a required status check via branch protection on `main` makes
+/// this guarantee an enforced merge gate; see the self-deploy default-gates
+/// reference.)
 /// Worse, re-running it from source under production host load (heavily
 /// oversubscribed by concurrent recipes) produced 30+ minute runtimes and
 /// load-induced false reds (individual integration binaries taking 538-618s with
