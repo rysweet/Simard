@@ -1,7 +1,7 @@
 ---
 title: No-progress breaker API reference
-description: Reference for the OODA no-progress breaker — the per-goal consecutive-no-action safeguard, its sentinel `[OODA-SAFEGUARD]` Blocked marker, the standing/perpetual-goal runtime exemption, the `perpetual_idled` report field, and the load-time `heal_stale_no_progress_blocks` self-heal (#2589).
-last_updated: 2026-07-05
+description: Reference for the OODA no-progress breaker — the per-goal consecutive-no-action safeguard, its sentinel `[OODA-SAFEGUARD]` Blocked marker, the standing/perpetual-goal runtime exemption, the `perpetual_idled` report field, the load-time `heal_stale_no_progress_blocks` self-heal (#2589), and the `GhIssueFiler` missing-label fallback that keeps tracking-issue filing resilient when the `ooda-stuck` repo label is absent (#4394).
+last_updated: 2026-07-22
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -55,6 +55,7 @@ standing/perpetual-goal exemption added in issue #2589. For the rationale, see
 - [`NoProgressResolution`](#noprogressresolution)
 - [Cycle driver: `apply_no_progress_breaker`](#cycle-driver-apply_no_progress_breaker)
 - [`NoProgressBreakerReport`](#noprogressbreakerreport)
+- [Tracking-issue filer: `NoProgressIssueFiler` and the missing-label fallback](#tracking-issue-filer-noprogressissuefiler-and-the-missing-label-fallback)
 - [Standing/perpetual runtime exemption](#standingperpetual-runtime-exemption)
 - [Load-time self-heal: `heal_stale_no_progress_blocks`](#load-time-self-heal-heal_stale_no_progress_blocks)
 - [Daemon hydration wiring](#daemon-hydration-wiring)
@@ -255,6 +256,165 @@ cycle whose *only* breaker activity is a standing goal idling therefore emits
 marked/dropped/escalated some other goal. The authoritative, always-present
 signal for a standing-goal idle is the per-goal `tracing::info!` emitted by the
 exemption (below) plus the `perpetual_idled` entry on the returned report.
+
+## Tracking-issue filer: `NoProgressIssueFiler` and the missing-label fallback
+
+When the breaker escalates a stuck goal it files a GitHub tracking issue so the
+done-gate gains a machine-verifiable signal (the issue observed as `CLOSED`).
+Filing is injected through a trait so the escalation path is unit-testable
+without shelling out to `gh`:
+
+```rust
+/// Files a tracking issue for a goal the breaker escalated. Injected so tests
+/// exercise the escalation path without shelling out to `gh`.
+pub(crate) trait NoProgressIssueFiler {
+    /// File (or attempt to file) a tracking issue. Returns the filed issue's
+    /// reference on success so the caller can `link_tracking_issue` it back to
+    /// the goal; returns `None` when filing failed or the issue number could
+    /// not be resolved. Failures are logged, never propagated.
+    fn file_issue(&self, title: &str, body: &str) -> Option<FiledIssue>;
+}
+
+/// A tracking issue the breaker successfully filed for an escalated goal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FiledIssue {
+    /// The issue number without a leading `#`, e.g. `"4231"`.
+    pub number: String,
+    /// The issue URL when the filer could resolve one.
+    pub url: Option<String>,
+}
+```
+
+### `GhIssueFiler` — production filer with label-missing resilience
+
+`GhIssueFiler` is the production implementation. It first attempts
+`gh issue create` **with** `--label ooda-stuck`. If that attempt fails **only**
+because the `ooda-stuck` label does not exist in the repository, the filer
+transparently retries **once** without `--label`, so a missing label can never
+block the breaker from recording a stuck goal.
+
+```rust
+/// Production filer: `gh issue create --label ooda-stuck`, with a resilient
+/// retry-without-label fallback when the label is absent from the repo (#4394).
+pub(crate) struct GhIssueFiler;
+```
+
+**Behaviour (labeled attempt → outcome):**
+
+The **Log** column names the *emitter* of each line, because logging
+responsibility is split across the command-runner seam (see
+[Log ownership and the command-runner seam](#log-ownership-and-the-command-runner-seam)).
+A spawn error is the one case the real-`gh` closure logs itself, because only it
+holds the `io::Error`; every other line is owned by `file_issue_with_runner`.
+
+| Labeled `gh issue create` outcome | Filer action | Return | Log (emitter) |
+| --- | --- | --- | --- |
+| success | parse issue number from printed URL | `Some(FiledIssue)` | `WARN` "tracking issue filed for stuck goal" — **`file_issue_with_runner`** |
+| non-success, stderr is the label-missing signature | retry once **without** `--label` | `Some(FiledIssue)` if retry succeeds; else `None` | `WARN` label fallback (with `stderr` field) on retry, then either the success `WARN` or the other-failure `ERROR` above — **`file_issue_with_runner`** |
+| non-success, any other stderr | no retry | `None` | `ERROR` "gh issue create failed (goal still Blocked)" — **`file_issue_with_runner`** |
+| spawn error (binary missing / IO) | no retry | `None` | `ERROR` "gh spawn failed (goal still Blocked)" `error = %e` — **real-`gh` closure** (before it returns `None` to the seam) |
+
+The retry succeeds against a repo that has never defined the label, which is
+exactly the crash-loop signature this change resolves:
+
+```text
+ERROR run_ooda_cycle: simard::ooda: no-progress breaker: gh issue create failed
+  (goal still Blocked) stderr=could not add label: 'ooda-stuck' not found
+```
+
+After this change the same repo yields a single WARN fallback and a filed
+issue, and the goal leaves the crash loop:
+
+```text
+WARN run_ooda_cycle: simard::ooda: no-progress breaker: 'ooda-stuck' label missing;
+  retrying gh issue create without --label stderr=could not add label: 'ooda-stuck' not found
+WARN run_ooda_cycle: simard::ooda: no-progress breaker: tracking issue filed for stuck goal (without label) issue=4231
+```
+
+### Missing-label detection
+
+The fallback is scoped narrowly so it never swallows a genuine failure. It fires
+**only** when the labeled attempt returned a non-success status **and** its
+stderr, lowercased, contains **both** tokens `not found` **and** `label`:
+
+```rust
+/// True when a failed `gh issue create` failed specifically because the label
+/// does not exist (e.g. `could not add label: 'ooda-stuck' not found`).
+/// Requires BOTH tokens so it never over-matches an unrelated failure.
+fn is_missing_label(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    s.contains("not found") && s.contains("label")
+}
+```
+
+Any other non-success stderr (auth failure, rate limit, network) returns `None`
+at `ERROR` with no retry. A `gh` spawn failure (binary missing / IO error) also
+returns `None` at `ERROR` with no retry.
+
+### Log ownership and the command-runner seam
+
+The label control flow is factored behind an injectable command-runner so the
+retry logic is unit-testable without a live `gh` or network. The seam has the
+signature:
+
+```rust
+/// `with_label` selects the labeled vs. unlabeled invocation.
+/// `Some(GhOutcome)` = the process ran to completion (success or not);
+/// `None` = the process could not be spawned at all (binary missing / IO error).
+Fn(bool) -> Option<GhOutcome>
+
+/// A completed `gh issue create` invocation, captured for the filer to inspect.
+struct GhOutcome {
+    success: bool,
+    stdout: String, // printed issue URL on success
+    stderr: String, // inspected by `is_missing_label`
+}
+```
+
+Because the seam returns `Option<GhOutcome>`, a **spawn error collapses to
+`None`** and the underlying `io::Error` never crosses the seam boundary. That
+forces a deliberate split of logging responsibility — the outcome table's
+**Log (emitter)** column reflects exactly this split:
+
+- **Real-`gh` closure owns the spawn-error `ERROR`.** Only the production closure
+  holds the `io::Error` from `Command::output()`, so it logs
+  `ERROR … "gh spawn failed (goal still Blocked)" error = %e` **before** returning
+  `None` to the seam. `file_issue_with_runner` therefore treats a `None` from the
+  runner as "already logged" and simply returns `None` — it must **not** emit a
+  second line for that case, or the spawn failure would be double-logged.
+- **`file_issue_with_runner` owns every `Some(GhOutcome)` line.** From a completed
+  outcome it emits the success `WARN`, the missing-label fallback `WARN`, and the
+  other-failure `ERROR`. These are the lines the seam tests assert, because a test
+  runner can synthesise any `GhOutcome` (or a `None`) it needs.
+
+This is why the unit tests cover success-with-label, missing-label → fallback
+success, and other-failure → `None` **through the seam**, but the spawn-error
+`ERROR` line is exercised in the production closure rather than through the seam.
+
+### Design guarantees
+
+- **Additive / non-breaking.** The success-with-label path is byte-for-byte
+  unchanged: it still returns `Some(FiledIssue)` parsed from the printed URL,
+  and `link_tracking_issue` is unaffected.
+- **Exactly one retry.** The fallback re-runs `gh issue create` at most once
+  and never recurses, so a persistently missing label cannot itself create a new
+  loop.
+- **Never silent.** Every fallback logs a `WARN` on target `simard::ooda`
+  carrying the `stderr` context; genuine failures log `ERROR`. No `print!`,
+  `println!`, or `eprintln!` is used — structured `tracing` + OTel only. The
+  spawn-error `ERROR` is emitted by the real-`gh` closure (it owns the
+  `io::Error`); all `Some(GhOutcome)` lines are emitted by
+  `file_issue_with_runner` — see
+  [Log ownership and the command-runner seam](#log-ownership-and-the-command-runner-seam).
+- **No `gh label create`.** The fallback re-files *without* the label rather than
+  creating the label, avoiding a second permission-dependent failure mode and
+  any token handling.
+- **Command-runner seam.** The label control flow is factored behind an
+  injectable `Fn(bool) -> Option<GhOutcome>` runner so unit tests cover (a)
+  success-with-label, (b) missing-label → fallback success, and (c)
+  other-failure → `None` without a live `gh` or network. Spawn errors collapse to
+  `None` at the seam and are logged by the production closure, not asserted
+  through the seam.
 
 ## Standing/perpetual runtime exemption
 
