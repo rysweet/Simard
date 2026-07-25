@@ -71,7 +71,7 @@ mod unix {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::super::paths::InstallLayout;
     use super::super::{InstallError, InstallResult, err};
@@ -162,19 +162,44 @@ mod unix {
 
     /// `true` when `<path> --version` prints a line starting with `simard `.
     /// argv-only (no shell), bounded, and any failure classifies as not-ours.
+    ///
+    /// Classifying an on-disk candidate means `exec`ing it. In a multithreaded
+    /// process (the daemon, or the `cargo test --lib` binary) a *sibling*
+    /// thread's `fork` can transiently inherit a write fd to this very file and
+    /// hold it open across our `exec`, which the kernel rejects with `ETXTBSY`
+    /// ("text file busy"). That window is short — the sibling's child closes the
+    /// fd the instant it `exec`s — so a bounded retry converts the transient
+    /// `ETXTBSY` into a correct classification instead of a spurious `Foreign`
+    /// verdict. This removes the fork/exec classification-flip race at its root
+    /// (deterministically, with no test-only `serial` serialization) and hardens
+    /// real installs against a concurrent writer of the entrypoint.
     fn version_banner_is_ours(path: &Path) -> bool {
-        let output = match Command::new(path).arg("--version").output() {
-            Ok(output) => output,
-            Err(_) => return false,
-        };
-        if !output.status.success() {
-            return false;
+        const MAX_ATTEMPTS: u32 = 8;
+        for attempt in 0..MAX_ATTEMPTS {
+            match Command::new(path).arg("--version").output() {
+                Ok(output) => {
+                    if !output.status.success() {
+                        return false;
+                    }
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    return stdout.lines().next().is_some_and(|line| {
+                        let line = line.trim_start();
+                        line.starts_with("simard ") || line == "simard"
+                    });
+                }
+                // Transient `ETXTBSY` from a sibling `fork` holding an inherited
+                // write fd: back off briefly and retry. Any other error, or a
+                // persistent `ETXTBSY`, classifies fail-closed as not-ours.
+                Err(error)
+                    if error.raw_os_error() == Some(libc::ETXTBSY)
+                        && attempt + 1 < MAX_ATTEMPTS =>
+                {
+                    std::thread::sleep(Duration::from_millis(5 * u64::from(attempt + 1)));
+                }
+                Err(_) => return false,
+            }
         }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        stdout.lines().next().is_some_and(|line| {
-            let line = line.trim_start();
-            line.starts_with("simard ") || line == "simard"
-        })
+        false
     }
 
     /// `true` when `path` is a symlink whose canonical target equals the
@@ -293,7 +318,6 @@ mod unix {
         }
 
         #[test]
-        #[serial_test::serial(install)]
         fn reconcile_creates_owned_symlink_on_fresh_home() {
             let temp = tempfile::TempDir::new().unwrap();
             let layout = layout_for(temp.path());
@@ -312,7 +336,6 @@ mod unix {
         }
 
         #[test]
-        #[serial_test::serial(install)]
         fn reconcile_removes_ours_symlink_orphan() {
             let temp = tempfile::TempDir::new().unwrap();
             let layout = layout_for(temp.path());
@@ -330,7 +353,6 @@ mod unix {
         }
 
         #[test]
-        #[serial_test::serial(install)]
         fn reconcile_removes_ours_marker_orphan() {
             let temp = tempfile::TempDir::new().unwrap();
             let layout = layout_for(temp.path());
@@ -347,7 +369,6 @@ mod unix {
         }
 
         #[test]
-        #[serial_test::serial(install)]
         fn reconcile_preserves_foreign_orphan() {
             let temp = tempfile::TempDir::new().unwrap();
             let layout = layout_for(temp.path());
@@ -366,7 +387,6 @@ mod unix {
         }
 
         #[test]
-        #[serial_test::serial(install)]
         fn reconcile_replaces_ours_marker_at_entrypoint() {
             let temp = tempfile::TempDir::new().unwrap();
             let layout = layout_for(temp.path());
@@ -387,7 +407,6 @@ mod unix {
         }
 
         #[test]
-        #[serial_test::serial(install)]
         fn reconcile_surfaces_foreign_shadow_at_entrypoint_untouched() {
             let temp = tempfile::TempDir::new().unwrap();
             let layout = layout_for(temp.path());
@@ -408,7 +427,6 @@ mod unix {
         }
 
         #[test]
-        #[serial_test::serial(install)]
         fn reconcile_is_idempotent() {
             let temp = tempfile::TempDir::new().unwrap();
             let layout = layout_for(temp.path());
@@ -431,7 +449,6 @@ mod unix {
         }
 
         #[test]
-        #[serial_test::serial(install)]
         fn classify_broken_symlink_is_foreign() {
             let temp = tempfile::TempDir::new().unwrap();
             let bin_dir = temp.path().join(".simard/bin");

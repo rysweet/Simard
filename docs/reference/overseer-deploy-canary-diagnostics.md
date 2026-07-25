@@ -7,6 +7,7 @@ owner: simard
 doc_type: reference
 status: implemented
 related:
+  - ./deterministic-canary-unit-test-gate.md
   - ./self-deploy-api.md
   - ./overseer-operator-notifications.md
   - ./overseer-tick-details.md

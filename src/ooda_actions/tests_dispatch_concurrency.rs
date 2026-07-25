@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::base_types::{BaseTypeDescriptor, BaseTypeOutcome, BaseTypeSession, BaseTypeTurnInput};
 use crate::error::{SimardError, SimardResult};
@@ -132,10 +132,8 @@ fn concurrent_dispatch_parallelizes_and_respects_cap() {
     let mut state = OodaState::new(board_with_unassigned_goals(&ids));
 
     // Run 1: cap = N → all dispatch concurrently.
-    let t0 = Instant::now();
     let outcomes =
         dispatch_actions_bounded(&actions, &mut memories, &mut state, ids.len()).unwrap();
-    let parallel_elapsed = t0.elapsed();
 
     assert_eq!(outcomes.len(), ids.len());
     for o in &outcomes {
@@ -159,22 +157,20 @@ fn concurrent_dispatch_parallelizes_and_respects_cap() {
     instr.live.store(0, Ordering::SeqCst);
 
     // Run 2: cap = 1 → dispatch serialized (peak must never exceed 1).
-    let t1 = Instant::now();
+    //
+    // The concurrency invariant is the deterministic peak-overlap gauge above
+    // (peak>=2 at cap=N, peak<=1 at cap=1), NOT a wall-clock ratio. The former
+    // `parallel_elapsed * 2 <= serial_elapsed` assertion was the canary redder:
+    // under heavy parallel host load the two runs' elapsed times converge and
+    // the ratio flakes, even though the actual overlap gauge is always correct.
+    // We assert the gauge, never the clock (and deliberately do NOT loosen a
+    // timing bound to paper over the flake — see PR #4566, rejected).
     let _ = dispatch_actions_bounded(&actions, &mut memories, &mut state, 1).unwrap();
-    let serial_elapsed = t1.elapsed();
 
     let peak_serial = instr.peak.load(Ordering::SeqCst);
     assert!(
         peak_serial <= 1,
         "cap=1 must serialize dispatch; peak={peak_serial}"
-    );
-
-    // The cap=N run must be substantially faster than the cap=1 run. This is
-    // robust to per-call overhead (both runs incur the same N input builds);
-    // only the sleep parallelizes.
-    assert!(
-        parallel_elapsed * 2 <= serial_elapsed,
-        "concurrent dispatch must be >=2x faster than serialized: parallel={parallel_elapsed:?}, serial={serial_elapsed:?}"
     );
 }
 

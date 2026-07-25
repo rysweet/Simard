@@ -153,6 +153,19 @@ pub fn verify_canary(
             detail = %bound_gate_detail(&result.detail),
             "canary gate evaluated"
         );
+        // Surface a red gate at ERROR level so a relaunch refusal is not buried
+        // among the per-gate INFO lines. The detail is built to lead with the
+        // failing test name(s) (see `summarize_test_failure`), so the actionable
+        // signal survives the credential-redacted length bound. Additive only —
+        // the fail-closed verdict is entirely carried by `result`.
+        if !result.passed {
+            tracing::error!(
+                target: "self_relaunch::gate",
+                gate = %result.gate,
+                detail = %bound_gate_detail(&result.detail),
+                "canary gate FAILED — relaunch refused"
+            );
+        }
         results.push(result);
     }
 
@@ -226,12 +239,18 @@ fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
             detail: "all tests passed".to_string(),
         },
         Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let truncated = truncate_output(&stderr, 200);
+            // Diagnosability fix (#4558): libtest prints the failing-test names and
+            // the "has been running for over N seconds" banners to STDOUT, which the
+            // old gate discarded (it truncated only stderr to 200 chars). Capture
+            // BOTH streams, name the failing tests, and sanitize control/ANSI bytes
+            // so the tracing event in `evaluate_gates` is actually actionable.
+            let summary = summarize_test_failure(&stdout, &stderr);
             GateResult {
                 gate: RelaunchGate::UnitTest,
                 passed: false,
-                detail: format!("tests failed (exit {}): {}", output.status, truncated),
+                detail: format!("tests failed (exit {}): {}", output.status, summary),
             }
         }
         Err(e) => GateResult {
@@ -306,6 +325,150 @@ fn truncate_output(s: &str, max_len: usize) -> String {
             .last()
             .map_or(0, |(i, c)| i + c.len_utf8());
         format!("{}...", s[..boundary].trim())
+    }
+}
+
+/// Append `name` to `names` if non-empty and not already present, preserving
+/// first-seen order. Used by the libtest capture parsers to dedup a failing
+/// test that appears both on its `… FAILED` running line and in the trailing
+/// `failures:` block.
+fn push_unique(names: &mut Vec<String>, name: &str) {
+    let name = name.trim();
+    if !name.is_empty() && !names.iter().any(|n| n == name) {
+        names.push(name.to_string());
+    }
+}
+
+/// Extract the names of assertion-failed tests from a libtest capture.
+///
+/// Combines the two places libtest names a failure — the `test <name> ... FAILED`
+/// running line and the indented entries under the trailing `failures:` block —
+/// and dedups them in first-seen order. A single bounded forward line-scan (no
+/// regex, no backtracking) keeps this linear on pathological input (ReDoS-safe).
+/// Slow-test banners are intentionally NOT collected here (see
+/// [`parse_slow_test_banners`]) so a timeout-red stays distinguishable from an
+/// assertion-red.
+fn parse_failing_test_names(capture: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let mut in_failures_block = false;
+    for line in capture.lines() {
+        let trimmed = line.trim();
+
+        // Source A: the per-test running line, e.g. `test foo::beta ... FAILED`.
+        if let Some(rest) = trimmed.strip_prefix("test ")
+            && let Some(name) = rest.strip_suffix(" ... FAILED")
+        {
+            push_unique(&mut names, name);
+            continue;
+        }
+
+        // Source B: the trailing `failures:` block lists the bare names, indented.
+        if trimmed == "failures:" {
+            in_failures_block = true;
+            continue;
+        }
+        if in_failures_block {
+            // The block ends at a blank line or the `test result:` summary line.
+            if trimmed.is_empty() || trimmed.starts_with("test result:") {
+                in_failures_block = false;
+                continue;
+            }
+            // Real names are single tokens; skip the `---- name stdout ----`
+            // sub-headers (which contain spaces) that precede panic output.
+            if !trimmed.starts_with("----") && !trimmed.contains(' ') {
+                push_unique(&mut names, trimmed);
+            }
+        }
+    }
+    names
+}
+
+/// Extract the names of tests that tripped libtest's
+/// `test <name> has been running for over N seconds` banner. Kept separate from
+/// [`parse_failing_test_names`] so a canary red caused by a slow/hung test is
+/// reported as a timeout rather than being conflated with an assertion failure.
+fn parse_slow_test_banners(capture: &str) -> Vec<String> {
+    const MARKER: &str = " has been running for over ";
+    let mut names: Vec<String> = Vec::new();
+    for line in capture.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("test ")
+            && let Some(idx) = rest.find(MARKER)
+        {
+            push_unique(&mut names, &rest[..idx]);
+        }
+    }
+    names
+}
+
+/// Strip ANSI/VT escape sequences and C0 control bytes (except newline) from a
+/// captured test stream before it is surfaced in a gate detail / tracing event.
+///
+/// Test output is untrusted data: a token embedded in a panic message could
+/// carry ANSI escapes to spoof the terminal or `\r` to overwrite/forge a log
+/// line (log injection). Printable text and newlines are preserved so the
+/// diagnostic stays readable.
+fn sanitize_gate_capture(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            // ESC: drop a CSI sequence (`ESC [ … final`) or a lone escape.
+            '\u{1b}' => {
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    // Consume parameter/intermediate bytes up to and including the
+                    // final byte in the 0x40..=0x7E range.
+                    for nc in chars.by_ref() {
+                        if ('@'..='~').contains(&nc) {
+                            break;
+                        }
+                    }
+                }
+            }
+            '\n' => out.push('\n'),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Build the compact, fail-closed `detail` for a failed `UnitTest` gate from the
+/// FULL captured stdout+stderr.
+///
+/// Names the failing (and separately, any slow/timed-out) tests, then appends a
+/// generously-bounded tail of the sanitized capture so a red with no parseable
+/// test names — a link error or a panic before the harness starts — is still
+/// diagnosable. The result is never empty and never reads as a success, so the
+/// gate's fail-closed contract holds regardless of capture content.
+fn summarize_test_failure(stdout: &str, stderr: &str) -> String {
+    let combined = format!("{stdout}\n{stderr}");
+    let clean = sanitize_gate_capture(&combined);
+
+    let failing = parse_failing_test_names(&clean);
+    let slow = parse_slow_test_banners(&clean);
+
+    let mut parts: Vec<String> = Vec::new();
+    if !failing.is_empty() {
+        parts.push(format!("failing tests: {}", failing.join(", ")));
+    }
+    if !slow.is_empty() {
+        parts.push(format!("slow/timed-out tests: {}", slow.join(", ")));
+    }
+
+    // Generous bound (full libtest failure blocks are large) that still protects
+    // the tracing sink / journal from unbounded disk use.
+    let tail = truncate_output(clean.trim(), 4096);
+
+    if parts.is_empty() {
+        if tail.is_empty() {
+            "cargo test reported failure with no captured output".to_string()
+        } else {
+            tail
+        }
+    } else {
+        format!("{} | output: {}", parts.join("; "), tail)
     }
 }
 
@@ -700,6 +863,178 @@ mod convergence_tests {
             results[0].passed,
             "a hijack-class name must be refused re-injection (stripped); got: {}",
             results[0].detail
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TDD (Problem: the canary `UnitTest` gate is undiagnosable): FAILING tests,
+// written first. Today `run_unit_test_gate` truncates ONLY `stderr` to 200 chars
+// and discards `stdout` — but libtest prints the failing-test name and the
+// "has been running for over 60 seconds" banner to STDOUT, so every refusal is an
+// opaque `tests failed (exit 101): …` tail with no failing name.
+//
+// These specify the diagnosability seams the fix must add. They are asserted
+// against pure helpers (so no `cargo test` is shelled out from within the suite)
+// and reference functions that DO NOT yet exist, so they fail to compile until
+// the fix lands, then pass.
+//
+// Contract (all additive, fail-closed preserved, NO timing bounds):
+//   * `parse_failing_test_names` — libtest `… FAILED` lines + the `failures:`
+//     block → deduped, ordered names; empty on a clean/garbage capture; a single
+//     bounded forward scan (ReDoS-safe) on pathological input.
+//   * `parse_slow_test_banners` — `has been running for over N seconds` lines →
+//     names, kept SEPARATE so a *timeout* red is distinguishable from an
+//     *assertion* red.
+//   * `summarize_test_failure` — the compact `detail` built from the FULL
+//     stdout+stderr; names the failing tests; never empty; never reads as a pass.
+//   * `sanitize_gate_capture` — strip ANSI escapes and C0 control bytes
+//     (log-injection / terminal-escape-spoofing defense) while preserving
+//     printable text and newlines.
+//   * `UnitTest` stays in `default_gates()` (the do-not-remove band-aid guard).
+#[cfg(test)]
+mod diagnosability_tdd {
+    use super::*;
+
+    // A representative libtest failure capture: two assertion failures reported
+    // both on their `… FAILED` running lines AND in the trailing `failures:`
+    // block (so the parser must dedup), plus a passing test and the summary line.
+    const LIBTEST_FAILURE_CAPTURE: &str = "\
+running 3 tests
+test foo::alpha ... ok
+test foo::beta ... FAILED
+test bar::gamma ... FAILED
+
+failures:
+
+---- foo::beta stdout ----
+thread 'foo::beta' panicked at src/foo.rs:10:5:
+assertion failed: left == right
+
+failures:
+    foo::beta
+    bar::gamma
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
+";
+
+    #[test]
+    fn parse_failing_test_names_extracts_deduped_failed_tests() {
+        let names = parse_failing_test_names(LIBTEST_FAILURE_CAPTURE);
+        assert!(
+            names.iter().any(|n| n == "foo::beta"),
+            "must name the failing test foo::beta: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "bar::gamma"),
+            "must name the failing test bar::gamma: {names:?}"
+        );
+        assert_eq!(
+            names.len(),
+            2,
+            "each failing test named exactly once (dedup `… FAILED` + `failures:` block): {names:?}"
+        );
+    }
+
+    #[test]
+    fn parse_failing_test_names_empty_on_all_green_or_garbage() {
+        assert!(parse_failing_test_names("test result: ok. 5 passed; 0 failed").is_empty());
+        assert!(parse_failing_test_names("").is_empty());
+        assert!(parse_failing_test_names("not libtest output at all\nrandom line").is_empty());
+    }
+
+    #[test]
+    fn parse_failing_test_names_is_linear_on_pathological_input() {
+        // No wall-clock assertion: a huge non-matching capture must be handled by
+        // a single bounded forward line-scan (ReDoS-safe) and yield no names — a
+        // super-linear parser would hang here instead of returning.
+        let huge_single_line = "x".repeat(2_000_000);
+        assert!(parse_failing_test_names(&huge_single_line).is_empty());
+        let many_lines = "no match on this line\n".repeat(100_000);
+        assert!(parse_failing_test_names(&many_lines).is_empty());
+    }
+
+    #[test]
+    fn parse_slow_test_banners_surfaces_timeouts_separately() {
+        let cap = "test squad::slow_op has been running for over 60 seconds\n\
+                   test result: FAILED. 0 passed; 0 failed; 0 ignored";
+        let slow = parse_slow_test_banners(cap);
+        assert!(
+            slow.iter().any(|n| n == "squad::slow_op"),
+            "a slow-test banner must surface the timing-out test name: {slow:?}"
+        );
+        // A slow banner is NOT an assertion failure, so it must not leak into the
+        // FAILED-name list (timeout-red stays distinguishable from assertion-red).
+        assert!(
+            parse_failing_test_names(cap).is_empty(),
+            "a slow banner alone must not register as an assertion FAILED"
+        );
+    }
+
+    #[test]
+    fn summarize_test_failure_names_the_failing_tests() {
+        let detail = summarize_test_failure(LIBTEST_FAILURE_CAPTURE, "");
+        assert!(
+            detail.contains("foo::beta"),
+            "the gate detail must name the failing test(s): {detail}"
+        );
+        assert!(
+            detail.contains("bar::gamma"),
+            "the gate detail must name the failing test(s): {detail}"
+        );
+    }
+
+    #[test]
+    fn summarize_test_failure_never_empty_and_never_claims_success() {
+        // Even when neither stream is parseable (e.g. a link error before any
+        // test ran), the detail must stay meaningful and fail-closed — it must
+        // never read as a pass.
+        let detail = summarize_test_failure("", "error: linking with `cc` failed");
+        assert!(
+            !detail.trim().is_empty(),
+            "a red must always produce a non-empty diagnostic detail"
+        );
+        assert!(
+            !detail.contains("all tests passed"),
+            "the failure summary must never read as a success"
+        );
+    }
+
+    #[test]
+    fn sanitize_gate_capture_strips_ansi_and_control_keeps_text() {
+        // ANSI colour wrap + bell + backspace + carriage return around the real
+        // libtest line: all control/escape bytes must go, printable text stays.
+        let raw = "\u{1b}[31mtest foo::beta ... FAILED\u{1b}[0m\u{7}\u{8}\r\nplain trailing line";
+        let clean = sanitize_gate_capture(raw);
+        assert!(
+            !clean.contains('\u{1b}'),
+            "ANSI ESC must be stripped (terminal-escape-spoofing defense): {clean:?}"
+        );
+        assert!(
+            !clean.contains('\u{7}'),
+            "the bell control byte must be stripped: {clean:?}"
+        );
+        assert!(
+            !clean.contains('\r'),
+            "carriage-return line spoofing must be stripped: {clean:?}"
+        );
+        assert!(
+            clean.contains("test foo::beta ... FAILED"),
+            "printable diagnostic text must be preserved: {clean:?}"
+        );
+        assert!(
+            clean.contains("plain trailing line"),
+            "newline-separated content must be preserved: {clean:?}"
+        );
+    }
+
+    #[test]
+    fn unit_test_gate_stays_in_default_gates() {
+        // The diagnosability fix is strictly additive: removing `UnitTest` from
+        // the canary to dodge the red is the explicitly-rejected band-aid.
+        assert!(
+            super::super::types::default_gates().contains(&RelaunchGate::UnitTest),
+            "UnitTest must remain a default canary gate (do-not-remove guard)"
         );
     }
 }

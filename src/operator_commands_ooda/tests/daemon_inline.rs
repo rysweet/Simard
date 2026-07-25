@@ -1,32 +1,7 @@
 use crate::operator_commands_ooda::daemon::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime};
-
-#[test]
-fn test_interruptible_sleep_returns_immediately_on_shutdown() {
-    let shutdown = AtomicBool::new(true);
-    let start = Instant::now();
-    interruptible_sleep(Duration::from_secs(60), &shutdown);
-    assert!(start.elapsed() < Duration::from_secs(1));
-}
-
-#[test]
-fn test_interruptible_sleep_completes_short_duration() {
-    let shutdown = AtomicBool::new(false);
-    let start = Instant::now();
-    interruptible_sleep(Duration::from_millis(100), &shutdown);
-    assert!(start.elapsed() >= Duration::from_millis(100));
-    assert!(start.elapsed() < Duration::from_secs(2));
-}
-
-#[test]
-fn test_interruptible_sleep_zero_duration() {
-    let shutdown = AtomicBool::new(false);
-    let start = Instant::now();
-    interruptible_sleep(Duration::ZERO, &shutdown);
-    assert!(start.elapsed() < Duration::from_millis(50));
-}
+use std::time::{Duration, SystemTime};
 
 #[test]
 fn test_binary_changed_false_for_future_time() {
@@ -51,21 +26,6 @@ fn test_binary_changed_false_for_epoch_identical_content() {
     // bug this gate fixes.
     let epoch = SystemTime::UNIX_EPOCH;
     assert!(!binary_changed(epoch));
-}
-
-#[test]
-fn test_interruptible_sleep_mid_shutdown() {
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&shutdown);
-    // Set shutdown after 100ms
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(100));
-        flag.store(true, Ordering::SeqCst);
-    });
-    let start = Instant::now();
-    interruptible_sleep(Duration::from_secs(60), &shutdown);
-    // Should return well before 60s
-    assert!(start.elapsed() < Duration::from_secs(2));
 }
 
 #[test]
@@ -152,12 +112,36 @@ fn binary_changed_false_for_current_time() {
     assert!(!binary_changed(SystemTime::now()));
 }
 
+// TDD (written first): the deterministic replacement for the wall-clock
+// `interruptible_sleep_*` duration asserts in this file. It drives the same
+// `interruptible_sleep_with` seam (re-exported from the daemon module) with a
+// FAKE sleeper — zero real sleeping, zero `elapsed()` — and asserts the wake
+// happens after exactly the chunks that ran before shutdown was observed. Fails
+// to compile until the seam is added and re-exported `pub(crate)`.
 #[test]
-fn interruptible_sleep_very_short_duration() {
-    let shutdown = AtomicBool::new(false);
-    let start = Instant::now();
-    interruptible_sleep(Duration::from_millis(1), &shutdown);
-    assert!(start.elapsed() < Duration::from_secs(1));
+fn interruptible_sleep_seam_wakes_deterministically_without_wall_clock() {
+    use std::cell::RefCell;
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let flip = Arc::clone(&shutdown);
+    let chunks = RefCell::new(Vec::new());
+    let mut calls = 0usize;
+    interruptible_sleep_with(Duration::from_secs(30), &shutdown, |d| {
+        chunks.borrow_mut().push(d);
+        calls += 1;
+        if calls == 3 {
+            flip.store(true, Ordering::SeqCst);
+        }
+    });
+    let recorded = chunks.into_inner();
+    assert_eq!(
+        recorded.len(),
+        3,
+        "loop must stop the tick after shutdown is observed, not run to 30s: {recorded:?}"
+    );
+    assert!(
+        recorded.iter().all(|d| *d <= Duration::from_millis(250)),
+        "each requested chunk must be tick-clamped: {recorded:?}"
+    );
 }
 
 #[test]
