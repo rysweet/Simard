@@ -246,10 +246,27 @@ fn run_smoke_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
 /// The returned [`TempDir`] guard MUST be kept alive by the caller until after
 /// `cmd.output()` completes, or the isolated root is deleted mid-run.
 fn build_unit_test_command(config: &RelaunchConfig) -> SimardResult<(Command, TempDir)> {
-    let state_root = TempDir::new().map_err(|e| SimardError::PersistentStoreIo {
+    build_unit_test_command_in(config, &std::env::temp_dir())
+}
+
+/// Testability seam for [`build_unit_test_command`]: mints the isolated state
+/// root under `temp_parent` (production passes the system temp dir, making this
+/// byte-for-byte equivalent to `TempDir::new()`).
+///
+/// The seam exists so the fail-closed test can force `TempDir` creation to error
+/// by passing a non-existent parent DIRECTLY — never by mutating the
+/// process-global `TMPDIR`. A global `TMPDIR` mutation would tear concurrent
+/// `tempfile::tempdir()` reads in unrelated tests (the `cognitive_memory` serial
+/// key only serializes tests that also carry it, which the broad `tempfile`
+/// callers do not).
+fn build_unit_test_command_in(
+    config: &RelaunchConfig,
+    temp_parent: &Path,
+) -> SimardResult<(Command, TempDir)> {
+    let state_root = TempDir::new_in(temp_parent).map_err(|e| SimardError::PersistentStoreIo {
         store: "canary-unit-test-isolated-state-root".to_string(),
         action: "create isolated tempdir".to_string(),
-        path: std::env::temp_dir(),
+        path: temp_parent.to_path_buf(),
         reason: e.to_string(),
     })?;
     // The canary must never run against a CWD-relative root; mkdtemp yields an
@@ -1327,23 +1344,20 @@ mod state_isolation_tdd {
     // FAIL CLOSED (non-negotiable): if the isolated root cannot be created the
     // gate MUST redden — it must NEVER silently fall back to the live state root
     // (that fallback is the exact bug #4628 removes). We force the failure by
-    // pointing the system temp dir at a non-existent, non-creatable path so
-    // `TempDir::new()` errors.
+    // injecting a non-existent, non-creatable temp PARENT directly, so
+    // `TempDir::new_in()` errors. Injecting the parent (rather than mutating the
+    // process-global `TMPDIR`) keeps this test from tearing a concurrent
+    // `tempfile::tempdir()` read in an unrelated test.
     #[test]
-    #[serial_test::serial(cognitive_memory)]
     fn unit_test_gate_fails_closed_when_state_isolation_unavailable() {
-        let _env = EnvGuard::capture(&["TMPDIR"]);
-        let bogus = format!(
+        let bogus = std::path::PathBuf::from(format!(
             "/simard-no-such-tmp-{}-{:?}/nested",
             std::process::id(),
             std::thread::current().id()
-        );
-        // SAFETY: serialized by the cognitive_memory serial key (whole-binary);
-        // no concurrent test reads TMPDIR. Restored by EnvGuard on drop.
-        unsafe { std::env::set_var("TMPDIR", &bogus) };
+        ));
 
         let config = RelaunchConfig::default();
-        let outcome = build_unit_test_command(&config);
+        let outcome = build_unit_test_command_in(&config, &bogus);
 
         assert!(
             outcome.is_err(),
