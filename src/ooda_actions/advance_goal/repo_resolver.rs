@@ -215,14 +215,17 @@ mod tests {
     }
 
     fn run_git(repo: &Path, args: &[&str]) {
-        let mut cmd = Command::new("git");
-        cmd.args(args).current_dir(repo).env_clear();
-        if let Ok(p) = std::env::var("PATH") {
-            cmd.env("PATH", p);
-        }
-        // Provide a HOME so git never reads a developer's global config.
-        cmd.env("HOME", repo);
-        let out = cmd.output().expect("spawn git");
+        let out = crate::util::spawn_retry::retry_spawn_sync(|| {
+            let mut cmd = Command::new("git");
+            cmd.args(args).current_dir(repo).env_clear();
+            if let Ok(p) = std::env::var("PATH") {
+                cmd.env("PATH", p);
+            }
+            // Provide a HOME so git never reads a developer's global config.
+            cmd.env("HOME", repo);
+            cmd.output()
+        })
+        .expect("spawn git");
         assert!(
             out.status.success(),
             "git {:?} failed in {}: {}",
@@ -245,13 +248,16 @@ mod tests {
     }
 
     fn git_output(repo: &Path, args: &[&str]) -> String {
-        let mut cmd = Command::new("git");
-        cmd.args(args).current_dir(repo).env_clear();
-        if let Ok(p) = std::env::var("PATH") {
-            cmd.env("PATH", p);
-        }
-        cmd.env("HOME", repo);
-        let out = cmd.output().expect("spawn git");
+        let out = crate::util::spawn_retry::retry_spawn_sync(|| {
+            let mut cmd = Command::new("git");
+            cmd.args(args).current_dir(repo).env_clear();
+            if let Ok(p) = std::env::var("PATH") {
+                cmd.env("PATH", p);
+            }
+            cmd.env("HOME", repo);
+            cmd.output()
+        })
+        .expect("spawn git");
         assert!(
             out.status.success(),
             "git {:?} failed: {}",

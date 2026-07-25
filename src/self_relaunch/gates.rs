@@ -183,9 +183,11 @@ fn run_gate(binary: &Path, gate: RelaunchGate, config: &RelaunchConfig) -> GateR
 }
 
 fn run_smoke_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
-    let mut cmd = scrubbed_command(binary, config);
-    cmd.arg("--version");
-    match cmd.output() {
+    match crate::util::spawn_retry::retry_spawn_sync(|| {
+        let mut cmd = scrubbed_command(binary, config);
+        cmd.arg("--version");
+        cmd.output()
+    }) {
         Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             GateResult {
@@ -212,14 +214,16 @@ fn run_smoke_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
 }
 
 fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
-    let mut cmd = scrubbed_command("cargo", config);
-    cmd.arg("test")
-        .arg("--manifest-path")
-        .arg(config.manifest_dir.join("Cargo.toml"))
-        .arg("--target-dir")
-        .arg(&config.canary_target_dir)
-        .env("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs());
-    match cmd.output() {
+    match crate::util::spawn_retry::retry_spawn_sync(|| {
+        let mut cmd = scrubbed_command("cargo", config);
+        cmd.arg("test")
+            .arg("--manifest-path")
+            .arg(config.manifest_dir.join("Cargo.toml"))
+            .arg("--target-dir")
+            .arg(&config.canary_target_dir)
+            .env("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs());
+        cmd.output()
+    }) {
         Ok(output) if output.status.success() => GateResult {
             gate: RelaunchGate::UnitTest,
             passed: true,
@@ -243,9 +247,11 @@ fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
 }
 
 fn run_gym_baseline_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
-    let mut cmd = scrubbed_command(binary, config);
-    cmd.args(["gym", "list"]);
-    match cmd.output() {
+    match crate::util::spawn_retry::retry_spawn_sync(|| {
+        let mut cmd = scrubbed_command(binary, config);
+        cmd.args(["gym", "list"]);
+        cmd.output()
+    }) {
         Ok(output) if output.status.success() => GateResult {
             gate: RelaunchGate::GymBaseline,
             passed: true,
@@ -270,9 +276,11 @@ fn run_gym_baseline_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
 
 fn run_rpc_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
     let timeout_secs = config.health_timeout.as_secs().to_string();
-    let mut cmd = scrubbed_command(binary, config);
-    cmd.args(["probe", "rpc", "--timeout", &timeout_secs]);
-    match cmd.output() {
+    match crate::util::spawn_retry::retry_spawn_sync(|| {
+        let mut cmd = scrubbed_command(binary, config);
+        cmd.args(["probe", "rpc", "--timeout", &timeout_secs]);
+        cmd.output()
+    }) {
         Ok(output) if output.status.success() => GateResult {
             gate: RelaunchGate::RpcHealth,
             passed: true,

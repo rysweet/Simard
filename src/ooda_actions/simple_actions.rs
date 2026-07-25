@@ -201,6 +201,9 @@ pub(super) fn dispatch_safe_update(action: &PlannedAction) -> ActionOutcome {
         .spawn();
     match result {
         Ok(child) => {
+            // Detached child (dropped without `wait()`): register its PID so the
+            // per-cycle reaper harvests it instead of leaving a `<defunct>` entry.
+            crate::util::spawn_retry::register_reapable_child(child.id());
             tracing::info!(
                 target: "simard::ooda_actions",
                 pid = child.id(),

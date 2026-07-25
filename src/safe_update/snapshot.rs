@@ -116,11 +116,20 @@ pub fn prune_backups(bin_dir: &Path, retention: usize) -> Result<(), SafeUpdateE
     // Sort newest-first by filename (timestamp embedded in name).
     backups.sort_by(|a, b| b.cmp(a));
     for path in backups.into_iter().skip(retention) {
-        fs::remove_file(&path).map_err(|e| SafeUpdateError::SnapshotIo {
-            action: "prune".into(),
-            path,
-            reason: e.to_string(),
-        })?;
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            // Another actor (a concurrent prune) already removed this backup.
+            // The post-condition — the file is gone — already holds, so this is
+            // success, not an error.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(SafeUpdateError::SnapshotIo {
+                    action: "prune".into(),
+                    path,
+                    reason: e.to_string(),
+                });
+            }
+        }
     }
     Ok(())
 }

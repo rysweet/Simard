@@ -184,8 +184,8 @@ fn export_to_file_and_load() {
         .store_fact("rust", "fast language", 0.95, &[], "")
         .unwrap();
 
-    let dir = std::env::temp_dir().join("simard-test-snapshot");
-    let _ = std::fs::create_dir_all(&dir);
+    let _tmp = tempfile::TempDir::new().unwrap();
+    let dir = _tmp.path().to_path_buf();
     let path = dir.join("snapshot.json");
 
     let snapshot = export_memory_snapshot(&memory, "file-agent", Some(&path)).unwrap();

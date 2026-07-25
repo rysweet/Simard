@@ -50,7 +50,8 @@ fn git_cmd(cwd: &Path, args: &[&str]) -> Command {
 }
 
 fn run_git(cwd: &Path, args: &[&str]) {
-    let out = git_cmd(cwd, args).output().expect("spawn git");
+    let out = crate::util::spawn_retry::retry_spawn_sync(|| git_cmd(cwd, args).output())
+        .expect("spawn git");
     assert!(
         out.status.success(),
         "git {args:?} failed in {}: {}",

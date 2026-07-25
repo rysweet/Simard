@@ -129,6 +129,7 @@ fn negative_pretest_failure_aborts_before_swap() {
     let false_bin = which("false");
 
     let isolated_engineers = tempdir().unwrap();
+    let isolated_bin_dir = tempdir().unwrap();
     let cfg = UpdateConfig {
         drain_timeout_seconds: 1,
         pretest_timeout_seconds: 5,
@@ -136,6 +137,7 @@ fn negative_pretest_failure_aborts_before_swap() {
         validate_timeout_seconds: 600,
         state_dir: state.path().to_path_buf(),
         engineer_worktrees_root: Some(isolated_engineers.path().to_path_buf()),
+        snapshot_bin_dir: Some(isolated_bin_dir.path().to_path_buf()),
         ..UpdateConfig::default()
     };
     let orch = SafeUpdateOrchestrator::new(cfg, false_bin, install.clone());

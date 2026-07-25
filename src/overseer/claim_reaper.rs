@@ -1011,12 +1011,13 @@ fn capture_journal_slice(goal_id: &str) -> Option<String> {
 /// NOT a wall-clock kill for any long-running agentic step.
 fn run_with_deadline(cmd: &str, args: &[&str], timeout: Duration) -> Option<String> {
     let started = Instant::now();
-    let mut child = match Command::new(cmd)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    {
+    let mut child = match crate::util::spawn_retry::retry_spawn_sync(|| {
+        Command::new(cmd)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+    }) {
         Ok(child) => child,
         Err(error) => {
             tracing::debug!(

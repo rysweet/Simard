@@ -163,8 +163,37 @@ pub fn reclaim_candidates(
     target_pct: u8,
     source: ReclaimSource,
 ) -> ReclaimReport {
+    reclaim_candidates_with_proc_root(
+        candidates,
+        state_root,
+        mode,
+        target_pct,
+        source,
+        Path::new("/proc"),
+    )
+}
+
+/// [`reclaim_candidates`] with an injectable `proc_root` for the daemon-cwd
+/// deny-set resolution.
+///
+/// Production always passes `/proc`. Tests pass a fabricated (e.g. empty)
+/// `/proc` so the protected deny-set is deterministic and independent of the
+/// test *process* working directory. Without this seam the deny-set includes
+/// `/proc/self/cwd`; if `cargo test` is launched from a directory that is an
+/// ancestor of the system temp dir (e.g. `/tmp`), every per-test `TempDir`
+/// candidate would then be misclassified as a protected path — a non-hermetic
+/// dependency on the ambient cwd. This keeps the reclaim tests resource-isolated
+/// under any launch directory and any host load.
+pub(crate) fn reclaim_candidates_with_proc_root(
+    candidates: Vec<ReclaimCandidate>,
+    state_root: &Path,
+    mode: ReclaimMode,
+    target_pct: u8,
+    source: ReclaimSource,
+    proc_root: &Path,
+) -> ReclaimReport {
     let allow = allow_roots(state_root);
-    let protected = ProtectedDenySet::resolve(Path::new("/proc"));
+    let protected = ProtectedDenySet::resolve(proc_root);
     let live = crate::worktree_gc::ProcfsLiveProcessProbe::new();
     let wt = RealTrackedWorktreeProbe;
     // Cache `du` results for this run so the largest-first sort and the guard's

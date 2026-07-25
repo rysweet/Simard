@@ -132,11 +132,13 @@ pub fn do_rollback_with_bin_dir(
 /// failure. We never fail the rollback on a restart failure — the bytes are
 /// already restored and the operator can recover.
 fn try_restart(argv: &[&str]) -> Option<String> {
-    let mut cmd = Command::new(argv[0]);
-    if argv.len() > 1 {
-        cmd.args(&argv[1..]);
-    }
-    match cmd.output() {
+    match crate::util::spawn_retry::retry_spawn_sync(|| {
+        let mut cmd = Command::new(argv[0]);
+        if argv.len() > 1 {
+            cmd.args(&argv[1..]);
+        }
+        cmd.output()
+    }) {
         Ok(out) if out.status.success() => None,
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);

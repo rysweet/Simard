@@ -258,9 +258,19 @@ mod tests {
     /// "command not found" diagnostic naming the offending command.
     #[test]
     fn run_terminal_script_surfaces_command_not_found_for_missing_binary() {
-        let spec =
-            TerminalTurnSpec::parse("definitely-not-a-real-binary-2077 hello", "terminal-shell")
-                .unwrap();
+        // Drive the interactive shell to exit deterministically with an explicit
+        // `exit` step. `script -e` propagates the last command's status, so bash
+        // returns the failed lookup's 127 without relying on EOF-triggered exit.
+        // Under heavy host load the stdin-EOF -> shell-exit chain can stall past
+        // the idle-timeout, which would otherwise force a SIGTERM and a
+        // synthesized exit status, masking the real 127. The `exit` step makes
+        // termination load-independent while exercising the identical diagnostic
+        // path (non-success status + the shell's own "command not found" line).
+        let spec = TerminalTurnSpec::parse(
+            "command: definitely-not-a-real-binary-2077 hello\ncommand: exit",
+            "terminal-shell",
+        )
+        .unwrap();
         let cwd = std::env::current_dir().unwrap();
 
         let error = run_terminal_script("terminal-shell", &spec, &cwd)
@@ -297,8 +307,17 @@ mod tests {
     /// now name the offending command and include the shell diagnostic.
     #[test]
     fn run_terminal_script_surfaces_diagnostic_when_wait_step_times_out() {
+        // The wait-for target never appears, so the wait always times out and the
+        // turn fails with the transcript diagnostic. The budget must be large
+        // enough that the PTY shell can physically execute the command and emit
+        // its "command not found" line into the transcript *before* the timeout
+        // fires; otherwise the extraction finds nothing and we fall back to the
+        // bare timeout message. A 1s budget cannot survive a saturated host (the
+        // command may not even have started), so use the same realistic PTY
+        // budget the other terminal tests rely on. The scenario under test (a
+        // wait-for that is never satisfied) is unchanged.
         let spec = TerminalTurnSpec::parse(
-            "wait-timeout-seconds: 1\ncommand: definitely-not-a-real-binary-2077 hello\nwait-for: never-seen-marker-2077",
+            "wait-timeout-seconds: 15\ncommand: definitely-not-a-real-binary-2077 hello\nwait-for: never-seen-marker-2077",
             "terminal-shell",
         )
         .unwrap();

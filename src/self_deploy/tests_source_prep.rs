@@ -80,7 +80,8 @@ fn git_cmd(repo: &Path, args: &[&str]) -> Command {
 }
 
 fn git_run(repo: &Path, args: &[&str]) {
-    let out = git_cmd(repo, args).output().expect("spawn git");
+    let out = crate::util::spawn_retry::retry_spawn_sync(|| git_cmd(repo, args).output())
+        .expect("spawn git");
     assert!(
         out.status.success(),
         "git {:?} failed in {}: {}",
@@ -91,7 +92,8 @@ fn git_run(repo: &Path, args: &[&str]) {
 }
 
 fn git_out(repo: &Path, args: &[&str]) -> String {
-    let out = git_cmd(repo, args).output().expect("spawn git");
+    let out = crate::util::spawn_retry::retry_spawn_sync(|| git_cmd(repo, args).output())
+        .expect("spawn git");
     assert!(
         out.status.success(),
         "git {:?} failed in {}: {}",
@@ -131,11 +133,13 @@ fn add_merged_commit(origin: &Path) -> String {
 fn clone_local(origin: &Path, dest: &Path) {
     let parent = dest.parent().unwrap();
     std::fs::create_dir_all(parent).unwrap();
-    let out = git_cmd(parent, &["clone", "--quiet"])
-        .arg(origin)
-        .arg(dest)
-        .output()
-        .expect("spawn git clone");
+    let out = crate::util::spawn_retry::retry_spawn_sync(|| {
+        git_cmd(parent, &["clone", "--quiet"])
+            .arg(origin)
+            .arg(dest)
+            .output()
+    })
+    .expect("spawn git clone");
     assert!(
         out.status.success(),
         "git clone failed: {}",
@@ -483,10 +487,11 @@ fn prepare_fetches_and_checks_out_merged_head_not_cwd_head() {
     );
     // Detached HEAD at the exact merged commit (so SIMARD_GIT_HASH == c2).
     assert!(
-        !git_cmd(&canonical, &["symbolic-ref", "-q", "HEAD"])
-            .status()
-            .unwrap()
-            .success(),
+        !crate::util::spawn_retry::retry_spawn_sync(|| {
+            git_cmd(&canonical, &["symbolic-ref", "-q", "HEAD"]).status()
+        })
+        .unwrap()
+        .success(),
         "HEAD must be detached at the merged commit"
     );
 }
@@ -526,10 +531,11 @@ fn prepare_skips_fetch_when_commit_already_present_offline() {
     );
     // Detached HEAD at the exact commit (so SIMARD_GIT_HASH == c1).
     assert!(
-        !git_cmd(&canonical, &["symbolic-ref", "-q", "HEAD"])
-            .status()
-            .unwrap()
-            .success(),
+        !crate::util::spawn_retry::retry_spawn_sync(|| {
+            git_cmd(&canonical, &["symbolic-ref", "-q", "HEAD"]).status()
+        })
+        .unwrap()
+        .success(),
         "HEAD must be detached at the present commit"
     );
 }

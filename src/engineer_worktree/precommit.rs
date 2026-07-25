@@ -88,11 +88,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         // Initialize a real git repo so `git config` has somewhere to write.
-        let git = Command::new("git")
-            .args(["init", "-q", "-b", "main"])
-            .current_dir(dir.path())
-            .status()
-            .unwrap();
+        let git = crate::util::spawn_retry::retry_spawn_sync(|| {
+            Command::new("git")
+                .args(["init", "-q", "-b", "main"])
+                .current_dir(dir.path())
+                .status()
+        })
+        .unwrap();
         assert!(git.success(), "git init failed");
 
         // Materialize the committed hooks so the presence check passes.
@@ -108,11 +110,13 @@ mod tests {
         );
 
         // Verify git now points at the committed hooks directory.
-        let out = Command::new("git")
-            .args(["config", "--get", "core.hooksPath"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
+        let out = crate::util::spawn_retry::retry_spawn_sync(|| {
+            Command::new("git")
+                .args(["config", "--get", "core.hooksPath"])
+                .current_dir(dir.path())
+                .output()
+        })
+        .unwrap();
         assert!(
             out.status.success(),
             "git config --get core.hooksPath failed"

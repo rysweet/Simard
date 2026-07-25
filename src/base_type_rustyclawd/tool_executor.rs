@@ -89,19 +89,28 @@ pub(super) async fn execute_tool_locally(
             let idle_window =
                 resolve_idle_window(std::env::var(IDLE_LIVENESS_ENV).ok().as_deref(), timeout_ms);
 
-            let mut cmd = tokio::process::Command::new("sh");
-            cmd.args(["-c", command]);
-            // Pipe stdout/stderr so tool output doesn't leak to the terminal.
-            cmd.stdout(std::process::Stdio::piped());
-            cmd.stderr(std::process::Stdio::piped());
             // Isolate the child into its own session/process group (setsid) so
             // the idle reaper can SIGKILL the whole subtree — the shell plus
             // anything it forked — leaving no descendant orphaned holding the
             // pipes open. With setsid the child's PID equals its PGID.
-            let config = rustyclawd_tools::ProcessSpawnConfig::with_isolation();
-            let mut child = rustyclawd_tools::spawn_with_isolation(cmd, &config)
-                .await
-                .map_err(|e| ClientError::Unknown(format!("spawn failed: {e}")))?;
+            //
+            // The spawn is wrapped in the bounded-backoff retry helper: under
+            // massive fork/exec host load the kernel intermittently rejects the
+            // spawn with a transient errno (ETXTBSY/EAGAIN/ENOMEM) that clears
+            // on a brief retry. The closure rebuilds the `Command` + config on
+            // each attempt because `tokio::process::Command` is not `Clone`
+            // (issue #4577). A genuine spawn failure still surfaces unchanged.
+            let mut child = crate::util::spawn_retry::retry_spawn_async(|| async {
+                let mut cmd = tokio::process::Command::new("sh");
+                cmd.args(["-c", command]);
+                // Pipe stdout/stderr so tool output doesn't leak to the terminal.
+                cmd.stdout(std::process::Stdio::piped());
+                cmd.stderr(std::process::Stdio::piped());
+                let config = rustyclawd_tools::ProcessSpawnConfig::with_isolation();
+                rustyclawd_tools::spawn_with_isolation(cmd, &config).await
+            })
+            .await
+            .map_err(|e| ClientError::Unknown(format!("spawn failed: {e}")))?;
 
             // Capture the PID up front: after the child is waited/reaped `id()`
             // returns None. This PID is also the process-group id (setsid).

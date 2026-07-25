@@ -642,7 +642,8 @@ mod reap_tests {
     }
 
     fn run_git(repo: &Path, args: &[&str]) {
-        let out = git_cmd(repo, args).output().expect("spawn git");
+        let out = crate::util::spawn_retry::retry_spawn_sync(|| git_cmd(repo, args).output())
+            .expect("spawn git");
         assert!(
             out.status.success(),
             "git {:?} failed in {}: {}",

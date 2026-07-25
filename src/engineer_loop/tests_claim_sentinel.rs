@@ -14,15 +14,17 @@ use super::{inspect_workspace, strip_claim_sentinel, verify_agent_spawn_artifact
 use crate::engineer_worktree::ENGINEER_CLAIM_FILE;
 
 fn git(repo: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .env("GIT_AUTHOR_NAME", "test")
-        .env("GIT_AUTHOR_EMAIL", "test@test.com")
-        .env("GIT_COMMITTER_NAME", "test")
-        .env("GIT_COMMITTER_EMAIL", "test@test.com")
-        .output()
-        .expect("spawn git");
+    let out = crate::util::spawn_retry::retry_spawn_sync(|| {
+        Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test.com")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test.com")
+            .output()
+    })
+    .expect("spawn git");
     assert!(
         out.status.success(),
         "git {:?} failed in {}: {}",

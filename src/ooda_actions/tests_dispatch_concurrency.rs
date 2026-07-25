@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::base_types::{BaseTypeDescriptor, BaseTypeOutcome, BaseTypeSession, BaseTypeTurnInput};
 use crate::error::{SimardError, SimardResult};
@@ -132,10 +132,8 @@ fn concurrent_dispatch_parallelizes_and_respects_cap() {
     let mut state = OodaState::new(board_with_unassigned_goals(&ids));
 
     // Run 1: cap = N → all dispatch concurrently.
-    let t0 = Instant::now();
     let outcomes =
         dispatch_actions_bounded(&actions, &mut memories, &mut state, ids.len()).unwrap();
-    let parallel_elapsed = t0.elapsed();
 
     assert_eq!(outcomes.len(), ids.len());
     for o in &outcomes {
@@ -159,9 +157,7 @@ fn concurrent_dispatch_parallelizes_and_respects_cap() {
     instr.live.store(0, Ordering::SeqCst);
 
     // Run 2: cap = 1 → dispatch serialized (peak must never exceed 1).
-    let t1 = Instant::now();
     let _ = dispatch_actions_bounded(&actions, &mut memories, &mut state, 1).unwrap();
-    let serial_elapsed = t1.elapsed();
 
     let peak_serial = instr.peak.load(Ordering::SeqCst);
     assert!(
@@ -169,13 +165,11 @@ fn concurrent_dispatch_parallelizes_and_respects_cap() {
         "cap=1 must serialize dispatch; peak={peak_serial}"
     );
 
-    // The cap=N run must be substantially faster than the cap=1 run. This is
-    // robust to per-call overhead (both runs incur the same N input builds);
-    // only the sleep parallelizes.
-    assert!(
-        parallel_elapsed * 2 <= serial_elapsed,
-        "concurrent dispatch must be >=2x faster than serialized: parallel={parallel_elapsed:?}, serial={serial_elapsed:?}"
-    );
+    // Parallelism is proven deterministically by the peak counters above
+    // (peak_parallel >= 2 with cap=N; peak_serial <= 1 with cap=1). A
+    // wall-clock parallel-vs-serial ratio assertion was removed: it is
+    // load-sensitive and reddens the self-deploy canary on a saturated host
+    // even though correctness is unchanged (issue #4577).
 }
 
 // ── (b): atomic claim — the same goal is run/claimed exactly once ───────────

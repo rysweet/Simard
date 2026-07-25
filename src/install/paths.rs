@@ -40,6 +40,32 @@ pub struct InstallLock {
     _file: fs::File,
 }
 
+// Release the advisory `flock` explicitly on drop instead of relying on the
+// bare `close(2)` of `_file`.
+//
+// `flock` locks live on the *open file description*, not the file descriptor.
+// A `close()` only releases the lock once the LAST descriptor referring to that
+// description is closed. When Simard spawns a subprocess (`fork` + `exec`) while
+// holding the install lock, the child transiently inherits a dup of this
+// descriptor during its fork→exec window (the fd is close-on-exec, but CLOEXEC
+// only fires at `exec`, not at `fork`). If the installer drops the lock while a
+// concurrent spawn sits in that window, the child's inherited dup keeps the lock
+// held, so a legitimate subsequent `acquire_install_lock` spuriously fails with
+// EWOULDBLOCK. `LOCK_UN` releases the lock on the shared open file description
+// immediately and deterministically, regardless of any outstanding inherited
+// dups — making release correct under massively-parallel `fork`/`exec` load.
+#[cfg(unix)]
+impl Drop for InstallLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // Best-effort: the fd is still open here (the File drops after us), and
+        // the lock is released whether or not this succeeds once the fd closes.
+        unsafe {
+            libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
 pub fn resolve(config: &InstallConfig) -> InstallResult<InstallLayout> {
     let simard_home = resolve_simard_home(config)?;
     validate_install_path("SIMARD_HOME", &simard_home)?;
@@ -340,5 +366,62 @@ mod tests {
 
         drop(first);
         acquire_install_lock(&layout).expect("lock should be available after guard drop");
+    }
+
+    /// Regression guard for the fork/exec fd-inheritance lock leak (issue #4577).
+    ///
+    /// While the install lock is held, a concurrent subprocess spawn (`fork` +
+    /// `exec`) transiently inherits a dup of the lock descriptor during its
+    /// fork→exec window. Because `flock` locks live on the open file
+    /// *description*, a bare `close(2)` of the parent's fd does NOT release the
+    /// lock while that inherited dup is still open — so a legitimate subsequent
+    /// `acquire_install_lock` spuriously failed with EWOULDBLOCK under
+    /// massively-parallel host load. `InstallLock::Drop` now issues an explicit
+    /// `flock(LOCK_UN)`, which releases the lock on the shared description
+    /// immediately regardless of outstanding inherited dups.
+    ///
+    /// This test makes the guarantee deterministic (independent of ambient
+    /// load) by `fork`ing a child that deliberately holds the inherited fd open
+    /// past the parent's drop, then asserting re-acquire still succeeds at once.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial(install)]
+    fn install_lock_release_survives_forked_child_holding_inherited_fd() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let layout = layout(&temp.path().join("simard-home"));
+
+        let first = acquire_install_lock(&layout).expect("first lock");
+
+        // Fork a child that inherits ALL parent fds (including the lock fd) and
+        // keeps them open well past the parent's `drop(first)` below — modelling
+        // another suite thread caught mid fork→exec under load.
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0, "fork failed");
+        if child == 0 {
+            // Child: hold inherited fds briefly, then exit WITHOUT exec (so the
+            // dup stays open — the worst case for close-only release).
+            unsafe {
+                libc::usleep(300_000);
+                libc::_exit(0);
+            }
+        }
+
+        // Parent releases the lock while the child still holds the inherited dup.
+        drop(first);
+
+        // With the explicit LOCK_UN on drop this succeeds immediately; with the
+        // old close-only release it would fail with EWOULDBLOCK until the child
+        // exited.
+        let reacquired = acquire_install_lock(&layout);
+
+        // Reap the child regardless of the assertion outcome.
+        let mut status = 0i32;
+        unsafe {
+            libc::waitpid(child, &mut status, 0);
+        }
+
+        reacquired.expect(
+            "lock must be released immediately despite a forked child holding the inherited fd",
+        );
     }
 }

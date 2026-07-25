@@ -309,8 +309,8 @@ mod tests {
 
     #[test]
     fn load_latest_snapshot_returns_none_for_empty_dir() {
-        let dir = std::env::temp_dir().join("simard-test-empty-snapshots");
-        let _ = std::fs::create_dir_all(&dir);
+        let _tmp = tempfile::TempDir::new().unwrap();
+        let dir = _tmp.path().to_path_buf();
         assert!(load_latest_snapshot(&dir).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -350,9 +350,8 @@ mod tests {
             });
         let memory = CognitiveMemoryClient::new(Box::new(transport));
 
-        let dir = std::env::temp_dir().join("simard-test-roundtrip-snapshots");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create test dir");
+        let _tmp = tempfile::TempDir::new().unwrap();
+        let dir = _tmp.path().to_path_buf();
 
         // Save
         let path = save_session_snapshot(&memory, "test-agent", &dir).expect("save snapshot");
@@ -444,9 +443,8 @@ mod tests {
 
     #[test]
     fn prune_snapshots_keeps_most_recent() {
-        let dir = std::env::temp_dir().join("simard-test-prune-snapshots");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create test dir");
+        let _tmp = tempfile::TempDir::new().unwrap();
+        let dir = _tmp.path().to_path_buf();
 
         // Create 15 fake snapshot files with ascending epoch names.
         for i in 1u32..=15 {

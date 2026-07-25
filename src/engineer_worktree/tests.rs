@@ -45,7 +45,8 @@ fn init_parent_repo_no_main(dir: &Path) -> PathBuf {
 }
 
 fn run_git(repo: &Path, args: &[&str]) {
-    let out = git_cmd(repo, args).output().expect("spawn git");
+    let out = crate::util::spawn_retry::retry_spawn_sync(|| git_cmd(repo, args).output())
+        .expect("spawn git");
     assert!(
         out.status.success(),
         "git {:?} failed in {}: {}",
@@ -56,7 +57,8 @@ fn run_git(repo: &Path, args: &[&str]) {
 }
 
 fn git_output(repo: &Path, args: &[&str]) -> String {
-    let out = git_cmd(repo, args).output().expect("spawn git");
+    let out = crate::util::spawn_retry::retry_spawn_sync(|| git_cmd(repo, args).output())
+        .expect("spawn git");
     assert!(
         out.status.success(),
         "git {:?} failed: {}",
@@ -73,10 +75,11 @@ fn worktree_registered(parent_repo: &Path, path: &Path) -> bool {
 }
 
 fn branch_exists(parent_repo: &Path, branch: &str) -> bool {
-    git_cmd(parent_repo, &["rev-parse", "--verify", "--quiet", branch])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    crate::util::spawn_retry::retry_spawn_sync(|| {
+        git_cmd(parent_repo, &["rev-parse", "--verify", "--quiet", branch]).status()
+    })
+    .map(|s| s.success())
+    .unwrap_or(false)
 }
 
 /// Build a `git` command that mirrors production isolation: clear env, then

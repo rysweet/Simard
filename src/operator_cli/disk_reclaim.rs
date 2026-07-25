@@ -22,8 +22,8 @@ use std::io::Read;
 use std::path::Path;
 
 use crate::disk_reclaim::{
-    ReclaimCandidate, ReclaimMode, ReclaimReport, ReclaimSource, is_root, reclaim_candidates,
-    reclaim_pct_from_env, run_disk_reclaim,
+    ReclaimCandidate, ReclaimMode, ReclaimReport, ReclaimSource, is_root,
+    reclaim_candidates_with_proc_root, reclaim_pct_from_env, run_disk_reclaim,
 };
 
 use super::args::reject_extra_args;
@@ -102,12 +102,28 @@ fn execute_candidates(
     mode: ReclaimMode,
     target_pct: u8,
 ) -> ReclaimReport {
-    reclaim_candidates(
+    execute_candidates_with_proc_root(candidates, state_root, mode, target_pct, Path::new("/proc"))
+}
+
+/// [`execute_candidates`] with an injectable `proc_root`. Production always uses
+/// `/proc`; tests pass a fabricated `/proc` so the daemon-cwd deny-set is
+/// deterministic and never captures the test process's own working directory
+/// (which would otherwise falsely protect per-test `TempDir` candidates when
+/// `cargo test` runs from an ancestor of the system temp dir).
+fn execute_candidates_with_proc_root(
+    candidates: &[ReclaimCandidate],
+    state_root: &Path,
+    mode: ReclaimMode,
+    target_pct: u8,
+    proc_root: &Path,
+) -> ReclaimReport {
+    reclaim_candidates_with_proc_root(
         candidates.to_vec(),
         state_root,
         mode,
         target_pct,
         ReclaimSource::Cli,
+        proc_root,
     )
 }
 
@@ -369,6 +385,10 @@ mod tests {
     #[test]
     fn exec_refuses_protected_main_even_when_instructed() {
         let state = tempfile::tempdir().expect("state root");
+        // Fabricated empty /proc: the daemon-cwd deny-set resolves to only the
+        // hardcoded protected main, never this test process's cwd — hermetic
+        // regardless of the directory `cargo test` was launched from.
+        let proc_root = tempfile::tempdir().expect("proc root");
         let candidate = ReclaimCandidate {
             path: PathBuf::from(HARDCODED_PROTECTED_MAIN),
             kind: CandidateKind::TrackedWorktree,
@@ -376,7 +396,13 @@ mod tests {
             reason: Some("delete the daemon's working directory!".to_string()),
             est_bytes: Some(999_999_999),
         };
-        let report = execute_candidates(&[candidate], state.path(), ReclaimMode::DryRun, 85);
+        let report = execute_candidates_with_proc_root(
+            &[candidate],
+            state.path(),
+            ReclaimMode::DryRun,
+            85,
+            proc_root.path(),
+        );
         assert!(
             report.would_remove.is_empty(),
             "protected main must never be a would-remove candidate",
@@ -396,6 +422,9 @@ mod tests {
     fn exec_refuses_path_outside_allow_roots() {
         let state = tempfile::tempdir().expect("state root");
         let outside = tempfile::tempdir().expect("some unrelated dir");
+        // Fabricated empty /proc so the deny-set never captures this process's
+        // cwd (see exec_refuses_protected_main_even_when_instructed).
+        let proc_root = tempfile::tempdir().expect("proc root");
         let candidate = ReclaimCandidate {
             path: outside.path().to_path_buf(),
             kind: CandidateKind::OrphanDir,
@@ -403,7 +432,13 @@ mod tests {
             reason: None,
             est_bytes: None,
         };
-        let report = execute_candidates(&[candidate], state.path(), ReclaimMode::DryRun, 85);
+        let report = execute_candidates_with_proc_root(
+            &[candidate],
+            state.path(),
+            ReclaimMode::DryRun,
+            85,
+            proc_root.path(),
+        );
         assert_eq!(report.skipped.len(), 1);
         assert_eq!(
             report.skipped[0].reject_reason,
@@ -420,6 +455,9 @@ mod tests {
         // engineer-worktrees is one of the allow-roots for this state root.
         let orphan = state.path().join("engineer-worktrees").join("leftover-9f3");
         std::fs::create_dir_all(&orphan).expect("orphan dir");
+        // Fabricated empty /proc so the deny-set never captures this process's
+        // cwd (see exec_refuses_protected_main_even_when_instructed).
+        let proc_root = tempfile::tempdir().expect("proc root");
         let candidate = ReclaimCandidate {
             path: orphan.clone(),
             kind: CandidateKind::OrphanDir,
@@ -427,7 +465,13 @@ mod tests {
             reason: None,
             est_bytes: None,
         };
-        let report = execute_candidates(&[candidate], state.path(), ReclaimMode::DryRun, 85);
+        let report = execute_candidates_with_proc_root(
+            &[candidate],
+            state.path(),
+            ReclaimMode::DryRun,
+            85,
+            proc_root.path(),
+        );
         assert_eq!(
             report.would_remove.len(),
             1,

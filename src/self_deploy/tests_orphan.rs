@@ -113,10 +113,9 @@ fn find_engineer_orphans_excludes_self_and_returns_vec() {
 fn reap_terminates_a_real_child_then_returns_count() {
     use std::process::Command;
     // Spawn a real, harmless child we are allowed to signal.
-    let mut child = Command::new("sleep")
-        .arg("30")
-        .spawn()
-        .expect("spawn sleep");
+    let mut child =
+        crate::util::spawn_retry::retry_spawn_sync(|| Command::new("sleep").arg("30").spawn())
+            .expect("spawn sleep");
     let pid = child.id() as i32;
     let orphan = OrphanEngineer {
         pid,

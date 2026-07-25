@@ -5,8 +5,8 @@
 //! where `<state_root>` follows [`crate::state_root::simard_state_root`]
 //! (`SIMARD_STATE_ROOT` when set, else `$HOME/.simard`).
 
-use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -68,20 +68,16 @@ pub fn record_metric(
     let dir = metrics_dir();
     fs::create_dir_all(&dir)?;
     let path = metrics_file_path();
-    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
-    let mut line = serde_json::to_string(&entry)?;
-    line.push('\n');
-    // Write the whole record (body + newline) in a single `write_all` so it is
-    // ONE `O_APPEND` `write()` syscall, not the two that `writeln!` on an
-    // unbuffered file emits (the JSON body, then "\n"). Engineer subprocesses
-    // share `$HOME` and append to this file concurrently; a two-syscall write
-    // lets records interleave into glued/blank lines, which the line-by-line
-    // readers (`query_metrics`/`recent_metrics`/`daily_report`) then silently
-    // `continue` past — dropping records. Records are well under `PIPE_BUF`, so
-    // a single append write is atomic. Newly consequential now that
-    // `brain_lifecycle_decision` is emitted per decision per in-flight engineer
-    // (issue #2419), making this the dominant writer to `metrics.jsonl`.
-    file.write_all(line.as_bytes())?;
+    let line = serde_json::to_string(&entry)?;
+    // Delegate to the single audited durable-append helper (shared with the
+    // cost ledger). It builds `line + "\n"` and emits it in ONE `O_APPEND`
+    // `write_all` under a process-global mutex, so concurrent engineer
+    // subprocesses sharing `$HOME` cannot interleave records into glued/blank
+    // lines that the line-by-line readers would silently drop (issue #2419).
+    // Records are well under `PIPE_BUF`, so the single append write is atomic
+    // across processes. Consolidating both writers here eliminates the prior
+    // divergence where a fix to one writer never reached the other (#4577).
+    crate::util::durable_append::append_line(&path, &line)?;
     Ok(())
 }
 

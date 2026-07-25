@@ -152,7 +152,12 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
                 exe.display()
             ),
         })?;
-        (child.id(), String::new())
+        let pid = child.id();
+        // Detached child: its `Child` handle is dropped without `wait()`, so
+        // register it for the per-cycle reaper to harvest (see
+        // `crate::util::spawn_retry::register_reapable_child`).
+        crate::util::spawn_retry::register_reapable_child(pid);
+        (pid, String::new())
     };
 
     Ok(SubordinateHandle {

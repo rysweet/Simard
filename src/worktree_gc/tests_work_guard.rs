@@ -64,15 +64,18 @@ impl GhClient for FakeGh {
 // ---------------------------------------------------------------------------
 
 fn run_git(cwd: &Path, args: &[&str]) {
-    let mut cmd = Command::new("git");
-    cmd.args(args).current_dir(cwd).env_clear();
-    if let Ok(p) = std::env::var("PATH") {
-        cmd.env("PATH", p);
-    }
-    if let Ok(h) = std::env::var("HOME") {
-        cmd.env("HOME", h);
-    }
-    let out = cmd.output().expect("spawn git");
+    let out = crate::util::spawn_retry::retry_spawn_sync(|| {
+        let mut cmd = Command::new("git");
+        cmd.args(args).current_dir(cwd).env_clear();
+        if let Ok(p) = std::env::var("PATH") {
+            cmd.env("PATH", p);
+        }
+        if let Ok(h) = std::env::var("HOME") {
+            cmd.env("HOME", h);
+        }
+        cmd.output()
+    })
+    .expect("spawn git");
     assert!(
         out.status.success(),
         "git {args:?} failed in {}: {}",

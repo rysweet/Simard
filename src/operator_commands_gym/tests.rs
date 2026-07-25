@@ -318,6 +318,7 @@ fn seed_run_report(
 /// scenario at `scenario_index`, returning the scenario id and its directory.
 /// The directory is removed first so the fixture set is deterministic.
 fn seed_two_runs(
+    output_root: &std::path::Path,
     scenario_index: usize,
     older_passed: bool,
     older_checks: usize,
@@ -328,7 +329,7 @@ fn seed_two_runs(
         .get(scenario_index)
         .expect("scenario index within registered scenarios")
         .id;
-    let scenario_dir = crate::default_output_root().join(scenario_id);
+    let scenario_dir = output_root.join(scenario_id);
     let _ = std::fs::remove_dir_all(&scenario_dir);
     seed_run_report(
         &scenario_dir.join("run-older"),
@@ -349,26 +350,18 @@ fn seed_two_runs(
     (scenario_id, scenario_dir)
 }
 
-fn cleanup_compare_fixtures(scenario_id: &str, scenario_dir: &std::path::Path) {
-    let _ = std::fs::remove_dir_all(scenario_dir);
-    let _ = std::fs::remove_dir_all(
-        crate::default_output_root()
-            .join("comparisons")
-            .join(scenario_id),
-    );
-}
-
 #[test]
 fn gym_compare_succeeds_with_two_seeded_runs_improved() {
     // Scenario index 1 keeps this isolated from the other compare test and
     // from the run-scenario test (which owns index 0). `run_gym_compare` only
     // resolves the id and reads the seeded fixtures, so the scenario's base
     // type is irrelevant here.
-    let (scenario_id, scenario_dir) = seed_two_runs(1, false, 1, true, 3);
+    let _tmp = tempfile::TempDir::new().unwrap();
+    let output_root = _tmp.path().to_path_buf();
+    let (scenario_id, _scenario_dir) = seed_two_runs(&output_root, 1, false, 1, true, 3);
 
-    let result = run_gym_compare(scenario_id);
+    let result = run_gym_compare_with_root(scenario_id, &output_root);
 
-    cleanup_compare_fixtures(scenario_id, &scenario_dir);
     assert!(
         result.is_ok(),
         "compare should succeed with two seeded runs: {result:?}"
@@ -379,11 +372,12 @@ fn gym_compare_succeeds_with_two_seeded_runs_improved() {
 fn gym_compare_succeeds_with_two_seeded_runs_unchanged() {
     // Identical metrics across both runs exercise the "unchanged" comparison
     // branch while still driving every print line in run_gym_compare.
-    let (scenario_id, scenario_dir) = seed_two_runs(2, true, 3, true, 3);
+    let _tmp = tempfile::TempDir::new().unwrap();
+    let output_root = _tmp.path().to_path_buf();
+    let (scenario_id, _scenario_dir) = seed_two_runs(&output_root, 2, true, 3, true, 3);
 
-    let result = run_gym_compare(scenario_id);
+    let result = run_gym_compare_with_root(scenario_id, &output_root);
 
-    cleanup_compare_fixtures(scenario_id, &scenario_dir);
     assert!(
         result.is_ok(),
         "compare should succeed for two identical seeded runs: {result:?}"
@@ -408,12 +402,11 @@ fn gym_scenario_succeeds_for_local_harness_scenario() {
     // is registered first and is owned exclusively by this test (the compare
     // tests use scenarios 1 and 2), so there is no fixture-directory race.
     let scenario_id = "repo-exploration-local";
-    let scenario_dir = crate::default_output_root().join(scenario_id);
-    let _ = std::fs::remove_dir_all(&scenario_dir);
+    let _tmp = tempfile::TempDir::new().unwrap();
+    let output_root = _tmp.path().to_path_buf();
 
-    let result = run_gym_scenario(scenario_id);
+    let result = run_gym_scenario_with_root(scenario_id, &output_root);
 
-    let _ = std::fs::remove_dir_all(&scenario_dir);
     assert!(
         result.is_ok(),
         "run_gym_scenario should succeed for the local-harness scenario: {result:?}"

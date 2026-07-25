@@ -71,12 +71,14 @@ pub fn overlap(candidate_scope: &[String], engineer_changed: &[String]) -> Vec<S
 /// Resolve the merge-base commit between `HEAD` and `base_branch` inside
 /// `worktree`. `None` on any git error (keeps `changed_files` absent-tolerant).
 fn merge_base(worktree: &Path, base_branch: &str) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(worktree)
-        .args(["merge-base", "HEAD", base_branch])
-        .output()
-        .ok()?;
+    let out = crate::util::spawn_retry::retry_spawn_sync(|| {
+        Command::new("git")
+            .arg("-C")
+            .arg(worktree)
+            .args(["merge-base", "HEAD", base_branch])
+            .output()
+    })
+    .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -121,14 +123,12 @@ mod tests {
     /// Hermetic: no network, uses local `git` only.
     fn init_repo(dir: &Path) {
         let run = |args: &[&str]| {
-            let ok = Command::new("git")
-                .arg("-C")
-                .arg(dir)
-                .args(args)
-                .output()
-                .expect("git runs")
-                .status
-                .success();
+            let ok = crate::util::spawn_retry::retry_spawn_sync(|| {
+                Command::new("git").arg("-C").arg(dir).args(args).output()
+            })
+            .expect("git runs")
+            .status
+            .success();
             assert!(ok, "git {args:?} failed");
         };
         run(&["init", "-q", "-b", "main"]);
@@ -138,12 +138,10 @@ mod tests {
 
     fn commit_all(dir: &Path, msg: &str) {
         let run = |args: &[&str]| {
-            Command::new("git")
-                .arg("-C")
-                .arg(dir)
-                .args(args)
-                .output()
-                .expect("git runs");
+            crate::util::spawn_retry::retry_spawn_sync(|| {
+                Command::new("git").arg("-C").arg(dir).args(args).output()
+            })
+            .expect("git runs");
         };
         run(&["add", "-A"]);
         run(&["commit", "-q", "-m", msg]);
@@ -158,12 +156,14 @@ mod tests {
         std::fs::write(repo.join("base.rs"), "fn a() {}\n").unwrap();
         commit_all(repo, "base");
         // A feature branch that adds a new file on top of main.
-        Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(["checkout", "-q", "-b", "feature"])
-            .output()
-            .unwrap();
+        crate::util::spawn_retry::retry_spawn_sync(|| {
+            Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(["checkout", "-q", "-b", "feature"])
+                .output()
+        })
+        .unwrap();
         std::fs::write(repo.join("feature.rs"), "fn b() {}\n").unwrap();
         commit_all(repo, "feature");
 

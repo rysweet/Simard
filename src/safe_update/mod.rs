@@ -49,7 +49,7 @@ pub use drain::{
 pub use errors::SafeUpdateError;
 pub use pretest::{PretestOutcome, run_pretest};
 pub use rollback::{RollbackOutcome, do_rollback};
-pub use snapshot::{BinarySnapshot, take_snapshot};
+pub use snapshot::{BinarySnapshot, take_snapshot, take_snapshot_of};
 pub use state::{
     DEFAULT_BACKUP_RETENTION, UpgradePhase, UpgradeStatus, default_state_dir, draining_flag_path,
     is_draining, read_status, status_path, write_status,
@@ -90,6 +90,11 @@ pub struct UpdateConfig {
     /// `~/.simard/engineer-worktrees/`. Tests can override this so the
     /// drain phase doesn't depend on the live filesystem.
     pub engineer_worktrees_root: Option<PathBuf>,
+    /// Where the snapshot phase writes rollback backups (`simard.bak.*`).
+    /// Defaults to [`snapshot::default_bin_dir`] (`~/.simard/bin/`). Tests can
+    /// override this so the snapshot phase writes into an isolated directory
+    /// instead of racing other processes over the shared real backup dir.
+    pub snapshot_bin_dir: Option<PathBuf>,
     /// #107 defense-in-depth: cognitive-memory item count read from the live
     /// (outgoing) store before the swap, recorded into `upgrade-status.json` so
     /// the incoming binary's validate phase can enforce item-count parity. Set
@@ -125,6 +130,7 @@ impl Default for UpdateConfig {
             validate_timeout_seconds: 600,
             state_dir: default_state_dir(),
             engineer_worktrees_root: None,
+            snapshot_bin_dir: None,
             pre_upgrade_item_count: None,
             deploy_source: crate::self_deploy::DeploySourceKind::BuildFromSource,
             memory_backup_required: true,
@@ -193,14 +199,44 @@ impl SafeUpdateOrchestrator {
         };
 
         // Phase 2: snapshot the current binary for rollback.
-        let snapshot = take_snapshot(&self.config.state_dir)?;
+        let snapshot = match &self.config.snapshot_bin_dir {
+            Some(bin_dir) => {
+                let bin = std::env::current_exe().map_err(|e| SafeUpdateError::SnapshotIo {
+                    action: "current_exe".into(),
+                    path: PathBuf::from("(current_exe)"),
+                    reason: e.to_string(),
+                })?;
+                take_snapshot_of(
+                    &bin,
+                    &self.config.state_dir,
+                    DEFAULT_BACKUP_RETENTION,
+                    bin_dir.clone(),
+                )?
+            }
+            None => take_snapshot(&self.config.state_dir)?,
+        };
 
         // Phase 3: pre-test the candidate binary.
-        let pretest = run_pretest(
+        let pretest = match run_pretest(
             &self.new_bin,
             &self.config.state_dir,
             self.config.pretest_timeout_seconds,
-        )?;
+        ) {
+            Ok(pretest) => pretest,
+            Err(error) => {
+                // A pretest that cannot be *executed* (transient subprocess-spawn
+                // starvation, a wait error, or a timeout on a saturated host) is
+                // still a pretest failure: the candidate has not been proven good,
+                // so the install must stay untouched and the phase must be
+                // recorded as `PretestFailed` (deterministically, regardless of
+                // load) so the brain backs off instead of retrying immediately.
+                let _ = write_status(
+                    &self.config.state_dir,
+                    &UpgradeStatus::pretest_failed(None, format!("pretest could not run: {error}")),
+                );
+                return Err(error);
+            }
+        };
         if !pretest.passed {
             // Mark phase=pretest_failed so the brain doesn't retry immediately.
             let _ = write_status(

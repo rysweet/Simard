@@ -264,8 +264,8 @@ mod tests {
 
     #[test]
     fn install_skill_creates_file() {
-        let dir = std::env::temp_dir().join("simard-test-skills-install");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _tmp = tempfile::TempDir::new().unwrap();
+        let dir = _tmp.path().to_path_buf();
 
         let template = SkillTemplate {
             name: "test-install".to_string(),
@@ -288,9 +288,8 @@ mod tests {
 
     #[test]
     fn list_installed_skills_finds_md_files() {
-        let dir = std::env::temp_dir().join("simard-test-skills-list");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let _tmp = tempfile::TempDir::new().unwrap();
+        let dir = _tmp.path().to_path_buf();
 
         std::fs::write(dir.join("skill-a.md"), "# A").unwrap();
         std::fs::write(dir.join("skill-b.md"), "# B").unwrap();
@@ -304,8 +303,8 @@ mod tests {
 
     #[test]
     fn list_installed_skills_empty_dir() {
-        let dir = std::env::temp_dir().join("simard-test-skills-empty");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _tmp = tempfile::TempDir::new().unwrap();
+        let dir = _tmp.path().to_path_buf();
         let skills = list_installed_skills(&dir).unwrap();
         assert!(skills.is_empty());
     }

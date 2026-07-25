@@ -107,13 +107,15 @@ fn execute_create_issue(
     args: &[&OsStr],
     body: &[u8],
 ) -> Result<Output, CreateIssueExecutionError> {
-    let mut child = Command::new(executable)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(CreateIssueExecutionError::Spawn)?;
+    let mut child = crate::util::spawn_retry::retry_spawn_sync(|| {
+        Command::new(executable)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+    })
+    .map_err(CreateIssueExecutionError::Spawn)?;
 
     let write_result = match child.stdin.take() {
         Some(mut stdin) => stdin.write_all(body),
@@ -266,11 +268,11 @@ where
 /// Shell out to `gh issue list` for one dedup [`IssueListQuery`] and parse it.
 fn run_gh_issue_list(repo: &str, query: &IssueListQuery) -> SimardResult<Vec<GhIssue>> {
     let args = issue_list_args(repo, query);
-    let output = Command::new("gh").args(&args).output().map_err(|e| {
-        SimardError::StewardshipGhCommandFailed {
-            reason: format!("failed to spawn `gh issue list`: {e}"),
-        }
-    })?;
+    let output =
+        crate::util::spawn_retry::retry_spawn_sync(|| Command::new("gh").args(&args).output())
+            .map_err(|e| SimardError::StewardshipGhCommandFailed {
+                reason: format!("failed to spawn `gh issue list`: {e}"),
+            })?;
     if !output.status.success() {
         return Err(SimardError::StewardshipGhCommandFailed {
             reason: format!(

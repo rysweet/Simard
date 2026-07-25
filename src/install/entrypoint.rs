@@ -163,7 +163,9 @@ mod unix {
     /// `true` when `<path> --version` prints a line starting with `simard `.
     /// argv-only (no shell), bounded, and any failure classifies as not-ours.
     fn version_banner_is_ours(path: &Path) -> bool {
-        let output = match Command::new(path).arg("--version").output() {
+        let output = match crate::util::spawn_retry::retry_spawn_sync(|| {
+            Command::new(path).arg("--version").output()
+        }) {
             Ok(output) => output,
             Err(_) => return false,
         };

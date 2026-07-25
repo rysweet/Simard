@@ -179,20 +179,24 @@ fn resumable_execution_requires_recorded_action_and_verification() {
 
 fn init_git_repo() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(dir.path())
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["commit", "--allow-empty", "-m", "init"])
-        .current_dir(dir.path())
-        .env("GIT_AUTHOR_NAME", "test")
-        .env("GIT_AUTHOR_EMAIL", "test@test.com")
-        .env("GIT_COMMITTER_NAME", "test")
-        .env("GIT_COMMITTER_EMAIL", "test@test.com")
-        .output()
-        .unwrap();
+    crate::util::spawn_retry::retry_spawn_sync(|| {
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+    })
+    .unwrap();
+    crate::util::spawn_retry::retry_spawn_sync(|| {
+        std::process::Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(dir.path())
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test.com")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test.com")
+            .output()
+    })
+    .unwrap();
     dir
 }
 

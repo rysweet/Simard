@@ -904,10 +904,8 @@ mod live_engineers_tests {
     /// A live claim under the state root must be counted.
     #[test]
     fn live_engineers_derives_from_live_worktree_claims() {
-        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("status-live-engineers-test");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _tmp = tempfile::TempDir::new().unwrap();
+        let dir = _tmp.path().to_path_buf();
         let wt = dir
             .join(crate::engineer_worktree::WORKTREES_SUBDIR)
             .join("goal-live-1");
@@ -919,7 +917,6 @@ mod live_engineers_tests {
         .unwrap();
 
         let resources = assemble_resources(None, &dir);
-        let _ = std::fs::remove_dir_all(&dir);
 
         let data = resources
             .data

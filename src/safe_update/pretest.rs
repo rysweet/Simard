@@ -41,15 +41,17 @@ pub fn run_pretest(
     let log_path = state_dir.join("last-pretest.log");
 
     let started = Instant::now();
-    let mut child = Command::new(binary)
-        .arg("self-test")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| SafeUpdateError::PretestSpawn {
-            path: binary.to_path_buf(),
-            reason: e.to_string(),
-        })?;
+    let mut child = crate::util::spawn_retry::retry_spawn_sync(|| {
+        Command::new(binary)
+            .arg("self-test")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+    })
+    .map_err(|e| SafeUpdateError::PretestSpawn {
+        path: binary.to_path_buf(),
+        reason: e.to_string(),
+    })?;
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -197,15 +199,17 @@ mod tests {
         })?;
         let log_path = state_dir.join("last-pretest.log");
         let started = Instant::now();
-        let mut child = Command::new(binary)
-            .args(args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| SafeUpdateError::PretestSpawn {
-                path: binary.to_path_buf(),
-                reason: e.to_string(),
-            })?;
+        let mut child = crate::util::spawn_retry::retry_spawn_sync(|| {
+            Command::new(binary)
+                .args(args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+        })
+        .map_err(|e| SafeUpdateError::PretestSpawn {
+            path: binary.to_path_buf(),
+            reason: e.to_string(),
+        })?;
         let deadline = started + Duration::from_secs(pretest_timeout_seconds);
         loop {
             match child.try_wait() {

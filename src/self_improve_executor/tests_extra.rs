@@ -30,32 +30,42 @@ fn rollback_cleans_untracked_files() {
     let ws = tmp.path();
 
     // Initialise a git repo with one committed file.
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(ws)
-        .output()
-        .expect("git init");
-    std::process::Command::new("git")
-        .args(["config", "user.email", "test@test.com"])
-        .current_dir(ws)
-        .output()
-        .expect("git config email");
-    std::process::Command::new("git")
-        .args(["config", "user.name", "Test"])
-        .current_dir(ws)
-        .output()
-        .expect("git config name");
+    crate::util::spawn_retry::retry_spawn_sync(|| {
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(ws)
+            .output()
+    })
+    .expect("git init");
+    crate::util::spawn_retry::retry_spawn_sync(|| {
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(ws)
+            .output()
+    })
+    .expect("git config email");
+    crate::util::spawn_retry::retry_spawn_sync(|| {
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(ws)
+            .output()
+    })
+    .expect("git config name");
     std::fs::write(ws.join("committed.txt"), "original").expect("write");
-    std::process::Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(ws)
-        .output()
-        .expect("git add");
-    std::process::Command::new("git")
-        .args(["commit", "-m", "init"])
-        .current_dir(ws)
-        .output()
-        .expect("git commit");
+    crate::util::spawn_retry::retry_spawn_sync(|| {
+        std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(ws)
+            .output()
+    })
+    .expect("git add");
+    crate::util::spawn_retry::retry_spawn_sync(|| {
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(ws)
+            .output()
+    })
+    .expect("git commit");
 
     // Simulate plan-created artefacts: modify tracked file + create untracked file.
     std::fs::write(ws.join("committed.txt"), "modified").expect("write");
@@ -175,21 +185,27 @@ fn init_test_repo(ws: &Path) {
         ),
         (vec!["config", "user.name", "Test"], "git config name"),
     ] {
-        std::process::Command::new("git")
-            .args(&args)
-            .current_dir(ws)
-            .output()
-            .unwrap_or_else(|_| panic!("{label}"));
+        crate::util::spawn_retry::retry_spawn_sync(|| {
+            std::process::Command::new("git")
+                .args(&args)
+                .current_dir(ws)
+                .output()
+        })
+        .unwrap_or_else(|_| panic!("{label}"));
     }
     std::fs::write(ws.join("init.txt"), "init").expect("write init file");
-    std::process::Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(ws)
-        .output()
-        .expect("git add");
-    std::process::Command::new("git")
-        .args(["commit", "-m", "init"])
-        .current_dir(ws)
-        .output()
-        .expect("git commit");
+    crate::util::spawn_retry::retry_spawn_sync(|| {
+        std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(ws)
+            .output()
+    })
+    .expect("git add");
+    crate::util::spawn_retry::retry_spawn_sync(|| {
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(ws)
+            .output()
+    })
+    .expect("git commit");
 }

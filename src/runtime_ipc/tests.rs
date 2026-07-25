@@ -132,7 +132,8 @@ fn unix_socket_transport_bind_connect_exchange() {
 #[test]
 fn ipc_subprocess_handle_construction() {
     use std::process::Command;
-    let child = Command::new("true").spawn().expect("spawn test process");
+    let child = crate::util::spawn_retry::retry_spawn_sync(|| Command::new("true").spawn())
+        .expect("spawn test process");
     let pid = child.id();
     let transport = StdioTransport::new(Box::new(std::io::sink()), Box::new(std::io::empty()));
     let mut handle = IpcSubprocessHandle::new(

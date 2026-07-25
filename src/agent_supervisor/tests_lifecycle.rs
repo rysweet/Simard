@@ -203,21 +203,21 @@ mod reaper_tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    // `reap_zombies()` is process-wide: it reaps ANY <defunct> child of this
-    // process, regardless of which test spawned it. Without serialization,
-    // peer tests in this module race with each other AND with subprocess-
-    // spawning tests elsewhere in the lib (e.g. the engineer_loop tests that
-    // run `git branch --show-current` via `try_wait()`). A concurrent
-    // `reap_zombies()` can steal those tests' SIGCHLDs, leaving `try_wait()`
-    // to fail with ECHILD ("No child processes"). See issue #1779.
+    // `reap_zombies()` harvests only PIDs explicitly registered via
+    // `crate::util::spawn_retry::register_reapable_child` (the detached-child
+    // registry). It no longer calls `waitpid(-1)`, so it can never steal a
+    // child that another test (or production spawn+wait span) is itself waiting
+    // on — the `ECHILD` race that previously reddened the canary (issue #1779)
+    // is gone by construction.
     //
-    // Serialize all reaper tests through the `simard_process_reaper` named
-    // lock from `serial_test`; subprocess-spawning tests that race against
-    // this reaper (e.g. `run_local_engineer_loop_emits_agent_prompt_build_phase`)
-    // must join the same group.
+    // These reaper tests still share the single process-global registry and
+    // each `reap_zombies()` call drains every registered PID, so they remain
+    // serialized against one another through the `simard_process_reaper` group
+    // to keep their per-test PID accounting deterministic. No *other* test in
+    // the suite registers a PID (the detached-spawn sites are production-only
+    // paths), so no cross-test contamination occurs.
 
-    /// Drain any pre-existing zombies left behind by other tests in the same
-    /// process so each test starts from a clean baseline.
+    /// Drain any pre-existing registered zombies so each test starts clean.
     fn drain() {
         for _ in 0..32 {
             if reap_zombies() == 0 {
@@ -226,15 +226,16 @@ mod reaper_tests {
         }
     }
 
-    /// Spawn `/bin/true`, drop its `Child` handle without `wait()`, and wait
-    /// (up to ~2s) for the kernel to mark the process as exited. Returns when
-    /// the child has had time to become a zombie.
+    /// Spawn `/bin/true`, register its PID in the detached-child registry, drop
+    /// its `Child` handle without `wait()`, and wait (up to ~2s) for the kernel
+    /// to mark the process as exited. Returns when the child has had time to
+    /// become a zombie that the targeted reaper can harvest.
     fn spawn_short_lived_unwaited() {
-        let child = Command::new("true")
-            .spawn()
+        let child = crate::util::spawn_retry::retry_spawn_sync(|| Command::new("true").spawn())
             .expect("spawn /bin/true should succeed on unix");
-        // Intentionally drop without wait() — this is the bug pattern the
-        // reaper must clean up.
+        // Register the detached PID, then drop the handle without wait() — this
+        // is the fire-and-forget pattern the targeted reaper must clean up.
+        crate::util::spawn_retry::register_reapable_child(child.id());
         drop(child);
         // Give the kernel a moment to transition the child to <defunct>.
         thread::sleep(Duration::from_millis(150));
@@ -288,10 +289,12 @@ mod reaper_tests {
         // Spawn a child that lives longer than the call to reap_zombies.
         // WNOHANG must guarantee non-blocking behaviour even when a child
         // exists but has not exited.
-        let mut child = Command::new("sleep")
-            .arg("2")
-            .spawn()
-            .expect("spawn /bin/sleep should succeed on unix");
+        let mut child =
+            crate::util::spawn_retry::retry_spawn_sync(|| Command::new("sleep").arg("2").spawn())
+                .expect("spawn /bin/sleep should succeed on unix");
+        // Register so the targeted reaper actually queries this PID; a live
+        // child must return WNOHANG=0 immediately (non-blocking).
+        crate::util::spawn_retry::register_reapable_child(child.id());
 
         let start = Instant::now();
         let _ = reap_zombies();
@@ -370,10 +373,10 @@ fn handle_with(pid: u32, session_name: &str) -> SubordinateHandle {
 #[serial_test::serial(simard_process_reaper)]
 fn kill_refuses_and_spares_reused_pid() {
     // An innocent long-lived process now owns the recycled PID.
-    let mut innocent = std::process::Command::new("sleep")
-        .arg("30")
-        .spawn()
-        .expect("spawn innocent sleep child");
+    let mut innocent = crate::util::spawn_retry::retry_spawn_sync(|| {
+        std::process::Command::new("sleep").arg("30").spawn()
+    })
+    .expect("spawn innocent sleep child");
     let innocent_pid = innocent.id();
 
     let mut handle = handle_with(innocent_pid, "ooda-session-x");
@@ -405,10 +408,10 @@ fn kill_refuses_and_spares_reused_pid() {
 #[test]
 #[serial_test::serial(simard_process_reaper)]
 fn kill_signals_matching_pane_pid() {
-    let mut child = std::process::Command::new("sleep")
-        .arg("30")
-        .spawn()
-        .expect("spawn subordinate sleep child");
+    let mut child = crate::util::spawn_retry::retry_spawn_sync(|| {
+        std::process::Command::new("sleep").arg("30").spawn()
+    })
+    .expect("spawn subordinate sleep child");
     let pid = child.id();
 
     let mut handle = handle_with(pid, "ooda-session-y");

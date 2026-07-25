@@ -51,21 +51,22 @@ fn run_command_inner(
         });
     }
 
-    let mut command = Command::new(program);
-    command
-        .args(args)
-        .current_dir(cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    for key in CLEARED_GIT_ENV_VARS {
-        command.env_remove(key);
-    }
-    let mut child = command
-        .spawn()
-        .map_err(|error| SimardError::ActionExecutionFailed {
-            action: argv.join(" "),
-            reason: error.to_string(),
-        })?;
+    let mut child = crate::util::spawn_retry::retry_spawn_sync(|| {
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .current_dir(cwd)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        for key in CLEARED_GIT_ENV_VARS {
+            command.env_remove(key);
+        }
+        command.spawn()
+    })
+    .map_err(|error| SimardError::ActionExecutionFailed {
+        action: argv.join(" "),
+        reason: error.to_string(),
+    })?;
 
     let deadline = Instant::now() + timeout_for_command(argv);
     loop {

@@ -10,10 +10,12 @@ use super::release::find_latest_release;
 /// Returns Ok(()) if the self-test passes, Err otherwise.
 fn run_self_test_on_binary(binary: &Path) -> Result<(), Box<dyn std::error::Error>> {
     println!("Running self-test on new binary...");
-    let output = std::process::Command::new(binary)
-        .args(["self-test"])
-        .output()
-        .map_err(|e| format!("Failed to run self-test on new binary: {e}"))?;
+    let output = crate::util::spawn_retry::retry_spawn_sync(|| {
+        std::process::Command::new(binary)
+            .args(["self-test"])
+            .output()
+    })
+    .map_err(|e| format!("Failed to run self-test on new binary: {e}"))?;
 
     if output.status.success() {
         println!("Self-test passed.");
@@ -38,10 +40,12 @@ pub fn handle_self_test() -> Result<(), Box<dyn std::error::Error>> {
     let current_exe =
         std::env::current_exe().map_err(|e| format!("Cannot determine current executable: {e}"))?;
 
-    let output = std::process::Command::new(&current_exe)
-        .args(["gym", "run-suite", "starter"])
-        .output()
-        .map_err(|e| format!("Failed to run gym suite: {e}"))?;
+    let output = crate::util::spawn_retry::retry_spawn_sync(|| {
+        std::process::Command::new(&current_exe)
+            .args(["gym", "run-suite", "starter"])
+            .output()
+    })
+    .map_err(|e| format!("Failed to run gym suite: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

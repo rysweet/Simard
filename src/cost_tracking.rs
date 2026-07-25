@@ -6,10 +6,9 @@
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 /// A single cost entry written to the ledger.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -125,43 +124,18 @@ fn write_entry(entry: &CostEntry) -> std::io::Result<()> {
     append_line(&ledger_path(), &line)
 }
 
-/// Serializes concurrent in-process appends to a cost ledger.
+/// Append one JSONL record to `path` without ever interleaving with, or
+/// dropping relative to, a concurrent append.
 ///
-/// The lib test binary runs every test in a single process with many threads,
-/// and `record_cost` resolves the ledger from the process-global `HOME` /
-/// `SIMARD_COST_LEDGER_PATH`. When one test redirects that env (e.g. the
-/// meeting-cost regression pins the ledger under a temp `$HOME`), a parallel,
-/// non-serialized test that also calls `record_cost` (e.g. the lightweight-chat
-/// adapter turn) resolves the *same* path and appends to it concurrently.
-static LEDGER_WRITE_LOCK: Mutex<()> = Mutex::new(());
-
-/// Append one JSONL record to `path` without ever interleaving with a
-/// concurrent append.
-///
-/// `writeln!` emits the payload and the trailing newline as two separate
-/// `write()` syscalls, so two threads appending to the same ledger can splice
-/// their bytes into one line (`{a}{b}\n\n`). A spliced line fails JSON parse
-/// and the entry is silently dropped on read — the intermittent
-/// "a copilot-meeting cost entry ... must be recorded" CI flake. Two guards
-/// close that window: a process-wide lock serializes in-process writers, and
-/// the whole record is written in a single buffered `write_all` so that even a
-/// cross-process appender (`O_APPEND` makes a lone `write()` atomic at EOF)
-/// cannot tear the line.
+/// This delegates to [`crate::util::durable_append::append_line`], the single
+/// audited source of truth for loss-free `O_APPEND` JSONL writes shared with
+/// the self-metrics stream. That helper builds the whole record (body + one
+/// newline) and emits it in a single `write_all` under a process-global append
+/// mutex, so two in-process threads cannot splice their bytes into one line and
+/// (records staying under `PIPE_BUF`) a cross-process appender cannot tear it
+/// either. Every IO error propagates — no silent drop.
 fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut record = String::with_capacity(line.len() + 1);
-    record.push_str(line);
-    record.push('\n');
-
-    let _guard = LEDGER_WRITE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    file.write_all(record.as_bytes())?;
-    file.flush()?;
-    Ok(())
+    crate::util::durable_append::append_line(path, line)
 }
 
 fn read_entries() -> std::io::Result<Vec<CostEntry>> {
@@ -296,10 +270,8 @@ mod tests {
 
     #[test]
     fn read_entries_handles_empty_lines() {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("test-cost-tracking");
-        fs::create_dir_all(&dir).unwrap();
+        let _tmp = tempfile::TempDir::new().unwrap();
+        let dir = _tmp.path().to_path_buf();
         let path = dir.join("test-empty-lines.jsonl");
 
         let entry = CostEntry {
@@ -333,7 +305,6 @@ mod tests {
             }
         }
         assert_eq!(entries.len(), 2);
-        fs::remove_dir_all(&dir).ok();
     }
 
     /// Regression for the intermittent `base_type_copilot::tests::
@@ -356,16 +327,14 @@ mod tests {
     /// threads, so the additional cross-process protection from the
     /// single-buffer `write_all` is guarded structurally by
     /// `scripts/qa-cost-ledger-concurrent-no-drop.sh`, not by this in-process
-    /// test. It uses an explicit path (no `HOME` / env dependency), so it needs
-    /// no serial key and is itself deterministic.
+    /// test. It writes to a unique per-test `tempfile::TempDir` (no shared
+    /// `target/` path, no `HOME` / env dependency), so parallel copies of the
+    /// lib test binary cannot collide on the ledger file and it needs no serial
+    /// key — it is itself deterministic under massive parallelism.
     #[test]
     fn concurrent_appends_never_interleave_or_drop_entries() {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("test-cost-tracking-concurrent");
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(format!("ledger-{}.jsonl", std::process::id()));
-        let _ = fs::remove_file(&path);
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("ledger.jsonl");
 
         const THREADS: usize = 16;
         const PER_THREAD: usize = 64;
@@ -412,7 +381,5 @@ mod tests {
             THREADS * PER_THREAD,
             "every concurrently-appended entry must be present and intact"
         );
-        let _ = fs::remove_file(&path);
-        fs::remove_dir_all(&dir).ok();
     }
 }

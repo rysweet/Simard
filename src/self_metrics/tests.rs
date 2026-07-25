@@ -12,12 +12,13 @@ use std::env;
 /// let these tests read/write a shared, uncleaned metrics dir (cross-test
 /// contamination). Both env vars are restored on exit.
 fn with_temp_home<F: FnOnce()>(f: F) {
-    let dir = env::current_dir()
-        .unwrap()
-        .join("target")
-        .join("test-metrics-home");
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
+    // Unique per-invocation temp HOME. A fixed shared path (e.g.
+    // `target/test-metrics-home`) is identical across every parallel *process*
+    // running this binary, so concurrent copies would wipe/read each other's
+    // metrics dir mid-run (NotFound / dropped entries). A `TempDir` is unique
+    // per call and per process, giving true cross-process isolation.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().to_path_buf();
     // Temporarily override HOME and clear any inherited/leaked state-root env.
     let prev = env::var_os("HOME");
     let prev_state_root = env::var_os(crate::state_root::STATE_ROOT_ENV);
@@ -37,7 +38,7 @@ fn with_temp_home<F: FnOnce()>(f: F) {
         Some(v) => unsafe { env::set_var(crate::state_root::STATE_ROOT_ENV, v) },
         None => unsafe { env::remove_var(crate::state_root::STATE_ROOT_ENV) },
     }
-    let _ = fs::remove_dir_all(&dir);
+    // `tmp` is removed automatically on drop.
 }
 
 #[test]
@@ -252,11 +253,8 @@ fn malformed_lines_skipped() {
 fn record_metric_follows_state_root_not_home() {
     use crate::state_root::STATE_ROOT_ENV;
 
-    let base = env::current_dir()
-        .unwrap()
-        .join("target")
-        .join("test-metrics-state-root");
-    let _ = fs::remove_dir_all(&base);
+    let _tmp = tempfile::TempDir::new().unwrap();
+    let base = _tmp.path().to_path_buf();
     let home_dir = base.join("home");
     let state_root = base.join("relocated-state");
     fs::create_dir_all(&home_dir).unwrap();
@@ -301,7 +299,6 @@ fn record_metric_follows_state_root_not_home() {
             None => env::remove_var(STATE_ROOT_ENV),
         }
     }
-    let _ = fs::remove_dir_all(&base);
 }
 
 // ── count_entries_since — pure core of the activity collectors ──────────────

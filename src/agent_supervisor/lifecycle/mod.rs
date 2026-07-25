@@ -316,45 +316,25 @@ pub(super) fn current_epoch_seconds() -> SimardResult<u64> {
 // ---------------------------------------------------------------------------
 //
 // The OODA daemon spawns subordinate engineer processes whose `Child` handles
-// are dropped without `wait()`. Without intervention, the kernel keeps those
-// exited children as `<defunct>` entries indefinitely. `reap_zombies` is
-// invoked once per OODA cycle to harvest exit statuses non-blockingly via
-// `waitpid(-1, ..., WNOHANG)`.
+// are dropped without `wait()`, and dispatches a detached `simard safe-update`
+// child the same way. Without intervention the kernel keeps those exited
+// children as `<defunct>` entries indefinitely. `reap_zombies` is invoked once
+// per OODA cycle to harvest exit statuses non-blockingly.
+//
+// It reaps **only** PIDs explicitly registered via
+// [`crate::util::spawn_retry::register_reapable_child`] (the detached-child
+// registry), using `waitpid(pid, WNOHANG)` per PID. It never calls
+// `waitpid(-1)`, so it can never steal a child that another owner (a `git`,
+// `gh`, or Bash-tool spawn+wait span) is itself waiting on — which would
+// otherwise fail that owner's wait with `ECHILD`.
 
-/// Non-blockingly reap any exited child processes of the calling process.
+/// Non-blockingly reap any exited, registered detached child processes.
 ///
 /// Returns the number of children reaped during this call. On non-Unix
-/// platforms this is a no-op that always returns `0`.
-///
-/// EINTR handling: the loop terminates on any `-1` return regardless of
-/// `errno`. A missed reap on signal interruption is harmless because the
-/// next OODA cycle (typically seconds later) will pick it up; retrying
-/// inside the loop risks unbounded iteration.
-#[cfg(unix)]
+/// platforms this is a no-op that always returns `0`. See
+/// [`crate::util::spawn_retry::reap_registered_children`] for the mechanism.
 pub fn reap_zombies() -> usize {
-    let mut reaped: usize = 0;
-    loop {
-        let mut status: libc::c_int = 0;
-        // SAFETY: `waitpid` with pid = -1 and WNOHANG is a non-blocking call
-        // that inspects the kernel's child-process table for the calling
-        // process. The `status` pointer points to a stack-allocated c_int we
-        // own. No invariants beyond standard POSIX semantics are required.
-        let pid = unsafe { libc::waitpid(-1, &mut status as *mut libc::c_int, libc::WNOHANG) };
-        if pid > 0 {
-            reaped += 1;
-            continue;
-        }
-        // pid == 0: children exist but none have exited.
-        // pid == -1: no children remain (ECHILD) or interrupted (EINTR).
-        // In all non-positive cases, stop polling this cycle.
-        break;
-    }
-    reaped
-}
-
-#[cfg(not(unix))]
-pub fn reap_zombies() -> usize {
-    0
+    crate::util::spawn_retry::reap_registered_children()
 }
 
 // ---------------------------------------------------------------------------

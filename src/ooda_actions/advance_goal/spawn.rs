@@ -983,13 +983,19 @@ fn apply_lifecycle_decision(
                 .stdin(std::process::Stdio::null())
                 .spawn();
             match result {
-                Ok(child) => tracing::info!(
-                    target: "simard::ooda_brain",
-                    goal = %goal_id,
-                    pid = child.id(),
-                    rationale = %rationale,
-                    "consider_self_update: spawned `simard safe-update` (detached)",
-                ),
+                Ok(child) => {
+                    // Detached child (dropped without `wait()`): register its
+                    // PID so the per-cycle reaper harvests it instead of leaving
+                    // a `<defunct>` entry.
+                    crate::util::spawn_retry::register_reapable_child(child.id());
+                    tracing::info!(
+                        target: "simard::ooda_brain",
+                        goal = %goal_id,
+                        pid = child.id(),
+                        rationale = %rationale,
+                        "consider_self_update: spawned `simard safe-update` (detached)",
+                    )
+                }
                 Err(e) => tracing::warn!(
                     target: "simard::ooda_brain",
                     goal = %goal_id,

@@ -31,7 +31,8 @@ fn init_parent_repo(dir: &Path) -> PathBuf {
 }
 
 fn run_git(repo: &Path, args: &[&str]) {
-    let out = git_cmd(repo, args).output().expect("spawn git");
+    let out = crate::util::spawn_retry::retry_spawn_sync(|| git_cmd(repo, args).output())
+        .expect("spawn git");
     assert!(
         out.status.success(),
         "git {:?} failed in {}: {}",
@@ -42,7 +43,8 @@ fn run_git(repo: &Path, args: &[&str]) {
 }
 
 fn git_output(repo: &Path, args: &[&str]) -> String {
-    let out = git_cmd(repo, args).output().expect("spawn git");
+    let out = crate::util::spawn_retry::retry_spawn_sync(|| git_cmd(repo, args).output())
+        .expect("spawn git");
     assert!(
         out.status.success(),
         "git {:?} failed: {}",

@@ -352,7 +352,9 @@ fn is_executable_file(path: &std::path::Path) -> bool {
 /// Run `<path> --version` (argv-only, no shell) and return the trimmed first
 /// line of stdout, or an empty string on any failure.
 fn version_string_of(path: &std::path::Path) -> String {
-    match std::process::Command::new(path).arg("--version").output() {
+    match crate::util::spawn_retry::retry_spawn_sync(|| {
+        std::process::Command::new(path).arg("--version").output()
+    }) {
         Ok(output) if output.status.success() => {
             String::from_utf8_lossy(&output.stdout).trim().to_string()
         }

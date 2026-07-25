@@ -17,7 +17,14 @@ pub fn run_gym_list() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 pub fn run_gym_scenario(scenario_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let report = run_benchmark_scenario(scenario_id, default_output_root())?;
+    run_gym_scenario_with_root(scenario_id, default_output_root())
+}
+
+pub(crate) fn run_gym_scenario_with_root(
+    scenario_id: &str,
+    output_root: impl AsRef<std::path::Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let report = run_benchmark_scenario(scenario_id, output_root.as_ref())?;
     print_text("Scenario", report.scenario.id);
     print_text("Suite", &report.suite_id);
     print_text("Session", &report.session_id);
@@ -44,7 +51,14 @@ pub fn run_gym_scenario(scenario_id: &str) -> Result<(), Box<dyn std::error::Err
 }
 
 pub fn run_gym_compare(scenario_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let report = compare_latest_benchmark_runs(scenario_id, default_output_root())?;
+    run_gym_compare_with_root(scenario_id, default_output_root())
+}
+
+pub(crate) fn run_gym_compare_with_root(
+    scenario_id: &str,
+    output_root: impl AsRef<std::path::Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let report = compare_latest_benchmark_runs(scenario_id, output_root.as_ref())?;
     print_text("Scenario", &report.scenario_id);
     print_display("Comparison status", report.status);
     print_text("Comparison summary", &report.summary);

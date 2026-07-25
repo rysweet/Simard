@@ -233,20 +233,24 @@ fn run_local_engineer_loop_emits_agent_prompt_build_phase() {
 
     let dir = tempfile::tempdir().unwrap();
     // Initialise a bare git repo so inspect_workspace succeeds.
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(dir.path())
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["commit", "--allow-empty", "-m", "init"])
-        .current_dir(dir.path())
-        .env("GIT_AUTHOR_NAME", "test")
-        .env("GIT_AUTHOR_EMAIL", "test@test.com")
-        .env("GIT_COMMITTER_NAME", "test")
-        .env("GIT_COMMITTER_EMAIL", "test@test.com")
-        .output()
-        .unwrap();
+    crate::util::spawn_retry::retry_spawn_sync(|| {
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+    })
+    .unwrap();
+    crate::util::spawn_retry::retry_spawn_sync(|| {
+        std::process::Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(dir.path())
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test.com")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test.com")
+            .output()
+    })
+    .unwrap();
 
     let state_root = dir.path().join("state");
     std::fs::create_dir_all(&state_root).unwrap();

@@ -13,14 +13,16 @@ pub(crate) fn git_diff(workspace: &Path) -> SimardResult<String> {
             reason: e,
         }
     })?;
-    let output = Command::new("git")
-        .args(["diff", "HEAD"])
-        .current_dir(workspace)
-        .output()
-        .map_err(|e| SimardError::GitCommandFailed {
-            command: "git diff HEAD".into(),
-            reason: e.to_string(),
-        })?;
+    let output = crate::util::spawn_retry::retry_spawn_sync(|| {
+        Command::new("git")
+            .args(["diff", "HEAD"])
+            .current_dir(workspace)
+            .output()
+    })
+    .map_err(|e| SimardError::GitCommandFailed {
+        command: "git diff HEAD".into(),
+        reason: e.to_string(),
+    })?;
 
     if !output.status.success() {
         return Err(SimardError::GitCommandFailed {
@@ -45,14 +47,16 @@ pub(crate) fn git_commit(workspace: &Path, message: &str) -> SimardResult<()> {
             reason: e,
         }
     })?;
-    let add_output = Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(workspace)
-        .output()
-        .map_err(|e| SimardError::GitCommandFailed {
-            command: "git add -A".into(),
-            reason: e.to_string(),
-        })?;
+    let add_output = crate::util::spawn_retry::retry_spawn_sync(|| {
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(workspace)
+            .output()
+    })
+    .map_err(|e| SimardError::GitCommandFailed {
+        command: "git add -A".into(),
+        reason: e.to_string(),
+    })?;
 
     if !add_output.status.success() {
         return Err(SimardError::GitCommandFailed {
@@ -61,14 +65,16 @@ pub(crate) fn git_commit(workspace: &Path, message: &str) -> SimardResult<()> {
         });
     }
 
-    let commit_output = Command::new("git")
-        .args(["commit", "-m", message])
-        .current_dir(workspace)
-        .output()
-        .map_err(|e| SimardError::GitCommandFailed {
-            command: "git commit".into(),
-            reason: e.to_string(),
-        })?;
+    let commit_output = crate::util::spawn_retry::retry_spawn_sync(|| {
+        Command::new("git")
+            .args(["commit", "-m", message])
+            .current_dir(workspace)
+            .output()
+    })
+    .map_err(|e| SimardError::GitCommandFailed {
+        command: "git commit".into(),
+        reason: e.to_string(),
+    })?;
 
     if !commit_output.status.success() {
         return Err(SimardError::GitCommandFailed {
@@ -94,14 +100,16 @@ pub(crate) fn rollback(workspace: &Path) -> SimardResult<()> {
         }
     })?;
     // Restore modified tracked files.
-    let checkout = Command::new("git")
-        .args(["checkout", "--", "."])
-        .current_dir(workspace)
-        .output()
-        .map_err(|e| SimardError::GitCommandFailed {
-            command: "git checkout -- .".into(),
-            reason: e.to_string(),
-        })?;
+    let checkout = crate::util::spawn_retry::retry_spawn_sync(|| {
+        Command::new("git")
+            .args(["checkout", "--", "."])
+            .current_dir(workspace)
+            .output()
+    })
+    .map_err(|e| SimardError::GitCommandFailed {
+        command: "git checkout -- .".into(),
+        reason: e.to_string(),
+    })?;
 
     if !checkout.status.success() {
         return Err(SimardError::GitCommandFailed {
@@ -111,14 +119,16 @@ pub(crate) fn rollback(workspace: &Path) -> SimardResult<()> {
     }
 
     // Remove untracked files/dirs created by plan steps.
-    let clean = Command::new("git")
-        .args(["clean", "-fd"])
-        .current_dir(workspace)
-        .output()
-        .map_err(|e| SimardError::GitCommandFailed {
-            command: "git clean -fd".into(),
-            reason: e.to_string(),
-        })?;
+    let clean = crate::util::spawn_retry::retry_spawn_sync(|| {
+        Command::new("git")
+            .args(["clean", "-fd"])
+            .current_dir(workspace)
+            .output()
+    })
+    .map_err(|e| SimardError::GitCommandFailed {
+        command: "git clean -fd".into(),
+        reason: e.to_string(),
+    })?;
 
     if !clean.status.success() {
         return Err(SimardError::GitCommandFailed {
@@ -144,19 +154,21 @@ mod tests {
     /// `git_diff`/`git_commit`/`rollback` calls (which can't take env
     /// overrides without changing the API).
     fn isolated_git(workspace: &Path, args: &[&str]) -> std::process::Output {
-        Command::new("git")
-            .args(args)
-            .current_dir(workspace)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("HOME", workspace)
-            .env("XDG_CONFIG_HOME", workspace)
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@test.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@test.com")
-            .output()
-            .unwrap()
+        crate::util::spawn_retry::retry_spawn_sync(|| {
+            Command::new("git")
+                .args(args)
+                .current_dir(workspace)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("HOME", workspace)
+                .env("XDG_CONFIG_HOME", workspace)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@test.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@test.com")
+                .output()
+        })
+        .unwrap()
     }
 
     /// Set up a temporary git repository with an initial commit.
