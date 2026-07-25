@@ -1,11 +1,12 @@
 ---
-title: Configure and verify durable gap dedup
+title: Configure and verify gap dedup
 description: >
-  How to operate and verify the Overseer's restart-safe, GitHub-side gap-filing
-  dedup guard for workstream-gap stewardship issues — confirm a duplicate gap is
-  reused rather than re-filed after a daemon restart, read the `overseer::gap_scan` reused/flagged
-  logs, understand the fail-loud behaviour when `gh` is unavailable, and check
-  the bounded GapCategory taxonomy that keeps titles stable and dedupable.
+  How to operate and verify the Overseer's stable-signature gap dedup for
+  workstream-gap notifications — confirm a recurring gap is deduped to one
+  operator notification within a running daemon, read the
+  overseer::gap_scan flagged/suppressed logs, understand that a daemon restart
+  resets the in-process gate, and check the bounded GapCategory taxonomy that
+  keeps gap signatures stable and dedupable.
 last_updated: 2026-07-25
 review_schedule: as-needed
 owner: simard
@@ -20,36 +21,41 @@ related:
   - ./file-stewardship-issues-from-orchestrator-runs.md
 ---
 
-# Configure and verify durable gap dedup
+# Configure and verify gap dedup
 
-The Overseer files stewardship issues for uncovered backlog work — uncovered
-goals, high-signal open issues, and unaddressed telemetry anomalies. It now
-dedupes those filings against **GitHub itself**, not just in-process memory, so
-a daemon **restart** (or a second daemon) no longer re-files an issue that is
-already open. This closes the near-duplicate `[stewardship] workstream_gap:*`
-flood (observed on e.g. #4671, #4680, #4685).
+The Overseer flags uncovered backlog work — uncovered goals, high-signal open
+issues, and unaddressed telemetry anomalies — on its recurring gap-scan and
+**notifies the operator** (email + Signal) about it. This rail makes the gap's
+dedup signature a **stable, content-addressed** slug (instead of a per-run hash),
+so a recurring gap is deduped to **one notification within a running daemon**
+rather than re-notified every tick. This is the root-cause fix behind the
+near-duplicate `[stewardship] workstream_gap:*` noise (observed on e.g. #4671,
+#4680, #4685).
 
 For the data model, signature grammar, and guarantees, see the
-[durable gap-filing dedup reference](../reference/overseer-gap-durable-dedup.md).
+[gap-filing dedup reference](../reference/overseer-gap-durable-dedup.md).
+
+> **Scope.** The gap-notification path dedupes via the **in-process**
+> `WhisperGate` and notifies the operator; it does **not** create GitHub issues
+> and is **not restart-safe on its own** — a daemon restart resets the gate. A
+> durable, GitHub-sourced cross-process check is scoped as follow-on work and is
+> **not** wired on this path yet; see the reference doc's *Future work* section.
 
 ## What changed for operators
 
-- **Before:** the filed `stewardship-signature:` was derived per run
+- **Before:** the gap signature was derived per run
   (`originating-run: overseer-<hash>`), so every restart/re-run minted a fresh
-  signature that matched nothing on GitHub, and the only stable-ish guard (the
-  in-process gate) went cold on restart → the next tick re-filed a near-duplicate
-  stewardship issue.
+  key and the in-process gate could not collapse a recurring gap → the scan
+  re-notified a near-duplicate gap every tick.
 - **Now:** the signature is a **stable, content-addressed** slug, so the
-  Overseer's open-issue search actually matches an already-open issue carrying
-  the gap's marker and **reuses** it. The guarantee is now *at most one open
-  issue per distinct gap signature*, **across restarts**.
-- **Legacy issues:** duplicates filed *before* this rail carry the old per-run
-  hash signature (e.g. `stewardship-signature: f6f8480b146b171e`), so the
-  slug-based search below only finds post-fix issues; old duplicates are not
-  retro-reconciled.
+  in-process gate collapses a recurring gap to **one notification per dedup
+  window** for the life of the daemon.
+- **Restart behaviour:** the in-process gate is memory-resident, so a restart
+  resets it and the first post-restart tick may re-notify. Cross-restart dedup
+  awaits the durable check (future work).
 
-There is **nothing to turn on** — the durable check is always active on the
-gap-filing path whenever the Overseer runs. The existing knobs still apply:
+There is **nothing to turn on** — stable-signature dedup is always active on the
+gap path whenever the Overseer runs. The existing knobs still apply:
 
 | Env var | What it does | Default |
 |---|---|---|
@@ -57,85 +63,65 @@ gap-filing path whenever the Overseer runs. The existing knobs still apply:
 | `SIMARD_OVERSEER_GAP_SCAN_EVERY_N` | Run the scan every *Nth* tick | `1` |
 
 See [configure the gap-scan backoff](./configure-overseer-gap-scan-backoff.md)
-for the in-process pre-filter window that sits in front of the durable check.
+for the in-process dedup window.
 
 ## Prerequisites
 
-- The `gh` CLI is installed, on `PATH`, and authenticated against `rysweet/Simard`
-  (or a token with `issues:write` scope). The durable check needs read (search)
-  and, when filing, write.
 - The acting Overseer is enabled (`SIMARD_OVERSEER_ENABLED` unset or truthy).
+- An operator notifier is configured (email and/or Signal) so gap notifications
+  have somewhere to go.
 
-## Verify: a restart does not re-file
+## Verify: a recurring gap is deduped within a run
 
 This is the core acceptance check for the workstream-gap dedup rail.
 
-1. Let the Overseer file one gap issue and note its number and signature:
+1. With a standing, uncovered gap present, let the Overseer run one gap-scan tick
+   and confirm it notifies **once** (a `flagged>=1` info line):
 
-   ```bash
-   gh issue list -R rysweet/Simard --search 'in:body stewardship-signature: workstream-gap:' \
-     --state open --json number,title | jq '.[0]'
+   ```text
+   INFO overseer::gap_scan flagged=1 suppressed=0
+        overseer recorded uncovered backlog work and notified the operator
    ```
 
-   Confirm the body carries the marker:
+2. On the **next** tick within the dedup window, confirm the **same** gap is
+   suppressed rather than re-notified — the count moves to `suppressed`:
 
-   ```bash
-   gh issue view <number> -R rysweet/Simard --json body \
-     | jq -r '.body' | grep 'stewardship-signature:'
+   ```text
+   DEBUG overseer::gap_scan flagged=0 suppressed=1
+         overseer gap-scan: every observed gap is within the dedup window (suppressed)
    ```
 
-2. **Restart the daemon** (the in-process gate is now cold).
-
-3. On the next gap-scan tick, confirm **no new issue** was opened for the same
-   signature — the open-issue count for that signature stays at **1**:
-
-   ```bash
-   gh issue list -R rysweet/Simard --state open \
-     --search 'in:body stewardship-signature: workstream-gap:<signature>' \
-     --json number | jq 'length'   # → 1, not 2
-   ```
-
-4. Confirm the reuse in the logs (see below).
+3. `flagged=0 suppressed=1` for the recurring gap is the proof the stable
+   signature deduped it. (A daemon restart between steps 1 and 2 resets the gate
+   and may re-notify — that is expected until the durable check lands.)
 
 ## Read the logs
 
-The rail emits structured `tracing` + OTel only (no `print!`/`println!`), on
+The gap path emits structured `tracing` + OTel only (no `print!`/`println!`), on
 `target: "overseer::gap_scan"`:
-
-```text
-INFO overseer::gap_scan flagged=0 reused_existing=1 suppressed=0
-     key="workstream-gap:goal:g-1873"
-     overseer gap-scan: matched an already-open issue; reused instead of re-filing
-```
 
 | Field | Meaning |
 |---|---|
-| `flagged` | New issues created this tick |
-| `reused_existing` | Gaps matched to an already-open issue (no new issue) |
-| `suppressed` | Gaps dropped by the in-process `WhisperGate` pre-filter |
-| `key` | The batch `workstream_gap_key` for the tick |
+| `flagged` | Fresh gaps notified this tick |
+| `suppressed` | Gaps dropped by the in-process gate or by a malformed signature |
+| `dispatched` / `all_sent` | Operator-notification delivery status |
 
-A restart-then-reuse shows `flagged=0 reused_existing=1` — the proof the durable
-check did its job.
+## Malformed signatures are dropped (injection defense)
 
-## What happens when `gh` is unavailable (fail-loud)
-
-If the open-issue search fails (unauthenticated, rate-limited, offline), the act
-path **files nothing** and surfaces the error — it never falls back to a blind
-create:
+A gap whose signature is not a valid restricted slug
+(`^[a-z0-9][a-z0-9:_#.\-/]{0,200}$`) is **dropped at the filing seam** and counted
+as suppressed — it never reaches an operator notification:
 
 ```text
-ERROR overseer::gap_scan gh search failed; filing skipped (fail-loud)
-      key="workstream-gap:goal:g-1873" reason="gh: HTTP 403 rate limit exceeded"
+WARN overseer::gap_scan category="goal"
+     overseer gap-scan: dropping a gap with a malformed dedup signature
+     (outside the bounded taxonomy)
 ```
 
-This is deliberate: a fail-*open* fallback would re-create the flood. Fix the
-`gh` auth / rate-limit condition (often `gh auth login`) and the next tick
-resumes normally. Contrast the in-process backoff gate, which fails *toward
-surfacing* — together they mean a genuine gap is never silently dropped **and**
-a duplicate is never blindly filed.
+This is deliberate: signatures come from trusted identifiers only, so a malformed
+one signals a bug or an injection attempt, not a real gap.
 
-## The bounded taxonomy (why titles are now stable)
+## The bounded taxonomy (why signatures are now stable)
 
 Duplicates used to slip through because free-form titles drifted between ticks.
 Each gap resolves to a bounded `GapCategory` variant with a stable slug that
@@ -147,36 +133,29 @@ anchors the signature:
 | High-signal open issue | `IssueUncovered` | `issue:<repo>#<n>` |
 | Unaddressed anomaly | `AnomalyUnaddressed` | `anomaly:<slug>` |
 
-`GapCategory` is a closed enum of exactly these three kinds, so a gap's title and
-signature are stable across ticks. The durable fix did not add kinds — it made
-the filed `stewardship-signature:` a stable, content-addressed slug (instead of a
-per-run hash) so an already-open issue for the same gap is found and reused. This
-change is additive — existing `goal:`/`issue:`/`anomaly:` issues keep matching.
+`GapCategory` is a closed enum of exactly these three kinds, so a gap's signature
+is stable across ticks. The fix did not add kinds — it made the signature a
+stable, content-addressed slug (instead of a per-run hash) so the in-process gate
+recognises the same gap across ticks. This change is additive.
 
 ## Common pitfalls
 
-- **A closed issue and the gap recurred → a new issue appeared.** Expected. The
-  search uses `--state open`, so a closed cover issue does not suppress a fresh
-  filing. Leave the issue open, or fix the underlying gap, to keep it deduped.
-- **Two issues for the "same" gap.** Confirm they carry the **same**
-  `stewardship-signature:`. If the signatures differ, the gap resolved to two
-  distinct keys (e.g. two different goal ids) — that is correct behaviour, not a
-  dedup miss.
-- **No reuse log after a restart, and a duplicate appeared.** Check the
-  `overseer::gap_scan` logs for a `gh search failed` ERROR line around the tick;
-  a failed search files nothing, so a duplicate here means the *prior* issue was
-  closed or its marker is missing. Verify the body still contains
-  `stewardship-signature:`.
-- **`gh` not authenticated.** The fail-loud ERROR carries the trimmed `gh`
-  stderr — usually a hint to run `gh auth login`.
+- **A duplicate notification appeared right after a restart.** Expected — the
+  in-process gate is reset on restart. Cross-restart dedup is future work.
+- **Two notifications for the "same" gap.** Confirm the gaps carry the **same**
+  signature. If the signatures differ, the gap resolved to two distinct keys
+  (e.g. two different goal ids) — correct behaviour, not a dedup miss.
+- **A gap I expected was never notified.** Check for a `dropping a gap with a
+  malformed dedup signature` WARN — a signature outside the bounded taxonomy is
+  dropped by design.
 
 ## See also
 
-- [Durable gap-filing dedup reference](../reference/overseer-gap-durable-dedup.md)
-  — signature grammar, flow, fail-loud contract, and security notes.
+- [Gap-filing dedup reference](../reference/overseer-gap-durable-dedup.md)
+  — signature grammar, the in-process flow, and the scoped durable follow-on.
 - [Review the Overseer's workstream gaps](./review-overseer-workstream-gaps.md)
   — where the gaps surface and how to respond.
 - [Gap-scan dedup & exponential backoff](../concepts/gap-scan-backoff-dedup.md)
-  — the in-process pre-filter this durable check backstops.
+  — the in-process gate this stable signature feeds.
 - [File stewardship issues from orchestrator runs](./file-stewardship-issues-from-orchestrator-runs.md)
-  — the sibling loop whose dedup flow this mirrors.
+  — the sibling loop whose durable dedup flow the future gap check would mirror.

@@ -8,9 +8,9 @@ description: >
   fixed-window dedup was insufficient, how exponential backoff rate-limits
   without ever permanently silencing a genuinely recurring gap, how this makes
   the Overseer ACT on a gap once rather than observe it forever (meta bugs
-  #4255 / #4126), and the durable cross-process open-issue check — enabled by a
-  stable, content-addressed signature — that now backstops the in-process gate
-  across daemon restarts.
+  #4255 / #4126), and the stable, content-addressed gap signature — the
+  foundation that a future durable cross-process open-issue check will build on
+  to survive daemon restarts.
 last_updated: 2026-07-25
 review_schedule: as-needed
 owner: simard
@@ -88,9 +88,10 @@ The fix
 ([BackoffGate reference](../reference/overseer-backoff-gate-api.md)) is
 deliberately additive — it adds a new primitive rather than mutating the
 existing `WhisperGate`, so every current caller is untouched. An in-process
-exponential-backoff gate guards the gap-cover act path, with a durable
-cross-process open-issue equivalence check layered in front of it so the
-guarantee survives daemon restarts.
+exponential-backoff gate guards the gap-cover act path. A stable,
+content-addressed gap signature (shipped here) lays the foundation for a
+durable cross-process open-issue equivalence check — the follow-on that will let
+the guarantee survive daemon restarts.
 
 ### Exponential BackoffGate (in-process) — implemented
 
@@ -113,24 +114,31 @@ Because the gate lives in the decide/act seam and only holds a suppressed plan,
 it gives a clean guarantee **within one running daemon**: at most one open
 covering issue per distinct gap for the life of the process.
 
-### Open-issue equivalence check (cross-process) — implemented
+### Open-issue equivalence check (cross-process) — future work
 
 The BackoffGate is in-memory, so a daemon restart forgets its state and a cold
 gate could re-file a duplicate that is already open on GitHub. The deeper cause
 of the observed `[stewardship] workstream_gap:*` flood (e.g. #4671, #4680,
-#4685; OODA-stuck #4689) was that the filed `stewardship-signature:` was keyed
-per **run** (`originating-run: overseer-<hash>`), so the already-existing
-open-issue search never matched across runs. The fix makes the signature a
-stable, content-addressed slug so the durable check closes this: on
-the gap-filing path, **before** filing, the Overseer runs a GitHub query
-(reusing the existing `stewardship::dedup` helpers and `find_existing` on the
-`stewardship-signature:` body marker) for an already-open **equivalent** issue
-and **reuses / skips** if one exists. It **fails loud** — a `gh` search error
-propagates and files nothing, never a blind create. Because GitHub is the source
-of truth, the guarantee is now *at most one open issue per distinct gap
-signature across restarts and daemons*. The in-process `WhisperGate` remains the
-fast pre-filter in front of it. See the
-[durable gap-filing dedup reference](../reference/overseer-gap-durable-dedup.md)
+#4685; OODA-stuck #4689) was that the gap signature was keyed
+per **run** (`originating-run: overseer-<hash>`), so the in-process gate key
+churned every run and any GitHub-side search would never match across runs.
+
+This change fixes the **root cause** by making the signature a **stable,
+content-addressed slug** (derived from trusted identifiers, not the run id), so
+the in-process gate now collapses a recurring gap to a single notification
+**within a running daemon**, and the slug is a valid, restart-safe join key.
+That stable signature is the **prerequisite** for a durable cross-process check.
+
+The durable check itself is **future work**: before notifying/filing, the
+Overseer would run a GitHub query (reusing the existing `stewardship::dedup`
+helpers and `find_existing` on the `stewardship-signature:` body marker) for an
+already-open **equivalent** issue and reuse/skip if one exists, failing loud on
+any `gh` error. The gap-notification path (`act_flag_workstream_gaps`) does
+**not** perform this query today — it applies the in-process `WhisperGate` and
+notifies the operator. The proven durable pattern lives on the sibling
+stewardship filing seam (`stewardship::process_orchestrator_run`); wiring it
+onto the gap path is the follow-on this stable signature enables. See the
+[gap-filing dedup reference](../reference/overseer-gap-durable-dedup.md)
 and the [how-to](../howto/configure-gap-durable-dedup.md).
 
 ## How this makes the Overseer ACT (not just observe)
@@ -159,9 +167,10 @@ protect.
 
 ## Invariants
 
-- **One open covering issue per distinct gap, across restarts.** The in-process
+- **One open covering issue per distinct gap within a process.** The in-process
   gate holds duplicate coverage plans across ticks; the cross-process case
-  (restarts / multiple daemons) is closed by the durable
+  (restarts / multiple daemons) is not yet closed — the stable signature shipped
+  here is the foundation for the future durable
   [open-issue check](../reference/overseer-gap-durable-dedup.md).
 - **Never permanently silent.** The window is capped and resets after silence; a
   genuinely recurring gap always re-surfaces.
