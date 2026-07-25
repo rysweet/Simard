@@ -119,7 +119,15 @@ fn advance_action(goal_id: &str) -> PlannedAction {
 fn concurrent_dispatch_parallelizes_and_respects_cap() {
     let ids = ["adv-t-0", "adv-t-1", "adv-t-2", "adv-t-3"];
     let actions: Vec<PlannedAction> = ids.iter().map(|id| advance_action(id)).collect();
-    let sleep = Duration::from_millis(200);
+    // Per-`run_turn` "live" window. `thread::sleep` yields the CPU, so once two
+    // workers have both entered `run_turn` they overlap regardless of core
+    // count — but only if the second worker starts before the first's window
+    // closes. Under the CPU-oversubscribed deploy gate, worker-thread start can
+    // stagger by >200ms, letting each call finish before the next begins so
+    // `peak` never reaches 2. A wider window swamps that scheduling jitter
+    // without weakening either assertion (peak>=2 still demands real overlap;
+    // cap=1 still forbids it).
+    let sleep = Duration::from_millis(1000);
 
     let instr = Arc::new(Instrumentation::default());
     let mut memories = test_memories();

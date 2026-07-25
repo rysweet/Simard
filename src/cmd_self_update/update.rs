@@ -6,13 +6,59 @@ use super::download::download_and_replace;
 use super::platform::CURRENT_VERSION;
 use super::release::find_latest_release;
 
+/// Maximum `<binary> self-test` spawn+wait attempts when the wait races with a
+/// process-wide `SIGCHLD` reaper and returns `ECHILD` ("No child processes",
+/// errno 10). The daemon self-update path runs inside a Tokio runtime whose
+/// signal driver reaps children process-wide, and the unit-test harness runs
+/// thousands of subprocess-spawning tests in one process; either can reap this
+/// child before `Command::output`'s own `waitpid`, yielding a spurious wait
+/// error that must NOT be mistaken for a failed self-test. The cap keeps a
+/// genuinely un-spawnable binary from spinning forever.
+const SELF_TEST_MAX_ATTEMPTS: usize = 8;
+
+/// Constant backoff between transient `ECHILD` self-test retries. Re-running a
+/// self-test is idempotent (it is a pure health probe), so a short synchronous
+/// sleep is enough to clear the reaping race without busy-spinning.
+const SELF_TEST_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Classify an [`std::io::Error`] as the transient `ECHILD` reaping race,
+/// strictly by numeric errno so the predicate stays locale-independent.
+fn is_echild(err: &std::io::Error) -> bool {
+    err.raw_os_error() == Some(libc::ECHILD)
+}
+
+/// Spawn `<binary> self-test` and collect its output, retrying **only** the
+/// transient `ECHILD` wait race up to [`SELF_TEST_MAX_ATTEMPTS`] times. Any
+/// other spawn/wait error surfaces immediately and unchanged, so real failures
+/// (`ENOENT`, `EACCES`, …) are never masked.
+fn run_self_test_output(binary: &Path) -> std::io::Result<std::process::Output> {
+    let mut attempt = 1usize;
+    loop {
+        match std::process::Command::new(binary)
+            .args(["self-test"])
+            .output()
+        {
+            Ok(output) => return Ok(output),
+            Err(err) if is_echild(&err) && attempt < SELF_TEST_MAX_ATTEMPTS => {
+                tracing::debug!(
+                    attempt,
+                    max_attempts = SELF_TEST_MAX_ATTEMPTS,
+                    errno = err.raw_os_error(),
+                    "retrying self-test spawn after transient ECHILD reaping race"
+                );
+                attempt += 1;
+                std::thread::sleep(SELF_TEST_RETRY_BACKOFF);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 /// Run `<binary> self-test` to verify a binary is healthy.
 /// Returns Ok(()) if the self-test passes, Err otherwise.
 fn run_self_test_on_binary(binary: &Path) -> Result<(), Box<dyn std::error::Error>> {
     println!("Running self-test on new binary...");
-    let output = std::process::Command::new(binary)
-        .args(["self-test"])
-        .output()
+    let output = run_self_test_output(binary)
         .map_err(|e| format!("Failed to run self-test on new binary: {e}"))?;
 
     if output.status.success() {
