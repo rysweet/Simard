@@ -59,12 +59,14 @@ fn try_exe_mtime_once() -> std::io::Result<SystemTime> {
     meta.modified()
 }
 
-/// Whether an io error is a *transient*, allow-listed failure worth a bounded
-/// retry. Conservative by default (do-not-swallow): only `EINTR`
-/// (`Interrupted`), `EAGAIN`/`EWOULDBLOCK` (`WouldBlock`), and the fd-exhaustion
-/// errnos `EMFILE`/`ENFILE` are transient. Everything else — notably `NotFound`
-/// (binary deleted/replaced) and `PermissionDenied` — is genuine and MUST NOT be
-/// retried, so a real "binary missing/tampered" signal is never masked as a blip.
+/// Whether an io error is a *transient load blip* worth a bounded retry:
+/// `EINTR` (`Interrupted`), `EAGAIN`/`EWOULDBLOCK` (`WouldBlock`), and the
+/// fd-exhaustion errnos `EMFILE`/`ENFILE`. These are scheduler/resource
+/// pressure symptoms under a storm of concurrent test binaries. `NotFound` is
+/// deliberately NOT in this set — it is not a load-blip errno; the distinct
+/// atomic-replace window is classified by [`is_atomic_replace_window_error`].
+/// `PermissionDenied` and every unclassified error stay genuine (never retried),
+/// so a real "binary tampered / permission revoked" signal is never masked.
 fn is_transient_exe_mtime_error(err: &std::io::Error) -> bool {
     use std::io::ErrorKind;
     // EMFILE (per-process fd table full) and ENFILE (system-wide fd table full)
@@ -77,21 +79,61 @@ fn is_transient_exe_mtime_error(err: &std::io::Error) -> bool {
     matches!(err.raw_os_error(), Some(EMFILE) | Some(ENFILE))
 }
 
-/// Bounded-retry resolver over [`try_exe_mtime_once`]. Retries only allow-listed
-/// transient errors up to [`EXE_MTIME_MAX_ATTEMPTS`] with exponential backoff
-/// (~2, 4, 8, 16 ms). Sleeps happen **between** attempts only — never after the
-/// terminal attempt — so the fail-closed `None` is not needlessly delayed.
-/// Genuine errors short-circuit to `Err` with no retry. Returns the resolved
-/// mtime, or the last error on exhaustion (with one structured `tracing::warn!`).
+/// Whether an io error is a `NotFound` observed on the current-exe path — the
+/// signature of a **transient atomic-replace window**, not necessarily a genuine
+/// deletion. During a rebuild/self-deploy the fresh image is `rename(2)`d over
+/// the on-disk path, and a `stat(2)` that lands in that microsecond-wide unlink
+/// window returns `ENOENT`. This is the root cause of the self-deploy `unit-test`
+/// canary going red (exit 101) under the load of a concurrent build replacing
+/// the binary: the happy-path `exe_mtime()` calls coerced that blip to a false
+/// `None`.
+///
+/// Retrying `NotFound` is safe and does **not** weaken the fail-closed posture:
+/// a *genuine* deletion PERSISTS across the entire bounded-retry budget and still
+/// resolves to `None`, while a *transient* replace window heals to `Some(mtime)`
+/// on a subsequent attempt. Tamper is separately caught by the content-hash gate
+/// in [`reload_decision`], never by mtime alone.
+fn is_atomic_replace_window_error(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::NotFound
+}
+
+/// Whether a failed attempt should be re-resolved within the bounded budget:
+/// a transient load blip ([`is_transient_exe_mtime_error`]) OR a transient
+/// atomic-replace window ([`is_atomic_replace_window_error`]). Every other error
+/// (notably `PermissionDenied` and unclassified) is genuine and short-circuits.
+fn is_retryable_exe_mtime_error(err: &std::io::Error) -> bool {
+    is_transient_exe_mtime_error(err) || is_atomic_replace_window_error(err)
+}
+
+/// Bounded-retry resolver over [`try_exe_mtime_once`]. Retries only retryable
+/// errors ([`is_retryable_exe_mtime_error`]) up to [`EXE_MTIME_MAX_ATTEMPTS`]
+/// with exponential backoff (~2, 4, 8, 16 ms). Sleeps happen **between** attempts
+/// only — never after the terminal attempt — so the fail-closed `None` is not
+/// needlessly delayed. Genuine errors short-circuit to `Err` with no retry.
+/// Returns the resolved mtime, or the last error on exhaustion (with one
+/// structured `tracing::warn!`).
 fn exe_mtime_resolved() -> std::io::Result<SystemTime> {
+    resolve_exe_mtime_with(try_exe_mtime_once)
+}
+
+/// Pure bounded-retry engine, generic over the per-attempt resolver so the
+/// retry/backoff/fail-closed policy is unit-testable with synthetic error
+/// sequences (no real syscalls). See [`exe_mtime_resolved`] for the production
+/// wiring. Tests that heal on an early attempt incur no backoff; the
+/// worst-case (a persistent retryable error) pays only the tiny fixed budget
+/// (~30 ms total), keeping the deterministic tests fast.
+fn resolve_exe_mtime_with<F>(mut attempt_once: F) -> std::io::Result<SystemTime>
+where
+    F: FnMut() -> std::io::Result<SystemTime>,
+{
     let mut last_err: Option<std::io::Error> = None;
     for attempt in 0..EXE_MTIME_MAX_ATTEMPTS {
-        match try_exe_mtime_once() {
+        match attempt_once() {
             Ok(mtime) => return Ok(mtime),
             Err(err) => {
-                if !is_transient_exe_mtime_error(&err) {
-                    // Genuine failure (NotFound/PermissionDenied/unclassified):
-                    // do not swallow, do not retry — fail-closed straight through.
+                if !is_retryable_exe_mtime_error(&err) {
+                    // Genuine failure (PermissionDenied/unclassified): do not
+                    // swallow, do not retry — fail-closed straight through.
                     return Err(err);
                 }
                 let is_last_attempt = attempt + 1 == EXE_MTIME_MAX_ATTEMPTS;
@@ -116,15 +158,17 @@ fn exe_mtime_resolved() -> std::io::Result<SystemTime> {
 }
 
 /// Return the mtime of the currently-running executable, or `None` if it
-/// genuinely cannot be determined (binary deleted/replaced after launch,
-/// permission denied, or a filesystem that does not report mtime). A *transient*
-/// syscall failure under load (`EINTR`/`EAGAIN`/`EMFILE`/`ENFILE`) is retried
-/// within a small bounded budget and resolves to `Some(mtime)` rather than a
-/// false `None`. Never panics.
+/// genuinely cannot be determined (binary permanently deleted, permission
+/// denied, or a filesystem that does not report mtime). A *transient* failure
+/// under load — a load-blip errno (`EINTR`/`EAGAIN`/`EMFILE`/`ENFILE`) or the
+/// microsecond-wide `NotFound` atomic-replace window when a concurrent
+/// rebuild/self-deploy `rename(2)`s a fresh image over the on-disk path — is
+/// re-resolved within a small bounded budget and yields `Some(mtime)` rather
+/// than a false `None`. Never panics.
 ///
 /// Public signature is unchanged (`-> Option<SystemTime>`); only the transient
-/// case changed (it no longer coerces to `None`). [`binary_changed`] stays
-/// fail-closed on a genuine `None`.
+/// case changed (it no longer coerces to `None`). A *persistent* failure still
+/// fails closed to `None`, and [`binary_changed`] stays fail-closed on it.
 pub fn exe_mtime() -> Option<SystemTime> {
     exe_mtime_resolved().ok()
 }
@@ -427,23 +471,160 @@ mod tests {
     }
 
     #[test]
-    fn transient_classifier_does_not_retry_not_found() {
-        // SECURITY: a deleted/replaced binary (NotFound) is a genuine signal —
-        // it MUST short-circuit to a fail-closed None, never be retried away.
+    fn transient_classifier_excludes_not_found_from_load_blips() {
+        // NotFound is NOT a load-blip errno: `is_transient_exe_mtime_error` must
+        // return false for it. It is instead classified as a transient
+        // atomic-replace window by `is_atomic_replace_window_error` (asserted
+        // separately below) — the two concerns are kept distinct on purpose.
         let err = std::io::Error::from(std::io::ErrorKind::NotFound);
         assert!(
             !is_transient_exe_mtime_error(&err),
-            "NotFound (binary deleted/replaced) must NOT be retried — fail closed"
+            "NotFound must not be classified as a load-blip errno"
+        );
+    }
+
+    #[test]
+    fn replace_window_classifier_retries_not_found() {
+        // The exit-101 self-deploy-canary fix: a NotFound on the current-exe
+        // path is the signature of a `rename(2)` atomic-replace window during a
+        // concurrent rebuild, so it MUST be re-resolved (retryable). A genuine
+        // deletion still fails closed by *persisting* across the whole budget.
+        let err = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert!(
+            is_atomic_replace_window_error(&err),
+            "NotFound (atomic-replace window) must be retryable"
+        );
+        assert!(
+            is_retryable_exe_mtime_error(&err),
+            "NotFound must be retried by the resolver"
+        );
+    }
+
+    #[test]
+    fn replace_window_classifier_excludes_permission_denied() {
+        // Only NotFound is a replace window; PermissionDenied is genuine.
+        let err = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(
+            !is_atomic_replace_window_error(&err),
+            "PermissionDenied is not an atomic-replace window"
         );
     }
 
     #[test]
     fn transient_classifier_does_not_retry_permission_denied() {
-        // SECURITY: PermissionDenied is a genuine failure, not a load blip.
+        // SECURITY: PermissionDenied is a genuine failure, not a load blip, and
+        // not a replace window — it must never be retried.
         let err = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
         assert!(
             !is_transient_exe_mtime_error(&err),
+            "PermissionDenied must NOT be a load-blip errno"
+        );
+        assert!(
+            !is_retryable_exe_mtime_error(&err),
             "PermissionDenied must NOT be retried — fail closed"
+        );
+    }
+
+    // ── resolver policy (deterministic, synthetic error sequences) ──────
+    //
+    // These drive `resolve_exe_mtime_with` with in-memory attempt sequences so
+    // the retry/heal/fail-closed policy is proven WITHOUT touching real syscalls
+    // or depending on scheduling — the load-independent counterpart to the
+    // happy-path `exe_mtime_returns_some_*` tests.
+
+    fn err_kind(kind: std::io::ErrorKind) -> std::io::Error {
+        std::io::Error::from(kind)
+    }
+
+    #[test]
+    fn resolver_heals_transient_replace_window_not_found() {
+        // A single NotFound (atomic-replace window) followed by success must
+        // resolve to Some — the exact production blip that was flaking the
+        // self-deploy unit-test canary red (exit 101).
+        let want = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let seq = std::cell::Cell::new(0u32);
+        let out = resolve_exe_mtime_with(|| {
+            let n = seq.get();
+            seq.set(n + 1);
+            if n == 0 {
+                Err(err_kind(std::io::ErrorKind::NotFound))
+            } else {
+                Ok(want)
+            }
+        });
+        assert_eq!(out.ok(), Some(want), "replace-window NotFound must heal");
+    }
+
+    #[test]
+    fn resolver_heals_transient_load_blip_then_success() {
+        // EINTR then success also heals within the budget.
+        let want = SystemTime::UNIX_EPOCH + Duration::from_secs(42);
+        let seq = std::cell::Cell::new(0u32);
+        let out = resolve_exe_mtime_with(|| {
+            let n = seq.get();
+            seq.set(n + 1);
+            if n < 2 {
+                Err(err_kind(std::io::ErrorKind::Interrupted))
+            } else {
+                Ok(want)
+            }
+        });
+        assert_eq!(out.ok(), Some(want));
+    }
+
+    #[test]
+    fn resolver_fails_closed_on_persistent_not_found() {
+        // SECURITY / fail-closed: a genuine deletion returns NotFound on EVERY
+        // attempt, so the resolver exhausts the budget and yields Err (→ None).
+        // This is what preserves the "real missing binary is never masked"
+        // invariant even though NotFound is now retryable.
+        let attempts = std::cell::Cell::new(0u32);
+        let out = resolve_exe_mtime_with(|| {
+            attempts.set(attempts.get() + 1);
+            Err(err_kind(std::io::ErrorKind::NotFound))
+        });
+        assert!(
+            out.is_err(),
+            "persistent NotFound must fail closed to Err/None"
+        );
+        assert_eq!(
+            attempts.get(),
+            EXE_MTIME_MAX_ATTEMPTS,
+            "a persistent retryable error must consume the full bounded budget"
+        );
+    }
+
+    #[test]
+    fn resolver_short_circuits_permission_denied_without_retry() {
+        // A genuine (non-retryable) error must short-circuit on the FIRST
+        // attempt — no retries, no masking.
+        let attempts = std::cell::Cell::new(0u32);
+        let out = resolve_exe_mtime_with(|| {
+            attempts.set(attempts.get() + 1);
+            Err(err_kind(std::io::ErrorKind::PermissionDenied))
+        });
+        assert!(out.is_err(), "PermissionDenied must fail closed");
+        assert_eq!(
+            attempts.get(),
+            1,
+            "a genuine error must not be retried (exactly one attempt)"
+        );
+    }
+
+    #[test]
+    fn resolver_returns_first_attempt_success_without_retry() {
+        // Steady-state hot path: success on attempt 1, no extra attempts.
+        let want = SystemTime::UNIX_EPOCH + Duration::from_secs(7);
+        let attempts = std::cell::Cell::new(0u32);
+        let out = resolve_exe_mtime_with(|| {
+            attempts.set(attempts.get() + 1);
+            Ok(want)
+        });
+        assert_eq!(out.ok(), Some(want));
+        assert_eq!(
+            attempts.get(),
+            1,
+            "steady state resolves on the first attempt"
         );
     }
 
