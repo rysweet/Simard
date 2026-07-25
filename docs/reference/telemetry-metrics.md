@@ -123,6 +123,16 @@ Migrated from the human line
 `[simard] distill: N episodes -> F facts, P procedures, M marked`, which is
 still emitted verbatim.
 
+**Consumed by the Status snapshot.** `simard.distill.runs{result="ok"}` also
+feeds the unified Status snapshot's MEMORY / BRAIN **cognitive** line
+(`GET /api/status/snapshot` → `data.memory.data.cognitive_processes.distillation`,
+Overview "System Status", `simard status`, TUI Status tab). It renders `idle`
+for a flushed-but-zero counter, `N runs` once runs have completed, and stays
+honestly `absent` until the daemon first flushes the counter — the same
+counter the Telemetry section already derives `distill_fail_pct` from, so the
+two never contradict each other. (`consolidation` and `introspection` on that
+line have no published counter yet and remain `absent`.)
+
 ### Brain — `simard.brain.*`
 
 | Metric | Type | Attributes | Meaning |
@@ -168,6 +178,13 @@ registry/snapshot/OTLP path like every other metric. The
 node/edge counts **from these snapshot gauges** — process-agnostic and requiring
 no LadybugDB open from the CLI. When the daemon has not yet flushed memory
 gauges the section renders `absent`, never a fabricated zero.
+
+> **Grounding coverage.** The raw `simard.memory.edges{type=DERIVES_FROM}` gauge
+> is complemented by a durable **`fact_provenance_coverage`** self-metric — the
+> grounded *fraction* (`facts_with_provenance / facts_total`) emitted per cycle
+> to the `metrics.jsonl` series so a graph-memory grounding regression is
+> comparable and regressable, not just a raw count. See
+> [Cognitive-memory provenance § Observability](./cognitive-memory-provenance.md#observability-grounding-coverage-self-metric).
 
 ### LLM usage — `simard.llm.*`
 

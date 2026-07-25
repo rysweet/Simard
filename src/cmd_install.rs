@@ -16,13 +16,17 @@ Options:
   --dry-run                  Validate inputs and print the activation plan without mutation
   --systemd-user-dir <PATH>  User unit directory. Defaults to ~/.config/systemd/user
   --systemctl <PATH|NAME>    systemctl executable for activation and tests
+  --entrypoint-dir <PATH>    Directory for the owned `simard` symlink. Defaults to ~/.local/bin
+  --orphan-dir <PATH>        Extra dir scanned for a stale ours `simard`. Repeatable. Defaults to ~/.cargo/bin
   --help, -h                 Show this help
 
 Installs:
   $SIMARD_HOME/bin/simard
   $SIMARD_HOME/prompt_assets
   simard-ooda.service
-  simard-signal.service
+
+The OODA daemon hosts the Signal operator channel in-process; any obsolete
+separate simard-signal.service is decommissioned on install.
 ";
 
 pub fn handle_install<I>(args: I) -> Result<(), Box<dyn std::error::Error>>
@@ -57,6 +61,13 @@ where
             "--systemctl" => {
                 config.systemctl = Some(next_path(&mut args, "--systemctl")?);
             }
+            "--entrypoint-dir" => {
+                config.entrypoint_dir = Some(next_path(&mut args, "--entrypoint-dir")?);
+            }
+            "--orphan-dir" => {
+                let path = next_path(&mut args, "--orphan-dir")?;
+                config.orphan_dirs.get_or_insert_with(Vec::new).push(path);
+            }
             _ if arg.starts_with("--simard-home=") => {
                 config.simard_home = Some(PathBuf::from(
                     arg.strip_prefix("--simard-home=").expect("prefix checked"),
@@ -72,6 +83,17 @@ where
                 config.systemctl = Some(PathBuf::from(
                     arg.strip_prefix("--systemctl=").expect("prefix checked"),
                 ));
+            }
+            _ if arg.starts_with("--entrypoint-dir=") => {
+                config.entrypoint_dir = Some(PathBuf::from(
+                    arg.strip_prefix("--entrypoint-dir=")
+                        .expect("prefix checked"),
+                ));
+            }
+            _ if arg.starts_with("--orphan-dir=") => {
+                let path =
+                    PathBuf::from(arg.strip_prefix("--orphan-dir=").expect("prefix checked"));
+                config.orphan_dirs.get_or_insert_with(Vec::new).push(path);
             }
             _ => return Err(format!("unexpected argument: {arg}").into()),
         }

@@ -97,6 +97,7 @@ pub mod hive_event_bus;
 pub mod identity;
 pub mod identity_auth;
 pub mod identity_composition;
+pub mod identity_curated_state;
 pub mod identity_precedence;
 pub mod improvements;
 pub mod install;
@@ -212,6 +213,7 @@ mod tests_hermetic_guard;
 #[cfg(test)]
 mod tests_memory_ipc;
 pub mod trace_collector;
+pub mod typed_ooda;
 pub mod update_check;
 pub mod util;
 pub mod worktree_gc;

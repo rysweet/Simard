@@ -1,0 +1,110 @@
+name: recall-sub-threshold-needle-cut
+app_type: cli
+description: |
+  Outside-in proof that the recall relevance gates in
+  `LibraryCognitiveMemory` DROP sub-threshold (single-character) CLEAN query
+  tokens before matching — a recall-precision axis of the standing
+  cognition-improvement goal.
+
+  The word-boundary gate admits a query token when it is a PREFIX of a whole
+  content word (`word.starts_with(needle)`), which preserves inflectional recall
+  (`deploy` -> "deployed"). But a lone single-character clean token — the shape a
+  possessive ("Rust's" tokenizes to {rust, s, ...}), an initial, or a stray list
+  separator emits — then prefix-matches EVERY content word beginning with that
+  character. That floods the capped turn/OODA working-context recall with
+  off-topic episodes and facts, dragging recall precision (and effective
+  distillation fact-yield) down.
+
+  The parallel knowledge-pack path (`knowledge_context::relevance_score`) already
+  drops objective tokens shorter than `MIN_TOKEN_LEN = 2`. The adapter now
+  mirrors that cut (`MIN_CLEAN_NEEDLE_LEN = 2`) at all three needle-construction
+  sites — `recall_episodes_ranked` (tokenized query), `search_episodes_by_keywords`
+  (clean keyword branch), and `partition_fact_query` (fact clean set). RAW tokens
+  (colon/hyphen markers, hyphenated concepts) are never length-cut, so exact
+  marker/concept lookups keep the library's verbatim substring semantics.
+
+  A critical guard closes the fact path: when a query holds ONLY sub-threshold
+  clean tokens (both needle sets empty after the cut), `search_facts` recalls
+  NOTHING rather than falling through to the library's raw-substring search,
+  where a lone "s" would substring nearly every stored fact — a worse over-match
+  than the leak the cut removes.
+
+  This scenario drives the hermetic, in-process tests that pin the corrected
+  contract against the live lbug-backed `LibraryCognitiveMemory` adapter:
+    - a possessive-style ranked query ("Rust's ownership model") recalls only the
+      genuinely relevant episode, not one sharing merely the stray "s" needle;
+    - a lone single-char keyword recalls no episodes, while a real multi-char
+      keyword still recalls at a word boundary;
+    - a lone single-char fact query recalls nothing (no raw-substring flood),
+      while a real token still recalls its whole-word fact;
+    - the pure `partition_fact_query` helper drops sub-threshold clean tokens,
+      never length-cuts RAW tokens, and a sub-threshold-only query matches
+      nothing;
+    - the pre-existing word-boundary / plural-fold / inflectional-recall
+      behaviours across the same modules are unregressed.
+  No network, no live host mutation. The CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # Ranked episodic recall: the sub-threshold-token drop plus all pre-existing
+  # ordering / backfill / word-boundary / plural-fold behaviours.
+  - action: run
+    params:
+      command: "cargo test --locked --lib cognitive_memory::tests_ranked_episodic"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Flat keyword episodic scan: a lone single-char keyword recalls nothing; a
+  # real keyword still recalls at a word boundary; markers stay exact.
+  - action: run
+    params:
+      command: "cargo test --locked --lib cognitive_memory::tests_whole_word_episode_recall"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Fact recall: a lone single-char clean query recalls nothing (no raw-substring
+  # flood); marker/concept substring semantics preserved; word-boundary gate kept.
+  - action: run
+    params:
+      command: "cargo test --locked --lib cognitive_memory::tests_fact_recall_word_boundary"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Pure fact-query partition helper: drops sub-threshold clean tokens, never
+  # length-cuts RAW tokens, sub-threshold-only query matches nothing.
+  - action: run
+    params:
+      command: "cargo test --locked --lib cognitive_memory::library_adapter::fact_query_gate_tests"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

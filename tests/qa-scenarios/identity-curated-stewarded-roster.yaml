@@ -1,0 +1,65 @@
+name: identity-curated-stewarded-roster
+app_type: cli
+description: |
+  Outside-in coverage for moving Simard's governed-repo roster OUT of framework
+  code and committed data INTO her identity as agentically-curated, mutable,
+  deploy-durable state.
+
+  The roster used to be a git-committed framework file
+  `prompt_assets/simard/ecosystem_repos.toml` parsed by bespoke Rust and
+  compile-time embedded via `include_str!` — so every self-deploy (which
+  re-installs `prompt_assets/` from the repo) clobbered any runtime edit and
+  Simard could not durably steward her own roster. That file and its coupling
+  are gone.
+
+  Now the framework provides a GENERIC identity-scoped mutable-curated-data
+  mechanism (`src/identity_curated_state.rs`): each identity carries its own
+  differently-typed curated collections (repos for Simard, hypothetically menus
+  or tickers for another identity). The roster is simply the `stewarded_repos`
+  collection for identity `simard`. It is SEEDED once from the committed
+  identity-data seed `prompt_assets/simard/identity/stewarded_repos.seed.toml`,
+  then owned as MUTABLE durable state at
+  `<state_root>/identity-state/simard/stewarded_repos.toml` — under the state
+  root that `install` NEVER overwrites — so agentic add/remove edits survive
+  self-deploys. All three consumers (ecosystem-observe, merge-queue-reasoning
+  scope, ci-health sweep) read this one identity-curated roster: a single
+  source of truth.
+
+  Verified end to end by:
+  - `cargo test --lib identity_curated_state::` — the generic mechanism:
+    state-root path resolution, path-traversal rejection, save/load roundtrip,
+    corrupt-file-is-error (never silent empty), seed-once-then-own-mutable-state
+    (the seed closure is invoked ONLY on first use and never again, proving
+    curation survives re-install), add/remove upsert/idempotency, and
+    per-identity/per-collection isolation.
+  - `cargo test --lib overseer::ecosystem_observe::` — the roster loader:
+    `load_stewarded_roster` seeds from the committed seed then owns the durable
+    copy; slugs are validated (`owner/name`); malformed slugs are skipped with a
+    warning; an EMPTY roster is a fail-closed ERROR (never a silent empty pass);
+    the seed path resolves install-first then in-tree.
+  - `cargo test --lib ci_health::governed_roster` — the ci-health sweep reads
+    the identity-curated roster at runtime (no compile-time `include_str!`).
+  - `cargo test --test ecosystem_observe_assets` — the committed seed is the
+    default source of truth for a fresh identity, lists the 10 stewarded slugs,
+    and excludes the deprecated Python `rysweet/amplihack`.
+
+  Schema note: the pinned `@gadugi/agentic-test` CLI runner gates only on
+  `run`-step exit codes and reads the command from `params.command`, so the
+  suite runs under a single `bash -lc` wrapper that exits zero only when every
+  `cargo test` above reports success.
+metadata:
+  tags:
+    - cli
+    - identity
+    - roster
+    - ecosystem
+    - state
+agents:
+  - name: cli-agent
+    type: cli
+    command: bash
+steps:
+  - action: run
+    params:
+      command: "bash -lc 'set -euo pipefail; cargo test --lib -- identity_curated_state:: overseer::ecosystem_observe:: ci_health::governed_roster 2>&1 | tee /tmp/roster-qa-lib.log | grep -q \"test result: ok\"; cargo test --test ecosystem_observe_assets 2>&1 | tee /tmp/roster-qa-assets.log | grep -q \"test result: ok\"'"
+    timeout: 600000

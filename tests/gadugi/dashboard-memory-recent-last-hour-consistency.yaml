@@ -1,0 +1,51 @@
+name: "Dashboard Memory Recent Last-Hour Consistency"
+description: "Outside-in operator check that the Memory tab's recent-memories panel copy never contradicts its own headline last-hour count. On the library backend per-item listing is unavailable (available:false, items:[]) yet last_hour_count can be positive; the empty-state copy must branch on last_hour_count so a headline of e.g. 313 is never shown beside 'No new memories in the last hour'. Boots the real dashboard binary, authenticates, and asserts both the live /api/memory/recent response shape and the served HTML renderer contract."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 0
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Recent-memories copy stays consistent with the last-hour headline count"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/dashboard-memory-recent-last-hour-consistency.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "dashboard"
+    - "memory"
+    - "usability"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

@@ -1,0 +1,12 @@
+flowchart LR
+    simard["simard crate Cargo package 0.33.1"] --> cargo["Cargo.toml direct dependency contract"]
+    cargo --> lock["Cargo.lock resolved graph"]
+    cargo --> features["features default signal dashboard_audit"]
+    cargo --> bins["binary targets default simard plus src_bin tools"]
+    cargo --> git_pinned["git pinned Rust crates amplihack_memory rustyclawd amplihack_agent_eval lbug"]
+    cargo --> crates_io_runtime["crates_io runtime deps async web ui telemetry storage crypto"]
+    cargo --> dev_build["dev build target deps assert_cmd proptest syn chrono libc"]
+    simard --> internal["internal Rust modules large src module dependency layer"]
+    git_pinned --> graph_store["embedded graph store amplihack_memory persistent to lbug"]
+    internal --> graph_store
+    internal --> subprocesses["external subprocess tools recipe_runner_rs signal_cli gh git systemctl cargo"]

@@ -418,6 +418,10 @@ fn run_ooda_cycle_inner(
                     "[simard] OODA cycle: goal '{goal_id}' consecutive failures = {} (cooldown will demote urgency)",
                     *entry
                 );
+                eprintln!(
+                    "[simard] OODA cycle: goal '{goal_id}' failure detail: {}",
+                    truncate_detail(&outcome.detail, 240)
+                );
             }
 
             if let Some(goal) = state
@@ -596,6 +600,28 @@ fn run_ooda_cycle_inner(
         }
     }
 
+    // --- Per-goal, per-cycle agentic decision (issue #4453) ---
+    // Run EXACTLY ONE reasoned decision per active goal per cycle
+    // (continue / spawn / reorient / investigate / wait / complete), replacing
+    // the imperative never-idle / reap / grace-window predicates with a thin
+    // deterministic rail that dispatches to the reasoner. A non-destructive
+    // verdict (continue / spawn / wait / investigate) PRESERVES the goal's
+    // in-flight `wip_refs` — the root-cause fix for the 70ab8541 idle->reset
+    // fault-loop: a standing research goal holding a live PR is never silently
+    // reset by a threshold. Destructive ref mutation is reachable only via a
+    // reasoned `reorient` / `complete` (a stale-worker concern goes through
+    // `investigate` first). NO silent fallback: a reasoner `Err` fails the cycle
+    // loudly (#1711) rather than masquerading as a no-op decision.
+    let per_goal_outcomes = drive_per_goal_cycle(state, memories.brain.as_ref())?;
+    if !per_goal_outcomes.is_empty() {
+        tracing::info!(
+            target: "simard::ooda",
+            decisions = per_goal_outcomes.len(),
+            reoriented = per_goal_outcomes.iter().filter(|o| o.touched_refs).count(),
+            "OODA per-goal-cycle: one agentic decision per active goal",
+        );
+    }
+
     // --- Fix 3: no-progress breaker (issue #1) ---
     // Before curation, bound the *no-action* livelock: a goal that produced a
     // no-shippable-progress cycle (`NO ACTION` / rejected progress claim) has
@@ -609,6 +635,14 @@ fn run_ooda_cycle_inner(
     // corruption guard treats them as a legitimate departure (not a "vanished"
     // goal) and the persist step force-removes them from the snapshot.
     let breaker_dropped: Vec<String> = if let Some(source) = &memories.completion_evidence {
+        // NEW-1 Prong 2 (PR #4428): reconcile PR-ref liveness BEFORE the breaker
+        // classifies. A standing research goal that merged/closed its PR keeps a
+        // stale `pr` wip_ref that `has_live_in_flight_ref` reads as LIVE, so the
+        // breaker would classify it `ResearchInFlight` forever and it would idle
+        // silently. Pruning merged/closed PR refs here makes the kind-based guard
+        // sound; a genuinely-open PR survives (finding #1 intact).
+        let pr_client = crate::stewardship::RealPrGhClient::new();
+        reconcile_merged_prs(&mut state.active_goals, &pr_client);
         if crate::ooda_loop::no_progress::no_progress_investigation_enabled() {
             // Root-cause investigation (issue #16): before authoring any block,
             // the breaker classifies WHY a stalled goal made no shippable
@@ -635,7 +669,7 @@ fn run_ooda_cycle_inner(
                 &crate::ooda_loop::no_progress::GhIssueFiler,
                 crate::ooda_loop::no_progress::INVESTIGATED_BREAKER_THRESHOLD,
             );
-            if report.fired() || !report.auto_cleared.is_empty() {
+            if report.is_noteworthy() {
                 tracing::info!(
                     target: "simard::ooda",
                     summary = %report.log_line(),
@@ -663,7 +697,10 @@ fn run_ooda_cycle_inner(
                     &crate::ooda_loop::no_progress::GhIssueFiler,
                     crate::ooda_loop::no_progress::INVESTIGATED_BREAKER_THRESHOLD,
                 );
-            if reinvestigate_report.fired() || !reinvestigate_report.reinvestigated.is_empty() {
+            if reinvestigate_report.fired()
+                || !reinvestigate_report.reinvestigated.is_empty()
+                || !reinvestigate_report.investigation_errors.is_empty()
+            {
                 tracing::info!(
                     target: "simard::ooda",
                     summary = %reinvestigate_report.log_line(),
@@ -1102,7 +1139,16 @@ pub(crate) fn sweep_stale_assignments_with_sessions(
         return;
     }
 
+    // Kinds whose liveness is bound to the owning engineer's session: once that
+    // session is gone they are dead artifacts. `pr`/`issue` refs OUTLIVE the
+    // session and are KEPT here (a merged PR is pruned by the separate per-cycle
+    // PR-liveness reconcile; an `issue` is a durable record).
+    const DEAD_SESSION_KINDS: [&str; 3] = ["session", "branch", "engineer"];
+
     for goal in board.active.iter_mut() {
+        // (A) Stale-ASSIGNMENT reset (unchanged): a goal assigned to a session
+        // that is no longer live has its assignment cleared and is reset to
+        // `NotStarted` so it is re-dispatched.
         let is_stale = goal
             .assigned_to
             .as_deref()
@@ -1115,6 +1161,200 @@ pub(crate) fn sweep_stale_assignments_with_sessions(
             );
             goal.status = crate::goal_curation::GoalProgress::NotStarted;
         }
+
+        // (B) FIX-1 (OBSERVATION 1, hardening): prune dead-session
+        // session/branch/engineer wip_refs for EVERY goal, keyed on whether the
+        // goal's session is actually alive — NOT on whether it carries a stale
+        // ASSIGNMENT. An UNASSIGNED goal (`assigned_to == None`) that still holds
+        // such a ref (e.g. `clear_goal_assignment` cleared the assignment but left
+        // the ref) otherwise reads as live in-flight forever through the kind-based
+        // `has_live_in_flight_ref` guard and suppresses the never-idle fault.
+        //
+        // A `branch`/`engineer` ref_id is a branch name / engineer id, NOT a
+        // session id, so the group's liveness is keyed on the goal's session
+        // anchor — a live `assigned_to`, or a `session`/`engineer` ref pointing at
+        // a live session. When no anchor is live the whole session-bound group is
+        // dropped; when one IS live the group is preserved untouched. Pure/total:
+        // no session lookup panics (plain `HashSet` membership).
+        let session_is_live = goal
+            .assigned_to
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|s| live_sessions.contains(s))
+            || goal.wip_refs.iter().any(|wip| {
+                let kind = wip.kind.trim();
+                (kind.eq_ignore_ascii_case("session") || kind.eq_ignore_ascii_case("engineer"))
+                    && live_sessions.contains(wip.ref_id.trim())
+            });
+        if !session_is_live {
+            let before = goal.wip_refs.len();
+            goal.wip_refs.retain(|wip| {
+                let kind = wip.kind.trim();
+                !DEAD_SESSION_KINDS
+                    .iter()
+                    .any(|dead| kind.eq_ignore_ascii_case(dead))
+            });
+            let dropped = before - goal.wip_refs.len();
+            if dropped > 0 {
+                eprintln!(
+                    "[simard] OODA start: pruned {} dead-session wip_ref(s) for goal '{}' (owning session not live)",
+                    dropped, goal.id
+                );
+            }
+        }
+    }
+}
+
+// ============================================================================
+// NEW-1 Prong 2 (PR #4428): per-cycle PR-liveness reconcile — production wiring
+// ============================================================================
+
+/// Upper bound for the per-cycle open-PR fetch. MUST stay well ABOVE the repo's
+/// realistic simultaneous-open-PR count.
+///
+/// `list_open_prs` forwards this to `gh pr list --limit`, which TRUNCATES the
+/// result set. The pure prune treats the returned set as authoritative, so a
+/// `pr` ref whose PR is genuinely open but BEYOND the limit would be absent from
+/// the set and wrongly pruned — wiping a live in-flight ref, i.e. the exact
+/// round-1 finding-#1 (F1) regression. Fail-open covers a fetch `Err` and an
+/// unparseable id, but NOT a silently truncated `Ok(...)`, so this high cap is
+/// the guarantee. `1000` is far above any realistic open-PR count for this repo.
+const OPEN_PR_RECONCILE_LIMIT: u32 = 1000;
+
+/// Conservative validation of a single `owner` or `repo` path segment for the
+/// `gh pr list --repo` slug (FIX-2). Mirrors the shape of `repo_resolver`'s
+/// `validate_repo_slug`: ASCII alphanumeric plus `.`/`_`/`-`, 1..=64 chars, no
+/// `..` traversal, no leading `-`/`.`. Every slug is already passed to `gh` as a
+/// discrete argv element (never string-interpolated into a shell line), but a
+/// malformed segment is still rejected so we never issue a nonsense query and
+/// fail open on it instead.
+fn valid_repo_segment(seg: &str) -> bool {
+    !seg.is_empty()
+        && seg.len() <= 64
+        && !seg.contains("..")
+        && !seg.starts_with('-')
+        && !seg.starts_with('.')
+        && seg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// Canonical `owner/repo` slug for a goal's PR reconcile (FIX-2, OBSERVATION 2).
+/// `None`, `""`, or `"simard"` (case-insensitive) fold to the canonical
+/// [`crate::stewardship::TargetRepo::Simard`] slug; a value already containing
+/// `'/'` is treated as an `owner/repo` slug (both components validated); a bare
+/// name maps to `rysweet/{name}`. Returns `None` for any slug that fails
+/// validation so the caller fails open and prunes NOTHING for that goal rather
+/// than issuing a malformed `gh` query.
+fn repo_slug_for_goal(goal: &crate::goal_curation::ActiveGoal) -> Option<String> {
+    let simard = crate::stewardship::TargetRepo::Simard.slug();
+    match goal.repo.as_deref().map(str::trim) {
+        None | Some("") => Some(simard.to_string()),
+        Some(s) if s.eq_ignore_ascii_case("simard") => Some(simard.to_string()),
+        Some(s) if s.contains('/') => {
+            let mut parts = s.splitn(2, '/');
+            let owner = parts.next().unwrap_or_default();
+            let repo = parts.next().unwrap_or_default();
+            // `splitn(2, '/')` leaves any 3rd+ segment inside `repo`; reject it.
+            if repo.contains('/') || !valid_repo_segment(owner) || !valid_repo_segment(repo) {
+                None
+            } else {
+                Some(format!("{owner}/{repo}"))
+            }
+        }
+        Some(name) if valid_repo_segment(name) => Some(format!("rysweet/{name}")),
+        Some(_) => None,
+    }
+}
+
+/// Fetch the open-PR set ONCE per distinct repo among the active goals holding a
+/// `pr` ref and prune every merged/closed `pr`
+/// [`crate::goal_curation::WipRef`] from the active board via the pure
+/// [`crate::ooda_loop::no_progress::prune_merged_pr_refs_scoped`], BEFORE the
+/// never-idle breaker classifies (NEW-1 Prong 2, PR #4428; FIX-2, OBSERVATION 2).
+///
+/// FIX-2 (OBSERVATION 2): each `pr` ref is reconciled against the open-PR set of
+/// ITS OWN repo ([`goal_repo_slug`]), NOT a hardcoded `TargetRepo::Simard`. A
+/// standing goal tracking a still-OPEN PR in another repo therefore survives
+/// instead of being wrongly pruned against Simard's open set. The `gh pr list`
+/// calls are DEDUPED to one per distinct repo.
+///
+/// Reuses the existing `gh pr list` path
+/// ([`crate::stewardship::PrGhClient::list_open_prs`]) — NO new brittle shell/gh
+/// parse. **Fail-open per repo**: if a repo's fetch errors it is omitted from
+/// the open-set map, so [`prune_merged_pr_refs_scoped`] prunes NOTHING for that
+/// repo's goals this cycle — a `gh` blip can never wipe a live PR ref (which
+/// would reintroduce the round-1 finding-#1 regression). A merged-PR fault is
+/// merely delayed a cycle, never suppressed forever. On a genuine empty open set
+/// (`Ok([])`) that repo's `pr` refs prune (correct — nothing is open).
+///
+/// The `client` is injected so production wires the concrete
+/// [`crate::stewardship::RealPrGhClient`] while the pure core is unit-tested
+/// directly with an in-memory set (IO-free).
+///
+/// Fast path: when no active goal carries a `pr` wip_ref the open-PR fetch is
+/// skipped entirely (the pure prune would be a no-op), avoiding the `gh pr
+/// list` subprocess on the common cycle.
+fn reconcile_merged_prs(
+    board: &mut crate::goal_curation::GoalBoard,
+    client: &dyn crate::stewardship::PrGhClient,
+) {
+    use std::collections::{HashMap, HashSet};
+
+    // Skip the `gh pr list` subprocess+network round-trip entirely when no
+    // active goal carries a `pr` wip_ref: the pure prune would drop nothing,
+    // so the fetch is pure waste. Behaviourally identical, avoids a process
+    // spawn on the common (no-PR-ref) cycle.
+    let has_pr = |goal: &crate::goal_curation::ActiveGoal| {
+        goal.wip_refs
+            .iter()
+            .any(|wip| wip.kind.trim().eq_ignore_ascii_case("pr"))
+    };
+    if !board.active.iter().any(has_pr) {
+        return;
+    }
+
+    // Distinct, safe repo slugs among the goals that actually hold a `pr` ref —
+    // dedup the `gh pr list` calls and never fetch a repo we won't prune.
+    let mut slugs: Vec<String> = Vec::new();
+    for goal in board.active.iter().filter(|g| has_pr(g)) {
+        if let Some(slug) = repo_slug_for_goal(goal)
+            && !slugs.contains(&slug)
+        {
+            slugs.push(slug);
+        }
+    }
+
+    // Fetch each distinct repo's open-PR set once. Fail-open per repo: on `Err`
+    // the repo is simply omitted, so its goals' `pr` refs are left untouched.
+    let mut open_by_repo: HashMap<String, HashSet<u32>> = HashMap::new();
+    for slug in slugs {
+        match client.list_open_prs(&slug, OPEN_PR_RECONCILE_LIMIT) {
+            Ok(open) => {
+                open_by_repo.insert(slug, open.iter().map(|s| s.number).collect());
+            }
+            Err(e) => {
+                eprintln!(
+                    "[simard] merged-PR reconcile: list_open_prs failed for repo '{slug}' — \
+                     skipping PR-ref prune for that repo this cycle (fail-open — never wipe a \
+                     possibly-live ref): {e}"
+                );
+            }
+        }
+    }
+
+    let pruned = crate::ooda_loop::no_progress::prune_merged_pr_refs_scoped(
+        board,
+        |goal| repo_slug_for_goal(goal).unwrap_or_default(),
+        &open_by_repo,
+    );
+    for (goal_id, ref_id) in pruned {
+        tracing::info!(
+            target: "simard::ooda",
+            goal = %goal_id,
+            ref_id = %ref_id,
+            "pruned merged/closed PR wip_ref (not in its repo's open-PR set)",
+        );
     }
 }
 
@@ -1340,6 +1580,191 @@ fn learn_from_refuted_goals(
         report.lessons_distilled,
         report.repeat_failures,
     );
+}
+
+// ===========================================================================
+// Per-goal, per-cycle agentic decision driver (issue #4453)
+//
+// Runs EXACTLY ONE agentic reasoning decision per active goal per cycle
+// (continue / spawn / reorient / investigate / wait / complete), replacing the
+// imperative never-idle / reap / grace-window predicates with a thin
+// deterministic rail that dispatches to the reasoner and executes the returned
+// action. The three former imperative deciders (classify_standing_idle, the
+// claim-reaper staleness sweep, and the effect board-miss) survive ONLY as
+// read-only INPUTS on `PerGoalCycleCtx` — never as the decision.
+// ===========================================================================
+
+/// The observable outcome of one per-goal, per-cycle decision. Returned per
+/// active goal so the caller (and the regression tests) can assert routing and
+/// the A6 invariant (only `reorient`/`complete` touch refs).
+#[derive(Clone, Debug)]
+pub struct PerGoalDecisionOutcome {
+    /// The goal this decision was made for.
+    pub goal_id: String,
+    /// Stable snake_case label of the chosen action (`"continue"`, `"spawn"`, …).
+    pub action_label: String,
+    /// The reasoner's mandatory reason for the chosen action.
+    pub reason: String,
+    /// `true` when the applied action performed a DESTRUCTIVE ref mutation
+    /// (cleared `wip_refs` / rolled or completed the goal). Only `reorient` and
+    /// `complete` do so — the code-level guarantee that a `continue` / `spawn` /
+    /// `wait` / `investigate` verdict never reproduces the 70ab8541 idle→reset
+    /// loop.
+    pub touched_refs: bool,
+}
+
+/// Gather the DURABLE per-goal context for one per-cycle reasoning decision
+/// (issue #4453). Best-effort and total: a goal id absent from the board yields
+/// a defaulted ctx (never panics). Reads only in-memory durable state — never a
+/// live worker's mere presence as the decision input. The three demoted
+/// imperative deciders are surfaced here as read-only signals.
+pub(crate) fn gather_per_goal_cycle_ctx(
+    state: &OodaState,
+    goal_id: &str,
+) -> crate::ooda_brain::PerGoalCycleCtx {
+    use crate::ooda_brain::PerGoalCycleCtx;
+
+    let Some(goal) = state.active_goals.active.iter().find(|g| g.id == goal_id) else {
+        return PerGoalCycleCtx {
+            goal_id: goal_id.to_string(),
+            cycle_number: state.cycle_count,
+            ..PerGoalCycleCtx::default()
+        };
+    };
+
+    // Durable in-flight work (NOT live-worktree presence).
+    let open_pr_refs: Vec<String> = goal
+        .wip_refs
+        .iter()
+        .filter(|w| w.kind.trim().eq_ignore_ascii_case("pr"))
+        .map(|w| w.ref_id.clone())
+        .collect();
+    // Issue #4631 (fail-OPEN counterpart to the #4437 fail-CLOSE hardening in
+    // PRs #4574 / #4608): a mere `engineer_worktrees` map entry only proves a
+    // claim once existed, not that a live engineer is still pursuing the goal.
+    // A leaked / idle worktree claim would otherwise read "present … alive"
+    // forever and the dead engineer would never be reclaimed. Gate presence on
+    // a VERIFIED-LIVE engineer (PID + starttime) via the same on-disk verifier
+    // the #4437 fail-close path uses. The cheap `contains_key` guard preserves
+    // the IO-free fast path for the common "no claim" case; the filesystem scan
+    // only runs when a claim exists. Unverifiable → NOT present → the existing
+    // `stale_claim_secs` reclaim path re-engages automatically below.
+    let worker_present = state.engineer_worktrees.contains_key(goal_id)
+        && crate::ooda_actions::advance_goal::find_live_engineer_for_goal(
+            &crate::goal_curation::simard_state_root(),
+            goal_id,
+        )
+        .is_some();
+
+    // DEMOTED decider #1 — classify_standing_idle: a standing goal that looks
+    // idle (no live in-flight ref) becomes a SIGNAL, not a roll.
+    let standing_idle_signal = matches!(
+        crate::ooda_loop::no_progress::classify_standing_idle(goal),
+        Some(crate::ooda_loop::no_progress::StandingIdle::ResearchFault { .. })
+    ) || (goal.is_perpetual() && !goal.has_live_in_flight_ref());
+
+    // DEMOTED decider #2 — claim-reaper staleness: when a worker claim is
+    // EXPECTED (assignment or engineer/session/branch ref) but no live worktree
+    // is present, surface how long since the claim was last observed alive as a
+    // read-only INPUT. STALE_SECS survives only as the threshold that populates
+    // this field, never as the reap trigger; no new SIMARD_*_SECS is added.
+    let expects_worker = goal.assigned_to.is_some()
+        || goal.wip_refs.iter().any(|w| {
+            let kind = w.kind.trim();
+            kind.eq_ignore_ascii_case("engineer")
+                || kind.eq_ignore_ascii_case("session")
+                || kind.eq_ignore_ascii_case("branch")
+        });
+    let stale_claim_secs = if expects_worker && !worker_present {
+        Some(claim_age_secs(goal))
+    } else {
+        None
+    };
+
+    PerGoalCycleCtx {
+        goal_id: goal.id.clone(),
+        goal_description: goal.description.clone(),
+        goal_status: goal.status.to_string(),
+        cycle_number: state.cycle_count,
+        history_summary: goal.current_activity.clone().unwrap_or_default(),
+        effect_jobs_in_flight: 0,
+        open_pr_refs,
+        last_outcomes: Vec::new(),
+        wip_ref_count: goal.wip_refs.len() as u32,
+        worker_present,
+        worker_log_tail: String::new(),
+        standing_idle_signal,
+        stale_claim_secs,
+        // DEMOTED decider #3 — effect board-miss: gathered by the caller from
+        // the durable effect-dispatch ledger when available; defaulted false
+        // here so the pure gather stays IO-free.
+        effect_board_missed: false,
+    }
+}
+
+/// Seconds since a goal's worker claim was last observed making durable
+/// progress. `u64::MAX` means "a claim is expected but was never observed
+/// progressing" (no `last_progress_update_at` recorded). A FACT fed to the
+/// reasoner — never a reap threshold.
+fn claim_age_secs(goal: &crate::goal_curation::ActiveGoal) -> u64 {
+    match goal.last_progress_update_at {
+        Some(ts) => (chrono::Utc::now() - ts).num_seconds().max(0) as u64,
+        None => u64::MAX,
+    }
+}
+
+/// Run EXACTLY ONE agentic reasoning decision per active goal for this cycle
+/// (issue #4453), routing each outcome through the thin deterministic state
+/// rail [`crate::ooda_brain::apply_per_goal_action_to_state`] and recording a
+/// [`BrainJudgmentRecord`] for EVERY goal (an action + a reason each cycle —
+/// none left idle without both).
+///
+/// NO silent fallback: an `Err` from the reasoner surfaces as a cycle failure
+/// (#1711). Destructive ref mutation is reachable only via a reasoned
+/// `reorient`/`complete` (a worker-health concern goes through `investigate`
+/// first) — never a threshold/counter/grace-window.
+pub fn drive_per_goal_cycle<B: crate::ooda_brain::OodaBrain + ?Sized>(
+    state: &mut OodaState,
+    brain: &B,
+) -> SimardResult<Vec<PerGoalDecisionOutcome>> {
+    use crate::ooda_brain::{
+        BrainJudgmentRecord, apply_per_goal_action_to_state, push_brain_judgment,
+    };
+
+    // Snapshot the active goal ids first (cf. the pre-cycle active-id snapshot)
+    // so the per-goal `apply_*` mutation cannot invalidate the iteration.
+    let active_ids: Vec<String> = state
+        .active_goals
+        .active
+        .iter()
+        .map(|g| g.id.clone())
+        .collect();
+
+    let mut outcomes = Vec::with_capacity(active_ids.len());
+    for goal_id in active_ids {
+        let ctx = gather_per_goal_cycle_ctx(state, &goal_id);
+        // One agentic decision for this goal this cycle. Err => cycle failure.
+        let action = brain.decide_per_goal_cycle(&ctx)?;
+        let touched_refs = action.mutates_refs();
+
+        // Thin deterministic rail: apply the chosen action to in-memory state.
+        let detail = apply_per_goal_action_to_state(&action, state, &goal_id);
+
+        // Record the judgment for EVERY goal — an action + a reason each cycle.
+        push_brain_judgment(BrainJudgmentRecord::from_per_goal_cycle(
+            &goal_id, &action, false, "",
+        ));
+
+        eprintln!("[simard] OODA per-goal-cycle: {} -> {}", goal_id, detail);
+
+        outcomes.push(PerGoalDecisionOutcome {
+            goal_id,
+            action_label: action.variant_label().to_string(),
+            reason: action.reason().to_string(),
+            touched_refs,
+        });
+    }
+    Ok(outcomes)
 }
 
 #[cfg(test)]
@@ -1619,6 +2044,512 @@ mod tests_sweep {
                 goal.id
             );
         }
+    }
+
+    /// NEW-1 Prong 1 (PR #4428): a dead session's assignment sweep must ALSO drop
+    /// that goal's session/branch/engineer wip_refs — they belong to the dead
+    /// engineer — so `has_live_in_flight_ref` no longer reads them as live and the
+    /// never-idle breaker can fault. Durable `pr`/`issue` refs are KEPT: they
+    /// outlive the session, and a merged PR is pruned by the separate per-cycle
+    /// PR-liveness reconcile (`prune_merged_pr_refs`), not here.
+    #[test]
+    fn drops_dead_session_wip_refs_but_keeps_pr_and_issue() {
+        use crate::goal_curation::WipRef;
+        let wref = |kind: &str, id: &str| WipRef {
+            kind: kind.to_string(),
+            ref_id: id.to_string(),
+            label: format!("{kind} {id}"),
+            url: None,
+        };
+        let mut board = GoalBoard::new();
+        let mut goal = make_goal("g1", Some("dead-session"));
+        goal.wip_refs = vec![
+            wref("session", "dead-session"),
+            wref("branch", "feat/x"),
+            wref("engineer", "engineer-7"),
+            wref("pr", "42"),
+            wref("issue", "100"),
+        ];
+        add_active_goal(&mut board, goal).unwrap();
+
+        sweep_stale_assignments_with_sessions(&mut board, &live(&["other"]));
+
+        let goal = &board.active[0];
+        assert!(
+            goal.assigned_to.is_none(),
+            "assignment must be cleared for the dead session"
+        );
+        let kinds: Vec<&str> = goal.wip_refs.iter().map(|w| w.kind.as_str()).collect();
+        assert!(
+            !kinds.contains(&"session"),
+            "the dead session's session ref must be dropped, got {kinds:?}"
+        );
+        assert!(
+            !kinds.contains(&"branch"),
+            "the dead session's branch ref must be dropped, got {kinds:?}"
+        );
+        assert!(
+            !kinds.contains(&"engineer"),
+            "the dead session's engineer ref must be dropped, got {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"pr"),
+            "a durable PR ref must be kept (pruned separately by the PR-liveness reconcile), got {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"issue"),
+            "a durable issue ref must be kept, got {kinds:?}"
+        );
+    }
+
+    /// A LIVE session must keep its session/branch wip_refs untouched — the ref
+    /// drop is scoped strictly to DEAD sessions.
+    #[test]
+    fn keeps_wip_refs_for_live_session() {
+        use crate::goal_curation::WipRef;
+        let wref = |kind: &str, id: &str| WipRef {
+            kind: kind.to_string(),
+            ref_id: id.to_string(),
+            label: format!("{kind} {id}"),
+            url: None,
+        };
+        let mut board = GoalBoard::new();
+        let mut goal = make_goal("g1", Some("live-session"));
+        goal.wip_refs = vec![wref("session", "live-session"), wref("branch", "feat/y")];
+        add_active_goal(&mut board, goal).unwrap();
+
+        sweep_stale_assignments_with_sessions(&mut board, &live(&["live-session"]));
+
+        let goal = &board.active[0];
+        assert_eq!(goal.assigned_to.as_deref(), Some("live-session"));
+        assert_eq!(
+            goal.wip_refs.len(),
+            2,
+            "a live session's wip_refs must be preserved untouched"
+        );
+    }
+
+    /// FIX-1 (OBSERVATION 1, hardening): the dead-session ref prune must run for
+    /// an UNASSIGNED goal too, keyed on whether the session is actually alive —
+    /// NOT gated on the goal carrying a stale ASSIGNMENT.
+    ///
+    /// Scenario: a standing *research* goal with `assigned_to == None` whose only
+    /// wip_ref is an `engineer` ref for a session that is NOT in the live set
+    /// (e.g. `clear_goal_assignment` cleared the assignment but left the ref).
+    /// After the sweep the dead ref must be dropped, so
+    /// [`ActiveGoal::has_live_in_flight_ref`] reads `false` and the never-idle
+    /// breaker classifies it as a [`ResearchFault`] — the goal is re-oriented,
+    /// stays active, and is never wrongly held as `ResearchInFlight` forever.
+    ///
+    /// **RED before FIX-1:** the pre-fix sweep prunes session/branch/engineer
+    /// refs only INSIDE the `if is_stale` block, which requires a stale
+    /// *assignment*. An unassigned goal (`assigned_to == None`) is never stale,
+    /// so the dead-session ref survives, `has_live_in_flight_ref()` stays `true`,
+    /// and `classify_standing_idle` returns `ResearchInFlight` (the fault is
+    /// suppressed) — this assertion fails.
+    #[test]
+    fn prunes_dead_session_ref_for_unassigned_standing_research_goal() {
+        use crate::goal_curation::WipRef;
+        use crate::ooda_loop::no_progress::{
+            ResearchIdleFault, StandingIdle, classify_standing_idle,
+        };
+
+        // Unassigned (assigned_to == None) standing research goal.
+        let mut goal = make_goal("standing-research", None);
+        goal.description = "[standing] improve memory recall quality".to_string();
+        // Its only ref is a dead engineer/session artifact (session not live).
+        goal.wip_refs = vec![WipRef {
+            kind: "engineer".to_string(),
+            ref_id: "dead-session-xyz".to_string(),
+            label: "engineer dead-session-xyz".to_string(),
+            url: None,
+        }];
+
+        let mut board = GoalBoard::new();
+        add_active_goal(&mut board, goal).unwrap();
+        assert!(
+            board.active[0].is_standing_research_goal(),
+            "precondition: the test goal must read as a standing research goal"
+        );
+        assert!(
+            board.active[0].has_live_in_flight_ref(),
+            "precondition: before the sweep the dead-session ref reads as live in-flight"
+        );
+
+        // A non-empty live-session set that does NOT contain the dead session.
+        sweep_stale_assignments_with_sessions(&mut board, &live(&["some-other-live-session"]));
+
+        let goal = &board.active[0];
+        assert!(
+            goal.wip_refs.is_empty(),
+            "the dead-session engineer ref must be pruned even though the goal is UNASSIGNED, got {:?}",
+            goal.wip_refs
+        );
+        assert!(
+            !goal.has_live_in_flight_ref(),
+            "with the dead ref pruned the goal must no longer read as holding a live in-flight ref"
+        );
+        assert_eq!(
+            classify_standing_idle(goal),
+            Some(StandingIdle::ResearchFault {
+                fault: ResearchIdleFault::NoNovelActionProduced,
+            }),
+            "an idle standing research goal with no live ref must classify as a ResearchFault (active, re-oriented, never Blocked)"
+        );
+    }
+
+    /// FIX-1 (OBSERVATION 1, hardening) — keyed-not-drop-all divergence: the
+    /// dead-session prune is keyed on whether the goal's OWNING session is alive,
+    /// NOT a blanket drop of every working ref whenever the assignment is stale.
+    ///
+    /// Scenario: a goal whose ASSIGNMENT is stale (`assigned_to = "dead-sess"`,
+    /// absent from `live_sessions`) but which ALSO carries a `session` ref for a
+    /// DIFFERENT, still-live session (`"live-sess"`). After the sweep the stale
+    /// assignment is cleared and the goal reset to `NotStarted` (branch (a),
+    /// unchanged) — but the live `session` ref MUST survive, so the goal still
+    /// reads `has_live_in_flight_ref() == true` (its live engineer session is not
+    /// discarded as collateral of the stale assignment pointer).
+    ///
+    /// **RED against NEW-1's drop-all:** the base #4428 sweep dropped ALL
+    /// session/branch/engineer refs inside the `if is_stale` block, so the live
+    /// ref would be wiped and `has_live_in_flight_ref()` would read `false`.
+    #[test]
+    fn keeps_live_session_ref_when_assignment_is_stale() {
+        use crate::goal_curation::WipRef;
+        let mut board = GoalBoard::new();
+        let mut goal = make_goal("g1", Some("dead-sess"));
+        goal.wip_refs = vec![WipRef {
+            kind: "session".to_string(),
+            ref_id: "live-sess".to_string(),
+            label: "session live-sess".to_string(),
+            url: None,
+        }];
+        add_active_goal(&mut board, goal).unwrap();
+
+        sweep_stale_assignments_with_sessions(&mut board, &live(&["live-sess"]));
+
+        let goal = &board.active[0];
+        assert!(
+            goal.assigned_to.is_none(),
+            "the stale assignment must be cleared"
+        );
+        assert!(
+            matches!(goal.status, GoalProgress::NotStarted),
+            "a stale-assignment goal must be reset to NotStarted"
+        );
+        assert_eq!(
+            goal.wip_refs.len(),
+            1,
+            "the ref for a DIFFERENT, still-live session must survive, got {:?}",
+            goal.wip_refs
+        );
+        assert!(
+            goal.has_live_in_flight_ref(),
+            "a live session ref must keep the goal reading as holding live in-flight work"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests_reconcile_fetch_guard {
+    use std::cell::Cell;
+
+    use super::reconcile_merged_prs;
+    use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, WipRef, add_active_goal};
+    use crate::stewardship::merge_authority::{OpenPrSummary, PrGhClient, PrSnapshot};
+
+    /// Fake that records how many times `list_open_prs` (the `gh pr list`
+    /// subprocess in prod) was invoked, so we can assert the fast-path guard
+    /// skips the fetch when there is nothing to reconcile.
+    struct CountingClient {
+        calls: Cell<u32>,
+        open: Vec<u32>,
+    }
+
+    impl PrGhClient for CountingClient {
+        fn view_pr(&self, _repo: &str, _pr_number: u32) -> crate::error::SimardResult<PrSnapshot> {
+            unimplemented!("not exercised by the reconcile fetch-guard tests")
+        }
+        fn squash_merge(&self, _repo: &str, _pr_number: u32) -> crate::error::SimardResult<()> {
+            unimplemented!("not exercised by the reconcile fetch-guard tests")
+        }
+        fn list_open_prs(
+            &self,
+            _repo: &str,
+            _limit: u32,
+        ) -> crate::error::SimardResult<Vec<OpenPrSummary>> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(self
+                .open
+                .iter()
+                .map(|n| OpenPrSummary {
+                    number: *n,
+                    ..Default::default()
+                })
+                .collect())
+        }
+    }
+
+    fn goal_with_refs(id: &str, refs: Vec<WipRef>) -> ActiveGoal {
+        ActiveGoal {
+            labels: Vec::new(),
+            parent_goal_id: None,
+            priority_explicit: false,
+            repo: None,
+            id: id.to_string(),
+            description: format!("Goal {id}"),
+            priority: 1,
+            status: GoalProgress::InProgress { percent: 50 },
+            assigned_to: None,
+            current_activity: None,
+            wip_refs: refs,
+            last_progress_update_at: None,
+        }
+    }
+
+    fn wref(kind: &str, ref_id: &str) -> WipRef {
+        WipRef {
+            kind: kind.to_string(),
+            ref_id: ref_id.to_string(),
+            label: format!("{kind} {ref_id}"),
+            url: None,
+        }
+    }
+
+    /// No active goal carries a `pr` wip_ref → the `gh pr list` fetch must be
+    /// SKIPPED entirely (the pure prune would be a no-op).
+    #[test]
+    fn skips_open_pr_fetch_when_no_pr_ref() {
+        let mut board = GoalBoard::new();
+        add_active_goal(
+            &mut board,
+            goal_with_refs("g1", vec![wref("branch", "feat/x"), wref("issue", "100")]),
+        )
+        .unwrap();
+        let client = CountingClient {
+            calls: Cell::new(0),
+            open: vec![],
+        };
+
+        reconcile_merged_prs(&mut board, &client);
+
+        assert_eq!(
+            client.calls.get(),
+            0,
+            "list_open_prs (the gh subprocess) must not run when no goal has a pr ref"
+        );
+        assert_eq!(
+            board.active[0].wip_refs.len(),
+            2,
+            "non-pr refs must be untouched"
+        );
+    }
+
+    /// An empty active board → also no fetch.
+    #[test]
+    fn skips_open_pr_fetch_on_empty_board() {
+        let mut board = GoalBoard::new();
+        let client = CountingClient {
+            calls: Cell::new(0),
+            open: vec![],
+        };
+
+        reconcile_merged_prs(&mut board, &client);
+
+        assert_eq!(client.calls.get(), 0, "no goals → no fetch");
+    }
+
+    /// A `pr` wip_ref present → fetch runs exactly once and merged/closed refs
+    /// (not in the open set) are pruned while a genuinely-open one survives.
+    #[test]
+    fn fetches_once_and_prunes_when_pr_ref_present() {
+        let mut board = GoalBoard::new();
+        add_active_goal(
+            &mut board,
+            goal_with_refs(
+                "g1",
+                vec![wref("pr", "42"), wref("pr", "99"), wref("branch", "feat/x")],
+            ),
+        )
+        .unwrap();
+        // 42 is open, 99 is merged/closed (absent).
+        let client = CountingClient {
+            calls: Cell::new(0),
+            open: vec![42],
+        };
+
+        reconcile_merged_prs(&mut board, &client);
+
+        assert_eq!(
+            client.calls.get(),
+            1,
+            "the open-PR fetch must run exactly once per cycle when a pr ref exists"
+        );
+        let kinds_ids: Vec<(&str, &str)> = board.active[0]
+            .wip_refs
+            .iter()
+            .map(|w| (w.kind.as_str(), w.ref_id.as_str()))
+            .collect();
+        assert!(
+            kinds_ids.contains(&("pr", "42")),
+            "the open PR ref must survive, got {kinds_ids:?}"
+        );
+        assert!(
+            !kinds_ids.contains(&("pr", "99")),
+            "the merged/closed PR ref must be pruned, got {kinds_ids:?}"
+        );
+        assert!(
+            kinds_ids.contains(&("branch", "feat/x")),
+            "non-pr refs must be untouched, got {kinds_ids:?}"
+        );
+    }
+}
+
+/// FIX-2 (OBSERVATION 2): the merged-PR reconcile must query each goal's OWN
+/// repo, not a hardcoded `TargetRepo::Simard`. These tests drive the new,
+/// repo-scoped [`reconcile_merged_prs`] (which derives the `owner/repo` slug
+/// per active goal and prunes each `pr` ref only against ITS OWN repo's open
+/// set) with a repo-keyed fake so the scoping is asserted directly, IO-free.
+#[cfg(test)]
+mod tests_reconcile_repo_scope {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    use super::reconcile_merged_prs;
+    use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, WipRef, add_active_goal};
+    use crate::stewardship::merge_authority::{OpenPrSummary, PrGhClient, PrSnapshot};
+
+    /// Fake keyed by the `owner/repo` slug: `list_open_prs(repo, _)` returns the
+    /// open-PR set registered for THAT repo (empty for an unregistered repo) and
+    /// records the per-repo call count, so we can assert each distinct goal repo
+    /// is queried against its OWN slug (deduped).
+    struct RepoKeyedClient {
+        open_by_repo: HashMap<String, Vec<u32>>,
+        calls_by_repo: RefCell<HashMap<String, u32>>,
+    }
+
+    impl PrGhClient for RepoKeyedClient {
+        fn view_pr(&self, _repo: &str, _pr_number: u32) -> crate::error::SimardResult<PrSnapshot> {
+            unimplemented!("not exercised by the repo-scope reconcile test")
+        }
+        fn squash_merge(&self, _repo: &str, _pr_number: u32) -> crate::error::SimardResult<()> {
+            unimplemented!("not exercised by the repo-scope reconcile test")
+        }
+        fn list_open_prs(
+            &self,
+            repo: &str,
+            _limit: u32,
+        ) -> crate::error::SimardResult<Vec<OpenPrSummary>> {
+            *self
+                .calls_by_repo
+                .borrow_mut()
+                .entry(repo.to_string())
+                .or_insert(0) += 1;
+            let open = self.open_by_repo.get(repo).cloned().unwrap_or_default();
+            Ok(open
+                .into_iter()
+                .map(|number| OpenPrSummary {
+                    number,
+                    ..Default::default()
+                })
+                .collect())
+        }
+    }
+
+    fn goal_in_repo(id: &str, repo: Option<&str>, refs: Vec<WipRef>) -> ActiveGoal {
+        ActiveGoal {
+            labels: Vec::new(),
+            parent_goal_id: None,
+            priority_explicit: false,
+            repo: repo.map(str::to_string),
+            id: id.to_string(),
+            description: format!("Goal {id}"),
+            priority: 1,
+            status: GoalProgress::InProgress { percent: 50 },
+            assigned_to: None,
+            current_activity: None,
+            wip_refs: refs,
+            last_progress_update_at: None,
+        }
+    }
+
+    fn pr_ref(number: &str) -> WipRef {
+        WipRef {
+            kind: "pr".to_string(),
+            ref_id: number.to_string(),
+            label: format!("pr {number}"),
+            url: None,
+        }
+    }
+
+    /// A goal in a repo OTHER than Simard, holding an OPEN pr ref, must have that
+    /// ref reconciled against ITS OWN repo — so the open PR survives — while a
+    /// Simard goal's merged pr ref is still pruned (NEW-1 not regressed).
+    ///
+    /// **RED before FIX-2:** the pre-fix `reconcile_merged_prs` hardcodes
+    /// `TargetRepo::Simard` and ignores `goal.repo`, so the other-repo goal's
+    /// OPEN pr (#500) is checked against Simard's open set (which does not
+    /// contain it) and wrongly pruned — the exact F1-style false prune this fix
+    /// closes. (The pre-fix signature also still takes a `repo` argument, so this
+    /// test — written against the target repo-scoped signature — does not even
+    /// compile until FIX-2 lands.)
+    #[test]
+    fn scopes_open_pr_reconcile_to_each_goals_own_repo() {
+        let mut board = GoalBoard::new();
+        // Simard goal (repo: None → rysweet/Simard) with a MERGED pr (#77).
+        add_active_goal(
+            &mut board,
+            goal_in_repo("simard-goal", None, vec![pr_ref("77")]),
+        )
+        .unwrap();
+        // Other-repo goal (repo: Some("other") → rysweet/other) with an OPEN pr (#500).
+        add_active_goal(
+            &mut board,
+            goal_in_repo("other-goal", Some("other"), vec![pr_ref("500")]),
+        )
+        .unwrap();
+
+        let mut open_by_repo = HashMap::new();
+        // Simard: #77 is NOT open (merged) → must be pruned.
+        open_by_repo.insert("rysweet/Simard".to_string(), Vec::new());
+        // rysweet/other: #500 IS open → must survive.
+        open_by_repo.insert("rysweet/other".to_string(), vec![500]);
+        let client = RepoKeyedClient {
+            open_by_repo,
+            calls_by_repo: RefCell::new(HashMap::new()),
+        };
+
+        reconcile_merged_prs(&mut board, &client);
+
+        let simard = board.active.iter().find(|g| g.id == "simard-goal").unwrap();
+        assert!(
+            !simard.wip_refs.iter().any(|w| w.kind == "pr"),
+            "the Simard goal's merged PR ref must still be pruned (NEW-1 intact), got {:?}",
+            simard.wip_refs
+        );
+
+        let other = board.active.iter().find(|g| g.id == "other-goal").unwrap();
+        assert!(
+            other
+                .wip_refs
+                .iter()
+                .any(|w| w.kind == "pr" && w.ref_id == "500"),
+            "the other-repo goal's OPEN PR ref must survive — it must be queried against its OWN repo (rysweet/other), got {:?}",
+            other.wip_refs
+        );
+
+        // Each distinct goal repo is queried against its own slug, deduped.
+        let calls = client.calls_by_repo.borrow();
+        assert_eq!(
+            calls.get("rysweet/other").copied(),
+            Some(1),
+            "the other-repo goal's PR must be checked against rysweet/other exactly once, calls={calls:?}"
+        );
+        assert_eq!(
+            calls.get("rysweet/Simard").copied(),
+            Some(1),
+            "the Simard goal's PR must be checked against rysweet/Simard exactly once, calls={calls:?}"
+        );
     }
 }
 
@@ -1997,6 +2928,234 @@ mod tests_objective_probe {
             "objective probe must fire the stored goal trigger; probe={probe:?}, \
              got {} triggers",
             triggered.len()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #4631 — worker_present must reflect a VERIFIED-LIVE engineer, not mere
+// engineer_worktrees map-membership. This is the fail-OPEN counterpart to the
+// #4437 fail-CLOSE hardening (PRs #4574 / #4608): a leaked / idle worktree
+// claim currently satisfies `contains_key(goal_id)` and is therefore reported
+// as "worker present … alive" forever, so a dead/leaked engineer is never
+// reclaimed. These tests pin the corrected contract:
+//
+//   worker_present == engineer_worktrees.contains_key(goal_id)
+//                  && find_live_engineer_for_goal(state_root, goal_id).is_some()
+//
+// TDD status: `leaked_claim_reads_not_present_and_is_reclaimable` FAILS against
+// the current map-membership-only implementation (it asserts `false` where the
+// present code yields `true`) and PASSES once the liveness gate is added. The
+// live-engineer and no-entry tests are guards proving the fix must not
+// over-correct (reclaim a genuinely-live worker) or change the short-circuit.
+#[cfg(test)]
+mod tests_worker_present_liveness {
+    use crate::engineer_worktree::{ENGINEER_CLAIM_FILE, EngineerWorktree};
+    use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
+    use crate::ooda_loop::OodaState;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use tempfile::tempdir;
+
+    // -- fixtures -----------------------------------------------------------
+
+    /// Scope `SIMARD_STATE_ROOT` to a temp dir and restore it on drop. The fix
+    /// reads the live-engineer scan root via `simard_state_root()`, which is
+    /// backed by this process-global env var — hence the `#[serial]` group.
+    struct StateRootGuard {
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl StateRootGuard {
+        fn set(root: &Path) -> Self {
+            let prev = std::env::var_os("SIMARD_STATE_ROOT");
+            // SAFETY: every test here is serialized via
+            // #[serial_test::serial(cognitive_memory)], the canonical group
+            // guarding the process-global SIMARD_STATE_ROOT env var.
+            unsafe { std::env::set_var("SIMARD_STATE_ROOT", root) };
+            Self { prev }
+        }
+    }
+
+    impl Drop for StateRootGuard {
+        fn drop(&mut self) {
+            // SAFETY: serialized via #[serial_test::serial(cognitive_memory)].
+            match &self.prev {
+                Some(v) => unsafe { std::env::set_var("SIMARD_STATE_ROOT", v) },
+                None => unsafe { std::env::remove_var("SIMARD_STATE_ROOT") },
+            }
+        }
+    }
+
+    /// `git` with a scrubbed environment (only PATH + HOME re-injected) so a
+    /// process-global GIT_DIR/GIT_WORK_TREE cannot poison the fixture repo.
+    fn git_cmd(repo: &Path, args: &[&str]) -> Command {
+        let mut cmd = Command::new("git");
+        cmd.args(args).current_dir(repo).env_clear();
+        if let Ok(p) = std::env::var("PATH") {
+            cmd.env("PATH", p);
+        }
+        if let Ok(h) = std::env::var("HOME") {
+            cmd.env("HOME", h);
+        }
+        cmd
+    }
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let out = git_cmd(repo, args).output().expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {:?} failed in {}: {}",
+            args,
+            repo.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A parent repo with a committed `main` so `EngineerWorktree::allocate`
+    /// (which branches off `main` HEAD) succeeds.
+    fn init_parent_repo(dir: &Path) {
+        std::fs::create_dir_all(dir).expect("create parent repo dir");
+        run_git(dir, &["init", "--initial-branch=main", "--quiet"]);
+        run_git(dir, &["config", "user.email", "test@example.com"]);
+        run_git(dir, &["config", "user.name", "test"]);
+        run_git(dir, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.join("README.md"), "seed\n").expect("seed file");
+        run_git(dir, &["add", "README.md"]);
+        run_git(dir, &["commit", "-m", "seed", "--quiet"]);
+    }
+
+    /// A goal that EXPECTS a worker (so `stale_claim_secs` populates whenever
+    /// `worker_present` is false), placed on the board and marked in-progress.
+    fn expecting_goal(id: &str) -> ActiveGoal {
+        let mut g = ActiveGoal::new(id, "ship the fix", 1);
+        g.status = GoalProgress::InProgress { percent: 50 };
+        g.assigned_to = Some(format!("engineer-{id}"));
+        g
+    }
+
+    /// Allocate a REAL per-engineer worktree under `state_root` (which also
+    /// writes a live `.simard-engineer-claim` naming THIS process's PID +
+    /// starttime) and register it in `state.engineer_worktrees` keyed by
+    /// `goal_id`. Returns the on-disk worktree path.
+    fn attach_engineer(
+        state: &mut OodaState,
+        parent_repo: &Path,
+        state_root: &Path,
+        goal_id: &str,
+    ) -> PathBuf {
+        let wt = EngineerWorktree::allocate(parent_repo, state_root, goal_id)
+            .expect("allocate engineer worktree");
+        let path = wt.path().to_path_buf();
+        assert!(
+            path.is_dir(),
+            "freshly allocated worktree must exist on disk"
+        );
+        state.engineer_worktrees.insert(goal_id.to_string(), wt);
+        path
+    }
+
+    /// Overwrite a worktree's claim sentinel so it names a PID that can never
+    /// be alive — i.e. the engineer leaked / died but the map entry lingers.
+    fn poison_claim_dead(worktree: &Path) {
+        // 2147483646 (i32::MAX - 1) is never a live PID on the test host;
+        // `is_pid_alive_public` returns false → the scan yields no live worker.
+        std::fs::write(worktree.join(ENGINEER_CLAIM_FILE), "2147483646\n")
+            .expect("overwrite claim sentinel with dead pid");
+    }
+
+    // -- Test 1 (the failing TDD driver): leaked claim reads NOT present -----
+
+    /// CORE #4631 regression: a lingering `engineer_worktrees` entry whose
+    /// on-disk claim names a DEAD pid must read `worker_present == false` so
+    /// the existing `stale_claim_secs` reclaim signal re-engages. FAILS against
+    /// the map-membership-only implementation (which reports `true`).
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn leaked_claim_reads_not_present_and_is_reclaimable() {
+        let parent = tempdir().expect("tempdir");
+        let state_dir = tempdir().expect("tempdir");
+        init_parent_repo(parent.path());
+        let _guard = StateRootGuard::set(state_dir.path());
+
+        let goal_id = "leaked-goal";
+        let mut board = GoalBoard::new();
+        board.active.push(expecting_goal(goal_id));
+        let mut state = OodaState::new(board);
+
+        // Map entry present (contains_key == true) but its claim is now dead.
+        let wt_path = attach_engineer(&mut state, parent.path(), state_dir.path(), goal_id);
+        poison_claim_dead(&wt_path);
+
+        let ctx = super::gather_per_goal_cycle_ctx(&state, goal_id);
+
+        assert!(
+            !ctx.worker_present,
+            "a leaked/idle engineer claim (dead pid) must NOT read as present; \
+             map-membership alone is the #4631 fail-open bug"
+        );
+        assert!(
+            ctx.stale_claim_secs.is_some(),
+            "with no live worker the stale-claim reclaim signal must re-engage \
+             so the leaked worktree can be reclaimed"
+        );
+    }
+
+    // -- Test 2 (guard): a genuinely-live engineer still reads present ------
+
+    /// The fix must NOT over-correct: a map entry whose claim names THIS live
+    /// process (real pid + matching starttime, as written by `allocate`) must
+    /// still read `worker_present == true` with no stale-claim signal.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn live_engineer_reads_present() {
+        let parent = tempdir().expect("tempdir");
+        let state_dir = tempdir().expect("tempdir");
+        init_parent_repo(parent.path());
+        let _guard = StateRootGuard::set(state_dir.path());
+
+        let goal_id = "live-goal";
+        let mut board = GoalBoard::new();
+        board.active.push(expecting_goal(goal_id));
+        let mut state = OodaState::new(board);
+
+        // Live claim written by allocate (this test process's pid + starttime).
+        attach_engineer(&mut state, parent.path(), state_dir.path(), goal_id);
+
+        let ctx = super::gather_per_goal_cycle_ctx(&state, goal_id);
+
+        assert!(
+            ctx.worker_present,
+            "a verified-live engineer (real pid + matching starttime) must read present"
+        );
+        assert!(
+            ctx.stale_claim_secs.is_none(),
+            "a live worker must not surface a stale-claim reclaim signal"
+        );
+    }
+
+    // -- Test 3 (guard): no map entry short-circuits to absent -------------
+
+    /// No `engineer_worktrees` entry → `worker_present == false` via the
+    /// `contains_key(..) && ..` short-circuit (no filesystem scan performed),
+    /// and the expected-but-absent worker surfaces a stale-claim signal.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn no_worktree_entry_short_circuits_to_absent() {
+        let state_dir = tempdir().expect("tempdir");
+        let _guard = StateRootGuard::set(state_dir.path());
+
+        let goal_id = "absent-goal";
+        let mut board = GoalBoard::new();
+        board.active.push(expecting_goal(goal_id));
+        let state = OodaState::new(board); // no engineer_worktrees entry
+
+        let ctx = super::gather_per_goal_cycle_ctx(&state, goal_id);
+
+        assert!(!ctx.worker_present, "no worktree entry must read as absent");
+        assert!(
+            ctx.stale_claim_secs.is_some(),
+            "an expected-but-absent worker must surface the stale-claim signal"
         );
     }
 }

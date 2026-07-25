@@ -1,0 +1,7 @@
+flowchart LR
+  Operator["Signal operator"] --> CLI["signal-cli JSON-RPC"] --> Recv["JsonRpcTransport recv_line"] --> Parse["parse_incoming"]
+  Parse --> Guards["self-notification / sync / echo guards"] --> Auth["allowlist + command gate"]
+  Auth --> Inbound["authorized conversation turn"] --> Index["operators.json active session"]
+  Index --> Session["load_session_at"] --> Backend["MeetingBackend restore + send_message"]
+  Backend --> Append["append user + assistant turns"] --> File["signal_sessions/<session_id>.json"]
+  Backend --> Out["Outbound response"] --> Send["SignalConversation::send"] --> SendLine["JsonRpcTransport send_line"] --> CLI --> Operator

@@ -224,8 +224,8 @@ mod fake_sequence {
     use crate::safe_update::SafeUpdateError;
     use crate::self_deploy::backup::ProtectiveBackup;
     use crate::self_deploy::health::{
-        BrainsLlmBackedProbe, GoalBoardIntactProbe, MemoryIntactProbe, NoQuarantineProbe,
-        SelfHealthProbes, SelfHealthReport, VersionAdvancedProbe,
+        BrainsLlmBackedProbe, EntrypointParityProbe, GoalBoardIntactProbe, MemoryIntactProbe,
+        NoQuarantineProbe, SelfHealthProbes, SelfHealthReport, VersionAdvancedProbe,
     };
     use crate::self_deploy::orchestrator::{DeployEffects, run_sequence};
 
@@ -239,6 +239,9 @@ mod fake_sequence {
 
     struct FakeEffects {
         calls: RefCell<Vec<&'static str>>,
+        draining: RefCell<bool>,
+        reap: Mode,
+        swap: Mode,
         restart: Mode,
         health: Mode,
         rollback: Mode,
@@ -248,6 +251,9 @@ mod fake_sequence {
         fn new() -> Self {
             Self {
                 calls: RefCell::new(Vec::new()),
+                draining: RefCell::new(false),
+                reap: Mode::Ok,
+                swap: Mode::Ok,
                 restart: Mode::Ok,
                 health: Mode::Ok,
                 rollback: Mode::Ok,
@@ -258,6 +264,9 @@ mod fake_sequence {
         }
         fn order(&self) -> Vec<&'static str> {
             self.calls.borrow().clone()
+        }
+        fn is_draining(&self) -> bool {
+            *self.draining.borrow()
         }
     }
 
@@ -284,6 +293,17 @@ mod fake_sequence {
             no_quarantine: NoQuarantineProbe {
                 healthy: true,
                 quarantined: false,
+                fresh_quarantines: 0,
+                retained: 0,
+            },
+            entrypoint_parity: EntrypointParityProbe {
+                healthy,
+                installed_version: "simard 0.35.0".into(),
+                path_version: "simard 0.35.0".into(),
+                resolved_path: "/home/you/.local/bin/simard".into(),
+                canonical_path: "/home/you/.simard/bin/simard".into(),
+                path_mismatch: false,
+                foreign_shadow: false,
             },
         })
     }
@@ -314,15 +334,29 @@ mod fake_sequence {
         }
         fn drain(&self) -> Result<(), SafeUpdateError> {
             self.record("drain");
+            *self.draining.borrow_mut() = true;
+            Ok(())
+        }
+        fn undrain(&self) -> Result<(), SafeUpdateError> {
+            self.record("undrain");
+            *self.draining.borrow_mut() = false;
             Ok(())
         }
         fn reap_orphans(&self) -> Result<usize, SafeUpdateError> {
             self.record("reap");
-            Ok(2)
+            match self.reap {
+                Mode::Err => Err(SafeUpdateError::OrphanReapTimeout { pid: 4242 }),
+                _ => Ok(2),
+            }
         }
         fn swap(&self, _candidate: &Path) -> Result<(), SafeUpdateError> {
             self.record("swap");
-            Ok(())
+            match self.swap {
+                Mode::Err => Err(SafeUpdateError::SwapFailed {
+                    reason: "fake swap failure".into(),
+                }),
+                _ => Ok(()),
+            }
         }
         fn restart(&self) -> Result<(), SafeUpdateError> {
             self.record("restart");
@@ -365,10 +399,28 @@ mod fake_sequence {
         assert_eq!(
             fx.order(),
             vec![
-                "build", "gate", "baseline", "backup", "drain", "reap", "swap", "restart", "health"
+                "build", "gate", "baseline", "backup", "drain", "reap", "swap", "restart",
+                "health", "undrain"
             ],
             "load-bearing order must hold; no rollback on success"
         );
+        assert!(
+            !fx.is_draining(),
+            "fake draining flag must be clear after success"
+        );
+    }
+
+    #[test]
+    fn failure_after_drain_reopens_dispatch_before_returning() {
+        let mut fx = FakeEffects::new();
+        fx.swap = Mode::Err;
+        let err = run_sequence(&fx).unwrap_err();
+        assert!(matches!(err, SafeUpdateError::SwapFailed { .. }), "{err:?}");
+        assert!(
+            !fx.is_draining(),
+            "fake draining flag must be clear after a post-drain failure"
+        );
+        assert_eq!(fx.order().last(), Some(&"undrain"));
     }
 
     #[test]
@@ -383,7 +435,8 @@ mod fake_sequence {
         );
         // Backups/swap happened before the rollback; health was the last gate.
         let order = fx.order();
-        assert_eq!(order.last(), Some(&"rollback"));
+        assert_eq!(order.last(), Some(&"undrain"));
+        assert_eq!(order.iter().rev().nth(1), Some(&"rollback"));
     }
 
     #[test]
@@ -432,6 +485,9 @@ mod fake_sequence {
             }
             fn drain(&self) -> Result<(), SafeUpdateError> {
                 panic!("no drain after build failure")
+            }
+            fn undrain(&self) -> Result<(), SafeUpdateError> {
+                panic!("no undrain when drain never ran")
             }
             fn reap_orphans(&self) -> Result<usize, SafeUpdateError> {
                 panic!("no reap after build failure")

@@ -223,6 +223,15 @@ fn dispatch(memory: &dyn CognitiveMemoryOps, req: MemoryRequest) -> MemoryRespon
             Ok(v) => MemoryResponse::Facts(v),
             Err(e) => MemoryResponse::Error(e.to_string()),
         },
+        MemoryRequest::RecallFactsRanked {
+            query,
+            limit,
+            min_confidence,
+            weights,
+        } => match memory.recall_facts_ranked(&query, limit, min_confidence, weights) {
+            Ok(v) => MemoryResponse::Facts(v),
+            Err(e) => MemoryResponse::Error(e.to_string()),
+        },
         MemoryRequest::StoreProcedure {
             name,
             steps,
@@ -423,12 +432,25 @@ fn gated_fact_write(
     }
 
     // (1) Grounding — the fact is grounded iff at least one cited episode id
-    // resolves to a real node in this store. The batch `any_episode_exists`
-    // materializes the episode set once for all cited ids (rather than once per
-    // id). A lookup error is treated as "does not resolve" (fail-closed), so a
-    // backend hiccup can never accidentally promote an ungrounded fact.
+    // resolves to a real node in this store. Normalize each cited id once (trim
+    // surrounding whitespace, drop empties) via the shared
+    // `normalize_source_episode_id`, then reuse that normalized set for BOTH
+    // grounding and the persisted provenance edges. `any_episode_exists` trims
+    // internally too, but the provenance ids handed to `commit_gated_fact` must
+    // be normalized here or a grounded fact whose id carried stray whitespace
+    // would thread a padded key whose `DERIVES_FROM` edge dangles. Episode ids
+    // never carry whitespace, so this is a no-op for well-formed ids. The batch
+    // `any_episode_exists` materializes the episode set once for all cited ids. A
+    // lookup error is treated as "does not resolve" (fail-closed), so a backend
+    // hiccup can never accidentally promote an ungrounded fact.
+    let normalized_episode_ids: Vec<String> = source_episode_ids
+        .iter()
+        .map(|s| crate::fact_reliability::normalize_source_episode_id(s))
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
     let grounded = memory
-        .any_episode_exists(source_episode_ids)
+        .any_episode_exists(&normalized_episode_ids)
         .unwrap_or(false);
 
     // (2–5) Score → threshold → dedup → persist through the single shared gate,
@@ -442,7 +464,7 @@ fn gated_fact_write(
         grounded,
         source_id,
         tags,
-        source_episode_ids,
+        &normalized_episode_ids,
     ) {
         Ok(FactGateDecision::Stored {
             confidence,

@@ -318,3 +318,141 @@ mod reaper_stub_tests {
         assert_eq!(reap_zombies(), 0);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TDD (issue #4243): PID-REUSE-SAFE subordinate reaping.
+//
+// `kill_subordinate` sends SIGTERM to the cached `handle.pid`. If the OS has
+// recycled that PID to an unrelated process, the reaper can kill the wrong
+// process. Fix: before signalling, cross-check the live tmux pane PID against
+// the cached PID and REFUSE to signal on mismatch.
+//
+// Fix contract (additive; `kill_subordinate` keeps its public `-> ()` shape and
+// becomes a thin wrapper that looks up the pane PID for non-empty
+// `session_name` and delegates here):
+//
+//   pub enum KillAction { Signalled, RefusedPidReuse, SkippedNoPid }
+//   pub fn kill_subordinate_with_pane_pid(
+//       handle: &mut SubordinateHandle,
+//       live_pane_pid: Option<u32>,
+//   ) -> SimardResult<KillAction>
+//
+//   * live_pane_pid == Some(p), handle.pid > 0, p != handle.pid
+//         -> RefusedPidReuse: DO NOT signal; mark handle.killed = true; Ok.
+//   * live_pane_pid == Some(p), p == handle.pid, handle.pid > 0
+//         -> Signalled: SIGTERM the (verified) pid; mark killed = true.
+//   * live_pane_pid == None (empty session_name or tmux query failed)
+//         -> fall back to today's behaviour: signal when pid > 0 (Signalled),
+//            otherwise SkippedNoPid; mark killed = true. Liveness > false refusal.
+//   * handle.pid == 0 (mock/test handle) -> SkippedNoPid; never signals.
+//   * already killed -> Err (unchanged).
+//
+// These tests are written FIRST and MUST FAIL until `kill_subordinate_with_pane_pid`
+// and `KillAction` exist.
+
+fn handle_with(pid: u32, session_name: &str) -> SubordinateHandle {
+    SubordinateHandle {
+        pid,
+        agent_name: "test-agent".to_string(),
+        goal: "test".to_string(),
+        worktree_path: std::path::PathBuf::from("/fake"),
+        spawn_time: 0,
+        retry_count: 0,
+        killed: false,
+        session_name: session_name.to_string(),
+    }
+}
+
+/// A stale/reused cached PID (the pane reports a DIFFERENT live PID) must NOT be
+/// signalled — the reaper refuses and leaves the innocent process untouched.
+#[cfg(unix)]
+#[test]
+#[serial_test::serial(simard_process_reaper)]
+fn kill_refuses_and_spares_reused_pid() {
+    // An innocent long-lived process now owns the recycled PID.
+    let mut innocent = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn innocent sleep child");
+    let innocent_pid = innocent.id();
+
+    let mut handle = handle_with(innocent_pid, "ooda-session-x");
+    // The live pane reports a pid that does NOT match the cached (recycled) pid.
+    let live_pane_pid = Some(innocent_pid.wrapping_add(1));
+
+    let action = kill_subordinate_with_pane_pid(&mut handle, live_pane_pid)
+        .expect("mismatch is not an error — it is a safe refusal");
+    assert_eq!(action, KillAction::RefusedPidReuse);
+    assert!(
+        handle.killed,
+        "mismatch branch still marks the handle killed"
+    );
+
+    // Give any (erroneous) signal a moment, then prove the innocent survived.
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    assert!(
+        matches!(innocent.try_wait(), Ok(None)),
+        "the reaper must NOT have terminated the innocent reused-PID process"
+    );
+
+    let _ = innocent.kill();
+    let _ = innocent.wait();
+}
+
+/// When the live pane PID matches the cached PID, the reaper proceeds and
+/// signals the (verified) subordinate.
+#[cfg(unix)]
+#[test]
+#[serial_test::serial(simard_process_reaper)]
+fn kill_signals_matching_pane_pid() {
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn subordinate sleep child");
+    let pid = child.id();
+
+    let mut handle = handle_with(pid, "ooda-session-y");
+    let action = kill_subordinate_with_pane_pid(&mut handle, Some(pid))
+        .expect("verified identity -> signal");
+    assert_eq!(action, KillAction::Signalled);
+    assert!(handle.killed);
+
+    // The verified child must actually receive the termination signal.
+    let mut terminated = false;
+    for _ in 0..50 {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                terminated = true;
+                break;
+            }
+            _ => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+    assert!(
+        terminated,
+        "matching-identity kill must terminate the subordinate"
+    );
+    let _ = child.wait();
+}
+
+/// When identity cannot be verified (no pane pid — tmux unavailable/failed or
+/// no session), the reaper falls back to today's behaviour rather than
+/// refusing, so normal teardown is never regressed.
+#[test]
+fn kill_falls_back_when_pane_unverifiable() {
+    // pid == 0 is a mock handle: never signals, but must still be marked killed.
+    let mut handle = handle_with(0, "");
+    let action = kill_subordinate_with_pane_pid(&mut handle, None)
+        .expect("unverifiable identity falls back, does not error");
+    assert_eq!(action, KillAction::SkippedNoPid);
+    assert!(handle.killed);
+}
+
+/// The additive guard must not change the public `kill_subordinate` contract:
+/// an empty-session, mock handle still succeeds and is marked killed.
+#[test]
+fn kill_subordinate_public_wrapper_preserves_behaviour() {
+    let mut handle = handle_with(0, "");
+    assert!(kill_subordinate(&mut handle).is_ok());
+    assert!(handle.killed);
+}

@@ -83,7 +83,7 @@ pub struct CheckRollupEntry {
 
 /// One open-PR summary used by the dashboard's Merge Readiness panel
 /// (#1880). Sourced from
-/// `gh pr list --json number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url`.
+/// `gh pr list --json number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url,author,labels`.
 /// Mirrors [`PrSnapshot`] without `body` or `review_decision` — the panel
 /// only renders the cheap deterministic gates per PR.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -94,6 +94,38 @@ pub struct OpenPrSummary {
     pub base_ref_name: String,
     pub mergeable: String,
     pub checks: Vec<CheckRollupEntry>,
+    pub url: String,
+    /// `author.login` from `gh pr list --json ...,author`. Used by the
+    /// autonomous-self-merge sensor (#4097) to tell Simard's OWN PRs from a
+    /// human's — an empty author (missing object) can never equal a configured
+    /// automerge author, so it fails closed. Not read by the dashboard panel.
+    pub author: String,
+    /// Label names from `gh pr list --json ...,labels`. The autonomous-self-merge
+    /// sensor (#4097) reads this to positively identify Simard's OWN engineer PRs
+    /// (they carry [`SIMARD_ENGINEER_PR_LABEL`]) and separate them from the
+    /// operator's own review PRs when both share the same author login. Nameless
+    /// labels are dropped at parse time. Not read by the dashboard panel.
+    ///
+    /// [`SIMARD_ENGINEER_PR_LABEL`]: crate::overseer::config::SIMARD_ENGINEER_PR_LABEL
+    pub labels: Vec<String>,
+    /// `isDraft` from `gh pr list --json ...,isDraft`. A draft PR can NEVER be
+    /// merged server-side (`gh pr merge` returns "Pull Request is still a
+    /// draft"), so the autonomous-self-merge sensor (#4097) excludes it from the
+    /// ready-PR candidate set. Fail-closed: `None` (field absent/unknown from the
+    /// listing) is treated as NOT-ready — the sensor admits ONLY `Some(false)`.
+    /// Not read by the dashboard panel.
+    pub is_draft: Option<bool>,
+}
+
+/// One merged-PR summary for the journal's day-scoped "landed changes" table.
+/// Sourced from
+/// `gh pr list --state merged --search "merged:YYYY-MM-DD" --json number,title,url`.
+/// Deliberately minimal: unlike [`OpenPrSummary`] a merged PR has no live gates
+/// left to evaluate, so only the fields the journal renders are carried.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct MergedPrSummary {
+    pub number: u32,
+    pub title: String,
     pub url: String,
 }
 
@@ -130,6 +162,60 @@ pub trait PrGhClient {
     /// dashboard handler relies on [`RealPrGhClient`]'s override.
     fn list_open_prs(&self, _repo: &str, _limit: u32) -> SimardResult<Vec<OpenPrSummary>> {
         Ok(Vec::new())
+    }
+
+    /// Author-scoped variant of [`list_open_prs`](Self::list_open_prs) for the
+    /// autonomous-self-merge sensor (#4097). Lists open PRs authored by
+    /// `author` only, pushing the author filter SERVER-SIDE so:
+    /// - a busy repo with more than `limit` open PRs can never crowd Simard's
+    ///   own eligible PRs out of the fetch window (they'd be silently skipped),
+    ///   and
+    /// - the transferred + parsed JSON shrinks to just Simard's PRs instead of
+    ///   every author's `statusCheckRollup`.
+    ///
+    /// The default impl delegates to [`list_open_prs`](Self::list_open_prs)
+    /// (the caller still applies its own exact-author match as defense-in-
+    /// depth), so existing fakes that only script the unscoped listing keep
+    /// working unchanged. [`RealPrGhClient`] overrides it to add
+    /// `gh pr list --author <author>`.
+    fn list_prs_by_author(
+        &self,
+        repo: &str,
+        _author: &str,
+        limit: u32,
+    ) -> SimardResult<Vec<OpenPrSummary>> {
+        self.list_open_prs(repo, limit)
+    }
+
+    /// `gh pr list --repo <repo> --state merged --search "merged:<date>" --json number,title,url --limit <limit>`.
+    ///
+    /// Added for the operator dashboard's Journal tab (#4140): the daily journal
+    /// needs the PRs that *merged* on a given day so `merged_pr_count` reflects
+    /// real landed changes instead of being structurally zero. `date` is the UTC
+    /// calendar day the search is scoped to. Default impl returns `Ok(vec![])`
+    /// so existing test fakes that only exercise the per-PR merge path or the
+    /// open-PR list don't need to grow a stub; production wires
+    /// [`RealPrGhClient`]'s override.
+    fn list_merged_prs(
+        &self,
+        _repo: &str,
+        _date: chrono::NaiveDate,
+        _limit: u32,
+    ) -> SimardResult<Vec<MergedPrSummary>> {
+        Ok(Vec::new())
+    }
+
+    /// Run an arbitrary POSITIONAL `gh` argv (issue #4097 merge-queue hygiene:
+    /// `gh pr comment` / `gh pr close`). The caller builds the argv via the
+    /// audited builders in
+    /// [`crate::overseer::intervention`], which are structurally incapable of
+    /// carrying `--admin` / `--no-verify`. The default fails CLOSED so a fake or
+    /// an unwired client performs no mutation; [`RealPrGhClient`] overrides it to
+    /// shell out to the `gh` binary (argv-only, never shell-interpolated).
+    fn run_gh(&self, _argv: &[String]) -> SimardResult<()> {
+        Err(SimardError::MergeAuthorityGhCommandFailed {
+            reason: "run_gh not wired on this PrGhClient (fail-closed)".to_string(),
+        })
     }
 }
 
@@ -264,7 +350,7 @@ impl PrGhClient for RealPrGhClient {
                     "--repo",
                     repo,
                     "--json",
-                    "body,statusCheckRollup,mergeable,reviewDecision,baseRefName,labels",
+                    "body,statusCheckRollup,mergeable,reviewDecision,baseRefName,labels,isDraft",
                 ],
             )?;
             parse_pr_view_json(&stdout)
@@ -306,13 +392,87 @@ impl PrGhClient for RealPrGhClient {
                     "--state",
                     "open",
                     "--json",
-                    "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url",
+                    "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url,author,labels,isDraft",
                     "--limit",
                     &limit_s,
                 ],
             )?;
             parse_pr_list_json(&stdout)
         })
+    }
+
+    fn list_prs_by_author(
+        &self,
+        repo: &str,
+        author: &str,
+        limit: u32,
+    ) -> SimardResult<Vec<OpenPrSummary>> {
+        retry_transient_gh("gh pr list", || {
+            let limit_s = limit.to_string();
+            let stdout = run_gh_checked(
+                &format!("gh pr list --repo {repo} --state open --author {author}"),
+                &[
+                    "pr",
+                    "list",
+                    "--repo",
+                    repo,
+                    "--state",
+                    "open",
+                    "--author",
+                    author,
+                    "--json",
+                    "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url,author,labels,isDraft",
+                    "--limit",
+                    &limit_s,
+                ],
+            )?;
+            parse_pr_list_json(&stdout)
+        })
+    }
+
+    fn list_merged_prs(
+        &self,
+        repo: &str,
+        date: chrono::NaiveDate,
+        limit: u32,
+    ) -> SimardResult<Vec<MergedPrSummary>> {
+        retry_transient_gh("gh pr list --state merged", || {
+            let limit_s = limit.to_string();
+            // GitHub search: `merged:YYYY-MM-DD` matches PRs merged on that
+            // exact UTC calendar day.
+            let search = format!("merged:{}", date.format("%Y-%m-%d"));
+            let stdout = run_gh_checked(
+                &format!("gh pr list --repo {repo} --state merged --search {search}"),
+                &[
+                    "pr",
+                    "list",
+                    "--repo",
+                    repo,
+                    "--state",
+                    "merged",
+                    "--search",
+                    &search,
+                    "--json",
+                    "number,title,url",
+                    "--limit",
+                    &limit_s,
+                ],
+            )?;
+            parse_merged_pr_list_json(&stdout)
+        })
+    }
+
+    /// Shell out to `gh` with a POSITIONAL argv (never shell-interpolated). Used
+    /// for the #4097 merge-queue hygiene mutations (`gh pr comment` / `gh pr
+    /// close`), whose argv is built by the audited
+    /// [`crate::overseer::intervention`] builders that can never contain
+    /// `--admin` / `--no-verify`. Single attempt (a comment/close is a mutation,
+    /// like [`squash_merge`](Self::squash_merge)); fail-visible on a non-zero exit.
+    fn run_gh(&self, argv: &[String]) -> SimardResult<()> {
+        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let label = format!("gh {}", refs.join(" "));
+        run_gh_checked(&label, &refs)?;
+        Ok(())
     }
 }
 
@@ -417,6 +577,22 @@ pub fn parse_pr_list_json(stdout: &[u8]) -> SimardResult<Vec<OpenPrSummary>> {
         status_check_rollup: Vec<RawCheck>,
         #[serde(default)]
         url: String,
+        #[serde(default)]
+        author: Option<RawAuthor>,
+        #[serde(default)]
+        labels: Vec<RawLabel>,
+        #[serde(default, rename = "isDraft")]
+        is_draft: Option<bool>,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawAuthor {
+        #[serde(default)]
+        login: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawLabel {
+        #[serde(default)]
+        name: String,
     }
     #[derive(serde::Deserialize)]
     struct RawCheck {
@@ -464,7 +640,44 @@ pub fn parse_pr_list_json(stdout: &[u8]) -> SimardResult<Vec<OpenPrSummary>> {
                 mergeable: r.mergeable,
                 checks,
                 url: r.url,
+                author: r.author.map(|a| a.login).unwrap_or_default(),
+                labels: r
+                    .labels
+                    .into_iter()
+                    .map(|l| l.name)
+                    .filter(|n| !n.is_empty())
+                    .collect(),
+                is_draft: r.is_draft,
             }
+        })
+        .collect())
+}
+
+/// Parse `gh pr list --state merged --json number,title,url` stdout into
+/// [`MergedPrSummary`] rows. Mirrors [`parse_pr_list_json`] but for the reduced
+/// merged-PR shape the journal needs (#4140). An empty array yields an empty
+/// vec (a quiet, no-merge day is honest, not an error).
+pub fn parse_merged_pr_list_json(stdout: &[u8]) -> SimardResult<Vec<MergedPrSummary>> {
+    #[derive(serde::Deserialize)]
+    struct RawMergedPr {
+        #[serde(default)]
+        number: u32,
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        url: String,
+    }
+    let raws: Vec<RawMergedPr> = serde_json::from_slice(stdout).map_err(|e| {
+        SimardError::MergeAuthorityEvaluationFailed {
+            reason: format!("could not parse `gh pr list --state merged` JSON: {e}"),
+        }
+    })?;
+    Ok(raws
+        .into_iter()
+        .map(|r| MergedPrSummary {
+            number: r.number,
+            title: r.title,
+            url: r.url,
         })
         .collect())
 }
@@ -1478,6 +1691,261 @@ mod tests {
     fn parse_pr_list_json_accepts_empty_array() {
         let prs = parse_pr_list_json(b"[]").unwrap();
         assert!(prs.is_empty());
+    }
+
+    /// Issue #4097: the autonomous-self-merge sensor must be able to tell
+    /// Simard's OWN PRs from a human's, so `parse_pr_list_json` has to capture
+    /// the `author.login` from the `gh pr list --json ...,author` shape.
+    #[test]
+    fn parse_pr_list_json_captures_author_login() {
+        let stdout = br#"[
+            {
+                "number": 4097,
+                "title": "feat: activate autonomous self-merge",
+                "headRefName": "feat/self-merge",
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "url": "https://github.com/rysweet/Simard/pull/4097",
+                "author": { "login": "simard-engineer" },
+                "statusCheckRollup": [
+                    { "name": "ci", "conclusion": "SUCCESS", "status": "COMPLETED" }
+                ]
+            }
+        ]"#;
+        let prs = parse_pr_list_json(stdout).unwrap();
+        assert_eq!(prs.len(), 1);
+        assert_eq!(
+            prs[0].author, "simard-engineer",
+            "author.login must be projected onto OpenPrSummary.author"
+        );
+    }
+
+    /// A `gh pr list` row missing the `author` object (e.g. a ghost/deleted
+    /// account) must default to an empty author, never panic — an empty author
+    /// can never equal a configured automerge author, so it fails closed.
+    #[test]
+    fn parse_pr_list_json_missing_author_defaults_empty() {
+        let stdout = br#"[
+            {
+                "number": 10,
+                "title": "orphan",
+                "headRefName": "x",
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "url": "https://github.com/rysweet/Simard/pull/10",
+                "statusCheckRollup": []
+            }
+        ]"#;
+        let prs = parse_pr_list_json(stdout).unwrap();
+        assert_eq!(prs.len(), 1);
+        assert!(
+            prs[0].author.is_empty(),
+            "a missing author object must default to empty (fail-closed), not panic"
+        );
+    }
+
+    /// Issue #4097 (G3): the autonomous-self-merge sensor's engineer-PR gate
+    /// needs the PR's labels to tell Simard's OWN engineer PRs from the
+    /// operator's own review PRs (both authored by the same login). So
+    /// `parse_pr_list_json` must project every `label.name` from the
+    /// `gh pr list --json ...,labels` shape onto `OpenPrSummary.labels`.
+    #[test]
+    fn parse_pr_list_json_captures_labels() {
+        let stdout = br#"[
+            {
+                "number": 4097,
+                "title": "feat: activate autonomous self-merge",
+                "headRefName": "feat/self-merge",
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "url": "https://github.com/rysweet/Simard/pull/4097",
+                "author": { "login": "rysweet" },
+                "labels": [
+                    { "name": "simard-autonomous" },
+                    { "name": "enhancement" }
+                ],
+                "statusCheckRollup": [
+                    { "name": "ci", "conclusion": "SUCCESS", "status": "COMPLETED" }
+                ]
+            }
+        ]"#;
+        let prs = parse_pr_list_json(stdout).unwrap();
+        assert_eq!(prs.len(), 1);
+        assert_eq!(
+            prs[0].labels,
+            vec!["simard-autonomous".to_string(), "enhancement".to_string()],
+            "every label.name must be projected onto OpenPrSummary.labels in order"
+        );
+    }
+
+    /// A `gh pr list` row with a missing or empty `labels` array must default to
+    /// an empty `Vec` — never panic. An engineer PR with no labels then relies on
+    /// its branch namespace (the G3 secondary marker); an operator PR with no
+    /// labels and a non-engineer branch fails the gate closed.
+    #[test]
+    fn parse_pr_list_json_missing_labels_defaults_empty() {
+        let stdout = br#"[
+            {
+                "number": 10,
+                "title": "no labels here",
+                "headRefName": "engineer/10-abcd",
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "url": "https://github.com/rysweet/Simard/pull/10",
+                "author": { "login": "rysweet" },
+                "statusCheckRollup": []
+            },
+            {
+                "number": 11,
+                "title": "explicitly empty labels",
+                "headRefName": "feat/11",
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "url": "https://github.com/rysweet/Simard/pull/11",
+                "author": { "login": "rysweet" },
+                "labels": [],
+                "statusCheckRollup": []
+            }
+        ]"#;
+        let prs = parse_pr_list_json(stdout).unwrap();
+        assert_eq!(prs.len(), 2);
+        assert!(
+            prs[0].labels.is_empty(),
+            "a missing labels array must default to an empty Vec (fail-closed), not panic"
+        );
+        assert!(
+            prs[1].labels.is_empty(),
+            "an explicitly empty labels array must round-trip to an empty Vec"
+        );
+    }
+
+    /// Defensive: a `label` object missing its `name` (or with an empty name)
+    /// must be dropped, mirroring how `parse_pr_view_json` filters empty label
+    /// names — a nameless label can never equal the exact engineer-PR marker.
+    #[test]
+    fn parse_pr_list_json_drops_nameless_labels() {
+        let stdout = br#"[
+            {
+                "number": 12,
+                "title": "malformed label",
+                "headRefName": "feat/12",
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "url": "https://github.com/rysweet/Simard/pull/12",
+                "author": { "login": "rysweet" },
+                "labels": [ { "name": "" }, {} , { "name": "simard-autonomous" } ],
+                "statusCheckRollup": []
+            }
+        ]"#;
+        let prs = parse_pr_list_json(stdout).unwrap();
+        assert_eq!(prs.len(), 1);
+        assert_eq!(
+            prs[0].labels,
+            vec!["simard-autonomous".to_string()],
+            "nameless/empty labels must be dropped, leaving only the real marker"
+        );
+    }
+
+    /// #4339 root-cause guard: the `gh pr list --json ...,isDraft` boundary must
+    /// project `isDraft` onto `OpenPrSummary.is_draft`. A draft row (`true`) and
+    /// a ready row (`false`) must round-trip to `Some(true)` / `Some(false)` so
+    /// the draft-exclusion gate can key on a KNOWN state. This is the exact
+    /// boundary the bug lived at — the field set never fetched `isDraft`.
+    #[test]
+    fn parse_pr_list_json_captures_is_draft() {
+        let stdout = br#"[
+            {
+                "number": 4336,
+                "title": "draft work in progress",
+                "headRefName": "engineer/4336-draft",
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "url": "https://github.com/rysweet/Simard/pull/4336",
+                "author": { "login": "rysweet" },
+                "isDraft": true,
+                "statusCheckRollup": []
+            },
+            {
+                "number": 4337,
+                "title": "ready for merge",
+                "headRefName": "engineer/4337-ready",
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "url": "https://github.com/rysweet/Simard/pull/4337",
+                "author": { "login": "rysweet" },
+                "isDraft": false,
+                "statusCheckRollup": []
+            }
+        ]"#;
+        let prs = parse_pr_list_json(stdout).unwrap();
+        assert_eq!(prs.len(), 2);
+        assert_eq!(
+            prs[0].is_draft,
+            Some(true),
+            "a draft row must project isDraft:true onto Some(true)"
+        );
+        assert_eq!(
+            prs[1].is_draft,
+            Some(false),
+            "a ready row must project isDraft:false onto Some(false)"
+        );
+    }
+
+    /// #4339 fail-closed at the parse boundary: a `gh pr list` row missing the
+    /// `isDraft` field must default to `None` (unknown), NOT `Some(false)`. The
+    /// draft gate admits ONLY `Some(false)`, so an unknown draft state is
+    /// excluded — never silently treated as ready. Guards against an accidental
+    /// `#[serde(default)]`-to-`false` regression.
+    #[test]
+    fn parse_pr_list_json_missing_is_draft_defaults_none_fail_closed() {
+        let stdout = br#"[
+            {
+                "number": 4338,
+                "title": "listing without isDraft field",
+                "headRefName": "engineer/4338",
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "url": "https://github.com/rysweet/Simard/pull/4338",
+                "author": { "login": "rysweet" },
+                "statusCheckRollup": []
+            }
+        ]"#;
+        let prs = parse_pr_list_json(stdout).unwrap();
+        assert_eq!(prs.len(), 1);
+        assert_eq!(
+            prs[0].is_draft, None,
+            "a missing isDraft field must default to None (unknown), never Some(false) — \
+             the gate then excludes it fail-closed"
+        );
+    }
+
+    #[test]
+    fn parse_merged_pr_list_json_round_trips_journal_shape() {
+        // The exact `gh pr list --state merged --json number,title,url` shape.
+        let stdout = br#"[
+            {"number": 4117, "title": "fix(journal): collapse duplicate dates",
+             "url": "https://github.com/rysweet/Simard/pull/4117"},
+            {"number": 4122, "title": "fix(dashboard): bound memory growth window",
+             "url": "https://github.com/rysweet/Simard/pull/4122"}
+        ]"#;
+        let merged = parse_merged_pr_list_json(stdout).expect("parses");
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].number, 4117);
+        assert_eq!(merged[0].title, "fix(journal): collapse duplicate dates");
+        assert_eq!(merged[1].number, 4122);
+        assert!(merged[1].url.ends_with("/pull/4122"));
+    }
+
+    #[test]
+    fn parse_merged_pr_list_json_accepts_empty_array() {
+        // A quiet, no-merge day is honest — an empty vec, not an error.
+        let merged = parse_merged_pr_list_json(b"[]").unwrap();
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn parse_merged_pr_list_json_rejects_malformed_json() {
+        assert!(parse_merged_pr_list_json(b"not json").is_err());
     }
 
     // ─── Transient gh retry / resilience (Step 8b) ─────────────────────────

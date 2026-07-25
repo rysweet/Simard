@@ -13,11 +13,11 @@
 //!   emits ONE consolidated [`Signal::WorkstreamGap`], which Orient classifies to
 //!   a [`ProblemKind::WorkstreamCoverage`] problem;
 //! - the act path notifies the operator on BOTH channels (email + Signal) with a
-//!   provenance-labelled summary AND files a deduped issue per gap — through the
-//!   SAME plumbing `goal_health` / M1 use, with NO new bypass — returning one
+//!   provenance-labelled summary and never files routine observation issues,
+//!   returning one
 //!   [`ActOutcome::WorkstreamGapsFlagged`] that feeds DEDICATED tick counters
 //!   (never the generic `issues_filed` / `escalations`);
-//! - a recurring gap is deduped to AT MOST ONE notification + issue per signature
+//! - a recurring gap is deduped to AT MOST ONE notification per signature
 //!   (WhisperGate layer), so a fast cadence or a restart never floods the operator;
 //! - the act FAILS CLOSED without a DISTINCT steward identity (anti-recursion);
 //! - the `SIMARD_OVERSEER_GAP_SCAN` kill-switch holds the whole action, and
@@ -429,6 +429,42 @@ fn delegates_blocked_goals_to_goal_health_and_never_reflags_them() {
 }
 
 #[test]
+fn exempts_standing_goals_from_the_gap_scan_even_when_uncovered() {
+    // A standing/perpetual goal is a permanent duty advanced by the OODA goal
+    // loop, not a one-shot uncovered gap. It has no terminal done-state and a
+    // merged PR gives it no coverage, so flagging it would re-notify forever
+    // (goal:steward-ci-github-actions-health-…e06d9e64 regression). It must be
+    // exempted exactly like a Blocked goal — even at p1/p2 with no assignee and
+    // no wip_ref.
+    let standing = ActiveGoal::new(
+        "g-standing",
+        "Steward CI/GitHub-Actions health across all governed repos. Standing goal.",
+        1,
+    );
+    assert!(
+        standing.is_perpetual(),
+        "the description marker must make this goal perpetual"
+    );
+    // A non-standing p1 sibling with the same coverage shape stays a gap — the
+    // exemption is scoped to the standing marker, not a blanket mute.
+    let one_shot = ActiveGoal::new("g-oneshot", "p1 one-shot with no workstream", 1);
+
+    let mut board = GoalBoard::new();
+    board.active = vec![standing, one_shot];
+
+    let gaps = detect_workstream_gaps(&board, &[], &[], &[]);
+    assert_eq!(
+        gaps.len(),
+        1,
+        "only the non-standing p1 goal is a gap; the standing goal is exempt: {gaps:?}"
+    );
+    assert_eq!(
+        gaps[0].signature, "goal:g-oneshot",
+        "the standing goal is never flagged; only the one-shot goal is: {gaps:?}"
+    );
+}
+
+#[test]
 fn flags_high_signal_uncovered_issue_ignores_low_signal_and_covered() {
     let high = SurveyedIssue {
         repo: "rysweet/Simard".to_string(),
@@ -576,7 +612,11 @@ fn workstream_gaps_flagged_outcome_carries_batch_counts() {
 }
 
 #[test]
-fn flags_gaps_notifies_both_channels_files_once_then_dedupes_on_repeat() {
+fn covers_gaps_with_a_launch_without_filing_then_dedupes_on_repeat() {
+    // Issue #4128 (D3b): a coverage gap now gets a CLOSING EDGE — the Overseer
+    // launches ONE workstream that actually covers the consolidated gap set —
+    // instead of the old notify-only path that left the gap uncovered and
+    // re-surfaced it every window as the recurring `workstream-gap` signature.
     let gaps = vec![sample_goal_gap(), sample_anomaly_gap()];
     let filed = Arc::new(Mutex::new(Vec::new()));
     let (notifier, email_log, signal_log) = dual_recording_notifier();
@@ -586,98 +626,48 @@ fn flags_gaps_notifies_both_channels_files_once_then_dedupes_on_repeat() {
         .with_gap_scan_enabled(true)
         .with_operator_notifier(Box::new(notifier));
 
-    // First tick: both gaps are genuine ⇒ flagged, one consolidated notification
-    // on BOTH channels, and one deduped issue per gap.
+    // First tick: the consolidated gap set decides to ONE covering launch.
     let first = overseer_tick(&mut ov);
     assert_eq!(
-        first.workstream_gaps_detected, 2,
-        "both genuine gaps are flagged this tick"
-    );
-    assert_eq!(first.workstream_gaps_suppressed, 0);
-    // Gap activity rides its DEDICATED counters, NOT the generic ones (one act
-    // returns one outcome — it cannot bump both IssueFiled and Escalated).
-    assert_eq!(
-        first.issues_filed, 0,
-        "gap issues ride the dedicated gap counter, not issues_filed"
-    );
-    assert_eq!(
-        first.escalations, 0,
-        "gaps do not ride the escalation counter"
+        first.recipes_launched, 1,
+        "the consolidated gap set is covered by exactly one launched workstream: {first:?}"
     );
     assert_eq!(first.errors, 0);
     assert!(!first.panicked);
 
-    // ONE consolidated notification per channel (not one per gap).
-    assert_eq!(
-        email_log.lock().unwrap().len(),
-        1,
-        "the email channel got one consolidated gap notification"
+    // The closing edge is a LAUNCH, never a notify and never a file: the old
+    // notify-only path is gone (issue #4128 A2 — the missing closing edge WAS
+    // the defect), so no operator notification and no issue are produced.
+    assert!(
+        email_log.lock().unwrap().is_empty() && signal_log.lock().unwrap().is_empty(),
+        "the coverage closing edge covers the gap by launching, it does not notify"
     );
-    assert_eq!(
-        signal_log.lock().unwrap().len(),
-        1,
-        "the Signal channel got one consolidated gap notification"
-    );
-    // One deduped issue filed per flagged gap.
-    assert_eq!(
-        filed.lock().unwrap().len(),
-        2,
-        "one deduped issue filed per flagged gap"
+    assert!(
+        filed.lock().unwrap().is_empty(),
+        "a coverage launch never files an issue"
     );
 
-    // The consolidated notification names the specifics.
-    {
-        let seen = email_log.lock().unwrap();
-        let n = &seen[0];
-        assert_eq!(n.kind, "workstream-gap");
-        assert!(
-            n.plain_text().contains("g-hot"),
-            "the notification names the uncovered goal: {n:?}"
-        );
-    }
-
-    // Second tick on the SAME picture: both signatures are still within the
-    // dedup window ⇒ both suppressed (gate hit). No second notification, no
-    // second issue — one deduped item per recurring signature, not per tick.
+    // Second tick on the SAME picture: the covering workstream is still in flight
+    // (poll ⇒ Running), so the in-flight dedup guard HOLDS a duplicate launch —
+    // the recurring gap is not re-covered while its coverage is already running.
     let second = overseer_tick(&mut ov);
     assert_eq!(
-        second.workstream_gaps_detected, 0,
-        "a recurring gap is not re-flagged within the dedup window"
+        second.recipes_launched, 0,
+        "a recurring gap is not re-launched while its coverage is in flight: {second:?}"
     );
-    assert_eq!(
-        second.workstream_gaps_suppressed, 2,
-        "both recurring gaps are counted as suppressed"
+    assert!(
+        second.held >= 1,
+        "the duplicate coverage launch is held by the in-flight guard: {second:?}"
     );
-    assert_eq!(
-        email_log.lock().unwrap().len(),
-        1,
-        "no second notification for a recurring gap"
+    assert!(
+        email_log.lock().unwrap().is_empty() && signal_log.lock().unwrap().is_empty(),
+        "no notification on a recurring gap"
     );
-    assert_eq!(
-        signal_log.lock().unwrap().len(),
-        1,
-        "no second Signal notification for a recurring gap"
-    );
-    assert_eq!(
-        filed.lock().unwrap().len(),
-        2,
-        "no second issue for a recurring gap"
-    );
+    assert!(filed.lock().unwrap().is_empty());
 }
 
 #[test]
-fn flagged_gap_brief_source_module_routes_to_default_repo() {
-    use crate::stewardship::{TargetRepo, route_failure};
-
-    // Regression for issue #2934: `act_flag_workstream_gaps` files each gap with
-    // the bare source_module "overseer", which matches NO stewardship routing
-    // keyword. Before the default-repo fallback, the real `StewardshipIssueFiler`
-    // rejected this with `StewardshipRoutingAmbiguous`, so `flag_workstream_gaps`
-    // failed every tick ("overseer intervention failed ...
-    // intervention=flag_workstream_gaps error=... cannot route source-module
-    // 'overseer'"). This test pins that the brief the gap path actually produces
-    // routes to a real repo — the configured default (rysweet/Simard) — so the
-    // issue gets filed instead of erroring.
+fn flagged_gap_never_constructs_an_issue_brief() {
     let gaps = vec![sample_goal_gap()];
     let filed = Arc::new(Mutex::new(Vec::new()));
     let (notifier, _email_log, _signal_log) = dual_recording_notifier();
@@ -689,25 +679,18 @@ fn flagged_gap_brief_source_module_routes_to_default_repo() {
 
     let report = overseer_tick(&mut ov);
     assert_eq!(
-        report.workstream_gaps_detected, 1,
-        "the genuine gap is flagged"
+        report.recipes_launched, 1,
+        "the genuine gap is covered by a launched workstream (issue #4128, D3b)"
     );
     assert_eq!(report.errors, 0, "the gap intervention must not error");
     assert!(!report.panicked);
 
-    let briefs = filed.lock().unwrap();
-    assert_eq!(briefs.len(), 1, "one deduped issue filed for the gap");
-    let src = &briefs[0].source_module;
-
-    // The exact value the gap path emits must resolve — never ambiguous.
-    let target = route_failure(src).unwrap_or_else(|e| {
-        panic!("gap brief source_module {src:?} must route to a real repo, got {e:?}")
-    });
+    // The coverage closing edge is a LaunchRecipe, never a FileIssue: a routine
+    // gap covers the work by launching, it never constructs an issue brief.
     assert!(
-        matches!(target, TargetRepo::Simard),
-        "an overseer gap brief routes to the default repo (rysweet/Simard): {src:?}"
+        filed.lock().unwrap().is_empty(),
+        "a coverage gap never files an issue"
     );
-    assert_eq!(target.slug(), "rysweet/Simard");
 }
 
 #[test]
@@ -876,26 +859,6 @@ fn gap_scan_every_n_defaults_to_one_and_clamps_to_floor() {
 // ═══════════════════ 6. decide / classify routing ═══════════════════════════
 
 #[test]
-fn decide_routes_workstream_coverage_to_flag_gaps() {
-    let problem = Problem {
-        kind: ProblemKind::WorkstreamCoverage,
-        priority: Priority::High,
-        dedup_key: "workstream-gap".to_string(),
-        summary: "2 uncovered workstreams".to_string(),
-        evidence: vec![Signal::WorkstreamGap {
-            gaps: vec![sample_goal_gap(), sample_anomaly_gap()],
-        }],
-        why: None,
-    };
-    match decide(&problem) {
-        Intervention::FlagWorkstreamGaps { gaps } => {
-            assert_eq!(gaps.len(), 2, "decide carries the specific gaps forward");
-        }
-        other => panic!("expected FlagWorkstreamGaps, got {other:?}"),
-    }
-}
-
-#[test]
 fn flag_workstream_gaps_is_routine_and_admitted_by_default_gate() {
     let iv = Intervention::FlagWorkstreamGaps {
         gaps: vec![sample_goal_gap()],
@@ -942,4 +905,268 @@ fn tick_render_shows_flagged_gap_clause_and_a_clean_scan_adds_none() {
         clean_line.contains("observing"),
         "a clean board is the honest 'observing' state: {clean_line}"
     );
+}
+
+// ═══════════════════ 8. issue #4128: gap closing edge (RED, TDD Step 7) ══════
+//
+// A backlog-coverage gap that only NOTIFIES never gets covered, so it recurs
+// every window and surfaces as the recurring `workstream-gap` signature. Two
+// coupled fixes are pinned here:
+//   D3a — per-gap keying: the coverage problem is keyed `workstream-gap:<sig>`,
+//         not the bare `workstream-gap` constant, so distinct gaps no longer
+//         collapse onto one dedup key (which starves the in-flight / closing
+//         edge to a single gap).
+//   D3b — closing edge: a coverage problem DECIDES to a terminal edge that
+//         actually covers the gap (LaunchRecipe / FileIssue), routed through the
+//         gate — not the notify-only `FlagWorkstreamGaps`. This SUPERSEDES the
+//         old `decide_routes_workstream_coverage_to_flag_gaps` contract.
+// RED until the per-gap key + Decide-arm closing edge land.
+
+/// D3a: a single observed gap orients to a PER-GAP dedup key
+/// `workstream-gap:<signature>`, not the bare `workstream-gap` constant.
+#[test]
+fn single_gap_orients_to_a_per_gap_keyed_coverage_problem() {
+    let gap = sample_goal_gap();
+    let observed = ObservedState {
+        workstream_gaps: vec![gap.clone()],
+        ..ObservedState::default()
+    };
+
+    let problems = orient(&signals_from(&observed), &[]);
+    let problem = problems
+        .iter()
+        .find(|p| p.kind == ProblemKind::WorkstreamCoverage)
+        .expect("a WorkstreamGap classifies to a WorkstreamCoverage problem");
+
+    assert_eq!(
+        problem.dedup_key,
+        format!("workstream-gap:{}", gap.signature),
+        "the coverage problem is keyed per-gap so distinct gaps don't collapse: {}",
+        problem.dedup_key
+    );
+}
+
+/// D3b: a WorkstreamCoverage problem DECIDES to a terminal closing edge that
+/// covers the gap (a LaunchRecipe or a FileIssue), routed through the gate —
+/// never a notify-only action that leaves the gap uncovered and recurring.
+#[test]
+fn a_coverage_gap_decides_to_a_terminal_closing_edge() {
+    let gap = sample_goal_gap();
+    let problem = Problem {
+        kind: ProblemKind::WorkstreamCoverage,
+        priority: Priority::High,
+        dedup_key: format!("workstream-gap:{}", gap.signature),
+        summary: "1 uncovered workstream".to_string(),
+        evidence: vec![Signal::WorkstreamGap {
+            gaps: vec![gap.clone()],
+        }],
+        why: None,
+    };
+
+    let iv = decide(&problem);
+    assert!(
+        matches!(
+            iv,
+            Intervention::LaunchRecipe { .. } | Intervention::FileIssue { .. }
+        ),
+        "a coverage gap decides to a terminal closing edge (launch/file) so the gap \
+         gets covered and stops recurring — not a notify-only action: {iv:?}"
+    );
+}
+
+// ═══════════════════ 4. BackoffGate dedup on the coverage launch ═════════════
+//
+// TDD (RED) contract for wiring the new `guardrails::BackoffGate` into the
+// `WorkstreamCoverage` `LaunchRecipe` path (Problem 1 / issue #4186; meta bugs
+// #4255, #4126). The pre-existing in-flight guard only holds a duplicate WHILE
+// the covering workstream is still running; once it COMPLETES, an unchanged,
+// still-recurring gap would re-launch every tick — the exact hole that spawned
+// duplicate backlog issues #4186/#4190/#4191/#4198/#4201/#4203/#4206.
+//
+// The BackoffGate closes it: keyed by the same `recipe_dedup_key` the in-flight
+// rail uses, it SUPPRESSES a relaunch of an equivalent coverage within the
+// (exponentially growing) backoff window even after the prior workstream has
+// completed — yet always re-admits once the window elapses (never permanent
+// silence). The window clock is INJECTED via `Overseer::with_clock` so these
+// tests drive a deterministic virtual clock.
+
+use std::sync::atomic::{AtomicI64, Ordering};
+
+/// A `RecipeLauncher` whose launched workstreams COMPLETE immediately (poll ⇒
+/// `ProducedPr`), so the in-flight dedup slot is freed on the next tick and the
+/// BackoffGate becomes the ONLY thing that can hold a relaunch. Counts launches.
+struct CompletingRecipes {
+    launched: Arc<Mutex<usize>>,
+}
+impl RecipeLauncher for CompletingRecipes {
+    fn launch(&self, _b: &RecipeBrief) -> Result<WorkstreamHandle, OverseerError> {
+        *self.launched.lock().unwrap() += 1;
+        Ok(WorkstreamHandle {
+            id: "ws-cover".to_string(),
+        })
+    }
+    fn poll(&self, _h: &WorkstreamHandle) -> Result<WorkstreamStatus, OverseerError> {
+        // Already delivered a PR ⇒ terminal, so reconcile frees the in-flight slot.
+        Ok(WorkstreamStatus::ProducedPr {
+            repo: "rysweet/Simard".to_string(),
+            pr: 1,
+        })
+    }
+}
+
+/// A goal-store fake whose gap survey can be SWAPPED between ticks, so a test
+/// can present a different (distinct-signature) gap set on a later tick.
+struct SwappableGapStore {
+    gaps: Arc<Mutex<Vec<GapItem>>>,
+}
+impl GoalCurator for SwappableGapStore {
+    fn propose(&self, _g: &GoalBrief) -> Result<(), OverseerError> {
+        Ok(())
+    }
+    fn in_flight(&self) -> Result<Vec<InFlightItem>, OverseerError> {
+        Ok(vec![])
+    }
+    fn blocked_goals(&self) -> Result<Vec<BlockedGoal>, OverseerError> {
+        Ok(vec![])
+    }
+    fn workstream_gaps(&self, _anomalies: &[String]) -> Result<Vec<GapItem>, OverseerError> {
+        Ok(self.gaps.lock().unwrap().clone())
+    }
+}
+
+/// Capabilities around a swappable gap survey + immediately-completing recipes,
+/// returning the shared launch counter and the shared swappable gap handle.
+type CapsWithSwappableGaps = (Capabilities, Arc<Mutex<usize>>, Arc<Mutex<Vec<GapItem>>>);
+fn caps_completing_swappable(initial: Vec<GapItem>) -> CapsWithSwappableGaps {
+    let launched = Arc::new(Mutex::new(0usize));
+    let gaps = Arc::new(Mutex::new(initial));
+    let caps = Capabilities {
+        status: Box::new(FakeStatus(ObservedState::default())),
+        recipes: Box::new(CompletingRecipes {
+            launched: launched.clone(),
+        }),
+        prs: Box::new(FakePrs),
+        deployer: Box::new(FakeDeployer),
+        meetings: Box::new(FakeMeetings),
+        issues: Box::new(RecordingIssues {
+            filed: Arc::new(Mutex::new(Vec::new())),
+        }),
+        goals: Box::new(SwappableGapStore { gaps: gaps.clone() }),
+        auditor: Box::new(FakeAuditor),
+        memory: Box::new(crate::overseer::capabilities::InertMemoryRecall),
+    };
+    (caps, launched, gaps)
+}
+
+/// A virtual clock the test advances; injected via `Overseer::with_clock`.
+fn virtual_clock() -> (Arc<AtomicI64>, Box<dyn Fn() -> i64 + Send + Sync>) {
+    let now = Arc::new(AtomicI64::new(0));
+    let handle = now.clone();
+    (now, Box::new(move || handle.load(Ordering::SeqCst)))
+}
+
+#[test]
+fn coverage_relaunch_is_suppressed_within_the_backoff_window_after_completion() {
+    // The gap recurs unchanged; the covering workstream completes immediately.
+    let (caps, launched, _gaps) = caps_completing_swappable(vec![sample_goal_gap()]);
+    let (now, clock) = virtual_clock();
+
+    let mut ov = Overseer::new(caps)
+        .with_identity(overseer_identity())
+        .with_gap_scan_enabled(true)
+        .with_clock(clock);
+
+    // Tick 1 at t=0: launches the covering workstream (arms the backoff window).
+    now.store(0, Ordering::SeqCst);
+    let first = overseer_tick(&mut ov);
+    assert_eq!(
+        first.recipes_launched, 1,
+        "the recurring gap is covered by exactly one launched workstream: {first:?}"
+    );
+    assert_eq!(*launched.lock().unwrap(), 1);
+
+    // Tick 2 at t=300 (< 900s base window). The prior workstream COMPLETED, so
+    // the in-flight guard no longer holds it — only the BackoffGate can. The
+    // equivalent coverage must NOT re-launch.
+    now.store(300, Ordering::SeqCst);
+    let second = overseer_tick(&mut ov);
+    assert_eq!(
+        second.recipes_launched, 0,
+        "an equivalent coverage is NOT relaunched within the backoff window even \
+         though its prior workstream already completed: {second:?}"
+    );
+    assert!(
+        second.held >= 1,
+        "the duplicate coverage relaunch is HELD by the backoff gate: {second:?}"
+    );
+    assert_eq!(
+        *launched.lock().unwrap(),
+        1,
+        "still exactly one launch — no duplicate backlog workstream was spawned"
+    );
+}
+
+#[test]
+fn coverage_relaunch_is_admitted_once_the_backoff_window_elapses() {
+    // Suppression is bounded: past the window the still-recurring gap surfaces
+    // again so a genuinely-uncovered gap is never permanently silenced.
+    let (caps, launched, _gaps) = caps_completing_swappable(vec![sample_goal_gap()]);
+    let (now, clock) = virtual_clock();
+
+    let mut ov = Overseer::new(caps)
+        .with_identity(overseer_identity())
+        .with_gap_scan_enabled(true)
+        .with_clock(clock);
+
+    now.store(0, Ordering::SeqCst);
+    assert_eq!(overseer_tick(&mut ov).recipes_launched, 1);
+
+    // Past the 900s base window the equivalent coverage may relaunch.
+    now.store(901, Ordering::SeqCst);
+    let later = overseer_tick(&mut ov);
+    assert_eq!(
+        later.recipes_launched, 1,
+        "past the backoff window the still-recurring gap is covered again \
+         (bounded suppression, never permanent silence): {later:?}"
+    );
+    assert_eq!(*launched.lock().unwrap(), 2);
+}
+
+#[test]
+fn a_distinct_gap_signature_is_not_suppressed_by_another_keys_backoff() {
+    // One noisy coverage key must not starve an unrelated gap. Swapping to a
+    // DIFFERENT gap set (distinct signature ⇒ distinct recipe_dedup_key) still
+    // launches while the first key is inside its backoff window.
+    let (caps, launched, gaps) = caps_completing_swappable(vec![sample_goal_gap()]);
+    let (now, clock) = virtual_clock();
+
+    let mut ov = Overseer::new(caps)
+        .with_identity(overseer_identity())
+        .with_gap_scan_enabled(true)
+        .with_clock(clock);
+
+    // Tick 1 at t=0 covers the goal gap (arms backoff for key-A).
+    now.store(0, Ordering::SeqCst);
+    assert_eq!(overseer_tick(&mut ov).recipes_launched, 1);
+
+    // Swap to a DIFFERENT gap (distinct signature) and tick at t=300, still
+    // inside key-A's window. Key-B is unrelated ⇒ it must launch.
+    *gaps.lock().unwrap() = vec![sample_anomaly_gap()];
+    now.store(300, Ordering::SeqCst);
+    let second = overseer_tick(&mut ov);
+    assert_eq!(
+        second.recipes_launched, 1,
+        "a distinct gap signature is unaffected by another key's backoff: {second:?}"
+    );
+    assert_eq!(*launched.lock().unwrap(), 2);
+
+    // Swap BACK to the original goal gap, still inside key-A's window ⇒ suppressed.
+    *gaps.lock().unwrap() = vec![sample_goal_gap()];
+    now.store(400, Ordering::SeqCst);
+    let third = overseer_tick(&mut ov);
+    assert_eq!(
+        third.recipes_launched, 0,
+        "the original key is still within its own backoff window: {third:?}"
+    );
+    assert_eq!(*launched.lock().unwrap(), 2);
 }

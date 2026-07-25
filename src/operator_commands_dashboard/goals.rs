@@ -122,6 +122,12 @@ pub(crate) async fn goals_at(state_root: &std::path::Path) -> Json<Value> {
     let mut active_goals = board.active;
     active_goals.sort_by(|a, b| a.priority.cmp(&b.priority).then_with(|| a.id.cmp(&b.id)));
 
+    // Lifecycle breakdown of the active board so the Goals tab can distinguish
+    // goals genuinely in progress from ones that are blocked, paused, or
+    // already `Completed` but not yet archived off the board. Computed BEFORE
+    // `active_goals` is consumed below. Additive: `active_count` is unchanged.
+    let active_status_breakdown = active_status_breakdown(active_goals.iter().map(|g| &g.status));
+
     let active: Vec<Value> = active_goals
         .into_iter()
         .map(|g| {
@@ -245,7 +251,56 @@ pub(crate) async fn goals_at(state_root: &std::path::Path) -> Json<Value> {
         "backlog": backlog,
         "active_count": active.len(),
         "backlog_count": backlog.len(),
+        // Issue #4270: additive per-lifecycle breakdown of the active board so
+        // the Goals tab (and API clients) can tell in-progress goals apart from
+        // blocked / paused / not-yet-archived Completed ones, instead of a
+        // single `active_count` that reads e.g. "20 active goal(s)" when half
+        // are finished. Existing consumers are unaffected (fields untouched).
+        "active_status_breakdown": Value::Object(active_status_breakdown),
     }))
+}
+
+/// Per-variant lifecycle breakdown of the active goal board.
+///
+/// Returns a JSON object with a faithful count for every [`GoalProgress`]
+/// variant (`proposed`, `not_started`, `in_progress`, `blocked`, `paused`,
+/// `completed`). No bucketing surprises: an `InProgress { percent: 100 }` goal
+/// counts as `in_progress`, not `completed` — callers that want the terminal
+/// view use [`GoalProgress::is_terminal`] additively. All six keys are always
+/// present (zero when unused) so clients can render a stable layout without
+/// null-checking each field.
+///
+/// This exists because the Goals tab previously showed only `active_count`,
+/// which conflates goals genuinely in progress with ones that are blocked,
+/// paused, or already `Completed` but not yet archived off the board — hiding
+/// what Simard is *actually working on right now*.
+pub(crate) fn active_status_breakdown<'a>(
+    statuses: impl IntoIterator<Item = &'a GoalProgress>,
+) -> serde_json::Map<String, Value> {
+    let mut proposed = 0u64;
+    let mut not_started = 0u64;
+    let mut in_progress = 0u64;
+    let mut blocked = 0u64;
+    let mut paused = 0u64;
+    let mut completed = 0u64;
+    for status in statuses {
+        match status {
+            GoalProgress::Proposed => proposed += 1,
+            GoalProgress::NotStarted => not_started += 1,
+            GoalProgress::InProgress { .. } => in_progress += 1,
+            GoalProgress::Blocked(_) => blocked += 1,
+            GoalProgress::Paused => paused += 1,
+            GoalProgress::Completed => completed += 1,
+        }
+    }
+    let mut breakdown = serde_json::Map::new();
+    breakdown.insert("proposed".to_string(), json!(proposed));
+    breakdown.insert("not_started".to_string(), json!(not_started));
+    breakdown.insert("in_progress".to_string(), json!(in_progress));
+    breakdown.insert("blocked".to_string(), json!(blocked));
+    breakdown.insert("paused".to_string(), json!(paused));
+    breakdown.insert("completed".to_string(), json!(completed));
+    breakdown
 }
 
 pub(crate) async fn seed_goals() -> Json<Value> {
@@ -638,5 +693,81 @@ mod tests_backlog_helpers {
         assert_eq!(human_source_label("decision-record"), "From decisions");
         assert_eq!(human_source_label("meeting-note"), "From meeting");
         assert_eq!(human_source_label("other-concept"), "From memory");
+    }
+
+    // ---- active_status_breakdown -----------------------------------------
+
+    #[test]
+    fn breakdown_always_has_all_six_keys() {
+        let empty: Vec<GoalProgress> = vec![];
+        let b = active_status_breakdown(empty.iter());
+        for key in [
+            "proposed",
+            "not_started",
+            "in_progress",
+            "blocked",
+            "paused",
+            "completed",
+        ] {
+            assert_eq!(b.get(key).and_then(Value::as_u64), Some(0), "missing {key}");
+        }
+    }
+
+    #[test]
+    fn breakdown_counts_each_variant_faithfully() {
+        let statuses = vec![
+            GoalProgress::Proposed,
+            GoalProgress::NotStarted,
+            GoalProgress::NotStarted,
+            GoalProgress::InProgress { percent: 40 },
+            GoalProgress::Blocked("some reason".to_string()),
+            GoalProgress::Blocked("another reason".to_string()),
+            GoalProgress::Blocked("third".to_string()),
+            GoalProgress::Paused,
+            GoalProgress::Completed,
+            GoalProgress::Completed,
+        ];
+        let b = active_status_breakdown(statuses.iter());
+        assert_eq!(b["proposed"].as_u64(), Some(1));
+        assert_eq!(b["not_started"].as_u64(), Some(2));
+        assert_eq!(b["in_progress"].as_u64(), Some(1));
+        assert_eq!(b["blocked"].as_u64(), Some(3));
+        assert_eq!(b["paused"].as_u64(), Some(1));
+        assert_eq!(b["completed"].as_u64(), Some(2));
+    }
+
+    #[test]
+    fn breakdown_in_progress_at_100_percent_is_not_completed() {
+        // Faithful per-variant counting: an InProgress goal at 100% is still
+        // `in_progress`, never bucketed as `completed` (that terminal view is
+        // GoalProgress::is_terminal, layered additively by callers).
+        let statuses = [GoalProgress::InProgress { percent: 100 }];
+        let b = active_status_breakdown(statuses.iter());
+        assert_eq!(b["in_progress"].as_u64(), Some(1));
+        assert_eq!(b["completed"].as_u64(), Some(0));
+    }
+
+    #[test]
+    fn breakdown_sum_equals_input_len() {
+        let statuses = [
+            GoalProgress::Proposed,
+            GoalProgress::InProgress { percent: 10 },
+            GoalProgress::Completed,
+            GoalProgress::Blocked("x".to_string()),
+            GoalProgress::Paused,
+        ];
+        let b = active_status_breakdown(statuses.iter());
+        let sum: u64 = [
+            "proposed",
+            "not_started",
+            "in_progress",
+            "blocked",
+            "paused",
+            "completed",
+        ]
+        .iter()
+        .map(|k| b[*k].as_u64().unwrap_or(0))
+        .sum();
+        assert_eq!(sum as usize, statuses.len());
     }
 }

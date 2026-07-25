@@ -129,6 +129,15 @@ pub struct GitDeploySource {
     repo_dir: PathBuf,
     /// Default-branch ref to compare against (e.g. `origin/main`).
     default_branch_ref: String,
+    /// When `true` (operator/CLI path), [`merged_head`](Self::merged_head) falls
+    /// back to local `HEAD` if the default-branch ref cannot be resolved (e.g. a
+    /// shallow/detached checkout). On the AUTONOMOUS self-deploy path this MUST
+    /// be `false` (issue #2590 SR-1): deploying an unverified local `HEAD` would
+    /// bypass the branch-protection / signed-merge root of trust the docs promise
+    /// (`docs/concepts/reconcile-and-self-deploy.md §Security prerequisites`), so
+    /// an unresolved `origin/<default-branch>` must yield an error → no drift →
+    /// no signal, never a `HEAD` deploy.
+    head_fallback: bool,
 }
 
 impl Default for GitDeploySource {
@@ -136,6 +145,7 @@ impl Default for GitDeploySource {
         Self {
             repo_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             default_branch_ref: "origin/main".to_string(),
+            head_fallback: true,
         }
     }
 }
@@ -152,6 +162,17 @@ impl GitDeploySource {
             repo_dir: repo_dir.into(),
             ..Self::default()
         }
+    }
+
+    /// Disable the local-`HEAD` fallback in [`merged_head`](Self::merged_head).
+    /// REQUIRED on the autonomous self-deploy path (#2590 SR-1) so an unresolved
+    /// `origin/<default-branch>` degrades to "no drift" rather than deploying an
+    /// unverified local `HEAD`. Keep the fallback (the default) only on the
+    /// operator/CLI path, where a human is choosing to relaunch a local checkout.
+    #[must_use]
+    pub fn origin_strict(mut self) -> Self {
+        self.head_fallback = false;
+        self
     }
 
     fn git(&self, args: &[&str]) -> SimardResult<String> {
@@ -176,10 +197,18 @@ impl GitDeploySource {
 
 impl DeploySource for GitDeploySource {
     fn merged_head(&self) -> SimardResult<String> {
-        // Prefer the tracked default branch; fall back to local HEAD when the
-        // remote ref is absent (e.g. a shallow or detached checkout).
-        self.git(&["rev-parse", &self.default_branch_ref])
-            .or_else(|_| self.git(&["rev-parse", "HEAD"]))
+        // Prefer the tracked default branch. On the operator/CLI path, fall back
+        // to local `HEAD` when the remote ref is absent (e.g. a shallow or
+        // detached checkout). On the AUTONOMOUS path (`origin_strict`) that
+        // fallback is DISABLED (#2590 SR-1): an unresolved `origin/<default>` is
+        // returned as an error so OBSERVE yields no drift rather than deploying
+        // an unverified local `HEAD` that never passed branch protection.
+        let origin = self.git(&["rev-parse", &self.default_branch_ref]);
+        if self.head_fallback {
+            origin.or_else(|_| self.git(&["rev-parse", "HEAD"]))
+        } else {
+            origin
+        }
     }
 
     fn running_commit(&self) -> SimardResult<String> {
@@ -252,6 +281,54 @@ mod prod_source_tests {
         assert!(
             !drift.needs_deploy,
             "a missing checkout must fail safe (no spurious deploy)"
+        );
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@e")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@e")
+            .status()
+            .expect("git spawn")
+            .success();
+        assert!(ok, "git {args:?} failed");
+    }
+
+    /// SR-1 (#2590): with no `origin/main` ref, the operator/CLI source falls
+    /// back to local `HEAD`, but an `origin_strict` (autonomous) source refuses
+    /// — so OBSERVE yields no drift rather than deploying an unverified `HEAD`.
+    #[test]
+    fn origin_strict_merged_head_refuses_head_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        std::fs::write(dir.join("f"), "x").unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "c0"]);
+
+        // No remote → `origin/main` is unresolvable.
+        let lenient = GitDeploySource::at(dir);
+        let strict = GitDeploySource::at(dir).origin_strict();
+
+        assert!(
+            lenient.merged_head().is_ok(),
+            "operator/CLI path falls back to local HEAD"
+        );
+        assert!(
+            strict.merged_head().is_err(),
+            "autonomous path must NOT fall back to local HEAD"
+        );
+
+        // And the strict source's detector therefore fails safe (no drift).
+        let drift = ReconcileDetector::new(strict).detect();
+        assert!(
+            !drift.needs_deploy,
+            "unresolved origin ref on the strict path must yield no drift"
         );
     }
 }

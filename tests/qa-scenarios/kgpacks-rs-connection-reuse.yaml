@@ -1,0 +1,70 @@
+name: kgpacks-rs-connection-reuse
+app_type: cli
+description: |
+  Outside-in proof for parity criterion **KGP-T3** of the kgpacks-rs port
+  (`Specs/agent-kgpacks-rs-parity.md`): the native knowledge handler reuses one
+  open read-only SQLite connection per pack across repeated `knowledge.query`
+  calls, instead of re-opening (and re-parsing the schema of) the pack database
+  on every request.
+
+  Before this fix the handler cached only each pack's database *path* and opened
+  a fresh `rusqlite::Connection` per query. It now caches the live connection in
+  a `ConnCache` — one `Arc<Mutex<Connection>>` per pack — and returns the same
+  handle on subsequent queries. rusqlite's `Connection` is `Send` but not `Sync`,
+  so each cached connection carries its own `Mutex`: queries to one pack
+  serialize on that mutex while different packs proceed independently. The
+  retrieval logic was extracted into `query_open_pack(conn, ...)` so the reused
+  connection and the path-based unit tests share one query path.
+
+  This scenario drives the hermetic, in-process `native_knowledge` unit tests
+  that pin the corrected contract:
+    - `conn_cache_reuses_open_connection_across_queries` — the second query
+      returns the SAME connection handle (`Arc::ptr_eq`) and the miss-only
+      resolver does not re-run on a cache hit;
+    - `conn_cache_keeps_distinct_connections_per_pack` — different packs get
+      independent connections;
+    - `conn_cache_propagates_resolve_error_without_caching` — a failed resolve
+      surfaces the error and does not poison the cache;
+    - `native_knowledge_transport_repeated_query_reuses_connection` — two
+      knowledge.query RPC calls to one pack both succeed against the reused
+      connection, end-to-end.
+  The same run re-asserts the pre-existing KGP-Q1/Q4/Q8 citation, parameterized
+  search, and ranking behaviour is unregressed. No network, no live host
+  mutation. The CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # The native knowledge query contract, including the new KGP-T3 connection
+  # reuse tests and the pre-existing citation / ranking / parameterized-search
+  # behaviours.
+  - action: run
+    params:
+      command: "cargo test --locked --lib native_knowledge"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Transport-level knowledge client suite proves the reused-connection query
+  # path is exercised end-to-end through the native RPC surface without
+  # regression.
+  - action: run
+    params:
+      command: "cargo test --locked --lib knowledge_client"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

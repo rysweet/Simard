@@ -1,0 +1,57 @@
+name: coin-gym-verify-operator-probe-done-gate
+app_type: cli
+description: |
+  Proves the LOCAL COIN Gym harness done-gate is reachable from the
+  operator-probe surface, not only from the standalone `coin-gym` binary. The
+  ProductArchitecture describes `dispatch_operator_probe` as the surface that
+  exposes the repo-grounded engineer surfaces (engineer-loop-run, terminal-run,
+  ...); this scenario drives `simard_operator_probe coin-gym-verify` and asserts
+  the same acceptance self-check that gates the LOCAL harness goal (issue #2713).
+
+  All offline: the probe isolates the self-improvement tactic memory under a
+  throwaway temp directory and never touches the network, a VM, Docker, or the
+  real ~/.simard state. Live VM grading (`coin evaluate`/`coin verify`, Phase 3,
+  issue #2823) is externally gated and intentionally out of this gate's scope.
+
+  Schema note: the pinned `@gadugi/agentic-test` CLI runner only gates on
+  `run`-step exit codes and reads command text from `params.command`, so each
+  assertion is encoded in the exit code of a `bash -lc` wrapper that exits zero
+  only when the observed probe output matches.
+metadata:
+  tags:
+    - cli
+    - coin-gym
+    - operator-probe
+    - benchmark
+agents:
+  - name: cli-agent
+    type: cli
+    command: bash
+steps:
+  # 1. The operator-probe surface runs the done-gate, prints the probe header,
+  #    every component criterion passes (7/7), and it exits 0.
+  - action: run
+    params:
+      command: "bash -lc 'OUT=$(cargo run --quiet --bin simard_operator_probe -- coin-gym-verify 2>&1); echo \"$OUT\"; echo \"$OUT\" | grep -q \"Probe mode: coin-gym-verify\" && echo \"$OUT\" | grep -q \"7/7 LOCAL acceptance criteria passed\" && echo \"$OUT\" | grep -q \"\\[PASS\\] self-improvement-loop\" && echo \"$OUT\" | grep -q \"\\[PASS\\] leaderboard-comparator\"'"
+    timeout: 360000
+
+  # 2. Multiagent beats the single-model baseline on the held-out slice: the
+  #    self-improvement-loop criterion reports held-out reach climbing to 100%.
+  - action: run
+    params:
+      command: "bash -lc 'OUT=$(cargo run --quiet --bin simard_operator_probe -- coin-gym-verify 2>&1); echo \"$OUT\" | grep -q \"held-out reach 0.0% . 100.0%\"'"
+    timeout: 360000
+
+  # 3. LOCAL-only guardrail: the surface never implies live VM grading or
+  #    external result posting.
+  - action: run
+    params:
+      command: "bash -lc 'OUT=$(cargo run --quiet --bin simard_operator_probe -- coin-gym-verify 2>&1); echo \"$OUT\" | grep -q \"LOCAL offline harness only\"'"
+    timeout: 360000
+
+  # 4. The done-gate takes no arguments; trailing tokens fail cleanly (non-zero)
+  #    rather than being silently ignored.
+  - action: run
+    params:
+      command: "bash -lc 'if cargo run --quiet --bin simard_operator_probe -- coin-gym-verify extra >/dev/null 2>&1; then echo \"expected non-zero exit for trailing args\"; exit 1; else exit 0; fi'"
+    timeout: 360000

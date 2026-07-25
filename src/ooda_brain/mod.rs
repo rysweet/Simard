@@ -38,6 +38,8 @@ mod orient_tests;
 mod prompt_store_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_per_goal_cycle;
 
 pub use confidence::{
     CalibrationWindow, ECE_BINS, ECE_METRIC, ECE_WINDOW, HIGH_STAKES_URGENCY, JudgedDecision,
@@ -166,6 +168,216 @@ pub enum EngineerLifecycleDecision {
     /// invoking `simard safe-update`; if it cannot run safely the choice is
     /// recorded as deferred (success-equivalent, no state mutation).
     ConsiderSelfUpdate { rationale: String },
+}
+
+// ---------------------------------------------------------------------------
+// Per-goal, per-cycle agentic decision (issue #4453)
+//
+// Sibling of the engineer-lifecycle reasoner: same shape (context-gather → one
+// recipe call → pure state rail → recorded judgment), different purpose. It is
+// invoked for EVERY goal on `board.active`, EVERY cycle, and returns the single
+// best next action for that goal. The reasoning step's OUTPUT is the decision;
+// the surrounding Rust is a thin deterministic rail that only executes the
+// chosen action and provides basic safety (don't double-spawn). No threshold /
+// counter / grace-window decides liveness — the three former imperative
+// deciders (`classify_standing_idle`, the claim-reaper staleness sweep, and the
+// effect-dispatch board-miss) survive here ONLY as read-only INPUTS.
+// ---------------------------------------------------------------------------
+
+/// Durable per-goal context handed to the per-cycle reasoner. Built best-effort
+/// by `gather_per_goal_cycle_ctx` (`context.rs`); every field is a snapshot of
+/// DURABLE goal state (status, history, in-flight work, worker/claim facts) —
+/// never a live worker's mere presence. Gathering never fails a cycle: any
+/// field may be defaulted and the reasoner reasons about partial context.
+///
+/// The three DEMOTED imperative deciders appear as the last three fields. They
+/// are plain data (an INPUT), never the decision: the reasoner — not a
+/// threshold — decides what, if anything, to do about them.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct PerGoalCycleCtx {
+    // --- Durable goal identity & state ---
+    pub goal_id: String,
+    pub goal_description: String,
+    /// Human-readable durable status (e.g. `"in-progress(40%)"`, `"blocked: …"`).
+    #[serde(default)]
+    pub goal_status: String,
+    pub cycle_number: u32,
+
+    // --- Durable history & in-flight work (NOT live-worktree presence) ---
+    /// Recent outcomes / last-N cycle results, best-effort.
+    #[serde(default)]
+    pub history_summary: String,
+    /// Durable effect-dispatch jobs still open for this goal.
+    #[serde(default)]
+    pub effect_jobs_in_flight: u32,
+    /// PRs opened for this goal, awaiting CI/merge (durable `wip_refs` of kind `pr`).
+    #[serde(default)]
+    pub open_pr_refs: Vec<String>,
+    /// Last few `ActionOutcome` detail strings, best-effort.
+    #[serde(default)]
+    pub last_outcomes: Vec<String>,
+    /// Count of in-flight work-in-progress refs the goal holds.
+    #[serde(default)]
+    pub wip_ref_count: u32,
+
+    // --- Worker / claim facts (facts, not verdicts) ---
+    /// A live claim/worktree exists right now for this goal.
+    #[serde(default)]
+    pub worker_present: bool,
+    /// Last of the worker log (secrets redacted), best-effort.
+    #[serde(default)]
+    pub worker_log_tail: String,
+
+    // --- The three DEMOTED imperative deciders, now read-only INPUTS ---
+    /// From `classify_standing_idle` (`no_progress.rs`): the goal is a standing
+    /// goal that currently looks idle (no live in-flight ref). A SIGNAL, not a
+    /// verdict — the reasoner decides whether to spawn / re-orient / wait.
+    #[serde(default)]
+    pub standing_idle_signal: bool,
+    /// From the claim-reaper `STALE_SECS` sweep: seconds since this goal's
+    /// worker claim was last observed alive, when a claim is expected but no
+    /// live worktree is present. `None` when a live worker is present or none is
+    /// expected. `STALE_SECS` survives ONLY as the threshold that populates this
+    /// input — never as the reap trigger. No new `SIMARD_*_SECS` is introduced.
+    #[serde(default)]
+    pub stale_claim_secs: Option<u64>,
+    /// From the effect-dispatch ledger board-presence check (fail-closed): the
+    /// goal's expected effect job was missing from the board. A SIGNAL fed to
+    /// the reasoner, never an autonomous fault/reclaim.
+    #[serde(default)]
+    pub effect_board_missed: bool,
+}
+
+/// One reasoned next-action for a single active goal, for a single cycle. The
+/// serde discriminator is `choice` (snake_case), mirroring
+/// [`EngineerLifecycleDecision`] so the recipe JSON-envelope parser is reused.
+/// Every variant carries a mandatory `reason` — a decision with no reason MUST
+/// fail to parse (acceptance: "a recorded reason every cycle"). An unknown
+/// `choice` tag is rejected, so a compromised prompt cannot smuggle a novel
+/// destructive action.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "choice", rename_all = "snake_case")]
+pub enum PerGoalAction {
+    /// Work is genuinely in flight and healthy; leave it. Never rolls/wipes.
+    Continue { reason: String },
+    /// No live work; start the next concrete piece (for the research goal: seek
+    /// a new source or design a new experiment — it must NEVER sit idle).
+    /// `task_hint` is optional model-supplied guidance for the new work. Never
+    /// rolls/wipes: the next piece builds on the goal's durable state.
+    Spawn {
+        reason: String,
+        #[serde(default)]
+        task_hint: String,
+    },
+    /// The goal needs a new angle; deliberately redirect it. This is the ONLY
+    /// non-terminal action that MUTATES refs / rolls the cycle.
+    Reorient { reason: String },
+    /// Something looks wrong (e.g. a worker went quiet); inspect logs/tools and
+    /// find out what happened BEFORE any destructive action. The ONLY gate
+    /// through which reclaim/reset/fault become reachable. Never itself reaps.
+    Investigate { reason: String },
+    /// Legitimately blocked on an external event (e.g. a PR awaiting CI/merge);
+    /// record why, do not churn. Never rolls/wipes.
+    Wait { reason: String },
+    /// The goal is done; close it and clear refs. MUTATES/clears refs.
+    Complete { reason: String },
+}
+
+/// Max characters retained for a per-goal action's `reason`/`task_hint` when
+/// parsed from an untrusted reasoner envelope (mirrors the act-phase rationale
+/// bound). Caps the blast radius of a runaway model response on logs/records.
+const PER_GOAL_REASON_MAX_CHARS: usize = 500;
+
+/// Raw `{"choice","reason"[,"task_hint"]}` shape emitted by the per-goal-cycle
+/// recipe/model, before validation into a [`PerGoalAction`] by
+/// [`PerGoalAction::from_recipe_envelope`].
+#[derive(serde::Deserialize)]
+struct PerGoalEnvelope {
+    choice: String,
+    #[serde(default)]
+    reason: String,
+    #[serde(default)]
+    task_hint: String,
+}
+
+impl PerGoalAction {
+    /// Parse a per-goal-cycle reasoner envelope into a [`PerGoalAction`] — the
+    /// SINGLE canonical parser shared by every brain backend (`RecipeBrain`,
+    /// `RustyClawdBrain`, …) so the "what is a valid action envelope?" contract
+    /// has exactly one definition. Returns `None` (surfaced by the caller as a
+    /// NO-FALLBACK `Err`, #1711) unless the text contains a balanced JSON object
+    /// with a known `choice` variant AND a non-empty `reason`. `choice` is
+    /// matched case-insensitively; `reason`/`task_hint` are sanitized (ANSI/C0
+    /// control stripped, whitespace collapsed) and bounded, since these
+    /// model-controlled strings flow to operator logs and persisted audit records.
+    /// A missing/empty `reason` or an unknown `choice` yields `None`, so a
+    /// compromised prompt cannot smuggle a reason-less or novel destructive
+    /// action past any backend.
+    pub fn from_recipe_envelope(text: &str) -> Option<Self> {
+        let env: PerGoalEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
+        let reason = env.reason.trim();
+        if reason.is_empty() {
+            return None;
+        }
+        // SECURITY (mirror of #2751): `reason`/`task_hint` are MODEL-CONTROLLED
+        // and flow verbatim to operator stderr logs and the *persisted*
+        // `BrainJudgmentRecord.rationale`. A prompt-injected model could smuggle
+        // ANSI escapes / raw C0 control bytes to spoof or hide operator log lines
+        // and audit records. Sanitize at this single canonical chokepoint (strip
+        // ANSI/control + collapse whitespace + bound length) so every downstream
+        // sink receives clean text — the outbound counterpart to the inbound
+        // `sanitize_context_var` applied to recipe `-c` context vars.
+        let reason = sanitize::sanitize_context_var(reason, PER_GOAL_REASON_MAX_CHARS);
+        match env.choice.trim() {
+            c if c.eq_ignore_ascii_case("continue") => Some(Self::Continue { reason }),
+            // `task_hint` is sanitized only here — it is discarded by every other
+            // variant, so we avoid the allocation on the non-spawn paths.
+            c if c.eq_ignore_ascii_case("spawn") => {
+                let task_hint =
+                    sanitize::sanitize_context_var(&env.task_hint, PER_GOAL_REASON_MAX_CHARS);
+                Some(Self::Spawn { reason, task_hint })
+            }
+            c if c.eq_ignore_ascii_case("reorient") => Some(Self::Reorient { reason }),
+            c if c.eq_ignore_ascii_case("investigate") => Some(Self::Investigate { reason }),
+            c if c.eq_ignore_ascii_case("wait") => Some(Self::Wait { reason }),
+            c if c.eq_ignore_ascii_case("complete") => Some(Self::Complete { reason }),
+            _ => None,
+        }
+    }
+
+    /// Stable snake_case label — identical to the serde `choice` tag. Shared by
+    /// the judgment record, the applied-detail string, and the per-goal outcome.
+    pub fn variant_label(&self) -> &'static str {
+        match self {
+            Self::Continue { .. } => "continue",
+            Self::Spawn { .. } => "spawn",
+            Self::Reorient { .. } => "reorient",
+            Self::Investigate { .. } => "investigate",
+            Self::Wait { .. } => "wait",
+            Self::Complete { .. } => "complete",
+        }
+    }
+
+    /// The mandatory reasoning the reasoner carried on the chosen action.
+    pub fn reason(&self) -> &str {
+        match self {
+            Self::Continue { reason }
+            | Self::Spawn { reason, .. }
+            | Self::Reorient { reason }
+            | Self::Investigate { reason }
+            | Self::Wait { reason }
+            | Self::Complete { reason } => reason,
+        }
+    }
+
+    /// `true` when applying this action performs a DESTRUCTIVE ref mutation
+    /// (clears `wip_refs` / rolls or completes the goal). Only `Reorient` (a
+    /// deliberate redirect) and `Complete` (the goal is done) do so — the A6
+    /// invariant that keeps a `continue`/`spawn`/`wait`/`investigate` verdict
+    /// from ever reproducing the 70ab8541 idle→reset loop.
+    pub fn mutates_refs(&self) -> bool {
+        matches!(self, Self::Reorient { .. } | Self::Complete { .. })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -619,6 +831,21 @@ pub trait OodaBrain: Send + Sync {
         ctx: &EngineerLifecycleCtx,
     ) -> SimardResult<EngineerLifecycleDecision>;
 
+    /// Decide the single best next action for ONE active goal, THIS cycle
+    /// (issue #4453). Invoked for EVERY goal on `board.active` every cycle — a
+    /// continuous, universal per-goal reasoning step, not a special-case reflex
+    /// that only fires when a goal looks idle/stuck/stale. The reasoning step's
+    /// OUTPUT is the decision (`continue` / `spawn` / `reorient` / `investigate`
+    /// / `wait` / `complete`, each with a reason); the surrounding Rust is only
+    /// a thin rail that executes it.
+    ///
+    /// **NO default impl** — every brain (production [`RecipeBrain`], the
+    /// [`DeterministicLifecycleBrain`] floor, and every test double) MUST decide
+    /// explicitly. Omitting it is a compile error, which is intentional: it
+    /// prevents a "hollow green" from an un-migrated brain silently no-op'ing.
+    /// An `Err` surfaces as a cycle failure (no silent fallback, #1711).
+    fn decide_per_goal_cycle(&self, ctx: &PerGoalCycleCtx) -> SimardResult<PerGoalAction>;
+
     /// Decide whether to admit a NEW engineer for `ctx.candidate` right now,
     /// given the live engineer set and file-overlap signals (issue #2690).
     /// Called at the spawn/admission decision point for a genuinely NEW
@@ -791,6 +1018,70 @@ pub fn apply_decision_to_state(
             // We do NOT mutate state here — the failure-counter / blocked
             // status logic is irrelevant to a self-update decision.
             format!("brain: consider_self_update ({rationale})")
+        }
+    }
+}
+
+/// Apply a per-goal, per-cycle reasoned action to OODA state and return the
+/// human-readable detail string the caller attaches to the outcome (issue
+/// #4453). The sibling of [`apply_decision_to_state`] for the per-goal reasoner.
+///
+/// **PURE** — no IO, no process spawning, no filesystem access. Side-effecting
+/// execution (spawning a worker, filing an issue, tearing down a worktree)
+/// lives in the thin rail in `ooda_loop::cycle` and runs AFTER this returns,
+/// gated by the double-spawn guard. Keeping it pure caps the blast radius of any
+/// single decision to in-memory state.
+///
+/// **A6 invariant** (the root-cause fix for the 70ab8541 idle→reset loop): only
+/// `Reorient` (a deliberate redirect) and `Complete` (the goal is done) mutate
+/// `wip_refs` / roll the cycle. `Continue`, `Spawn`, `Wait`, and `Investigate`
+/// leave the load-bearing `wip_refs` — on which Overseer dedup, engineer
+/// admission, and the completion gate depend — untouched. Applying to a goal id
+/// absent from the board is a total no-op (never panics), matching
+/// [`apply_decision_to_state`].
+pub fn apply_per_goal_action_to_state(
+    action: &PerGoalAction,
+    state: &mut OodaState,
+    goal_id: &str,
+) -> String {
+    let label = action.variant_label();
+    let reason = action.reason();
+    match action {
+        // Non-destructive verdicts: NEVER touch wip_refs / status / assignment.
+        PerGoalAction::Continue { .. }
+        | PerGoalAction::Spawn { .. }
+        | PerGoalAction::Wait { .. }
+        | PerGoalAction::Investigate { .. } => {
+            format!("per-goal: {label} ({reason})")
+        }
+        // Deliberate redirect: roll the goal to a fresh cycle. This is the ONLY
+        // non-terminal path that clears the load-bearing wip_refs, and it is a
+        // REASONED choice (never a threshold), so a bursty standing goal is
+        // never self-reset.
+        PerGoalAction::Reorient { .. } => {
+            if let Some(g) = state
+                .active_goals
+                .active
+                .iter_mut()
+                .find(|g| g.id == goal_id)
+            {
+                g.roll_to_new_cycle();
+            }
+            format!("per-goal: {label} ({reason})")
+        }
+        // The goal is done: mark it Completed and clear its now-finished refs.
+        PerGoalAction::Complete { .. } => {
+            if let Some(g) = state
+                .active_goals
+                .active
+                .iter_mut()
+                .find(|g| g.id == goal_id)
+            {
+                g.status = crate::goal_curation::GoalProgress::Completed;
+                g.assigned_to = None;
+                g.wip_refs.clear();
+            }
+            format!("per-goal: {label} ({reason})")
         }
     }
 }

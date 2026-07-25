@@ -1,0 +1,40 @@
+# Canonical agentic-test schema (name + agents[] + steps[] with params).
+#
+# The installed `gadugi-test` / `@gadugi/agentic-test` binary validates and runs
+# scenarios through `ScenarioLoader` (canonical format), which requires a `name`,
+# a `steps` array, and a non-empty `agents` array. A single `cli` agent runs the
+# hermetic regression script; the agent's command runner treats a non-zero exit
+# code as a step failure, so the script's own `exit 1` on a wrong count makes
+# this a real pass/fail gate (not a cosmetic assertion).
+name: simard-dashboard-ooda-cycles-lifetime-count
+description: >-
+  Standalone dashboard's Cycle History surface (`/api/ooda-cycles`) reports the
+  authoritative lifetime cycle count via `latest_cycle_number`, never the
+  50-report scan window (`total_cycles`) mislabelled as the total. Extends the
+  single-source-of-truth cycle counter invariant (#1680) to the Thinking tab's
+  Cycle History.
+version: "1.0"
+config:
+  timeout: 240000
+environment:
+  requires: []
+agents:
+  - name: cli-agent
+    type: cli
+    config: {}
+metadata:
+  tags:
+    - cli
+    - dashboard
+    - ooda
+    - issue-1680
+  priority: high
+steps:
+  - name: Run the standalone dashboard ooda-cycles lifetime-count regression script
+    agent: cli-agent
+    action: run
+    params:
+      command: bash
+      args:
+        - scripts/qa-dashboard-ooda-cycles-lifetime-count.sh
+    timeout: 240000

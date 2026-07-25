@@ -214,6 +214,25 @@ pub enum MemoryRequest {
         limit: u32,
         min_confidence: f64,
     },
+    /// Forward six-signal ranked recall to the daemon's library backend (issue
+    /// #2329). Without this variant the socket client had no
+    /// `recall_facts_ranked` override and fell back to the trait default →
+    /// [`SearchFacts`](MemoryRequest::SearchFacts), so the primary *production*
+    /// path (OODA ⇄ daemon over the socket) silently degraded ranked recall to
+    /// word-boundary-gated keyword search — discarding the phase-weighted
+    /// ranking AND its `recall_precision_at_k` metric, both of which live only
+    /// in [`LibraryCognitiveMemory::recall_facts_ranked`]. This is the same
+    /// additive-socket-forward fix as `list_all_episodes` (#2627): the client is
+    /// a transport to a library backend, so it must forward the library override
+    /// rather than collapse to the empty/gated trait default. `weights` carries
+    /// the per-[`OodaPhase`](crate::ooda_loop::OodaPhase) recall weighting across
+    /// the wire. Returns [`MemoryResponse::Facts`].
+    RecallFactsRanked {
+        query: String,
+        limit: u32,
+        min_confidence: f64,
+        weights: crate::cognitive_memory::RecallWeightSet,
+    },
     StoreProcedure {
         name: String,
         steps: Vec<String>,

@@ -167,6 +167,15 @@ pub struct LibraryCognitiveMemory {
     /// memory under `$HOME/.simard` (issues #1923 / #1925).
     #[cfg_attr(not(test), allow(dead_code))]
     state_root: Option<std::path::PathBuf>,
+    /// Cross-process open-serialization guard (issue: lbug lock-contention
+    /// mistaken for corruption). Held for the lifetime of this handle so no
+    /// other process can open the same store concurrently and trip lbug's
+    /// lock-conflict-as-corruption rebuild (which wipes memory). Declared
+    /// **last** so it drops **after** `inner` — the advisory `flock` is
+    /// released only once the underlying lbug store has finished closing and
+    /// dropped its own PID lock. `None` for the in-memory test constructor.
+    #[allow(dead_code)]
+    open_guard: Option<super::open_guard::CognitiveOpenGuard>,
 }
 
 impl LibraryCognitiveMemory {
@@ -182,6 +191,16 @@ impl LibraryCognitiveMemory {
     /// Returns [`SimardError::PersistentStoreIo`] if the underlying LadybugDB
     /// store cannot be opened.
     pub fn open(state_root: &Path) -> SimardResult<Self> {
+        // Serialize cross-process opens BEFORE touching the library. lbug takes
+        // a POSIX/PID lock on the store and mis-classifies a lock conflict from
+        // a *second* concurrent process as catalog corruption — quarantining the
+        // DB and rebuilding it EMPTY. Acquiring this guard first means the
+        // library never sees a concurrent open on this path: a transient race
+        // waits (bounded backoff) and then proceeds, and a genuinely
+        // still-held store makes us FAIL LOUD here rather than let the library
+        // wipe memory. Same-process re-opens share the guard (no self-deadlock).
+        let open_guard = super::open_guard::CognitiveOpenGuard::acquire(state_root)?;
+
         // Use the shared `LIVE_STORE_SUBDIR` constant (not a bare literal) so the
         // path the daemon opens and the verified-backup resolver `live_store_path`
         // are anchored to one source of truth and cannot silently drift (#2420).
@@ -200,6 +219,7 @@ impl LibraryCognitiveMemory {
             inner: Mutex::new(inner),
             fact_seq,
             state_root: Some(state_root.to_path_buf()),
+            open_guard: Some(open_guard),
         })
     }
 
@@ -230,6 +250,7 @@ impl LibraryCognitiveMemory {
             inner: Mutex::new(inner),
             fact_seq: AtomicU64::new(0),
             state_root: None,
+            open_guard: None,
         })
     }
 
@@ -450,6 +471,241 @@ fn to_library_weights(w: RecallWeightSet) -> RecallWeights {
 }
 
 // ---------------------------------------------------------------------------
+// Word-boundary episodic-recall relevance gate
+// ---------------------------------------------------------------------------
+
+/// Tokenize `text` into its set of distinct lowercase alphanumeric words.
+///
+/// Splitting on any run of non-alphanumeric characters (rather than only
+/// whitespace) means punctuation attached to a token is folded away — `"kafka,"`
+/// and `"kafka"` both yield the bare word `kafka`, and `"durable-recall"` yields
+/// `{durable, recall}`. Empty tokens produced by leading/trailing/repeated
+/// separators are dropped. This is the same tokenization
+/// [`crate::knowledge_context`] and [`crate::memory_consolidation::tokenize_objective`]
+/// use, so the recall gate scores relevance on the same word basis as the rest
+/// of the cognition stack.
+fn tokenize_words(text: &str) -> HashSet<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Minimum length a de-pluralized needle stem must clear before it is allowed to
+/// fold onto a content word (mirrors `knowledge_context`'s `MIN_TOKEN_LEN`), so a
+/// short token never collapses onto a one/zero-character fragment — e.g. `"is"`
+/// does not fold to `"i"`, and the fold can never re-introduce broad matching.
+const MIN_FOLDED_STEM_LEN: usize = 2;
+
+/// Minimum length a CLEAN (all-alphanumeric) query token must clear before it is
+/// admitted to a recall needle set. Mirrors `knowledge_context`'s `MIN_TOKEN_LEN`
+/// (which drops sub-threshold objective tokens before pack matching), so the
+/// whole cognition stack applies the same cut.
+///
+/// A single-character clean token (`"s"` from a possessive like "Rust's", an
+/// initial, or a stray list separator) is recall NOISE on the word-boundary
+/// gate: `needle_matches_word` accepts it via `word.starts_with(needle)`, so it
+/// matches EVERY content word beginning with that character — floating unrelated
+/// episodes/facts into the capped turn/OODA working-context recall and dragging
+/// recall precision (and effective distillation fact-yield) down. Dropping such
+/// tokens closes that leak without touching the inflectional/plural recall a
+/// two-or-more-character token still drives. RAW tokens (markers, hyphenated
+/// concepts) are never length-cut — they keep the library's exact substring
+/// semantics their callers store and re-filter on.
+const MIN_CLEAN_NEEDLE_LEN: usize = 2;
+
+/// `true` iff query token `needle` is relevant to a single content `word` — the
+/// per-(needle, word) predicate [`shares_word_prefix`] applies across the query
+/// word set and the tokenized content.
+///
+/// Two match shapes, in precedence order:
+///  1. **Word-boundary prefix** (`word.starts_with(needle)`): the primary gate,
+///     which preserves the inflectional recall the live path depends on — a
+///     query stem still recalls its inflected forms (`deploy` → "deployed" /
+///     "deploys" / "deployment", `sync` → "syncing"). This also covers the
+///     additive regular plural (`test` → "tests", `box` → "boxes").
+///  2. **Conservative singular/plural fold by EQUALITY**: closes the direction
+///     the prefix rule alone cannot — a PLURAL query token recalling the
+///     SINGULAR content word (`tests` → "test", `caches` → "cache",
+///     `categories` → "category"), plus the shape-changing `-y`↔`-ies` pair in
+///     both directions (`category` → "categories"). Folding matches only on
+///     whole-word EQUALITY of a generated variant (never a prefix) and only when
+///     the stem clears [`MIN_FOLDED_STEM_LEN`], so — unlike a prefix on a
+///     stripped stem — it cannot re-introduce the interior over-matching the
+///     word-boundary rule removed. This is the same guarded folding
+///     `knowledge_context::token_matches_pack` applies to pack selection
+///     (PR #4241 lineage), now extended to episodic/keyword/fact recall so the
+///     whole cognition stack folds regular plurals uniformly.
+///
+/// Both arguments are already lowercase (the caller lowercases content words and
+/// [`tokenize_words`] lowercases needles); the variants operate on ASCII
+/// inflectional endings only.
+fn needle_matches_word(needle: &str, word: &str) -> bool {
+    if word.starts_with(needle) {
+        return true;
+    }
+    // Subtractive regular plural: plural needle → singular content word. `-es`
+    // is tried before `-s` so a base is not over-generated (`caches` also folds
+    // via `-s` → "cache", which the OR below still reaches).
+    if needle
+        .strip_suffix("es")
+        .filter(|s| s.len() >= MIN_FOLDED_STEM_LEN)
+        .is_some_and(|s| s == word)
+        || needle
+            .strip_suffix('s')
+            .filter(|s| s.len() >= MIN_FOLDED_STEM_LEN)
+            .is_some_and(|s| s == word)
+    {
+        return true;
+    }
+    // `-y` ↔ `-ies`, both directions (the stem changes, so the prefix branch
+    // misses these): `categories` → "category" and `category` → "categories".
+    if needle
+        .strip_suffix("ies")
+        .filter(|s| s.len() >= MIN_FOLDED_STEM_LEN)
+        .is_some_and(|s| word.strip_suffix('y') == Some(s))
+    {
+        return true;
+    }
+    if needle.len() > MIN_FOLDED_STEM_LEN
+        && needle
+            .strip_suffix('y')
+            .is_some_and(|s| word.strip_suffix("ies") == Some(s))
+    {
+        return true;
+    }
+    false
+}
+
+/// `true` iff `content` shares a keyword with the query at a WORD BOUNDARY: some
+/// `needle` query token matches a whole word in `content` per
+/// [`needle_matches_word`] — a word-boundary prefix, or a conservative
+/// singular/plural fold.
+///
+/// This is the episodic-recall relevance gate. It replaces a raw-substring gate
+/// (`content.to_lowercase().contains(kw)`) that matched a query token wherever
+/// it was embedded — including the INTERIOR or SUFFIX of an unrelated content
+/// word (`act` in "reactor" / "contract", `test` in "latest", `own` in
+/// "download"), floating off-topic episodes into the ranked set that feeds the
+/// OODA cycle's working context and degrading recall precision.
+///
+/// Anchoring the match to a word boundary removes those interior/suffix false
+/// positives while PRESERVING the inflectional recall the live path depends on
+/// (`deploy` → "deployed"), and — via the fold in [`needle_matches_word`] — also
+/// recalls the singular form of a plural query token (`tests` → "test"), the
+/// asymmetry a prefix-only gate leaves open. A pure whole-word (equality) gate
+/// would drop the inflectional recalls; a raw substring gate admits interior
+/// noise. This aligns episodic recall with the word-boundary + plural-folding
+/// policy adopted elsewhere in the cognition stack
+/// (`knowledge_context::relevance_score`, `memory_consolidation::classifier`,
+/// `fact_reliability`; PR #4241 lineage).
+///
+/// `needles` is the pre-tokenized query word set (see [`tokenize_words`]);
+/// `content` is tokenized on the same word basis. Content with no alphanumeric
+/// words shares nothing and is gated out.
+fn shares_word_prefix(content: &str, needles: &HashSet<String>) -> bool {
+    content
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .any(|w| {
+            let word = w.to_lowercase();
+            needles
+                .iter()
+                .any(|needle| needle_matches_word(needle, &word))
+        })
+}
+
+/// A `search_facts` query partitioned into the two token shapes the fact-recall
+/// relevance gate ([`fact_shares_query_relevance`]) treats differently — exactly
+/// mirroring the clean/raw partition [`LibraryCognitiveMemory::search_episodes_by_keywords`]
+/// already applies to keyword episode recall.
+struct FactQueryNeedles {
+    /// Whitespace tokens that are entirely alphanumeric — the shape a
+    /// natural-language recall query emits (a turn objective, `"rust"`,
+    /// `"project"`). These match at a WORD BOUNDARY (prefix of a whole word).
+    clean: HashSet<String>,
+    /// Whitespace tokens carrying any non-alphanumeric char — a concept label
+    /// (`"bug-pattern"`), a marker (`"journal:2026-07-18"`, `"goal-edge:blocks"`,
+    /// `"sub:abc"`), or a punctuated phrase. These keep the library's exact
+    /// case-insensitive SUBSTRING semantics their callers store and re-filter on.
+    raw: Vec<String>,
+}
+
+/// Partition a `search_facts` query into [`FactQueryNeedles`], lowercasing every
+/// token. Empty tokens (from repeated separators) are dropped. A token is CLEAN
+/// iff every character is alphanumeric AND it clears [`MIN_CLEAN_NEEDLE_LEN`]
+/// (a sub-threshold clean token is dropped as recall noise); otherwise it is RAW.
+fn partition_fact_query(query: &str) -> FactQueryNeedles {
+    let mut clean: HashSet<String> = HashSet::new();
+    let mut raw: Vec<String> = Vec::new();
+    for token in query.split_whitespace() {
+        let lowered = token.to_lowercase();
+        if lowered.is_empty() {
+            continue;
+        }
+        if lowered.chars().all(char::is_alphanumeric) {
+            // Drop a sub-threshold clean token: as a word-boundary PREFIX a lone
+            // character matches nearly every word, so it is recall noise — the
+            // same MIN_TOKEN_LEN cut `knowledge_context` applies to objective
+            // tokens. RAW tokens keep exact substring semantics and are never cut.
+            if lowered.len() >= MIN_CLEAN_NEEDLE_LEN {
+                clean.insert(lowered);
+            }
+        } else {
+            raw.push(lowered);
+        }
+    }
+    FactQueryNeedles { clean, raw }
+}
+
+/// `true` iff a fact is genuinely relevant to `needles` — the fact-recall
+/// relevance gate that closes the interior/suffix substring-recall gap on the
+/// FACT path, mirroring the word-boundary gate `recall_episodes_ranked` /
+/// `search_episodes_by_keywords` already apply to episode recall (PR #4241
+/// lineage).
+///
+/// The upstream library's `search_facts` matches a query token as a raw
+/// case-insensitive SUBSTRING of a fact's concept OR content, so a clean
+/// natural-language token floated facts in on the INTERIOR/SUFFIX of an
+/// unrelated word — `"act"` recalled "re**act**or" and "artif**act**", `"own"`
+/// recalled "d**own**load", `"test"` recalled "la**test**" — polluting the
+/// capped working-context recall the turn/OODA path (`base_type_turn::
+/// prepare_turn_context`) feeds to reasoning and dragging fact recall precision
+/// down. A fact is relevant iff:
+///
+///   * some CLEAN token is a prefix of a whole word in the concept OR content
+///     (word-boundary match) — this drops the interior/suffix noise while
+///     PRESERVING the inflectional recall the live path depends on (`deploy`
+///     still recalls "deployed"/"deploys"), OR
+///   * some RAW token is a case-insensitive substring of the concept OR content
+///     — preserving verbatim the exact concept/marker lookups (`"bug-pattern"`,
+///     `"journal:2026-07-18"`, `"goal-edge:blocks"`) their callers store and
+///     re-filter on.
+///
+/// Both fields are checked because the library matches a query against concept
+/// AND content, so gating on content alone would drop a legitimate concept hit.
+fn fact_shares_query_relevance(concept: &str, content: &str, needles: &FactQueryNeedles) -> bool {
+    if !needles.clean.is_empty()
+        && (shares_word_prefix(content, &needles.clean)
+            || shares_word_prefix(concept, &needles.clean))
+    {
+        return true;
+    }
+    if !needles.raw.is_empty() {
+        let content_lc = content.to_lowercase();
+        let concept_lc = concept.to_lowercase();
+        if needles
+            .raw
+            .iter()
+            .any(|kw| content_lc.contains(kw.as_str()) || concept_lc.contains(kw.as_str()))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------
 // Library record -> Simard DTO converters
 // ---------------------------------------------------------------------------
 
@@ -559,6 +815,9 @@ fn to_episode(e: EpisodicMemory) -> CognitiveEpisode {
         source_label: e.source_label,
         temporal_index: e.temporal_index,
         compressed: e.compressed,
+        // Carry the real wall-clock instant through so the dashboard
+        // "Recent Memories" panel can render "time ago" (issue #4383).
+        created_at: Some(e.created_at),
     }
 }
 
@@ -745,7 +1004,42 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
             top.retain(|f| f.confidence >= min_confidence);
             top
         } else {
-            guard.search_facts(query, limit as usize, min_confidence)
+            let needles = partition_fact_query(query);
+            if needles.clean.is_empty() && needles.raw.is_empty() {
+                // The query held ONLY sub-threshold clean tokens (e.g. a lone
+                // "s"/"a" from a possessive or initial); after the
+                // MIN_CLEAN_NEEDLE_LEN cut nothing survives to match on. Recall
+                // nothing rather than fall through to the library's raw-substring
+                // `search_facts`, which would match such a character as a
+                // substring of nearly every stored fact — a worse over-match than
+                // the word-boundary leak this cut removes.
+                Vec::new()
+            } else if needles.clean.is_empty() {
+                // Pure concept/marker query (every token carries a non-alphanumeric
+                // char — a hyphenated concept like `bug-pattern`, or a `journal:` /
+                // `goal-edge:` / `sub:` marker). Preserve the library's exact
+                // substring semantics AND its `limit` verbatim: these callers store
+                // and re-filter on that precise surface form, so the word-boundary
+                // gate does not apply and must add no behavior.
+                guard.search_facts(query, limit as usize, min_confidence)
+            } else {
+                // Natural-language (or mixed) query: apply the word-boundary
+                // relevance gate so a clean token no longer floats a fact in on the
+                // INTERIOR/SUFFIX of an unrelated word (`act` in "reactor", `own` in
+                // "download"), aligning FACT recall precision with the episodic
+                // recall gate (PR #4241 lineage). Truncation is deferred until AFTER
+                // the gate — the library is queried unbounded (`usize::MAX`) so a
+                // genuinely relevant fact ranked behind an interior-substring false
+                // positive is not dropped before the gate runs (mirroring
+                // `recall_episodes_ranked`), then the surviving set is capped to
+                // `limit`.
+                guard
+                    .search_facts(query, usize::MAX, min_confidence)
+                    .into_iter()
+                    .filter(|f| fact_shares_query_relevance(&f.concept, &f.content, &needles))
+                    .take(limit as usize)
+                    .collect()
+            }
         };
         Ok(facts.into_iter().map(to_fact).collect())
     }
@@ -1265,20 +1559,63 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         if keywords.is_empty() {
             return Ok(vec![]);
         }
-        let needles: Vec<String> = keywords.iter().map(|k| k.to_lowercase()).collect();
+        // Partition the query keywords by shape — a recall-quality gate that
+        // mirrors, for this flat keyword scan, the word-boundary relevance gate
+        // `recall_episodes_ranked` already applies:
+        //   * a CLEAN token (non-empty, every char alphanumeric — the shape the
+        //     natural-language callers emit, e.g. `creative_ideas` ->
+        //     "meeting"/"conversation"/"decision", and `tokenize_objective`) is
+        //     matched at a WORD BOUNDARY via `shares_word_prefix`, so a token
+        //     merely embedded in the interior/suffix of an unrelated content word
+        //     ("test" in "latest", "own" in "download", "decision" in
+        //     "indecision") no longer floats an off-topic episode into recall;
+        //   * a keyword carrying ANY non-alphanumeric char — a phrase or,
+        //     crucially, a bracketed provenance MARKER (`[reflect-occ=…]`,
+        //     `[reflect-key=…|…]`) that `memory_consolidation::reflection_lessons`
+        //     dedup relies on — keeps the exact case-insensitive SUBSTRING
+        //     semantics its callers re-filter on (`content.contains(marker)`).
+        // This closes the substring-recall gap on the clean-token callers while
+        // preserving, by construction, the exact-marker substring path the flat
+        // scan was deliberately kept on.
+        let mut clean_needles: HashSet<String> = HashSet::new();
+        let mut raw_needles: Vec<String> = Vec::new();
+        for keyword in keywords {
+            let lowered = keyword.to_lowercase();
+            if lowered.is_empty() {
+                continue;
+            }
+            if lowered.chars().all(char::is_alphanumeric) {
+                // Drop a sub-threshold clean keyword (a lone character): as a
+                // word-boundary PREFIX it matches nearly every content word, so it
+                // is recall noise. RAW marker keywords are never length-cut.
+                if lowered.len() >= MIN_CLEAN_NEEDLE_LEN {
+                    clean_needles.insert(lowered);
+                }
+            } else {
+                raw_needles.push(lowered);
+            }
+        }
+        if clean_needles.is_empty() && raw_needles.is_empty() {
+            return Ok(vec![]);
+        }
+        let has_clean = !clean_needles.is_empty();
         // Include compressed episodes so consolidation sources remain recallable
         // by keyword (matching native, whose query has no compressed filter).
         // `get_episodes` already returns newest-first by `temporal_index`.
-        // `take(limit)` short-circuits the per-episode lowercase/contains scan
-        // (and the DTO conversion) once `limit` matches are found, instead of
-        // converting every match and truncating afterwards.
+        // `take(limit)` short-circuits the per-episode scan (and the DTO
+        // conversion) once `limit` matches are found, instead of converting every
+        // match and truncating afterwards. The `has_clean` guard skips the
+        // word-boundary tokenization entirely on the marker-only path
+        // (`reflection_lessons::count_recurring_failures` scans with
+        // `limit = u32::MAX`), so that path does no extra work.
         let episodes: Vec<CognitiveEpisode> = self
             .lock()?
             .get_episodes(usize::MAX, true)
             .into_iter()
             .filter(|e| {
                 let content = e.content.to_lowercase();
-                needles.iter().any(|kw| content.contains(kw))
+                (has_clean && shares_word_prefix(&content, &clean_needles))
+                    || raw_needles.iter().any(|kw| content.contains(kw))
             })
             .take(limit as usize)
             .map(to_episode)
@@ -1306,18 +1643,33 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         // `&mut self`, so we still lock for write. `limit = usize::MAX` defers
         // truncation until *after* the keyword gate, so a relevant episode
         // ranked behind recent noise is not dropped before the gate runs.
-        let needles: Vec<String> = query
-            .split_whitespace()
-            .map(str::to_lowercase)
-            .filter(|s| !s.is_empty())
+        //
+        // The relevance gate is WORD-BOUNDARY, not raw substring: a query token
+        // gates an episode in only when it is a prefix of a whole word in the
+        // episode's content, not when it is merely *embedded* in the interior or
+        // suffix of an unrelated word (`act` in "reactor" / "contract", `test`
+        // in "latest", `own` in "download"). Substring matching floated such
+        // off-topic episodes into the ranked set that feeds the OODA cycle's
+        // working context, degrading recall precision. Anchoring to a word
+        // boundary preserves the inflectional recall the path depends on
+        // (`deploy` still recalls "deployed" / "deploys") while dropping the
+        // interior/suffix noise — aligning episodic recall with the
+        // word-boundary policy adopted by `knowledge_context::relevance_score`,
+        // `memory_consolidation::classifier`, and `fact_reliability` (PR #4241
+        // lineage). Tokenizing the query on non-alphanumeric runs (not only
+        // whitespace) also folds any punctuation attached to a query token onto
+        // its bare word so it can still match. Sub-threshold (single-char) clean
+        // tokens are then dropped (MIN_CLEAN_NEEDLE_LEN) so a lone char like "s"
+        // from "Rust's" cannot prefix-match every s-word — the same cut
+        // `knowledge_context` applies to objective tokens.
+        let needles: HashSet<String> = tokenize_words(query)
+            .into_iter()
+            .filter(|t| t.len() >= MIN_CLEAN_NEEDLE_LEN)
             .collect();
         if needles.is_empty() {
             return Ok(vec![]);
         }
-        let matches_kw = |content: &str| {
-            let c = content.to_lowercase();
-            needles.iter().any(|kw| c.contains(kw))
-        };
+        let matches_kw = |content: &str| shares_word_prefix(content, &needles);
 
         let options = RecallOptions {
             limit: usize::MAX,
@@ -1477,5 +1829,294 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         // a subsequent reopen of the same path observes all committed writes.
         self.lock()?.close();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod word_boundary_gate_tests {
+    use super::{shares_word_prefix, tokenize_words};
+
+    #[test]
+    fn tokenize_words_folds_case_and_punctuation() {
+        let words = tokenize_words("Deploy, the durable-recall PATH!");
+        // Lowercased, split on every non-alphanumeric run (so the comma, the
+        // hyphen and the trailing `!` are separators), empties dropped.
+        for expected in ["deploy", "the", "durable", "recall", "path"] {
+            assert!(
+                words.contains(expected),
+                "missing {expected:?} in {words:?}"
+            );
+        }
+        assert_eq!(words.len(), 5, "distinct words only: {words:?}");
+    }
+
+    #[test]
+    fn tokenize_words_empty_for_no_alphanumerics() {
+        assert!(tokenize_words("   ,.;-—  ").is_empty());
+        assert!(tokenize_words("").is_empty());
+    }
+
+    #[test]
+    fn shares_word_prefix_rejects_interior_and_suffix_embedding() {
+        let needles = tokenize_words("act test own");
+        // Every match would be interior/suffix, not a word-boundary prefix.
+        assert!(!shares_word_prefix(
+            "the reactor signed a contract",
+            &needles
+        ));
+        assert!(!shares_word_prefix("the latest greatest contest", &needles));
+        assert!(!shares_word_prefix("download the file", &needles));
+    }
+
+    #[test]
+    fn shares_word_prefix_accepts_word_boundary_match() {
+        let needles = tokenize_words("act log own");
+        assert!(shares_word_prefix("we act on the alert", &needles));
+        assert!(shares_word_prefix("check the log file", &needles));
+        assert!(shares_word_prefix("this is my own note", &needles));
+    }
+
+    #[test]
+    fn shares_word_prefix_preserves_inflectional_recall() {
+        // A query stem must still recall its inflected forms — the recall the
+        // live OODA path depends on (a pure whole-word/equality gate would drop
+        // these).
+        let needles = tokenize_words("deploy");
+        assert!(shares_word_prefix("deployed the payment service", &needles));
+        assert!(shares_word_prefix("two deploys ran today", &needles));
+        assert!(shares_word_prefix("the deployment succeeded", &needles));
+        // But an unrelated interior embedding of the stem is still rejected.
+        assert!(!shares_word_prefix("we redeployed nothing new", &needles));
+    }
+
+    #[test]
+    fn shares_word_prefix_is_case_insensitive_and_punctuation_tolerant() {
+        let needles = tokenize_words("authentication");
+        // ALL-CAPS content, punctuation-attached word — still a boundary match.
+        assert!(shares_word_prefix(
+            "DEPLOYED THE AUTHENTICATION, OK",
+            &needles
+        ));
+    }
+
+    #[test]
+    fn shares_word_prefix_false_on_empty_content() {
+        let needles = tokenize_words("deploy");
+        assert!(!shares_word_prefix("", &needles));
+        assert!(!shares_word_prefix("   ...   ", &needles));
+    }
+
+    #[test]
+    fn shares_word_prefix_folds_plural_query_onto_singular_content() {
+        // The asymmetry a prefix-only gate leaves open: a PLURAL query token must
+        // recall the SINGULAR-form content word. Prefix alone misses these
+        // (`"test".starts_with("tests")` is false); the conservative singular
+        // fold closes it.
+        assert!(shares_word_prefix(
+            "wrote a test for the parser",
+            &tokenize_words("tests")
+        ));
+        assert!(shares_word_prefix(
+            "warmed the cache on startup",
+            &tokenize_words("caches")
+        ));
+        assert!(shares_word_prefix(
+            "the box was shipped",
+            &tokenize_words("boxes")
+        ));
+    }
+
+    #[test]
+    fn shares_word_prefix_folds_y_ies_both_directions() {
+        // The `-y` ↔ `-ies` pair changes the stem, so the prefix branch misses it
+        // in BOTH directions; the fold handles each.
+        assert!(shares_word_prefix(
+            "the category was wrong",
+            &tokenize_words("categories")
+        ));
+        assert!(shares_word_prefix(
+            "ran several categories of checks",
+            &tokenize_words("category")
+        ));
+    }
+
+    #[test]
+    fn shares_word_prefix_fold_does_not_reintroduce_interior_matching() {
+        // Folding matches only on whole-word EQUALITY of a generated variant, so a
+        // stripped stem must NOT prefix-match an unrelated longer word: the stem
+        // "bus" (from the plural "buses") must not surface "business".
+        assert!(!shares_word_prefix(
+            "the business plan shipped",
+            &tokenize_words("buses")
+        ));
+        // A plural query must not fold onto a same-prefix but distinct word:
+        // "tests" (stem "test") must not gate in "testing".
+        assert!(!shares_word_prefix(
+            "the testing harness is flaky",
+            &tokenize_words("tests")
+        ));
+    }
+
+    #[test]
+    fn shares_word_prefix_short_token_never_folds_to_fragment() {
+        // A short token cannot collapse onto a one/zero-character stem: `"is"`
+        // must not fold to `"i"` and gate in an episode that merely contains "i".
+        assert!(!shares_word_prefix("i wrote it", &tokenize_words("is")));
+    }
+}
+
+#[cfg(test)]
+mod fact_query_gate_tests {
+    use super::{fact_shares_query_relevance, partition_fact_query};
+
+    #[test]
+    fn partition_splits_clean_and_raw_tokens() {
+        // Clean natural-language words fold to lowercase in the clean set; a
+        // hyphenated concept and a colon marker land in the raw set verbatim
+        // (lowercased); empty tokens from repeated separators are dropped.
+        let n = partition_fact_query("Reactor  bug-pattern journal:2026-07-18 OWNS");
+        assert!(n.clean.contains("reactor"));
+        assert!(n.clean.contains("owns"));
+        assert_eq!(n.clean.len(), 2, "clean: {:?}", n.clean);
+        assert!(n.raw.contains(&"bug-pattern".to_string()));
+        assert!(n.raw.contains(&"journal:2026-07-18".to_string()));
+        assert_eq!(n.raw.len(), 2, "raw: {:?}", n.raw);
+    }
+
+    #[test]
+    fn clean_token_gate_rejects_interior_and_suffix_but_keeps_word_boundary() {
+        // `act` must not float a fact in on the interior of "reactor"/"artifact"
+        // or the suffix of a word, but must keep a genuine word-boundary hit.
+        let n = partition_fact_query("act");
+        assert!(!fact_shares_query_relevance(
+            "bug-pattern",
+            "the reactor overheated badly",
+            &n
+        ));
+        assert!(!fact_shares_query_relevance(
+            "bug-pattern",
+            "download the latest artifact",
+            &n
+        ));
+        assert!(fact_shares_query_relevance(
+            "bug-pattern",
+            "act quickly on failures",
+            &n
+        ));
+    }
+
+    #[test]
+    fn clean_token_gate_preserves_inflectional_recall() {
+        // A stem still recalls its inflected forms (the live-path recall a pure
+        // whole-word gate would drop).
+        let n = partition_fact_query("deploy");
+        assert!(fact_shares_query_relevance(
+            "lesson-learned",
+            "deployed the payment service",
+            &n
+        ));
+        assert!(fact_shares_query_relevance(
+            "lesson-learned",
+            "two deploys ran today",
+            &n
+        ));
+    }
+
+    #[test]
+    fn clean_token_gate_matches_on_concept_field_too() {
+        // The library matches a query against concept AND content, so a clean
+        // token that is a word-boundary prefix of the CONCEPT keeps the fact even
+        // when the content shares nothing.
+        let n = partition_fact_query("pr");
+        assert!(fact_shares_query_relevance(
+            "pr-pattern",
+            "unrelated body text",
+            &n
+        ));
+    }
+
+    #[test]
+    fn raw_token_gate_preserves_marker_substring_semantics() {
+        // A colon marker keeps the library's exact substring lookup — matched
+        // against either field — so marker/concept callers are unaffected.
+        let n = partition_fact_query("journal:2026-07-18");
+        assert!(n.clean.is_empty());
+        assert!(fact_shares_query_relevance(
+            "journal:2026-07-18",
+            "{\"body\":\"...\"}",
+            &n
+        ));
+        assert!(!fact_shares_query_relevance(
+            "journal:2026-07-19",
+            "unrelated",
+            &n
+        ));
+    }
+
+    #[test]
+    fn mixed_query_keeps_fact_via_either_clean_or_raw_token() {
+        // A mixed query gates the clean token at a word boundary while still
+        // honoring the raw marker substring.
+        let n = partition_fact_query("reactor goal-edge:blocks");
+        // Kept via the clean word-boundary token.
+        assert!(fact_shares_query_relevance(
+            "bug-pattern",
+            "the reactor tripped",
+            &n
+        ));
+        // Kept via the raw marker substring even though the clean token misses.
+        assert!(fact_shares_query_relevance(
+            "goal-edge:blocks",
+            "edge payload",
+            &n
+        ));
+        // Dropped: clean token only interior-embeds and no raw token matches.
+        assert!(!fact_shares_query_relevance(
+            "bug-pattern",
+            "subreactor note",
+            &n
+        ));
+    }
+
+    #[test]
+    fn partition_drops_sub_threshold_clean_tokens() {
+        // Single-char clean tokens (a possessive fragment, an initial, a stray
+        // separator) are recall noise on the word-boundary prefix gate, so they
+        // are dropped; a two-or-more-char clean token is kept.
+        let n = partition_fact_query("s rust a session");
+        assert!(n.clean.contains("rust"));
+        assert!(n.clean.contains("session"));
+        assert_eq!(
+            n.clean.len(),
+            2,
+            "single-char clean tokens must be dropped, clean: {:?}",
+            n.clean
+        );
+        assert!(n.raw.is_empty(), "raw: {:?}", n.raw);
+    }
+
+    #[test]
+    fn partition_never_length_cuts_raw_tokens() {
+        // The cut applies only to CLEAN tokens — RAW tokens keep exact substring
+        // semantics regardless of length (a short colon/hyphen marker survives).
+        let n = partition_fact_query("x: y-z");
+        assert!(n.clean.is_empty(), "clean: {:?}", n.clean);
+        assert!(n.raw.contains(&"x:".to_string()), "raw: {:?}", n.raw);
+        assert!(n.raw.contains(&"y-z".to_string()), "raw: {:?}", n.raw);
+    }
+
+    #[test]
+    fn sub_threshold_only_query_matches_nothing() {
+        // A query of only sub-threshold clean tokens leaves both needle sets
+        // empty, so the gate matches nothing — the `search_facts` caller turns
+        // this into an empty recall rather than a raw-substring flood where the
+        // lone char matches every fact containing an s-word.
+        let n = partition_fact_query("s");
+        assert!(n.clean.is_empty() && n.raw.is_empty());
+        assert!(!fact_shares_query_relevance(
+            "session",
+            "the s3 storage layer synced",
+            &n
+        ));
     }
 }

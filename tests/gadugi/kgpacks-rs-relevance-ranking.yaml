@@ -1,0 +1,56 @@
+name: "kgpacks-rs relevance ranking (recall quality)"
+description: "Outside-in coverage for the native Rust knowledge client's recall-quality relevance ranking: native_knowledge::query_articles must rank candidate articles by keyword COVERAGE (title hits weighted above content-only mentions) so the most on-topic article survives the query `limit` cut instead of being crowded out by an arbitrary earlier-in-table single-keyword row. This feeds the reasoner's planning context (enrich_planning_context -> knowledge.query), a recall axis of the standing cognition-improvement goal. See Specs/agent-kgpacks-rs-parity.md."
+version: "1.0.0"
+
+config:
+  timeout: 600000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 600000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "native knowledge query ranks the most on-topic article within the limit"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/kgpacks-rs-relevance-ranking.sh"
+    timeout: 600000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "kgpacks-rs"
+    - "knowledge"
+    - "recall"
+    - "ranking"
+    - "cognition"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

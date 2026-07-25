@@ -1,0 +1,108 @@
+# Scheduled CI-health sweep (goal steward-ci-github-actions-health-across-all-gov).
+#
+# The recurring, unattended half of the CI-health stewardship goal. Decoupled
+# from PR gating: on a cadence it runs `simard ci-health` over every active
+# default-branch workflow across the governed fleet (Simard + sibling repos),
+# and with --file-issues it files ONE deduplicated tracking issue per distinct
+# actionable failure (embedding a root-cause block) and closes any tracking
+# issue whose workflow is green again. This is the "a recurring CI-health check
+# exists so regressions are caught without a human" done-gate of the owning
+# workstream (issue #4172): a fleet regression is turned into a tracked,
+# deduplicated issue here instead of waiting for a person to run the sweep.
+#
+# Mirrors advisory-scan.yml (the supply-chain steward's scheduled runner).
+#
+# See docs/reference/ci-health-sweep.md § Scheduled recurring sweep.
+name: ci-health
+
+on:
+  schedule:
+    - cron: "17 5 * * *" # daily 05:17 UTC (offset from advisory-scan's 06:00)
+  workflow_dispatch: {} # manual trigger for testing / on-demand sweeps
+
+permissions:
+  contents: read # read-only: the sweep never pushes
+  issues: write # file / close tracking issues in this repo
+
+# Never let two runs race on the same tracking issues.
+concurrency:
+  group: ci-health
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out default branch
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Prepare Rust runner (free disk, swap, mold, rust)
+        uses: ./.github/actions/rust-runner-prep
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Restore the SAME warm shared cache that main writes for verify.yml
+          # (single writer is main; see verify.yml `shared-key: simard-ci-v2`).
+          # Without this the sweep uses a default job-scoped key that never
+          # matches, so it rebuilds the whole `simard` monolith from scratch —
+          # a cold build that overran this job's 20-minute timeout and cancelled
+          # the sweep. Restoring the warm cache rebuilds the dev-profile binary
+          # in a few minutes instead, keeping the daily sweep well inside budget.
+          shared-key: simard-ci-v2
+          # Read-only: the scheduled sweep must never poison the shared PR/verify
+          # build cache with its default-branch build artifacts.
+          save-if: "false"
+          # lbug's prebuilt static archive lives here; rust-cache restores around
+          # but evicts the copy inside the registry-source tree, so provision it
+          # explicitly below (mirrors verify.yml's fallback rebuild).
+          cache-directories: |
+            ~/.cache/simard-lbug-precommit
+
+      - name: Provision lbug native static library link path
+        # `simard` links the native `liblbug.a`. rust-cache evicts lbug's
+        # in-registry prebuilt archive while keeping the build-script output that
+        # references it, so a warm-cache build would otherwise fail to link (or
+        # fall back to a slow from-source lbug rebuild). Point lbug at a stable
+        # prebuilt copy via LBUG_LIBRARY_DIR/INCLUDE_DIR — the single source of
+        # truth used by verify.yml — and drop stale lbug build fingerprints so
+        # the build script re-runs against the provisioned path.
+        shell: bash
+        run: |
+          lib_dir="$HOME/.cache/simard-lbug-precommit/lib"
+          scripts/provision-lbug-prebuilt.sh "$lib_dir" >/dev/null
+          echo "LBUG_LIBRARY_DIR=$lib_dir" >> "$GITHUB_ENV"
+          echo "LBUG_INCLUDE_DIR=$lib_dir" >> "$GITHUB_ENV"
+          rm -rf target/*/build/lbug-* target/*/.fingerprint/lbug-* 2>/dev/null || true
+
+      - name: Run CI-health sweep (detect, file/resolve deduplicated tracking issues)
+        env:
+          # Cross-repo issue writes (a sibling repo's failure files an issue in
+          # THAT repo) need a token with fleet-wide `issues:write`; the default
+          # GITHUB_TOKEN is scoped to this repo only. Prefer the dedicated bot
+          # token, falling back to the default so the green path (and Simard's
+          # own issues) still works. When a sibling is red and the bot token is
+          # absent, the cross-repo `gh issue create` is denied
+          # ("Resource not accessible by integration"); the sweep now records
+          # that as a *reported unauthorized skip* (loud stderr line + the
+          # sibling still appears in the printed FleetReport) and continues —
+          # rather than aborting, which used to fail the whole run. That abort
+          # turned Simard's own scheduled ci-health run red on ANY sibling
+          # failure, which the next sweep re-detected as a fresh actionable
+          # failure: the exact self-referential loop --exit-zero exists to
+          # avoid. Fail-safe (the failure is surfaced), not fail-open (it is not
+          # silently dropped) and not self-defeating (it no longer reddens this
+          # run). Configure STEWARD_GH_TOKEN to actually FILE those cross-repo
+          # issues; absent it, they are reported-and-skipped. A genuine gh/parse
+          # error (not an authorization denial) still fails the run loud.
+          GH_TOKEN: ${{ secrets.STEWARD_GH_TOKEN || github.token }}
+        # --no-cache: a scheduled sweep always re-audits every repo (no green-SHA
+        #             skips), so a regression is caught the same day it lands.
+        # --file-issues: the human-free alarm — dedupe each distinct failure to
+        #                one tracking issue, and close recovered ones.
+        # --exit-zero: a red fleet is reported via the filed tracking issue, not
+        #              a red run; letting this run go red would itself become an
+        #              actionable failure the next sweep re-detects. An actual
+        #              gh/parse error still fails the run.
+        run: cargo run --locked --bin simard -- ci-health --no-cache --file-issues --exit-zero

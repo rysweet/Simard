@@ -117,15 +117,69 @@ pub struct OverseerThreadStatus {
 impl OverseerThreadStatus {
     /// Build the synthetic status row for the acting Overseer meta-thread (which
     /// is driven directly by the daemon loop, not the [`Mind`](crate::cognitive_threads::Mind)
-    /// scheduler). `last_success` reflects the just-completed tick.
-    pub fn overseer_meta(cadence_secs: u64, last_success: bool) -> Self {
+    /// scheduler), deriving its health from the just-completed tick `report`.
+    ///
+    /// Health mapping (#4080 + #893 self-healing):
+    ///   * completed tick (no cycle failure — including an *isolated* act error,
+    ///     `cycle_failed == false`) → `"ok"`
+    ///   * **transient** cycle failure, `consecutive_transient <= ceiling` →
+    ///     `"backoff"` (self-healing: `backoff_until = now + cadence`,
+    ///     `consecutive_errors = 0`)
+    ///   * transient cycle failure, `consecutive_transient > ceiling` →
+    ///     `"erroring"` (SR-2 bounded self-healing — a hard-down dependency
+    ///     cannot hide behind an infinite backoff)
+    ///   * fatal / panicked cycle failure → `"erroring"`
+    ///
+    /// `consecutive_transient` is the running count of *consecutive* transient
+    /// failures INCLUDING the current tick; the daemon owns it (reset to 0 on any
+    /// completed tick, incremented on a transient failure, left unchanged on a
+    /// fatal failure). A panic is never transient.
+    pub fn overseer_meta(
+        cadence_secs: u64,
+        report: &OverseerTickReport,
+        consecutive_transient: u32,
+        transient_ceiling: u32,
+    ) -> Self {
         let now = chrono::Utc::now();
-        let consecutive_errors = u32::from(!last_success);
         let last_run = Some(rfc3339(now));
         let next_due = Some(rfc3339(
             now + chrono::Duration::seconds(cadence_secs as i64),
         ));
-        let health = derive_health(true, None, consecutive_errors, last_run.as_deref());
+
+        // A panic OR a `run_cycle` Err is a genuine cycle failure. An isolated
+        // per-intervention act error leaves `cycle_failed == false` (#4080) and
+        // stays "ok".
+        let cycle_failed = report.panicked || report.cycle_failed;
+        let last_success = !cycle_failed;
+
+        // Self-heal only a TRANSIENT failure, never a panic, and only while the
+        // consecutive-transient count stays within the configured ceiling.
+        let self_healing = cycle_failed
+            && report.transient_cycle_failure
+            && !report.panicked
+            && consecutive_transient <= transient_ceiling;
+
+        let (consecutive_errors, backoff_until) = if !cycle_failed {
+            (0, None)
+        } else if self_healing {
+            // Arm backoff one cadence out; do NOT accrue the erroring counter.
+            (
+                0,
+                Some(rfc3339(
+                    now + chrono::Duration::seconds(cadence_secs as i64),
+                )),
+            )
+        } else {
+            // Fatal, panicked, or ceiling-exceeded transient → erroring.
+            (1, None)
+        };
+
+        let health = derive_health(
+            true,
+            backoff_until.as_deref(),
+            consecutive_errors,
+            last_run.as_deref(),
+        );
         Self {
             id: "overseer".to_string(),
             enabled: true,
@@ -133,7 +187,7 @@ impl OverseerThreadStatus {
             next_due,
             last_success: Some(last_success),
             consecutive_errors,
-            backoff_until: None,
+            backoff_until,
             health,
         }
     }
@@ -645,14 +699,68 @@ mod tests {
 
     #[test]
     fn overseer_meta_thread_reflects_tick_success() {
-        let ok = OverseerThreadStatus::overseer_meta(900, true);
+        use crate::overseer::config::DEFAULT_OVERSEER_TRANSIENT_BACKOFF_CEILING as CEIL;
+
+        let clean = OverseerTickReport::default();
+        let ok = OverseerThreadStatus::overseer_meta(900, &clean, 0, CEIL);
         assert_eq!(ok.id, "overseer");
         assert_eq!(ok.health, "ok");
         assert_eq!(ok.consecutive_errors, 0);
 
-        let bad = OverseerThreadStatus::overseer_meta(900, false);
+        let failed = OverseerTickReport {
+            cycle_failed: true,
+            ..OverseerTickReport::default()
+        };
+        let bad = OverseerThreadStatus::overseer_meta(900, &failed, 0, CEIL);
         assert_eq!(bad.health, "erroring");
         assert_eq!(bad.consecutive_errors, 1);
+    }
+
+    /// The daemon derives the overseer meta-thread's health from a tick report.
+    /// Per #4080 an isolated per-intervention `act` error (counted in `errors`)
+    /// must NOT drag the thread into "erroring", while a genuine cycle failure or
+    /// panic must. (#893 adds the transient self-heal rung, pinned separately in
+    /// `tests_self_healing`; these cases carry no transient flag.)
+    fn meta_health_for(report: &OverseerTickReport) -> String {
+        use crate::overseer::config::DEFAULT_OVERSEER_TRANSIENT_BACKOFF_CEILING as CEIL;
+        OverseerThreadStatus::overseer_meta(900, report, 0, CEIL).health
+    }
+
+    #[test]
+    fn isolated_errors_keep_the_meta_thread_ok_but_cycle_failure_errors_4080() {
+        // Isolated act error, cycle otherwise healthy → "ok" (the recovery path).
+        let isolated = OverseerTickReport {
+            errors: 1,
+            panicked: false,
+            cycle_failed: false,
+            ..OverseerTickReport::default()
+        };
+        assert_eq!(
+            meta_health_for(&isolated),
+            "ok",
+            "an isolated act error must not pin the meta-thread erroring (#4080)"
+        );
+
+        // Genuine cycle failure → "erroring".
+        let cycle_failed = OverseerTickReport {
+            errors: 1,
+            panicked: false,
+            cycle_failed: true,
+            ..OverseerTickReport::default()
+        };
+        assert_eq!(meta_health_for(&cycle_failed), "erroring");
+
+        // Panic → "erroring".
+        let panicked = OverseerTickReport {
+            panicked: true,
+            cycle_failed: true,
+            ..OverseerTickReport::default()
+        };
+        assert_eq!(meta_health_for(&panicked), "erroring");
+
+        // Clean tick → "ok".
+        let clean = OverseerTickReport::default();
+        assert_eq!(meta_health_for(&clean), "ok");
     }
 }
 

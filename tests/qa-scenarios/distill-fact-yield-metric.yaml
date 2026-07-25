@@ -1,0 +1,64 @@
+name: distill-fact-yield-metric
+app_type: cli
+description: |
+  Verify the durable `distill_fact_yield` self-metric (perpetual-cognition goal:
+  make distillation fact-yield observable). Fact-yield — promoted facts per input
+  episode — was previously visible only as inert `input_count`/`fact_count`
+  context on the binary `distill_success_rate` metric; there was no trendable
+  yield series. `distill_recent_episodes_with_runner` now records one
+  `distill_fact_yield` event per completed pass via `self_metrics::record_metric`,
+  mirroring `distill_reliability_gate` / `recall_precision_at_k`.
+
+  Behavior is proven by the hermetic in-crate unit tests this scenario drives:
+  the `fact_yield` helper is `facts / episodes` (and total at zero input) and the
+  `distill_fact_yield` context payload carries `{input_count, fact_count,
+  quarantined, fact_yield}`. The CLI runner rejects any non-zero exit, so a
+  failing test fails the scenario. No live-host state is mutated (the metric
+  recorder is `cfg!(test)`-gated to a no-op under test).
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+steps:
+  # fact_yield() math: promoted facts per input episode (25 → 3 == 0.12).
+  # First invocation may compile the test binary; subsequent filters reuse it.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_consolidation::distillation::unit_tests::fact_yield_is_facts_per_episode"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Totality: a zero-input pass yields 0.0 (guards the division; never panics).
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_consolidation::distillation::unit_tests::fact_yield_is_zero_when_no_input_episodes"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Metric context payload shape: {input_count, fact_count, quarantined, fact_yield}.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_consolidation::distillation::unit_tests::fact_yield_metric_context_shape"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

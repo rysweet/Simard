@@ -28,17 +28,16 @@ pub use operations::CarryoverVerification;
 pub use operations::{
     BoardPlacement, DEFAULT_SEED_GOALS, DEFAULT_STEWARD_SCORE, active_goals_as_records,
     add_active_goal, add_backlog_item, archive_completed, board_snapshot_hash,
-    clear_goal_assignment, default_seed_goals, enqueue_stewardship_issue, load_goal_board,
-    overwrite_memory_cache, persist_board, promote_to_active, read_latest_carryover,
-    record_as_active_goal, resolve_seed_goals, rollup_parent_progress, save_goal_board,
-    save_goal_board_with_removals, seed_board_from_seed_goals, seed_default_board,
-    simard_state_root, update_goal_progress, update_goal_progress_with_evidence,
-    verify_goal_carryover, write_goal_carryover,
+    clear_goal_assignment, default_seed_goals, load_goal_board, overwrite_memory_cache,
+    persist_board, promote_to_active, read_latest_carryover, record_as_active_goal,
+    resolve_seed_goals, rollup_parent_progress, save_goal_board, save_goal_board_with_removals,
+    seed_board_from_seed_goals, seed_default_board, simard_state_root, update_goal_progress,
+    update_goal_progress_with_evidence, verify_goal_carryover, write_goal_carryover,
 };
 pub use types::{
     ActiveGoal, BacklogItem, CARRYOVER_CONCEPT, GoalBoard, GoalCarryoverRecord, GoalEdge,
     GoalEdgeType, GoalNode, GoalProgress, MAX_ACTIVE_GOALS, STANDING_MARKER_PREFIX, WipRef,
-    description_marks_standing,
+    description_marks_research, description_marks_standing,
 };
 
 pub use decompose::{
@@ -60,9 +59,10 @@ pub use completion_gate::{
 
 pub use no_progress_breaker::{
     NO_PROGRESS_BLOCKED_PREFIX, NO_PROGRESS_BLOCKED_SUFFIX, NO_PROGRESS_BREAKER_THRESHOLD,
-    NoProgressResolution, NoProgressTracker, StuckGoalDisposition, is_bare_no_progress_block,
-    is_no_progress_marker, no_progress_blocked_reason, no_progress_blocked_reason_with_why,
-    obsolescence_reason, resolution_for_why, resolve_no_progress, verify_stuck_goal,
+    NoProgressResolution, NoProgressTracker, StuckGoalDisposition, humanize_block_reason,
+    is_bare_no_progress_block, is_no_progress_marker, no_progress_blocked_reason,
+    no_progress_blocked_reason_with_why, obsolescence_reason, resolution_for_why,
+    resolve_no_progress, verify_stuck_goal,
 };
 
 pub use no_progress_why::{Evidence, NoProgressClass, NoProgressWhy, NoProgressWhyReasoner};

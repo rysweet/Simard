@@ -262,8 +262,21 @@ mod tests {
     }
 
     #[test]
-    fn memory_pressure_returns_option() {
-        let _p = sample_memory_pressure();
+    fn memory_pressure_is_a_normalized_fraction_when_sampled() {
+        // Pressure is defined as `1 - available/total`, so any successful
+        // sample must be a finite fraction within [0.0, 1.0]. On platforms
+        // without `/proc/meminfo` the sample is `None` and the bounds check is
+        // vacuously satisfied.
+        if let Some(pressure) = sample_memory_pressure() {
+            assert!(
+                pressure.is_finite(),
+                "pressure must be finite, got {pressure}"
+            );
+            assert!(
+                (0.0..=1.0).contains(&pressure),
+                "pressure must be a fraction in [0, 1], got {pressure}"
+            );
+        }
     }
 
     #[test]

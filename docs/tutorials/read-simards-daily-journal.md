@@ -6,7 +6,7 @@ description: >
   plain-language pull-request table, jump to another date, search across days, glance at a
   quiet-day entry, and peek at the raw stored record — so a newcomer understands what Simard
   did without reading logs.
-last_updated: 2026-07-06
+last_updated: 2026-07-17
 review_schedule: as-needed
 owner: simard
 doc_type: tutorial
@@ -112,6 +112,14 @@ GitHub's open pull-request list — just retold so anyone can follow it. (The ta
 Pick an earlier date from the **newest-first** list on the left (or use the date picker).
 The report for that day loads: its own overview, sections, moments, and PR table. Days are
 always ordered most-recent-first, so scrolling back in time is scrolling down the list.
+
+A day's entry **freezes** once the day passes — it stops regenerating. But the number of
+changes that *shipped* that day keeps updating: a background reconciliation pass revisits the
+last several past days each tick and folds in any pull requests that merged after the day's
+final write (or that landed before the merge-count wiring existed). So a past day's
+**merged** count reflects what really shipped that day, not a stale zero — it only ever
+climbs toward the truth, never down, and today is always left to the live tick
+([#4225](https://github.com/rysweet/Simard/issues/4225)).
 
 ## Step 4 — Search across days
 

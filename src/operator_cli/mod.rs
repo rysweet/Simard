@@ -137,7 +137,9 @@ Product modes:
   update
   self-test
   self-health            — post-deploy probes (version/memory/board/brains/quarantine)
-  ci-health [--json] [--no-cache]  — sweep active default-branch CI across the governed fleet (green-SHA cached)
+  ci-health [--json] [--no-cache] [--file-issues] [--exit-zero]
+                         — sweep active default-branch CI across the governed fleet (green-SHA cached;
+                           --file-issues dedupes tracking issues, --exit-zero for the scheduled sweep)
   self-deploy [--check]  — close the merged-but-not-running gap (operator-only)
   safe-update            — drain → snapshot → pre-test → swap → exec
   rollback               — restore the latest backup over the install path
@@ -449,7 +451,12 @@ fn dispatch_handover_command(
         }
     }
 
-    let mut config = RelaunchConfig::default();
+    // Mirror the automated self-deploy canary: supply the same deploy-shape
+    // env allow-list so a manual handover verdict matches the daemon's (#4440).
+    let mut config = RelaunchConfig {
+        canary_env: crate::self_relaunch::canary_gate_env_allowlist(),
+        ..RelaunchConfig::default()
+    };
     if let Some(dir) = canary_dir {
         config.canary_target_dir = dir;
     }

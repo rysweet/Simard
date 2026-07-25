@@ -31,6 +31,11 @@ pub enum OverseerError {
     Recursion { subject: String },
     /// An intervention was deferred to avoid colliding with in-flight work.
     Conflict { with: String },
+    /// The authoritative merge-readiness review did not approve the PR (the
+    /// agentic judge refused, or no LLM provider was available so it fails
+    /// closed). This is NOT an error — the Act handler maps it to an operator
+    /// escalation. Never merge blindly on this outcome.
+    NotMergeReady { pr: u32, reason: String },
 }
 
 impl fmt::Display for OverseerError {
@@ -51,6 +56,9 @@ impl fmt::Display for OverseerError {
             }
             Self::Recursion { subject } => write!(f, "anti-recursion: refused own {subject}"),
             Self::Conflict { with } => write!(f, "conflict-avoidance: deferred (overlaps {with})"),
+            Self::NotMergeReady { pr, reason } => {
+                write!(f, "PR #{pr} is not merge-ready yet: {reason}")
+            }
         }
     }
 }
@@ -129,6 +137,43 @@ pub struct ObservedState {
     ///
     /// [`sensor::detect_workstream_gaps`]: crate::overseer::sensor::detect_workstream_gaps
     pub workstream_gaps: Vec<GapItem>,
+    /// The AGENTIC merge-queue reasoning brief's per-PR conclusions (#4097). Each
+    /// [`ReasonedPr`] is a REASONING PROPOSAL — never itself an authorization to
+    /// merge. Populated by the agentic `observe-merge-queue` recipe pass over the
+    /// governed roster, parsed FAIL-CLOSED (`merge_queue_observe::parse_merge_queue_brief`).
+    /// NON-EMPTY even when `SIMARD_AUTOMERGE_REPOS`/`SIMARD_AUTOMERGE_AUTHOR` are
+    /// unset — reasoning is DEFAULT-ON over the roster; only the re-narrowed
+    /// [`ready_prs`](Self::ready_prs) projection authorizes a merge. `signals_from`
+    /// lifts `Stale`/`Duplicate` dispositions into `Signal::StalePrDetected` /
+    /// `Signal::DuplicatePrDetected` (gated `FlagStalePr` / `CloseDuplicatePr`).
+    pub reasoned_prs: Vec<ReasonedPr>,
+    /// The AGENTIC merge-queue reasoning brief's per-ISSUE triage (#4097).
+    /// Populated by the same agentic pass; parsed FAIL-CLOSED against the roster
+    /// trust boundary. A `Ready` triaged issue becomes a
+    /// `Signal::IssueNeedsWorkstream` so backlog work with no active workstream is
+    /// surfaced into Decide (never merges anything — it proposes a workstream).
+    pub triaged_issues: Vec<TriagedIssue>,
+    /// WHY merge reasoning is (or is not) running this pass (#4097, R3). Default
+    /// [`MergeReasoningStatus::Unknown`] (additive — existing constructors compile
+    /// unchanged). Set to [`MergeReasoningStatus::Disabled`] with the raw reason
+    /// ONLY when an operator EXPLICITLY disabled reasoning
+    /// (`SIMARD_MERGE_REASONING_SCOPE=off`), so a disable is LOUD (WARN log +
+    /// surfaced status), never a silent OFF. Unset env is NOT disabled.
+    pub merge_reasoning_status: MergeReasoningStatus,
+    /// WHAT the agentic health-review pass concluded this tick ([standing]).
+    /// Default [`HealthReviewStatus::NotRun`] (additive — existing constructors
+    /// compile unchanged), left unchanged when the rail is unwired, the
+    /// dedicated opt-out disabled it, or the pass is off-cadence this tick. A
+    /// pass that RAN and parsed a verdict sets [`HealthReviewStatus::Reviewed`]
+    /// with the agent's one-line `HEALTH_REVIEW_COMPLETE` summary + the count of
+    /// typed decisions it drove — so a HEALTHY pass (zero interventions) still
+    /// leaves an OBSERVABLE trace instead of a silent no-op, exactly as
+    /// [`merge_reasoning_status`](Self::merge_reasoning_status) surfaces WHY
+    /// reasoning ran. A pass that RAN but DEGRADED (a truncated report the
+    /// bounded escalation ladder could not recover, or a base infra fault) sets
+    /// [`HealthReviewStatus::Degraded`] so the weak pass is LOUD, never a silent
+    /// OFF. Set by the acting Overseer's `health_review` pass; never fabricated.
+    pub health_review_status: HealthReviewStatus,
     /// Structured diagnoses of decision-cycle / engineer / terminal-shell steps
     /// that failed since the last Observe pass (issue #2640, PART 2). The acting
     /// Overseer drains these from the process-global failure sink
@@ -137,6 +182,29 @@ pub struct ObservedState {
     /// so a caught failure drives a fix instead of a silent log. Empty when no
     /// step failed this window.
     pub recent_step_failures: Vec<FailureDiagnosis>,
+    /// Autonomous self-deploy drift observed this pass (issue #2590): the running
+    /// daemon binary is behind merged `origin/main` and a target commit resolved.
+    /// Populated by the acting Overseer's drift-observe rail (fail-safe: a git or
+    /// source error, a current daemon, or an unresolved head all leave this
+    /// `None`). `signals_from` lifts it into a `Signal::DeployDriftDetected` that
+    /// Decide maps to a guarded `Intervention::Deploy`. `None` when there is
+    /// nothing to deploy or the rail is disabled/unwired.
+    pub deploy_drift: Option<DeployDriftObservation>,
+}
+
+/// The self-deploy drift the Overseer observed this pass (issue #2590): the
+/// running binary is behind merged `main`, and `target_commit` is the resolved
+/// merged head a guarded deploy should converge on. Carried on
+/// [`ObservedState::deploy_drift`] so `signals_from` can lift it into a
+/// [`Signal::DeployDriftDetected`] purely (the effectful git probe stays in the
+/// observe rail).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeployDriftObservation {
+    /// Merged-head commit the daemon should deploy to (a non-empty git rev).
+    pub target_commit: String,
+    /// Commits the running binary is behind `origin/main` (`0` when only pins
+    /// drifted).
+    pub behind_commits: usize,
 }
 
 /// A `(repo, pr)` pair. `repo` is an `owner/name` slug.
@@ -144,6 +212,120 @@ pub struct ObservedState {
 pub struct PrRef {
     pub repo: String,
     pub pr: u32,
+}
+
+/// The agentic reviewer's disposition for one open PR (#4097). A REASONING
+/// PROPOSAL, never an authorization: `ReadyForMerge` says "this looks ready",
+/// but only the re-narrowing [`project_ready_prs`](crate::overseer::project_ready_prs)
+/// projection — author guard + engineer-PR narrowing + objective gates —
+/// authorizes a merge. Unknown disposition strings are DROPPED at parse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrDisposition {
+    /// The reviewer judges the PR ready for merge action. A PROPOSAL only.
+    ReadyForMerge,
+    /// The PR needs more work (failing checks, requested changes, conflicts).
+    NeedsWork,
+    /// The PR is stale (no activity for a long window) and should be flagged.
+    Stale,
+    /// The PR duplicates another (see [`ReasonedPr::duplicate_of`]) and should be
+    /// closed with a reference to the original.
+    Duplicate,
+}
+
+/// The agentic reviewer's per-PR reasoning conclusion (#4097). Bounded, parsed
+/// FAIL-CLOSED from the opaque brief. Off-roster `repo`s are dropped (the roster
+/// is the reasoning trust boundary); a `Duplicate` with no `duplicate_of` is
+/// incoherent and dropped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReasonedPr {
+    /// `owner/name` slug — MUST be on the governed roster or the entry is dropped.
+    pub repo: String,
+    pub pr: u32,
+    pub disposition: PrDisposition,
+    /// One-line agentic rationale (bounded). Advisory prose only.
+    pub rationale: String,
+    /// For [`PrDisposition::Duplicate`], the PR number this one duplicates.
+    /// `Some` is REQUIRED for a coherent `Duplicate`; `None` otherwise.
+    pub duplicate_of: Option<u32>,
+}
+
+/// The agentic reviewer's triage priority for one open issue (#4097).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IssuePriority {
+    High,
+    Medium,
+    Low,
+}
+
+/// The agentic reviewer's readiness verdict for one open issue (#4097).
+/// `Ready` means actionable NOW (a workstream can start); `Blocked` means it is
+/// waiting on something and must NOT spawn a workstream this pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IssueReadiness {
+    Ready,
+    Blocked,
+    /// Needs clarification / more information before it is actionable.
+    NeedsInfo,
+}
+
+/// The agentic reviewer's per-ISSUE triage conclusion (#4097). Bounded, parsed
+/// FAIL-CLOSED; off-roster `repo`s are dropped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TriagedIssue {
+    /// `owner/name` slug — MUST be on the governed roster or the entry is dropped.
+    pub repo: String,
+    pub issue: u32,
+    pub priority: IssuePriority,
+    pub readiness: IssueReadiness,
+    /// The concrete next action, in plain English (bounded).
+    pub next_action: String,
+}
+
+/// WHY merge-queue reasoning is (or is not) running (#4097, R3). The distinction
+/// the fix hinges on: an UNSET scope env is NOT disabled (reasoning defaults ON
+/// over the roster). Only an EXPLICIT operator disable produces
+/// [`Self::Disabled`], which is surfaced LOUD (WARN log + this status) so
+/// `simard status` can name WHY reasoning is off — never a silent OFF.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum MergeReasoningStatus {
+    /// Not yet resolved this pass (the additive default so existing constructors
+    /// compile unchanged).
+    #[default]
+    Unknown,
+    /// Reasoning ran over the full governed roster (unset scope — default-ON).
+    RosterWide,
+    /// Reasoning ran over an operator-narrowed explicit scope.
+    Narrowed { repos: Vec<String> },
+    /// An operator EXPLICITLY disabled reasoning. `reason` carries the raw signal
+    /// (e.g. `SIMARD_MERGE_REASONING_SCOPE=off`) so the disable is loud.
+    Disabled { reason: String },
+}
+
+/// WHAT the agentic Overseer health-review pass concluded this tick ([standing]).
+///
+/// Mirrors [`MergeReasoningStatus`]: the distinction the observability hinges on
+/// is that a pass that RAN and found nothing wrong is NOT the same as a pass
+/// that never ran. Default [`Self::NotRun`] (the additive default) covers an
+/// unwired / disabled / off-cadence tick; a pass that produced an honest verdict
+/// sets [`Self::Reviewed`] (so a HEALTHY pass leaves an observable trace, never a
+/// silent no-op); and a pass that degraded to no remediation sets
+/// [`Self::Degraded`] so the weak pass is LOUD in status rather than a silent OFF.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum HealthReviewStatus {
+    /// No pass ran this tick: the rail is unwired, the dedicated opt-out disabled
+    /// it, or it is off-cadence (the additive default so existing constructors
+    /// compile unchanged).
+    #[default]
+    NotRun,
+    /// A pass RAN and parsed an honest verdict. `summary` is the recipe's
+    /// one-line `HEALTH_REVIEW_COMPLETE` text; `decisions` is the count of typed
+    /// remediation interventions it drove (`0` on a HEALTHY pass — an observable
+    /// "reviewed, nothing to do", never a fabricated action).
+    Reviewed { summary: String, decisions: usize },
+    /// A pass RAN but DEGRADED end to end (a truncated report the bounded
+    /// escalation ladder could not recover, or a base infra fault) and took no
+    /// remediation. Surfaced so the weak pass is LOUD, never a silent OFF.
+    Degraded,
 }
 
 /// A cluster of failing checks for one repo over the observation window.
@@ -327,6 +509,73 @@ pub trait PrOps {
     fn verify(&self, repo: &str, pr: u32) -> Result<VerifyReport, OverseerError>;
     fn merge(&self, repo: &str, pr: u32) -> Result<(), OverseerError>;
     fn resolve_conflict(&self, repo: &str, pr: u32) -> Result<(), OverseerError>;
+
+    /// Survey the given `owner/name` repos for Simard's OWN green + MERGEABLE
+    /// PRs and return them as a candidate list (issue #4097). This is the THIN
+    /// DETERMINISTIC sensor rail that populates
+    /// [`ObservedState::ready_prs`](crate::overseer::capabilities::ObservedState),
+    /// re-activating the dormant `PrReadyToMerge`/`VerifyAndMergePr` machinery.
+    ///
+    /// It is a candidate LIST only — a cheap author-filter + the already-fetched
+    /// `mergeable`/`statusCheckRollup` objective pre-filter. It NEVER merges and
+    /// NEVER runs the MergeJudge: the authoritative six-criteria gate stays
+    /// downstream in `merge_authority` and remains the single source of merge
+    /// truth. The default is EMPTY (default-off, fail-closed) so an
+    /// implementation that has not opted in performs no autonomous merge.
+    fn survey_ready_prs(&self, _repos: &[String]) -> Vec<PrRef> {
+        Vec::new()
+    }
+
+    /// Flag an open PR judged STALE by the agentic merge-queue reasoner (#4097)
+    /// with a `gh pr comment` (see [`crate::overseer::intervention::flag_stale_pr_argv`]).
+    /// NEVER merges, NEVER closes. The default fails CLOSED so an implementation
+    /// that has not wired the `gh` seam performs no autonomous hygiene action.
+    fn flag_stale_pr(&self, _repo: &str, _pr: u32, _note: &str) -> Result<(), OverseerError> {
+        Err(OverseerError::Capability {
+            what: "flag_stale_pr",
+            detail: "no PR-ops gh seam wired".to_string(),
+        })
+    }
+
+    /// Close an open PR judged a DUPLICATE by the agentic merge-queue reasoner
+    /// (#4097) with `gh pr close` referencing the original (see
+    /// [`crate::overseer::intervention::close_duplicate_pr_argv`]). NEVER merges,
+    /// NEVER `--admin`/`--no-verify`. The default fails CLOSED.
+    fn close_duplicate_pr(
+        &self,
+        _repo: &str,
+        _pr: u32,
+        _duplicate_of: u32,
+    ) -> Result<(), OverseerError> {
+        Err(OverseerError::Capability {
+            what: "close_duplicate_pr",
+            detail: "no PR-ops gh seam wired".to_string(),
+        })
+    }
+
+    /// RE-NARROW the agentic reasoner's `ReadyForMerge` proposals into the set of
+    /// PRs actually authorized to merge (#4097), the DETERMINISTIC safety rail.
+    ///
+    /// The agentic observe/orient pass reasons BROADLY over the governed roster
+    /// and PROPOSES a [`PrDisposition::ReadyForMerge`] for some PRs. That proposal
+    /// alone NEVER authorizes a merge. This method fetches the AUTHORITATIVE `gh`
+    /// facts (author, head branch, mergeable/checks/base/labels) for each proposed
+    /// PR and runs [`project_ready_prs`](crate::overseer::project_ready_prs): the
+    /// author-guard + engineer-PR narrowing + objective gates. Only survivors are
+    /// returned — they populate `ObservedState.ready_prs`, the ONLY thing that
+    /// drives `Signal::PrReadyToMerge` into the gated merge chain.
+    ///
+    /// The default returns EMPTY (fail-closed) so an impl that has not wired the
+    /// authoritative `gh` seam authorizes no autonomous merge. The agent can never
+    /// widen merge authorization; it can only ever propose candidates this rail
+    /// then re-verifies against ground truth.
+    fn project_reasoned_ready_prs(
+        &self,
+        _reasoned: &[ReasonedPr],
+        _overseer_login: &str,
+    ) -> Vec<PrRef> {
+        Vec::new()
+    }
 }
 
 /// Build, verify, and hand over a new binary — the Overseer's guarded (HIGH-RISK)
@@ -358,8 +607,8 @@ pub trait MeetingHost {
 /// **Reuse:** `crate::stewardship::process_orchestrator_run`
 /// (`src/stewardship/mod.rs:51`) with `OrchestratorRunSummary`; dedup via
 /// `crate::stewardship::{failure_signature, find_existing}`
-/// (`src/stewardship/dedup.rs`); backlog enqueue via
-/// `crate::goal_curation::enqueue_stewardship_issue`.
+/// (`src/stewardship/dedup.rs`). Filing never writes the resulting issue back
+/// into the goal board.
 pub trait IssueFiler {
     fn file(&self, run: &OrchestratorRunBrief) -> Result<IssueOutcome, OverseerError>;
 }
@@ -575,6 +824,10 @@ fn signal_keyword(s: &Signal) -> Option<String> {
         // Recurring step failures are keyed on their root cause, so a repeated
         // failure mode (e.g. arg-list-too-long) recalls prior diagnoses.
         Signal::StepFailureDiagnosed { cause, .. } => format!("step-failure:{}", cause.as_str()),
+        Signal::StalePrDetected { repo, pr } => format!("stale-pr:{repo}#{pr}"),
+        Signal::DuplicatePrDetected { repo, pr, .. } => format!("dup-pr:{repo}#{pr}"),
+        Signal::IssueNeedsWorkstream { repo, issue, .. } => format!("issue-ws:{repo}#{issue}"),
+        Signal::DeployDriftDetected { .. } => "deploy-drift".to_string(),
     };
     if kw.is_empty() { None } else { Some(kw) }
 }

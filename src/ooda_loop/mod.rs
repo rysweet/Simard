@@ -31,6 +31,8 @@ mod tests_orient_extra;
 #[cfg(test)]
 mod tests_parse_failure_1890;
 #[cfg(test)]
+mod tests_per_goal_cycle;
+#[cfg(test)]
 mod tests_types;
 
 // Fix 3 (issue #1): integration tests for the no-progress breaker wiring.
@@ -49,6 +51,15 @@ mod tests_no_progress_investigation;
 // over them, so no goal is ever stranded with a bare, unexplained block.
 #[cfg(test)]
 mod tests_no_progress_reinvestigation;
+
+// Issue #16 (follow-up, TDD): direct unit tests for the production
+// `DeterministicNoProgressReasoner` — pin the terminal-rung invariant that it
+// never returns an empty-evidence WHY, so the breaker can never author a bare
+// `evidence=[(none)]` block (the live-daemon defect that stranded the synthetic
+// `simard-identity-*` goals). A no-artifact stall is `UNCLEAR-CRITERIA` with a
+// named unmeasurable criterion; open work stays `GENUINELY-STUCK` with it.
+#[cfg(test)]
+mod tests_no_progress_reasoner;
 
 // Issue #2329: Observe-vs-Decide phase weights yield different ranked-recall
 // ordering of the same fact set, exercised against the real lbug-backed

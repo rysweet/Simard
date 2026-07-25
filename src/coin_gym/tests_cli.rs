@@ -1,7 +1,9 @@
 use super::profiles::{PersistedRun, ensure_profile, runs_dir, save_run};
 use super::target_loader::DemoScenario;
 use super::types::Strategy;
-use super::{coin_gym_usage, dispatch_with_home, execute_run};
+use super::{
+    AcceptanceReport, coin_gym_usage, dispatch_with_home, execute_run, run_acceptance_checks,
+};
 
 fn args(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| (*s).to_string()).collect()
@@ -182,7 +184,9 @@ fn explicit_profile_name_is_sanitised() {
 #[test]
 fn usage_lists_all_subcommands() {
     let usage = coin_gym_usage();
-    for cmd in ["run", "score", "compare", "improve", "contract", "profiles"] {
+    for cmd in [
+        "run", "score", "compare", "improve", "contract", "verify", "profiles",
+    ] {
         assert!(usage.contains(cmd), "usage should mention {cmd}");
     }
 }
@@ -354,4 +358,67 @@ fn improve_holdout_rejects_unknown_mode() {
     )
     .unwrap_err();
     assert!(err.to_string().contains("only supports 'fresh'"));
+}
+
+// ── verify (measurable done-criteria self-check) ─────────────────────────────
+
+/// Assert every criterion in a report passed, with a helpful message naming the
+/// first failing row.
+fn assert_all_passed(report: &AcceptanceReport) {
+    if let Some(bad) = report.checks.iter().find(|c| !c.passed) {
+        panic!("criterion '{}' failed: {}", bad.criterion, bad.detail);
+    }
+    assert!(report.all_passed());
+}
+
+#[test]
+fn acceptance_checks_all_pass_on_the_sample_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let report = run_acceptance_checks(dir.path());
+
+    // Every design component (issue #2713) is exercised and asserted.
+    let names: Vec<&str> = report.checks.iter().map(|c| c.criterion).collect();
+    assert_eq!(
+        names,
+        vec![
+            "target-loader",
+            "baseline-runner",
+            "team-runner",
+            "scorer",
+            "leaderboard-comparator",
+            "self-improvement-loop",
+            "contract-wiring",
+        ],
+        "verify must cover the full LOCAL harness surface in a stable order"
+    );
+    assert_all_passed(&report);
+    assert_eq!(report.passed_count(), report.total());
+    assert_eq!(report.total(), 7);
+}
+
+#[test]
+fn acceptance_check_is_deterministic_and_hermetic() {
+    // Two independent runs against isolated temp homes yield identical reports,
+    // and neither touches the caller's real coin-gym profiles.
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let ra = run_acceptance_checks(a.path());
+    let rb = run_acceptance_checks(b.path());
+    assert_eq!(ra, rb, "verify must be deterministic across isolated homes");
+    assert_all_passed(&ra);
+}
+
+#[test]
+fn verify_command_dispatches_and_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    // The command uses its own throwaway temp home internally; `home` here is
+    // unused by verify but keeps the dispatch signature uniform.
+    dispatch_with_home(dir.path(), args(&["verify"])).unwrap();
+}
+
+#[test]
+fn verify_rejects_unexpected_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let err = dispatch_with_home(dir.path(), args(&["verify", "--bogus", "x"])).unwrap_err();
+    assert!(err.to_string().contains("unknown flag"));
 }

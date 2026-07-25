@@ -1,3 +1,4 @@
+mod coin_gym;
 mod command_context;
 mod dispatch;
 mod evidence;
@@ -30,6 +31,7 @@ pub use crate::operator_commands_terminal::{
 };
 
 // Re-export pub items from sub-modules.
+pub use coin_gym::run_coin_gym_verify_probe;
 pub use dispatch::{
     dispatch_legacy_gym_cli, dispatch_operator_probe, dispatch_probe_with_context, gym_usage,
 };

@@ -4,15 +4,14 @@ Simard is the engineering steward over the amplihack ecosystem (see
 `Specs/ProductArchitecture.md` § *Stewardship Mode* and § *Goal Stewardship Mode*). This
 document describes a **new sub-mode of Goal Stewardship**: the autonomous
 loop that turns Simard's own orchestrator failures into tracked, deduplicated
-GitHub issues and feeds those issues back into Simard's curation backlog.
+GitHub issues without feeding those issues back into Simard's curation backlog.
 
 The existing Goal Stewardship Mode (PRD § *Goal Stewardship Mode*) is about maintaining a
 durable backlog and explicit top-5 goals across sessions. The orchestrator
 failure loop documented here extends that mode with an automated
 *failure-to-issue* path: when the orchestrator fails, stewardship turns the
-failure into a tracked upstream issue and a curated backlog item, so the
-durable backlog reflects observed system breakage and not just human-entered
-goals.
+failure into a tracked upstream issue. The issue remains an external tracker;
+automation output is not recycled into the goal board.
 
 ## Purpose
 
@@ -34,8 +33,7 @@ file. The orchestrator-failure sub-mode of Goal Stewardship:
 3. **Deduplicates** the failure against existing open issues using a stable
    SHA-256 signature embedded in each issue body.
 4. **Files** a new issue (or matches an existing one) via the `gh` CLI.
-5. **Enqueues** the resulting issue into Simard's own backlog through
-   `src/goal_curation`, so the next curation cycle can pick it up.
+5. **Returns** the resulting issue handle without mutating the goal board.
 
 The loop **never silently degrades**. Any `gh` failure or invalid input
 surfaces as a `SimardError`, and the loop never files duplicate issues. Routing
@@ -61,9 +59,9 @@ OrchestratorRunSummary
         ▼
   gh.search_issues(repo, signature)      ── non-zero → StewardshipGhCommandFailed
         │
-        ├── match found → enqueue_stewardship_issue → MatchedExisting
+        ├── match found → MatchedExisting
         │
-        └── no match  → gh.create_issue → enqueue_stewardship_issue → FiledNew
+        └── no match  → gh.create_issue → FiledNew
 ```
 
 ## Invariants
@@ -80,8 +78,9 @@ OrchestratorRunSummary
 - **At most one create per call.** Each call yields exactly one of
   `FiledNew` (one create) or `MatchedExisting` (zero creates).
 - **End-to-end idempotency.** Re-running with the same `OrchestratorRunSummary`
-  after a `FiledNew` yields `MatchedExisting` with the same issue number and
-  adds no new backlog row.
+  after a `FiledNew` yields `MatchedExisting` with the same issue number.
+- **No recursive handoff.** Filing or matching an issue never mutates the goal
+  board. External automation output cannot become fresh internal backlog work.
 - **Closed issues do not match.** Signature search is scoped to open issues
   only; recurrence after manual close files a fresh issue.
 - **Fail-loud.** Missing `gh`, non-zero `gh` exit, malformed JSON, or empty
@@ -107,8 +106,8 @@ design; this precedence is pinned by tests.
 
 When no keyword matches, `route_failure` **does not error**. It returns the
 `DEFAULT_TARGET_REPO` constant (`TargetRepo::Simard` → `rysweet/Simard`) and
-emits a single `tracing::warn!` carrying the unmatched `source_module` and the
-chosen default slug. `DEFAULT_TARGET_REPO` is a compile-time constant — the one
+emits a single `tracing::warn!` carrying only the chosen default slug; the
+free-form source is deliberately excluded from diagnostics. `DEFAULT_TARGET_REPO` is a compile-time constant — the one
 named source of truth for the default — so the fallback can never be an
 attacker-chosen or dynamically-supplied repo. This is what lets the Overseer's
 own `source_module = "overseer"` gap-scan briefs file/upsert tracking issues in
@@ -123,14 +122,21 @@ signature = sha256(failure_kind + "\n" + normalize(error_text))[..16]
 ```
 
 `normalize` strips noise that varies between otherwise-identical failures so
-that two runs of the same bug collapse to the same signature:
+that two runs of the same bug collapse to the same signature. It first strips
+ANSI escape sequences and collapses whitespace, then rewrites each
+whitespace-delimited token whose *shape* is volatile to a stable placeholder:
 
-1. ANSI escape sequences (`\x1B\[[0-9;]*[A-Za-z]`).
-2. ISO-8601 timestamps → `<TS>`.
-3. Absolute paths → `<PATH>`.
-4. Hex hashes of length ≥ 7 → `<HEX>`.
-5. Run identifiers matching `run-[A-Za-z0-9_-]+` → `<RUN>`.
-6. `:line:col` in stack frames → `:<L>:<C>`.
+1. ANSI escape sequences (CSI/OSC) are removed.
+2. Tokens beginning with `/` (absolute paths) → `<PATH>`.
+3. Tokens beginning with `run-` / `Run-` / `RUN-` (run identifiers) → `<RUNID>`.
+4. ISO-8601 timestamps (`YYYY-MM-DDT…`) → `<TS>`.
+5. All-hex tokens of length ≥ 7 (hashes/blobs) → `<HEX>`.
+6. Canonical UUIDs (`8-4-4-4-12` hex, case-insensitive) → `<UUID>`, folded
+   even when embedded in a larger token so a prefixed session id such as
+   `ooda-<uuid>` collapses to `ooda-<UUID>`. UUIDs are the system's ubiquitous
+   session / node / run identifiers (UUIDv7); without this a failure that
+   differs only in its embedded id would file a fresh issue every time and never
+   be recalled as recurring.
 7. Whitespace collapse + trim.
 
 The hex signature is embedded verbatim in every filed issue body as
@@ -139,36 +145,26 @@ The hex signature is embedded verbatim in every filed issue body as
 
 ## Issue Body Template
 
-Every issue Simard files looks like this (outer fence shown with `~~~` so the
-inner ```` ``` ```` fence around `<error_text>` renders correctly):
+Every issue uses the fixed title `[stewardship] Orchestrator failure`, keeping
+free-form run metadata out of process arguments. Its body looks like this:
 
-~~~
+```
 filed-by: simard-stewardship
 stewardship-signature: <hex>
 originating-run: <run_id>
-recipe: <recipe_name>
 failed-step: <failed_step>
 source-module: <source_module>
-failure-kind: <failure_kind>
 
 ## Error
-```
 <error_text>
 ```
-~~~
 
-The leading metadata block is intentionally machine-readable so future
-tooling (or a human triager) can re-derive the routing and signature without
-re-running Simard.
-
-## Backlog Handoff
-
-After filing or matching, Stewardship calls
-`goal_curation::operations::enqueue_stewardship_issue`, which constructs a
-`BacklogItem` with a deterministic id of the form
-`stewardship-<repo_slug_with_underscores>-<issue_number>` and a default
-steward score of `0.6`. Because `add_backlog_item` already deduplicates on
-`id`, repeated `MatchedExisting` outcomes never grow the backlog.
+The complete body passes through credential redaction immediately before the
+GitHub client receives it. Redaction covers GitHub tokens, authorization and
+bearer credentials, JWTs, password/key/secret assignments, cloud access keys,
+and PEM material while retaining surrounding diagnostic text. Deduplication
+continues to use the original failure kind and error text so redaction cannot
+collapse distinct failures.
 
 ## Out of Scope
 

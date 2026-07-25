@@ -48,20 +48,48 @@ order:
    server holds no in-memory batch, so grounding is an existence lookup, not a
    batch scan: the fact is grounded if **at least one** supplied id resolves.
    An ungrounded fact (no id resolves) scores low and is quarantined — never
-   stored blind. The write records provenance to each resolved id.
+   stored blind. The write records provenance to each resolved id. Each cited id
+   is first passed through `fact_reliability::normalize_source_episode_id`
+   (trim surrounding whitespace, drop empties), and that **normalized** set is
+   used for *both* the existence check *and* the persisted `DERIVES_FROM` edges.
+   Episode node ids (UUID-v7 / ULID) never carry whitespace, so this is a no-op
+   for a well-formed id; it only rescues an id an LLM re-emitted with a stray
+   leading/trailing newline or space, which would otherwise fail the exact
+   grounding match — silently quarantining a genuinely grounded fact (lost
+   fact-yield) or, if grounded, dangling its `DERIVES_FROM` edge on the padded
+   key. The in-process stub seam normalizes its cited id identically before its
+   batch-membership lookup, so both seams ground and thread provenance the same
+   way (interior whitespace is preserved — a genuinely different id stays
+   ungrounded rather than silently folding).
 3. **Reliability scoring** — `fact_reliability::score_fact_reliability` computes a
    confidence in `[0.0, 1.0]` (already clamped into range by the scorer) from the
    fact and its resolved grounding. The client cannot supply this; any
    client-provided `confidence` hint is ignored. There is **no** confidence floor
    — an ungrounded or empty fact keeps its genuinely low score so the threshold
    can quarantine it. (Fail-closed: an unscoreable input scores low, never stored
-   blind.)
+   blind.) The content-quality component scores **distinct informative words** —
+   alphanumeric-bearing tokens, case/punctuation-normalized and de-duplicated —
+   rather than raw whitespace tokens, so content that carries no information
+   (empty, whitespace-only, or punctuation/symbol-only such as `"... ... ..."`)
+   is hard-gated to `0.0`, and degenerate repetition (`"the the the"`) earns only
+   the partial short-content weight instead of full credit.
 4. **Threshold quarantine** — if the score is below
    `DISTILL_RELIABILITY_THRESHOLD`, the fact is **quarantined** (counted, not
    stored) so a low-reliability candidate can never corrupt past experience.
 5. **Identity dedup** — a weaker-or-equal new fact never clobbers a
-   higher-confidence existing fact of the **same identity** (concept + content).
-   Distinct lessons that merely share a label still accumulate.
+   higher-confidence existing fact of the **same identity** (canonical concept +
+   whitespace-normalized content). Prior candidates are gathered from **two
+   bounded scans** — one keyed on the fact's `concept`, one on its `content` —
+   whose union is checked against the new fact's full `(concept, content)`
+   identity. Either scan alone can miss a real duplicate: `search_facts` returns
+   priors ranked confidence-descending and capped at `DEDUP_PRIOR_SCAN_LIMIT`,
+   and because the distillation vocabulary is a tiny closed set (`KNOWN_CONCEPTS`)
+   many distinct facts pile up under one label, so a content-duplicate can be
+   crowded out of a concept-only window and wrongly re-promoted. The content scan
+   surfaces the restatement even when its concept is crowded; an explicit
+   canonical-concept guard keeps the two-scan union from merging identical content
+   under a *different* concept. Distinct lessons that merely share a label still
+   accumulate.
 6. **Persist** — surviving facts are written with
    `store_fact_with_provenance` (computed confidence, **one `DERIVES_FROM` edge
    per supplied `source_episode_id`**, and a scalar `source_id` of
@@ -71,6 +99,19 @@ order:
 7. **Pass ledger** — the disposition (stored / quarantined) is recorded against
    the request's opaque `pass_id` so the scheduler can report accurate counts
    without parsing anything.
+
+**Concept canonicalization.** `commit_gated_fact` folds the concept through
+`canonical_concept` **once** at the top of the gate, so a concept that maps into
+the closed `KNOWN_CONCEPTS` set is scored, **deduped, and stored** under its
+canonical label. The surface variants an LLM routinely emits for the same
+label — `"PR-Pattern"`, `"pr_pattern"`, `"pr-pattern."` — therefore land as one
+concept rather than fragmenting across spellings. Fragmentation would split the
+graph's concept vocabulary, let a variant-labeled restatement slip past the
+identity-dedup (promoting a duplicate that inflates semantic memory and drags
+recall precision down), and hide a fact from a recall that queries the canonical
+label. A genuinely off-spec concept (one that canonicalizes to `None`) is stored
+**verbatim** — canonicalization folds recognized labels, it never coerces a
+different concept into the closed set.
 
 Because the gate is server-side, the same guarantees hold whether a fact arrives
 from the distiller, a manual `simard memory remember`, or any future agentic
@@ -108,9 +149,10 @@ exactly what lets the stub and the IPC handler agree on every decision.
 |--------|---------|
 | `fact_reliability::score_fact_reliability(concept: &str, content: &str, grounded: bool) -> f64` | Confidence in `[0.0, 1.0]` from the fact's concept/content and whether its provenance resolved. Deterministic; fail-closed (ungrounded / empty → low → quarantined). No batch argument. |
 | `fact_reliability::fact_passes_gate(concept, content, grounded) -> bool` | Thin predicate: `score >= RELIABILITY_THRESHOLD`. The shared store/quarantine decision. |
-| `fact_reliability::commit_gated_fact(memory, concept, content, grounded, source_id, tags, source_episode_ids) -> SimardResult<FactGateDecision>` | The shared gate orchestration both seams call: score → threshold → identity-dedup → `store_fact_with_provenance`. Grounding is resolved by the caller; the returned `FactGateDecision` is `Stored { confidence, node_id }` or `Quarantined { confidence }` (a `confidence >= RELIABILITY_THRESHOLD` quarantine is a dedup skip, below is a low-reliability block). |
+| `fact_reliability::commit_gated_fact(memory, concept, content, grounded, source_id, tags, source_episode_ids) -> SimardResult<FactGateDecision>` | The shared gate orchestration both seams call: **canonicalize concept** → score → threshold → identity-dedup → `store_fact_with_provenance`. A `KNOWN_CONCEPTS` variant is deduped/stored under its canonical label; an off-spec concept is kept verbatim. Grounding is resolved by the caller; the returned `FactGateDecision` is `Stored { confidence, node_id }` or `Quarantined { confidence }` (a `confidence >= RELIABILITY_THRESHOLD` quarantine is a dedup skip, below is a low-reliability block). |
 | `fact_reliability::RELIABILITY_THRESHOLD` (re-exported as `distillation::DISTILL_RELIABILITY_THRESHOLD`) | Minimum confidence to store rather than quarantine (`0.5`). |
 | `fact_reliability::canonical_concept(label) -> Option<&'static str>` | Canonicalises / validates a concept label. |
+| `fact_reliability::normalize_source_episode_id(raw: &str) -> &str` | Canonical grounding / provenance key for a cited episode id: trim surrounding whitespace (no-op for a well-formed id; interior whitespace preserved). Both seams normalize with this so a padded id grounds and threads provenance identically. |
 
 > **G2 / D3 note.** #2679 homes the gate at the IPC handler that fronts
 > `amplihack-memory-lib`; it does **not** add a new memory-engine primitive, so

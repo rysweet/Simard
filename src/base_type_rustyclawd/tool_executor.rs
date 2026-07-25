@@ -320,6 +320,15 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    // Every `Bash` test below spawns a real `sh -c …` child and waits on it.
+    // `agent_supervisor::reap_zombies()` is process-wide (`waitpid(-1)`) and,
+    // when a reaper test elsewhere in this binary runs concurrently, it steals
+    // this child's `SIGCHLD` — leaving our wait to fail with `ECHILD`
+    // ("No child processes"), a whole-suite parallelism artifact (issue #1779).
+    // Re-running an arbitrary bash command is NOT idempotent, so instead of a
+    // retry these tests join the `simard_process_reaper` serial group (the
+    // documented remedy) so they never run alongside the reaper.
+
     #[tokio::test]
     async fn execute_tool_locally_unknown_tool_returns_error_json() {
         let input = serde_json::json!({});
@@ -388,6 +397,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(simard_process_reaper)]
     async fn execute_tool_locally_bash_missing_command_runs_empty_string() {
         let input = serde_json::json!({});
         let result = execute_tool_locally("Bash", &input)
@@ -398,6 +408,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(simard_process_reaper)]
     async fn execute_tool_locally_bash_echo_captures_stdout() {
         let input = serde_json::json!({ "command": "echo hello_test_42" });
         let result = execute_tool_locally("Bash", &input)
@@ -413,6 +424,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(simard_process_reaper)]
     async fn execute_tool_locally_bash_failing_command_has_nonzero_exit() {
         let input = serde_json::json!({ "command": "false" });
         let result = execute_tool_locally("Bash", &input)
@@ -484,6 +496,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(simard_process_reaper)]
     async fn execute_tool_locally_bash_with_timeout_param() {
         let input = serde_json::json!({ "command": "echo timeout_test", "timeout": 5000 });
         let result = execute_tool_locally("Bash", &input)
@@ -494,6 +507,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(simard_process_reaper)]
     async fn execute_tool_locally_bash_stderr_capture() {
         let input = serde_json::json!({ "command": "echo stderr_test >&2" });
         let result = execute_tool_locally("Bash", &input)

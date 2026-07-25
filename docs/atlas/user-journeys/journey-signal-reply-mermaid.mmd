@@ -1,0 +1,34 @@
+sequenceDiagram
+  autonumber
+  participant Operator as Signal operator
+  participant CLI as signal-cli JSON-RPC daemon
+  participant Transport as JsonRpcTransport
+  participant Channel as SignalConversation
+  participant Gate as gating/allowlist
+  participant Sessions as signal_conversation::session_store
+  participant Backend as MeetingBackend
+
+  Operator->>CLI: send message
+  CLI->>Transport: JSON-RPC line
+  Transport->>Channel: recv_line()
+  Channel->>Channel: parse_incoming(line)
+  Channel->>Gate: drop self-notifications, bad sync-sent, recent outbound echoes
+  Channel->>Gate: authorize sender and parse command
+  alt read-only status command
+    Channel->>Operator: reply(status)
+  else authorized conversation turn
+    Channel-->>Backend: Inbound operator text
+    Backend->>Sessions: active_session_for(operator)
+    alt first contact or /new
+      Backend->>Sessions: set_active_session(operator, new session id)
+    end
+    Backend->>Sessions: load_session_at(session id)
+    Sessions-->>Backend: prior uncapped history
+    Backend->>Backend: restore(history) and send_message(text)
+    Backend->>Sessions: append_turn_at(user)
+    Backend->>Sessions: append_turn_at(assistant)
+    Backend-->>Channel: Outbound assistant response
+    Channel->>Transport: send_line(JSON-RPC send)
+    Transport->>CLI: write request line
+    CLI->>Operator: Signal reply
+  end

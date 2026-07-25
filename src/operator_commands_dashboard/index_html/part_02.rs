@@ -325,6 +325,12 @@ pub(crate) const PART_02: &str = r#"          if(d.ooda_transcripts?.length){
         // Discovered VMs from azlin
         const discovered=d.discovered||[];
         const configuredNames=new Set((d.hosts||[]).map(h=>h.name));
+        if(d.discovery_timed_out){
+          const msg=d.discovery_stale
+            ?'VM discovery timed out — showing last known list (may be stale).'
+            :'VM discovery timed out (azlin slow or unavailable).';
+          html+=`<div style="color:#d29922;font-size:.8rem;margin-bottom:.5rem">⚠ ${esc(msg)}</div>`;
+        }
         if(discovered.length){
           html+=`<div style="margin-bottom:.75rem"><div style="font-weight:600;font-size:.85rem;margin-bottom:.4rem;color:var(--accent)">Available VMs (${discovered.length})</div>`;
           html+=`<table class="proc-table"><tr><th>Name</th><th>Location</th><th>Resource Group</th><th>Status</th><th></th></tr>`;

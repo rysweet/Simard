@@ -1,0 +1,51 @@
+# Gastronome — EXAMPLE non-engineering identity (culinary menu & event design).
+#
+# This is a DATA-ONLY package. It is loaded by the data-driven file loader
+# (`load_example_identity`), NOT compiled into `BuiltinIdentityLoader`. It adds
+# ZERO Rust to `src/`, no operator_cli subcommand, and no `src/bin/*`. It mirrors
+# the reference package examples/identities/cartographer/ exactly in shape.
+#
+# The gastronome turns a menu brief + constraints (headcount, dietary needs,
+# budget, service time) into a costed, nutrition-analyzed, service-scaled menu
+# with a prep schedule. Its real behavior is delivered by the agentic recipe in
+# `recipes/gastronome-menu.yaml`, which may drive any external domain tooling
+# (a nutrition database, a spreadsheet/costing library, a scheduler, …). None of
+# that tooling lives in Simard's daemon.
+
+[package]
+name = "gastronome"
+version = "0.1.0"
+description = "Reference example identity: menu brief + constraints -> costed, nutrition-analyzed, scaled menu with a prep schedule"
+
+[[identities]]
+name = "gastronome"
+default_mode = "curator"
+supported_base_types = ["local-harness", "terminal-shell", "rusty-clawd"]
+required_capabilities = ["prompt-assets", "session-lifecycle", "memory"]
+
+[[identities.prompt_assets]]
+id = "gastronome-system"
+path = "prompts/gastronome_system.md"
+
+[[identities.prompt_assets]]
+id = "gastronome-compose"
+path = "prompts/gastronome_compose.md"
+
+[[identities.prompt_assets]]
+id = "gastronome-analyze"
+path = "prompts/gastronome_analyze.md"
+
+[[identities.prompt_assets]]
+id = "gastronome-scale"
+path = "prompts/gastronome_scale.md"
+
+[[identities.prompt_assets]]
+id = "gastronome-schedule"
+path = "prompts/gastronome_schedule.md"
+
+[identities.memory_policy]
+allow_project_writes = false
+summary_scope = "session-summary"
+
+[identities.authority]
+posture = "read-only"

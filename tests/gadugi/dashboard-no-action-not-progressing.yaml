@@ -1,0 +1,50 @@
+name: "Dashboard No-Action Is Not Progressing"
+description: "Outside-in guard that the dashboard's OODA Cycle History (/api/ooda-cycles) never labels a pure no-action cycle as `progressing`. The typed outcome ledger commits every terminal — including a no-action — with the verb 'committed' ('typed no-action committed'), so the old `commit` progress marker matched the substring inside 'no-action committed' and mislabelled 100% of no-action cycles as progressing, masking goals that were making no shippable progress. Fixed by keying progress on the real-action 'effect completed' suffix in thinking_collapse.rs and part_04.rs."
+version: "1.0.0"
+
+config:
+  timeout: 120000
+  retries: 0
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 120000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "No no-action cycle is labelled progressing"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/dashboard-no-action-not-progressing.sh"
+    timeout: 120000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "dashboard"
+    - "ooda"
+    - "cycle-history"
+    - "honesty"

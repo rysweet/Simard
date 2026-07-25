@@ -276,7 +276,7 @@ EnvironmentFile=%h/crocutus/crocutus.env
 ExecStartPre=%h/.crocutus/bin/simard debug instance --check-collision
 ExecStartPre=%h/.crocutus/bin/simard debug authority --probe-write ${SIMARD_TARGET_REPO_URL}
 ExecStart=%h/.crocutus/bin/simard ooda run
-Restart=on-failure
+Restart=always
 
 [Install]
 WantedBy=default.target

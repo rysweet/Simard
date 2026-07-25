@@ -41,11 +41,12 @@ use crate::overseer::audit::SelfQualityAuditor;
 use crate::overseer::capabilities::{
     BlockedGoal, DeployReport, Deployer, GoalBrief, GoalCurator, InFlightItem, IssueOutcome,
     MemoryRecall, ObservationEpisode, OverseerError, RecallKeys, RecalledEpisode, RecalledFact,
-    RecalledProcedure, RecalledProspective, RecordOutcome,
+    RecalledProcedure, RecalledProspective, RecordOutcome, StatusReader,
 };
 use crate::overseer::config::{
-    gap_scan_enabled, goal_health_enabled, memory_recall_enabled, overseer_author_login,
-    overseer_interval_secs, whisper_enabled,
+    claim_reap_enabled, claim_reap_stale_secs, gap_scan_enabled, gap_scan_every_n,
+    goal_health_enabled, health_review_enabled, health_review_service_unit, memory_recall_enabled,
+    overseer_author_login, overseer_interval_secs, whisper_enabled,
 };
 use crate::overseer::deploy::GuardedDeployer;
 use crate::overseer::guardrails::RecursionGuard;
@@ -56,8 +57,7 @@ use crate::overseer::merge_ops::MergePrOps;
 use crate::overseer::notify::DualChannelNotifier;
 use crate::overseer::observer::StewardshipIssueFiler;
 use crate::overseer::sensor::{
-    SnapshotStatusReader, SurveyedIssue, blocked_goals_from_board, detect_workstream_gaps,
-    in_flight_from_board,
+    SnapshotStatusReader, blocked_goals_from_board, detect_workstream_gaps, in_flight_from_board,
 };
 use crate::overseer::signal::{DETAIL_CAP, GapItem, Signal, sanitize_detail};
 use crate::overseer::{ActOutcome, Capabilities, CycleReport, Overseer};
@@ -163,6 +163,13 @@ pub struct OverseerTickReport {
     /// Backlog-coverage gaps SUPPRESSED this tick (a recurring gap within the
     /// dedup window — not re-notified/re-filed).
     pub workstream_gaps_suppressed: usize,
+    /// Open PRs judged STALE by the agentic merge-queue reasoner (#4097) and
+    /// flagged with a `gh pr comment` this tick. A DEDICATED counter, never
+    /// folded into `prs_merged` / `escalations`.
+    pub stale_prs_flagged: usize,
+    /// Open PRs judged DUPLICATE by the agentic merge-queue reasoner (#4097) and
+    /// closed with `gh pr close` this tick. A DEDICATED counter.
+    pub duplicate_prs_closed: usize,
     /// Capability errors encountered while acting (isolated, never fatal).
     pub errors: usize,
     /// Completed whole cognitive-memory recall passes this tick (issue #2628):
@@ -178,6 +185,33 @@ pub struct OverseerTickReport {
     /// Set when the tick itself panicked and was isolated by
     /// [`run_overseer_tick_isolated`].
     pub panicked: bool,
+    /// Additive (#4080). `true` **only** when the tick's OODA cycle itself
+    /// failed — either `run_cycle()` returned `Err` or the tick panicked (in
+    /// which case `panicked` is also set). This is the fatal-failure signal
+    /// that (together with `panicked`) drives the `overseer` meta-thread's
+    /// `"erroring"` health: the daemon derives
+    /// `last_success = !panicked && !cycle_failed`.
+    ///
+    /// It is deliberately **separate** from `errors`: an isolated
+    /// per-intervention `act()` failure increments `errors` (for feed/totals
+    /// visibility) but leaves `cycle_failed` **false**, so a transient
+    /// capability error no longer pins the meta-thread in `"erroring"`. Covered
+    /// by the struct-level `#[serde(default)]`, so legacy feed records written
+    /// before this field existed deserialize with `cycle_failed = false` and
+    /// the feed `SCHEMA_VERSION` does not change.
+    pub cycle_failed: bool,
+    /// Additive (#893). `true` **only** when a `cycle_failed` tick's underlying
+    /// `run_cycle()` error was a *transient*, externally-caused fault (an
+    /// upstream `5xx`, a timeout, a connection reset, a rate-limit) as
+    /// classified by the fail-closed [`is_transient`]. A panic is never
+    /// transient. It is deliberately **separate** from `cycle_failed`: the
+    /// cycle still failed (so `cycle_failed` stays `true`), but the *reason* is
+    /// self-clearing, so the daemon can route the `overseer` meta-thread to a
+    /// bounded `"backoff"` for one cadence instead of latching `"erroring"`.
+    /// Covered by the struct-level `#[serde(default)]` (conservative `false`),
+    /// so legacy feed records deserialize safely and `SCHEMA_VERSION` is
+    /// unchanged.
+    pub transient_cycle_failure: bool,
     /// Wall-clock duration of the tick in milliseconds.
     pub duration_ms: u64,
     /// Human-readable lines describing WHAT was observed this tick — the ranked
@@ -190,6 +224,55 @@ pub struct OverseerTickReport {
     /// (`held: …`), and isolated failures. Bounded to [`DETAIL_CAP`] with a
     /// `(+N more)` sentinel. Additive (issue #21); empty on no-action ticks.
     pub action_details: Vec<String>,
+}
+
+/// Fail-closed classifier: is this `run_cycle` failure a *transient*, external,
+/// self-clearing fault the next tick can simply retry (issue #893)?
+///
+/// Only a [`OverseerError::Capability`] whose `detail` names a **known**
+/// retryable upstream fault — an HTTP `5xx` (`500`/`502`/`503`/`504`), a
+/// gateway/service-unavailable, a timeout, a connection reset, or a rate-limit
+/// (`429`) — is transient. **Everything else is fatal**: an unknown/opaque
+/// capability detail, and *every* non-`Capability` variant (those are gate /
+/// budget / recursion / conflict / not-ready **decisions**, never infrastructure
+/// blips). This is the SR-1 invariant — a real defect must still latch
+/// `"erroring"`, so the allowlist is explicit and the wildcard arm returns
+/// `false`.
+pub fn is_transient(err: &OverseerError) -> bool {
+    let OverseerError::Capability { what, detail } = err else {
+        return false;
+    };
+    // #4420 fail-closed guard: a deploy-gate refusal (a red canary) or a
+    // target-canary failure is a DECISION — a gate said no — never a retryable
+    // upstream blip, even when the reddening gate's now-surfaced detail happens
+    // to mention a "timeout" or "503". Short-circuit `false` BEFORE the substring
+    // allowlist so a genuine regression always latches "erroring" (fail-closed)
+    // and is never silently retried away.
+    if matches!(*what, "deploy_gate" | "target_canary") {
+        return false;
+    }
+    let d = detail.to_ascii_lowercase();
+    // Explicit allowlist of known-retryable upstream signals. Matching any one
+    // routes to self-healing; nothing else does.
+    const TRANSIENT_SIGNALS: &[&str] = &[
+        "500",
+        "502",
+        "503",
+        "504",
+        "5xx",
+        "bad gateway",
+        "gateway timeout",
+        "service unavailable",
+        "temporarily unavailable",
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection refused",
+        "rate limit",
+        "429",
+        "too many requests",
+    ];
+    TRANSIENT_SIGNALS.iter().any(|needle| d.contains(needle))
 }
 
 /// Run ONE Overseer meta-OODA turn: `run_cycle` (Observe→Orient→Decide→plan)
@@ -316,9 +399,15 @@ pub fn overseer_tick_detailed(
         }
         Err(e) => {
             report.errors += 1;
+            report.cycle_failed = true;
+            // Record WHY the cycle failed: a transient upstream blip is
+            // self-healable (routes the meta-thread to a bounded "backoff"),
+            // while a fatal/opaque fault stays latched "erroring" (#893).
+            report.transient_cycle_failure = is_transient(&e);
             tracing::warn!(
                 target: "overseer::tick",
                 error = %e,
+                transient = report.transient_cycle_failure,
                 "overseer run_cycle failed — isolated, no actions taken"
             );
         }
@@ -349,6 +438,9 @@ pub fn overseer_tick_detailed(
         workstream_gaps_detected = report.workstream_gaps_detected,
         workstream_gaps_suppressed = report.workstream_gaps_suppressed,
         errors = report.errors,
+        panicked = report.panicked,
+        cycle_failed = report.cycle_failed,
+        transient_cycle_failure = report.transient_cycle_failure,
         duration_ms = report.duration_ms,
         "overseer tick complete"
     );
@@ -386,6 +478,7 @@ pub fn run_overseer_tick_isolated_detailed(
             (
                 OverseerTickReport {
                     panicked: true,
+                    cycle_failed: true,
                     errors: 1,
                     duration_ms: start.elapsed().as_millis() as u64,
                     ..OverseerTickReport::default()
@@ -415,6 +508,8 @@ fn tally_outcome(report: &mut OverseerTickReport, outcome: &ActOutcome) {
             report.workstream_gaps_detected += flagged;
             report.workstream_gaps_suppressed += suppressed;
         }
+        ActOutcome::StalePrFlagged { .. } => report.stale_prs_flagged += 1,
+        ActOutcome::DuplicatePrClosed { .. } => report.duplicate_prs_closed += 1,
         ActOutcome::ConflictResolved
         | ActOutcome::GoalTransferred
         | ActOutcome::Reported
@@ -506,6 +601,12 @@ fn intervention_target(iv: &Intervention) -> String {
         Intervention::FlagWorkstreamGaps { gaps } => {
             format!("flag {} uncovered workstream(s)", gaps.len())
         }
+        Intervention::FlagStalePr { repo, pr, .. } => format!("flag stale PR {repo}#{pr}"),
+        Intervention::CloseDuplicatePr {
+            repo,
+            pr,
+            duplicate_of,
+        } => format!("close duplicate PR {repo}#{pr} (dup of #{duplicate_of})"),
     }
 }
 
@@ -570,6 +671,16 @@ fn describe_action(iv: &Intervention, outcome: &ActOutcome) -> String {
                 format!("workstream gaps suppressed — {suppressed} within the dedup window")
             }
         }
+        ActOutcome::StalePrFlagged { repo, pr } => {
+            format!("flagged stale PR {repo}#{pr} (agentic merge-queue reasoning)")
+        }
+        ActOutcome::DuplicatePrClosed {
+            repo,
+            pr,
+            duplicate_of,
+        } => {
+            format!("closed duplicate PR {repo}#{pr} (dup of #{duplicate_of})")
+        }
     };
     sanitize_detail(&format!("did: {body}"))
 }
@@ -598,6 +709,9 @@ fn describe_act_error(iv: &Intervention, err: &OverseerError) -> String {
         } => ("budget", format!("${spent_usd:.2} of ${budget_usd:.2}")),
         OverseerError::Recursion { subject } => ("recursion", format!("own {subject}")),
         OverseerError::Conflict { with } => ("conflict", format!("overlaps {with}")),
+        OverseerError::NotMergeReady { pr, reason } => {
+            ("merge readiness", format!("PR #{pr}: {reason}"))
+        }
     };
     sanitize_detail(&format!(
         "did: {} failed — {kind}: {detail} (isolated)",
@@ -761,158 +875,18 @@ impl GoalCurator for BoardGoalCurator {
                 return Ok(Vec::new());
             }
         };
-        // High-signal open issues + open-PR issue coverage are best-effort
-        // external `gh` reads; each degrades to empty (logged) so a network hiccup
-        // never aborts the scan nor invents a gap. Anomalies flow through from the
-        // Observe pass; correlating a specific anomaly to an in-flight fix is left
-        // to the durable per-signature dedup (M1 issue + gap gate) rather than a
-        // brittle text match.
-        let issues = survey_high_signal_open_issues(OVERSEER_SURVEY_REPO);
-        let coverage = issue_coverage_from_open_prs(OVERSEER_SURVEY_REPO);
-        Ok(detect_workstream_gaps(
-            &board, &issues, anomalies, &coverage,
-        ))
+        // Ecosystem observation is no longer a single-repo Rust survey-and-parse
+        // (issue #2419): the agentic `ecosystem-observe` recipe is now the
+        // observation SOURCE for cross-repo work (see the
+        // `EcosystemObserver` rail + `docs/design/ecosystem-observe.md`). What
+        // remains here is the INTERNAL goal-board / anomaly hygiene detector,
+        // which reads Simard's OWN in-memory board state — not a repo code
+        // sensor. It never calls `gh`, never parses issue/PR JSON, and holds no
+        // per-repo observation. Anomalies flow through from the Observe pass;
+        // correlating a specific anomaly to an in-flight fix is left to the
+        // durable per-signature dedup (M1 issue + gap gate).
+        Ok(detect_workstream_gaps(&board, &[], anomalies, &[]))
     }
-}
-
-/// The repo the Overseer surveys for high-signal open issues + open PRs — its own
-/// stewarded repo (`rysweet/Simard`), per the gap-scan directive.
-const OVERSEER_SURVEY_REPO: &str = "rysweet/Simard";
-
-/// Upper bound on issues / PRs pulled in one survey, so the `gh` reads stay cheap
-/// and the candidate set bounded regardless of backlog size.
-const OVERSEER_SURVEY_LIMIT: u32 = 100;
-
-/// Best-effort label-aware survey of OPEN issues via `gh issue list --json
-/// number,title,labels`. Any failure (spawn, non-zero exit, JSON parse) degrades
-/// to an empty list (logged via tracing) — no gap is ever fabricated from a failed
-/// read, and there is no stray `print`. The detector filters these to the
-/// high-signal, uncovered ones.
-fn survey_high_signal_open_issues(repo: &str) -> Vec<SurveyedIssue> {
-    let output = match std::process::Command::new("gh")
-        .args([
-            "issue",
-            "list",
-            "-R",
-            repo,
-            "--state",
-            "open",
-            "--json",
-            "number,title,labels",
-            "--limit",
-            &OVERSEER_SURVEY_LIMIT.to_string(),
-        ])
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::warn!(
-                target: "overseer::gap_scan", repo, error = %e,
-                "gap-scan: `gh issue list` spawn failed; degrading to no issue gaps"
-            );
-            return Vec::new();
-        }
-    };
-    if !output.status.success() {
-        tracing::warn!(
-            target: "overseer::gap_scan", repo,
-            status = %output.status,
-            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
-            "gap-scan: `gh issue list` failed; degrading to no issue gaps"
-        );
-        return Vec::new();
-    }
-    #[derive(serde::Deserialize)]
-    struct RawLabel {
-        name: String,
-    }
-    #[derive(serde::Deserialize)]
-    struct RawIssue {
-        number: u64,
-        title: String,
-        labels: Vec<RawLabel>,
-    }
-    match serde_json::from_slice::<Vec<RawIssue>>(&output.stdout) {
-        Ok(raws) => raws
-            .into_iter()
-            .map(|r| SurveyedIssue {
-                repo: repo.to_string(),
-                number: r.number,
-                title: r.title,
-                labels: r.labels.into_iter().map(|l| l.name).collect(),
-            })
-            .collect(),
-        Err(e) => {
-            tracing::warn!(
-                target: "overseer::gap_scan", repo, error = %e,
-                "gap-scan: `gh issue list` JSON parse failed; degrading to no issue gaps"
-            );
-            Vec::new()
-        }
-    }
-}
-
-/// Build the ISSUE coverage set from the OPEN PRs: an issue with an open PR
-/// referencing it is not a gap. Best-effort — a `gh pr list` failure degrades to
-/// empty coverage (logged), so the worst case is flagging an already-covered issue
-/// (bounded by the per-signature dedup), never a panic. Issue references are read
-/// structurally: `#<n>` tokens in the PR title, and the `issue-<n>` / `issue/<n>`
-/// branch-naming convention.
-fn issue_coverage_from_open_prs(repo: &str) -> Vec<String> {
-    use crate::stewardship::merge_authority::{PrGhClient, RealPrGhClient};
-    let prs = match RealPrGhClient::new().list_open_prs(repo, OVERSEER_SURVEY_LIMIT) {
-        Ok(prs) => prs,
-        Err(e) => {
-            tracing::warn!(
-                target: "overseer::gap_scan", repo, error = %e,
-                "gap-scan: `gh pr list` failed; degrading to no open-PR issue coverage"
-            );
-            return Vec::new();
-        }
-    };
-    let mut coverage = Vec::new();
-    for pr in &prs {
-        for n in issue_refs_from_pr(&pr.title, &pr.head_ref_name) {
-            coverage.push(format!("issue:{repo}#{n}"));
-        }
-    }
-    coverage
-}
-
-/// Extract the issue numbers an open PR references, structurally: every `#<n>`
-/// token in the title, plus the digits after an `issue-` / `issue/` marker in the
-/// branch name (Simard's branch convention).
-fn issue_refs_from_pr(title: &str, branch: &str) -> Vec<u64> {
-    let mut nums = hash_issue_numbers(title);
-    let lower = branch.to_ascii_lowercase();
-    for marker in ["issue-", "issue/"] {
-        if let Some(pos) = lower.find(marker) {
-            let digits: String = lower[pos + marker.len()..]
-                .chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect();
-            if let Ok(n) = digits.parse::<u64>() {
-                nums.push(n);
-            }
-        }
-    }
-    nums
-}
-
-/// Collect every `#<digits>` issue reference in `text`.
-fn hash_issue_numbers(text: &str) -> Vec<u64> {
-    let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(pos) = rest.find('#') {
-        let after = &rest[pos + 1..];
-        let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if let Ok(n) = digits.parse::<u64>() {
-            out.push(n);
-        }
-        // Advance past this `#` (and any digits) to find the next reference.
-        rest = &after[digits.len()..];
-    }
-    out
 }
 
 /// Lowercase, hyphenate, and bound a title into a stable backlog id fragment.
@@ -1093,12 +1067,14 @@ impl MemoryRecall for MemoryRecallOps {
 
 // ─────────────────────────── deployer (safe stub) ──────────────────────────
 
-/// A [`Deployer`] that REFUSES autonomous deploys. The deterministic Decide
-/// mapping the wired daemon uses never emits `Intervention::Deploy`, so a live
-/// deploy is never planned through this path; if one ever were, it escalates
-/// rather than blindly swapping the binary. Guarded self-deploy stays the
-/// operator's canary/self-deploy gates (unit-tested via `GuardedDeployer` and
-/// `evaluate_deploy_gate`), never a blind deploy from the acting loop.
+/// A [`Deployer`] that REFUSES every deploy. **No longer used in production
+/// assembly** (issue #2590): [`assemble_capabilities`] now injects the
+/// production guarded deployer, and the deterministic Decide mapping DOES emit
+/// `Intervention::Deploy` when the running binary drifts behind merged `main`.
+/// Retained only as a safe, self-contained stub for tests and for any operator
+/// build that deliberately pins the daemon by swapping this in — its `deploy()`
+/// escalates rather than swapping a binary, so it can never perform a blind
+/// deploy.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RefuseDeployer;
 
@@ -1128,11 +1104,36 @@ pub fn assemble_capabilities(
     repo_root: std::path::PathBuf,
     state_root: std::path::PathBuf,
 ) -> Capabilities {
+    // Read LIVE restart churn once so the guarded deployer's crash-loop refusal
+    // (`evaluate_deploy_gate`) sees CURRENT churn — the daemon rebuilds this
+    // Overseer every tick, so an assembly-time read is fresh each tick. A status
+    // read failure degrades to `0` (the process-global deploy throttle + the
+    // orchestrator's own health-check/rollback remain the anti-thrash / instability
+    // guards); it never blocks assembly.
+    let status = SnapshotStatusReader::from_env();
+    let recent_restart_churn = status
+        .snapshot()
+        .ok()
+        .and_then(|s| s.restart_churn)
+        .unwrap_or(0);
+    // Autonomous self-deploy ACT (#2590): the PRODUCTION guarded deployer replaces
+    // the `RefuseDeployer` stub. It composes the real self-relaunch canary, the
+    // `SelfDeployOrchestrator` swap (identical to `simard self-deploy`), a git
+    // ancestry oracle rooted at the daemon repo, and the mandatory dual-channel
+    // operator notifier — behind `evaluate_deploy_gate`'s no-op / rollback /
+    // red-canary / crash-loop refusals and the high-risk AutonomyGate. Honours the
+    // operator opt-out (`SIMARD_OVERSEER_AUTONOMOUS_DEPLOY=0`): a PINNED daemon
+    // gets the safe `RefuseDeployer` so NO production deploy machinery is built.
+    let deployer = assemble_deployer(
+        repo_root.clone(),
+        recent_restart_churn,
+        overseer_self_repo(),
+    );
     Capabilities {
-        status: Box::new(SnapshotStatusReader::from_env()),
+        status: Box::new(status),
         recipes: Box::new(SmartOrchestratorLauncher::from_env()),
         prs: Box::new(MergePrOps::from_env().with_recursion_guard(overseer_identity())),
-        deployer: Box::new(RefuseDeployer),
+        deployer,
         meetings: Box::new(MeetingGoalTransfer::from_env()),
         issues: Box::new(StewardshipIssueFiler::new(Arc::new(
             crate::stewardship::RealGhClient,
@@ -1142,6 +1143,40 @@ pub fn assemble_capabilities(
         goals: Box::new(BoardGoalCurator::new(Arc::clone(&mem))),
         auditor: Box::new(SelfQualityAuditor::from_env(repo_root, state_root)),
         memory: Box::new(MemoryRecallOps::new(mem)),
+    }
+}
+
+/// The daemon's OWN repo slug (`owner/name`), used to label self-deploy operator
+/// notifications and root the deploy ancestry oracle. Override with
+/// `SIMARD_SELF_REPO`; defaults to the canonical `rysweet/Simard`.
+fn overseer_self_repo() -> String {
+    std::env::var("SIMARD_SELF_REPO")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "rysweet/Simard".to_string())
+}
+
+/// Select the acting [`Deployer`] for THIS assembly (#2590). Honours the operator
+/// opt-out (`SIMARD_OVERSEER_AUTONOMOUS_DEPLOY=0`): when the daemon is PINNED,
+/// inject the safe [`RefuseDeployer`] so NO production deploy machinery — not even
+/// the ancestry-repo resolution — is built or exercised. Otherwise build the
+/// production guarded deployer. Enabled by default (consistent with the observe
+/// rail's own opt-out check), so the two opt-out gates stay in lock-step: a
+/// pinned daemon neither observes drift NOR carries a live deployer.
+fn assemble_deployer(
+    repo_root: std::path::PathBuf,
+    recent_restart_churn: u64,
+    repo: String,
+) -> Box<dyn Deployer> {
+    if crate::overseer::deploy_trigger::autonomous_deploy_enabled() {
+        Box::new(crate::overseer::deploy::production_guarded_deployer(
+            repo_root,
+            recent_restart_churn,
+            repo,
+        ))
+    } else {
+        Box::new(RefuseDeployer)
     }
 }
 
@@ -1156,10 +1191,11 @@ pub fn build_overseer(
     repo_root: std::path::PathBuf,
     state_root: std::path::PathBuf,
 ) -> Overseer {
-    Overseer::new(assemble_capabilities(
+    let repo_root_for_ecosystem = repo_root.clone();
+    let overseer = Overseer::new(assemble_capabilities(
         Arc::clone(&mem),
         repo_root,
-        state_root,
+        state_root.clone(),
     ))
     .with_verify_merge_autonomy(true)
     .with_high_risk_autonomy(true)
@@ -1186,8 +1222,8 @@ pub fn build_overseer(
     // SIMARD_OVERSEER_MEMORY_RECALL); a disabled Overseer forces it off.
     .with_memory_recall_enabled(memory_recall_enabled())
     // The recurring backlog-coverage gap-scan: each tick, survey the whole
-    // work picture and flag important work with no active workstream, notify
-    // the operator (email + Signal) + file a deduped issue. Enabled by default
+    // work picture and flag important work with no active workstream, then
+    // notify the operator (email + Signal). Enabled by default
     // (opt-out via SIMARD_OVERSEER_GAP_SCAN); its every-N cadence is applied
     // by the daemon tick loop.
     .with_gap_scan_enabled(gap_scan_enabled())
@@ -1196,15 +1232,261 @@ pub fn build_overseer(
     // prior occurrences of a problem's root cause and records new ones — turning
     // a one-off false-park into a detected recurring root cause it escalates
     // instead of re-patching.
-    .with_memory(mem)
+    .with_memory(mem);
+
+    // Live agentic ecosystem-observe rail (issue #2419): REPLACES the retired
+    // single-repo Rust gap-scan survey as the cross-repo observation SOURCE. On
+    // the Overseer cadence the thin rail invokes the `ecosystem-observe` recipe —
+    // an AGENT runs `gh` across the stewarded roster and REASONS to a deduped
+    // Problem list, then briefs each into a `smart-orchestrator` run — and routes
+    // the agent's OPAQUE brief into the SAME gated launch path. Rust never queries
+    // or parses a repo. Wiring is fail-visible: if the committed roster fails to
+    // load, or `recipe-runner-rs`/the recipe is unavailable, the rail is simply
+    // not wired this build (the pass is skipped) rather than aborting the tick.
+    let overseer = match build_ecosystem_observer(&repo_root_for_ecosystem, &state_root) {
+        Some((roster, observer)) => {
+            overseer.with_ecosystem_observer(roster, observer, gap_scan_every_n())
+        }
+        None => overseer,
+    };
+
+    // Live agentic observe-merge-queue reasoner rail (issue #4097): the FIX for
+    // the dead-wire allowlist sensor. On the Overseer cadence the thin rail
+    // invokes the `observe-merge-queue` recipe — an AGENT surveys open PRs +
+    // issues across the governed roster with `gh` and REASONS to a bounded brief —
+    // and the rail parses it FAIL-CLOSED into `reasoned_prs` / `triaged_issues` +
+    // a re-narrowed `ready_prs` projection. Reasoning is default-ON over the
+    // governed roster; merge AUTHORIZATION stays narrow behind the objective +
+    // agentic gate. Wiring is fail-visible: if the roster fails to load, or
+    // `recipe-runner-rs`/the recipe is unavailable, the rail is simply not wired
+    // this build (the pass is skipped) rather than aborting the tick.
+    let overseer = match build_merge_queue_reasoner(&repo_root_for_ecosystem, &state_root) {
+        Some((roster, reasoner)) => {
+            overseer.with_merge_queue_reasoner(roster, reasoner, gap_scan_every_n())
+        }
+        None => overseer,
+    };
+
+    // Live agentic health-review rail ([standing]): on the Overseer cadence the
+    // thin rail invokes the `overseer-health-review` recipe — an AGENT reads the
+    // OODA journal + `simard status` + `simard goal list`, detects crash-loops /
+    // clustered failure signatures, and REASONS to typed remediation DECISIONS —
+    // and routes each parsed `LaunchRecipe` / `EscalateBlockedGoal` through the
+    // SAME gated action path. Rust never reads the journal or encodes a failure
+    // threshold. Enabled by default (opt-out via SIMARD_OVERSEER_HEALTH_REVIEW);
+    // the shared gap-scan throttle applies on top. Wiring is fail-visible: if
+    // `recipe-runner-rs`/the recipe is unavailable the rail is simply not wired
+    // this build (the pass is skipped) rather than aborting the tick.
+    let overseer = match build_health_reviewer(&repo_root_for_ecosystem, &state_root) {
+        Some(reviewer) => overseer
+            .with_health_reviewer(reviewer, gap_scan_every_n())
+            .with_health_review_enabled(health_review_enabled()),
+        None => overseer,
+    };
+
+    // Autonomous self-deploy OBSERVE rail (issue #2590): wire the production
+    // drift sensor so each tick can OBSERVE whether the running binary is behind
+    // merged `main` and, if so, drive a guarded self-deploy. Always wired here;
+    // the runtime opt-out (`SIMARD_OVERSEER_AUTONOMOUS_DEPLOY=0`), the
+    // process-global anti-thrash throttle, the live crash-loop guard, and the
+    // high-risk AutonomyGate govern whether a deploy actually fires. The sensor
+    // itself is fail-safe (a git/source error reports "no drift").
+    let overseer = overseer.with_deploy_drift_observer(Box::new(
+        crate::overseer::deploy_trigger::GitDeployDriftObserver::new(),
+    ));
+
+    // Periodic stale-engineer-claim reaper (issue #4099): sweep + reclaim the
+    // `engineer_claims` leak independent of per-goal polling. Wire the shared
+    // ledger chokepoint, the worktree liveness probe, and the orphan cleanup —
+    // all rooted at the SAME `state_root` the engineers spawn under. Opening the
+    // ledger is fail-visible: if it fails the reaper is simply not wired this
+    // tick (the sweep is skipped), never a panic that would abort the tick.
+    match build_claim_reaper_seams(&state_root) {
+        Some((ledger, probe, cleanup, investigator)) => overseer.with_claim_reaper(
+            ledger,
+            probe,
+            cleanup,
+            investigator,
+            claim_reap_enabled(),
+            claim_reap_stale_secs(),
+        ),
+        None => overseer,
+    }
 }
 
-/// Resolve the acting Overseer's tick cadence (seconds), clamped to the config
+/// Open the reaper's ledger + build its worktree-rooted probe and cleanup seams.
+/// Returns `None` (fail-visible log) if the ledger cannot be opened so the tick
+/// runs without the reaper rather than panicking.
+fn build_claim_reaper_seams(
+    state_root: &std::path::Path,
+) -> Option<crate::overseer::claim_reaper::ClaimReaperSeamSet> {
+    let ledger_path = crate::typed_ooda::ledger_path(state_root);
+    let policy = crate::typed_ooda::CapabilityPolicy::new("engineer-claim-reaper");
+    let handler = match crate::typed_ooda::CapabilityHandler::open(&ledger_path, policy) {
+        Ok(handler) => handler,
+        Err(error) => {
+            tracing::error!(
+                target: "simard::claim_reaper",
+                error = %error,
+                ledger_path = %ledger_path.display(),
+                "[simard] claim-reaper NOT wired this tick: failed to open ledger",
+            );
+            return None;
+        }
+    };
+    Some((
+        Box::new(handler),
+        Box::new(
+            crate::overseer::claim_reaper::WorktreeClaimLivenessProbe::new(
+                state_root.to_path_buf(),
+            ),
+        ),
+        Box::new(crate::overseer::claim_reaper::WorktreeDirCleanup::new(
+            state_root.to_path_buf(),
+        )),
+        // Investigate-before-reap (issue #4400): the thin agentic rail that
+        // archives a would-be-stale engineer's evidence to `reaped-engineers/`
+        // and dispatches the `investigate_stale_engineer` recipe through the SAME
+        // gated Act path — so staleness ALONE never reaps and a genuinely-dead
+        // engineer's death becomes a self-improvement signal.
+        Box::new(
+            crate::overseer::claim_reaper::RecipeStaleEngineerInvestigator::new(
+                state_root.to_path_buf(),
+                overseer_self_repo(),
+            ),
+        ),
+    ))
+}
+
+/// Load the identity-curated stewarded roster and build the production
+/// ecosystem-observe rail. Returns `None` (fail-visible log) if the roster cannot
+/// be loaded or `recipe-runner-rs`/the recipe is unavailable, so the build
+/// proceeds without the rail rather than panicking. The `owner/name` roster is
+/// identity-scoped MUTABLE state (`identity-state/<identity>/stewarded_repos.toml`
+/// under the state root), seeded on first use from committed identity data.
+fn build_ecosystem_observer(
+    repo_root: &std::path::Path,
+    state_root: &std::path::Path,
+) -> Option<(
+    Vec<String>,
+    Box<dyn crate::overseer::ecosystem_observe::EcosystemObserver>,
+)> {
+    use crate::overseer::ecosystem_observe::{
+        RecipeEcosystemObserver, SpawnEcosystemRecipeRunner, load_stewarded_roster,
+    };
+
+    // Identity-curated, deploy-durable roster: seeded from committed identity
+    // data on first use, then owned as mutable state the install never clobbers.
+    let identity = crate::identity_curated_state::active_identity();
+    let roster = match load_stewarded_roster(repo_root, &identity, Some(state_root), None) {
+        Ok(roster) => roster,
+        Err(error) => {
+            tracing::warn!(
+                target: "simard::ecosystem_observe",
+                error = %error,
+                identity = %identity,
+                state_root = %state_root.display(),
+                "[simard] ecosystem-observe NOT wired: failed to load stewarded roster",
+            );
+            return None;
+        }
+    };
+    let runner = match SpawnEcosystemRecipeRunner::new(repo_root) {
+        Some(runner) => runner,
+        None => {
+            tracing::warn!(
+                target: "simard::ecosystem_observe",
+                "[simard] ecosystem-observe NOT wired: recipe-runner-rs or ecosystem-observe.yaml unavailable",
+            );
+            return None;
+        }
+    };
+    Some((roster, Box::new(RecipeEcosystemObserver::new(runner))))
+}
+
+/// Load the identity-curated governed roster and build the production
+/// observe-merge-queue reasoner rail (#4097). Returns `None` (fail-visible log)
+/// if the roster cannot be loaded or `recipe-runner-rs`/the recipe is
+/// unavailable, so the build proceeds without the rail rather than panicking.
+/// Reuses the SAME identity-curated roster as the governed reasoning scope, per
+/// the design (Simard's governed repos are default-in-scope for merge REASONING
+/// while the merge ACTION stays behind the objective + agentic gate).
+fn build_merge_queue_reasoner(
+    repo_root: &std::path::Path,
+    state_root: &std::path::Path,
+) -> Option<(
+    Vec<String>,
+    Box<dyn crate::overseer::merge_queue_observe::MergeQueueReasoner>,
+)> {
+    use crate::overseer::ecosystem_observe::load_stewarded_roster;
+    use crate::overseer::merge_queue_observe::{
+        RecipeMergeQueueReasoner, SpawnMergeQueueRecipeRunner,
+    };
+
+    let identity = crate::identity_curated_state::active_identity();
+    let roster = match load_stewarded_roster(repo_root, &identity, Some(state_root), None) {
+        Ok(roster) => roster,
+        Err(error) => {
+            tracing::warn!(
+                target: "simard::merge_queue_observe",
+                error = %error,
+                identity = %identity,
+                state_root = %state_root.display(),
+                "[simard] observe-merge-queue NOT wired: failed to load governed roster",
+            );
+            return None;
+        }
+    };
+    let runner = match SpawnMergeQueueRecipeRunner::new(repo_root) {
+        Some(runner) => runner,
+        None => {
+            tracing::warn!(
+                target: "simard::merge_queue_observe",
+                "[simard] observe-merge-queue NOT wired: recipe-runner-rs or observe-merge-queue.yaml unavailable",
+            );
+            return None;
+        }
+    };
+    Some((roster, Box::new(RecipeMergeQueueReasoner::new(runner))))
+}
+
+/// Build the production agentic health-review rail ([standing]). Returns `None`
+/// (fail-visible log) if `recipe-runner-rs`/the `overseer-health-review` recipe
+/// is unavailable, so the build proceeds without the rail rather than panicking.
+///
+/// Unlike the ecosystem/merge-queue rails there is NO roster to load — the agent
+/// reads the LOCAL daemon's own observable state (`journalctl --user -u <unit>`,
+/// `simard status`, `simard goal list`). The service unit comes from
+/// [`health_review_service_unit`] (default `simard-ooda.service`), the state root
+/// and repo path are threaded from the daemon so the recipe reads the SAME roots
+/// the engineers spawn under.
+fn build_health_reviewer(
+    repo_root: &std::path::Path,
+    state_root: &std::path::Path,
+) -> Option<Box<dyn crate::overseer::health_review::HealthReviewer>> {
+    use crate::overseer::health_review::{RecipeHealthReviewer, SpawnHealthReviewRecipeRunner};
+
+    let runner = match SpawnHealthReviewRecipeRunner::new(repo_root) {
+        Some(runner) => runner,
+        None => {
+            tracing::warn!(
+                target: "simard::health_review",
+                "[simard] overseer-health-review NOT wired: recipe-runner-rs or overseer-health-review.yaml unavailable",
+            );
+            return None;
+        }
+    };
+    Some(Box::new(RecipeHealthReviewer::new(
+        runner,
+        health_review_service_unit(),
+        state_root.to_string_lossy().into_owned(),
+        repo_root.to_string_lossy().into_owned(),
+    )))
+}
 /// floor so self-tuning can never drive a hot loop.
 pub fn overseer_tick_interval_secs() -> u64 {
     overseer_interval_secs()
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1283,6 +1565,10 @@ mod tests {
     struct RecordingPrs {
         ready: bool,
         merges: MergeLog,
+        /// Candidates the survey rail reports (#4097). In production `ready_prs`
+        /// is populated by `PrOps::survey_ready_prs`, not the status snapshot, so
+        /// tests seed the merge path HERE rather than via `FakeStatus`.
+        ready_prs: Vec<crate::overseer::capabilities::PrRef>,
     }
     impl RecordingPrs {
         fn new(ready: bool) -> (Self, MergeLog) {
@@ -1291,9 +1577,16 @@ mod tests {
                 Self {
                     ready,
                     merges: Arc::clone(&merges),
+                    ready_prs: Vec::new(),
                 },
                 merges,
             )
+        }
+
+        /// Seed the candidates the survey rail will report this tick.
+        fn with_ready_prs(mut self, ready_prs: Vec<crate::overseer::capabilities::PrRef>) -> Self {
+            self.ready_prs = ready_prs;
+            self
         }
     }
     impl PrOps for RecordingPrs {
@@ -1313,6 +1606,9 @@ mod tests {
         }
         fn resolve_conflict(&self, _repo: &str, _pr: u32) -> Result<(), OverseerError> {
             Ok(())
+        }
+        fn survey_ready_prs(&self, _repos: &[String]) -> Vec<crate::overseer::capabilities::PrRef> {
+            self.ready_prs.clone()
         }
     }
 
@@ -1406,16 +1702,17 @@ mod tests {
     fn tick_verifies_and_merges_a_green_ready_pr_and_records_the_merge() {
         // Seed a merge-ready PR signal → Decide maps to VerifyAndMergePr →
         // with verify-merge autonomy ON, the tick merges it (normal merge).
-        let observed = ObservedState {
-            ready_prs: vec![crate::overseer::capabilities::PrRef {
-                repo: "rysweet/Simard".to_string(),
-                pr: 42,
-            }],
-            ..ObservedState::default()
-        };
+        // `ready_prs` is sourced from the survey rail (#4097), not the snapshot.
         let (prs, merges) = RecordingPrs::new(true);
-        let mut overseer = Overseer::new(caps_with(Box::new(FakeStatus(observed)), Box::new(prs)))
-            .with_verify_merge_autonomy(true);
+        let prs = prs.with_ready_prs(vec![crate::overseer::capabilities::PrRef {
+            repo: "rysweet/Simard".to_string(),
+            pr: 42,
+        }]);
+        let mut overseer = Overseer::new(caps_with(
+            Box::new(FakeStatus(ObservedState::default())),
+            Box::new(prs),
+        ))
+        .with_verify_merge_autonomy(true);
         let report = overseer_tick(&mut overseer);
         assert_eq!(report.prs_merged, 1, "green ready PR must be merged");
         assert_eq!(
@@ -1426,16 +1723,16 @@ mod tests {
 
     #[test]
     fn tick_holds_the_merge_when_autonomy_is_not_opted_in() {
-        let observed = ObservedState {
-            ready_prs: vec![crate::overseer::capabilities::PrRef {
-                repo: "rysweet/Simard".to_string(),
-                pr: 7,
-            }],
-            ..ObservedState::default()
-        };
-        // Default autonomy (verify-merge OFF) → the merge is HELD (escalated).
         let (prs, merges) = RecordingPrs::new(true);
-        let mut overseer = Overseer::new(caps_with(Box::new(FakeStatus(observed)), Box::new(prs)));
+        let prs = prs.with_ready_prs(vec![crate::overseer::capabilities::PrRef {
+            repo: "rysweet/Simard".to_string(),
+            pr: 7,
+        }]);
+        // Default autonomy (verify-merge OFF) → the merge is HELD (escalated).
+        let mut overseer = Overseer::new(caps_with(
+            Box::new(FakeStatus(ObservedState::default())),
+            Box::new(prs),
+        ));
         let report = overseer_tick(&mut overseer);
         assert_eq!(report.prs_merged, 0);
         assert_eq!(report.held, 1, "verify-merge is opt-in; held by default");
@@ -1479,6 +1776,235 @@ mod tests {
         assert_eq!(report.problems, 0);
     }
 
+    // ── #4080: isolated `act` errors must not pin the meta-thread "erroring" ─
+    //
+    // Root cause: the daemon derived the overseer meta-thread's `last_success`
+    // from `!panicked && errors == 0`, so a single transient per-intervention
+    // `act` failure (which is documented as "isolated, never fatal") pinned the
+    // thread in "erroring" and a later healthy tick never cleared it. The fix
+    // adds an additive `cycle_failed: bool` that is set ONLY when the tick's
+    // OODA cycle itself fails (`run_cycle` Err or a panic), and health is then
+    // derived from `!panicked && !cycle_failed`. These tests pin that contract.
+
+    /// A `PrOps` whose `merge` fails with a *capability* error (not
+    /// `NotMergeReady`), so `act` returns `Err` → the tick records an isolated
+    /// `errors += 1` while `run_cycle` itself succeeded. This reproduces the
+    /// exact signal (#4080) that used to pin the meta-thread in "erroring".
+    struct FailingMergePrs {
+        ready_prs: Vec<crate::overseer::capabilities::PrRef>,
+    }
+    impl PrOps for FailingMergePrs {
+        fn verify(&self, _repo: &str, _pr: u32) -> Result<VerifyReport, OverseerError> {
+            Ok(VerifyReport {
+                ready: true,
+                checks: vec![CheckItem {
+                    name: "objective gates".to_string(),
+                    passed: true,
+                    note: "test".to_string(),
+                }],
+            })
+        }
+        fn merge(&self, _repo: &str, _pr: u32) -> Result<(), OverseerError> {
+            Err(OverseerError::Capability {
+                what: "merge",
+                detail: "transient GitHub 502 — retry next tick".to_string(),
+            })
+        }
+        fn resolve_conflict(&self, _repo: &str, _pr: u32) -> Result<(), OverseerError> {
+            Ok(())
+        }
+        fn survey_ready_prs(&self, _repos: &[String]) -> Vec<crate::overseer::capabilities::PrRef> {
+            self.ready_prs.clone()
+        }
+    }
+
+    #[test]
+    fn an_isolated_act_error_does_not_mark_the_cycle_failed() {
+        // A green, merge-ready PR is surveyed and verify-merge autonomy is ON, so
+        // the tick ADMITS a VerifyAndMergePr intervention. Its `merge` fails →
+        // the act error is isolated and counted in `errors`, but `run_cycle`
+        // succeeded, so the tick is NOT a cycle failure. This is the recovery
+        // (erroring→ok) path: `cycle_failed` MUST stay false so the daemon
+        // derives the meta-thread health as "ok".
+        let prs = FailingMergePrs {
+            ready_prs: vec![crate::overseer::capabilities::PrRef {
+                repo: "rysweet/Simard".to_string(),
+                pr: 42,
+            }],
+        };
+        let mut overseer = Overseer::new(caps_with(
+            Box::new(FakeStatus(ObservedState::default())),
+            Box::new(prs),
+        ))
+        .with_verify_merge_autonomy(true);
+        let report = overseer_tick(&mut overseer);
+        assert!(
+            report.errors >= 1,
+            "the failed merge must still be surfaced as an isolated error"
+        );
+        assert!(!report.panicked, "an isolated act error is not a panic");
+        assert!(
+            !report.cycle_failed,
+            "run_cycle succeeded — an isolated act error must NOT mark the tick \
+             cycle_failed (#4080 erroring→ok recovery)"
+        );
+    }
+
+    #[test]
+    fn a_run_cycle_error_marks_the_cycle_failed() {
+        // A genuine OODA-cycle failure (the Observe pass errors) IS a cycle
+        // failure and must surface: `cycle_failed` true, not a panic.
+        struct ErrStatus;
+        impl StatusReader for ErrStatus {
+            fn snapshot(&self) -> Result<ObservedState, OverseerError> {
+                Err(OverseerError::Capability {
+                    what: "status",
+                    detail: "degraded".to_string(),
+                })
+            }
+        }
+        let (prs, _merges) = RecordingPrs::new(true);
+        let mut overseer = Overseer::new(caps_with(Box::new(ErrStatus), Box::new(prs)));
+        let report = overseer_tick(&mut overseer);
+        assert!(!report.panicked, "a run_cycle error is not a panic");
+        assert!(
+            report.cycle_failed,
+            "run_cycle returned Err — the tick's cycle failed and must surface \
+             cycle_failed so health stays erroring (#4080)"
+        );
+    }
+
+    // ── #893: a TRANSIENT cycle failure must be self-healable (not latched) ──
+    //
+    // #4080 stopped isolated act errors from pinning the meta-thread, but a
+    // genuine `run_cycle` failure still latches "erroring" even when its cause is
+    // an external, self-clearing fault (a GitHub 503, a timeout, a rate limit).
+    // The fix records WHY the cycle failed: the Err arm classifies the error via
+    // `is_transient` and sets an additive `transient_cycle_failure` alongside
+    // `cycle_failed`. These tests pin that the flag is populated correctly at the
+    // tick boundary. The health mapping it feeds is pinned in tests_self_healing.
+
+    #[test]
+    fn a_transient_run_cycle_error_marks_transient_cycle_failure() {
+        // The Observe pass fails with a retryable upstream fault (HTTP 503). The
+        // tick's cycle fails (cycle_failed) BUT the failure is transient, so
+        // `transient_cycle_failure` must also be set so the daemon can self-heal
+        // to "backoff" instead of latching "erroring".
+        struct TransientErrStatus;
+        impl StatusReader for TransientErrStatus {
+            fn snapshot(&self) -> Result<ObservedState, OverseerError> {
+                Err(OverseerError::Capability {
+                    what: "status",
+                    detail: "upstream returned HTTP 503 Service Unavailable".to_string(),
+                })
+            }
+        }
+        let (prs, _merges) = RecordingPrs::new(true);
+        let mut overseer = Overseer::new(caps_with(Box::new(TransientErrStatus), Box::new(prs)));
+        let report = overseer_tick(&mut overseer);
+        assert!(!report.panicked, "a transient error is not a panic");
+        assert!(
+            report.cycle_failed,
+            "a run_cycle Err is still a cycle failure (cycle_failed stays true)"
+        );
+        assert!(
+            report.transient_cycle_failure,
+            "a 503 upstream fault is transient — transient_cycle_failure must be set (#893)"
+        );
+    }
+
+    #[test]
+    fn a_fatal_run_cycle_error_leaves_transient_cycle_failure_false() {
+        // A non-retryable (opaque/fatal) cycle failure must NOT be marked
+        // transient — it should latch "erroring", so `transient_cycle_failure`
+        // stays false while `cycle_failed` is true. This is the fail-closed side.
+        struct FatalErrStatus;
+        impl StatusReader for FatalErrStatus {
+            fn snapshot(&self) -> Result<ObservedState, OverseerError> {
+                Err(OverseerError::Capability {
+                    what: "status",
+                    detail: "malformed config: unknown field `widget`".to_string(),
+                })
+            }
+        }
+        let (prs, _merges) = RecordingPrs::new(true);
+        let mut overseer = Overseer::new(caps_with(Box::new(FatalErrStatus), Box::new(prs)));
+        let report = overseer_tick(&mut overseer);
+        assert!(!report.panicked);
+        assert!(report.cycle_failed, "a run_cycle Err is a cycle failure");
+        assert!(
+            !report.transient_cycle_failure,
+            "an unknown/fatal fault must NOT be transient (fail-closed) so it still latches erroring"
+        );
+    }
+
+    #[test]
+    fn a_panicking_tick_is_never_transient() {
+        // A panic is the most severe cycle failure and is never self-healed:
+        // `panicked` and `cycle_failed` are set but `transient_cycle_failure` is
+        // false so the meta-thread maps to "erroring".
+        let (prs, _merges) = RecordingPrs::new(true);
+        let mut overseer = Overseer::new(caps_with(Box::new(PanicStatus), Box::new(prs)));
+        let report = run_overseer_tick_isolated(&mut overseer);
+        assert!(report.panicked && report.cycle_failed);
+        assert!(
+            !report.transient_cycle_failure,
+            "a panic is never transient — it must map to erroring, not backoff (#893)"
+        );
+    }
+
+    #[test]
+    fn a_panicking_tick_marks_the_cycle_failed() {
+        // A panic is the most severe cycle failure: both `panicked` and
+        // `cycle_failed` must be set so the meta-thread health is "erroring".
+        let (prs, _merges) = RecordingPrs::new(true);
+        let mut overseer = Overseer::new(caps_with(Box::new(PanicStatus), Box::new(prs)));
+        let report = run_overseer_tick_isolated(&mut overseer);
+        assert!(report.panicked, "the tick panicked and was isolated");
+        assert!(
+            report.cycle_failed,
+            "a panic is a cycle failure — cycle_failed must be set alongside \
+             panicked (#4080)"
+        );
+    }
+
+    #[test]
+    fn a_default_report_is_not_cycle_failed() {
+        // The healthy baseline: a freshly-defaulted report is neither panicked
+        // nor cycle_failed, so the derived health is "ok".
+        let report = OverseerTickReport::default();
+        assert!(!report.cycle_failed);
+        assert!(!report.panicked);
+    }
+
+    #[test]
+    fn cycle_failed_deserializes_to_false_from_a_legacy_feed_record() {
+        // Durable JSON written by an older build lacks `cycle_failed`. The
+        // struct-level `#[serde(default)]` must fill it with `false` so existing
+        // feed records keep deserializing without a SCHEMA_VERSION bump.
+        let legacy = r#"{
+            "problems": 3,
+            "errors": 1,
+            "panicked": false,
+            "duration_ms": 12
+        }"#;
+        let report: OverseerTickReport =
+            serde_json::from_str(legacy).expect("legacy record without cycle_failed must parse");
+        assert_eq!(report.problems, 3);
+        assert_eq!(report.errors, 1);
+        assert!(
+            !report.cycle_failed,
+            "a legacy record without the field must default cycle_failed to false"
+        );
+
+        // And a round-trip now carries the field explicitly.
+        let json = serde_json::to_string(&report).expect("serialize");
+        assert!(
+            json.contains("\"cycle_failed\":false"),
+            "the additive field must be emitted on write: {json}"
+        );
+    }
+
     // ── identity ──────────────────────────────────────────────────────────
 
     #[test]
@@ -1511,6 +2037,38 @@ mod tests {
         let d = RefuseDeployer;
         assert!(d.deploy("abc123").is_err(), "never a blind deploy");
         assert!(d.deployed_commit().is_ok());
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn assemble_deployer_honours_the_operator_opt_out() {
+        // #2590 A5: a PINNED daemon (`SIMARD_OVERSEER_AUTONOMOUS_DEPLOY=0`) gets
+        // the safe `RefuseDeployer` — no production deploy machinery (nor its
+        // per-tick ancestry-repo resolution) is built. Only the opt-out branch is
+        // exercised here: constructing the enabled branch is covered elsewhere,
+        // and its `deploy()` would run the real canary.
+        use crate::overseer::deploy_trigger::AUTONOMOUS_DEPLOY_ENV;
+        let prev = std::env::var(AUTONOMOUS_DEPLOY_ENV).ok();
+        // SAFETY: single-threaded, serialized test-local env toggle, restored below.
+        unsafe {
+            std::env::set_var(AUTONOMOUS_DEPLOY_ENV, "0");
+        }
+        let pinned = assemble_deployer(
+            std::path::PathBuf::from("."),
+            0,
+            "rysweet/Simard".to_string(),
+        );
+        let err = pinned.deploy("aaaaaaaaaaaa").unwrap_err();
+        assert!(
+            format!("{err}").contains("not wired"),
+            "a pinned daemon must get the RefuseDeployer stub, got: {err}"
+        );
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(AUTONOMOUS_DEPLOY_ENV, v),
+                None => std::env::remove_var(AUTONOMOUS_DEPLOY_ENV),
+            }
+        }
     }
 
     #[test]
@@ -1712,6 +2270,32 @@ mod tests {
     }
 
     #[test]
+    fn describe_act_error_handles_not_merge_ready_in_plain_english() {
+        // #4097: NotMergeReady normally maps to an escalation (handled in act()),
+        // but describe_act_error's classifier must exhaustively cover it and
+        // render a plain-English, jargon-free, target-named line.
+        let err = OverseerError::NotMergeReady {
+            pr: 4097,
+            reason: "the merge-readiness review did not approve this change yet".to_string(),
+        };
+        let s = describe_act_error(
+            &Intervention::VerifyAndMergePr {
+                repo: "rysweet/Simard".to_string(),
+                pr: 4097,
+            },
+            &err,
+        );
+        assert!(
+            s.contains("4097"),
+            "an act line must name the target PR: {s:?}"
+        );
+        assert!(
+            !s.contains("check #7") && !s.contains("DiffReviewer"),
+            "no internal gate jargon may leak into the operator feed: {s:?}"
+        );
+    }
+
+    #[test]
     fn describe_act_error_is_classified_and_never_leaks_the_raw_body() {
         let err = OverseerError::Capability {
             what: "merge",
@@ -1785,16 +2369,16 @@ mod tests {
 
     #[test]
     fn tick_records_action_details_for_a_merged_pr() {
-        let observed = ObservedState {
-            ready_prs: vec![crate::overseer::capabilities::PrRef {
-                repo: "rysweet/Simard".to_string(),
-                pr: 42,
-            }],
-            ..ObservedState::default()
-        };
         let (prs, _merges) = RecordingPrs::new(true);
-        let mut overseer = Overseer::new(caps_with(Box::new(FakeStatus(observed)), Box::new(prs)))
-            .with_verify_merge_autonomy(true);
+        let prs = prs.with_ready_prs(vec![crate::overseer::capabilities::PrRef {
+            repo: "rysweet/Simard".to_string(),
+            pr: 42,
+        }]);
+        let mut overseer = Overseer::new(caps_with(
+            Box::new(FakeStatus(ObservedState::default())),
+            Box::new(prs),
+        ))
+        .with_verify_merge_autonomy(true);
         let report = overseer_tick(&mut overseer);
 
         assert_eq!(report.prs_merged, 1);
@@ -1811,16 +2395,16 @@ mod tests {
 
     #[test]
     fn tick_records_why_a_held_intervention_took_no_action() {
-        let observed = ObservedState {
-            ready_prs: vec![crate::overseer::capabilities::PrRef {
-                repo: "rysweet/Simard".to_string(),
-                pr: 7,
-            }],
-            ..ObservedState::default()
-        };
         // Default autonomy → the merge is HELD; the log must SAY WHY, not go silent.
         let (prs, _merges) = RecordingPrs::new(true);
-        let mut overseer = Overseer::new(caps_with(Box::new(FakeStatus(observed)), Box::new(prs)));
+        let prs = prs.with_ready_prs(vec![crate::overseer::capabilities::PrRef {
+            repo: "rysweet/Simard".to_string(),
+            pr: 7,
+        }]);
+        let mut overseer = Overseer::new(caps_with(
+            Box::new(FakeStatus(ObservedState::default())),
+            Box::new(prs),
+        ));
         let report = overseer_tick(&mut overseer);
 
         assert_eq!(report.held, 1);
@@ -1862,6 +2446,55 @@ mod tests {
         assert!(
             last.to_lowercase().contains("more"),
             "the final capped entry must summarise the overflow (e.g. '(+N more)'): {last:?}"
+        );
+    }
+
+    // ── #4420: a red canary must NEVER be misclassified as transient ────────
+    //
+    // The reddening-gate detail STEP 1 now threads into `OverseerError::Capability`
+    // can contain transient-looking words (a gate whose failure text mentions a
+    // "timeout" or "503"). `is_transient`'s substring allowlist would then falsely
+    // route a genuine deploy-gate refusal to self-healing/retry, silently masking
+    // a real regression. The fix short-circuits `false` for the deploy-gate and
+    // target-canary `what` discriminants BEFORE the allowlist, so a red canary
+    // always latches "erroring" (fail-closed).
+
+    #[test]
+    fn a_red_deploy_gate_is_never_transient_even_with_timeout_wording() {
+        let err = OverseerError::Capability {
+            what: "deploy_gate",
+            detail: "red canary (gate rpc-health: request timed out waiting for health probe)"
+                .to_string(),
+        };
+        assert!(
+            !is_transient(&err),
+            "a red canary deploy-gate refusal must be fatal, not retried away (#4420)"
+        );
+    }
+
+    #[test]
+    fn a_target_canary_failure_is_never_transient_even_with_503_wording() {
+        let err = OverseerError::Capability {
+            what: "target_canary",
+            detail: "gate probe returned 503 service unavailable".to_string(),
+        };
+        assert!(
+            !is_transient(&err),
+            "a target-canary failure must be fatal, not transient (fail-closed, #4420)"
+        );
+    }
+
+    #[test]
+    fn genuinely_transient_upstream_faults_remain_transient() {
+        // The guard must be narrow: non-canary capability faults that are truly
+        // retryable upstream blips still classify transient (unchanged behaviour).
+        let err = OverseerError::Capability {
+            what: "status",
+            detail: "upstream returned HTTP 503 Service Unavailable".to_string(),
+        };
+        assert!(
+            is_transient(&err),
+            "a real upstream 503 on a non-canary capability stays transient"
         );
     }
 }

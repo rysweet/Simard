@@ -1,0 +1,37 @@
+# Canonical agentic-test schema (name + agents[] + steps[] with params).
+#
+# The installed `gadugi-test` / `@gadugi/agentic-test` binary validates and runs
+# scenarios through `ScenarioLoader` (canonical format), which requires a `name`,
+# a `steps` array, and a non-empty `agents` array. A single `cli` agent runs the
+# hermetic regression script; the agent's command runner treats a non-zero exit
+# code as a step failure, so the script's own `exit 1` on a wrong rate makes
+# this a real pass/fail gate (not a cosmetic assertion).
+name: simard-dashboard-memory-growth-rate-window
+description: >-
+  Standalone dashboard reports the memory growth rate over a bounded trailing
+  24 h window, never averaged across the whole multi-week snapshot ring buffer
+  (#4107).
+version: "1.0"
+config:
+  timeout: 240000
+environment:
+  requires: []
+agents:
+  - name: cli-agent
+    type: cli
+    config: {}
+metadata:
+  tags:
+    - cli
+    - dashboard
+    - memory
+  priority: high
+steps:
+  - name: Run the standalone dashboard memory growth-rate window regression script
+    agent: cli-agent
+    action: run
+    params:
+      command: bash
+      args:
+        - scripts/qa-dashboard-memory-growth-rate-window.sh
+    timeout: 240000

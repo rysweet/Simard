@@ -41,7 +41,7 @@ Tabs render in the nav in this order:
 | **Resources** | Memory · Costs | What Simard has remembered alongside what it costs to run — the live **Memory Store** counts, the "What Simard Remembers" recent-memory list, the **Memory Growth** trend, and the **Memory Files** panel (**Memory**); and per-provider, per-model token spend across the active session (**Costs**). The full interactive memory graph now lives on its own [**Memory** tab](reference/dashboard-memory-tab.md). |
 | **Chat** | — | Direct chat with Simard. Conversations are saved as durable, resumable **sessions**: a sidebar lists every saved chat, the panel fills the page, and assistant replies stream in incrementally. See [Chat: durable, resumable sessions](#chat-tab-durable-resumable-sessions). |
 | **Overseer** | — | The overseer goal-board health view: per-goal health, staleness, and the intervention signals that decide when a stalled goal needs attention. |
-| **Journal** | — | The daemon's narrative journal — a human-readable, chronological record of what Simard decided and why, newest entries first. |
+| **Journal** | — | The daemon's narrative journal — a human-readable, chronological record of what Simard decided and why, newest entries first. Each day's entry includes a plain-language code-change-proposal table whose **merged** count reflects the pull requests that actually landed on that day (sourced from `gh pr list --state merged --search "merged:<date>"`), so the diary honestly reports "how many changes shipped today" instead of always showing zero ([#4140](https://github.com/rysweet/Simard/issues/4140)). Once a day's entry freezes, a merged-only reconciliation pass revisits the last several past days each tick and folds in any PRs that merged after the day's final write (or before the merged-count wiring existed), so a **past** day's merged count converges to reality instead of freezing at zero — additively only, never touching today ([#4225](https://github.com/rysweet/Simard/issues/4225)). |
 | **Creative Ideas** | — | The pool of candidate self-improvement ideas Simard generates for herself, each reviewed for feasibility, worth, and measurability. Browse and search by review status (new · needs-revision · needs-human-review · accepted · in-progress · completed · deferred · rejected), generate a fresh batch on demand with **Run now**, and **Promote** (accept → goal) or **Prune** (reject) any idea inline — see [Creative Ideas tab — live view and operator controls](operator-dashboard/creative-ideas-operator-controls.md). |
 
 **Memory**, **Overseer**, **Journal**, and **Creative Ideas** are standalone
@@ -310,6 +310,37 @@ additive fields on `/api/goals`, and the `active` array is returned sorted by
 priority ascending. See
 [Goals tab hierarchy & differentiated priorities](reference/dashboard-goal-hierarchy-priority.md)
 for the full reference.
+
+### Goals tab: active lifecycle breakdown
+
+The active-goals count line breaks the board down by lifecycle state instead of
+showing a single conflated total. The board's `active` set legitimately holds
+goals that are **blocked**, **paused**, **not started**, or already
+**completed** but not yet archived off the board — so a bare "20 active goal(s)"
+badly overstates in-flight work and hides how many goals are stuck or finished.
+(On a live host, 18 "active" goals were 9 `completed` + 6 `blocked` +
+3 `not-started` with **0 actually in progress** — a fact the old count line
+could not surface.)
+
+`/api/goals` therefore returns an additive `active_status_breakdown` object with
+a faithful per-`GoalProgress`-variant count — always all six keys, zero when
+unused:
+
+```json
+"active_status_breakdown": {
+  "proposed": 0, "not_started": 3, "in_progress": 0,
+  "blocked": 6, "paused": 0, "completed": 9
+}
+```
+
+The buckets partition the active board, so they always sum to `active_count`
+(which is preserved for back-compat). Counting is faithful — an
+`InProgress { percent: 100 }` goal is `in_progress`, never `completed`; the
+terminal view is `GoalProgress::is_terminal` layered additively. The Goals tab
+appends only the **nonzero** buckets to the count line, in a fixed order
+(in progress · blocked · paused · not started · proposed · completed), via the
+`goalBreakdownText` helper — e.g. `18 active goal(s) — 6 blocked · 3 not
+started · 9 completed`.
 
 ### Goals tab → Work Board: plain-English Task Memory & Recent Actions
 

@@ -1,0 +1,57 @@
+name: "Overseer Agentic Health-Review Rail ([standing])"
+description: "Outside-in proof that the Overseer reviews its OWN process health AGENTICALLY on every tick behind a THIN deterministic rail: a reasoning recipe reads the observable state the daemon already emits (journalctl --user -u simard-ooda, simard status, simard goal list), detects crash-loops and clusters a shared failure signature across goals into a systemic-vs-per-goal root cause, and drives remediation through the EXISTING capabilities LaunchRecipe (systemic fix) and EscalateBlockedGoal (plain-English operator notification on both channels). Proves the deterministic recipe-runner seam forwards the typed decision markers verbatim (no LLM), then validates the rail + every safety invariant via the in-tree parser, config opt-out, and run_cycle wiring tests: a HEALTHY verdict fabricates nothing, the required terminal marker gates the pass fail-closed, malformed/missing-field decisions are dropped, a runner error degrades to no action, both decisions flow through the SAME gate as every other action, the shared gap-scan throttle and the dedicated SIMARD_OVERSEER_HEALTH_REVIEW opt-out each disable the rail, an escalation is HELD when goal-board health is opted out, an unwired rail is a pure no-op, and a degraded pass (missing terminal marker) drives the SHARED bounded escalation ladder (schema-repair then high-effort) that recovers a truncated pass, exhausts fail-closed, honors its disable knob, and stops on a rung fault, and the pass's HEALTH_REVIEW_COMPLETE verdict is SURFACED on the observed state (a HEALTHY pass is an observable Reviewed{0}, a fault is a LOUD Degraded, an unwired/off-cadence tick stays NotRun) so a review is never a silent no-op. Deliberately NO record_step_failure plumbing and NO N-identical-failure threshold counter in Rust."
+version: "1.0.0"
+
+config:
+  timeout: 600000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 600000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Health-review rail: recipe-runner seam markers + in-tree rail/config/wiring tests"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/overseer-health-review.sh"
+    timeout: 600000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "overseer"
+    - "health-review"
+    - "self-healing"
+    - "crash-loop"
+    - "root-cause"
+    - "agentic-recipes"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

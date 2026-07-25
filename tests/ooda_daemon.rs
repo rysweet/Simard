@@ -411,13 +411,9 @@ fn goal_objective_contains_goal_id_and_description() {
 // 7. run_ooda_daemon function signature accepts optional session
 // ===========================================================================
 
-/// Test that run_ooda_daemon_with_session (the new entry point) can accept
-/// a pre-built session for testing, avoiding the need for live bridges.
-///
-/// This test defines the expected new API. The function should:
-/// - Accept an optional Box<dyn BaseTypeSession>
-/// - Use it for run_turn calls during AdvanceGoal actions
-/// - Use bridge-only dispatch if session is None
+/// AdvanceGoal must either complete through the typed actor or surface an
+/// explicit actor/provider failure. It must never fall back to interpreting a
+/// pre-built session's prose.
 #[test]
 fn run_ooda_daemon_with_session_uses_session_for_advance_goal() {
     // This tests the new function signature that we need to implement.
@@ -426,8 +422,13 @@ fn run_ooda_daemon_with_session_uses_session_for_advance_goal() {
     let mut bridges = test_bridges();
     let board = board_with_active_goals();
     let mut state = OodaState::new(board);
+    // `scaler: None` keeps the per-cycle concurrency cap hermetic under
+    // `SIMARD_SCALING=auto` (the deploy environment), where
+    // `OodaConfig::default()` would otherwise seed an ambient AIMD scaler that
+    // overrides the explicit `max_concurrent_actions` under test (issue #2732).
     let config = OodaConfig {
         max_concurrent_actions: 2,
+        scaler: None,
         ..Default::default()
     };
 
@@ -442,17 +443,16 @@ fn run_ooda_daemon_with_session_uses_session_for_advance_goal() {
         .collect();
 
     for outcome in &advance_outcomes {
-        // After wiring, successful outcomes contain evidence from run_turn.
-        // Without a session, advance_goal fails visibly per PHILOSOPHY.md
-        // ("no LLM session available"). Both success and visible-failure with
-        // a clear explanation are acceptable here; what we forbid is silent
-        // success without a session (the old fallback behavior).
+        // A provider may be unavailable in this hermetic test. That is an
+        // explicit typed-cycle failure, not a synthetic no-action or parser
+        // fallback.
         let detail = &outcome.detail;
         assert!(
             outcome.success
                 || detail.contains("blocked")
                 || detail.contains("no LLM session")
-                || detail.contains("cannot advance"),
+                || detail.contains("cannot advance")
+                || detail.contains("typed goal-session cycle failed"),
             "advance goal outcome should succeed or explain visibly: {detail}",
         );
     }

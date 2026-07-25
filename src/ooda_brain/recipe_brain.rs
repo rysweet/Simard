@@ -30,8 +30,8 @@ use super::sanitize::sanitize_context_var;
 use super::{
     BrainPhase, EngineerAdmissionCtx, EngineerAdmissionDecision, EngineerLifecycleCtx,
     EngineerLifecycleDecision, GoalOutcomeCtx, GoalOutcomeDecision, IdeaCluster,
-    IdeaConsolidationCtx, IdeaDedupCtx, IdeaDedupDecision, OodaBrain, ResourceAdmissionCtx,
-    ResourceAdmissionDecision,
+    IdeaConsolidationCtx, IdeaDedupCtx, IdeaDedupDecision, OodaBrain, PerGoalAction,
+    PerGoalCycleCtx, ResourceAdmissionCtx, ResourceAdmissionDecision,
 };
 use crate::error::{SimardError, SimardResult};
 
@@ -60,6 +60,11 @@ const IDEA_DEDUP_RECIPE_FILENAME: &str = "creative-idea-dedup.yaml";
 const IDEA_CONSOLIDATION_ADAPTER_TAG: &str = "recipe-idea-consolidation-brain";
 /// Recipe filename for the one-time consolidation clustering step (#2925).
 const IDEA_CONSOLIDATION_RECIPE_FILENAME: &str = "creative-ideas-consolidation.yaml";
+/// Adapter tag for the per-goal, per-cycle agentic decision recipe (issue #4453).
+const PER_GOAL_CYCLE_ADAPTER_TAG: &str = "recipe-per-goal-cycle-brain";
+/// Recipe filename for the per-goal, per-cycle reasoning step (issue #4453).
+/// Resolved as a sibling of the lifecycle recipe, like the admission recipes.
+const PER_GOAL_CYCLE_RECIPE_FILENAME: &str = "ooda-per-goal-cycle.yaml";
 
 /// Cap on raw response text embedded in error messages and rationale fields.
 const MAX_RATIONALE_CHARS: usize = 500;
@@ -1222,6 +1227,30 @@ impl OodaBrain for RecipeBrain {
         })
     }
 
+    /// Per-goal, per-cycle agentic decision (issue #4453). Runs the
+    /// `ooda-per-goal-cycle.yaml` recipe (a sibling of this act-phase brain's
+    /// lifecycle recipe) over the goal's DURABLE state and the three demoted
+    /// signals, then parses the strict `{"choice","reason"[,"task_hint"]}`
+    /// envelope into a [`PerGoalAction`].
+    ///
+    /// NO-FALLBACK (operator zero-fallback contract, #2580 / #1711): a recipe
+    /// invocation failure OR an unparseable/forged envelope surfaces as an
+    /// explicit `Err`. The driver records it as a visible cycle failure — never
+    /// a silent `continue` masquerading as a reasoned decision. A genuine
+    /// "leave it" answer is a real, model-emitted `continue` (parsed).
+    fn decide_per_goal_cycle(&self, ctx: &PerGoalCycleCtx) -> SimardResult<PerGoalAction> {
+        let raw = self.invoke_per_goal_cycle_raw(ctx)?;
+        PerGoalAction::from_recipe_envelope(&raw).ok_or_else(|| {
+            SimardError::AdapterInvocationFailed {
+                base_type: PER_GOAL_CYCLE_ADAPTER_TAG.to_string(),
+                reason: format!(
+                    "per-goal-cycle recipe output had no parseable action envelope: {}",
+                    truncate(&raw, MAX_RATIONALE_CHARS)
+                ),
+            }
+        })
+    }
+
     /// Dependency/overlap-aware engineer admission (issue #2690). Resolves the
     /// admission recipe as a sibling of this act-phase brain's recipe, renders
     /// the overlap context, runs the recipe, and parses the
@@ -1392,8 +1421,117 @@ impl RecipeBrain {
         extract_recipe_decision_output(&output.stdout, self.adapter_tag)
     }
 
-    /// Invoke the engineer-admission recipe once and return the raw decision
-    /// text. The recipe is resolved as a **sibling** of this brain's own recipe
+    /// Invoke the per-goal, per-cycle recipe once and return the raw decision
+    /// text (issue #4453). The recipe is resolved as a **sibling** of this
+    /// brain's own lifecycle recipe (same `recipes/` dir, whether that resolved
+    /// to the hot-reload `~/.simard/...` copy or the in-tree copy). Every ctx
+    /// field is routed through [`sanitize_context_var`] before it becomes a `-c`
+    /// arg (YAML/context/prompt-injection + `E2BIG` defence). Errors surface as
+    /// `Err` (no silent fallback).
+    fn invoke_per_goal_cycle_raw(&self, ctx: &PerGoalCycleCtx) -> SimardResult<String> {
+        let recipe = self
+            .recipe_path
+            .parent()
+            .map(|d| d.join(PER_GOAL_CYCLE_RECIPE_FILENAME))
+            .filter(|p| p.is_file())
+            .ok_or_else(|| SimardError::AdapterInvocationFailed {
+                base_type: PER_GOAL_CYCLE_ADAPTER_TAG.to_string(),
+                reason: format!(
+                    "per-goal-cycle recipe '{PER_GOAL_CYCLE_RECIPE_FILENAME}' not found beside {}",
+                    self.recipe_path.display()
+                ),
+            })?;
+
+        let stale = match ctx.stale_claim_secs {
+            Some(secs) => secs.to_string(),
+            None => "none".to_string(),
+        };
+        let open_prs = ctx.open_pr_refs.join(", ");
+        let last_outcomes = ctx.last_outcomes.join(" | ");
+
+        let output = Command::new("recipe-runner-rs")
+            .arg(recipe.as_os_str())
+            .arg("--output-format")
+            .arg("json")
+            .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
+            .arg("-c")
+            .arg(format!(
+                "goal_id={}",
+                sanitize_context_var(&ctx.goal_id, 500)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "goal_description={}",
+                sanitize_context_var(&ctx.goal_description, 2000)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "goal_status={}",
+                sanitize_context_var(&ctx.goal_status, 200)
+            ))
+            .arg("-c")
+            .arg(format!("cycle_number={}", ctx.cycle_number))
+            .arg("-c")
+            .arg(format!(
+                "history_summary={}",
+                sanitize_context_var(&ctx.history_summary, 4000)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "effect_jobs_in_flight={}",
+                ctx.effect_jobs_in_flight
+            ))
+            .arg("-c")
+            .arg(format!(
+                "open_pr_refs={}",
+                sanitize_context_var(&open_prs, 1000)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "last_outcomes={}",
+                sanitize_context_var(&last_outcomes, 4000)
+            ))
+            .arg("-c")
+            .arg(format!("wip_ref_count={}", ctx.wip_ref_count))
+            .arg("-c")
+            .arg(format!("worker_present={}", ctx.worker_present))
+            .arg("-c")
+            .arg(format!(
+                "worker_log_tail={}",
+                sanitize_context_var(&ctx.worker_log_tail, 8000)
+            ))
+            .arg("-c")
+            .arg(format!("standing_idle_signal={}", ctx.standing_idle_signal))
+            .arg("-c")
+            .arg(format!("stale_claim_secs={stale}"))
+            .arg("-c")
+            .arg(format!("effect_board_missed={}", ctx.effect_board_missed))
+            .output();
+
+        let output = match output {
+            Ok(o) => o,
+            Err(e) => {
+                return Err(SimardError::AdapterInvocationFailed {
+                    base_type: PER_GOAL_CYCLE_ADAPTER_TAG.to_string(),
+                    reason: format!("recipe-runner-rs spawn failed: {e}"),
+                });
+            }
+        };
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(SimardError::AdapterInvocationFailed {
+                base_type: PER_GOAL_CYCLE_ADAPTER_TAG.to_string(),
+                reason: format!(
+                    "recipe exited with {}: {}",
+                    output.status,
+                    truncate(&stderr, MAX_RATIONALE_CHARS)
+                ),
+            });
+        }
+
+        extract_recipe_decision_output(&output.stdout, PER_GOAL_CYCLE_ADAPTER_TAG)
+    }
     /// (the act-phase [`RecipeBrain`] holds the lifecycle recipe; the admission
     /// recipe lives beside it in the same `recipes/` dir, whether that resolved
     /// to the hot-reload `~/.simard/...` copy or the in-tree copy). Every ctx
@@ -1762,8 +1900,7 @@ struct AdmissionEnvelope {
 /// present (the caller surfaces that as a fail-open `Err`). Routes through the
 /// shared sanitizing chokepoint so a banner-polluted envelope still parses.
 fn parse_admission_decision(text: &str) -> Option<EngineerAdmissionDecision> {
-    let payload = crate::recipe_output::extract_json_payload(text)?;
-    let env: AdmissionEnvelope = serde_json::from_str(&payload).ok()?;
+    let env: AdmissionEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
     if env.decision.trim().is_empty() {
         return None;
     }
@@ -1822,8 +1959,7 @@ struct ResourceAdmissionEnvelope {
 /// which the seam fails CLOSED to a benign `Defer`). Routes through the shared
 /// sanitizing chokepoint so a banner-polluted envelope still parses.
 fn parse_resource_admission_decision(text: &str) -> Option<ResourceAdmissionDecision> {
-    let payload = crate::recipe_output::extract_json_payload(text)?;
-    let env: ResourceAdmissionEnvelope = serde_json::from_str(&payload).ok()?;
+    let env: ResourceAdmissionEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
     if env.decision.trim().is_empty() {
         return None;
     }
@@ -1900,8 +2036,7 @@ struct IdeaDedupEnvelope {
 /// `Err`, which the seam fails CLOSED). Routes through the shared sanitising
 /// chokepoint so a banner-polluted envelope still parses — no stdout scraping.
 fn parse_idea_dedup_decision(text: &str) -> Option<IdeaDedupDecision> {
-    let payload = crate::recipe_output::extract_json_payload(text)?;
-    let env: IdeaDedupEnvelope = serde_json::from_str(&payload).ok()?;
+    let env: IdeaDedupEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
     let choice = env.choice.trim();
     if choice.is_empty() {
         return None;
@@ -1946,8 +2081,7 @@ struct IdeaConsolidationEnvelope {
 /// Clusters missing a `canonical_id` are dropped. `Some(vec![])` is a valid
 /// "nothing to consolidate" result and is distinct from an unparseable `None`.
 fn parse_idea_consolidation(text: &str) -> Option<Vec<IdeaCluster>> {
-    let payload = crate::recipe_output::extract_json_payload(text)?;
-    let env: IdeaConsolidationEnvelope = serde_json::from_str(&payload).ok()?;
+    let env: IdeaConsolidationEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
     Some(
         env.clusters
             .into_iter()
@@ -1997,8 +2131,7 @@ struct OutcomeEnvelope {
 /// present (the caller surfaces that as a NO-FALLBACK `Err`). Routes through the
 /// shared sanitizing chokepoint so a banner-polluted envelope still parses.
 fn parse_outcome_decision(text: &str) -> Option<GoalOutcomeDecision> {
-    let payload = crate::recipe_output::extract_json_payload(text)?;
-    let env: OutcomeEnvelope = serde_json::from_str(&payload).ok()?;
+    let env: OutcomeEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
     if env.decision.trim().is_empty() {
         return None;
     }
@@ -2065,13 +2198,13 @@ struct DecisionEnvelope {
 
 /// Extract the `{"decision": "...", "rationale": "..."}` envelope from recipe
 /// output, if present. Routes through the shared #2484 sanitizing chokepoint
-/// ([`crate::recipe_output::extract_json_payload`] strips the banner, ANSI, and
-/// interleaved log lines) so a banner-polluted envelope still parses. Returns
+/// ([`crate::recipe_output::extract_and_parse_json`] strips the banner, ANSI,
+/// and interleaved log lines, and recovers a trailing-comma-defective body) so
+/// a banner-polluted or trailing-comma envelope still parses. Returns
 /// `None` when no balanced JSON object with a non-empty string `decision` field
 /// is present — the caller then falls back to the legacy first-word scan.
 fn extract_decision_envelope(text: &str) -> Option<DecisionEnvelope> {
-    let payload = crate::recipe_output::extract_json_payload(text)?;
-    let env: DecisionEnvelope = serde_json::from_str(&payload).ok()?;
+    let env: DecisionEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
     if env.decision.trim().is_empty() {
         return None;
     }
@@ -2114,9 +2247,10 @@ pub fn parse_action_from_text(text: &str) -> DecideJudgment {
 pub fn parse_action_outcome(text: &str) -> (DecideJudgment, LifecycleParseOutcome) {
     // Structured JSON envelope FIRST (issue #2580): a well-formed
     // `{"decision":"<variant>","rationale":"..."}` block — extracted through the
-    // shared #2484 sanitizing chokepoint (`extract_json_payload` strips the
-    // banner + ANSI + log noise) — parses deterministically, so the daemon no
-    // longer *relies* on free-prose first-word sniffing to route a decision.
+    // shared #2484 sanitizing chokepoint (`extract_and_parse_json` strips the
+    // banner + ANSI + log noise and recovers a trailing-comma body) — parses
+    // deterministically, so the daemon no longer *relies* on free-prose
+    // first-word sniffing to route a decision.
     if let Some(env) = extract_decision_envelope(text)
         && let Some(judgment) =
             decide_judgment_from_variant(env.decision.trim(), envelope_rationale(&env))
@@ -2309,8 +2443,7 @@ struct OrientEnvelope {
 /// through the shared #2484 sanitizing chokepoint. `None` when no balanced JSON
 /// object with a numeric `adjusted_urgency` field is present.
 fn extract_orient_envelope(text: &str) -> Option<OrientEnvelope> {
-    let payload = crate::recipe_output::extract_json_payload(text)?;
-    serde_json::from_str::<OrientEnvelope>(&payload).ok()
+    crate::recipe_output::extract_and_parse_json(text)
 }
 
 /// Validate and project a parsed [`OrientEnvelope`] onto an [`OrientJudgment`].
@@ -3065,6 +3198,64 @@ mod tests {
         assert!(parse_admission_decision(r#"{"decision": "nope"}"#).is_none());
         assert!(parse_admission_decision("not json at all").is_none());
         assert!(parse_admission_decision(r#"{"decision": ""}"#).is_none());
+    }
+
+    // ---- trailing-comma recovery (reasoner reliability, issue #2658) -------
+
+    #[test]
+    fn parse_admission_recovers_trailing_comma_in_object() {
+        // A stray trailing comma before `}` is the most common LLM JSON defect.
+        // Before the shared `extract_and_parse_json` chokepoint applied the
+        // trailing-comma recovery view, this failed the strict parse and the
+        // reasoner silently dropped its whole admission decision (fail-open).
+        let d =
+            parse_admission_decision(r#"{"decision": "admit", "rationale": "independent files",}"#)
+                .expect("trailing comma before } must be recovered");
+        assert!(matches!(d, EngineerAdmissionDecision::Admit { .. }));
+        assert_eq!(d.rationale(), "independent files");
+    }
+
+    #[test]
+    fn parse_admission_recovers_trailing_comma_in_array_and_banner() {
+        // Trailing comma inside the `blocked_by` array AND a banner/log preamble
+        // the sanitizing extractor must strip first — the two defects compose.
+        let noisy = "Recipe: ooda-engineer-lifecycle SUCCESS (12.0s)\n2026-07-20T00:00:00.000000Z INFO decide\n{\"decision\": \"defer\", \"blocked_by\": [\"fix-goals-status\",], \"rationale\": \"shared file\",}";
+        let d =
+            parse_admission_decision(noisy).expect("banner + trailing commas must be recovered");
+        match d {
+            EngineerAdmissionDecision::Defer { blocked_by, .. } => {
+                assert_eq!(blocked_by, vec!["fix-goals-status".to_string()]);
+            }
+            other => panic!("expected Defer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_outcome_recovers_trailing_comma() {
+        // The outcome seam fails NO-FALLBACK on a parse miss, so recovering a
+        // trailing-comma body is what keeps a genuine reasoner verdict from
+        // being discarded.
+        let d = parse_outcome_decision(r#"{"decision": "mark_achieved", "rationale": "done",}"#);
+        assert!(
+            d.is_some(),
+            "a trailing-comma outcome envelope must still parse"
+        );
+    }
+
+    #[test]
+    fn extract_decision_envelope_recovers_trailing_comma() {
+        let env =
+            extract_decision_envelope(r#"{"decision": "advance_goal", "rationale": "next step",}"#)
+                .expect("trailing-comma decision envelope must parse");
+        assert_eq!(env.decision.trim(), "advance_goal");
+    }
+
+    #[test]
+    fn parse_admission_still_rejects_non_comma_malformed_json() {
+        // Leniency must NOT widen beyond the trailing-comma defect: an unquoted
+        // key / missing value stays a parse miss (returns None, not a default).
+        assert!(parse_admission_decision(r#"{decision: "admit"}"#).is_none());
+        assert!(parse_admission_decision(r#"{"decision": }"#).is_none());
     }
 
     #[test]

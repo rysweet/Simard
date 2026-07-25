@@ -469,6 +469,43 @@ async fn memory_metrics_goal_count_reflects_live_union_and_relabels_source() {
     drop(mem);
 }
 
+/// Regression for #4075. The Memory tab's "Memory records" tile
+/// (`GET /api/memory` → `memory_records.count`) must reflect the number of
+/// records in the on-disk checksummed envelope, not its two top-level keys.
+/// A live store with 1244 records previously reported `2` because
+/// `count_json_records` counted the `{crc32, records}` object's keys.
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn memory_metrics_record_count_reads_checksummed_envelope() {
+    let state = HermeticState::new();
+    let root = state.state_root().to_path_buf();
+
+    // Write the canonical checksummed envelope the FileBackedMemoryStore
+    // persists: a two-key object whose real record count lives in `records`.
+    let envelope = serde_json::json!({
+        "crc32": 3861665043u32,
+        "records": [
+            {"id": "a"}, {"id": "b"}, {"id": "c"},
+            {"id": "d"}, {"id": "e"},
+        ],
+    });
+    std::fs::write(
+        root.join("memory_records.json"),
+        serde_json::to_vec(&envelope).unwrap(),
+    )
+    .expect("write memory_records.json envelope");
+
+    let result = memory_metrics().await;
+    let mr = &result.0["memory_records"];
+
+    assert_eq!(
+        mr["count"].as_u64(),
+        Some(5),
+        "memory_records.count must equal the `records` array length (5), never the \
+         object's two top-level keys (#4075); got {mr}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Outside-in end-to-end (Step 13): drive the REAL dashboard router over raw
 // HTTP/1.1 on an ephemeral loopback port, exactly as the browser Goals tab
@@ -621,4 +658,100 @@ async fn http_goals_board_surfaces_live_proposed_goal_without_snapshot() {
         "goal_records.count must include the live goal-store record over HTTP; got {gr}"
     );
     drop(mem);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #4178 — Workboard emits a clean `block_reason` for a BLOCKED goal.
+//
+// The Workboard card must surface WHY a goal is blocked without re-parsing the
+// legacy `status` Display string. `/api/workboard` therefore additively emits
+// a prefix-free `block_reason` for blocked goals while keeping the legacy
+// `status` == "blocked: <reason>" shape (the kanban classifier keys off it).
+// ---------------------------------------------------------------------------
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn workboard_blocked_goal_emits_clean_block_reason() {
+    use super::workboard::workboard;
+
+    let state = HermeticState::new();
+    let root = state.state_root().to_path_buf();
+    let mem = SharedMem::register(&root);
+
+    let reason = "WS1 #16 baseline still OPEN — gate unmeasurable this cycle";
+    let mut base = GoalBoard::new();
+    base.active.push(ActiveGoal {
+        labels: Vec::new(),
+        parent_goal_id: None,
+        priority_explicit: false,
+        repo: Some("Simard".to_string()),
+        id: "blocked-goal".to_string(),
+        description: "a genuinely blocked goal".to_string(),
+        priority: 1,
+        status: GoalProgress::Blocked(reason.to_string()),
+        assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
+        last_progress_update_at: None,
+    });
+    save_goal_board(&base, mem.ops()).expect("seed blocked goal snapshot");
+
+    let result = workboard().await;
+    let goals = result.0["goals"].as_array().expect("goals array");
+    let blocked = goals
+        .iter()
+        .find(|g| g["name"] == "blocked-goal")
+        .expect("blocked goal must appear on the workboard");
+
+    // The clean reason is exposed prefix-free so the card can render it directly.
+    assert_eq!(
+        blocked["block_reason"], reason,
+        "the workboard must emit a clean, prefix-free block_reason for a blocked goal"
+    );
+    // Back-compat: the legacy status keeps the "blocked: " prefix the kanban
+    // classifier (`g.status.startsWith('blocked')`) depends on.
+    assert_eq!(
+        blocked["status"],
+        format!("blocked: {reason}"),
+        "the legacy status Display string must stay 'blocked: <reason>' for back-compat"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn workboard_non_blocked_goal_omits_block_reason() {
+    use super::workboard::workboard;
+
+    let state = HermeticState::new();
+    let root = state.state_root().to_path_buf();
+    let mem = SharedMem::register(&root);
+
+    let mut base = GoalBoard::new();
+    base.active.push(ActiveGoal {
+        labels: Vec::new(),
+        parent_goal_id: None,
+        priority_explicit: false,
+        repo: Some("Simard".to_string()),
+        id: "working-goal".to_string(),
+        description: "an in-progress goal".to_string(),
+        priority: 1,
+        status: GoalProgress::InProgress { percent: 40 },
+        assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
+        last_progress_update_at: None,
+    });
+    save_goal_board(&base, mem.ops()).expect("seed in-progress goal snapshot");
+
+    let result = workboard().await;
+    let goals = result.0["goals"].as_array().expect("goals array");
+    let working = goals
+        .iter()
+        .find(|g| g["name"] == "working-goal")
+        .expect("in-progress goal must appear on the workboard");
+
+    // A non-blocked goal must NOT carry a block_reason field at all.
+    assert!(
+        working.get("block_reason").is_none(),
+        "a non-blocked goal must omit block_reason entirely"
+    );
 }

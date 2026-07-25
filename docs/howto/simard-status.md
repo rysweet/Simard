@@ -122,16 +122,17 @@ Every label and section above is stable — the dashboard and TUI tabs mirror th
 exact section model.
 
 > **What's live today.** `DAEMON / UPTIME`, `RESOURCE SNAPSHOT`, `LLM USAGE`,
-> `MEMORY / BRAIN` (from the daemon-sampled memory gauges), `GYM`, and
-> `TELEMETRY / UNEXPECTED SIGNALS` are populated by `simard status` from durable
-> sources. `GOAL BOARD`, `ACTIVE WORKSTREAMS`, `COMPLETED WORK`, and
+> `MEMORY / BRAIN` (from the daemon-sampled memory gauges), `GYM`, `GOAL BOARD`
+> (issue #4196 — read from the durable `goal-board:snapshot` via the same
+> process-agnostic reader that backs the dashboard `/api/goals` panel and the TUI
+> goal tab), and `TELEMETRY / UNEXPECTED SIGNALS` are populated by `simard status`
+> from durable sources. `ACTIVE WORKSTREAMS`, `COMPLETED WORK`, and
 > `SELF-IMPROVEMENT` render `unavailable (<reason>)` from the process-agnostic
-> CLI in this release — the goal board is surfaced live in the daemon-hosted
-> dashboard and TUI goal tabs. The example above shows the full target layout;
-> the frame (headers + honest `unavailable` markers) is always complete and a
-> missing count is never shown as a fabricated `0`. Some example numbers
-> (`cgroup mem peak`, per-turn `AI-credits`, `cognitive` health) are likewise
-> illustrative of the layout.
+> CLI in this release. The example above shows the full target layout; the frame
+> (headers + honest `unavailable` markers) is always complete and a missing count
+> is never shown as a fabricated `0`. Some example numbers (`cgroup mem peak`,
+> per-turn `AI-credits`, `cognitive` health) are likewise illustrative of the
+> layout.
 
 ## 2. Read each section
 

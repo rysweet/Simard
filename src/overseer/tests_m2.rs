@@ -12,14 +12,13 @@ use crate::overseer::capabilities::{
 };
 use crate::overseer::intervention::Intervention;
 use crate::overseer::launch::{RecipeRunner, SmartOrchestratorLauncher};
-use crate::overseer::merge_ops::{DiffReviewer, MergePrOps, PollClock, PollConfig, PrSource};
+use crate::overseer::merge_ops::{MergePrOps, PollClock, PollConfig, PrSource};
 use crate::overseer::notify::{
     ChannelDelivery, DualChannelNotifier, NotifyChannel, OperatorNotification,
 };
 use crate::overseer::signal::signals_from;
 use crate::overseer::{decide, orient};
 
-use crate::review_pipeline::ReviewFinding;
 use crate::stewardship::merge_authority::CheckRollupEntry;
 use crate::stewardship::{
     JudgeOutcome, MergeJudge, MergeJudgeKind, PrGhClient, PrSnapshot, Verdict,
@@ -90,13 +89,6 @@ impl PrSource for CleanSource {
     }
 }
 
-struct NoFindings;
-impl DiffReviewer for NoFindings {
-    fn review(&self, _diff: &str) -> Result<Vec<ReviewFinding>, OverseerError> {
-        Ok(vec![])
-    }
-}
-
 struct ReadyJudge;
 impl MergeJudge for ReadyJudge {
     fn judge(
@@ -158,7 +150,6 @@ fn green_merge_ops(
     let ops = MergePrOps::new(
         Box::new(gh),
         Box::new(CleanSource),
-        Some(Box::new(NoFindings)),
         Box::new(ReadyJudge),
         notifier,
         Box::new(NoSleep),
@@ -217,7 +208,10 @@ fn seeded_problem_launches_fix_merges_green_pr_and_notifies_operator() {
     );
     let n = &email.lock().unwrap()[0];
     assert!(n.link.as_deref().unwrap().ends_with("/pull/2601"));
-    assert!(n.problem.contains("merge-ready"));
+    assert!(
+        n.problem.contains("passed every check and review"),
+        "the operator notification must be plain English, not gate jargon"
+    );
     assert!(n.autonomous);
 }
 

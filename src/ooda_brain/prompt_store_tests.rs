@@ -517,6 +517,37 @@ fn goal_curator_has_open_ended_hygiene_and_proactive_backfill() {
 }
 
 #[test]
+fn goal_curator_gates_backfill_to_rysweet_authored_issues() {
+    // Regression: only `rysweet`-authored issues/PRs may become goals. The curator
+    // prompt must (a) mandate the `gh issue view --json author` verification step
+    // and (b) require skipping any non-`rysweet` account. This gate stops any
+    // external filer (contributor, bot, or Simard's own engineer-created issue)
+    // from steering the goal board — the curator-side mirror of engineer_system.md
+    // rule #3. If this gate is ever dropped from the prompt, this test must fail.
+    let prompt = include_str!("../../prompt_assets/simard/goal_curator_system.md");
+    let lower = prompt.to_lowercase();
+
+    // (a) the author-verification step must be present.
+    assert!(
+        prompt.contains("gh issue view") && lower.contains("--json author"),
+        "goal_curator_system.md must mandate `gh issue view <N> --json author` to verify the issue/PR author before backfilling a goal"
+    );
+
+    // (b) the rysweet-only + skip-other-account language must be present.
+    // Anchor on a phrase unique to the gate block so this assertion is an
+    // independent tripwire (bare "rysweet" also appears in the operator/ecosystem
+    // sections and would not fail on gate removal).
+    assert!(
+        lower.contains("only issues/prs authored by") && lower.contains("rysweet"),
+        "goal_curator_system.md must restrict backfill to `rysweet`-authored issues/PRs"
+    );
+    assert!(
+        lower.contains("skip"),
+        "goal_curator_system.md must instruct skipping issues/PRs authored by any non-`rysweet` account"
+    );
+}
+
+#[test]
 fn goal_session_objective_enumerates_concrete_progress_signals() {
     // Behavior A: the loop self-detection must DEFINE concrete progress signals
     // (a new commit SHA, an opened/merged PR, a closed issue, a completion-%
@@ -637,7 +668,7 @@ fn goal_session_objective_parallelism_is_collision_safe() {
 fn goal_session_objective_parallelism_keeps_response_shapes() {
     // The fan-out must reuse the existing "Spawn an engineer" response shape and
     // must NOT invent a new shape the Rust parser cannot read. Both documented
-    // shapes (Spawn an engineer / NO ACTION) remain intact.
+    // shapes (Spawn an engineer / strict NO ACTION + REASON) remain intact.
     let content = embedded_fallback("goal_session_objective.md")
         .expect("goal_session_objective.md must be registered");
     let lower = content.to_lowercase();
@@ -646,8 +677,25 @@ fn goal_session_objective_parallelism_keeps_response_shapes() {
         "fan-out must use the existing Spawn-an-engineer response shape"
     );
     assert!(
-        content.contains("NO ACTION"),
-        "the NO ACTION response shape must remain documented"
+        content.contains("NO ACTION") && content.contains("REASON:"),
+        "the strict NO ACTION + REASON response shape must remain documented"
+    );
+}
+
+#[test]
+fn goal_session_objective_requires_strict_no_action_contract() {
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        content.contains("NO ACTION")
+            && content.contains("REASON:")
+            && content.contains("PROGRESS:"),
+        "goal-session no-action output must keep the strict parser-owned marker shape"
+    );
+    assert!(
+        lower.contains("`no_action`") && lower.contains("unknown `action:`"),
+        "goal-session prompt must explicitly reject legacy or unknown machine-looking action fragments"
     );
 }
 
@@ -1025,6 +1073,32 @@ fn progress_assessment_recipe_mirrors_done_gate() {
     );
 }
 
+#[test]
+fn progress_reviewer_accepts_observe_only_evidence_progress() {
+    let content = embedded_fallback("progress_assessment_reviewer.md")
+        .expect("progress_assessment_reviewer.md must be registered");
+    let norm = normalize_ws(content).to_lowercase();
+    assert!(
+        norm.contains("observe-only / read-only audit goal"),
+        "progress reviewer must treat read-only audit evidence as progress"
+    );
+    assert!(
+        norm.contains("do not require a write artifact"),
+        "observe-only progress must not require forbidden target writes"
+    );
+
+    let recipe = include_str!("../../prompt_assets/simard/recipes/progress-assessment.yaml");
+    let recipe_norm = normalize_ws(recipe).to_lowercase();
+    assert!(
+        recipe_norm.contains("observe-only / read-only audit goal"),
+        "progress-assessment.yaml must mirror the observe-only evidence rule"
+    );
+    assert!(
+        recipe_norm.contains("do not require a write artifact"),
+        "recipe mirror must not require forbidden target writes"
+    );
+}
+
 // ── PR-finalization review pipeline (#2410 follow-on) ───────────────────────
 //
 // These tests pin the prompt-content contract for the new, bounded, ordered
@@ -1361,7 +1435,7 @@ fn goal_session_objective_finalization_preserves_prose_contract() {
 // #2405 per-issue fan-out, #2410 own-PRs-to-landing, and #2413 finalization — the
 // dep-bump is a NEW done-gate that runs AFTER landing, alongside #2410. Output
 // contracts are PRESERVED: `goal_session_objective.md` stays prose-only (NO ACTION
-// / PROGRESS markers intact); `progress_assessment_reviewer.md` and its recipe
+// / REASON / PROGRESS markers intact); `progress_assessment_reviewer.md` and its recipe
 // mirror keep the single-line `{"verdict": …}` JSON the Rust parser reads. Phrases
 // are checked after `normalize_ws` + lowercase so Markdown wrapping cannot defeat
 // them. `engineer_system.md` is asserted via `engineer_system_md()` (include_str!),
@@ -1476,8 +1550,8 @@ fn goal_session_objective_has_proactive_dependency_drift_note() {
 #[test]
 fn goal_session_objective_dep_gate_preserves_prose_contract() {
     // Output-contract guard: the new gate must stay additive PROSE — it must NOT
-    // introduce a JSON verdict shape, and must keep the NO ACTION / PROGRESS
-    // markers the goal-session parser reads. (Combined with a new-behaviour
+    // introduce a JSON verdict shape, and must keep the NO ACTION / REASON /
+    // PROGRESS markers the goal-session parser reads. (Combined with a new-behaviour
     // assertion so the test fails until the gate lands.)
     let content = embedded_fallback("goal_session_objective.md")
         .expect("goal_session_objective.md must be registered");
@@ -1491,8 +1565,8 @@ fn goal_session_objective_dep_gate_preserves_prose_contract() {
         "goal_session_objective.md is prose-only — the dep-gate must not add a JSON verdict contract"
     );
     assert!(
-        content.contains("NO ACTION"),
-        "the prose `NO ACTION` marker the parser reads must be preserved"
+        content.contains("NO ACTION") && content.contains("REASON:"),
+        "the strict no-action marker shape the parser reads must be preserved"
     );
     assert!(
         content.contains("PROGRESS:"),

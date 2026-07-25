@@ -201,14 +201,13 @@ same perpetual goal every cycle, the Overseer routes on the recalled recurrence:
   self-heals with a one-off `UnblockGoal` (labelled **root-cause**), exactly as
   [goal-board health](./configure-overseer-goal-board-health.md) always did.
 - **When it keeps getting re-parked** (`recurrence ≥ N`) → it stops re-unblocking
-  and **files a deduped issue describing the root cause** (e.g. "perpetual goal
-  repeatedly parked by the no-progress safeguard — safeguard exemption not
-  applied"), so the systemic defect reaches a human once, not a symptom patch
-  every cycle.
+  and sends a **deduped operator notification describing the root cause** (e.g.
+  "perpetual goal repeatedly parked by the no-progress safeguard — safeguard
+  exemption not applied"), so the systemic defect reaches a human once without
+  creating recursive tracking work.
 
-If you see the Overseer file such an issue, the WHY in the issue body tells you
-the diagnosed root cause; fixing that (e.g. applying the perpetual tag, or the
-no-progress exemption from
+The WHY in the notification tells you the diagnosed root cause; fixing that
+(e.g. applying the perpetual tag, or the no-progress exemption from
 [#2589](../concepts/perpetual-goal-no-progress-exemption.md)) stops the recurrence
 at the source.
 

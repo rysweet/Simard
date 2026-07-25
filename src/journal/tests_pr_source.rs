@@ -14,7 +14,7 @@ use crate::journal::providers::PrListSource;
 use crate::journal::store::get_entry_by_date;
 use crate::journal::thread::run_journal_tick_with_prs;
 use crate::stewardship::merge_authority::{
-    CheckRollupEntry, OpenPrSummary, PrGhClient, PrSnapshot,
+    CheckRollupEntry, MergedPrSummary, OpenPrSummary, PrGhClient, PrSnapshot,
 };
 
 /// Scripted stand-in for the external `gh` PR service: either returns a canned
@@ -22,16 +22,39 @@ use crate::stewardship::merge_authority::{
 struct ScriptedGh {
     prs: Vec<OpenPrSummary>,
     fail: bool,
+    merged: Vec<MergedPrSummary>,
+    merged_fail: bool,
 }
 
 impl ScriptedGh {
     fn listing(prs: Vec<OpenPrSummary>) -> Self {
-        Self { prs, fail: false }
+        Self {
+            prs,
+            fail: false,
+            merged: Vec::new(),
+            merged_fail: false,
+        }
     }
     fn failing() -> Self {
         Self {
             prs: Vec::new(),
             fail: true,
+            merged: Vec::new(),
+            merged_fail: false,
+        }
+    }
+    /// Attach the day's merged PRs to an existing (open-PR) listing.
+    fn with_merged(mut self, merged: Vec<MergedPrSummary>) -> Self {
+        self.merged = merged;
+        self
+    }
+    /// Open-PR read succeeds; the merged-PR read fails like a network blip.
+    fn merged_read_failing(prs: Vec<OpenPrSummary>) -> Self {
+        Self {
+            prs,
+            fail: false,
+            merged: Vec::new(),
+            merged_fail: true,
         }
     }
 }
@@ -50,6 +73,20 @@ impl PrGhClient for ScriptedGh {
             })
         } else {
             Ok(self.prs.clone())
+        }
+    }
+    fn list_merged_prs(
+        &self,
+        _repo: &str,
+        _date: chrono::NaiveDate,
+        _limit: u32,
+    ) -> SimardResult<Vec<MergedPrSummary>> {
+        if self.merged_fail {
+            Err(SimardError::MergeAuthorityGhCommandFailed {
+                reason: "gh merged list exploded".into(),
+            })
+        } else {
+            Ok(self.merged.clone())
         }
     }
 }
@@ -75,6 +112,9 @@ fn pr(number: u32, title: &str) -> OpenPrSummary {
         mergeable: "MERGEABLE".into(),
         checks: vec![check("SUCCESS")],
         url: format!("https://github.com/rysweet/Simard/pull/{number}"),
+        author: "simard-engineer".into(),
+        labels: Vec::new(),
+        is_draft: Some(false),
     }
 }
 
@@ -228,4 +268,85 @@ fn tick_with_prs_writes_and_persists_the_proposal_table() {
 #[test]
 fn pr_limit_is_sane() {
     assert!((1..=200).contains(&JOURNAL_PR_LIMIT));
+}
+
+/// Build a canned merged-PR summary for the day's "landed changes".
+fn merged_pr(number: u32, title: &str) -> MergedPrSummary {
+    MergedPrSummary {
+        number,
+        title: title.to_string(),
+        url: format!("https://github.com/rysweet/Simard/pull/{number}"),
+    }
+}
+
+#[test]
+fn gh_source_appends_the_days_merged_prs_with_merged_outcome() {
+    // One open proposal plus two changes that merged on the day.
+    let gh =
+        ScriptedGh::listing(vec![pr(10, "feat(auth): protect the login page")]).with_merged(vec![
+            merged_pr(7, "fix(journal): collapse duplicate dates"),
+            merged_pr(9, "feat(memory): bound the growth window"),
+        ]);
+    let src = GhPrListSource::new(&gh, "rysweet/Simard", allowlist());
+
+    let rows = src.prs_for_date(day()).expect("mapping succeeds");
+    assert_eq!(rows.len(), 3, "one open + two merged rows");
+    // Open proposal keeps its readiness outcome...
+    assert_eq!(rows[0].number, 10);
+    assert!(
+        rows[0].outcome.contains("still open"),
+        "open PR keeps a readiness outcome: {}",
+        rows[0].outcome
+    );
+    // ...and the merged changes carry the canonical `merged` outcome the
+    // journal's merge counter looks for.
+    let merged: Vec<&_> = rows.iter().filter(|r| r.outcome == "merged").collect();
+    assert_eq!(merged.len(), 2, "both merged PRs are tagged `merged`");
+    assert!(merged.iter().any(|r| r.number == 7));
+    assert!(merged.iter().any(|r| r.number == 9));
+}
+
+#[test]
+fn merged_pr_count_reflects_the_days_landed_changes() {
+    // Regression for #4140: before the fix `merged_pr_count()` was
+    // structurally 0 because the production source only ingested OPEN PRs.
+    let mem = FakeMemory::new();
+    mem.add_episode(episode("I landed two changes today."));
+    let clock = FixedClock(day());
+    let gh = ScriptedGh::listing(vec![pr(42, "feat(login): make login safer")]).with_merged(vec![
+        merged_pr(40, "fix(x): correct a rollup"),
+        merged_pr(41, "chore(y): tidy up"),
+    ]);
+    let src = GhPrListSource::new(&gh, "rysweet/Simard", allowlist());
+
+    let entry = run_journal_tick_with_prs(&mem, &clock, &src).expect("tick");
+    assert_eq!(
+        entry.merged_pr_count(),
+        2,
+        "the day's merged PRs are counted, not reported as zero"
+    );
+
+    // Survives persistence so the dashboard `/api/journal/dates` read agrees.
+    let got = get_entry_by_date(&mem as &dyn CognitiveMemoryOps, day())
+        .expect("get")
+        .expect("entry stored");
+    assert_eq!(got.merged_pr_count(), 2, "merge count survives persistence");
+}
+
+#[test]
+fn merged_pr_fetch_failure_keeps_open_rows_and_degrades_merges() {
+    // A merged-list `gh` blip must not fail the tick nor drop the open
+    // proposals; it degrades to "no merges surfaced" (honest degradation).
+    let gh = ScriptedGh::merged_read_failing(vec![pr(10, "feat: keep me")]);
+    let src = GhPrListSource::new(&gh, "rysweet/Simard", allowlist());
+
+    let rows = src
+        .prs_for_date(day())
+        .expect("a merged-fetch blip degrades honestly, it does not error");
+    assert_eq!(rows.len(), 1, "the open proposal survives");
+    assert_eq!(rows[0].number, 10);
+    assert!(
+        !rows.iter().any(|r| r.outcome == "merged"),
+        "no merged rows are fabricated when the merged read fails"
+    );
 }

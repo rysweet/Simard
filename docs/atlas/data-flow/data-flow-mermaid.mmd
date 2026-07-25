@@ -1,0 +1,96 @@
+flowchart LR
+  %% Simard primary read/write data paths, traced from Rust modules.
+
+  subgraph MemoryRead["OODA prepare-context READ path"]
+    ActiveGoals["active goals\nOodaState.active_goals"] --> ObjectiveProbe["build_objective_probe\ncycle.rs"]
+    ObjectiveProbe --> PrepCtx["preparation_memory_operations_with_active_slugs_phased"]
+    PrepCtx --> RankedFacts["recall_facts_ranked\nfiltered + round-robin"]
+    PrepCtx --> GoalFacts["search_facts(goal-store:record)\nlatest by slug"]
+    PrepCtx --> Triggers["check_triggers"]
+    PrepCtx --> ProcRecall["tokenize objective\nrecall_procedure per token"]
+    PrepCtx --> EpisodeRecall["recall_episodes_ranked\nsession noise filtered"]
+    RankedFacts --> MemoryOpsRead["CognitiveMemoryOps"]
+    GoalFacts --> MemoryOpsRead
+    Triggers --> MemoryOpsRead
+    ProcRecall --> MemoryOpsRead
+    EpisodeRecall --> MemoryOpsRead
+    MemoryOpsRead --> RemoteRead["RemoteCognitiveMemory\nMemoryRequest over Unix socket"]
+    RemoteRead --> IpcServer["memory_ipc::server dispatch"]
+    IpcServer --> LbugStore["LibraryCognitiveMemory\nstate_root/cognitive lbug store"]
+    PrepCtx --> WorkingSummary["push_working(context-summary)"]
+    WorkingSummary --> MemoryOpsRead
+    PrepCtx --> PreparedContext["PreparedContext\nfacts + triggers + procedures + episodes"]
+    PreparedContext --> OodaPrompt["OODA prompt/context\nOrient/Decide/Act"]
+  end
+
+  subgraph MemoryWrite["OODA act WRITE + consolidation path"]
+    ActOutcomes["act outcomes\nActionOutcome.detail"] --> ExecMemory["execution_memory_operations"]
+    ExecMemory --> Sensory["record_sensory(pty-output)"]
+    ExecMemory --> ExecWorking["push_working(execution-output)"]
+    ActOutcomes --> ProcStore["compose_procedure_name\nstore_procedure"]
+    ActTranscript["outcome transcript"] --> Reflection["reflection_memory_operations"]
+    Reflection --> EpisodeStore["store_episode(session-reflection)"]
+    Reflection --> FactStore["store_fact facts w/provenance"]
+    Sensory --> MemoryOpsWrite["CognitiveMemoryOps writes"]
+    ExecWorking --> MemoryOpsWrite
+    ProcStore --> MemoryOpsWrite
+    EpisodeStore --> MemoryOpsWrite
+    FactStore --> MemoryOpsWrite
+    MemoryOpsWrite --> RemoteWrite["RemoteCognitiveMemory\nMemoryRequest writes"]
+    RemoteWrite --> IpcServer
+    MemoryOpsWrite --> LbugStore
+    LbugStore --> Consolidate["consolidate_episodes(10)\nprune_expired_sensory"]
+  end
+
+  subgraph GoalFlow["Goal lifecycle and storage"]
+    OperatorGoal["operator / meeting / OODA goal mutation"] --> AuthoritativeLoad["goal_board_store::load\ncycle start"]
+    AuthoritativeLoad --> GoalJson["<state_root>/state/goal_board.json\nauthoritative board"]
+    GoalJson --> HealFilter["filter_tombstoned\nheal_stale_no_progress_blocks"]
+    HealFilter --> OodaBoard["OodaState.active_goals"]
+    OodaBoard --> CacheSync["overwrite_memory_cache"]
+    CacheSync --> GoalSnapshot["goal-board:snapshot fact\nderived cache"]
+    OodaBoard --> CommitCycle["goal_board_store::commit_cycle"]
+    CommitCycle --> Reconcile["reconcile persisted vs in-flight\napply tombstones + no-progress tracker"]
+    Reconcile --> GoalJson
+    GoalSnapshot --> LegacyReaders["legacy/dashboard/prepare reads\nread_latest_snapshot/load_goal_board"]
+  end
+
+  subgraph EngineerFlow["Engineer-loop goal to PR path"]
+    PlannedSpawn["PlannedAction spawn_engineer"] --> SpawnDispatch["dispatch_spawn_engineer"]
+    SpawnDispatch --> RepoResolve["resolve goal target repo\nfail loud if missing"]
+    RepoResolve --> Admission["overlap + resource admission gates"]
+    Admission --> WorktreeAlloc["EngineerWorktree::allocate\nstate_root/engineer-worktrees"]
+    WorktreeAlloc --> Freshness["ensure_amplihack_fresh"]
+    Freshness --> Subordinate["spawn_subordinate"]
+    Subordinate --> TmuxOrChild["tmux session or direct child\nsimard engineer run single-process"]
+    TmuxOrChild --> AgentPrompt["spawn_agent_for_goal\nbuild_agent_prompt"]
+    AgentPrompt --> Amplihack["amplihack copilot/RustyClawd subprocess"]
+    Amplihack --> PR["engineer-owned git/gh workflow\nPR creation via prompt/tools"]
+    PR --> Merge["operator/merge authority merges PR"]
+    Merge --> SelfDeployTrigger["self_deploy/self_relaunch candidate"]
+  end
+
+  subgraph SignalFlow["Signal message in/out path"]
+    SignalCli["signal-cli JSON-RPC\n127.0.0.1:7583"] --> JsonRpc["JsonRpcTransport recv_line"]
+    JsonRpc --> ParseIncoming["parse_incoming"]
+    ParseIncoming --> RecvGate["SignalConversation::recv\nself-echo, sync, allowlist, command gate"]
+    RecvGate --> MeetingTurn["Inbound conversation turn"]
+    MeetingTurn --> SessionIndex["session_store operators.json\nactive session id"]
+    SessionIndex --> MeetingBackend["MeetingBackend restore/send_message"]
+    MeetingBackend --> SessionFile["signal_sessions/<session_id>.json\nuncapped history"]
+    MeetingBackend --> Outbound["Outbound assistant/status/error"]
+    Outbound --> Send["SignalConversation::send/reply"]
+    Send --> JsonRpcSend["JsonRpcTransport send_line"]
+    JsonRpcSend --> SignalCli
+  end
+
+  subgraph DeployFlow["Merged PR self-deploy path"]
+    Merge --> TargetCommit["target merged commit SHA"]
+    TargetCommit --> SourcePrep["GitSourcePreparer\nfetch + checkout detached"]
+    SourcePrep --> CandidateBuild["build_self_deploy_candidate\nwarm target dir"]
+    CandidateBuild --> GateBackup["self-test + baseline + backup"]
+    GateBackup --> DrainReap["drain engineers + reap orphans"]
+    DrainReap --> SwapRestart["atomic swap + restart\nsystemd or exec handover"]
+    SwapRestart --> Health["post-deploy health probe"]
+    Health --> Rollback["rollback on unhealthy"]
+  end

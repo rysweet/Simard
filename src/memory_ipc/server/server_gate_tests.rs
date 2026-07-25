@@ -101,6 +101,54 @@ fn sec_t3_grounded_known_concept_fact_is_stored_with_server_confidence() {
     );
 }
 
+// ── Seam-parity: a whitespace-padded cited id still grounds + stores ─────────
+
+/// A distiller can re-emit a real episode id with stray surrounding whitespace
+/// (a trailing newline copied from context). The server must normalize the cited
+/// id (trim) before the exact grounding match so the fact still grounds and
+/// stores — identical to the in-process `DistillFactSink` seam, and never leaking
+/// a padded key into the persisted `DERIVES_FROM` provenance edge. Guards the
+/// grounding/provenance surface-form robustness that keeps the two write-boundary
+/// seams deciding identically.
+#[test]
+fn grounded_when_cited_episode_id_has_surrounding_whitespace() {
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let episode_id = mem
+        .store_episode(
+            "empty outcome list panicked the cycle",
+            "engineer-cycle",
+            None,
+        )
+        .expect("store_episode");
+
+    // Cite the SAME real id but wrapped in whitespace the LLM appended.
+    let padded = format!("  {episode_id}\n");
+    let resp = dispatch(
+        &mem as &dyn CognitiveMemoryOps,
+        gated("bug-pattern", "empty outcome list panics cycle", &padded),
+    );
+    let outcome = expect_fact_write(resp);
+
+    assert!(
+        outcome.stored,
+        "a whitespace-padded cited id of a real episode must still ground and store"
+    );
+    assert!(!outcome.quarantined);
+    assert!(
+        (outcome.confidence - 0.9).abs() < 1e-9,
+        "grounded + ≥3 words + known concept must score 0.9; got {}",
+        outcome.confidence
+    );
+
+    let facts = mem.search_facts("bug-pattern", 10, 0.0).expect("search");
+    assert!(
+        facts
+            .iter()
+            .any(|f| f.content == "empty outcome list panics cycle"),
+        "the grounded fact must be retrievable from semantic memory"
+    );
+}
+
 // ── SEC-T1: ungrounded fact is quarantined regardless of client confidence ──
 
 #[test]
