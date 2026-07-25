@@ -834,12 +834,171 @@ fn has_json_comment(bytes: &[u8]) -> bool {
     false
 }
 
+/// Is `c` a byte that may appear inside a bareword identifier / literal token —
+/// an ASCII letter, digit, or underscore?
+///
+/// Used only to enforce a **whole-word boundary** around a recovered Python
+/// constant in [`normalize_json_python_constants`]: a `True`/`False`/`None`
+/// match must be flanked by a non-word byte (or the input edge) on both sides,
+/// so a longer bareword that merely starts or ends with those letters
+/// (`Truthy`, `Truelike`, `NoneOfThese`) is left untouched for the strict parse
+/// to reject — leniency never widens beyond the exact three-literal defect.
+fn is_json_word_byte(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_'
+}
+
+/// If a Python/JS-style constant literal (`True`, `False`, or `None`) begins at
+/// `bytes[i]` as a **whole word**, return its byte length and the JSON literal
+/// that replaces it (`true`, `false`, `null`); otherwise `None`.
+///
+/// The word-boundary guard requires a non-[`is_json_word_byte`] byte (or the
+/// input edge) immediately before `i` and immediately after the matched token,
+/// so only the exact standalone literal is recognised. Each replacement is the
+/// **same byte length** as the token it replaces (`True`→`true`, `False`→
+/// `false`, `None`→`null`), which is a convenience — the rebuild in
+/// [`normalize_json_python_constants`] does not rely on it — but keeps the
+/// transform obviously length-preserving.
+fn python_constant_at(bytes: &[u8], i: usize) -> Option<(usize, &'static [u8])> {
+    const MAP: [(&[u8], &[u8]); 3] = [(b"True", b"true"), (b"False", b"false"), (b"None", b"null")];
+    for (needle, replacement) in MAP {
+        let end = i + needle.len();
+        if bytes.len() >= end
+            && &bytes[i..end] == needle
+            && (i == 0 || !is_json_word_byte(bytes[i - 1]))
+            && (end == bytes.len() || !is_json_word_byte(bytes[end]))
+        {
+            return Some((needle.len(), replacement));
+        }
+    }
+    None
+}
+
+/// Normalize **Python/JS-style constant literals (`True`, `False`, `None`) that
+/// appear as a bare value OUTSIDE a JSON string literal** to their JSON spelling
+/// (`true`, `false`, `null`) — a last-resort recovery view for otherwise-well-
+/// formed LLM JSON.
+///
+/// After the trailing comma, the unescaped control character, the invalid
+/// backslash escape, and the interleaved JavaScript comment, a Python-cased
+/// boolean/null literal is the next most common real-world LLM JSON defect: a
+/// model with strong Python priors emits `"ready": True` or `"value": None`
+/// (the Python/`repr` spelling it has seen throughout its training data) instead
+/// of the lowercase `true`/`null` the JSON grammar requires. `serde_json` is
+/// spec-strict — `True`/`False`/`None` are not JSON tokens — and rejects the
+/// stray capital (`expected value`), so the model's WHOLE structured decision is
+/// dropped on the mis-cased literal — a parse-failure default, not a real model
+/// decision.
+///
+/// Like [`strip_json_trailing_commas`] this is a **provable no-op on valid
+/// JSON**: outside a string literal the grammar permits only structural
+/// punctuation, numbers, insignificant whitespace, and the three *lowercase*
+/// literals `true`/`false`/`null` — a bareword beginning with a capital `T`/`F`/
+/// `N` can never appear in well-formed JSON. So [`has_python_constant`] returns
+/// `false` on any well-formed payload and the input borrows back byte-for-byte
+/// unchanged (the zero-allocation clean path). A caller therefore retries a
+/// strict-parse failure on this view without any risk of altering behaviour on
+/// well-formed output.
+///
+/// String-literal aware in exactly the same way as the rest of this module: the
+/// scan tracks `in_string` (respecting `\"` escapes), so a `True`/`False`/`None`
+/// **inside** a string value — the word `None` in a `"rationale"`, a `True` in a
+/// key like `"isTrueFor"` — is a legitimate content byte run and is copied
+/// through untouched. Only a **whole-word** match (see [`python_constant_at`])
+/// is rewritten, so a longer bareword such as `Truthy` outside a string is left
+/// in place for the strict parse to reject; leniency never widens beyond the
+/// three named literals. Every replacement byte is ASCII, so the result is
+/// always valid UTF-8 and every multibyte UTF-8 body byte (all `>= 0x80`) is
+/// copied through unchanged.
+///
+/// Note a `True`/`False`/`None` used as an unquoted KEY (`{True: 1}`) is
+/// normalized to `{true: 1}` but remains an unquoted key — still malformed, so
+/// the strict parse still rejects it and leniency never widens to accept
+/// unquoted keys.
+pub fn normalize_json_python_constants(s: &str) -> Cow<'_, str> {
+    let bytes = s.as_bytes();
+    // Cheap detection pass first so clean JSON borrows unchanged (zero-alloc).
+    if !has_python_constant(bytes) {
+        return Cow::Borrowed(s);
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+            i += 1;
+        } else if c == b'"' {
+            in_string = true;
+            out.push(c);
+            i += 1;
+        } else if let Some((len, replacement)) = python_constant_at(bytes, i) {
+            out.extend_from_slice(replacement);
+            i += len;
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    match String::from_utf8(out) {
+        Ok(normalized) => Cow::Owned(normalized),
+        // Unreachable in practice (only ASCII literal bytes are substituted and
+        // every other byte is preserved), but never panic on recovery input —
+        // fall back to the original text.
+        Err(_) => Cow::Borrowed(s),
+    }
+}
+
+/// Does `bytes` contain at least one whole-word Python constant (`True`,
+/// `False`, or `None`) OUTSIDE a JSON string literal?
+///
+/// Mirrors the string-aware scan in [`normalize_json_python_constants`] but only
+/// detects, so the common clean case can borrow the input without allocating. A
+/// `True`/`False`/`None` INSIDE a string (a key, a rationale) is a content byte
+/// run and does not count; a longer bareword that merely contains those letters
+/// (`Truthy`) is not a whole-word match and does not count.
+fn has_python_constant(bytes: &[u8]) -> bool {
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+            i += 1;
+        } else if c == b'"' {
+            in_string = true;
+            i += 1;
+        } else if python_constant_at(bytes, i).is_some() {
+            return true;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
 /// Compose every JSON **recovery view** this module applies to an
 /// otherwise-well-formed LLM JSON payload that failed a strict parse — currently
 /// JavaScript-comment stripping ([`strip_json_comments`]), then
 /// invalid-backslash-escape doubling ([`escape_json_string_invalid_escapes`]),
 /// then unescaped-control-character escaping ([`escape_json_string_control_chars`]),
-/// then trailing-comma stripping ([`strip_json_trailing_commas`]).
+/// then trailing-comma stripping ([`strip_json_trailing_commas`]), then
+/// Python-constant normalization ([`normalize_json_python_constants`]).
 ///
 /// Returns [`Cow::Borrowed`] byte-for-byte unchanged when NONE of the defects is
 /// present (each sub-view is a provable no-op on valid JSON), and
@@ -849,15 +1008,16 @@ fn has_json_comment(bytes: &[u8]) -> bool {
 /// reason (unquoted key, elided element, missing value) preserves the strict
 /// miss unchanged.
 ///
-/// The four recoveries are independent — the two string-view recoveries touch
-/// only bytes inside string literals, comment-stripping and trailing-comma
-/// stripping only touch bytes outside them. Comment-stripping runs **first**,
-/// ahead of the two string-aware views, on purpose: a `"` byte inside a `//` or
-/// `/* */` comment (`// see "foo"`) is comment text, not a string delimiter, so
-/// removing whole comment spans before any string-tracking view runs keeps every
-/// downstream `in_string` scan aligned with the real string boundaries. On a
-/// comment-free payload [`strip_json_comments`] borrows unchanged, so the
-/// pre-existing three-view recovery and its ordering are preserved exactly.
+/// The five recoveries are independent — the two string-view recoveries touch
+/// only bytes inside string literals, comment-stripping, trailing-comma
+/// stripping, and Python-constant normalization only touch bytes outside them.
+/// Comment-stripping runs **first**, ahead of the two string-aware views, on
+/// purpose: a `"` byte inside a `//` or `/* */` comment (`// see "foo"`) is
+/// comment text, not a string delimiter, so removing whole comment spans before
+/// any string-tracking view runs keeps every downstream `in_string` scan aligned
+/// with the real string boundaries. On a comment-free payload
+/// [`strip_json_comments`] borrows unchanged, so the pre-existing three-view
+/// recovery and its ordering are preserved exactly.
 ///
 /// The two string views are ordered invalid-escape **before** control-char on
 /// purpose: a model that emits a lone backslash immediately followed by a raw
@@ -866,6 +1026,13 @@ fn has_json_comment(bytes: &[u8]) -> bool {
 /// then escape the newline (`\\` + `\n`), reproducing the intended two
 /// characters. Running control-char first would instead treat the raw newline as
 /// the (invalid) escape target of the backslash and leave it a raw control byte.
+///
+/// Python-constant normalization runs **last**: like comment-stripping and
+/// trailing-comma stripping it is a structural, outside-string transform, and
+/// running it after comment-stripping means a `True`/`None` sitting inside a
+/// `// …` annotation is already gone rather than being needlessly rewritten. It
+/// substitutes only same-length ASCII literals outside string bodies, so it can
+/// neither move a string boundary nor perturb any earlier view.
 pub fn recover_json_view(s: &str) -> Cow<'_, str> {
     // Step 0: strip any JavaScript-style comment outside string literals, before
     // the string-aware views run so a quote inside a comment can never desync
@@ -884,9 +1051,15 @@ pub fn recover_json_view(s: &str) -> Cow<'_, str> {
         Cow::Owned(o) => Cow::Owned(escape_json_string_control_chars(&o).into_owned()),
     };
     // Step 3: strip any structural trailing comma outside string literals.
-    match step2 {
+    let step3 = match step2 {
         Cow::Borrowed(b) => strip_json_trailing_commas(b),
         Cow::Owned(o) => Cow::Owned(strip_json_trailing_commas(&o).into_owned()),
+    };
+    // Step 4: normalize any Python-style constant (True/False/None) used as a
+    // bare value outside a string literal to its JSON spelling (true/false/null).
+    match step3 {
+        Cow::Borrowed(b) => normalize_json_python_constants(b),
+        Cow::Owned(o) => Cow::Owned(normalize_json_python_constants(&o).into_owned()),
     }
 }
 
@@ -920,7 +1093,7 @@ pub fn extract_json_payload(raw: &str) -> Option<String> {
 /// consolidation, outcome, decide, orient) reads its structured decision by
 /// extracting the balanced `{…}` object and `serde_json`-deserializing it.
 /// [`extract_json_payload`] strips the banner / ANSI / log noise but returns
-/// the object body **verbatim**, so four common real-world LLM JSON defects
+/// the object body **verbatim**, so five common real-world LLM JSON defects
 /// survive into the payload and fail a strict `serde_json::from_str`:
 ///
 ///  1. a `,` immediately before a closing `}`/`]` (the trailing comma,
@@ -931,10 +1104,13 @@ pub fn extract_json_payload(raw: &str) -> Option<String> {
 ///  3. an INVALID backslash escape inside a string value — a lone `\` not
 ///     followed by a JSON escape initiator, the shape a model emits for a
 ///     Windows path (`C:\Users`), a regex (`\d+`), or a LaTeX fragment
-///     (`\alpha`), and
+///     (`\alpha`),
 ///  4. a JavaScript-style COMMENT outside a string value — a `// …` line or
 ///     `/* … */` block comment, the "JSONC" shape a model emits to annotate a
-///     field (`"confidence": 0.8 // high`).
+///     field (`"confidence": 0.8 // high`), and
+///  5. a Python/JS-style CONSTANT (`True`/`False`/`None`) used as a bare value
+///     outside a string value — the mis-cased spelling a model with Python
+///     priors emits for a boolean/null field (`"ready": True`, `"value": None`).
 ///
 /// Before this helper each phase parsed strictly and silently dropped its whole
 /// structured decision on any one stray byte, falling back to a permissive
@@ -942,13 +1118,13 @@ pub fn extract_json_payload(raw: &str) -> Option<String> {
 ///
 /// Recovery retries the strict parse on the composed [`recover_json_view`]
 /// (comment stripping + invalid-escape doubling + control-character escaping +
-/// trailing-comma stripping). Each sub-view is a *provable no-op on valid JSON* —
-/// it returns [`Cow::Borrowed`] byte-for-byte unchanged unless its specific
-/// defect is present — so recovery is attempted **only** when a view actually
-/// rewrote the payload (the [`Cow::Owned`] arm). Any other malformed shape
-/// (unquoted key, elided element, missing value) yields [`Cow::Borrowed`] and
-/// returns `None` unchanged: leniency never widens beyond the four named defects
-/// and a genuine parse error is never masked.
+/// trailing-comma stripping + Python-constant normalization). Each sub-view is a
+/// *provable no-op on valid JSON* — it returns [`Cow::Borrowed`] byte-for-byte
+/// unchanged unless its specific defect is present — so recovery is attempted
+/// **only** when a view actually rewrote the payload (the [`Cow::Owned`] arm).
+/// Any other malformed shape (unquoted key, elided element, missing value)
+/// yields [`Cow::Borrowed`] and returns `None` unchanged: leniency never widens
+/// beyond the five named defects and a genuine parse error is never masked.
 pub fn extract_and_parse_json<T: serde::de::DeserializeOwned>(raw: &str) -> Option<T> {
     let payload = extract_json_payload(raw)?;
     match serde_json::from_str::<T>(&payload) {
@@ -1690,6 +1866,118 @@ mod tests {
         ));
     }
 
+    // ---- normalize_json_python_constants ---------------------------------
+
+    #[test]
+    fn python_constants_valid_json_is_borrowed_zero_copy() {
+        // Valid JSON (already-lowercase literals, or the words only inside
+        // strings) borrows unchanged — the provable no-op clean path.
+        for s in [
+            r#"{"a": true, "b": false, "c": null}"#,
+            r#"{"ready": true}"#,
+            r#"{"items": [1, 2, 3]}"#,
+            r#"{"note": "True story, None taken, all False"}"#, // words are INSIDE the string
+            r#"{"key": "isTrueFor"}"#,                          // substring inside a string value
+        ] {
+            assert!(
+                matches!(normalize_json_python_constants(s), Cow::Borrowed(_)),
+                "expected borrow for {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn python_constants_normalizes_true_false_none_outside_strings() {
+        let cases = [
+            (r#"{"ready": True}"#, r#"{"ready": true}"#),
+            (r#"{"ok": False}"#, r#"{"ok": false}"#),
+            (r#"{"val": None}"#, r#"{"val": null}"#),
+            (
+                r#"{"flags": [True, False, None]}"#,
+                r#"{"flags": [true, false, null]}"#,
+            ),
+        ];
+        for (raw, want) in cases {
+            let fixed = normalize_json_python_constants(raw);
+            assert!(matches!(fixed, Cow::Owned(_)), "expected owned for {raw:?}");
+            assert_eq!(fixed.as_ref(), want);
+            // The recovered view is now strict-parseable.
+            serde_json::from_str::<serde_json::Value>(fixed.as_ref())
+                .expect("recovered view is valid JSON");
+        }
+    }
+
+    #[test]
+    fn python_constants_leaves_words_inside_strings_untouched() {
+        // A `True`/`False`/`None` appearing INSIDE a string value is content and
+        // must survive byte-for-byte — borrow, no rewrite.
+        let raw = r#"{"note": "None of True or False applies"}"#;
+        assert!(matches!(
+            normalize_json_python_constants(raw),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn python_constants_only_whole_word_matches() {
+        // A longer bareword that merely starts/ends with the letters is NOT a
+        // whole-word match — left in place for the strict parse to reject, so
+        // leniency never widens beyond the three exact literals.
+        for s in [
+            r#"{"x": Truthy}"#,
+            r#"{"x": Falsehood}"#,
+            r#"{"x": Noneness}"#,
+            r#"{"x": xNone}"#,
+        ] {
+            assert!(
+                matches!(normalize_json_python_constants(s), Cow::Borrowed(_)),
+                "expected borrow (non-whole-word) for {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn python_constants_preserves_multibyte_outside_the_token() {
+        // A multibyte UTF-8 body byte elsewhere is copied through unchanged while
+        // the outside-string constant is normalized; result stays valid UTF-8.
+        let raw = r#"{"emoji": "🚀", "ok": True}"#;
+        let fixed = normalize_json_python_constants(raw);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        assert_eq!(fixed.as_ref(), r#"{"emoji": "🚀", "ok": true}"#);
+    }
+
+    #[test]
+    fn python_constants_respects_escaped_quote_before_token() {
+        // An escaped quote inside a string (`\"`) does not close the string, so a
+        // `True` that follows it is still string content and is NOT rewritten.
+        let raw = r#"{"a": "say \"True\" here"}"#;
+        assert!(matches!(
+            normalize_json_python_constants(raw),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn python_constants_other_malformed_stays_borrowed() {
+        // No target literal present (unquoted key) => borrow => the caller's
+        // strict miss is preserved.
+        assert!(matches!(
+            normalize_json_python_constants(r#"{a: "b"}"#),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn has_python_constant_detects_only_outside_string_whole_words() {
+        assert!(has_python_constant(br#"{"ready": True}"#));
+        assert!(has_python_constant(br#"{"v": None}"#));
+        assert!(has_python_constant(br#"[True, False]"#));
+        // Inside a string, or a non-whole-word, or lowercase: not detected.
+        assert!(!has_python_constant(br#"{"note": "True None"}"#));
+        assert!(!has_python_constant(br#"{"x": Truthy}"#));
+        assert!(!has_python_constant(br#"{"ready": true}"#));
+    }
+
     // ---- recover_json_view (composed) ------------------------------------
 
     #[test]
@@ -1769,6 +2057,44 @@ mod tests {
         assert!(matches!(
             recover_json_view("{\"a\": 1 /* x */}"),
             Cow::Owned(_)
+        ));
+    }
+
+    #[test]
+    fn recover_json_view_recovers_python_constant_only() {
+        // A Python-cased boolean alone: owned and parseable.
+        let fixed = recover_json_view(r#"{"ready": True}"#);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["ready"], true);
+    }
+
+    #[test]
+    fn recover_json_view_python_constant_only_still_owned() {
+        assert!(matches!(recover_json_view(r#"{"v": None}"#), Cow::Owned(_)));
+    }
+
+    #[test]
+    fn recover_json_view_composes_all_five_defects() {
+        // A comment, an invalid escape (`\d`), a raw control char (newline), a
+        // Python constant (`True`), AND a trailing comma in one payload: all five
+        // recovery views compose to a parseable object.
+        let raw = "{\"a\": \"re \\d\nmulti\", /* note */ \"ok\": True, \"b\": [1, 2,],}";
+        let fixed = recover_json_view(raw);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["a"], "re \\d\nmulti");
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["b"], serde_json::json!([1, 2]));
+    }
+
+    #[test]
+    fn recover_json_view_python_words_inside_string_stay_borrowed() {
+        // A valid object whose string value merely contains the words parses
+        // strictly, so recover_json_view is a byte-for-byte no-op (borrow).
+        assert!(matches!(
+            recover_json_view(r#"{"note": "None of True applies", "n": 1}"#),
+            Cow::Borrowed(_)
         ));
     }
 
@@ -1878,6 +2204,106 @@ mod tests {
         let raw = r#"{"decision": "admit", "items": ["see https://x.example//y"]}"#;
         let env: Env = extract_and_parse_json(raw).expect("url slashes preserved");
         assert_eq!(env.items, vec!["see https://x.example//y".to_string()]);
+    }
+
+    // A phase whose decision carries a boolean/nullable field — the shape that
+    // exposes the Python-constant defect (`"ready": True`, `"note": None`).
+    #[derive(Debug, serde::Deserialize, PartialEq)]
+    struct Flags {
+        ready: bool,
+        #[serde(default)]
+        note: Option<String>,
+    }
+
+    #[test]
+    fn extract_and_parse_json_recovers_python_true_constant() {
+        // End-to-end: a model with Python priors emits `True` for a boolean field
+        // and is recovered through the shared chokepoint instead of dropping the
+        // whole decision.
+        let raw = r#"{"ready": True, "note": "go"}"#;
+        let flags: Flags = extract_and_parse_json(raw).expect("python True recovered");
+        assert_eq!(
+            flags,
+            Flags {
+                ready: true,
+                note: Some("go".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn extract_and_parse_json_recovers_python_none_constant() {
+        // `None` for a nullable field becomes JSON `null` => deserializes to None.
+        let raw = r#"{"ready": False, "note": None}"#;
+        let flags: Flags = extract_and_parse_json(raw).expect("python None recovered");
+        assert_eq!(
+            flags,
+            Flags {
+                ready: false,
+                note: None
+            }
+        );
+    }
+
+    #[test]
+    fn extract_and_parse_json_recovers_python_constant_through_banner_noise() {
+        // Banner + interleaved ANSI log line AND a Python constant: the extractor
+        // strips the noise, then recovery normalizes the literal.
+        let raw = "Recipe: ooda SUCCESS (3.0s)\n\
+                   \x1b[2m2026-07-20T00:00:00.000000Z\x1b[0m INFO decide\n\
+                   {\"ready\": True}";
+        let flags: Flags = extract_and_parse_json(raw).expect("noise + python constant recovered");
+        assert_eq!(
+            flags,
+            Flags {
+                ready: true,
+                note: None
+            }
+        );
+    }
+
+    // A phase whose decision carries every recoverable shape at once.
+    #[derive(Debug, serde::Deserialize, PartialEq)]
+    struct FullDecision {
+        decision: String,
+        ready: bool,
+        #[serde(default)]
+        items: Vec<String>,
+    }
+
+    #[test]
+    fn extract_and_parse_json_recovers_all_five_defects_together() {
+        // A single payload with every recoverable defect: a comment, an invalid
+        // escape (`\d`), a raw control char (newline), a Python constant (`True`),
+        // and a trailing comma.
+        let raw = "{\"decision\": \"admit\", /* note */ \"ready\": True, \
+                   \"items\": [\"re \\d\nline\",],}";
+        let full: FullDecision = extract_and_parse_json(raw).expect("all five defects recovered");
+        assert_eq!(
+            full,
+            FullDecision {
+                decision: "admit".to_string(),
+                ready: true,
+                items: vec!["re \\d\nline".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn extract_and_parse_json_preserves_python_words_inside_string() {
+        // The words inside a string value are legitimate content: the payload is
+        // already valid JSON, parses strictly, and is never mangled by recovery.
+        let raw = r#"{"decision": "admit", "items": ["None of these are True"]}"#;
+        let env: Env = extract_and_parse_json(raw).expect("in-string words preserved");
+        assert_eq!(env.items, vec!["None of these are True".to_string()]);
+    }
+
+    #[test]
+    fn extract_and_parse_json_none_for_python_constant_unquoted_key() {
+        // Leniency never widens past the five named defects: normalizing a
+        // Python constant does not rescue an accompanying unquoted key — the
+        // object stays malformed and the strict miss is preserved (None).
+        assert_eq!(extract_and_parse_json::<Flags>(r#"{ready: True}"#), None);
     }
 
     #[test]

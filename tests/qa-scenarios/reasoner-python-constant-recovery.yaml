@@ -1,0 +1,122 @@
+name: reasoner-python-constant-recovery
+app_type: cli
+description: |
+  Outside-in proof that every recipe-backed REASONER parse site now recovers a
+  JSON envelope carrying a PYTHON-STYLE CONSTANT (`True`, `False`, or `None`
+  used as a bare value outside a string value — the Python/`repr` mis-casing)
+  instead of silently discarding the model's whole structured decision — a
+  reasoner-reliability axis of the standing cognition-improvement goal (extends
+  the trailing-comma #2658, unescaped-control-character #4424,
+  invalid-backslash-escape #4434, and JavaScript-comment #4458 recoveries).
+
+  The shared extractor `recipe_output::extract_json_payload` strips banner / ANSI
+  / interleaved-log noise but returns the balanced `{…}` object body VERBATIM. A
+  model with strong Python priors routinely emits a boolean/null field in Python
+  casing — `"ready": True`, `"value": None` — the spelling it has seen throughout
+  its training data. `serde_json` is spec-strict: `True`/`False`/`None` are not
+  JSON tokens, so the stray capital survives into the extracted payload and fails
+  a strict parse (`expected value`). Before this change every reasoner site parsed
+  strictly (`extract_json_payload(text)?` -> `serde_json::from_str(..).ok()?`), so
+  one mis-cased literal dropped the entire decision and the phase fell back to its
+  deterministic default — a PARSE-FAILURE default, not a real model decision.
+
+  Recovery is composed by `recover_json_view`, which strips any `//`/`/*` comment
+  outside a string literal, doubles any invalid backslash escape inside a string
+  literal, escapes any unescaped control byte inside a string literal, strips
+  trailing commas, and FINALLY normalizes any Python constant
+  (`True`/`False`/`None` -> `true`/`false`/`null`) sitting OUTSIDE a string
+  literal. The Python-constant view runs last on purpose: like comment- and
+  comma-stripping it is a structural, outside-string transform, and substitutes
+  only same-length ASCII literals, so it can neither move a string boundary nor
+  perturb any earlier view. All reasoner sites route through the one shared
+  chokepoint `recipe_output::extract_and_parse_json`, which retries the strict
+  parse on the recovered view — but ONLY when a view actually rewrote the payload
+  (the `Cow::Owned` arm). Each sub-view is a provable no-op (`Cow::Borrowed`) on
+  valid JSON — valid JSON never has a bareword `True`/`False`/`None` outside a
+  string — so any OTHER malformed shape (unquoted key, elided element, missing
+  value, a longer bareword like `Truthy`) still returns `None`: leniency never
+  widens beyond the five named defects and a genuine parse error is never masked.
+  A `True`/`False`/`None` that is legitimate string content (a rationale, a key)
+  is preserved because the scan is string-literal and whole-word aware.
+
+  Sites routed through the chokepoint in `src/ooda_brain/recipe_brain.rs`:
+  `parse_admission_decision`, `parse_resource_admission_decision`,
+  `parse_idea_dedup_decision`, `parse_idea_consolidation`, `parse_outcome_decision`,
+  `extract_decision_envelope` (decide), and `extract_orient_envelope`.
+
+  This scenario drives the hermetic, in-process tests that pin the corrected
+  contract:
+    - the `normalize_json_python_constants` view: borrows valid JSON unchanged
+      (including lowercase literals and the words `True`/`False`/`None` INSIDE a
+      string value); normalizes a bare `True`/`False`/`None` outside a string to
+      `true`/`false`/`null` (incl. inside an array); matches only WHOLE words so
+      `Truthy`/`Falsehood`/`Noneness`/`xNone` are left untouched; respects an
+      escaped quote before the token; preserves multibyte UTF-8; leaves other
+      malformed bodies borrowed; plus the `has_python_constant` detector;
+    - the composed `recover_json_view`: recovers a Python constant alone, keeps
+      the words inside a string a byte-for-byte borrow, and composes all five
+      defects;
+    - the shared `extract_and_parse_json` helper end-to-end: recovers a `True`
+      and a `None` constant (alone and through banner + ANSI + log noise) and all
+      five defects together, while the words inside a string value are preserved
+      and a genuinely malformed (non-target) envelope — including a Python
+      constant with an accompanying unquoted key — stays a loud parse miss.
+  No network, no live host mutation. The CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # Recovery views: Python-constant normalization (borrow on valid incl. lowercase
+  # literals and the words inside a string; normalize bare True/False/None outside
+  # a string incl. inside an array; whole-word only; escaped-quote and multibyte
+  # preserved) and the composed recover_json_view (recovers a Python constant
+  # alone; words inside a string stay borrowed; composes all five defects).
+  - action: run
+    params:
+      command: "cargo test --locked --lib -- recipe_output::extract::tests::python_constants recipe_output::extract::tests::has_python_constant recipe_output::extract::tests::recover_json_view"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Shared chokepoint end-to-end: a Python-constant envelope now parses to the
+  # correct typed decision (True alone, None alone, through banner+ANSI+log noise,
+  # and composed with the other four defects); the words inside a string value are
+  # preserved and a non-target-malformed body (incl. an accompanying unquoted key)
+  # still returns None.
+  - action: run
+    params:
+      command: "cargo test --locked --lib recipe_output::extract::tests::extract_and_parse_json"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Whole recipe_output module and full recipe_brain test module stay green — the
+  # shared extractor and every pre-existing banner/ANSI/verdict/trailing-comma/
+  # control-char/invalid-escape/comment behaviour is unregressed by composing the
+  # Python-constant view as the final structural view.
+  - action: run
+    params:
+      command: "cargo test --locked --lib -- recipe_output:: ooda_brain::recipe_brain::tests"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
