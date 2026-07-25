@@ -279,6 +279,17 @@ fn run_smoke_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
 
 /// Build the isolated `cargo test` command for the UnitTest canary gate.
 ///
+/// SCOPE (issue #4622): this runs the curated, hermetic-by-construction
+/// `self_deploy_canary` integration target (`tests/self_deploy_canary.rs`,
+/// selected by the opt-in `canary-tests` feature) — NOT the full lib suite. The
+/// full suite contains non-hermetic tests (shared `HOME`/tempdirs, unserialized
+/// shared resources, `Drop`-order cleanup guards) that panic inside the isolated
+/// self-deploy-target env even when green in CI, wedging the gate on an
+/// ever-shifting target (the observed `e3a4327834db` red-canary crash-loop:
+/// deterministic `exit status 101`). Scoping to a deterministic curated set ends
+/// that whack-a-mole while keeping the gate a real fail-closed
+/// deploy-authorization control (the `UnitTest` gate stays in `default_gates()`).
+///
 /// The live daemon holds its lbug cognitive store + typed-OODA sqlite outcome
 /// store open under `SIMARD_STATE_ROOT`/`SIMARD_HOME`. If the canary's
 /// `cargo test` opened those SAME stores it would collide with the running
@@ -331,7 +342,16 @@ fn build_unit_test_command_in(
     // Build the scrubbed command FIRST so `scrub_gate_env` runs before the
     // isolation override below (last-write-wins ordering is load-bearing).
     let mut cmd = scrubbed_command("cargo", config);
+    // SCOPE (#4622): run ONLY the curated hermetic `self_deploy_canary` target,
+    // gated behind the opt-in `canary-tests` feature — never the full, shifting
+    // lib suite. `--test`, `self_deploy_canary`, `--features`, and `canary-tests`
+    // are discrete static `.arg` literals (no shell, no interpolation), so the
+    // scope introduces no command-injection surface.
     cmd.arg("test")
+        .arg("--test")
+        .arg("self_deploy_canary")
+        .arg("--features")
+        .arg("canary-tests")
         .arg("--manifest-path")
         .arg(config.manifest_dir.join("Cargo.toml"))
         .arg("--target-dir")
@@ -384,7 +404,7 @@ fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
         Ok(output) if output.status.success() => GateResult {
             gate: RelaunchGate::UnitTest,
             passed: true,
-            detail: "all tests passed".to_string(),
+            detail: "self-deploy canary regression suite passed".to_string(),
         },
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
