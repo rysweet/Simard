@@ -1,8 +1,10 @@
 use std::path::Path;
 use std::process::Command;
 
+use tempfile::TempDir;
+
 use super::types::{GateResult, RelaunchConfig, RelaunchGate};
-use crate::error::SimardResult;
+use crate::error::{SimardError, SimardResult};
 
 /// The Simard-specific environment the canary gates legitimately need to render
 /// a **true** verdict for a healthy candidate — the deploy-shape signals that
@@ -224,7 +226,42 @@ fn run_smoke_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
     }
 }
 
-fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
+/// Build the isolated `cargo test` command for the UnitTest canary gate.
+///
+/// The live daemon holds its lbug cognitive store + typed-OODA sqlite outcome
+/// store open under `SIMARD_STATE_ROOT`/`SIMARD_HOME`. If the canary's
+/// `cargo test` opened those SAME stores it would collide with the running
+/// daemon's locks/state and redden EVERY self-deploy at test `Drop` (#4628).
+///
+/// To prevent that, this mints a fresh, ABSOLUTE, per-run [`TempDir`] and —
+/// **after** `scrub_gate_env` has run (so this override wins last-write-wins
+/// over any allow-listed live value) — points `SIMARD_STATE_ROOT`/`SIMARD_HOME`
+/// at it and REMOVES `SIMARD_MEMORY_SOCKET` so the canary opens its OWN
+/// throwaway stores and cannot dial the live memory daemon.
+///
+/// FAIL CLOSED: if the isolated root cannot be created this returns `Err` so the
+/// gate reddens. It must NEVER fall back to the live state root — that fallback
+/// is the exact collision bug this seam removes.
+///
+/// The returned [`TempDir`] guard MUST be kept alive by the caller until after
+/// `cmd.output()` completes, or the isolated root is deleted mid-run.
+fn build_unit_test_command(config: &RelaunchConfig) -> SimardResult<(Command, TempDir)> {
+    let state_root = TempDir::new().map_err(|e| SimardError::PersistentStoreIo {
+        store: "canary-unit-test-isolated-state-root".to_string(),
+        action: "create isolated tempdir".to_string(),
+        path: std::env::temp_dir(),
+        reason: e.to_string(),
+    })?;
+    // The canary must never run against a CWD-relative root; mkdtemp yields an
+    // absolute path under the system temp dir.
+    debug_assert!(
+        state_root.path().is_absolute(),
+        "isolated canary state root must be absolute: {:?}",
+        state_root.path()
+    );
+
+    // Build the scrubbed command FIRST so `scrub_gate_env` runs before the
+    // isolation override below (last-write-wins ordering is load-bearing).
     let mut cmd = scrubbed_command("cargo", config);
     cmd.arg("test")
         .arg("--manifest-path")
@@ -232,6 +269,49 @@ fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
         .arg("--target-dir")
         .arg(&config.canary_target_dir)
         .env("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs());
+
+    // Isolation override (AFTER scrub): the canary opens its OWN throwaway
+    // stores, never the live daemon's. Removing the memory socket prevents the
+    // canary from dialing the running daemon's cognitive-memory endpoint.
+    cmd.env("SIMARD_STATE_ROOT", state_root.path())
+        .env("SIMARD_HOME", state_root.path())
+        .env_remove("SIMARD_MEMORY_SOCKET");
+
+    Ok((cmd, state_root))
+}
+
+/// The RED `GateResult` returned when the UnitTest gate cannot establish its
+/// isolated state root. The refusal is carried entirely by `passed: false`; the
+/// detail names the isolation cause so the tracing event in [`verify_canary`] is
+/// actionable. Scoped to the UnitTest gate only.
+fn unit_test_gate_failed_closed(reason: impl std::fmt::Display) -> GateResult {
+    GateResult {
+        gate: RelaunchGate::UnitTest,
+        passed: false,
+        detail: format!(
+            "could not create the canary's isolated state root — refusing to run \
+             unit tests against the live daemon's stores (#4628): {reason}"
+        ),
+    }
+}
+
+fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
+    // FAIL CLOSED: if the isolated state root cannot be created, redden the gate
+    // instead of falling back to the live daemon's state root (#4628).
+    let (mut cmd, _state_root) = match build_unit_test_command(config) {
+        Ok(built) => built,
+        Err(e) => {
+            tracing::error!(
+                target: "self_relaunch::gate",
+                error = %e,
+                "canary unit-test gate could not isolate its state root — failing closed"
+            );
+            return unit_test_gate_failed_closed(e);
+        }
+    };
+    // `_state_root` (the TempDir guard) is bound here so the isolated root
+    // outlives `cmd.output()` below; dropping it early would delete the root
+    // mid-run.
     match cmd.output() {
         Ok(output) if output.status.success() => GateResult {
             gate: RelaunchGate::UnitTest,
@@ -1035,6 +1115,268 @@ test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
         assert!(
             super::super::types::default_gates().contains(&RelaunchGate::UnitTest),
             "UnitTest must remain a default canary gate (do-not-remove guard)"
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TDD (Problem: canary UnitTest gate collides with the LIVE daemon's state):
+// FAILING tests, written first (issue #4628). These supersede the stale PR #4632.
+//
+// Root cause: `scrub_gate_env`'s allow-list PASSES `SIMARD_STATE_ROOT` /
+// `SIMARD_HOME` THROUGH from the running daemon's environment, so the spawned
+// `cargo test` opens the SAME lbug cognitive store + typed-OODA sqlite outcome
+// store the live daemon holds → lock/state collision → the canary reddens with
+// `exit status: 101` at test Drop ~1.7s into unittests → every self-deploy is
+// refused.
+//
+// The fix must give the UnitTest gate its OWN throwaway state root:
+//   * `build_unit_test_command(config)` — builds the scrubbed `cargo test`
+//     command, then (AFTER the scrub, last-write-wins) overrides
+//     `SIMARD_STATE_ROOT` + `SIMARD_HOME` to a fresh, ABSOLUTE, per-run
+//     `tempfile::TempDir` and REMOVES `SIMARD_MEMORY_SOCKET` so the canary can
+//     neither open the live stores nor dial the live memory daemon. Returns the
+//     `TempDir` guard so the caller can keep it alive across `cmd.output()`.
+//   * FAIL CLOSED — if the isolated root cannot be created the gate reddens
+//     (`Err`); it must NEVER fall back to the live state root.
+//   * `unit_test_gate_failed_closed(reason)` — the RED `GateResult` used when
+//     isolation is unavailable; verdict carried by `passed: false`.
+//
+// Scope discipline (asserted implicitly — no override helpers are added to the
+// other gates): only the UnitTest gate gets this isolation seam; smoke,
+// gym-baseline, and rpc-health stay byte-for-byte unchanged (rpc-health MUST
+// keep dialing the live daemon).
+//
+// These reference `build_unit_test_command` / `unit_test_gate_failed_closed`,
+// which DO NOT yet exist, so the module fails to compile until the fix lands,
+// then passes. Env-mutating cases are `serial(cognitive_memory)` and save /
+// restore the global environment verbatim.
+#[cfg(all(test, unix))]
+mod state_isolation_tdd {
+    use super::*;
+    use std::ffi::OsStr;
+
+    // A live daemon-shaped state-root value the scrub allow-list would otherwise
+    // pass straight through into the canary's `cargo test` — the collision source.
+    const LIVE_STATE_ROOT: &str = "/var/lib/simard/live-state-root";
+    const LIVE_HOME: &str = "/var/lib/simard/live-home";
+    const LIVE_MEMORY_SOCKET: &str = "/run/simard/live-memory.sock";
+
+    /// The final override the built command carries for `key`:
+    ///   * `Some(Some(val))` — explicitly set (survives last-write-wins),
+    ///   * `Some(None)` — explicitly removed via `env_remove`,
+    ///   * `None` — not mentioned at all.
+    fn overridden_env<'a>(cmd: &'a Command, key: &str) -> Option<Option<&'a OsStr>> {
+        cmd.get_envs()
+            .find(|(k, _)| *k == OsStr::new(key))
+            .map(|(_, v)| v)
+    }
+
+    /// Snapshot of the three env names this seam touches, so a test can restore
+    /// the global environment verbatim regardless of which branch it took.
+    struct EnvGuard {
+        vars: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn capture(names: &[&'static str]) -> Self {
+            Self {
+                vars: names.iter().map(|&n| (n, std::env::var(n).ok())).collect(),
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (name, prev) in &self.vars {
+                match prev {
+                    // SAFETY: serialized by the cognitive_memory serial key
+                    // (whole-binary); no concurrent test reads these vars.
+                    Some(val) => unsafe { std::env::set_var(name, val) },
+                    None => unsafe { std::env::remove_var(name) },
+                }
+            }
+        }
+    }
+
+    // A config that ALLOW-LISTS the very names the live daemon exports, so the
+    // scrub step re-injects the live values — proving the override must win.
+    fn config_allowlisting_live_state() -> RelaunchConfig {
+        RelaunchConfig {
+            canary_env: vec![
+                "SIMARD_STATE_ROOT".to_string(),
+                "SIMARD_HOME".to_string(),
+                "SIMARD_MEMORY_SOCKET".to_string(),
+            ],
+            ..RelaunchConfig::default()
+        }
+    }
+
+    // The load-bearing isolation contract: the UnitTest gate's `cargo test` must
+    // run against its OWN throwaway state root, NOT the live daemon's. Even when
+    // the scrub allow-list re-injects the live `SIMARD_STATE_ROOT`/`SIMARD_HOME`,
+    // the override lands AFTER the scrub (last-write-wins) and points at a fresh,
+    // ABSOLUTE, per-run tempdir; `SIMARD_MEMORY_SOCKET` is stripped so the canary
+    // cannot dial the live memory daemon. This is the exact collision fix (#4628).
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn unit_test_gate_overrides_state_root_to_isolated_temp() {
+        let _env = EnvGuard::capture(&["SIMARD_STATE_ROOT", "SIMARD_HOME", "SIMARD_MEMORY_SOCKET"]);
+        // SAFETY: serialized by the cognitive_memory serial key (whole-binary);
+        // no concurrent test reads these vars. Restored by EnvGuard on drop.
+        unsafe {
+            std::env::set_var("SIMARD_STATE_ROOT", LIVE_STATE_ROOT);
+            std::env::set_var("SIMARD_HOME", LIVE_HOME);
+            std::env::set_var("SIMARD_MEMORY_SOCKET", LIVE_MEMORY_SOCKET);
+        }
+
+        let config = config_allowlisting_live_state();
+        let (cmd, guard) =
+            build_unit_test_command(&config).expect("isolated state root must be creatable");
+
+        let state_root = overridden_env(&cmd, "SIMARD_STATE_ROOT")
+            .expect("SIMARD_STATE_ROOT must be set on the command")
+            .expect("SIMARD_STATE_ROOT must be a value, not a removal");
+        let home = overridden_env(&cmd, "SIMARD_HOME")
+            .expect("SIMARD_HOME must be set on the command")
+            .expect("SIMARD_HOME must be a value, not a removal");
+
+        // Override wins over the scrub allow-list — the live values never leak in.
+        assert_ne!(
+            state_root,
+            OsStr::new(LIVE_STATE_ROOT),
+            "SIMARD_STATE_ROOT must be the isolated tempdir, not the live root"
+        );
+        assert_ne!(
+            home,
+            OsStr::new(LIVE_HOME),
+            "SIMARD_HOME must be the isolated tempdir, not the live home"
+        );
+
+        // The isolated root is the actual TempDir the guard owns.
+        assert_eq!(
+            state_root,
+            guard.path().as_os_str(),
+            "SIMARD_STATE_ROOT must equal the returned TempDir guard's path"
+        );
+        // Both point at the SAME throwaway root (one isolated store tree).
+        assert_eq!(
+            state_root, home,
+            "SIMARD_STATE_ROOT and SIMARD_HOME must share the isolated tempdir"
+        );
+
+        // Absolute, and under the system temp dir — never CWD-relative.
+        let root_path = std::path::Path::new(state_root);
+        assert!(
+            root_path.is_absolute(),
+            "isolated state root must be an absolute path: {root_path:?}"
+        );
+        assert!(
+            root_path.starts_with(std::env::temp_dir()),
+            "isolated state root must live under the system temp dir: {root_path:?}"
+        );
+
+        // The live memory socket must NOT reach the canary: the scrub allow-list
+        // re-injected it (config allow-lists SIMARD_MEMORY_SOCKET and it is set
+        // live above), and the override must strip it so the canary cannot open
+        // the live daemon's memory socket. Under current main's `env_clear`-based
+        // scrub (#4629), `env_remove` after a clear yields ABSENCE (`None`) rather
+        // than an explicit-removal sentinel (`Some(None)`) — either way the child
+        // process never receives the variable. The load-bearing guarantee is that
+        // the live value is gone: it is neither carried nor set to any value.
+        assert_eq!(
+            overridden_env(&cmd, "SIMARD_MEMORY_SOCKET"),
+            None,
+            "SIMARD_MEMORY_SOCKET must be stripped from the gate command (env_remove \
+             after env_clear yields absence), never carried as the live socket"
+        );
+        assert_ne!(
+            overridden_env(&cmd, "SIMARD_MEMORY_SOCKET"),
+            Some(Some(OsStr::new(LIVE_MEMORY_SOCKET))),
+            "the live memory socket must never leak into the canary gate command"
+        );
+    }
+
+    // No cross-run bleed: each invocation mints a UNIQUE isolated root, so two
+    // concurrent/sequential canaries can never share a store tree.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn unit_test_gate_isolated_root_is_unique_per_run() {
+        let config = RelaunchConfig::default();
+        let (cmd_a, guard_a) = build_unit_test_command(&config).expect("first isolated root");
+        let (cmd_b, guard_b) = build_unit_test_command(&config).expect("second isolated root");
+
+        let root_a = overridden_env(&cmd_a, "SIMARD_STATE_ROOT")
+            .flatten()
+            .expect("first run sets SIMARD_STATE_ROOT");
+        let root_b = overridden_env(&cmd_b, "SIMARD_STATE_ROOT")
+            .flatten()
+            .expect("second run sets SIMARD_STATE_ROOT");
+
+        assert_ne!(
+            root_a, root_b,
+            "each canary run must get a unique isolated state root (no cross-run bleed)"
+        );
+        assert_ne!(
+            guard_a.path(),
+            guard_b.path(),
+            "each returned TempDir guard must own a distinct directory"
+        );
+    }
+
+    // FAIL CLOSED (non-negotiable): if the isolated root cannot be created the
+    // gate MUST redden — it must NEVER silently fall back to the live state root
+    // (that fallback is the exact bug #4628 removes). We force the failure by
+    // pointing the system temp dir at a non-existent, non-creatable path so
+    // `TempDir::new()` errors.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn unit_test_gate_fails_closed_when_state_isolation_unavailable() {
+        let _env = EnvGuard::capture(&["TMPDIR"]);
+        let bogus = format!(
+            "/simard-no-such-tmp-{}-{:?}/nested",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        // SAFETY: serialized by the cognitive_memory serial key (whole-binary);
+        // no concurrent test reads TMPDIR. Restored by EnvGuard on drop.
+        unsafe { std::env::set_var("TMPDIR", &bogus) };
+
+        let config = RelaunchConfig::default();
+        let outcome = build_unit_test_command(&config);
+
+        assert!(
+            outcome.is_err(),
+            "build_unit_test_command MUST fail closed when the isolated state root \
+             cannot be created — never fall back to the live root"
+        );
+    }
+
+    // The fail-closed verdict is a RED `GateResult` whose refusal is carried by
+    // `passed: false` and whose detail names the isolation cause (so the tracing
+    // event in `verify_canary` is actionable), scoped to the UnitTest gate.
+    #[test]
+    fn unit_test_gate_failed_closed_is_red_and_names_the_cause() {
+        let result = unit_test_gate_failed_closed("mkdtemp: No such file or directory");
+
+        assert_eq!(
+            result.gate,
+            RelaunchGate::UnitTest,
+            "the fail-closed verdict must be attributed to the UnitTest gate"
+        );
+        assert!(
+            !result.passed,
+            "isolation failure must redden the gate (verdict carried by passed:false)"
+        );
+        assert!(
+            result.detail.contains("isolated state root"),
+            "detail must explain the isolation failure: {}",
+            result.detail
+        );
+        assert!(
+            result.detail.contains("mkdtemp: No such file or directory"),
+            "detail must carry the underlying cause: {}",
+            result.detail
         );
     }
 }
