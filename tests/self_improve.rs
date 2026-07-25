@@ -237,11 +237,25 @@ fn bridge_error_propagates_from_cycle() {
 
 #[test]
 fn default_gates_is_ordered() {
+    // #4619: the flaky/redundant full-suite `UnitTest` canary is removed from
+    // the default deploy-gate set (GitHub `verify` CI already runs the full
+    // suite). Default is now three gates in order: Smoke, GymBaseline, RpcHealth.
     let gates = default_gates();
+    assert_eq!(gates.len(), 3);
     assert_eq!(gates[0], RelaunchGate::Smoke);
-    assert_eq!(gates[1], RelaunchGate::UnitTest);
-    assert_eq!(gates[2], RelaunchGate::GymBaseline);
-    assert_eq!(gates[3], RelaunchGate::RpcHealth);
+    assert_eq!(gates[1], RelaunchGate::GymBaseline);
+    assert_eq!(gates[2], RelaunchGate::RpcHealth);
+}
+
+#[test]
+fn default_gates_excludes_unit_test() {
+    // #4619: UnitTest must NOT be part of the default deploy-gate set — this is
+    // the crash-loop fix. The enum variant is retained for explicit/manual runs.
+    let gates = default_gates();
+    assert!(
+        !gates.contains(&RelaunchGate::UnitTest),
+        "UnitTest must be removed from default_gates() to stop the self-deploy crash-loop"
+    );
 }
 
 #[test]

@@ -35,6 +35,15 @@ related:
 > sequence keep their signatures and semantics; `RelaunchConfig` gains one
 > field that defaults to the pre-existing behavior.
 
+> **Superseded gate count (#4619).** This document describes the #4440 env-scrub
+> repair, when the default set was four gates. The default deploy-gate set is now
+> **three** — `Smoke → GymBaseline → RpcHealth` — after the flaky/redundant local
+> full-suite `UnitTest` canary was removed from `default_gates()` to stop the
+> self-deploy crash-loop. See
+> [Canary default gate set](./canary-gate-default-set.md) for the current
+> behavior. The invariants below (fail-closed refusal, no short-circuit,
+> deny-by-default env) are unchanged; only the gate count differs.
+
 ## Why this exists
 
 The [red-canary diagnostics](./overseer-deploy-canary-diagnostics.md) (#4420)
@@ -229,7 +238,9 @@ for &gate in gates {
 }
 ```
 
-The sequence is unchanged: `Smoke → UnitTest → GymBaseline → RpcHealth`, run to
+The sequence at the time of this repair was `Smoke → UnitTest → GymBaseline →
+RpcHealth` (the default is now `Smoke → GymBaseline → RpcHealth` after #4619; see
+[Canary default gate set](./canary-gate-default-set.md)), run to
 completion **without short-circuit**, so every gate's verdict is observable on a
 single canary run even when an earlier gate has already reddened. Before this
 change, gate details were only partially bounded and never redacted: the
@@ -312,8 +323,10 @@ No loop, requeue, or drift logic changed.
 This repair is bounded by the same rails as the diagnostics feature; none is
 relaxed:
 
-- **Canary is the authorization boundary.** The four gates still gate promotion
-  and still fail closed. An unhealthy candidate reddens exactly as before.
+- **Canary is the authorization boundary.** The default gates still gate
+  promotion and still fail closed. An unhealthy candidate reddens exactly as
+  before. (The default set is three gates after #4619; `UnitTest` is retained for
+  explicit/manual runs.)
 - **No short-circuit.** All gates run to completion so every verdict is
   observable; `all_gates_passed` still requires every gate to pass.
 - **Deny-by-default env.** `scrub_gate_env` forwards only the base set plus the

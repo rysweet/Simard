@@ -1,7 +1,11 @@
 //! Canary deployment and handover for self-relaunch.
 //!
-//! Gate sequence: Smoke -> UnitTest -> GymBaseline -> RpcHealth.
+//! Default gate sequence: Smoke -> GymBaseline -> RpcHealth.
 //! All gates must pass before handover. Failures reject the canary (Pillar 11).
+//!
+//! The full-suite `UnitTest` gate is excluded from the default set (#4619): it
+//! crash-looped the self-deploy under host load and is already covered by
+//! GitHub `verify` CI. The variant is retained for explicit/manual runs.
 //!
 //! For coordinated multi-process handoff with leader election, see
 //! [`coordinated_relaunch`] which uses [`self_relaunch_semaphore`].
@@ -21,13 +25,19 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn default_gates_returns_four_in_order() {
+    fn default_gates_returns_three_in_order() {
+        // #4619: `UnitTest` is removed from the default deploy-gate set to stop
+        // the self-deploy crash-loop under host CPU oversubscription. The full
+        // suite is still gated by GitHub `verify` CI. Default is now three gates.
         let gates = default_gates();
-        assert_eq!(gates.len(), 4);
+        assert_eq!(gates.len(), 3);
         assert_eq!(gates[0], RelaunchGate::Smoke);
-        assert_eq!(gates[1], RelaunchGate::UnitTest);
-        assert_eq!(gates[2], RelaunchGate::GymBaseline);
-        assert_eq!(gates[3], RelaunchGate::RpcHealth);
+        assert_eq!(gates[1], RelaunchGate::GymBaseline);
+        assert_eq!(gates[2], RelaunchGate::RpcHealth);
+        assert!(
+            !gates.contains(&RelaunchGate::UnitTest),
+            "UnitTest must not appear in the default gate set"
+        );
     }
 
     #[test]

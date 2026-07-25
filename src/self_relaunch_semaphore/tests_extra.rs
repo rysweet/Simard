@@ -25,7 +25,13 @@ fn handoff_config_defaults() {
     let lock = temp_lock_path();
     let sem = LeaderSemaphore::new(&lock);
     let cfg = HandoffConfig::new(sem, RelaunchConfig::default());
-    assert_eq!(cfg.gates.len(), 4);
+    // #4619: default deploy-gate set is three (UnitTest removed from the hot path).
+    assert_eq!(cfg.gates.len(), 3);
+    assert!(
+        !cfg.gates
+            .contains(&crate::self_relaunch::RelaunchGate::UnitTest),
+        "UnitTest must be excluded from the default handoff gate set"
+    );
     assert_eq!(cfg.child_ready_timeout, Duration::from_secs(45));
 
     let _ = fs::remove_dir(lock.parent().unwrap());

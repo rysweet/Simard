@@ -69,10 +69,17 @@ impl Display for GateResult {
     }
 }
 
+/// Default deploy-gate canary set.
+///
+/// #4619: the full-suite `UnitTest` gate is intentionally excluded here. It was
+/// crash-looping the self-deploy under host CPU oversubscription (flaky
+/// `exit status: 101`) while adding no signal — GitHub `verify` CI already runs
+/// the full suite (`cargo test --all-features --locked`) on clean runners every
+/// push. The `UnitTest` variant and `run_unit_test_gate` are retained for
+/// explicit/manual verification; only the default hot-path set changes.
 pub fn default_gates() -> Vec<RelaunchGate> {
     vec![
         RelaunchGate::Smoke,
-        RelaunchGate::UnitTest,
         RelaunchGate::GymBaseline,
         RelaunchGate::RpcHealth,
     ]
@@ -89,11 +96,25 @@ mod tests {
     }
 
     #[test]
-    fn default_gates_has_all_four() {
+    fn default_gates_has_three() {
+        // #4619: default deploy-gate set drops the flaky/redundant full-suite
+        // `UnitTest` canary; the variant is retained for explicit/manual runs.
         let gates = default_gates();
-        assert_eq!(gates.len(), 4);
+        assert_eq!(gates.len(), 3);
         assert_eq!(gates[0], RelaunchGate::Smoke);
-        assert_eq!(gates[3], RelaunchGate::RpcHealth);
+        assert_eq!(gates[1], RelaunchGate::GymBaseline);
+        assert_eq!(gates[2], RelaunchGate::RpcHealth);
+        assert!(
+            !gates.contains(&RelaunchGate::UnitTest),
+            "UnitTest must be excluded from the default gate set"
+        );
+    }
+
+    #[test]
+    fn unit_test_variant_retained_for_manual_runs() {
+        // Non-breaking: the variant and its Display string survive removal from
+        // the default set so explicit/manual verification callers still work.
+        assert_eq!(RelaunchGate::UnitTest.to_string(), "unit-test");
     }
 
     #[test]
