@@ -7,8 +7,9 @@ description: >
   first then in-tree) from prompt_assets/simard/identity/stewarded_repos.seed.toml.
   Documents resolve_curated_path, load_or_seed, resolve_roster_seed_path, the
   fail-closed-on-empty / skip-malformed loader contract in load_stewarded_roster,
-  the (repo_root, state_root) wiring contract, and how to verify it.
-last_updated: 2026-07-23
+  the (repo_root, state_root) wiring contract, the `simard roster` curation CLI,
+  and how to verify it.
+last_updated: 2026-07-25
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -291,11 +292,47 @@ roster location follows the state root
 | First-use seed — deployed daemon | `~/.simard/prompt_assets/simard/identity/stewarded_repos.seed.toml` | `resolve_roster_seed_path` install candidate (preferred) |
 | First-use seed — source checkout | `<repo_root>/prompt_assets/simard/identity/stewarded_repos.seed.toml` | in-tree fallback |
 
-To **curate** the roster (add/remove a stewarded repo), use the `add_item` /
-`remove_item` primitives against the `stewarded_repos` collection — the edit is
-written to the durable state root and survives the next deploy. Editing the
-committed **seed** only affects a *fresh* identity that has not yet seeded its
-roster.
+To **curate** the roster (add/remove a stewarded repo), use the
+[`simard roster`](#curating-the-roster-simard-roster) CLI (which drives the
+`add_item` / `remove_item` primitives against the `stewarded_repos` collection)
+— the edit is written to the durable state root and survives the next deploy.
+Editing the committed **seed** only affects a *fresh* identity that has not yet
+seeded its roster.
+
+---
+
+## Curating the roster (`simard roster`)
+
+`simard roster` is the runtime **curation surface** — the reachable verb Simard
+(or an operator) uses to steward the roster agentically. It is the one supported
+way to mutate the durable `stewarded_repos` collection; it honours
+`SIMARD_STATE_ROOT` and `SIMARD_IDENTITY`, so curation and the observe/merge/ci
+rails always agree on the same file.
+
+| Command | Effect |
+|---|---|
+| `simard roster list` | Print the durable roster (`owner/name` + note). Seeds from the committed identity seed on first use, so a fresh install shows the seeded roster, not an empty set. |
+| `simard roster add <owner/name> [note…]` | Upsert a stewarded repo (`add_item`). The slug is validated as a clean `owner/name` **before any write**, so a malformed slug can never reach the store or `gh`. Seeds first, so `add` augments the full seeded roster on a fresh install. |
+| `simard roster remove <owner/name>` | Drop a stewarded repo (`remove_item`; idempotent — a no-op if absent). |
+
+```
+# Steward a new repo (durable — survives the next self-deploy):
+$ simard roster add rysweet/new-repo "why Simard stewards it"
+roster: stewarding rysweet/new-repo (identity 'simard', 11 repos total)
+
+# It is now in the durable state-root file (never overwritten by install):
+$ simard roster list | grep new-repo
+   rysweet/new-repo — why Simard stewards it
+
+# Stop stewarding it:
+$ simard roster remove rysweet/new-repo
+roster: no longer stewarding rysweet/new-repo (identity 'simard', 10 repos total)
+
+# A malformed slug is rejected with a non-zero exit and never mutates state:
+$ simard roster add "not a slug"; echo "exit=$?"
+Error: invalid repo slug "not a slug": expected a clean 'owner/name' ...
+exit=1
+```
 
 ---
 
@@ -323,7 +360,7 @@ again. A self-deploy re-installs `prompt_assets/` but leaves the state root
 untouched, so Simard's curation persists:
 
 ```
-# Simard stewards a new repo agentically (add_item upserts stewarded_repos):
+# Simard stewards a new repo agentically (`simard roster add` → add_item upsert):
 #   -> ~/.simard/identity-state/simard/stewarded_repos.toml now lists it.
 # A subsequent self-deploy re-installs prompt_assets/ but NOT the state root.
 # The next tick reads the curated durable roster — the new repo is still there.

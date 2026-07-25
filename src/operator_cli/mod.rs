@@ -13,6 +13,7 @@ mod memory;
 mod merge;
 mod ooda;
 mod review;
+mod roster;
 mod safe_update;
 mod self_deploy;
 mod self_health;
@@ -91,6 +92,13 @@ Product modes:
                             exactly 'Goal <id>' (the test-fixture
                             placeholder pattern). Defence-in-depth
                             cleanup for issues #1923 / #1925.
+  roster list              — print Simard's stewarded-repo roster
+                             (identity-scoped, install-durable) to stdout
+  roster add <owner/name> [note…]
+                          — start stewarding a repo (validated slug;
+                            upsert). Durable across re-installs.
+  roster remove <owner/name>
+                          — stop stewarding a repo (idempotent)
   goal-curation run <base-type> <topology> <objective> [state-root]
   goal-curation read <base-type> <topology> [state-root]
                          — read goals from $SIMARD_STATE_ROOT (or
@@ -241,6 +249,7 @@ where
         "engineer" => engineer::dispatch_engineer_command(args),
         "meeting" => meeting::dispatch_meeting_command(args),
         "goal" => goal::dispatch_goal_command(args),
+        "roster" => roster::dispatch_roster_command(args),
         "goal-curation" => curation::dispatch_goal_curation_command(args),
         "improvement-curation" => curation::dispatch_improvement_curation_command(args),
         "creative-ideas" => creative_ideas::dispatch_creative_ideas_command(args),
