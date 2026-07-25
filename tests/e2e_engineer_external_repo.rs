@@ -4,9 +4,11 @@
 //! outcomes on repositories outside her own codebase — the core capability
 //! needed for autonomous engineering work on the amplihack ecosystem.
 //!
-//! IMPORTANT: These tests use the pre-built binary at `target/debug/simard`
-//! to avoid cargo lock contention when multiple tests run in parallel.
-//! Run `cargo build` before `cargo test --test e2e_engineer_external_repo`.
+//! IMPORTANT: These tests resolve the Simard binary via Cargo's compile-time
+//! `CARGO_BIN_EXE_simard` env var, which Cargo sets automatically for
+//! integration tests and points at the active (possibly redirected)
+//! `CARGO_TARGET_DIR`. Cargo builds the `simard` binary as a dependency of
+//! this test crate, so no separate `cargo build` step is required.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14,12 +16,18 @@ use std::process::Command;
 mod common;
 
 /// Resolve the Simard binary path from the build output.
+///
+/// Uses Cargo's compile-time `CARGO_BIN_EXE_simard`, which Cargo defines for
+/// integration tests and points at the active `CARGO_TARGET_DIR`. This keeps
+/// resolution correct even when the target dir is redirected (e.g. the
+/// self-deploy canary building under `~/.simard/self-deploy-target`), instead
+/// of assuming a fixed binary location under the manifest's own build dir.
 fn simard_binary() -> PathBuf {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let binary = manifest_dir.join("target/debug/simard");
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_simard"));
     assert!(
         binary.exists(),
-        "Simard binary not found at {}. Run `cargo build` first.",
+        "Simard binary not found at {}. Cargo should build it automatically \
+         for this integration test; check the active CARGO_TARGET_DIR.",
         binary.display()
     );
     binary

@@ -282,3 +282,9 @@ Every iteration should report `test result: ok`.
 
 All three patterns are enforced by CI: the affected tests run on every
 PR and will fail if the pattern is violated.
+
+## Related
+
+- [Target-dir-independent binary resolution](./target-dir-independent-binary-resolution.md)
+  — resolve compiled binaries via `CARGO_BIN_EXE_*` so e2e tests pass under the
+  redirected `CARGO_TARGET_DIR` used by the self-deploy canary.
