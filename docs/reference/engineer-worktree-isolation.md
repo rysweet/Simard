@@ -9,6 +9,7 @@ related:
   - ../howto/spawn-engineers-from-ooda-daemon.md
   - ./engineer-loop-argv-sanitization.md
   - ./engineer-worktree-sweep-safety.md
+  - ./engineer-worktree-presence-guard.md
   - ../howto/run-ooda-daemon.md
 ---
 

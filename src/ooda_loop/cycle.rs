@@ -1610,7 +1610,15 @@ pub(crate) fn gather_per_goal_cycle_ctx(
         .filter(|w| w.kind.trim().eq_ignore_ascii_case("pr"))
         .map(|w| w.ref_id.clone())
         .collect();
-    let worker_present = state.engineer_worktrees.contains_key(goal_id);
+    // Presence guard (issue #4578): map membership alone can report a phantom
+    // live worker after the reaper removes a worktree out of band. Require the
+    // checkout to still be present on disk so a reaped worktree no longer
+    // counts as a live worker.
+    let worker_present = state
+        .engineer_worktrees
+        .get(goal_id)
+        .map(|worktree| worktree.is_present())
+        .unwrap_or(false);
 
     // DEMOTED decider #1 — classify_standing_idle: a standing goal that looks
     // idle (no live in-flight ref) becomes a SIGNAL, not a roll.
