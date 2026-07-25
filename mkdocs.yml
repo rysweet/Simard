@@ -168,6 +168,7 @@ nav:
     - Journal Report Tone Contract: concepts/journal-report-tone-contract.md
     - Eliminating "bridge" Terminology: concepts/bridge-terminology-elimination.md
     - Engineer-Claim Liveness Lease: concepts/engineer-claim-liveness-lease.md
+    - Worker-Presence Liveness Verification: concepts/worker-presence-liveness-verification.md
     - Stale-Engineer-Claim Reaper: concepts/stale-engineer-claim-reaper.md
     - Investigate-Before-Reap: concepts/investigate-stale-engineer-before-reap.md
     - Tombstoned-Goal Engineer Reaper: concepts/tombstoned-goal-engineer-reaper.md
@@ -365,6 +366,7 @@ nav:
     - OODA Orient Recipe: reference/ooda-orient-recipe.md
     - OODA Engineer-Lifecycle Recipe: reference/ooda-engineer-lifecycle-recipe.md
     - OODA Per-Goal-Cycle API: reference/ooda-per-goal-cycle-api.md
+    - Worker-Presence Liveness API: reference/worker-presence-liveness-api.md
     - OODA Per-Goal-Cycle Recipe: reference/ooda-per-goal-cycle-recipe.md
     - OODA Procedural Memory: reference/ooda-procedural-memory.md
     - OODA Binary-Identity Reload Gate: reference/ooda-binary-identity-reload-gate.md
