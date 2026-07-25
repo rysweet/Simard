@@ -153,6 +153,17 @@ jobs:
             -- --skip install_packages_runs_and_self_installs \
             2>&1 | tee target/ci-logs/cargo-test.log
 
+      - name: Self-deploy canary regression target (issue #4622)
+        # Proves the EXACT target name + feature the self-deploy UnitTest canary
+        # gate invokes (`cargo test --test self_deploy_canary --features
+        # canary-tests`, see src/self_relaunch/gates.rs::build_unit_test_command)
+        # stays valid on every push/PR. A rename or typo in the curated
+        # hermetic canary suite fails CI HERE — before it can redden the live
+        # self-deploy canary and wedge running_commit. The suite is
+        # hermetic-by-construction (owns its HOME/tempdir, #[serial], no network),
+        # so it is fast and deterministic.
+        run: cargo test --test self_deploy_canary --features canary-tests
+
       - name: Run full clippy gate (--all-targets --all-features --locked)
         # Runs AFTER cargo test on purpose: test compiles the entire crate
         # graph (test profile) into target/debug/deps. Clippy on `--all-targets`

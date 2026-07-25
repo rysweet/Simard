@@ -226,13 +226,22 @@ chrono = "=0.4.44"
 # deliberately minimal binary with `--no-default-features`.
 default = ["signal", "dashboard-audit"]
 
-# THE ONE INTENTIONAL EXCEPTION to the "features are default" rule (issue #2576):
-# `slow-tests` is NOT a shippable product capability — it is a TEST-SELECTION gate
-# that turns on the slow, long-running `#[cfg(feature = "slow-tests")]` tests.
-# Defaulting it would force those slow tests into every `cargo test` / CI run and
-# blow up CI time for zero runtime benefit, so it stays opt-in. Enable explicitly
-# with `cargo test --features slow-tests` when you want the slow suite.
+# TWO INTENTIONAL EXCEPTIONS to the "features are default" rule (issue #2576):
+# `slow-tests` and `canary-tests` are NOT shippable product capabilities — they
+# are TEST-SELECTION gates. Defaulting either would force test-only scaffolding
+# into every `cargo test` / CI run for zero runtime benefit, so both stay opt-in.
+#
+# `slow-tests` turns on the slow, long-running `#[cfg(feature = "slow-tests")]`
+# tests. Enable with `cargo test --features slow-tests`.
 slow-tests = []
+
+# `canary-tests` (issue #4622) turns on the curated, hermetic-by-construction
+# self-deploy canary regression target (`tests/self_deploy_canary.rs`, selected
+# by a whole-target `#![cfg(feature = "canary-tests")]` inner attribute). The
+# self-deploy UnitTest canary enables it explicitly; stock `cargo test` and CI
+# unit runs leave it off so they never pull in the canary-only scaffolding.
+# Enable with `cargo test --test self_deploy_canary --features canary-tests`.
+canary-tests = []
 dashboard-audit = ["dep:headless_chrome", "dep:regex", "dep:url"]
 # Issue #2527: the Signal conversation channel (`src/signal_conversation/`).
 # Built by DEFAULT since issue #2576 (see `default` above) so the daemon ships
