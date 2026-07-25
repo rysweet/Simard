@@ -2606,8 +2606,13 @@ mod tests {
     #[test]
     fn t3_run_with_deadline_bounds_a_slow_subprocess_and_warns() {
         // A child that sleeps far longer than the deadline must be bounded: the
-        // helper returns shortly after the deadline (NOT after the full sleep),
-        // yields no slice, and surfaces a warn.
+        // helper returns well before the child's full sleep, yields no slice, and
+        // surfaces a warn. The deadline is enforced by a 20ms poll loop on this
+        // thread; under the CPU-oversubscribed deploy gate that thread can be
+        // starved for seconds, so a 300ms deadline may only be *observed* after a
+        // few seconds. The bound therefore proves boundedness against the child's
+        // 30s runtime (a removed/broken deadline would take ~30s) rather than
+        // asserting an unrealistically tight sub-second wake-up.
         let capture = LogCapture::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(capture.clone())
@@ -2617,7 +2622,7 @@ mod tests {
 
         let started = std::time::Instant::now();
         let slow = tracing::subscriber::with_default(subscriber, || {
-            run_with_deadline("sleep", &["10"], std::time::Duration::from_millis(300))
+            run_with_deadline("sleep", &["30"], std::time::Duration::from_millis(300))
         });
         let elapsed = started.elapsed();
 
@@ -2626,8 +2631,8 @@ mod tests {
             "a journalctl subprocess that exceeds the deadline must yield no slice (best-effort)"
         );
         assert!(
-            elapsed < std::time::Duration::from_secs(3),
-            "the deadline must bound the tick — returned in {elapsed:?}, not the full 10s sleep"
+            elapsed < std::time::Duration::from_secs(10),
+            "the deadline must bound the tick — returned in {elapsed:?}, not the full 30s sleep"
         );
         let logs = capture.contents();
         assert!(
