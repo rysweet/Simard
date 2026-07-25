@@ -36,7 +36,7 @@
 
 use std::error::Error;
 
-use crate::goal_curation::{GoalDecomposer, GoalProgress, labels, simard_state_root};
+use crate::goal_curation::{GoalDecomposer, GoalProgress, WipRef, labels, simard_state_root};
 use crate::memory_ipc::launch_writer_client;
 use crate::ooda_actions::advance_goal::spawn::is_brain_failure_marker;
 
@@ -79,6 +79,15 @@ Commands:
   label <goal-id> add <tag>   Add a free-form tag to a goal (idempotent).
   label <goal-id> remove <tag>  Remove a tag from a goal (no-op if absent).
   label <goal-id> list        Print a goal's tags, one per line ('(none)' if bare).
+  wip <goal-id> add <kind> <ref-id> [label...] [--url <url>]
+                              Bind a work-in-progress reference (a done-gate
+                              anchor) to a goal. <kind> is one of pr, issue,
+                              branch, session, engineer. Idempotent on
+                              (kind, ref-id): re-adding updates the label/url.
+                              Binding an `issue`/`pr` ref gives the completion
+                              gate a concrete artifact to observe CLOSED/MERGED.
+  wip <goal-id> remove <ref-id>  Remove every wip-ref with that ref-id (no-op if absent).
+  wip <goal-id> list          Print a goal's wip-refs, one per line ('(none)' if bare).
   help, -h, --help            Show this help message and exit.
 ";
 
@@ -159,6 +168,11 @@ pub(super) fn dispatch_goal_command(
             let goal_id = next_required(&mut args, "goal id")?;
             let sub = next_required(&mut args, "label subcommand (add|remove|list)")?;
             handle_label(&goal_id, &sub, args)
+        }
+        "wip" => {
+            let goal_id = next_required(&mut args, "goal id")?;
+            let sub = next_required(&mut args, "wip subcommand (add|remove|list)")?;
+            handle_wip(&goal_id, &sub, args)
         }
         other => Err(format!("unsupported command 'goal {other}'").into()),
     }
@@ -442,6 +456,179 @@ fn handle_label_list(goal_id: &str) -> Result<(), Box<dyn Error>> {
         println!("{line}");
     }
     Ok(())
+}
+
+/// The work-reference kinds the completion gate and Overseer understand.
+/// Mirrors the doc comment on [`crate::goal_curation::WipRef::kind`].
+const WIP_KINDS: [&str; 5] = ["pr", "issue", "branch", "session", "engineer"];
+
+/// `simard goal wip <goal-id> <add|remove|list> …` — manage a goal's
+/// work-in-progress references (its done-gate anchors). Mirrors `handle_label`.
+fn handle_wip(
+    goal_id: &str,
+    sub: &str,
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn Error>> {
+    match sub {
+        "add" => {
+            let kind = next_required(&mut args, "wip kind (pr|issue|branch|session|engineer)")?;
+            let ref_id = next_required(&mut args, "ref-id")?;
+            let rest: Vec<String> = args.collect();
+            handle_wip_add(goal_id, &kind, &ref_id, rest)
+        }
+        "remove" => {
+            let ref_id = next_required(&mut args, "ref-id")?;
+            reject_extra_args(args)?;
+            handle_wip_remove(goal_id, &ref_id)
+        }
+        "list" => {
+            reject_extra_args(args)?;
+            handle_wip_list(goal_id)
+        }
+        other => Err(
+            format!("unsupported wip subcommand '{other}' (expected: add, remove, list)").into(),
+        ),
+    }
+}
+
+/// Split trailing `wip add` tokens into an optional `--url <url>` and the
+/// remaining free-text label. Rejects a dangling `--url` with no value.
+fn extract_wip_flags(tokens: Vec<String>) -> Result<(Option<String>, String), Box<dyn Error>> {
+    let mut url: Option<String> = None;
+    let mut label_tokens: Vec<String> = Vec::new();
+    let mut it = tokens.into_iter();
+    while let Some(tok) = it.next() {
+        if tok == "--url" {
+            let val = it
+                .next()
+                .ok_or_else(|| -> Box<dyn Error> { "--url requires a value".into() })?;
+            url = Some(val);
+        } else {
+            label_tokens.push(tok);
+        }
+    }
+    Ok((url, label_tokens.join(" ")))
+}
+
+fn handle_wip_add(
+    goal_id: &str,
+    kind: &str,
+    ref_id: &str,
+    rest: Vec<String>,
+) -> Result<(), Box<dyn Error>> {
+    let kind = kind.trim().to_ascii_lowercase();
+    if !WIP_KINDS.contains(&kind.as_str()) {
+        return Err(format!(
+            "invalid wip kind '{kind}' (expected one of: {})",
+            WIP_KINDS.join(", ")
+        )
+        .into());
+    }
+    let ref_id = ref_id.trim();
+    if ref_id.is_empty() {
+        return Err("ref-id must not be empty".into());
+    }
+    let (url, label_raw) = extract_wip_flags(rest)?;
+    let label = if label_raw.trim().is_empty() {
+        format!("{kind} {ref_id}")
+    } else {
+        label_raw.trim().to_string()
+    };
+    let wip = WipRef {
+        kind: kind.clone(),
+        ref_id: ref_id.to_string(),
+        label,
+        url,
+    };
+    let replaced = with_board(|board| {
+        let goal = board
+            .active
+            .iter_mut()
+            .find(|g| g.id == goal_id)
+            .ok_or_else(|| -> Box<dyn Error> {
+                format!("goal '{goal_id}' not found on active board").into()
+            })?;
+        // Idempotent on (kind, ref_id): update in place, else append.
+        if let Some(existing) = goal
+            .wip_refs
+            .iter_mut()
+            .find(|w| w.kind == wip.kind && w.ref_id == wip.ref_id)
+        {
+            *existing = wip.clone();
+            Ok(true)
+        } else {
+            goal.wip_refs.push(wip.clone());
+            Ok(false)
+        }
+    })?;
+    if replaced {
+        eprintln!(
+            "[simard] goal wip: updated {kind} ref '{ref_id}' on '{goal_id}'",
+            kind = wip.kind,
+            ref_id = wip.ref_id
+        );
+    } else {
+        eprintln!(
+            "[simard] goal wip: bound {kind} ref '{ref_id}' to '{goal_id}'",
+            kind = wip.kind,
+            ref_id = wip.ref_id
+        );
+    }
+    Ok(())
+}
+
+fn handle_wip_remove(goal_id: &str, ref_id: &str) -> Result<(), Box<dyn Error>> {
+    let ref_id = ref_id.trim();
+    if ref_id.is_empty() {
+        return Err("ref-id must not be empty".into());
+    }
+    let removed = with_board(|board| {
+        let goal = board
+            .active
+            .iter_mut()
+            .find(|g| g.id == goal_id)
+            .ok_or_else(|| -> Box<dyn Error> {
+                format!("goal '{goal_id}' not found on active board").into()
+            })?;
+        let before = goal.wip_refs.len();
+        goal.wip_refs.retain(|w| w.ref_id != ref_id);
+        Ok(before - goal.wip_refs.len())
+    })?;
+    if removed > 0 {
+        eprintln!("[simard] goal wip: removed {removed} ref(s) '{ref_id}' from '{goal_id}'");
+    } else {
+        eprintln!("[simard] goal wip: '{goal_id}' has no ref '{ref_id}' (no-op)");
+    }
+    Ok(())
+}
+
+fn handle_wip_list(goal_id: &str) -> Result<(), Box<dyn Error>> {
+    let board = load_board()?;
+    let goal = board
+        .active
+        .iter()
+        .find(|g| g.id == goal_id)
+        .ok_or_else(|| -> Box<dyn Error> {
+            format!("goal '{goal_id}' not found on active board").into()
+        })?;
+    for line in format_wip_list(&goal.wip_refs) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// Render a goal's wip-refs one per line, or a single `(none)` when bare.
+fn format_wip_list(wip_refs: &[WipRef]) -> Vec<String> {
+    if wip_refs.is_empty() {
+        return vec!["(none)".to_string()];
+    }
+    wip_refs
+        .iter()
+        .map(|w| match &w.url {
+            Some(url) => format!("{} {} — {} ({})", w.kind, w.ref_id, w.label, url),
+            None => format!("{} {} — {}", w.kind, w.ref_id, w.label),
+        })
+        .collect()
 }
 
 fn handle_unblock(goal_id: &str) -> Result<(), Box<dyn Error>> {
@@ -1075,6 +1262,51 @@ mod tests {
             format_label_list(&["a".to_string(), "b".to_string()]),
             vec!["a".to_string(), "b".to_string()],
         );
+    }
+
+    #[test]
+    fn format_wip_list_renders_refs_or_none() {
+        assert_eq!(format_wip_list(&[]), vec!["(none)".to_string()]);
+        let refs = vec![
+            WipRef {
+                kind: "issue".to_string(),
+                ref_id: "4616".to_string(),
+                label: "acceptance anchor".to_string(),
+                url: Some("https://example/issues/4616".to_string()),
+            },
+            WipRef {
+                kind: "pr".to_string(),
+                ref_id: "42".to_string(),
+                label: "audit-complete".to_string(),
+                url: None,
+            },
+        ];
+        assert_eq!(
+            format_wip_list(&refs),
+            vec![
+                "issue 4616 — acceptance anchor (https://example/issues/4616)".to_string(),
+                "pr 42 — audit-complete".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn extract_wip_flags_splits_url_from_label() {
+        let (url, label) = extract_wip_flags(vec![
+            "acceptance".to_string(),
+            "anchor".to_string(),
+            "--url".to_string(),
+            "https://x/4616".to_string(),
+        ])
+        .expect("parses");
+        assert_eq!(url.as_deref(), Some("https://x/4616"));
+        assert_eq!(label, "acceptance anchor");
+    }
+
+    #[test]
+    fn extract_wip_flags_rejects_dangling_url() {
+        let err = extract_wip_flags(vec!["--url".to_string()]);
+        assert!(err.is_err(), "a --url with no value must be rejected");
     }
 
     // ---- is_id_placeholder ------------------------------------------------
