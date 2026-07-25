@@ -348,15 +348,26 @@ impl LiveGoalSessionEffects<'_, '_> {
                 // otherwise clear the stale assignment + map entry and fall
                 // through to a clean re-provision instead of failing
                 // permanently with a missing-workspace fault.
-                let present = guard
+                // Derive the evidence session_id from the worktree checkout
+                // basename so both reuse branches (assigned short-circuit here
+                // and disk discovery below) report the engineer with the same
+                // identifier shape and `existing-engineer` fallback.
+                let existing_session_id = guard
                     .engineer_worktrees
                     .get(goal_id)
-                    .map(|worktree| worktree.is_present())
-                    .unwrap_or(false);
-                if present {
+                    .filter(|worktree| worktree.is_present())
+                    .map(|worktree| {
+                        worktree
+                            .path()
+                            .file_name()
+                            .and_then(|value| value.to_str())
+                            .unwrap_or("existing-engineer")
+                            .to_string()
+                    });
+                if let Some(session_id) = existing_session_id {
                     return Ok(EffectResult::Succeeded {
                         evidence: vec![EvidenceRef::EngineerRun {
-                            session_id: format!("engineer-{goal_id}"),
+                            session_id,
                             claim_key: spawn.claim_key.clone(),
                         }],
                     });
