@@ -31,7 +31,7 @@ related:
 > ([`src/self_deploy/source_prep.rs`](https://github.com/rysweet/Simard/blob/main/src/self_deploy/source_prep.rs))
 > ship the root-cause repair for the self-deploy red-canary convergence stall
 > (#4440). The change is **additive and non-breaking**: `verify_canary`,
-> `all_gates_passed`, `default_gates`, and the four-gate no-short-circuit
+> `all_gates_passed`, `default_gates`, and the no-short-circuit
 > sequence keep their signatures and semantics; `RelaunchConfig` gains one
 > field that defaults to the pre-existing behavior.
 
@@ -187,7 +187,7 @@ below); confirm it against a real gate run before narrowing it.
 
 > **The base set is load-bearing.** `env_clear()` on the `unit-test` gate is only
 > safe if the Cargo/rustup toolchain variables are re-injected; the exact base
-> list is whatever the four gates empirically require in the canary context.
+> list is whatever the gates empirically require in the canary context.
 > Confirm it against a real gate run before shipping — an over-narrow base set
 > converts a healthy candidate into a false red (a self-inflicted stall), while
 > an over-broad one erodes the deny-by-default guarantee.
@@ -229,9 +229,12 @@ for &gate in gates {
 }
 ```
 
-The sequence is unchanged: `Smoke → UnitTest → GymBaseline → RpcHealth`, run to
+The no-short-circuit behavior is unchanged: the default gate sequence runs to
 completion **without short-circuit**, so every gate's verdict is observable on a
-single canary run even when an earlier gate has already reddened. Before this
+single canary run even when an earlier gate has already reddened. (As of the
+self-deploy-freeze fix the default sequence is `Smoke → GymBaseline →
+RpcHealth`; the `unit-test` gate is retained as a non-default variant — see
+[self-deploy default gates](./self-deploy-default-gates.md).) Before this
 change, gate details were only partially bounded and never redacted: the
 `unit-test` gate truncated its `cargo` stderr to 200 bytes via a local
 `truncate_output` helper, while the `smoke`, `gym-baseline`, and `rpc-health`
@@ -312,7 +315,7 @@ No loop, requeue, or drift logic changed.
 This repair is bounded by the same rails as the diagnostics feature; none is
 relaxed:
 
-- **Canary is the authorization boundary.** The four gates still gate promotion
+- **Canary is the authorization boundary.** The default gates still gate promotion
   and still fail closed. An unhealthy candidate reddens exactly as before.
 - **No short-circuit.** All gates run to completion so every verdict is
   observable; `all_gates_passed` still requires every gate to pass.

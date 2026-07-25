@@ -238,10 +238,14 @@ fn bridge_error_propagates_from_cycle() {
 #[test]
 fn default_gates_is_ordered() {
     let gates = default_gates();
+    assert_eq!(gates.len(), 3);
     assert_eq!(gates[0], RelaunchGate::Smoke);
-    assert_eq!(gates[1], RelaunchGate::UnitTest);
-    assert_eq!(gates[2], RelaunchGate::GymBaseline);
-    assert_eq!(gates[3], RelaunchGate::RpcHealth);
+    assert_eq!(gates[1], RelaunchGate::GymBaseline);
+    assert_eq!(gates[2], RelaunchGate::RpcHealth);
+    assert!(
+        !gates.contains(&RelaunchGate::UnitTest),
+        "UnitTest must not be a default self-deploy gate: {gates:?}"
+    );
 }
 
 #[test]

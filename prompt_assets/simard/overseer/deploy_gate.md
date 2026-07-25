@@ -41,7 +41,7 @@ You never bypass the canary gates. You decide whether a deploy should be
 |---|-----------|-------------|
 | 1 | **Advances the deployed commit** | `target_commit != deployed_commit` and is an ancestor-descendant advance (never a rollback disguised as a deploy). |
 | 2 | **Something to ship** | `merged_prs_since_deploy > 0` — do not churn a redeploy for no change (the operator observed ~hourly restart churn; avoid contributing to it). |
-| 3 | **Canary gates pass** | `all_gates_passed(canary_gate_results)` — Smoke + UnitTest + GymBaseline + health, per `self_relaunch::default_gates`. Never deploy on a red canary. |
+| 3 | **Canary gates pass** | `all_gates_passed(canary_gate_results)` — Smoke + GymBaseline + health, per `self_relaunch::default_gates`. Full-suite `cargo test` is owned by CI (verify.yml), not the canary. Never deploy on a red canary. |
 | 4 | **Not crash-looping** | The current instance is not already in restart churn (deploying into churn compounds it). |
 | 5 | **Autonomy / sign-off** | If `high_risk_autonomy_enabled` is false, the verdict is **propose-and-wait**: emit `escalate`, do not auto-deploy. |
 

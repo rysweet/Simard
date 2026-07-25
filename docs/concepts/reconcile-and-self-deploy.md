@@ -150,9 +150,11 @@ flowchart TD
    directory; see the
    [self-deploy source-prep reference](../reference/self-deploy-source-prep.md)
    and [how to run self-deploy from any directory](../howto/run-self-deploy-from-any-directory.md).
-2. **Gate the candidate.** The existing relaunch gates run in order — Smoke →
-   UnitTest → GymBaseline → RpcHealth — followed by the candidate's own
-   `simard self-test`. Any failure aborts.
+2. **Gate the candidate.** The default relaunch gates run in order — Smoke →
+   GymBaseline → RpcHealth — followed by the candidate's own
+   `simard self-test`. Any failure aborts. (The full-suite `UnitTest` gate is
+   owned by CI, not the self-deploy canary; see the
+   [self-deploy default gates reference](../reference/self-deploy-default-gates.md).)
 3. **Dual protective backup** (taken only *after* build + gates pass, immediately
    before any daemon mutation):
    - a **live cognitive-memory backup** of the running store, via

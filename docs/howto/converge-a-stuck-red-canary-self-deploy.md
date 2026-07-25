@@ -127,7 +127,7 @@ back to step 2 and read the new `failing_gate` / `refusal`.
   ([self-healing classifier](../reference/overseer-tick-self-healing.md)) — even
   if the enriched detail contains `timeout` or `503`. Do not try to make it
   retry away; a real red must latch.
-- The four gates still run to completion without short-circuit, and promotion
+- The default gates still run to completion without short-circuit, and promotion
   still verifies the exact artifact it ships. Never add a "skip gate" control.
 
 ## Verify end-to-end
