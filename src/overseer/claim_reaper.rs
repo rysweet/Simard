@@ -52,6 +52,16 @@ pub enum DeadReason {
     NoWorktree,
     /// A worktree exists; `age_secs` is its newest-file idle age.
     HeartbeatStale,
+    /// A worktree exists AND the engineer occupying it wrote a terminal
+    /// `status=completed` session record: a POSITIVE completion signal, NOT a
+    /// wedge. `age_secs` is its newest-file idle age (the same staleness
+    /// THRESHOLD is applied, so a completion whose claim-release / cleanup is
+    /// still in flight is never raced). Distinguishing this from
+    /// [`DeadReason::HeartbeatStale`] is what stops a cleanly-finished engineer
+    /// from being re-investigated every tick — the `completed`-vs-`wedged`
+    /// conflation behind the unbounded re-archival churn (#4467 / #4500) and the
+    /// leaked-claim churn of #4464.
+    Completed,
 }
 
 impl DeadReason {
@@ -60,6 +70,7 @@ impl DeadReason {
         match self {
             DeadReason::NoWorktree => "no-worktree",
             DeadReason::HeartbeatStale => "heartbeat-stale",
+            DeadReason::Completed => "session-completed",
         }
     }
 }
@@ -321,6 +332,21 @@ pub fn reap_stale_claims(
                     continue;
                 }
             },
+            ClaimLiveness::Dead {
+                reason: DeadReason::Completed,
+                age_secs,
+            } => match age_secs {
+                // Same idle THRESHOLD guard as HeartbeatStale: a JUST-completed
+                // worktree whose completion→claim-release / cleanup is still in
+                // flight (age <= threshold) is protected. Older than the
+                // threshold ⇒ a residual completed worktree whose claim leaked;
+                // reclaim it directly (below) instead of re-investigating it.
+                Some(age) if age > stale_secs => (DeadReason::Completed, Some(age)),
+                _ => {
+                    summary.skipped += 1;
+                    continue;
+                }
+            },
         };
 
         // INVESTIGATE-BEFORE-REAP (issue #4400). A `HeartbeatStale` engineer has a
@@ -331,6 +357,27 @@ pub fn reap_stale_claims(
         // reclaimed directly (verdict is `None`, i.e. an unconditional reap).
         let verdict = match reason {
             DeadReason::NoWorktree => None,
+            DeadReason::Completed => {
+                // POSITIVE terminal signal: the engineer's OWN session wrote
+                // `status=completed`. Its durable output is already committed /
+                // pushed, so there is NOTHING to preserve via an agentic
+                // investigation — and re-investigating a naturally-idle
+                // completed worktree every tick IS the unbounded re-archival
+                // churn (#4467) rooted in idle-age conflating *completed* with
+                // *wedged* (#4500), compounded by the leaked-claim-on-completion
+                // path (#4464). Reclaim directly: release the leaked claim and
+                // remove the residual worktree, exactly once. No investigation,
+                // so the churn loop terminates.
+                tracing::info!(
+                    target: "simard::claim_reaper",
+                    claim_key = %claim_key,
+                    "[simard] claim-reaper: {claim_key} engineer session COMPLETED \
+                     (status=completed); reclaiming residual worktree directly \
+                     without agentic investigation (terminates completed-vs-wedged \
+                     re-archival churn)",
+                );
+                None
+            }
             DeadReason::HeartbeatStale => {
                 let idle_age = age_secs.unwrap_or(0);
                 let outcome = investigator.investigate(&claim_key, idle_age);
@@ -429,6 +476,44 @@ fn goal_id_from_claim_key(claim_key: &str) -> &str {
         .rsplit_once(':')
         .map(|(_, goal)| goal)
         .unwrap_or(claim_key)
+}
+
+/// Whether the engineer occupying `worktree` reached a CLEAN terminal state.
+///
+/// Reads the agent runtime's `.claude/runtime/sessions.jsonl` (one JSON object
+/// per line; the engineer appends a terminal `{"status":"completed", ...}`
+/// record when its session ends normally). Returns `true` iff the LAST record
+/// carrying a `status` field is `"completed"` — so a worktree that a NEW session
+/// has since re-entered (last status back to `"active"`) is correctly NOT
+/// treated as completed and stays on the ordinary idle path.
+///
+/// Fail-closed to `false` (treat as an ordinary — possibly wedged — worktree,
+/// NEVER as completed) on a missing file, any read/parse error, or no status
+/// record at all: a `completed` verdict must be POSITIVELY proven from the
+/// engineer's own record, never assumed. Being wrong in the `false` direction
+/// only keeps the (safe, evidence-preserving) investigate-before-reap path.
+fn engineer_session_completed(worktree: &std::path::Path) -> bool {
+    let sessions = worktree
+        .join(".claude")
+        .join("runtime")
+        .join("sessions.jsonl");
+    let Ok(content) = std::fs::read_to_string(&sessions) else {
+        return false;
+    };
+    let mut last_status: Option<String> = None;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(status) = value.get("status").and_then(|s| s.as_str()) {
+            last_status = Some(status.to_string());
+        }
+    }
+    last_status.as_deref() == Some("completed")
 }
 
 /// Newest-file idle age (seconds) under `worktree`, or `None` if not even the
@@ -541,10 +626,22 @@ impl ClaimLivenessProbe for WorktreeClaimLivenessProbe {
         // the dir metadata can be read, fail-closed to `Live` (never reap on an
         // unknown age).
         match newest_file_age_secs(&worktree) {
-            Some(age_secs) => ClaimLiveness::Dead {
-                reason: DeadReason::HeartbeatStale,
-                age_secs: Some(age_secs),
-            },
+            Some(age_secs) => {
+                // Distinguish a cleanly-COMPLETED engineer from a WEDGED one
+                // (#4500): a completed worktree naturally stops writing files, so
+                // newest-file mtime ALONE would mislabel it `HeartbeatStale` and
+                // drive a perpetual investigate-before-reap loop (#4467). Read the
+                // engineer's OWN terminal session record to tell them apart.
+                let reason = if engineer_session_completed(&worktree) {
+                    DeadReason::Completed
+                } else {
+                    DeadReason::HeartbeatStale
+                };
+                ClaimLiveness::Dead {
+                    reason,
+                    age_secs: Some(age_secs),
+                }
+            }
             None => ClaimLiveness::Live,
         }
     }
@@ -1578,7 +1675,61 @@ mod tests {
         assert_eq!(ledger.list_engineer_claims(), vec![key.to_string()]);
     }
 
-    // ----- T4: reclaim goes through the shared release path -------------------
+    // ----- T3c: COMPLETED worktree ⇒ reclaimed WITHOUT an agentic investigation
+    // (terminates the completed-vs-wedged re-archival churn: #4467 / #4500 / #4464)
+
+    #[test]
+    fn t3c_completed_worktree_is_reclaimed_without_investigation() {
+        let key = "rysweet/Simard:advance-rysweet-agent-kgpacks-rs-to-full-parity-f29bb15c";
+        let ledger = FakeLedger::new(&[key]);
+        // Idle 20520s (> 1800 threshold) AND the engineer's session COMPLETED —
+        // the exact archived-evidence shape behind the 54× re-archival churn.
+        let probe = MapProbe::new(&[(key, dead(DeadReason::Completed, Some(20_520)))]);
+        let cleanup = FakeCleanup::new();
+        // A spying investigator that records every `investigate` call. A COMPLETED
+        // engineer must be reclaimed DIRECTLY: investigating it every tick IS the
+        // unbounded re-archival churn this fix eliminates.
+        let investigator = FakeInvestigator::dead_unknown();
+
+        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+
+        // Reclaimed exactly once, through the shared release chokepoint + cleanup.
+        assert_eq!(summary.reclaimed, vec![key.to_string()]);
+        assert_eq!(*ledger.released.borrow(), vec![key.to_string()]);
+        assert!(ledger.list_engineer_claims().is_empty());
+        assert_eq!(cleanup.cleaned(), vec![key.to_string()]);
+        // The churn-breaker invariant: NO agentic investigation was launched for
+        // a positively-completed engineer (nothing to preserve; work is pushed).
+        assert!(
+            investigator.investigated().is_empty(),
+            "a COMPLETED engineer must be reclaimed directly, never investigated \
+             (re-investigating it is the unbounded re-archival churn #4467/#4500)"
+        );
+    }
+
+    // ----- T3d: a just-COMPLETED worktree still under the idle threshold is
+    // protected (completion→claim-release / cleanup may still be in flight).
+
+    #[test]
+    fn t3d_fresh_completed_worktree_is_not_reclaimed() {
+        let key = "rysweet/Simard:just-finished";
+        let ledger = FakeLedger::new(&[key]);
+        // Completed, but idle only 1s ⇒ under threshold ⇒ protected.
+        let probe = MapProbe::new(&[(key, dead(DeadReason::Completed, Some(1)))]);
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown();
+
+        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+
+        assert!(
+            summary.reclaimed.is_empty(),
+            "a completed worktree under the idle threshold must be protected \
+             (its claim-release / cleanup may still be in flight)"
+        );
+        assert_eq!(ledger.list_engineer_claims(), vec![key.to_string()]);
+        assert!(cleanup.cleaned().is_empty());
+        assert!(investigator.investigated().is_empty());
+    }
 
     #[test]
     fn t4_reclaim_uses_release_chokepoint_and_cleans_worktree() {
@@ -1777,6 +1928,7 @@ mod tests {
     fn dead_reason_labels_are_stable() {
         assert_eq!(DeadReason::NoWorktree.label(), "no-worktree");
         assert_eq!(DeadReason::HeartbeatStale.label(), "heartbeat-stale");
+        assert_eq!(DeadReason::Completed.label(), "session-completed");
     }
 
     // ----- Production probe: filesystem seam (NoWorktree / fresh / failclosed)-
@@ -1823,10 +1975,103 @@ mod tests {
         }
     }
 
-    /// FAIL-CLOSED: an unreadable / absent worktrees ROOT must NOT be mistaken
-    /// for `NoWorktree`. When the root cannot be enumerated the verdict is
-    /// [`ClaimLiveness::Live`] so a transient IO error never mass-reaps live
-    /// claims.
+    /// A worktree whose engineer wrote a terminal `status=completed` record in
+    /// `.claude/runtime/sessions.jsonl` ⇒ `Dead { Completed }`, NOT
+    /// `HeartbeatStale` — this is the completed-vs-wedged distinction (#4500)
+    /// that stops the perpetual re-archival churn (#4467).
+    #[test]
+    fn probe_reports_completed_when_session_terminal_status_completed() {
+        let state_root = tempfile::tempdir().expect("tempdir");
+        let goal = "advance-rysweet-agent-kgpacks-rs-to-full-parity-f29bb15c";
+        let wt = state_root
+            .path()
+            .join("engineer-worktrees")
+            .join(format!("{goal}-1784990963-3c6c56"));
+        let runtime = wt.join(".claude").join("runtime");
+        std::fs::create_dir_all(&runtime).expect("create runtime dir");
+        // The exact two-line shape observed in the archived evidence: an initial
+        // `active` record, then a terminal `completed` record.
+        std::fs::write(
+            runtime.join("sessions.jsonl"),
+            b"{\"session_id\":\"s1\",\"status\":\"active\",\"end_time\":null}\n\
+              {\"session_id\":\"s1\",\"status\":\"completed\",\"end_time\":1784995274.7}\n",
+        )
+        .expect("write sessions.jsonl");
+
+        let probe = WorktreeClaimLivenessProbe::new(state_root.path());
+        let verdict = probe.assess(&format!("rysweet/Simard:{goal}"));
+
+        match verdict {
+            ClaimLiveness::Dead {
+                reason: DeadReason::Completed,
+                age_secs: Some(_),
+            } => {}
+            other => panic!("expected Dead {{ Completed }}, got {other:?}"),
+        }
+    }
+
+    /// A worktree a NEW session has re-entered (last `status` back to `active`)
+    /// is NOT completed — it stays on the ordinary `HeartbeatStale` path so a
+    /// genuinely-live engineer is never short-circuit-reclaimed.
+    #[test]
+    fn probe_not_completed_when_last_status_is_active() {
+        let state_root = tempfile::tempdir().expect("tempdir");
+        let goal = "re-entered-goal";
+        let wt = state_root
+            .path()
+            .join("engineer-worktrees")
+            .join(format!("{goal}-1784990963-aa11bb"));
+        let runtime = wt.join(".claude").join("runtime");
+        std::fs::create_dir_all(&runtime).expect("create runtime dir");
+        std::fs::write(
+            runtime.join("sessions.jsonl"),
+            b"{\"session_id\":\"s1\",\"status\":\"completed\",\"end_time\":1.0}\n\
+              {\"session_id\":\"s2\",\"status\":\"active\",\"end_time\":null}\n",
+        )
+        .expect("write sessions.jsonl");
+
+        let probe = WorktreeClaimLivenessProbe::new(state_root.path());
+        let verdict = probe.assess(&format!("rysweet/Simard:{goal}"));
+
+        assert!(
+            matches!(
+                verdict,
+                ClaimLiveness::Dead {
+                    reason: DeadReason::HeartbeatStale,
+                    ..
+                }
+            ),
+            "a re-entered (last status=active) worktree must NOT be Completed, got {verdict:?}"
+        );
+    }
+
+    /// Fail-closed: no `sessions.jsonl` at all ⇒ NOT completed (ordinary
+    /// `HeartbeatStale` path). A completed verdict must be positively proven.
+    #[test]
+    fn probe_not_completed_when_no_sessions_file() {
+        let state_root = tempfile::tempdir().expect("tempdir");
+        let goal = "no-runtime-goal";
+        let wt = state_root
+            .path()
+            .join("engineer-worktrees")
+            .join(format!("{goal}-1784990963-cc22dd"));
+        std::fs::create_dir_all(&wt).expect("create worktree dir");
+        std::fs::write(wt.join("work.txt"), b"x").expect("write file");
+
+        let probe = WorktreeClaimLivenessProbe::new(state_root.path());
+        let verdict = probe.assess(&format!("rysweet/Simard:{goal}"));
+
+        assert!(
+            matches!(
+                verdict,
+                ClaimLiveness::Dead {
+                    reason: DeadReason::HeartbeatStale,
+                    ..
+                }
+            ),
+            "absent sessions.jsonl must fail-closed to HeartbeatStale, got {verdict:?}"
+        );
+    }
     #[test]
     fn probe_is_fail_closed_when_worktrees_root_unreadable() {
         // state_root points at a path with NO engineer-worktrees dir at all;
