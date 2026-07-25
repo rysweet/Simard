@@ -976,13 +976,177 @@ fn has_python_json_literal(bytes: &[u8]) -> bool {
     false
 }
 
+/// The `Infinity` token, factored out so the `-Infinity` sign handling and the
+/// positive-infinity match share one spelling and one length.
+const INFINITY: &[u8] = b"Infinity";
+
+/// Is the maximal identifier run beginning at `start` **exactly** the word
+/// `Infinity` (nothing more)?
+///
+/// Used so a `-` sitting immediately before it is consumed as the sign of the
+/// `-Infinity` special rather than left behind as a stray number sign. A longer
+/// run such as `Infinityx` is not a match, so the `-` is treated as an ordinary
+/// sign and the run is copied through verbatim.
+fn ident_run_is_infinity(bytes: &[u8], start: usize) -> bool {
+    let mut end = start;
+    while end < bytes.len() && is_json_ident_byte(bytes[end]) {
+        end += 1;
+    }
+    &bytes[start..end] == INFINITY
+}
+
+/// Rewrite a **non-finite numeric literal** (`NaN`, `Infinity`, `-Infinity`)
+/// that appears OUTSIDE a JSON string literal into the JSON `null` token.
+///
+/// After the trailing comma, the unescaped control char, the invalid backslash
+/// escape, the JavaScript comment, and the Python/JS bare boolean/null literal,
+/// a non-finite number is the next real-world LLM JSON defect: Python's
+/// `json.dumps` emits bare `NaN`, `Infinity`, and `-Infinity` **by default**
+/// (`allow_nan=True`) for IEEE float specials, and a model pretty-printing a
+/// Python computation — an overflowed score, a `0/0` confidence, a diagnostic
+/// metric it appended — routinely reproduces them. The JSON grammar has no
+/// non-finite number production, so `serde_json` rejects the bare token
+/// (`expected value`) and the model's WHOLE structured decision is dropped on
+/// the one stray token — a parse-failure default, not a real model decision.
+/// This is a reasoner-reliability axis of the standing cognition-improvement
+/// goal.
+///
+/// `null` is the **canonical JSON rendering** of these IEEE specials: ECMAScript
+/// `JSON.stringify` serialises `NaN`, `Infinity`, and `-Infinity` to `null`, and
+/// `serde_json` itself refuses to *serialise* a non-finite `f64` to any JSON
+/// number, so `null` is the only valid JSON a non-finite value can become.
+/// Substituting it lets the rest of the decision parse — the non-finite field
+/// (commonly an ignored diagnostic field or an optional metric) then reads as a
+/// missing/null value through the same downstream default path — instead of
+/// discarding the entire structured decision. Leniency does not widen to any
+/// other shape: a non-finite value landing in a *required, non-optional* numeric
+/// field still fails the strict re-parse and returns `None`, exactly as before.
+///
+/// Like the other recovery views this is a **provable no-op on valid JSON**:
+/// outside a string literal, valid JSON never contains a bare `NaN`/`Infinity`
+/// token, and a `-` is only ever a number sign followed by a digit — never by
+/// `Infinity` — so [`has_json_number_special`] returns `false` and the input
+/// borrows back byte-for-byte unchanged (the zero-allocation clean path).
+///
+/// String-literal aware in exactly the same way as the rest of this module: the
+/// scan tracks `in_string` (respecting `\"` escapes), so a `NaN`/`Infinity`
+/// substring INSIDE a string value (a rationale mentioning "Infinity") is
+/// content and is preserved untouched. Only a token OUTSIDE a string is
+/// rewritten, and only when the maximal identifier run (`[A-Za-z0-9_]+`) equals
+/// `NaN` or `Infinity` **exactly** — a longer word such as `NaNValue` or
+/// `Infinityx` is left verbatim for the strict parse to reject. A leading `-` is
+/// consumed together with `Infinity` (so `-Infinity` collapses to a single
+/// `null`) but is otherwise emitted verbatim as an ordinary number sign. Only
+/// ASCII replacement bytes are emitted, so the result is always valid UTF-8 and
+/// every multibyte body byte is copied through unchanged.
+pub fn normalize_json_number_specials(s: &str) -> Cow<'_, str> {
+    let bytes = s.as_bytes();
+    // Cheap detection pass first so clean JSON borrows unchanged (zero-alloc).
+    if !has_json_number_special(bytes) {
+        return Cow::Borrowed(s);
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+            i += 1;
+        } else if c == b'"' {
+            in_string = true;
+            out.push(c);
+            i += 1;
+        } else if c == b'-' && ident_run_is_infinity(bytes, i + 1) {
+            // A `-` immediately followed by the whole word `Infinity` is the
+            // negative-infinity special; collapse the pair to a single null.
+            out.extend_from_slice(b"null");
+            i += 1 + INFINITY.len();
+        } else if is_json_ident_byte(c) {
+            // Consume the maximal identifier run and rewrite it only when it is
+            // exactly a non-finite literal; otherwise copy it through verbatim.
+            let start = i;
+            while i < bytes.len() && is_json_ident_byte(bytes[i]) {
+                i += 1;
+            }
+            match &bytes[start..i] {
+                b"NaN" | b"Infinity" => out.extend_from_slice(b"null"),
+                run => out.extend_from_slice(run),
+            }
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    match String::from_utf8(out) {
+        Ok(normalized) => Cow::Owned(normalized),
+        // Unreachable in practice (only ASCII replacement bytes are substituted
+        // and every original byte is otherwise preserved), but never panic on
+        // recovery input — fall back to the original text.
+        Err(_) => Cow::Borrowed(s),
+    }
+}
+
+/// Does `bytes` contain at least one bare `NaN`/`Infinity`/`-Infinity` non-finite
+/// literal OUTSIDE a JSON string literal?
+///
+/// Mirrors the string-aware scan in [`normalize_json_number_specials`] but only
+/// detects, so the common clean case can borrow the input without allocating. A
+/// `NaN`/`Infinity` substring INSIDE a string (content) does not count, a longer
+/// identifier run such as `NaNValue` does not count, and a `-` not immediately
+/// followed by the whole word `Infinity` (an ordinary negative number) does not
+/// count.
+fn has_json_number_special(bytes: &[u8]) -> bool {
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+            i += 1;
+        } else if c == b'"' {
+            in_string = true;
+            i += 1;
+        } else if c == b'-' && ident_run_is_infinity(bytes, i + 1) {
+            return true;
+        } else if is_json_ident_byte(c) {
+            let start = i;
+            while i < bytes.len() && is_json_ident_byte(bytes[i]) {
+                i += 1;
+            }
+            if matches!(&bytes[start..i], b"NaN" | b"Infinity") {
+                return true;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
 /// Compose every JSON **recovery view** this module applies to an
 /// otherwise-well-formed LLM JSON payload that failed a strict parse — currently
 /// JavaScript-comment stripping ([`strip_json_comments`]), then
 /// invalid-backslash-escape doubling ([`escape_json_string_invalid_escapes`]),
 /// then unescaped-control-character escaping ([`escape_json_string_control_chars`]),
 /// then trailing-comma stripping ([`strip_json_trailing_commas`]), then
-/// Python/JS-literal normalisation ([`normalize_python_json_literals`]).
+/// Python/JS-literal normalisation ([`normalize_python_json_literals`]), then
+/// non-finite-number normalisation ([`normalize_json_number_specials`]).
 ///
 /// Returns [`Cow::Borrowed`] byte-for-byte unchanged when NONE of the defects is
 /// present (each sub-view is a provable no-op on valid JSON), and
@@ -992,9 +1156,10 @@ fn has_python_json_literal(bytes: &[u8]) -> bool {
 /// reason (unquoted key, elided element, missing value) preserves the strict
 /// miss unchanged.
 ///
-/// The five recoveries are independent — the two string-value recoveries touch
+/// The six recoveries are independent — the two string-value recoveries touch
 /// only bytes inside string literals, while comment-stripping, trailing-comma
-/// stripping, and Python-literal normalisation only touch bytes outside them.
+/// stripping, Python-literal normalisation, and non-finite-number normalisation
+/// only touch bytes outside them.
 /// Comment-stripping runs **first**, ahead of the string-aware views, on
 /// purpose: a `"` byte inside a `//` or `/* */` comment (`// see "foo"`) is
 /// comment text, not a string delimiter, so removing whole comment spans before
@@ -1004,11 +1169,15 @@ fn has_python_json_literal(bytes: &[u8]) -> bool {
 /// its ordering are preserved exactly.
 ///
 /// Python-literal normalisation ([`normalize_python_json_literals`]) runs
-/// **last**, after comments are already stripped, so its own `in_string` scan is
-/// aligned with the real string boundaries and a `True`/`False`/`None` word
+/// after the trailing-comma view, then non-finite-number normalisation
+/// ([`normalize_json_number_specials`]) runs **last**. Both operate after
+/// comments are already stripped, so each `in_string` scan is aligned with the
+/// real string boundaries and a `True`/`None` word or a `NaN`/`Infinity` word
 /// inside a comment (already removed) or inside a string value (a quoted
-/// sentence) is never rewritten. Its outside-string, whole-token rewrite is
-/// independent of the trailing-comma and string-value views it follows.
+/// sentence) is never rewritten. Their outside-string, whole-token rewrites are
+/// independent of one another and of the trailing-comma and string-value views
+/// they follow (`True`/`False`/`None` and `NaN`/`Infinity`/`-Infinity` are
+/// disjoint token sets).
 ///
 /// The two string views are ordered invalid-escape **before** control-char on
 /// purpose: a model that emits a lone backslash immediately followed by a raw
@@ -1042,9 +1211,16 @@ pub fn recover_json_view(s: &str) -> Cow<'_, str> {
     // Step 4: normalise any Python/JS bare literal (True/False/None) outside a
     // string literal, carrying the borrow/owned distinction through so a full
     // no-op stays borrowed.
-    match step3 {
+    let step4 = match step3 {
         Cow::Borrowed(b) => normalize_python_json_literals(b),
         Cow::Owned(o) => Cow::Owned(normalize_python_json_literals(&o).into_owned()),
+    };
+    // Step 5: normalise any non-finite numeric literal (NaN/Infinity/-Infinity)
+    // outside a string literal to the JSON null token, carrying the borrow/owned
+    // distinction through so a full no-op stays borrowed.
+    match step4 {
+        Cow::Borrowed(b) => normalize_json_number_specials(b),
+        Cow::Owned(o) => Cow::Owned(normalize_json_number_specials(&o).into_owned()),
     }
 }
 
@@ -1078,7 +1254,7 @@ pub fn extract_json_payload(raw: &str) -> Option<String> {
 /// consolidation, outcome, decide, orient) reads its structured decision by
 /// extracting the balanced `{…}` object and `serde_json`-deserializing it.
 /// [`extract_json_payload`] strips the banner / ANSI / log noise but returns
-/// the object body **verbatim**, so five common real-world LLM JSON defects
+/// the object body **verbatim**, so six common real-world LLM JSON defects
 /// survive into the payload and fail a strict `serde_json::from_str`:
 ///
 ///  1. a `,` immediately before a closing `}`/`]` (the trailing comma,
@@ -1092,10 +1268,14 @@ pub fn extract_json_payload(raw: &str) -> Option<String> {
 ///     (`\alpha`),
 ///  4. a JavaScript-style COMMENT outside a string value — a `// …` line or
 ///     `/* … */` block comment, the "JSONC" shape a model emits to annotate a
-///     field (`"confidence": 0.8 // high`), and
+///     field (`"confidence": 0.8 // high`),
 ///  5. a Python/JS bare literal (`True`/`False`/`None`) outside a string value —
 ///     the shape a model that reasons in Python emits for a boolean/null field
-///     (`"ready": True`, `"error": None`).
+///     (`"ready": True`, `"error": None`), and
+///  6. a non-finite NUMBER literal (`NaN`/`Infinity`/`-Infinity`) outside a
+///     string value — the shape Python's `json.dumps` emits by default for an
+///     IEEE float special (`"score": NaN`, `"bound": -Infinity`), normalised to
+///     the canonical JSON `null`.
 ///
 /// Before this helper each phase parsed strictly and silently dropped its whole
 /// structured decision on any one stray byte, falling back to a permissive
@@ -1103,13 +1283,14 @@ pub fn extract_json_payload(raw: &str) -> Option<String> {
 ///
 /// Recovery retries the strict parse on the composed [`recover_json_view`]
 /// (comment stripping + invalid-escape doubling + control-character escaping +
-/// trailing-comma stripping + Python-literal normalisation). Each sub-view is a
+/// trailing-comma stripping + Python-literal normalisation + non-finite-number
+/// normalisation). Each sub-view is a
 /// *provable no-op on valid JSON* —
 /// it returns [`Cow::Borrowed`] byte-for-byte unchanged unless its specific
 /// defect is present — so recovery is attempted **only** when a view actually
 /// rewrote the payload (the [`Cow::Owned`] arm). Any other malformed shape
 /// (unquoted key, elided element, missing value) yields [`Cow::Borrowed`] and
-/// returns `None` unchanged: leniency never widens beyond the five named defects
+/// returns `None` unchanged: leniency never widens beyond the six named defects
 /// and a genuine parse error is never masked.
 pub fn extract_and_parse_json<T: serde::de::DeserializeOwned>(raw: &str) -> Option<T> {
     let payload = extract_json_payload(raw)?;
@@ -2415,6 +2596,255 @@ mod tests {
         let raw = r#"{"decision": "admit", "items": ["set True, keep None"]}"#;
         let env: Env = extract_and_parse_json(raw).expect("literal-in-string preserved");
         assert_eq!(env.items, vec!["set True, keep None".to_string()]);
+    }
+
+    // ---- normalize_json_number_specials ----------------------------------
+
+    #[test]
+    fn normalize_number_specials_valid_json_is_borrowed_zero_copy() {
+        // The clean path allocates nothing and yields identical text: valid JSON
+        // has no bare NaN/Infinity token outside a string, and a `-` is only ever
+        // a sign followed by a digit — never by `Infinity`. Finite numbers
+        // (negatives, exponents) and the words inside strings must not be touched.
+        for s in [
+            r#"{"a": 1, "b": -2, "c": -1.5e10}"#,
+            r#"{"n": 3, "s": "hello"}"#,
+            r#"{"msg": "score is NaN, bound is Infinity, floor -Infinity"}"#, // inside a string
+            r#"["NaN", "Infinity", "-Infinity"]"#,
+            r#"{"x": -0.0, "y": 0}"#,
+        ] {
+            assert!(
+                matches!(normalize_json_number_specials(s), Cow::Borrowed(_)),
+                "expected borrow for {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_number_specials_rewrites_nan_infinity_neg_infinity() {
+        let raw = r#"{"a": NaN, "b": Infinity, "c": -Infinity}"#;
+        let fixed = normalize_json_number_specials(raw);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["a"], serde_json::json!(null));
+        assert_eq!(v["b"], serde_json::json!(null));
+        assert_eq!(v["c"], serde_json::json!(null));
+    }
+
+    #[test]
+    fn normalize_number_specials_preserves_words_inside_strings() {
+        // A NaN/Infinity substring inside a string value is content and must
+        // survive verbatim; only the bare value token is rewritten.
+        let raw = r#"{"note": "reached Infinity here", "score": NaN}"#;
+        let fixed = normalize_json_number_specials(raw);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["note"], "reached Infinity here");
+        assert_eq!(v["score"], serde_json::json!(null));
+    }
+
+    #[test]
+    fn normalize_number_specials_leaves_longer_words_untouched() {
+        // Only the exact tokens are rewritten: a longer identifier run that
+        // merely starts with one (`NaNValue`, `Infinityx`, `xNaN`), or a `-`
+        // followed by such a run (`-Infinityx`), is left verbatim for the strict
+        // parse to reject — leniency never widens.
+        for s in [
+            r#"{"k": NaNValue}"#,
+            r#"{"k": Infinityx}"#,
+            r#"{"k": xNaN}"#,
+            r#"{"k": -Infinityx}"#,
+        ] {
+            assert!(
+                matches!(normalize_json_number_specials(s), Cow::Borrowed(_)),
+                "expected borrow (no exact literal) for {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_number_specials_handles_array_and_tight_delimiters() {
+        // Whole-token detection works with no surrounding whitespace and inside
+        // arrays: `[NaN,Infinity,-Infinity]` and `{"k":NaN}`.
+        for (raw, expected) in [
+            (
+                r#"[NaN,Infinity,-Infinity]"#,
+                serde_json::json!([null, null, null]),
+            ),
+            (r#"{"k":-Infinity}"#, serde_json::json!({ "k": null })),
+        ] {
+            let fixed = normalize_json_number_specials(raw);
+            assert!(matches!(fixed, Cow::Owned(_)), "expected owned for {raw:?}");
+            let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+            assert_eq!(v, expected);
+        }
+    }
+
+    #[test]
+    fn normalize_number_specials_preserves_finite_negative_numbers() {
+        // A `-` that begins an ordinary negative number (or a negative exponent)
+        // is NOT the `-Infinity` special: it is emitted verbatim and the number
+        // round-trips unchanged. Only `-` immediately before the whole word
+        // `Infinity` collapses to null.
+        let raw = r#"{"lo": -5, "hi": Infinity, "exp": -1.0e-9}"#;
+        let fixed = normalize_json_number_specials(raw);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["lo"], serde_json::json!(-5));
+        assert_eq!(v["hi"], serde_json::json!(null));
+        assert_eq!(v["exp"], serde_json::json!(-1.0e-9));
+    }
+
+    #[test]
+    fn normalize_number_specials_preserves_multibyte_utf8() {
+        // Every multibyte body byte outside the rewritten token is copied through
+        // unchanged, so the result stays valid UTF-8.
+        let raw = "{\"note\": \"café ☕ π\", \"score\": NaN}";
+        let fixed = normalize_json_number_specials(raw);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["note"], "café ☕ π");
+        assert_eq!(v["score"], serde_json::json!(null));
+    }
+
+    #[test]
+    fn normalize_number_specials_respects_escaped_quote_in_string() {
+        // A `\"`-escaped quote must not close the string early, so an `Infinity`
+        // after it (still inside the string) stays content.
+        let raw = r#"{"note": "say \"Infinity\" here", "score": NaN}"#;
+        let fixed = normalize_json_number_specials(raw);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["note"], r#"say "Infinity" here"#);
+        assert_eq!(v["score"], serde_json::json!(null));
+    }
+
+    #[test]
+    fn recover_json_view_recovers_number_special_only() {
+        assert!(matches!(
+            recover_json_view(r#"{"score": NaN}"#),
+            Cow::Owned(_)
+        ));
+        assert!(matches!(
+            recover_json_view(r#"{"bound": -Infinity}"#),
+            Cow::Owned(_)
+        ));
+    }
+
+    #[test]
+    fn recover_json_view_number_special_inside_string_is_borrowed() {
+        // The word inside a string value stays a byte-for-byte borrow through the
+        // whole composed pipeline.
+        assert!(matches!(
+            recover_json_view(r#"{"note": "up to Infinity"}"#),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn recover_json_view_composes_number_special_with_trailing_comma() {
+        // The non-finite view composes with the outside-string trailing-comma
+        // view: `NaN,}` becomes `null}`.
+        let fixed = recover_json_view(r#"{"score": NaN,}"#);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["score"], serde_json::json!(null));
+    }
+
+    #[test]
+    fn recover_json_view_composes_number_special_with_python_literal() {
+        // Python-literal (Step 4) and non-finite (Step 5) views are disjoint and
+        // compose: `True` becomes `true`, `Infinity` becomes `null`, in one pass.
+        let fixed = recover_json_view(r#"{"ready": True, "score": Infinity}"#);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["ready"], serde_json::json!(true));
+        assert_eq!(v["score"], serde_json::json!(null));
+    }
+
+    #[test]
+    fn recover_json_view_composes_all_six_defects() {
+        // A single payload carrying every recoverable defect: a comment, an
+        // invalid escape (`\d`), a raw control char (newline), a trailing comma,
+        // a Python literal (`None`), and a non-finite number (`NaN`).
+        let raw = "{\"ready\": None, \"score\": NaN, /* note */ \"items\": [\"re \\d\nline\",],}";
+        let fixed = recover_json_view(raw);
+        assert!(matches!(fixed, Cow::Owned(_)));
+        let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
+        assert_eq!(v["ready"], serde_json::json!(null));
+        assert_eq!(v["score"], serde_json::json!(null));
+        assert_eq!(v["items"], serde_json::json!(["re \\d\nline"]));
+    }
+
+    #[test]
+    fn extract_and_parse_json_recovers_number_special_in_optional_field() {
+        // End-to-end: a model pretty-printing a Python computation emits a bare
+        // NaN/Infinity for a numeric field; the shared chokepoint recovers the
+        // whole decision (the non-finite value reads as null) instead of dropping
+        // it on the one stray token.
+        #[derive(Debug, serde::Deserialize, PartialEq)]
+        struct Scored {
+            decision: String,
+            #[serde(default)]
+            score: Option<f64>,
+            #[serde(default)]
+            bound: Option<f64>,
+        }
+        let raw = r#"{"decision": "admit", "score": NaN, "bound": -Infinity}"#;
+        let s: Scored = extract_and_parse_json(raw).expect("non-finite numbers recovered");
+        assert_eq!(
+            s,
+            Scored {
+                decision: "admit".to_string(),
+                score: None,
+                bound: None,
+            }
+        );
+    }
+
+    #[test]
+    fn extract_and_parse_json_recovers_number_special_through_banner_noise() {
+        // Banner + interleaved ANSI log line AND a bare `Infinity`: the extractor
+        // strips the noise, then recovery normalises the non-finite number on an
+        // extra field the envelope ignores.
+        let raw = "Recipe: ooda SUCCESS (3.0s)\n\
+                   \x1b[2m2026-07-25T00:00:00.000000Z\x1b[0m INFO decide\n\
+                   {\"decision\": \"admit\", \"score\": Infinity}";
+        let env: Env = extract_and_parse_json(raw).expect("noise + non-finite number recovered");
+        assert_eq!(env.decision, "admit");
+    }
+
+    #[test]
+    fn extract_and_parse_json_recovers_all_six_defects_together() {
+        // Every recoverable defect at once through the shared chokepoint: a
+        // comment, an invalid escape (`\d`), a raw control char (newline), a
+        // trailing comma, a Python literal (`None`), and a non-finite number
+        // (`NaN`), the latter two on extra fields the envelope ignores.
+        let raw = "{\"decision\": \"admit\", \"ready\": None, \"score\": NaN, /* note */ \"items\": [\"re \\d\nline\",],}";
+        let env: Env = extract_and_parse_json(raw).expect("all six defects recovered");
+        assert_eq!(env.decision, "admit");
+        assert_eq!(env.items, vec!["re \\d\nline".to_string()]);
+    }
+
+    #[test]
+    fn extract_and_parse_json_preserves_number_special_word_inside_string() {
+        // A NaN/Infinity word inside a string value is content: the clean payload
+        // parses strictly and the recovery view never mangles it.
+        let raw = r#"{"decision": "admit", "items": ["score was NaN then Infinity"]}"#;
+        let env: Env = extract_and_parse_json(raw).expect("special-in-string preserved");
+        assert_eq!(env.items, vec!["score was NaN then Infinity".to_string()]);
+    }
+
+    #[test]
+    fn extract_and_parse_json_number_special_with_unquoted_key_still_none() {
+        // Leniency never widens: a non-finite number ALONGSIDE a genuinely
+        // unrecoverable defect (an unquoted key) still yields None — the
+        // non-finite view rewrites its token but the strict re-parse of the
+        // still-malformed body fails, so no broken decision is masked.
+        assert_eq!(
+            extract_and_parse_json::<Env>(r#"{decision: "admit", "score": NaN}"#),
+            None
+        );
     }
 }
 
