@@ -94,12 +94,10 @@ PR's actual head at closure time:
 | #4566 | *"de-flake local canary deploy-gate under CPU oversubscription"* — single-test de-flake. | Same whack-a-mole class as #4624 — one test healed, the coupling to the shifting suite remains. |
 | #4570 | *"de-flake deploy-gate unit-test suite (fork/exec + load races)"* — single-suite de-flake. | Same whack-a-mole class; treats symptoms of running the full suite rather than the coupling itself. |
 
-> **Confirm the head before closing.** These rows reflect each PR's title and
-> diff at authoring time; auto-generated PRs can be force-pushed. Re-read each
-> PR's current head before posting its `superseded-by #4622` closure comment so
-> the stated reason stays per-PR accurate.
-
-Each is closed with a `superseded-by #4622` reference at merge.
+> **Confirm each PR's current head before posting its `superseded-by #4622`
+> closure comment** — auto-generated PRs can be force-pushed, so re-read the head
+> so the per-PR reason stays accurate. Each is closed with a `superseded-by
+> #4622` reference at merge.
 
 ## What changed
 
@@ -137,13 +135,11 @@ Each is closed with a `superseded-by #4622` reference at merge.
 ### The `canary-tests` Cargo feature
 
 `canary-tests` is the **second** intentional exception to Simard's
-"features are default" rule (issue #2576), alongside `slow-tests`. It is a
-TEST-SELECTION gate, not a shippable product capability, so it stays opt-in.
-
-Because Simard's `Cargo.toml` currently documents `slow-tests` as *"THE ONE
-INTENTIONAL EXCEPTION"*, adding `canary-tests` **requires amending that comment
-in the same change** — otherwise `Cargo.toml` becomes self-contradictory. The
-two opt-in test-selection features share one header:
+"features are default" rule (issue #2576), alongside `slow-tests`: a
+TEST-SELECTION gate, not a shippable capability, so it stays opt-in. Because
+`Cargo.toml` documents `slow-tests` as *"THE ONE INTENTIONAL EXCEPTION"*, adding
+`canary-tests` **requires amending that comment in the same change** (otherwise
+`Cargo.toml` self-contradicts). The two share one header:
 
 ```toml
 # Cargo.toml — [features]
@@ -166,11 +162,6 @@ slow-tests = []
 canary-tests = []
 ```
 
-> **Implementation note.** Editing the `slow-tests` comment from *"THE ONE
-> INTENTIONAL EXCEPTION"* to the shared *"TWO INTENTIONAL EXCEPTIONS"* header
-> above is part of this change, not optional cleanup. Leaving the old comment
-> makes `Cargo.toml` assert there is exactly one exception while defining two.
-
 | Property | Value |
 | --- | --- |
 | Default-enabled | **No** — opt-in only |
@@ -178,62 +169,23 @@ canary-tests = []
 | New runtime dependencies | **None** (`tempfile`, `serial_test` are already dev-deps) |
 | Enabled by | the self-deploy UnitTest canary and the CI proof job |
 
-> **Why not default?** Defaulting `canary-tests` would compile the canary-only
-> scaffolding into every `cargo test` / CI run for zero runtime benefit, exactly
-> the reasoning that keeps `slow-tests` opt-in. It is dev/test-only and
-> **not shipped**.
-
 ## API / behavior
 
 ### The scoped `build_unit_test_command`
 
-The gate builder keeps its signature and every isolation guarantee; only the
-argv narrows. It still returns the `TempDir` guard the caller must keep alive
-until `cmd.output()` completes.
-
-```rust
-/// Build the isolated `cargo test` command for the UnitTest canary gate.
-///
-/// SCOPE (issue #4622): this runs the curated, hermetic-by-construction
-/// `self_deploy_canary` integration target — NOT the full lib suite. The full
-/// suite contains non-hermetic tests (shared HOME/tempdirs, unserialized shared
-/// resources, Drop-order cleanup guards) that panic inside the isolated
-/// self-deploy-target env even when green in CI, wedging the gate on a shifting
-/// target. Scoping to a deterministic curated set ends that whack-a-mole while
-/// keeping the gate a real fail-closed deploy-authorization control.
-///
-/// ISOLATION (#4628) is unchanged: a fresh, absolute, per-run `TempDir` is
-/// pointed at by SIMARD_STATE_ROOT/SIMARD_HOME AFTER `scrub_gate_env` (so the
-/// override wins last-write-wins), and SIMARD_MEMORY_SOCKET is removed so the
-/// canary opens its OWN throwaway stores and cannot dial the live daemon.
-///
-/// FAIL CLOSED: if the isolated root cannot be created this returns `Err` and
-/// the gate reddens. It never falls back to the live state root.
-fn build_unit_test_command(config: &RelaunchConfig) -> SimardResult<(Command, TempDir)> {
-    let state_root = TempDir::new().map_err(/* ... PersistentStoreIo, fail closed ... */)?;
-    debug_assert!(state_root.path().is_absolute());
-
-    // Scrubbed command FIRST (last-write-wins ordering is load-bearing).
-    let mut cmd = scrubbed_command("cargo", config);
-    cmd.arg("test")
-        .arg("--test")
-        .arg("self_deploy_canary")
-        .arg("--features")
-        .arg("canary-tests")
-        .arg("--manifest-path")
-        .arg(config.manifest_dir.join("Cargo.toml"))
-        .arg("--target-dir")
-        .arg(&config.canary_target_dir)
-        .env("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs());
-
-    // Isolation override AFTER scrub.
-    cmd.env("SIMARD_STATE_ROOT", state_root.path())
-        .env("SIMARD_HOME", state_root.path())
-        .env_remove("SIMARD_MEMORY_SOCKET");
-
-    Ok((cmd, state_root))
-}
-```
+`build_unit_test_command`
+([source](https://github.com/rysweet/Simard/blob/main/src/self_relaunch/gates.rs))
+keeps its signature `(config) -> SimardResult<(Command, TempDir)>` and every
+isolation guarantee; only the argv narrows. It builds a `scrubbed_command`
+running `cargo test --test self_deploy_canary --features canary-tests` (with
+`--manifest-path`, `--target-dir`, and `CARGO_BUILD_JOBS`), then applies the
+`#4628` isolation override *after* the scrub (last-write-wins):
+`SIMARD_STATE_ROOT`/`SIMARD_HOME` point at a fresh per-run `TempDir` and
+`SIMARD_MEMORY_SOCKET` is removed so the canary uses throwaway stores and cannot
+dial the live daemon. It returns the `TempDir` guard the caller keeps alive
+until `cmd.output()` completes, and fails closed (`Err ⇒ RED`) if the isolated
+root cannot be created — it never falls back to the live state root. See the
+source for the exact argv and the doc-comment rationale.
 
 **What is unchanged (all preserved):**
 
@@ -258,18 +210,12 @@ fn build_unit_test_command(config: &RelaunchConfig) -> SimardResult<(Command, Te
 The target is compiled only when `canary-tests` is enabled and asserts the
 load-bearing self-deploy invariants through the crate's **public API**, so the
 gate stays a meaningful deploy-authorization control rather than a cosmetic
-pass.
-
-```rust
-#![cfg(feature = "canary-tests")]
-//! Curated, hermetic-by-construction self-deploy canary regression target
-//! (issue #4622). This is the ONLY test target the self-deploy UnitTest gate
-//! runs. Every test here MUST be hermetic: own `TempDir`, own
-//! HOME/SIMARD_STATE_ROOT/SIMARD_HOME, `#[serial]` for process globals, and
-//! deterministic Drop cleanup. A non-hermetic test added here would re-wedge
-//! the gate — reviewers reject any test that touches the live state root,
-//! shares an unserialized global, or relies on Drop ordering.
-```
+pass. Its module attribute is `#![cfg(feature = "canary-tests")]`, and every
+test MUST be hermetic: own `TempDir`, own `HOME`/`SIMARD_STATE_ROOT`/
+`SIMARD_HOME`, `#[serial]` for process globals, and deterministic Drop cleanup.
+A non-hermetic test added here would re-wedge the gate, so reviewers reject any
+test that touches the live state root, shares an unserialized global, or relies
+on Drop ordering.
 
 The suite covers, at minimum:
 
@@ -277,7 +223,7 @@ The suite covers, at minimum:
 | --- | --- |
 | **Gate execution (end-to-end)** | `verify_canary(stub_binary, &[RelaunchGate::Smoke], &config)` drives a real gate against a **deliberately-red stub binary** (one whose `--version` exits non-zero): the returned `GateResult.passed` is `false` and `all_gates_passed(&results)` is `false`. A red gate executed through the live path is **never** mapped to pass. This is the load-bearing invariant — it exercises the authorization control itself, not just its pure helpers. |
 | Gate order | `default_gates()` yields exactly `Smoke → UnitTest → GymBaseline → RpcHealth`. |
-| Aggregate verdict | `all_gates_passed(results)` is `true` **iff** every `GateResult.passed` is `true` (pure mapping — includes the empty and single-red cases). |
+| Aggregate verdict | `all_gates_passed(results)` is `true` **iff** the verdict set is non-empty and every `GateResult.passed` is `true`. An empty set fails closed (authorizes nothing); a single red gate fails the aggregate. |
 | Env deny-by-default floor | `canary_gate_env_allowlist()` carries deploy-shape signal *names* (`SIMARD_HOME`, …) and never hijack vars (`LD_PRELOAD`, `GIT_SSH_COMMAND`). |
 | State isolation (#4628) | Canary state stays inside the owned `TempDir`; the live state root/secrets are never reachable — isolation is asserted as an invariant, and its absence refuses RED. |
 
@@ -350,28 +296,6 @@ every push to `main` and every PR:
 This guarantees the exact target name and feature the gate uses stay valid: a
 rename or typo fails CI **before** it can redden the live self-deploy canary.
 
-## Fail-closed invariants (preserved)
-
-This scoping is bounded by the same rails as the prior canary work; none is
-relaxed:
-
-- **Canary is the authorization boundary.** The four gates still gate promotion
-  and still fail closed. A genuine regression in the curated set reddens
-  `UnitTest` exactly as a lib-suite failure did before.
-- **No short-circuit.** All gates run to completion; `all_gates_passed` still
-  requires every gate to pass.
-- **`Err ⇒ RED`.** A missing isolated root, a `cargo` error, a compile failure,
-  or a misspelled `--test` target all redden the gate. Error/missing-target is
-  **never** mapped to pass.
-- **Deny-by-default env + #4628 isolation** are unchanged (`scrub_gate_env`,
-  `canary_gate_env_allowlist`, per-run `TempDir` state root, memory-socket
-  removal).
-- **Gate not removed.** `RelaunchGate::UnitTest` stays in `default_gates()`;
-  `types.rs` and `mod.rs` gate-order tests stay green. Only the invocation scope
-  changes.
-- **No new operator inputs.** No CLI flags, RPC, config keys, or "skip gate"
-  controls. The trust boundary is unchanged.
-
 ## Convergence (done-when)
 
 Once the scoped gate passes on current `main`:
@@ -388,19 +312,51 @@ Exactly one PR (#4622) lands; the five competing stale PRs are closed as
 superseded. No loop, requeue, or drift logic changed — the loop was already
 correct once handed a green canary.
 
-## Compatibility
+## Known limitations / future work
 
-- **Additive feature.** `canary-tests = []` is opt-in, non-default, dev/test-only,
-  and shipped in no runtime path.
+- **Gate coverage is `Smoke`-end-to-end + pure helpers, not `run_unit_test_gate`
+  end-to-end (B).** The curated suite drives `verify_canary` against a stub
+  binary through the **`Smoke`** gate (a real fail-closed authorization path) and
+  asserts the pure aggregation/order/allow-list helpers. It does **not** spawn
+  the scoped `cargo test --test self_deploy_canary` invocation that
+  `run_unit_test_gate` performs — doing so would fork a nested `cargo` build
+  inside a test, which is neither hermetic nor fast. That gate's scoped argv and
+  `#4628` isolation are instead pinned by the in-crate `state_isolation_tdd` unit
+  tests (`unit_test_gate_scopes_to_hermetic_canary_target_and_feature`, …), and
+  the [CI proof job](#ci) keeps the target name/feature valid. Closing the full
+  end-to-end gap would need a sandboxed `cargo` fixture; tracked as future work.
+- **The stub binary is unix-only (D).** `write_stub_binary` emits a `#!/bin/sh`
+  script and `chmod +x`es it under `#[cfg(unix)]`, so the curated suite runs on
+  unix only. Simard self-deploys on unix hosts, so this matches the gate's real
+  runtime; a Windows port would need a `.cmd`/compiled no-op stub before the
+  suite could run on Windows CI.
+
+## Fail-closed invariants & compatibility (preserved)
+
+This scoping is **additive and non-breaking**, bounded by the same rails as the
+prior canary work; none is relaxed:
+
+- **Canary is the authorization boundary.** The four gates still gate promotion
+  and fail closed; a genuine regression in the curated set reddens `UnitTest`
+  exactly as a lib-suite failure did before. `RelaunchGate::UnitTest` stays in
+  `default_gates()` — only its invocation scope changes.
+- **No short-circuit.** All gates run to completion; `all_gates_passed` requires
+  a non-empty set where every gate passed (fail-closed on empty).
+- **`Err ⇒ RED`.** A missing isolated root, a `cargo` error, a compile failure,
+  or a misspelled `--test` target all redden the gate — never mapped to pass.
+- **Deny-by-default env + #4628 isolation** are unchanged (`scrub_gate_env`,
+  `canary_gate_env_allowlist`, per-run `TempDir` state root, memory-socket
+  removal).
 - **Signatures unchanged.** `verify_canary`, `all_gates_passed`, `default_gates`,
-  `RelaunchGate`, `GateResult`, and `RelaunchConfig` are unchanged.
-- **New test target.** `tests/self_deploy_canary.rs` compiles only under
-  `canary-tests`; it adds no runtime deps (`tempfile`, `serial_test` already
-  dev-deps).
-- **No `print`-family macros.** All gate emission stays `tracing` structured
-  key=value → OTel via the existing bridge; no `print!` / `println!` /
-  `eprintln!`, no silent fallbacks.
-- **No `Bridge` naming.** New identifiers follow the
+  `RelaunchGate`, `GateResult`, and `RelaunchConfig` keep their signatures; the
+  `types.rs`/`mod.rs` gate-order tests stay green.
+- **Additive, dev/test-only feature.** `canary-tests = []` is opt-in, non-default,
+  shipped in no runtime path, and adds no runtime deps (`tempfile`, `serial_test`
+  are already dev-deps). `tests/self_deploy_canary.rs` compiles only under it.
+- **No new operator inputs, no `print`-family macros, no `Bridge` naming.** No
+  CLI flags, RPC, config keys, or "skip gate" controls (trust boundary
+  unchanged); all gate emission stays `tracing`→OTel (no `print!`/`println!`/
+  `eprintln!`, no silent fallbacks); new identifiers follow the
   [no-Bridge-naming guard](./no-bridge-naming-guard.md).
 
 ## See also
