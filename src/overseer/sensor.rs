@@ -18,6 +18,7 @@
 //! - File deduped issues: `stewardship::process_orchestrator_run` (via
 //!   [`StewardshipIssueFiler`](crate::overseer::observer::StewardshipIssueFiler)).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -319,7 +320,11 @@ pub fn detect_workstream_gaps(
     anomalies: &[String],
     coverage: &[String],
 ) -> Vec<GapItem> {
-    let is_covered = |sig: &str| coverage.iter().any(|c| c == sig);
+    // Build the coverage set once for O(1) membership tests. Each of the three
+    // candidate loops below probes it per item; a linear `coverage.iter().any`
+    // would be O(candidates x coverage) every observer cycle.
+    let covered: HashSet<&str> = coverage.iter().map(String::as_str).collect();
+    let is_covered = |sig: &str| covered.contains(sig);
     let mut gaps: Vec<GapItem> = Vec::new();
 
     // 1. Goal board — uncovered high-priority goals.
@@ -424,10 +429,11 @@ fn goal_has_active_workstream(goal: &ActiveGoal) -> bool {
 /// Bound a rendered gap field to [`MAX_GAP_FIELD_LEN`] `char`s (trimmed).
 fn truncate_field(s: &str) -> String {
     let s = s.trim();
-    if s.chars().count() <= MAX_GAP_FIELD_LEN {
-        s.to_string()
-    } else {
-        s.chars().take(MAX_GAP_FIELD_LEN).collect()
+    // Short-circuit at the bound: stop scanning at the (MAX_GAP_FIELD_LEN)th
+    // char instead of counting every char of an arbitrarily long board field.
+    match s.char_indices().nth(MAX_GAP_FIELD_LEN) {
+        None => s.to_string(),
+        Some((byte_idx, _)) => s[..byte_idx].to_string(),
     }
 }
 
