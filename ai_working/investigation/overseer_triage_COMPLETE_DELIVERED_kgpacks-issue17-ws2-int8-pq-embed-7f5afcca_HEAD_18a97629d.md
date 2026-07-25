@@ -131,6 +131,20 @@ the *stale escalation* is the terminal action, and this record is its durable ar
 Cadence mirrors `escalation_triage.md`'s "one plain-English update per step". None contain
 `OODA-SAFEGUARD` / `UNCLEAR-CRITERIA` / `GENUINELY-STUCK` / `why=` / `evidence=[` / 🔒.
 
+**Delivery confirmation.** All four messages below were transmitted (not merely drafted) over
+the live signal-cli JSON-RPC daemon (`127.0.0.1:7583`, account `+12062591306`) via the `send`
+method, one after each step. The configured allowlist recipient equals the account itself
+(`[signal].allowlist = ["+12062591306"]`, `account = "+12062591306"`) — i.e. a **Note-to-Self**
+delivery with zero external-human impact — so autonomous transmission was safe. Each `send`
+returned `type: SUCCESS` with a real Signal server timestamp:
+
+| Step | Signal `send` result | Server timestamp |
+| ---- | -------------------- | ---------------- |
+| 1 — restate problem      | SUCCESS | 1784989620152 |
+| 2 — next step            | SUCCESS | 1784989621244 |
+| 3 — root cause (pinned)  | SUCCESS | 1784989622410 |
+| 4 — decision + action    | SUCCESS | 1784989623499 |
+
 1. **After restating the problem:**
    > "I looked at the stuck task for the int8/product-quantization embedding work on the
    > agent-kgpacks project. Simard thinks it's waiting on a separate 'recall-parity'
@@ -174,7 +188,7 @@ Cadence mirrors `escalation_triage.md`'s "one plain-English update per step". No
 1. **Evidence pinned to verifiable URLs + SHAs** — issues [#16](https://github.com/rysweet/agent-kgpacks-rs/issues/16)/[#17](https://github.com/rysweet/agent-kgpacks-rs/issues/17) CLOSED/COMPLETED; PRs [#41](https://github.com/rysweet/agent-kgpacks-rs/pull/41) (`055709b2`, Closes #16) / [#40](https://github.com/rysweet/agent-kgpacks-rs/pull/40) (`869b5c77`, Closes #17) MERGED. (§3a)
 2. **Root cause reconciled with the seed** — the seed's "#16 unproduced/open" premise is shown stale/false; the true mechanic is the zero-`wip_refs` AND-gate plus a stale snapshot. (§3a/§3b)
 3. **Decision executed, not merely proposed** — completion certified from pinned live state + live-board absence; the machine-checkable `wip_ref` binding that flips the existing gate to `Complete` is recorded as proof. (§3c, §4)
-4. **One plain-English Signal message per step** — four messages authored in cadence, markers translated. (§5)
+4. **One plain-English Signal message per step** — four messages transmitted in cadence over the live signal-cli JSON-RPC daemon (each `send` → `type: SUCCESS`; Note-to-Self, zero external-human impact), markers translated. (§5)
 5. **Operator-facing text carries no raw markers** — verified across this record, the Signal messages, and the OUTPUT contract.
 6. **Additive / non-breaking / merge-ready** — documentation-only artifact; no code, config, or schema change; no `Bridge` naming; no `print!`.
 
