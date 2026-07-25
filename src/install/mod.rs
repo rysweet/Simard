@@ -7,9 +7,6 @@ pub mod paths;
 pub mod rollback;
 pub mod systemd;
 
-#[cfg(test)]
-mod serial_isolation_guard;
-
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::path::PathBuf;

@@ -292,7 +292,28 @@ pub fn exec_self_reload() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Sleep that wakes early when the shutdown flag is set.
+///
+/// Thin wrapper over [`interruptible_sleep_with`] that supplies the real
+/// `std::thread::sleep`. The seam exists so the tick/interrupt contract can be
+/// asserted deterministically with a fake sleeper — no wall-clock, no
+/// `Instant::elapsed()` — so those tests behave identically on an idle laptop
+/// and on a host under heavy parallel load (the canary-redder root cause).
 pub fn interruptible_sleep(total: Duration, shutdown: &AtomicBool) {
+    interruptible_sleep_with(total, shutdown, std::thread::sleep);
+}
+
+/// Injectable-clock core of [`interruptible_sleep`].
+///
+/// Sleeps `total` in chunks of at most 250ms, re-checking `shutdown` at the top
+/// of every tick and returning early the moment it is observed set. `sleep_fn`
+/// receives each tick-clamped chunk, so tests can drive the loop with a fake
+/// sleeper that records the chunks and flips `shutdown` mid-sleep — proving the
+/// interrupt path by causality/ordering rather than by measuring elapsed time.
+pub(crate) fn interruptible_sleep_with<F: FnMut(Duration)>(
+    total: Duration,
+    shutdown: &AtomicBool,
+    mut sleep_fn: F,
+) {
     let tick = Duration::from_millis(250);
     let mut remaining = total;
     while remaining > Duration::ZERO {
@@ -300,7 +321,7 @@ pub fn interruptible_sleep(total: Duration, shutdown: &AtomicBool) {
             return;
         }
         let chunk = remaining.min(tick);
-        std::thread::sleep(chunk);
+        sleep_fn(chunk);
         remaining = remaining.saturating_sub(chunk);
     }
 }
@@ -309,7 +330,6 @@ pub fn interruptible_sleep(total: Duration, shutdown: &AtomicBool) {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::time::Instant;
 
     // ── daemon_log ──────────────────────────────────────────────────
 
@@ -663,46 +683,108 @@ mod tests {
         assert!(!mtime_advanced(SystemTime::now(), None));
     }
 
-    // ── interruptible_sleep ─────────────────────────────────────────
+    // ── interruptible_sleep (public wrapper) ────────────────────────
+    //
+    // Delegation smoke test with NO wall-clock upper-bound assertion (those were
+    // the canary redders: `elapsed() < 50ms/1s/2s` flakes when a loaded host
+    // overshoots the deadline). The tick/interrupt contract is proven
+    // deterministically by the `interruptible_sleep_with` seam tests below; here
+    // we only prove the real wrapper delegates and terminates for the two paths
+    // that must not sleep — a zero total and an already-set shutdown.
 
     #[test]
-    fn interruptible_sleep_zero_duration_returns_immediately() {
-        let shutdown = AtomicBool::new(false);
-        let start = Instant::now();
-        interruptible_sleep(Duration::ZERO, &shutdown);
-        assert!(start.elapsed() < Duration::from_millis(50));
-    }
+    fn interruptible_sleep_returns_for_zero_and_already_shutdown() {
+        // Zero total → returns without sleeping.
+        let idle = AtomicBool::new(false);
+        interruptible_sleep(Duration::ZERO, &idle);
 
-    #[test]
-    fn interruptible_sleep_completes_short_sleep() {
-        let shutdown = AtomicBool::new(false);
-        let start = Instant::now();
-        interruptible_sleep(Duration::from_millis(100), &shutdown);
-        assert!(start.elapsed() >= Duration::from_millis(100));
-        assert!(start.elapsed() < Duration::from_secs(2));
-    }
-
-    #[test]
-    fn interruptible_sleep_exits_immediately_when_already_shutdown() {
+        // Already shutdown → returns before the first tick even for a huge total.
         let shutdown = AtomicBool::new(true);
-        let start = Instant::now();
         interruptible_sleep(Duration::from_secs(60), &shutdown);
-        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    // ── interruptible_sleep_with (deterministic injectable-clock seam) ──
+    //
+    // TDD (written first): these specify the private seam the fix must add so the
+    // interrupt/tick contract is asserted WITHOUT wall-clock. They drive a FAKE
+    // sleeper — zero real sleeping, zero `Instant::elapsed()` — so they pass
+    // identically on an idle laptop and on a host at load 150. They fail to
+    // compile until `interruptible_sleep_with(total, shutdown, sleep_fn)` exists;
+    // the public `interruptible_sleep` must delegate to it with `thread::sleep`.
+
+    #[test]
+    fn interruptible_sleep_with_zero_duration_never_sleeps() {
+        use std::cell::RefCell;
+        let shutdown = AtomicBool::new(false);
+        let chunks = RefCell::new(Vec::new());
+        interruptible_sleep_with(Duration::ZERO, &shutdown, |d| chunks.borrow_mut().push(d));
+        assert!(
+            chunks.into_inner().is_empty(),
+            "a zero total must not invoke the sleeper at all"
+        );
     }
 
     #[test]
-    fn interruptible_sleep_exits_on_mid_sleep_shutdown() {
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&shutdown);
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(100));
-            flag.store(true, Ordering::SeqCst);
+    fn interruptible_sleep_with_already_shutdown_never_sleeps() {
+        use std::cell::RefCell;
+        let shutdown = AtomicBool::new(true);
+        let chunks = RefCell::new(Vec::new());
+        interruptible_sleep_with(Duration::from_secs(60), &shutdown, |d| {
+            chunks.borrow_mut().push(d)
         });
-        let start = Instant::now();
-        interruptible_sleep(Duration::from_secs(60), &shutdown);
         assert!(
-            start.elapsed() < Duration::from_secs(2),
-            "should wake within ~350ms of shutdown signal, not wait 60s"
+            chunks.into_inner().is_empty(),
+            "an already-set shutdown must exit before the first sleep"
+        );
+    }
+
+    #[test]
+    fn interruptible_sleep_with_full_duration_sums_to_total_in_tick_chunks() {
+        use std::cell::RefCell;
+        let shutdown = AtomicBool::new(false);
+        let chunks = RefCell::new(Vec::new());
+        interruptible_sleep_with(Duration::from_millis(1000), &shutdown, |d| {
+            chunks.borrow_mut().push(d)
+        });
+        let recorded = chunks.into_inner();
+        let tick = Duration::from_millis(250);
+        assert!(
+            recorded.iter().all(|d| *d <= tick),
+            "each requested chunk must be tick-clamped (<= 250ms): {recorded:?}"
+        );
+        assert_eq!(
+            recorded.iter().copied().sum::<Duration>(),
+            Duration::from_millis(1000),
+            "the summed chunks must equal the requested total exactly: {recorded:?}"
+        );
+    }
+
+    #[test]
+    fn interruptible_sleep_with_wakes_before_total_on_mid_sleep_shutdown() {
+        use std::cell::RefCell;
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let flip = Arc::clone(&shutdown);
+        let chunks = RefCell::new(Vec::new());
+        let mut calls = 0usize;
+        // The fake sleeper flips shutdown as its 2nd chunk "elapses"; the loop's
+        // next top-of-iteration check must then exit — deterministically after
+        // exactly 2 chunks, never running the 60s total to completion.
+        interruptible_sleep_with(Duration::from_secs(60), &shutdown, |d| {
+            chunks.borrow_mut().push(d);
+            calls += 1;
+            if calls == 2 {
+                flip.store(true, Ordering::SeqCst);
+            }
+        });
+        let recorded = chunks.into_inner();
+        assert_eq!(
+            recorded.len(),
+            2,
+            "the loop must exit the tick after shutdown is observed, not run to 60s: {recorded:?}"
+        );
+        assert!(
+            recorded.iter().copied().sum::<Duration>() < Duration::from_secs(60),
+            "the wake must happen strictly before the full total elapses"
         );
     }
 }

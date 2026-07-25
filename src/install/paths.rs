@@ -345,7 +345,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[serial_test::serial(install)]
     fn install_lock_is_exclusive_per_simard_home() {
         let temp = tempfile::TempDir::new().expect("tempdir");
         let layout = layout(&temp.path().join("simard-home"));
