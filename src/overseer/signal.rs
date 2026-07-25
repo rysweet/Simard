@@ -244,13 +244,12 @@ pub fn is_bounded_signature_slug(sig: &str) -> bool {
     if sig.is_empty() || sig.len() > MAX_GAP_SIGNATURE_LEN {
         return false;
     }
-    let mut chars = sig.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_alphanumeric() => {}
-        _ => return false,
-    }
-    sig.chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '#' | '.' | '/' | '-'))
+    // Single pass: an ASCII alphanumeric is allowed anywhere; the restricted
+    // separators are allowed only after the first char (so the slug must open
+    // with an alphanumeric, never a separator).
+    sig.char_indices().all(|(i, c)| {
+        c.is_ascii_alphanumeric() || (i > 0 && matches!(c, ':' | '_' | '#' | '.' | '/' | '-'))
+    })
 }
 
 /// Coarse relative importance. `Ord` sorts ascending so `Critical` comes first,
