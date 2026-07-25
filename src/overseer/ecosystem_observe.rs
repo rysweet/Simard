@@ -43,8 +43,9 @@ pub const STEWARDED_REPOS_COLLECTION: &str = "stewarded_repos";
 /// clean two-segment slug: a missing or extra `/`, an empty segment, embedded
 /// whitespace, path traversal (`..`), a leading `-`, or any shell metacharacter.
 /// Only `[A-Za-z0-9._-]` is permitted per segment, so a malformed slug can never
-/// reach `gh`.
-fn is_valid_slug(slug: &str) -> bool {
+/// reach `gh`. Public so the `simard roster` curation CLI can reject a bad slug
+/// before it is ever persisted.
+pub fn is_valid_slug(slug: &str) -> bool {
     let mut parts = slug.split('/');
     let (owner, name) = match (parts.next(), parts.next(), parts.next()) {
         (Some(owner), Some(name), None) => (owner, name),
