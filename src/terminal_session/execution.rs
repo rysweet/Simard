@@ -193,6 +193,10 @@ fn exit_code_guidance(exit_status: &ExitStatus) -> &'static str {
             " — exit code 126 means a command was found but is not executable; \
              check the file permissions"
         }
+        Some(124) => {
+            " — exit code 124 means the terminal session hung past the idle timeout \
+             and was force-killed; inspect the transcript for the last command that stalled"
+        }
         _ => "",
     }
 }
