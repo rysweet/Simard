@@ -1,6 +1,6 @@
 ---
 title: RPC-health canary gate probe
-description: Reference for the rpc-health self-relaunch canary gate — how it genuinely dials the running memory daemon via the read-only `simard memory stats` operator-cli subcommand (RPC_HEALTH_PROBE_ARGS), the liveness pre-flight that refuses to green a dead daemon, the fail-closed timeout/spawn/exit handling, the SIMARD_STATE_ROOT-driven socket resolution, and the regression guards that keep the probe pointed at a real dispatched subcommand rather than the `unsupported command 'probe'` no-op it replaced.
+description: How the rpc-health self-relaunch canary gate dials the running memory daemon via the read-only `simard memory stats` subcommand — its liveness pre-flight, fail-closed timeout/spawn/exit handling, SIMARD_STATE_ROOT socket resolution, and the guards that keep it pointed at a dispatched subcommand (resolving the `unsupported command 'probe'` red, #4646).
 last_updated: 2026-07-25
 review_schedule: as-needed
 owner: simard
