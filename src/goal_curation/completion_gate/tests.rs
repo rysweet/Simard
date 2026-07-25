@@ -906,3 +906,161 @@ fn gh_source_first_ref_of_kind_matches_case_insensitively() {
     assert_eq!(super::first_ref_of_kind(&goal, "ISSUE"), Some("202"));
     assert_eq!(super::first_ref_of_kind(&goal, "commit"), None);
 }
+
+// ===========================================================================
+// #4441 — awaiting-merge branch (TEST-FIRST / failing until implemented).
+//
+// These specify the additive `open_mergeable_pr` evidence signal, its
+// fail-closed default, the `&T` blanket forward, the
+// `CompletionEvidenceGate::awaiting_merge` pass-through, and the new
+// `is_valid_repo_slug` argument-validation helper. See
+// docs/reference/no-progress-awaiting-merge-api.md.
+// ===========================================================================
+
+/// A source that answers ONLY the awaiting-merge signal (base done-gate methods
+/// return neutral "blocked" answers) so tests can drive `open_mergeable_pr`
+/// through the gate independently of the three-part rule. Each field is a
+/// `Result<bool, String>` so a transient query error can be modelled.
+struct MergeableEvidence {
+    open_mergeable: Result<bool, String>,
+}
+
+impl MergeableEvidence {
+    fn of(open_mergeable: bool) -> Self {
+        Self {
+            open_mergeable: Ok(open_mergeable),
+        }
+    }
+    fn erroring() -> Self {
+        Self {
+            open_mergeable: Err("gh transport failed".to_string()),
+        }
+    }
+}
+
+impl EvidenceSource for MergeableEvidence {
+    fn any_pr_merged(&self, _goal: &ActiveGoal) -> SimardResult<bool> {
+        Ok(false)
+    }
+    fn issue_closed(&self, _goal: &ActiveGoal) -> SimardResult<bool> {
+        Ok(true)
+    }
+    fn is_deployed(&self, _goal: &ActiveGoal) -> SimardResult<bool> {
+        Ok(false)
+    }
+    fn open_mergeable_pr(&self, _goal: &ActiveGoal) -> SimardResult<bool> {
+        to_result(&self.open_mergeable)
+    }
+}
+
+#[test]
+fn open_mergeable_pr_defaults_to_false_fail_closed() {
+    // The base `FakeEvidence` does NOT override `open_mergeable_pr`, so it must
+    // inherit the trait default `Ok(false)`: a source that cannot tell never
+    // suppresses a reap.
+    let src = FakeEvidence::ok(false, false, false);
+    let goal = simard_goal("g", GoalProgress::NotStarted);
+    assert!(
+        !src.open_mergeable_pr(&goal).expect("default is infallible"),
+        "the default open_mergeable_pr must be Ok(false)"
+    );
+}
+
+#[test]
+fn blanket_ref_impl_forwards_open_mergeable_pr() {
+    // An `&dyn EvidenceSource` (the shape the daemon passes into the gate) must
+    // delegate the new method to the concrete source.
+    let src = MergeableEvidence::of(true);
+    let goal = simard_goal("g", GoalProgress::NotStarted);
+    let by_ref: &dyn EvidenceSource = &src;
+    assert!(
+        by_ref.open_mergeable_pr(&goal).expect("forwarded"),
+        "the &T blanket impl must forward open_mergeable_pr"
+    );
+}
+
+#[test]
+fn gate_awaiting_merge_passes_through_true() {
+    let gate = CompletionEvidenceGate::new(MergeableEvidence::of(true));
+    let goal = simard_goal("g", GoalProgress::NotStarted);
+    assert!(
+        gate.awaiting_merge(&goal),
+        "awaiting_merge must report the source's true signal"
+    );
+}
+
+#[test]
+fn gate_awaiting_merge_passes_through_false() {
+    let gate = CompletionEvidenceGate::new(MergeableEvidence::of(false));
+    let goal = simard_goal("g", GoalProgress::NotStarted);
+    assert!(
+        !gate.awaiting_merge(&goal),
+        "awaiting_merge must report the source's false signal"
+    );
+}
+
+#[test]
+fn gate_awaiting_merge_fails_closed_on_source_error() {
+    // A source error must resolve to `false` (never suppress a reap), mirroring
+    // the fail-closed convention of the base done-gate.
+    let gate = CompletionEvidenceGate::new(MergeableEvidence::erroring());
+    let goal = simard_goal("g", GoalProgress::NotStarted);
+    assert!(
+        !gate.awaiting_merge(&goal),
+        "a source error must resolve awaiting_merge to false (fail-closed)"
+    );
+}
+
+#[test]
+fn awaiting_merge_does_not_change_the_completion_verdict() {
+    // `awaiting_merge` is a SEPARATE query — it must not add a CompletionVerdict
+    // variant nor flip a Blocked verdict to Complete. A goal that is blocked
+    // (PR not merged) stays Blocked even when its PR is open+mergeable.
+    let gate = CompletionEvidenceGate::new(MergeableEvidence::of(true));
+    let mut goal = simard_goal("g", GoalProgress::NotStarted);
+    goal.wip_refs = vec![WipRef {
+        kind: "pr".to_string(),
+        ref_id: "7".to_string(),
+        label: "PR #7".to_string(),
+        url: None,
+    }];
+    assert!(
+        !gate.evaluate(&goal).is_complete(),
+        "an open-mergeable-but-unmerged PR must NOT be certified Complete"
+    );
+    assert!(gate.awaiting_merge(&goal));
+}
+
+#[test]
+fn is_valid_repo_slug_accepts_owner_repo_and_rejects_injection() {
+    // The new fail-closed validator gates the live `gh pr view` spawn.
+    assert!(super::is_valid_repo_slug("rysweet/Simard"));
+    assert!(super::is_valid_repo_slug("owner-1/repo.rs"));
+    assert!(super::is_valid_repo_slug("a_b/c-d.e"));
+
+    assert!(!super::is_valid_repo_slug(""), "empty slug rejected");
+    assert!(
+        !super::is_valid_repo_slug("noslash"),
+        "missing '/' rejected"
+    );
+    assert!(
+        !super::is_valid_repo_slug("owner/repo; rm -rf /"),
+        "shell metacharacters rejected"
+    );
+    assert!(
+        !super::is_valid_repo_slug("owner/repo extra"),
+        "spaces rejected"
+    );
+    assert!(
+        !super::is_valid_repo_slug("a/b/c"),
+        "more than one '/' rejected"
+    );
+    assert!(
+        !super::is_valid_repo_slug("owner/"),
+        "empty repo half rejected"
+    );
+    assert!(
+        !super::is_valid_repo_slug("/repo"),
+        "empty owner half rejected"
+    );
+}

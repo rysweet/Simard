@@ -332,3 +332,194 @@ fn four_stuck_supply_chain_goals_all_leave_the_active_loop_via_the_ladder() {
         }
     }
 }
+
+// ===========================================================================
+// #4441 — awaiting-merge disposition (TEST-FIRST / failing until implemented).
+//
+// A goal whose workstream already has an OPEN, non-draft, MERGEABLE PR is
+// awaiting an external merge — NOT stalled. The breaker must classify it
+// `AwaitingMerge` → `AwaitMerge` (non-terminal) instead of reaping/escalating
+// it, which is what produced the duplicate PRs in the live incident. See
+// docs/reference/no-progress-awaiting-merge-api.md.
+// ===========================================================================
+
+/// Evidence double that also answers the new `open_mergeable_pr` signal.
+struct AwaitMergeEvidence {
+    pr_merged: bool,
+    issue_closed: bool,
+    deployed: bool,
+    open_mergeable: bool,
+}
+
+impl EvidenceSource for AwaitMergeEvidence {
+    fn any_pr_merged(&self, _goal: &ActiveGoal) -> SimardResult<bool> {
+        Ok(self.pr_merged)
+    }
+    fn issue_closed(&self, _goal: &ActiveGoal) -> SimardResult<bool> {
+        Ok(self.issue_closed)
+    }
+    fn is_deployed(&self, _goal: &ActiveGoal) -> SimardResult<bool> {
+        Ok(self.deployed)
+    }
+    fn open_mergeable_pr(&self, _goal: &ActiveGoal) -> SimardResult<bool> {
+        Ok(self.open_mergeable)
+    }
+}
+
+#[test]
+fn verify_maps_open_mergeable_pr_goal_to_awaiting_merge() {
+    // Gate says Blocked (PR not merged), the goal is not obsolete, and the PR is
+    // open+non-draft+mergeable → AwaitingMerge (not Unresolved).
+    let gate = CompletionEvidenceGate::new(AwaitMergeEvidence {
+        pr_merged: false,
+        issue_closed: true,
+        deployed: false,
+        open_mergeable: true,
+    });
+    let mut goal = stuck_goal("g");
+    goal.wip_refs = vec![pr_ref("4440")];
+    assert_eq!(
+        verify_stuck_goal(&goal, &gate),
+        StuckGoalDisposition::AwaitingMerge,
+        "a completed-with-open-mergeable-PR goal must be AwaitingMerge"
+    );
+}
+
+#[test]
+fn verify_without_open_mergeable_pr_stays_unresolved() {
+    // Same blocked verdict but the PR is NOT open+mergeable → the existing
+    // reap/escalate semantics are preserved (Unresolved).
+    let gate = CompletionEvidenceGate::new(AwaitMergeEvidence {
+        pr_merged: false,
+        issue_closed: true,
+        deployed: false,
+        open_mergeable: false,
+    });
+    let mut goal = stuck_goal("g");
+    goal.wip_refs = vec![pr_ref("7")];
+    assert_eq!(
+        verify_stuck_goal(&goal, &gate),
+        StuckGoalDisposition::Unresolved,
+        "a draft/dirty/closed PR must NOT be treated as awaiting-merge"
+    );
+}
+
+#[test]
+fn verify_merged_pr_is_done_and_wins_over_awaiting_merge() {
+    // A MERGED PR (with issue closed + deployed) is certified Complete → Done
+    // BEFORE the awaiting-merge branch is even consulted.
+    let gate = CompletionEvidenceGate::new(AwaitMergeEvidence {
+        pr_merged: true,
+        issue_closed: true,
+        deployed: true,
+        open_mergeable: true,
+    });
+    let mut goal = stuck_goal("g");
+    goal.wip_refs = vec![pr_ref("4440")];
+    assert_eq!(
+        verify_stuck_goal(&goal, &gate),
+        StuckGoalDisposition::Done,
+        "a merged PR must resolve as Done, never AwaitingMerge"
+    );
+}
+
+#[test]
+fn verify_obsolete_wins_over_awaiting_merge() {
+    // An out-of-scope goal is dropped even if it has an open mergeable PR:
+    // obsolescence is checked before the awaiting-merge branch.
+    let gate = CompletionEvidenceGate::new(AwaitMergeEvidence {
+        pr_merged: false,
+        issue_closed: false,
+        deployed: false,
+        open_mergeable: true,
+    });
+    let mut goal = stuck_goal("g");
+    goal.wip_refs = vec![
+        pr_ref("4440"),
+        issue_ref("42", "out-of-scope; tracked elsewhere"),
+    ];
+    match verify_stuck_goal(&goal, &gate) {
+        StuckGoalDisposition::Obsolete { .. } => {}
+        other => panic!("expected Obsolete to win over AwaitingMerge, got {other:?}"),
+    }
+}
+
+#[test]
+fn resolve_maps_awaiting_merge_disposition_to_await_merge() {
+    let res = resolve_no_progress(
+        "g",
+        NO_PROGRESS_BREAKER_THRESHOLD,
+        NO_PROGRESS_BREAKER_THRESHOLD,
+        || StuckGoalDisposition::AwaitingMerge,
+    );
+    assert_eq!(res, NoProgressResolution::AwaitMerge);
+}
+
+#[test]
+fn resolve_below_threshold_never_consults_awaiting_merge() {
+    // Below threshold the disposition closure is never evaluated.
+    let res = resolve_no_progress("g", 1, NO_PROGRESS_BREAKER_THRESHOLD, || {
+        panic!("disposition must not be evaluated below threshold");
+    });
+    assert_eq!(res, NoProgressResolution::Continue);
+}
+
+#[test]
+fn await_merge_resolution_is_not_terminal() {
+    // Non-terminal, alongside Continue and SurfaceInvestigationFailure: the goal
+    // stays tracked and its counter is preserved.
+    assert!(
+        !NoProgressResolution::AwaitMerge.is_terminal(),
+        "AwaitMerge must be non-terminal so a degraded PR can fall back instantly"
+    );
+}
+
+#[test]
+fn record_and_resolve_await_merge_preserves_counter_and_falls_back_on_degradation() {
+    // While the PR is open+mergeable the breaker idles the goal every cycle
+    // WITHOUT clearing its no-action counter. The instant the PR degrades the
+    // very next cycle escalates — proving the counter was never reset (a reset
+    // would need another full threshold run before firing).
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let mut tracker = NoProgressTracker::new();
+
+    // Build up to the threshold (sub-threshold cycles stay `Continue` — the
+    // disposition closure is evaluated lazily), then idle as awaiting-merge for
+    // two extra cycles once the breaker fires. Across the awaiting-merge idles
+    // the counter is NOT reset (AwaitMerge is non-terminal).
+    for cycle in 1..=(threshold + 2) {
+        let res =
+            tracker.record_and_resolve("g", threshold, || StuckGoalDisposition::AwaitingMerge);
+        if cycle < threshold {
+            assert_eq!(
+                res,
+                NoProgressResolution::Continue,
+                "cycle {cycle} is sub-threshold"
+            );
+        } else {
+            assert_eq!(
+                res,
+                NoProgressResolution::AwaitMerge,
+                "cycle {cycle} idles awaiting-merge"
+            );
+        }
+    }
+    assert!(
+        tracker.consecutive("g") >= threshold,
+        "the counter must be preserved across awaiting-merge idles, got {}",
+        tracker.consecutive("g")
+    );
+
+    // PR degrades → the next single cycle escalates (terminal), clearing the
+    // counter.
+    let res = tracker.record_and_resolve("g", threshold, || StuckGoalDisposition::Unresolved);
+    assert!(
+        matches!(res, NoProgressResolution::Escalate { .. }),
+        "a degraded PR must fall back to Escalate on the next cycle, got {res:?}"
+    );
+    assert_eq!(
+        tracker.consecutive("g"),
+        0,
+        "the terminal escalation must clear the counter"
+    );
+}
