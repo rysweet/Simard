@@ -16,6 +16,7 @@ owner: simard
 doc_type: reference
 related:
   - ./overseer-activity-feed.md
+  - ./overseer-gap-durable-dedup.md
   - ./overseer-self-observation-stability.md
   - ../design/overseer.md
   - ../howto/review-overseer-workstream-gaps.md

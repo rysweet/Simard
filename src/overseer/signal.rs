@@ -155,6 +155,20 @@ impl GapCategory {
             Self::AnomalyUnaddressed => "anomaly",
         }
     }
+
+    /// The stable prefix every [`GapItem::signature`] of this category MUST begin
+    /// with (`goal:` / `issue:` / `anomaly:`). Part of the bounded gap taxonomy:
+    /// the sensor builds each signature as `<prefix><trusted-slug>`, so a
+    /// recurring gap of the same kind always collapses onto one dedup key rather
+    /// than a free-form, per-tick-unstable title. Kept in lock-step with
+    /// [`GapCategory::label`] so provenance and signature never drift.
+    pub fn signature_prefix(&self) -> &'static str {
+        match self {
+            Self::GoalUncovered => "goal:",
+            Self::IssueUncovered => "issue:",
+            Self::AnomalyUnaddressed => "anomaly:",
+        }
+    }
 }
 
 /// One genuine backlog-coverage gap: a specific piece of important work that is
@@ -178,6 +192,65 @@ pub struct GapItem {
     /// `anomaly:<slug>`). Identical inputs yield identical signatures so a
     /// recurring gap is deduped to at most one notification per signature.
     pub signature: String,
+}
+
+/// The single canonical prefix for a workstream-gap dedup key. The per-gap key
+/// is `<DEDUP_KEY_PREFIX><signature>` and the combined per-tick key
+/// (`overseer::mod::workstream_gap_key`) is `<DEDUP_KEY_PREFIX><sorted sigs>`,
+/// so both filing seams agree on one stable, content-addressed token.
+pub const GAP_DEDUP_KEY_PREFIX: &str = "workstream-gap:";
+
+/// Upper bound on a gap signature's length, matching the sensor's field bound
+/// (`sensor::MAX_GAP_FIELD_LEN` plus the short category prefix). A signature is
+/// only ever built from trusted identifiers; this bound guarantees it stays a
+/// small, safe token even for exotic ids (IV-1: dedup-search-injection defense).
+pub const MAX_GAP_SIGNATURE_LEN: usize = 200;
+
+impl GapItem {
+    /// This gap's stable, restart-durable dedup key: `workstream-gap:<signature>`.
+    ///
+    /// The key is content-addressed on trusted identifiers only, so the SAME
+    /// uncovered work always yields the SAME key across ticks — and across daemon
+    /// restarts. The gap-scan notifier collapses a recurring gap onto this key
+    /// (one operator notification per window) and a downstream filer can search an
+    /// existing open issue by embedding it, instead of emitting a fresh,
+    /// free-form-titled issue every detection tick. Centralising the key here (vs.
+    /// inlining `format!("workstream-gap:{}", sig)` at each seam) stops the filing
+    /// paths from silently drifting apart.
+    pub fn dedup_key(&self) -> String {
+        format!("{}{}", GAP_DEDUP_KEY_PREFIX, self.signature)
+    }
+
+    /// True when `signature` upholds the construction contract the sensor
+    /// guarantees: it begins with this gap's [`GapCategory::signature_prefix`] and
+    /// is a bounded slug in the restricted alphabet (see
+    /// [`is_bounded_signature_slug`]). The notifier guards on this so a malformed
+    /// signature can never inflate a notification, an issue body, or a dedup
+    /// search query — the bounded taxonomy is enforced at the filing seam, not
+    /// merely assumed.
+    pub fn has_valid_dedup_signature(&self) -> bool {
+        self.signature.starts_with(self.category.signature_prefix())
+            && is_bounded_signature_slug(&self.signature)
+    }
+}
+
+/// Validate that a gap signature is a bounded slug: non-empty, at most
+/// [`MAX_GAP_SIGNATURE_LEN`] chars, beginning with an ASCII alphanumeric, and
+/// composed solely of the restricted alphabet `[A-Za-z0-9:_#./-]`. This is the
+/// IV-1 dedup-search-injection defense: no whitespace, quoting, or shell/search
+/// metacharacter can appear in a key that is later embedded in a `gh` search
+/// query or an issue body, regardless of how exotic the source identifier is.
+pub fn is_bounded_signature_slug(sig: &str) -> bool {
+    if sig.is_empty() || sig.len() > MAX_GAP_SIGNATURE_LEN {
+        return false;
+    }
+    let mut chars = sig.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphanumeric() => {}
+        _ => return false,
+    }
+    sig.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '#' | '.' | '/' | '-'))
 }
 
 /// Coarse relative importance. `Ord` sorts ascending so `Critical` comes first,
@@ -963,5 +1036,102 @@ mod describe_tests {
             d.to_lowercase().contains("alert"),
             "lost benign text: {d:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod gap_dedup_key_tests {
+    //! Contract for the bounded workstream-gap taxonomy (Problem 2, issue #4687):
+    //! every gap carries a stable, restart-durable, injection-safe dedup key so a
+    //! recurring gap collapses onto one key instead of flooding the tracker with
+    //! near-duplicate, free-form-titled issues on every daemon restart.
+    use super::*;
+
+    fn gap(category: GapCategory, signature: &str) -> GapItem {
+        GapItem {
+            category,
+            ref_id: "ref".to_string(),
+            title: "title".to_string(),
+            why_it_matters: "why".to_string(),
+            signature: signature.to_string(),
+        }
+    }
+
+    #[test]
+    fn dedup_key_is_the_stable_prefixed_signature() {
+        let g = gap(GapCategory::GoalUncovered, "goal:g-hot");
+        assert_eq!(g.dedup_key(), "workstream-gap:goal:g-hot");
+        // The centralised prefix is the single source of truth for both seams.
+        assert!(g.dedup_key().starts_with(GAP_DEDUP_KEY_PREFIX));
+    }
+
+    #[test]
+    fn identical_uncovered_work_yields_an_identical_key_across_ticks() {
+        // Content-addressed on trusted identifiers only: a re-detection of the
+        // same gap (a fresh GapItem, as after a daemon restart) produces the same
+        // key, so the notifier/filer deduplicates it instead of re-filing.
+        let first = gap(GapCategory::IssueUncovered, "issue:rysweet/simard#4687");
+        let after_restart = gap(GapCategory::IssueUncovered, "issue:rysweet/simard#4687");
+        assert_eq!(first.dedup_key(), after_restart.dedup_key());
+    }
+
+    #[test]
+    fn category_prefix_tracks_the_label() {
+        for (cat, prefix, label) in [
+            (GapCategory::GoalUncovered, "goal:", "goal"),
+            (GapCategory::IssueUncovered, "issue:", "issue"),
+            (GapCategory::AnomalyUnaddressed, "anomaly:", "anomaly"),
+        ] {
+            assert_eq!(cat.signature_prefix(), prefix);
+            assert_eq!(cat.signature_prefix().trim_end_matches(':'), cat.label());
+            assert_eq!(cat.label(), label);
+        }
+    }
+
+    #[test]
+    fn well_formed_gaps_from_every_category_are_valid() {
+        assert!(gap(GapCategory::GoalUncovered, "goal:g-hot").has_valid_dedup_signature());
+        assert!(
+            gap(GapCategory::IssueUncovered, "issue:rysweet/simard#4687")
+                .has_valid_dedup_signature()
+        );
+        assert!(
+            gap(
+                GapCategory::AnomalyUnaddressed,
+                "anomaly:distill_parse_fail_rate_high",
+            )
+            .has_valid_dedup_signature()
+        );
+    }
+
+    #[test]
+    fn a_signature_missing_its_category_prefix_is_rejected() {
+        // A goal gap whose signature does not start with `goal:` breaks the
+        // bounded-taxonomy contract and must not be treated as dedupable.
+        assert!(
+            !gap(GapCategory::GoalUncovered, "issue:rysweet/simard#1").has_valid_dedup_signature()
+        );
+    }
+
+    #[test]
+    fn injection_and_unbounded_signatures_are_rejected() {
+        // IV-1: a signature carrying whitespace / search or shell metacharacters
+        // (as free-form text would) is not a bounded slug and is rejected before
+        // it can reach a `gh` search query or an issue body.
+        assert!(!is_bounded_signature_slug(""));
+        assert!(!is_bounded_signature_slug("goal:has space"));
+        assert!(!is_bounded_signature_slug("goal:\"quoted\""));
+        assert!(!is_bounded_signature_slug("goal:a`b"));
+        assert!(!is_bounded_signature_slug(":leading-colon"));
+        assert!(!is_bounded_signature_slug(&format!(
+            "goal:{}",
+            "x".repeat(MAX_GAP_SIGNATURE_LEN)
+        )));
+        // The legitimate trusted-slug shapes stay valid.
+        assert!(is_bounded_signature_slug("goal:g-hot"));
+        assert!(is_bounded_signature_slug("issue:rysweet/simard#4687"));
+        assert!(is_bounded_signature_slug(
+            "anomaly:distill_parse_fail_rate_high"
+        ));
     }
 }

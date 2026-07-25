@@ -362,6 +362,106 @@ fn process_run_routes_overseer_to_default_and_dedups() {
     );
 }
 
+// ─────────────────────────── Storm regression (multi-sweep dedup) ───────────
+
+/// A stateful `GhClient` that models the daemon's real dedup surface once the
+/// search-index-lag fallback is in play: a filed tracking issue is visible to a
+/// subsequent `search_issues` call (as the strongly-consistent recent-open scan
+/// makes it), so re-observing the same failure matches instead of re-filing.
+/// Unlike the seeded [`FakeGhClient`], this one accumulates created issues and
+/// answers searches from that live store — the shape a full observation window
+/// actually sees.
+#[derive(Default)]
+struct StatefulGhClient {
+    issues: Mutex<Vec<GhIssue>>,
+    create_calls: Mutex<usize>,
+    next_number: Mutex<u64>,
+}
+
+impl StatefulGhClient {
+    fn new() -> Self {
+        Self {
+            issues: Mutex::new(Vec::new()),
+            create_calls: Mutex::new(0),
+            next_number: Mutex::new(4671),
+        }
+    }
+    fn create_call_count(&self) -> usize {
+        *self.create_calls.lock().unwrap()
+    }
+    fn open_issue_count(&self) -> usize {
+        self.issues.lock().unwrap().len()
+    }
+}
+
+impl GhClient for StatefulGhClient {
+    fn search_issues(&self, _repo: &str, signature: &str) -> Result<Vec<GhIssue>, SimardError> {
+        let needle = format!("stewardship-signature: {signature}");
+        Ok(self
+            .issues
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|i| i.body.contains(&needle))
+            .cloned()
+            .collect())
+    }
+    fn create_issue(&self, repo: &str, title: &str, body: &str) -> Result<GhIssue, SimardError> {
+        *self.create_calls.lock().unwrap() += 1;
+        let mut num = self.next_number.lock().unwrap();
+        let issue = GhIssue {
+            number: *num,
+            url: format!("https://github.com/{repo}/issues/{num}"),
+            title: title.to_string(),
+            body: body.to_string(),
+        };
+        *num += 1;
+        self.issues.lock().unwrap().push(issue.clone());
+        Ok(issue)
+    }
+}
+
+/// End-to-end regression for the stewardship issue *storm* (rysweet/Simard
+/// #4671-#4686): a whole observation window of identical detections routed
+/// through [`process_orchestrator_run`] must produce exactly ONE open issue —
+/// the first sweep files, every later sweep dedups to `MatchedExisting`. This is
+/// the public-API expression of the "duplicate detections within a window
+/// produce at most one open issue" contract; it would fail the moment the
+/// file-if-no-match dedup guard regressed and the loop filed per-tick.
+#[test]
+fn process_run_files_one_issue_across_a_full_window_of_identical_detections() {
+    let gh = StatefulGhClient::new();
+    let run = sample_run();
+
+    let mut filed_new = 0usize;
+    let mut matched_existing = 0usize;
+    for _ in 0..15 {
+        match process_orchestrator_run(&run, &gh).unwrap() {
+            StewardshipOutcome::FiledNew { .. } => filed_new += 1,
+            StewardshipOutcome::MatchedExisting { .. } => matched_existing += 1,
+        }
+    }
+
+    assert_eq!(
+        filed_new, 1,
+        "only the first sweep files a new tracking issue"
+    );
+    assert_eq!(
+        matched_existing, 14,
+        "every subsequent sweep dedups to the existing issue"
+    );
+    assert_eq!(
+        gh.create_call_count(),
+        1,
+        "exactly one `create_issue` across the whole window — no duplicate flood"
+    );
+    assert_eq!(
+        gh.open_issue_count(),
+        1,
+        "exactly one open tracking issue remains after the window"
+    );
+}
+
 // ─────────────────────────── Input validation ───────────────────────────
 
 #[test]

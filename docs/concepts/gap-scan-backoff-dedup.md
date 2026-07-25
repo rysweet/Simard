@@ -8,14 +8,18 @@ description: >
   fixed-window dedup was insufficient, how exponential backoff rate-limits
   without ever permanently silencing a genuinely recurring gap, how this makes
   the Overseer ACT on a gap once rather than observe it forever (meta bugs
-  #4255 / #4126), and the planned cross-process open-issue check (future work).
-last_updated: 2026-07-17
+  #4255 / #4126), and the durable cross-process open-issue check — enabled by a
+  stable, content-addressed signature — that now backstops the in-process gate
+  across daemon restarts.
+last_updated: 2026-07-25
 review_schedule: as-needed
 owner: simard
 doc_type: concept
 status: reference
 related:
   - ../reference/overseer-backoff-gate-api.md
+  - ../reference/overseer-gap-durable-dedup.md
+  - ../howto/configure-gap-durable-dedup.md
   - ../howto/configure-overseer-gap-scan-backoff.md
   - ../reference/overseer-workstream-gap-scan.md
   - ../reference/overseer-recipe-launch-idempotency.md
@@ -84,8 +88,9 @@ The fix
 ([BackoffGate reference](../reference/overseer-backoff-gate-api.md)) is
 deliberately additive — it adds a new primitive rather than mutating the
 existing `WhisperGate`, so every current caller is untouched. An in-process
-exponential-backoff gate guards the gap-cover act path, with a cross-process
-open-issue equivalence check planned as a follow-on (future work).
+exponential-backoff gate guards the gap-cover act path, with a durable
+cross-process open-issue equivalence check layered in front of it so the
+guarantee survives daemon restarts.
 
 ### Exponential BackoffGate (in-process) — implemented
 
@@ -108,15 +113,25 @@ Because the gate lives in the decide/act seam and only holds a suppressed plan,
 it gives a clean guarantee **within one running daemon**: at most one open
 covering issue per distinct gap for the life of the process.
 
-### Open-issue equivalence check (cross-process) — future work
+### Open-issue equivalence check (cross-process) — implemented
 
 The BackoffGate is in-memory, so a daemon restart forgets its state and a cold
-gate could re-file a duplicate that is already open on GitHub. A planned
-follow-on would, before launching a gap-cover recipe, do a **best-effort** GitHub
-query (reusing the existing `stewardship::dedup` helpers) for an already-open
-**equivalent** issue and skip the launch if one exists (failing toward surfacing
-on any API error). This cross-process layer is **not** part of #4186; it is
-documented here as intended direction only.
+gate could re-file a duplicate that is already open on GitHub. The deeper cause
+of the observed `[stewardship] workstream_gap:*` flood (e.g. #4671, #4680,
+#4685; OODA-stuck #4689) was that the filed `stewardship-signature:` was keyed
+per **run** (`originating-run: overseer-<hash>`), so the already-existing
+open-issue search never matched across runs. The fix makes the signature a
+stable, content-addressed slug so the durable check closes this: on
+the gap-filing path, **before** filing, the Overseer runs a GitHub query
+(reusing the existing `stewardship::dedup` helpers and `find_existing` on the
+`stewardship-signature:` body marker) for an already-open **equivalent** issue
+and **reuses / skips** if one exists. It **fails loud** — a `gh` search error
+propagates and files nothing, never a blind create. Because GitHub is the source
+of truth, the guarantee is now *at most one open issue per distinct gap
+signature across restarts and daemons*. The in-process `WhisperGate` remains the
+fast pre-filter in front of it. See the
+[durable gap-filing dedup reference](../reference/overseer-gap-durable-dedup.md)
+and the [how-to](../howto/configure-gap-durable-dedup.md).
 
 ## How this makes the Overseer ACT (not just observe)
 
@@ -144,9 +159,10 @@ protect.
 
 ## Invariants
 
-- **One open covering issue per distinct gap within a process.** The in-process
+- **One open covering issue per distinct gap, across restarts.** The in-process
   gate holds duplicate coverage plans across ticks; the cross-process case
-  (restarts) is the planned open-issue check (future work).
+  (restarts / multiple daemons) is closed by the durable
+  [open-issue check](../reference/overseer-gap-durable-dedup.md).
 - **Never permanently silent.** The window is capped and resets after silence; a
   genuinely recurring gap always re-surfaces.
 - **Additive / non-breaking.** A new `BackoffGate` primitive; existing
