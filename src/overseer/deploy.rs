@@ -455,8 +455,9 @@ fn pass_word(passed: bool) -> &'static str {
 
 /// Production [`CanaryRunner`]: prepare the canonical self-deploy source at the
 /// resolved target commit, build it with the shared self-deploy builder, then
-/// run the full relaunch gate sequence (Smoke → UnitTest → GymBaseline →
-/// RpcHealth). A target build or gate FAILURE is a RED canary
+/// run the default relaunch gate sequence (Smoke → GymBaseline → RpcHealth;
+/// the full-suite `UnitTest` gate is excluded from the default set per #4619).
+/// A target build or gate FAILURE is a RED canary
 /// (`passed: false`), NOT a hard error, so the deploy gate refuses it
 /// (`RedCanary`) and nothing is swapped. Source-resolution/git failures surface
 /// as hard errors to stay fail-safe without falling back to the daemon cwd.
