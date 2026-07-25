@@ -1765,6 +1765,63 @@ mod state_isolation_tdd {
         );
     }
 
+    // SCOPE CONTRACT (#4622): the built command must invoke ONLY the curated
+    // hermetic `self_deploy_canary` integration target behind the opt-in
+    // `canary-tests` feature — never the full, shifting lib suite. This is the
+    // symmetric counterpart to the env-isolation assertions above: a fast unit
+    // test that reddens the moment the scope silently reverts to the full suite,
+    // instead of relying solely on `verify.yml` proving the target passes
+    // standalone (which cannot catch the gate ceasing to invoke it).
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn unit_test_gate_scopes_to_hermetic_canary_target_and_feature() {
+        let config = RelaunchConfig::default();
+        let (cmd, _guard) =
+            build_unit_test_command(&config).expect("isolated state root must be creatable");
+
+        assert_eq!(
+            cmd.get_program(),
+            OsStr::new("cargo"),
+            "the UnitTest gate must invoke `cargo`"
+        );
+
+        let args: Vec<&OsStr> = cmd.get_args().collect();
+
+        // The `cargo test` subcommand must be present.
+        assert!(
+            args.contains(&OsStr::new("test")),
+            "gate command must run the `cargo test` subcommand; got {args:?}"
+        );
+
+        // `--test self_deploy_canary` must appear as an adjacent pair so the gate
+        // targets exactly the curated integration target, not the lib suite.
+        let test_selector = args
+            .windows(2)
+            .position(|w| w == [OsStr::new("--test"), OsStr::new("self_deploy_canary")]);
+        assert!(
+            test_selector.is_some(),
+            "gate command must scope to `--test self_deploy_canary` (curated hermetic \
+             target, not the full lib suite); got {args:?}"
+        );
+
+        // `--features canary-tests` must appear as an adjacent pair so the opt-in
+        // feature that compiles the canary target is enabled.
+        let feature_selector = args
+            .windows(2)
+            .position(|w| w == [OsStr::new("--features"), OsStr::new("canary-tests")]);
+        assert!(
+            feature_selector.is_some(),
+            "gate command must enable the opt-in `--features canary-tests`; got {args:?}"
+        );
+
+        // Belt-and-suspenders: the full lib suite is never selected wholesale.
+        assert!(
+            !args.contains(&OsStr::new("--lib")),
+            "gate command must NOT run the full `--lib` suite (that reintroduces the \
+             #4622 crash surface); got {args:?}"
+        );
+    }
+
     // FAIL CLOSED (non-negotiable): if the isolated root cannot be created the
     // gate MUST redden — it must NEVER silently fall back to the live state root
     // (that fallback is the exact bug #4628 removes). We force the failure by
