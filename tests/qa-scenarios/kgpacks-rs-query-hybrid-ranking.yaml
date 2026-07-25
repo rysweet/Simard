@@ -1,0 +1,79 @@
+name: kgpacks-rs-query-hybrid-ranking
+app_type: cli
+description: |
+  Outside-in proof for parity criterion **KGP-Q10** of the kgpacks-rs port
+  (`Specs/agent-kgpacks-rs-parity.md`): the native knowledge query
+  (`native_knowledge::query_hybrid`) answers a `knowledge.query` by **blending**
+  all three retrieval signals into one fused ranking, not by selecting a single
+  retrieval path.
+
+  Before this change, `query_open_pack` returned whichever of graph → vector →
+  keyword fired first, so a pack's answer came from one signal alone. Per the
+  operator directive (issue #4321) — *"No keyword search is not good enough. It
+  needs to be the same"* GraphRAG method — retrieval parity requires fusing the
+  signals so a semantically-near or graph-linked answer can outrank an item that
+  merely shares more literal keywords.
+
+  The corrected contract runs `query_graph`, `query_vector`, and `query_articles`
+  and fuses their ranked outputs via weighted Reciprocal Rank Fusion
+  (`fuse_rankings`, `RRF_K = 60`): each list `l` with weight `w` contributes
+  `w / (RRF_K + rank)` to a candidate's fused score, with the vector and graph
+  signals weighted above keyword (`HYBRID_VECTOR_WEIGHT = HYBRID_GRAPH_WEIGHT =
+  1.0` > `HYBRID_KEYWORD_WEIGHT = 0.5`). Candidates are identified across lists by
+  case-folded title, and a citation `url` from any signal survives fusion
+  (KGP-Q1). A pack exposing only one signal fuses a single list — which RRF
+  returns in its original order — so single-signal packs behave exactly as before.
+
+  This scenario drives the hermetic, in-process `native_knowledge` unit tests
+  that pin the fused-ranking contract:
+    - `query_hybrid_fuses_signals_so_semantic_and_graph_outrank_keyword` — on a
+      shared fixture where the signals disagree, the top-vector article and a
+      graph-linked entity (both with zero keyword overlap) outrank the highest
+      literal-keyword-coverage item;
+    - `query_hybrid_end_to_end_blends_via_query_pack_db` — the blend is what the
+      public `query_pack_db` path (and thus the RPC handler) runs;
+    - `fuse_rankings_accumulates_cross_signal_agreement` — cross-signal agreement
+      accumulates so an agreed candidate outranks a single list's leader;
+    - `fuse_rankings_backfills_missing_citation_url` — a citation url / non-empty
+      section from any signal survives fusion;
+    - `fuse_rankings_single_list_preserves_order_and_respects_limit` — one signal
+      fuses to its own order, capped at the limit (single-signal packs unchanged).
+  The same run re-asserts the pre-existing KGP-Q1/Q4/Q5/Q8/Q9 behaviour is
+  unregressed. No network, no live host mutation. The CLI runner rejects any
+  non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # The native knowledge query contract, including the new KGP-Q10 hybrid-ranking
+  # fusion tests and the pre-existing graph / vector / ranking / citation
+  # behaviours.
+  - action: run
+    params:
+      command: "cargo test --locked --lib native_knowledge"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Transport-level knowledge client suite proves the fused query path is
+  # exercised end-to-end through the native RPC surface without regression.
+  - action: run
+    params:
+      command: "cargo test --locked --lib knowledge_client"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

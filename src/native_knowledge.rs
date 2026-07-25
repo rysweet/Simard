@@ -168,38 +168,16 @@ fn query_open_pack(
         ));
     }
 
-    // GraphRAG path (KGP-Q5): when the pack exposes a knowledge graph
-    // (`entities` + `relationships` tables), traverse entities and their
-    // relationships (multi-hop) so the answer is grounded in linked entities,
-    // not just a single-table LIKE scan. `query_graph` returns `None` when the
-    // pack has no graph tables or no seed entity matches, in which case we fall
-    // back to the article scan below — preserving behaviour for article-only
-    // packs.
-    if let Some((answer, sources)) = query_graph(conn, &keywords, limit) {
-        let confidence = estimate_confidence(&answer, &sources);
-        return Ok((answer, sources, confidence));
-    }
-
-    // Vector semantic-search path (KGP-Q9): when the pack ships precomputed
-    // embeddings, retrieve by embedding cosine — the *same retrieval method* as
-    // the original agent-kgpacks (`Section.embedding` vector index) — rather than
-    // the keyword LIKE scan. The question is embedded with the deterministic
-    // default embedder (`embed_text`), so a pack whose stored embeddings came
-    // from that same default embedder is fully searchable end-to-end.
-    // `query_vector` returns `None` — falling back to the keyword scan below, so
-    // keyword-only packs are unchanged — when the pack exposes no `embedding`
-    // column or no stored vector shares the query embedding's dimension.
+    // Hybrid GraphRAG retrieval (KGP-Q10): blend all three retrieval signals —
+    // multi-hop graph (KGP-Q5), vector-semantic cosine (KGP-Q9), and keyword
+    // coverage (KGP-Q8) — into one fused ranking rather than selecting a single
+    // path. The question is embedded once with the deterministic default
+    // embedder (`embed_text`) for the vector signal. `query_hybrid` degrades
+    // gracefully: a pack that exposes only one of the signals ranks by that
+    // signal alone (so graph-only, embedding-only, and keyword-only packs behave
+    // exactly as before), while a pack exposing several has their scores fused.
     let query_embedding = embed_text(question, DEFAULT_EMBED_DIM);
-    if let Some(sources) = query_vector(conn, &query_embedding, limit) {
-        let answer = build_answer(conn, &keywords, &sources);
-        let confidence = estimate_confidence(&answer, &sources);
-        return Ok((answer, sources, confidence));
-    }
-
-    // Fallback: single-table article LIKE scan (pack databases may have varying
-    // schemas).
-    let sources = query_articles(conn, &keywords, limit);
-    let answer = build_answer(conn, &keywords, &sources);
+    let (answer, sources) = query_hybrid(conn, &keywords, &query_embedding, limit);
     let confidence = estimate_confidence(&answer, &sources);
 
     Ok((answer, sources, confidence))
@@ -992,6 +970,145 @@ fn query_vector(
     }
 
     None
+}
+
+// ── Hybrid ranking (KGP-Q10) ─────────────────────────────────────────────────
+
+/// Reciprocal Rank Fusion smoothing constant (the `k` from the original RRF
+/// paper, Cormack et al. 2009). It flattens the contribution of the very top
+/// ranks so that no single signal can dominate on rank position alone; agreement
+/// *across* signals is what lifts a candidate. 60 is the paper's default and the
+/// value used by mainstream hybrid-search engines.
+const RRF_K: f64 = 60.0;
+
+/// Weight of the vector-semantic signal ([`query_vector`]) in the hybrid ranker.
+const HYBRID_VECTOR_WEIGHT: f64 = 1.0;
+
+/// Weight of the multi-hop graph signal ([`query_graph`]) in the hybrid ranker.
+const HYBRID_GRAPH_WEIGHT: f64 = 1.0;
+
+/// Weight of the literal-keyword signal ([`query_articles`]) in the hybrid
+/// ranker. Deliberately **below** the vector and graph weights: per the operator
+/// directive (issue #4321, 2026-07-20) — *"No keyword search is not good enough.
+/// It needs to be the same"* GraphRAG method — a literal-keyword match is a
+/// supporting signal, not the authority. Down-weighting it lets a
+/// semantically-near or graph-linked answer outrank an item that merely shares
+/// more literal keywords, which is the defining behaviour of KGP-Q10.
+const HYBRID_KEYWORD_WEIGHT: f64 = 0.5;
+
+/// Fuse several ranked candidate lists into one order by **weighted Reciprocal
+/// Rank Fusion** (KGP-Q10).
+///
+/// Each list `l` with weight `w` contributes `w / (RRF_K + rank)` (0-based rank)
+/// to a candidate's fused score; a candidate present in several lists accumulates
+/// each list's contribution, so cross-signal agreement rises to the top. Because
+/// RRF ranks by *position* rather than by each signal's raw score, it fuses
+/// heterogeneous scales (cosine in `[0,1]`, integer keyword coverage, graph hop
+/// order) without any per-signal normalization.
+///
+/// Candidates are identified across lists by their case-folded `title` (the
+/// stable identity a pack shares between its article, entity, and section rows).
+/// The first-seen [`SourceInfo`] is kept, but is upgraded to a later variant's
+/// citation `url` or non-empty `section` when the first lacked one — so a signal
+/// that omits the url (e.g. a keyword row whose table has no `url` column) does
+/// not strip a citation another signal supplied. Ties in fused score break by
+/// `title` ascending, so the order is deterministic run to run.
+fn fuse_rankings(lists: &[(f64, &[SourceInfo])], limit: usize) -> Vec<SourceInfo> {
+    let mut scores: HashMap<String, f64> = HashMap::new();
+    let mut repr: HashMap<String, SourceInfo> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+
+    for (weight, list) in lists {
+        for (rank, src) in list.iter().enumerate() {
+            let key = src.title.to_ascii_lowercase();
+            *scores.entry(key.clone()).or_insert(0.0) += weight / (RRF_K + rank as f64);
+            match repr.get_mut(&key) {
+                None => {
+                    repr.insert(key.clone(), src.clone());
+                    order.push(key);
+                }
+                Some(existing) => {
+                    if existing.url.is_none() && src.url.is_some() {
+                        existing.url = src.url.clone();
+                    }
+                    if existing.section.is_empty() && !src.section.is_empty() {
+                        existing.section = src.section.clone();
+                    }
+                }
+            }
+        }
+    }
+
+    order.sort_by(|a, b| {
+        let sa = scores.get(a).copied().unwrap_or(0.0);
+        let sb = scores.get(b).copied().unwrap_or(0.0);
+        sb.partial_cmp(&sa)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| repr[a].title.cmp(&repr[b].title))
+    });
+
+    order
+        .into_iter()
+        .take(limit)
+        .filter_map(|k| repr.remove(&k))
+        .collect()
+}
+
+/// Hybrid GraphRAG retrieval (KGP-Q10): run all three retrieval signals and
+/// **blend** their rankings into one, rather than returning whichever single
+/// path fires first.
+///
+/// The three signals are the multi-hop graph traversal ([`query_graph`]), the
+/// vector-semantic cosine search ([`query_vector`]), and the keyword-coverage
+/// scan ([`query_articles`]). Their ranked outputs are fused by weighted
+/// Reciprocal Rank Fusion ([`fuse_rankings`]) with the vector and graph signals
+/// weighted above keyword, so a semantically-near or graph-linked answer can
+/// outrank an item that merely shares more literal keywords — the retrieval
+/// parity the operator directive requires.
+///
+/// **Graceful degradation.** A pack that exposes only one signal (a graph-only
+/// pack, an embedding-only pack, or a keyword-only pack) fuses a single ranked
+/// list, which RRF returns in its original order — so single-signal packs behave
+/// exactly as they did before hybrid ranking. When no signal returns anything,
+/// the "no relevant information" answer is produced (matching the prior
+/// empty-result contract).
+///
+/// **Answer synthesis.** When the graph signal fired, its answer — which names
+/// the linked entities and the relationships joining them — is the richest
+/// narrative and is kept; otherwise the answer is synthesized from the fused
+/// sources via [`build_answer`].
+fn query_hybrid(
+    conn: &Connection,
+    keywords: &[&str],
+    query_embedding: &[f64],
+    limit: usize,
+) -> (String, Vec<SourceInfo>) {
+    let graph = query_graph(conn, keywords, limit);
+    let vector = query_vector(conn, query_embedding, limit);
+    let keyword = query_articles(conn, keywords, limit);
+
+    let graph_sources: &[SourceInfo] = graph.as_ref().map(|(_, s)| s.as_slice()).unwrap_or(&[]);
+    let vector_sources: &[SourceInfo] = vector.as_deref().unwrap_or(&[]);
+
+    if graph_sources.is_empty() && vector_sources.is_empty() && keyword.is_empty() {
+        return (build_answer(conn, keywords, &[]), Vec::new());
+    }
+
+    let fused = fuse_rankings(
+        &[
+            (HYBRID_GRAPH_WEIGHT, graph_sources),
+            (HYBRID_VECTOR_WEIGHT, vector_sources),
+            (HYBRID_KEYWORD_WEIGHT, keyword.as_slice()),
+        ],
+        limit,
+    );
+
+    let answer = match &graph {
+        Some((graph_answer, _)) => graph_answer.clone(),
+        None => build_answer(conn, keywords, &fused),
+    };
+
+    (answer, fused)
 }
 
 /// Per-pack cache of a **live, reused** read-only SQLite connection (KGP-T3).
@@ -2349,8 +2466,9 @@ mod tests {
     fn native_knowledge_transport_query_uses_vector_search_when_embeddings_present() {
         // End-to-end KGP-Q9: a pack whose articles carry embeddings produced by
         // the default embedder is retrieved by embedding cosine through the RPC
-        // transport. The pack has no graph tables, so the wired path is
-        // graph(None) → vector(Some) — the keyword fallback is never reached.
+        // transport. The pack has no graph tables, so the hybrid ranker (KGP-Q10)
+        // fuses only the vector and keyword signals; the vector signal is what
+        // surfaces the semantically-closest article at the top.
         let tmp = TempDir::new().unwrap();
         let pack_dir = tmp.path().join("embed-pack");
         fs::create_dir_all(&pack_dir).unwrap();
@@ -2415,5 +2533,237 @@ mod tests {
             "vector search must rank the semantically-closest article first; got: {sources:?}"
         );
         assert!(result["confidence"].as_f64().unwrap() > 0.0);
+    }
+
+    // ── KGP-Q10: hybrid ranking ─────────────────────────────────────────────
+
+    /// Build a pack that exercises **all three** retrieval signals on one
+    /// fixture so the hybrid ranker (KGP-Q10) can be observed fusing them:
+    ///
+    /// * an `articles` table carrying BOTH `content` (keyword signal) and an
+    ///   `embedding` (vector signal), and
+    /// * an `entities` + `relationships` graph (graph signal).
+    ///
+    /// The fixture is rigged so the signals *disagree*, which is the only way to
+    /// prove a genuine blend:
+    ///
+    /// * **"Literal Keyword Match"** — its title+content contain BOTH query
+    ///   keywords ("distributed", "consensus"), so it tops the keyword signal.
+    ///   But its embedding is orthogonal to the query axis, so the vector signal
+    ///   drops it (cosine 0). A keyword-only ranker would put it first.
+    /// * **"Raft Log Replication"** — shares NO query keyword (so the keyword
+    ///   signal never returns it), but its embedding sits exactly on the query
+    ///   axis, so it tops the vector signal.
+    /// * graph: entity **"Distributed Systems"** matches "distributed" (a graph
+    ///   seed) and links to **"Byzantine Fault Tolerance"**, which shares no
+    ///   query keyword and is reached only by traversal.
+    ///
+    /// Query embedding = the `[1,0,0,0]` axis; query keywords =
+    /// `["distributed","consensus"]`.
+    fn create_test_hybrid_pack(packs_dir: &Path, name: &str) -> PathBuf {
+        let pack_dir = packs_dir.join(name);
+        fs::create_dir_all(&pack_dir).unwrap();
+
+        let manifest = serde_json::json!({
+            "name": name,
+            "description": format!("{name} knowledge pack"),
+            "graph_stats": { "articles": 2, "entities": 2, "relationships": 1, "size_mb": 0.1 }
+        });
+        fs::write(
+            pack_dir.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let db_path = pack_dir.join("pack.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE articles (title TEXT, section TEXT, content TEXT, url TEXT, embedding TEXT);
+             INSERT INTO articles VALUES ('Literal Keyword Match', 'Core', 'distributed consensus distributed consensus', 'https://example.com/keyword', '[0.0, 0.0, 1.0, 0.0]');
+             INSERT INTO articles VALUES ('Raft Log Replication', 'Core', 'leader election heartbeat quorum', 'https://example.com/raft', '[1.0, 0.0, 0.0, 0.0]');
+             CREATE TABLE entities (entity_id TEXT, name TEXT, type TEXT, description TEXT, url TEXT);
+             INSERT INTO entities VALUES ('e_ds', 'Distributed Systems', 'concept', 'Distributed systems coordinate many nodes.', 'https://example.com/ds');
+             INSERT INTO entities VALUES ('e_bft', 'Byzantine Fault Tolerance', 'concept', 'Tolerating arbitrary node failures.', 'https://example.com/bft');
+             CREATE TABLE relationships (source_id TEXT, target_id TEXT, relation TEXT, context TEXT);
+             INSERT INTO relationships VALUES ('e_ds', 'e_bft', 'requires', 'coordination needs fault tolerance');",
+        )
+        .unwrap();
+
+        pack_dir
+    }
+
+    #[test]
+    fn query_hybrid_fuses_signals_so_semantic_and_graph_outrank_keyword() {
+        // KGP-Q10 (the decisive acceptance check): on a shared fixture where the
+        // signals disagree, the hybrid ranker must fuse vector-semantic + graph +
+        // keyword so that a semantically-near article (top of the vector signal,
+        // ZERO literal keyword overlap) and a graph-linked entity (reached only by
+        // traversal, ZERO keyword overlap) both outrank the item with the highest
+        // literal-keyword coverage. A single-signal keyword ranker would invert
+        // this order.
+        let tmp = TempDir::new().unwrap();
+        let pack_dir = create_test_hybrid_pack(tmp.path(), "hybrid-pack");
+        let conn = Connection::open_with_flags(
+            pack_dir.join("pack.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+
+        let keywords = ["distributed", "consensus"];
+        // Query embedding on the same axis as "Raft Log Replication".
+        let query_embedding = vec![1.0, 0.0, 0.0, 0.0];
+
+        let (answer, sources) = query_hybrid(&conn, &keywords, &query_embedding, 5);
+
+        let pos = |title: &str| sources.iter().position(|s| s.title == title);
+
+        // Baseline: the keyword signal alone would rank the literal-keyword
+        // article first and would NOT return the semantic/graph-only items.
+        let keyword_only = query_articles(&conn, &keywords, 5);
+        assert_eq!(
+            keyword_only.first().map(|s| s.title.as_str()),
+            Some("Literal Keyword Match"),
+            "sanity: the keyword signal alone tops the literal-keyword article"
+        );
+        assert!(
+            !keyword_only
+                .iter()
+                .any(|s| s.title == "Raft Log Replication"),
+            "sanity: the keyword signal alone must NOT retrieve the zero-keyword semantic article"
+        );
+
+        // The fused ranking must include candidates each signal contributed.
+        let raft = pos("Raft Log Replication").expect("vector-semantic article must be fused in");
+        let bft = pos("Byzantine Fault Tolerance").expect("graph-linked entity must be fused in");
+        let literal = pos("Literal Keyword Match")
+            .expect("keyword article must still be present in the blend");
+
+        // The decisive assertions: semantic AND graph both outrank the
+        // highest-keyword-coverage item.
+        assert!(
+            raft < literal,
+            "the semantically-near article (no keyword overlap) must outrank the \
+             literal-keyword item; order: {:?}",
+            sources.iter().map(|s| &s.title).collect::<Vec<_>>()
+        );
+        assert!(
+            bft < literal,
+            "the graph-linked entity (no keyword overlap) must outrank the \
+             literal-keyword item; order: {:?}",
+            sources.iter().map(|s| &s.title).collect::<Vec<_>>()
+        );
+
+        // KGP-Q1 is preserved through fusion: the citation url survives.
+        let raft_src = &sources[raft];
+        assert_eq!(
+            raft_src.url.as_deref(),
+            Some("https://example.com/raft"),
+            "the fused source must keep its citation url"
+        );
+        // The graph signal fired, so the narrative answer names the traversal.
+        assert!(
+            !answer.is_empty(),
+            "the hybrid answer must be non-empty; got: {answer:?}"
+        );
+    }
+
+    #[test]
+    fn query_hybrid_end_to_end_blends_via_query_pack_db() {
+        // KGP-Q10 through the public query path: query_pack_db embeds the question
+        // with the default embedder and runs the hybrid ranker. The graph-linked
+        // "Byzantine Fault Tolerance" entity (no keyword overlap) must surface in
+        // the blended sources, proving the fused path is what the RPC handler runs.
+        let tmp = TempDir::new().unwrap();
+        let pack_dir = create_test_hybrid_pack(tmp.path(), "hybrid-pack");
+        let db_path = pack_dir.join("pack.db");
+
+        let (answer, sources, confidence) =
+            query_pack_db(&db_path, "distributed consensus", 5).unwrap();
+
+        assert!(confidence > 0.0);
+        assert!(
+            sources
+                .iter()
+                .any(|s| s.title == "Byzantine Fault Tolerance"),
+            "the graph-linked entity must appear in the blended result; got: {sources:?}"
+        );
+        assert!(!answer.is_empty());
+    }
+
+    #[test]
+    fn fuse_rankings_accumulates_cross_signal_agreement() {
+        // A candidate agreed on by two signals must outrank one that leads a
+        // single list, because RRF sums each list's contribution.
+        let agreed = SourceInfo {
+            title: "Agreed".into(),
+            section: "".into(),
+            url: None,
+        };
+        let solo = SourceInfo {
+            title: "Solo".into(),
+            section: "".into(),
+            url: None,
+        };
+        // `solo` is rank 0 of list A; `agreed` is rank 1 of A but rank 0 of B.
+        let list_a = vec![solo.clone(), agreed.clone()];
+        let list_b = vec![agreed.clone()];
+
+        let fused = fuse_rankings(&[(1.0, &list_a), (1.0, &list_b)], 5);
+        assert_eq!(
+            fused.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(),
+            vec!["Agreed", "Solo"],
+            "a candidate two signals agree on must outrank a single list's leader"
+        );
+    }
+
+    #[test]
+    fn fuse_rankings_backfills_missing_citation_url() {
+        // Identity is the case-folded title; when one signal's variant carries a
+        // url and another's does not, the fused source must keep the citation.
+        let with_url = SourceInfo {
+            title: "Ownership".into(),
+            section: "Concept".into(),
+            url: Some("https://example.com/ownership".into()),
+        };
+        let without_url = SourceInfo {
+            title: "ownership".into(), // different case → same identity
+            section: "".into(),
+            url: None,
+        };
+
+        // The url-less variant is seen first; the later url must backfill it.
+        let fused = fuse_rankings(&[(1.0, &[without_url]), (1.0, &[with_url])], 5);
+        assert_eq!(fused.len(), 1, "same-title variants must merge into one");
+        assert_eq!(
+            fused[0].url.as_deref(),
+            Some("https://example.com/ownership"),
+            "a citation url from any signal must survive fusion"
+        );
+        assert_eq!(
+            fused[0].section, "Concept",
+            "a non-empty section must backfill an empty one"
+        );
+    }
+
+    #[test]
+    fn fuse_rankings_single_list_preserves_order_and_respects_limit() {
+        // A single-signal pack must rank exactly by that signal's order (RRF of
+        // one list is order-preserving) and honour the limit — the property that
+        // keeps graph-only / keyword-only packs behaving as before hybrid ranking.
+        let list: Vec<SourceInfo> = ["A", "B", "C"]
+            .iter()
+            .map(|t| SourceInfo {
+                title: (*t).into(),
+                section: "".into(),
+                url: None,
+            })
+            .collect();
+
+        let fused = fuse_rankings(&[(0.5, &list)], 2);
+        assert_eq!(
+            fused.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(),
+            vec!["A", "B"],
+            "one list must fuse to its own order, capped at the limit"
+        );
     }
 }
