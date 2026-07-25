@@ -37,31 +37,27 @@ pub struct StagingLayout {
 
 #[derive(Debug)]
 pub struct InstallLock {
-    _file: fs::File,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    file: fs::File,
 }
 
-// Release the advisory `flock` explicitly on drop instead of relying on the
-// bare `close(2)` of `_file`.
-//
-// `flock` locks live on the *open file description*, not the file descriptor.
-// A `close()` only releases the lock once the LAST descriptor referring to that
-// description is closed. When Simard spawns a subprocess (`fork` + `exec`) while
-// holding the install lock, the child transiently inherits a dup of this
-// descriptor during its fork→exec window (the fd is close-on-exec, but CLOEXEC
-// only fires at `exec`, not at `fork`). If the installer drops the lock while a
-// concurrent spawn sits in that window, the child's inherited dup keeps the lock
-// held, so a legitimate subsequent `acquire_install_lock` spuriously fails with
-// EWOULDBLOCK. `LOCK_UN` releases the lock on the shared open file description
-// immediately and deterministically, regardless of any outstanding inherited
-// dups — making release correct under massively-parallel `fork`/`exec` load.
 #[cfg(unix)]
 impl Drop for InstallLock {
     fn drop(&mut self) {
         use std::os::fd::AsRawFd;
-        // Best-effort: the fd is still open here (the File drops after us), and
-        // the lock is released whether or not this succeeds once the fd closes.
+
+        // Release the advisory lock explicitly instead of relying on the file
+        // close alone. `flock` locks live on the open file description, so any
+        // sibling that `fork`/`exec`s while this guard is held inherits the same
+        // locked description; the kernel keeps the lock until *every* inherited
+        // descriptor is closed, which can outlast this guard by the child's
+        // brief fork→exec window. An explicit `LOCK_UN` drops the shared lock
+        // immediately, so a subsequent acquire never races that window.
+        //
+        // SAFETY: `flock` only reads the still-open lock-file descriptor; the
+        // File is closed immediately after this returns.
         unsafe {
-            libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
         }
     }
 }
@@ -196,7 +192,7 @@ pub fn acquire_install_lock(layout: &InstallLayout) -> InstallResult<InstallLock
         }
     }
 
-    Ok(InstallLock { _file: file })
+    Ok(InstallLock { file })
 }
 
 pub fn backup_path(layout: &InstallLayout, name: &str) -> PathBuf {

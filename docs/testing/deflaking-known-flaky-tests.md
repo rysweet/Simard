@@ -8,8 +8,8 @@ description: >
   threading an explicit state root through the goal-CRUD handlers (the `_at`
   cores) so the dashboard's read/write path never resolves the root ambiently
   from the process environment during a test.
-last_updated: 2026-06-28
-review_schedule: when a new env-reading handler is added to the dashboard, or when serial_test is upgraded
+last_updated: 2026-07-24
+review_schedule: when a new env-reading handler is added to the dashboard, when serial_test is upgraded, or when the stewardship `gh` spawn path changes
 owner: simard
 doc_type: reference
 related:
@@ -24,10 +24,11 @@ related:
 
 # De-flaking the known flaky tests
 
-This page documents the finished state of the work that made three known-flaky
+This page documents the finished state of the work that made the known-flaky
 tests deterministic under parallel `cargo test`. It is the test-author and
-reviewer contract for the two isolation mechanisms that closed the flakes, and
-the verification gate that keeps them closed.
+reviewer contract for the three de-flake mechanisms that closed the flakes — two
+env-isolation fixes and one `gh` spawn `ETXTBSY` retry — and the verification
+gate that keeps them closed.
 
 The flakes and their fixes:
 
@@ -35,12 +36,15 @@ The flakes and their fixes:
 | ----- | ---------- | ---------- | --- |
 | [#2412](https://github.com/rysweet/Simard/issues/2412) | `prompt_delivery::applied_mode_reports_inline_for_small_prompt`, `…_tempfile_for_large_prompt` | `Auto` mode reads `AMPLIHACK_PROMPT_DELIVERY` (`ENV_OVERRIDE`) and could observe a leaked `inline`/`tempfile` value set by a *concurrent* env test | Share the `prompt_delivery_env` serial key on the two Auto-mode size tests |
 | [#2408](https://github.com/rysweet/Simard/issues/2408) · [#2384](https://github.com/rysweet/Simard/issues/2384) | `operator_commands_dashboard::tests_goals_crud::full_goal_lifecycle_crud` (and siblings) | The goal-CRUD handlers resolved `SIMARD_STATE_ROOT` ambiently via `resolve_state_root()`, so a concurrent `setenv`/`remove_var` in an unrelated lib-binary test could tear the read and route a handler at the wrong state root | Thread an explicit state root through the goal-CRUD path (the `_at` handler cores) so the exercised path never reads the env |
+| [#4523](https://github.com/rysweet/Simard/pull/4523) | `stewardship::gh_client::tests::create_issue_reports_nonzero_exit_and_stderr_without_body_content` (and its sibling `fake_gh` test) | Under parallel `cargo test`, one thread writes its per-test `fake_gh` script and immediately `Command::spawn()`s it while another thread's concurrent `fork()` has inherited a still-open write descriptor to that file, so the kernel refuses the `exec` with `ETXTBSY` (`Text file busy`, `os error 26`) — a transient exec-vs-write race, not a logic bug | Wrap the `execute_create_issue` spawn in a bounded, `ETXTBSY`-exclusive retry (`retry_on_etxtbsy`) so the transient kernel condition is retried and the test path is deterministic |
 
-Both fixes preserve full test parallelism. Neither blanket-serializes the suite,
-and the de-flake mechanisms themselves do not change production behaviour: the
-HTTP handlers still resolve the state root from the environment exactly as
-before, and `select_mode` still reads the same env override. The suite is simply
-prevented from racing on those reads.
+All three fixes preserve full test parallelism. None blanket-serializes the
+suite, and the de-flake mechanisms themselves do not change production
+behaviour: the HTTP handlers still resolve the state root from the environment
+exactly as before, `select_mode` still reads the same env override, and
+`gh_client` still spawns the same `gh` argv over the same `--body-file -` stdin
+channel. The suite is simply prevented from racing on those reads and from
+tripping over the transient exec-vs-write `ETXTBSY` window.
 
 > **One coupled bug fix.** Wiring `remove_goal` through the explicit-root core
 > surfaced a pre-existing dashboard bug: it persisted removals through the plain
@@ -60,7 +64,12 @@ prevented from racing on those reads.
 >   core**. Tests call the `_at` cores with `HermeticState::state_root()`, so the
 >   goal-board read/write path is driven by an explicit, test-owned path rather
 >   than the process-global environment.
-> - **Gate:** ≥20 consecutive parallel runs of the three tests with zero
+> - **#4523:** wrap the `execute_create_issue` `.spawn()` in
+>   `src/stewardship/gh_client.rs` with `retry_on_etxtbsy` — a bounded (8 × 5 ms),
+>   `ETXTBSY`-exclusive retry that tolerates the transient exec-vs-write race on
+>   the `fake_gh` helper without deleting or ignoring any test. Leaves
+>   `tool_executor.rs` (the PR's ECHILD/SIGCHLD fix) untouched.
+> - **Gate:** ≥20 consecutive parallel runs of the affected tests with zero
 >   failures, plus a green `cargo test --all-features`.
 
 ---
@@ -369,9 +378,201 @@ identically. Only the *test* path opts into explicit-root threading.
 
 ---
 
+## Fix #4523 — the `gh` spawn `ETXTBSY` race
+
+### The race this eliminates
+
+`stewardship::gh_client` shells out to the real `gh` binary in production, but its
+unit tests exercise `execute_create_issue` against a small **`fake_gh`** helper —
+a `#!/bin/sh` script that each test writes into its own `tempfile::tempdir()`,
+`chmod 0o700`s, and then spawns. Under parallel `cargo test`, two things happen
+on different threads at nearly the same time:
+
+1. One test thread writes its per-test `fake_gh` script and, in the window before
+   that write handle is fully closed, is about to `exec` it.
+2. Another test thread concurrently calls `Command::spawn()` (a `fork`), whose
+   child inherits the still-open *writable* file descriptor to that script.
+
+If the `execve(2)` lands while the forked child still holds that write handle,
+Linux refuses the exec with **`ETXTBSY` — `Text file busy`
+(`os error 26`)**. The failure surfaced as an intermittent red `coverage` check
+on PR [#4523](https://github.com/rysweet/Simard/pull/4523):
+
+```
+stewardship::gh_client::tests::create_issue_reports_nonzero_exit_and_stderr_without_body_content
+  panicked: failed to spawn `gh issue create`: Text file busy (os error 26)
+```
+
+This is a classic **exec-vs-write TOCTOU** at the OS layer. It is not a defect in
+the ECHILD/SIGCHLD reaping fix that PR #4523 actually delivers
+(`src/base_type_rustyclawd/tool_executor.rs`) — that file is untouched by this
+de-flake. The red check simply co-located with an unrelated, pre-existing flaky
+test, and the fix belongs where CI proves the failure lives:
+`src/stewardship/gh_client.rs`.
+
+> **TL;DR**
+>
+> - The `.spawn()` inside `execute_create_issue` is wrapped in
+>   `retry_on_etxtbsy`, a bounded retry that retries **only** `ETXTBSY`.
+> - Retry budget: **8 attempts, 5 ms constant sleep** between attempts
+>   (≤ ~35 ms added latency, and only on the rare retry path).
+> - Every other error (`ENOENT`, `EACCES`, `EPERM`, …) and every `Ok` returns
+>   **immediately** — the fix never masks a real failure.
+> - Classification is **numeric** (`err.raw_os_error() == Some(libc::ETXTBSY)`),
+>   never a locale-dependent match on the error string.
+> - Production behaviour is unchanged: the same argv, the same `--body-file -`
+>   stdin channel, the same no-shell `Command::args` exec. The only difference is
+>   that a transient kernel `ETXTBSY` is retried instead of surfaced.
+
+### The mechanism
+
+Two small, pure helpers were added to `src/stewardship/gh_client.rs`, and the
+existing spawn call site was wrapped in the retry.
+
+**`is_etxtbsy` — numeric classification.**
+
+```rust
+/// True iff `err` is the transient `ETXTBSY` (`Text file busy`, os error 26)
+/// exec-vs-write race. Classification is numeric only — no string matching.
+fn is_etxtbsy(err: &io::Error) -> bool {
+    err.raw_os_error() == Some(libc::ETXTBSY) // 26
+}
+```
+
+`libc` is already a direct dependency of the crate (`libc = "=0.2.185"` in
+`Cargo.toml`), so the named constant `libc::ETXTBSY` is used directly — no new
+dependency is added and no magic number is hard-coded. `libc::ETXTBSY` is `26`
+on Linux; the value is compared numerically, never against the error string.
+
+**`retry_on_etxtbsy` — bounded, `ETXTBSY`-exclusive retry.**
+
+```rust
+/// Run `op`, retrying **only** on `ETXTBSY`. All other `Err` and any `Ok`
+/// return immediately. Bounded to `MAX_ATTEMPTS` with a constant backoff so a
+/// persistent condition can never hang the caller.
+fn retry_on_etxtbsy<T, F: FnMut() -> io::Result<T>>(mut op: F) -> io::Result<T> {
+    const MAX_ATTEMPTS: usize = 8;
+    const BACKOFF: Duration = Duration::from_millis(5);
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        match op() {
+            Err(err) if is_etxtbsy(&err) && attempt < MAX_ATTEMPTS => {
+                // Retry path only: log the attempt index and error code —
+                // never the body, title, args, repo, or token.
+                tracing::debug!(
+                    attempt,
+                    os_error = err.raw_os_error(),
+                    "gh spawn hit ETXTBSY; retrying"
+                );
+                std::thread::sleep(BACKOFF);
+            }
+            other => return other,
+        }
+    }
+    unreachable!("loop returns on the final attempt")
+}
+```
+
+**The wrapped spawn** in `execute_create_issue`:
+
+```rust
+let mut child = retry_on_etxtbsy(|| {
+    Command::new(executable)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+})
+.map_err(CreateIssueExecutionError::Spawn)?;
+```
+
+Everything downstream — the piped-stdin `--body-file -` write, `wait_with_output`,
+and the `CreateIssueExecutionError` mapping — is byte-for-byte identical.
+
+### Why not just serialize the tests?
+
+Adding `#[serial]` to the two `fake_gh` tests narrows the window but does **not**
+close it: the `fork`/`exec` race is against *any* concurrent `Command::spawn()`
+anywhere in the test binary (each fork can inherit the just-opened write
+descriptor), not only against the sibling `fake_gh` test, and serialization would
+needlessly drop test parallelism. The retry closes the race at its source — the
+transient kernel condition — and keeps the suite fully parallel. Serial grouping
+may be layered on as defence-in-depth, but it is not the fix.
+
+### What this fix deliberately does *not* do
+
+- It does **not** delete or `#[ignore]` any flaky test. Both `fake_gh` tests and
+  the no-secret-leak tests stay live and green.
+- It does **not** retry anything other than `ETXTBSY`. `ENOENT` (binary missing),
+  `EACCES`/`EPERM` (permissions), and `ENOMEM` fail loud on the first attempt.
+- It does **not** touch `src/base_type_rustyclawd/tool_executor.rs`. PR #4523's
+  ECHILD-tolerance fix and its PRD are preserved intact.
+- It does **not** log any issue content. The retry-path `tracing::debug!` emits
+  only the attempt index and the numeric OS error — no title, body, argv, repo,
+  or token — so the existing no-leak tests remain green.
+
+### Security properties
+
+| # | Property | Guarantee |
+| - | -------- | --------- |
+| S1 | No secret leakage | Retry-path `tracing::debug!` logs only `attempt` + `raw_os_error()`; never body/title/args/repo/token. No-leak tests stay green. |
+| S2 | Numeric classification | `ETXTBSY` matched via `raw_os_error() == Some(libc::ETXTBSY)` (26), never by string, so locale/format changes cannot mis-route. |
+| S3 | Fail-loud on real errors | Only `ETXTBSY` is retried; all other errors surface immediately and unmodified. |
+| S4 | Bounded, no busy-spin | Hard cap of 8 attempts × 5 ms synchronous sleep — no unbounded loop, no local DoS/hang. |
+| S5 | Unchanged exec boundary | Same `Command::args` no-shell exec and `--body-file -` stdin channel; user input is not re-parsed on retry. |
+| S6 | No new TOCTOU window | Only the transient kernel condition is retried; no runtime `chmod`, fd reopen, or temp-file creation is introduced. |
+
+### The tests
+
+Deterministic, subprocess-free unit tests were added alongside the two existing
+`fake_gh` tests in the inline `#[cfg(test)] mod tests` of `gh_client.rs`:
+
+- **`is_etxtbsy` classifies correctly** — returns `true` for a synthetic
+  `io::Error::from_raw_os_error(26)` and `false` for `ENOENT` (2) and `EACCES`
+  (13). No subprocess, no sleep.
+- **`retry_on_etxtbsy` retries only `ETXTBSY`** — a closure that returns
+  `ETXTBSY` on the first N calls and then `Ok` is retried and ultimately
+  succeeds; a closure returning `ENOENT` returns on the **first** call (asserts
+  the counter is `1`); a closure returning `Ok` is called exactly once.
+- **`retry_on_etxtbsy` respects the cap** — a closure that always returns
+  `ETXTBSY` returns `Err(ETXTBSY)` after exactly `MAX_ATTEMPTS` calls, proving the
+  bound and the fail-loud surrender.
+
+Because the retry tests drive `retry_on_etxtbsy` with in-memory closures (not a
+real spawn), they add **zero** real backoff to the suite and cannot themselves
+flake.
+
+### Verification
+
+```bash
+# Targeted: the stewardship gh_client tests, including the two fake_gh tests.
+cargo test -p simard stewardship::gh_client
+
+# Parallel stress: the historically flaky binary, many times, high thread count.
+for i in $(seq 1 30); do
+  cargo test -p simard stewardship::gh_client -- --test-threads=16 \
+    || { echo "FLAKE on run $i"; break; }
+done
+```
+
+The gate for this fix: **≥30 consecutive parallel runs with zero `ETXTBSY`
+failures**, a green `cargo test --all-features`, and — the authoritative signal —
+`gh pr checks 4523` reporting **0 FAILURE** (all required checks green,
+including the `coverage` check that surfaced the flake). Verify against real CI,
+not local assumption:
+
+```bash
+gh pr checks 4523
+```
+
+> **Do not merge.** This work leaves PR #4523 green and merge-ready; landing it is
+> a human/merge-queue action, out of scope here.
+
 ## Verification gate
 
-A change to either fix is merge-ready only when all of the following pass.
+A change to any of the three fixes is merge-ready only when all of the following
+pass.
 
 ### Targeted stress (the de-flake proof)
 
@@ -455,17 +656,22 @@ tests.
 
 ## Scope
 
-**In scope:** the two isolation mechanisms above, their tests, the one coupled
+**In scope:** the three de-flake mechanisms above (the two env-isolation fixes
+and the Fix #4523 `gh` spawn `ETXTBSY` retry), their tests, the one coupled
 removal bug fix (`remove_goal` now persists removals via
 `save_goal_board_with_removals`, surfaced while wiring `remove_goal_at`), and this
-page.
+page. Fix #4523 touches only `src/stewardship/gh_client.rs` (spawn retry +
+deterministic unit tests); it leaves `src/base_type_rustyclawd/tool_executor.rs`
+(the PR's ECHILD/SIGCHLD fix) unchanged.
 
 **Out of scope (confirmed):** snapshot/redeploy docs; refactoring `select_mode`
 or the goal-board logic beyond the isolation needs and that coupled removal fix;
-unrelated flaky tests (e.g. the `ooda_brain::recipe_brain` recipe-resolution and
-`base_type_copilot` copilot-spawning tests, which only fail on a developer box
-that has a live `~/.simard` install / `copilot` on `PATH` and pass/skip in clean
-CI); any change to CI workflow definitions.
+broad `rustyclawd` refactors or any change to the ECHILD-tolerance fix; merging
+any PR (including #4523 — left green for the merge queue); unrelated flaky tests
+(e.g. the `ooda_brain::recipe_brain` recipe-resolution and `base_type_copilot`
+copilot-spawning tests, which only fail on a developer box that has a live
+`~/.simard` install / `copilot` on `PATH` and pass/skip in clean CI); any change
+to CI workflow definitions.
 
 ## Related pages
 
@@ -479,3 +685,6 @@ CI); any change to CI workflow definitions.
   module, `select_mode`, and `ENV_OVERRIDE`.
 - [Goal-board API](../reference/goal-board-api.md) — the dashboard goal-CRUD
   endpoints these handlers back.
+- [`stewardship::gh_client`](../prompt-delivery.md) — the GitHub issue-creation
+  path (`src/stewardship/gh_client.rs`) whose `gh` spawn is guarded by the
+  `ETXTBSY` retry (Fix #4523).

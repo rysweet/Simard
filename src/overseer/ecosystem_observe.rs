@@ -4,8 +4,10 @@
 //! AGENTIC STEPS + PROMPTS — not a Rust "code sensor." This module is the only
 //! new Rust the feature needs, and it is deliberately thin:
 //!
-//! 1. [`load_ecosystem_roster`] reads the committed roster of stewarded repos as
-//!    pure DATA (a list of `owner/name` slugs), validating each slug before use.
+//! 1. [`load_stewarded_roster`] reads the identity-CURATED roster of stewarded
+//!    repos (seeded from committed identity data on first use, then owned as
+//!    durable mutable state) as pure DATA — a list of `owner/name` slugs,
+//!    validating each slug before use.
 //! 2. [`should_observe`] decides, on the Overseer cadence, whether an observation
 //!    pass is due this tick (reusing the existing gap-scan enable / every-N gate).
 //! 3. [`RecipeEcosystemObserver`] invokes the `ecosystem-observe` recipe through
@@ -23,27 +25,19 @@ use std::path::Path;
 use crate::error::{SimardError, SimardResult};
 
 // ─────────────────────────── roster (data) ─────────────────────────────────
+//
+// The stewarded roster is NOT a framework file bound to code any more. It is
+// identity-scoped mutable state (`crate::identity_curated_state`, collection
+// `stewarded_repos`) that Simard OWNS and curates agentically. On first use the
+// generic mechanism SEEDS the roster from committed IDENTITY DATA
+// (`prompt_assets/simard/identity/stewarded_repos.seed.toml`) into the durable
+// state root — which `install` never overwrites — and from then on that curated
+// copy is the single source of truth. This module only *reads* it and validates
+// the `owner/name` slugs before they reach the agent's `gh` calls.
 
-/// One roster entry as parsed from `ecosystem_repos.toml`. Pure data — a slug
-/// plus a human-readable note. The note is ignored by the loader; only the slug
-/// strings reach the agent.
-#[derive(Debug, serde::Deserialize)]
-struct RosterEntry {
-    slug: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    note: String,
-}
-
-/// The roster file shape: `schema_version` plus a `[[repo]]` array.
-#[derive(Debug, serde::Deserialize)]
-struct RosterFile {
-    #[serde(default)]
-    #[allow(dead_code)]
-    schema_version: u32,
-    #[serde(default)]
-    repo: Vec<RosterEntry>,
-}
+/// The identity-scoped collection name that holds the stewarded roster. A
+/// compile-time constant — never derived from env, argv, or file contents.
+pub const STEWARDED_REPOS_COLLECTION: &str = "stewarded_repos";
 
 /// Validate a stewarded-repo slug as `owner/name`. Rejects anything that is not a
 /// clean two-segment slug: a missing or extra `/`, an empty segment, embedded
@@ -70,59 +64,108 @@ fn is_valid_slug(slug: &str) -> bool {
     true
 }
 
-/// Load the stewarded roster from the committed TOML data file.
+/// Load the stewarded roster as validated `owner/name` slugs from the
+/// **identity-curated** collection, seeding it on first use from committed
+/// identity data.
 ///
-/// Returns the list of validated `owner/name` slugs, in file order. Each slug is
-/// checked with [`is_valid_slug`]; a malformed slug is **skipped with a logged
-/// warning** — it never reaches the agent's `gh` calls. An empty roster (no
-/// valid slugs, whether the file was empty or every slug was malformed) is an
-/// **error**, never a silent empty pass: the caller skips the observation tick
-/// and fabricates no Problems.
-pub fn load_ecosystem_roster(path: &Path) -> SimardResult<Vec<String>> {
-    let raw = std::fs::read_to_string(path).map_err(|e| SimardError::PromptAssetRead {
-        path: path.to_path_buf(),
-        reason: format!("read ecosystem roster failed: {e}"),
-    })?;
-    parse_ecosystem_roster(&raw).map_err(|reason| SimardError::PromptAssetRead {
-        path: path.to_path_buf(),
+/// This is the single source of truth for the roster. It routes through
+/// [`crate::identity_curated_state::load_or_seed`]:
+///   - if the durable `<state_root>/identity-state/<identity>/stewarded_repos.toml`
+///     exists, its curated contents win (Simard's agentic edits, survived across
+///     re-installs);
+///   - otherwise the collection is seeded from
+///     `prompt_assets/simard/identity/stewarded_repos.seed.toml` (resolved
+///     install-first, then in-tree) and persisted, then returned.
+///
+/// Each item `key` is validated as an `owner/name` slug with [`is_valid_slug`];
+/// a malformed slug is **skipped with a logged warning** — it never reaches the
+/// agent's `gh` calls. An empty roster (no valid slugs) is an **error**, never a
+/// silent empty pass: the caller skips the observation tick and fabricates no
+/// Problems.
+///
+/// `state_root_override` / `home_override` are test seams; production passes
+/// `None`.
+pub fn load_stewarded_roster(
+    repo_root: &Path,
+    identity: &str,
+    state_root_override: Option<&Path>,
+    home_override: Option<&Path>,
+) -> SimardResult<Vec<String>> {
+    let repo_root = repo_root.to_path_buf();
+    let collection = crate::identity_curated_state::load_or_seed(
+        STEWARDED_REPOS_COLLECTION,
+        identity,
+        || load_roster_seed(&repo_root, home_override),
+        state_root_override,
+    )?;
+    slugs_from_collection(&collection).map_err(|reason| SimardError::PersistentStoreIo {
+        store: "stewarded_roster".into(),
+        action: "validate".into(),
+        path: repo_root,
         reason,
     })
 }
 
-/// Parse & validate a roster from its TOML **text** — the path-agnostic core
-/// shared by the filesystem loader [`load_ecosystem_roster`] and any
-/// compile-time-embedded roster (e.g. the CI-health sweep, which `include_str!`s
-/// the same `ecosystem_repos.toml` so the roster has exactly one source of
-/// truth). Returns the validated `owner/name` slugs in file order.
-///
-/// Each slug is checked with [`is_valid_slug`]; a malformed slug is skipped with
-/// a logged warning. An empty roster (no valid slugs — the file was empty or
-/// every slug was malformed) is an **error** (the `Err` reason), never a silent
-/// empty pass, so a caller can fail loud instead of concluding an empty fleet is
-/// healthy. The error carries only a human-readable reason; the caller wraps it
-/// in whatever error type fits its context (a filesystem path, an embed marker).
-pub fn parse_ecosystem_roster(raw: &str) -> Result<Vec<String>, String> {
-    let parsed: RosterFile =
-        toml::from_str(raw).map_err(|e| format!("parse ecosystem roster failed: {e}"))?;
+/// Convenience wrapper for callers without an explicit `repo_root` / identity /
+/// state root (e.g. the CI-health sweep CLI). Resolves the active identity via
+/// [`crate::identity_curated_state::active_identity`], the seed's in-tree
+/// fallback from `CARGO_MANIFEST_DIR`, and the state root from the environment.
+pub fn load_stewarded_roster_from_env() -> SimardResult<Vec<String>> {
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let identity = crate::identity_curated_state::active_identity();
+    load_stewarded_roster(&repo_root, &identity, None, None)
+}
 
-    let mut roster = Vec::with_capacity(parsed.repo.len());
-    for entry in parsed.repo {
-        let slug = entry.slug.trim();
+/// Validate a curated collection's item keys into an ordered list of `owner/name`
+/// slugs. Malformed slugs are skipped with a logged warning; an empty result is
+/// an `Err` reason (never a silent empty pass), so a caller fails loud instead of
+/// concluding an empty fleet is healthy.
+fn slugs_from_collection(
+    collection: &crate::identity_curated_state::CuratedCollection,
+) -> Result<Vec<String>, String> {
+    let mut roster = Vec::with_capacity(collection.items.len());
+    for item in &collection.items {
+        let slug = item.key.trim();
         if is_valid_slug(slug) {
             roster.push(slug.to_string());
         } else {
             tracing::warn!(
                 target: "overseer::ecosystem_observe",
-                slug = %entry.slug,
-                "ecosystem roster: skipping malformed slug (not a clean owner/name)"
+                slug = %item.key,
+                "stewarded roster: skipping malformed slug (not a clean owner/name)"
             );
         }
     }
-
     if roster.is_empty() {
-        return Err("ecosystem roster has no valid owner/name slugs".to_string());
+        return Err("stewarded roster has no valid owner/name slugs".to_string());
     }
     Ok(roster)
+}
+
+/// Load the committed roster SEED (identity data) as a curated collection,
+/// resolving the seed file install-first then in-tree. Used only on first use,
+/// when the durable curated roster does not exist yet.
+fn load_roster_seed(
+    repo_root: &Path,
+    home_override: Option<&Path>,
+) -> SimardResult<crate::identity_curated_state::CuratedCollection> {
+    let seed_path = resolve_roster_seed_path(repo_root, home_override).ok_or_else(|| {
+        let in_tree = repo_root
+            .join(ROSTER_SEED_RELDIR)
+            .join(ROSTER_SEED_FILENAME);
+        SimardError::PromptAssetMissing {
+            asset_id: STEWARDED_REPOS_COLLECTION.to_string(),
+            path: in_tree,
+        }
+    })?;
+    let raw = std::fs::read_to_string(&seed_path).map_err(|e| SimardError::PromptAssetRead {
+        path: seed_path.clone(),
+        reason: format!("read stewarded-roster seed failed: {e}"),
+    })?;
+    toml::from_str(&raw).map_err(|e| SimardError::PromptAssetRead {
+        path: seed_path,
+        reason: format!("parse stewarded-roster seed failed: {e}"),
+    })
 }
 
 // ─────────────────────────── cadence gate ──────────────────────────────────
@@ -283,21 +326,22 @@ fn resolve_observe_recipe_path(
     None
 }
 
-/// The stewarded roster this rail loads (resolved install-first, then in-tree).
-/// Hardcoded const — never derived from env/args/file contents (path-traversal
-/// prevention).
-pub(crate) const ECOSYSTEM_ROSTER_FILENAME: &str = "ecosystem_repos.toml";
+/// The stewarded-roster SEED filename and its relative directory under
+/// `prompt_assets/simard`. Hardcoded consts — never derived from env/args/file
+/// contents (path-traversal prevention). The seed is IDENTITY DATA consumed only
+/// on first use; the durable roster lives under the state root.
+pub(crate) const ROSTER_SEED_FILENAME: &str = "stewarded_repos.seed.toml";
+pub(crate) const ROSTER_SEED_RELDIR: &str = "prompt_assets/simard/identity";
 
-/// Resolve the `ecosystem_repos.toml` roster path. Checks, in order:
-///   1. `~/.simard/prompt_assets/simard/<name>` (installed / hot-reload path)
-///   2. `<repo_root>/prompt_assets/simard/<name>` (in-tree)
+/// Resolve the stewarded-roster SEED path. Checks, in order:
+///   1. `~/.simard/prompt_assets/simard/identity/<name>` (installed path)
+///   2. `<repo_root>/prompt_assets/simard/identity/<name>` (in-tree)
 ///
-/// Mirrors [`resolve_observe_recipe_path`] EXACTLY (minus the `recipes/`
-/// subdir), fixing issue #2419: the deployed daemon's `repo_root` is a stale
-/// source checkout that lacks the roster, while the roster is installed under
-/// `~/.simard`. `home_override` keeps tests hermetic against the ambient
-/// `~/.simard`; production passes `None`.
-pub(crate) fn resolve_ecosystem_roster_path(
+/// Mirrors [`resolve_observe_recipe_path`]'s install-first ladder so a deployed
+/// daemon (whose `repo_root` is a stale source checkout) still finds the seed
+/// installed under `~/.simard`. `home_override` keeps tests hermetic against the
+/// ambient `~/.simard`; production passes `None`.
+pub(crate) fn resolve_roster_seed_path(
     repo_root: &Path,
     home_override: Option<&Path>,
 ) -> Option<std::path::PathBuf> {
@@ -307,15 +351,15 @@ pub(crate) fn resolve_ecosystem_roster_path(
     if let Some(home) = home {
         let installed = home
             .join(".simard")
-            .join("prompt_assets/simard")
-            .join(ECOSYSTEM_ROSTER_FILENAME);
+            .join(ROSTER_SEED_RELDIR)
+            .join(ROSTER_SEED_FILENAME);
         if installed.is_file() {
             return Some(installed);
         }
     }
     let in_tree = repo_root
-        .join("prompt_assets/simard")
-        .join(ECOSYSTEM_ROSTER_FILENAME);
+        .join(ROSTER_SEED_RELDIR)
+        .join(ROSTER_SEED_FILENAME);
     if in_tree.is_file() {
         return Some(in_tree);
     }
@@ -432,7 +476,6 @@ impl EcosystemRecipeRunner for SpawnEcosystemRecipeRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use std::sync::Mutex;
 
     // ── fake recipe-runner seam ──────────────────────────────────────────
@@ -477,13 +520,6 @@ mod tests {
                 }),
             }
         }
-    }
-
-    fn write_tmp(contents: &str) -> tempfile::NamedTempFile {
-        let mut f = tempfile::NamedTempFile::new().unwrap();
-        f.write_all(contents.as_bytes()).unwrap();
-        f.flush().unwrap();
-        f
     }
 
     // ── cadence gate ─────────────────────────────────────────────────────
@@ -596,18 +632,16 @@ mod tests {
         );
     }
 
-    // ── roster loader ────────────────────────────────────────────────────
+    // ── roster loader (identity-curated) ─────────────────────────────────
 
     #[test]
-    fn roster_loads_committed_file() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("prompt_assets/simard/ecosystem_repos.toml");
-        let roster = load_ecosystem_roster(&path).expect("committed roster must load");
-        assert_eq!(
-            roster.len(),
-            10,
-            "the committed roster lists the 10 stewarded repos"
-        );
+    fn seed_slugs_are_validated_from_committed_seed_file() {
+        // The committed identity-data SEED lists the stewarded repos as generic
+        // curated items; validating its keys yields the same 10-repo roster.
+        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let seed = load_roster_seed(&repo_root, None).expect("committed seed must load");
+        let roster = slugs_from_collection(&seed).expect("seed slugs validate");
+        assert_eq!(roster.len(), 10, "the seed lists the 10 stewarded repos");
         assert!(roster.contains(&"rysweet/Simard".to_string()));
         assert!(roster.contains(&"rysweet/amplihack-rs".to_string()));
         assert!(roster.contains(&"rysweet/gadugi-agentic-test".to_string()));
@@ -617,21 +651,25 @@ mod tests {
         );
     }
 
+    /// A curated collection from `(key, note)` pairs.
+    fn collection(items: &[(&str, &str)]) -> crate::identity_curated_state::CuratedCollection {
+        crate::identity_curated_state::CuratedCollection::from_items(
+            items
+                .iter()
+                .map(|(k, n)| crate::identity_curated_state::CuratedItem::new(*k, *n))
+                .collect(),
+        )
+    }
+
     #[test]
-    fn roster_skips_malformed_slugs_but_keeps_valid() {
-        let toml = r#"
-schema_version = 1
-[[repo]]
-slug = "rysweet/Simard"
-[[repo]]
-slug = "not-a-slug"
-[[repo]]
-slug = "rysweet//azlin"
-[[repo]]
-slug = "rysweet/azlin"
-"#;
-        let f = write_tmp(toml);
-        let roster = load_ecosystem_roster(f.path()).unwrap();
+    fn slugs_skips_malformed_but_keeps_valid_in_order() {
+        let c = collection(&[
+            ("rysweet/Simard", ""),
+            ("not-a-slug", ""),
+            ("rysweet//azlin", ""),
+            ("rysweet/azlin", ""),
+        ]);
+        let roster = slugs_from_collection(&c).unwrap();
         assert_eq!(
             roster,
             vec!["rysweet/Simard".to_string(), "rysweet/azlin".to_string()],
@@ -640,60 +678,74 @@ slug = "rysweet/azlin"
     }
 
     #[test]
-    fn roster_all_invalid_is_error_not_empty_pass() {
-        let toml = r#"
-schema_version = 1
-[[repo]]
-slug = "bad"
-"#;
-        let f = write_tmp(toml);
+    fn slugs_all_invalid_is_error_not_empty_pass() {
+        let c = collection(&[("bad", "")]);
         assert!(
-            load_ecosystem_roster(f.path()).is_err(),
+            slugs_from_collection(&c).is_err(),
             "a roster with no valid slugs is an error, never a silent empty pass"
         );
     }
 
     #[test]
-    fn roster_no_entries_is_error() {
-        let f = write_tmp("schema_version = 1\n");
-        assert!(load_ecosystem_roster(f.path()).is_err());
+    fn slugs_no_items_is_error() {
+        let c = crate::identity_curated_state::CuratedCollection::default();
+        assert!(slugs_from_collection(&c).is_err());
     }
 
     #[test]
-    fn parse_str_core_is_path_agnostic_and_matches_the_file_loader() {
-        // The extracted string parser (shared with the CI-health sweep's embedded
-        // roster) validates and orders slugs identically to the file loader, with
-        // no filesystem involved.
-        let toml = r#"
-schema_version = 1
-[[repo]]
-slug = "rysweet/Simard"
-[[repo]]
-slug = "not-a-slug"
-[[repo]]
-slug = "rysweet/azlin"
-"#;
-        let roster = parse_ecosystem_roster(toml).unwrap();
-        assert_eq!(
-            roster,
-            vec!["rysweet/Simard".to_string(), "rysweet/azlin".to_string()],
+    fn load_stewarded_roster_seeds_from_committed_seed_then_owns_it() {
+        // Fresh state root + real repo_root (so the seed resolves in-tree). First
+        // load seeds from the committed seed; a curation edit then persists to the
+        // durable state; the next load returns the CURATED copy, not the seed.
+        let state = tempfile::tempdir().unwrap();
+        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let first = load_stewarded_roster(&repo_root, "simard", Some(state.path()), None).unwrap();
+        assert!(first.contains(&"rysweet/Simard".to_string()));
+        assert_eq!(first.len(), 10);
+
+        // Curate: add a repo to the OWNED mutable state, then drop one.
+        crate::identity_curated_state::add_item(
+            STEWARDED_REPOS_COLLECTION,
+            "simard",
+            crate::identity_curated_state::CuratedItem::new("rysweet/skwaq", "vuln research"),
+            Some(state.path()),
+        )
+        .unwrap();
+        crate::identity_curated_state::remove_item(
+            STEWARDED_REPOS_COLLECTION,
+            "simard",
+            "rysweet/azlin",
+            Some(state.path()),
+        )
+        .unwrap();
+
+        let second = load_stewarded_roster(&repo_root, "simard", Some(state.path()), None).unwrap();
+        assert!(
+            second.contains(&"rysweet/skwaq".to_string()),
+            "the agentic addition is present (curated copy wins, not re-seeded)"
         );
-        // Empty / all-malformed rosters are an Err reason, never a silent empty
-        // pass — the same fail-loud contract the file loader wraps in an error.
-        assert!(parse_ecosystem_roster("schema_version = 1\n").is_err());
-        assert!(parse_ecosystem_roster("not valid toml {{").is_err());
+        assert!(
+            !second.contains(&"rysweet/azlin".to_string()),
+            "the agentic removal persisted across reload"
+        );
     }
 
     #[test]
-    fn roster_missing_file_is_error() {
-        let missing = std::path::Path::new("/nonexistent/ecosystem_repos.toml");
-        assert!(load_ecosystem_roster(missing).is_err());
-    }
-
-    #[test]
-    fn roster_invalid_toml_is_error() {
-        let f = write_tmp("this is = = not valid toml");
-        assert!(load_ecosystem_roster(f.path()).is_err());
+    fn load_stewarded_roster_errors_when_no_seed_and_no_state() {
+        // No durable state AND no seed anywhere → a loud error, never an empty pass.
+        let state = tempfile::tempdir().unwrap();
+        let empty_repo = tempfile::tempdir().unwrap();
+        let empty_home = tempfile::tempdir().unwrap();
+        assert!(
+            load_stewarded_roster(
+                empty_repo.path(),
+                "simard",
+                Some(state.path()),
+                Some(empty_home.path()),
+            )
+            .is_err(),
+            "missing seed + empty state fails loud (no silent empty roster)"
+        );
     }
 
     // ── slug validation ──────────────────────────────────────────────────
@@ -721,113 +773,98 @@ slug = "rysweet/azlin"
         assert!(!is_valid_slug("owner/name$(id)"));
     }
 
-    // ── roster path resolution (install-first) ───────────────────────────
+    // ── roster-seed path resolution (install-first) ──────────────────────
     //
-    // These specify `resolve_ecosystem_roster_path`, the install-first
-    // resolver that fixes the #2419 bug where the deployed daemon
-    // (WorkingDirectory ~/.simard, a stale source `repo_root`) failed-closed
-    // on EVERY tick with "NOT wired: failed to load stewarded roster" because
-    // the roster was only ever sought under `repo_root`. The resolver mirrors
-    // `resolve_observe_recipe_path` EXACTLY: prefer
-    // `<home>/.simard/prompt_assets/simard/ecosystem_repos.toml`, else fall
-    // back to `<repo_root>/prompt_assets/simard/ecosystem_repos.toml`, else
-    // `None`. All tests are hermetic: they use `tempfile::tempdir` + an
-    // explicit `home_override` and NEVER touch the ambient `~/.simard`.
+    // These specify `resolve_roster_seed_path`, the install-first resolver for
+    // the identity-data SEED. On a deployed daemon (WorkingDirectory ~/.simard,
+    // a stale source `repo_root`) the seed must resolve from the installed
+    // `~/.simard/prompt_assets/simard/identity/stewarded_repos.seed.toml` rather
+    // than the (possibly stale) `repo_root`. All tests are hermetic: they use
+    // `tempfile::tempdir` + an explicit `home_override` and NEVER touch the
+    // ambient `~/.simard`.
 
-    /// Write the roster under `<base>/prompt_assets/simard/ecosystem_repos.toml`
-    /// and return the file path. `base` is a home's `.simard` dir or a repo_root.
-    fn write_roster_under(base: &Path) -> std::path::PathBuf {
-        let dir = base.join("prompt_assets/simard");
+    /// Write the SEED under `<base>/prompt_assets/simard/identity/…` and return
+    /// the file path. `base` is a home's `.simard` dir or a repo_root.
+    fn write_seed_under(base: &Path) -> std::path::PathBuf {
+        let dir = base.join(ROSTER_SEED_RELDIR);
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(ECOSYSTEM_ROSTER_FILENAME);
+        let path = dir.join(ROSTER_SEED_FILENAME);
         std::fs::write(
             &path,
-            "schema_version = 1\n[[repo]]\nslug = \"rysweet/Simard\"\n",
+            "schema_version = 1\n[[item]]\nkey = \"rysweet/Simard\"\n",
         )
         .unwrap();
         path
     }
 
     #[test]
-    fn roster_path_filename_is_fixed_const() {
-        // Security invariant: the filename is a hardcoded const, never derived
-        // from env/args/file contents (path-traversal prevention).
-        assert_eq!(ECOSYSTEM_ROSTER_FILENAME, "ecosystem_repos.toml");
+    fn seed_filename_and_dir_are_fixed_consts() {
+        // Security invariant: the names are hardcoded consts, never derived from
+        // env/args/file contents (path-traversal prevention).
+        assert_eq!(ROSTER_SEED_FILENAME, "stewarded_repos.seed.toml");
+        assert_eq!(ROSTER_SEED_RELDIR, "prompt_assets/simard/identity");
     }
 
     #[test]
-    fn roster_path_prefers_installed_home() {
-        // Given BOTH an installed roster (~/.simard/...) and an in-tree roster
-        // (repo_root/...), the resolver prefers the INSTALLED one (install-first),
-        // exactly like the recipe resolver.
+    fn seed_path_prefers_installed_home() {
         let home = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
-        let installed = write_roster_under(&home.path().join(".simard"));
-        let _in_tree = write_roster_under(repo.path());
+        let installed = write_seed_under(&home.path().join(".simard"));
+        let _in_tree = write_seed_under(repo.path());
 
-        let resolved = resolve_ecosystem_roster_path(repo.path(), Some(home.path()))
-            .expect("resolver must find the installed roster");
+        let resolved = resolve_roster_seed_path(repo.path(), Some(home.path()))
+            .expect("resolver must find the installed seed");
         assert_eq!(
             resolved, installed,
-            "install-first: the ~/.simard roster wins over the in-tree copy"
+            "install-first: the ~/.simard seed wins over the in-tree copy"
         );
     }
 
     #[test]
-    fn roster_path_falls_back_to_repo_root() {
-        // Given ONLY the in-tree roster (no installed copy under home_override),
-        // the resolver falls back to `repo_root/prompt_assets/simard/...`.
-        let home = tempfile::tempdir().unwrap(); // empty .simard — no roster
+    fn seed_path_falls_back_to_repo_root() {
+        let home = tempfile::tempdir().unwrap(); // empty .simard — no seed
         let repo = tempfile::tempdir().unwrap();
-        let in_tree = write_roster_under(repo.path());
+        let in_tree = write_seed_under(repo.path());
 
-        let resolved = resolve_ecosystem_roster_path(repo.path(), Some(home.path()))
-            .expect("resolver must fall back to the in-tree roster");
+        let resolved = resolve_roster_seed_path(repo.path(), Some(home.path()))
+            .expect("resolver must fall back to the in-tree seed");
         assert_eq!(
             resolved, in_tree,
-            "fallback: the repo_root roster is used when no install copy exists"
+            "fallback: the repo_root seed is used when no install copy exists"
         );
     }
 
     #[test]
-    fn roster_path_none_when_absent() {
-        // Given NEITHER an installed nor an in-tree roster, the resolver returns
-        // None (fail-open seam: the caller then emits the fail-visible warn and
-        // skips the pass without panicking).
+    fn seed_path_none_when_absent() {
         let home = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
 
         assert!(
-            resolve_ecosystem_roster_path(repo.path(), Some(home.path())).is_none(),
-            "no roster anywhere → None, never a panic"
+            resolve_roster_seed_path(repo.path(), Some(home.path())).is_none(),
+            "no seed anywhere → None, never a panic"
         );
     }
 
     #[test]
-    fn roster_path_wires_from_install_when_repo_root_lacks_roster() {
-        // REGRESSION for #2419: the deployed daemon's `repo_root` is a STALE
-        // source checkout WITHOUT the roster, while the roster is installed at
-        // ~/.simard/prompt_assets/simard/ecosystem_repos.toml. The resolver MUST
-        // wire from the installed location — the reported bug cannot come back.
+    fn seed_path_resolves_from_install_when_repo_root_lacks_seed() {
+        // A deployed daemon's `repo_root` is a STALE source checkout WITHOUT the
+        // seed, while the seed is installed under ~/.simard. The resolver MUST
+        // resolve from the installed location.
         let home = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap(); // repo_root deliberately EMPTY
-        let installed = write_roster_under(&home.path().join(".simard"));
+        let installed = write_seed_under(&home.path().join(".simard"));
 
-        // Sanity: repo_root truly lacks the roster (mirrors the stale deploy dir).
         assert!(
             !repo
                 .path()
-                .join("prompt_assets/simard")
-                .join(ECOSYSTEM_ROSTER_FILENAME)
+                .join(ROSTER_SEED_RELDIR)
+                .join(ROSTER_SEED_FILENAME)
                 .exists(),
-            "precondition: repo_root has no roster (as on the stale deploy dir)"
+            "precondition: repo_root has no seed (as on the stale deploy dir)"
         );
 
-        let resolved = resolve_ecosystem_roster_path(repo.path(), Some(home.path()))
-            .expect("must wire from the installed roster even when repo_root lacks it");
-        assert_eq!(
-            resolved, installed,
-            "install-first resolution fixes the #2419 fail-closed-every-tick bug"
-        );
+        let resolved = resolve_roster_seed_path(repo.path(), Some(home.path()))
+            .expect("must resolve the installed seed even when repo_root lacks it");
+        assert_eq!(resolved, installed, "install-first resolution");
     }
 }
