@@ -39,7 +39,7 @@ pub struct PerGoalCycleCtx {
     pub wip_ref_count: u32,         // in-flight work-in-progress refs held
 
     // --- Worker / claim facts (facts, not verdicts) ---
-    pub worker_present: bool,       // a live claim/worktree exists right now
+    pub worker_present: bool,       // a *verified-live* engineer exists right now (liveness-checked, not bare map membership — see below)
     pub worker_log_tail: String,    // last ~8 KB of the worker log, secrets redacted
 
     // --- The three DEMOTED imperative deciders, now read-only INPUTS ---
@@ -52,6 +52,31 @@ pub struct PerGoalCycleCtx {
 The last three fields are the crux of the design: the deciders that previously
 *acted* on these signals now only *report* them. The reasoner — not a threshold —
 decides what, if anything, to do about them.
+
+### `worker_present` is liveness-verified (not bare map membership) — #4631
+
+`worker_present` is a **verified-live-process** fact, not membership in the
+in-memory `engineer_worktrees` map. `gather_per_goal_cycle_ctx` computes it as:
+
+```rust
+let worker_present = state.engineer_worktrees.contains_key(goal_id)
+    && crate::ooda_actions::advance_goal::find_live_engineer_for_goal(
+        &crate::goal_curation::simard_state_root(),
+        goal_id,
+    )
+    .is_some();
+```
+
+The bare `contains_key(goal_id)` read that shipped previously was **fail-open**:
+a leaked or orphaned worktree entry (engineer SIGKILLed, OOM-killed, host reboot,
+daemon crash-reload) kept `worker_present == true` forever, so the goal never
+re-spawned and never populated `stale_claim_secs` — it silently wedged. The
+second conjunct verifies an actual live, start-time-guarded engineer (reusing the
+fail-close hardening from #4608 / #4574), so a dead/leaked claim now reads
+`false` and the existing reclaim path re-engages. `contains_key` is retained as a
+short-circuit so the filesystem scan only runs for goals that hold a claim.
+Full contract: [Worker-Presence Liveness API](worker-presence-liveness-api.md).
+
 
 ## `PerGoalAction`
 
@@ -272,6 +297,8 @@ actions (no live recipe-runner subprocess):
 
 ## See Also
 
+- [Concept: Worker-Presence Liveness Verification](../concepts/worker-presence-liveness-verification.md) — the fail-open `worker_present` fix (#4631)
+- [Reference: Worker-Presence Liveness API](worker-presence-liveness-api.md)
 - [Concept: Agentic Per-Goal, Per-Cycle Decision](../concepts/agentic-per-goal-per-cycle.md)
 - [Reference: OODA Per-Goal-Cycle Recipe & Prompt Schema](ooda-per-goal-cycle-recipe.md)
 - [Reference: `OodaBrain` API](ooda-brain-api.md) — the sibling engineer-lifecycle reasoner

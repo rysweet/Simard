@@ -1610,7 +1610,22 @@ pub(crate) fn gather_per_goal_cycle_ctx(
         .filter(|w| w.kind.trim().eq_ignore_ascii_case("pr"))
         .map(|w| w.ref_id.clone())
         .collect();
-    let worker_present = state.engineer_worktrees.contains_key(goal_id);
+    // Issue #4631 (fail-OPEN counterpart to the #4437 fail-CLOSE hardening in
+    // PRs #4574 / #4608): a mere `engineer_worktrees` map entry only proves a
+    // claim once existed, not that a live engineer is still pursuing the goal.
+    // A leaked / idle worktree claim would otherwise read "present … alive"
+    // forever and the dead engineer would never be reclaimed. Gate presence on
+    // a VERIFIED-LIVE engineer (PID + starttime) via the same on-disk verifier
+    // the #4437 fail-close path uses. The cheap `contains_key` guard preserves
+    // the IO-free fast path for the common "no claim" case; the filesystem scan
+    // only runs when a claim exists. Unverifiable → NOT present → the existing
+    // `stale_claim_secs` reclaim path re-engages automatically below.
+    let worker_present = state.engineer_worktrees.contains_key(goal_id)
+        && crate::ooda_actions::advance_goal::find_live_engineer_for_goal(
+            &crate::goal_curation::simard_state_root(),
+            goal_id,
+        )
+        .is_some();
 
     // DEMOTED decider #1 — classify_standing_idle: a standing goal that looks
     // idle (no live in-flight ref) becomes a SIGNAL, not a roll.
@@ -2884,6 +2899,234 @@ mod tests_objective_probe {
             "objective probe must fire the stored goal trigger; probe={probe:?}, \
              got {} triggers",
             triggered.len()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #4631 — worker_present must reflect a VERIFIED-LIVE engineer, not mere
+// engineer_worktrees map-membership. This is the fail-OPEN counterpart to the
+// #4437 fail-CLOSE hardening (PRs #4574 / #4608): a leaked / idle worktree
+// claim currently satisfies `contains_key(goal_id)` and is therefore reported
+// as "worker present … alive" forever, so a dead/leaked engineer is never
+// reclaimed. These tests pin the corrected contract:
+//
+//   worker_present == engineer_worktrees.contains_key(goal_id)
+//                  && find_live_engineer_for_goal(state_root, goal_id).is_some()
+//
+// TDD status: `leaked_claim_reads_not_present_and_is_reclaimable` FAILS against
+// the current map-membership-only implementation (it asserts `false` where the
+// present code yields `true`) and PASSES once the liveness gate is added. The
+// live-engineer and no-entry tests are guards proving the fix must not
+// over-correct (reclaim a genuinely-live worker) or change the short-circuit.
+#[cfg(test)]
+mod tests_worker_present_liveness {
+    use crate::engineer_worktree::{ENGINEER_CLAIM_FILE, EngineerWorktree};
+    use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
+    use crate::ooda_loop::OodaState;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use tempfile::tempdir;
+
+    // -- fixtures -----------------------------------------------------------
+
+    /// Scope `SIMARD_STATE_ROOT` to a temp dir and restore it on drop. The fix
+    /// reads the live-engineer scan root via `simard_state_root()`, which is
+    /// backed by this process-global env var — hence the `#[serial]` group.
+    struct StateRootGuard {
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl StateRootGuard {
+        fn set(root: &Path) -> Self {
+            let prev = std::env::var_os("SIMARD_STATE_ROOT");
+            // SAFETY: every test here is serialized via
+            // #[serial_test::serial(cognitive_memory)], the canonical group
+            // guarding the process-global SIMARD_STATE_ROOT env var.
+            unsafe { std::env::set_var("SIMARD_STATE_ROOT", root) };
+            Self { prev }
+        }
+    }
+
+    impl Drop for StateRootGuard {
+        fn drop(&mut self) {
+            // SAFETY: serialized via #[serial_test::serial(cognitive_memory)].
+            match &self.prev {
+                Some(v) => unsafe { std::env::set_var("SIMARD_STATE_ROOT", v) },
+                None => unsafe { std::env::remove_var("SIMARD_STATE_ROOT") },
+            }
+        }
+    }
+
+    /// `git` with a scrubbed environment (only PATH + HOME re-injected) so a
+    /// process-global GIT_DIR/GIT_WORK_TREE cannot poison the fixture repo.
+    fn git_cmd(repo: &Path, args: &[&str]) -> Command {
+        let mut cmd = Command::new("git");
+        cmd.args(args).current_dir(repo).env_clear();
+        if let Ok(p) = std::env::var("PATH") {
+            cmd.env("PATH", p);
+        }
+        if let Ok(h) = std::env::var("HOME") {
+            cmd.env("HOME", h);
+        }
+        cmd
+    }
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let out = git_cmd(repo, args).output().expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {:?} failed in {}: {}",
+            args,
+            repo.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A parent repo with a committed `main` so `EngineerWorktree::allocate`
+    /// (which branches off `main` HEAD) succeeds.
+    fn init_parent_repo(dir: &Path) {
+        std::fs::create_dir_all(dir).expect("create parent repo dir");
+        run_git(dir, &["init", "--initial-branch=main", "--quiet"]);
+        run_git(dir, &["config", "user.email", "test@example.com"]);
+        run_git(dir, &["config", "user.name", "test"]);
+        run_git(dir, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.join("README.md"), "seed\n").expect("seed file");
+        run_git(dir, &["add", "README.md"]);
+        run_git(dir, &["commit", "-m", "seed", "--quiet"]);
+    }
+
+    /// A goal that EXPECTS a worker (so `stale_claim_secs` populates whenever
+    /// `worker_present` is false), placed on the board and marked in-progress.
+    fn expecting_goal(id: &str) -> ActiveGoal {
+        let mut g = ActiveGoal::new(id, "ship the fix", 1);
+        g.status = GoalProgress::InProgress { percent: 50 };
+        g.assigned_to = Some(format!("engineer-{id}"));
+        g
+    }
+
+    /// Allocate a REAL per-engineer worktree under `state_root` (which also
+    /// writes a live `.simard-engineer-claim` naming THIS process's PID +
+    /// starttime) and register it in `state.engineer_worktrees` keyed by
+    /// `goal_id`. Returns the on-disk worktree path.
+    fn attach_engineer(
+        state: &mut OodaState,
+        parent_repo: &Path,
+        state_root: &Path,
+        goal_id: &str,
+    ) -> PathBuf {
+        let wt = EngineerWorktree::allocate(parent_repo, state_root, goal_id)
+            .expect("allocate engineer worktree");
+        let path = wt.path().to_path_buf();
+        assert!(
+            path.is_dir(),
+            "freshly allocated worktree must exist on disk"
+        );
+        state.engineer_worktrees.insert(goal_id.to_string(), wt);
+        path
+    }
+
+    /// Overwrite a worktree's claim sentinel so it names a PID that can never
+    /// be alive — i.e. the engineer leaked / died but the map entry lingers.
+    fn poison_claim_dead(worktree: &Path) {
+        // 2147483646 (i32::MAX - 1) is never a live PID on the test host;
+        // `is_pid_alive_public` returns false → the scan yields no live worker.
+        std::fs::write(worktree.join(ENGINEER_CLAIM_FILE), "2147483646\n")
+            .expect("overwrite claim sentinel with dead pid");
+    }
+
+    // -- Test 1 (the failing TDD driver): leaked claim reads NOT present -----
+
+    /// CORE #4631 regression: a lingering `engineer_worktrees` entry whose
+    /// on-disk claim names a DEAD pid must read `worker_present == false` so
+    /// the existing `stale_claim_secs` reclaim signal re-engages. FAILS against
+    /// the map-membership-only implementation (which reports `true`).
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn leaked_claim_reads_not_present_and_is_reclaimable() {
+        let parent = tempdir().expect("tempdir");
+        let state_dir = tempdir().expect("tempdir");
+        init_parent_repo(parent.path());
+        let _guard = StateRootGuard::set(state_dir.path());
+
+        let goal_id = "leaked-goal";
+        let mut board = GoalBoard::new();
+        board.active.push(expecting_goal(goal_id));
+        let mut state = OodaState::new(board);
+
+        // Map entry present (contains_key == true) but its claim is now dead.
+        let wt_path = attach_engineer(&mut state, parent.path(), state_dir.path(), goal_id);
+        poison_claim_dead(&wt_path);
+
+        let ctx = super::gather_per_goal_cycle_ctx(&state, goal_id);
+
+        assert!(
+            !ctx.worker_present,
+            "a leaked/idle engineer claim (dead pid) must NOT read as present; \
+             map-membership alone is the #4631 fail-open bug"
+        );
+        assert!(
+            ctx.stale_claim_secs.is_some(),
+            "with no live worker the stale-claim reclaim signal must re-engage \
+             so the leaked worktree can be reclaimed"
+        );
+    }
+
+    // -- Test 2 (guard): a genuinely-live engineer still reads present ------
+
+    /// The fix must NOT over-correct: a map entry whose claim names THIS live
+    /// process (real pid + matching starttime, as written by `allocate`) must
+    /// still read `worker_present == true` with no stale-claim signal.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn live_engineer_reads_present() {
+        let parent = tempdir().expect("tempdir");
+        let state_dir = tempdir().expect("tempdir");
+        init_parent_repo(parent.path());
+        let _guard = StateRootGuard::set(state_dir.path());
+
+        let goal_id = "live-goal";
+        let mut board = GoalBoard::new();
+        board.active.push(expecting_goal(goal_id));
+        let mut state = OodaState::new(board);
+
+        // Live claim written by allocate (this test process's pid + starttime).
+        attach_engineer(&mut state, parent.path(), state_dir.path(), goal_id);
+
+        let ctx = super::gather_per_goal_cycle_ctx(&state, goal_id);
+
+        assert!(
+            ctx.worker_present,
+            "a verified-live engineer (real pid + matching starttime) must read present"
+        );
+        assert!(
+            ctx.stale_claim_secs.is_none(),
+            "a live worker must not surface a stale-claim reclaim signal"
+        );
+    }
+
+    // -- Test 3 (guard): no map entry short-circuits to absent -------------
+
+    /// No `engineer_worktrees` entry → `worker_present == false` via the
+    /// `contains_key(..) && ..` short-circuit (no filesystem scan performed),
+    /// and the expected-but-absent worker surfaces a stale-claim signal.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn no_worktree_entry_short_circuits_to_absent() {
+        let state_dir = tempdir().expect("tempdir");
+        let _guard = StateRootGuard::set(state_dir.path());
+
+        let goal_id = "absent-goal";
+        let mut board = GoalBoard::new();
+        board.active.push(expecting_goal(goal_id));
+        let state = OodaState::new(board); // no engineer_worktrees entry
+
+        let ctx = super::gather_per_goal_cycle_ctx(&state, goal_id);
+
+        assert!(!ctx.worker_present, "no worktree entry must read as absent");
+        assert!(
+            ctx.stale_claim_secs.is_some(),
+            "an expected-but-absent worker must surface the stale-claim signal"
         );
     }
 }
