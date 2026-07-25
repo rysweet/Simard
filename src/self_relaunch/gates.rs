@@ -1115,6 +1115,37 @@ mod convergence_tests {
             results[0].detail
         );
     }
+
+    // The rpc-health gate's PRIMARY red path: the candidate spawns fine but the
+    // `memory stats` round-trip fails (a present-but-unconnectable daemon socket,
+    // #2896) → non-zero exit. The gate MUST fail closed AND surface the
+    // candidate's own stderr in `detail` so the red verdict is diagnosable. The
+    // `tests` mod already covers the spawn-failure and timeout arms; this locks
+    // the exited-non-success arm, which is the most common real red scenario.
+    #[test]
+    fn rpc_health_gate_fails_closed_and_surfaces_stderr_on_nonzero_exit() {
+        let dir = unique_tmp("rpc-red");
+        // The candidate ignores the appended `memory stats …` argv and reddens
+        // with a diagnostic on stderr, standing in for an unreachable daemon.
+        let bin = write_exe(
+            &dir,
+            "candidate",
+            "#!/bin/sh\necho 'rpc dial refused: connection reset' >&2\nexit 7\n",
+        );
+
+        let result = run_rpc_health_gate(&bin, &RelaunchConfig::default());
+
+        assert!(
+            !result.passed,
+            "a non-zero rpc probe exit must fail closed; got: {}",
+            result.detail
+        );
+        assert!(
+            result.detail.contains("rpc dial refused: connection reset"),
+            "the red verdict must surface the candidate's stderr for diagnosability; got: {}",
+            result.detail
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

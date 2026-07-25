@@ -60,10 +60,10 @@ needs so the gate can render a true verdict.
 > `failing_gate` / `failing_detail` — and the exact variable it needs is
 > confirmed against a real canary run before the allow-list is populated. The
 > `rpc-health` gate is used as the running illustration below because it dials a
-> live endpoint (`binary probe rpc --timeout N`), but note that today's probe
-> takes its endpoint from the candidate binary's own config, **not** a confirmed
-> environment variable; the actual env dependency of the actual reddening gate
-> must be established empirically rather than presumed to be `rpc-health`.
+> live endpoint (`simard memory stats`, a read-only RPC round-trip to the running
+> memory daemon), but note that the concrete env dependency of the *actual*
+> reddening gate must be established empirically rather than presumed to be
+> `rpc-health`.
 
 This feature does **not** weaken, skip, or disable any gate. It is the
 "supply the missing signal correctly" repair, never the "bypass the check"
