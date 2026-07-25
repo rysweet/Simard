@@ -251,7 +251,17 @@ fn cargo_install_runtime_features_self_installs_with_canonical_installer() {
         &systemctl_log,
         &["--user", "restart", "simard-ooda.service"],
     );
+    // Convergence: the separate signal service is decommissioned, never
+    // enabled or restarted (Signal is hosted in-process by the OODA daemon).
     assert_systemctl_logged(
+        &systemctl_log,
+        &["--user", "disable", "--now", "simard-signal.service"],
+    );
+    assert_systemctl_not_logged(
+        &systemctl_log,
+        &["--user", "enable", "simard-signal.service"],
+    );
+    assert_systemctl_not_logged(
         &systemctl_log,
         &["--user", "restart", "simard-signal.service"],
     );
