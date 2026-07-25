@@ -235,12 +235,19 @@ impl GapItem {
 }
 
 /// Validate that a gap signature is a bounded slug: non-empty, at most
-/// [`MAX_GAP_SIGNATURE_LEN`] chars, beginning with an ASCII alphanumeric, and
+/// [`MAX_GAP_SIGNATURE_LEN`] bytes (which equals characters for the ASCII-only
+/// alphabet enforced here), beginning with an ASCII alphanumeric, and
 /// composed solely of the restricted alphabet `[A-Za-z0-9:_#./-]`. This is the
 /// IV-1 dedup-search-injection defense: no whitespace, quoting, or shell/search
 /// metacharacter can appear in a key that is later embedded in a `gh` search
 /// query or an issue body, regardless of how exotic the source identifier is.
 pub fn is_bounded_signature_slug(sig: &str) -> bool {
+    // `sig.len()` is the UTF-8 byte length. Because the character check below
+    // admits only ASCII bytes (alphanumerics + the restricted separators), a
+    // slug that passes this function is pure ASCII, so its byte length equals
+    // its `char` count — the `MAX_GAP_SIGNATURE_LEN` bound is therefore an exact
+    // character bound for every *valid* slug. Checking bytes up front also
+    // cheaply rejects an over-long multi-byte input before the per-char scan.
     if sig.is_empty() || sig.len() > MAX_GAP_SIGNATURE_LEN {
         return false;
     }

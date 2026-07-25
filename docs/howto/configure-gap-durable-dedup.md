@@ -38,7 +38,8 @@ For the data model, signature grammar, and guarantees, see the
 > **Scope.** The gap-notification path dedupes via the **in-process**
 > `WhisperGate` and notifies the operator; it does **not** create GitHub issues
 > and is **not restart-safe on its own** — a daemon restart resets the gate. A
-> durable, GitHub-sourced cross-process check is scoped as follow-on work and is
+> durable, GitHub-sourced cross-process check is scoped as follow-on work
+> ([#4717](https://github.com/rysweet/Simard/issues/4717)) and is
 > **not** wired on this path yet; see the reference doc's *Future work* section.
 
 ## What changed for operators

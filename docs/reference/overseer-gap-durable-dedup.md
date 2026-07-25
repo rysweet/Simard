@@ -185,7 +185,8 @@ When wired, this would upgrade the guarantee to *"at most one open issue per
 distinct gap signature across restarts and daemons"* and must **fail loud** — a
 `gh` search error stops filing rather than falling back to a blind
 `create_issue`, which would reintroduce exactly the flood this work prevents.
-**This flow is not implemented on the gap-notification path today.**
+**This flow is not implemented on the gap-notification path today; it is
+tracked in [#4717](https://github.com/rysweet/Simard/issues/4717).**
 
 ## Structured observability
 

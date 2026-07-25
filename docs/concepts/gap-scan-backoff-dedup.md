@@ -137,7 +137,8 @@ any `gh` error. The gap-notification path (`act_flag_workstream_gaps`) does
 **not** perform this query today — it applies the in-process `WhisperGate` and
 notifies the operator. The proven durable pattern lives on the sibling
 stewardship filing seam (`stewardship::process_orchestrator_run`); wiring it
-onto the gap path is the follow-on this stable signature enables. See the
+onto the gap path is the follow-on this stable signature enables, tracked in
+[#4717](https://github.com/rysweet/Simard/issues/4717). See the
 [gap-filing dedup reference](../reference/overseer-gap-durable-dedup.md)
 and the [how-to](../howto/configure-gap-durable-dedup.md).
 
