@@ -68,6 +68,7 @@ impl LiveDaemon {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 #[ignore = "spawns a live memory daemon and runs the release binary; run with --ignored"]
 fn healthy_candidate_passes_rpc_health_against_a_live_daemon() {
     let daemon = LiveDaemon::start();
@@ -121,5 +122,78 @@ fn healthy_candidate_passes_rpc_health_against_a_live_daemon() {
         rpc.passed,
         "rpc-health must GREEN when the candidate can dial the live daemon: {}",
         rpc.detail
+    );
+}
+
+/// F2 liveness (#4639 review): the negative process-boundary contract. With NO
+/// live daemon (no socket under the resolved state root), the rpc-health gate
+/// MUST redden — proving the gate asserts reachability and does not green on the
+/// `memory stats` tier-2 on-disk fallback. The gate short-circuits on the absent
+/// socket before spawning anything, so this needs neither a daemon nor the
+/// release binary and runs by default (unlike the live-daemon path above).
+///
+/// Serialized with the live-daemon test because both mutate `SIMARD_STATE_ROOT`.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn rpc_health_reds_when_no_live_daemon() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_root = dir.path().to_path_buf();
+    // No server is started, so `<state_root>/memory.sock` never exists.
+    assert!(
+        !socket_path_for(&state_root).exists(),
+        "precondition: the isolated state root must have no live daemon socket"
+    );
+
+    // The gate re-injects the allow-listed SIMARD_STATE_ROOT and resolves the
+    // socket from it; point this process's env at the isolated (dead) root.
+    // SAFETY: this test is serialized on the cognitive_memory key, so no sibling
+    // test races on the process environment; restored below.
+    let prev_root = std::env::var_os("SIMARD_STATE_ROOT");
+    let prev_sock = std::env::var_os("SIMARD_MEMORY_SOCKET");
+    unsafe {
+        std::env::set_var("SIMARD_STATE_ROOT", &state_root);
+        std::env::remove_var("SIMARD_MEMORY_SOCKET");
+    }
+
+    let config = RelaunchConfig {
+        canary_env: simard::self_relaunch::canary_gate_env_allowlist(),
+        ..RelaunchConfig::default()
+    };
+    // The binary is never spawned (the liveness pre-flight short-circuits), so a
+    // bogus path is fine and keeps this test off the release binary.
+    let results = verify_canary(
+        std::path::Path::new("/no-such-candidate-should-not-be-spawned"),
+        &[RelaunchGate::RpcHealth],
+        &config,
+    )
+    .expect("verify_canary ran");
+
+    unsafe {
+        match prev_root {
+            Some(v) => std::env::set_var("SIMARD_STATE_ROOT", v),
+            None => std::env::remove_var("SIMARD_STATE_ROOT"),
+        }
+        if let Some(v) = prev_sock {
+            std::env::set_var("SIMARD_MEMORY_SOCKET", v);
+        }
+    }
+
+    let rpc = results
+        .iter()
+        .find(|r| r.gate == RelaunchGate::RpcHealth)
+        .expect("rpc-health gate present in results");
+    assert!(
+        !rpc.passed,
+        "rpc-health must RED when no live daemon socket exists (no tier-2 green): {}",
+        rpc.detail
+    );
+    assert!(
+        rpc.detail.contains("no live daemon socket"),
+        "the red verdict must name the absent-socket liveness failure: {}",
+        rpc.detail
+    );
+    assert!(
+        !all_gates_passed(&results),
+        "an absent daemon must not yield an all-green verdict"
     );
 }

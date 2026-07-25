@@ -7,6 +7,8 @@ use tempfile::TempDir;
 
 use super::types::{GateResult, RelaunchConfig, RelaunchGate};
 use crate::error::{SimardError, SimardResult};
+use crate::memory_ipc::{MEMORY_SOCKET_ENV, socket_path_for};
+use crate::state_root::simard_state_root;
 
 /// The Simard-specific environment the canary gates legitimately need to render
 /// a **true** verdict for a healthy candidate — the deploy-shape signals that
@@ -109,17 +111,42 @@ fn scrub_gate_env(cmd: &mut Command, config: &RelaunchConfig) {
 /// True when `name` is an execution-hijack environment variable that must never
 /// be re-injected into a canary gate subprocess, regardless of whether an
 /// operator or build step listed it in [`RelaunchConfig::canary_env`]. These
-/// steer a dynamic loader, shell, or git transport into running attacker code
-/// (`LD_PRELOAD` / `LD_LIBRARY_PATH`, macOS `DYLD_*`, `GIT_SSH_COMMAND`,
-/// `BASH_ENV` / `ENV`, `SHELLOPTS` / `BASHOPTS`, `IFS`). Matching is
-/// case-insensitive so a lower/mixed-case spelling cannot slip a variant past
-/// the floor. This is the code-enforced counterpart to the docstring guarantee
-/// on [`scrub_gate_env`] — the deny-by-default floor already omits them; this
-/// prevents the allow-list re-injection loop from restoring one.
+/// steer a dynamic loader, shell, git transport, or language interpreter into
+/// running attacker code (`LD_PRELOAD` / `LD_LIBRARY_PATH`, macOS `DYLD_*`,
+/// `GIT_SSH_COMMAND` / `GIT_PROXY_COMMAND`, `BASH_ENV` / `ENV`, `SHELLOPTS` /
+/// `BASHOPTS`, `IFS`, and interpreter loaders such as `PYTHONPATH` /
+/// `NODE_OPTIONS` / `PERL5LIB` / `RUBYOPT`). Matching is case-insensitive so a
+/// lower/mixed-case spelling cannot slip a variant past the floor. This is the
+/// code-enforced counterpart to the docstring guarantee on [`scrub_gate_env`] —
+/// the deny-by-default floor already omits them; this prevents the allow-list
+/// re-injection loop from restoring one.
+///
+/// The interpreter-loader names are defense-in-depth (#4639 review F6): the
+/// production [`canary_gate_env_allowlist`] is a fixed set of `SIMARD_*` names,
+/// so none of these are reachable today — but a future caller that populated
+/// `config.canary_env` from a wider source must not be able to hand a gate a
+/// `PYTHONPATH`/`NODE_OPTIONS`-class steering var. No canary gate legitimately
+/// needs an interpreter loader (they run `--version`, `cargo test`, and
+/// `memory stats`), so denying them costs nothing.
 fn is_hijack_class_env(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
     const HIJACK_PREFIXES: &[&str] = &["LD_", "DYLD_", "GIT_SSH"];
-    const HIJACK_EXACT: &[&str] = &["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "IFS"];
+    const HIJACK_EXACT: &[&str] = &[
+        "BASH_ENV",
+        "ENV",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "IFS",
+        // Interpreter loaders (defense-in-depth, #4639 review F6).
+        "PYTHONPATH",
+        "PYTHONSTARTUP",
+        "NODE_OPTIONS",
+        "PERL5LIB",
+        "PERL5OPT",
+        "RUBYOPT",
+        "RUBYLIB",
+        "GIT_PROXY_COMMAND",
+    ];
     HIJACK_PREFIXES.iter().any(|p| upper.starts_with(p)) || HIJACK_EXACT.iter().any(|n| upper == *n)
 }
 
@@ -411,8 +438,13 @@ enum ProbeOutcome {
 ///
 /// `stderr` is piped so a red verdict carries the daemon's own error text;
 /// `stdout` is discarded (the human/JSON stats table is not needed for a
-/// pass/fail signal). The probe emits only a few lines, so draining the pipe
-/// *after* the process exits cannot deadlock on a full pipe buffer.
+/// pass/fail signal). `stderr` is drained on a **dedicated thread** rather than
+/// after the process exits: a candidate that writes more than the pipe buffer
+/// (~64KB on Linux) before exiting would otherwise block on the `write`,
+/// `try_wait` would never observe the exit, and a genuine exit would be
+/// misclassified as a `TimedOut` (#4639 review F3). The drain thread reads to
+/// EOF — which arrives when the child's stderr fd closes on exit or kill — so it
+/// always terminates and is joined before returning.
 fn run_probe_with_timeout(mut cmd: Command, timeout: Duration) -> ProbeOutcome {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -422,15 +454,24 @@ fn run_probe_with_timeout(mut cmd: Command, timeout: Duration) -> ProbeOutcome {
         Err(e) => return ProbeOutcome::SpawnFailed(e),
     };
 
+    // Concurrently drain stderr so a full pipe buffer can never wedge the child.
+    let drain = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = pipe.read_to_string(&mut buf);
+            buf
+        })
+    });
+    let collect = |drain: Option<std::thread::JoinHandle<String>>| -> String {
+        drain.and_then(|h| h.join().ok()).unwrap_or_default()
+    };
+
     let start = Instant::now();
     let poll = Duration::from_millis(50);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut stderr = String::new();
-                if let Some(mut pipe) = child.stderr.take() {
-                    let _ = pipe.read_to_string(&mut stderr);
-                }
+                let stderr = collect(drain);
                 return ProbeOutcome::Exited { status, stderr };
             }
             Ok(None) => {
@@ -439,12 +480,40 @@ fn run_probe_with_timeout(mut cmd: Command, timeout: Duration) -> ProbeOutcome {
                     // does not leak, then report the timeout as a red verdict.
                     let _ = child.kill();
                     let _ = child.wait();
+                    // Killing the child closes its stderr fd, so the drain thread
+                    // reaches EOF; join it so we do not leak the thread.
+                    let _ = collect(drain);
                     return ProbeOutcome::TimedOut;
                 }
                 std::thread::sleep(poll);
             }
-            Err(e) => return ProbeOutcome::SpawnFailed(e),
+            Err(e) => {
+                let _ = collect(drain);
+                return ProbeOutcome::SpawnFailed(e);
+            }
         }
+    }
+}
+
+/// Resolve the daemon socket the **candidate** will dial for `memory stats`,
+/// mirroring the candidate's own resolution under the scrubbed gate env.
+///
+/// The gate re-injects the allow-listed `SIMARD_STATE_ROOT`, so
+/// [`simard_state_root`] here agrees with what the candidate resolves.
+/// `SIMARD_MEMORY_SOCKET` is honored **only** when the gate re-injects it (it is
+/// on `config.canary_env`); otherwise the candidate never sees it and resolves
+/// `<state_root>/memory.sock`. Matching that decision keeps this pre-flight
+/// check pointed at the exact socket the candidate would dial.
+fn probe_socket_path(config: &RelaunchConfig) -> std::path::PathBuf {
+    let state_root = simard_state_root();
+    if config.canary_env.iter().any(|n| n == MEMORY_SOCKET_ENV) {
+        socket_path_for(&state_root)
+    } else {
+        // The candidate's env has no SIMARD_MEMORY_SOCKET override, so it falls
+        // to the default `<state_root>/memory.sock` — replicate that here rather
+        // than calling `socket_path_for`, which would honor an ambient override
+        // the candidate can't see.
+        state_root.join("memory.sock")
     }
 }
 
@@ -457,10 +526,30 @@ fn run_probe_with_timeout(mut cmd: Command, timeout: Duration) -> ProbeOutcome {
 /// socket makes `open_reader_client` perform a real stats RPC round-trip that
 /// fails closed if the socket is unconnectable (#2896).
 ///
-/// FAIL CLOSED: a non-zero exit, a spawn error, or exhausting
+/// LIVENESS PRE-FLIGHT (#4639 review F2): `memory stats` falls through to a
+/// tier-2 on-disk store when the socket is **absent**, so it would exit 0 and
+/// GREEN this gate without ever proving the daemon is reachable — defeating the
+/// gate's entire purpose. Require the socket the candidate will dial to be
+/// present before probing; a genuinely absent daemon reddens here. A socket that
+/// is present but unconnectable still reaches the probe and reddens via #2896.
+///
+/// FAIL CLOSED: an absent socket, a non-zero exit, a spawn error, or exhausting
 /// `config.health_timeout` all yield `passed: false`. Only a clean exit (a
 /// genuine round-trip) yields `passed: true`.
 fn run_rpc_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
+    let socket = probe_socket_path(config);
+    if !socket.exists() {
+        return GateResult {
+            gate: RelaunchGate::RpcHealth,
+            passed: false,
+            detail: format!(
+                "rpc health failed: no live daemon socket at {} — the candidate \
+                 would fall through to a tier-2 on-disk store and pass without \
+                 proving reachability; refusing to green a dead daemon",
+                socket.display()
+            ),
+        };
+    }
     let mut cmd = scrubbed_command(binary, config);
     cmd.args(RPC_HEALTH_PROBE_ARGS);
     match run_probe_with_timeout(cmd, config.health_timeout) {
@@ -472,7 +561,13 @@ fn run_rpc_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
         ProbeOutcome::Exited { status, stderr } => GateResult {
             gate: RelaunchGate::RpcHealth,
             passed: false,
-            detail: format!("rpc health failed (exit {status}): {}", stderr.trim()),
+            // Redact + bound the daemon's stderr AT CONSTRUCTION so
+            // `GateResult.detail` is safe-by-default for ANY consumer, not only
+            // the redacted tracing path in `verify_canary` (defense-in-depth).
+            detail: format!(
+                "rpc health failed (exit {status}): {}",
+                bound_gate_detail(&stderr)
+            ),
         },
         ProbeOutcome::TimedOut => GateResult {
             gate: RelaunchGate::RpcHealth,
@@ -675,7 +770,10 @@ mod tests {
         // The NEW argv dispatches: `memory stats <state-root>` resolves through
         // dispatch_operator_cli → dispatch_memory_command → run_stats and opens a
         // hermetic tier-2 store in the temp root (no live socket present), so it
-        // returns Ok(()). Critically it is NOT the `unsupported command` arm.
+        // returns Ok(()). Assert the POSITIVE outcome (#4639 review F5): the prior
+        // `if let Err` guard was vacuous on the Ok path and accepted any non-
+        // "unsupported" error. A real dispatched read-only subcommand against an
+        // empty hermetic store must succeed.
         let root = tempfile::tempdir().expect("tempdir");
         let mut argv: Vec<String> = RPC_HEALTH_PROBE_ARGS
             .iter()
@@ -683,12 +781,12 @@ mod tests {
             .collect();
         argv.push(root.path().display().to_string());
         let dispatched = crate::operator_cli::dispatch_operator_cli(argv);
-        if let Err(e) = &dispatched {
-            assert!(
-                !e.to_string().contains("unsupported command"),
-                "rpc-health argv must dispatch, not fall to the unsupported-command arm: {e}"
-            );
-        }
+        assert!(
+            dispatched.is_ok(),
+            "rpc-health argv must dispatch and succeed against a hermetic tier-2 \
+             store (no live socket), proving it is a real dispatched subcommand \
+             and not the unsupported-command regression; got: {dispatched:?}"
+        );
 
         // Guard/documentation: the OLD `probe` argv is exactly the regression the
         // fix removes — an unknown subcommand that reddened every candidate.
@@ -710,6 +808,19 @@ mod tests {
             &RelaunchConfig::default(),
         );
         assert!(!result.passed, "rpc-health must fail closed on spawn error");
+    }
+
+    #[test]
+    fn rpc_health_stays_in_default_gates() {
+        // The rpc-health gate is the ONLY canary that proves live daemon
+        // reachability. Silently dropping it from the default set (e.g. to dodge
+        // a red) would let a candidate that can't reach the daemon deploy — the
+        // exact failure this gate exists to catch. Do-not-remove guard, mirroring
+        // the UnitTest guard.
+        assert!(
+            super::super::types::default_gates().contains(&RelaunchGate::RpcHealth),
+            "RpcHealth must remain a default canary gate (do-not-remove guard)"
+        );
     }
 
     #[test]
@@ -762,6 +873,16 @@ mod tests {
             "SHELLOPTS",
             "BASHOPTS",
             "IFS",
+            // Interpreter loaders (defense-in-depth, #4639 review F6).
+            "PYTHONPATH",
+            "pythonpath",
+            "PYTHONSTARTUP",
+            "NODE_OPTIONS",
+            "PERL5LIB",
+            "PERL5OPT",
+            "RUBYOPT",
+            "RUBYLIB",
+            "GIT_PROXY_COMMAND",
         ] {
             assert!(
                 is_hijack_class_env(name),
@@ -982,6 +1103,50 @@ mod convergence_tests {
         dir
     }
 
+    /// Save/restore the env names the F2 liveness pre-flight reads, so a test can
+    /// point `SIMARD_STATE_ROOT` at a throwaway root without leaking into siblings.
+    /// Env mutation is serialized by the `cognitive_memory` serial key.
+    struct StateEnvGuard {
+        vars: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl StateEnvGuard {
+        fn set_state_root(root: &Path) -> Self {
+            let names = ["SIMARD_STATE_ROOT", "SIMARD_MEMORY_SOCKET"];
+            let vars = names.iter().map(|&n| (n, std::env::var(n).ok())).collect();
+            // SAFETY: serialized by the cognitive_memory serial key; restored on drop.
+            unsafe {
+                std::env::set_var("SIMARD_STATE_ROOT", root);
+                // No override — force `<state_root>/memory.sock` resolution, exactly
+                // what the scrubbed candidate (no re-injected override) would use.
+                std::env::remove_var("SIMARD_MEMORY_SOCKET");
+            }
+            Self { vars }
+        }
+    }
+
+    impl Drop for StateEnvGuard {
+        fn drop(&mut self) {
+            for (name, prev) in &self.vars {
+                // SAFETY: serialized by the cognitive_memory serial key.
+                match prev {
+                    Some(val) => unsafe { std::env::set_var(name, val) },
+                    None => unsafe { std::env::remove_var(name) },
+                }
+            }
+        }
+    }
+
+    /// An isolated state root whose `memory.sock` is present, so the F2 liveness
+    /// pre-flight passes and the gate proceeds to actually spawn the candidate.
+    /// A plain file suffices — the pre-flight only checks `.exists()`.
+    fn state_root_with_live_socket(tag: &str) -> (std::path::PathBuf, StateEnvGuard) {
+        let dir = unique_tmp(tag);
+        fs::File::create(dir.join("memory.sock")).expect("create fake live socket");
+        let guard = StateEnvGuard::set_state_root(&dir);
+        (dir, guard)
+    }
+
     // GREEN side of the bidirectional verdict AND the load-bearing convergence
     // proof: a HEALTHY candidate that refuses to run under a hijacked env passes
     // ONLY when the gate spawned it in a scrubbed env. Current code inherits the
@@ -1122,9 +1287,16 @@ mod convergence_tests {
     // candidate's own stderr in `detail` so the red verdict is diagnosable. The
     // `tests` mod already covers the spawn-failure and timeout arms; this locks
     // the exited-non-success arm, which is the most common real red scenario.
+    //
+    // The F2 liveness pre-flight runs first, so this points SIMARD_STATE_ROOT at
+    // an isolated root WITH a present socket — modelling a live-but-unconnectable
+    // daemon — so the gate proceeds past the pre-flight and actually spawns the
+    // candidate whose non-zero exit + stderr we assert on. Serialized because it
+    // mutates the process environment.
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn rpc_health_gate_fails_closed_and_surfaces_stderr_on_nonzero_exit() {
-        let dir = unique_tmp("rpc-red");
+        let (dir, _env) = state_root_with_live_socket("rpc-red");
         // The candidate ignores the appended `memory stats …` argv and reddens
         // with a diagnostic on stderr, standing in for an unreachable daemon.
         let bin = write_exe(
@@ -1143,6 +1315,37 @@ mod convergence_tests {
         assert!(
             result.detail.contains("rpc dial refused: connection reset"),
             "the red verdict must surface the candidate's stderr for diagnosability; got: {}",
+            result.detail
+        );
+    }
+
+    // F2 liveness pre-flight (#4639 review): an ABSENT daemon socket must redden
+    // the gate. Without this, `memory stats` falls through to a tier-2 on-disk
+    // store, exits 0, and GREENS the gate with no live daemon behind it. Points
+    // SIMARD_STATE_ROOT at an isolated root with NO `memory.sock`; the candidate
+    // is never even spawned (the pre-flight short-circuits), so a bogus binary
+    // path is fine. Serialized because it mutates the process environment.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn rpc_health_gate_fails_closed_when_daemon_socket_absent() {
+        let dir = unique_tmp("rpc-no-socket");
+        // Ensure no socket exists at the resolved path.
+        let _ = fs::remove_file(dir.join("memory.sock"));
+        let _env = StateEnvGuard::set_state_root(&dir);
+
+        let result = run_rpc_health_gate(
+            Path::new("/no-such-candidate-should-not-be-spawned"),
+            &RelaunchConfig::default(),
+        );
+
+        assert!(
+            !result.passed,
+            "an absent daemon socket must fail closed, not green on the tier-2 fallback; got: {}",
+            result.detail
+        );
+        assert!(
+            result.detail.contains("no live daemon socket"),
+            "the red verdict must name the absent-socket liveness failure; got: {}",
             result.detail
         );
     }

@@ -742,15 +742,23 @@ timeout is a **red** (`passed: false`) verdict — gates fail closed.
 | `smoke` | `simard --version` | the binary runs and prints its version |
 | `unit-test` | `cargo test` (isolated `SIMARD_STATE_ROOT` TempDir, #4628) | the candidate's own test suite is green |
 | `gym-baseline` | `simard gym list` | the gym registry loads |
-| `rpc-health` | `simard memory stats` | a real stats **RPC round-trip** to the running memory daemon succeeds |
+| `rpc-health` | `simard memory stats` (after a live-socket pre-flight) | the daemon socket is present **and** a real stats **RPC round-trip** succeeds |
 
 The `rpc-health` gate dials the live daemon via `simard memory stats` →
 `open_reader_client`, which connects the daemon socket resolved by
 `socket_path_for(SIMARD_STATE_ROOT)` (the allow-listed state root is re-injected
 into the scrubbed gate env). A socket that is present but unconnectable **fails
 closed** (`SimardError::RpcSpawnFailed`, bug #2896), so the gate reddens on a
-wedged daemon rather than passing blindly. `memory stats` is read-only, so the
-probe never mutates the live store. The gate enforces `UpdateConfig`'s
+wedged daemon rather than passing blindly.
+
+Because `memory stats` legitimately falls through to a tier-2 on-disk store when
+the socket is **absent** (it would then exit 0 and green the gate without
+proving reachability), the gate runs a **liveness pre-flight** first: it resolves
+the exact socket the candidate would dial and reddens immediately if that socket
+does not exist. This closes the "green a dead daemon" gap — an absent socket, a
+present-but-unconnectable socket, a non-zero exit, a spawn error, and a timeout
+all fail closed. `memory stats` is read-only, so the probe never mutates the live
+store. The gate enforces `UpdateConfig`'s
 `health_timeout` itself (via a spawn + bounded-wait wrapper), because neither
 `memory stats` nor `status` exposes a `--timeout` flag; a probe that never
 returns is killed and reddened.
