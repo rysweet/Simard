@@ -8,6 +8,7 @@ doc_type: concept
 related:
   - ../howto/configure-disk-reclamation.md
   - ../reference/disk-reclaim-api.md
+  - ../reference/disk-reclaim-deterministic-enumeration.md
   - ../reference/disk-reclaim-telemetry.md
   - ../reference/engineer-worktree-sweep-safety.md
   - ./automated-disk-health.md
@@ -85,6 +86,38 @@ This split makes selection genuinely agentic (the agent decides *what* to
 nominate and in *what order*) while safety is genuinely deterministic (Rust
 decides *whether* any nominee is actually removed, and can only ever narrow the
 set).
+
+## The deterministic floor: why routine reclaim stopped freeing 0 bytes
+
+Agentic proposal alone had a failure mode: if the agent did not nominate the real
+consumers, the executor routed everything to human-review and removed nothing.
+Routine reclaim then logged the steady state
+
+```text
+disk reclaim: 89% -> 89% used, freed 0 bytes, 0 paths removed, 7 skipped for review
+```
+
+on *every* cycle while `%-used` climbed monotonically toward 100%. Emergency
+cleanup did free artifacts (`target/debug/`, `target/llvm-cov-target/`,
+`worktrees/*/target/`, state-root `cargo-target/`/`shared-target/`, stale
+backups), but it only fired at ≥95% and — like routine reclaim — never reclaimed
+the idle `self-deploy-target/` build tree, a regenerable multi-gigabyte consumer
+that sat untouched until the partition approached `ENOSPC`.
+
+The resolution keeps agentic proposal but adds a **deterministic Rust
+enumerator** as the floor. `reclaimable_targets(state_root)` **always** proposes
+the known-safe, regenerable set — the idle `self-deploy-target` build tree and
+the shared state-root build caches (no live PID, idle beyond a window), plus
+stale engineer worktrees — so a routine cycle frees real space *before* emergency
+thresholds, deterministically. The agent's proposals remain **additive** on top;
+**both** sources pass through `vet_candidate` unchanged (no "trusted internal"
+bypass). `emergency_cleanup` consumes the *same* `reclaimable_targets` set for the
+state-root build trees, so it now also reclaims the previously-ignored
+`self-deploy-target/`. Snapshot / backup / corruption-quarantine dirs are
+**out of scope** for this enumerator — they are owned by `MaintenanceThread`;
+live state (`cognitive`/`.wal`/`.shadow`) is never enumerated. See
+[Deterministic reclaimable-set enumeration](../reference/disk-reclaim-deterministic-enumeration.md)
+for the full contract and the maintenance-ownership boundary.
 
 The guard is **authoritative for the disposal path**: nothing the executor
 removes bypasses it. But the guard only governs the delete primitive it owns —
@@ -198,11 +231,16 @@ Inside the maintenance block, in execution order:
 ```
 Tier 1: emergency_cleanup   (deterministic, no LLM, no recipe)
         ↓ Runs FIRST every tick. At severe pressure (~>=95%) it frees space
-          with hardcoded actions — never depends on spawning an agent or gh.
+          with deterministic actions — never depends on spawning an agent or gh.
+          Consumes the SAME reclaimable_targets() set as routine reclaim for the
+          state-root build trees, so it also reclaims the idle self-deploy-target/
+          it previously ignored — plus its existing removals (target/debug,
+          llvm-cov, worktrees/*/target, cargo/shared-target, stale backups).
 Tier 2: agentic disk-reclaim (run_disk_reclaim, repointed from the old
                               recipe-based disk-health check)
-        ↓ Agent proposes candidates → Rust guard disposes, largest-first.
-          Dry-run + human-review by default (SIMARD_DISK_RECLAIM_DAEMON_APPLY).
+        ↓ Deterministic enumerator + agent both propose candidates → Rust guard
+          disposes, largest-first. Routine cycles free real space before Tier 1
+          thresholds. Dry-run + human-review by default (SIMARD_DISK_RECLAIM_DAEMON_APPLY).
 ```
 
 Surrounding, independent mechanisms:
@@ -257,6 +295,7 @@ reused unchanged.
 
 - [Configure disk reclamation (how-to)](../howto/configure-disk-reclamation.md) — operator guide, CLI, env config
 - [Disk reclaim API (reference)](../reference/disk-reclaim-api.md) — module API, the guard, the executor, the recipe contract
+- [Deterministic reclaimable-set enumeration (reference)](../reference/disk-reclaim-deterministic-enumeration.md) — the enumerator, keep-N/age thresholds, emergency alignment
 - [Disk reclaim telemetry (reference)](../reference/disk-reclaim-telemetry.md) — emitted metrics
 - [Worktree reaping safety guards](../reference/engineer-worktree-sweep-safety.md) — the shared liveness/uncommitted-work primitives the guard composes
 - [Automated disk health (concept)](./automated-disk-health.md) — the superseded per-cycle check

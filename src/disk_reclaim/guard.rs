@@ -597,6 +597,66 @@ mod tests {
         );
     }
 
+    // ---- deterministic-enumerator candidates get NO self-trust --------
+    //
+    // The #4809 enumerator proposes candidates (typically labelled
+    // `stale_build_cache`) from Rust rather than the LLM. They MUST flow through
+    // this same guard identically — an enumerated candidate is not "trusted
+    // internal" and cannot bypass any rail.
+
+    #[test]
+    fn enumerated_candidate_at_a_protected_path_is_still_rejected() {
+        // An enumerated `stale_build_cache` candidate that happens to resolve to
+        // a protected path must be refused exactly like an LLM candidate.
+        let h = Harness::new("enum-protected");
+        let protected = ProtectedDenySet::from_paths(vec![h.child.clone()]);
+        let live = FakeLiveProcessProbe::default();
+        let wt = FixedWtProbe(WorktreeVerdict::Reclaimable);
+        let measurer = MapMeasurer::default();
+
+        let c = cand(&h.child, CandidateKind::StaleBuildCache);
+        let v = vet(&c, &h.allow_roots, &protected, &live, &wt, &measurer);
+        assert_eq!(
+            v,
+            Verdict::Reject {
+                reason: RejectReason::ProtectedPath
+            },
+            "a deterministically-enumerated candidate must not be self-trusted — \
+             the protected deny-set still wins",
+        );
+    }
+
+    #[test]
+    fn enumerated_candidate_outside_allow_roots_is_still_rejected() {
+        // An enumerated candidate that is not strictly inside any allow-root is
+        // refused, proving the enumerator cannot widen the containment scope.
+        let h = Harness::new("enum-outside");
+        let other_root = TempDir::new().expect("unrelated allow root");
+        let protected = ProtectedDenySet::from_paths(vec![]);
+        let live = FakeLiveProcessProbe::default();
+        let wt = FixedWtProbe(WorktreeVerdict::Reclaimable);
+        let measurer = MapMeasurer::default();
+
+        // Vet against an allow-root set that does NOT contain h.child.
+        let c = cand(&h.child, CandidateKind::StaleBuildCache);
+        let v = vet(
+            &c,
+            &[other_root.path().to_path_buf()],
+            &protected,
+            &live,
+            &wt,
+            &measurer,
+        );
+        assert_eq!(
+            v,
+            Verdict::Reject {
+                reason: RejectReason::OutsideAllowRoot
+            },
+            "an enumerated candidate outside every allow-root must be refused — \
+             the enumerator cannot widen the reclamation scope",
+        );
+    }
+
     #[test]
     fn rail_refuses_path_outside_every_allow_root() {
         // Candidate is a real dir but NOT under the allow-root.

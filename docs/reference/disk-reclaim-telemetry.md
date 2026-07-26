@@ -9,6 +9,7 @@ related:
   - ../concepts/agentic-disk-reclamation.md
   - ../howto/configure-disk-reclamation.md
   - ./disk-reclaim-api.md
+  - ./disk-reclaim-deterministic-enumeration.md
   - ./telemetry-metrics.md
 ---
 
@@ -107,6 +108,7 @@ attributes (`source`, `kind`, `reason`) are non-PII fixed enums and are safe to 
 | Reclamation is keeping up | `used_pct_after < SIMARD_DISK_RECLAIM_PCT` after runs | if `used_pct_after` stays ≥ target, reclamation cannot free enough — investigate the human-review list |
 | Human-review backlog | rate of `candidates_skipped` by `reason` | a rising `uncommitted_or_unpushed` or `unknown_pr_state` rate means work is piling up that reclamation refuses to touch |
 | Space recovered | `bytes_freed{source="daemon"}` over time | the self-healing yield (filter to `daemon` to exclude operator dry-runs) |
+| Routine reclaim is effective | `bytes_freed` / `paths_removed` non-zero on routine cycles | with the deterministic enumerator, a routine apply cycle under real pressure should free space — a sustained `0` under climbing `used_pct_before` signals a regression in the [reclaimable-set enumerator](./disk-reclaim-deterministic-enumeration.md) |
 | Protected-path attempts | `candidates_skipped{reason="protected_path"}` | the agent nominating protected paths is expected occasionally; a spike may indicate a prompt regression (the guard still refuses them) |
 
 > **Filter by `source` on all reclaim dashboards.** An operator dry-run
@@ -119,4 +121,5 @@ attributes (`source`, `kind`, `reason`) are non-PII fixed enums and are safe to 
 - [Agentic disk reclamation (concept)](../concepts/agentic-disk-reclamation.md) — design rationale
 - [Configure disk reclamation (how-to)](../howto/configure-disk-reclamation.md) — operator usage
 - [Disk reclaim API (reference)](./disk-reclaim-api.md) — the `ReclaimReport` these metrics derive from
+- [Deterministic reclaimable-set enumeration (reference)](./disk-reclaim-deterministic-enumeration.md) — why routine reclaim now reports `bytes_freed > 0`
 - [Telemetry metrics reference](./telemetry-metrics.md) — the facade, registry, snapshot, and OTLP gating

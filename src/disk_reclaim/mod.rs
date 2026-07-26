@@ -28,6 +28,7 @@ pub mod executor;
 pub mod guard;
 pub mod prod;
 pub mod recipe;
+pub mod reclaimable;
 
 pub use candidate::{CandidateKind, MAX_CANDIDATES, ReclaimCandidate, parse_candidates};
 pub use daemon_dir::resolve_daemon_working_dirs;
@@ -90,6 +91,14 @@ pub fn allow_roots(state_root: &Path) -> Vec<PathBuf> {
     }
     roots.push(state_root.join("cargo-target"));
     roots.push(state_root.join("shared-target"));
+    // Widen containment to the idle `self-deploy-target` build tree so routine
+    // reclaim can free its *contents* through the guard (issue #4809). The guard
+    // refuses a candidate equal to an allow-root, so only strictly-inside
+    // children are reclaimable — the build tree's own dir is never removed here.
+    // `build_tree_roots` is the single source of truth and never spans bare
+    // `state_root` (snapshot backups + the live cognitive store live there) or
+    // `$HOME`.
+    roots.extend(reclaimable::build_tree_roots(state_root));
     roots
 }
 
@@ -218,6 +227,14 @@ pub fn reclaim_candidates(
     report
 }
 
+/// Deduplicate candidates by path, preserving first occurrence. Agent proposals
+/// come first, so an agent-named path wins its metadata over the deterministic
+/// floor's copy; either way the guard re-vets the single retained entry.
+fn dedup_candidates_by_path(candidates: &mut Vec<ReclaimCandidate>) {
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|c| seen.insert(c.path.clone()));
+}
+
 /// Production top-level orchestrator: invoke the analysis recipe, vet every
 /// candidate through the non-bypassable guard, reclaim largest-first up to
 /// `target_pct`, and emit telemetry. **No fallback** — a recipe/parse failure
@@ -247,7 +264,16 @@ pub fn run_disk_reclaim(
         state_root: state_root.to_path_buf(),
         home_override: home_override.map(Path::to_path_buf),
     };
-    let (candidates, _used_pct) = run_reclaim_recipe(&invoker)?;
+    let (mut candidates, _used_pct) = run_reclaim_recipe(&invoker)?;
+
+    // Deterministic floor (issue #4809): always add the known-safe, regenerable
+    // reclaimable set so routine reclaim frees real bytes even when the LLM
+    // proposes nothing — ending the "freed 0 bytes, 0 paths removed, N skipped
+    // for review" steady state. These are **additive** to the agent proposals
+    // and — like every candidate — are still re-vetted by the guard. Dedup by
+    // path so a target the agent also named is not processed twice.
+    candidates.extend(reclaimable::reclaimable_targets(state_root));
+    dedup_candidates_by_path(&mut candidates);
 
     Ok(reclaim_candidates(
         candidates, state_root, mode, target_pct, source,
@@ -431,6 +457,43 @@ mod tests {
         let repos = managed_repos();
         assert!(!repos.contains(&PathBuf::from("/home/azureuser")));
         assert_eq!(repos.len(), 3);
+    }
+
+    // ------------------------------------------------------------------
+    // allow-root widening for the deterministic enumerator (issue #4809).
+    //
+    // Routine reclaim must be able to free the *contents* of the idle
+    // `self-deploy-target` build tree through the guard. Because the guard's
+    // `is_safe_to_delete` refuses a candidate that equals an allow-root, the
+    // build tree's own directory must be present as an allow-root so its
+    // children are strictly-inside and therefore reclaimable. The widening must
+    // stay an exact closed set — it must NEVER span bare state_root (snapshot
+    // backups live directly under it) or $HOME.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn allow_roots_include_self_deploy_target_build_tree() {
+        let roots = allow_roots(Path::new("/home/azureuser/.simard"));
+        assert!(
+            roots.contains(&PathBuf::from("/home/azureuser/.simard/self-deploy-target")),
+            "allow_roots must widen to include the self-deploy-target build tree \
+             so routine reclaim can free its contents; got {roots:?}",
+        );
+    }
+
+    #[test]
+    fn allow_roots_never_span_bare_state_root_or_home() {
+        let state_root = Path::new("/home/azureuser/.simard");
+        let roots = allow_roots(state_root);
+        assert!(
+            !roots.contains(&state_root.to_path_buf()),
+            "allow_roots must never add bare state_root — snapshot backups and \
+             the live cognitive store live directly under it",
+        );
+        assert!(
+            !roots.contains(&PathBuf::from("/home/azureuser")),
+            "allow_roots must never span $HOME",
+        );
     }
 
     #[test]

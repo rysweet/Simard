@@ -8,6 +8,7 @@ doc_type: howto
 related:
   - ../concepts/agentic-disk-reclamation.md
   - ../reference/disk-reclaim-api.md
+  - ../reference/disk-reclaim-deterministic-enumeration.md
   - ../reference/disk-reclaim-telemetry.md
   - ./configure-disk-health-check.md
   - ./reclaim-disk-space-and-run-low-space-rust-builds.md
@@ -136,6 +137,30 @@ The single knob is the `%-used` trigger and target, set via environment:
 | `SIMARD_GIT_PROTECTED_REPOS` | Comma-separated extra repo roots added to the protected deny-set (never reclaimable). | unset |
 | `SIMARD_STATE_ROOT` | State root (`~/.simard`) — where engineer worktrees, backups, and shared cargo targets live. | `$HOME/.simard` |
 
+### Deterministic reclaimable-set thresholds
+
+Routine reclaim also runs a **deterministic enumerator** that always proposes the
+regenerable space hogs routine reclaim previously ignored (the idle
+`self-deploy-target` build tree, the shared state-root build caches, and stale
+engineer worktrees) so a cycle frees real space *before* emergency thresholds —
+it no longer logs `freed 0 bytes` while `%-used` climbs. These knobs tune it;
+both have conservative defaults and a **safe floor** (`0`/empty/invalid never
+means "purge now"):
+
+| Variable | Effect | Default |
+| -------- | ------ | ------- |
+| `SIMARD_DISK_RECLAIM_BUILD_IDLE_DAYS` | An idle build tree (`self-deploy-target`/`cargo-target`/`shared-target`) is proposed only if older than this **and** no live PID references it. | `1` |
+| `SIMARD_DISK_RECLAIM_WORKTREE_IDLE_DAYS` | A stale engineer worktree is proposed only if idle beyond this (still subject to dirty/unpushed/PR-state vetoes). | `7` |
+
+Snapshot / backup / corruption-quarantine retention is **not** configured here —
+those directories are owned by the maintenance thread and its
+`SIMARD_MAINTENANCE_KEEP_SNAPSHOTS` / `_KEEP_BACKUPS` / `_KEEP_CORRUPT` knobs.
+
+See [Deterministic reclaimable-set enumeration](../reference/disk-reclaim-deterministic-enumeration.md)
+for the full contract, the maintenance-ownership boundary, and the live-state
+protections (live `cognitive`/`.wal`/`.shadow` and all snapshot/backup/corrupt
+dirs are never enumerated by this path).
+
 Set the threshold for the daemon by exporting it in the service environment:
 
 ```bash
@@ -232,9 +257,16 @@ simard worktree-gc --apply   # still refuses if it detects unsaved/unpushed work
 
 ## Run just the analysis (candidate proposal)
 
-The recipe agent only **proposes** candidates; it never deletes. To see the raw
-candidate JSON the agent emits (useful when diagnosing why something was or was
-not nominated):
+Routine reclaim gathers candidates from **two** sources, merged together and both
+re-vetted by the guard: a **deterministic Rust enumerator** (always proposes the
+regenerable set — see
+[Deterministic reclaimable-set enumeration](../reference/disk-reclaim-deterministic-enumeration.md))
+and the **recipe agent** (additive proposals; only ever *proposes*, never
+deletes). If the recipe fails, it is non-fatal — the deterministic enumerator
+still yields candidates, so reclaim frees space anyway.
+
+To see the raw candidate JSON the agent emits (useful when diagnosing why
+something was or was not nominated):
 
 ```bash
 recipe-runner-rs prompt_assets/simard/recipes/disk-reclaim.yaml \
@@ -322,6 +354,7 @@ du -sh /home/azureuser/* 2>/dev/null | sort -h | tail -10
 - [The simard disk tool (reference)](../reference/simard-disk-tool.md) — CLI grammar, exit codes, guard reasons
 - [Agentic disk reclamation (concept)](../concepts/agentic-disk-reclamation.md) — design rationale, the rails, "agent proposes, Rust disposes"
 - [Disk reclaim API (reference)](../reference/disk-reclaim-api.md) — module API, guard, executor, recipe contract
+- [Deterministic reclaimable-set enumeration (reference)](../reference/disk-reclaim-deterministic-enumeration.md) — the enumerator, keep-N/age thresholds, emergency alignment
 - [Disk reclaim telemetry (reference)](../reference/disk-reclaim-telemetry.md) — emitted metrics
 - [Configure the disk health check](./configure-disk-health-check.md) — the superseded per-cycle check
 - [Reclaim disk space and run low-space Rust builds](./reclaim-disk-space-and-run-low-space-rust-builds.md) — manual build-artifact scripts

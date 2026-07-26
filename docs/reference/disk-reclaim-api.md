@@ -8,6 +8,7 @@ doc_type: reference
 related:
   - ../concepts/agentic-disk-reclamation.md
   - ../howto/configure-disk-reclamation.md
+  - ./disk-reclaim-deterministic-enumeration.md
   - ./disk-reclaim-telemetry.md
   - ./disk-health-api.md
   - ./engineer-worktree-sweep-safety.md
@@ -32,12 +33,13 @@ for operator usage.
 
 | File | Responsibility |
 | ---- | -------------- |
-| `mod.rs` | Env parsing (`reclaim_pct_from_env`, `daemon_apply_from_env`) + `run_disk_reclaim` orchestrator (recipe → parse → executor, no fallback) |
+| `mod.rs` | Env parsing (`reclaim_pct_from_env`, `daemon_apply_from_env`, the build/worktree idle-day knobs) + `allow_roots` (widened via `build_tree_roots`) + `run_disk_reclaim` orchestrator (deterministic enumerator + recipe → parse → executor) |
 | `candidate.rs` | `ReclaimCandidate` / `CandidateKind` serde contract + `parse_candidates` marker parser |
 | `guard.rs` | The non-bypassable rail: `vet_candidate` → `Verdict::{Allow, Reject}` |
 | `daemon_dir.rs` | `resolve_daemon_working_dirs` — the protected daemon-directory union |
+| `reclaimable.rs` | `reclaimable_targets` / `build_tree_roots` — the **deterministic enumerator** shared by routine reclaim and `emergency_cleanup` ([full reference](./disk-reclaim-deterministic-enumeration.md)) |
 | `executor.rs` | `exec_reclaim` — largest-first, threshold-stop, TOCTOU-reasserting executor + `ReclaimReport` |
-| `recipe.rs` | Invoke `disk-reclaim.yaml`, strict marker parse, no-fallback error path |
+| `recipe.rs` | Invoke `disk-reclaim.yaml`, strict marker parse, **non-fatal** on failure (the deterministic enumerator still yields candidates) |
 
 ## Data flow
 
@@ -306,14 +308,18 @@ from this variable.
 
 ### `run_disk_reclaim(repo_root, state_root, home_override, mode, target_pct, source) → SimardResult<ReclaimReport>`
 
-Top-level production orchestrator wiring recipe → parse → executor with the live
-guard seams (`RealTrackedWorktreeProbe`, `ProcfsLiveProcessProbe`,
-`DuSizeMeasurer`, `DerivingPathRemover`). Emits the `simard.disk.reclaim.*`
-telemetry tagged with `source` (`daemon` | `cli`). **No fallback:** any recipe or
-parse failure yields `SimardError::AdapterInvocationFailed` and propagates to the
-caller (daemon logs a warning and continues; the CLI exits non-zero). Apply mode
-is **refused when `geteuid() == 0`** (defense in depth; the CLI also pre-checks
-for its exit-2 mapping).
+Top-level production orchestrator wiring the deterministic enumerator + recipe →
+parse → executor with the live guard seams (`RealTrackedWorktreeProbe`,
+`ProcfsLiveProcessProbe`, `DuSizeMeasurer`, `DerivingPathRemover`). Emits the
+`simard.disk.reclaim.*` telemetry tagged with `source` (`daemon` | `cli`).
+Candidates come from **two additive sources** — `reclaimable::reclaimable_targets`
+(deterministic, always present) and the `disk-reclaim.yaml` recipe — both re-vetted
+by the guard. **Recipe failure is non-fatal:** a recipe or parse error is
+surfaced via `tracing::warn!` + an OTel span (never swallowed) and the
+deterministic enumerator still yields candidates, so routine reclaim frees space
+anyway (`bytes_freed > 0` under the stale-artifact scenario). Apply mode is
+**refused when `geteuid() == 0`** (defense in depth; the CLI also pre-checks for
+its exit-2 mapping).
 
 | `mode` | Behavior |
 | ------ | -------- |
@@ -325,6 +331,59 @@ for its exit-2 mapping).
 The named, tested predicate for the daemon self-heal trigger: `true` iff
 `used_pct >= threshold_pct`. Keeps the trigger semantics in one place rather than
 inline in the maintenance loop.
+
+### Deterministic reclaimable-set knobs
+
+Read by the enumerator each reclaim cycle, defensively clamped (a `0`/empty/invalid
+value clamps to the safe default — **never** "purge now"):
+
+| Env var | Default | Meaning |
+| ------- | ------- | ------- |
+| `SIMARD_DISK_RECLAIM_BUILD_IDLE_DAYS` | `1` | idle-age floor for proposing a build tree (`self-deploy-target`/`cargo-target`/`shared-target`; also requires no live PID) |
+| `SIMARD_DISK_RECLAIM_WORKTREE_IDLE_DAYS` | `7` | idle-age floor for proposing a stale engineer worktree |
+
+Snapshot / backup / corruption retention is **not** owned here — see
+[Relationship to MaintenanceThread](./disk-reclaim-deterministic-enumeration.md#relationship-to-maintenancethread-snapshot-ownership)
+(`SIMARD_MAINTENANCE_KEEP_SNAPSHOTS` / `_KEEP_BACKUPS` / `_KEEP_CORRUPT`).
+
+## `reclaimable.rs` — the deterministic enumerator
+
+The shared, LLM-independent candidate source. Full contract in
+[Deterministic reclaimable-set enumeration](./disk-reclaim-deterministic-enumeration.md).
+
+### `reclaimable_targets(state_root) → Vec<ReclaimCandidate>`
+
+Always proposes the known-safe, regenerable set — the idle `self-deploy-target`
+build tree, the shared state-root build caches (`cargo-target`/`shared-target`),
+and stale engineer worktrees (all gated by an idle window + no live PID). Pure
+proposal (no deletion); every returned candidate is re-vetted by `vet_candidate`
+unchanged. Merged **additively** with recipe proposals in `run_disk_reclaim`, and
+consumed by `emergency_cleanup` so the two paths cannot diverge. Never proposes
+live `cognitive`/`cognitive.wal`/`cognitive.shadow` or any snapshot/backup/corrupt
+dir (those are owned by `MaintenanceThread`).
+
+### `build_tree_roots(state_root) → Vec<PathBuf>`
+
+Pure helper returning the specific leaf build-tree dir(s) — chiefly
+`<state_root>/self-deploy-target` — that `allow_roots` unions in for guard
+containment (the `cargo-target`/`shared-target`/`engineer-worktrees` roots are
+already present). Guaranteed to be an **exact closed set of leaf directories** —
+never bare `$HOME` or bare `state_root` (debug-assert + test enforced; snapshot
+backups live directly under `state_root`, so `state_root` itself is never an
+allow-root). The self-deploy dir name reuses the existing
+`SELF_DEPLOY_TARGET_DIRNAME` constant from `src/self_deploy/source_prep.rs`.
+
+## Disk-health emergency-tier alignment
+
+`disk_health::emergency_cleanup` (Tier 1) consumes the **same**
+`reclaimable_targets(state_root)` set for the state-root build trees plus the
+live-PID guard, extending it to reclaim the idle `self-deploy-target/` it
+previously ignored. It **retains every prior removal** — `target/debug/`,
+`target/llvm-cov-target/`, `worktrees/*/target/`, state-root `cargo-target/` and
+`shared-target/`, and stale backups (keep 2). At ≥95% used it therefore frees its
+previous set **plus** `self-deploy-target/` in one deterministic pass — no LLM,
+no `gh` — while routine reclaim already provides a deterministic floor below that
+threshold.
 
 ## `recipe.rs` + `disk-reclaim.yaml` — the analysis-only recipe
 
@@ -445,6 +504,7 @@ tempdirs, a fabricated `/proc` root, and `FakeLiveProcessProbe` / fake
 
 - [Agentic disk reclamation (concept)](../concepts/agentic-disk-reclamation.md) — design rationale
 - [Configure disk reclamation (how-to)](../howto/configure-disk-reclamation.md) — operator usage
+- [Deterministic reclaimable-set enumeration (reference)](./disk-reclaim-deterministic-enumeration.md) — the enumerator, keep-N/age thresholds, emergency alignment
 - [Disk reclaim telemetry (reference)](./disk-reclaim-telemetry.md) — emitted metrics
 - [Disk health API (reference)](./disk-health-api.md) — the superseded per-cycle shim and the shared JSON-envelope pattern
 - [Worktree reaping safety guards (reference)](./engineer-worktree-sweep-safety.md) — the liveness / uncommitted-work primitives the guard composes

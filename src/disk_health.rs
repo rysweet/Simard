@@ -19,6 +19,7 @@ use tracing::{info, warn};
 
 use crate::error::{SimardError, SimardResult};
 use crate::runtime_config::RuntimeConfig;
+use crate::worktree_gc::LiveProcessProbe;
 
 const ADAPTER_TAG: &str = "disk-health-check";
 const RECIPE_FILENAME: &str = "disk-health-check.yaml";
@@ -76,7 +77,34 @@ fn resolve_recipe_path(repo_root: &Path, home_override: Option<&Path>) -> Option
 /// Returns a report of what was done, or None if disk is below threshold.
 pub fn emergency_cleanup(repo_root: &Path, state_root: &Path) -> Option<DiskHealthReport> {
     let pct = get_disk_usage_pct(repo_root)?;
+    emergency_cleanup_with_pct(repo_root, state_root, pct)
+}
 
+/// Testable core of [`emergency_cleanup`] with the disk-usage percentage
+/// injected, so tests can drive the destructive pass without a real ≥95% disk.
+///
+/// Returns `None` when `pct < 95` (below the emergency threshold). Otherwise
+/// performs the deterministic removals and returns a [`DiskHealthReport`].
+///
+/// At `pct >= 95` this:
+///   1. Retains every historical `emergency_cleanup` removal (`target/debug/`,
+///      `target/llvm-cov-target/`, `worktrees/*/target/`, the state-root
+///      `cargo-target/` and `shared-target/`, and stale backups keep-2), AND
+///   2. Additionally reclaims the idle `self-deploy-target/` build tree via the
+///      **same** shared reclaimable-set definition
+///      ([`crate::disk_reclaim::reclaimable::build_tree_roots`]) that routine
+///      reclaim widens `allow_roots` with — closing the one regenerable consumer
+///      both tiers previously ignored so they can never diverge (issue #4809).
+///
+/// Emergency is a last-resort nuke of fully regenerable `cargo build` output, so
+/// (unlike routine reclaim) it removes each build-tree root wholesale without an
+/// idle window — but it still never touches the live `cognitive` store or any
+/// snapshot/backup directory.
+pub(crate) fn emergency_cleanup_with_pct(
+    repo_root: &Path,
+    state_root: &Path,
+    pct: u8,
+) -> Option<DiskHealthReport> {
     if pct < 95 {
         return None;
     }
@@ -141,7 +169,36 @@ pub fn emergency_cleanup(repo_root: &Path, state_root: &Path) -> Option<DiskHeal
         }
     }
 
-    // 5. Stale backups (keep 2 most recent)
+    // 5. Shared reclaimable build trees (issue #4809). Same source of truth as
+    //    the routine-reclaim allow-root widening — the idle `self-deploy-target`
+    //    build tree both tiers previously ignored. Removed wholesale here (no
+    //    idle window: emergency is a last-resort hard stop) but still guarded by
+    //    the live-PID probe so a build tree an active self-deploy is using is
+    //    never yanked out from under it.
+    let live = crate::worktree_gc::ProcfsLiveProcessProbe::new();
+    for root in crate::disk_reclaim::reclaimable::build_tree_roots(state_root) {
+        if !root.is_dir() {
+            continue;
+        }
+        if live.worktree_has_live_process(&root) {
+            info!(
+                path = %root.display(),
+                "Emergency cleanup skipped build tree referenced by a live process",
+            );
+            continue;
+        }
+        let size = dir_size_bytes(&root);
+        if std::fs::remove_dir_all(&root).is_ok() {
+            freed += size;
+            let name = root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| root.display().to_string());
+            actions.push(format!("Removed {name}/ ({} MB)", size / 1_000_000));
+        }
+    }
+
+    // 6. Stale backups (keep 2 most recent)
     let backup_dir = state_root.join("backups");
     if backup_dir.is_dir()
         && let Ok(mut entries) = std::fs::read_dir(&backup_dir)
@@ -159,13 +216,15 @@ pub fn emergency_cleanup(repo_root: &Path, state_root: &Path) -> Option<DiskHeal
                     .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
             )
         });
+        let mut pruned_any = false;
         for old in files.into_iter().skip(2) {
             let size = old.metadata().map(|m| m.len()).unwrap_or(0);
             if std::fs::remove_file(old.path()).is_ok() {
                 freed += size;
+                pruned_any = true;
             }
         }
-        if freed > 0 {
+        if pruned_any {
             actions.push("Pruned old backups (kept 2 most recent)".to_string());
         }
     }
@@ -457,5 +516,69 @@ mod tests {
     fn truncate_zero_max() {
         let result = truncate("hello", 0);
         assert_eq!(result, "…");
+    }
+
+    // ------------------------------------------------------------------
+    // Emergency-tier parity with the shared reclaimable set (issue #4809).
+    //
+    // The regression: emergency cleanup already removed target caches and old
+    // backups, but never reclaimed the idle `self-deploy-target/` build tree —
+    // the same regenerable consumer routine reclaim also ignored. After the fix
+    // both tiers consume `reclaimable::reclaimable_targets`, so emergency frees
+    // its previous set PLUS the idle self-deploy-target build tree.
+    //
+    // These drive the injectable `emergency_cleanup_with_pct` seam so no real
+    // ≥95% disk is required.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn emergency_cleanup_below_threshold_is_a_noop() {
+        let repo = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        assert!(
+            emergency_cleanup_with_pct(repo.path(), state.path(), 80).is_none(),
+            "below the 95% emergency threshold, no destructive pass may run",
+        );
+    }
+
+    #[test]
+    fn emergency_cleanup_reclaims_idle_self_deploy_target_and_retains_prior_removals() {
+        let repo = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+
+        // The consumer emergency ALREADY handled (must still be removed).
+        let debug = repo.path().join("target/debug");
+        std::fs::create_dir_all(&debug).unwrap();
+        std::fs::write(debug.join("bin"), vec![0u8; 4096]).unwrap();
+
+        // The NEW consumer both tiers previously ignored (must now be removed).
+        let sdt = state.path().join("self-deploy-target");
+        std::fs::create_dir_all(sdt.join("debug")).unwrap();
+        std::fs::write(sdt.join("debug").join("artifact.o"), vec![0u8; 8192]).unwrap();
+
+        let report = emergency_cleanup_with_pct(repo.path(), state.path(), 97)
+            .expect("≥95% must run the emergency pass and return a report");
+
+        assert!(
+            !debug.exists(),
+            "emergency must retain the existing target/debug removal",
+        );
+        assert!(
+            !sdt.exists(),
+            "emergency must now also reclaim the idle self-deploy-target build tree",
+        );
+        assert!(
+            report.freed_bytes > 0,
+            "emergency must report the bytes it freed",
+        );
+        assert!(
+            report
+                .actions_taken
+                .iter()
+                .any(|a| a.contains("self-deploy-target")),
+            "the self-deploy-target reclamation must be reported in actions_taken; \
+             got {:?}",
+            report.actions_taken,
+        );
     }
 }

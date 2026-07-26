@@ -597,4 +597,75 @@ mod tests {
             "disk reclaim: 88% -> 84% used, freed 12026531840 bytes, 0 paths removed, 0 skipped for review",
         );
     }
+
+    // ------------------------------------------------------------------
+    // Deterministic-floor regression (issue #4809): routine reclaim must free
+    // real bytes from the enumerator's output even with ZERO agent proposals —
+    // ending the "freed 0 bytes, 0 paths removed, N skipped for review" steady
+    // state. This wires the deterministic enumerator directly into the disposer.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn routine_reclaim_of_enumerated_idle_worktree_frees_bytes() {
+        use crate::disk_reclaim::reclaimable::enumerate_reclaimable;
+        use crate::worktree_gc::liveness::FakeLiveProcessProbe;
+        use std::time::{Duration, SystemTime};
+
+        // A state root with one idle engineer worktree (the deterministic floor
+        // proposes it; it is strictly inside the engineer-worktrees allow-root).
+        let state = TempDir::new().unwrap();
+        let engineer_worktrees = state.path().join("engineer-worktrees");
+        let idle_wt = engineer_worktrees.join("wt-stale-1");
+        std::fs::create_dir_all(&idle_wt).unwrap();
+        std::fs::write(idle_wt.join("scratch"), vec![0u8; 4096]).unwrap();
+
+        let live = FakeLiveProcessProbe::default();
+        // `now` far in the future so the freshly-created worktree reads as idle.
+        let now = SystemTime::now() + Duration::from_secs(30 * 86_400);
+        let candidates = enumerate_reclaimable(state.path(), &live, now, 1, 7);
+        assert!(
+            !candidates.is_empty(),
+            "the deterministic floor must propose the idle worktree with no agent input",
+        );
+
+        let protected = ProtectedDenySet::from_paths(vec![]);
+        let wt = AllowAllWtProbe;
+        let measurer = MapMeasurer::default();
+        measurer.set(&idle_wt, 5_000_000);
+        let allow_roots = vec![engineer_worktrees.clone()];
+        let guard = GuardContext {
+            allow_roots: &allow_roots,
+            protected: &protected,
+            live_probe: &live,
+            wt_probe: &wt,
+            measurer: &measurer,
+        };
+        // Stays above target so apply mode processes the candidate.
+        let disk = ScriptedDisk::new(vec![95]);
+        let remover = RecordingRemover::default();
+
+        let report = exec_reclaim(
+            candidates,
+            &guard,
+            ReclaimMode::Apply,
+            85,
+            &disk,
+            Path::new("/home"),
+            &remover,
+        );
+
+        assert!(
+            report.bytes_freed > 0,
+            "routine reclaim must free real bytes from the deterministic floor, \
+             not report '0 bytes, 0 paths removed'",
+        );
+        assert!(
+            report.reclaim_performed(),
+            "ReclaimReport::reclaim_performed() must be true after the floor runs",
+        );
+        assert!(
+            !report.removed.is_empty(),
+            "the enumerated idle worktree must appear in removed[]",
+        );
+    }
 }
