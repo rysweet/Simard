@@ -181,8 +181,8 @@ pub struct HealthReviewReport {
 
 /// Parse the recipe's plain-text DECISION markers into typed interventions.
 ///
-/// This is the MECHANICAL rail: it moves the recipe's typed DECISIONS onto the capability path; it re-derives no
-/// judgment. Recognised markers, one per line:
+/// This is the MECHANICAL rail: it moves the recipe's typed DECISIONS onto the
+/// capability path; it re-derives no judgment. Recognised markers, one per line:
 ///
 /// ```text
 /// HEALTHY
