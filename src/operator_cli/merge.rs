@@ -47,18 +47,14 @@ pub(crate) enum MergePrCommand {
     Merge(MergePrArgs),
 }
 
-/// Validate an `owner/repo` slug: exactly one `/`, non-empty halves, no
-/// whitespace. Keeps a malformed value from reaching the `gh --repo` argument.
+/// Validate an `owner/repo` slug before it reaches the `gh --repo` argument.
+/// Delegates to the store's single traversal-safe guard ([`validate_repo_slug`])
+/// so `merge-pr` and `record-verdict` enforce the *same* well-formedness rule,
+/// while preserving this subcommand's `invalid --repo '<repo>'` error contract.
 fn validate_repo(repo: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let parts: Vec<&str> = repo.split('/').collect();
-    let well_formed = parts.len() == 2
-        && parts.iter().all(|p| !p.is_empty())
-        && !repo.chars().any(char::is_whitespace);
-    if well_formed {
-        Ok(())
-    } else {
-        Err(format!("invalid --repo '{repo}' (expected <owner/repo>)").into())
-    }
+    validate_repo_slug(repo)
+        .map(|_| ())
+        .map_err(|_| format!("invalid --repo '{repo}' (expected <owner/repo>)").into())
 }
 
 /// Parse `merge-pr` arguments. Accepts the PR number as the single positional
