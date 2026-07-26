@@ -5,8 +5,8 @@
 //! the state root by reusing the existing `cmd_cleanup::disk` / `memory_backup`
 //! helpers — never reimplementing them. Every destructive candidate must pass
 //! the canonical allow/deny + symlink-refusal gate ([`is_safe_to_delete`]) and
-//! honour `ctx.dry_run`. Behaviour bodies are `todo!()` stubs during TDD; the
-//! config/type surface is real so tests can pin the safety contract.
+//! honour `ctx.dry_run`. The behaviour is implemented; the config/type surface
+//! and the safety contract are pinned by tests.
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};

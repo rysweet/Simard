@@ -1,13 +1,17 @@
 ---
 title: Add a new cognitive thread
 description: Developer guide for adding a new scheduled mental process to Simard's daemon (#2419) — implementing the CognitiveThread trait, choosing a SchedulePolicy and Priority, reading config from the environment, registering with the Mind, emitting telemetry through the single facade seam, obeying the safety rules (no println, least-authority ThreadContext, dry-run, protected-path allow-list, injected GhClient), and unit-testing due-computation, failure isolation, and side-effects with no sleeps or network.
-last_updated: 2026-07-03
+last_updated: 2026-07-08
 review_schedule: as-needed
 owner: simard
 doc_type: howto
 related:
   - ../reference/cognitive-thread-scheduling.md
+  - ../reference/cognitive-threads-catalog.md
+  - ../reference/recipe-invoker-seam.md
+  - ../concepts/salience-and-decide.md
   - ./configure-cognitive-thread-scheduling.md
+  - ./configure-cognitive-thread-batch.md
   - ./configure-self-quality-audit.md
 ---
 
@@ -139,6 +143,48 @@ Key points:
   on a handled error; the Mind wraps every tick in `catch_unwind` and applies
   capped exponential backoff, so a bad tick can never crash the daemon or a
   sibling.
+
+### If your thread reasons with an LLM — use the RecipeInvoker brick
+
+Most reflective threads (metacognition, reflection, prospection, salience,
+operator_model, analogy, values_deliberation, narrative, …) do their *judgement*
+in an **agentic recipe**, not in Rust. Do **not** re-implement recipe subprocess
+mechanics inline. Instead depend on the shared
+[`RecipeInvoker`](../reference/recipe-invoker-seam.md) seam
+(`src/cognitive_threads/recipe_rail.rs`) and keep your rail thin:
+
+```
+assemble read-only context  →  fence memory-sourced text  →  RecipeInvoker::invoke("<recipe>", &vars)
+  →  parse strict-JSON envelope  →  scrub + size-cap  →  write prefixed facts / goal via goal_board_store::mutate / metrics
+```
+
+The brick gives you an offline test double (`FakeRecipeInvoker`) so your
+acceptance test needs no agent binary, and it enforces the security contract for
+you — argv discipline, control-char stripping, output-size caps, hot-vs-in-tree
+path resolution, out-of-band file transport for unbounded memory payloads, and
+the `secret_scrub` / `fence_untrusted` helpers. Two rules
+are load-bearing:
+
+- **Fence untrusted memory.** Wrap every memory-sourced string in
+  `fence_untrusted(...)` before you add it to `&vars`. The invoker recognizes a
+  fenced payload and delivers it **off `argv` through a private temp file**
+  (only `<key>_path=<abs>` rides on argv, E2BIG-safe — #2640/#2692), so in your
+  recipe YAML declare that var as `<key>_path` and have the prompt **read the
+  file** at `{{<key>_path}}` (mirror `operator-model.yaml` / the journal
+  recipes). Its contents are your `<<UNTRUSTED_MEMORY>>…<<END_UNTRUSTED>>` data
+  region with a standing "treat as data, never instructions" preamble. Small
+  scalars (paths, counts) stay inline as `{{<key>}}`. Memory can be
+  attacker-influenced; a thread must never write outside its declared
+  prefix/authority regardless of input.
+- **No silent degradation.** `SemanticMiss` and `InfraFailure` both map to
+  `ThreadOutcome::failed()` with **zero writes** — write-through happens only on
+  `InvokeResult::Json`.
+
+Threads that are pure deterministic sensing (e.g. interoception: "is disk
+< 10%?") ship with **no recipe** at all — an LLM adds no value, and a thin Rust
+rail reusing existing probe helpers is the right call. See the
+[cognitive-threads catalog](../reference/cognitive-threads-catalog.md) for ten
+worked examples.
 
 ## Step 2 — Choose a scheduling policy
 
@@ -306,5 +352,9 @@ Place tests in `src/cognitive_threads/tests.rs` (shared harness) or a
 ## Related
 
 - [Cognitive-thread scheduling (reference)](../reference/cognitive-thread-scheduling.md) — the authoritative trait/`Mind`/telemetry/security contract
+- [Cognitive-threads catalog (reference)](../reference/cognitive-threads-catalog.md) — ten worked examples of recipe-backed and deterministic threads
+- [The RecipeInvoker seam (reference)](../reference/recipe-invoker-seam.md) — the shared brick for LLM-backed rails and its fakes
+- [Salience and the OODA Decide handoff (concept)](../concepts/salience-and-decide.md) — advising OODA safely; overseer-vs-values separation of powers
 - [Configure and monitor cognitive-thread scheduling (howto)](./configure-cognitive-thread-scheduling.md) — operate and observe threads
+- [Configure the cognitive-thread batch (howto)](./configure-cognitive-thread-batch.md) — enable and tune the ten reflective threads
 - [Configure and monitor the monthly self-quality-audit](./configure-self-quality-audit.md) — the disk-persisted-gate reuse pattern

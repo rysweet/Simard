@@ -8,10 +8,13 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command as StdCommand;
 use std::time::Duration;
 
 use assert_cmd::Command;
 use tempfile::TempDir;
+
+const EXPECTED_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn simard() -> Command {
     let mut command = Command::cargo_bin("simard").expect("simard binary must be buildable");
@@ -121,6 +124,21 @@ fn assert_backup_contains(root: &Path, expected: &[u8]) {
     );
 }
 
+fn run_capture(bin: &Path, args: &[&str]) -> String {
+    let output = StdCommand::new(bin)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to execute {bin:?} {args:?}: {e}"));
+    assert!(
+        output.status.success(),
+        "{bin:?} {args:?} exited {:?}\nstdout: {}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 #[test]
 fn install_help_documents_the_canonical_installer_contract() {
     let assert = simard().args(["install", "--help"]).assert().success();
@@ -141,6 +159,112 @@ fn install_help_documents_the_canonical_installer_contract() {
             "`simard install --help` should document {expected:?}; stdout:\n{stdout}"
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn cargo_install_runtime_features_self_installs_with_canonical_installer() {
+    let workspace = std::env::current_dir().expect("cwd");
+    let install_root = workspace.join("target").join("install-real");
+    let _ = fs::remove_dir_all(&install_root);
+
+    let install_status = StdCommand::new(env!("CARGO"))
+        .args(["install", "--path", ".", "--root"])
+        .arg(&install_root)
+        .args([
+            "--no-track",
+            "--quiet",
+            "--debug",
+            "--no-default-features",
+            "--features",
+            "signal",
+        ])
+        .status()
+        .expect("failed to launch cargo install");
+    assert!(install_status.success(), "cargo install --path . failed");
+
+    let installed_simard = install_root.join("bin").join("simard");
+    assert!(
+        installed_simard.exists(),
+        "expected installed binary at {installed_simard:?}"
+    );
+
+    let version_output = run_capture(&installed_simard, &["--version"]);
+    assert_eq!(
+        version_output.trim(),
+        format!("simard {EXPECTED_VERSION}"),
+        "installed simard --version mismatch"
+    );
+
+    let ensure_status = StdCommand::new(&installed_simard)
+        .arg("ensure-deps")
+        .status()
+        .expect("failed to launch installed simard ensure-deps");
+    assert!(
+        ensure_status.success(),
+        "installed simard ensure-deps failed (exit {:?})",
+        ensure_status.code()
+    );
+
+    let temp = TempDir::new().expect("tempdir");
+    let simard_home = temp.path().join("self-install-home");
+    let unit_dir = temp.path().join("systemd-user");
+    let (systemctl, systemctl_log) = fake_systemctl(temp.path());
+
+    let self_install_status = StdCommand::new(&installed_simard)
+        .arg("install")
+        .arg("--simard-home")
+        .arg(&simard_home)
+        .arg("--systemd-user-dir")
+        .arg(&unit_dir)
+        .arg("--systemctl")
+        .arg(&systemctl)
+        .status()
+        .expect("failed to launch installed simard install");
+    assert!(
+        self_install_status.success(),
+        "installed simard install failed"
+    );
+
+    let second_hop = simard_home.join("bin").join("simard");
+    assert!(
+        second_hop.exists(),
+        "second-hop binary missing at {second_hop:?}"
+    );
+    let mode = fs::metadata(&second_hop)
+        .expect("stat second-hop")
+        .permissions()
+        .mode();
+    assert!(
+        mode & 0o111 != 0,
+        "second-hop binary at {second_hop:?} not executable (mode {mode:o})"
+    );
+
+    let second_hop_version = run_capture(&second_hop, &["--version"]);
+    assert_eq!(
+        second_hop_version.trim(),
+        format!("simard {EXPECTED_VERSION}"),
+        "second-hop simard --version mismatch"
+    );
+    assert_systemctl_logged(&systemctl_log, &["--user", "daemon-reload"]);
+    assert_systemctl_logged(
+        &systemctl_log,
+        &["--user", "restart", "simard-ooda.service"],
+    );
+    // Convergence: the separate signal service is decommissioned, never
+    // enabled or restarted (Signal is hosted in-process by the OODA daemon).
+    assert_systemctl_logged(
+        &systemctl_log,
+        &["--user", "disable", "--now", "simard-signal.service"],
+    );
+    assert_systemctl_not_logged(
+        &systemctl_log,
+        &["--user", "enable", "simard-signal.service"],
+    );
+    assert_systemctl_not_logged(
+        &systemctl_log,
+        &["--user", "restart", "simard-signal.service"],
+    );
 }
 
 #[cfg(unix)]
