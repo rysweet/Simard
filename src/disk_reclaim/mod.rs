@@ -29,6 +29,11 @@ pub mod guard;
 pub mod prod;
 pub mod recipe;
 
+pub mod build_cache;
+
+pub use build_cache::{
+    EVICTABLE_CACHE_DIRS, build_cache_candidates, build_cache_leaf_dirs, target_debug_roots,
+};
 pub use candidate::{CandidateKind, MAX_CANDIDATES, ReclaimCandidate, parse_candidates};
 pub use daemon_dir::resolve_daemon_working_dirs;
 pub use executor::{
@@ -191,7 +196,16 @@ pub fn reclaim_candidates(
         effective
     };
 
-    let allow = allow_roots(state_root);
+    // Deterministic build-cache leaves for the managed repos (issue #4810).
+    // Threaded into BOTH the Rail-2 allow-scope and the guard's registered-leaf
+    // allowlist so routine reclaim can evict `<repo>/target/debug/*` without
+    // widening any other rail. The widening is expressed leaf-by-leaf (never
+    // `target/`), so `starts_with` structurally forbids a wholesale-`target/debug`
+    // candidate from ever being contained. Empty when nothing is built yet.
+    let build_cache_leaves = build_cache::build_cache_leaf_dirs(&managed_repos());
+    let mut allow = allow_roots(state_root);
+    allow.extend(build_cache_leaves.iter().cloned());
+
     let protected = ProtectedDenySet::resolve(Path::new("/proc"));
     let live = crate::worktree_gc::ProcfsLiveProcessProbe::new();
     let wt = RealTrackedWorktreeProbe;
@@ -201,6 +215,7 @@ pub fn reclaim_candidates(
     let measurer = CachingSizeMeasurer::new(&du);
     let ctx = GuardContext {
         allow_roots: &allow,
+        build_cache_leaves: &build_cache_leaves,
         protected: &protected,
         live_probe: &live,
         wt_probe: &wt,
@@ -249,9 +264,38 @@ pub fn run_disk_reclaim(
     };
     let (candidates, _used_pct) = run_reclaim_recipe(&invoker)?;
 
+    // Merge the deterministic build-cache leaves with the agent's proposal,
+    // de-duplicating by path (issue #4810). The recipe contract is unchanged —
+    // the agent may still nominate build caches and everything else — but the
+    // deterministic set guarantees the regenerable leaves are always present
+    // regardless of what the agent returns, removing steady-state relief's
+    // dependence on non-deterministic LLM output. There is NO fallback: a recipe
+    // failure still surfaces above as `AdapterInvocationFailed`; the deterministic
+    // candidates never mask a broken recipe.
+    let candidates = merge_dedup_by_path(candidates, build_cache_candidates(&managed_repos()));
+
     Ok(reclaim_candidates(
         candidates, state_root, mode, target_pct, source,
     ))
+}
+
+/// Merge two candidate lists, keeping the first occurrence of each path. The
+/// recipe proposal wins on a path collision (its `kind`/`reason` are advisory and
+/// re-derived by the guard anyway), and each deterministic leaf is appended only
+/// when no candidate already targets that path.
+fn merge_dedup_by_path(
+    primary: Vec<ReclaimCandidate>,
+    extra: Vec<ReclaimCandidate>,
+) -> Vec<ReclaimCandidate> {
+    let mut seen: std::collections::HashSet<PathBuf> =
+        primary.iter().map(|c| c.path.clone()).collect();
+    let mut out = primary;
+    for candidate in extra {
+        if seen.insert(candidate.path.clone()) {
+            out.push(candidate);
+        }
+    }
+    out
 }
 
 /// Whether the daemon self-heal trigger should fire: the measured home-partition
@@ -566,5 +610,33 @@ mod tests {
             reason_attr(RejectReason::UnknownPrState),
             "unknown_pr_state"
         );
+    }
+
+    #[test]
+    fn merge_dedup_by_path_appends_only_new_paths() {
+        let mk = |p: &str, kind: CandidateKind| ReclaimCandidate {
+            path: PathBuf::from(p),
+            kind,
+            parent_repo: None,
+            reason: None,
+            est_bytes: None,
+        };
+        // The recipe proposal already includes `/a`; the deterministic set adds
+        // `/a` (a collision, dropped) and `/b` (new, appended).
+        let recipe = vec![mk("/a", CandidateKind::OrphanDir)];
+        let deterministic = vec![
+            mk("/a", CandidateKind::StaleBuildCache),
+            mk("/b", CandidateKind::StaleBuildCache),
+        ];
+
+        let merged = merge_dedup_by_path(recipe, deterministic);
+        let paths: Vec<_> = merged.iter().map(|c| c.path.clone()).collect();
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("/a"), PathBuf::from("/b")],
+            "collision keeps the first (recipe) entry; only the new path is appended",
+        );
+        // The surviving `/a` is the recipe's, proving first-wins on collision.
+        assert_eq!(merged[0].kind, CandidateKind::OrphanDir);
     }
 }

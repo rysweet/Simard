@@ -362,6 +362,7 @@ mod tests {
     ) -> GuardContext<'a> {
         GuardContext {
             allow_roots: &env.allow_roots,
+            build_cache_leaves: &[],
             protected,
             live_probe: live,
             wt_probe: wt,
