@@ -60,6 +60,12 @@ fn run_command_inner(
     for key in CLEARED_GIT_ENV_VARS {
         command.env_remove(key);
     }
+    // Cap cargo parallelism to prevent OOM (issues #2199, #4778). Every other
+    // Simard-spawned cargo path applies this limit; run_command_inner was the
+    // single outlier, so cargo invocations here could ignore SIMARD_CARGO_JOBS.
+    if *program == "cargo" {
+        command.env("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs());
+    }
     let mut child = command
         .spawn()
         .map_err(|error| SimardError::ActionExecutionFailed {
