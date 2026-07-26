@@ -31,6 +31,8 @@ mod tests_checkpoint;
 #[cfg(test)]
 mod tests_claim_sentinel;
 #[cfg(test)]
+mod tests_inspect_worktree_resolution;
+#[cfg(test)]
 mod tests_meeting_decisions;
 #[cfg(test)]
 mod tests_resume;
@@ -117,6 +119,14 @@ pub fn run_local_engineer_loop(
     state_root: impl Into<PathBuf>,
 ) -> SimardResult<EngineerLoopRun> {
     let loop_start = Instant::now();
+    // Issue #4744: resolve the engineer's REAL worktree before any probe when
+    // the launching harness names the claim. This closes the false-stale-reap
+    // where the inspect phase probed a synthetic `/tmp/...not-a-repo` path,
+    // `git` returned exit 128, and a healthy-but-idle engineer was reaped as
+    // "producing nothing". A genuinely-absent worktree fails loudly and early
+    // with the distinct `MissingWorktree` signal instead of degrading to a
+    // bogus-path `NotARepo`.
+    let workspace_root = effective_workspace_root(workspace_root.as_ref())?;
     let state_root = state_root.into();
     let mut phase_traces = Vec::new();
 
@@ -182,7 +192,7 @@ pub fn run_local_engineer_loop(
         inspection
     } else {
         let phase_start = Instant::now();
-        let inspection = inspect_workspace(workspace_root.as_ref(), &state_root);
+        let inspection = inspect_workspace(&workspace_root, &state_root);
         let inspection = match &inspection {
             Ok(_) => {
                 phase_traces.push(PhaseTrace {
@@ -1008,6 +1018,32 @@ fn summarize_results(
         changed_files,
         key_decisions,
         accomplishment,
+    }
+}
+
+/// Environment variable by which the launching harness names the engineer claim
+/// this loop is advancing (issue #4744). When set to a non-empty value, the loop
+/// resolves the engineer's REAL worktree via
+/// [`crate::engineer_worktree::resolve_engineer_worktree`] instead of trusting a
+/// caller-supplied path that may be a synthetic, non-repository `/tmp` default.
+/// When unset, legacy behaviour is preserved and the supplied path is used
+/// verbatim.
+pub(crate) const ENGINEER_CLAIM_KEY_ENV: &str = "SIMARD_ENGINEER_CLAIM_KEY";
+
+/// Choose the worktree the inspect phase probes.
+///
+/// If the harness named the claim through [`ENGINEER_CLAIM_KEY_ENV`], resolve
+/// the engineer's managed worktree from the durable state root — a
+/// genuinely-absent worktree surfaces the distinct, fail-closed
+/// [`SimardError::MissingWorktree`] rather than degrading to a bogus-path
+/// [`SimardError::NotARepo`]. Otherwise the caller-supplied `supplied` path is
+/// used unchanged (legacy behaviour).
+pub(crate) fn effective_workspace_root(supplied: &Path) -> SimardResult<PathBuf> {
+    match std::env::var(ENGINEER_CLAIM_KEY_ENV) {
+        Ok(claim_key) if !claim_key.trim().is_empty() => {
+            crate::engineer_worktree::resolve_engineer_worktree(claim_key.trim())
+        }
+        _ => Ok(supplied.to_path_buf()),
     }
 }
 

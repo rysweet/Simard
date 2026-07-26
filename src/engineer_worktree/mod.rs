@@ -67,11 +67,11 @@ pub const WORKTREES_SUBDIR: &str = "engineer-worktrees";
 ///           optional — absent in pre-#1238 sentinels)
 pub const ENGINEER_CLAIM_FILE: &str = ".simard-engineer-claim";
 
-mod claim;
+pub mod claim;
 mod discovery;
 mod precommit;
 use claim::{claim_is_live, format_engineer_claim, read_engineer_claim_full};
-pub use claim::{is_pid_alive_public, read_pid_starttime_public};
+pub use claim::{is_pid_alive_public, read_pid_starttime_public, resolve_engineer_worktree};
 pub(crate) use discovery::goal_id_from_worktree_dir;
 pub use discovery::{
     LiveEngineerWorktree, live_claimed_engineers, live_claimed_engineers_in_worktrees,

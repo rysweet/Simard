@@ -153,6 +153,16 @@ pub enum SimardError {
         path: PathBuf,
         reason: String,
     },
+    /// A known engineer claim's worktree directory is absent (reaped, swept, or
+    /// never allocated). Distinct from [`SimardError::NotARepo`]: the engineer
+    /// is not "not a repo", its worktree simply does not exist on disk. The
+    /// reaper treats this as a genuinely-missing worktree, NOT as a healthy
+    /// engineer producing nothing, so it never triggers a false-stale reap of a
+    /// live-but-idle engineer (issue #4744).
+    MissingWorktree {
+        claim_key: String,
+        expected_path: PathBuf,
+    },
     UnsupportedEngineerAction {
         reason: String,
     },

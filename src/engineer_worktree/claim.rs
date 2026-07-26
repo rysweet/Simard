@@ -1,8 +1,11 @@
 //! Per-engineer worktree claim helpers — PID + starttime sentinel.
 
 use super::ENGINEER_CLAIM_FILE;
+use super::WORKTREES_SUBDIR;
+use super::discovery::goal_id_from_worktree_dir;
+use crate::error::{SimardError, SimardResult};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Read field 22 (starttime in jiffies since boot) from `/proc/<pid>/stat`.
 /// Returns `None` if the file can't be read or is malformed.
@@ -136,4 +139,72 @@ pub fn claim_is_live(claim: &EngineerClaim) -> bool {
         // Pre-#1238 sentinel: no starttime recorded. Fall back to PID-only.
         None => true,
     }
+}
+
+/// Recover the goal token an engineer claim key carries.
+///
+/// Claim keys look like `engineer:<goal-id>` or `<repo>:<goal-id>` (e.g.
+/// `rysweet/Simard:advance-agent-parity-f29bb15c`). The goal token is the
+/// segment after the LAST `:`; a key with no `:` is itself the token. This is
+/// the value that matches the allocator's worktree directory goal id (see
+/// [`goal_id_from_worktree_dir`]).
+fn goal_token_from_claim_key(claim_key: &str) -> &str {
+    claim_key.rsplit(':').next().unwrap_or(claim_key)
+}
+
+/// Resolve the on-disk worktree path for the engineer holding `claim_key`.
+///
+/// Returns the canonicalized worktree root when the directory exists and lives
+/// under the managed `<state_root>/engineer-worktrees/` root. Returns
+/// [`SimardError::MissingWorktree`] when the claim is known but its worktree
+/// directory is absent (reaped, swept, or never allocated) — a distinct,
+/// fail-closed signal, never [`SimardError::NotARepo`] (issue #4744).
+///
+/// The engineer-loop inspect phase drives its `git` probe from this resolved
+/// path instead of trusting a caller-supplied path, so a synthetic `/tmp`
+/// default can never be probed into a `NOT_A_REPO` false-stale reap of a
+/// live-but-idle engineer.
+///
+/// Path safety: the resolved directory is canonicalized (collapsing `..` and
+/// resolving symlinks) and confirmed to live *within* the canonicalized managed
+/// worktrees root; a symlink that escapes the root is rejected as missing.
+pub fn resolve_engineer_worktree(claim_key: &str) -> SimardResult<PathBuf> {
+    let state_root = crate::state_root::simard_state_root();
+    let worktrees_root = state_root.join(WORKTREES_SUBDIR);
+    let goal_token = goal_token_from_claim_key(claim_key);
+    let expected_path = worktrees_root.join(goal_token);
+
+    let missing = || SimardError::MissingWorktree {
+        claim_key: claim_key.to_string(),
+        expected_path: expected_path.clone(),
+    };
+
+    // The managed root must exist before any worktree can live under it.
+    let worktrees_root_canonical = fs::canonicalize(&worktrees_root).map_err(|_| missing())?;
+
+    let entries = fs::read_dir(&worktrees_root_canonical).map_err(|_| missing())?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if goal_id_from_worktree_dir(name) != goal_token {
+            continue;
+        }
+        // Canonicalize and confirm containment inside the managed root so a
+        // symlink planted under engineer-worktrees/ can never redirect the
+        // probe outside the sandbox.
+        let Ok(canonical) = fs::canonicalize(&path) else {
+            continue;
+        };
+        if !canonical.starts_with(&worktrees_root_canonical) {
+            continue;
+        }
+        return Ok(canonical);
+    }
+
+    Err(missing())
 }

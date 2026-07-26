@@ -131,6 +131,37 @@ fn display_not_a_repo() {
     assert!(msg.contains("no .git directory"), "{msg}");
 }
 
+// --- Display: MissingWorktree (issue #4744) ---
+
+#[test]
+fn display_missing_worktree() {
+    let err = SimardError::MissingWorktree {
+        claim_key: "engineer:goal-7f5afcca".to_string(),
+        expected_path: PathBuf::from("/state/engineer-worktrees/eng-7f5afcca"),
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("MISSING_WORKTREE"), "{msg}");
+    assert!(msg.contains("engineer:goal-7f5afcca"), "{msg}");
+    assert!(
+        msg.contains("/state/engineer-worktrees/eng-7f5afcca"),
+        "{msg}"
+    );
+    // A MissingWorktree must never be renderable as a NotARepo false positive.
+    assert!(!msg.contains("NOT_A_REPO"), "{msg}");
+}
+
+#[test]
+fn missing_worktree_is_not_not_a_repo_variant() {
+    let missing = SimardError::MissingWorktree {
+        claim_key: "engineer:x".to_string(),
+        expected_path: PathBuf::from("/state/engineer-worktrees/x"),
+    };
+    assert!(
+        !matches!(missing, SimardError::NotARepo { .. }),
+        "MissingWorktree must be a distinct variant from NotARepo (issue #4744)"
+    );
+}
+
 // --- Display: StewardshipRoutingAmbiguous (issue #1167) ---
 
 #[test]

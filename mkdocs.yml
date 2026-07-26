@@ -299,6 +299,7 @@ nav:
     - Engineer-Claim Release & Reclaim API: reference/engineer-claim-release-api.md
     - Stale-Engineer-Claim Reaper API: reference/claim-reaper-api.md
     - Investigate-Before-Reap API: reference/investigate-stale-engineer-api.md
+    - Engineer-Inspect Worktree Resolution: reference/engineer-inspect-worktree-resolution.md
     - Tombstoned-Goal Engineer Reaper API: reference/tombstoned-goal-engineer-reaper-api.md
     - Typed OODA Goal-Session Deterministic Rails: reference/typed-ooda-goal-session-rails.md
     - Stable Goal-Session Identity API: reference/stable-goal-session-identity-api.md

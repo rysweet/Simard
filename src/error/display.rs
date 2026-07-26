@@ -159,6 +159,16 @@ impl Display for SimardError {
                     path.display()
                 )
             }
+            Self::MissingWorktree {
+                claim_key,
+                expected_path,
+            } => {
+                write!(
+                    f,
+                    "MISSING_WORKTREE: engineer claim '{claim_key}' has no worktree on disk at '{}' (reaped, swept, or never allocated); not a NotARepo false positive",
+                    expected_path.display()
+                )
+            }
             Self::UnsupportedEngineerAction { reason } => {
                 write!(
                     f,
