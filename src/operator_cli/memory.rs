@@ -608,7 +608,28 @@ fn run_stats(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::erro
 /// Observability: structured `tracing` only — no user-facing stdout, no
 /// `print!`/`println!`, no silent fallback.
 fn run_ping(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
-    let (state_root_opt, _json) = super::args::parse_state_root_and_json(args.collect())?;
+    // Ping is deliberately silent (structured tracing only, exit-code contract),
+    // so unlike `stats`/`dump` it has no `--json` output mode. Parse its own
+    // args rather than reusing `parse_state_root_and_json`, which would silently
+    // swallow `--json` and mislead scripts into expecting JSON on stdout.
+    let mut state_root_opt: Option<PathBuf> = None;
+    for arg in args {
+        if arg == "--help" || arg == "-h" {
+            print!("{MEMORY_HELP}");
+            return Ok(());
+        } else if arg == "--json" {
+            return Err("simard memory ping has no --json output (it is a silent \
+                        exit-code-only liveness probe); drop --json or use \
+                        `simard memory stats --json` for machine-readable output"
+                .into());
+        } else if arg.starts_with("--") {
+            return Err(format!("unexpected flag: {arg}").into());
+        } else if state_root_opt.is_none() {
+            state_root_opt = Some(PathBuf::from(arg));
+        } else {
+            return Err(format!("unexpected argument: {arg}").into());
+        }
+    }
     let state_root = resolve_state_root(state_root_opt);
     let sock = socket_path_for(&state_root);
     let span = tracing::info_span!(
@@ -1596,6 +1617,28 @@ mod tests {
             !err.to_string()
                 .contains("unsupported command 'memory ping'"),
             "`ping` must be dispatched, not rejected as unsupported: {err}"
+        );
+    }
+
+    // ARG CONTRACT: `ping` has no `--json` mode (it is a silent exit-code-only
+    // probe). Passing `--json` must fail loudly rather than be silently ignored,
+    // so scripts never expect JSON on stdout that ping does not emit.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn ping_rejects_json_flag_with_a_clear_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _env = PingStateEnvGuard::set_state_root(tmp.path());
+        let err =
+            dispatch_memory_command(vec!["ping".to_string(), "--json".to_string()].into_iter())
+                .expect_err("ping must reject --json rather than silently ignore it");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--json"),
+            "the error must name the rejected --json flag: {err}"
+        );
+        assert!(
+            !msg.contains("unsupported command"),
+            "ping must reject --json via its own arg parser, not the dispatch catch-all: {err}"
         );
     }
 
