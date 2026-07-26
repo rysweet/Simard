@@ -318,6 +318,8 @@ du -sh /home/azureuser/* 2>/dev/null | sort -h | tail -10
 
 ## Related
 
+- [Reclaim disk with the simard disk tool](./reclaim-disk-with-the-simard-disk-tool.md) — the agent-facing `simard disk reclaim`/`report` tool the disk-health recipe calls to act
+- [The simard disk tool (reference)](../reference/simard-disk-tool.md) — CLI grammar, exit codes, guard reasons
 - [Agentic disk reclamation (concept)](../concepts/agentic-disk-reclamation.md) — design rationale, the rails, "agent proposes, Rust disposes"
 - [Disk reclaim API (reference)](../reference/disk-reclaim-api.md) — module API, guard, executor, recipe contract
 - [Disk reclaim telemetry (reference)](../reference/disk-reclaim-telemetry.md) — emitted metrics

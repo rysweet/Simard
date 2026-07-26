@@ -1,23 +1,33 @@
-# disk-health-check.yaml — Agent-based disk health check.
+# disk-health-check.yaml — Agent-based disk health check that ACTS via a tool.
 #
-# Invoked by src/disk_health.rs via recipe-runner-rs. An agent checks disk
-# usage on the home partition and uses its judgment to clean up when usage
-# exceeds 80%.
+# Invoked by src/disk_health.rs via recipe-runner-rs. An agent surveys disk
+# usage on the home partition and, when space is tight, reclaims stale artifacts
+# by calling the safety-enforcing `simard disk` tool — exactly the way
+# distill-episodes.yaml commits facts via `simard memory remember`.
+#
+# ## What changed (issue #4722)
+#
+# The recipe no longer PRINTS `DISK_USED_PCT=`/`FREED_BYTES=`/`ACTION:` markers
+# for Simard to scrape back out of recipe stdout, and it never runs `rm` itself.
+# That parse-then-act was the forbidden "recipe emits output → Rust parses →
+# Rust acts" pattern. Instead the agent CALLS the `simard disk` tool, which
+# enforces the disk-safety heuristic INTERNALLY (it only reclaims a worktree or
+# target dir whose PR is merged/closed AND that has no active recipe/engineer
+# session; it never uses a `git merge-base --is-ancestor` staleness test). There
+# is no return document for anyone to parse.
 #
 # Context vars (passed via -c):
 #   state_root  — path to ~/.simard (worktrees, backups, cargo dirs live here)
+#   repo_path   — the Simard source worktree root
 #
-# Output: text markers to stdout (one per line):
-#   DISK_USED_PCT=<0-255>
-#   FREED_BYTES=<int>
-#   ACTION: <description>   (one line per action taken; omitted if none)
-#
-# Design: single agent step — the LLM decides what to clean and how
-# aggressively based on disk pressure. No hardcoded find/rm scripts.
+# Output: NONE on stdout. The agent's `simard disk` invocations ARE the effect.
+# Whatever the agent prints is ignored — Simard interprets this recipe by its
+# EXIT STATUS alone (src/disk_health.rs::run_disk_health_check -> Ok(true) on
+# exit 0, Ok(false) on non-zero).
 
 name: "disk-health-check"
-description: "Agent-based disk health check and adaptive cleanup"
-version: "2.0.0"
+description: "Agent-based disk health check that reclaims via the safety-enforcing `simard disk` tool"
+version: "3.0.0"
 author: "Simard"
 tags: ["simard", "disk", "maintenance", "ops"]
 
@@ -31,79 +41,78 @@ steps:
     agent: "default"
     prompt: |
       You are a disk health maintenance agent for Simard. Your job is to check
-      disk usage and, if needed, clean up stale artifacts to free space. You have
-      bash tools available to run shell commands.
+      disk usage and, when space is tight, free it by calling the
+      **`simard disk`** command-line tool. You have bash tools available.
+
+      ## The tool does the deleting — never `rm` yourself
+
+      `simard disk` enforces the disk-safety heuristic internally: it only
+      reclaims a worktree or `target/` dir whose PR is **merged or closed** AND
+      that has **no active recipe/engineer session**, and it re-vets every
+      candidate immediately before removing anything. You MUST reclaim through
+      this tool. Do **not** run `rm`, `git worktree remove`, or any direct delete
+      command yourself, and do **not** print `DISK_USED_PCT=`/`FREED_BYTES=`/
+      `ACTION:` markers — there is nothing to parse.
+
+      Tool surface:
+      ```
+      simard disk report  --path <P> [--path <P> …]      # vet + summarise, never deletes
+      simard disk report  --paths @<file>                # newline-delimited path list (NOT JSON)
+      simard disk reclaim --path <P> [--path <P> …]      # guarded delete (APPLY by default)
+      simard disk reclaim --path <P> --dry-run           # vet only, delete nothing
+      ```
+      A large candidate list must be passed with `--paths @<file>` (one path per
+      line), never inlined into a single huge argument.
+
+      Exit-code contract: `0` = handled (a candidate was reclaimed OR safely
+      skipped by a guard rail — a per-candidate rejection is NOT an error);
+      `1` = operational failure; `2` = refused (apply-as-root). A skip is normal
+      and safe — the tool is refusing to delete something still in use.
 
       ## Procedure
 
-      1. **Measure current disk usage.** Run a single command to capture both the
-         usage percentage and available bytes:
+      1. **Measure current disk usage** on the home partition:
          ```
          df -B1 --output=pcent,avail "$HOME" | tail -1
          ```
-         Parse the percentage (strip the `%` sign) and the available-bytes value.
-         Store the available bytes as `AVAIL_BEFORE` for the delta calculation.
+         Strip the `%` and read the available bytes.
 
-      2. **If usage is below 80%**, no cleanup is needed. Print the output markers
-         and stop immediately — do not scan any directories:
+      2. **If usage is below 80%**, no cleanup is needed. Stop immediately — do
+         not scan or reclaim anything.
+
+      3. **If usage is 80% or above**, enumerate candidate paths (largest yield
+         first), then hand them to the tool. Be more aggressive as pressure
+         rises (95% warrants surveying more than 82% does). Candidate sources:
+
+         - **Cargo `target/` build caches** (the biggest consumer):
+           `{{repo_path}}/target/`, `{{repo_path}}/worktrees/*/target/`,
+           `{{state_root}}/cargo-target/`, `{{state_root}}/shared-target/`.
+         - **Engineer worktrees** under `{{state_root}}/engineer-worktrees/*` and
+           `{{repo_path}}/worktrees/*` (the tool keeps any whose PR is not
+           merged/closed or that has a live session — trust it).
+         - **Old database backups** in `{{state_root}}/backups/` — but the tool
+           does not manage backups; if you must prune those, keep at least the 5
+           most recent and delete older ones by hand only if they are plainly
+           disposable. Prefer letting the tool handle worktrees and caches.
+
+      4. **Survey first, then reclaim.** For the candidate paths you gathered:
          ```
-         DISK_USED_PCT=<current percentage>
-         FREED_BYTES=0
+         printf '%s\n' <path> <path> … > /tmp/disk-candidates.txt
+         simard disk report --paths @/tmp/disk-candidates.txt
+         simard disk reclaim --paths @/tmp/disk-candidates.txt
          ```
+         (or per-path `simard disk reclaim --path <P>`). The tool applies its own
+         guard rails; candidates it skips are correctly protected. If `simard
+         disk` is unavailable, fall back to `simard disk-reclaim` only if that
+         subcommand exists — otherwise stop without deleting anything by hand.
 
-      3. **If usage is 80% or above**, free space using the cleanup targets below.
-         Be more aggressive when disk pressure is higher (e.g., 95% warrants
-         removing more than 82% does). Process targets in the order listed — they
-         are sorted by typical space yield (largest first). After each target
-         category, re-check usage with `df -B1 --output=pcent "$HOME" | tail -1`.
-         If usage has dropped below 80%, skip the remaining categories.
+      5. **Re-check** with `df -B1 --output=pcent "$HOME" | tail -1`. If usage is
+         back under 80%, stop.
 
-      4. **After cleanup** (or after early termination), run one final
-         `df -B1 --output=pcent,avail "$HOME" | tail -1`. Compute freed bytes as
-         `AVAIL_AFTER - AVAIL_BEFORE`. If the delta is negative, report 0.
+      ## Output
 
-      ## Cleanup Targets (ordered by typical yield)
-
-      Cleanup targets span both `{{state_root}}` and the source worktree.
-
-      1. **Cargo `target/` directories** — the single biggest disk consumer.
-         These accumulate incremental build artifacts that grow without bound.
-         Scan ALL of these paths for `target/` directories:
-         - `{{repo_path}}/target/` (main worktree build cache)
-         - `{{repo_path}}/worktrees/*/target/` (engineer worktree build caches)
-         - `{{state_root}}/cargo-target/` and `{{state_root}}/shared-target/`
-         For each found `target/` dir: remove `incremental/` and `debug/` subdirs
-         first. Under extreme pressure (>90%), remove the entire `target/` dir.
-         These are always safe to delete — cargo rebuilds them automatically.
-
-      2. **`{{repo_path}}/worktrees/`** (inner engineer worktrees) — For each
-         subdirectory, check modification time and `.simard-engineer-claim` file:
-         - If older than 24h AND (claim file missing OR PID is dead per `kill -0`),
-           remove the entire worktree.
-         - For kept worktrees, still remove their `target/` subdirectory.
-
-      3. **`{{state_root}}/backups/`** — Database backup files. List by modification
-         time (`ls -1t`), keep approximately 5 most recent, remove the rest. Under
-         extreme disk pressure you may keep fewer, but never delete all backups.
-
-      ## Required Output Format
-
-      Your **final** output must contain these text markers, each on its own line.
-      The Rust shim (`parse_disk_health_text` in `src/disk_health.rs`) parses these
-      markers from your stdout. Any other lines are silently ignored.
-
-      ```
-      DISK_USED_PCT=<integer 0-255>
-      FREED_BYTES=<integer, bytes freed>
-      ACTION: <one-line description of action taken>
-      ```
-
-      - `DISK_USED_PCT` is **required**. Use the post-cleanup percentage (or the
-        current percentage if no cleanup was needed).
-      - `FREED_BYTES` defaults to 0 if omitted. Use the actual `df` delta.
-      - `ACTION:` lines are optional. Emit one per cleanup action you took. If the
-        text after `ACTION:` is empty, it will be skipped.
-
-      Print these markers as plain text in your response — not inside code fences
-      or markdown formatting.
+      There is **no output file and no JSON to print**. Your `simard disk`
+      invocations ARE the output. Whatever you print to the terminal is ignored;
+      Simard interprets this run by its EXIT STATUS alone. Finish successfully
+      once you have surveyed and (if needed) reclaimed via the tool.
     output: "disk_health_report"
