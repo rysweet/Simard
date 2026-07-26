@@ -12,6 +12,8 @@ owner: simard
 doc_type: howto
 related:
   - ../reference/overseer-workstream-gap-scan.md
+  - ../reference/overseer-gap-durable-dedup.md
+  - ../howto/configure-gap-durable-dedup.md
   - ./watch-overseer-activity.md
   - ../reference/overseer-activity-feed.md
   - ../design/overseer.md

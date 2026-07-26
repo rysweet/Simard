@@ -125,8 +125,8 @@ pub use sensor::{
     blocked_goals_from_board, in_flight_from_board, observed_from_snapshot, run_observer_cycle,
 };
 pub use signal::{
-    CauseCandidate, CauseSource, Confidence, GapCategory, GapItem, Likelihood, Priority, Problem,
-    ProblemKind, RootCause, Signal, signals_from,
+    CauseCandidate, CauseSource, Confidence, GAP_DEDUP_KEY_PREFIX, GapCategory, GapItem,
+    Likelihood, Priority, Problem, ProblemKind, RootCause, Signal, signals_from,
 };
 pub use whisper_ops::{
     MeetingHandoffWhisperSink, WhisperRecord, WhisperSink, WhisperUrgency, compose_whisper_note,
@@ -1968,7 +1968,23 @@ impl Overseer {
         let mut fresh: Vec<GapItem> = Vec::new();
         let mut suppressed = 0usize;
         for g in gaps {
-            let sig = format!("workstream-gap:{}", g.signature);
+            // Enforce the bounded-taxonomy contract at the filing seam: a gap
+            // whose signature is not a stable, restricted slug (never expected
+            // from the sensor, which builds every signature from trusted
+            // identifiers) is dropped rather than allowed to inflate a
+            // notification or a dedup search query (IV-1). Counted as suppressed
+            // so the observability contract stays exact.
+            if !g.has_valid_dedup_signature() {
+                tracing::warn!(
+                    target: "overseer::gap_scan",
+                    category = g.category.label(),
+                    "overseer gap-scan: dropping a gap with a malformed dedup signature \
+                     (outside the bounded taxonomy)"
+                );
+                suppressed += 1;
+                continue;
+            }
+            let sig = g.dedup_key();
             match self.gap_gate.peek(&sig, now) {
                 WhisperDecision::Deliver => fresh.push(g.clone()),
                 WhisperDecision::SuppressDuplicate | WhisperDecision::SuppressCapReached => {
@@ -1999,7 +2015,7 @@ impl Overseer {
         let notification = OperatorNotification::workstream_gap(fresh.len(), &fresh);
         let report = notifier.notify(&notification);
         for g in &fresh {
-            let sig = format!("workstream-gap:{}", g.signature);
+            let sig = g.dedup_key();
             self.gap_gate.commit(&sig, now);
         }
 
@@ -2453,7 +2469,7 @@ fn workstream_gap_key(gaps: &[GapItem]) -> String {
     let mut sigs: Vec<&str> = gaps.iter().map(|g| g.signature.as_str()).collect();
     sigs.sort_unstable();
     sigs.dedup();
-    format!("workstream-gap:{}", sigs.join("|"))
+    format!("{}{}", GAP_DEDUP_KEY_PREFIX, sigs.join("|"))
 }
 
 /// Orient: fold `Signal`s into ranked, deduplicated `Problem`s. Dedups against

@@ -487,6 +487,95 @@ mod tests {
         );
     }
 
+    /// A stateful `gh issue list` model of GitHub's eventually-consistent issue
+    /// search: filed issues are visible to the strongly-consistent
+    /// [`IssueListQuery::RecentOpen`] scan *immediately*, but the full-text
+    /// [`IssueListQuery::Signature`] index lags for the entire observation window
+    /// (it never surfaces the just-filed issue). This is the exact condition that
+    /// produced the 28-near-duplicate stewardship issue storm (rysweet/Simard
+    /// #4671-#4686): every sweep within the multi-minute index window saw an
+    /// empty signature search.
+    struct IndexLagList {
+        /// Issues already filed (what a strongly-consistent scan would return).
+        recent: RefCell<Vec<GhIssue>>,
+        signature_queries: Cell<usize>,
+        recent_queries: Cell<usize>,
+    }
+
+    impl IndexLagList {
+        fn new() -> Self {
+            Self {
+                recent: RefCell::new(Vec::new()),
+                signature_queries: Cell::new(0),
+                recent_queries: Cell::new(0),
+            }
+        }
+        fn run(&self, query: &IssueListQuery) -> Result<Vec<GhIssue>, SimardError> {
+            match query {
+                // The search index lags for the whole window: always empty.
+                IssueListQuery::Signature(_) => {
+                    self.signature_queries.set(self.signature_queries.get() + 1);
+                    Ok(Vec::new())
+                }
+                // Strongly consistent: returns everything filed so far.
+                IssueListQuery::RecentOpen(_) => {
+                    self.recent_queries.set(self.recent_queries.get() + 1);
+                    Ok(self.recent.borrow().clone())
+                }
+            }
+        }
+        fn file(&self, issue: GhIssue) {
+            self.recent.borrow_mut().push(issue);
+        }
+    }
+
+    /// Regression for the stewardship duplicate-issue *storm* (rysweet/Simard
+    /// #4671-#4686): many detection sweeps of the SAME failure within GitHub's
+    /// search-index window must collapse to exactly ONE filed issue, not one per
+    /// sweep. This drives the real [`resolve_dedup_candidates`] dedup — mirroring
+    /// the file-if-no-match decision `process_orchestrator_run` makes — across a
+    /// window in which the full-text index never catches up. The
+    /// strongly-consistent recent-open scan is what keeps the count at one; if
+    /// that fallback were removed each sweep would see an empty search and file
+    /// afresh, reproducing the flood.
+    #[test]
+    fn resolve_collapses_a_full_window_of_sweeps_to_a_single_filed_issue() {
+        let sig = "cafef00dcafef00d";
+        let gh = IndexLagList::new();
+        let sweeps = 12;
+        let mut filed = 0u64;
+
+        for _ in 0..sweeps {
+            let candidates = resolve_dedup_candidates(|q| gh.run(q), sig).unwrap();
+            if super::find_existing(&candidates, sig).is_none() {
+                // No open issue carries this signature yet — file exactly one.
+                filed += 1;
+                gh.file(issue(4671, sig));
+            }
+        }
+
+        assert_eq!(
+            filed, 1,
+            "a full index-lag window of {sweeps} identical detections must file ONE issue, \
+             not one per sweep (the #4671-#4686 storm)"
+        );
+        assert_eq!(
+            gh.recent.borrow().len(),
+            1,
+            "exactly one tracking issue exists after the whole window"
+        );
+        assert_eq!(
+            gh.signature_queries.get(),
+            sweeps,
+            "every sweep still runs the fast signature search first"
+        );
+        assert_eq!(
+            gh.recent_queries.get(),
+            sweeps,
+            "every empty search must fall back to the strongly-consistent recent scan"
+        );
+    }
+
     #[test]
     fn resolve_returns_no_match_when_neither_query_has_signature() {
         let sig = "cafef00dcafef00d";
