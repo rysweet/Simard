@@ -197,6 +197,53 @@ fn fail_closed_identity_cognition(identity_name: &str) -> crate::ooda_loop::Iden
     }
 }
 
+/// Issue #1025: active goals that have exhausted the reflection bound and must
+/// be yielded with a recorded blocker, returned as `(goal_id, streak)` pairs.
+///
+/// Pure and side-effect-free so the daemon's opt-in bounded-reflection safeguard
+/// is unit-testable without spinning the full loop. Goals already in a terminal
+/// state (`Blocked` / `Completed`) are skipped, and perpetual/standing goals are
+/// exempt (delegated to [`ReflectionBounds::bound_exhausted`]). Returns an empty
+/// vec when the bound is disabled (`max_reflection_cycles == 0`).
+fn reflection_bound_yields(
+    active: &[crate::goal_curation::ActiveGoal],
+    tracker: &crate::goal_curation::NoProgressTracker,
+    bounds: &crate::ooda_loop::ReflectionBounds,
+) -> Vec<(String, u32)> {
+    active
+        .iter()
+        .filter(|g| {
+            !matches!(
+                g.status,
+                crate::goal_curation::GoalProgress::Blocked(_)
+                    | crate::goal_curation::GoalProgress::Completed
+            )
+        })
+        .filter_map(|g| {
+            let streak = tracker.consecutive(&g.id);
+            bounds
+                .bound_exhausted(g.is_perpetual(), streak)
+                .then(|| (g.id.clone(), streak))
+        })
+        .collect()
+}
+
+/// Issue #1025: graceful idle-stop predicate for the daemon loop.
+///
+/// Returns `true` only when the operator opted in (`stop_when_idle`), the board
+/// held delivery work at cycle start (`had_active_at_cycle_start`), and it is now
+/// fully drained (`active_now_empty && backlog_now_empty`). A board that started
+/// empty never trips this — nothing was achieved — and with the flag unset (the
+/// default) it never fires, preserving the perpetual posture. Pure and testable.
+fn should_graceful_idle_stop(
+    stop_when_idle: bool,
+    had_active_at_cycle_start: bool,
+    active_now_empty: bool,
+    backlog_now_empty: bool,
+) -> bool {
+    stop_when_idle && had_active_at_cycle_start && active_now_empty && backlog_now_empty
+}
+
 /// Run one or more OODA cycles as a daemon-style loop.
 ///
 /// Launches all memories, opens a RustyClawd session via [`SessionBuilder`]
@@ -640,6 +687,23 @@ pub fn run_ooda_daemon(
     daemon_log(
         &state_root,
         &format!("[simard] OODA daemon: cycle interval = {interval_secs}s"),
+    );
+
+    // ── Issue #1025: graceful OODA completion + bounded reflection safeguard ──
+    // Read the effective policy once at daemon start (re-read on the exec()
+    // self-reload, which re-enters this function). Perpetual-safe defaults:
+    // the reflection cap is disabled (0) and the daemon never idles on an
+    // all-ACHIEVED board. Operators opt in via SIMARD_OODA_MAX_REFLECTION_CYCLES
+    // (bound self-inflicted no-progress spin on non-perpetual goals) and
+    // SIMARD_OODA_STOP_WHEN_ACHIEVED (let a drained board pause a batch host).
+    let reflection_bounds = crate::ooda_loop::ReflectionBounds::from_env();
+    daemon_log(
+        &state_root,
+        &format!(
+            "[simard] OODA daemon: reflection bound = {} consecutive no-progress cycle(s) \
+             (0 = disabled); stop-when-achieved = {}",
+            reflection_bounds.max_reflection_cycles, reflection_bounds.stop_when_idle,
+        ),
     );
 
     // --- embedded dashboard ------------------------------------------------
@@ -1437,6 +1501,19 @@ pub fn run_ooda_daemon(
                                     newly_done.join(", "),
                                 ),
                             );
+                            // Issue #1025: emit one terminal graceful-completion
+                            // line per goal. This is the "deliverable achieved"
+                            // short-circuit — a gate-verified goal (its PR merged/
+                            // green with success criteria met) stops re-reflecting
+                            // instead of spinning further validation rounds.
+                            for gid in &newly_done {
+                                daemon_log(
+                                    &state_root,
+                                    &format!(
+                                        "[simard] OODA graceful completion: goal {gid} ACHIEVED (gate-verified) — closing reflection loop (issue #1025)"
+                                    ),
+                                );
+                            }
                         }
                     }
 
@@ -1950,6 +2027,68 @@ pub fn run_ooda_daemon(
             }
         }
 
+        // ── Issue #1025: bounded reflection safeguard (opt-in) ────────────
+        // With SIMARD_OODA_MAX_REFLECTION_CYCLES > 0, a NON-perpetual active
+        // goal that has burned that many consecutive no-progress cycles is
+        // yielded with a recorded blocker instead of reflecting forever. It
+        // never fabricates completion (a green deliverable is handled by the
+        // done-gate above, not here). Disabled by default (0), so perpetual
+        // instances are unaffected; perpetual/standing goals are always exempt.
+        if reflection_bounds.max_reflection_cycles > 0 {
+            let yields = reflection_bound_yields(
+                &state.active_goals.active,
+                &state.no_progress_tracker,
+                &reflection_bounds,
+            );
+            if !yields.is_empty() {
+                let streak_by_id: std::collections::HashMap<&str, u32> =
+                    yields.iter().map(|(id, s)| (id.as_str(), *s)).collect();
+                for goal in state.active_goals.active.iter_mut() {
+                    if let Some(&streak) = streak_by_id.get(goal.id.as_str()) {
+                        goal.status = crate::goal_curation::GoalProgress::Blocked(format!(
+                            "reflection bound exhausted: {streak} consecutive no-progress cycle(s) \
+                             (>= SIMARD_OODA_MAX_REFLECTION_CYCLES={}); needs human review (issue #1025)",
+                            reflection_bounds.max_reflection_cycles,
+                        ));
+                    }
+                }
+                for (gid, _streak) in &yields {
+                    daemon_log(
+                        &state_root,
+                        &format!(
+                            "[simard] OODA reflection bound: goal {gid} yielded (BoundExceeded) after \
+                             reaching SIMARD_OODA_MAX_REFLECTION_CYCLES={} — recorded blocker for \
+                             human review (issue #1025)",
+                            reflection_bounds.max_reflection_cycles,
+                        ),
+                    );
+                }
+            }
+        }
+
+        // ── Issue #1025: graceful idle stop (opt-in) ──────────────────────
+        // With SIMARD_OODA_STOP_WHEN_ACHIEVED=1 (a bounded batch host, NOT a
+        // standing autonomous instance) break the perpetual loop once the
+        // board that had delivery work at cycle start has been fully drained —
+        // every goal resolved (the gate-verified completions are logged above).
+        // Perpetual-by-default is preserved: with the flag unset (the default),
+        // or while any goal (including a standing research goal) remains active
+        // or queued, this never fires.
+        if should_graceful_idle_stop(
+            reflection_bounds.stop_when_idle,
+            !pre_cycle_active_ids.is_empty(),
+            state.active_goals.active.is_empty(),
+            state.active_goals.backlog.is_empty(),
+        ) {
+            daemon_log(
+                &state_root,
+                "[simard] OODA daemon: goal board idle — all delivery goals resolved \
+                 (gate-verified completions logged above); graceful stop \
+                 (SIMARD_OODA_STOP_WHEN_ACHIEVED, issue #1025)",
+            );
+            break;
+        }
+
         // Skip the inter-cycle sleep if this was the last requested cycle.
         if max_cycles > 0 && cycles_run >= max_cycles {
             continue;
@@ -2380,5 +2519,78 @@ mod tests {
 
         assert_eq!(seed_cycle_count(0, tmp.path()), 42);
         assert_eq!(seed_cycle_count(0, tmp.path()), 42);
+    }
+
+    // --- Issue #1025: daemon graceful-completion glue ---------------------
+
+    use crate::goal_curation::{ActiveGoal, GoalProgress, NoProgressTracker};
+    use crate::ooda_loop::ReflectionBounds;
+
+    fn bounds(max: u32) -> ReflectionBounds {
+        ReflectionBounds {
+            max_reflection_cycles: max,
+            stop_when_idle: false,
+        }
+    }
+
+    #[test]
+    fn reflection_bound_yields_empty_when_disabled() {
+        let goals = vec![ActiveGoal::new("g", "deliver g", 100)];
+        let mut tracker = NoProgressTracker::new();
+        for _ in 0..50 {
+            tracker.record_no_action("g");
+        }
+        assert!(reflection_bound_yields(&goals, &tracker, &bounds(0)).is_empty());
+    }
+
+    #[test]
+    fn reflection_bound_yields_stuck_non_perpetual_goal() {
+        let goals = vec![ActiveGoal::new("stuck", "deliver stuck", 100)];
+        let mut tracker = NoProgressTracker::new();
+        for _ in 0..3 {
+            tracker.record_no_action("stuck");
+        }
+        let yields = reflection_bound_yields(&goals, &tracker, &bounds(3));
+        assert_eq!(yields, vec![("stuck".to_string(), 3)]);
+    }
+
+    #[test]
+    fn reflection_bound_exempts_perpetual_and_terminal_goals() {
+        let mut standing = ActiveGoal::new("research", "standing", 100).mark_standing();
+        assert!(standing.is_perpetual());
+        standing.status = GoalProgress::InProgress { percent: 0 };
+        let mut already_blocked = ActiveGoal::new("blocked", "deliver", 100);
+        already_blocked.status = GoalProgress::Blocked("prior reason".to_string());
+
+        let goals = vec![standing, already_blocked];
+        let mut tracker = NoProgressTracker::new();
+        for _ in 0..99 {
+            tracker.record_no_action("research");
+            tracker.record_no_action("blocked");
+        }
+        assert!(reflection_bound_yields(&goals, &tracker, &bounds(3)).is_empty());
+    }
+
+    #[test]
+    fn reflection_bound_leaves_moving_goal_alone() {
+        // Streak under the cap => not yielded (an actively moving goal).
+        let goals = vec![ActiveGoal::new("moving", "deliver moving", 100)];
+        let mut tracker = NoProgressTracker::new();
+        tracker.record_no_action("moving"); // streak = 1, cap = 3
+        assert!(reflection_bound_yields(&goals, &tracker, &bounds(3)).is_empty());
+    }
+
+    #[test]
+    fn idle_stop_requires_opt_in_and_drained_board() {
+        // Opted in, board had work at cycle start, now fully drained => stop.
+        assert!(should_graceful_idle_stop(true, true, true, true));
+        // Not opted in => never stop (perpetual default).
+        assert!(!should_graceful_idle_stop(false, true, true, true));
+        // Board started empty => nothing was achieved => never stop.
+        assert!(!should_graceful_idle_stop(true, false, true, true));
+        // Active goal remains => still working => never stop.
+        assert!(!should_graceful_idle_stop(true, true, false, true));
+        // Backlog remains => queued work => never stop.
+        assert!(!should_graceful_idle_stop(true, true, true, false));
     }
 }

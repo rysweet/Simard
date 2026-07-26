@@ -8,6 +8,8 @@
 pub mod adaptive_scaling;
 mod client_factory;
 mod curate;
+// Issue #1025: graceful OODA completion + bounded reflection safeguard (pure).
+pub mod completion;
 // Issue #2359 (BUG 2): per-cycle goal coverage allocator.
 pub mod coverage;
 pub mod cycle;
@@ -117,5 +119,9 @@ pub fn act(
     crate::ooda_actions::dispatch_actions_bounded(actions, memories, state, max_concurrency)
 }
 
+pub use completion::{
+    LoopDecision, ReflectionBounds, evaluate as evaluate_reflection, goal_achieved,
+    goals_all_achieved,
+};
 pub use cycle::run_ooda_cycle;
 pub use cycle::{compose_procedure_name, derive_triggers_from_objective};

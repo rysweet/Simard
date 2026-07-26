@@ -138,6 +138,7 @@ nav:
     - Unified Telemetry and Status: concepts/unified-telemetry-and-status.md
     - Goal-Board Persistence: concepts/goal-board-persistence.md
     - Keeping the OODA Daemon Steerable: concepts/steerable-ooda-daemon.md
+    - Graceful OODA Completion + Bounded Reflection (#1025): concepts/graceful-ooda-completion.md
     - Perpetual Goals Exempt from No-Progress Hard-Block: concepts/perpetual-goal-no-progress-exemption.md
     - Novelty-First Steering for Standing Research Goals: concepts/novelty-first-standing-research-steering.md
     - The Standing Research Goal Never Idles (Idle = Fault): concepts/research-goal-never-idle.md
@@ -192,6 +193,7 @@ nav:
     - Grant Engineer Write Permissions: howto/grant-engineer-write-permissions.md
     - Edit the Engineer System Prompt: howto/edit-the-engineer-system-prompt.md
     - Run the OODA Daemon: howto/run-ooda-daemon.md
+    - Configure Graceful OODA Completion (#1025): howto/configure-graceful-ooda-completion.md
     - Spawn Engineers from the OODA Daemon: howto/spawn-engineers-from-ooda-daemon.md
     - Diagnose a Deferred/Serialized Engineer Spawn (overlap): howto/diagnose-a-deferred-engineer-spawn.md
     - Configure Resource-Aware Engineer Admission: howto/configure-resource-aware-admission.md
@@ -292,6 +294,7 @@ nav:
     - CLI Reference: reference/simard-cli.md
     - Simard Installer: reference/simard-installer.md
     - OODA Capability API: reference/ooda-capability-api.md
+    - OODA Graceful-Completion API (#1025): reference/ooda-graceful-completion-api.md
     - Engineer-Claim Release & Reclaim API: reference/engineer-claim-release-api.md
     - Stale-Engineer-Claim Reaper API: reference/claim-reaper-api.md
     - Investigate-Before-Reap API: reference/investigate-stale-engineer-api.md
