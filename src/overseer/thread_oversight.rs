@@ -22,6 +22,7 @@ use std::path::Path;
 
 use crate::cognitive_threads::ThreadHealth;
 use crate::telemetry::names;
+use crate::telemetry::names::thread_metric_name as series_name;
 use crate::telemetry::snapshot::MetricsSnapshot;
 
 /// Per-cycle cap on emitted thread anomalies — bounds notification pressure when
@@ -47,11 +48,6 @@ const OODA_ERROR_EXCERPT_LEN: usize = 200;
 
 /// Default bounded tail size read from `ooda.log` for the error scan.
 pub const OODA_TAIL_MAX_BYTES: u64 = 64 * 1024;
-
-/// Build a per-thread series name: `simard.thread.<id>.<suffix>`.
-fn series_name(id: &str, suffix: &str) -> String {
-    format!("{}{id}.{suffix}", names::THREAD_METRIC_PREFIX)
-}
 
 /// Detect cognitive-thread anomalies for this Observe pass.
 ///

@@ -17,9 +17,11 @@ use crate::telemetry::{self, names};
 
 /// Build a facade-ready metric name: `simard.thread.<id>.<suffix>`.
 ///
-/// `id` and `suffix` are compile-time constants at every call site (SR-11).
+/// Thin wrapper over the single-source-of-truth [`names::thread_metric_name`]
+/// (co-located with the scheme's constants); `id` and `suffix` are compile-time
+/// constants at every call site (SR-11).
 pub fn metric_name(id: &str, suffix: &str) -> String {
-    format!("{}{id}.{suffix}", names::THREAD_METRIC_PREFIX)
+    names::thread_metric_name(id, suffix)
 }
 
 /// Record a completed run at `run_epoch` (Unix seconds): opens span

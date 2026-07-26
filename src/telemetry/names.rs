@@ -129,11 +129,20 @@ pub const DISK_RECLAIM_USED_PCT_AFTER: &str = "simard.disk.reclaim.used_pct_afte
 // hosts ~15 threads, which on a single attribute key would breach the registry's
 // `MAX_VALUES_PER_KEY` (16) cardinality cliff and fold into `other`; embedding in
 // the name yields one clean series per (thread, suffix). Every series is emitted
-// with an EMPTY attribute set. Build a full name with
-// [`crate::cognitive_threads`]'s `telemetry::metric_name(id, suffix)`.
+// with an EMPTY attribute set. Build a full name with [`thread_metric_name`].
 
 /// Metric-name prefix for every per-thread series (`simard.thread.`).
 pub const THREAD_METRIC_PREFIX: &str = "simard.thread.";
+
+/// Build a per-thread metric/span name: `simard.thread.<id>.<suffix>`.
+///
+/// The single source of truth for the per-thread naming scheme, shared by the
+/// emitting telemetry seam (`cognitive_threads::telemetry`) and the reading
+/// oversight rail (`overseer::thread_oversight`) so the two can never drift.
+/// `id` and `suffix` are compile-time constants at every call site (SR-11).
+pub fn thread_metric_name(id: &str, suffix: &str) -> String {
+    format!("{THREAD_METRIC_PREFIX}{id}.{suffix}")
+}
 /// Suffix: every scheduler attempt to run the thread (counter).
 pub const THREAD_SUFFIX_RUNS: &str = "runs";
 /// Suffix: successful runs (counter). `runs - successes - failures` is skips.
