@@ -205,9 +205,12 @@ mod tests {
     // ── P3 (process:self_deploy_blocked): additive rpc-health retry knobs ──────
     // (TDD Step 7 — FAILING.) `RelaunchConfig` gains a configurable probe timeout
     // (already `health_timeout`) plus a bounded retry budget and backoff. The new
-    // fields are serde-defaulted and additive, so existing configs deserialize
-    // unchanged. These reference fields that do not exist yet and MUST fail to
-    // compile until the fix lands. See docs/reference/rpc-health-gate-diagnostics.md.
+    // fields are additive with `Default` values, so every existing constructor —
+    // `RelaunchConfig::default()` and any `..Default::default()` literal — picks
+    // them up unchanged (the struct is built programmatically, never deserialized;
+    // there is no serde here). These reference fields that do not exist yet and
+    // MUST fail to compile until the fix lands. See
+    // docs/reference/rpc-health-gate-diagnostics.md.
 
     #[test]
     fn default_health_timeout_preserves_prior_30s_behaviour() {

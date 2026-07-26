@@ -671,8 +671,9 @@ const JOURNAL_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Result of [`archive_stale_engineer_evidence`]: the durable evidence dir plus
 /// whether this call MINTED a fresh epoch (`true`) or REUSED an existing within-
 /// [`ARCHIVE_FRESHNESS_WINDOW`] epoch for the claim (`false`). `investigate` keys
-/// its dedup decision on `minted`: a reused epoch means an investigation is
-/// already outstanding, so it emits `Pending` with NO re-archive and NO re-launch.
+/// its dedup decision on `minted`: a reused epoch means an investigation was
+/// already dispatched this window, so it emits the terminal [`InvestigationVerdict::Converged`]
+/// with NO re-archive and NO re-launch (the loop settles instead of spinning on `Pending`).
 pub struct ArchiveOutcome {
     /// The durable `reaped-engineers/<sanitized_key>-<ts>/` evidence dir.
     pub dir: PathBuf,
@@ -1109,8 +1110,13 @@ fn run_with_deadline(cmd: &str, args: &[&str], timeout: Duration) -> Option<Stri
 ///      Overseer's in-flight-investigation guard admits exactly ONE launch until
 ///      it completes or the evidence epoch ages out of [`ARCHIVE_FRESHNESS_WINDOW`]
 ///      (belt-and-suspenders to the disk-derived reuse guard in `investigate`).
-///   3. Returns [`InvestigationVerdict::Pending`] — the reaper does NOT reap this
-///      sweep. The claim + evidence persist; the investigation (a) files issues /
+///   3. Returns a verdict that NEVER reaps this sweep: the FIRST tick that mints a
+///      fresh evidence epoch dispatches the investigation and returns
+///      [`InvestigationVerdict::Pending`] (a genuine in-flight investigation); every
+///      later tick within the freshness window reuses the epoch in place and returns
+///      the terminal [`InvestigationVerdict::Converged`] (mechanical part done, no
+///      re-dispatch — so a standing goal settles instead of spinning on `Pending`).
+///      Either way the claim + evidence persist; the investigation (a) files issues /
 ///      escalates via its own tools when a Simard bug is implicated and (b) tears
 ///      down a genuinely-dead worktree, after which the NEXT sweep sees
 ///      `NoWorktree` and reclaims the leaked slot immediately. Staleness ALONE
@@ -1204,23 +1210,26 @@ impl StaleEngineerInvestigator for RecipeStaleEngineerInvestigator {
                 }
             };
 
-        // 2. CROSS-TICK DEDUP (Finding 1, issue #4400). A REUSED (not freshly
-        //    minted) evidence epoch means an investigation for THIS claim is
-        //    already outstanding this freshness window. Do NOT re-archive and do
-        //    NOT re-dispatch — keep the claim, emit Pending with NO interventions
-        //    this sweep. This is disk-derived idempotency (belt-and-suspenders to
-        //    the Overseer's in-flight-investigation guard, which the stable
+        // 2. CROSS-TICK DEDUP + CONVERGENCE (Finding 1 #4400 / #4755). A REUSED
+        //    (not freshly minted) evidence epoch means an investigation for THIS
+        //    claim was already dispatched this freshness window. Do NOT re-archive
+        //    and do NOT re-dispatch — keep the claim and emit the TERMINAL,
+        //    fail-closed `Converged` (NOT `Pending`): the reaper's mechanical part
+        //    is done for this run, so a standing / perpetual goal settles on one
+        //    stable decision instead of spinning on `Pending` (the observed 59×
+        //    loop). This is disk-derived idempotency (belt-and-suspenders to the
+        //    Overseer's in-flight-investigation guard, which the stable
         //    `stale-investigation:` dedup token also holds).
         if !archived.minted {
             tracing::debug!(
                 target: "simard::claim_reaper",
                 claim_key = %claim_key,
                 evidence_dir = %archived.dir.display(),
-                "[simard] claim-reaper: investigation already outstanding for this claim \
-                 (reusing evidence epoch) — Pending, no re-archive / no re-dispatch this sweep",
+                "[simard] claim-reaper: investigation already dispatched for this claim \
+                 (reusing evidence epoch) — Converged, no re-archive / no re-dispatch this sweep",
             );
             return InvestigationOutcome {
-                verdict: InvestigationVerdict::Pending,
+                verdict: InvestigationVerdict::Converged,
                 interventions: Vec::new(),
             };
         }
@@ -2454,8 +2463,9 @@ mod tests {
     /// still-stale/quiet claim with the PRODUCTION investigator (real archive on a
     /// temp state root). The fix must yield EXACTLY ONE evidence dir (no
     /// `<key>-<ts2>` sibling on later ticks) and EXACTLY ONE admitted investigation
-    /// launch — later ticks return `Pending` with NO new archive and NO new launch
-    /// — and the claim is NEVER reaped while the investigation is outstanding.
+    /// launch — the first tick dispatches (`Pending`), later ticks reuse the epoch
+    /// in place and CONVERGE (`Converged`) with NO new archive and NO new launch —
+    /// and the claim is NEVER reaped while the investigation is outstanding.
     ///
     /// Pre-fix this FAILS: every tick mints a fresh `<key>-<now_ts>` dir and emits
     /// a fresh `LaunchRecipe`, so three ticks produce three launches.
@@ -2469,8 +2479,9 @@ mod tests {
 
         let mut launches = 0usize;
         for tick in 0..3 {
-            // A fresh ledger each tick models the claim persisting because a
-            // Pending investigation keeps it (never reaped).
+            // A fresh ledger each tick models the claim persisting because the
+            // investigation keeps it (Pending on tick 0, Converged after — never
+            // reaped).
             let ledger = FakeLedger::new(&[key]);
             let probe = MapProbe::new(&[(key, dead(DeadReason::HeartbeatStale, Some(9000)))]);
             let cleanup = FakeCleanup::new();
@@ -2480,7 +2491,7 @@ mod tests {
 
             assert!(
                 summary.reclaimed.is_empty(),
-                "tick {tick}: an outstanding (Pending) investigation must never reap"
+                "tick {tick}: an outstanding (Pending/Converged) investigation must never reap"
             );
             assert_eq!(
                 ledger.list_engineer_claims(),
@@ -2544,8 +2555,17 @@ mod tests {
         let inv = RecipeStaleEngineerInvestigator::new(state.path(), "rysweet/Simard");
         let a = inv.investigate(stale_key, 9000);
         let b = inv.investigate(stale_key, 9100);
-        assert_eq!(a.verdict, InvestigationVerdict::Pending);
-        assert_eq!(b.verdict, InvestigationVerdict::Pending);
+        assert_eq!(
+            a.verdict,
+            InvestigationVerdict::Pending,
+            "the FIRST tick mints the epoch and dispatches the investigation (in-flight)"
+        );
+        assert_eq!(
+            b.verdict,
+            InvestigationVerdict::Converged,
+            "a later tick within the window reuses the epoch in place and CONVERGES \
+             (terminal, no re-dispatch) instead of spinning on Pending"
+        );
         assert_eq!(
             launch_count(&a.interventions) + launch_count(&b.interventions),
             1,
@@ -2708,11 +2728,11 @@ mod tests {
         );
     }
 
-    /// Serialization compatibility: verdicts are NAME-tagged, so inserting
-    /// `Converged` must not shift any EXISTING variant's stable label. This is
-    /// what lets verdicts already persisted under `reaped-engineers/` round-trip
-    /// after `Converged` is added — no migration required
-    /// (`persisted_verdicts_deserialize_after_converged_added`).
+    /// Label stability: each verdict's [`InvestigationVerdict::label`] is a stable,
+    /// name-based token used only in fail-visible log lines (verdicts are NOT
+    /// serialized or persisted anywhere — the reaper archives evidence, never the
+    /// verdict). Inserting `Converged` must not shift any EXISTING variant's label,
+    /// so existing log tooling / greps keep matching unchanged.
     #[test]
     fn converged_label_does_not_shift_existing_verdict_labels() {
         assert_eq!(InvestigationVerdict::StillAlive.label(), "still-alive");

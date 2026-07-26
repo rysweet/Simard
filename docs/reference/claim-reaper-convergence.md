@@ -41,15 +41,20 @@ evidence for stale engineer `70ab8541` and unbounded growth of
 `reaped-engineers/`, with per-cycle band-aid PRs (#4608, #4642) repeatedly
 persisting the same "fail-closed still-alive" verdict.
 
-Two additive mechanisms make the investigation **converge**:
+The two additive mechanisms are **coupled through the `minted` flag**: the first
+tick that mints a fresh evidence epoch (`minted = true`) dispatches the
+investigation and returns `Pending`; every later tick within the freshness window
+reuses that epoch in place (`minted = false`) and returns the terminal
+**`Converged`** — so a standing goal reaches a stable decision instead of spinning:
 
 1. a terminal **`Converged`** verdict — a stable, fail-closed decision that a
-   standing goal's engineer has been investigated and needs no further
-   re-investigation this run; and
+   standing goal's engineer has already been investigated this window and needs no
+   further re-dispatch this run; and
 2. the existing **idempotent per-claim archival guard** — a freshness-window
    dedup ([`find_recent_archive_epoch`] + [`ARCHIVE_FRESHNESS_WINDOW`]) that
    REUSES a within-window evidence epoch in place (`minted = false`) instead of
-   minting a new `<key>-<ts>/` directory every tick.
+   minting a new `<key>-<ts>/` directory every tick, and whose `minted = false`
+   result is exactly what the seam maps to `Converged`.
 
 Result: a standing-goal stale engineer reaches **one terminal verdict** and its
 evidence is archived **at most once per freshness window** (not every tick), so
@@ -89,14 +94,14 @@ pub enum InvestigationVerdict {
 `should_reap()` remains `matches!(self, Dead { .. })` — `Converged` never reaps.
 `label()` returns the stable, log-safe token `"converged"`.
 
-> **Serialization compatibility.** `Converged` is inserted *before* `Dead` in the
-> enum for readability, but the wire/persisted form is **name-tagged, not
-> positional** — verdicts are serialized by their variant name (e.g. `"dead"`,
-> `"pending"`), never by ordinal/index. Adding `Converged` therefore does not
-> shift any existing tag, so verdicts already persisted under
-> `reaped-engineers/` deserialize unchanged, and an older reader that predates
-> `Converged` treats it as an unknown non-`Dead` verdict (fail-closed: keeps the
-> claim). No migration of persisted verdicts is required.
+> **Label stability, not serialization.** Verdicts are **never serialized or
+> persisted** — the reaper archives an engineer's *evidence* under
+> `reaped-engineers/` (a hand-written `manifest.json` of claim key / goal id /
+> idle age / timestamp / worktree), never the `InvestigationVerdict` itself, and
+> the type derives no serde. `label()` is a stable, name-based token used only in
+> fail-visible log lines. Inserting `Converged` before `Dead` (for readability)
+> therefore shifts no existing token, so existing log tooling / greps for
+> `"pending"`, `"dead"`, etc. keep matching unchanged. No migration is involved.
 
 ### Pending vs. Converged
 
@@ -153,11 +158,11 @@ continue to govern the sweep.
 
 ```text
 tick 1  investigate claim=engineer:70ab8541
-        mint archive epoch 70ab8541-<ts> (first time) → verdict=converged
+        mint archive epoch 70ab8541-<ts> (first time) → dispatch investigation → verdict=pending
 tick 2  investigate claim=engineer:70ab8541
         within-window epoch exists → REUSE in place (minted=false) → verdict=converged
-tick N  … same: one terminal verdict, archival bounded to once per window,
-        no reaped-engineers/ growth every tick
+tick N  … same reuse-in-place: one terminal verdict, archival bounded to once per
+        window, no reaped-engineers/ growth every tick
 ```
 
 Before this change the same sequence produced:
@@ -170,8 +175,10 @@ tick 1..59  re-investigate → verdict=pending (never terminal)
 ## Fail-closed guarantees
 
 - `Converged` **never reaps** — it keeps the claim like every non-`Dead` verdict.
-- The archival guard **never fabricates** a `Converged`: it only bounds *where*
-  evidence lands (reuse-in-place vs mint), never the verdict itself.
+- The archival guard **never fabricates** a `Converged` on failure: an I/O error
+  folds to `StillAlive` (claim kept, no reap). On success the seam derives the
+  verdict from the `minted` flag — a freshly minted epoch is `Pending` (dispatch),
+  a reused-in-place epoch is `Converged` (terminal) — never reaping either way.
 - A new archive epoch is minted once the freshness window elapses, so a genuinely
   progressing or newly-dead engineer is still re-investigated and can reach
   `Recoverable` / `Dead`.
