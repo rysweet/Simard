@@ -142,8 +142,8 @@ impl RemoteCognitiveMemory {
                     return Ok(resp);
                 }
                 Err((phase, e)) => {
-                    let retriable = is_broken_pipe(&e) && attempt < MAX_ATTEMPTS;
-                    if !retriable {
+                    let broken = is_broken_pipe(&e);
+                    if !(broken && attempt < MAX_ATTEMPTS) {
                         // Fail-closed: not a retriable broken pipe, or attempts
                         // exhausted. Surface the transport error; never drop
                         // the write silently. Diagnostics carry only transport
@@ -157,7 +157,7 @@ impl RemoteCognitiveMemory {
                             errno = e.raw_os_error(),
                             "memory-ipc write failed terminally; surfacing transport error (no silent drop)"
                         );
-                        if is_broken_pipe(&e) {
+                        if broken {
                             metrics::increment("epipe_exhausted", "memory-ipc");
                         }
                         return Err(ipc_err(phase, e));
