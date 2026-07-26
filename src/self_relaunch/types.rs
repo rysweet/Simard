@@ -21,6 +21,15 @@ pub struct RelaunchConfig {
     /// env (which could hijack a gate or drift the canary away from the deployed
     /// systemd shape, the observed red-canary non-convergence).
     pub canary_env: Vec<String>,
+    /// Bounded retry budget for the RpcHealth probe (issue
+    /// `process:self_deploy_blocked`). A TRANSIENT probe fault (a wedged daemon
+    /// that timed out, or a socket not yet listening) is retried up to this many
+    /// attempts before the gate reddens; DETERMINISTIC faults (empty stats, a
+    /// non-zero exit) are never retried. Defaults to `3` — bounded and positive.
+    pub health_probe_max_attempts: usize,
+    /// Base backoff between RpcHealth probe attempts (capped-exponential). Bounds
+    /// total retry wait; a zero value retries immediately. Defaults to `2s`.
+    pub health_probe_backoff: Duration,
 }
 
 impl Default for RelaunchConfig {
@@ -31,6 +40,8 @@ impl Default for RelaunchConfig {
             health_timeout: Duration::from_secs(30),
             manifest_dir: PathBuf::from("."),
             canary_env: Vec::new(),
+            health_probe_max_attempts: 3,
+            health_probe_backoff: Duration::from_secs(2),
         }
     }
 }

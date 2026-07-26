@@ -1,12 +1,11 @@
 ---
 title: "Reference: Claim-Reaper Convergence & Idempotent Archival"
 description: >
-  The terminal Converged verdict and the idempotent-archival guard that stop the
-  stale-engineer investigation from looping on verdict=pending for standing /
-  perpetual research goals. Covers the (claim_key, evidence_fingerprint) dedup
-  key, SHA-256 canonicalization, the bounded per-claim guard store, and the
-  guarantee of one terminal decision + one archival (no 59x re-archival)
-  (issue #4755).
+  The terminal Converged verdict and the idempotent per-claim archival guard that
+  stop the stale-engineer investigation from looping on verdict=pending for
+  standing / perpetual research goals. Covers the freshness-window archival dedup
+  (reuse-in-place, minted=false) and the guarantee of one terminal decision +
+  bounded archival (no 59x re-archival every tick) (issue #4755).
 last_updated: 2026-07-26
 review_schedule: as-needed
 owner: simard
@@ -47,20 +46,22 @@ Two additive mechanisms make the investigation **converge**:
 1. a terminal **`Converged`** verdict — a stable, fail-closed decision that a
    standing goal's engineer has been investigated and needs no further
    re-investigation this run; and
-2. an **idempotent-archival guard** — a per-claim dedup keyed on
-   `(claim_key, evidence_fingerprint)` so byte-identical evidence archives
-   exactly once.
+2. the existing **idempotent per-claim archival guard** — a freshness-window
+   dedup ([`find_recent_archive_epoch`] + [`ARCHIVE_FRESHNESS_WINDOW`]) that
+   REUSES a within-window evidence epoch in place (`minted = false`) instead of
+   minting a new `<key>-<ts>/` directory every tick.
 
-Result: a standing-goal stale engineer reaches **one terminal verdict with a
-single archival**, and `reaped-engineers/` stops growing unboundedly.
+Result: a standing-goal stale engineer reaches **one terminal verdict** and its
+evidence is archived **at most once per freshness window** (not every tick), so
+`reaped-engineers/` stops growing unboundedly.
 
 ## The `Converged` verdict
 
 `Converged` is an additive, non-terminal-for-reaping variant of
 [`InvestigationVerdict`]. Like every non-`Dead` verdict it is **fail-closed**:
 it KEEPS the claim (`should_reap()` stays `false`). It differs from `Pending`
-in that it is *stable* — once reached for a given evidence fingerprint, the
-investigation does not re-run and re-archive on subsequent ticks.
+in that it is *stable* — it marks a standing goal as fully investigated for this
+run, so the seam does not treat it as an outstanding, must-resolve investigation.
 
 ```rust
 // src/overseer/claim_reaper.rs
@@ -102,45 +103,41 @@ pub enum InvestigationVerdict {
 | Verdict | Meaning | Re-investigates next tick? | Reaps? |
 | --- | --- | --- | --- |
 | `Pending` | Investigation launched, not yet resolved | Yes (a later sweep resolves it) | No |
-| `Converged` | Standing goal fully investigated; stable decision | No (guard holds it) | No |
+| `Converged` | Standing goal fully investigated; stable decision | No (terminal for this run) | No |
 
-## Idempotent-archival guard
+## Idempotent per-claim archival guard
 
-Before archiving evidence, the seam computes an **evidence fingerprint** and
-consults a per-claim guard. If the same `(claim_key, evidence_fingerprint)` has
-already been archived, the archival is skipped and the prior terminal verdict is
-returned unchanged.
+The re-archival half of the loop is bounded by the reaper's **existing**
+per-claim freshness-window dedup in
+[`archive_stale_engineer_evidence`](https://github.com/rysweet/Simard/blob/main/src/overseer/claim_reaper.rs)
+— no new guard store is introduced.
 
-### Fingerprint
-
-The fingerprint is a **SHA-256** over the **canonicalized** evidence: fields are
-serialized in a stable, deterministic order (sorted keys, normalized whitespace,
-volatile fields such as timestamps and per-tick evidence-dir paths excluded) so
-that logically-identical evidence always produces the same digest, and any real
-change in the engineer's state produces a different one.
+Before minting a fresh archive directory, the seam calls
+[`find_recent_archive_epoch`]: if a `reaped-engineers/<sanitized_key>-<ts>/`
+evidence epoch for THIS claim already exists within
+[`ARCHIVE_FRESHNESS_WINDOW`] (1 hour), that epoch is **reused in place**
+(`ArchiveOutcome { minted: false, .. }`) rather than creating a sibling
+timestamped directory. Only a freshly-minted epoch (`minted = true`) writes the
+`manifest.json` / `evidence.txt` / `journal.txt` (so the bounded `journalctl`
+capture runs at most once per epoch, not every tick).
 
 ```rust
-/// SHA-256 over canonicalized (stable-ordered, volatile-fields-excluded)
-/// evidence. Collision-resistant so distinct evidence never aliases to a
-/// premature `Converged`; deterministic so identical evidence archives once.
-fn evidence_fingerprint(evidence: &StaleEngineerEvidence) -> [u8; 32];
+// src/overseer/claim_reaper.rs — reuse a within-window epoch in place.
+if let Some(existing) = find_recent_archive_epoch(&archive_root, &sanitized, ts) {
+    return Ok(ArchiveOutcome { dir: existing, minted: false });
+}
 ```
 
-> **Security note.** A weak or truncated hash could alias distinct evidence to
-> the same key, producing a premature `Converged` and a wrongful skip of a real
-> re-investigation. The guard uses full-width SHA-256 specifically to prevent
-> this.
+The `<ts>` is parsed from the directory NAME (not its mtime), so the window is
+derived from the archive epoch itself and is robust to later in-place refreshes.
 
-### Guard store
+This is:
 
-The guard is a **bounded per-claim store** keyed on `claim_key`, holding the set
-of already-archived fingerprints for that claim. It is:
-
-- **bounded** — capped size per claim; entries are evicted when the claim is
-  reaped or released, so the store cannot grow unboundedly;
-- **fail-closed** — if the guard cannot be consulted (I/O fault), the seam
-  behaves as before (archive + return the fail-closed default), never
-  fabricating a `Converged`.
+- **bounded** — at most one minted archive per claim per window, so a standing
+  goal re-investigated every ~15-minute tick archives once per hour, not 59×;
+- **fail-closed** — an I/O error minting or reading the archive is surfaced as
+  `Err`, and the caller keeps the claim (never reaps without preserved evidence),
+  never fabricating a `Converged`.
 
 ## Configuration
 
@@ -156,26 +153,27 @@ continue to govern the sweep.
 
 ```text
 tick 1  investigate claim=engineer:70ab8541
-        archive evidence fp=9f3c… (first time) → verdict=converged
+        mint archive epoch 70ab8541-<ts> (first time) → verdict=converged
 tick 2  investigate claim=engineer:70ab8541
-        fp=9f3c… already archived → SKIP archival → verdict=converged (stable)
-tick N  … same: single verdict, single archival, no reaped-engineers/ growth
+        within-window epoch exists → REUSE in place (minted=false) → verdict=converged
+tick N  … same: one terminal verdict, archival bounded to once per window,
+        no reaped-engineers/ growth every tick
 ```
 
 Before this change the same sequence produced:
 
 ```text
-tick 1..59  archive evidence fp=9f3c… (again) → verdict=pending
-            reaped-engineers/ grows every tick; PRs #4608/#4642 re-persist
+tick 1..59  re-investigate → verdict=pending (never terminal)
+            reaped-engineers/ churned every tick; PRs #4608/#4642 re-persist
 ```
 
 ## Fail-closed guarantees
 
 - `Converged` **never reaps** — it keeps the claim like every non-`Dead` verdict.
-- The guard **never fabricates** a `Converged`: it only holds an *already-decided*
-  terminal verdict for *byte-identical* evidence.
-- Any real change in engineer state changes the fingerprint, so a genuinely
-  progressing or newly-dead engineer is re-investigated and can still reach
+- The archival guard **never fabricates** a `Converged`: it only bounds *where*
+  evidence lands (reuse-in-place vs mint), never the verdict itself.
+- A new archive epoch is minted once the freshness window elapses, so a genuinely
+  progressing or newly-dead engineer is still re-investigated and can reach
   `Recoverable` / `Dead`.
 
 ## Regression tests
@@ -183,19 +181,16 @@ tick 1..59  archive evidence fp=9f3c… (again) → verdict=pending
 Co-located in
 [`src/overseer/claim_reaper.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/claim_reaper.rs):
 
-- `standing_goal_converges_to_single_verdict` — a standing-goal stale engineer
-  reaches exactly one terminal `Converged` verdict across many ticks.
-- `identical_evidence_archives_once` — byte-identical evidence archives a single
-  time; no 59× re-archival.
-- `changed_evidence_reinvestigates` — a different fingerprint re-runs the
-  investigation (no premature convergence).
-- `fingerprint_non_collision` — canonicalized-distinct evidence yields distinct
-  digests.
-- `converged_never_reaps` — `Converged.should_reap()` is `false`.
-- `guard_store_is_bounded_and_evicts_on_reap` — the per-claim store stays bounded.
-- `persisted_verdicts_deserialize_after_converged_added` — verdicts serialized
-  before `Converged` existed round-trip by name, confirming the additive variant
-  needs no migration.
+- `standing_goal_converges_to_single_verdict` — a standing-goal stale engineer on
+  a `Converged` outcome is never reaped across 59 sweeps (mirrors the observed
+  59× non-convergence loop); the claim is preserved and its worktree never cleaned.
+- `converged_never_reaps` — `Converged.should_reap()` is `false` and its label is
+  the stable token `"converged"`.
+- `converged_label_does_not_shift_existing_verdict_labels` — adding `Converged`
+  leaves every existing name-tagged label unchanged (no persisted-verdict
+  migration required).
+- `converged_is_kept_like_pending` — both `Pending` and `Converged` keep the
+  claim (fail-closed).
 
 ## Related
 

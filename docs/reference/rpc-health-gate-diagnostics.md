@@ -96,18 +96,19 @@ enum ProbeOutcome {
 > `run_rpc_health_gate` — every existing `ProbeOutcome::SpawnFailed` arm is
 > renamed and a new `EmptyStats` arm added, so the compiler enforces coverage.
 
-Because a plain exit-0 no longer proves health, the probe now reads a **bounded**
-amount of stdout to confirm memory stats were actually returned (distinguishing
-`EmptyStats` from a genuine round-trip). The stdout read is size-capped, and the
-existing dedicated **drain thread** design is preserved so a full pipe buffer can
-never wedge the child and be misclassified as `TimedOut` (#4639 review F3).
+Because a plain exit-0 no longer proves health, the probe now **captures** stdout
+(previously discarded) to confirm memory stats were actually returned
+(distinguishing `EmptyStats` from a genuine round-trip). The existing dedicated
+**drain thread** design is preserved — now for both stdout and stderr — so a full
+pipe buffer can never wedge the child and be misclassified as `TimedOut`
+(#4639 review F3).
 
 ## Configuration
 
-`RelaunchConfig` gains additive, serde-defaulted fields
+`RelaunchConfig` gains additive fields
 ([`src/self_relaunch/types.rs`](https://github.com/rysweet/Simard/blob/main/src/self_relaunch/types.rs)).
-Existing configs deserialize unchanged (defaults apply), so the change is
-non-breaking.
+The struct is constructed via `..RelaunchConfig::default()` at every call site, so
+adding fields with defaults is non-breaking.
 
 ```rust
 pub struct RelaunchConfig {
@@ -115,14 +116,14 @@ pub struct RelaunchConfig {
 
     /// Per-attempt timeout for the memory-stats rpc-health probe.
     /// Default: 30s (preserves prior behaviour). Enforced as a spawn + bounded
-    /// wait inside the gate, floored/ceiled to sane bounds.
+    /// wait inside the gate.
     pub health_timeout: Duration,
 
     /// Maximum number of probe attempts before the gate reddens.
-    /// Bounded and positive; default keeps a single retry cheap.
-    pub health_probe_max_attempts: u32,
+    /// Bounded and positive; default 3.
+    pub health_probe_max_attempts: usize,
 
-    /// Base backoff between probe attempts (capped exponential).
+    /// Base backoff between probe attempts (capped exponential). Default 2s.
     pub health_probe_backoff: Duration,
 }
 ```
@@ -130,8 +131,8 @@ pub struct RelaunchConfig {
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `health_timeout` | `30s` | Per-attempt probe timeout (was a hardcoded 30 s) |
-| `health_probe_max_attempts` | bounded positive default | Total attempts before fail-closed |
-| `health_probe_backoff` | bounded default | Base backoff, capped exponential between attempts |
+| `health_probe_max_attempts` | `3` | Total attempts before fail-closed |
+| `health_probe_backoff` | `2s` | Base backoff, capped exponential (`base << (attempt-1)`, clamped to `base * 8`) between attempts |
 
 Retry applies **only** to the **transient** outcomes (`TimedOut`, `Unreachable`);
 once attempts are exhausted the gate reddens fail-closed with the last outcome's
@@ -181,29 +182,34 @@ gate=rpc-health attempt=1 → exit 0, stdout empty → empty_stats
   `passed: false` and **block the deploy** by default.
 - **Only** a clean exit that returns memory stats yields `passed: true`.
 - Retry/backoff is **bounded** — it never loops forever; the gate always reaches
-  a terminal pass/fail.
-- Timeout is floored/ceiled to sane bounds; a misconfigured value cannot disable
-  the timeout.
+  a terminal pass/fail within `health_probe_max_attempts`.
 - No secret/PII/host-path leakage in diagnostics.
 
 ## Regression tests
 
 Co-located in
-[`src/self_relaunch/gates.rs`](https://github.com/rysweet/Simard/blob/main/src/self_relaunch/gates.rs):
+[`src/self_relaunch/gates.rs`](https://github.com/rysweet/Simard/blob/main/src/self_relaunch/gates.rs)
+and
+[`src/self_relaunch/types.rs`](https://github.com/rysweet/Simard/blob/main/src/self_relaunch/types.rs):
 
-- `probe_timeout_is_fail_closed` — a wedged probe yields `TimedOut` and reddens.
+- `probe_timeout_is_transient_and_fail_closed` — a wedged probe yields `TimedOut`,
+  is killed and reaped, and is classified transient.
 - `probe_empty_stats_is_fail_closed` — exit-0-empty-stdout yields `EmptyStats`
-  and reddens (hollow success rejected).
-- `probe_unreachable_is_fail_closed` — spawn/connect failure or absent socket
-  yields `Unreachable` and reddens.
-- `probe_retries_bounded_then_reddens` — transient failures retry up to
-  `health_probe_max_attempts`, then fail closed.
-- `empty_stats_is_not_retried` — `EmptyStats` reddens on the first attempt
-  without consuming further probe attempts (deterministic fault, not retried).
-- `configurable_health_timeout_is_floored_and_ceiled` — timeout bounds hold.
-- `bounded_stdout_read_does_not_wedge` — the drain-thread anti-wedge design is
-  preserved under a large stdout.
-- `default_health_timeout_is_30s` — default preserves prior behaviour.
+  and reddens (hollow success rejected); not transient.
+- `probe_nonempty_stdout_is_a_genuine_round_trip` — exit-0 WITH stats on stdout is
+  a successful `Exited` round-trip (the only healthy outcome).
+- `probe_unreachable_is_fail_closed` — a spawn/connect failure yields
+  `Unreachable` and is classified transient.
+- `empty_stats_is_not_retried` — `EmptyStats` is deterministic (not transient) so
+  the bounded-retry loop never retries it; `TimedOut` is transient.
+- `rpc_health_gate_reddens_when_unreachable_after_bounded_retry` — the gate fails
+  closed for an unreachable daemon even after the bounded retry budget, and the
+  attempt budget is positive.
+- `default_health_timeout_preserves_prior_30s_behaviour` — the per-attempt probe
+  timeout default is the prior fixed 30s.
+- `default_health_probe_attempts_is_bounded_positive` /
+  `default_health_probe_backoff_is_set` — the retry budget and base backoff have
+  bounded, positive defaults.
 
 ## Related
 

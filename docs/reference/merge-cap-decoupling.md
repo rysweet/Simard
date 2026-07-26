@@ -146,18 +146,16 @@ plan : held: per-cycle launch cap reached  → cycle short-circuits
 ## Regression tests
 
 Co-located in
-[`src/overseer/mod.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/mod.rs)
-and
-[`src/overseer/merge_ops.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/merge_ops.rs):
+[`src/overseer/mod.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/mod.rs):
 
 - `ready_prs_drain_when_launch_cap_exhausted` — the pinning test: green + CLEAN +
   MERGEABLE `VerifyAndMergePr` is planned into `act` even with launches at cap.
 - `merges_still_require_full_eligibility` — a non-`CLEAN` / failing-check PR is
-  never merged; eligibility is unchanged.
+  never merged; eligibility is unchanged (the `act` re-verify escalates it).
 - `max_merges_per_cycle_bound_is_honored` — merges stop at the budget within a
   single cycle and resume next cycle.
-- `merge_reverifies_mergeability_at_act_time` — a since-failed PR built into an
-  earlier plan is not merged (TOCTOU).
+- `max_merges_per_cycle_default_is_two` / `merge_budget_is_independent_of_launch_cap`
+  — the merge budget defaults to 2 and is a field independent of the launch cap.
 
 ## Related
 

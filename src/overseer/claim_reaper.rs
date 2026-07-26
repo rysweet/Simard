@@ -172,6 +172,13 @@ pub enum InvestigationVerdict {
     /// The agentic investigation is still IN FLIGHT (a recipe was launched and
     /// has not yet resolved). Not reaped this sweep; a later sweep resolves it.
     Pending,
+    /// TERMINAL, fail-closed convergence for a standing / perpetual research
+    /// goal (issue #4755). Such a goal is legitimately never "done", so the
+    /// investigation would otherwise re-run and re-archive byte-identical
+    /// evidence every sweep (observed 59× for engineer `70ab8541`). `Converged`
+    /// records ONE terminal decision that keeps the claim and stops re-archival,
+    /// so the stale-engineer loop settles instead of spinning on `Pending`.
+    Converged,
     /// Genuinely gone AND unrecoverable. The ONLY verdict that reaps.
     Dead { cause: InvestigationCause },
 }
@@ -191,6 +198,7 @@ impl InvestigationVerdict {
             InvestigationVerdict::Blocked => "blocked",
             InvestigationVerdict::Recoverable => "recoverable",
             InvestigationVerdict::Pending => "pending",
+            InvestigationVerdict::Converged => "converged",
             InvestigationVerdict::Dead { .. } => "dead",
         }
     }

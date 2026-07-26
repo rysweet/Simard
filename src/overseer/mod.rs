@@ -186,6 +186,17 @@ pub struct Overseer {
     /// Cap on how many cost-bearing launches one cycle may plan (concurrency
     /// bound layered on top of the AIMD engineer cap the launcher already obeys).
     max_launches_per_cycle: usize,
+    /// Cap on how many auto-merges one cycle may plan. Independent of
+    /// [`Self::max_launches_per_cycle`] (issue `delivery:simard_merge_backlog`):
+    /// green + CLEAN + MERGEABLE merges are NOT cost-bearing and never consume a
+    /// launch slot, so exhausting the launch cap must never starve the ready-PR
+    /// backlog. Defaults to `2`, mirroring the launch cap, to bound blast radius
+    /// (no thundering herd) while the backlog drains over successive cycles.
+    max_merges_per_cycle: usize,
+    /// Auto-merges already admitted in the CURRENT cycle, reset at the top of
+    /// each `run_cycle` plan build. Bounds admitted merges to
+    /// [`Self::max_merges_per_cycle`] without coupling to the launch counter.
+    merges_this_cycle: usize,
     /// The Simard Whisperer's delivery seam (advisory steering notes onto the
     /// meeting-handoff inbox). `None` until wired; whispers require it.
     whisper_sink: Option<Box<dyn WhisperSink>>,
@@ -452,6 +463,8 @@ impl Overseer {
             budget: BudgetGate::default(),
             sequencer: ConflictSequencer::default(),
             max_launches_per_cycle: 2,
+            max_merges_per_cycle: 2,
+            merges_this_cycle: 0,
             whisper_sink: None,
             // 15-minute dedup window; at most 5 whispers per rolling hour.
             whisper_gate: WhisperGate::new(900, 5),
@@ -892,6 +905,10 @@ impl Overseer {
         let mut plan = Vec::with_capacity(problems.len());
         let mut entries = Vec::with_capacity(problems.len());
         let mut launches = 0usize;
+        // Reset the per-cycle auto-merge budget: green+CLEAN+MERGEABLE merges
+        // draw from `max_merges_per_cycle`, independent of the launch cap
+        // (issue `delivery:simard_merge_backlog`).
+        self.merges_this_cycle = 0;
         for problem in &problems {
             let iv = decide(problem);
             let mut planned = self.gate(&iv, &observed, &mut launches);
@@ -1547,6 +1564,22 @@ impl Overseer {
                 return held_plan(iv, e.to_string());
             }
             *launches += 1;
+        }
+
+        // Auto-merge budget (issue `delivery:simard_merge_backlog`): a green +
+        // CLEAN + MERGEABLE merge is NOT cost-bearing (see `is_cost_bearing`), so
+        // it never consumed a launch slot and the launch-cap hold above never
+        // applied to it — but plan-building still short-circuited the cycle when
+        // launches were capped, starving 13 ready-and-clean PRs. Merges now draw
+        // from their OWN bounded budget here so they DRAIN even when launches are
+        // exhausted, at a rate that avoids a thundering herd. Eligibility is
+        // untouched: `act` still re-verifies CLEAN+MERGEABLE and runs the full
+        // `evaluate_objective_gates` before any merge.
+        if is_auto_merge(iv) {
+            if self.merges_this_cycle >= self.max_merges_per_cycle {
+                return held_plan(iv, "held: per-cycle merge budget reached");
+            }
+            self.merges_this_cycle += 1;
         }
 
         admitted_plan(iv)
@@ -2212,6 +2245,15 @@ fn is_cost_bearing(iv: &Intervention) -> bool {
         iv,
         Intervention::LaunchRecipe { .. } | Intervention::RunAudit { .. }
     )
+}
+
+/// Whether an intervention is an autonomous PR merge that draws from the bounded
+/// `max_merges_per_cycle` budget (issue `delivery:simard_merge_backlog`). Only
+/// the actual merge action counts; merge-queue hygiene (`FlagStalePr`,
+/// `CloseDuplicatePr`) shares the `MergeAuthority` risk class but performs no
+/// merge, so it does not consume the merge budget.
+fn is_auto_merge(iv: &Intervention) -> bool {
+    matches!(iv, Intervention::VerifyAndMergePr { .. })
 }
 
 /// Stable dedup key for one recipe-runner investigation launch (live defect
@@ -4702,6 +4744,52 @@ mod tests {
         assert!(
             matches!(outcome, ActOutcome::Escalated),
             "a non-ready PR must NEVER merge — eligibility is unchanged; got {outcome:?}"
+        );
+    }
+
+    /// The bounded-budget contract: merges are admitted only up to
+    /// `max_merges_per_cycle` within one cycle; the next ready merge is HELD with
+    /// the distinct merge-budget note (not the launch-cap note). This pins the new
+    /// `merges_this_cycle` counter and its budget branch.
+    #[test]
+    fn max_merges_per_cycle_bound_is_honored() {
+        let observed = ObservedState::default();
+        let mut ov =
+            Overseer::new(caps(observed.clone(), true, vec![])).with_verify_merge_autonomy(true);
+        assert_eq!(ov.max_merges_per_cycle, 2, "precondition: budget is 2");
+
+        let mut launches = 0usize;
+        let merge = |pr| Intervention::VerifyAndMergePr {
+            repo: "rysweet/Simard".to_string(),
+            pr,
+        };
+
+        // The first `max_merges_per_cycle` ready merges are admitted.
+        for pr in [4544u32, 4545] {
+            let planned = ov.gate(&merge(pr), &observed, &mut launches);
+            assert!(
+                planned.admitted,
+                "merge #{pr} within budget must be admitted; note={}",
+                planned.note
+            );
+        }
+
+        // The next ready merge is held by the MERGE budget (not the launch cap).
+        let over = ov.gate(&merge(4546), &observed, &mut launches);
+        assert!(!over.admitted, "the merge past budget must be held");
+        assert!(
+            over.note.contains("per-cycle merge budget reached"),
+            "over-budget merge must cite the merge budget, not the launch cap; note={}",
+            over.note
+        );
+
+        // A fresh cycle resets the budget: the reset makes the next merge admit.
+        ov.merges_this_cycle = 0;
+        let next_cycle = ov.gate(&merge(4546), &observed, &mut launches);
+        assert!(
+            next_cycle.admitted,
+            "the merge budget must reset per cycle so the backlog drains; note={}",
+            next_cycle.note
         );
     }
 }

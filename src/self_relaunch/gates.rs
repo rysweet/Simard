@@ -456,13 +456,39 @@ fn run_gym_baseline_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
 }
 
 /// The terminal disposition of the RpcHealth probe subprocess, so
-/// [`run_rpc_health_gate`] can render a fail-closed verdict for each of the
-/// three ways it can end: a clean exit, exhausting the health timeout, or
-/// failing to spawn at all.
+/// [`run_rpc_health_gate`] can render a DISTINCT fail-closed verdict for each way
+/// the probe can end (issue `process:self_deploy_blocked`): a genuine round-trip
+/// (exit 0 WITH stats), a hollow success (exit 0 but NO stats), a wedged daemon
+/// (timeout), or an unreachable endpoint (spawn/connect failure). Distinguishing
+/// these lets an operator tell WHICH failure occurred instead of reading one
+/// opaque "memory stats did not return" line.
+#[derive(Debug)]
 enum ProbeOutcome {
+    /// The probe process exited. `status.success()` WITH non-empty stdout is the
+    /// ONLY genuine round-trip; a non-zero exit reddens the gate.
     Exited { status: ExitStatus, stderr: String },
+    /// The probe exited 0 but wrote NOTHING to stdout — the daemon answered but
+    /// returned no memory stats. A HOLLOW success: fail-closed and deterministic
+    /// (a retry will not clear it), so it is never retried.
+    EmptyStats,
+    /// The probe exceeded its per-attempt timeout (a wedged daemon that accepted
+    /// the connection but never answered). Killed and reaped. Transient —
+    /// eligible for bounded retry/backoff.
     TimedOut,
-    SpawnFailed(std::io::Error),
+    /// The probe could not be spawned, or its endpoint/socket was unreachable.
+    /// Supersedes the former `SpawnFailed` (same payload, clearer name covering
+    /// an absent socket too). Transient — eligible for bounded retry/backoff.
+    Unreachable(std::io::Error),
+}
+
+impl ProbeOutcome {
+    /// Whether this outcome is a TRANSIENT fault a bounded retry+backoff might
+    /// clear. `TimedOut` and `Unreachable` are transient; `EmptyStats` (a
+    /// deterministic hollow success) and any `Exited` verdict are not — retrying
+    /// them would only burn the deploy budget.
+    fn is_transient(&self) -> bool {
+        matches!(self, ProbeOutcome::TimedOut | ProbeOutcome::Unreachable(_))
+    }
 }
 
 /// Spawn `cmd` and wait at most `timeout` for it to exit, killing it on elapse.
@@ -484,15 +510,25 @@ enum ProbeOutcome {
 /// always terminates and is joined before returning.
 fn run_probe_with_timeout(mut cmd: Command, timeout: Duration) -> ProbeOutcome {
     cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = match cmd.spawn() {
         Ok(child) => child,
-        Err(e) => return ProbeOutcome::SpawnFailed(e),
+        Err(e) => return ProbeOutcome::Unreachable(e),
     };
 
-    // Concurrently drain stderr so a full pipe buffer can never wedge the child.
-    let drain = child.stderr.take().map(|mut pipe| {
+    // Concurrently drain BOTH pipes so a full pipe buffer can never wedge the
+    // child. stdout is now captured (not discarded) so an exit-0 with EMPTY
+    // stdout — a daemon that answered but returned no stats — is distinguishable
+    // from a genuine round-trip that printed the stats table.
+    let drain_out = child.stdout.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = pipe.read_to_string(&mut buf);
+            buf
+        })
+    });
+    let drain_err = child.stderr.take().map(|mut pipe| {
         std::thread::spawn(move || {
             let mut buf = String::new();
             let _ = pipe.read_to_string(&mut buf);
@@ -508,7 +544,14 @@ fn run_probe_with_timeout(mut cmd: Command, timeout: Duration) -> ProbeOutcome {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let stderr = collect(drain);
+                let stdout = collect(drain_out);
+                let stderr = collect(drain_err);
+                // A clean exit that produced NO stats is a hollow success —
+                // exit-0 alone no longer proves health (issue
+                // `process:self_deploy_blocked`).
+                if status.success() && stdout.trim().is_empty() {
+                    return ProbeOutcome::EmptyStats;
+                }
                 return ProbeOutcome::Exited { status, stderr };
             }
             Ok(None) => {
@@ -517,16 +560,18 @@ fn run_probe_with_timeout(mut cmd: Command, timeout: Duration) -> ProbeOutcome {
                     // does not leak, then report the timeout as a red verdict.
                     let _ = child.kill();
                     let _ = child.wait();
-                    // Killing the child closes its stderr fd, so the drain thread
-                    // reaches EOF; join it so we do not leak the thread.
-                    let _ = collect(drain);
+                    // Killing the child closes its pipes, so the drain threads
+                    // reach EOF; join them so we do not leak the threads.
+                    let _ = collect(drain_out);
+                    let _ = collect(drain_err);
                     return ProbeOutcome::TimedOut;
                 }
                 std::thread::sleep(poll);
             }
             Err(e) => {
-                let _ = collect(drain);
-                return ProbeOutcome::SpawnFailed(e);
+                let _ = collect(drain_out);
+                let _ = collect(drain_err);
+                return ProbeOutcome::Unreachable(e);
             }
         }
     }
@@ -587,9 +632,42 @@ fn run_rpc_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
             ),
         };
     }
-    let mut cmd = scrubbed_command(binary, config);
-    cmd.args(RPC_HEALTH_PROBE_ARGS);
-    match run_probe_with_timeout(cmd, config.health_timeout) {
+
+    // Bounded retry/backoff (issue `process:self_deploy_blocked`): a TRANSIENT
+    // fault (a wedged daemon that timed out, or a not-yet-listening socket) may
+    // clear on a second dial, so retry up to `health_probe_max_attempts` with a
+    // capped-exponential backoff. DETERMINISTIC faults (EmptyStats, a non-zero
+    // exit) and a genuine pass return immediately — retrying them only burns the
+    // deploy budget. Fail-closed is preserved: an exhausted retry budget reddens.
+    let attempts = config.health_probe_max_attempts.max(1);
+    let mut last = GateResult {
+        gate: RelaunchGate::RpcHealth,
+        passed: false,
+        detail: "rpc health check did not run".to_string(),
+    };
+    for attempt in 1..=attempts {
+        let mut cmd = scrubbed_command(binary, config);
+        cmd.args(RPC_HEALTH_PROBE_ARGS);
+        let outcome = run_probe_with_timeout(cmd, config.health_timeout);
+        let transient = outcome.is_transient();
+        last = gate_result_for_probe(outcome, config);
+        if last.passed || !transient || attempt == attempts {
+            return last;
+        }
+        // Capped-exponential backoff between attempts: base << (attempt-1),
+        // clamped to the configured base ceiling to bound total wait.
+        let backoff = probe_backoff_for_attempt(config.health_probe_backoff, attempt);
+        if !backoff.is_zero() {
+            std::thread::sleep(backoff);
+        }
+    }
+    last
+}
+
+/// Render the fail-closed [`GateResult`] for a single probe outcome. Each outcome
+/// maps to a DISTINCT diagnostic so an operator can tell WHICH failure occurred.
+fn gate_result_for_probe(outcome: ProbeOutcome, config: &RelaunchConfig) -> GateResult {
+    match outcome {
         ProbeOutcome::Exited { status, .. } if status.success() => GateResult {
             gate: RelaunchGate::RpcHealth,
             passed: true,
@@ -606,6 +684,14 @@ fn run_rpc_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
                 bound_gate_detail(&stderr)
             ),
         },
+        ProbeOutcome::EmptyStats => GateResult {
+            gate: RelaunchGate::RpcHealth,
+            passed: false,
+            detail: "rpc health failed: memory stats returned exit 0 but NO stats \
+                     (hollow success — the daemon answered without proving \
+                     reachability); refusing to green a daemon that returned no stats"
+                .to_string(),
+        },
         ProbeOutcome::TimedOut => GateResult {
             gate: RelaunchGate::RpcHealth,
             passed: false,
@@ -614,12 +700,24 @@ fn run_rpc_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
                 config.health_timeout.as_secs()
             ),
         },
-        ProbeOutcome::SpawnFailed(e) => GateResult {
+        ProbeOutcome::Unreachable(e) => GateResult {
             gate: RelaunchGate::RpcHealth,
             passed: false,
-            detail: format!("rpc health probe failed to run: {e}"),
+            detail: format!("rpc health probe unreachable: {e}"),
         },
     }
+}
+
+/// Capped-exponential backoff for probe attempt `attempt` (1-based): `base`
+/// doubled `attempt-1` times, clamped to `base * 8` so total wait stays bounded
+/// even at a high attempt budget. A zero base yields zero (retry immediately).
+fn probe_backoff_for_attempt(base: Duration, attempt: usize) -> Duration {
+    if base.is_zero() {
+        return Duration::ZERO;
+    }
+    let shift = (attempt.saturating_sub(1)).min(3) as u32;
+    let ceiling = base.saturating_mul(8);
+    base.saturating_mul(1u32 << shift).min(ceiling)
 }
 
 fn truncate_output(s: &str, max_len: usize) -> String {
