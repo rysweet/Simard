@@ -1,0 +1,80 @@
+name: kgpacks-rs-hybrid-ranking
+app_type: cli
+description: |
+  Outside-in proof for parity criterion **KGP-Q10** of the kgpacks-rs port
+  (`Specs/agent-kgpacks-rs-parity.md`): the native knowledge handler answers a
+  `knowledge.query` by **hybrid ranking** — blending the vector-semantic
+  (KGP-Q9), GraphRAG multi-hop (KGP-Q5), and keyword-coverage (KGP-Q8) signals
+  into one fused order — rather than committing to a single retrieval path.
+
+  Per the operator directive (issue #4321, 2026-07-20) — "No keyword search is
+  not good enough. It needs to be the same" — retrieval parity requires the
+  original's ranker, which blends signals rather than using one alone. The
+  `knowledge.query` handler now routes through `query_hybrid`: it gathers every
+  available signal via the score-exposing `query_graph_scored`,
+  `query_vector_scored`, and `query_articles_scored`, and when two or more are
+  present `fuse_signals` normalizes each by its own max (so a cosine in (0,1], an
+  integer keyword-coverage sum, and a `1/(1+hop)` graph proximity are comparable)
+  and blends them by weight (vector = graph = 1.0 > keyword = 0.6), so a
+  semantic/graph match outranks literal keyword overlap and a graph-only
+  neighbour the keyword scan misses is still surfaced. When only one signal is
+  available the native single-signal output and answer synthesis are returned
+  unchanged — nothing to blend — so keyword-only, vector-only, and graph-only
+  packs behave exactly as before.
+
+  This scenario drives the hermetic, in-process `native_knowledge` unit tests
+  that pin the corrected contract:
+    - `fuse_signals_normalizes_and_weights_signals` — the fusion math in
+      isolation: heterogeneous per-signal score scales are normalized, weighted,
+      and accumulated across signals, and a citation url carries over;
+    - `query_hybrid_blends_semantic_graph_and_keyword` — the decisive one: on a
+      fixture where all three signals disagree, the semantic and graph matches
+      outrank the keyword-only match and the graph-only neighbour is surfaced;
+    - `query_hybrid_semantic_outranks_keyword_only_with_two_signals` — a
+      semantic-only article outranks a keyword-only article (vector weight >
+      keyword weight);
+    - `query_hybrid_single_signal_matches_component_ranking` — a single-signal
+      pack ranks identically to its component (no regression);
+    - `native_knowledge_transport_query_hybrid_ranks_semantic_over_keyword` — the
+      semantic match ranks first in the wire response end-to-end, where a pure
+      keyword scan would rank the keyword-overlap article first.
+  The same run re-asserts the pre-existing KGP-Q1/Q4/Q5/Q8/Q9/T3 citation,
+  parameterized-search, GraphRAG, ranking, vector-search, and connection-reuse
+  behaviour is unregressed. No network, no live host mutation. The CLI runner
+  rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # The native knowledge query contract, including the new KGP-Q10 hybrid-ranking
+  # tests and the pre-existing citation / GraphRAG / vector / ranking /
+  # parameterized-search / connection-reuse behaviours.
+  - action: run
+    params:
+      command: "cargo test --locked --lib native_knowledge"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Transport-level knowledge client suite proves the hybrid query path is
+  # exercised end-to-end through the native RPC surface without regression.
+  - action: run
+    params:
+      command: "cargo test --locked --lib knowledge_client"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
