@@ -142,8 +142,17 @@ fn scan_ooda_errors(ooda_tail: &[String]) -> Option<String> {
 /// Whether a log line is an ERROR line (case-insensitive `error` token). Kept
 /// deliberately narrow — only the explicit error level, not the broad
 /// warning/failure vocabulary — so oversight surfaces genuine errors, not noise.
+///
+/// Allocation-free: scans the line's bytes for a case-insensitive `error`
+/// substring rather than materializing a lowercased copy of every line (this
+/// runs over the whole ooda.log tail, up to [`OODA_TAIL_MAX_BYTES`]).
 fn is_error_line(line: &str) -> bool {
-    line.to_ascii_lowercase().contains("error")
+    const NEEDLE: &[u8] = b"error";
+    let hay = line.as_bytes();
+    hay.len() >= NEEDLE.len()
+        && hay
+            .windows(NEEDLE.len())
+            .any(|w| w.eq_ignore_ascii_case(NEEDLE))
 }
 
 /// A single-line, length-bounded excerpt of `line` (control chars stripped).
@@ -183,11 +192,12 @@ pub fn read_ooda_tail(state_root: &Path, max_bytes: u64) -> Vec<String> {
     let Ok((content, start)) = read() else {
         return Vec::new();
     };
-    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    let mut it = content.lines();
     // Drop the leading (possibly truncated) partial line only when we actually
-    // seeked past the start of the file.
-    if start > 0 && !lines.is_empty() {
-        lines.remove(0);
+    // seeked past the start of the file — skipping it in the iterator avoids
+    // both allocating that line and an O(n) Vec shift from `remove(0)`.
+    if start > 0 {
+        it.next();
     }
-    lines
+    it.map(str::to_string).collect()
 }
