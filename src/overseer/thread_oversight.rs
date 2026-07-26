@@ -95,7 +95,9 @@ pub fn detect_thread_anomalies(
             }
         }
 
-        // --- Failure rate: the majority of recent attempts failed. ---
+        // --- Failure rate: the majority of lifetime attempts failed. ---
+        // Note: `runs`/`failures` are cumulative (lifetime) counters, so this
+        // check reflects the thread's whole history, not a recent window.
         let runs = snapshot
             .counter(&series_name(id, names::THREAD_SUFFIX_RUNS), &[])
             .unwrap_or(0);
@@ -139,20 +141,45 @@ fn scan_ooda_errors(ooda_tail: &[String]) -> Option<String> {
     ))
 }
 
-/// Whether a log line is an ERROR line (case-insensitive `error` token). Kept
-/// deliberately narrow — only the explicit error level, not the broad
+/// Whether a log line is an ERROR line (case-insensitive `error` **token**).
+/// Kept deliberately narrow — only the explicit error level, not the broad
 /// warning/failure vocabulary — so oversight surfaces genuine errors, not noise.
 ///
-/// Allocation-free: scans the line's bytes for a case-insensitive `error`
-/// substring rather than materializing a lowercased copy of every line (this
-/// runs over the whole ooda.log tail, up to [`OODA_TAIL_MAX_BYTES`]).
+/// Matches `error` only as a whole word, so precision-sapping substrings are
+/// rejected: `"0 errors"` (trailing `s` — a word char) and `"error-free"`
+/// (trailing `-` — a compound) do **not** count, while `ERROR`, `[error]`, and
+/// `error:` do. A word char is ASCII alphanumeric or `_`.
+///
+/// Allocation-free: scans the line's bytes for the token rather than
+/// materializing a lowercased copy of every line (this runs over the whole
+/// ooda.log tail, up to [`OODA_TAIL_MAX_BYTES`]).
 fn is_error_line(line: &str) -> bool {
     const NEEDLE: &[u8] = b"error";
     let hay = line.as_bytes();
-    hay.len() >= NEEDLE.len()
-        && hay
-            .windows(NEEDLE.len())
-            .any(|w| w.eq_ignore_ascii_case(NEEDLE))
+    if hay.len() < NEEDLE.len() {
+        return false;
+    }
+    for start in 0..=hay.len() - NEEDLE.len() {
+        if !hay[start..start + NEEDLE.len()].eq_ignore_ascii_case(NEEDLE) {
+            continue;
+        }
+        // Left boundary: the byte before `error` must not be a word char.
+        let left_ok = start == 0 || !is_word_byte(hay[start - 1]);
+        // Right boundary: the byte after must be neither a word char (excludes
+        // `errors`) nor `-` (excludes `error-free`).
+        let after = start + NEEDLE.len();
+        let right_ok = after >= hay.len() || (!is_word_byte(hay[after]) && hay[after] != b'-');
+        if left_ok && right_ok {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether `b` is an ASCII "word" byte (alphanumeric or `_`) for token
+/// boundary detection in [`is_error_line`].
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 /// A single-line, length-bounded excerpt of `line` (control chars stripped).

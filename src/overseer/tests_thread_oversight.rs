@@ -164,6 +164,50 @@ fn ooda_log_error_line_yields_an_anomaly() {
 }
 
 #[test]
+fn ooda_log_error_substrings_do_not_false_positive() {
+    // `error` must match only as a whole word: `0 errors` (trailing word char)
+    // and `error-free` (compound) are NOT error lines and must not surface an
+    // anomaly on their own.
+    let registry = vec![reg_entry("ooda", 300)];
+    let mut snap = MetricsSnapshot::empty();
+    snap.gauges
+        .push(gauge(tname("ooda", "next_run_epoch"), (NOW + 300) as i64));
+    snap.gauges
+        .push(gauge(tname("ooda", "last_run_epoch"), (NOW - 10) as i64));
+
+    let tail = vec![
+        "2026-07-26T19:00:00Z INFO ooda cycle complete with 0 errors".to_string(),
+        "2026-07-26T19:05:00Z INFO ooda run was error-free".to_string(),
+    ];
+
+    let anomalies = detect_thread_anomalies(&snap, &registry, &tail, NOW);
+    assert!(
+        anomalies.is_empty(),
+        "`0 errors` / `error-free` are not error lines: {anomalies:?}"
+    );
+}
+
+#[test]
+fn ooda_log_error_tokens_with_punctuation_still_match() {
+    // Genuine error-level markers embedded in punctuation (`[error]`, `error:`)
+    // must still surface an anomaly.
+    let registry = vec![reg_entry("ooda", 300)];
+    let mut snap = MetricsSnapshot::empty();
+    snap.gauges
+        .push(gauge(tname("ooda", "next_run_epoch"), (NOW + 300) as i64));
+    snap.gauges
+        .push(gauge(tname("ooda", "last_run_epoch"), (NOW - 10) as i64));
+
+    let tail = vec!["2026-07-26T19:05:00Z [error] ooda: decision parse failed".to_string()];
+
+    let anomalies = detect_thread_anomalies(&snap, &registry, &tail, NOW);
+    assert!(
+        !anomalies.is_empty(),
+        "punctuation-delimited `[error]` must surface an anomaly"
+    );
+}
+
+#[test]
 fn malformed_input_degrades_to_bounded_result_without_panic() {
     // Empty registry + empty snapshot + junk tail must not panic (SR-R1) and
     // must stay within the cap (SR-R5).

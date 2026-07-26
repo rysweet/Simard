@@ -145,7 +145,9 @@ pub fn thread_metric_name(id: &str, suffix: &str) -> String {
 }
 /// Suffix: every scheduler attempt to run the thread (counter).
 pub const THREAD_SUFFIX_RUNS: &str = "runs";
-/// Suffix: successful runs (counter). `runs - successes - failures` is skips.
+/// Suffix: successful runs (counter). Every scheduled run terminates as either
+/// a success or a failure, so `successes + failures == runs`; the success rate
+/// is `successes / runs`.
 pub const THREAD_SUFFIX_SUCCESSES: &str = "successes";
 /// Suffix: failed/errored runs (counter). Success rate is derivable.
 pub const THREAD_SUFFIX_FAILURES: &str = "failures";
