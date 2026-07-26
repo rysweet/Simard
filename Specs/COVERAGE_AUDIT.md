@@ -3,10 +3,14 @@
 ## Status
 
 - **Created**: 2026-07-16
-- **State**: PROPOSED — awaiting owner/PM-architect ratification. The
-  disambiguation (§1), the measurable done-criteria (§2), and the
-  deterministic next-target procedure (§3) are actionable immediately; they
-  do not change any code or CI behavior.
+- **Updated**: 2026-07-26 — done-gate simplified to a single deterministic
+  boolean (whole-repo line coverage ≥ 70%, via `scripts/coverage-gate.sh`),
+  replacing the former per-module audit series. Ratified by the operator in
+  the 2026-07-26 alignment meeting ("70% coverage *is* clear enough —
+  `cargo llvm-cov`, compare to 70, done").
+- **State**: ACTIVE. §1 (scope), §2 (the deterministic done-gate), and §3
+  (how to raise the number when short) are in force. This charter changes no
+  CI behavior; §4 still holds (no hard CI coverage gate).
 - **Consolidates goal slugs**: `audit-simard-test-coverage`,
   `raise-coverage-to-70`, `improve-amplihack-test-coverage`.
 - **Companion ledger**: [`docs/testing/COVERAGE_BASELINE.md`](../docs/testing/COVERAGE_BASELINE.md)
@@ -22,6 +26,11 @@ gets a single answer to three questions that were previously unanswered:
 1. **What does the goal mean, precisely, and in which repository?** (§1)
 2. **When is it DONE, measured how?** (§2)
 3. **What is the concrete next step if it is not yet done?** (§3)
+
+> **2026-07-26 update.** The done-gate (question 2) is now a single
+> deterministic boolean: whole-repo line coverage ≥ 70%, measured by
+> `scripts/coverage-gate.sh`. The per-group ledger below is retained as a
+> **map for choosing what to test next** (question 3), not as the done-gate.
 
 ## Why this charter exists now
 
@@ -77,73 +86,78 @@ defensible "already done" verdict).
 - **Out of scope — a workspace-wide hard coverage gate.** See §4.
 
 > If the goal text says "raise it to 70%" with no further qualification,
-> read it as: *raise each attacked Simard module to ≥ 70% aggregate line
-> coverage, one bounded increment per PR, tracked in the companion ledger* —
-> **not** as a single workspace-wide percentage enforced by CI.
+> read it literally: *raise the repository's whole-crate aggregate line
+> coverage to ≥ 70%*, measured by `cargo llvm-cov` (§2). This is a single
+> deterministic number, not a per-module audit series. The per-group ledger
+> in §5's companion file remains a **useful map for choosing what to test
+> next**, but it is no longer the done-gate — the whole-repo total is.
+>
+> This is **not** a workspace-wide *hard coverage gate enforced by CI* (§4);
+> it is the completion criterion for the recurring goal, evaluated on demand
+> by running one command.
 
-## 2. Measurable done-criteria
+## 2. Measurable done-criteria — one deterministic boolean
 
-The unit of measurement is **aggregate line coverage of a target group**
-(a single file or a `src/<module>/` directory), produced by:
+The goal is DONE when the repository's **whole-crate aggregate line coverage
+is ≥ 70%**. That is the entire criterion. It is measured by one command and
+evaluated by a comparison — a boolean, not a judgement call:
 
 ```bash
-cargo llvm-cov --no-fail-fast --summary-only
-# or, scoped to one library module:
-cargo llvm-cov --lib --summary-only -- <module_path_fragment>
+scripts/coverage-gate.sh          # threshold defaults to 70
+# which measures the same way CI does (.github/workflows/coverage.yml):
+cargo llvm-cov --no-fail-fast --workspace --lib --bins \
+  --ignore-filename-regex 'tests?/' --summary-only --json \
+  | jq '.data[0].totals.lines.percent'
+# → compare the printed total to 70
 ```
 
-A target group **clears** the bar when its aggregate line coverage is
-**≥ 70%**. Individual files inside a group may sit below 70% when the
-uncovered paths are client-/runtime-dependent (require a live cognitive
-memory or state-root), provided (a) the *group* aggregate clears 70% and
-(b) the exception is recorded with a one-line justification in the ledger.
-This mirrors the already-accepted `simard_ooda_step.rs` exception in the
-companion ledger (group aggregate 76.07% with one 60.36% file).
+`scripts/coverage-gate.sh` runs the measurement, reads the `TOTAL` line-%,
+and:
 
-The **audit goal as a whole is DONE** when *all* of the following hold:
+- prints the measured total and the verdict,
+- exits **0** when coverage ≥ 70% (**DONE**),
+- exits **1** when coverage < 70% (**NOT DONE**, and prints the exact gap),
+- exits **2** only if the measurement itself could not run (could-not-verify).
 
-- [ ] Every group listed in the companion ledger's tables shows a landed
-      post-lift aggregate ≥ 70% (or a recorded, justified exception).
-- [ ] The "Other groups" backlog table in the ledger is empty (every
-      remaining tracked group has either landed or been explicitly deferred
-      with justification).
-- [ ] The deterministic scan in §3 finds no un-ledgered `src/` file that is
-      both **high-risk** (per the §3 risk list) and below 70% with more than
-      50 executable lines.
+**When the gate exits 0, the goal is DONE:** mark it complete and tombstone
+its slugs via `simard goal remove`. A future resurfacing is resolved by
+re-running the gate and re-tombstoning, not by opening another planning cycle.
 
-When those hold, the goal is marked DONE and its slugs are tombstoned via
-`simard goal remove`; a future resurfacing is resolved by linking this
-charter and re-tombstoning, not by opening another planning cycle.
+There is deliberately **no** steward-identity gate, **no** recursion guard,
+and **no** manual per-module audit charter standing between the measurement
+and the verdict. Those layers exist to protect judgement calls; whether a
+number clears 70 is not a judgement call. Running the command answers it.
 
-## 3. Deterministic next-target procedure
+> **Why this replaced the old per-module audit series.** This goal cycled
+> repeatedly and self-diagnosed `GENUINELY-STUCK` not because 70% is
+> ambiguous — it is trivially measurable — but because the done-gate had been
+> reframed into an open-ended "attack each module to ≥ 70%, one PR at a time"
+> series with no whole-goal terminator, then wrapped in scaffolding that
+> checked the scaffolding instead of the number. The fix is to gate on the
+> number.
 
-Any cycle that picks up this goal runs this procedure and always ends with
-either a concrete target file **or** a defensible DONE verdict — never
-`GENUINELY-STUCK`:
+## 3. If the gate says NOT DONE: how to make progress
 
-1. **Measure.** Run `cargo llvm-cov --no-fail-fast --summary-only` (or the
-   scoped `--lib` form for speed) and capture the per-file line-% table.
-   The raw table *is* the evidence a cycle was previously missing.
-2. **Filter.** Keep only files under `src/` with **> 50 executable lines**
-   and **< 70% line coverage** that are not already recorded as a justified
-   exception in the ledger.
-3. **Rank by risk, then by gap.** Prioritise files on the safety/critical
-   path first — the loop and safety surfaces named in #1735
-   (`engineer_loop`, `ooda`/brain, merge/overseer authority,
-   cognitive-memory, safe-update, `git_guardrails`) — then by absolute
-   coverage gap (lowest line-% first).
-4. **Pick the top candidate** and open a single bounded PR that raises that
-   one group to ≥ 70% with **hermetic** tests (no network, no sleeps, no
-   live runtime; use `InMemory*` stores and a `TempDir` `SIMARD_STATE_ROOT`
-   per `docs/testing/hermetic-tests.md`).
-5. **Record.** Add or update the group's row in the companion ledger with
-   the before/after aggregate, the reproduce command, and any justified
-   sub-70% file exception.
-6. **If step 2 yields an empty set**, the audit is DONE per §2 — record that
-   verdict (with the measured table as evidence) and tombstone the slug.
+The whole-repo total in §2 is the done-gate. It does **not** tell you *which*
+tests to write to move the number, so use the per-group ledger as a map:
 
-One PR attacks **one** group. Bounded increments keep each PR reviewable and
-keep the merge-ready bar achievable, exactly as the landed per-group PRs did.
+1. **Measure per file.** Run `cargo llvm-cov --no-fail-fast --summary-only`
+   and capture the per-file line-% table.
+2. **Filter.** Keep files under `src/` with **> 50 executable lines** and
+   **< 70% line coverage**.
+3. **Rank by risk, then by gap.** Prioritise the safety/critical path first —
+   the loop and safety surfaces named in #1735 (`engineer_loop`, `ooda`/brain,
+   merge/overseer authority, cognitive-memory, safe-update, `git_guardrails`) —
+   then by absolute coverage gap (lowest line-% first).
+4. **Pick the top candidate** and open a single bounded PR that adds
+   **hermetic** tests (no network, no sleeps, no live runtime; use
+   `InMemory*` stores and a `TempDir` `SIMARD_STATE_ROOT` per
+   `docs/testing/hermetic-tests.md`).
+5. **Re-run the gate.** `scripts/coverage-gate.sh`. If it now exits 0, the
+   goal is DONE.
+
+This is guidance for *raising* the number when it is short, not a second
+done-gate. One PR still attacks one bounded area to stay reviewable.
 
 ## 4. Explicitly NOT in this charter
 
