@@ -5,7 +5,7 @@
 //! Its `tick()` performs the exact current per-cycle work in the same order
 //! (heartbeat → `run_ooda_cycle` → persist report/episode/health/metrics), so
 //! the daemon's external cadence and side-effects are byte-for-byte preserved.
-//! The `tick()` body is a `todo!()` stub during TDD; the OODA state/memories/
+//! The `tick()` body is implemented; the OODA state/memories/
 //! config it owns are moved in at construction, matching Appendix A.7/A.9.
 
 use std::time::Instant;
