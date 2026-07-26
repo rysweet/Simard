@@ -343,6 +343,7 @@ nav:
     - Self-Deploy Source Prep & Warm Target Dir: reference/self-deploy-source-prep.md
     - Overseer Deploy Red-Canary Diagnostics: reference/overseer-deploy-canary-diagnostics.md
     - Canary Gate Isolation & Self-Deploy Convergence: reference/canary-gate-convergence.md
+    - RPC-Health Canary Gate Probe: reference/rpc-health-canary-gate-probe.md
     - State-Root Resolution: reference/state-root-resolution.md
     - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
     - Runtime Contracts: reference/runtime-contracts.md

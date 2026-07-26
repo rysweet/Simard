@@ -1,7 +1,7 @@
 ---
 title: How to converge a stuck red-canary self-deploy
 description: Operator runbook for the case where the Overseer refuses the same deploy on a red canary every tick and the running binary falls behind main — read the enriched refusal to name the reddening gate, decide regression vs missing-signal, apply the narrow canary_env allow-list fix, and confirm the self-deploy loop advances past the stuck SHA.
-last_updated: 2026-07-22
+last_updated: 2026-07-25
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -74,6 +74,20 @@ Note the `failing_gate` value: `smoke`, `unit-test`, `gym-baseline`, or
 The convergence stall this runbook targets is the **missing-signal** row: the
 gate is correctly failing closed on an absent signal, and a healthy candidate
 never gets a fair verdict.
+
+### Special case: `rpc-health` reddens *every* candidate identically
+
+If `failing_gate=rpc-health` and the detail is an `unsupported command` /
+`unknown subcommand` error (rather than `connection refused` or a missing
+socket), the gate is not probing the daemon at all — it is running a subcommand
+that does not exist, so it reddens every candidate regardless of health. This is
+the #4646 class of bug. The gate must dial a **real, read-only, dispatched**
+operator-cli subcommand — `simard memory stats` (`RPC_HEALTH_PROBE_ARGS`) —
+guarded by a socket-liveness pre-flight, so a healthy relaunch passes while a
+dead or unreachable daemon still reddens. See
+[RPC-health canary gate probe](../reference/rpc-health-canary-gate-probe.md) for
+the probe contract, the socket resolution, and the regression guard that keeps
+the argv pointed at a dispatched subcommand.
 
 ## 4. Apply the narrow allow-list (missing-signal case)
 
@@ -153,6 +167,9 @@ simard status | grep -Ei 'deploy_drift|running_commit'
 - [Overseer deploy red-canary diagnostics](../reference/overseer-deploy-canary-diagnostics.md) —
   how the reddening gate is named in the tick WARN and the operator
   notification.
+- [RPC-health canary gate probe](../reference/rpc-health-canary-gate-probe.md) —
+  how the `rpc-health` gate dials the daemon via `memory stats`, the liveness
+  pre-flight, and the #4646 regression guard.
 - [Self-deploy API reference](../reference/self-deploy-api.md) — the
   `GuardedDeployer`, `DeployRefusal`, and the swap path.
 - [Overseer tick self-healing](../reference/overseer-tick-self-healing.md) — the
