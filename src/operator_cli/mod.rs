@@ -23,6 +23,8 @@ mod signal;
 mod status;
 #[cfg(test)]
 mod tests_record_decision;
+#[cfg(test)]
+mod tests_record_orient_decide;
 mod worktree_gc;
 
 use std::path::PathBuf;

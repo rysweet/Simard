@@ -25,6 +25,18 @@ Commands:
                   [--task-hint <TEXT> | --task-hint-path <FILE>]
                               Record exactly one typed, validated per-goal-cycle
                               decision (the reasoner's tool; zero privilege).
+  record-orient   --adjusted-urgency <F> --confidence <F> --demotion-applied <F>
+                  --base-urgency <F> (--reason <TEXT> | --reason-path <FILE>)
+                  --record-path <ABSOLUTE_PATH> --goal-id <ID> --cycle-number <N>
+                              Record exactly one typed, validated OODA Orient
+                              judgment (the reasoner's tool; zero privilege).
+  record-decide   --choice <poll_developer_activity|consolidate_memory|run_improvement|
+                            extract_ideas|safe_update|research_query|run_gym_eval|
+                            build_skill|launch_session|advance_goal>
+                  (--reason <TEXT> | --reason-path <FILE>)
+                  --record-path <ABSOLUTE_PATH> --goal-id <ID> --cycle-number <N>
+                              Record exactly one typed, validated OODA Decide
+                              action-routing (the reasoner's tool; zero privilege).
   approvals issue --state-root <PATH> --effect-id <ID> --request-id <ID>
                               Issue a privileged merge/deploy approval from
                               the configured server principal and signing key.
@@ -75,6 +87,8 @@ pub(super) fn dispatch_ooda_command(
         "fixture" => dispatch_fixture(args),
         "terminal" => dispatch_terminal(args),
         "record-decision" => dispatch_record_decision(args),
+        "record-orient" => dispatch_record_orient(args),
+        "record-decide" => dispatch_record_decide(args),
         "approvals" => dispatch_approvals(args),
         other => Err(format!("unsupported command 'ooda {other}'").into()),
     }
@@ -154,6 +168,152 @@ fn dispatch_record_decision(
     // Validate-all-then-write-once: this atomic, owner-only (0o600) write is the
     // tool's ONLY side effect. It runs only after EVERY check above passed.
     crate::persistence::persist_json("ooda-per-goal-decision", record_path, &record)?;
+    Ok(())
+}
+
+/// `simard ooda record-orient` — the zero-privilege tool the OODA **Orient**
+/// reasoner calls to record EXACTLY ONE typed, validated urgency judgment.
+///
+/// It validates the numeric fields + reason through the SINGLE shared
+/// [`OrientFields::from_fields`](crate::ooda_brain::OrientFields::from_fields)
+/// chokepoint (finite, `[0,1]`, no escalation `adjusted ≤ base`, non-empty
+/// sanitized reason), hardens `--record-path` (absolute, no `..`), then writes
+/// exactly one atomic `0o600` [`OrientDecisionRecord`](crate::ooda_brain::OrientDecisionRecord).
+/// Any validation failure ⇒ a non-zero exit AND **no file on disk**
+/// (validate-all-then-write-once). `--confidence`, `--demotion-applied`, and
+/// `--base-urgency` are REQUIRED — the typed CLI deliberately tightens the
+/// legacy wire's `#[serde(default)]` behaviour so writer and reader agree.
+///
+/// See `docs/reference/ooda-record-orient-decide-cli.md` for the full contract.
+fn dispatch_record_orient(
+    args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const KNOWN_FLAGS: &[&str] = &[
+        "adjusted-urgency",
+        "confidence",
+        "demotion-applied",
+        "base-urgency",
+        "reason",
+        "reason-path",
+        "record-path",
+        "goal-id",
+        "cycle-number",
+    ];
+
+    let parsed = parse_named_args(args)?;
+    for flag in parsed.keys() {
+        if !KNOWN_FLAGS.contains(&flag.as_str()) {
+            return Err(format!("unknown option --{flag}").into());
+        }
+    }
+
+    let goal_id = required_named(&parsed, "goal-id")?;
+    let cycle_number: u32 = required_named(&parsed, "cycle-number")?
+        .parse()
+        .map_err(|_| "invalid --cycle-number (expected a u32)")?;
+    let record_path = Path::new(required_named(&parsed, "record-path")?);
+    harden_path(record_path, "record-path")?;
+
+    let parse_f64 = |flag: &str| -> Result<f64, Box<dyn std::error::Error>> {
+        required_named(&parsed, flag)?
+            .parse::<f64>()
+            .map_err(|_| format!("invalid --{flag} (expected a float)").into())
+    };
+    let adjusted_urgency = parse_f64("adjusted-urgency")?;
+    let confidence = parse_f64("confidence")?;
+    let demotion_applied = parse_f64("demotion-applied")?;
+    let base_urgency = parse_f64("base-urgency")?;
+
+    let reason = resolve_field(&parsed, "reason", "reason-path")?
+        .ok_or("an orient judgment requires --reason or --reason-path")?;
+
+    // Validate the numerics + reason through the SINGLE shared chokepoint. Any
+    // non-finite / out-of-range / escalating value or an empty reason ⇒ Err
+    // here, before any write.
+    let fields = crate::ooda_brain::OrientFields::from_fields(
+        adjusted_urgency,
+        confidence,
+        demotion_applied,
+        &reason,
+        base_urgency,
+    )
+    .map_err(|e| format!("invalid orient judgment: {e}"))?;
+
+    let record = crate::ooda_brain::OrientDecisionRecord {
+        schema: crate::ooda_brain::ORIENT_SCHEMA.to_string(),
+        goal_id: goal_id.to_string(),
+        cycle_number,
+        base_urgency,
+        fields,
+    };
+
+    crate::persistence::persist_json("ooda-orient-decision", record_path, &record)?;
+    Ok(())
+}
+
+/// `simard ooda record-decide` — the zero-privilege tool the OODA **Decide**
+/// reasoner calls to record EXACTLY ONE typed, validated action routing.
+///
+/// It validates the closed 10-variant `--choice` enum + non-empty `--reason`
+/// through the SINGLE shared
+/// [`DecideChoice::from_choice_fields`](crate::ooda_brain::DecideChoice::from_choice_fields)
+/// chokepoint, hardens `--record-path` (absolute, no `..`), then writes exactly
+/// one atomic `0o600` [`DecideDecisionRecord`](crate::ooda_brain::DecideDecisionRecord).
+/// Any validation failure ⇒ a non-zero exit AND **no file on disk**
+/// (validate-all-then-write-once).
+///
+/// See `docs/reference/ooda-record-orient-decide-cli.md` for the full contract.
+fn dispatch_record_decide(
+    args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const KNOWN_FLAGS: &[&str] = &[
+        "choice",
+        "reason",
+        "reason-path",
+        "record-path",
+        "goal-id",
+        "cycle-number",
+    ];
+
+    let parsed = parse_named_args(args)?;
+    for flag in parsed.keys() {
+        if !KNOWN_FLAGS.contains(&flag.as_str()) {
+            return Err(format!("unknown option --{flag}").into());
+        }
+    }
+
+    let choice = required_named(&parsed, "choice")?;
+    let goal_id = required_named(&parsed, "goal-id")?;
+    let cycle_number: u32 = required_named(&parsed, "cycle-number")?
+        .parse()
+        .map_err(|_| "invalid --cycle-number (expected a u32)")?;
+    let record_path = Path::new(required_named(&parsed, "record-path")?);
+    harden_path(record_path, "record-path")?;
+
+    let reason = resolve_field(&parsed, "reason", "reason-path")?
+        .ok_or("a decision requires --reason or --reason-path")?;
+
+    // Validate the closed enum + non-empty reason through the SINGLE shared
+    // chokepoint. An unknown choice or an empty reason ⇒ None ⇒ rejected here,
+    // before any write.
+    let choice =
+        crate::ooda_brain::DecideChoice::from_choice_fields(choice, &reason).ok_or_else(|| {
+            format!(
+                "invalid decision: unknown --choice {choice:?} or empty --reason \
+                 (choice must be one of poll_developer_activity|consolidate_memory|\
+                 run_improvement|extract_ideas|safe_update|research_query|run_gym_eval|\
+                 build_skill|launch_session|advance_goal)"
+            )
+        })?;
+
+    let record = crate::ooda_brain::DecideDecisionRecord {
+        schema: crate::ooda_brain::DECIDE_SCHEMA.to_string(),
+        goal_id: goal_id.to_string(),
+        cycle_number,
+        choice,
+    };
+
+    crate::persistence::persist_json("ooda-decide-decision", record_path, &record)?;
     Ok(())
 }
 
