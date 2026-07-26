@@ -14,6 +14,7 @@ related:
   - ../architecture/distillation-semantic-handoff.md
   - ./distill-write-boundary-gate.md
   - ./disk-reclaim-telemetry.md
+  - ./cognitive-thread-observability.md
 ---
 
 # Telemetry metrics reference
@@ -227,6 +228,29 @@ dedicated [disk reclaim telemetry reference](./disk-reclaim-telemetry.md).
 The agent's free-text candidate `reason` is **never** used as an attribute; only
 the enum `RejectReason` (`reason=`) is. See
 [Agentic disk reclamation](../concepts/agentic-disk-reclamation.md).
+
+### Cognitive threads — `simard.thread.*`
+
+Emitted per cognitive-thread run through the thread telemetry seam
+(`src/cognitive_threads/telemetry.rs`). Thread identity is embedded in the
+**metric name** (`simard.thread.<id>.<suffix>`), never as an attribute, so these
+series carry no attributes. Full details, the Overseer oversight rail, and the
+durable error path live in the dedicated
+[cognitive-thread observability reference](./cognitive-thread-observability.md).
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `simard.thread.<id>.runs` | counter | one run the thread actually performed |
+| `simard.thread.<id>.successes` | counter | runs that succeeded |
+| `simard.thread.<id>.failures` | counter | runs that failed/panicked (mirrored to a durable `FailureDiagnosis` the Overseer drains) |
+| `simard.thread.<id>.duration_seconds` | histogram | per-run wall-clock seconds (shared cycle buckets) |
+| `simard.thread.<id>.last_run_epoch` | gauge | epoch of the last completed run (last-run age is derived) |
+| `simard.thread.<id>.next_run_epoch` | gauge | epoch of the next scheduled run (stall signal) |
+| `simard.thread.<id>.active` | gauge | `1` while mid-tick, `0` otherwise |
+
+`<id>` is the stable `snake_case` [`CognitiveThread::id`](./cognitive-threads-catalog.md)
+(e.g. `ooda`, `metacognition`, `reflection`); `runs = successes + failures`, so
+success/failure rate is derivable at zero attribute cardinality.
 
 ## In-process registry and the on-disk snapshot
 

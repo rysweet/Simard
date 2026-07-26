@@ -122,6 +122,35 @@ pub const DISK_RECLAIM_USED_PCT_BEFORE: &str = "simard.disk.reclaim.used_pct_bef
 /// Home-partition `%-used` after the run (gauge, 0–100).
 pub const DISK_RECLAIM_USED_PCT_AFTER: &str = "simard.disk.reclaim.used_pct_after";
 
+// ── Cognitive threads — simard.thread.<id>.* (#4786) ────────────────────────
+//
+// Per-thread observability. Thread identity is embedded in the metric NAME
+// (`simard.thread.<id>.<suffix>`) rather than an attribute value: the scheduler
+// hosts ~15 threads, which on a single attribute key would breach the registry's
+// `MAX_VALUES_PER_KEY` (16) cardinality cliff and fold into `other`; embedding in
+// the name yields one clean series per (thread, suffix). Every series is emitted
+// with an EMPTY attribute set. Build a full name with
+// [`crate::cognitive_threads`]'s `telemetry::metric_name(id, suffix)`.
+
+/// Metric-name prefix for every per-thread series (`simard.thread.`).
+pub const THREAD_METRIC_PREFIX: &str = "simard.thread.";
+/// Suffix: every scheduler attempt to run the thread (counter).
+pub const THREAD_SUFFIX_RUNS: &str = "runs";
+/// Suffix: successful runs (counter). `runs - successes - failures` is skips.
+pub const THREAD_SUFFIX_SUCCESSES: &str = "successes";
+/// Suffix: failed/errored runs (counter). Success rate is derivable.
+pub const THREAD_SUFFIX_FAILURES: &str = "failures";
+/// Suffix: per-run wall-clock duration in seconds (histogram).
+pub const THREAD_SUFFIX_DURATION_SECONDS: &str = "duration_seconds";
+/// Suffix: Unix epoch (seconds) of the last completed run (gauge). Liveness:
+/// `now - last_run_epoch` is the last-run age the Overseer derives.
+pub const THREAD_SUFFIX_LAST_RUN_EPOCH: &str = "last_run_epoch";
+/// Suffix: Unix epoch (seconds) of the next scheduled run (gauge). The cadence /
+/// staleness seam the Overseer reads to detect a stalled thread.
+pub const THREAD_SUFFIX_NEXT_RUN_EPOCH: &str = "next_run_epoch";
+/// Suffix: `1` while a tick is in flight, `0` otherwise (gauge).
+pub const THREAD_SUFFIX_ACTIVE: &str = "active";
+
 // ── Attribute keys ──────────────────────────────────────────────────────────
 
 /// Attribute key: outcome/result discriminator (`ok`/`parse_fail`, parse

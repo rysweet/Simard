@@ -1200,6 +1200,11 @@ pub fn build_overseer(
     .with_verify_merge_autonomy(true)
     .with_high_risk_autonomy(true)
     .with_identity(overseer_identity())
+    // Cognitive-thread oversight (#4786): the state root locates the metrics
+    // snapshot + `ooda.log` the deterministic thread-oversight pass reads. The
+    // thread registry itself is injected per-tick by the daemon from
+    // `Mind::health()` (the single source of truth).
+    .with_state_root(state_root.clone())
     // The Simard Whisperer: advisory steering notes onto the SAME
     // meeting-handoff inbox the OODA observe step scans. Enabled by default
     // (opt-out via SIMARD_OVERSEER_WHISPER), consistent with the acting

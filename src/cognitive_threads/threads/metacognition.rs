@@ -107,6 +107,10 @@ impl CognitiveThread for MetacognitionThread {
         ThreadKind::Metacognition
     }
 
+    fn purpose(&self) -> &'static str {
+        "Appraise reasoning quality — confidence vs outcome calibration"
+    }
+
     fn policy(&self) -> SchedulePolicy {
         SchedulePolicy::Interval(Duration::from_secs(schedule::clamp_interval_secs(
             self.cfg.interval_secs,
@@ -170,6 +174,8 @@ impl CognitiveThread for MetacognitionThread {
             last_success: self.last_success,
             consecutive_errors: self.consecutive_errors,
             backoff_until_epoch: None,
+            purpose: self.purpose().to_string(),
+            cadence_secs: self.policy().cadence_secs(),
         }
     }
 }

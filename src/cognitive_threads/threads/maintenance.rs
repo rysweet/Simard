@@ -107,6 +107,10 @@ impl CognitiveThread for MaintenanceThread {
         ThreadKind::Maintenance
     }
 
+    fn purpose(&self) -> &'static str {
+        "Perform safe, conservative housekeeping and cleanup"
+    }
+
     fn policy(&self) -> SchedulePolicy {
         SchedulePolicy::Interval(std::time::Duration::from_secs(self.cfg.interval_secs))
     }
@@ -209,6 +213,8 @@ impl CognitiveThread for MaintenanceThread {
             last_success: self.last_success,
             consecutive_errors: self.consecutive_errors,
             backoff_until_epoch: None,
+            purpose: self.purpose().to_string(),
+            cadence_secs: self.policy().cadence_secs(),
         }
     }
 }

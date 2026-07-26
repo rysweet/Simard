@@ -72,6 +72,10 @@ impl CognitiveThread for OodaThread {
         ThreadKind::Ooda
     }
 
+    fn purpose(&self) -> &'static str {
+        "Run the primary Observe-Orient-Decide-Act reasoning cycle"
+    }
+
     fn policy(&self) -> SchedulePolicy {
         SchedulePolicy::Interval(std::time::Duration::from_secs(self.interval_secs))
     }
@@ -138,6 +142,8 @@ impl CognitiveThread for OodaThread {
             // enforces this and never accrues errors against it.
             consecutive_errors: 0,
             backoff_until_epoch: None,
+            purpose: self.purpose().to_string(),
+            cadence_secs: self.policy().cadence_secs(),
         }
     }
 }

@@ -196,14 +196,20 @@ impl Mind {
         entry.last_success = Some(outcome.success);
         entry.next_run = schedule::next_run_epoch(&entry.thread.policy(), entry.last_run, now);
 
-        telemetry::record_run(&id, &outcome);
+        telemetry::record_run(&id, &outcome, now);
         telemetry::record_next_run(&id, entry.next_run);
 
         if outcome.success {
             entry.consecutive_errors = 0;
             entry.backoff_until = None;
         } else {
+            // Errors flow to the Overseer on BOTH channels (issue #4786): the
+            // per-thread `failures` counter (bumped inside `record_run`) AND a
+            // durable, Overseer-drained `FailureDiagnosis`, so a caught thread
+            // failure drives a corrective `Signal::StepFailureDiagnosed` instead
+            // of being swallowed inside the thread.
             telemetry::record_error(&id, &outcome.summary);
+            record_thread_failure(&id, &outcome.summary);
             if !critical {
                 entry.consecutive_errors = entry.consecutive_errors.saturating_add(1);
                 entry.backoff_until = Some(schedule::backoff_until_epoch(
@@ -232,6 +238,11 @@ impl Mind {
                 last_success: e.last_success,
                 consecutive_errors: e.consecutive_errors,
                 backoff_until_epoch: e.backoff_until,
+                // Single source of truth for the Overseer's thread registry
+                // (#4786): purpose from the thread itself, cadence derived from
+                // its schedule policy — no hand-maintained duplicate list.
+                purpose: e.thread.purpose().to_string(),
+                cadence_secs: e.thread.policy().cadence_secs(),
             })
             .collect()
     }
@@ -251,4 +262,27 @@ impl Default for Mind {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Record a durable [`FailureDiagnosis`] for a failed cognitive-thread tick into
+/// the process-global Overseer [`failure_sink`], so the failure surfaces as a
+/// corrective `Signal::StepFailureDiagnosed` on the next Observe pass (issue
+/// #4786). Evidence carries the thread id and its summary, bounded to
+/// [`FailureDiagnosis`]'s evidence cap so a pathological summary can never
+/// inflate the sink or a downstream notification.
+fn record_thread_failure(id: &str, summary: &str) {
+    use crate::overseer::diagnosis::{FailureCause, FailureDiagnosis, MAX_EVIDENCE_LEN};
+    use crate::overseer::failure_sink;
+
+    let raw = format!("thread {id}: {summary}");
+    let evidence: String = if raw.chars().count() <= MAX_EVIDENCE_LEN {
+        raw
+    } else {
+        raw.chars().take(MAX_EVIDENCE_LEN).collect()
+    };
+    failure_sink::record_step_failure(FailureDiagnosis {
+        cause: FailureCause::CognitiveThread,
+        exit_code: None,
+        evidence,
+    });
 }

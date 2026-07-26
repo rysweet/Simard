@@ -24,6 +24,7 @@ related:
   - ./creative-ideas-api.md
   - ./goal-board-api.md
   - ./telemetry-metrics.md
+  - ./cognitive-thread-observability.md
 ---
 
 # Cognitive-threads catalog — the ten reflective threads
