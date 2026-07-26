@@ -66,6 +66,12 @@ pub struct PrSnapshot {
     /// human-review gate: a PR carrying
     /// [`crate::creative_ideas::CREATIVE_IDEA_PR_LABEL`] is never auto-merged.
     pub labels: Vec<String>,
+    /// `isDraft` from `gh pr view --json ...,isDraft`. A draft PR can NEVER be
+    /// merged server-side (`gh pr merge` returns "Pull Request is still a
+    /// draft"), so the deterministic rail refuses it. Fail-closed: `None`
+    /// (field absent/unknown) is treated as NOT-mergeable — the draft gate
+    /// admits ONLY `Some(false)`. Mirrors [`OpenPrSummary::is_draft`].
+    pub is_draft: Option<bool>,
 }
 
 /// One row from `statusCheckRollup`. Both check runs and statuses get
@@ -142,6 +148,7 @@ impl OpenPrSummary {
             checks: self.checks.clone(),
             base_ref_name: self.base_ref_name.clone(),
             labels: Vec::new(),
+            is_draft: self.is_draft,
         }
     }
 }
@@ -494,6 +501,8 @@ pub fn parse_pr_view_json(stdout: &[u8]) -> SimardResult<PrSnapshot> {
         base_ref_name: String,
         #[serde(default)]
         labels: Vec<RawLabel>,
+        #[serde(default, rename = "isDraft")]
+        is_draft: Option<bool>,
     }
     #[derive(serde::Deserialize)]
     struct RawLabel {
@@ -552,6 +561,7 @@ pub fn parse_pr_view_json(stdout: &[u8]) -> SimardResult<PrSnapshot> {
             .map(|l| l.name)
             .filter(|n| !n.is_empty())
             .collect(),
+        is_draft: raw.is_draft,
     })
 }
 
@@ -765,6 +775,26 @@ pub fn evaluate_objective_gates(
             ));
         }
     }
+    // Gate 3: not a draft. A draft PR can never be merged server-side, so the
+    // rail refuses it deterministically. Fail-closed: an unknown draft state
+    // (`None` — `gh` did not report `isDraft`) is treated AS a draft, never
+    // waved through. Only an explicit `Some(false)` passes.
+    match snapshot.is_draft {
+        Some(false) => {}
+        Some(true) => {
+            return Err(
+                "PR is a draft (isDraft=true); a draft can never be merged — mark it ready first"
+                    .to_string(),
+            );
+        }
+        None => {
+            return Err(
+                "PR draft state is unknown (isDraft absent from `gh pr view`); failing closed \
+                 (treated as draft) rather than risk merging a draft"
+                    .to_string(),
+            );
+        }
+    }
     Ok(())
 }
 
@@ -929,6 +959,7 @@ mod tests {
             ],
             base_ref_name: "main".to_string(),
             labels: Vec::new(),
+            is_draft: Some(false),
         }
     }
 

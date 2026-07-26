@@ -403,6 +403,7 @@ mod tests {
             checks: vec![],
             base_ref_name: "main".into(),
             labels: vec![],
+            is_draft: Some(false),
         }
     }
 
