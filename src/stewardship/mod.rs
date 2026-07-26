@@ -18,10 +18,13 @@ pub mod dedup;
 pub mod gh_client;
 pub mod merge_authority;
 pub mod merge_judge;
+pub mod merge_verdict_store;
 pub mod recipe_merge_judge;
 pub mod routing;
 pub mod types;
 
+#[cfg(test)]
+mod merge_verdict_store_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -38,6 +41,10 @@ pub use merge_authority::{
 pub use merge_judge::{
     Blocker, JudgeOutcome, LlmMergeJudge, MergeJudge, MergeJudgeKind, RefusingMergeJudge, Verdict,
     build_merge_judge,
+};
+pub use merge_verdict_store::{
+    MergeVerdictRecord, ReadOutcome, VerdictKind, delete_record, read_verified, record_path,
+    write_record,
 };
 pub use recipe_merge_judge::RecipeMergeJudge;
 pub use routing::route_failure;

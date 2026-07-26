@@ -1,17 +1,23 @@
 //! Content-pin tests for the recipe-brain verdict/decision parse fix
-//! (issue #2419 family: #2421 decide/orient, #2428/#2430/#2435/#2462/#2463
-//! merge-judge, #2429 metric).
+//! (issue #2419 family: #2421 decide/orient, #2429 metric).
 //!
-//! TDD (Step 7 — write tests first): these are RED until the implementation
-//! step adds the additive `{{escalation_note}}` placeholder to the
-//! decide / orient / merge-judge recipes, mirroring the lifecycle recipe that
-//! already exposes it (issue #2432). The escalation seam is what lets each of
-//! these recipe-backed brains re-prompt (schema-repair → escalate) on a
-//! verdict/decision parse-miss before falling back deterministically, instead
-//! of silently defaulting on the first miss.
+//! The `{{escalation_note}}` placeholder is the schema-repair seam that lets a
+//! recipe-backed brain re-prompt (schema-repair → escalate) on a verdict/
+//! decision parse-miss before falling back deterministically, instead of
+//! silently defaulting on the first miss.
 //!
 //! The lifecycle recipe is asserted as a GREEN anchor so a regression that
 //! strips the placeholder from the already-fixed recipe is also caught.
+//!
+//! NOTE (issue #4721): the merge-readiness judge is DELIBERATELY absent from
+//! the escalation ladder here. The escalation seam exists only to recover from
+//! brittle JSON parse-misses; #4721 removed JSON parsing from the merge judge
+//! entirely — the agent now RECORDS its verdict by calling the
+//! `simard merge record-verdict` tool (no envelope to scrape, nothing to
+//! schema-repair). A missing/ambiguous record fails the deterministic rail
+//! closed on the first pass, so there is no parse-miss to escalate. The
+//! merge-judge's new tool contract is pinned separately by
+//! `merge_readiness_recipe_records_verdict_via_tool_not_json` below.
 
 use std::fs;
 use std::path::PathBuf;
@@ -30,9 +36,8 @@ fn recipe(name: &str) -> String {
 /// attempt (byte-identical base behaviour); populated on escalation rungs.
 const LADDER_RECIPES: &[&str] = &[
     "ooda-engineer-lifecycle.yaml", // GREEN anchor (already fixed, #2432)
-    "ooda-decide.yaml",             // #2421 — RED until Step 8
-    "ooda-orient.yaml",             // #2421 — RED until Step 8
-    "merge-readiness-judge.yaml",   // #2428/#2430/#2435/#2462/#2463 — RED until Step 8
+    "ooda-decide.yaml",             // #2421 — parses a JSON decision, still laddered
+    "ooda-orient.yaml",             // #2421 — parses a JSON orientation, still laddered
 ];
 
 #[test]
@@ -68,20 +73,28 @@ fn lifecycle_recipe_documents_empty_on_base_contract() {
 }
 
 #[test]
-fn merge_readiness_recipe_documents_structured_verdict_contract() {
-    // The merge-judge fix surfaces a STRUCTURED verdict; the recipe must keep
-    // instructing the agent to emit the `{"verdict": ...}` JSON object so the
-    // caller can parse `ready`/`not_ready`/`unclear` from the json envelope
-    // rather than the text-mode banner (#2462/#2463).
+fn merge_readiness_recipe_records_verdict_via_tool_not_json() {
+    // #4721: the merge judge no longer emits a JSON verdict for Simard to
+    // scrape. The recipe MUST instruct the agent to record its decision by
+    // calling the `simard merge record-verdict` tool with `--verdict merge`
+    // or `--verdict hold`, and MUST NOT reintroduce a JSON verdict envelope.
     let body = recipe("merge-readiness-judge.yaml");
     assert!(
-        body.contains("\"verdict\""),
-        "merge recipe must document the structured verdict JSON contract"
+        body.contains("simard merge record-verdict"),
+        "merge recipe must instruct the agent to act via the \
+         `simard merge record-verdict` tool"
     );
-    for kw in ["ready", "not_ready", "unclear"] {
+    for arg in ["--verdict merge", "--verdict hold"] {
         assert!(
-            body.contains(kw),
-            "merge recipe must document the '{kw}' verdict value"
+            body.contains(arg),
+            "merge recipe must document the '{arg}' tool verdict"
         );
     }
+    // Guard against regressing to the forbidden emit-JSON-then-scrape pattern:
+    // the recipe must not carry a quoted `"verdict"` JSON key.
+    assert!(
+        !body.contains("\"verdict\""),
+        "merge recipe must NOT document a JSON verdict envelope (#4721 removed \
+         the emit-JSON→parse antipattern; the tool call is the output)"
+    );
 }

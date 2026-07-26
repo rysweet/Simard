@@ -22,8 +22,13 @@
 //!   3. The rigid "six evidence sections that MUST be present" body-template
 //!      mandate is GONE — a substantive-but-non-templated description is
 //!      acceptable when the change is sound, in-scope, tested and CI-green.
-//!   4. The fail-closed verdict contract is PRESERVED: exactly the tokens
-//!      `ready` / `not_ready` / `unclear`, with ambiguity → `unclear`.
+//!   4. The fail-closed verdict contract is PRESERVED, now on a PER-ASSET
+//!      vocabulary after #4721 split the two judge paths:
+//!      - the `.md` LLM fallback judge (`merge_judge.rs`) keeps the JSON enum
+//!        `ready` / `not_ready` / `unclear`, with ambiguity → `unclear`;
+//!      - the `.yaml` typed-verdict rail (`recipe_merge_judge.rs`) ACTS VIA
+//!        `simard merge record-verdict` with `merge` / `hold`, printing NO
+//!        scrapable JSON envelope and failing closed to `hold` when unsure.
 //!   5. The file-channel transport is PRESERVED: the recipe reads
 //!      `{{pr_body_path}}` (supplementary context), never the raw `{{pr_body}}`.
 //!   6. Both the `.md` source and its `.yaml` recipe mirror carry the rewrite
@@ -151,24 +156,56 @@ fn judge_verdict_is_substance_over_template() {
     }
 }
 
-// ── 4. fail-closed verdict contract PRESERVED ────────────────────────────────
+// ── 4. fail-closed verdict contract PRESERVED (per-asset after #4721) ────────
+//
+// Issue #4721 split the two judge paths onto DIFFERENT verdict vocabularies:
+//   • the `.md` prompt drives the LLM fallback judge (`merge_judge.rs`), which
+//     still returns the fail-closed JSON enum `ready` / `not_ready` / `unclear`;
+//   • the `.yaml` recipe drives the typed-verdict rail (`recipe_merge_judge.rs`),
+//     which ACTS VIA the `simard merge record-verdict` tool with `merge` / `hold`
+//     and prints NO scrapable JSON envelope.
+// Both remain fail-closed; the tokens differ by transport.
 
 #[test]
-fn judge_preserves_the_three_verdict_tokens() {
-    for (name, body) in [("md", judge_md()), ("yaml", judge_yaml())] {
-        for token in ["ready", "not_ready", "unclear"] {
-            assert!(
-                body.contains(token),
-                "the judge prompt ({name}) must preserve the verdict token \
-                 {token:?} (fail-closed contract in recipe_merge_judge.rs)"
-            );
-        }
+fn md_judge_preserves_the_json_verdict_enum() {
+    let md = judge_md();
+    for token in ["ready", "not_ready", "unclear"] {
         assert!(
-            body.contains("unclear"),
-            "ambiguity/parse-miss must map to `unclear` ({name}) — never \
-             ready-without-verdict"
+            md.contains(token),
+            "the .md fallback judge must preserve the fail-closed JSON verdict \
+             token {token:?} (contract in merge_judge.rs)"
         );
     }
+    assert!(
+        md.contains("unclear"),
+        "ambiguity/parse-miss must map to `unclear` (.md) — never \
+         ready-without-verdict"
+    );
+}
+
+#[test]
+fn yaml_recipe_uses_typed_merge_hold_verdict_and_fails_closed() {
+    let yaml = judge_yaml();
+    // The rail records a TYPED verdict via the tool; the scraped JSON enum is
+    // gone by design (#4721 — "remove the forbidden JSON verdict scrape").
+    assert!(
+        yaml.contains("record-verdict"),
+        "the recipe rail must record its verdict via `simard merge record-verdict`"
+    );
+    for token in ["merge", "hold"] {
+        assert!(
+            yaml.contains(token),
+            "the recipe rail must offer the typed verdict token {token:?}"
+        );
+    }
+    assert!(
+        contains_any(&yaml, &["fail closed", "fail-closed"]),
+        "the recipe rail must fail closed (to `hold`) when unsure"
+    );
+    assert!(
+        !yaml.contains(r#"{"verdict""#),
+        "the recipe rail must NOT reintroduce a scrapable JSON verdict envelope"
+    );
 }
 
 // ── 5. file-channel transport PRESERVED (reads pr_body_path, not pr_body) ─────

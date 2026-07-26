@@ -317,6 +317,35 @@ fn run_ooda_cycle_inner(
         priorities.len()
     );
 
+    // --- Salience advisory bias (issue #5, thread 7) ---
+    // Reorder priorities by a FRESH, numeric-only salience signal so Decide
+    // considers the most salient goals first under the concurrency cap. Fully
+    // fail-closed: an absent / stale / oversized / malformed signal (the default,
+    // since salience is OFF by default) yields no reordering and behaves exactly
+    // as before. Salience ADVISES; it never changes an action's kind. The signal
+    // carries validated goal ids + clamped numbers only — no free text reaches
+    // Decide. See docs/concepts/salience-and-decide.md.
+    let mut priorities = priorities;
+    let salience_order = crate::cognitive_threads::salience_signal::advisory_priority_order(
+        &crate::goal_curation::simard_state_root(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        crate::cognitive_threads::salience_signal::DEFAULT_INTERVAL_SECS,
+    );
+    if !salience_order.is_empty() {
+        let rank = |goal_id: &str| salience_order.iter().position(|g| g == goal_id);
+        // Stable sort: salient goals move to the front in salience order; every
+        // other priority keeps its Orient-produced relative order.
+        priorities.sort_by(|a, b| match (rank(&a.goal_id), rank(&b.goal_id)) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+    }
+
     // --- Decide ---
     state.current_phase = OodaPhase::Decide;
     eprintln!("[simard] OODA cycle: entering Decide phase");

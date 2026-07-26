@@ -71,8 +71,7 @@ pub use recipe_brain::RecipeBrain;
 /// crate-wide so `stewardship::recipe_merge_judge` runs on the SAME ladder /
 /// transport / metric as the OODA brains rather than reinventing them.
 pub(crate) use recipe_brain::{
-    EscalationConfig, LadderRung, LifecycleParseOutcome, build_phase_escalation_note,
-    extract_recipe_decision_output, record_verdict_parse_metric, run_brain_ladder,
+    EscalationConfig, LadderRung, build_phase_escalation_note, extract_recipe_decision_output,
 };
 /// Backward-compatible type aliases (issue #2132).
 pub type RecipeDecideBrain = RecipeBrain;

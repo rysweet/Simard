@@ -1,9 +1,11 @@
 mod args;
 mod ci_health;
+pub(crate) mod cognition;
 mod creative_ideas;
 mod curation;
 mod dashboard;
 mod decisions;
+mod disk;
 mod disk_reclaim;
 mod engineer;
 mod goal;
@@ -138,6 +140,12 @@ Product modes:
                            authority (objective gates + merge-readiness judge)
                            if it is merge-ready; defaults to rysweet/Simard,
                            pass --repo to land a PR in any repo Simard governs
+  merge record-verdict --pr <N> --repo <owner/name> --verdict merge|hold
+                       --reason \"<text>\" --run-token <token> [--state-root <path>]
+                         — agent-facing tool the merge-readiness recipe calls to
+                           durably record its typed verdict; the deterministic
+                           rail reads it back and INDEPENDENTLY re-verifies the
+                           hard safety gates before authorizing a merge
   worktree-gc [--apply] [--idle-days=N] [--root=PATH ...] [--parent-repo=PATH]
                          — prune merged/stale engineer worktrees (dry-run by default)
   disk-reclaim [--apply] [--report-json] [--target-pct=N]
@@ -261,11 +269,14 @@ where
         "dashboard" => dashboard::dispatch_dashboard_command(args),
         "signal" => signal::dispatch_signal_command(args),
         "memory" => memory::dispatch_memory_command(args),
+        "cognition" => cognition::dispatch_cognition_command(args),
         "status" => status::dispatch_status_command(args),
         "spawn" => dispatch_spawn_command(args),
+        "merge" => merge::dispatch_merge_command(args),
         "merge-pr" => merge::dispatch_merge_pr_command(args),
         "worktree-gc" => worktree_gc::dispatch_worktree_gc_command(args),
         "disk-reclaim" => disk_reclaim::dispatch_disk_reclaim_command(args),
+        "disk" => disk::dispatch_disk_command(args),
         "handover" => dispatch_handover_command(args),
         "bootstrap" => dispatch_bootstrap_command(args),
         "act-on-decisions" => {

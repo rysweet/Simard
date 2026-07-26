@@ -199,6 +199,17 @@ pub struct ThreadContext<'a> {
 Injecting `now_epoch` and a `Clock` makes due-computation and backoff **purely
 unit-testable** with no sleeps.
 
+!!! note "`ThreadKind` — the ten reflective threads (issue #5)"
+    Issue #5 adds ten new reflective threads on this same `Mind`. Consolidation
+    reuses `MemoryConsolidation` and prospection reuses `LongTermPlanning`; the
+    other eight add variants — `Metacognition`, `Reflection`, `Salience`,
+    `OperatorModel`, `Analogy`, `ValuesDeliberation`, `Interoception`,
+    `Narrative`. `ThreadKind` is **pure telemetry** (no exhaustive `match` on it
+    exists), so the new variants ripple only into the enum and its serialize
+    round-trip test. Full per-thread kind/cadence/priority/gate/recipe details
+    live in the [Cognitive-threads catalog](./cognitive-threads-catalog.md); the
+    shared invoke seam is [The RecipeInvoker seam](./recipe-invoker-seam.md).
+
 ## 5. The `Mind` (Scheduler)
 
 ```rust
@@ -567,6 +578,16 @@ green CI, no redeploy.
   — developer guide: implementing the trait, choosing a policy/priority,
   env-config, registering with the `Mind`, emitting telemetry through the single
   seam, the safety rules, and the fixture-only test plan.
+- [Cognitive-threads catalog](./cognitive-threads-catalog.md)
+  — reference for the ten reflective threads (issue #5): each thread's kind,
+  cadence, priority, env gate, recipe, memory prefixes, and live acceptance
+  signal, plus the cadence/stagger table and the S1–S8 security invariants.
+- [The RecipeInvoker seam](./recipe-invoker-seam.md)
+  — the one shared brick behind the eight recipe-backed threads and its
+  security contract.
+- [Configure the cognitive-thread batch](../howto/configure-cognitive-thread-batch.md)
+  — operator guide: the double env gate, one-at-a-time rollout, interval tuning
+  and `SIMARD_THREAD_INTERVAL_SCALE`.
 
 ---
 
