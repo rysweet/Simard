@@ -1,9 +1,10 @@
 # OODA Brain — Per-Goal, Per-Cycle Decision
 
 > Canonical prompt for the `ooda-per-goal-cycle.yaml` recipe (issue #4453). The
-> recipe embeds this text inline; this file is the reviewable copy. The Rust
-> shim (`recipe_brain.rs`) parses the `{"choice","reason"[,"task_hint"]}`
-> envelope this prompt emits — keep the two in sync.
+> recipe embeds this text inline; this file is the reviewable copy. The agent
+> RECORDS its verdict by calling the `simard ooda record-decision` tool (WS-4,
+> #2573/#2658); the Rust shim (`recipe_brain.rs`) reads the typed record via
+> `read_verified` and never scrapes this prompt's stdout — keep the two in sync.
 
 ## ROLE
 
@@ -92,46 +93,85 @@ Pick exactly one `choice`. Each maps to a concrete state effect:
 Re-triaging the same state every cycle is not progress. But the fix for churn is
 a reasoned `spawn`/`reorient`/`investigate` — never a silent idle-reset.
 
-## OUTPUT FORMAT
+## HOW TO RECORD YOUR DECISION (call the tool — do NOT print JSON)
 
-Respond with a single JSON object (a fenced ```json block is fine; the daemon
-strips any surrounding banner/prose before parsing):
+Record your verdict by calling the `simard ooda record-decision` tool EXACTLY
+ONCE, using your shell/bash tool. The daemon reads the typed record the tool
+writes; it does NOT read your prose. Anything you print to stdout is ignored.
 
-```json
-{"choice": "<action>", "reason": "<short concrete reason>"}
+Run (substitute your chosen `<action>` and a concrete `<reason>`):
+
+```bash
+"{{simard_bin}}" ooda record-decision \
+  --choice <action> \
+  --reason "<short concrete reason>" \
+  --record-path "{{record_path}}" \
+  --goal-id "{{goal_id}}" \
+  --cycle-number {{cycle_number}}
 ```
 
-For `spawn` you may include an optional hint:
+For `spawn` you MAY add an optional next-piece hint:
 
-```json
-{"choice": "spawn", "reason": "PR merged; pick the next research direction", "task_hint": "benchmark recall@k after the new distiller"}
+```bash
+"{{simard_bin}}" ooda record-decision \
+  --choice spawn \
+  --reason "last PR merged; standing research goal must not sit idle" \
+  --task-hint "design a distillation fact-yield experiment" \
+  --record-path "{{record_path}}" \
+  --goal-id "{{goal_id}}" \
+  --cycle-number {{cycle_number}}
 ```
+
+For a LARGE reason or task-hint, write it to a file first and pass
+`--reason-path <FILE>` / `--task-hint-path <FILE>` instead of the inline flag
+(never put large text on the command line).
 
 `<action>` is exactly one of: `continue`, `spawn`, `reorient`, `investigate`,
-`wait`, `complete`. `reason` is MANDATORY and must be non-empty — a decision
-with no reason is rejected. An unknown `choice` is rejected. If your output is
-unparseable the daemon does NOT default to any action on your behalf: it records
-an explicit cycle failure (no silent fallback, #1711). A genuine "leave it"
-answer is a real `continue`, emitted explicitly.
+`wait`, `complete`. `--reason` is MANDATORY and must be non-empty; an unknown
+`--choice` is rejected by the tool. Call the tool EXACTLY ONCE. If you do not
+record a valid decision, the daemon takes NO action on your behalf: it records
+an explicit cycle failure and fails CLOSED (no silent fallback, #1711). A
+genuine "leave it" answer is a real `continue`, recorded explicitly.
 
-## EXAMPLES
+## EXAMPLES (the command to run, one per situation)
 
-```json
-{"choice": "continue", "reason": "PR #4453 open and updated 6 min ago; healthy in-flight progress"}
+Healthy in-flight PR — leave it:
+
+```bash
+"{{simard_bin}}" ooda record-decision --choice continue \
+  --reason "PR #4453 open and updated 6 min ago; healthy in-flight progress" \
+  --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{cycle_number}}
 ```
 
-```json
-{"choice": "spawn", "reason": "last PR merged; standing research goal must not sit idle", "task_hint": "design a distillation fact-yield experiment"}
+Standing goal idle between bursts — start the next piece:
+
+```bash
+"{{simard_bin}}" ooda record-decision --choice spawn \
+  --reason "last PR merged; standing research goal must not sit idle" \
+  --task-hint "design a distillation fact-yield experiment" \
+  --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{cycle_number}}
 ```
 
-```json
-{"choice": "investigate", "reason": "engineer heartbeat quiet ~30m; inspect logs before any reclaim"}
+Worker looks stuck — investigate before any reclaim:
+
+```bash
+"{{simard_bin}}" ooda record-decision --choice investigate \
+  --reason "engineer heartbeat quiet ~30m; inspect logs before any reclaim" \
+  --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{cycle_number}}
 ```
 
-```json
-{"choice": "reorient", "reason": "logs confirm the engineer died mid-task; reclaim and redirect to a fresh angle"}
+Confirmed dead engineer — deliberately reorient:
+
+```bash
+"{{simard_bin}}" ooda record-decision --choice reorient \
+  --reason "logs confirm the engineer died mid-task; reclaim and redirect to a fresh angle" \
+  --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{cycle_number}}
 ```
 
-```json
-{"choice": "wait", "reason": "PR awaiting required CI checks; nothing to do until they finish"}
+Blocked on CI — wait:
+
+```bash
+"{{simard_bin}}" ooda record-decision --choice wait \
+  --reason "PR awaiting required CI checks; nothing to do until they finish" \
+  --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{cycle_number}}
 ```

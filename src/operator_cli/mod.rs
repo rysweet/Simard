@@ -21,6 +21,8 @@ mod self_deploy;
 mod self_health;
 mod signal;
 mod status;
+#[cfg(test)]
+mod tests_record_decision;
 mod worktree_gc;
 
 use std::path::PathBuf;

@@ -1230,25 +1230,43 @@ impl OodaBrain for RecipeBrain {
     /// Per-goal, per-cycle agentic decision (issue #4453). Runs the
     /// `ooda-per-goal-cycle.yaml` recipe (a sibling of this act-phase brain's
     /// lifecycle recipe) over the goal's DURABLE state and the three demoted
-    /// signals, then parses the strict `{"choice","reason"[,"task_hint"]}`
-    /// envelope into a [`PerGoalAction`].
+    /// signals. The reasoner records its verdict by calling the
+    /// `simard ooda record-decision` TOOL (which validates the closed
+    /// [`PerGoalAction`] enum and atomically writes one typed
+    /// [`PerGoalDecisionRecord`](super::PerGoalDecisionRecord)); this method then
+    /// reads that typed record via [`read_verified`](super::read_verified). It
+    /// NEVER scrapes the agent's prose stdout (WS-4, #2573/#2658).
     ///
-    /// NO-FALLBACK (operator zero-fallback contract, #2580 / #1711): a recipe
-    /// invocation failure OR an unparseable/forged envelope surfaces as an
-    /// explicit `Err`. The driver records it as a visible cycle failure — never
-    /// a silent `continue` masquerading as a reasoned decision. A genuine
-    /// "leave it" answer is a real, model-emitted `continue` (parsed).
+    /// NO-FALLBACK, FAIL-CLOSED (operator zero-fallback contract, #2580 / #1711):
+    /// a recipe invocation failure OR any read-verification failure (absent /
+    /// malformed / wrong-schema / out-of-enum / empty-reason / goal- or
+    /// cycle-mismatch) surfaces as an explicit `Err`. The driver records it as a
+    /// visible cycle failure and performs a safe no-op — never a silent
+    /// `continue` masquerading as a reasoned decision. A genuine "leave it"
+    /// answer is a real, model-recorded `continue`.
     fn decide_per_goal_cycle(&self, ctx: &PerGoalCycleCtx) -> SimardResult<PerGoalAction> {
-        let raw = self.invoke_per_goal_cycle_raw(ctx)?;
-        PerGoalAction::from_recipe_envelope(&raw).ok_or_else(|| {
-            SimardError::AdapterInvocationFailed {
+        // Fresh, UNIQUE per-cycle temp dir (owner-only, auto-removed on drop). A
+        // stale record from a prior cycle can never live at this path — and the
+        // reader still independently re-checks goal_id/cycle_number (R6/R7).
+        let tempdir = tempfile::Builder::new()
+            .prefix("simard-ooda-decision-")
+            .tempdir()
+            .map_err(|e| SimardError::AdapterInvocationFailed {
                 base_type: PER_GOAL_CYCLE_ADAPTER_TAG.to_string(),
-                reason: format!(
-                    "per-goal-cycle recipe output had no parseable action envelope: {}",
-                    truncate(&raw, MAX_RATIONALE_CHARS)
-                ),
-            }
-        })
+                reason: format!("could not allocate a per-cycle decision temp dir: {e}"),
+            })?;
+        let record_path = tempdir.path().join("decision.json");
+
+        // Run the reasoner recipe. Its agent records its verdict by calling the
+        // `simard ooda record-decision` tool (writing `record_path`); the agent's
+        // stdout is IGNORED — a stray JSON print has zero effect. NO timeout on
+        // the agentic step.
+        self.run_per_goal_cycle_recipe(ctx, &record_path)?;
+
+        // Read the TYPED record — never scrape prose. Every failure mode is an
+        // Err → a safe no-op cycle failure (#1711). The thin deterministic rail
+        // then acts on this validated closed enum.
+        super::read_verified(&record_path, &ctx.goal_id, ctx.cycle_number)
     }
 
     /// Dependency/overlap-aware engineer admission (issue #2690). Resolves the
@@ -1428,7 +1446,11 @@ impl RecipeBrain {
     /// field is routed through [`sanitize_context_var`] before it becomes a `-c`
     /// arg (YAML/context/prompt-injection + `E2BIG` defence). Errors surface as
     /// `Err` (no silent fallback).
-    fn invoke_per_goal_cycle_raw(&self, ctx: &PerGoalCycleCtx) -> SimardResult<String> {
+    fn run_per_goal_cycle_recipe(
+        &self,
+        ctx: &PerGoalCycleCtx,
+        record_path: &Path,
+    ) -> SimardResult<()> {
         let recipe = self
             .recipe_path
             .parent()
@@ -1440,6 +1462,17 @@ impl RecipeBrain {
                     "per-goal-cycle recipe '{PER_GOAL_CYCLE_RECIPE_FILENAME}' not found beside {}",
                     self.recipe_path.display()
                 ),
+            })?;
+
+        // Resolve THIS binary so the recipe sandbox can invoke the
+        // `record-decision` tool deterministically — resolved the same way
+        // `recipe-runner-rs` is (via the running executable), never a bare name
+        // that depends on PATH. If it cannot be resolved, no record is written
+        // and the reader fails CLOSED at R1.
+        let simard_bin =
+            std::env::current_exe().map_err(|e| SimardError::AdapterInvocationFailed {
+                base_type: PER_GOAL_CYCLE_ADAPTER_TAG.to_string(),
+                reason: format!("could not resolve the running simard binary: {e}"),
             })?;
 
         let stale = match ctx.stale_claim_secs {
@@ -1454,6 +1487,14 @@ impl RecipeBrain {
             .arg("--output-format")
             .arg("json")
             .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
+            // The typed-decision seam: where to write the record and which
+            // binary records it. Paths are trusted (a daemon-owned per-cycle
+            // temp dir + the resolved current_exe), so they are passed verbatim
+            // — never sanitized (which would fold/truncate a path).
+            .arg("-c")
+            .arg(format!("record_path={}", record_path.display()))
+            .arg("-c")
+            .arg(format!("simard_bin={}", simard_bin.display()))
             .arg("-c")
             .arg(format!(
                 "goal_id={}",
@@ -1530,7 +1571,10 @@ impl RecipeBrain {
             });
         }
 
-        extract_recipe_decision_output(&output.stdout, PER_GOAL_CYCLE_ADAPTER_TAG)
+        // The verdict lives in the typed record the agent wrote via the tool,
+        // NOT in stdout. Stdout is intentionally ignored; the caller reads and
+        // verifies `record_path`.
+        Ok(())
     }
     /// (the act-phase [`RecipeBrain`] holds the lifecycle recipe; the admission
     /// recipe lives beside it in the same `recipes/` dir, whether that resolved

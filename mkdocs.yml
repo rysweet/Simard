@@ -372,6 +372,7 @@ nav:
     - OODA Per-Goal-Cycle API: reference/ooda-per-goal-cycle-api.md
     - Worker-Presence Liveness API: reference/worker-presence-liveness-api.md
     - OODA Per-Goal-Cycle Recipe: reference/ooda-per-goal-cycle-recipe.md
+    - OODA Record-Decision Tool: reference/ooda-record-decision-cli.md
     - OODA Procedural Memory: reference/ooda-procedural-memory.md
     - OODA Binary-Identity Reload Gate: reference/ooda-binary-identity-reload-gate.md
     - Distill Recipe-Output Capture: reference/distill-recipe-output-capture.md
