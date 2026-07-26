@@ -5,6 +5,7 @@ mod creative_ideas;
 mod curation;
 mod dashboard;
 mod decisions;
+mod disk;
 mod disk_reclaim;
 mod engineer;
 mod goal;
@@ -273,6 +274,7 @@ where
         "merge-pr" => merge::dispatch_merge_pr_command(args),
         "worktree-gc" => worktree_gc::dispatch_worktree_gc_command(args),
         "disk-reclaim" => disk_reclaim::dispatch_disk_reclaim_command(args),
+        "disk" => disk::dispatch_disk_command(args),
         "handover" => dispatch_handover_command(args),
         "bootstrap" => dispatch_bootstrap_command(args),
         "act-on-decisions" => {

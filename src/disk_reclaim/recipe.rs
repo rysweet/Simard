@@ -22,6 +22,24 @@ const ADAPTER_TAG: &str = "disk-reclaim";
 /// Recipe file name resolved via the hot-reload / in-tree precedence.
 const RECIPE_FILENAME: &str = "disk-reclaim.yaml";
 
+/// JSON envelope returned by `recipe-runner-rs --output-format json`. The
+/// analysis-only reclaim proposal flow still scrapes candidate JSON out of the
+/// first step's `output`, so this envelope stays here (relocated from
+/// `disk_health.rs`, which no longer parses recipe output — issue #4722).
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct RecipeOutput {
+    pub success: bool,
+    pub step_results: Vec<StepResult>,
+}
+
+/// A single step's result inside the [`RecipeOutput`] envelope.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct StepResult {
+    #[allow(dead_code)] // Part of the JSON contract; used in tests.
+    pub step_id: String,
+    pub output: String,
+}
+
 /// Seam that produces the raw first-step output text of the analysis recipe.
 /// Production shells `recipe-runner-rs`; tests substitute a deterministic
 /// double so the no-fallback contract is verified hermetically.
@@ -31,7 +49,7 @@ pub trait RecipeInvoker {
 }
 
 /// Production invoker: runs `recipe-runner-rs <recipe> --output-format json`,
-/// deserializes the [`crate::disk_health::RecipeOutput`] envelope, and returns
+/// deserializes the [`RecipeOutput`] envelope, and returns
 /// `step_results[0].output`. Mirrors the disk-health resolver precedence.
 pub struct RecipeRunnerInvoker {
     pub repo_root: PathBuf,
@@ -71,7 +89,7 @@ impl RecipeInvoker for RecipeRunnerInvoker {
             ));
         }
 
-        let envelope: crate::disk_health::RecipeOutput = serde_json::from_slice(&output.stdout)
+        let envelope: RecipeOutput = serde_json::from_slice(&output.stdout)
             .map_err(|e| format!("failed to deserialize recipe JSON output: {e}"))?;
         if !envelope.success {
             return Err("recipe reported success=false in JSON output".to_string());

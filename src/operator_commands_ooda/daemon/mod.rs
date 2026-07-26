@@ -1109,18 +1109,18 @@ pub fn run_ooda_daemon(
                     ),
                 );
             }
-            // Tier 2: recipe-based LLM cleanup (moderate pressure, nuanced decisions)
+            // Tier 2: agentic disk-health recipe (moderate pressure). The recipe
+            // now *acts* through the `simard disk` tool (which enforces the
+            // disk-safety heuristic internally) and prints no envelope — this is
+            // a thin exit-status trigger (issue #4722). We log success/failure by
+            // the recipe's exit status; there is no report to parse.
             match crate::disk_health::run_disk_health_check(&memories.repo_root, &state_root, None)
             {
-                Ok(report) => {
-                    daemon_log(&state_root, &format!("[simard] {}", report.summary()));
-                    if report.cleanup_performed() {
-                        daemon_log(
-                            &state_root,
-                            &format!("[simard] disk cleanup actions: {:?}", report.actions_taken),
-                        );
-                    }
-                }
+                Ok(true) => daemon_log(&state_root, "[simard] disk health recipe: OK"),
+                Ok(false) => daemon_log(
+                    &state_root,
+                    "[simard] WARN: disk health recipe reported failure (non-zero exit)",
+                ),
                 Err(e) => {
                     daemon_log(
                         &state_root,
