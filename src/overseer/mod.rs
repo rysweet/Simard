@@ -4616,4 +4616,92 @@ mod tests {
             "the reasoner recipe is never spawned under the resource opt-out"
         );
     }
+
+    // ───── P2 (delivery:simard_merge_backlog): merge-cap decoupling — FAILING ──
+    // (TDD Step 7.) 13 non-draft PRs were MERGEABLE+CLEAN with every required
+    // check green yet stayed unmerged: the launcher kept hitting "per-cycle launch
+    // cap reached" and ready merges were coupled to that same exhausted budget.
+    // The fix decouples green+CLEAN+MERGEABLE merges from the launch cap, giving
+    // them their OWN bounded `max_merges_per_cycle` budget (default 2, mirroring
+    // `max_launches_per_cycle`) so ready PRs drain even when launches are capped —
+    // WITHOUT relaxing merge-eligibility.
+    //
+    // These tests reference the new private field `max_merges_per_cycle`, which
+    // does not exist yet, so they MUST fail to compile against the current tree.
+    // They go GREEN once the fix lands. See docs/reference/merge-cap-decoupling.md.
+
+    /// The new merge budget defaults to `2`, mirroring `max_launches_per_cycle`,
+    /// to bound blast radius (no thundering herd) while draining the backlog over
+    /// successive cycles.
+    #[test]
+    fn max_merges_per_cycle_default_is_two() {
+        let ov = Overseer::new(caps(ObservedState::default(), true, vec![]));
+        assert_eq!(
+            ov.max_merges_per_cycle, 2,
+            "merge budget must default to 2 (mirrors max_launches_per_cycle)"
+        );
+    }
+
+    /// The merge budget is a SEPARATE knob from the launch cap: exhausting one
+    /// never starves the other. Both default to 2 but are independent fields.
+    #[test]
+    fn merge_budget_is_independent_of_launch_cap() {
+        let ov = Overseer::new(caps(ObservedState::default(), true, vec![]));
+        assert_eq!(ov.max_launches_per_cycle, 2, "launch cap unchanged");
+        assert_eq!(
+            ov.max_merges_per_cycle, 2,
+            "merge budget is its own field, independent of the launch cap"
+        );
+    }
+
+    /// The pinning test: a green + CLEAN + MERGEABLE `VerifyAndMergePr` must be
+    /// ADMITTED (planned into `act`) even when the per-cycle launch cap is fully
+    /// exhausted — ready PRs drain regardless of the launch budget.
+    #[test]
+    fn ready_prs_drain_when_launch_cap_exhausted() {
+        let observed = ObservedState::default();
+        let mut ov =
+            Overseer::new(caps(observed.clone(), true, vec![])).with_verify_merge_autonomy(true);
+
+        // Launch budget fully consumed this cycle.
+        let mut launches = ov.max_launches_per_cycle;
+        let planned = ov.gate(
+            &Intervention::VerifyAndMergePr {
+                repo: "rysweet/Simard".to_string(),
+                pr: 4544,
+            },
+            &observed,
+            &mut launches,
+        );
+
+        assert!(
+            planned.admitted,
+            "a ready merge must be admitted even when launches are capped; note={}",
+            planned.note
+        );
+        assert!(
+            !planned.note.contains("per-cycle launch cap reached"),
+            "merges must NOT be held by the launch-cap hold; note={}",
+            planned.note
+        );
+    }
+
+    /// Eligibility is UNCHANGED: a non-ready PR (fails the objective pre-filter)
+    /// is never merged — it escalates. Decoupling affects scheduling only.
+    #[test]
+    fn merges_still_require_full_eligibility() {
+        // `ready = false` ⇒ the objective pre-filter (`verify`) reports not-ready.
+        let mut ov = Overseer::new(caps(ObservedState::default(), false, vec![]))
+            .with_verify_merge_autonomy(true);
+        let outcome = ov
+            .act(&Intervention::VerifyAndMergePr {
+                repo: "rysweet/Simard".to_string(),
+                pr: 4544,
+            })
+            .expect("act must not error on a non-ready PR");
+        assert!(
+            matches!(outcome, ActOutcome::Escalated),
+            "a non-ready PR must NEVER merge — eligibility is unchanged; got {outcome:?}"
+        );
+    }
 }

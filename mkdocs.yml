@@ -298,6 +298,7 @@ nav:
     - OODA Capability API: reference/ooda-capability-api.md
     - Engineer-Claim Release & Reclaim API: reference/engineer-claim-release-api.md
     - Stale-Engineer-Claim Reaper API: reference/claim-reaper-api.md
+    - Claim-Reaper Convergence &amp; Idempotent Archival: reference/claim-reaper-convergence.md
     - Investigate-Before-Reap API: reference/investigate-stale-engineer-api.md
     - Engineer-Inspect Worktree Resolution: reference/engineer-inspect-worktree-resolution.md
     - Tombstoned-Goal Engineer Reaper API: reference/tombstoned-goal-engineer-reaper-api.md
@@ -327,6 +328,7 @@ nav:
     - Overseer BackoffGate &amp; Gap-Scan Dedup: reference/overseer-backoff-gate-api.md
     - Overseer Root-Cause (WHY) API: reference/overseer-root-cause-why-api.md
     - Overseer Self-Observation Stability: reference/overseer-self-observation-stability.md
+    - Merge-Cap Decoupling &amp; Bounded Merge Budget: reference/merge-cap-decoupling.md
     - simard-engineer-step CLI: reference/simard-engineer-step.md
     - simard-tui Dashboard: reference/simard-tui.md
     - Dashboard Memory Tab: reference/dashboard-memory-tab.md
@@ -343,6 +345,7 @@ nav:
     - Self-Deploy API: reference/self-deploy-api.md
     - Self-Deploy Source Prep & Warm Target Dir: reference/self-deploy-source-prep.md
     - Overseer Deploy Red-Canary Diagnostics: reference/overseer-deploy-canary-diagnostics.md
+    - RPC-Health Gate Timeout, Retry &amp; Diagnostics: reference/rpc-health-gate-diagnostics.md
     - Canary Gate Isolation & Self-Deploy Convergence: reference/canary-gate-convergence.md
     - State-Root Resolution: reference/state-root-resolution.md
     - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md

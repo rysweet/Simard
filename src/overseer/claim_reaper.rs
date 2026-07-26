@@ -2672,4 +2672,106 @@ mod tests {
             "an un-spawnable subprocess must fold to None (best-effort), got {missing:?}"
         );
     }
+
+    // ───── P4 (#4755): claim-reaper convergence — FAILING (TDD Step 7) ─────────
+    // Standing / perpetual research goals made the stale-engineer investigation
+    // loop on verdict=pending: 59x re-archival of byte-identical evidence for
+    // stale engineer `70ab8541` and unbounded growth of `reaped-engineers/`
+    // (per-cycle band-aid PRs #4608, #4642). The fix adds a terminal, fail-closed
+    // `Converged` verdict (+ an idempotent-archival guard) so a standing goal
+    // reaches ONE terminal decision and STOPS re-archiving.
+    //
+    // These tests reference `InvestigationVerdict::Converged`, which does not yet
+    // exist, so they MUST fail to compile against the current tree. They go GREEN
+    // once the #4755 fix lands. See docs/reference/claim-reaper-convergence.md.
+
+    /// `Converged` is fail-closed like every non-`Dead` verdict: it NEVER reaps.
+    #[test]
+    fn converged_never_reaps() {
+        let v = InvestigationVerdict::Converged;
+        assert!(
+            !v.should_reap(),
+            "Converged must be fail-closed (keeps the claim), like every non-Dead verdict"
+        );
+        assert_eq!(
+            v.label(),
+            "converged",
+            "Converged must expose a stable, log-safe label"
+        );
+    }
+
+    /// Serialization compatibility: verdicts are NAME-tagged, so inserting
+    /// `Converged` must not shift any EXISTING variant's stable label. This is
+    /// what lets verdicts already persisted under `reaped-engineers/` round-trip
+    /// after `Converged` is added — no migration required
+    /// (`persisted_verdicts_deserialize_after_converged_added`).
+    #[test]
+    fn converged_label_does_not_shift_existing_verdict_labels() {
+        assert_eq!(InvestigationVerdict::StillAlive.label(), "still-alive");
+        assert_eq!(InvestigationVerdict::Blocked.label(), "blocked");
+        assert_eq!(InvestigationVerdict::Recoverable.label(), "recoverable");
+        assert_eq!(InvestigationVerdict::Pending.label(), "pending");
+        assert_eq!(
+            InvestigationVerdict::Dead {
+                cause: InvestigationCause::Unknown
+            }
+            .label(),
+            "dead"
+        );
+        assert_eq!(InvestigationVerdict::Converged.label(), "converged");
+    }
+
+    /// The core anti-`59x` contract: a would-be-stale engineer on a STANDING
+    /// research goal whose investigation returns `Converged` must reach a single
+    /// terminal, fail-closed decision and KEEP its claim across EVERY sweep —
+    /// never reaped, worktree never cleaned, `reaped-engineers/` never grown.
+    #[test]
+    fn standing_goal_converges_to_single_verdict() {
+        let ledger = FakeLedger::new(&["engineer:70ab8541"]);
+        let probe = MapProbe::new(&[(
+            "engineer:70ab8541",
+            dead(DeadReason::HeartbeatStale, Some(STALE_SECS + 10_000)),
+        )]);
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown().with_outcome(
+            "engineer:70ab8541",
+            outcome(InvestigationVerdict::Converged, Vec::new()),
+        );
+
+        // The production Overseer ticks forever; a standing goal must not reap on
+        // ANY tick. 59 sweeps mirrors the observed 59x non-convergence loop.
+        for _ in 0..59 {
+            let summary =
+                reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+            assert!(
+                summary.reclaimed.is_empty(),
+                "a Converged standing-goal engineer must NEVER be reaped (fail-closed)"
+            );
+        }
+        assert!(
+            ledger
+                .list_engineer_claims()
+                .contains(&"engineer:70ab8541".to_string()),
+            "the standing-goal claim must be preserved across every sweep"
+        );
+        assert!(
+            cleanup.cleaned().is_empty(),
+            "a Converged engineer's worktree must never be cleaned (evidence preserved)"
+        );
+    }
+
+    /// `Pending` and `Converged` are both fail-closed (kept), but `Converged` is
+    /// the STABLE terminal decision that stops the loop — both keep the claim.
+    #[test]
+    fn converged_is_kept_like_pending() {
+        for verdict in [
+            InvestigationVerdict::Pending,
+            InvestigationVerdict::Converged,
+        ] {
+            assert!(
+                !verdict.should_reap(),
+                "{verdict:?} must keep the claim (fail-closed)"
+            );
+        }
+    }
 }

@@ -1090,6 +1090,121 @@ mod tests {
         let results = verify_canary(Path::new("/no-such-binary"), &[], &config).unwrap();
         assert!(results.is_empty());
     }
+
+    // ───── P3 (process:self_deploy_blocked): rpc-health diagnostics — FAILING ──
+    // (TDD Step 7.) The rpc-health deploy gate failed with an opaque
+    // `rpc health timed out after 30s (memory stats did not return)`
+    // (deploy 953d5a9d407a) while self-deploy drift grew. The fix gives the
+    // memory-stats probe a configurable timeout + bounded retry/backoff and THREE
+    // distinct fail-closed outcomes — TimedOut, EmptyStats, Unreachable — so an
+    // operator can tell WHICH failure occurred. Fail-closed strictness is
+    // preserved; host disk pressure is explicitly OUT OF SCOPE.
+    //
+    // These tests reference `ProbeOutcome::{EmptyStats, Unreachable}` and
+    // `ProbeOutcome::is_transient()`, none of which exist yet, so they MUST fail
+    // to compile against the current tree. They go GREEN once the fix lands. See
+    // docs/reference/rpc-health-gate-diagnostics.md.
+
+    /// A probe that exits 0 but writes NOTHING to stdout (the daemon answered but
+    /// returned no memory stats) is a HOLLOW success: it must classify as
+    /// `EmptyStats` and fail closed — a plain exit-0 no longer proves health.
+    #[test]
+    fn probe_empty_stats_is_fail_closed() {
+        // `sh -c 'exit 0'` exits 0 with empty stdout — the exit-0-empty case.
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exit 0"]);
+        let outcome = run_probe_with_timeout(cmd, Duration::from_secs(5));
+        assert!(
+            matches!(outcome, ProbeOutcome::EmptyStats),
+            "exit-0 with empty stdout must classify as EmptyStats (hollow success), got: {outcome:?}"
+        );
+        assert!(
+            !outcome.is_transient(),
+            "EmptyStats is a deterministic (non-transient) fault — it is NOT retried"
+        );
+    }
+
+    /// A genuine round-trip — exit 0 WITH memory stats on stdout — is the ONLY
+    /// outcome that proves health.
+    #[test]
+    fn probe_nonempty_stdout_is_a_genuine_round_trip() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo memory-stats-ok"]);
+        let outcome = run_probe_with_timeout(cmd, Duration::from_secs(5));
+        assert!(
+            matches!(outcome, ProbeOutcome::Exited { status, .. } if status.success()),
+            "exit-0 WITH stats on stdout must be a successful Exited round-trip, got: {outcome:?}"
+        );
+    }
+
+    /// A probe that cannot even be spawned (or whose endpoint is unreachable) must
+    /// classify as `Unreachable` and fail closed. `Unreachable` supersedes the old
+    /// `SpawnFailed` (same payload, clearer name that also covers an absent
+    /// socket) and IS a transient condition eligible for bounded retry.
+    #[test]
+    fn probe_unreachable_is_fail_closed() {
+        let cmd = Command::new("/definitely/not/a/real/binary-xyzzy-48291");
+        let outcome = run_probe_with_timeout(cmd, Duration::from_secs(5));
+        assert!(
+            matches!(outcome, ProbeOutcome::Unreachable(_)),
+            "a spawn/connect failure must classify as Unreachable, got: {outcome:?}"
+        );
+        assert!(
+            outcome.is_transient(),
+            "Unreachable is transient — eligible for bounded retry/backoff"
+        );
+    }
+
+    /// A probe that exhausts its timeout (a wedged daemon that accepted the
+    /// connection but never answered) must classify as `TimedOut`, be killed and
+    /// reaped, and IS a transient condition eligible for bounded retry.
+    #[test]
+    fn probe_timeout_is_transient_and_fail_closed() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 60"]);
+        let outcome = run_probe_with_timeout(cmd, Duration::from_millis(200));
+        assert!(
+            matches!(outcome, ProbeOutcome::TimedOut),
+            "a probe exceeding its timeout must classify as TimedOut, got: {outcome:?}"
+        );
+        assert!(
+            outcome.is_transient(),
+            "TimedOut is transient — eligible for bounded retry/backoff"
+        );
+    }
+
+    /// Retry applies ONLY to the transient outcomes. `EmptyStats` (deterministic)
+    /// and a successful `Exited` are NOT transient; `TimedOut`/`Unreachable` are.
+    /// This is the classifier the bounded-retry loop consults.
+    #[test]
+    fn empty_stats_is_not_retried() {
+        assert!(
+            !ProbeOutcome::EmptyStats.is_transient(),
+            "EmptyStats must NOT be retried (a daemon answering exit-0 with no \
+             stats is a deterministic fault a retry won't clear)"
+        );
+        assert!(
+            ProbeOutcome::TimedOut.is_transient(),
+            "TimedOut must be retryable"
+        );
+    }
+
+    /// The rpc-health gate stays fail-closed by default: an absent daemon socket
+    /// (no live daemon) reddens the gate even after bounded retry is exhausted.
+    /// Also pins that the new retry knob is bounded and positive.
+    #[test]
+    fn rpc_health_gate_reddens_when_unreachable_after_bounded_retry() {
+        let config = RelaunchConfig::default();
+        assert!(
+            config.health_probe_max_attempts >= 1,
+            "the probe attempt budget must be bounded and positive"
+        );
+        let result = run_rpc_health_gate(Path::new("/no-such-binary-rpc-health-48291"), &config);
+        assert!(
+            !result.passed,
+            "rpc-health must fail closed for an unreachable daemon, even with retry"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

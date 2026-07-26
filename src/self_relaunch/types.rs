@@ -190,4 +190,39 @@ mod tests {
         let debug = format!("{result:?}");
         assert!(debug.contains("RpcHealth"), "{debug}");
     }
+
+    // ── P3 (process:self_deploy_blocked): additive rpc-health retry knobs ──────
+    // (TDD Step 7 — FAILING.) `RelaunchConfig` gains a configurable probe timeout
+    // (already `health_timeout`) plus a bounded retry budget and backoff. The new
+    // fields are serde-defaulted and additive, so existing configs deserialize
+    // unchanged. These reference fields that do not exist yet and MUST fail to
+    // compile until the fix lands. See docs/reference/rpc-health-gate-diagnostics.md.
+
+    #[test]
+    fn default_health_timeout_preserves_prior_30s_behaviour() {
+        // The per-attempt probe timeout default must preserve the prior fixed 30s.
+        assert_eq!(
+            RelaunchConfig::default().health_timeout,
+            Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn default_health_probe_attempts_is_bounded_positive() {
+        let config = RelaunchConfig::default();
+        assert!(
+            config.health_probe_max_attempts >= 1,
+            "the probe attempt budget must be a bounded, positive default"
+        );
+    }
+
+    #[test]
+    fn default_health_probe_backoff_is_set() {
+        let config = RelaunchConfig::default();
+        // A bounded, non-negative base backoff between probe attempts.
+        assert!(
+            config.health_probe_backoff <= Duration::from_secs(60),
+            "the base backoff must have a bounded default (capped exponential)"
+        );
+    }
 }
