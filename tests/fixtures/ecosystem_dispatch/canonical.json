@@ -1,0 +1,34 @@
+[
+  {
+    "recipe": null,
+    "escalate": "Problem 1 (critical, resource_pressure, rysweet/Simard, dedup process:disk_full:root_fs) is NOT engineer-fixable in its current state: root fs / is 100% full (28G/28G, 0 avail), so the disk-admission ceiling (max_disk_used_percent=90) rejects every engineer spawn. This is a bootstrap deadlock: the fix requires an engineer, but no engineer can be admitted until disk is freed. Requires MANUAL operator intervention first: reclaim the ~2.78 GiB of stale ~/.simard/cognitive.corrupt-*/bad-*/predeploy-*/pr*-canary-* snapshots to drop usage below 90% and unblock #4803 / cycle-2630. AFTER disk is freed, file two follow-up bugs: (a) the periodic reclaim job frees 0 bytes because it perpetually defers stale snapshots 'for review' instead of collecting them; (b) `simard status` mis-reports '/home 25 GiB free' via a statvfs f_bavail illusion while df shows root full."
+  },
+  {
+    "recipe": "smart-orchestrator",
+    "task_description": "In target_repo rysweet/amplihack-rs, fix the CI/merge strict up-to-date branch-protection live-lock tracked in issue #1050. Required 'branch must be up to date before merging' protection forces every PR to rebase/re-run CI whenever any other PR merges, causing a merge live-lock (evidence: open PR #1063 sitting in mergeStateStatus=BEHIND while mergeable=MERGEABLE). Smallest surface: the repo's branch-protection / merge-queue config and CI workflows under .github/workflows that gate merges - enable a GitHub merge queue (merge_group trigger + 'Require merge queue') so PRs are batched and tested serially. Wire required status checks to run on the merge_group event. Additive / non-breaking: do not remove existing required checks or weaken protection; preserve the PRD; no Bridge naming; no stray print!/println! (tracing + OTel only). Link the resulting PR to issue #1050.",
+    "target_repo": "rysweet/amplihack-rs",
+    "is_mechanical_sweep": false,
+    "sequence_group": null,
+    "success_criteria": [
+      "CI green on all required checks (including on the merge_group event)",
+      "GitHub merge queue enabled and required status checks wired to merge_group; PR live-lock relieved",
+      "additive / non-breaking; existing required checks and protections preserved; PRD preserved",
+      "no Bridge naming; no stray print!/println! in new code (tracing + OTel only)",
+      "docs/CONTRIBUTING updated with the merge-queue flow and links; PR linked to issue #1050"
+    ]
+  },
+  {
+    "recipe": "smart-orchestrator",
+    "task_description": "In target_repo rysweet/amplihack-recipe-runner, fix the red default branch: the 'Deploy mdBook to GitHub Pages' workflow build check failed on the head commit (failing run 30187028559 / job 89753457708). Fresh regression, not chronic - prior 4 runs of that workflow succeeded; core CI and Auto Release were green on the same push, so blast radius is docs-pages-only. Smallest surface: the .github/workflows/ mdBook/GitHub-Pages deploy workflow and the book source it builds (book.toml, docs/ or book/ SUMMARY.md and referenced markdown) - inspect the failing job log for the actual build error (missing/renamed page in SUMMARY.md, broken intra-book link, mdBook version pin drift, or preprocessor change) and correct the root cause. Additive / non-breaking: restore the docs deploy without altering unrelated CI; preserve the PRD; no Bridge naming; no stray print!/println! (tracing + OTel only). Keep workflow permissions least-privilege and job-scoped (pages: write, id-token: write).",
+    "target_repo": "rysweet/amplihack-recipe-runner",
+    "is_mechanical_sweep": false,
+    "sequence_group": null,
+    "success_criteria": [
+      "CI green on all required checks",
+      "'Deploy mdBook to GitHub Pages' workflow build check passes on main head",
+      "additive / non-breaking; only docs-pages deploy restored, unrelated CI untouched; PRD preserved",
+      "no Bridge naming; no stray print!/println! in new code (tracing + OTel only)",
+      "docs/link updates included; quality-audit cycles pass"
+    ]
+  }
+]
