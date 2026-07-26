@@ -195,3 +195,59 @@ done-gate. One PR still attacks one bounded area to stay reviewable.
 | #2150 / #2151 | CLOSED | Bash CI gate — rejected by owner (informs §4) |
 | `docs/testing/COVERAGE_BASELINE.md` | landed | The companion per-group coverage ledger |
 | `Specs/TDD_ADOPTION.md` | RATIFIED | Sibling charter for the recurring `adopt-tdd` goal; same "durable artifact stops the resurfacing" pattern |
+
+## 6. Escalation-triage record (2026-07-26)
+
+Follows `prompt_assets/simard/overseer/escalation_triage.md` for the blocked
+goal `audit-simard-s-test-coverage-and-raise-it-to-70-4d27c91a`. Recorded here
+as the durable internal audit trail; the operator only ever saw the
+plain-English Signal message (last row).
+
+| Field | Value |
+|---|---|
+| Goal id | `audit-simard-s-test-coverage-and-raise-it-to-70-4d27c91a` |
+| Blocker outcome id | `019f6c08-d053-7d93-89bf-f1f86aee408c` |
+| Goal `status.Blocked` (pointer) | `typed blocker recorded in outcome 019f6c08-d053-7d93-89bf-f1f86aee408c` |
+| Reason marker | `health-review:blocked-goal` |
+
+**Raw typed-blocker payload (internal only — never surfaced to the operator):**
+
+```
+🔒 [OODA-SAFEGUARD] OODA goal made no shippable progress for 3 consecutive
+no-action cycles; why=GENUINELY-STUCK evidence=[(none)]
+```
+
+Retrieved from the persisted goal-board snapshot in the daemon's cognitive
+memory (`self-deploy-memory.2026-07-25T20-27-59Z.json`, concept
+`goal-board:snapshot`), keyed to the outcome id above.
+
+**Plain-English translation.** The safety brake tripped: the goal ran several
+cycles in a row without shipping anything the system could point to (the
+evidence list was empty), so it flagged itself as stuck. It was never stuck on
+the coverage number — it was stuck because the finish check could not *observe*
+completion.
+
+**Root cause.** The done-gate certified scaffolding (steward-identity /
+recursion-guard wrapping) instead of the one thing that actually decides the
+goal: whole-repo line coverage. With nothing measurable to certify, every cycle
+produced "no shippable progress" and eventually "genuinely stuck", even though
+coverage had been well over 70% the whole time.
+
+**Decision:** `rewrite-done-gate` (done-gate was unmeasurable) **+**
+`complete-delivered-goal` (the underlying work was already delivered).
+
+**Action taken.**
+- Rewrote the done-gate to a single deterministic boolean — whole-repo line
+  coverage ≥ 70%, measured by `scripts/coverage-gate.sh` (§2).
+- Ran the gate: **84.36%** whole-repo line coverage (9,393 unit tests, 0
+  failures) → **DONE**. Recorded in §"Latest gate result".
+
+**Signal sent to operator (plain English, no markers):** delivered via the
+signal-cli JSON-RPC daemon on 2026-07-26 (send `type: SUCCESS`, timestamp
+`1785032545738`). Message told the operator, in plain English, that the goal
+kept stalling because its automatic "is it finished?" check looked at the wrong
+thing, that the check was rewritten to measure coverage and pass at ≥ 70%, that
+coverage is already 84% so the goal is complete, and that nothing is needed
+from them.
+
+**Escalate to a human?** No — the block was course-corrected agentically.
