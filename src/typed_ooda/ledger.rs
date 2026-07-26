@@ -1,8 +1,9 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{self, Read, Write};
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -145,8 +146,82 @@ pub trait EngineerLiveness: Send + Sync {
 
 pub struct CapabilityHandler {
     connection: Mutex<Connection>,
+    /// Process-wide writer serialization for this ledger file.
+    ///
+    /// Every [`CapabilityHandler`] opened on the same canonical path shares this
+    /// `Arc<Mutex<()>>`, so writes from independent per-goal handlers (each with
+    /// its OWN [`Connection`], spawned one-per-goal in `concurrent.rs`) and from
+    /// the startup outbox-recovery path cannot collide. The in-process
+    /// `connection` mutex only serializes WITHIN a handler; this lock serializes
+    /// ACROSS handlers, which is what a single burst of `SQLITE_BUSY` failures
+    /// (issue #4483) required. Acquired in [`CapabilityHandler::lock`] before the
+    /// connection mutex, giving a single consistent lock order (no deadlock).
+    writer_lock: Arc<Mutex<()>>,
     policy: CapabilityPolicy,
     engineer_liveness: Option<Box<dyn EngineerLiveness>>,
+}
+
+/// Process-wide registry of per-ledger-path writer locks.
+///
+/// Keyed by the CANONICAL ledger path so two handlers opened via different but
+/// equivalent path spellings (e.g. relative vs. absolute) still share one lock.
+static LEDGER_WRITER_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+
+/// Resolve (creating on first use) the process-wide writer lock for `path`.
+///
+/// `path` must already exist on disk — callers open the SQLite connection (which
+/// creates the file) before calling this, so canonicalization succeeds.
+fn writer_lock_for(path: &Path) -> CapabilityResult<Arc<Mutex<()>>> {
+    let canonical = std::fs::canonicalize(path).map_err(|error| {
+        persistence_message(format!(
+            "typed outcome persistence failed: cannot canonicalize ledger path \
+             {}: {error}",
+            path.display()
+        ))
+    })?;
+    let registry = LEDGER_WRITER_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = registry
+        .lock()
+        .map_err(|_| persistence_message("outcome ledger writer-lock registry is poisoned"))?;
+    match guard.get(&canonical) {
+        Some(existing) => Ok(Arc::clone(existing)),
+        None => {
+            let lock = Arc::new(Mutex::new(()));
+            tracing::debug!(
+                target: "typed_ooda::ledger",
+                ledger_path = %canonical.display(),
+                "registered process-wide writer lock for ledger path"
+            );
+            guard.insert(canonical, Arc::clone(&lock));
+            Ok(lock)
+        }
+    }
+}
+
+/// A held write guard bundling BOTH the process-wide per-path writer lock and
+/// the per-handler connection mutex.
+///
+/// Derefs to [`Connection`] so every existing `self.lock()?` call site is
+/// unchanged. The writer guard is dropped AFTER the connection guard (fields
+/// drop in declaration order), releasing locks in reverse acquisition order.
+struct WriteGuard<'a> {
+    connection: MutexGuard<'a, Connection>,
+    // Held for the lifetime of the guard; released last. Never read directly.
+    _writer: MutexGuard<'a, ()>,
+}
+
+impl Deref for WriteGuard<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        &self.connection
+    }
+}
+
+impl DerefMut for WriteGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.connection
+    }
 }
 
 #[derive(Debug)]
@@ -253,13 +328,25 @@ impl std::fmt::Debug for CapabilityHandler {
 
 impl CapabilityHandler {
     pub fn open(path: impl AsRef<Path>, policy: CapabilityPolicy) -> CapabilityResult<Self> {
-        let mut connection = Connection::open(path.as_ref()).map_err(persistence)?;
-        connection
-            .busy_timeout(Duration::from_secs(5))
-            .map_err(persistence)?;
-        super::schema::initialize(&mut connection, now_millis()).map_err(persistence)?;
+        let path = path.as_ref();
+        let mut connection = Connection::open(path).map_err(persistence)?;
+        // Apply WAL + synchronous=NORMAL + busy_timeout + foreign_keys on EVERY
+        // open, before `initialize` (which early-returns on an already-created
+        // schema and would otherwise leave these unset). See
+        // `super::schema::configure_connection`.
+        super::schema::configure_connection(&connection).map_err(persistence)?;
+        let writer_lock = writer_lock_for(path)?;
+        {
+            // Serialize first-time schema creation (a real write transaction)
+            // against concurrent writers on the same file.
+            let _writer = writer_lock
+                .lock()
+                .map_err(|_| persistence_message("outcome ledger writer lock is poisoned"))?;
+            super::schema::initialize(&mut connection, now_millis()).map_err(persistence)?;
+        }
         Ok(Self {
             connection: Mutex::new(connection),
+            writer_lock,
             policy,
             engineer_liveness: None,
         })
@@ -1925,10 +2012,24 @@ impl CapabilityHandler {
         Ok(())
     }
 
-    fn lock(&self) -> CapabilityResult<MutexGuard<'_, Connection>> {
-        self.connection
+    fn lock(&self) -> CapabilityResult<WriteGuard<'_>> {
+        // Acquire the process-wide per-path writer lock FIRST, then the
+        // per-handler connection mutex. This single, consistent order across all
+        // call sites serializes every ledger access (across independent
+        // handlers on the same file) so a burst of concurrent per-goal and
+        // startup-recovery writes cannot collide into `database is locked`.
+        let writer = self
+            .writer_lock
             .lock()
-            .map_err(|_| persistence_message("outcome ledger lock is poisoned"))
+            .map_err(|_| persistence_message("outcome ledger writer lock is poisoned"))?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| persistence_message("outcome ledger lock is poisoned"))?;
+        Ok(WriteGuard {
+            connection,
+            _writer: writer,
+        })
     }
 
     /// True iff the existing claim for `claim_key` corresponds to a live
@@ -3517,5 +3618,287 @@ mod actor_session_scope_tests {
                     )
                 });
         }
+    }
+}
+
+/// TDD regression suite for the systemic `database is locked` crash-loop
+/// (issue #4483).
+///
+/// ## Incident shape
+///
+/// One `simard-ooda` process spawns one thread per goal (`std::thread::scope`
+/// in `concurrent.rs`). Each thread opens its OWN [`CapabilityHandler`] on the
+/// SAME ledger file, so N independent SQLite connections each sit behind their
+/// own `Mutex<Connection>`. The in-process mutex serializes writes only WITHIN
+/// a handler, never ACROSS handlers. Combined with a rollback-journal DB (WAL
+/// was never applied on an already-initialized ledger — see
+/// `schema::configure_connection_tests`), the outbox startup-recovery writer
+/// and the concurrent per-goal cycle writers took colliding whole-file
+/// EXCLUSIVE locks and failed, in one synchronized burst, with:
+///
+///   `typed outcome persistence failed: database is locked`
+///
+/// firing across 7 distinct goals plus 6 startup-recovery paths.
+///
+/// ## Fix under test (two reinforcing layers)
+///
+///   1. `journal_mode=WAL` applied on every open (readers + one writer proceed
+///      concurrently) — asserted here via the file-persistent `journal_mode`.
+///   2. A process-wide, per-canonical-path writer lock acquired by BOTH the
+///      startup-recovery path and every per-goal cycle write, so concurrent
+///      connections to the same file cannot collide at all.
+///
+/// These tests exercise the PUBLIC handler API under real thread contention.
+/// Without the fix they fail (either the crate fails to compile because
+/// `configure_connection` does not exist yet — the TDD "red" contract — or,
+/// once the pragmas alone are added, the burst still flakes on `SQLITE_BUSY`
+/// until the writer lock lands).
+#[cfg(test)]
+mod database_locked_regression_tests {
+    use super::*;
+    use std::sync::Barrier;
+
+    const POLICY_REVISION: &str = "policy-v1";
+
+    fn open_shared_handler(path: &std::path::Path) -> CapabilityHandler {
+        CapabilityHandler::open(path, CapabilityPolicy::new(POLICY_REVISION))
+            .expect("open capability handler on shared ledger path")
+    }
+
+    /// A single terminal write through the exact `record_no_action` path the
+    /// crash signature came from. Every call uses a UNIQUE `(session, cycle,
+    /// request)` triple so it never trips `terminal_outcomes`'
+    /// `UNIQUE(session_id, cycle_id)` or the `request_id` PRIMARY KEY — any
+    /// failure is therefore a genuine persistence/locking failure, not a
+    /// data-model conflict.
+    fn record_one_no_action(
+        handler: &CapabilityHandler,
+        key: &str,
+        goal: &str,
+    ) -> CapabilityResult<TerminalOutcome> {
+        let session = format!("session-{key}");
+        let cycle = format!("cycle-{key}");
+        let request = format!("request-{key}");
+        let actor = AuthenticatedToolContext::new(
+            "goal-session-actor",
+            &session,
+            [CapabilityGrant::RecordNoAction],
+        )
+        .bound_to_cycle_goal(&cycle, goal);
+        handler.record_no_action(
+            &actor,
+            RecordNoActionRequest {
+                identity: TerminalRequestIdentity::new(&request, &session, &cycle, goal),
+                reason: OpaqueBytes::from(b"no action needed this cycle".to_vec()),
+                raw_semantic: OpaqueBytes::from(b"observed and decided".to_vec()),
+                evidence: Vec::new(),
+            },
+        )
+    }
+
+    fn terminal_row_count(path: &std::path::Path) -> i64 {
+        let connection = Connection::open(path).expect("open ledger for row count");
+        connection
+            .query_row("SELECT COUNT(*) FROM terminal_outcomes", [], |row| {
+                row.get(0)
+            })
+            .expect("count terminal_outcomes")
+    }
+
+    fn file_journal_mode(path: &std::path::Path) -> String {
+        let connection = Connection::open(path).expect("open ledger for journal_mode");
+        connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+            .expect("read journal_mode")
+    }
+
+    /// The handler must leave the ledger FILE in WAL mode. WAL is a persistent
+    /// file property, so a fresh independent connection observes it — this is
+    /// the one lock-avoidance layer that IS externally verifiable (unlike the
+    /// per-connection `synchronous`/`busy_timeout`, checked in schema tests).
+    #[test]
+    fn opening_a_handler_puts_the_ledger_file_in_wal_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("outcomes.sqlite3");
+
+        let _handler = open_shared_handler(&path);
+
+        assert_eq!(
+            file_journal_mode(&path),
+            "wal",
+            "CapabilityHandler::open must configure the ledger into WAL journal mode"
+        );
+    }
+
+    /// CORE #4483 REGRESSION.
+    ///
+    /// Reproduce the incident: many goals, each with its OWN handler on the
+    /// SAME ledger file, all bursting terminal writes at once (released
+    /// together by a barrier). Assert that NOT ONE write fails with
+    /// `database is locked`, and that every write is durably persisted exactly
+    /// once. Before the fix, the synchronized burst across independent
+    /// connections fails a subset of writes with `SQLITE_BUSY`.
+    #[test]
+    fn concurrent_handlers_burst_writes_never_hit_database_locked() {
+        const GOALS: usize = 8; // >= the 7 goals from the live incident
+        const WRITES_PER_GOAL: usize = 25;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("outcomes.sqlite3");
+
+        // Warm up: create the schema once so per-thread opens all early-return
+        // in `initialize` — mirroring production, where the ledger file already
+        // exists from prior runs and the burst is on WRITES, not first-init.
+        drop(open_shared_handler(&path));
+
+        // One independent handler (= one SQLite connection) per goal thread,
+        // exactly like the per-goal `std::thread::scope` spawn in concurrent.rs.
+        let handlers: Vec<CapabilityHandler> =
+            (0..GOALS).map(|_| open_shared_handler(&path)).collect();
+        let barrier = Barrier::new(GOALS);
+
+        let lock_failures: Vec<String> = std::thread::scope(|scope| {
+            let handles: Vec<_> = handlers
+                .iter()
+                .enumerate()
+                .map(|(goal_index, handler)| {
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        let goal = format!("goal-{goal_index}");
+                        let mut locked = Vec::new();
+                        barrier.wait(); // release all goals simultaneously
+                        for write_index in 0..WRITES_PER_GOAL {
+                            let key = format!("g{goal_index}-w{write_index}");
+                            if let Err(error) = record_one_no_action(handler, &key, &goal) {
+                                let message = error.to_string();
+                                if message.contains("database is locked") {
+                                    locked.push(format!(
+                                        "goal {goal_index} write {write_index}: {message}"
+                                    ));
+                                } else {
+                                    panic!(
+                                        "unexpected non-lock persistence error \
+                                         (goal {goal_index} write {write_index}): {message}"
+                                    );
+                                }
+                            }
+                        }
+                        locked
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().expect("goal thread panicked"))
+                .collect()
+        });
+
+        assert!(
+            lock_failures.is_empty(),
+            "typed outcome writes must NEVER fail with `database is locked`; \
+             got {} lock failures across concurrent goals:\n{:#?}",
+            lock_failures.len(),
+            lock_failures
+        );
+        assert_eq!(
+            terminal_row_count(&path) as usize,
+            GOALS * WRITES_PER_GOAL,
+            "every concurrent write must be durably persisted exactly once"
+        );
+        assert_eq!(
+            file_journal_mode(&path),
+            "wal",
+            "the ledger must remain in WAL mode throughout the concurrent burst"
+        );
+    }
+
+    /// Startup outbox recovery vs. live cycle writes.
+    ///
+    /// The 6 `typed OODA outbox startup recovery incomplete: ... database is
+    /// locked` failures came from the recovery path (which opens its OWN fresh
+    /// connection) colliding with per-goal cycle writers. Here a recovery-style
+    /// worker repeatedly opens a BRAND-NEW handler mid-burst while several goal
+    /// writers hammer the same file. The process-wide per-path writer lock must
+    /// serialize all of them so no recovery or cycle write hits
+    /// `database is locked`.
+    #[test]
+    fn startup_recovery_serializes_against_concurrent_cycle_writes() {
+        const WRITERS: usize = 6;
+        const WRITES_PER_WRITER: usize = 20;
+        const RECOVERY_PASSES: usize = 20;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("outcomes.sqlite3");
+        drop(open_shared_handler(&path)); // pre-create schema (already-exists case)
+
+        let writer_handlers: Vec<CapabilityHandler> =
+            (0..WRITERS).map(|_| open_shared_handler(&path)).collect();
+        // +1 participant for the recovery worker.
+        let barrier = Barrier::new(WRITERS + 1);
+
+        let lock_failures: Vec<String> = std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+
+            for (writer_index, handler) in writer_handlers.iter().enumerate() {
+                let barrier = &barrier;
+                handles.push(scope.spawn(move || {
+                    let goal = format!("cycle-goal-{writer_index}");
+                    let mut locked = Vec::new();
+                    barrier.wait();
+                    for write_index in 0..WRITES_PER_WRITER {
+                        let key = format!("cw{writer_index}-{write_index}");
+                        if let Err(error) = record_one_no_action(handler, &key, &goal) {
+                            let message = error.to_string();
+                            if message.contains("database is locked") {
+                                locked.push(format!("cycle writer {writer_index}: {message}"));
+                            } else {
+                                panic!("unexpected cycle-write error: {message}");
+                            }
+                        }
+                    }
+                    locked
+                }));
+            }
+
+            // Recovery worker: opens a fresh handler each pass (as startup
+            // outbox recovery does) and writes, racing the cycle writers.
+            let recovery_path = path.as_path();
+            let barrier = &barrier;
+            handles.push(scope.spawn(move || {
+                let mut locked = Vec::new();
+                barrier.wait();
+                for pass in 0..RECOVERY_PASSES {
+                    let handler = open_shared_handler(recovery_path);
+                    let key = format!("recovery-{pass}");
+                    if let Err(error) = record_one_no_action(&handler, &key, "goal-recovery") {
+                        let message = error.to_string();
+                        if message.contains("database is locked") {
+                            locked.push(format!("startup recovery pass {pass}: {message}"));
+                        } else {
+                            panic!("unexpected recovery-write error: {message}");
+                        }
+                    }
+                }
+                locked
+            }));
+
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().expect("worker thread panicked"))
+                .collect()
+        });
+
+        assert!(
+            lock_failures.is_empty(),
+            "startup recovery must be serialized against cycle writes so a single \
+             lock cannot fail multiple goals; got {} lock failures:\n{:#?}",
+            lock_failures.len(),
+            lock_failures
+        );
+        assert_eq!(
+            terminal_row_count(&path) as usize,
+            WRITERS * WRITES_PER_WRITER + RECOVERY_PASSES,
+            "every cycle and recovery write must be persisted exactly once"
+        );
     }
 }

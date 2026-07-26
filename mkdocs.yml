@@ -198,6 +198,7 @@ nav:
     - Diagnose a Deferred/Serialized Engineer Spawn (overlap): howto/diagnose-a-deferred-engineer-spawn.md
     - Configure Resource-Aware Engineer Admission: howto/configure-resource-aware-admission.md
     - Unblock Stuck OODA Goals: howto/unblock-stuck-ooda-goals.md
+    - Diagnose the Typed-OODA "database is locked" Crash-Loop: howto/diagnose-typed-ooda-database-locked.md
     - Diagnose a No-Progress Block and Read Its WHY: howto/diagnose-a-no-progress-block.md
     - Diagnose a No-Progress Breaker Issue Storm: howto/diagnose-a-no-progress-breaker-issue-storm.md
     - Re-Investigate Bare-Blocked OODA Goals: howto/reinvestigate-bare-blocked-goals.md
@@ -301,6 +302,7 @@ nav:
     - Investigate-Before-Reap API: reference/investigate-stale-engineer-api.md
     - Tombstoned-Goal Engineer Reaper API: reference/tombstoned-goal-engineer-reaper-api.md
     - Typed OODA Goal-Session Deterministic Rails: reference/typed-ooda-goal-session-rails.md
+    - Typed-OODA Persistence Concurrency API: reference/typed-ooda-persistence-concurrency-api.md
     - Stable Goal-Session Identity API: reference/stable-goal-session-identity-api.md
     - Standing-Research Novelty-Directive API: reference/standing-research-goal-novelty-directive-api.md
     - Research-Goal Never-Idle Rail API: reference/research-goal-never-idle-rail-api.md
