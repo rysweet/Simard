@@ -3,16 +3,23 @@
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::thread;
 use std::time::Duration;
 
+use tracing::{debug, error, warn};
+
 use crate::cognitive_memory::CognitiveMemoryOps;
+use crate::cognitive_memory::metrics;
 use crate::error::{SimardError, SimardResult};
 use crate::memory_cognitive::{
     CognitiveEpisode, CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
     CognitiveWorkingSlot,
 };
 
-use super::{FactWriteOutcome, MemoryRequest, MemoryResponse, ipc_err, read_frame, write_frame};
+use super::{
+    FactWriteOutcome, MemoryRequest, MemoryResponse, ipc_err, is_broken_pipe, read_frame,
+    write_frame, write_frame_raw,
+};
 
 // ============================================================================
 // Client
@@ -29,19 +36,7 @@ impl RemoteCognitiveMemory {
     /// Connect to the daemon's memory socket. Returns an error if the socket
     /// doesn't exist, the daemon isn't listening, or the handshake fails.
     pub fn connect(socket_path: &Path) -> SimardResult<Self> {
-        if !socket_path.exists() {
-            return Err(SimardError::RpcSpawnFailed {
-                endpoint: "memory-ipc-client".into(),
-                reason: format!("socket {} not present", socket_path.display()),
-            });
-        }
-        let stream = UnixStream::connect(socket_path).map_err(|e| SimardError::RpcSpawnFailed {
-            endpoint: "memory-ipc-client".into(),
-            reason: format!("connect {}: {e}", socket_path.display()),
-        })?;
-        // Short timeouts so a wedged daemon doesn't hang meeting forever.
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
-        let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
+        let stream = Self::connect_stream(socket_path)?;
         let client = Self {
             stream: Mutex::new(stream),
             socket_path: socket_path.to_path_buf(),
@@ -56,22 +51,152 @@ impl RemoteCognitiveMemory {
         }
     }
 
+    /// Open a fresh timeout-configured stream to `socket_path` WITHOUT a Ping
+    /// handshake.
+    ///
+    /// Factored out so the write-path reconnect ([`Self::reconnect`]) can reuse
+    /// the exact connect + timeout setup while performing its handshake inline
+    /// — breaking the `connect() -> call(Ping)` recursion that would otherwise
+    /// occur if reconnect went back through [`Self::connect`]. The stored,
+    /// immutable `socket_path` is the only source for reconnects, so a
+    /// reconnect can never be redirected to a different (possibly more
+    /// permissive) socket.
+    fn connect_stream(socket_path: &Path) -> SimardResult<UnixStream> {
+        if !socket_path.exists() {
+            return Err(SimardError::RpcSpawnFailed {
+                endpoint: "memory-ipc-client".into(),
+                reason: format!("socket {} not present", socket_path.display()),
+            });
+        }
+        let stream = UnixStream::connect(socket_path).map_err(|e| SimardError::RpcSpawnFailed {
+            endpoint: "memory-ipc-client".into(),
+            reason: format!("connect {}: {e}", socket_path.display()),
+        })?;
+        // Short timeouts so a wedged daemon doesn't hang meeting forever.
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
+        Ok(stream)
+    }
+
+    /// Re-establish the connection in place after a mid-write peer reset (issue
+    /// #4731). Opens a fresh stream via [`Self::connect_stream`], performs an
+    /// INLINE Ping/Pong handshake on it (never via [`Self::call`], to avoid
+    /// recursion), and only on a verified `Pong` swaps the new stream into the
+    /// held guard — deterministically dropping the stale stream.
+    ///
+    /// If the handshake returns anything other than `Pong`, the peer is
+    /// unverified and this returns an error WITHOUT swapping, so the caller
+    /// must not resend the real payload onto it.
+    fn reconnect(&self, stream: &mut UnixStream) -> SimardResult<()> {
+        let mut fresh = Self::connect_stream(&self.socket_path)?;
+        let ping =
+            serde_json::to_vec(&MemoryRequest::Ping).map_err(|e| ipc_err("serialize-ping", e))?;
+        write_frame(&mut fresh, &ping)?;
+        let resp_bytes = read_frame(&mut fresh)?;
+        let resp: MemoryResponse =
+            serde_json::from_slice(&resp_bytes).map_err(|e| ipc_err("parse-pong", e))?;
+        match resp {
+            MemoryResponse::Pong => {
+                *stream = fresh;
+                Ok(())
+            }
+            other => Err(SimardError::RpcTransportError {
+                endpoint: "memory-ipc".into(),
+                reason: format!("reconnect handshake: expected Pong, got {other:?}"),
+            }),
+        }
+    }
+
     /// Socket path this client is connected to (for logging).
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
 
     fn call(&self, req: MemoryRequest) -> SimardResult<MemoryResponse> {
+        // Bounded write-half reconnect+retry (issue #4731). The peer can close
+        // the socket mid-write under load, so a single large frame write hits
+        // EPIPE. Because a write-half EPIPE means the server never received or
+        // committed the request, it is safe to reconnect and idempotently
+        // re-send. Read-half failures are NEVER retried (the server may have
+        // already persisted). On exhaustion we surface `RpcTransportError` —
+        // never a silent `Ok`, never a dropped write.
+        const MAX_ATTEMPTS: usize = 3;
+        const BACKOFF: Duration = Duration::from_millis(50);
+
         let bytes = serde_json::to_vec(&req).map_err(|e| ipc_err("serialize-request", e))?;
         let mut guard = self
             .stream
             .lock()
             .map_err(|e| ipc_err("lock-poisoned", e))?;
-        write_frame(&mut *guard, &bytes)?;
-        let resp_bytes = read_frame(&mut *guard)?;
-        let resp: MemoryResponse =
-            serde_json::from_slice(&resp_bytes).map_err(|e| ipc_err("parse-response", e))?;
-        Ok(resp)
+
+        let mut attempt = 1usize;
+        loop {
+            match write_frame_raw(&mut *guard, &bytes) {
+                Ok(()) => {
+                    // Write committed to the peer; read the response. Read-half
+                    // errors propagate as-is (no retry — server may have
+                    // persisted, retrying could duplicate the mutation).
+                    let resp_bytes = read_frame(&mut *guard)?;
+                    let resp: MemoryResponse = serde_json::from_slice(&resp_bytes)
+                        .map_err(|e| ipc_err("parse-response", e))?;
+                    return Ok(resp);
+                }
+                Err((phase, e)) => {
+                    let retriable = is_broken_pipe(&e) && attempt < MAX_ATTEMPTS;
+                    if !retriable {
+                        // Fail-closed: not a retriable broken pipe, or attempts
+                        // exhausted. Surface the transport error; never drop
+                        // the write silently. Diagnostics carry only transport
+                        // metadata (endpoint, phase, errno) — never payload.
+                        error!(
+                            endpoint = "memory-ipc",
+                            attempt,
+                            max_attempts = MAX_ATTEMPTS,
+                            phase,
+                            error_kind = ?e.kind(),
+                            errno = e.raw_os_error(),
+                            "memory-ipc write failed terminally; surfacing transport error (no silent drop)"
+                        );
+                        if is_broken_pipe(&e) {
+                            metrics::increment("epipe_exhausted", "memory-ipc");
+                        }
+                        return Err(ipc_err(phase, e));
+                    }
+
+                    warn!(
+                        endpoint = "memory-ipc",
+                        attempt,
+                        max_attempts = MAX_ATTEMPTS,
+                        phase,
+                        error_kind = ?e.kind(),
+                        errno = e.raw_os_error(),
+                        "memory-ipc write hit broken pipe; reconnecting to retry"
+                    );
+                    metrics::increment("epipe_reconnect", "memory-ipc");
+
+                    // Reconnect + verified handshake, swapping the fresh stream
+                    // into the held guard. A failed/unverified reconnect is
+                    // surfaced immediately and the payload is NOT resent.
+                    if let Err(reconnect_err) = self.reconnect(&mut guard) {
+                        error!(
+                            endpoint = "memory-ipc",
+                            attempt,
+                            "memory-ipc reconnect failed; surfacing transport error (no silent drop)"
+                        );
+                        return Err(reconnect_err);
+                    }
+
+                    debug!(
+                        endpoint = "memory-ipc",
+                        attempt,
+                        next_attempt = attempt + 1,
+                        "memory-ipc reconnected; retrying write after backoff"
+                    );
+                    thread::sleep(BACKOFF);
+                    attempt += 1;
+                }
+            }
+        }
     }
 
     fn unexpected(name: &str, got: MemoryResponse) -> SimardError {

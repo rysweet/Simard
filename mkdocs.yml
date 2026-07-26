@@ -344,6 +344,7 @@ nav:
     - Runtime Contracts: reference/runtime-contracts.md
     - Subprocess Prompt Delivery: prompt-delivery.md
     - RPC Wire Protocol: reference/rpc-wire-protocol.md
+    - memory-ipc Write-Path Resilience: reference/memory-ipc-write-resilience.md
     - No-`bridge` Naming Guard: reference/no-bridge-naming-guard.md
     - Argv-Free Copilot/OODA Invocation: reference/argv-free-copilot-invocation.md
     - Argv-Free Meeting/Signal Agent Proxy: reference/argv-free-meeting-agent-proxy.md

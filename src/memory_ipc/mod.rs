@@ -15,7 +15,7 @@
 //! Fallback: if no daemon is running (socket absent or connect fails), the
 //! caller should open the DB directly.
 
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -23,6 +23,14 @@ use std::sync::Arc;
 mod tests_client_isolation;
 #[cfg(test)]
 mod tests_default_state_root_1967;
+// TDD (RED) for issue #4731: memory-ipc write-path resilience against a
+// mid-write peer reset (EPIPE). The client is expected to reconnect and
+// idempotently re-send a write-half frame on BrokenPipe/errno-32, bounded to a
+// few attempts, surfacing RpcTransportError on exhaustion — never a silent drop.
+// Until the bounded reconnect+retry lands in `client::call`, these behavioural
+// tests fail (no reconnect ⇒ no durable delivery / no second connection).
+#[cfg(test)]
+mod tests_epipe_resilience_4731;
 #[cfg(test)]
 mod tests_launcher;
 #[cfg(test)]
@@ -370,15 +378,47 @@ pub(crate) fn ipc_err(ctx: &str, e: impl std::fmt::Display) -> SimardError {
 /// single fact is a few hundred bytes) yet small enough to bound abuse.
 pub(crate) const MAX_FRAME: usize = 8 * 1024 * 1024;
 
-pub(crate) fn write_frame<W: Write>(w: &mut W, payload: &[u8]) -> SimardResult<()> {
-    let len = u32::try_from(payload.len()).map_err(|_| SimardError::RpcTransportError {
-        endpoint: "memory-ipc".into(),
-        reason: format!("message too large: {} bytes", payload.len()),
+/// Whether an `io::Error` is a broken-pipe / `EPIPE` (errno 32).
+///
+/// Branch on the RAW `io::Error` here — BEFORE [`ipc_err`] stringifies it —
+/// so the client's write-path retry can distinguish a mid-write peer reset
+/// (safe to reconnect + resend, the server never committed the request) from
+/// any other transport failure. Matches on both the portable
+/// [`io::ErrorKind::BrokenPipe`] and the raw `errno == 32`, mirroring the
+/// `raw_os_error()` precedent in `operator_commands_ooda/daemon/helpers.rs`.
+pub(crate) fn is_broken_pipe(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::BrokenPipe || e.raw_os_error() == Some(32)
+}
+
+/// Write one length-prefixed frame, surfacing the failing **phase** and the
+/// raw [`io::Error`] instead of a stringified [`SimardError`].
+///
+/// Keeping the un-stringified `io::Error` lets the client branch on
+/// [`is_broken_pipe`] (issue #4731 write-path resilience) before deciding
+/// whether the write half is safe to reconnect + resend. [`write_frame`] is a
+/// thin wrapper over this that maps `(phase, io::Error)` through [`ipc_err`],
+/// so server and all other callers are unchanged.
+pub(crate) fn write_frame_raw<W: Write>(
+    w: &mut W,
+    payload: &[u8],
+) -> Result<(), (&'static str, io::Error)> {
+    let len = u32::try_from(payload.len()).map_err(|_| {
+        (
+            "write-len",
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("message too large: {} bytes", payload.len()),
+            ),
+        )
     })?;
     w.write_all(&len.to_be_bytes())
-        .map_err(|e| ipc_err("write-len", e))?;
-    w.write_all(payload).map_err(|e| ipc_err("write-body", e))?;
-    w.flush().map_err(|e| ipc_err("flush", e))
+        .map_err(|e| ("write-len", e))?;
+    w.write_all(payload).map_err(|e| ("write-body", e))?;
+    w.flush().map_err(|e| ("flush", e))
+}
+
+pub(crate) fn write_frame<W: Write>(w: &mut W, payload: &[u8]) -> SimardResult<()> {
+    write_frame_raw(w, payload).map_err(|(phase, e)| ipc_err(phase, e))
 }
 
 pub(crate) fn read_frame<R: Read>(r: &mut R) -> SimardResult<Vec<u8>> {

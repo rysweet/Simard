@@ -316,3 +316,4 @@ For multi-host coordination see [Distributed operations](distributed-operations.
 - [Dashboard](dashboard.md) — Memory tab
 - [Dashboard Memory tab — dedicated cognitive-memory graph](reference/dashboard-memory-tab.md) — the live `GET /api/memory/graph` visualization (nodes/edges, per-type filters, node inspection)
 - [Daemon mode](daemon-mode.md) — when consolidation runs
+- [memory-ipc Write-Path Resilience](reference/memory-ipc-write-resilience.md) — the `RemoteCognitiveMemory` client reconnects and idempotently re-sends a framed write on a broken-pipe/EPIPE so large distillation writes are never silently dropped (#4731)
