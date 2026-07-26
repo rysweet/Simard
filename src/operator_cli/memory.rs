@@ -1,4 +1,5 @@
-//! Operator subcommand `simard memory <stats|dump>` — read-only introspection
+//! Operator subcommand `simard memory <stats|ping|dump>` — read-only
+//! introspection
 //! of the six-type cognitive-memory store on the library backend (issue #2308
 //! follow-up).
 //!
@@ -21,12 +22,18 @@ Simard memory subcommand — cognitive-memory introspection & restore
 
 Usage:
   simard memory stats  [state-root] [--json]
+  simard memory ping   [state-root]
   simard memory dump   [state-root] [--type=TYPE] [--limit=N] [--json]
   simard memory import <snapshot.json> [state-root]
 
 stats  Print per-type counts (sensory, working, episodic, semantic/facts,
        procedural/procedures, prospective/triggers), a graph-edge / dedup
        (\"edges / connections\") section, plus a few sample rows.
+ping   Bounded O(1) liveness check: dial the live daemon socket and complete a
+       lock-free Ping/Pong round-trip. Exits 0 when a live daemon answers,
+       non-zero when the socket is absent or unconnectable. Used by the
+       self-deploy rpc-health gate (issue #2896); does NOT scan the graph or
+       contend on the store lock, so it returns promptly on large stores.
 dump   Print counts plus a larger set of sample rows per type for eyeballing
        content. --type restricts to one of: facts, episodes, procedures.
 import Ingest a cognitive_snapshot.json (as written by the periodic verified
@@ -166,6 +173,7 @@ pub(crate) fn dispatch_memory_command(
             Ok(())
         }
         "stats" => run_stats(args),
+        "ping" => run_ping(args),
         "dump" => run_dump(args),
         "import" => run_import(args),
         "remember" => {
@@ -574,6 +582,52 @@ fn run_stats(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::erro
         print!("{}", render_human(&report, false));
     }
     Ok(())
+}
+
+/// `simard memory ping [state-root]` — bounded O(1) liveness probe for the
+/// rpc-health self-deploy gate (issue #2896 / #4639).
+///
+/// Dials the LIVE daemon socket DIRECTLY via [`RemoteCognitiveMemory::connect`],
+/// which performs the existing lock-free `Ping`/`Pong` handshake: the server
+/// answers `Ping` without touching the store lock or scanning the graph, so the
+/// round-trip is O(1) and returns far inside the gate's `health_timeout`.
+/// Returns `Ok(())` on `Pong` and errors on any connection/round-trip failure.
+///
+/// Contrast [`run_stats`], whose `build_report` full-graph scan over the large
+/// cognitive store (~30.8k nodes) did NOT return within the 30s `health_timeout`
+/// and reddened every self-deploy. `run_ping` deliberately does no
+/// `build_report`, holds no store lock, and performs no graph scan.
+///
+/// Fail-closed (the load-bearing #2896/#4639 guard): this NEVER calls
+/// `open_reader_client`, so it cannot fall back to a tier-2 on-disk open that
+/// would "succeed" with no live daemon and green a dead candidate. An absent
+/// socket yields `RpcSpawnFailed`; an unconnectable/hung socket errors (or the
+/// gate's process-level timeout reddens it). Every failure surfaces as a traced
+/// non-zero exit.
+///
+/// Observability: structured `tracing` only — no user-facing stdout, no
+/// `print!`/`println!`, no silent fallback.
+fn run_ping(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
+    let (state_root_opt, _json) = super::args::parse_state_root_and_json(args.collect())?;
+    let state_root = resolve_state_root(state_root_opt);
+    let sock = socket_path_for(&state_root);
+    let span = tracing::info_span!(
+        "memory_ping",
+        socket = %sock.display(),
+        state_root = %state_root.display(),
+    );
+    let _guard = span.enter();
+
+    match RemoteCognitiveMemory::connect(&sock) {
+        Ok(_client) => {
+            tracing::info!("memory ping: live daemon Ping/Pong round-trip ok");
+            Ok(())
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "memory ping: liveness round-trip failed (fail closed)");
+            Err(Box::new(e))
+        }
+    }
 }
 
 /// `simard memory import <snapshot.json> [state-root] [--json]` — restore a
@@ -1351,6 +1405,206 @@ mod tests {
         assert!(
             parsed["edges"].get("derives_from").is_some(),
             "edges keys stay present (zeroed) for stable scripting: {json}"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // TDD (issue #2896 / #4639 — self-deploy rpc-health crash-loop): FAILING
+    // tests, written first, for the new bounded `memory ping` liveness
+    // subcommand.
+    //
+    // Problem: the rpc-health canary probes the candidate via `memory stats`,
+    // whose round-trip does a full-graph report (`build_report`) over the
+    // ~30.8k-node cognitive store and does NOT return within the 30s
+    // health_timeout — so `ProbeOutcome::TimedOut` reddens every self-deploy
+    // and the daemon is stuck at 0.38.0.
+    //
+    // Fix direction (design): a new O(1), lock-free `memory ping` that reuses
+    // the existing `MemoryRequest::Ping` / `MemoryResponse::Pong` handshake,
+    // dials the LIVE daemon socket DIRECTLY via `RemoteCognitiveMemory::connect`
+    // (NEVER `open_reader_client`, whose tier-2 branch opens the on-disk store
+    // and would green a dead daemon), and returns immediately. No `build_report`,
+    // no store lock, no graph scan.
+    //
+    // These reference the `"ping"` dispatch arm and the documented help line,
+    // which do NOT yet exist, so they FAIL now (dispatch returns
+    // `unsupported command 'memory ping'` / help omits it) and GREEN once the
+    // fix lands. Fail-closed guarantees are asserted so the fix cannot regress
+    // #2896/#4639: an absent OR present-but-unconnectable socket must NEVER
+    // green (no tier-2 fallback).
+    use crate::memory_ipc::{ServerHandle, spawn_server};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// Save/restore `SIMARD_STATE_ROOT` + `SIMARD_MEMORY_SOCKET` so a test can
+    /// point `memory ping`'s resolution at a throwaway root without leaking into
+    /// sibling tests. Env mutation is serialized by the `cognitive_memory` key.
+    /// Mirrors the gate's real resolution (the rpc-health gate re-injects the
+    /// allow-listed `SIMARD_STATE_ROOT`, not a positional arg).
+    struct PingStateEnvGuard {
+        prev: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+    impl PingStateEnvGuard {
+        fn set_state_root(root: &Path) -> Self {
+            let names = ["SIMARD_STATE_ROOT", "SIMARD_MEMORY_SOCKET"];
+            let prev = names.iter().map(|&n| (n, std::env::var_os(n))).collect();
+            // SAFETY: serialized by the cognitive_memory serial key; restored on drop.
+            unsafe {
+                std::env::set_var("SIMARD_STATE_ROOT", root);
+                // No socket override — force `<state_root>/memory.sock` resolution,
+                // exactly what the scrubbed candidate would use.
+                std::env::remove_var("SIMARD_MEMORY_SOCKET");
+            }
+            Self { prev }
+        }
+    }
+    impl Drop for PingStateEnvGuard {
+        fn drop(&mut self) {
+            for (name, prev) in &self.prev {
+                // SAFETY: serialized by the cognitive_memory serial key.
+                match prev {
+                    Some(val) => unsafe { std::env::set_var(name, val) },
+                    None => unsafe { std::env::remove_var(name) },
+                }
+            }
+        }
+    }
+
+    /// Bring up a real memory IPC server on the socket `memory ping` resolves for
+    /// `root`, so a hermetic test can exercise a genuine live-daemon round-trip.
+    /// Unique per-test tmp root + `ServerHandle` drop keeps daemons from leaking
+    /// between hermetic tests.
+    fn spawn_live_daemon(root: &Path) -> ServerHandle {
+        let sock = socket_path_for(root);
+        let _ = std::fs::remove_file(&sock);
+        let mem: Arc<dyn CognitiveMemoryOps> =
+            Arc::new(LibraryCognitiveMemory::in_memory().expect("in-memory db"));
+        let handle = spawn_server(sock.clone(), mem).expect("spawn server");
+        for _ in 0..200 {
+            if sock.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(sock.exists(), "server socket never appeared at {sock:?}");
+        handle
+    }
+
+    // POSITIVE contract: against a LIVE daemon, `memory ping` completes a real
+    // Ping/Pong round-trip and returns Ok — this is the green the rpc-health
+    // canary needs so self-deploy can proceed.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn ping_greens_against_a_live_daemon() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _daemon = spawn_live_daemon(tmp.path());
+        let _env = PingStateEnvGuard::set_state_root(tmp.path());
+
+        let res = dispatch_memory_command(vec!["ping".to_string()].into_iter());
+        assert!(
+            res.is_ok(),
+            "`memory ping` must green against a live daemon socket: {res:?}"
+        );
+    }
+
+    // BOUNDEDNESS/RESPONSIVENESS (the crux of #2896): the ping round-trip against
+    // a healthy hermetic daemon must return FAR inside the 30s health_timeout —
+    // unlike `memory stats`, whose full-graph scan timed out. Uses the real
+    // default `health_timeout` as the ceiling, plus a tight sub-5s bound so a
+    // future regression into a scanning / lock-contending path is caught.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn ping_returns_well_within_health_timeout_against_a_live_daemon() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _daemon = spawn_live_daemon(tmp.path());
+        let _env = PingStateEnvGuard::set_state_root(tmp.path());
+
+        let health_timeout = crate::self_relaunch::RelaunchConfig::default().health_timeout;
+        let start = Instant::now();
+        let res = dispatch_memory_command(vec!["ping".to_string()].into_iter());
+        let elapsed = start.elapsed();
+
+        assert!(
+            res.is_ok(),
+            "ping must succeed against a live daemon: {res:?}"
+        );
+        assert!(
+            elapsed < health_timeout,
+            "ping must return within the {}s health_timeout; took {elapsed:?}",
+            health_timeout.as_secs()
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "ping must be a cheap O(1) liveness check, not a scanning round-trip; took {elapsed:?}"
+        );
+    }
+
+    // FAIL-CLOSED #1 (absent socket): with NO live daemon, `memory ping` MUST
+    // error — it must NOT fall through to `open_reader_client`'s tier-2 on-disk
+    // store and green a dead daemon (the #2896/#4639 fail-open the gate exists
+    // to prevent). The error must be a real liveness failure, NOT the pre-impl
+    // `unsupported command` (which would be a false RED).
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn ping_fails_closed_when_socket_absent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // No server started → `<root>/memory.sock` never exists.
+        assert!(
+            !socket_path_for(tmp.path()).exists(),
+            "precondition: no live daemon socket under the isolated root"
+        );
+        let _env = PingStateEnvGuard::set_state_root(tmp.path());
+
+        let err = dispatch_memory_command(vec!["ping".to_string()].into_iter())
+            .expect_err("ping must fail closed with no live daemon (no tier-2 green)");
+        assert!(
+            !err.to_string().contains("unsupported command"),
+            "ping must be a real dispatched liveness subcommand, not unsupported: {err}"
+        );
+    }
+
+    // FAIL-CLOSED #2 (present-but-unconnectable socket): a leftover socket FILE
+    // with no listener behind it (dead daemon) must also RED. `connect()` dials
+    // it, fails, and errors — it must NOT silently fall back to a direct on-disk
+    // open. Guards the #2896 divergent-reader fail-open.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn ping_fails_closed_on_unconnectable_socket() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // A plain file at the socket path: `.exists()` is true, but nothing listens.
+        std::fs::File::create(socket_path_for(tmp.path())).expect("create fake socket file");
+        let _env = PingStateEnvGuard::set_state_root(tmp.path());
+
+        let err = dispatch_memory_command(vec!["ping".to_string()].into_iter())
+            .expect_err("ping must fail closed on a present-but-unconnectable socket");
+        assert!(
+            !err.to_string().contains("unsupported command"),
+            "ping must be a real dispatched liveness subcommand, not unsupported: {err}"
+        );
+    }
+
+    // DISPATCH ROUTING: `ping` must route to the new liveness handler, not the
+    // catch-all `unsupported command 'memory ping'` arm.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn dispatch_routes_ping_to_the_liveness_handler() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _env = PingStateEnvGuard::set_state_root(tmp.path());
+        let err = dispatch_memory_command(vec!["ping".to_string()].into_iter())
+            .expect_err("no live daemon → ping errors (fail closed)");
+        assert!(
+            !err.to_string()
+                .contains("unsupported command 'memory ping'"),
+            "`ping` must be dispatched, not rejected as unsupported: {err}"
+        );
+    }
+
+    // DISCOVERABILITY: the operator help must document the new subcommand.
+    #[test]
+    fn memory_help_documents_ping() {
+        assert!(
+            MEMORY_HELP.contains("ping"),
+            "MEMORY_HELP must document the `ping` liveness subcommand"
         );
     }
 }
