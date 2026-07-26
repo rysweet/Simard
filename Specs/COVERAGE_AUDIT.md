@@ -11,6 +11,11 @@
 - **State**: ACTIVE. §1 (scope), §2 (the deterministic done-gate), and §3
   (how to raise the number when short) are in force. This charter changes no
   CI behavior; §4 still holds (no hard CI coverage gate).
+- **Latest gate result**: 2026-07-26 — `scripts/coverage-gate.sh` measured
+  **84.36%** whole-repo line coverage (9393 unit tests, 0 failures), i.e.
+  **DONE** (≥ 70%). The goal has in fact been over the bar for a long time;
+  it only ever appeared "stuck" because the done-gate checked scaffolding
+  instead of this number. Close its slugs with `simard goal remove`.
 - **Consolidates goal slugs**: `audit-simard-test-coverage`,
   `raise-coverage-to-70`, `improve-amplihack-test-coverage`.
 - **Companion ledger**: [`docs/testing/COVERAGE_BASELINE.md`](../docs/testing/COVERAGE_BASELINE.md)
