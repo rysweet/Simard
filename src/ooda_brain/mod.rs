@@ -40,6 +40,8 @@ mod prompt_store_tests;
 mod tests;
 #[cfg(test)]
 mod tests_per_goal_cycle;
+#[cfg(test)]
+mod tests_record_decision;
 
 pub use confidence::{
     CalibrationWindow, ECE_BINS, ECE_METRIC, ECE_WINDOW, HIGH_STAKES_URGENCY, JudgedDecision,
@@ -315,26 +317,47 @@ impl PerGoalAction {
     /// action past any backend.
     pub fn from_recipe_envelope(text: &str) -> Option<Self> {
         let env: PerGoalEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
-        let reason = env.reason.trim();
+        Self::from_choice_fields(&env.choice, &env.reason, &env.task_hint)
+    }
+
+    /// Construct a validated [`PerGoalAction`] from already-separated
+    /// `choice`/`reason`/`task_hint` fields — the scraper-free core shared by
+    /// [`from_recipe_envelope`](Self::from_recipe_envelope) (which first pulls
+    /// the fields out of a prose envelope) and the `simard ooda record-decision`
+    /// CLI tool (which gets them directly as argv). This is the SINGLE closed-
+    /// enum validation chokepoint:
+    ///
+    /// * `choice` is matched case-insensitively; an unknown tag ⇒ `None`.
+    /// * `reason` must be non-empty after trimming ⇒ `None` otherwise.
+    /// * `reason`/`task_hint` are sanitized (ANSI/C0 control stripped,
+    ///   whitespace folded) and bounded to [`PER_GOAL_REASON_MAX_CHARS`], since
+    ///   these model-controlled strings flow to operator logs and persisted
+    ///   audit records.
+    ///
+    /// A missing/empty `reason` or an unknown `choice` yields `None`, so neither
+    /// a compromised prompt nor a hostile CLI invocation can smuggle a
+    /// reason-less or novel destructive action past this one gate.
+    pub fn from_choice_fields(choice: &str, reason: &str, task_hint: &str) -> Option<Self> {
+        // SECURITY (mirror of #2751): `reason`/`task_hint` are MODEL-CONTROLLED
+        // and flow verbatim to operator stderr logs and the *persisted* decision
+        // record. A prompt-injected model could smuggle ANSI escapes / raw C0
+        // control bytes to spoof or hide operator log lines and audit records.
+        // Sanitize at this single canonical chokepoint (strip ANSI/control +
+        // collapse whitespace + bound length) so every downstream sink receives
+        // clean text. Sanitize BEFORE the emptiness gate so a reason made up
+        // ENTIRELY of control/ANSI bytes (which `str::trim` does NOT remove)
+        // collapses to empty and is rejected — fail CLOSED, not open.
+        let reason = sanitize::sanitize_context_var(reason.trim(), PER_GOAL_REASON_MAX_CHARS);
         if reason.is_empty() {
             return None;
         }
-        // SECURITY (mirror of #2751): `reason`/`task_hint` are MODEL-CONTROLLED
-        // and flow verbatim to operator stderr logs and the *persisted*
-        // `BrainJudgmentRecord.rationale`. A prompt-injected model could smuggle
-        // ANSI escapes / raw C0 control bytes to spoof or hide operator log lines
-        // and audit records. Sanitize at this single canonical chokepoint (strip
-        // ANSI/control + collapse whitespace + bound length) so every downstream
-        // sink receives clean text — the outbound counterpart to the inbound
-        // `sanitize_context_var` applied to recipe `-c` context vars.
-        let reason = sanitize::sanitize_context_var(reason, PER_GOAL_REASON_MAX_CHARS);
-        match env.choice.trim() {
+        match choice.trim() {
             c if c.eq_ignore_ascii_case("continue") => Some(Self::Continue { reason }),
             // `task_hint` is sanitized only here — it is discarded by every other
             // variant, so we avoid the allocation on the non-spawn paths.
             c if c.eq_ignore_ascii_case("spawn") => {
                 let task_hint =
-                    sanitize::sanitize_context_var(&env.task_hint, PER_GOAL_REASON_MAX_CHARS);
+                    sanitize::sanitize_context_var(task_hint, PER_GOAL_REASON_MAX_CHARS);
                 Some(Self::Spawn { reason, task_hint })
             }
             c if c.eq_ignore_ascii_case("reorient") => Some(Self::Reorient { reason }),
@@ -378,6 +401,151 @@ impl PerGoalAction {
     pub fn mutates_refs(&self) -> bool {
         matches!(self, Self::Reorient { .. } | Self::Complete { .. })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Typed per-goal-cycle decision RECORD + fail-CLOSED reader (WS-4, #2573/#2658)
+//
+// Replaces the forbidden "recipe prints JSON → Rust scrapes prose → Rust acts"
+// pattern on the core decision path. The `simard ooda record-decision` tool
+// writes exactly one `PerGoalDecisionRecord`; `RecipeBrain` reads it with
+// `read_verified` instead of scraping the agent's stdout. Every failure mode is
+// an `Err` (a safe no-op cycle failure) — never a default action (#1711).
+// ---------------------------------------------------------------------------
+
+/// The pinned on-disk schema string for a [`PerGoalDecisionRecord`]. The reader
+/// rejects any other value, so a future `…v2` writer can never be honored by a
+/// `…v1` reader (bumping this is a hard, coordinated change).
+pub const EXPECTED_SCHEMA: &str = "simard.ooda.per_goal_decision.v1";
+
+/// One typed, on-disk per-goal-cycle decision, written by the
+/// `simard ooda record-decision` tool and read by [`RecipeBrain`] via
+/// [`read_verified`]. It is NEVER scraped from agent prose.
+///
+/// The `choice` discriminator and its per-variant fields come from
+/// [`PerGoalAction`]'s existing `#[serde(tag = "choice", rename_all =
+/// "snake_case")]` representation, flattened into the record — so the tool and
+/// the enum can never disagree on the wire shape:
+///
+/// ```json
+/// {"schema":"simard.ooda.per_goal_decision.v1","goal_id":"…","cycle_number":42,
+///  "choice":"spawn","reason":"…","task_hint":"…"}
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PerGoalDecisionRecord {
+    /// Schema pin. Must equal [`EXPECTED_SCHEMA`].
+    pub schema: String,
+    /// The goal this decision is for. Re-verified against the live ctx.
+    pub goal_id: String,
+    /// The cycle this decision is for. Re-verified against the live ctx.
+    pub cycle_number: u32,
+    /// The validated, closed-enum action (flattened `choice` + fields).
+    #[serde(flatten)]
+    pub action: PerGoalAction,
+}
+
+/// Read and FULLY verify a per-goal decision record, returning the validated
+/// closed-enum action.
+///
+/// Returns `Ok(PerGoalAction)` ONLY when the record exists, deserializes into a
+/// [`PerGoalDecisionRecord`] (which already enforces a known `choice` variant
+/// and a present `reason`), pins [`EXPECTED_SCHEMA`], carries a non-empty
+/// `reason`, and its embedded `goal_id`/`cycle_number` match the live ctx.
+/// EVERY other outcome is an `Err` — the caller surfaces it as a cycle failure
+/// (a safe no-op), never a default action (#1711).
+///
+/// The fail-CLOSED matrix (each row is an `Err`):
+///
+/// | # | Condition | Result |
+/// |---|---|---|
+/// | R1 | file absent (tool never ran / unresolvable / non-zero exit) | `Err` |
+/// | R2 | present but not valid JSON / truncated | `Err` |
+/// | R3 | `schema != EXPECTED_SCHEMA` | `Err` |
+/// | R4 | `choice` not one of the six closed variants | `Err` |
+/// | R5 | `reason` missing or empty (after trim) | `Err` |
+/// | R6 | `goal_id` ≠ live ctx `goal_id` | `Err` |
+/// | R7 | `cycle_number` ≠ live ctx `cycle_number` | `Err` |
+/// | R8 | all checks pass | `Ok(action)` |
+///
+/// R6/R7 defeat the subtle fail-OPEN risk of honoring a prior cycle's (or
+/// another goal's) decision that happens to linger on disk.
+pub fn read_verified(
+    path: &std::path::Path,
+    goal_id: &str,
+    cycle_number: u32,
+) -> SimardResult<PerGoalAction> {
+    use crate::error::SimardError;
+
+    let fail = |reason: String| SimardError::AdapterInvocationFailed {
+        base_type: "recipe-per-goal-cycle-brain".to_string(),
+        reason,
+    };
+
+    // R1 — absence (or any read error) is fail-CLOSED. The tool writes nothing
+    // when it cannot resolve its binary or fails validation, so a missing file
+    // is the common, expected "the reasoner produced no valid decision" path.
+    let bytes = std::fs::read(path).map_err(|e| {
+        fail(format!(
+            "per-goal decision record absent/unreadable at {}: {e} (fail-CLOSED)",
+            path.display()
+        ))
+    })?;
+
+    // R2/R4/R5(missing) — malformed JSON, an unknown `choice` tag, or a missing
+    // `reason` field all fail deserialization into the closed record type.
+    let record: PerGoalDecisionRecord = serde_json::from_slice(&bytes).map_err(|e| {
+        fail(format!(
+            "per-goal decision record did not deserialize (malformed/unknown-choice/missing-reason): {e} (fail-CLOSED)"
+        ))
+    })?;
+
+    // R3 — schema version pin.
+    if record.schema != EXPECTED_SCHEMA {
+        return Err(fail(format!(
+            "per-goal decision record schema {:?} != expected {EXPECTED_SCHEMA:?} (fail-CLOSED)",
+            record.schema
+        )));
+    }
+
+    // R6 — goal identity.
+    if record.goal_id != goal_id {
+        return Err(fail(format!(
+            "per-goal decision record goal_id {:?} != live ctx {:?} (stale/other-goal; fail-CLOSED)",
+            record.goal_id, goal_id
+        )));
+    }
+
+    // R7 — cycle identity (no replay of a prior cycle's verdict).
+    if record.cycle_number != cycle_number {
+        return Err(fail(format!(
+            "per-goal decision record cycle_number {} != live ctx {cycle_number} (prior-cycle; fail-CLOSED)",
+            record.cycle_number
+        )));
+    }
+
+    // R5 + defense-in-depth — re-validate AND re-sanitize the free text through
+    // the SAME closed-enum chokepoint the tool uses on write
+    // ([`PerGoalAction::from_choice_fields`]). This is deliberately independent
+    // of the tool: a hostile record the tool would never produce — e.g. a
+    // control-byte-only `reason` that sanitizes to empty, or one carrying raw
+    // ANSI/C0 bytes bound for operator logs (#2751) — is rejected (empty after
+    // sanitize ⇒ `None` ⇒ fail-CLOSED) or cleaned here, never honored verbatim.
+    // The `choice` tag is already known-valid (it deserialized into the closed
+    // enum), so only the empty-after-sanitize case can reject at this step.
+    let task_hint = match &record.action {
+        PerGoalAction::Spawn { task_hint, .. } => task_hint.as_str(),
+        _ => "",
+    };
+    PerGoalAction::from_choice_fields(
+        record.action.variant_label(),
+        record.action.reason(),
+        task_hint,
+    )
+    .ok_or_else(|| {
+        fail(
+            "per-goal decision record reason is empty after sanitization (fail-CLOSED)".to_string(),
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------

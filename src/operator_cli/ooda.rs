@@ -19,6 +19,12 @@ Commands:
                               List authoritative typed terminals.
   terminal <spawn-engineer|no-action|blocked|completed> [SCOPED OPTIONS]
                               Record exactly one authenticated typed terminal.
+  record-decision --choice <continue|spawn|reorient|investigate|wait|complete>
+                  (--reason <TEXT> | --reason-path <FILE>)
+                  --record-path <ABSOLUTE_PATH> --goal-id <ID> --cycle-number <N>
+                  [--task-hint <TEXT> | --task-hint-path <FILE>]
+                              Record exactly one typed, validated per-goal-cycle
+                              decision (the reasoner's tool; zero privilege).
   approvals issue --state-root <PATH> --effect-id <ID> --request-id <ID>
                               Issue a privileged merge/deploy approval from
                               the configured server principal and signing key.
@@ -68,8 +74,118 @@ pub(super) fn dispatch_ooda_command(
         "outcomes" => dispatch_outcomes(args),
         "fixture" => dispatch_fixture(args),
         "terminal" => dispatch_terminal(args),
+        "record-decision" => dispatch_record_decision(args),
         "approvals" => dispatch_approvals(args),
         other => Err(format!("unsupported command 'ooda {other}'").into()),
+    }
+}
+
+/// `simard ooda record-decision` — the zero-privilege tool the OODA per-goal-
+/// cycle reasoner calls to record EXACTLY ONE typed, validated decision.
+///
+/// It validates the closed `--choice` enum, requires a non-empty `--reason`,
+/// hardens `--record-path` (absolute, no `..`), then writes exactly one atomic
+/// `0o600` [`PerGoalDecisionRecord`]. Any validation failure ⇒ a non-zero exit
+/// AND **no file on disk** (validate-all-then-write-once). The tool holds no
+/// privilege: its only side effect is that one write. `RecipeBrain` reads the
+/// record back with `read_verified` — it never scrapes the agent's stdout.
+///
+/// See `docs/reference/ooda-record-decision-cli.md` for the full contract.
+fn dispatch_record_decision(
+    args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const KNOWN_FLAGS: &[&str] = &[
+        "choice",
+        "reason",
+        "reason-path",
+        "task-hint",
+        "task-hint-path",
+        "record-path",
+        "goal-id",
+        "cycle-number",
+    ];
+
+    // `parse_named_args` already rejects duplicate flags and value-less flags.
+    let parsed = parse_named_args(args)?;
+
+    // Reject any unknown flag — never silently ignore an argument.
+    for flag in parsed.keys() {
+        if !KNOWN_FLAGS.contains(&flag.as_str()) {
+            return Err(format!("unknown option --{flag}").into());
+        }
+    }
+
+    // --- Required scalar fields (validated before any write) ---
+    let choice = required_named(&parsed, "choice")?;
+    let goal_id = required_named(&parsed, "goal-id")?;
+    let cycle_number: u32 = required_named(&parsed, "cycle-number")?
+        .parse()
+        .map_err(|_| "invalid --cycle-number (expected a u32)")?;
+    let record_path = Path::new(required_named(&parsed, "record-path")?);
+
+    // SR-VAL-8 — the record path must be ABSOLUTE and free of `..` traversal.
+    // The daemon supplies a fresh per-cycle temp dir; a relative or `..`-bearing
+    // path is a misuse we reject before touching the filesystem.
+    if !record_path.is_absolute() {
+        return Err(format!(
+            "--record-path must be absolute, got {}",
+            record_path.display()
+        )
+        .into());
+    }
+    if record_path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "--record-path must not contain '..', got {}",
+            record_path.display()
+        )
+        .into());
+    }
+
+    // --- Free text: inline XOR file, per field (large payloads via file) ---
+    let reason = resolve_field(&parsed, "reason", "reason-path")?
+        .ok_or("a decision requires --reason or --reason-path")?;
+    let task_hint = resolve_field(&parsed, "task-hint", "task-hint-path")?.unwrap_or_default();
+
+    // Validate the closed enum + non-empty reason through the SINGLE shared
+    // chokepoint (case-insensitive choice, sanitized+bounded free text). An
+    // unknown choice or an empty reason ⇒ None ⇒ rejected here, before any write.
+    let action = crate::ooda_brain::PerGoalAction::from_choice_fields(choice, &reason, &task_hint)
+        .ok_or_else(|| {
+            format!(
+                "invalid decision: unknown --choice {choice:?} or empty --reason \
+                 (choice must be one of continue|spawn|reorient|investigate|wait|complete)"
+            )
+        })?;
+
+    let record = crate::ooda_brain::PerGoalDecisionRecord {
+        schema: crate::ooda_brain::EXPECTED_SCHEMA.to_string(),
+        goal_id: goal_id.to_string(),
+        cycle_number,
+        action,
+    };
+
+    // Validate-all-then-write-once: this atomic, owner-only (0o600) write is the
+    // tool's ONLY side effect. It runs only after EVERY check above passed.
+    crate::persistence::persist_json("ooda-per-goal-decision", record_path, &record)?;
+    Ok(())
+}
+
+/// Resolve one free-text field that may be supplied inline (`--<inline>`) OR
+/// from a file (`--<path>`), but never both. Returns `Ok(None)` when neither is
+/// present (the caller decides whether that field is required).
+fn resolve_field(
+    parsed: &std::collections::BTreeMap<String, String>,
+    inline: &str,
+    path: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    match (parsed.get(inline), parsed.get(path)) {
+        (Some(_), Some(_)) => Err(format!("--{inline} and --{path} are mutually exclusive").into()),
+        (Some(value), None) => Ok(Some(value.clone())),
+        (None, Some(file)) => Ok(Some(std::fs::read_to_string(file)?)),
+        (None, None) => Ok(None),
     }
 }
 

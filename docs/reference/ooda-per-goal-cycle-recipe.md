@@ -7,9 +7,18 @@ Shim: `RecipeBrain::decide_per_goal_cycle` (`src/ooda_brain/recipe_brain.rs`)
 This is the single source of truth for the **per-goal, per-cycle decision** — the
 reasoning step run once for **every** goal on `board.active`, every cycle
 ([#4453](https://github.com/rysweet/Simard/issues/4453)). It is the sibling of
-[`ooda-engineer-lifecycle.yaml`](ooda-engineer-lifecycle-recipe.md) and follows
-the identical recipe pattern: a single `agent` step whose stdout is a JSON
-decision envelope parsed by the Rust shim.
+[`ooda-engineer-lifecycle.yaml`](ooda-engineer-lifecycle-recipe.md).
+
+> **Changed in #4720 (typed decision tool).** The recipe no longer prints a
+> prose JSON envelope for the Rust layer to scrape with
+> `recipe_output::extract_json_payload`. Its single `agent` step now calls the
+> zero-privilege tool
+> [`simard ooda record-decision`](ooda-record-decision-cli.md) **exactly once**,
+> which validates the choice against the closed `PerGoalAction` enum and
+> atomically writes a typed `PerGoalDecisionRecord`. `RecipeBrain` reads that
+> record with `read_verified` — the agent's **stdout is ignored**. This removes
+> the forbidden "recipe emits JSON → Rust scrapes prose → Rust acts" pattern
+> from the core decision path.
 
 For the Rust types and driver loop, see
 [Reference: OODA Per-Goal-Cycle API](ooda-per-goal-cycle-api.md). For the
@@ -54,10 +63,15 @@ steps:
       ```
       ## OPTIONS  ...(6 actions)...
       ## RULES    ...(investigate-before-destructive)...
-      ## OUTPUT FORMAT ...(JSON envelope)...
+      ## HOW TO RECORD ...(call `simard ooda record-decision`)...
       ## EXAMPLES ...
     output: "per_goal_cycle_result"
 ```
+
+Two context vars drive the tool call: `-c record_path=<per-cycle tempdir>/decision.json`
+(where `RecipeBrain` reads the typed record) and `-c simard_bin=<current_exe>`
+(the absolute path the sandbox uses to resolve the tool). See
+[Reference: `simard ooda record-decision`](ooda-record-decision-cli.md).
 
 The recipe is loaded at **runtime** by recipe-runner-rs (edit the YAML / prompt,
 take effect next cycle, no rebuild), resolved in this order:
@@ -121,78 +135,105 @@ cycle once the investigation shows it is warranted.
 The prompt also carries an explicit **anti-heartbeat-reap** example so a future
 prompt edit does not re-introduce threshold reaping:
 
-```
+```text
 worker_present=false, standing_idle_signal=true, stale_claim_secs=9000
 
 A bursty standing goal with no live worktree is NORMAL, not death. This is the
 next piece of ongoing work, not a fault.
-{"choice": "spawn", "reason": "standing research goal is idle between bursts; seek a new source", "task_hint": "search for 2026 sources on <topic>"}
+→ simard ooda record-decision --choice spawn \
+    --reason "standing research goal is idle between bursts; seek a new source" \
+    --task-hint "search for 2026 sources on <topic>" ...
 ```
 
-## OUTPUT FORMAT — JSON envelope
+## HOW TO RECORD — call the typed decision tool
 
-The agent responds with a single JSON object (a fenced ```json block is fine;
-the shim strips surrounding banner/prose before parsing):
+The agent records its verdict by calling the zero-privilege tool
+[`simard ooda record-decision`](ooda-record-decision-cli.md) **exactly once**,
+using the injected `-c` context vars:
 
-```json
-{"choice": "<action>", "reason": "<why>"}
+```bash
+"$simard_bin" ooda record-decision \
+  --choice <continue|spawn|reorient|investigate|wait|complete> \
+  --reason "<short concrete reason>" \
+  [--task-hint "<hint, spawn only>"] \
+  --record-path "$record_path" \
+  --goal-id "$goal_id" \
+  --cycle-number "$cycle_number"
 ```
 
-where `<action>` is exactly one of `continue`, `spawn`, `reorient`,
-`investigate`, `wait`, `complete`. Only `spawn` may add a `task_hint` string.
-`reason` is **required** for every variant.
+`--choice` is validated against the closed `PerGoalAction` enum (case-insensitive);
+only `spawn` may carry a `task_hint`; `--reason` is mandatory and non-empty. The
+tool sanitizes and bounds the free text, then atomically writes a single
+`PerGoalDecisionRecord`. The agent prints **no JSON envelope** — its stdout is
+ignored.
 
-### Parsing & no silent fallback ([#1711](https://github.com/rysweet/Simard/issues/1711))
+### Reading & no silent fallback ([#1711](https://github.com/rysweet/Simard/issues/1711))
 
-`RecipeBrain::decide_per_goal_cycle` parses the envelope strictly:
+`RecipeBrain::decide_per_goal_cycle` reads the typed record with
+`read_verified(record_path, goal_id, cycle_number)` — it does **not** scrape the
+agent's stdout. Every failure mode is **fail-CLOSED** → `Err`:
 
-- Unknown `choice` → `Err`.
-- Missing/empty `reason` → `Err`.
-- Non-JSON / no envelope found → `Err`.
-- Subprocess spawn failure / non-zero exit → `Err`.
+- Record absent (tool never ran / binary unresolvable / non-zero exit) → `Err`.
+- Malformed JSON, wrong `schema`, unknown `choice`, missing/empty `reason` → `Err`.
+- `goal_id` / `cycle_number` mismatch (stale or prior-cycle record) → `Err`.
 
 An `Err` **surfaces as a cycle failure** — it is never silently coerced into a
-`continue` no-op. This is the contract that prevents a parse failure from
+`continue` no-op. This is the contract that prevents a parse/read failure from
 masquerading as a "do nothing" decision. The **only** brain that returns
 `Continue` without reasoning is the explicit `DeterministicLifecycleBrain`
-fallback (no LLM available), which by construction never rolls or reaps.
+fallback (no LLM available), which by construction never rolls or reaps. The
+full fail-closed matrix is in
+[Reference: `simard ooda record-decision`](ooda-record-decision-cli.md#read_verified--the-fail-closed-reader).
 
 ## Examples
 
+Each example shows the tool invocation and the typed record it writes.
+
 ### `continue`
 
+```bash
+simard ooda record-decision --choice continue \
+  --reason "PR #4501 open and CI running; engineer committed 3 min ago" ...
+```
+
 ```json
-{"choice": "continue", "reason": "PR #4501 open and CI running; engineer committed 3 min ago"}
+{"schema": "simard.ooda.per_goal_decision.v1", "goal_id": "...", "cycle_number": 4501, "choice": "continue", "reason": "PR #4501 open and CI running; engineer committed 3 min ago"}
 ```
 
 ### `spawn` (standing research goal, idle between bursts)
 
-```json
-{"choice": "spawn", "reason": "no live work; standing research goal must seek the next source", "task_hint": "survey arXiv 2026 for new results on <topic>"}
+```bash
+simard ooda record-decision --choice spawn \
+  --reason "no live work; standing research goal must seek the next source" \
+  --task-hint "survey arXiv 2026 for new results on <topic>" ...
 ```
 
 ### `investigate` (quiet worker — NOT an auto-reap)
 
-```json
-{"choice": "investigate", "reason": "stale_claim_secs=9000 and log tail truncated mid-tool-call; read logs before any reclaim"}
+```bash
+simard ooda record-decision --choice investigate \
+  --reason "stale_claim_secs=9000 and log tail truncated mid-tool-call; read logs before any reclaim" ...
 ```
 
 ### `wait` (blocked on external CI)
 
-```json
-{"choice": "wait", "reason": "PR #4501 awaiting required CI checks; nothing actionable this cycle"}
+```bash
+simard ooda record-decision --choice wait \
+  --reason "PR #4501 awaiting required CI checks; nothing actionable this cycle" ...
 ```
 
 ### `reorient` (deliberate redirect — clears wip refs)
 
-```json
-{"choice": "reorient", "reason": "current experiment design exhausted; pivot to the benchmark-first angle"}
+```bash
+simard ooda record-decision --choice reorient \
+  --reason "current experiment design exhausted; pivot to the benchmark-first angle" ...
 ```
 
 ### `complete`
 
-```json
-{"choice": "complete", "reason": "goal shipped and merged in PR #4501; success criteria met"}
+```bash
+simard ooda record-decision --choice complete \
+  --reason "goal shipped and merged in PR #4501; success criteria met" ...
 ```
 
 ## Comparison with the engineer-lifecycle recipe
@@ -203,7 +244,7 @@ fallback (no LLM available), which by construction never rolls or reaps.
 | Input | Live-worktree facts (mtime, sentinel pid) | **Durable** goal state + 3 demoted signals as inputs |
 | Actions | `continue_skipping` / `reclaim_and_redispatch` / `deprioritize` / `open_tracking_issue` / `mark_goal_blocked` / `consider_self_update` | `continue` / `spawn` / `reorient` / `investigate` / `wait` / `complete` |
 | Destructive path | direct (`reclaim_and_redispatch`) | **gated** behind an `investigate` verdict first |
-| Parse failure | bounded escalation → `Err` | bounded escalation → `Err` (no silent fallback) |
+| Parse failure | bounded escalation → `Err` | absent/malformed/mismatched typed record → `Err` (no silent fallback) |
 
 ## Versioning & Compatibility
 
@@ -212,18 +253,19 @@ Adding a new action requires a coordinated change:
 1. Add the variant to `PerGoalAction` in `src/ooda_brain/mod.rs`.
 2. Add its `apply_per_goal_action_to_state` mutation (respecting the A6
    `wip_refs` invariant).
-3. Add the `choice` tag + guidance to the `OPTIONS`/`RULES` sections of the
-   recipe YAML.
+3. Extend the `OPTIONS`/`HOW TO RECORD` guidance in the recipe YAML/prompt so the
+   agent knows to pass the new value to `--choice`.
 4. Add an example to `EXAMPLES` here and in the recipe.
-5. Add serde round-trip + mutation-table tests.
+5. Add serde round-trip, `read_verified` fail-closed, and mutation-table tests.
 
 Cosmetic prompt edits (rationale guidance, examples, ROLE phrasing) ship alone
 and take effect on the next cycle **without a rebuild**.
 
 ## See Also
 
+- [Reference: `simard ooda record-decision` (typed decision tool)](ooda-record-decision-cli.md) — the tool the recipe calls; record format & fail-closed matrix
 - [Reference: OODA Per-Goal-Cycle API](ooda-per-goal-cycle-api.md) — types, driver loop, tests
 - [Concept: Agentic Per-Goal, Per-Cycle Decision](../concepts/agentic-per-goal-per-cycle.md)
 - [Reference: OODA Engineer-Lifecycle Recipe](ooda-engineer-lifecycle-recipe.md) — the template
 - [Reference: recipe context variable sanitization](recipe-context-var-sanitization.md)
-- [Reference: OODA Brain Decision Protocol](ooda-brain-decision-protocol.md) — shared envelope conventions
+- [Reference: OODA Brain Decision Protocol](ooda-brain-decision-protocol.md) — shared decision conventions
