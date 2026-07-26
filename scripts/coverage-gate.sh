@@ -53,12 +53,15 @@ if [[ -z "$total" || "$total" == "null" ]]; then
 fi
 
 # Integer-scaled comparison keeps the gate free of floating-point shell math.
+# The `10#` prefixes force base-10: a scaled value below 1% carries a leading
+# zero (e.g. 0.58% -> "05800"), which bash would otherwise read as octal —
+# silently mis-comparing all-octal-digit values and erroring on any digit >= 8.
 total_scaled="$(printf '%.4f' "$total" | tr -d '.')"
 threshold_scaled="$(printf '%.4f' "$threshold" | tr -d '.')"
 
 printf 'coverage-gate: total line coverage = %.2f%% (threshold %s%%)\n' "$total" "$threshold"
 
-if (( total_scaled >= threshold_scaled )); then
+if (( 10#$total_scaled >= 10#$threshold_scaled )); then
   printf 'coverage-gate: DONE — %.2f%% >= %s%%. Close the goal (simard goal remove).\n' "$total" "$threshold"
   exit 0
 fi
