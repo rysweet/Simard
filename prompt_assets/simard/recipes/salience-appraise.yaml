@@ -14,11 +14,13 @@
 #   health_facts_path — ABSOLUTE path to a file of recent `interocept:` health
 #                   facts, similarly fenced and file-delivered.
 #
-# Output: a single strict-JSON object:
-#   { "ranking": [ { "goal_id": "<id>",
-#                    "valence": <f64 -1..1>,
-#                    "urgency": <f64 0..1>,
-#                    "reason":  "<short rationale>" } ] }
+# Output: NONE on stdout. The agent performs its two-projection effect by
+#   CALLING tools — the durable free-text rationale via `simard memory remember`
+#   and the numeric Decide signal via the CLAMPING/VALIDATING `simard cognition
+#   salience-signal` tool (which drops off-board ids and clamps every score
+#   itself, so no JSON is parsed in Rust). There is no JSON envelope and no
+#   output file for Rust to parse; the thread interprets this recipe by its EXIT
+#   STATUS alone.
 
 name: "salience-appraise"
 description: "Appraise what matters most now: valence + urgency per goal"
@@ -59,23 +61,48 @@ steps:
 
       ## Your job
 
-      For each active goal, emit a ranking entry with:
+      Appraise each genuinely salient active goal (you need not include every
+      goal). For each, decide:
         - `goal_id` — the goal's id, verbatim from the input;
         - `valence` — how positive/negative it feels, in `[-1.0, 1.0]`;
         - `urgency` — how time-critical it is, in `[0.0, 1.0]`;
-        - `reason`  — a short free-text rationale (stored durably, NOT sent to
-          the Decide step).
+        - a short free-text `reason` (stored durably, NOT sent to Decide).
 
-      Rank the genuinely salient goals; you need not include every goal.
+      This appraisal has TWO projections, each written by a tool call:
+
+      1. **Durable rationale** — one `simard memory remember` per goal you rank,
+         carrying the free-text reason (NEVER routed into a prompt):
+
+         ```
+         simard memory remember \
+           --concept=salience:<goal_id> \
+           --content="why this goal is salient right now" \
+           --tags=salience
+         ```
+
+      2. **Numeric Decide signal** — write the WHOLE ranking in ONE call to the
+         clamping/validating tool. The tool clamps each valence into `[-1,1]`
+         and urgency into `[0,1]`, drops any id not on the live board, and stamps
+         the generation epoch itself — you do NOT pre-clamp or emit JSON for Rust
+         to parse. Pass one repeatable `--entry goal_id:valence:urgency` flag per
+         ranked goal:
+
+         ```
+         simard cognition salience-signal \
+           --entry <goal_id>:<valence>:<urgency> \
+           --entry <goal_id>:<valence>:<urgency>
+         ```
+
+         For a large ranking, pass the entries as a JSON array on stdin instead:
+
+         ```
+         echo '[{"goal_id":"g1","valence":0.4,"urgency":0.8}]' \
+           | simard cognition salience-signal --stdin
+         ```
 
       ## Output
 
-      Return **only** this JSON object — no prose, no markdown fence:
-
-      ```json
-      {
-        "ranking": [
-          { "goal_id": "id", "valence": 0.0, "urgency": 0.0, "reason": "short rationale" }
-        ]
-      }
-      ```
+      There is **no JSON to print and no output file to write** by hand. Your
+      `simard memory remember` and `simard cognition salience-signal` calls ARE
+      the effect. If nothing is salient, still write the numeric signal (an empty
+      ranking is a valid, fail-closed "nothing pressing" signal) and finish.

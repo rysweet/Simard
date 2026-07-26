@@ -1,10 +1,11 @@
-//! Cognitive thread 7 (issue #5) — [`SalienceThread`]: appraise what matters most now; write the free-text reason to durable `salience:<goal_id>` facts and the numeric-only validated ranking to state/salience_signal.json (S1).
+//! Cognitive thread 7 (issue #5) — [`SalienceThread`]: appraise what matters most now. The recipe itself writes the free-text reason to durable `salience:<goal_id>` facts (`simard memory remember`) and the numeric-only validated ranking to state/salience_signal.json (`simard cognition salience-signal`) (S1).
 //!
 //! A thin `CognitiveThread` rail over the agentic recipe `salience-appraise`: assemble
-//! read-only context in-thread, fence memory-sourced text as untrusted, invoke
-//! the recipe through the shared [`RecipeInvoker`](super::super::recipe_rail),
-//! parse a strict-JSON envelope, then scrub + size-cap and write through the
-//! declared `salience:` prefix only. OFF by default behind the double env gate.
+//! read-only context in-thread, fence memory-sourced text as untrusted, then
+//! trigger the recipe through the shared [`RecipeInvoker`](super::super::recipe_rail)
+//! and record ran/health from its EXIT STATUS alone. The thread parses NOTHING
+//! back and performs NO durable write itself — the recipe's `simard …` tool
+//! calls ARE the effect. OFF by default behind the double env gate.
 //!
 //! **Status (issue #5):** implemented; [`SalienceThread::tick`] is covered by
 //! the hermetic offline unit tests in `tests_catalog` (fake recipe invoker)
@@ -13,10 +14,7 @@
 
 use std::time::{Duration, Instant};
 
-use serde_json::json;
-
 use super::super::recipe_rail::{self, RecipeInvoker};
-use super::super::salience_signal::{self, SalienceEntry, SalienceSignal};
 use super::super::schedule;
 use super::super::thread::{
     CognitiveThread, Priority, SchedulePolicy, ThreadContext, ThreadHealth, ThreadKind,
@@ -124,7 +122,23 @@ impl CognitiveThread for SalienceThread {
     fn tick(&mut self, ctx: &mut ThreadContext<'_>) -> ThreadOutcome {
         let start = Instant::now();
 
+        // The global safety switch prevents the durable-writing recipe from
+        // running at all — the recipe's own `simard memory remember` /
+        // `simard cognition salience-signal` calls are the only effect — so a
+        // dry-run tick triggers ZERO recipe subprocesses.
+        if ctx.dry_run || self.cfg.dry_run {
+            self.note_run(ctx.now_epoch, true);
+            return ThreadOutcome::ok(
+                format!("{RECIPE}: dry-run (no recipe triggered)"),
+                start.elapsed(),
+            );
+        }
+
         // INPUT — active goals (the appraisal targets) + health facts, fenced.
+        // The thread parses NOTHING back and performs NO durable write itself:
+        // the free-text `salience:` rationale facts AND the numeric Decide signal
+        // (`state/salience_signal.json`) are both written by the recipe's own
+        // `simard …` tool calls.
         let board = crate::goal_board_store::load(ctx.state_root).board;
         let goals = board
             .active
@@ -149,86 +163,10 @@ impl CognitiveThread for SalienceThread {
             ("health_facts", recipe_rail::fence_untrusted(&health)),
         ];
 
-        let envelope =
-            match recipe_rail::invoke_for_envelope(self.invoker.as_ref(), RECIPE, &ctx_vars, start)
-            {
-                Ok(v) => v,
-                Err(failed) => {
-                    self.note_run(ctx.now_epoch, false);
-                    return failed;
-                }
-            };
-
-        let dry_run = ctx.dry_run || self.cfg.dry_run;
-        if dry_run {
-            self.note_run(ctx.now_epoch, true);
-            return ThreadOutcome::ok("salience: dry-run", start.elapsed());
-        }
-
-        // WRITE — the two projections of one appraisal (S1):
-        //  1) durable `salience:<goal_id>` facts hold the free-text `reason`;
-        //  2) a numeric-only signal file feeds OODA Decide.
-        let mut entries: Vec<SalienceEntry> = Vec::new();
-        let mut facts_written = 0usize;
-        if let Some(ranking) = envelope.get("ranking").and_then(|v| v.as_array()) {
-            for e in ranking {
-                let goal_id = e.get("goal_id").and_then(|v| v.as_str()).unwrap_or("");
-                let valence = e.get("valence").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let urgency = e.get("urgency").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let reason = e.get("reason").and_then(|v| v.as_str()).unwrap_or("");
-                let Some(key) = recipe_rail::validate_concept_key(goal_id) else {
-                    continue;
-                };
-                // Free-text rationale → durable fact (NEVER routed into a prompt).
-                let concept = format!("salience:{key}");
-                let content = recipe_rail::secret_scrub(reason);
-                if let Err(e) = ctx.memory.store_fact_with_caller_key(
-                    &concept,
-                    &concept,
-                    &content,
-                    0.5,
-                    &["salience".to_string()],
-                    ID,
-                ) {
-                    self.note_run(ctx.now_epoch, false);
-                    return ThreadOutcome::failed(
-                        format!("salience fact write failed: {e}"),
-                        start.elapsed(),
-                    );
-                }
-                facts_written += 1;
-                entries.push(
-                    SalienceEntry {
-                        goal_id: key,
-                        valence,
-                        urgency,
-                    }
-                    .clamped(),
-                );
-            }
-        }
-
-        // Numeric-only Decide projection: only ids validated against the live
-        // board reach the file (S1). Absent board => empty ranking, file present.
-        let valid_ids: Vec<String> = board.active.iter().map(|g| g.id.clone()).collect();
-        let signal = SalienceSignal {
-            generated_epoch: ctx.now_epoch,
-            ranking: entries,
-        };
-        if let Err(e) = salience_signal::write_signal(ctx.state_root, &signal, &valid_ids) {
-            self.note_run(ctx.now_epoch, false);
-            return ThreadOutcome::failed(
-                format!("salience signal write failed: {e}"),
-                start.elapsed(),
-            );
-        }
-
-        self.note_run(ctx.now_epoch, true);
-        ThreadOutcome::ok(
-            format!("salience: {facts_written} rationale fact(s), signal written"),
-            start.elapsed(),
-        )
-        .with_detail(json!({ "facts_written": facts_written }))
+        // TRIGGER — record ran/health from the recipe's EXIT STATUS only.
+        let result = self.invoker.invoke(RECIPE, &ctx_vars);
+        self.note_run(ctx.now_epoch, result.is_success());
+        result.into_outcome(RECIPE, start.elapsed())
     }
 
     fn health(&self) -> ThreadHealth {

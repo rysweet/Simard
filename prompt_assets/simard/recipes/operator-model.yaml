@@ -13,11 +13,10 @@
 #                           large recall cannot overflow ARG_MAX and fail the
 #                           spawn with E2BIG (#2640/#2692). The agent READS it.
 #
-# Output: a single strict-JSON object:
-#   { "preferences": [ { "trait": "<snake_case>",
-#                        "value": "<observed value>",
-#                        "confidence": <f64 0..1>,
-#                        "evidence": "<short>" } ] }
+# Output: NONE on stdout. The agent performs its effect by CALLING the
+#   `simard memory remember` tool (concept `operator:<trait>`). No JSON
+#   envelope, no output file — the thread interprets this recipe by its EXIT
+#   STATUS alone.
 
 name: "operator-model"
 description: "Model operator intent, preferences and communication style"
@@ -68,12 +67,18 @@ steps:
 
       ## Output
 
-      Return **only** this JSON object — no prose, no markdown fence:
+      There is **no JSON to print and no output file to write**. Perform your
+      effect by CALLING the `simard memory remember` tool — one call per durable
+      operator-preference you infer:
 
-      ```json
-      {
-        "preferences": [
-          { "trait": "snake_case", "value": "observed value", "confidence": 0.0, "evidence": "short" }
-        ]
-      }
       ```
+      simard memory remember \
+        --concept=operator:<snake_case_trait> \
+        --content="observed value + short evidence" \
+        --confidence=0.6 \
+        --tags=operator-model
+      ```
+
+      Your `simard …` invocations ARE the effect. Infer only what the evidence
+      supports; if you learned nothing new about the operator, run no commands
+      and finish successfully.

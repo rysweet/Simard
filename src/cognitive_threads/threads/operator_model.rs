@@ -1,10 +1,12 @@
 //! Cognitive thread 8 (issue #5) — [`OperatorModelThread`]: grow a live operator model into `operator:<trait>` facts (secret-scrubbed, supersede-in-place), seeded read-only from USER_PREFERENCES.md.
 //!
 //! A thin `CognitiveThread` rail over the agentic recipe `operator-model`: assemble
-//! read-only context in-thread, fence memory-sourced text as untrusted, invoke
-//! the recipe through the shared [`RecipeInvoker`](super::super::recipe_rail),
-//! parse a strict-JSON envelope, then scrub + size-cap and write through the
-//! declared `operator:` prefix only. OFF by default behind the double env gate.
+//! read-only context in-thread, fence memory-sourced text as untrusted, then
+//! trigger the recipe through the shared [`RecipeInvoker`](super::super::recipe_rail)
+//! and record ran/health from its EXIT STATUS alone. The recipe's own `simard …`
+//! tool calls (writing `operator:` facts) ARE the effect — the thread parses NOTHING
+//! back and performs NO durable write itself. OFF by default behind the double
+//! env gate.
 //!
 //! **Status (issue #5):** implemented; [`OperatorModelThread::tick`] is covered
 //! by the hermetic offline unit tests in `tests_catalog` (fake recipe invoker)
@@ -12,8 +14,6 @@
 #![allow(dead_code)]
 
 use std::time::{Duration, Instant};
-
-use serde_json::json;
 
 use super::super::recipe_rail::{self, RecipeInvoker};
 use super::super::schedule;
@@ -123,7 +123,19 @@ impl CognitiveThread for OperatorModelThread {
     fn tick(&mut self, ctx: &mut ThreadContext<'_>) -> ThreadOutcome {
         let start = Instant::now();
 
+        // The global safety switch prevents the durable-writing recipe from
+        // running at all — the recipe's own `simard memory remember` calls are
+        // the only effect — so a dry-run tick triggers ZERO recipe subprocesses.
+        if ctx.dry_run || self.cfg.dry_run {
+            self.note_run(ctx.now_epoch, true);
+            return ThreadOutcome::ok(
+                format!("{RECIPE}: dry-run (no recipe triggered)"),
+                start.elapsed(),
+            );
+        }
+
         // INPUT — prior operator model (fenced as untrusted) for update-in-place.
+        // The thread parses NOTHING back and performs NO durable write itself.
         let prior = ctx
             .memory
             .search_facts("operator:", 30, 0.0)
@@ -141,62 +153,12 @@ impl CognitiveThread for OperatorModelThread {
             ("prior_operator_model", recipe_rail::fence_untrusted(&prior)),
         ];
 
-        let envelope =
-            match recipe_rail::invoke_for_envelope(self.invoker.as_ref(), RECIPE, &ctx_vars, start)
-            {
-                Ok(v) => v,
-                Err(failed) => {
-                    self.note_run(ctx.now_epoch, false);
-                    return failed;
-                }
-            };
-
-        let dry_run = ctx.dry_run || self.cfg.dry_run;
-
-        // WRITE — `operator:<trait>` facts, superseded in place (the model
-        // UPDATES, not accretes). Every value+evidence is secret-scrubbed so a
-        // token in a source episode is never echoed into a stored fact (S5).
-        let mut written = 0usize;
-        if let Some(prefs) = envelope.get("preferences").and_then(|v| v.as_array()) {
-            for p in prefs {
-                let trait_name = p.get("trait").and_then(|v| v.as_str()).unwrap_or("");
-                let value = p.get("value").and_then(|v| v.as_str()).unwrap_or("");
-                let confidence = p.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.5);
-                let evidence = p.get("evidence").and_then(|v| v.as_str()).unwrap_or("");
-                let Some(key) = recipe_rail::validate_concept_key(trait_name) else {
-                    continue;
-                };
-                if dry_run {
-                    written += 1;
-                    continue;
-                }
-                let concept = format!("operator:{key}");
-                let content =
-                    recipe_rail::secret_scrub(&format!("{} (evidence: {})", value, evidence));
-                if let Err(e) = ctx.memory.store_fact_with_caller_key(
-                    &concept,
-                    &concept,
-                    &content,
-                    confidence.clamp(0.0, 1.0),
-                    &["operator".to_string()],
-                    ID,
-                ) {
-                    self.note_run(ctx.now_epoch, false);
-                    return ThreadOutcome::failed(
-                        format!("operator fact write failed: {e}"),
-                        start.elapsed(),
-                    );
-                }
-                written += 1;
-            }
-        }
-
-        self.note_run(ctx.now_epoch, true);
-        ThreadOutcome::ok(
-            format!("operator_model: {written} preference(s)"),
-            start.elapsed(),
-        )
-        .with_detail(json!({ "preferences_written": written, "dry_run": dry_run }))
+        // TRIGGER — record ran/health from the recipe's EXIT STATUS only. The
+        // recipe writes each `operator:` trait fact itself via
+        // `simard memory remember`.
+        let result = self.invoker.invoke(RECIPE, &ctx_vars);
+        self.note_run(ctx.now_epoch, result.is_success());
+        result.into_outcome(RECIPE, start.elapsed())
     }
 
     fn health(&self) -> ThreadHealth {

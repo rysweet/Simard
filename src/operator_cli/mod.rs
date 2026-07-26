@@ -1,5 +1,6 @@
 mod args;
 mod ci_health;
+pub(crate) mod cognition;
 mod creative_ideas;
 mod curation;
 mod dashboard;
@@ -259,6 +260,7 @@ where
         "dashboard" => dashboard::dispatch_dashboard_command(args),
         "signal" => signal::dispatch_signal_command(args),
         "memory" => memory::dispatch_memory_command(args),
+        "cognition" => cognition::dispatch_cognition_command(args),
         "status" => status::dispatch_status_command(args),
         "spawn" => dispatch_spawn_command(args),
         "merge-pr" => merge::dispatch_merge_pr_command(args),

@@ -1,9 +1,11 @@
 //! The one shared brick behind the ten reflective threads (issue #5).
 //!
-//! `RecipeInvoker` is a synchronous "run one recipe, get its strict-JSON
-//! stdout" seam: given a recipe name and context variables it resolves + spawns
-//! `recipe-runner-rs`, reads stdout, and returns a **classified** result
-//! ([`InvokeResult`]). Every recipe-backed thread depends on this one trait so
+//! `RecipeInvoker` is a synchronous "run one recipe, get a success/failure
+//! verdict" seam: given a recipe name and context variables it resolves + spawns
+//! `recipe-runner-rs` and returns whether it ran ([`InvokeResult`]) — it parses
+//! NOTHING from stdout, because each recipe performs every durable effect itself
+//! via its own `simard …` tool calls (like `distill-episodes.yaml`). Every
+//! recipe-backed thread depends on this one trait so
 //! every thread's unit test runs offline through a fake. Alongside the trait the
 //! brick exports the three small security helpers every rail applies before a
 //! durable write ([`sanitize_value`], [`fence_untrusted`], [`secret_scrub`]),
@@ -24,9 +26,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Instant;
-
-use serde_json::Value;
 
 use crate::recipe_context_file::ContextFile;
 
@@ -35,73 +34,68 @@ use super::thread::ThreadOutcome;
 /// The master env gate that must be truthy for *any* cognitive thread to run.
 pub const MASTER_GATE_ENV: &str = "SIMARD_COGNITIVE_THREADS_ENABLED";
 
-/// Hard cap on the parsed stdout the invoker will accept from a recipe, so a
-/// runaway recipe cannot exhaust memory or flood a durable sink (SR-11).
-pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
-
 /// Maximum length of an LLM-derived concept key (SR-7). Longer keys are
 /// rejected rather than truncated so a partial key can never collide.
 pub const MAX_CONCEPT_KEY_LEN: usize = 128;
 
-/// Synchronous "run one recipe, get its strict-JSON stdout" seam.
+/// Synchronous "run one recipe, get a success/failure verdict" seam.
+///
+/// The recipe performs every durable effect ITSELF via its own `simard …` tool
+/// calls (`simard memory remember` / `remember-procedure` / `goal add` /
+/// `cognition salience-signal`), exactly like `distill-episodes.yaml`. So the
+/// invoker parses NOTHING from stdout — it only reports whether the recipe ran.
 pub trait RecipeInvoker: Send {
     /// Resolve + spawn `<recipe_name>.yaml`, pass each `(k, v)` as a **distinct**
-    /// `-c k=v` argv pair (no shell), read stdout under [`MAX_OUTPUT_BYTES`], and
-    /// return the classified result. NEVER silently degrades: infra and semantic
-    /// misses are distinct, both non-success.
+    /// `-c k=v` argv pair (no shell), and return whether it ran: a clean exit is
+    /// [`InvokeResult::Ran`], anything else is [`InvokeResult::Failed`]. NEVER
+    /// silently degrades — a failed run is recorded LOUDLY, never squashed into
+    /// a "ran, wrote nothing" success.
     fn invoke(&self, recipe_name: &str, ctx_vars: &[(&str, String)]) -> InvokeResult;
 }
 
-/// The three-way classification of a recipe run — the crux of the
-/// no-silent-degradation contract (invariant I4 / SR-9).
+/// The two-way verdict of a recipe run — the crux of the no-silent-degradation
+/// contract (invariant I4 / SR-9). There is deliberately no third "semantic
+/// miss" state to swallow: the recipe's tool calls ARE its effect, so stdout is
+/// never parsed and a torn envelope can no longer discard the work.
 #[derive(Clone, Debug)]
 pub enum InvokeResult {
-    /// exit 0, non-empty stdout, parsed as strict JSON within the size cap.
-    Json(Value),
-    /// exit 0, non-empty stdout, but unparseable / typeless / oversized envelope.
-    SemanticMiss {
-        /// The raw (bounded) stdout, for diagnostics only — never written durably.
-        raw: String,
-    },
-    /// spawn error | non-zero exit | empty stdout.
-    InfraFailure {
-        /// Human-readable failure detail, for diagnostics only.
+    /// The recipe exited 0. Its own `simard …` tool calls performed every
+    /// durable effect; the invoker read nothing back.
+    Ran,
+    /// spawn error | non-zero exit. Recorded LOUDLY, never a silent success.
+    Failed {
+        /// Human-readable failure detail, for diagnostics / health only.
         detail: String,
     },
 }
 
 impl InvokeResult {
-    /// `true` only for [`InvokeResult::Json`] — the single case a rail may write.
+    /// `true` only for [`InvokeResult::Ran`] — a non-zero recipe is a failure,
+    /// never a silent success.
     pub fn is_success(&self) -> bool {
-        matches!(self, InvokeResult::Json(_))
+        matches!(self, InvokeResult::Ran)
     }
 
-    /// Borrow the parsed JSON, if this was a successful `Json` result.
-    pub fn json(&self) -> Option<&Value> {
+    /// Map the verdict to a [`ThreadOutcome`]: `Ran` => a successful tick,
+    /// `Failed` => a failed tick surfaced LOUDLY with its detail. No third state
+    /// can quietly turn a failure into a wrote-nothing success.
+    pub fn into_outcome(self, recipe_name: &str, duration: std::time::Duration) -> ThreadOutcome {
         match self {
-            InvokeResult::Json(v) => Some(v),
-            _ => None,
-        }
-    }
-
-    /// Map a non-success result to a [`ThreadOutcome::failed`] with a stable
-    /// summary so every rail surfaces the same asymmetry: both `SemanticMiss`
-    /// and `InfraFailure` fail the tick and perform **zero** writes.
-    pub fn into_failed_outcome(
-        self,
-        recipe_name: &str,
-        duration: std::time::Duration,
-    ) -> ThreadOutcome {
-        match self {
-            InvokeResult::Json(_) => ThreadOutcome::ok(format!("{recipe_name}: ok"), duration),
-            InvokeResult::SemanticMiss { .. } => {
-                ThreadOutcome::failed(format!("{recipe_name}: semantic miss"), duration)
-            }
-            InvokeResult::InfraFailure { detail } => {
-                ThreadOutcome::failed(format!("{recipe_name}: infra failure: {detail}"), duration)
+            InvokeResult::Ran => ThreadOutcome::ok(format!("{recipe_name}: ok"), duration),
+            InvokeResult::Failed { detail } => {
+                ThreadOutcome::failed(format!("{recipe_name}: {detail}"), duration)
             }
         }
     }
+}
+
+/// The memory IPC socket a reflective recipe inherits so a bare `simard memory
+/// remember` inside it reaches the SAME live store the daemon publishes — the
+/// exact seam the episode-distiller uses (issue #2679). Kept identical to
+/// [`crate::memory_ipc::socket_path_for`] so the rail and the daemon never
+/// disagree on the path.
+pub fn memory_socket_path(state_root: &Path) -> PathBuf {
+    crate::memory_ipc::socket_path_for(state_root)
 }
 
 /// Strip newlines, carriage returns, NUL, and other control characters from a
@@ -344,58 +338,6 @@ pub fn thread_enabled(thread_gate_env: &str) -> bool {
     )
 }
 
-/// The one shared invoke step every recipe-backed rail runs: invoke `recipe`
-/// with `ctx_vars` and return the parsed strict-JSON envelope, or the mapped
-/// [`ThreadOutcome::failed`] when the run was not a clean `Json` success.
-///
-/// This is the no-silent-degradation crux (I4 / SR-9): **both** a
-/// [`InvokeResult::SemanticMiss`] and an [`InvokeResult::InfraFailure`] short-
-/// circuit to a failed tick with **zero** durable writes — the rail simply
-/// `?`-style returns the `Err`. Only `Json` reaches the write phase.
-pub fn invoke_for_envelope(
-    invoker: &dyn RecipeInvoker,
-    recipe: &str,
-    ctx_vars: &[(&str, String)],
-    started: Instant,
-) -> Result<Value, ThreadOutcome> {
-    match invoker.invoke(recipe, ctx_vars) {
-        InvokeResult::Json(v) => Ok(v),
-        other => Err(other.into_failed_outcome(recipe, started.elapsed())),
-    }
-}
-
-/// Propose at most one goal onto the shared board through the single capacity-
-/// checked path (`goal_board_store::mutate`), preserving the global
-/// `MAX_ACTIVE_GOALS` cap across every thread proposer. Returns `true` iff a new
-/// goal was actually appended.
-///
-/// A thread-proposed goal is **enforcement-equivalent** to an operator goal: no
-/// privileged path, deduplicated by id, and blockable by the overseer exactly
-/// like any other (invariant S3). Best-effort — a locked/unwritable board
-/// never fails the calling tick.
-pub fn propose_goal_if_capacity(
-    state_root: &Path,
-    id: &str,
-    description: &str,
-    priority: u32,
-) -> bool {
-    use crate::goal_curation::ActiveGoal;
-    crate::goal_board_store::mutate(state_root, |state| {
-        if state.board.active_slots_remaining() > 0
-            && !state.board.active.iter().any(|g| g.id == id)
-        {
-            state
-                .board
-                .active
-                .push(ActiveGoal::new(id, description, priority));
-            true
-        } else {
-            false
-        }
-    })
-    .unwrap_or(false)
-}
-
 /// Production [`RecipeInvoker`] — a faithful extraction of the existing
 /// progress-checker subprocess path plus the security contract (argv discipline,
 /// hot-vs-in-tree path resolution + logging, size cap, classification).
@@ -465,7 +407,7 @@ impl RecipeInvoker for RecipeRunnerInvoker {
         let (path, _from_hot) = match self.resolve_recipe_path(recipe_name) {
             Some(p) => p,
             None => {
-                return InvokeResult::InfraFailure {
+                return InvokeResult::Failed {
                     detail: format!(
                         "recipe `{recipe_name}` not found in hot-reload or in-tree paths"
                     ),
@@ -476,7 +418,7 @@ impl RecipeInvoker for RecipeRunnerInvoker {
         let agent_binary = match crate::runtime_config::RuntimeConfig::load() {
             Ok(cfg) => cfg.llm_provider.agent_binary_value().to_string(),
             Err(e) => {
-                return InvokeResult::InfraFailure {
+                return InvokeResult::Failed {
                     detail: format!("runtime config load failed: {e}"),
                 };
             }
@@ -491,19 +433,22 @@ impl RecipeInvoker for RecipeRunnerInvoker {
         let (arg_values, _guards) = match build_context_args(recipe_name, ctx_vars) {
             Ok(pair) => pair,
             Err(e) => {
-                return InvokeResult::InfraFailure {
+                return InvokeResult::Failed {
                     detail: format!("recipe context-file write failed: {e}"),
                 };
             }
         };
 
         // 3. Spawn with argv discipline — each `-c …` is a DISTINCT argv pair,
-        //    never a shell string (SR-8).
+        //    never a shell string (SR-8). Export SIMARD_MEMORY_SOCKET so a bare
+        //    `simard memory remember` inside the recipe reaches the SAME live
+        //    store the daemon publishes, through the gated write boundary — the
+        //    exact episode-distiller seam (issue #2679). The recipe's own tool
+        //    calls ARE its effect; this invoker reads NOTHING back from stdout.
         let mut cmd = Command::new("recipe-runner-rs");
         cmd.arg(path.as_os_str())
-            .arg("--output-format")
-            .arg("json")
-            .env("AMPLIHACK_AGENT_BINARY", agent_binary);
+            .env("AMPLIHACK_AGENT_BINARY", agent_binary)
+            .env("SIMARD_MEMORY_SOCKET", memory_socket_path(&self.state_root));
         for value in &arg_values {
             cmd.arg("-c").arg(value);
         }
@@ -511,35 +456,29 @@ impl RecipeInvoker for RecipeRunnerInvoker {
         let output = match cmd.output() {
             Ok(o) => o,
             Err(e) => {
-                return InvokeResult::InfraFailure {
+                return InvokeResult::Failed {
                     detail: format!("recipe-runner-rs spawn failed: {e}"),
                 };
             }
         };
-        if !output.status.success() {
+
+        // 4. Success is EXIT STATUS only (SR-9). A clean exit is `Ran` — the
+        //    recipe's `simard …` tool calls already performed every durable
+        //    effect. A non-zero exit is a LOUD `Failed` carrying bounded stderr
+        //    for health/logging; nothing is ever parsed from stdout, so a torn
+        //    envelope can no longer discard the work (#2658/#2679).
+        if output.status.success() {
+            InvokeResult::Ran
+        } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return InvokeResult::InfraFailure {
+            InvokeResult::Failed {
                 detail: format!(
                     "recipe-runner-rs exited {}: {}",
                     output.status,
                     bound_diag(&stderr)
                 ),
-            };
+            }
         }
-
-        // 4. Size-cap stdout (SR-11) then classify (SR-9): only a clean strict-
-        //    JSON object is a success; anything else is a SemanticMiss.
-        let mut bytes = output.stdout;
-        if bytes.len() > MAX_OUTPUT_BYTES {
-            bytes.truncate(MAX_OUTPUT_BYTES);
-        }
-        let raw = String::from_utf8_lossy(&bytes);
-        if raw.trim().is_empty() {
-            return InvokeResult::InfraFailure {
-                detail: "recipe produced empty stdout".to_string(),
-            };
-        }
-        classify_recipe_stdout(&raw)
     }
 }
 
@@ -582,47 +521,6 @@ fn build_context_args(
 fn bound_diag(s: &str) -> String {
     const MAX: usize = 500;
     s.chars().take(MAX).collect::<String>().trim().to_string()
-}
-
-/// Classify recipe-runner-rs stdout into the success/miss contract: prefer the
-/// runner's JSON envelope's last step output, fall back to a bare object in
-/// stdout, and require a strict-JSON **object** to count as `Json`.
-fn classify_recipe_stdout(raw: &str) -> InvokeResult {
-    let payload =
-        parse_step_output(raw).or_else(|| crate::recipe_output::extract::extract_json_payload(raw));
-    match payload {
-        Some(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(v) if v.is_object() => InvokeResult::Json(v),
-            _ => InvokeResult::SemanticMiss {
-                raw: bound_diag(raw),
-            },
-        },
-        None => InvokeResult::SemanticMiss {
-            raw: bound_diag(raw),
-        },
-    }
-}
-
-/// Pull the strict-JSON object out of the recipe-runner-rs `--output-format
-/// json` envelope's last step, or `None` if the envelope is absent, reported
-/// `success=false`, or has no JSON-object step output.
-fn parse_step_output(raw: &str) -> Option<String> {
-    #[derive(serde::Deserialize)]
-    struct StepResult {
-        output: String,
-    }
-    #[derive(serde::Deserialize)]
-    struct RecipeEnvelope {
-        success: bool,
-        #[serde(default)]
-        step_results: Vec<StepResult>,
-    }
-    let envelope: RecipeEnvelope = serde_json::from_str(raw).ok()?;
-    if !envelope.success {
-        return None;
-    }
-    let last = envelope.step_results.last()?;
-    crate::recipe_output::extract::extract_json_payload(&last.output)
 }
 
 /// Whether `dir` is group- or world-writable (SR-4). On non-unix targets this

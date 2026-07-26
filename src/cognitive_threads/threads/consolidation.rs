@@ -1,10 +1,12 @@
 //! Cognitive thread 2 (issue #5) — [`ConsolidationThread`]: replay undistilled episodes -> facts/procedures, form `schema:` facts, and advise (dry-run/class-protected/logged) forgetting of low-value memory; distillation itself reuses `distill-episodes.yaml`.
 //!
 //! A thin `CognitiveThread` rail over the agentic recipe `consolidate-sleep`: assemble
-//! read-only context in-thread, fence memory-sourced text as untrusted, invoke
-//! the recipe through the shared [`RecipeInvoker`](super::super::recipe_rail),
-//! parse a strict-JSON envelope, then scrub + size-cap and write through the
-//! declared `schema:` prefix only. OFF by default behind the double env gate.
+//! read-only context in-thread, fence memory-sourced text as untrusted, then
+//! trigger the recipe through the shared [`RecipeInvoker`](super::super::recipe_rail)
+//! and record ran/health from its EXIT STATUS alone. The recipe's own `simard …`
+//! tool calls (writing `schema:` facts) ARE the effect — the thread parses NOTHING
+//! back and performs NO durable write itself. OFF by default behind the double
+//! env gate.
 //!
 //! **Status (issue #5):** implemented; [`ConsolidationThread::tick`] is covered
 //! by the hermetic offline unit tests in `tests_catalog` (fake recipe invoker)
@@ -12,8 +14,6 @@
 #![allow(dead_code)]
 
 use std::time::{Duration, Instant};
-
-use serde_json::json;
 
 use super::super::recipe_rail::{self, RecipeInvoker};
 use super::super::schedule;
@@ -123,7 +123,19 @@ impl CognitiveThread for ConsolidationThread {
     fn tick(&mut self, ctx: &mut ThreadContext<'_>) -> ThreadOutcome {
         let start = Instant::now();
 
-        // INPUT — memory pressure + prior schemas (fenced as untrusted).
+        // The global safety switch prevents the durable-writing recipe from
+        // running at all — the recipe's own `simard memory remember` calls are
+        // the only effect — so a dry-run tick triggers ZERO recipe subprocesses.
+        if ctx.dry_run || self.cfg.dry_run {
+            self.note_run(ctx.now_epoch, true);
+            return ThreadOutcome::ok(
+                format!("{RECIPE}: dry-run (no recipe triggered)"),
+                start.elapsed(),
+            );
+        }
+
+        // INPUT — memory pressure + prior schemas (fenced as untrusted). The
+        // thread parses NOTHING back and performs NO durable write itself.
         let stats = ctx.memory.get_statistics().ok();
         let prior = ctx
             .memory
@@ -136,88 +148,18 @@ impl CognitiveThread for ConsolidationThread {
                     .join("\n")
             })
             .unwrap_or_default();
+        let episodic_count = stats.as_ref().map_or(0, |s| s.episodic_count);
         let ctx_vars: Vec<(&str, String)> = vec![
             ("state_root", ctx.state_root.display().to_string()),
-            (
-                "episodic_count",
-                stats
-                    .as_ref()
-                    .map(|s| s.episodic_count)
-                    .unwrap_or(0)
-                    .to_string(),
-            ),
+            ("episodic_count", episodic_count.to_string()),
             ("prior_schemas", recipe_rail::fence_untrusted(&prior)),
         ];
 
-        let envelope =
-            match recipe_rail::invoke_for_envelope(self.invoker.as_ref(), RECIPE, &ctx_vars, start)
-            {
-                Ok(v) => v,
-                Err(failed) => {
-                    self.note_run(ctx.now_epoch, false);
-                    return failed;
-                }
-            };
-
-        let dry_run = ctx.dry_run || self.cfg.dry_run;
-
-        // Deepen the existing distillation loop (reused, never reimplemented) and
-        // run forgetting in ADVISORY dry-run only — thread-initiated forgetting is
-        // never a single-pass delete (invariant S4). Both best-effort.
-        if !dry_run {
-            let _ = ctx.memory.consolidate_episodes(20);
-            let _ = ctx.memory.forget_low_value_facts(true);
-        }
-
-        // WRITE — one `schema:<cluster>` fact per higher-order schema.
-        let mut written = 0usize;
-        if let Some(schemas) = envelope.get("schemas").and_then(|v| v.as_array()) {
-            for s in schemas {
-                let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let summary = s.get("summary").and_then(|v| v.as_str()).unwrap_or("");
-                let members = s
-                    .get("member_concepts")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
-                    .unwrap_or_default();
-                let Some(key) = recipe_rail::validate_concept_key(name) else {
-                    continue;
-                };
-                if dry_run {
-                    written += 1;
-                    continue;
-                }
-                let concept = format!("schema:{key}");
-                let content = recipe_rail::secret_scrub(&format!("{summary} [members: {members}]"));
-                if let Err(e) = ctx.memory.store_fact_with_caller_key(
-                    &concept,
-                    &concept,
-                    &content,
-                    0.6,
-                    &["schema".to_string()],
-                    ID,
-                ) {
-                    self.note_run(ctx.now_epoch, false);
-                    return ThreadOutcome::failed(
-                        format!("schema fact write failed: {e}"),
-                        start.elapsed(),
-                    );
-                }
-                written += 1;
-            }
-        }
-
-        self.note_run(ctx.now_epoch, true);
-        ThreadOutcome::ok(
-            format!("consolidation: {written} schema(s)"),
-            start.elapsed(),
-        )
-        .with_detail(json!({ "schemas_written": written, "dry_run": dry_run }))
+        // TRIGGER — record ran/health from the recipe's EXIT STATUS only. The
+        // recipe writes each `schema:` fact itself via `simard memory remember`.
+        let result = self.invoker.invoke(RECIPE, &ctx_vars);
+        self.note_run(ctx.now_epoch, result.is_success());
+        result.into_outcome(RECIPE, start.elapsed())
     }
 
     fn health(&self) -> ThreadHealth {

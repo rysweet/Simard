@@ -1,10 +1,12 @@
 //! Cognitive thread 12 (issue #5) — [`NarrativeThread`]: maintain a singleton `narrative:identity` fact (supersede-in-place) plus append-only `narrative:chapter:<epoch>` milestones for identity continuity.
 //!
 //! A thin `CognitiveThread` rail over the agentic recipe `narrative-identity`: assemble
-//! read-only context in-thread, fence memory-sourced text as untrusted, invoke
-//! the recipe through the shared [`RecipeInvoker`](super::super::recipe_rail),
-//! parse a strict-JSON envelope, then scrub + size-cap and write through the
-//! declared `narrative:` prefix only. OFF by default behind the double env gate.
+//! read-only context in-thread, fence memory-sourced text as untrusted, then
+//! trigger the recipe through the shared [`RecipeInvoker`](super::super::recipe_rail)
+//! and record ran/health from its EXIT STATUS alone. The recipe's own `simard …`
+//! tool calls (writing `narrative:` facts) ARE the effect — the thread parses NOTHING
+//! back and performs NO durable write itself. OFF by default behind the double
+//! env gate.
 //!
 //! **Status (issue #5):** implemented; [`NarrativeThread::tick`] is covered by
 //! the hermetic offline unit tests in `tests_catalog` (fake recipe invoker)
@@ -12,8 +14,6 @@
 #![allow(dead_code)]
 
 use std::time::{Duration, Instant};
-
-use serde_json::json;
 
 use super::super::recipe_rail::{self, RecipeInvoker};
 use super::super::schedule;
@@ -123,7 +123,19 @@ impl CognitiveThread for NarrativeThread {
     fn tick(&mut self, ctx: &mut ThreadContext<'_>) -> ThreadOutcome {
         let start = Instant::now();
 
+        // The global safety switch prevents the durable-writing recipe from
+        // running at all — the recipe's own `simard memory remember` calls are
+        // the only effect — so a dry-run tick triggers ZERO recipe subprocesses.
+        if ctx.dry_run || self.cfg.dry_run {
+            self.note_run(ctx.now_epoch, true);
+            return ThreadOutcome::ok(
+                format!("{RECIPE}: dry-run (no recipe triggered)"),
+                start.elapsed(),
+            );
+        }
+
         // INPUT — the current self-story + recent chapters, fenced as untrusted.
+        // The thread parses NOTHING back and performs NO durable write itself.
         let prior_identity = ctx
             .memory
             .search_facts("narrative:identity", 1, 0.0)
@@ -140,68 +152,12 @@ impl CognitiveThread for NarrativeThread {
             ),
         ];
 
-        let envelope =
-            match recipe_rail::invoke_for_envelope(self.invoker.as_ref(), RECIPE, &ctx_vars, start)
-            {
-                Ok(v) => v,
-                Err(failed) => {
-                    self.note_run(ctx.now_epoch, false);
-                    return failed;
-                }
-            };
-
-        let dry_run = ctx.dry_run || self.cfg.dry_run;
-        let identity = envelope
-            .get("identity")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        // WRITE — the identity fact is a SINGLETON: superseded in place through a
-        // stable caller key so it is never duplicated across ticks.
-        if !dry_run && !identity.trim().is_empty() {
-            let content = recipe_rail::secret_scrub(identity);
-            if let Err(e) = ctx.memory.store_fact_with_caller_key(
-                "narrative:identity",
-                "narrative:identity",
-                &content,
-                0.9,
-                &["narrative".to_string()],
-                ID,
-            ) {
-                self.note_run(ctx.now_epoch, false);
-                return ThreadOutcome::failed(
-                    format!("identity fact write failed: {e}"),
-                    start.elapsed(),
-                );
-            }
-        }
-
-        // An optional new chapter is an APPEND-only, per-epoch fact (not a
-        // singleton) — the story's continuity across time.
-        let mut chapter_written = false;
-        if let Some(chapter) = envelope.get("new_chapter").and_then(|v| v.as_str())
-            && !dry_run
-            && !chapter.trim().is_empty()
-        {
-            let concept = format!("narrative:chapter:{}", ctx.now_epoch);
-            chapter_written = ctx
-                .memory
-                .store_fact(
-                    &concept,
-                    &recipe_rail::secret_scrub(chapter),
-                    0.7,
-                    &["narrative".to_string()],
-                    ID,
-                )
-                .is_ok();
-        }
-
-        self.note_run(ctx.now_epoch, true);
-        ThreadOutcome::ok(
-            format!("narrative: identity refreshed, chapter={chapter_written}"),
-            start.elapsed(),
-        )
-        .with_detail(json!({ "chapter_written": chapter_written, "dry_run": dry_run }))
+        // TRIGGER — record ran/health from the recipe's EXIT STATUS only. The
+        // recipe supersedes the `narrative:identity` singleton and appends any
+        // new chapter itself via `simard memory remember`.
+        let result = self.invoker.invoke(RECIPE, &ctx_vars);
+        self.note_run(ctx.now_epoch, result.is_success());
+        result.into_outcome(RECIPE, start.elapsed())
     }
 
     fn health(&self) -> ThreadHealth {

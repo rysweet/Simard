@@ -230,12 +230,7 @@ impl CognitiveThread for InteroceptionThread {
                 issue_filed = self.gh.create_issue(&self.cfg.repo, title, &body).is_ok();
             }
             let id = format!("interoception-health-{}", ctx.now_epoch);
-            health_goal = super::super::recipe_rail::propose_goal_if_capacity(
-                ctx.state_root,
-                &id,
-                &breach_detail,
-                20,
-            );
+            health_goal = propose_health_goal_if_capacity(ctx.state_root, &id, &breach_detail, 20);
         }
 
         self.note_run(ctx.now_epoch, true);
@@ -267,4 +262,32 @@ impl CognitiveThread for InteroceptionThread {
 
 fn read_u64_env(key: &str) -> Option<u64> {
     std::env::var(key).ok().and_then(|s| s.trim().parse().ok())
+}
+
+/// Propose at most one health goal onto the shared board through the single
+/// capacity-checked path (`goal_board_store::mutate`), preserving the global
+/// `MAX_ACTIVE_GOALS` cap. Deduplicated by id; best-effort (a locked/unwritable
+/// board never fails the calling tick). A thread-proposed goal is
+/// enforcement-equivalent to an operator goal — no privileged path (S3).
+fn propose_health_goal_if_capacity(
+    state_root: &std::path::Path,
+    id: &str,
+    description: &str,
+    priority: u32,
+) -> bool {
+    use crate::goal_curation::ActiveGoal;
+    crate::goal_board_store::mutate(state_root, |state| {
+        if state.board.active_slots_remaining() > 0
+            && !state.board.active.iter().any(|g| g.id == id)
+        {
+            state
+                .board
+                .active
+                .push(ActiveGoal::new(id, description, priority));
+            true
+        } else {
+            false
+        }
+    })
+    .unwrap_or(false)
 }

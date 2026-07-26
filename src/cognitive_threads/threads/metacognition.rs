@@ -1,10 +1,12 @@
 //! Cognitive thread 1 (issue #5) — [`MetacognitionThread`]: compare stated confidence vs actual outcome, scan for error/bias signatures, publish calibration + decision-quality self-metrics and `metacog:` facts, and propose <=1 recalibration goal on threshold.
 //!
 //! A thin `CognitiveThread` rail over the agentic recipe `metacognition-appraise`: assemble
-//! read-only context in-thread, fence memory-sourced text as untrusted, invoke
-//! the recipe through the shared [`RecipeInvoker`](super::super::recipe_rail),
-//! parse a strict-JSON envelope, then scrub + size-cap and write through the
-//! declared `metacog:` prefix only. OFF by default behind the double env gate.
+//! read-only context in-thread, fence memory-sourced text as untrusted, then
+//! trigger the recipe through the shared [`RecipeInvoker`](super::super::recipe_rail)
+//! and record ran/health from its EXIT STATUS alone. The recipe's own `simard …`
+//! tool calls (writing `metacog:` facts) ARE the effect — the thread parses NOTHING
+//! back and performs NO durable write itself. OFF by default behind the double
+//! env gate.
 //!
 //! **Status (issue #5):** implemented; [`MetacognitionThread::tick`] is covered
 //! by the hermetic offline unit tests in `tests_catalog` (fake recipe invoker)
@@ -12,8 +14,6 @@
 #![allow(dead_code)]
 
 use std::time::{Duration, Instant};
-
-use serde_json::json;
 
 use super::super::recipe_rail::{self, RecipeInvoker};
 use super::super::schedule;
@@ -124,7 +124,19 @@ impl CognitiveThread for MetacognitionThread {
     fn tick(&mut self, ctx: &mut ThreadContext<'_>) -> ThreadOutcome {
         let start = Instant::now();
 
+        // The global safety switch prevents the durable-writing recipe from
+        // running at all — the recipe's own `simard memory remember` calls are
+        // the only effect — so a dry-run tick triggers ZERO recipe subprocesses.
+        if ctx.dry_run || self.cfg.dry_run {
+            self.note_run(ctx.now_epoch, true);
+            return ThreadOutcome::ok(
+                format!("{RECIPE}: dry-run (no recipe triggered)"),
+                start.elapsed(),
+            );
+        }
+
         // INPUT — assemble read-only context and fence prior facts as untrusted.
+        // The thread parses NOTHING back and performs NO durable write itself.
         let prior = ctx
             .memory
             .search_facts("metacog:", 20, 0.0)
@@ -142,77 +154,11 @@ impl CognitiveThread for MetacognitionThread {
             ("prior_metacognition", recipe_rail::fence_untrusted(&prior)),
         ];
 
-        // INVOKE — no-silent-degradation: both misses short-circuit to failed().
-        let envelope =
-            match recipe_rail::invoke_for_envelope(self.invoker.as_ref(), RECIPE, &ctx_vars, start)
-            {
-                Ok(v) => v,
-                Err(failed) => {
-                    self.note_run(ctx.now_epoch, false);
-                    return failed;
-                }
-            };
-
-        let dry_run = ctx.dry_run || self.cfg.dry_run;
-
-        // WRITE — one `metacog:<pattern>` fact per detected pattern (key-
-        // validated, secret-scrubbed). A failed durable write fails the tick.
-        let mut written = 0usize;
-        if let Some(patterns) = envelope.get("patterns").and_then(|v| v.as_array()) {
-            for p in patterns {
-                let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let evidence = p.get("evidence").and_then(|v| v.as_str()).unwrap_or("");
-                let Some(key) = recipe_rail::validate_concept_key(name) else {
-                    continue;
-                };
-                if dry_run {
-                    written += 1;
-                    continue;
-                }
-                let concept = format!("metacog:{key}");
-                let content = recipe_rail::secret_scrub(evidence);
-                if let Err(e) = ctx.memory.store_fact(
-                    &concept,
-                    &content,
-                    0.7,
-                    &["metacognition".to_string()],
-                    ID,
-                ) {
-                    self.note_run(ctx.now_epoch, false);
-                    return ThreadOutcome::failed(
-                        format!("metacog fact write failed: {e}"),
-                        start.elapsed(),
-                    );
-                }
-                written += 1;
-            }
-        }
-
-        // Self-metrics feed the hybrid self-measurement goal LIVE. Best-effort:
-        // the durable self-metric sink lives under $HOME and a failure to append
-        // must never turn a successful appraisal into a failed tick.
-        let calibration_error = envelope.get("calibration_error").and_then(|v| v.as_f64());
-        let decision_quality = envelope.get("decision_quality").and_then(|v| v.as_f64());
-        if !dry_run {
-            if let Some(ce) = calibration_error {
-                let _ = crate::self_metrics::record_metric("confidence_calibration_error", ce, ID);
-            }
-            if let Some(dq) = decision_quality {
-                let _ = crate::self_metrics::record_metric("decision_quality", dq, ID);
-            }
-        }
-
-        self.note_run(ctx.now_epoch, true);
-        let summary = format!(
-            "metacognition: {written} pattern(s), calibration_error={:?}, decision_quality={:?}",
-            calibration_error, decision_quality
-        );
-        ThreadOutcome::ok(summary, start.elapsed()).with_detail(json!({
-            "patterns_written": written,
-            "calibration_error": calibration_error,
-            "decision_quality": decision_quality,
-            "dry_run": dry_run,
-        }))
+        // TRIGGER — record ran/health from the recipe's EXIT STATUS only. The
+        // recipe writes each `metacog:` fact itself via `simard memory remember`.
+        let result = self.invoker.invoke(RECIPE, &ctx_vars);
+        self.note_run(ctx.now_epoch, result.is_success());
+        result.into_outcome(RECIPE, start.elapsed())
     }
 
     fn health(&self) -> ThreadHealth {

@@ -1,10 +1,12 @@
 //! Cognitive thread 10 (issue #5) — [`ValuesDeliberationThread`]: weigh competing goods for hard tradeoffs into `values:` facts/procedures as advice only (no veto; overseer stays terminal).
 //!
 //! A thin `CognitiveThread` rail over the agentic recipe `values-deliberate`: assemble
-//! read-only context in-thread, fence memory-sourced text as untrusted, invoke
-//! the recipe through the shared [`RecipeInvoker`](super::super::recipe_rail),
-//! parse a strict-JSON envelope, then scrub + size-cap and write through the
-//! declared `values:` prefix only. OFF by default behind the double env gate.
+//! read-only context in-thread, fence memory-sourced text as untrusted, then
+//! trigger the recipe through the shared [`RecipeInvoker`](super::super::recipe_rail)
+//! and record ran/health from its EXIT STATUS alone. The recipe's own `simard …`
+//! tool calls (writing `values:` facts) ARE the effect — the thread parses NOTHING
+//! back and performs NO durable write itself. OFF by default behind the double
+//! env gate.
 //!
 //! **Status (issue #5):** implemented; [`ValuesDeliberationThread::tick`] is
 //! covered by the hermetic offline unit tests in `tests_catalog` (fake recipe
@@ -12,8 +14,6 @@
 #![allow(dead_code)]
 
 use std::time::{Duration, Instant};
-
-use serde_json::json;
 
 use super::super::recipe_rail::{self, RecipeInvoker};
 use super::super::schedule;
@@ -138,8 +138,20 @@ impl CognitiveThread for ValuesDeliberationThread {
             return ThreadOutcome::skipped();
         }
 
+        // The global safety switch prevents the durable-writing recipe from
+        // running at all — the recipe's own `simard memory remember` / `goal add`
+        // calls are the only effect — so a dry-run tick triggers ZERO subprocesses.
+        if ctx.dry_run || self.cfg.dry_run {
+            self.note_run(ctx.now_epoch, true);
+            return ThreadOutcome::ok(
+                format!("{RECIPE}: dry-run (no recipe triggered)"),
+                start.elapsed(),
+            );
+        }
+
         // INPUT — the professed identity anchors the weighing; prior values +
-        // active goals as fenced untrusted context.
+        // active goals as fenced untrusted context. The thread parses NOTHING
+        // back and performs NO durable write itself.
         let identity = ctx
             .memory
             .search_facts("narrative:identity", 1, 0.0)
@@ -164,80 +176,12 @@ impl CognitiveThread for ValuesDeliberationThread {
             ("prior_values", recipe_rail::fence_untrusted(&prior)),
         ];
 
-        let envelope =
-            match recipe_rail::invoke_for_envelope(self.invoker.as_ref(), RECIPE, &ctx_vars, start)
-            {
-                Ok(v) => v,
-                Err(failed) => {
-                    self.note_run(ctx.now_epoch, false);
-                    return failed;
-                }
-            };
-
-        let dry_run = ctx.dry_run || self.cfg.dry_run;
-
-        let competing = envelope
-            .get("competing_goods")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .unwrap_or_default();
-        let weighing = envelope
-            .get("weighing")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let stance = envelope
-            .get("recommended_stance")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        // WRITE — an ADVISORY `values:` fact. Deliberation weighs; it never emits
-        // an enforcement/veto artifact (separation of powers: that is the
-        // overseer's job, not this thread's).
-        let key = recipe_rail::validate_concept_key(stance)
-            .unwrap_or_else(|| format!("deliberation-{}", ctx.now_epoch));
-        if !dry_run {
-            let concept = format!("values:{key}");
-            let content = recipe_rail::secret_scrub(&format!(
-                "competing goods: [{competing}]; weighing: {weighing}; stance: {stance}"
-            ));
-            if let Err(e) =
-                ctx.memory
-                    .store_fact(&concept, &content, 0.6, &["values".to_string()], ID)
-            {
-                self.note_run(ctx.now_epoch, false);
-                return ThreadOutcome::failed(
-                    format!("values fact write failed: {e}"),
-                    start.elapsed(),
-                );
-            }
-        }
-
-        // At most ONE follow-up heuristic goal (advice, never a veto).
-        let mut goal = false;
-        if let Some(heuristic) = envelope.get("heuristic").and_then(|v| v.as_str())
-            && !dry_run
-            && !heuristic.trim().is_empty()
-        {
-            let id = format!("values-heuristic-{}", ctx.now_epoch);
-            goal = recipe_rail::propose_goal_if_capacity(
-                ctx.state_root,
-                &id,
-                &recipe_rail::secret_scrub(heuristic),
-                40,
-            );
-        }
-
-        self.note_run(ctx.now_epoch, true);
-        ThreadOutcome::ok(
-            format!("values_deliberation: stance `{key}`, heuristic_goal={goal}"),
-            start.elapsed(),
-        )
-        .with_detail(json!({ "stance": key, "heuristic_goal": goal, "dry_run": dry_run }))
+        // TRIGGER — record ran/health from the recipe's EXIT STATUS only. The
+        // recipe writes each advisory `values:` fact via `simard memory remember`
+        // and proposes any follow-up heuristic goal via `simard goal add`.
+        let result = self.invoker.invoke(RECIPE, &ctx_vars);
+        self.note_run(ctx.now_epoch, result.is_success());
+        result.into_outcome(RECIPE, start.elapsed())
     }
 
     fn health(&self) -> ThreadHealth {

@@ -1,10 +1,12 @@
 //! Cognitive thread 4 (issue #5) — [`ProspectionThread`]: simulate plausible futures for active goals into `foresight:` facts + prospective triggers, and propose <=1 preventive goal per pass (capacity-checked).
 //!
 //! A thin `CognitiveThread` rail over the agentic recipe `prospect-foresight`: assemble
-//! read-only context in-thread, fence memory-sourced text as untrusted, invoke
-//! the recipe through the shared [`RecipeInvoker`](super::super::recipe_rail),
-//! parse a strict-JSON envelope, then scrub + size-cap and write through the
-//! declared `foresight:` prefix only. OFF by default behind the double env gate.
+//! read-only context in-thread, fence memory-sourced text as untrusted, then
+//! trigger the recipe through the shared [`RecipeInvoker`](super::super::recipe_rail)
+//! and record ran/health from its EXIT STATUS alone. The recipe's own `simard …`
+//! tool calls (writing `foresight:` facts) ARE the effect — the thread parses NOTHING
+//! back and performs NO durable write itself. OFF by default behind the double
+//! env gate.
 //!
 //! **Status (issue #5):** implemented; [`ProspectionThread::tick`] is covered by
 //! the hermetic offline unit tests in `tests_catalog` (fake recipe invoker)
@@ -12,8 +14,6 @@
 #![allow(dead_code)]
 
 use std::time::{Duration, Instant};
-
-use serde_json::json;
 
 use super::super::recipe_rail::{self, RecipeInvoker};
 use super::super::schedule;
@@ -123,7 +123,19 @@ impl CognitiveThread for ProspectionThread {
     fn tick(&mut self, ctx: &mut ThreadContext<'_>) -> ThreadOutcome {
         let start = Instant::now();
 
-        // INPUT — active goals + prior foresight (fenced as untrusted).
+        // The global safety switch prevents the durable-writing recipe from
+        // running at all — the recipe's own `simard memory remember` / `goal add`
+        // calls are the only effect — so a dry-run tick triggers ZERO subprocesses.
+        if ctx.dry_run || self.cfg.dry_run {
+            self.note_run(ctx.now_epoch, true);
+            return ThreadOutcome::ok(
+                format!("{RECIPE}: dry-run (no recipe triggered)"),
+                start.elapsed(),
+            );
+        }
+
+        // INPUT — active goals + prior foresight (fenced as untrusted). The
+        // thread parses NOTHING back and performs NO durable write itself.
         let board = crate::goal_board_store::load(ctx.state_root).board;
         let goals = board
             .active
@@ -148,99 +160,12 @@ impl CognitiveThread for ProspectionThread {
             ("prior_foresight", recipe_rail::fence_untrusted(&prior)),
         ];
 
-        let envelope =
-            match recipe_rail::invoke_for_envelope(self.invoker.as_ref(), RECIPE, &ctx_vars, start)
-            {
-                Ok(v) => v,
-                Err(failed) => {
-                    self.note_run(ctx.now_epoch, false);
-                    return failed;
-                }
-            };
-
-        let dry_run = ctx.dry_run || self.cfg.dry_run;
-
-        // WRITE — a `foresight:<goal_id>` fact + a prospective watch-condition per
-        // predicted risk. Prospective triggers surface in the next cycle's
-        // `check_triggers`, so prospection feeds OODA indirectly.
-        let mut risks_written = 0usize;
-        let mut triggers_staged = 0usize;
-        if let Some(risks) = envelope.get("risks").and_then(|v| v.as_array()) {
-            for r in risks {
-                let goal_id = r.get("goal_id").and_then(|v| v.as_str()).unwrap_or("");
-                let scenario = r.get("scenario").and_then(|v| v.as_str()).unwrap_or("");
-                let trigger = r
-                    .get("trigger_phrase")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let Some(key) = recipe_rail::validate_concept_key(goal_id) else {
-                    continue;
-                };
-                if dry_run {
-                    risks_written += 1;
-                    continue;
-                }
-                let concept = format!("foresight:{key}");
-                let content = recipe_rail::secret_scrub(scenario);
-                if let Err(e) = ctx.memory.store_fact_with_caller_key(
-                    &concept,
-                    &concept,
-                    &content,
-                    0.6,
-                    &["foresight".to_string()],
-                    ID,
-                ) {
-                    self.note_run(ctx.now_epoch, false);
-                    return ThreadOutcome::failed(
-                        format!("foresight fact write failed: {e}"),
-                        start.elapsed(),
-                    );
-                }
-                risks_written += 1;
-                if !trigger.trim().is_empty() {
-                    let action = format!("review goal {key}: predicted risk materialised");
-                    if ctx
-                        .memory
-                        .store_prospective(
-                            &recipe_rail::secret_scrub(scenario),
-                            &recipe_rail::secret_scrub(trigger),
-                            &action,
-                            5,
-                        )
-                        .is_ok()
-                    {
-                        triggers_staged += 1;
-                    }
-                }
-            }
-        }
-
-        // At most ONE preventive goal per pass, capacity-checked (S3).
-        let mut preventive = false;
-        if let Some(text) = envelope.get("preventive_goal").and_then(|v| v.as_str())
-            && !dry_run
-            && !text.trim().is_empty()
-        {
-            let id = format!("prospection-preventive-{}", ctx.now_epoch);
-            preventive = recipe_rail::propose_goal_if_capacity(
-                ctx.state_root,
-                &id,
-                &recipe_rail::secret_scrub(text),
-                30,
-            );
-        }
-
-        self.note_run(ctx.now_epoch, true);
-        ThreadOutcome::ok(
-            format!("prospection: {risks_written} risk(s), {triggers_staged} trigger(s), preventive={preventive}"),
-            start.elapsed(),
-        )
-        .with_detail(json!({
-            "risks_written": risks_written,
-            "triggers_staged": triggers_staged,
-            "preventive_goal": preventive,
-            "dry_run": dry_run,
-        }))
+        // TRIGGER — record ran/health from the recipe's EXIT STATUS only. The
+        // recipe writes each `foresight:` fact via `simard memory remember` and
+        // proposes any preventive goal via `simard goal add`.
+        let result = self.invoker.invoke(RECIPE, &ctx_vars);
+        self.note_run(ctx.now_epoch, result.is_success());
+        result.into_outcome(RECIPE, start.elapsed())
     }
 
     fn health(&self) -> ThreadHealth {

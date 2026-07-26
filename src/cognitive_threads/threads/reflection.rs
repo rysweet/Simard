@@ -1,10 +1,12 @@
 //! Cognitive thread 3 (issue #5) — [`ReflectionThread`]: post-mortem completed goals and verified failures into `postmortem:` facts and, on recurrence, `lesson:` procedures via the existing reflection_lessons path.
 //!
 //! A thin `CognitiveThread` rail over the agentic recipe `reflect-postmortem`: assemble
-//! read-only context in-thread, fence memory-sourced text as untrusted, invoke
-//! the recipe through the shared [`RecipeInvoker`](super::super::recipe_rail),
-//! parse a strict-JSON envelope, then scrub + size-cap and write through the
-//! declared `postmortem:` prefix only. OFF by default behind the double env gate.
+//! read-only context in-thread, fence memory-sourced text as untrusted, then
+//! trigger the recipe through the shared [`RecipeInvoker`](super::super::recipe_rail)
+//! and record ran/health from its EXIT STATUS alone. The recipe's own `simard …`
+//! tool calls (writing `postmortem:` facts) ARE the effect — the thread parses NOTHING
+//! back and performs NO durable write itself. OFF by default behind the double
+//! env gate.
 //!
 //! **Status (issue #5):** implemented; [`ReflectionThread::tick`] is covered by
 //! the hermetic offline unit tests in `tests_catalog` (fake recipe invoker)
@@ -12,8 +14,6 @@
 #![allow(dead_code)]
 
 use std::time::{Duration, Instant};
-
-use serde_json::json;
 
 use super::super::recipe_rail::{self, RecipeInvoker};
 use super::super::schedule;
@@ -140,7 +140,21 @@ impl CognitiveThread for ReflectionThread {
             return ThreadOutcome::skipped();
         }
 
-        // INPUT — prior post-mortems (fenced as untrusted) + board digest.
+        // The global safety switch prevents the durable-writing recipe from
+        // running at all — the thread no longer gates writes, the recipe's own
+        // `simard memory remember` / `goal add` calls do — so a dry-run tick
+        // triggers ZERO recipe subprocesses.
+        if ctx.dry_run || self.cfg.dry_run {
+            self.note_run(ctx.now_epoch, true);
+            return ThreadOutcome::ok(
+                format!("{RECIPE}: dry-run (no recipe triggered)"),
+                start.elapsed(),
+            );
+        }
+
+        // INPUT — prior post-mortems (fenced as untrusted) + board digest. This
+        // is the ONLY thing the thread does besides triggering the recipe: it
+        // parses NOTHING back and performs NO durable write itself.
         let prior = ctx
             .memory
             .search_facts("postmortem:", 20, 0.0)
@@ -158,76 +172,12 @@ impl CognitiveThread for ReflectionThread {
             ("prior_postmortems", recipe_rail::fence_untrusted(&prior)),
         ];
 
-        let envelope =
-            match recipe_rail::invoke_for_envelope(self.invoker.as_ref(), RECIPE, &ctx_vars, start)
-            {
-                Ok(v) => v,
-                Err(failed) => {
-                    self.note_run(ctx.now_epoch, false);
-                    return failed;
-                }
-            };
-
-        let dry_run = ctx.dry_run || self.cfg.dry_run;
-        let postmortem = envelope
-            .get("postmortem")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let goal_type = envelope
-            .get("goal_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let error_class = envelope.get("error_class").and_then(|v| v.as_str());
-        let type_key =
-            recipe_rail::validate_concept_key(goal_type).unwrap_or_else(|| "general".to_string());
-
-        // WRITE — a durable `postmortem:<goal_type>` fact.
-        if !dry_run {
-            let concept = format!("postmortem:{type_key}");
-            let content = recipe_rail::secret_scrub(postmortem);
-            if let Err(e) =
-                ctx.memory
-                    .store_fact(&concept, &content, 0.7, &["postmortem".to_string()], ID)
-            {
-                self.note_run(ctx.now_epoch, false);
-                return ThreadOutcome::failed(
-                    format!("postmortem fact write failed: {e}"),
-                    start.elapsed(),
-                );
-            }
-        }
-
-        // On a classified failure with concrete steps, distil a durable lesson
-        // procedure (best-effort — the fact above is the load-bearing output).
-        let mut lesson_written = false;
-        if !dry_run
-            && let Some(error_class) = error_class
-            && let Some(steps) = envelope.get("lesson_steps").and_then(|v| v.as_array())
-        {
-            let steps: Vec<String> = steps
-                .iter()
-                .filter_map(|s| s.as_str())
-                .map(recipe_rail::secret_scrub)
-                .collect();
-            if !steps.is_empty()
-                && let Some(class_key) = recipe_rail::validate_concept_key(error_class)
-            {
-                let name = format!("lesson:{type_key}:{class_key}");
-                lesson_written = ctx.memory.store_procedure(&name, &steps, &[]).is_ok();
-            }
-        }
-
-        self.note_run(ctx.now_epoch, true);
-        ThreadOutcome::ok(
-            format!("reflection: postmortem for `{type_key}`, lesson={lesson_written}"),
-            start.elapsed(),
-        )
-        .with_detail(json!({
-            "goal_type": type_key,
-            "error_class": error_class,
-            "lesson_written": lesson_written,
-            "dry_run": dry_run,
-        }))
+        // TRIGGER — record ran/health from the recipe's EXIT STATUS only. The
+        // recipe writes each `postmortem:` fact / `lesson:` procedure itself via
+        // `simard memory remember` / `remember-procedure`.
+        let result = self.invoker.invoke(RECIPE, &ctx_vars);
+        self.note_run(ctx.now_epoch, result.is_success());
+        result.into_outcome(RECIPE, start.elapsed())
     }
 
     fn health(&self) -> ThreadHealth {

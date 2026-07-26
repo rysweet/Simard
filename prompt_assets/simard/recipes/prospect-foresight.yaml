@@ -13,11 +13,10 @@
 #   prior_foresight_path — ABSOLUTE path to a file of prior `foresight:` facts,
 #                     similarly fenced and file-delivered.
 #
-# Output: a single strict-JSON object:
-#   { "risks": [ { "goal_id": "<id>",
-#                  "scenario": "<what could go wrong>",
-#                  "trigger_phrase": "<observable condition>" } ],
-#     "preventive_goal": null | "<short goal text>" }
+# Output: NONE on stdout. The agent performs its effect by CALLING the
+#   `simard memory remember` tool (concept `foresight:<goal_id>`) and, when a
+#   preventive action is warranted, `simard goal add`. No JSON envelope, no
+#   output file — the thread interprets this recipe by its EXIT STATUS alone.
 
 name: "prospect-foresight"
 description: "Anticipate risks for active goals and stage prospective triggers"
@@ -66,13 +65,23 @@ steps:
 
       ## Output
 
-      Return **only** this JSON object — no prose, no markdown fence:
+      There is **no JSON to print and no output file to write**. Perform your
+      effect by CALLING the `simard memory remember` tool — one call per durable
+      foresight/risk you identify:
 
-      ```json
-      {
-        "risks": [
-          { "goal_id": "id", "scenario": "what could go wrong", "trigger_phrase": "observable condition" }
-        ],
-        "preventive_goal": null
-      }
       ```
+      simard memory remember \
+        --concept=foresight:<goal_id> \
+        --content="what could go wrong; observable trigger condition to watch for" \
+        --tags=prospection
+      ```
+
+      If (and only if) a concrete preventive action is warranted, ALSO propose at
+      most one follow-up goal (durable, capacity-capped by the board):
+
+      ```
+      simard goal add 4 "preventive: <the mitigation for the specific risk>"
+      ```
+
+      Your `simard …` invocations ARE the effect. Invent no risks — if the near
+      future looks clear, run no commands and finish successfully.

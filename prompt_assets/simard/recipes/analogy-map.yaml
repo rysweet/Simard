@@ -14,11 +14,10 @@
 #   prior_analogies_path — ABSOLUTE path to a file of prior `analogy:` facts,
 #                      similarly fenced and file-delivered.
 #
-# Output: a single strict-JSON object:
-#   { "analogies": [ { "source": "<domain A>",
-#                      "target": "<domain B / snake_case key>",
-#                      "structural_mapping": "<shared structure>",
-#                      "transferable_insight": "<what to reuse>" } ] }
+# Output: NONE on stdout. The agent performs its effect by CALLING the
+#   `simard memory remember` tool (concept `analogy:<target>`). No JSON
+#   envelope, no output file — the thread interprets this recipe by its EXIT
+#   STATUS alone.
 
 name: "analogy-map"
 description: "Map structural analogies across domains for transferable insight"
@@ -68,12 +67,16 @@ steps:
 
       ## Output
 
-      Return **only** this JSON object — no prose, no markdown fence:
+      There is **no JSON to print and no output file to write**. Perform your
+      effect by CALLING the `simard memory remember` tool — one call per durable
+      cross-domain analogy you find:
 
-      ```json
-      {
-        "analogies": [
-          { "source": "domain A", "target": "domain_b", "structural_mapping": "shared structure", "transferable_insight": "what to reuse" }
-        ]
-      }
       ```
+      simard memory remember \
+        --concept=analogy:<snake_case_target> \
+        --content="source domain → target: shared structure; transferable insight" \
+        --tags=analogy
+      ```
+
+      Your `simard …` invocations ARE the effect. Map only structurally sound
+      analogies; if none is apt, run no commands and finish successfully.

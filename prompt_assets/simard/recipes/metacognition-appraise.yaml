@@ -13,11 +13,10 @@
 #                          large recall cannot overflow ARG_MAX / E2BIG
 #                          (#2640/#2692). The agent READS it.
 #
-# Output: a single strict-JSON object:
-#   { "calibration_error": <f64 0..1>,
-#     "decision_quality":  <f64 0..1>,
-#     "patterns": [ { "name": "<snake_case>", "evidence": "<short>" } ],
-#     "recalibration_goal": null | "<short goal text>" }
+# Output: NONE on stdout. The agent performs its effect by CALLING the
+#   `simard memory remember` tool (concept `metacog:<pattern>`) and, when a
+#   recalibration is warranted, `simard goal add`. No JSON envelope, no output
+#   file — the thread interprets this recipe by its EXIT STATUS alone.
 
 name: "metacognition-appraise"
 description: "Self-audit reasoning quality: calibration, biases, decision quality"
@@ -71,13 +70,23 @@ steps:
 
       ## Output
 
-      Return **only** this JSON object — no prose, no markdown fence:
+      There is **no JSON to print and no output file to write**. Perform your
+      effect by CALLING the `simard memory remember` tool — one call per durable
+      metacognitive pattern you find worth keeping:
 
-      ```json
-      {
-        "calibration_error": 0.0,
-        "decision_quality": 0.0,
-        "patterns": [ { "name": "snake_case_name", "evidence": "short evidence" } ],
-        "recalibration_goal": null
-      }
       ```
+      simard memory remember \
+        --concept=metacog:<snake_case_pattern_name> \
+        --content="short evidence-backed appraisal (calibration/decision quality)" \
+        --tags=metacognition
+      ```
+
+      If (and only if) a recalibration is clearly warranted, ALSO propose at most
+      one follow-up goal (durable, capacity-capped by the board):
+
+      ```
+      simard goal add 4 "recalibrate <the specific miscalibration you observed>"
+      ```
+
+      Your `simard …` invocations ARE the effect. If nothing is worth keeping,
+      run no commands and finish successfully.

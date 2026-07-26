@@ -12,9 +12,10 @@
 #                     <<END_UNTRUSTED>>). Delivered via a file, never inlined
 #                     into argv (ARG_MAX / E2BIG safe, #2640/#2692); agent READS.
 #
-# Output: a single strict-JSON object:
-#   { "identity": "<coherent one-paragraph self-story>",
-#     "new_chapter": null | "<short development note>" }
+# Output: NONE on stdout. The agent performs its effect by CALLING the
+#   `simard memory remember` tool (singleton concept `narrative:identity`, plus
+#   `narrative:chapter` on a real turning point). No JSON envelope, no output
+#   file — the thread interprets this recipe by its EXIT STATUS alone.
 
 name: "narrative-identity"
 description: "Maintain a coherent self-story and value continuity over time"
@@ -60,11 +61,27 @@ steps:
 
       ## Output
 
-      Return **only** this JSON object — no prose, no markdown fence:
+      There is **no JSON to print and no output file to write**. Perform your
+      effect by CALLING the `simard memory remember` tool. Refresh the self-story
+      (a singleton — reuse the SAME concept each time so it supersedes rather
+      than accumulates):
 
-      ```json
-      {
-        "identity": "I am Simard, a self-improving engineer who values ...",
-        "new_chapter": null
-      }
       ```
+      simard memory remember \
+        --concept=narrative:identity \
+        --content="I am Simard, a self-improving engineer who values ..." \
+        --confidence=0.9 --tags=narrative
+      ```
+
+      If a genuinely new chapter occurred, ALSO append it (per-moment, NOT a
+      singleton):
+
+      ```
+      simard memory remember \
+        --concept=narrative:chapter \
+        --content="what changed in the self-story and why" \
+        --tags=narrative
+      ```
+
+      Your `simard …` invocations ARE the effect. Refresh the identity every run;
+      append a chapter only on a real turning point.

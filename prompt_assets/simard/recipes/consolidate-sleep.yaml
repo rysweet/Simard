@@ -13,11 +13,9 @@
 #                     file, never inlined into argv, so a large recall cannot
 #                     overflow ARG_MAX / E2BIG (#2640/#2692); the agent READS it.
 #
-# Output: a single strict-JSON object:
-#   { "schemas": [ { "name": "<snake_case>",
-#                    "member_concepts": ["<concept>", ...],
-#                    "summary": "<short>" } ],
-#     "forget_candidates": ["<fact_id>", ...] }
+# Output: NONE on stdout. The agent performs its effect by CALLING the
+#   `simard memory remember` tool (concept `schema:<name>`). No JSON envelope,
+#   no output file — the thread interprets this recipe by its EXIT STATUS alone.
 
 name: "consolidate-sleep"
 description: "Form higher-order memory schemas and nominate low-value memory"
@@ -65,13 +63,17 @@ steps:
 
       ## Output
 
-      Return **only** this JSON object — no prose, no markdown fence:
+      There is **no JSON to print and no output file to write**. Perform your
+      effect by CALLING the `simard memory remember` tool — one call per durable
+      schema (a many-to-few generalisation over related concepts):
 
-      ```json
-      {
-        "schemas": [
-          { "name": "snake_case_name", "member_concepts": ["a", "b"], "summary": "short summary" }
-        ],
-        "forget_candidates": []
-      }
       ```
+      simard memory remember \
+        --concept=schema:<snake_case_name> \
+        --content="short summary of the shared structure across [member concepts]" \
+        --tags=consolidation
+      ```
+
+      Your `simard …` invocations ARE the effect. Consolidate only genuine
+      recurring structure; if the recent material reveals no schema, run no
+      commands and finish successfully.

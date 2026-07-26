@@ -11,11 +11,12 @@
 #                        Delivered via a file, never inlined into argv (ARG_MAX /
 #                        E2BIG safe, #2640/#2692); the agent READS it.
 #
-# Output: a single strict-JSON object:
-#   { "postmortem": "<takeaway>",
-#     "goal_type": "<snake_case>",
-#     "error_class": "<snake_case>" | null,
-#     "lesson_steps": ["<step>", ...] }
+# Output: NONE on stdout. The agent performs its effect by CALLING the
+#   `simard memory remember` / `simard memory remember-procedure` tools (exactly
+#   like distill-episodes.yaml). There is no JSON envelope and no output file for
+#   Rust to parse — the thread interprets this recipe by its EXIT STATUS alone.
+#   `simard memory remember` reaches the daemon via the SIMARD_MEMORY_SOCKET the
+#   thread exports into this subprocess.
 
 name: "reflect-postmortem"
 description: "Post-mortem completed goals and failures into durable lessons"
@@ -53,26 +54,43 @@ steps:
 
       ## Your job
 
-      1. Write a single, durable **postmortem** takeaway (one or two sentences):
-         what actually happened and what should change next time.
-      2. Classify the work with a `snake_case` **goal_type** (e.g. `bugfix`,
-         `refactor`, `feature`).
-      3. If the outcome was a **verified failure**, give a `snake_case`
-         **error_class** (e.g. `flaky_test`, `scope_creep`); otherwise `null`.
-      4. If (and only if) the failure recurs and is preventable, give the ordered
-         **lesson_steps** of a reusable procedure to avoid it; otherwise `[]`.
-         NEVER fabricate a failure — a clean success has `error_class: null` and
-         `lesson_steps: []`.
+      1. Decide whether the outcome is worth a durable post-mortem. If it is
+         pure noise (a trivial success with nothing to learn, or an exact repeat
+         of a prior post-mortem above), write nothing and finish successfully.
+      2. For a post-mortem worth keeping, WRITE it into memory by running the
+         `simard memory remember` tool with these scalar flags:
+
+         - `--concept=postmortem:<goal_type>` — `<goal_type>` is a `snake_case`
+           classification of the work (e.g. `bugfix`, `refactor`, `feature`).
+         - `--content` — a short, durable takeaway (one or two sentences): what
+           actually happened and what should change next time. Quote it.
+         - `--tags=reflection`
+
+         Run one command per takeaway, for example:
+
+         ```
+         simard memory remember \
+           --concept=postmortem:bugfix \
+           --content="flaky assertion on wall-clock time; inject the clock next time" \
+           --tags=reflection
+         ```
+
+      3. If (and ONLY if) the outcome was a **verified, recurring, preventable
+         failure**, ALSO write the reusable avoidance procedure with the
+         companion tool:
+
+         ```
+         simard memory remember-procedure \
+           --name=avoid:scope-creep \
+           --step="restate the single acceptance criterion" \
+           --step="reject work that does not serve it"
+         ```
+
+         NEVER fabricate a failure — a clean success writes no procedure.
 
       ## Output
 
-      Return **only** this JSON object — no prose, no markdown fence:
-
-      ```json
-      {
-        "postmortem": "short durable takeaway",
-        "goal_type": "snake_case",
-        "error_class": null,
-        "lesson_steps": []
-      }
-      ```
+      There is **no JSON to print and no output file to write**. Your `simard
+      memory remember` / `remember-procedure` invocations ARE the effect. The
+      server grounds, scores, and stores or quarantines each fact and prints its
+      own disposition; you do not parse or report that.

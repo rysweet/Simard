@@ -14,11 +14,11 @@
 #   prior_values_path — ABSOLUTE path to a file of prior `values:` records,
 #                   similarly fenced and file-delivered.
 #
-# Output: a single strict-JSON object:
-#   { "competing_goods": ["<good>", ...],
-#     "weighing": "<how they trade off>",
-#     "recommended_stance": "<short snake_case-friendly stance>",
-#     "heuristic": null | "<durable rule of thumb>" }
+# Output: NONE on stdout. The agent performs its effect by CALLING the
+#   `simard memory remember` tool (concept `values:<stance>`) and, when a
+#   reusable heuristic emerges, `simard goal add` (advisory only — never a
+#   veto). No JSON envelope, no output file — the thread interprets this recipe
+#   by its EXIT STATUS alone.
 
 name: "values-deliberate"
 description: "Weigh competing goods for hard calls as advice, never enforcement"
@@ -67,13 +67,24 @@ steps:
 
       ## Output
 
-      Return **only** this JSON object — no prose, no markdown fence:
+      There is **no JSON to print and no output file to write**. Perform your
+      effect by CALLING the `simard memory remember` tool. Record your ADVISORY
+      deliberation (deliberation weighs; it NEVER issues an enforcement/veto —
+      that is the overseer's job):
 
-      ```json
-      {
-        "competing_goods": ["speed", "safety"],
-        "weighing": "how they trade off here",
-        "recommended_stance": "hold_for_review",
-        "heuristic": null
-      }
       ```
+      simard memory remember \
+        --concept=values:<snake_case_stance> \
+        --content="competing goods: [speed, safety]; weighing: ...; stance: ..." \
+        --confidence=0.6 --tags=values
+      ```
+
+      If a reusable heuristic emerged, ALSO propose at most one advisory goal
+      (durable, capacity-capped by the board — advice, never a veto):
+
+      ```
+      simard goal add 4 "heuristic: <the reusable guidance you distilled>"
+      ```
+
+      Your `simard …` invocations ARE the effect. If there is no genuine hard
+      tradeoff to weigh, run no commands and finish successfully.
