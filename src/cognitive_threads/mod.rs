@@ -29,6 +29,9 @@ mod tests;
 #[cfg(test)]
 mod tests_catalog;
 
+#[cfg(test)]
+mod tests_rework_contract;
+
 pub use mind::Mind;
 pub use thread::{
     CognitiveThread, Priority, SchedulePolicy, ThreadContext, ThreadHealth, ThreadKind,

@@ -3,8 +3,9 @@
 //! so the whole suite — the metadata / naming / numeric-projection / serialize
 //! checks plus the security helpers (`recipe_rail::{sanitize_value,
 //! fence_untrusted, secret_scrub, validate_concept_key, env_gate_open}`),
-//! `salience_signal::{write_signal, read_valid_signal}`, and every thread's
-//! `tick` — passes.
+//! `salience_signal::{write_signal, read_valid_signal}`, and every reworked
+//! thread's `tick` (gate → trigger recipe → record ran/health, with NO stdout
+//! parse and NO direct durable write) — passes once the rework lands.
 //!
 //! Every non-ignored test is hermetic: an injected `now_epoch` clock (no
 //! sleeps), an in-memory cognitive store, a fake recipe invoker / `gh` client
@@ -16,8 +17,8 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::json;
@@ -98,16 +99,21 @@ type RecordedCall = (String, Vec<(String, String)>);
 /// An offline [`RecipeInvoker`] returning a canned [`InvokeResult`] per recipe
 /// name, recording every call's argv so a rail's invoke discipline is testable
 /// with no subprocess, network, or credentials.
+/// An offline [`RecipeInvoker`] that returns a canned [`InvokeResult`] per recipe
+/// name and records every call's argv. Cloning shares the recorded-call log (an
+/// `Arc<Mutex<…>>`) so a test can hand a clone to a thread and still inspect the
+/// calls afterwards. No subprocess, network, or credentials.
+#[derive(Clone)]
 struct FakeRecipeInvoker {
-    canned: HashMap<String, InvokeResult>,
-    calls: Mutex<Vec<RecordedCall>>,
+    canned: Arc<HashMap<String, InvokeResult>>,
+    calls: Arc<Mutex<Vec<RecordedCall>>>,
 }
 
 impl FakeRecipeInvoker {
     fn new() -> Self {
         Self {
-            canned: HashMap::new(),
-            calls: Mutex::new(Vec::new()),
+            canned: Arc::new(HashMap::new()),
+            calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -115,13 +121,23 @@ impl FakeRecipeInvoker {
         let mut canned = HashMap::new();
         canned.insert(recipe.to_string(), result);
         Self {
-            canned,
-            calls: Mutex::new(Vec::new()),
+            canned: Arc::new(canned),
+            calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    fn boxed(self) -> Box<dyn RecipeInvoker> {
-        Box::new(self)
+    fn boxed(&self) -> Box<dyn RecipeInvoker> {
+        Box::new(self.clone())
+    }
+
+    /// A snapshot of every recorded `(recipe_name, argv)` call.
+    fn calls(&self) -> Vec<RecordedCall> {
+        self.calls.lock().expect("calls lock").clone()
+    }
+
+    /// How many times any recipe was invoked.
+    fn call_count(&self) -> usize {
+        self.calls.lock().expect("calls lock").len()
     }
 }
 
@@ -137,7 +153,7 @@ impl RecipeInvoker for FakeRecipeInvoker {
         self.canned
             .get(recipe_name)
             .cloned()
-            .unwrap_or_else(|| InvokeResult::InfraFailure {
+            .unwrap_or_else(|| InvokeResult::Failed {
                 detail: format!("no canned result for {recipe_name}"),
             })
     }
@@ -284,35 +300,38 @@ fn validate_concept_key_bounds_length() {
 }
 
 // ---------------------------------------------------------------------------
-// Shared seam — InvokeResult classification (GREEN: real today)
+// Shared seam — InvokeResult is a bare success/failure verdict (RED)
+//
+// The rework DELETES the JSON classification (`InvokeResult::{Json,
+// SemanticMiss}`, `classify_recipe_stdout`, `parse_step_output`,
+// `extract_json_payload`). A recipe's `simard …` tool calls ARE its effect, so
+// the invoker parses NOTHING from stdout: exit 0 => `Ran`, otherwise `Failed`.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn invoke_result_is_success_only_for_json() {
-    assert!(InvokeResult::Json(json!({})).is_success());
-    assert!(!InvokeResult::SemanticMiss { raw: "x".into() }.is_success());
-    assert!(!InvokeResult::InfraFailure { detail: "x".into() }.is_success());
+fn invoke_result_is_success_only_when_ran() {
+    assert!(InvokeResult::Ran.is_success(), "exit 0 => success");
+    assert!(
+        !InvokeResult::Failed {
+            detail: "recipe-runner-rs exited 1".into()
+        }
+        .is_success(),
+        "a non-zero recipe is a failure, never a silent success"
+    );
 }
 
 #[test]
-fn invoke_result_both_misses_map_to_failed_outcome() {
-    // I4 / SR-9: SemanticMiss and InfraFailure are BOTH non-success; only Json
-    // is a success — the no-silent-degradation asymmetry.
+fn invoke_result_failed_maps_to_a_failed_outcome() {
+    // A `Failed` verdict becomes a failed tick (recorded LOUDLY); `Ran` a
+    // successful one. There is no third "semantic miss" state to swallow.
     let d = Duration::from_millis(1);
+    assert!(InvokeResult::Ran.into_outcome("r", d).success);
     assert!(
-        !InvokeResult::SemanticMiss { raw: "x".into() }
-            .into_failed_outcome("r", d)
-            .success
-    );
-    assert!(
-        !InvokeResult::InfraFailure { detail: "x".into() }
-            .into_failed_outcome("r", d)
-            .success
-    );
-    assert!(
-        InvokeResult::Json(json!({}))
-            .into_failed_outcome("r", d)
-            .success
+        !InvokeResult::Failed {
+            detail: "boom".into()
+        }
+        .into_outcome("r", d)
+        .success
     );
 }
 
@@ -625,271 +644,6 @@ fn narrative_metadata_matches_catalog() {
     assert_meta(&t, "narrative", ThreadKind::Narrative, Priority::Low, 43200);
 }
 
-// ---------------------------------------------------------------------------
-// Per-thread rail behaviour
-//
-// Each rail, given a canned strict-JSON envelope, must write through its
-// declared prefix — the contract for each thread's durable write.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn metacognition_writes_metacog_fact_from_envelope() {
-    let env = TestEnv::new();
-    let envelope = json!({
-        "calibration_error": 0.3,
-        "decision_quality": 0.7,
-        "patterns": [{ "name": "over_optimism", "evidence": "e" }],
-        "recalibration_goal": null
-    });
-    let fake = FakeRecipeInvoker::returning("metacognition-appraise", InvokeResult::Json(envelope));
-    let mut t = MetacognitionThread::with_invoker(MetacognitionConfig::default(), fake.boxed());
-    let mut ctx = env.ctx(now(), false);
-    let out = t.tick(&mut ctx);
-    assert!(out.success, "successful appraisal");
-    assert!(
-        fact_prefix_present(env.memory(), "metacog:"),
-        "writes a metacog: fact"
-    );
-}
-
-#[test]
-fn metacognition_semantic_miss_writes_nothing_and_fails() {
-    // SR-9: a SemanticMiss maps to failed() with ZERO writes.
-    let env = TestEnv::new();
-    let fake = FakeRecipeInvoker::returning(
-        "metacognition-appraise",
-        InvokeResult::SemanticMiss {
-            raw: "not json".into(),
-        },
-    );
-    let mut t = MetacognitionThread::with_invoker(MetacognitionConfig::default(), fake.boxed());
-    let mut ctx = env.ctx(now(), false);
-    let out = t.tick(&mut ctx);
-    assert!(!out.success, "semantic miss fails the tick");
-    assert!(
-        !fact_prefix_present(env.memory(), "metacog:"),
-        "no partial write on miss"
-    );
-}
-
-#[test]
-fn metacognition_infra_failure_writes_nothing_and_fails() {
-    // SR-9: an InfraFailure maps to failed() with ZERO writes (opposite of the
-    // progress-checker's historical accept-on-infra posture).
-    let env = TestEnv::new();
-    let fake = FakeRecipeInvoker::returning(
-        "metacognition-appraise",
-        InvokeResult::InfraFailure {
-            detail: "spawn failed".into(),
-        },
-    );
-    let mut t = MetacognitionThread::with_invoker(MetacognitionConfig::default(), fake.boxed());
-    let mut ctx = env.ctx(now(), false);
-    let out = t.tick(&mut ctx);
-    assert!(!out.success, "infra failure fails the tick");
-    assert!(
-        !fact_prefix_present(env.memory(), "metacog:"),
-        "no partial write on infra failure"
-    );
-}
-
-#[test]
-fn consolidation_writes_schema_fact_from_envelope() {
-    let env = TestEnv::new();
-    let envelope = json!({
-        "schemas": [{ "name": "retry_loops", "member_concepts": ["a", "b"], "summary": "s" }],
-        "forget_candidates": []
-    });
-    let fake = FakeRecipeInvoker::returning("consolidate-sleep", InvokeResult::Json(envelope));
-    let mut t = ConsolidationThread::with_invoker(ConsolidationConfig::default(), fake.boxed());
-    let mut ctx = env.ctx(now(), false);
-    let out = t.tick(&mut ctx);
-    assert!(out.success);
-    assert!(
-        fact_prefix_present(env.memory(), "schema:"),
-        "writes a schema: fact"
-    );
-}
-
-#[test]
-fn reflection_writes_postmortem_fact_from_envelope() {
-    let env = TestEnv::new();
-    let envelope = json!({
-        "postmortem": "took away X",
-        "goal_type": "bugfix",
-        "error_class": "flaky-test",
-        "lesson_steps": []
-    });
-    let fake = FakeRecipeInvoker::returning("reflect-postmortem", InvokeResult::Json(envelope));
-    let mut t = ReflectionThread::with_invoker(ReflectionConfig::default(), fake.boxed());
-    let mut ctx = env.ctx(now(), false);
-    let out = t.tick(&mut ctx);
-    assert!(out.success);
-    assert!(
-        fact_prefix_present(env.memory(), "postmortem:"),
-        "writes a postmortem: fact"
-    );
-}
-
-#[test]
-fn prospection_writes_foresight_fact_from_envelope() {
-    let env = TestEnv::new();
-    let envelope = json!({
-        "risks": [{ "goal_id": "g1", "scenario": "engineer stalls", "trigger_phrase": "no progress 3 cycles" }],
-        "preventive_goal": null
-    });
-    let fake = FakeRecipeInvoker::returning("prospect-foresight", InvokeResult::Json(envelope));
-    let mut t = ProspectionThread::with_invoker(ProspectionConfig::default(), fake.boxed());
-    let mut ctx = env.ctx(now(), false);
-    let out = t.tick(&mut ctx);
-    assert!(out.success);
-    assert!(
-        fact_prefix_present(env.memory(), "foresight:"),
-        "writes a foresight: fact"
-    );
-}
-
-#[test]
-fn salience_writes_numeric_signal_and_durable_reason_fact() {
-    // The load-bearing S1 split: the free-text reason goes to a durable
-    // salience: fact; the Decide-facing signal file is numeric-only.
-    let env = TestEnv::new();
-    let envelope = json!({
-        "ranking": [{ "goal_id": "g1", "valence": 0.5, "urgency": 0.9, "reason": "disk crisis dominates" }]
-    });
-    let fake = FakeRecipeInvoker::returning("salience-appraise", InvokeResult::Json(envelope));
-    let mut t = SalienceThread::with_invoker(SalienceConfig::default(), fake.boxed());
-    let mut ctx = env.ctx(now(), false);
-    let out = t.tick(&mut ctx);
-    assert!(out.success);
-    let path = salience_signal::signal_path(env.state_root());
-    assert!(path.exists(), "writes the Decide-facing signal file");
-    let raw = std::fs::read_to_string(&path).expect("read signal");
-    assert!(
-        !raw.contains("reason"),
-        "S1: signal file carries no free-text reason"
-    );
-    assert!(
-        !raw.contains("disk crisis"),
-        "S1: appraisal reason never reaches the signal file"
-    );
-    assert!(
-        fact_prefix_present(env.memory(), "salience:"),
-        "writes the durable rationale fact"
-    );
-}
-
-#[test]
-fn operator_model_writes_operator_fact_from_envelope() {
-    let env = TestEnv::new();
-    let envelope = json!({
-        "preferences": [{ "trait": "verbosity", "value": "balanced", "confidence": 0.8, "evidence": "e" }]
-    });
-    let fake = FakeRecipeInvoker::returning("operator-model", InvokeResult::Json(envelope));
-    let mut t = OperatorModelThread::with_invoker(OperatorModelConfig::default(), fake.boxed());
-    let mut ctx = env.ctx(now(), false);
-    let out = t.tick(&mut ctx);
-    assert!(out.success);
-    assert!(
-        fact_prefix_present(env.memory(), "operator:"),
-        "writes an operator: fact"
-    );
-}
-
-#[test]
-fn operator_model_scrubs_secrets_from_source_episode() {
-    // S5: a token in a source episode is never echoed into a stored fact.
-    let env = TestEnv::new();
-    let envelope = json!({
-        "preferences": [{ "trait": "note", "value": "token=SECRETVALUE123", "confidence": 0.9, "evidence": "leak" }]
-    });
-    let fake = FakeRecipeInvoker::returning("operator-model", InvokeResult::Json(envelope));
-    let mut t = OperatorModelThread::with_invoker(OperatorModelConfig::default(), fake.boxed());
-    let mut ctx = env.ctx(now(), false);
-    let _ = t.tick(&mut ctx);
-    let facts = env
-        .memory()
-        .search_facts("operator:", 50, 0.0)
-        .expect("search");
-    assert!(
-        facts.iter().all(|f| !f.content.contains("SECRETVALUE123")),
-        "no seeded token may appear in a stored operator: fact (S5)"
-    );
-}
-
-#[test]
-fn analogy_writes_analogy_fact_from_envelope() {
-    let env = TestEnv::new();
-    let envelope = json!({
-        "analogies": [{
-            "source": "distill retry loop",
-            "target": "engineer retry loop",
-            "structural_mapping": "bounded backoff",
-            "transferable_insight": "cap retries"
-        }]
-    });
-    let fake = FakeRecipeInvoker::returning("analogy-map", InvokeResult::Json(envelope));
-    let mut t = AnalogyThread::with_invoker(AnalogyConfig::default(), fake.boxed());
-    let mut ctx = env.ctx(now(), false);
-    let out = t.tick(&mut ctx);
-    assert!(out.success);
-    assert!(
-        fact_prefix_present(env.memory(), "analogy:"),
-        "writes an analogy: fact"
-    );
-}
-
-#[test]
-fn values_deliberation_writes_values_fact_and_no_veto() {
-    // Separation of powers: values writes advice only; it never emits an
-    // enforcement/veto artifact.
-    let env = TestEnv::new();
-    let envelope = json!({
-        "competing_goods": ["speed", "safety"],
-        "weighing": "favor safety when irreversible",
-        "recommended_stance": "hold for review",
-        "heuristic": null
-    });
-    let fake = FakeRecipeInvoker::returning("values-deliberate", InvokeResult::Json(envelope));
-    let mut t =
-        ValuesDeliberationThread::with_invoker(ValuesDeliberationConfig::default(), fake.boxed());
-    let mut ctx = env.ctx(now(), false);
-    let out = t.tick(&mut ctx);
-    assert!(out.success);
-    assert!(
-        fact_prefix_present(env.memory(), "values:"),
-        "writes a values: fact"
-    );
-    assert!(
-        !fact_prefix_present(env.memory(), "overseer:"),
-        "values must NOT write any enforcement/veto artifact"
-    );
-}
-
-#[test]
-fn narrative_writes_exactly_one_identity_fact() {
-    // The identity fact is a singleton (superseded in place, never duplicated).
-    let env = TestEnv::new();
-    let envelope =
-        json!({ "identity": "I am Simard, a self-improving engineer.", "new_chapter": null });
-    let fake = FakeRecipeInvoker::returning("narrative-identity", InvokeResult::Json(envelope));
-    let mut t = NarrativeThread::with_invoker(NarrativeConfig::default(), fake.boxed());
-    let mut ctx = env.ctx(now(), false);
-    let out = t.tick(&mut ctx);
-    assert!(out.success);
-    let identity = env
-        .memory()
-        .search_facts("narrative:identity", 50, 0.0)
-        .expect("search")
-        .into_iter()
-        .filter(|f| f.concept == "narrative:identity")
-        .count();
-    assert_eq!(
-        identity, 1,
-        "exactly one narrative:identity fact (singleton)"
-    );
-}
-
 #[test]
 fn interoception_writes_interocept_fact_from_probes() {
     // Recipe-free deterministic sensing: a tick records an interocept: fact.
@@ -1043,4 +797,329 @@ fn live_acceptance_narrative() {
     let mut ctx = env.ctx(now(), false);
     let out = t.tick(&mut ctx);
     assert!(out.ran, "narrative runs live");
+}
+
+// ---------------------------------------------------------------------------
+// Reworked per-thread rail behaviour (RED)
+//
+// After the rework a recipe-backed thread's `tick` is: gate → assemble
+// read-only (fenced) context → trigger its recipe → record ran/health from the
+// child's EXIT STATUS only. The recipe performs every durable write itself via
+// `simard memory remember` / `remember-procedure` / `goal add` /
+// `cognition salience-signal`, so the THREAD writes NOTHING to memory, the goal
+// board, or the salience signal file — and it parses NOTHING from stdout.
+// ---------------------------------------------------------------------------
+
+/// Assert the reworked contract for one recipe-backed thread: on a `Ran` verdict
+/// the tick succeeds but the THREAD performs no durable `prefix` write (the
+/// recipe's own tool calls do); on a `Failed` verdict the tick fails LOUDLY and
+/// still writes nothing (no silent "ran, wrote nothing" success, no partial
+/// write).
+fn assert_recipe_thread_contract(
+    make: impl Fn(Box<dyn RecipeInvoker>) -> Box<dyn CognitiveThread>,
+    recipe: &str,
+    prefix: &str,
+) {
+    // Ran: an exit-0 recipe is a successful tick, but the thread wrote nothing.
+    let env = TestEnv::new();
+    let fake = FakeRecipeInvoker::returning(recipe, InvokeResult::Ran);
+    let mut thread = make(fake.boxed());
+    let mut ctx = env.ctx(now(), false);
+    let out = thread.tick(&mut ctx);
+    assert!(out.ran, "{recipe}: a due tick runs");
+    assert!(
+        out.success,
+        "{recipe}: an exit-0 recipe is a successful tick"
+    );
+    assert_eq!(
+        fake.call_count(),
+        1,
+        "{recipe}: the tick triggers its recipe exactly once"
+    );
+    assert_eq!(
+        fake.calls()[0].0,
+        recipe,
+        "{recipe}: the tick triggers ITS recipe"
+    );
+    assert!(
+        !fact_prefix_present(env.memory(), prefix),
+        "{recipe}: the THREAD performs no durable `{prefix}` write — the recipe's \
+         `simard …` tool calls are the only effect"
+    );
+
+    // Failed: a non-zero recipe fails the tick LOUDLY and still writes nothing.
+    let env = TestEnv::new();
+    let fake = FakeRecipeInvoker::returning(
+        recipe,
+        InvokeResult::Failed {
+            detail: "recipe-runner-rs exited 1".into(),
+        },
+    );
+    let mut thread = make(fake.boxed());
+    let mut ctx = env.ctx(now(), false);
+    let out = thread.tick(&mut ctx);
+    assert!(out.ran, "{recipe}: a failed run still counts as having run");
+    assert!(
+        !out.success,
+        "{recipe}: a non-zero recipe fails the tick — never a silent default"
+    );
+    assert!(
+        !fact_prefix_present(env.memory(), prefix),
+        "{recipe}: no partial `{prefix}` write on failure"
+    );
+}
+
+#[test]
+fn metacognition_rework_contract() {
+    assert_recipe_thread_contract(
+        |inv| {
+            Box::new(MetacognitionThread::with_invoker(
+                MetacognitionConfig::default(),
+                inv,
+            ))
+        },
+        "metacognition-appraise",
+        "metacog:",
+    );
+}
+
+#[test]
+fn consolidation_rework_contract() {
+    assert_recipe_thread_contract(
+        |inv| {
+            Box::new(ConsolidationThread::with_invoker(
+                ConsolidationConfig::default(),
+                inv,
+            ))
+        },
+        "consolidate-sleep",
+        "schema:",
+    );
+}
+
+#[test]
+fn reflection_rework_contract() {
+    assert_recipe_thread_contract(
+        |inv| {
+            Box::new(ReflectionThread::with_invoker(
+                ReflectionConfig::default(),
+                inv,
+            ))
+        },
+        "reflect-postmortem",
+        "postmortem:",
+    );
+}
+
+#[test]
+fn prospection_rework_contract() {
+    assert_recipe_thread_contract(
+        |inv| {
+            Box::new(ProspectionThread::with_invoker(
+                ProspectionConfig::default(),
+                inv,
+            ))
+        },
+        "prospect-foresight",
+        "foresight:",
+    );
+}
+
+#[test]
+fn operator_model_rework_contract() {
+    assert_recipe_thread_contract(
+        |inv| {
+            Box::new(OperatorModelThread::with_invoker(
+                OperatorModelConfig::default(),
+                inv,
+            ))
+        },
+        "operator-model",
+        "operator:",
+    );
+}
+
+#[test]
+fn analogy_rework_contract() {
+    assert_recipe_thread_contract(
+        |inv| Box::new(AnalogyThread::with_invoker(AnalogyConfig::default(), inv)),
+        "analogy-map",
+        "analogy:",
+    );
+}
+
+#[test]
+fn values_deliberation_rework_contract() {
+    assert_recipe_thread_contract(
+        |inv| {
+            Box::new(ValuesDeliberationThread::with_invoker(
+                ValuesDeliberationConfig::default(),
+                inv,
+            ))
+        },
+        "values-deliberate",
+        "values:",
+    );
+}
+
+#[test]
+fn narrative_rework_contract() {
+    assert_recipe_thread_contract(
+        |inv| {
+            Box::new(NarrativeThread::with_invoker(
+                NarrativeConfig::default(),
+                inv,
+            ))
+        },
+        "narrative-identity",
+        "narrative:",
+    );
+}
+
+#[test]
+fn salience_rework_contract() {
+    assert_recipe_thread_contract(
+        |inv| Box::new(SalienceThread::with_invoker(SalienceConfig::default(), inv)),
+        "salience-appraise",
+        "salience:",
+    );
+    // The salience THREAD also no longer writes the numeric Decide signal file —
+    // the `simard cognition salience-signal` tool (called by the recipe) does.
+    let env = TestEnv::new();
+    let fake = FakeRecipeInvoker::returning("salience-appraise", InvokeResult::Ran);
+    let mut thread = SalienceThread::with_invoker(SalienceConfig::default(), fake.boxed());
+    let mut ctx = env.ctx(now(), false);
+    let _ = thread.tick(&mut ctx);
+    assert!(
+        !salience_signal::signal_path(env.state_root()).exists(),
+        "the salience thread no longer writes state/salience_signal.json; the tool does"
+    );
+}
+
+#[test]
+fn dry_run_does_not_trigger_the_recipe_subprocess() {
+    // The global safety switch must prevent the durable-writing recipe from
+    // running at all (the thread no longer gates writes — the recipe does them),
+    // so a dry-run tick triggers ZERO recipe subprocesses.
+    let env = TestEnv::new();
+    let fake = FakeRecipeInvoker::returning("reflect-postmortem", InvokeResult::Ran);
+    let mut thread = ReflectionThread::with_invoker(ReflectionConfig::default(), fake.boxed());
+    let mut ctx = env.ctx(now(), true);
+    let out = thread.tick(&mut ctx);
+    assert!(out.success, "a dry-run tick is a successful no-op");
+    assert_eq!(
+        fake.call_count(),
+        0,
+        "dry-run triggers NO durable recipe subprocess"
+    );
+    assert!(!fact_prefix_present(env.memory(), "postmortem:"));
+}
+
+#[test]
+fn recipe_thread_fences_memory_context_before_the_recipe() {
+    // SR-2 preserved: memory-sourced context still rides into the recipe wrapped
+    // as untrusted data (never as instructions).
+    let env = TestEnv::new();
+    let fake = FakeRecipeInvoker::returning("salience-appraise", InvokeResult::Ran);
+    let mut thread = SalienceThread::with_invoker(SalienceConfig::default(), fake.boxed());
+    let mut ctx = env.ctx(now(), false);
+    let _ = thread.tick(&mut ctx);
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 1, "one recipe invocation");
+    assert!(
+        calls[0]
+            .1
+            .iter()
+            .any(|(_, v)| v.starts_with(recipe_rail::UNTRUSTED_OPEN)),
+        "at least one memory-sourced context var is fenced as untrusted (SR-2)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Shared seam — the memory socket the recipe inherits (RED)
+//
+// So a bare `simard memory remember` inside a recipe reaches the SAME live store
+// the daemon publishes — exactly like the episode-distiller seam. The reworked
+// invoker exports SIMARD_MEMORY_SOCKET = this path into the child process.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn invoker_hands_recipes_the_daemon_memory_socket() {
+    let env = TestEnv::new();
+    assert_eq!(
+        recipe_rail::memory_socket_path(env.state_root()),
+        crate::memory_ipc::socket_path_for(env.state_root()),
+        "the reflective rail and the daemon agree on the memory socket path"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// New tool — `simard cognition salience-signal` (RED)
+//
+// The numeric Decide projection is now written by a CLAMPING/VALIDATING CLI tool
+// the recipe calls, NOT by parsing the recipe's JSON in Rust. The tool reuses
+// `salience_signal::write_signal`, so every score is clamped and every off-board
+// id dropped INSIDE the tool. Large rankings ride stdin, never argv.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn salience_signal_tool_clamps_scores_and_drops_offboard_ids() {
+    use crate::operator_cli::cognition;
+    let env = TestEnv::new();
+    let entries = vec![
+        cognition::SalienceEntryInput {
+            goal_id: "known".into(),
+            valence: 5.0,
+            urgency: -2.0,
+        },
+        cognition::SalienceEntryInput {
+            goal_id: "ghost".into(),
+            valence: 0.1,
+            urgency: 0.1,
+        },
+    ];
+    cognition::write_salience_signal(env.state_root(), now(), &entries, &["known".to_string()])
+        .expect("tool writes the signal");
+    let sig = salience_signal::read_valid_signal(env.state_root(), now(), 1800)
+        .expect("a fresh, well-formed signal");
+    assert_eq!(sig.ranking.len(), 1, "the off-board `ghost` id is dropped");
+    let e = &sig.ranking[0];
+    assert_eq!(e.goal_id, "known");
+    assert_eq!(e.valence, 1.0, "valence clamped into [-1,1] by the tool");
+    assert_eq!(e.urgency, 0.0, "urgency clamped into [0,1] by the tool");
+    assert_eq!(
+        sig.generated_epoch,
+        now(),
+        "the tool stamps the generation epoch"
+    );
+}
+
+#[test]
+fn salience_signal_tool_parses_a_scalar_entry_flag() {
+    use crate::operator_cli::cognition;
+    let e = cognition::parse_entry_arg("g1:0.5:0.9").expect("well-formed entry");
+    assert_eq!(e.goal_id, "g1");
+    assert_eq!(e.valence, 0.5);
+    assert_eq!(e.urgency, 0.9);
+    assert!(
+        cognition::parse_entry_arg("g1:notanumber:0.9").is_err(),
+        "a non-numeric score is rejected, never silently defaulted to 0"
+    );
+    assert!(
+        cognition::parse_entry_arg("g1:0.5").is_err(),
+        "a missing urgency field is rejected"
+    );
+}
+
+#[test]
+fn salience_signal_tool_reads_a_large_ranking_from_stdin() {
+    // Large payloads ride stdin/file, never argv (E2BIG-safe).
+    use crate::operator_cli::cognition;
+    let json = r#"[{"goal_id":"g1","valence":0.2,"urgency":0.3},
+                   {"goal_id":"g2","valence":-0.4,"urgency":0.8}]"#;
+    let entries =
+        cognition::parse_entries_json(std::io::Cursor::new(json)).expect("parse stdin JSON array");
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[1].goal_id, "g2");
+    assert_eq!(entries[1].urgency, 0.8);
 }
