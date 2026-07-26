@@ -24,11 +24,11 @@
 //!      acceptable when the change is sound, in-scope, tested and CI-green.
 //!   4. The fail-closed verdict contract is PRESERVED, now on a PER-ASSET
 //!      vocabulary after #4721 split the two judge paths:
-//!        • the `.md` LLM fallback judge (`merge_judge.rs`) keeps the JSON enum
-//!          `ready` / `not_ready` / `unclear`, with ambiguity → `unclear`;
-//!        • the `.yaml` typed-verdict rail (`recipe_merge_judge.rs`) ACTS VIA
-//!          `simard merge record-verdict` with `merge` / `hold`, printing NO
-//!          scrapable JSON envelope and failing closed to `hold` when unsure.
+//!      - the `.md` LLM fallback judge (`merge_judge.rs`) keeps the JSON enum
+//!        `ready` / `not_ready` / `unclear`, with ambiguity → `unclear`;
+//!      - the `.yaml` typed-verdict rail (`recipe_merge_judge.rs`) ACTS VIA
+//!        `simard merge record-verdict` with `merge` / `hold`, printing NO
+//!        scrapable JSON envelope and failing closed to `hold` when unsure.
 //!   5. The file-channel transport is PRESERVED: the recipe reads
 //!      `{{pr_body_path}}` (supplementary context), never the raw `{{pr_body}}`.
 //!   6. Both the `.md` source and its `.yaml` recipe mirror carry the rewrite
