@@ -635,6 +635,18 @@ pub trait CognitiveMemoryOps: Send + Sync {
 
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics>;
 
+    /// Recompute the cached statistics snapshot that
+    /// [`get_statistics`](Self::get_statistics) serves (issue #4756).
+    ///
+    /// Default is a **no-op**: backends without a snapshot fast path compute
+    /// their statistics on demand, so there is nothing to refresh and every
+    /// existing impl / test-double keeps compiling untouched.
+    /// [`LibraryCognitiveMemory`](crate::cognitive_memory::LibraryCognitiveMemory)
+    /// overrides it to recompute its snapshot *off* the heavy read lock via
+    /// `try_lock`, so a long-held write lock during canary startup can no longer
+    /// starve the memory-stats RPC into the 30s rpc-health timeout.
+    fn refresh_stats_snapshot(&self) {}
+
     /// Probe whether the store is *confirmed* empty, **failing closed** on a
     /// read error (issue #2561).
     ///

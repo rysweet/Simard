@@ -212,6 +212,45 @@ fn fail_closed_identity_cognition(identity_name: &str) -> crate::ooda_loop::Iden
 ///
 /// If no LLM adapter is available (e.g. no API key, no Copilot SDK),
 /// the daemon exits with an error — no silent degradation to memory-only mode.
+/// Interval between off-path cognitive-memory statistics-snapshot refreshes
+/// (issue #4756). Short enough to keep the rpc-health canary's reading current,
+/// long enough to be negligible load (`try_lock` + a cheap fold).
+const STATS_SNAPSHOT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Spawn a lightweight background thread that periodically refreshes the
+/// cognitive-memory statistics snapshot OFF the heavy read lock (issue #4756).
+///
+/// [`CognitiveMemoryOps::refresh_stats_snapshot`] recomputes via `try_lock`, so
+/// this thread never blocks on `inner` and can never reintroduce the
+/// lock-starvation that timed out the rpc-health gate; it merely bounds how
+/// stale the snapshot `get_statistics` serves can get between reads. Holds a
+/// [`Weak`] handle so the thread exits on its own once the daemon drops its
+/// memory (no lifetime leak in tests or on shutdown). A spawn failure is traced
+/// and tolerated: the snapshot is still primed and `get_statistics` refreshes
+/// inline on every read, so the canary path stays correct.
+fn spawn_stats_snapshot_refresher(memory: std::sync::Weak<dyn CognitiveMemoryOps>) {
+    let spawned = std::thread::Builder::new()
+        .name("stats-snapshot-refresher".to_string())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(STATS_SNAPSHOT_REFRESH_INTERVAL);
+                let Some(memory) = memory.upgrade() else {
+                    // Daemon dropped its memory handle — nothing left to refresh.
+                    break;
+                };
+                memory.refresh_stats_snapshot();
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::error!(
+            target: "simard::memory",
+            error = %e,
+            "failed to spawn stats-snapshot refresher (snapshot still primed; \
+             get_statistics refreshes inline on read)",
+        );
+    }
+}
+
 pub fn run_ooda_daemon(
     max_cycles: u32,
     state_root_override: Option<PathBuf>,
@@ -301,6 +340,16 @@ pub fn run_ooda_daemon(
     // fell through to a read-only handle when both IPC and direct open
     // failed (issue #1590 follow-up).
     memory_ipc::register_in_process_writer(state_root.clone(), Arc::clone(&shared_mem));
+
+    // Issue #4756: prime the cognitive-memory statistics snapshot synchronously
+    // BEFORE the memory IPC socket starts accepting, so the very first canary
+    // `memory stats` RPC is served from a populated, in-well-under-a-second
+    // snapshot rather than the heavy `inner` lock that starved the rpc-health
+    // probe past its 30s window and reddened every self-deploy canary. Then run
+    // a lightweight refresher that recomputes the snapshot off the read path
+    // (via `try_lock`, never blocking) so its staleness stays bounded.
+    shared_mem.refresh_stats_snapshot();
+    spawn_stats_snapshot_refresher(Arc::downgrade(&shared_mem));
 
     // Spawn the memory IPC server so meetings and other clients can share
     // this live DB handle without their own locks conflicting. The socket
