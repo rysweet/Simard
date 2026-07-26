@@ -142,6 +142,15 @@ is reaped, killing the whole process group so no orphan survives. See the
 reference:
 [RustyClawd Bash-tool idle-liveness](./rustyclawd-bash-tool-idle-liveness.md).
 
+**Tool-executor ECHILD reap tolerance (#4506):** When the daemon's `SIGCHLD`
+auto-reaps a Bash child out from under the tool executor, the reap (`try_wait`
+/ `wait`) returns `ECHILD` (errno 10). That benign race is tolerated as a
+logged `exit_code: 0` success rather than a spurious `ClientError::Unknown`, so
+fast/empty commands (e.g. `sh -c ""`) no longer intermittently fail the
+`unit-test` deploy-gate. Any other errno remains a genuine error. See the
+reference:
+[RustyClawd tool-executor ECHILD reap tolerance](./rustyclawd-echild-reap-tolerance.md).
+
 ### `copilot-sdk` — `CopilotSdkAdapter`
 
 **Module:** `src/base_type_copilot/` (`CopilotSdkAdapter` in `mod.rs`)
