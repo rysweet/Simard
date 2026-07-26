@@ -532,6 +532,59 @@ fn run_probe_with_timeout(mut cmd: Command, timeout: Duration) -> ProbeOutcome {
     }
 }
 
+/// Per-attempt probe budget for the rpc-health retry loop (issue #4756).
+///
+/// Generous for a healthy `memory stats` round-trip — with the Brick A stats
+/// snapshot the RPC answers in well under a second — yet short enough that
+/// several attempts fit inside the unchanged overall `health_timeout`, so a
+/// candidate that is briefly not-yet-ready during heavy startup can still pass
+/// on a later attempt without ever extending the window.
+const RPC_HEALTH_RETRY_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Backoff between retried `TimedOut` probe attempts (issue #4756). Small
+/// relative to the window so it does not meaningfully reduce the retry count.
+const RPC_HEALTH_RETRY_BACKOFF: Duration = Duration::from_millis(200);
+
+/// Retry ONLY the `TimedOut` outcome within the deploy gate's UNCHANGED health
+/// window (issue #4756).
+///
+/// The memory-stats RPC can be briefly not-yet-ready during heavy canary
+/// startup. Retrying a `TimedOut` inside the same overall budget lets a
+/// candidate that becomes ready mid-window pass, WITHOUT ever weakening the
+/// fail-closed contract (defense in depth complementing the Brick A snapshot):
+///
+///   * the first NON-`TimedOut` outcome (a clean exit, a non-zero exit, or a
+///     spawn failure) is returned IMMEDIATELY — never retried, never masked;
+///   * a `TimedOut` is retried only while `Instant::now() < deadline`;
+///   * once the window is exhausted the last `TimedOut` is returned as a
+///     fail-closed red — a genuinely stalled daemon can never be retried into a
+///     fail-open pass.
+fn retry_probe_until_deadline(
+    deadline: Instant,
+    mut attempt: impl FnMut() -> ProbeOutcome,
+) -> ProbeOutcome {
+    loop {
+        match attempt() {
+            // Any terminal (non-timeout) verdict is authoritative: a clean exit
+            // passes, a non-zero exit or spawn failure stays an immediate
+            // fail-closed red. NEVER retried, so retry cannot mask a real red.
+            outcome @ (ProbeOutcome::Exited { .. } | ProbeOutcome::SpawnFailed(_)) => {
+                return outcome;
+            }
+            ProbeOutcome::TimedOut => {
+                // Only a TimedOut is retryable, and only inside the window.
+                if Instant::now() >= deadline {
+                    return ProbeOutcome::TimedOut;
+                }
+                // Brief backoff before the next attempt, capped at the time left
+                // so an exhausted window still returns promptly.
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                std::thread::sleep(RPC_HEALTH_RETRY_BACKOFF.min(remaining));
+            }
+        }
+    }
+}
+
 /// Resolve the daemon socket the **candidate** will dial for `memory stats`,
 /// mirroring the candidate's own resolution under the scrubbed gate env.
 ///
@@ -587,9 +640,23 @@ fn run_rpc_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
             ),
         };
     }
-    let mut cmd = scrubbed_command(binary, config);
-    cmd.args(RPC_HEALTH_PROBE_ARGS);
-    match run_probe_with_timeout(cmd, config.health_timeout) {
+    let deadline = Instant::now() + config.health_timeout;
+    // Retry ONLY a TimedOut inside the unchanged `health_timeout` window
+    // (issue #4756). Each attempt gets a short per-attempt budget so several
+    // retries fit inside the overall cap, and it is clamped to the time left so
+    // a single attempt can never overrun the window. Every non-timeout outcome
+    // is returned by the helper immediately, preserving fail-closed.
+    let outcome = retry_probe_until_deadline(deadline, || {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let attempt_timeout = RPC_HEALTH_RETRY_ATTEMPT_TIMEOUT
+            .min(config.health_timeout)
+            .min(remaining)
+            .max(Duration::from_millis(1));
+        let mut cmd = scrubbed_command(binary, config);
+        cmd.args(RPC_HEALTH_PROBE_ARGS);
+        run_probe_with_timeout(cmd, attempt_timeout)
+    });
+    match outcome {
         ProbeOutcome::Exited { status, .. } if status.success() => GateResult {
             gate: RelaunchGate::RpcHealth,
             passed: true,
@@ -1872,6 +1939,124 @@ mod state_isolation_tdd {
             result.detail.contains("mkdtemp: No such file or directory"),
             "detail must carry the underlying cause: {}",
             result.detail
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests_rpc_health_retry_4756 {
+    //! TDD (issue #4756 — self-deploy failure loop). The `rpc-health` gate must
+    //! survive a memory-stats RPC that is briefly not-yet-ready during canary
+    //! startup by RETRYING **only** the `TimedOut` outcome inside the unchanged
+    //! 30s window — while every other failure (non-zero exit, spawn failure,
+    //! absent socket) stays an IMMEDIATE fail-closed red. This is defense in
+    //! depth complementing the Brick A snapshot fix; it must never trade the
+    //! original DoS-style lock-starvation red for a fail-open canary.
+    //!
+    //! RED until the fix lands. The retry seam under test:
+    //!
+    //!   fn retry_probe_until_deadline(
+    //!       deadline: Instant,
+    //!       attempt: impl FnMut() -> ProbeOutcome,
+    //!   ) -> ProbeOutcome
+    //!
+    //! Contract: return the first NON-`TimedOut` outcome immediately; on
+    //! `TimedOut`, retry while `Instant::now() < deadline`; once the window is
+    //! exhausted, return `TimedOut` (fail closed).
+    use super::*;
+    use std::cell::Cell;
+    use std::os::unix::process::ExitStatusExt;
+    use std::time::{Duration, Instant};
+
+    /// Build an `Exited` outcome. `from_raw` takes a wait-status: `0` => exited
+    /// with code 0 (`success()`); `1 << 8` => exit code 1 (failure).
+    fn exited(success: bool) -> ProbeOutcome {
+        let raw = if success { 0 } else { 1 << 8 };
+        ProbeOutcome::Exited {
+            status: ExitStatus::from_raw(raw),
+            stderr: String::new(),
+        }
+    }
+
+    #[test]
+    fn timed_out_is_retried_then_a_successful_exit_passes() {
+        // Two not-yet-ready TimedOut attempts, then a real round-trip succeeds —
+        // the readiness case the fix unblocks so self-deploy can land.
+        let calls = Cell::new(0u32);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let outcome = retry_probe_until_deadline(deadline, || {
+            let n = calls.get();
+            calls.set(n + 1);
+            match n {
+                0 | 1 => ProbeOutcome::TimedOut,
+                _ => exited(true),
+            }
+        });
+        assert!(
+            matches!(&outcome, ProbeOutcome::Exited { status, .. } if status.success()),
+            "a TimedOut that later succeeds within the window must pass"
+        );
+        assert_eq!(
+            calls.get(),
+            3,
+            "must retry the two TimedOut attempts, then stop on the first success"
+        );
+    }
+
+    #[test]
+    fn nonzero_exit_is_immediate_and_not_retried() {
+        let calls = Cell::new(0u32);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let outcome = retry_probe_until_deadline(deadline, || {
+            calls.set(calls.get() + 1);
+            exited(false)
+        });
+        assert!(
+            matches!(&outcome, ProbeOutcome::Exited { status, .. } if !status.success()),
+            "a non-zero exit must be returned immediately as fail-closed red"
+        );
+        assert_eq!(calls.get(), 1, "a non-timeout failure must NOT be retried");
+    }
+
+    #[test]
+    fn spawn_failure_is_immediate_and_not_retried() {
+        let calls = Cell::new(0u32);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let outcome = retry_probe_until_deadline(deadline, || {
+            calls.set(calls.get() + 1);
+            ProbeOutcome::SpawnFailed(std::io::Error::from_raw_os_error(2))
+        });
+        assert!(
+            matches!(outcome, ProbeOutcome::SpawnFailed(_)),
+            "a spawn failure must be returned immediately, never masked by retry"
+        );
+        assert_eq!(calls.get(), 1, "a spawn failure must NOT be retried");
+    }
+
+    #[test]
+    fn exhausted_window_stays_timed_out_fail_closed() {
+        // With the deadline already reached, the very first TimedOut must be
+        // returned as fail-closed red (never retried into a fail-open pass), and
+        // the helper must return promptly.
+        let calls = Cell::new(0u32);
+        let deadline = Instant::now();
+        let start = Instant::now();
+        let outcome = retry_probe_until_deadline(deadline, || {
+            calls.set(calls.get() + 1);
+            ProbeOutcome::TimedOut
+        });
+        let elapsed = start.elapsed();
+        assert!(
+            matches!(outcome, ProbeOutcome::TimedOut),
+            "an exhausted window must stay fail-closed TimedOut, never flip to a pass"
+        );
+        assert!(
+            calls.get() >= 1,
+            "the probe must be attempted at least once before judging the window exhausted"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "an exhausted window must return promptly (took {elapsed:?})"
         );
     }
 }

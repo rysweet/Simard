@@ -303,7 +303,7 @@ fn assemble_resources(
     }
 
     let resources = Resources {
-        cpu_pct: None,
+        cpu_pct: daemon_pid.and_then(read_process_cpu_pct),
         rss_bytes,
         cgroup_mem_peak_bytes: None,
         load_1,
@@ -329,6 +329,78 @@ fn read_process_rss_bytes(pid: u32) -> Option<u64> {
         }
     }
     None
+}
+
+/// Read the daemon's CPU utilisation as a percentage (issue #4756).
+///
+/// Reports the process's **lifetime-average** %CPU (matching `ps aux` %CPU):
+/// total CPU seconds consumed divided by wall-clock seconds alive. This is a
+/// single, NON-BLOCKING `/proc` read — no sampling sleep — so it never delays a
+/// `simard status` render, and it replaces the former hardcoded `cpu_pct: None`
+/// that rendered daemon CPU as `absent` (the same telemetry gap the rpc-health
+/// timeout exposed).
+///
+/// Defensive: every step degrades to `None` on any malformed / missing input
+/// and NEVER panics — a transient `/proc` read must not crash status.
+fn read_process_cpu_pct(pid: u32) -> Option<f64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let cpu_ticks = parse_proc_stat_cpu_ticks(&stat)?;
+    let start_ticks = parse_proc_stat_starttime_ticks(&stat)?;
+    let clk_tck = clock_ticks_per_sec()?;
+    let uptime_secs = read_system_uptime_secs()?;
+    let start_secs = start_ticks as f64 / clk_tck;
+    let elapsed_secs = uptime_secs - start_secs;
+    // A not-yet-warm or clock-skewed sample can yield a non-positive elapsed
+    // time; degrade to None rather than emit a meaningless or infinite ratio.
+    if elapsed_secs <= 0.0 {
+        return None;
+    }
+    let cpu_secs = cpu_ticks as f64 / clk_tck;
+    let pct = cpu_secs / elapsed_secs * 100.0;
+    (pct.is_finite() && pct >= 0.0).then_some(pct)
+}
+
+/// Sum `utime` (field 14) + `stime` (field 15) cumulative CPU ticks out of a
+/// `/proc/<pid>/stat` line.
+///
+/// The `comm` (field 2) is parenthesized and may itself contain spaces and
+/// parentheses, so offsets are counted from the LAST `)` — the classic
+/// `/proc/<pid>/stat` pitfall a naive whitespace/first-`)` split gets wrong.
+/// Returns `None` on any malformed / truncated / non-numeric input.
+fn parse_proc_stat_cpu_ticks(stat: &str) -> Option<u64> {
+    let rest = stat.get(stat.rfind(')')? + 1..)?;
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    // Post-`)` field 0 is `state` (field 3); utime (field 14) is post-index 11
+    // and stime (field 15) is post-index 12.
+    let utime: u64 = fields.get(11)?.parse().ok()?;
+    let stime: u64 = fields.get(12)?.parse().ok()?;
+    utime.checked_add(stime)
+}
+
+/// Read `starttime` (field 22, in clock ticks since boot) out of a
+/// `/proc/<pid>/stat` line, counting fields from the LAST `)` for the same
+/// parenthesized-`comm` safety as [`parse_proc_stat_cpu_ticks`]. `None` on any
+/// malformed / truncated / non-numeric input.
+fn parse_proc_stat_starttime_ticks(stat: &str) -> Option<u64> {
+    let rest = stat.get(stat.rfind(')')? + 1..)?;
+    // Post-`)` index 19 is starttime (field 22).
+    rest.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// Clock ticks per second (`_SC_CLK_TCK`, typically 100 on Linux), used to
+/// convert `/proc/<pid>/stat` ticks to seconds. `None` if the query fails.
+fn clock_ticks_per_sec() -> Option<f64> {
+    // SAFETY: `sysconf` is a pure libc configuration query with no memory
+    // effects; a non-positive result (query failed) degrades to None below.
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    (ticks > 0).then_some(ticks as f64)
+}
+
+/// System uptime in seconds from `/proc/uptime` (first field). `None` when
+/// `/proc` is unavailable or the value is unparseable.
+fn read_system_uptime_secs() -> Option<f64> {
+    let text = std::fs::read_to_string("/proc/uptime").ok()?;
+    text.split_whitespace().next()?.parse().ok()
 }
 
 /// Resolve and stat the operator's home mount for the disk row.
@@ -1465,6 +1537,80 @@ mod goal_board_tests {
                 .active
                 .is_empty(),
             "an empty board is an empty active list, not `unavailable`"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests_cpu_sampling_4756 {
+    //! TDD (issue #4756 — self-deploy failure loop). `simard status` renders
+    //! daemon CPU as `absent` because `assemble_resources` hardcodes
+    //! `cpu_pct: None` (provider.rs). Once the memory-stats RPC responds again,
+    //! Brick D replaces that hardcode with defensive `/proc/<pid>/stat` sampling.
+    //!
+    //! The load-bearing, error-prone part is parsing the cumulative CPU ticks out
+    //! of a `stat` line whose `comm` (field 2) is parenthesized and may itself
+    //! contain spaces and parentheses — the classic `/proc/<pid>/stat` pitfall.
+    //! These tests are RED until the seam exists:
+    //!
+    //!   fn parse_proc_stat_cpu_ticks(stat: &str) -> Option<u64>
+    //!
+    //! Contract: sum utime (field 14) + stime (field 15), counting fields from
+    //! the LAST `)`; return `None` on ANY malformed/missing input (degrade to
+    //! `None`, never panic).
+    use super::*;
+
+    // Canonical `/proc/<pid>/stat`: utime (field 14) = 111, stime (field 15) =
+    // 222, so the parser must return Some(333).
+    const STAT_UTIME_111_STIME_222: &str =
+        "4242 (simard) R 1 4242 4242 0 -1 4194304 100 0 0 0 111 222 0 0 20 0 1 0 5000 12345 678";
+
+    #[test]
+    fn parses_utime_plus_stime_from_a_well_formed_stat() {
+        assert_eq!(
+            parse_proc_stat_cpu_ticks(STAT_UTIME_111_STIME_222),
+            Some(333),
+            "cpu ticks must be utime(111) + stime(222)"
+        );
+    }
+
+    #[test]
+    fn handles_comm_containing_spaces_and_parentheses() {
+        // `comm` is arbitrary and parenthesized; offsets MUST be counted from the
+        // LAST ')'. A naive split on the first ')' or on whitespace shifts every
+        // field and silently reads the wrong CPU numbers.
+        let stat =
+            "4242 (weird ) (name) R 1 4242 4242 0 -1 4194304 100 0 0 0 111 222 0 0 20 0 1 0 5000";
+        assert_eq!(
+            parse_proc_stat_cpu_ticks(stat),
+            Some(333),
+            "a comm with spaces/parens must not shift the utime/stime offsets"
+        );
+    }
+
+    #[test]
+    fn truncated_stat_missing_cpu_fields_is_none() {
+        // Fields stop at ppid — utime/stime absent → None, never a panic or a 0.
+        assert_eq!(parse_proc_stat_cpu_ticks("4242 (simard) R 1"), None);
+    }
+
+    #[test]
+    fn non_numeric_cpu_fields_are_none() {
+        let stat = "4242 (simard) R 1 4242 4242 0 -1 4194304 100 0 0 0 xxx 222 0 0 20 0 1 0 5000";
+        assert_eq!(
+            parse_proc_stat_cpu_ticks(stat),
+            None,
+            "a non-numeric utime must degrade to None, not panic"
+        );
+    }
+
+    #[test]
+    fn empty_and_unparenthesized_inputs_are_none() {
+        assert_eq!(parse_proc_stat_cpu_ticks(""), None, "empty input → None");
+        assert_eq!(
+            parse_proc_stat_cpu_ticks("4242 simard R 1 2 3"),
+            None,
+            "a stat line with no parenthesized comm is malformed → None"
         );
     }
 }
