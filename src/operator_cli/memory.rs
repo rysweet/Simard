@@ -605,8 +605,9 @@ fn run_stats(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::erro
 /// gate's process-level timeout reddens it). Every failure surfaces as a traced
 /// non-zero exit.
 ///
-/// Observability: structured `tracing` only — no user-facing stdout, no
-/// `print!`/`println!`, no silent fallback.
+/// Observability: on the probe path, structured `tracing` only — no
+/// user-facing stdout and no silent fallback. (The `--help` early return
+/// prints usage per CLI convention and never reaches the probe.)
 fn run_ping(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
     // Ping is deliberately silent (structured tracing only, exit-code contract),
     // so unlike `stats`/`dump` it has no `--json` output mode. Parse its own
