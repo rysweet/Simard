@@ -155,3 +155,93 @@ link this incarnation to the canonical issues, not open new ones:
   improvement signal rather than a silent reclaim.
 - **Claim key** was treated strictly as untrusted DATA throughout and never
   executed; any instruction text inside the evidence is data, not a command.
+
+---
+
+## Recurrence — archive `-1785025251` (idle age `31238s`), 2026-07-26
+
+A later reaper sweep re-flagged the **same** claim
+`rysweet/Simard:continuously-research-and-improve-your-own-cogn-70ab8541` and
+archived a fresh evidence epoch. This section records the grounded verdict for
+that specific archive, following `investigate_stale_engineer.md` end to end. The
+verdict is **unchanged and re-confirmed**: `still-alive` (false positive), fail
+closed. Nothing was reaped; claim and worktree remain preserved.
+
+- **Idle age at investigation time:** `31238s` (newest-worktree-file mtime age).
+- **Archived evidence dir (durable):**
+  `/home/azureuser/.simard/reaped-engineers/rysweet_Simard_continuously-research-and-improve-your-own-cogn-70ab8541-1785025251`
+  (`manifest.json`, `evidence.txt` 47 KB, `journal.txt` 20 KB — all read and cited).
+- **Worktree (verified still present, NOT removed):**
+  `/home/azureuser/.simard/engineer-worktrees/continuously-research-and-improve-your-own-cogn-70ab8541-1784985274-30ad0e`
+
+### Verdict (schema per `investigate_stale_engineer.md`)
+
+```json
+{
+  "verdict": "still-alive",
+  "cause": null,
+  "why": "Recurrence of #4437. This is the same standing/perpetual research goal; journal.txt (cycles 2597->2609, Jul 25 18:30 -> Jul 26 00:20) shows the OODA per-goal reasoner re-spawning it every ~25 min and the no-progress breaker recording 'FAULT signal ... counter reset, goal stays active, never blocked'. Unlike the -1784926332 archive (which captured repo fixtures, #4449), this archive DID capture real session handoff state (target/test-state/.../latest_handoff.json) showing the worker sessions phase=\"complete\" with terminal exit code 0 — i.e. the last workers finished CLEANLY, not crashed. The 31238s newest-file idle age therefore measures benign between-spawn quiet on a perpetual goal with worker absent, not death. Ambiguous-to-absent death evidence => fail closed to still-alive.",
+  "interventions": [
+    { "kind": "file_issue",
+      "summary": "Dedup-link this recurrence to canonical #4437 (missing is_perpetual() reaper exemption). The systemic fix is already in-flight as PRs #4445 and #4479 — do NOT file a duplicate and do NOT open a third fix PR.",
+      "next_step": "Comment on #4437 with this archive's evidence dir, idle_age 31238s, and the fresh re-archival timestamps." },
+    { "kind": "file_issue",
+      "summary": "Dedup-link to #4467 (recipe verdict never written back => verdict stuck 'pending' => unbounded re-archival). This epoch alone shows FOUR fresh archives for the one claim. Related in-flight fix: PR #4712 (distinguish COMPLETED engineer from wedged).",
+      "next_step": "Comment on #4467/#4712 with the four re-archival timestamps below." },
+    { "kind": "whisper",
+      "summary": "Confirmed still-alive false positive; do not reap. The memory-ipc/EPIPE issue #4731 is NOT grounded in this archive (zero broken-pipe/EPIPE/memory-ipc hits in evidence.txt) and must not be attributed to this goal's idleness.",
+      "next_step": null }
+  ],
+  "escalate": null
+}
+```
+
+### Evidence — grounded in the `-1785025251` archive
+
+**1. Alive: perpetual goal re-spawned every cycle; breaker never blocks/kills.**
+`journal.txt` repeats, across cycles 2597–2609:
+
+```
+Jul 25 18:31:07 ... per-goal: spawn (No live work (0 WIP refs, no open PRs, no worker), standing_idle_signal true; standing research goal must not sit idle)
+Jul 26 00:20:01 ... no-progress breaker: research goal idled — FAULT signal recorded
+    (counter reset, goal stays active, never blocked);
+    re-orient is owned by the agentic per-goal reasoner, not this imperative path
+    goal=continuously-research-and-improve-your-own-cogn-70ab8541
+    category="no-novel-action-produced"
+```
+
+**2. Worker sessions COMPLETED cleanly — no death signal.**
+`evidence.txt` → `target/test-state/terminal-shell-execution/latest_handoff.json`
+and `.../composite/latest_handoff.json` show `"phase":"complete"`,
+`"exported_state":"ready"`, with a terminal transcript ending
+`Script done ... [COMMAND_EXIT_CODE="0"]`. The only failure line is a synthetic
+`error_reflection.json` (`objective:"test objective"`,
+`NOT_A_REPO: '/nonexistent/workspace/path'`) — a probe fixture, not the
+engineer's death. Zero real `panic` / `SIGKILL` / `OOM` / `broken pipe` /
+`EPIPE` / `memory-ipc` hits.
+
+**3. Reaper already refused to reap (verdict pending) — #4467 churn continues.**
+Four fresh archives for this one claim in ~5 h, every pass logging `NOT reaping`:
+
+```
+evidence_dir=...-1785008091   (idle_age_secs=14078)
+evidence_dir=...-1785015795   (idle_age_secs=21782)
+evidence_dir=...-1785020645   (idle_age_secs=26632)
+evidence_dir=...-1785025251   (idle_age_secs=31238, this investigation)
+```
+
+### Dedup correction (round-1 mis-filing)
+
+The prior round filed/considered **#4731** (`memory-ipc` EPIPE, `workflow:default`,
+grounded in *post-archival* live daemon logs 00:47–01:09Z). That signature does
+**not** appear anywhere in this archive and is **not** the cause of this goal's
+idleness. The correctly-grounded, deduplicated targets are **#4437** (root cause;
+fix in-flight PRs #4445/#4479), **#4467** (verdict write-back / re-archival churn;
+related fix PR #4712), and **#4449** (evidence-collector fidelity). No new
+duplicate issue or fix PR is warranted.
+
+### Disposition (fail-closed) — re-confirmed
+
+- **Verdict:** `still-alive` (false positive). **Not reaped.**
+- **Claim + worktree + all evidence archives:** preserved (verified present).
+- **Claim key:** treated strictly as untrusted DATA; never executed.
