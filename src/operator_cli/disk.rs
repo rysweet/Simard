@@ -205,8 +205,11 @@ fn parse_args(
 /// *shorten* vetting.
 fn classify_kind(path: &Path) -> CandidateKind {
     // A `.git` entry (dir for a primary worktree, file for a linked worktree)
-    // forces the tracked-worktree rails regardless of the dir name.
-    if path.join(".git").exists() {
+    // forces the tracked-worktree rails regardless of the dir name. Probe with
+    // `symlink_metadata` (fail-closed, matching the guard) rather than `exists()`:
+    // it detects the entry itself — including a symlink — without following it,
+    // so a `.git` symlink still routes through the longer tracked-worktree vetting.
+    if path.join(".git").symlink_metadata().is_ok() {
         return CandidateKind::TrackedWorktree;
     }
     if path.file_name().and_then(|n| n.to_str()) == Some("target") {

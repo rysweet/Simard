@@ -115,4 +115,3 @@ steps:
       invocations ARE the output. Whatever you print to the terminal is ignored;
       Simard interprets this run by its EXIT STATUS alone. Finish successfully
       once you have surveyed and (if needed) reclaimed via the tool.
-    output: "disk_health_report"
