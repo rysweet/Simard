@@ -65,7 +65,7 @@ implemented; acceptance test is the definition of done) · **OUT-OF-SCOPE**.
 | KGP-Q4 | Keyword search binds parameters instead of string-interpolating LIKE clauses | `like_contains_pattern_escapes_metacharacters`, `query_articles_treats_like_wildcards_as_literal`, `query_articles_binds_keywords_and_resists_injection` green | DONE | `native_knowledge.rs::query_articles` binds each keyword as `?n` via `like_contains_pattern` (`LIKE ?n ESCAPE '\'`) |
 | KGP-Q5 | GraphRAG retrieval: traverse entity + relationship tables (multi-hop), not only a single-table LIKE scan | NEW test: a pack fixture with `relationships` yields a graph-grounded answer joining linked entities | DONE | `native_knowledge.rs::query_graph` runs before the article fallback: it seeds keyword-matched `entities`, traverses `relationships` up to `MAX_GRAPH_HOPS` (2), and builds an answer naming the linked entities + relations. Tests: `query_graph_traverses_relationships_for_linked_entities`, `query_graph_reaches_two_hop_neighbor` |
 | KGP-Q9 | **[RETRIEVAL PARITY — REQUIRED]** Vector **semantic** search: embedding-cosine retrieval over stored article/section embeddings, so a question retrieves a semantically-related article that shares **no** literal keyword with it (a keyword LIKE scan would miss it) — the original's retrieval *method*, not just a substring probe | `query_vector_retrieves_semantically_near_article_without_keyword_overlap`, `query_vector_ranks_by_cosine_descending`, `native_knowledge_transport_query_uses_vector_search_when_embeddings_present` green | DONE (method) | `native_knowledge.rs::query_vector` runs before the keyword fallback: it ranks the pack's stored `embedding` vectors by `cosine_similarity` to the query embedding (the deterministic default `embed_text`), projecting the `url` citation (KGP-Q1). Returns `None` — keyword fallback, so keyword-only packs are unchanged — with no `embedding` column or a dimension mismatch. **Semantic-quality caveat:** the *method* (embedding cosine) is at parity; recall *quality* tracks the pack's embedder — a real-model embedder is pack-build-time (`KGP-B*`, out of scope), the same PARTIAL posture as upstream R1 |
-| KGP-Q10 | **[RETRIEVAL PARITY — REQUIRED]** Hybrid ranking that blends vector-semantic + graph + keyword signals (the original's ranker), not any single signal alone | NEW test: on a shared fixture, ranking matches where semantic/graph signal outweighs literal keyword overlap | OPEN | `native_knowledge.rs` currently selects one retrieval path (graph → vector → keyword) rather than blending their scores; hybrid fusion is the remaining retrieval-parity criterion |
+| KGP-Q10 | **[RETRIEVAL PARITY — REQUIRED]** Hybrid ranking that blends vector-semantic + graph + keyword signals (the original's ranker), not any single signal alone | `query_hybrid_ranks_semantic_and_graph_above_literal_keyword_overlap`, `query_hybrid_matches_keyword_ranking_when_only_keyword_signal_fires`, `graph_hop_score_decays_with_distance`, `native_knowledge_transport_query_hybrid_blends_signals_end_to_end` green | DONE | `native_knowledge.rs::query_hybrid` fuses all three signals: it normalizes each to `[0,1]` — vector cosine (`query_vector_scored`), hop-decayed graph score (`query_graph_scored` / `graph_hop_score`), and keyword coverage / theoretical-max (`query_articles_scored`) — sums them with equal weights (`HYBRID_VECTOR_WEIGHT`/`HYBRID_GRAPH_WEIGHT`/`HYBRID_KEYWORD_WEIGHT`), keyed by title so a source found by several signals blends (and keeps its `url` citation, KGP-Q1), and ranks by the fused score. A candidate strong in semantic+graph therefore outranks one that merely shares a literal keyword |
 
 ### Transport, health & lifecycle
 
@@ -103,31 +103,30 @@ Per the operator directive (issue #4321, 2026-07-20), retrieval parity is **not*
 satisfied by a keyword/LIKE scan alone: the three REQUIRED retrieval-parity rows —
 **KGP-Q5** (multi-hop graph), **KGP-Q9** (vector semantic search), and
 **KGP-Q10** (hybrid ranking) — must use the same GraphRAG method the original
-performs. KGP-Q5 and KGP-Q9 are DONE; **KGP-Q10 remains the one OPEN in-scope
-criterion**, so the port is not yet at full parity.
+performs. **All three are now DONE**, so **every in-scope criterion is DONE and
+the port is at full parity.**
 
 Out-of-scope `KGP-B*` criteria do **not** gate parity; they are tracked
 separately for the Phase 9+ pack-authoring work.
 
 ## Ordered backlog (so the next cycle is never stuck)
 
-**One in-scope retrieval-parity criterion remains OPEN: KGP-Q10 (hybrid
-ranking).** Per the operator directive (2026-07-20, issue #4321) — *"No keyword
-search is not good enough. It needs to be the same"* GraphRAG method — retrieval
-parity requires the three REQUIRED rows: multi-hop graph (KGP-Q5, **DONE**),
-vector semantic search (KGP-Q9, **DONE — method**), and hybrid ranking
-(KGP-Q10, **OPEN**). All other in-scope rows (`KGP-M*`, the remaining `KGP-Q*`,
-`KGP-T*`, `KGP-P*`) are DONE and both done-gate commands are green.
+**No in-scope criteria remain OPEN — the port is at full parity.** Per the
+operator directive (2026-07-20, issue #4321) — *"No keyword search is not good
+enough. It needs to be the same"* GraphRAG method — retrieval parity required the
+three REQUIRED rows: multi-hop graph (KGP-Q5, **DONE**), vector semantic search
+(KGP-Q9, **DONE — method**), and hybrid ranking (KGP-Q10, **DONE**). All other
+in-scope rows (`KGP-M*`, the remaining `KGP-Q*`, `KGP-T*`, `KGP-P*`) are DONE and
+both done-gate commands are green.
 
-**Next concrete step:** KGP-Q10 — blend the vector-cosine score (`query_vector`),
-the graph signal (`query_graph`), and the keyword-coverage score
-(`query_articles`) into one hybrid ranker, with a named acceptance test proving
-the fused order where semantic/graph signal outweighs literal keyword overlap.
+**Next concrete step:** none for in-scope parity. Remaining work is the
+out-of-scope Phase 9+ pack-authoring criteria (`KGP-B*`), tracked separately.
 
-(KGP-Q9 — vector semantic search — closed on 2026-07-21; see the progress log
-below. KGP-Q5 — GraphRAG multi-hop retrieval — closed 2026-07-21. KGP-T3 —
-reuse an open `Connection` in `conn_cache` — and KGP-Q4 — parameterize the
-keyword LIKE search — are likewise **DONE**.)
+(KGP-Q10 — hybrid ranking — closed on 2026-07-26; see the progress log below.
+KGP-Q9 — vector semantic search — closed on 2026-07-21. KGP-Q5 — GraphRAG
+multi-hop retrieval — closed 2026-07-21. KGP-T3 — reuse an open `Connection` in
+`conn_cache` — and KGP-Q4 — parameterize the keyword LIKE search — are likewise
+**DONE**.)
 
 ## Progress log
 
@@ -255,3 +254,36 @@ keyword LIKE search — are likewise **DONE**.)
   `native_knowledge_transport_query_uses_vector_search_when_embeddings_present`
   (end-to-end via the RPC transport). **Remaining REQUIRED retrieval-parity
   criterion: KGP-Q10 (hybrid ranking).**
+- **2026-07-26** — **KGP-Q10 closed (hybrid ranking) — full parity achieved.**
+  `knowledge.query` previously selected a **single** retrieval path (graph →
+  vector → keyword, first non-empty wins), so a pack's ranking was governed by
+  whichever path fired first rather than by a blend of all the evidence — the
+  operator directive (issue #4321) explicitly rejects a keyword LIKE scan as
+  parity. A new `query_hybrid(conn, keywords, query_embedding, limit)` now fuses
+  all three GraphRAG signals into one ranking. Each retrieval function grew a
+  score-exposing variant (`query_vector_scored` → cosine, `query_graph_scored` →
+  hop-decayed `graph_hop_score` with seed = 1.0, `query_articles_scored` → raw
+  keyword-coverage; the old `query_vector`/`query_graph`/`query_articles` are now
+  `#[cfg(test)]` score-dropping wrappers). `query_hybrid` normalizes each signal
+  to `[0,1]` (vector cosine as-is; graph via the hop score; keyword as
+  `coverage / (keywords.len() * TITLE_MATCH_WEIGHT)` capped at 1.0), keys
+  candidates by case-folded title so a source retrieved by several signals blends
+  into one candidate — **preserving its `url` citation (KGP-Q1)** by filling a
+  missing url from any contributing signal — and ranks by the equal-weighted sum
+  (`HYBRID_VECTOR_WEIGHT`/`HYBRID_GRAPH_WEIGHT`/`HYBRID_KEYWORD_WEIGHT`, `title
+  ASC` tie-break). Because the signals are additive, a candidate carrying a
+  strong semantic + graph signal outranks one that merely shares a literal
+  keyword. `query_open_pack` now calls `query_hybrid` instead of the single-path
+  selector; the graph narrative answer is preserved when the graph signal
+  grounds any fused source, and a pack the vector/graph signals cannot serve
+  reduces exactly to the prior keyword-coverage ranking (no regression).
+  Acceptance tests:
+  `query_hybrid_ranks_semantic_and_graph_above_literal_keyword_overlap` (the
+  decisive one: on a shared fixture the blended vector+graph candidate outranks
+  the literal-keyword candidate, the reverse of the keyword-only order, and keeps
+  its citation url), `query_hybrid_matches_keyword_ranking_when_only_keyword_signal_fires`
+  (keyword-only packs unchanged), `graph_hop_score_decays_with_distance`, and
+  `native_knowledge_transport_query_hybrid_blends_signals_end_to_end` (end-to-end
+  via the RPC transport). With this, **every in-scope parity criterion is DONE**
+  and the done-gate (`cargo test --lib native_knowledge` + `cargo test --lib
+  knowledge_client`) is green.

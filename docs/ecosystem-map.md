@@ -279,9 +279,13 @@ knowledge to enrich its orient/decide phases with grounded facts rather than
 relying solely on LLM training data.
 
 Simard's **native Rust reimplementation** of the knowledge-pack client
-("kgpacks-rs", `src/native_knowledge.rs` + `src/knowledge_client.rs`) is tracked to full parity
-with the Python agent-kgpacks contract by a measurable criteria checklist at
-`Specs/agent-kgpacks-rs-parity.md`.
+("kgpacks-rs", `src/native_knowledge.rs` + `src/knowledge_client.rs`) has reached
+**full parity** with the Python agent-kgpacks contract, tracked by a measurable
+criteria checklist at `Specs/agent-kgpacks-rs-parity.md`. A `knowledge.query` is
+answered by the original's **hybrid GraphRAG ranker** (`query_hybrid`), which
+blends vector-semantic (cosine), graph multi-hop, and keyword-coverage signals
+into one fused ranking rather than selecting a single retrieval path, while
+preserving source `url` citations.
 
 ### amplihack-rs ↔ amplihack-xpia-defender
 

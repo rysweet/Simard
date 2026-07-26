@@ -1,0 +1,79 @@
+name: kgpacks-rs-hybrid-ranking
+app_type: cli
+description: |
+  Outside-in proof for parity criterion **KGP-Q10** of the kgpacks-rs port
+  (`Specs/agent-kgpacks-rs-parity.md`): the native knowledge handler answers a
+  `knowledge.query` by a **hybrid GraphRAG ranker** that blends the three
+  retrieval signals — vector-semantic (KGP-Q9), graph multi-hop (KGP-Q5), and
+  keyword-coverage (KGP-Q8) — into one fused ranking, rather than selecting a
+  single retrieval path.
+
+  Per the operator directive (issue #4321, 2026-07-20) — "No keyword search is
+  not good enough. It needs to be the same" — retrieval parity requires the
+  original's GraphRAG ranker, which fuses semantic + graph + keyword evidence.
+  A new `query_hybrid(conn, keywords, query_embedding, limit)` now replaces the
+  single-path selector in `query_open_pack`: it gathers candidates from
+  `query_vector_scored` (cosine), `query_graph_scored` (hop-decayed graph score),
+  and `query_articles_scored` (keyword coverage), normalizes each signal to
+  [0,1], keys candidates by title so a source found by several signals blends
+  into one (preserving its `url` citation, KGP-Q1), and ranks by the
+  equal-weighted sum. Because the signals are additive, a candidate carrying a
+  strong semantic + graph signal outranks one that merely shares a literal
+  keyword — the reverse of the keyword-only order. A pack the vector/graph
+  signals cannot serve reduces exactly to the prior keyword-coverage ranking, so
+  keyword-only packs are unchanged.
+
+  This scenario drives the hermetic, in-process `native_knowledge` unit tests
+  that pin the corrected contract:
+    - `query_hybrid_ranks_semantic_and_graph_above_literal_keyword_overlap`
+      — the decisive one: on a shared fixture the blended vector+graph candidate
+      outranks the literal-keyword candidate (the reverse of the keyword-only
+      order) and keeps its citation url;
+    - `query_hybrid_matches_keyword_ranking_when_only_keyword_signal_fires`
+      — a keyword-only pack (no graph tables, no embeddings) reduces exactly to
+      the keyword-coverage ranking (no regression);
+    - `graph_hop_score_decays_with_distance` — the graph signal weights a seed
+      above a one-hop above a two-hop neighbour;
+    - `native_knowledge_transport_query_hybrid_blends_signals_end_to_end`
+      — the fused ranking surfaces graph-linked and semantically-near sources
+      together in the wire response end-to-end via the native RPC transport.
+  The same run re-asserts the pre-existing KGP-Q1/Q4/Q5/Q8/Q9/T3 citation,
+  parameterized-search, GraphRAG, ranking, vector, and connection-reuse
+  behaviour is unregressed. No network, no live host mutation. The CLI runner
+  rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # The native knowledge query contract, including the new KGP-Q10 hybrid-ranking
+  # tests and the pre-existing citation / GraphRAG / vector / ranking /
+  # parameterized-search / connection-reuse behaviours.
+  - action: run
+    params:
+      command: "cargo test --locked --lib native_knowledge"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Transport-level knowledge client suite proves the hybrid query path is
+  # exercised end-to-end through the native RPC surface without regression.
+  - action: run
+    params:
+      command: "cargo test --locked --lib knowledge_client"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
