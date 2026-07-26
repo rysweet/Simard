@@ -1732,6 +1732,7 @@ pub fn run_ooda_daemon(
                                  held={} goals_unblocked={} goals_escalated={} \
                                  memory_recalls={} memory_writes={} memory_errors={} \
                                  workstream_gaps_detected={} workstream_gaps_suppressed={} \
+                                 workstream_gaps_reused_existing={} \
                                  errors={} panicked={} cycle_failed={} ({}ms)",
                                 report.problems,
                                 report.issues_filed,
@@ -1747,6 +1748,7 @@ pub fn run_ooda_daemon(
                                 report.memory_errors,
                                 report.workstream_gaps_detected,
                                 report.workstream_gaps_suppressed,
+                                report.workstream_gaps_reused_existing,
                                 report.errors,
                                 report.panicked,
                                 report.cycle_failed,

@@ -180,6 +180,36 @@ pub struct GapItem {
     pub signature: String,
 }
 
+impl GapItem {
+    /// The stable, shell-safe dedup marker key used for durable GitHub-side
+    /// gap-filing dedup (issue #4717): `workstream-gap:<signature>`. It is
+    /// embedded on its own `stewardship-signature:` line in a filed issue's body
+    /// and fed to `gh issue list --search`, so it MUST be deterministic and a
+    /// restricted, shell-safe slug even if a gap's `signature` somehow carried
+    /// metacharacters (defense in depth over the detector's slug guarantee).
+    /// Identical inputs always yield an identical key so the same gap resolves to
+    /// the same open-issue query across process restarts.
+    pub fn dedup_key(&self) -> String {
+        format!(
+            "workstream-gap:{}",
+            sanitize_signature_slug(&self.signature)
+        )
+    }
+}
+
+/// Keep only characters that are safe in a shell argument and a single-line
+/// issue-body marker: ASCII alphanumerics plus the stable slug punctuation the
+/// trusted signatures already use (`:`, `-`, `_`, `.`, `/`, `#`). Every
+/// whitespace, shell/expansion metacharacter, quote, brace, and control byte is
+/// dropped, so the resulting key can never break an argv or spill onto a second
+/// line.
+fn sanitize_signature_slug(signature: &str) -> String {
+    signature
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_' | '.' | '/' | '#'))
+        .collect()
+}
+
 /// Coarse relative importance. `Ord` sorts ascending so `Critical` comes first,
 /// mirroring `crate::cognitive_threads::Priority`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

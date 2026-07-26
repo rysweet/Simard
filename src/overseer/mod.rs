@@ -148,6 +148,7 @@ use crate::goal_curation::no_progress_breaker::{
 };
 use crate::overseer::notify::{OperatorNotification, OperatorNotifier};
 use crate::stewardship::PrSnapshot;
+use crate::stewardship::gh_client::{GhClient, GhIssue};
 use crate::stewardship::merge_authority::evaluate_objective_gates;
 use capabilities::{
     DeployReport, GoalBrief, InFlightItem, IssueOutcome, WorkstreamHandle, WorkstreamStatus,
@@ -221,6 +222,14 @@ pub struct Overseer {
     /// distinct from `blocked_goal_gate` so goal-health and gap-scan dedup never
     /// interfere.
     gap_gate: WhisperGate,
+    /// Durable GitHub-side dedup seam for the gap-scan's issue filing (issue
+    /// #4717). Before filing a fresh gap the Act path queries GitHub for an OPEN
+    /// issue carrying the gap's `stewardship-signature` marker and skips creation
+    /// on a match, so a recurring gap is filed at most once EVEN ACROSS A PROCESS
+    /// RESTART — the in-process `gap_gate` resets to empty on boot and cannot
+    /// remember a prior process's file. `None` until wired: the Act path then only
+    /// notifies the operator (never files), exactly as before this seam existed.
+    gap_issue_client: Option<Box<dyn GhClient>>,
     /// The cognitive-memory handle (amplihack-memory-lib, G2) the root-cause
     /// analysis recalls prior occurrences from and records new ones into. `None`
     /// until wired: the analysis then degrades gracefully to telemetry-only WHYs
@@ -413,11 +422,15 @@ pub enum ActOutcome {
     /// The recurring backlog-coverage gap-scan flagged (and/or suppressed)
     /// backlog gaps this act. `flagged` gaps got the consolidated operator
     /// notification + one deduped issue each; `suppressed` gaps were within the
-    /// per-gap dedup window (a recurring gap, not re-notified/re-filed). Feeds the
-    /// DEDICATED tick counters — never the generic `issues_filed`/`escalations`.
+    /// per-gap dedup window (a recurring gap, not re-notified/re-filed);
+    /// `reused_existing` gaps already had a matching OPEN GitHub issue carrying
+    /// their durable `stewardship-signature` marker (issue #4717), so filing was
+    /// skipped even across a process restart. Feeds the DEDICATED tick counters —
+    /// never the generic `issues_filed`/`escalations`.
     WorkstreamGapsFlagged {
         flagged: usize,
         suppressed: usize,
+        reused_existing: usize,
     },
     /// An open PR judged STALE by the agentic merge-queue reasoner (#4097) was
     /// flagged with a `gh pr comment` (never a merge/close).
@@ -477,6 +490,7 @@ impl Overseer {
             // window; a generous per-hour cap covers a maxed-out tick's distinct
             // gaps (bounded by `sensor::MAX_GAPS_PER_TICK`) without flooding.
             gap_gate: WhisperGate::new(900, 200),
+            gap_issue_client: None,
             memory: None,
             inflight_investigations: HashMap::new(),
             claim_reap_enabled: false,
@@ -539,6 +553,16 @@ impl Overseer {
     /// cadence). When off, observed gaps are held (never notified/filed).
     pub fn with_gap_scan_enabled(mut self, enabled: bool) -> Self {
         self.gap_scan_enabled = enabled;
+        self
+    }
+
+    /// Wire the durable GitHub-side dedup seam for gap-scan issue filing (issue
+    /// #4717). With it wired, the gap-scan files ONE deduped issue per genuinely-
+    /// new gap and skips any gap that already has a matching OPEN issue on GitHub
+    /// — the durable check that survives a process restart. `None` (unwired)
+    /// preserves the prior notify-only behavior (no issues filed).
+    pub fn with_gap_issue_client(mut self, client: Box<dyn GhClient>) -> Self {
+        self.gap_issue_client = Some(client);
         self
     }
 
@@ -1982,22 +2006,115 @@ impl Overseer {
                 target: "overseer::gap_scan",
                 flagged = 0usize,
                 suppressed,
+                reused_existing = 0usize,
                 "overseer gap-scan: every observed gap is within the dedup window (suppressed)"
             );
             return Ok(ActOutcome::WorkstreamGapsFlagged {
                 flagged: 0,
                 suppressed,
+                reused_existing: 0,
+            });
+        }
+
+        // Durable GitHub-side dedup (issue #4717): BEFORE filing anything, query
+        // GitHub for an OPEN issue already carrying each fresh gap's stable
+        // `stewardship-signature` marker. A match means a prior process (or an
+        // earlier window) already filed it — skip creation so a recurring gap is
+        // filed at most once EVEN ACROSS A RESTART (the in-process `gap_gate`
+        // reset to empty on boot cannot remember it). A `gh` search error FAILS
+        // LOUD and creates nothing — a blind create on a failed dedup lookup is
+        // exactly the burst regression #4717 fixes. When no seam is wired the
+        // gap-scan only notifies (never files), exactly as before.
+        let mut reused_existing = 0usize;
+        let mut to_file: Vec<GapItem> = Vec::new();
+        if let Some(client) = self.gap_issue_client.as_ref() {
+            for g in &fresh {
+                let key = g.dedup_key();
+                let open = client
+                    .search_issues(ECOSYSTEM_OBSERVE_TARGET, &key)
+                    .map_err(|source| OverseerError::Capability {
+                        what: "gap_scan.dedup_search",
+                        detail: format!(
+                            "durable gap-filing dedup lookup failed for {key}: {source}"
+                        ),
+                    })?;
+                if open_issue_has_marker(&open, &key) {
+                    reused_existing += 1;
+                } else {
+                    to_file.push(g.clone());
+                }
+            }
+        } else {
+            to_file = fresh.clone();
+        }
+
+        // A durable match on every fresh gap ⇒ nothing new to notify or file, but
+        // still commit the in-process gate so an immediate re-observation does not
+        // re-hit `gh`.
+        if to_file.is_empty() {
+            for g in &fresh {
+                let sig = format!("workstream-gap:{}", g.signature);
+                self.gap_gate.commit(&sig, now);
+            }
+            tracing::info!(
+                target: "overseer::gap_scan",
+                flagged = 0usize,
+                suppressed,
+                reused_existing,
+                "overseer gap-scan: every fresh gap already has an open issue (durable dedup skip)"
+            );
+            return Ok(ActOutcome::WorkstreamGapsFlagged {
+                flagged: 0,
+                suppressed,
+                reused_existing,
             });
         }
 
         // ONE consolidated operator notification (email + Signal) naming every
-        // fresh gap — the SAME mandatory notifier the merge / goal-health paths use.
+        // gap we are actually filing — the SAME mandatory notifier the merge /
+        // goal-health paths use.
         let notifier = self.notifier.as_ref().ok_or(OverseerError::Capability {
             what: "notify.operator",
             detail: "no operator notifier configured".to_string(),
         })?;
-        let notification = OperatorNotification::workstream_gap(fresh.len(), &fresh);
+        let notification = OperatorNotification::workstream_gap(to_file.len(), &to_file);
         let report = notifier.notify(&notification);
+
+        // File ONE deduped issue per genuinely-new gap, embedding the durable
+        // `stewardship-signature` marker so a later sweep (or a restarted process)
+        // finds it and skips a re-file. Only when the durable seam is wired.
+        if let Some(client) = self.gap_issue_client.as_ref() {
+            for g in &to_file {
+                let key = g.dedup_key();
+                let title = format!("[stewardship] workstream_gap: {}", g.title);
+                let body = format!(
+                    "Auto-filed by the Overseer gap-scan: uncovered backlog work with no active \
+                     workstream, no open PR, and no fix in flight.\n\n\
+                     - what: {what}\n- ref: {ref_id}\n- why it matters: {why}\n\n\
+                     stewardship-signature: {key}\n",
+                    what = g.title,
+                    ref_id = g.ref_id,
+                    why = g.why_it_matters,
+                    key = key,
+                );
+                let filed = client
+                    .create_issue(ECOSYSTEM_OBSERVE_TARGET, &title, &body)
+                    .map_err(|source| OverseerError::Capability {
+                        what: "gap_scan.issue_create",
+                        detail: format!("durable gap-filing create failed for {key}: {source}"),
+                    })?;
+                tracing::info!(
+                    target: "overseer::gap_scan",
+                    signature = %key,
+                    issue = filed.number,
+                    url = %filed.url,
+                    "overseer gap-scan filed a deduped issue for an uncovered workstream"
+                );
+            }
+        }
+
+        // Commit the gate for EVERY fresh gap (filed and durable-reused) so an
+        // immediate same-window re-observation is suppressed before any `gh` call.
         for g in &fresh {
             let sig = format!("workstream-gap:{}", g.signature);
             self.gap_gate.commit(&sig, now);
@@ -2005,15 +2122,17 @@ impl Overseer {
 
         tracing::info!(
             target: "overseer::gap_scan",
-            flagged = fresh.len(),
+            flagged = to_file.len(),
             suppressed,
+            reused_existing,
             dispatched = report.dispatched(),
             all_sent = report.all_sent(),
             "overseer recorded uncovered backlog work and notified the operator"
         );
         Ok(ActOutcome::WorkstreamGapsFlagged {
-            flagged: fresh.len(),
+            flagged: to_file.len(),
             suppressed,
+            reused_existing,
         })
     }
 
@@ -2454,6 +2573,20 @@ fn workstream_gap_key(gaps: &[GapItem]) -> String {
     sigs.sort_unstable();
     sigs.dedup();
     format!("workstream-gap:{}", sigs.join("|"))
+}
+
+/// LINE-BOUNDED durable-marker match for gap-filing dedup (issue #4717): true iff
+/// some OPEN `issue`'s body carries a whole line equal to
+/// `stewardship-signature: <key>` (after trimming that line's surrounding
+/// whitespace). Deliberately NOT a bare `body.contains(...)` substring test — a
+/// longer, distinct key (`…g-hot-extra`) embeds a shorter one (`…g-hot`) as a
+/// prefix, so a substring match would silently swallow a genuinely-new gap under
+/// an unrelated issue.
+fn open_issue_has_marker(issues: &[GhIssue], key: &str) -> bool {
+    let needle = format!("stewardship-signature: {key}");
+    issues
+        .iter()
+        .any(|i| i.body.lines().any(|line| line.trim() == needle))
 }
 
 /// Orient: fold `Signal`s into ranked, deduplicated `Problem`s. Dedups against

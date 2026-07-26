@@ -66,6 +66,10 @@ pub struct OverseerTotals {
     pub workstream_gaps_detected: u64,
     /// Backlog-coverage gaps suppressed as recurring (within the dedup window).
     pub workstream_gaps_suppressed: u64,
+    /// Backlog-coverage gaps reused via durable GitHub-side dedup (issue #4717):
+    /// a matching open issue already existed, so filing was skipped (survives a
+    /// process restart). Distinct from the in-window `workstream_gaps_suppressed`.
+    pub workstream_gaps_reused_existing: u64,
     /// Problems for which a structured root-cause WHY was produced (issue #2635).
     pub root_cause_analyses: u64,
     /// Actions labelled symptom-mitigation (root cause left unaddressed). A
@@ -299,6 +303,7 @@ impl OverseerActivity {
             t.goals_escalated += rep.goals_escalated as u64;
             t.workstream_gaps_detected += rep.workstream_gaps_detected as u64;
             t.workstream_gaps_suppressed += rep.workstream_gaps_suppressed as u64;
+            t.workstream_gaps_reused_existing += rep.workstream_gaps_reused_existing as u64;
             t.root_cause_analyses += rep.root_cause_analyses as u64;
             t.symptom_mitigations += rep.symptom_mitigations as u64;
             t.root_causes_addressed += rep.root_causes_addressed as u64;

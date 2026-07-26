@@ -163,6 +163,12 @@ pub struct OverseerTickReport {
     /// Backlog-coverage gaps SUPPRESSED this tick (a recurring gap within the
     /// dedup window — not re-notified/re-filed).
     pub workstream_gaps_suppressed: usize,
+    /// Backlog-coverage gaps REUSED this tick by the durable GitHub-side dedup
+    /// (issue #4717): a matching OPEN issue already carried the gap's
+    /// `stewardship-signature` marker, so filing was skipped even across a
+    /// process restart. A DEDICATED counter, distinct from the in-window
+    /// `workstream_gaps_suppressed`.
+    pub workstream_gaps_reused_existing: usize,
     /// Open PRs judged STALE by the agentic merge-queue reasoner (#4097) and
     /// flagged with a `gh pr comment` this tick. A DEDICATED counter, never
     /// folded into `prs_merged` / `escalations`.
@@ -504,9 +510,11 @@ fn tally_outcome(report: &mut OverseerTickReport, outcome: &ActOutcome) {
         ActOutcome::WorkstreamGapsFlagged {
             flagged,
             suppressed,
+            reused_existing,
         } => {
             report.workstream_gaps_detected += flagged;
             report.workstream_gaps_suppressed += suppressed;
+            report.workstream_gaps_reused_existing += reused_existing;
         }
         ActOutcome::StalePrFlagged { .. } => report.stale_prs_flagged += 1,
         ActOutcome::DuplicatePrClosed { .. } => report.duplicate_prs_closed += 1,
@@ -662,10 +670,15 @@ fn describe_action(iv: &Intervention, outcome: &ActOutcome) -> String {
         ActOutcome::WorkstreamGapsFlagged {
             flagged,
             suppressed,
+            reused_existing,
         } => {
             if *flagged > 0 {
                 format!(
-                    "flagged {flagged} uncovered workstream(s) — notified operator + filed deduped issue(s) ({suppressed} suppressed)"
+                    "flagged {flagged} uncovered workstream(s) — notified operator + filed deduped issue(s) ({suppressed} suppressed, {reused_existing} already open)"
+                )
+            } else if *reused_existing > 0 {
+                format!(
+                    "workstream gaps deduped — {reused_existing} already have an open issue, {suppressed} within the dedup window"
                 )
             } else {
                 format!("workstream gaps suppressed — {suppressed} within the dedup window")
@@ -1227,6 +1240,13 @@ pub fn build_overseer(
     // (opt-out via SIMARD_OVERSEER_GAP_SCAN); its every-N cadence is applied
     // by the daemon tick loop.
     .with_gap_scan_enabled(gap_scan_enabled())
+    // Durable GitHub-side gap-filing dedup (issue #4717): the gap-scan queries
+    // GitHub for an OPEN issue carrying each gap's `stewardship-signature` marker
+    // BEFORE filing, so a recurring gap is filed at most once EVEN ACROSS A
+    // RESTART (the in-process gate resets to empty on boot). Wiring the real `gh`
+    // seam is what makes the durable check live in production; without it the
+    // gap-scan only notifies. A search error fails loud (never a blind create).
+    .with_gap_issue_client(Box::new(crate::stewardship::RealGhClient::new()))
     // Root-cause recall/store (issue #2635, G2): the SAME cognitive-memory
     // handle the goal board + recall seam read through, so the Overseer recalls
     // prior occurrences of a problem's root cause and records new ones — turning
