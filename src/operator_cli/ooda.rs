@@ -126,23 +126,7 @@ fn dispatch_record_decision(
     // SR-VAL-8 — the record path must be ABSOLUTE and free of `..` traversal.
     // The daemon supplies a fresh per-cycle temp dir; a relative or `..`-bearing
     // path is a misuse we reject before touching the filesystem.
-    if !record_path.is_absolute() {
-        return Err(format!(
-            "--record-path must be absolute, got {}",
-            record_path.display()
-        )
-        .into());
-    }
-    if record_path
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return Err(format!(
-            "--record-path must not contain '..', got {}",
-            record_path.display()
-        )
-        .into());
-    }
+    harden_path(record_path, "record-path")?;
 
     // --- Free text: inline XOR file, per field (large payloads via file) ---
     let reason = resolve_field(&parsed, "reason", "reason-path")?
@@ -173,9 +157,50 @@ fn dispatch_record_decision(
     Ok(())
 }
 
+/// Maximum bytes read from a `--<field>-path` input file before failing closed.
+/// The free-text fields are bounded to 500 chars downstream, so a 64 KiB cap is
+/// ample headroom for legitimate (multi-byte) input while preventing a transient
+/// OOM from reading a hostile or accidental huge file into memory first.
+const MAX_FIELD_FILE_BYTES: u64 = 64 * 1024;
+
+/// Harden a caller-supplied path (SR-VAL-8): it must be ABSOLUTE and free of
+/// `..` traversal. Shared by the record output path and the free-text input
+/// file paths so every path the tool touches passes the identical gate.
+fn harden_path(path: &Path, flag: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if !path.is_absolute() {
+        return Err(format!("--{flag} must be absolute, got {}", path.display()).into());
+    }
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!("--{flag} must not contain '..', got {}", path.display()).into());
+    }
+    Ok(())
+}
+
+/// Read at most [`MAX_FIELD_FILE_BYTES`] from a field-input file, failing closed
+/// if the file is larger. The daemon owns these paths, so an oversized file is
+/// misuse we surface as a hard error rather than silently truncating.
+fn read_bounded_field_file(path: &Path, flag: &str) -> Result<String, Box<dyn std::error::Error>> {
+    use std::io::Read;
+    let mut reader = std::fs::File::open(path)?.take(MAX_FIELD_FILE_BYTES + 1);
+    let mut buf = String::new();
+    reader.read_to_string(&mut buf)?;
+    if buf.len() as u64 > MAX_FIELD_FILE_BYTES {
+        return Err(format!(
+            "--{flag} file {} exceeds the {MAX_FIELD_FILE_BYTES}-byte cap",
+            path.display()
+        )
+        .into());
+    }
+    Ok(buf)
+}
+
 /// Resolve one free-text field that may be supplied inline (`--<inline>`) OR
 /// from a file (`--<path>`), but never both. Returns `Ok(None)` when neither is
-/// present (the caller decides whether that field is required).
+/// present (the caller decides whether that field is required). A file source is
+/// hardened (absolute, no `..`) and read under a byte cap before use.
 fn resolve_field(
     parsed: &std::collections::BTreeMap<String, String>,
     inline: &str,
@@ -184,7 +209,11 @@ fn resolve_field(
     match (parsed.get(inline), parsed.get(path)) {
         (Some(_), Some(_)) => Err(format!("--{inline} and --{path} are mutually exclusive").into()),
         (Some(value), None) => Ok(Some(value.clone())),
-        (None, Some(file)) => Ok(Some(std::fs::read_to_string(file)?)),
+        (None, Some(file)) => {
+            let file_path = Path::new(file);
+            harden_path(file_path, path)?;
+            Ok(Some(read_bounded_field_file(file_path, path)?))
+        }
         (None, None) => Ok(None),
     }
 }

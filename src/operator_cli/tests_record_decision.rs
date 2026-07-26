@@ -494,3 +494,149 @@ fn tool_writes_only_the_record_and_nothing_else() {
     );
     assert_eq!(entries[0], std::ffi::OsStr::new("decision.json"));
 }
+
+// ---------------------------------------------------------------------------
+// Defense-in-depth hardening (S1/S2): field-input files are bounded (64 KiB,
+// fail-closed) and hardened (absolute, no `..`) — the same SR-VAL-8 gate the
+// `--record-path` enforces, applied to `--reason-path` / `--task-hint-path`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn oversized_reason_path_file_rejected_and_no_record_written() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let record_path = dir.path().join("decision.json");
+    let reason_file = dir.path().join("reason.txt");
+    // One byte over the 64 KiB cap ⇒ fail-closed before any downstream 500-char
+    // bound, preventing a transient OOM from reading the whole file into memory.
+    std::fs::write(&reason_file, "A".repeat(64 * 1024 + 1)).unwrap();
+
+    let result = run(&[
+        "ooda",
+        "record-decision",
+        "--choice",
+        "spawn",
+        "--reason-path",
+        reason_file.to_str().unwrap(),
+        "--record-path",
+        record_path.to_str().unwrap(),
+        "--goal-id",
+        "g1",
+        "--cycle-number",
+        "1",
+    ]);
+    assert!(
+        result.is_err(),
+        "a --reason-path file over the 64 KiB cap MUST be rejected"
+    );
+    assert!(
+        !record_path.exists(),
+        "no record must be written when the input file is rejected"
+    );
+}
+
+#[test]
+fn reason_path_at_the_cap_is_accepted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let record_path = dir.path().join("decision.json");
+    let reason_file = dir.path().join("reason.txt");
+    // Exactly at the cap must still be read (downstream sanitize bounds to 500).
+    std::fs::write(&reason_file, "A".repeat(64 * 1024)).unwrap();
+
+    run(&[
+        "ooda",
+        "record-decision",
+        "--choice",
+        "spawn",
+        "--reason-path",
+        reason_file.to_str().unwrap(),
+        "--record-path",
+        record_path.to_str().unwrap(),
+        "--goal-id",
+        "g1",
+        "--cycle-number",
+        "1",
+    ])
+    .expect("a --reason-path file exactly at the cap must be accepted");
+    assert!(record_path.exists(), "the record must be written");
+}
+
+#[test]
+fn reason_path_with_parent_traversal_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let record_path = dir.path().join("decision.json");
+    let traversal = dir.path().join("..").join("reason.txt");
+    let result = run(&[
+        "ooda",
+        "record-decision",
+        "--choice",
+        "spawn",
+        "--reason-path",
+        traversal.to_str().unwrap(),
+        "--record-path",
+        record_path.to_str().unwrap(),
+        "--goal-id",
+        "g1",
+        "--cycle-number",
+        "1",
+    ]);
+    assert!(
+        result.is_err(),
+        "a --reason-path containing '..' MUST be rejected (SR-VAL-8)"
+    );
+    assert!(!record_path.exists(), "no record for a rejected input path");
+}
+
+#[test]
+fn relative_reason_path_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let record_path = dir.path().join("decision.json");
+    let result = run(&[
+        "ooda",
+        "record-decision",
+        "--choice",
+        "spawn",
+        "--reason-path",
+        "relative/reason.txt",
+        "--record-path",
+        record_path.to_str().unwrap(),
+        "--goal-id",
+        "g1",
+        "--cycle-number",
+        "1",
+    ]);
+    assert!(
+        result.is_err(),
+        "a non-absolute --reason-path MUST be rejected (SR-VAL-8)"
+    );
+    assert!(!record_path.exists(), "no record for a rejected input path");
+}
+
+#[test]
+fn task_hint_path_with_parent_traversal_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let record_path = dir.path().join("decision.json");
+    let reason_file = dir.path().join("reason.txt");
+    std::fs::write(&reason_file, "valid reason").unwrap();
+    let traversal = dir.path().join("..").join("hint.txt");
+    let result = run(&[
+        "ooda",
+        "record-decision",
+        "--choice",
+        "spawn",
+        "--reason-path",
+        reason_file.to_str().unwrap(),
+        "--task-hint-path",
+        traversal.to_str().unwrap(),
+        "--record-path",
+        record_path.to_str().unwrap(),
+        "--goal-id",
+        "g1",
+        "--cycle-number",
+        "1",
+    ]);
+    assert!(
+        result.is_err(),
+        "a --task-hint-path containing '..' MUST be rejected (SR-VAL-8)"
+    );
+    assert!(!record_path.exists(), "no record for a rejected input path");
+}

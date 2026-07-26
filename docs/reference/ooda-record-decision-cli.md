@@ -86,8 +86,8 @@ On success the tool writes the record atomically and prints nothing to stdout
 | `--goal-id` | yes | The goal this decision is for. Embedded in the record and re-verified by the reader. |
 | `--cycle-number` | yes | The cycle this decision is for (`u32`). Embedded in the record and re-verified by the reader. |
 | `--task-hint` | no | Optional next-piece guidance. Only meaningful for `spawn`; ignored for other choices. |
-| `--reason-path` | no | Read `reason` from a file instead of argv (for large text; see [Large payloads](#large-payloads-file-not-argv)). Mutually exclusive with `--reason`. |
-| `--task-hint-path` | no | Read `task_hint` from a file instead of argv. Mutually exclusive with `--task-hint`. |
+| `--reason-path` | no | Read `reason` from a file instead of argv (for large text; see [Large payloads](#large-payloads-file-not-argv)). Path must be **absolute** and free of `..`; the file is read under a 64 KiB cap. Mutually exclusive with `--reason`. |
+| `--task-hint-path` | no | Read `task_hint` from a file instead of argv. Same absolute/no-`..`/64 KiB-cap rules as `--reason-path`. Mutually exclusive with `--task-hint`. |
 
 \* Exactly one of `--reason` / `--reason-path` must be supplied and resolve to
 non-empty text. The same applies pairwise to `--task-hint` / `--task-hint-path`,
@@ -267,9 +267,12 @@ Per the operator constraint, oversized text goes through a **file**, never argv.
 Use `--reason-path` / `--task-hint-path` to point at files the agent wrote with
 its file tool — the per-field file alternative to inline `--reason` /
 `--task-hint` (see the [inline-and-file note](#arguments) above; the two forms
-are mutually exclusive per field). Both inline and file-sourced text are run
-through `sanitize_context_var(_, 500)` (strips ANSI/CSI and C0/DEL control
-bytes, folds newlines, bounds length) before being written to the record.
+are mutually exclusive per field). Each file path is hardened exactly like
+`--record-path` — it must be **absolute** and free of `..` (SR-VAL-8) — and is
+read under a **64 KiB byte cap** (fail-closed: an oversized file is a hard error,
+never silently truncated) before the text is run through
+`sanitize_context_var(_, 500)` (strips ANSI/CSI and C0/DEL control bytes, folds
+newlines, bounds length) and written to the record.
 
 ## Fail-CLOSED contract (the whole point)
 
@@ -298,7 +301,8 @@ on the core loop.
 | SR-VAL-1 | Injected / drifted choice | `--choice` validated by constructing `PerGoalAction` (case-insensitive); no parallel enum. |
 | SR-VAL-3 | Terminal-escape / log injection via free text | `reason` / `task_hint` run through `sanitize_context_var(_, 500)` — strips ANSI/CSI + C0/DEL, folds newlines, bounds to 500 chars ([#2751](https://github.com/rysweet/Simard/issues/2751)). |
 | SR-VAL-7 | Replay / stale-record fail-open | Reader independently checks `schema == EXPECTED_SCHEMA`, `goal_id == ctx`, `cycle_number == ctx` → mismatch fails CLOSED. |
-| SR-VAL-8 | Path traversal / symlink write | `--record-path` must be **absolute** and free of `..`; the parent must be the daemon-supplied per-cycle temp dir. The daemon-owned fresh temp dir is the primary control (the underlying `persist_bytes` uses a plain rename). |
+| SR-VAL-8 | Path traversal / symlink write | `--record-path` **and** the free-text input paths (`--reason-path` / `--task-hint-path`) must be **absolute** and free of `..`; the parent must be the daemon-supplied per-cycle temp dir. The daemon-owned fresh temp dir is the primary control (the underlying `persist_bytes` uses a plain rename). |
+| SR-DOS-1 | Transient OOM via huge input file | `--reason-path` / `--task-hint-path` are read under a **64 KiB cap** (`File::take`), failing closed before the whole file is buffered. |
 | SR-DATA-1 | World-readable record | `0o600` owner-only mode. |
 | SR-DATA-2 | Torn / partial write | Atomic temp + fsync + rename. |
 | SR-DATA-3 | Secret leakage | No secrets in the record; free text is sanitized and bounded. |
